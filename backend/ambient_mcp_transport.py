@@ -87,6 +87,13 @@ def connect() -> tuple[Any, Any]:
         connection = ambient_mcp_windows.connect(endpoint())
         return connection, connection
     connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    connection.connect(endpoint())
+    try:
+        connection.connect(endpoint())
+        # The socket dir is shared per-user; refuse to speak to a broker
+        # that is not running as this OS user before any frame is sent.
+        posix_peer_user(connection)
+    except BaseException:
+        connection.close()
+        raise
     stream = connection.makefile("rwb", buffering=0)
     return connection, stream

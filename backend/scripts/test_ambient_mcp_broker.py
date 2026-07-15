@@ -9,7 +9,12 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-os.environ["BETTER_AGENT_HOME"] = tempfile.mkdtemp(prefix="ba-ambient-broker-")
+# Deep home (> macOS 104-byte AF_UNIX cap): regression-locks the hashed
+# short-dir endpoint — serving the socket from under the home must fail.
+_TMP_ROOT = tempfile.mkdtemp(prefix="ba-ambient-broker-")
+_DEEP_HOME = os.path.join(_TMP_ROOT, "d" * 60, "e" * 60)
+os.makedirs(_DEEP_HOME)
+os.environ["BETTER_AGENT_HOME"] = _DEEP_HOME
 os.environ["BETTER_AGENT_TEST_MODE"] = "1"
 
 import ambient_mcp_broker
@@ -66,4 +71,9 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    finally:
+        import shutil
+
+        shutil.rmtree(_TMP_ROOT, ignore_errors=True)
