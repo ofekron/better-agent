@@ -336,7 +336,6 @@
   "settings.internalLlmTask.provider_config_sync_review": "Config-sync-controle",
   "settings.internalLlmTask.session_search_worker": "Zoek-/Ask-worker",
   "settings.internalLlmTask.project_structure_edit": "Projectstructuur bewerken",
-  "settings.internalLlmTask.extension_context_audit": "Extensiecontext-audit",
   "settings.internalLlmTask.assistant": "Assistant",
   "settings.sessionAutoDelete": "Sessies ouder dan automatisch verwijderen",
   "settings.sessionAutoDeleteNever": "Nooit",

@@ -350,7 +350,6 @@
   "settings.internalLlmTask.provider_config_sync_review": "Config-sync review",
   "settings.internalLlmTask.session_search_worker": "Search / Ask worker",
   "settings.internalLlmTask.project_structure_edit": "Project structure edit",
-  "settings.internalLlmTask.extension_context_audit": "Extension context audit",
   "settings.internalLlmTask.assistant": "Assistant",
   "settings.internalLlmTask.delegation_task": "Delegated task",
   "settings.internalLlmTask.delegation_message": "Team message",

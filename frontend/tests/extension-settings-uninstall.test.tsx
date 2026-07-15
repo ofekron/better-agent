@@ -489,7 +489,7 @@ describe("ExtensionUiSettingsSection uninstall", () => {
           harness_delivery: "native",
           has_quick_button: false,
           has_page: false,
-          internal_llm_tasks: ["extension_context_audit"],
+          internal_llm_tasks: ["project_structure_edit"],
           ui: {},
           mcp: [],
           settings: { schema: [], values: {}, secret_present: {} },
@@ -497,7 +497,7 @@ describe("ExtensionUiSettingsSection uninstall", () => {
         });
       }
       if (url.endsWith("/api/extensions/better-agent.harness-for-better-agent/internal-llm")) {
-        return jsonResponse({ tasks: ["extension_context_audit"], assignments: {} });
+        return jsonResponse({ tasks: ["project_structure_edit"], assignments: {} });
       }
       if (url.endsWith("/api/providers")) {
         return jsonResponse({
@@ -524,6 +524,6 @@ describe("ExtensionUiSettingsSection uninstall", () => {
     expect(screen.getByText("Better Agent Harness Behavior")).toBeTruthy();
     expect(screen.getByText("project-structure")).toBeTruthy();
     expect(screen.getByText("better-agent-coordination")).toBeTruthy();
-    expect(await screen.findByText("Extension context audit")).toBeTruthy();
+    expect(await screen.findByText("Project structure edit")).toBeTruthy();
   });
 });

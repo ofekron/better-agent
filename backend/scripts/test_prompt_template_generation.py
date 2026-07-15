@@ -90,7 +90,6 @@ print(json.dumps(keys))
     )
     assert "provisioning/worker_prep.md" in names
     assert "provisioning/search_worker.md" in names
-    assert "provisioning/extension_context_auditor.md" in names
     assert "provisioning/project_structure_maintainer.md" in names
     assert not (BACKEND / "provisioning" / "prompts.py").exists()
 

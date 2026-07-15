@@ -1052,10 +1052,8 @@ def test_turn_manager_dead_runner_replays_codex_rollout_events() -> bool:
             ws_events.append(event)
 
         original_runtime = turn_manager_mod.runtime_skill_contexts
-        original_audit = turn_manager_mod.extension_audit_context
         original_instructions = turn_manager_mod.extension_user_instruction_contexts
         turn_manager_mod.runtime_skill_contexts = lambda *_args, **_kwargs: []
-        turn_manager_mod.extension_audit_context = lambda *_args, **_kwargs: []
         turn_manager_mod.extension_user_instruction_contexts = lambda *_args, **_kwargs: []
         try:
             result = await tm._drive_cli_run(
@@ -1073,7 +1071,6 @@ def test_turn_manager_dead_runner_replays_codex_rollout_events() -> bool:
             )
         finally:
             turn_manager_mod.runtime_skill_contexts = original_runtime
-            turn_manager_mod.extension_audit_context = original_audit
             turn_manager_mod.extension_user_instruction_contexts = original_instructions
         events = result.get("events") or []
         if result.get("success") is not True:

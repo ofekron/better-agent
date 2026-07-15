@@ -336,7 +336,6 @@
   "settings.internalLlmTask.provider_config_sync_review": "설정 동기화 검토",
   "settings.internalLlmTask.session_search_worker": "검색 / 질문 워커",
   "settings.internalLlmTask.project_structure_edit": "프로젝트 구조 편집",
-  "settings.internalLlmTask.extension_context_audit": "확장 컨텍스트 감사",
   "settings.internalLlmTask.assistant": "Assistant",
   "settings.internalLlmTask.delegation_task": "Delegated task",
   "settings.internalLlmTask.delegation_message": "Team message",

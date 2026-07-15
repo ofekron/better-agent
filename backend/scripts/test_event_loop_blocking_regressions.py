@@ -1479,14 +1479,14 @@ SOURCE_GREP_CASES: tuple = (
      ('grep', 'turn_manager.py',
       (('        runtime_capability_contexts = await _to_turn_dispatch_thread(', '        transient_attempt = 0'),),
       ('runtime_capability_contexts = await _to_turn_dispatch_thread(', 'runtime_skill_contexts,',
-       'dynamic_capability_contexts = await _to_turn_dispatch_thread(', 'extension_audit_context,',
+       'extension_instruction_contexts = await _to_turn_dispatch_thread(', 'extension_user_instruction_contexts,',
       ),
       (),
      ),
      ('grep', 'turn_manager.py',
       (('        async def _refresh_provider_context()', '        async def _start_selector_change_continuation('),),
       ('runtime_capability_contexts = await _to_turn_dispatch_thread(', 'runtime_skill_contexts,',
-       'dynamic_capability_contexts = await _to_turn_dispatch_thread(', 'extension_audit_context,',
+       'extension_instruction_contexts = await _to_turn_dispatch_thread(', 'extension_user_instruction_contexts,',
       ),
       (),
      ),
@@ -3148,14 +3148,6 @@ SOURCE_GREP_CASES: tuple = (
       ),
      ),
     )),
-    ('extension_audit_inventory_refresh_is_off_provider_hot_path', (
-     ('grep', 'extension_context_audit.py', (('def runtime_context(', 'def _inventory_projection('),),
-      ('_trigger_projection_refresh(cwd)', '_read_cache_cached()'), ('build_inventory(',),
-     ),
-     ('grep', 'extension_context_audit.py', (('def _refresh_projection(', 'def build_inventory('),),
-      ('inventory = build_inventory(cwd)', '_trigger_refresh(fingerprint, inventory)'), (),
-     ),
-    )),
     ('summary_index_indexes_seen_sidecars_once', (
      ('grep', 'session_store.py', (('def _do_build_summary_index_unsafe()', 'def _refresh_summaries_for_cwd('),),
       ('seen_cursor_ids: set[str] = set()', 'for storage_dir in _session_storage_dirs():',
@@ -3827,7 +3819,7 @@ def _grep_check_failures(check: tuple) -> list[str]:
 
 
 def test_source_grep_regressions() -> None:
-    assert len(SOURCE_GREP_CASES) == 187
+    assert len(SOURCE_GREP_CASES) == 186
     executed = 0
     failing: list[str] = []
     report: list[str] = []

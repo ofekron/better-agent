@@ -101,17 +101,11 @@ def run() -> None:
         "delegation_message",
         "delegation_ask",
         "delegation_session_bridge",
-        "extension_context_audit",
     ):
         check(
             task in config_store.internal_llm_tasks(),
             f"{task} is a registered internal-LLM task",
         )
-    harness_record = {"manifest": {"id": es.BUILTIN_HARNESS_INSTRUCTIONS_EXTENSION_ID}}
-    check(
-        es.extension_internal_llm_tasks(harness_record) == ["extension_context_audit"],
-        "harness extension owns extension_context_audit task",
-    )
     ask_record = {"manifest": {"id": es.BUILTIN_ASK_EXTENSION_ID}}
     check(
         es.extension_internal_llm_tasks(ask_record) == ["session_search_worker"],

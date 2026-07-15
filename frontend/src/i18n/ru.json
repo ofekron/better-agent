@@ -336,7 +336,6 @@
   "settings.internalLlmTask.provider_config_sync_review": "Ревью Config-sync",
   "settings.internalLlmTask.session_search_worker": "Воркер поиска / Ask",
   "settings.internalLlmTask.project_structure_edit": "Редактирование структуры проекта",
-  "settings.internalLlmTask.extension_context_audit": "Аудит контекста расширений",
   "settings.internalLlmTask.assistant": "Assistant",
   "settings.internalLlmTask.delegation_task": "Delegated task",
   "settings.internalLlmTask.delegation_message": "Team message",

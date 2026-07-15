@@ -195,7 +195,6 @@ _required_artifact_update_checked: set[str] = set()
 _BUILTIN_INTERNAL_LLM_TASKS: dict[str, tuple[str, ...]] = {
     BUILTIN_ASK_EXTENSION_ID: ("session_search_worker",),
     BUILTIN_PROVIDER_CONFIG_SYNC_EXTENSION_ID: ("provider_config_sync_review",),
-    BUILTIN_HARNESS_INSTRUCTIONS_EXTENSION_ID: ("extension_context_audit",),
 }
 _DEFAULT_NATIVE_HARNESS_BY_EXTENSION_ID: dict[str, tuple[str, ...]] = {
     BUILTIN_HARNESS_INSTRUCTIONS_EXTENSION_ID: (
@@ -216,11 +215,6 @@ _EXTENSION_SETTINGS_INTERNAL_LLM_TASKS: dict[str, tuple[str, ...]] = {
     **(
         {BUILTIN_SESSION_BRIDGE_EXTENSION_ID: ("delegation_session_bridge",)}
         if BUILTIN_SESSION_BRIDGE_EXTENSION_ID
-        else {}
-    ),
-    **(
-        {BUILTIN_HARNESS_INSTRUCTIONS_EXTENSION_ID: ("extension_context_audit",)}
-        if BUILTIN_HARNESS_INSTRUCTIONS_EXTENSION_ID
         else {}
     ),
 }

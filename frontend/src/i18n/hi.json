@@ -336,7 +336,6 @@
   "settings.internalLlmTask.provider_config_sync_review": "Config-sync समीक्षा",
   "settings.internalLlmTask.session_search_worker": "खोज / पूछें वर्कर",
   "settings.internalLlmTask.project_structure_edit": "प्रोजेक्ट संरचना संपादन",
-  "settings.internalLlmTask.extension_context_audit": "एक्सटेंशन संदर्भ ऑडिट",
   "settings.internalLlmTask.assistant": "Assistant",
   "settings.internalLlmTask.delegation_task": "Delegated task",
   "settings.internalLlmTask.delegation_message": "Team message",

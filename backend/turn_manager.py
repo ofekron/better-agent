@@ -56,7 +56,6 @@ from event_shape import (
     is_synthetic_event as _is_synthetic_event,
 )
 from capability_contexts import provider_capability_contexts
-from extension_context_audit import runtime_context as extension_audit_context
 from extension_store import user_instruction_contexts as extension_user_instruction_contexts
 from runtime_skills import runtime_skill_contexts
 from i18n import t
@@ -308,13 +307,16 @@ class TurnManager:
         # Stale entries are popped by the processor (skip path, item
         # finally, loop exit) in orchestrator.py.
         self._pending_cancel: dict[str, object] = {}
+        self._state_lock = threading.RLock()
+        self._detached_operation_lock = threading.Lock()
         self._run_state: dict[str, list[dict]] = {}
         self._detached_background_links: dict[str, dict[str, dict]] = {}
-        for record in detached_background_store.load().values():
-            self._detached_background_links.setdefault(
-                record["parent_session_id"],
-                {},
-            )[record["lifecycle_msg_id"]] = dict(record)
+        with self._state_lock:
+            for record in detached_background_store.load().values():
+                self._detached_background_links.setdefault(
+                    record["parent_session_id"],
+                    {},
+                )[record["lifecycle_msg_id"]] = dict(record)
         self._run_state_emit_locks: dict[str, asyncio.Lock] = {}
         self._forced_context_overflow_once: set[str] = set()
 
@@ -514,7 +516,8 @@ class TurnManager:
         `_prompt_queues` signals stay on Coordinator (queue ownership).
         Reaches across to Coordinator for those two.
         """
-        if self._foreground_run_ids(app_session_id):
+        runs, _ = self._state_for_sid_snapshot(app_session_id)
+        if self._foreground_run_ids_from_runs(app_session_id, runs):
             return True
         if getattr(self._c, "_in_flight_prompts", {}).get(app_session_id, 0) > 0:
             return True
@@ -523,11 +526,44 @@ class TurnManager:
             return True
         return False
 
+    def _state_for_sid_snapshot(
+        self, app_session_id: str,
+    ) -> tuple[list[dict], dict[str, dict]]:
+        with self._state_lock:
+            return (
+                copy.deepcopy(self._run_state.get(app_session_id) or []),
+                copy.deepcopy(
+                    self._detached_background_links.get(app_session_id) or {}
+                ),
+            )
+
+    def tracked_session_ids(self) -> set[str]:
+        with self._state_lock:
+            return set(self._run_state) | set(self._detached_background_links)
+
+    def run_state_map_snapshot(self) -> dict[str, list[dict]]:
+        with self._state_lock:
+            return copy.deepcopy(self._run_state)
+
+    def replace_run_state(self, value: dict[str, list[dict]]) -> None:
+        with self._state_lock:
+            self._run_state = copy.deepcopy(value)
+
+    def drop_run_state(self, app_session_id: str) -> None:
+        with self._state_lock:
+            self._run_state.pop(app_session_id, None)
+
     def _foreground_run_ids(self, app_session_id: str) -> list[str]:
+        runs, _ = self._state_for_sid_snapshot(app_session_id)
+        return self._foreground_run_ids_from_runs(app_session_id, runs)
+
+    def _foreground_run_ids_from_runs(
+        self, app_session_id: str, runs: list[dict],
+    ) -> list[str]:
         run_ids = self.active_run_ids.get(app_session_id) or []
         entries = {
             entry.get("run_id"): entry
-            for entry in self._run_state.get(app_session_id) or []
+            for entry in runs
         }
         return [
             run_id
@@ -543,7 +579,8 @@ class TurnManager:
         evicted — that would erase their kill levers and monitoring
         while the process keeps running and writing.
         """
-        for r in list(self._run_state.get(app_session_id, [])):
+        runs, _ = self._state_for_sid_snapshot(app_session_id)
+        for r in runs:
             if r.get("kind") != mode:
                 continue
             rid, pid = r["run_id"], r.get("pid")
@@ -645,7 +682,7 @@ class TurnManager:
         Grep `RUNSTATE_DBG` to trace why a 'Native Running' badge sticks."""
         if not logger.isEnabledFor(logging.DEBUG):
             return
-        runs = self._run_state.get(app_session_id) or []
+        runs, _ = self._state_for_sid_snapshot(app_session_id)
         entries = [
             f"{(r.get('run_id') or '?')[:8]}|{r.get('kind')}|pid={r.get('pid')}"
             f"|tgt={(r.get('target_message_id') or '-')[:8]}"
@@ -673,75 +710,76 @@ class TurnManager:
         turn_id: Optional[str] = None,
         lifecycle_msg_id: Optional[str] = None,
     ) -> dict:
-        if kind != "worker" and target_message_id:
-            current = self._run_state.get(app_session_id) or []
-            self._run_state[app_session_id] = [
-                r for r in current
-                if not (
-                    r.get("kind") == kind
-                    and r.get("target_message_id") == target_message_id
-                    and r.get("run_id") != run_id
-                )
-            ]
-            if not self._run_state[app_session_id]:
-                self._run_state.pop(app_session_id, None)
-        now = datetime.now().isoformat()
-        for entry in self._run_state.get(app_session_id) or []:
-            if entry.get("run_id") != run_id:
-                continue
-            updates = {
-                "kind": kind,
-                "target_message_id": target_message_id,
-                "delegation_id": delegation_id,
-                "pid": pid,
-                "last_event_at": now,
-            }
-            if foreground_status is not None:
-                updates["foreground_status"] = foreground_status
-            if background_work_ids is not None:
-                updates["background_work_ids"] = sorted(set(background_work_ids))
-            if activity_revision is not None:
-                updates["activity_revision"] = activity_revision
-            if turn_id is not None:
-                updates["turn_id"] = turn_id
-            if lifecycle_msg_id is not None:
-                updates["lifecycle_msg_id"] = lifecycle_msg_id
-            entry.update(updates)
+        with self._state_lock:
+            if kind != "worker" and target_message_id:
+                current = self._run_state.get(app_session_id) or []
+                self._run_state[app_session_id] = [
+                    r for r in current
+                    if not (
+                        r.get("kind") == kind
+                        and r.get("target_message_id") == target_message_id
+                        and r.get("run_id") != run_id
+                    )
+                ]
+                if not self._run_state[app_session_id]:
+                    self._run_state.pop(app_session_id, None)
+            now = datetime.now().isoformat()
+            entry = next(
+                (
+                    candidate
+                    for candidate in self._run_state.get(app_session_id) or []
+                    if candidate.get("run_id") == run_id
+                ),
+                None,
+            )
+            existing = entry is not None
+            if entry is None:
+                entry = {
+                    "run_id": run_id,
+                    "kind": kind,
+                    "target_message_id": target_message_id,
+                    "delegation_id": delegation_id,
+                    "pid": pid,
+                    "foreground_status": foreground_status or "running",
+                    "background_work_ids": sorted(set(background_work_ids or [])),
+                    "activity_revision": activity_revision or 0,
+                    "turn_id": turn_id,
+                    "lifecycle_msg_id": lifecycle_msg_id,
+                    "started_at": now,
+                    "last_event_at": now,
+                }
+                self._run_state.setdefault(app_session_id, []).append(entry)
+            else:
+                updates = {
+                    "kind": kind,
+                    "target_message_id": target_message_id,
+                    "delegation_id": delegation_id,
+                    "pid": pid,
+                    "last_event_at": now,
+                }
+                if foreground_status is not None:
+                    updates["foreground_status"] = foreground_status
+                if background_work_ids is not None:
+                    updates["background_work_ids"] = sorted(set(background_work_ids))
+                if activity_revision is not None:
+                    updates["activity_revision"] = activity_revision
+                if turn_id is not None:
+                    updates["turn_id"] = turn_id
+                if lifecycle_msg_id is not None:
+                    updates["lifecycle_msg_id"] = lifecycle_msg_id
+                entry.update(updates)
             entry["detached_lifecycle_ids"] = self._detached_lifecycles_for_run(
                 app_session_id,
                 entry.get("lifecycle_msg_id"),
             )
-            self._maybe_flip_streaming(
-                app_session_id, target_message_id, True, kind,
-            )
-            session_manager.recompute_state(app_session_id)
-            self._dbg_runstate(app_session_id, f"add_existing:{run_id[:8]}:{kind}")
-            return entry
-        entry = {
-            "run_id": run_id,
-            "kind": kind,
-            "target_message_id": target_message_id,
-            "delegation_id": delegation_id,
-            "pid": pid,
-            "foreground_status": foreground_status or "running",
-            "background_work_ids": sorted(set(background_work_ids or [])),
-            "activity_revision": activity_revision or 0,
-            "turn_id": turn_id,
-            "lifecycle_msg_id": lifecycle_msg_id,
-            "started_at": now,
-            "last_event_at": now,
-        }
-        self._run_state.setdefault(app_session_id, []).append(entry)
-        entry["detached_lifecycle_ids"] = self._detached_lifecycles_for_run(
-            app_session_id,
-            lifecycle_msg_id,
-        )
+            snapshot = copy.deepcopy(entry)
         self._maybe_flip_streaming(
             app_session_id, target_message_id, True, kind,
         )
         session_manager.recompute_state(app_session_id)
-        self._dbg_runstate(app_session_id, f"add:{run_id[:8]}:{kind}")
-        return entry
+        prefix = "add_existing" if existing else "add"
+        self._dbg_runstate(app_session_id, f"{prefix}:{run_id[:8]}:{kind}")
+        return snapshot
 
     def run_state_apply_activity(
         self,
@@ -753,9 +791,17 @@ class TurnManager:
         activity_revision: int,
         turn_id: Optional[str] = None,
     ) -> bool:
-        for entry in self._run_state.get(app_session_id) or []:
-            if entry.get("run_id") != run_id:
-                continue
+        with self._state_lock:
+            entry = next(
+                (
+                    candidate
+                    for candidate in self._run_state.get(app_session_id) or []
+                    if candidate.get("run_id") == run_id
+                ),
+                None,
+            )
+            if entry is None:
+                return False
             current_turn_id = entry.get("turn_id")
             if current_turn_id and turn_id and current_turn_id != turn_id:
                 return False
@@ -768,31 +814,35 @@ class TurnManager:
                 "turn_id": turn_id or current_turn_id,
                 "last_event_at": datetime.now().isoformat(),
             })
-            if foreground_status != "running":
-                self._maybe_flip_streaming(
-                    app_session_id,
-                    entry.get("target_message_id"),
-                    False,
-                    entry.get("kind"),
-                )
-            session_manager.recompute_state(app_session_id)
-            return True
-        return False
+            target = entry.get("target_message_id")
+            entry_kind = entry.get("kind")
+        if foreground_status != "running":
+            self._maybe_flip_streaming(
+                app_session_id, target, False, entry_kind,
+            )
+        session_manager.recompute_state(app_session_id)
+        return True
 
     def run_state_remove(self, app_session_id: str, run_id: str) -> None:
-        runs = self._run_state.get(app_session_id)
+        with self._state_lock:
+            runs = self._run_state.get(app_session_id)
+            if not runs:
+                removed: list[dict] = []
+            else:
+                removed = [
+                    copy.deepcopy(r) for r in runs if r.get("run_id") == run_id
+                ]
+                remaining = [r for r in runs if r.get("run_id") != run_id]
+                if remaining:
+                    self._run_state[app_session_id] = remaining
+                else:
+                    self._run_state.pop(app_session_id, None)
         if not runs:
             logger.debug(
                 "RUNSTATE_DBG[remove_noop:%s] sid=%s — no entries to remove",
                 run_id[:8], app_session_id[:8],
             )
             return
-        removed = [r for r in runs if r.get("run_id") == run_id]
-        self._run_state[app_session_id] = [
-            r for r in runs if r.get("run_id") != run_id
-        ]
-        if not self._run_state[app_session_id]:
-            self._run_state.pop(app_session_id, None)
         for r in removed:
             self._maybe_flip_streaming(
                 app_session_id,
@@ -809,40 +859,41 @@ class TurnManager:
     def run_state_release_foreground(
         self, app_session_id: str, run_id: str,
     ) -> None:
-        entry = next(
-            (
-                candidate
-                for candidate in self._run_state.get(app_session_id) or []
-                if candidate.get("run_id") == run_id
-            ),
-            None,
-        )
-        if entry is None or not entry.get("background_work_ids"):
+        with self._state_lock:
+            entry = next(
+                (
+                    candidate
+                    for candidate in self._run_state.get(app_session_id) or []
+                    if candidate.get("run_id") == run_id
+                ),
+                None,
+            )
+            should_remove = entry is None or not entry.get("background_work_ids")
+            if not should_remove:
+                if entry.get("foreground_status") == "running":
+                    entry["foreground_status"] = "completed"
+                target = entry.get("target_message_id")
+                entry_kind = entry.get("kind")
+        if should_remove:
             self.run_state_remove(app_session_id, run_id)
             return
-        if entry.get("foreground_status") == "running":
-            entry["foreground_status"] = "completed"
         self._maybe_flip_streaming(
-            app_session_id,
-            entry.get("target_message_id"),
-            False,
-            entry.get("kind"),
+            app_session_id, target, False, entry_kind,
         )
         session_manager.recompute_state(app_session_id)
 
     def is_running(self, sid: str) -> bool:
-        if self._detached_background_links.get(sid):
+        runs, links = self._state_for_sid_snapshot(sid)
+        if links:
             return True
-        runs = self._run_state.get(sid)
-        if not runs:
-            return False
-        for r in runs:
-            pid = r.get("pid")
-            if pid is None:
-                return True
-            if _pid_alive(pid):
-                return True
-        return False
+        return self._runs_are_live(runs)
+
+    @staticmethod
+    def _runs_are_live(runs: list[dict]) -> bool:
+        return any(
+            run.get("pid") is None or _pid_alive(run["pid"])
+            for run in runs
+        )
 
     def _has_pending_approval(self, sid: str) -> bool:
         try:
@@ -855,9 +906,14 @@ class TurnManager:
             return False
 
     def _has_background_work(self, sid: str) -> bool:
-        if self._detached_background_links.get(sid):
+        runs, links = self._state_for_sid_snapshot(sid)
+        return self._snapshot_has_background_work(runs, bool(links))
+
+    def _snapshot_has_background_work(
+        self, runs: list[dict], has_detached_links: bool,
+    ) -> bool:
+        if has_detached_links:
             return True
-        runs = self._run_state.get(sid)
         if not runs:
             return False
         if any(r.get("background_work_ids") for r in runs):
@@ -874,56 +930,63 @@ class TurnManager:
         return False
 
     def monitoring_state(self, sid: str) -> str:
-        if not self.is_running(sid):
+        runs, links = self._state_for_sid_snapshot(sid)
+        if not links and not self._runs_are_live(runs):
             return "stopped"
         if self._has_pending_approval(sid):
             return "blocked_on_user"
-        if self._foreground_run_ids(sid) or self.has_active_runs(sid):
+        if self._foreground_run_ids_from_runs(sid, runs):
             return "active"
-        if self._has_background_work(sid):
+        if getattr(self._c, "_in_flight_prompts", {}).get(sid, 0) > 0:
+            return "active"
+        queue = getattr(self._c, "_prompt_queues", {}).get(sid)
+        if queue is not None and queue.qsize() > 0:
+            return "active"
+        if self._snapshot_has_background_work(runs, bool(links)):
             return "waiting_on_background"
         return "idle"
 
     def _prune_dead_entries(self, sid: str) -> bool:
-        runs = self._run_state.get(sid)
-        if not runs:
-            return False
-        active_ids = set(self.active_run_ids.get(sid) or [])
-        alive: list[dict] = []
-        dropped: list[dict] = []
-        for r in runs:
-            pid = r.get("pid")
-            run_id = r.get("run_id")
-            if pid is None:
-                if self._run_state_age_s(r) < _PIDLESS_RUN_STALE_AFTER_S:
-                    alive.append(r)
+        with self._state_lock:
+            runs = self._run_state.get(sid)
+            if not runs:
+                return False
+            active_ids = set(self.active_run_ids.get(sid) or [])
+            alive: list[dict] = []
+            dropped: list[dict] = []
+            for r in runs:
+                pid = r.get("pid")
+                run_id = r.get("run_id")
+                if pid is None:
+                    if self._run_state_age_s(r) < _PIDLESS_RUN_STALE_AFTER_S:
+                        alive.append(r)
+                        continue
+                    if run_id in active_ids and sid in self.cancel_events:
+                        alive.append(r)
+                        continue
+                    if run_id in active_ids and r.get("retrying"):
+                        alive.append(r)
+                        continue
+                    logger.warning(
+                        "_prune_dead_entries: pidless orphan run %s on session %s — dropping",
+                        (run_id or "?")[:8], sid[:8],
+                    )
+                    dropped.append(copy.deepcopy(r))
                     continue
-                if run_id in active_ids and sid in self.cancel_events:
+                if _pid_alive(pid):
                     alive.append(r)
-                    continue
-                if run_id in active_ids and r.get("retrying"):
-                    alive.append(r)
-                    continue
-                logger.warning(
-                    "_prune_dead_entries: pidless orphan run %s on session %s — dropping",
-                    (run_id or "?")[:8], sid[:8],
-                )
-                dropped.append(r)
-                continue
-            if _pid_alive(pid):
-                alive.append(r)
+                else:
+                    logger.warning(
+                        "_prune_dead_entries: pid %s dead for run %s on session %s — dropping",
+                        pid, (run_id or "?")[:8], sid[:8],
+                    )
+                    dropped.append(copy.deepcopy(r))
+            if len(alive) == len(runs):
+                return False
+            if alive:
+                self._run_state[sid] = alive
             else:
-                logger.warning(
-                    "_prune_dead_entries: pid %s dead for run %s on session %s — dropping",
-                    pid, (run_id or "?")[:8], sid[:8],
-                )
-                dropped.append(r)
-        if len(alive) == len(runs):
-            return False
-        if alive:
-            self._run_state[sid] = alive
-        else:
-            self._run_state.pop(sid, None)
+                self._run_state.pop(sid, None)
         for r in dropped:
             run_id = r.get("run_id")
             if run_id:
@@ -974,9 +1037,13 @@ class TurnManager:
         t.start()
 
     def _state_session_ids(self, *, include_projections: bool = False) -> set[str]:
-        sids = set(self._run_state) | set(self._detached_background_links)
+        sids = self.tracked_session_ids()
         if not include_projections:
             return sids
+        return self._include_projection_session_ids(sids)
+
+    def _include_projection_session_ids(self, sids: set[str]) -> set[str]:
+        sids = set(sids)
         with self._cache_lock:
             sids.update(self._cached_running)
             sids.update(
@@ -995,10 +1062,13 @@ class TurnManager:
         self, app_session_id: Optional[str] = None,
     ) -> None:
         sids = (
-            [app_session_id]
+            {app_session_id}
             if app_session_id is not None
-            else list(self._state_session_ids(include_projections=True))
+            else self._state_session_ids(include_projections=True)
         )
+        self._tick_running_state_for(sids)
+
+    def _tick_running_state_for(self, sids: set[str]) -> None:
         pruned_sids: list[str] = []
         for sid in sids:
             try:
@@ -1073,14 +1143,18 @@ class TurnManager:
 
     def _refresh_cache(self) -> None:
         """Run tick_running_state then snapshot running/monitoring into cache."""
-        self.tick_running_state()
+        authoritative_sids = self._state_session_ids()
+        self._tick_running_state_for(
+            self._include_projection_session_ids(authoritative_sids),
+        )
         running: set[str] = set()
         monitoring: dict[str, str] = {}
-        for sid in self._state_session_ids():
+        for sid in authoritative_sids:
             try:
-                if self.is_running(sid):
+                state = self.monitoring_state(sid)
+                if state != "stopped":
                     running.add(sid)
-                monitoring[sid] = self.monitoring_state(sid)
+                    monitoring[sid] = state
             except Exception:
                 pass
         with self._cache_lock:
@@ -1135,7 +1209,8 @@ class TurnManager:
         with self._cache_lock:
             cached_running = set(self._cached_running)
             cached_monitoring = dict(self._cached_monitoring)
-        sids = self._state_session_ids() | cached_running
+        state_snapshots = self.run_state_snapshots()
+        sids = set(state_snapshots) | cached_running
         sids.update(
             sid for sid, state in cached_monitoring.items() if state != "stopped"
         )
@@ -1148,7 +1223,7 @@ class TurnManager:
         live_count = 0
         for sid in sids:
             runs: list[dict] = []
-            for r in self._run_state.get(sid, []):
+            for r in state_snapshots.get(sid, []):
                 pid = r.get("pid")
                 run_id = r.get("run_id") or "?"
                 run_dir = root / run_id
@@ -1224,74 +1299,94 @@ class TurnManager:
         return discrepancies
 
     def _run_state_touch(self, app_session_id: str) -> None:
-        runs = self._run_state.get(app_session_id)
-        if not runs:
-            return
-        now = datetime.now().isoformat()
-        for r in runs:
-            r["last_event_at"] = now
+        with self._state_lock:
+            runs = self._run_state.get(app_session_id)
+            if not runs:
+                return
+            now = datetime.now().isoformat()
+            for r in runs:
+                r["last_event_at"] = now
 
     def run_state_set_pid(
         self, app_session_id: str, run_id: str, pid: int,
     ) -> None:
-        runs = self._run_state.get(app_session_id)
+        matched = False
+        with self._state_lock:
+            runs = self._run_state.get(app_session_id)
+            if runs:
+                for r in runs:
+                    if r.get("run_id") == run_id:
+                        r["pid"] = pid
+                        r.pop("retrying", None)
+                        matched = True
+                        break
         if not runs:
             logger.debug(
                 "RUNSTATE_DBG[set_pid_noop:%s] sid=%s pid=%s — no entries",
                 run_id[:8], app_session_id[:8], pid,
             )
             return
-        for r in runs:
-            if r.get("run_id") == run_id:
-                r["pid"] = pid
-                r.pop("retrying", None)
-                self._dbg_runstate(
-                    app_session_id, f"set_pid:{run_id[:8]}:{pid}",
-                )
-                return
+        if matched:
+            self._dbg_runstate(
+                app_session_id, f"set_pid:{run_id[:8]}:{pid}",
+            )
+            return
         logger.debug(
             "RUNSTATE_DBG[set_pid_nomatch:%s] sid=%s pid=%s — run_id absent",
             run_id[:8], app_session_id[:8], pid,
         )
 
     def run_state_clear_pid(self, app_session_id: str, run_id: str) -> None:
-        runs = self._run_state.get(app_session_id)
-        if not runs:
-            return
-        for r in runs:
-            if r.get("run_id") == run_id:
-                r.pop("pid", None)
-                self._dbg_runstate(app_session_id, f"clear_pid:{run_id[:8]}")
-                return
+        with self._state_lock:
+            matched = next(
+                (
+                    run
+                    for run in self._run_state.get(app_session_id) or []
+                    if run.get("run_id") == run_id
+                ),
+                None,
+            )
+            if matched is not None:
+                matched.pop("pid", None)
+        if matched is not None:
+            self._dbg_runstate(app_session_id, f"clear_pid:{run_id[:8]}")
 
     def run_state_mark_retrying(self, app_session_id: str, run_id: str) -> None:
-        runs = self._run_state.get(app_session_id)
-        if not runs:
-            return
-        for r in runs:
-            if r.get("run_id") == run_id:
-                r["retrying"] = True
-                self._dbg_runstate(app_session_id, f"retrying:{run_id[:8]}")
-                return
+        with self._state_lock:
+            matched = next(
+                (
+                    run
+                    for run in self._run_state.get(app_session_id) or []
+                    if run.get("run_id") == run_id
+                ),
+                None,
+            )
+            if matched is not None:
+                matched["retrying"] = True
+        if matched is not None:
+            self._dbg_runstate(app_session_id, f"retrying:{run_id[:8]}")
 
     def _run_state_set_target(
         self, app_session_id: str, run_id: str, target_message_id: str,
     ) -> None:
-        runs = self._run_state.get(app_session_id)
-        if not runs:
-            return
-        for r in runs:
-            if r.get("run_id") == run_id:
-                prev = r.get("target_message_id")
-                r["target_message_id"] = target_message_id
-                if prev != target_message_id:
-                    self._maybe_flip_streaming(
-                        app_session_id,
-                        target_message_id,
-                        True,
-                        r.get("kind"),
-                    )
+        with self._state_lock:
+            matched = next(
+                (
+                    run
+                    for run in self._run_state.get(app_session_id) or []
+                    if run.get("run_id") == run_id
+                ),
+                None,
+            )
+            if matched is None:
                 return
+            previous = matched.get("target_message_id")
+            matched["target_message_id"] = target_message_id
+            entry_kind = matched.get("kind")
+        if previous != target_message_id:
+            self._maybe_flip_streaming(
+                app_session_id, target_message_id, True, entry_kind,
+            )
 
     def register_detached_background(
         self,
@@ -1311,34 +1406,43 @@ class TurnManager:
         owner_lifecycle = str(owner_lifecycle_msg_id or "").strip() or (
             self._c.user_prompt_manager.get_in_flight_lifecycle_msg_id(parent)
         )
-        existing = next(
-            (
-                candidate
-                for links in self._detached_background_links.values()
-                if (candidate := links.get(lifecycle)) is not None
-            ),
-            None,
-        )
-        if existing is not None:
-            if existing.get("target_session_id") != target:
-                raise ValueError("lifecycle_msg_id already belongs to another target")
-            if (
-                owner_lifecycle
-                and existing.get("owner_lifecycle_msg_id")
-                and existing.get("owner_lifecycle_msg_id") != owner_lifecycle
-            ):
-                raise ValueError("lifecycle_msg_id already belongs to another owner")
-            return False
-        now = datetime.now().isoformat()
-        record = detached_background_store.upsert(
-            parent_session_id=parent,
-            target_session_id=target,
-            lifecycle_msg_id=lifecycle,
-            owner_lifecycle_msg_id=owner_lifecycle,
-            started_at=now,
-            last_event_at=now,
-        )
-        self._detached_background_links.setdefault(parent, {})[lifecycle] = dict(record)
+        with self._detached_operation_lock:
+            with self._state_lock:
+                existing = next(
+                    (
+                        candidate
+                        for links in self._detached_background_links.values()
+                        if (candidate := links.get(lifecycle)) is not None
+                    ),
+                    None,
+                )
+                if existing is not None:
+                    if existing.get("target_session_id") != target:
+                        raise ValueError(
+                            "lifecycle_msg_id already belongs to another target"
+                        )
+                    if (
+                        owner_lifecycle
+                        and existing.get("owner_lifecycle_msg_id")
+                        and existing.get("owner_lifecycle_msg_id") != owner_lifecycle
+                    ):
+                        raise ValueError(
+                            "lifecycle_msg_id already belongs to another owner"
+                        )
+                    return False
+            now = datetime.now().isoformat()
+            record = detached_background_store.upsert(
+                parent_session_id=parent,
+                target_session_id=target,
+                lifecycle_msg_id=lifecycle,
+                owner_lifecycle_msg_id=owner_lifecycle,
+                started_at=now,
+                last_event_at=now,
+            )
+            with self._state_lock:
+                self._detached_background_links.setdefault(
+                    parent, {},
+                )[lifecycle] = dict(record)
         session_manager.recompute_state(parent)
         return True
 
@@ -1351,21 +1455,23 @@ class TurnManager:
     ) -> set[str]:
         lifecycle = str(lifecycle_msg_id or "").strip()
         target = str(target_session_id or "").strip()
-        changed: set[str] = set()
-        for parent, links in list(self._detached_background_links.items()):
-            link = links.get(lifecycle)
-            if link is None:
-                continue
-            if target and link.get("target_session_id") != target:
-                continue
-            links.pop(lifecycle, None)
-            changed.add(parent)
-            if not links:
-                self._detached_background_links.pop(parent, None)
-        detached_background_store.remove(
-            lifecycle,
-            target_session_id=target or None,
-        )
+        with self._detached_operation_lock:
+            detached_background_store.remove(
+                lifecycle,
+                target_session_id=target or None,
+            )
+            changed: set[str] = set()
+            with self._state_lock:
+                for parent, links in list(self._detached_background_links.items()):
+                    link = links.get(lifecycle)
+                    if link is None:
+                        continue
+                    if target and link.get("target_session_id") != target:
+                        continue
+                    links.pop(lifecycle, None)
+                    changed.add(parent)
+                    if not links:
+                        self._detached_background_links.pop(parent, None)
         for parent in changed:
             session_manager.recompute_state(parent)
             self._reconcile_inbound_detached(parent, _visited)
@@ -1376,18 +1482,20 @@ class TurnManager:
         session_ids: set[str],
     ) -> None:
         removed = {str(session_id) for session_id in session_ids if session_id}
-        detached_background_store.drop_sessions(removed)
-        changed: set[str] = set()
-        for parent, links in list(self._detached_background_links.items()):
-            if parent in removed:
-                self._detached_background_links.pop(parent, None)
-                continue
-            for lifecycle, link in list(links.items()):
-                if link.get("target_session_id") in removed:
-                    links.pop(lifecycle, None)
-                    changed.add(parent)
-            if not links:
-                self._detached_background_links.pop(parent, None)
+        with self._detached_operation_lock:
+            detached_background_store.drop_sessions(removed)
+            changed: set[str] = set()
+            with self._state_lock:
+                for parent, links in list(self._detached_background_links.items()):
+                    if parent in removed:
+                        self._detached_background_links.pop(parent, None)
+                        continue
+                    for lifecycle, link in list(links.items()):
+                        if link.get("target_session_id") in removed:
+                            links.pop(lifecycle, None)
+                            changed.add(parent)
+                    if not links:
+                        self._detached_background_links.pop(parent, None)
         for parent in changed - removed:
             session_manager.recompute_state(parent)
             self._reconcile_inbound_detached(parent)
@@ -1400,10 +1508,14 @@ class TurnManager:
         lifecycle = str(lifecycle_msg_id or "").strip()
         if not lifecycle:
             return []
-        for links in self._detached_background_links.values():
-            link = links.get(lifecycle)
-            if link is not None and link.get("target_session_id") == target_session_id:
-                return [lifecycle]
+        with self._state_lock:
+            for links in self._detached_background_links.values():
+                link = links.get(lifecycle)
+                if (
+                    link is not None
+                    and link.get("target_session_id") == target_session_id
+                ):
+                    return [lifecycle]
         return []
 
     def _detached_lifecycle_is_active(
@@ -1411,14 +1523,12 @@ class TurnManager:
         target_session_id: str,
         lifecycle_msg_id: str,
     ) -> bool:
-        if any(
-            run.get("lifecycle_msg_id") == lifecycle_msg_id
-            for run in self._run_state.get(target_session_id) or []
-        ):
+        runs, links = self._state_for_sid_snapshot(target_session_id)
+        if any(run.get("lifecycle_msg_id") == lifecycle_msg_id for run in runs):
             return True
         if any(
             link.get("owner_lifecycle_msg_id") == lifecycle_msg_id
-            for link in (self._detached_background_links.get(target_session_id) or {}).values()
+            for link in links.values()
         ):
             return True
         target = session_manager.get(target_session_id) or {}
@@ -1443,12 +1553,13 @@ class TurnManager:
         if target_session_id in seen:
             return
         seen.add(target_session_id)
-        incoming = [
-            dict(link)
-            for links in self._detached_background_links.values()
-            for link in links.values()
-            if link.get("target_session_id") == target_session_id
-        ]
+        with self._state_lock:
+            incoming = [
+                copy.deepcopy(link)
+                for links in self._detached_background_links.values()
+                for link in links.values()
+                if link.get("target_session_id") == target_session_id
+            ]
         for link in incoming:
             lifecycle = link["lifecycle_msg_id"]
             if self._detached_lifecycle_is_active(target_session_id, lifecycle):
@@ -1460,19 +1571,23 @@ class TurnManager:
             )
 
     def reconcile_detached_background(self) -> None:
-        targets = {
-            link["target_session_id"]
-            for links in self._detached_background_links.values()
-            for link in links.values()
-        }
+        with self._state_lock:
+            targets = {
+                link["target_session_id"]
+                for links in self._detached_background_links.values()
+                for link in links.values()
+            }
         for target_session_id in targets:
             self._reconcile_inbound_detached(target_session_id)
 
     def _run_state_snapshot(self, app_session_id: str) -> list[dict]:
+        with self._state_lock:
+            return copy.deepcopy(self._run_state_snapshot_locked(app_session_id))
+
+    def _run_state_snapshot_locked(self, app_session_id: str) -> list[dict]:
         runs = list(self._run_state.get(app_session_id) or [])
-        for lifecycle, link in (
-            self._detached_background_links.get(app_session_id) or {}
-        ).items():
+        links = self._detached_background_links.get(app_session_id) or {}
+        for lifecycle, link in links.items():
             target = link["target_session_id"]
             runs.append({
                 "run_id": f"detached:{lifecycle}",
@@ -1490,28 +1605,32 @@ class TurnManager:
             })
         return runs
 
+    def run_state_snapshots(self) -> dict[str, list[dict]]:
+        with self._state_lock:
+            session_ids = set(self._run_state) | set(self._detached_background_links)
+            return {
+                sid: copy.deepcopy(self._run_state_snapshot_locked(sid))
+                for sid in session_ids
+            }
+
     def get_run_state(self, app_session_id: str) -> list[dict]:
         pruned = self._prune_dead_entries(app_session_id)
         if pruned:
             session_manager.recompute_state(app_session_id)
-        return copy.deepcopy(self._run_state_snapshot(app_session_id))
+        return self._run_state_snapshot(app_session_id)
 
     def get_all_run_states(self) -> dict[str, list[dict]]:
-        for sid in list(self._run_state.keys()):
+        for sid in self.tracked_session_ids():
             if self._prune_dead_entries(sid):
                 session_manager.recompute_state(sid)
-        session_ids = set(self._run_state) | set(self._detached_background_links)
-        return {
-            sid: copy.deepcopy(self._run_state_snapshot(sid))
-            for sid in session_ids
-        }
+        return self.run_state_snapshots()
 
     async def emit_run_state(self, app_session_id: str) -> None:
         lock = self._run_state_emit_locks.setdefault(
             app_session_id, asyncio.Lock(),
         )
         async with lock:
-            snapshot = copy.deepcopy(self._run_state_snapshot(app_session_id))
+            snapshot = self._run_state_snapshot(app_session_id)
             session = session_manager.get_lite(app_session_id) or {}
             if logger.isEnabledFor(logging.DEBUG):
                 logger.debug(
@@ -1561,9 +1680,8 @@ class TurnManager:
                 app_session_id,
                 interrupted_by_msg_id=interrupted_by_msg_id,
             )
-        links = list(
-            (self._detached_background_links.get(app_session_id) or {}).values()
-        )
+        _, detached_links = self._state_for_sid_snapshot(app_session_id)
+        links = list(detached_links.values())
         for link in links:
             target_session_id = link["target_session_id"]
             lifecycle_msg_id = link["lifecycle_msg_id"]
@@ -1616,9 +1734,10 @@ class TurnManager:
         if active_lifecycle == lifecycle_msg_id:
             return await self.cancel_turn(target_session_id)
 
+        runs, _ = self._state_for_sid_snapshot(target_session_id)
         matching_runs = [
             run
-            for run in self._run_state.get(target_session_id) or []
+            for run in runs
             if lifecycle_msg_id in (run.get("detached_lifecycle_ids") or [])
         ]
         for run in matching_runs:
@@ -1713,7 +1832,7 @@ class TurnManager:
         await asyncio.sleep(_RECOVERED_CANCEL_ESCALATE_AFTER_S)
         if run_id not in self.active_run_ids.get(app_session_id, []):
             return
-        runs = self._run_state.get(app_session_id) or []
+        runs, _ = self._state_for_sid_snapshot(app_session_id)
         entry = next((r for r in runs if r.get("run_id") == run_id), None)
         if entry is None:
             return
@@ -2643,11 +2762,6 @@ class TurnManager:
             cwd,
             bare_config=bool((_session_rec or {}).get("bare_config")),
         )
-        dynamic_capability_contexts = await _to_turn_dispatch_thread(
-            extension_audit_context,
-            cwd,
-            bare_config=bool((_session_rec or {}).get("bare_config")),
-        )
         extension_instruction_contexts = await _to_turn_dispatch_thread(
             extension_user_instruction_contexts,
             bare_config=bool((_session_rec or {}).get("bare_config")),
@@ -2658,7 +2772,6 @@ class TurnManager:
         )
         run_capability_contexts = [
             *runtime_capability_contexts,
-            *dynamic_capability_contexts,
             *extension_instruction_contexts,
             *run_capability_contexts,
         ]
@@ -2814,11 +2927,6 @@ class TurnManager:
                 cwd,
                 bare_config=bool(_session_rec.get("bare_config")),
             )
-            dynamic_capability_contexts = await _to_turn_dispatch_thread(
-                extension_audit_context,
-                cwd,
-                bare_config=bool(_session_rec.get("bare_config")),
-            )
             extension_instruction_contexts = await _to_turn_dispatch_thread(
                 extension_user_instruction_contexts,
                 bare_config=bool(_session_rec.get("bare_config")),
@@ -2829,7 +2937,6 @@ class TurnManager:
             )
             run_capability_contexts = [
                 *runtime_capability_contexts,
-                *dynamic_capability_contexts,
                 *extension_instruction_contexts,
                 *run_capability_contexts,
             ]

@@ -336,7 +336,6 @@
   "settings.internalLlmTask.provider_config_sync_review": "配置同步审查",
   "settings.internalLlmTask.session_search_worker": "搜索 / 询问 worker",
   "settings.internalLlmTask.project_structure_edit": "项目结构编辑",
-  "settings.internalLlmTask.extension_context_audit": "扩展上下文审计",
   "settings.internalLlmTask.assistant": "Assistant",
   "settings.internalLlmTask.delegation_task": "Delegated task",
   "settings.internalLlmTask.delegation_message": "Team message",
