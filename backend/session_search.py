@@ -54,7 +54,7 @@ import virtual_session_store
 import working_mode
 from provisioning import DirtyPolicy, ProvisionedSessionSpec
 from prompt_templates import render_prompt
-from session_manager import manager as session_manager
+from session_manager import manager as session_manager, session_matches_project
 
 logger = logging.getLogger(__name__)
 
@@ -442,16 +442,28 @@ def _normalize_cwd(value: str) -> str:
         return text
 
 
+def _cwd_in_scope(session_cwd: str, want_cwd: str) -> bool:
+    """Worktree-aware cwd scoping. A session is in scope when its cwd
+    normalizes to the requested cwd, or when both sides resolve to the same
+    git repo — any sibling worktree or subdirectory — via
+    `session_matches_project`, the canonical project-membership check
+    backed by git_repo_info's TTL-cached common-dir resolution. Cheap
+    normalized equality runs first so exact matches never shell out."""
+    if _normalize_cwd(session_cwd) == want_cwd:
+        return True
+    return session_matches_project({"cwd": session_cwd}, want_cwd)
+
+
 def _matches_filters(stub: dict, filters: dict) -> bool:
     """Dispatch a stub against resolved filters. Scalar keys are exact-match;
-    `cwd` is normalized-equality; `tag_ids` is a subset of the stub's
-    `tag_filter_ids`; `folder_ids` is membership of the stub's `folder_id`
-    in the resolved folder subtree."""
+    `cwd` is worktree-aware repo scoping (`_cwd_in_scope`); `tag_ids` is a
+    subset of the stub's `tag_filter_ids`; `folder_ids` is membership of the
+    stub's `folder_id` in the resolved folder subtree."""
     for key, want in filters.items():
         if not want:
             continue
         if key == "cwd":
-            if _normalize_cwd(stub.get("cwd") or "") != want:
+            if not _cwd_in_scope(stub.get("cwd") or "", want):
                 return False
         elif key == "tag_ids":
             if not set(want).issubset(stub.get("tag_filter_ids") or set()):
