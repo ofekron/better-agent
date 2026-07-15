@@ -187,6 +187,10 @@ import { makeSessionExtender } from "./utils/wsExtender";
 import { cacheProviders } from "./utils/providerCache";
 import { useProviderChanged } from "./hooks/useProviderChanged";
 import { useBackButtonDismiss } from "./hooks/useBackButtonDismiss";
+import {
+  useProjectInventoryEvents,
+  useSessionInventoryEvents,
+} from "./hooks/useDomainEventAdapters";
 
 type RightPanelTab = "files" | "canvas" | "notes" | "comments" | "todos" | "screen" | "changes" | "communications" | "board";
 
@@ -1922,10 +1926,8 @@ function AppMain({
     [removeAckedOfflineAction, setPendingForSession, offlineDispatchKey]
   );
 
-  // Forward-declared shim so useWebSocket's `onProjectsChanged` option can
-  // dispatch to refreshProjects, which is declared further down the file.
-  // The ref is patched by an effect right after refreshProjects's
-  // declaration. Stable identity ⇒ no churn in useWebSocket option deps.
+  // refreshProjects is declared below; this stable adapter is patched once
+  // that domain controller is available.
   const refreshProjectsRef = useRef<() => void>(() => {});
   const handleProjectsChanged = useCallback(() => {
     refreshProjectsRef.current();
@@ -1940,6 +1942,22 @@ function AppMain({
   const setProjectUpdatesCount = useCallback((projectId: string, count: number) => {
     setProjectUpdatesCounts(prev => ({ ...prev, [projectId]: count }));
   }, []);
+
+  useSessionInventoryEvents({
+    onCreated: appendSessionIfNew,
+    onDeleted: handleSessionDeleted,
+    onRenamed: updateSessionName,
+    onForked: appendFork,
+  });
+  useProjectInventoryEvents({
+    onProjectsChanged: handleProjectsChanged,
+    onProjectUpdatesChanged: setProjectUpdatesCount,
+    onWorkersChanged: handleWorkersChanged,
+    onSessionOrganizationChanged: refreshSessions,
+    onProjectMappingsChanged: () => {
+      window.dispatchEvent(new CustomEvent("project_mappings_changed"));
+    },
+  });
 
   const {
     connected,
@@ -2051,19 +2069,6 @@ function AppMain({
         const queuedPrompts = (patch.queued_prompts ?? []) as QueuedPrompt[];
         promptQueue.applySnapshot(sessionId, queuedPrompts, Number(patch.queue_revision ?? 0));
       }
-    },
-    onSessionForked: appendFork,
-    onSessionCreated: appendSessionIfNew,
-    onSessionDeleted: handleSessionDeleted,
-    onSessionRenamed: updateSessionName,
-    onProjectsChanged: handleProjectsChanged,
-    onProjectUpdatesChanged: (data) => {
-      setProjectUpdatesCount(data.project_id, data.unseen_count);
-    },
-    onWorkersChanged: handleWorkersChanged,
-    onSessionOrganizationChanged: refreshSessions,
-    onProjectMappingsChanged: () => {
-      window.dispatchEvent(new CustomEvent("project_mappings_changed"));
     },
     onSupervisorEvent: handleSupervisorEvent,
     onPrLink: handlePrLink,
@@ -3918,7 +3923,7 @@ function AppMain({
   }, [authStatus, refreshProjectCounts]);
 
   // Project list refetch on backend `projects_changed` is wired
-  // directly through the WS handler (`onProjectsChanged` option above);
+  // directly through the project inventory event adapter above;
   // no buffer-scan effect needed.
 
   const handleSelectProject = useCallback(
@@ -4766,7 +4771,7 @@ function AppMain({
   // subsequent `setEvents([])` in the same React commit cycle.
 
   // Session auto-rename on first prompt is wired through the WS
-  // handler (`onSessionRenamed` option above); no buffer-scan effect.
+  // session inventory event adapter above; no buffer-scan effect.
 
   // Backstop pending-clear: treat any persisted user message whose
   // client_id appears in our optimistic pending list as an ack. The

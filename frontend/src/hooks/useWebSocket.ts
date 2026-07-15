@@ -237,43 +237,6 @@ interface UseWebSocketOptions {
       sidebar_minimized?: boolean;
     }
   ) => void;
-  /** A new fork session was just born (server-emitted on every fork
-   * creation). Caller appends to its split-pane state if it's viewing
-   * the parent. */
-  onSessionForked?: (
-    childSession: Session,
-    parentSessionId: string | null
-  ) => void;
-  /** A NEW (non-fork) session was just created in some tab — added
-   * for INV-3 / DIV-4 multi-tab convergence. Frontend dedup-by-id is
-   * required since the originating tab already inserted via the REST
-   * POST response. */
-  onSessionCreated?: (session: Session) => void;
-  /** A session was deleted in some tab — multi-tab convergence so
-   * tab B's sidebar drops it without a manual refresh. Frontend
-   * dedups-by-id (the originating tab already filtered locally). */
-  onSessionDeleted?: (sessionId: string) => void;
-  /** A session was renamed (auto-title from first prompt, or manual
-   * rename in another tab). Replaces a prior pattern that scanned the
-   * shared `events` buffer on every render — the scan cost grew with
-   * the buffer and re-ran on every WS frame from any session. */
-  onSessionRenamed?: (sessionId: string, name: string) => void;
-  /** Backend's project list changed (auto-add on session create or
-   * REST POST/DELETE/touch from any tab). Caller refetches the list.
-   * Replaces a buffer-tail scan that fired on every WS frame. */
-  onProjectsChanged?: () => void;
-  /** Project structure updates changed (new capture or marked seen).
-   * Carries project_id and unseen_count. */
-  onProjectUpdatesChanged?: (data: { project_id: string; unseen_count: number }) => void;
-  /** Worker list for a session changed (created/destroyed/updated).
-   * Caller refetches sessions to update worker_count in the sidebar. */
-  onWorkersChanged?: () => void;
-  /** Virtual session folders/tags changed. Caller refetches organization
-   * snapshot and session summaries. */
-  onSessionOrganizationChanged?: () => void;
-  /** Project mapping groups changed (auto-match rebuild or user edit).
-   * Caller refetches GET /api/project-mappings. */
-  onProjectMappingsChanged?: () => void;
   /** Backend-emitted notification that supervisor verdict failed
    * (kind=verdict_failed), hit MAX_VERDICTS_PER_TURN
    * (kind=verdict_capped), or terminated because the worker is
@@ -466,15 +429,6 @@ export function useWebSocket(
   const getEventsCursorKnownRef = useRef(options.getEventsCursorKnown);
   const onEventSeqAdvanceRef = useRef(options.onEventSeqAdvance);
   const onSessionMetadataUpdatedRef = useRef(options.onSessionMetadataUpdated);
-  const onSessionForkedRef = useRef(options.onSessionForked);
-  const onSessionCreatedRef = useRef(options.onSessionCreated);
-  const onSessionDeletedRef = useRef(options.onSessionDeleted);
-  const onSessionRenamedRef = useRef(options.onSessionRenamed);
-  const onProjectsChangedRef = useRef(options.onProjectsChanged);
-  const onProjectUpdatesChangedRef = useRef(options.onProjectUpdatesChanged);
-  const onWorkersChangedRef = useRef(options.onWorkersChanged);
-  const onSessionOrganizationChangedRef = useRef(options.onSessionOrganizationChanged);
-  const onProjectMappingsChangedRef = useRef(options.onProjectMappingsChanged);
   const onSupervisorEventRef = useRef(options.onSupervisorEvent);
   const onPrLinkRef = useRef(options.onPrLink);
   const onPromptQueuedRef = useRef(options.onPromptQueued);
@@ -529,14 +483,6 @@ export function useWebSocket(
     getEventsCursorKnownRef.current = options.getEventsCursorKnown;
     onEventSeqAdvanceRef.current = options.onEventSeqAdvance;
     onSessionMetadataUpdatedRef.current = options.onSessionMetadataUpdated;
-    onSessionForkedRef.current = options.onSessionForked;
-    onSessionCreatedRef.current = options.onSessionCreated;
-    onSessionDeletedRef.current = options.onSessionDeleted;
-    onSessionRenamedRef.current = options.onSessionRenamed;
-    onProjectsChangedRef.current = options.onProjectsChanged;
-    onWorkersChangedRef.current = options.onWorkersChanged;
-    onSessionOrganizationChangedRef.current = options.onSessionOrganizationChanged;
-    onProjectMappingsChangedRef.current = options.onProjectMappingsChanged;
     onSupervisorEventRef.current = options.onSupervisorEvent;
     onPrLinkRef.current = options.onPrLink;
     onPromptQueuedRef.current = options.onPromptQueued;
@@ -577,15 +523,6 @@ export function useWebSocket(
     options.getEventsCursorKnown,
     options.onEventSeqAdvance,
     options.onSessionMetadataUpdated,
-    options.onSessionForked,
-    options.onSessionCreated,
-    options.onSessionDeleted,
-    options.onSessionRenamed,
-    options.onProjectsChanged,
-    options.onProjectUpdatesChanged,
-    options.onWorkersChanged,
-    options.onSessionOrganizationChanged,
-    options.onProjectMappingsChanged,
     options.onPromptQueued,
     options.onTurnStarted,
     options.onQueueConsumed,
@@ -1422,26 +1359,6 @@ export function useWebSocket(
             onSessionMetadataUpdatedRef.current?.(d.session_id, d.patch);
           }
         }
-        if (event.type === "session_created") {
-          // DIV-4: multi-tab convergence for new sessions. The
-          // originating tab already added the session via the REST POST
-          // response — caller MUST dedup by id (see appendSessionIfNew
-          // in useSession).
-          const d = event.data as { session: Session };
-          if (d.session) {
-            onSessionCreatedRef.current?.(d.session);
-          }
-        }
-        if (event.type === "session_deleted") {
-          // Multi-tab convergence for deletes. Originating tab
-          // already filtered locally after REST DELETE; this covers
-          // other tabs + the originating tab on REST↔WS races.
-          // Caller MUST dedup-by-id (no-op when already removed).
-          const d = event.data as { session_id?: string };
-          if (d.session_id) {
-            onSessionDeletedRef.current?.(d.session_id);
-          }
-        }
         if (event.type === "supervisor_event") {
           // Three flavors today: verdict_failed (supervisor errored —
           // we fail open), verdict_capped (loop hit MAX_VERDICTS), and
@@ -1468,37 +1385,6 @@ export function useWebSocket(
             error: d.error,
             reason: d.reason,
           });
-        }
-        if (event.type === "session_forked") {
-          const d = event.data as {
-            session: Session;
-            parent_session_id: string | null;
-          };
-          if (d.session) {
-            onSessionForkedRef.current?.(d.session, d.parent_session_id ?? null);
-          }
-        }
-        if (event.type === "session_renamed") {
-          const d = event.data as { session_id?: string; name?: string };
-          if (d.session_id && d.name) {
-            onSessionRenamedRef.current?.(d.session_id, d.name);
-          }
-        }
-        if (event.type === "projects_changed") {
-          onProjectsChangedRef.current?.();
-        }
-        if (event.type === "project_updates_changed") {
-          const d = event.data as { project_id: string; unseen_count: number };
-          onProjectUpdatesChangedRef.current?.(d);
-        }
-        if (event.type === "workers_changed") {
-          onWorkersChangedRef.current?.();
-        }
-        if (event.type === "session_organization_changed") {
-          onSessionOrganizationChangedRef.current?.();
-        }
-        if (event.type === "project_mappings_changed") {
-          onProjectMappingsChangedRef.current?.();
         }
         // Provider list/active-id changed somewhere — let any open
         // ProvidersModal + every ModelSelector refetch via a global

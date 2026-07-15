@@ -65,6 +65,17 @@ export interface BusEventMap {
   session_created: { session: Session };
   session_deleted: { session_id: string };
   session_renamed: { session_id: string; name: string };
+  session_forked: {
+    session: Session;
+    parent_session_id: string | null;
+  };
+  project_updates_changed: {
+    project_id: string;
+    unseen_count: number;
+  };
+  workers_changed: Record<string, unknown>;
+  session_organization_changed: Record<string, unknown>;
+  project_mappings_changed: Record<string, unknown>;
   run_state: {
     app_session_id: string;
     runs: unknown[];
