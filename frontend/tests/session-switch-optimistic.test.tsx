@@ -21,11 +21,12 @@
  * directly here.
  */
 import { describe, it, expect, afterEach, vi } from "vitest";
+import { chatTreeResponse } from "./harness/mockBackend";
 import { renderHook, act, waitFor } from "@testing-library/react";
 import { useSession } from "../src/hooks/useSession";
 import type { Session } from "../src/types";
 
-const SESSION_FETCH = /\/api\/sessions\/[^?]+\?.*exchange_count=/;
+const SESSION_FETCH = /\/api\/chat-tree\/[^?]+\?.*turns=/;
 const SESSION_LIST = /\/api\/sessions\?/;
 const SESSION_DELETE = /\/api\/sessions\/[^/?]+$/;
 
@@ -195,7 +196,7 @@ describe("useSession.selectSession — optimistic swap", () => {
       ],
     };
     await act(async () => {
-      gate!.resolve(SESSION_FETCH, canonicalB);
+      gate!.resolve(SESSION_FETCH, chatTreeResponse(canonicalB, 5, undefined));
       await Promise.resolve();
     });
 
@@ -224,7 +225,7 @@ describe("useSession.selectSession — optimistic swap", () => {
       await Promise.resolve();
     });
     await act(async () => {
-      gate!.resolve(SESSION_FETCH, a);
+      gate!.resolve(SESSION_FETCH, chatTreeResponse(a, 5, undefined));
       await Promise.resolve();
     });
 
@@ -258,7 +259,7 @@ describe("useSession.selectSession — optimistic swap", () => {
       await Promise.resolve();
     });
     await act(async () => {
-      gate!.resolve(SESSION_FETCH, b);
+      gate!.resolve(SESSION_FETCH, chatTreeResponse(b, 5, undefined));
       await Promise.resolve();
     });
 
@@ -302,7 +303,7 @@ describe("useSession.selectSession — optimistic swap", () => {
     gate = installFetchGate({
       hold: SESSION_DELETE,
       defaultBody: (url) => {
-        if (SESSION_FETCH.test(url)) return a;
+        if (SESSION_FETCH.test(url)) return chatTreeResponse(a, 5, undefined);
         return { sessions: [a, b] };
       },
     });
@@ -341,7 +342,7 @@ describe("useSession.selectSession — optimistic swap", () => {
     gate = installFetchGate({
       hold: SESSION_DELETE,
       defaultBody: (url) => {
-        if (SESSION_FETCH.test(url)) return a;
+        if (SESSION_FETCH.test(url)) return chatTreeResponse(a, 5, undefined);
         return { sessions: [a, b] };
       },
     });
@@ -456,7 +457,7 @@ describe("useSession.selectSession — optimistic swap", () => {
     // (selectRequestIdRef) must drop it — currentSession stays on B.
     const canonicalA: Session = { ...a, messages: [] };
     await act(async () => {
-      gate!.resolve(SESSION_FETCH, canonicalA);
+      gate!.resolve(SESSION_FETCH, chatTreeResponse(canonicalA, 5, undefined));
       await Promise.resolve();
     });
     expect(result.current.currentSession?.id).toBe("b");
@@ -464,7 +465,7 @@ describe("useSession.selectSession — optimistic swap", () => {
     // Resolve REST B — canonical state lands.
     const canonicalB: Session = { ...b, messages: [] };
     await act(async () => {
-      gate!.resolve(SESSION_FETCH, canonicalB);
+      gate!.resolve(SESSION_FETCH, chatTreeResponse(canonicalB, 5, undefined));
       await Promise.resolve();
     });
     expect(result.current.currentSession?.id).toBe("b");
@@ -498,7 +499,7 @@ describe("useSession.selectSession — optimistic swap", () => {
 
     const canonical = makeSession({ id: "unknown-id", name: "Surprise" });
     await act(async () => {
-      gate!.resolve(SESSION_FETCH, canonical);
+      gate!.resolve(SESSION_FETCH, chatTreeResponse(canonical, 5, undefined));
       await Promise.resolve();
     });
     expect(result.current.currentSession?.id).toBe("unknown-id");
@@ -541,7 +542,7 @@ describe("useSession.selectSession — optimistic swap", () => {
       ],
     };
     await act(async () => {
-      gate!.resolve(SESSION_FETCH, canonicalA);
+      gate!.resolve(SESSION_FETCH, chatTreeResponse(canonicalA, 5, undefined));
       await Promise.resolve();
     });
     expect(result.current.currentSession?.messages).toHaveLength(1);
@@ -575,7 +576,7 @@ describe("useSession.selectSession — optimistic swap", () => {
       await Promise.resolve();
     });
     await act(async () => {
-      gate!.resolve(SESSION_FETCH, {
+      gate!.resolve(SESSION_FETCH, chatTreeResponse({
         ...a,
         messages: [
           {
@@ -588,7 +589,7 @@ describe("useSession.selectSession — optimistic swap", () => {
             seq: 0,
           },
         ],
-      });
+      }, 5, undefined));
       await Promise.resolve();
     });
     await waitFor(() => {
@@ -600,7 +601,7 @@ describe("useSession.selectSession — optimistic swap", () => {
       await Promise.resolve();
     });
     await act(async () => {
-      gate!.resolve(SESSION_FETCH, { ...b, messages: [] });
+      gate!.resolve(SESSION_FETCH, chatTreeResponse({ ...b, messages: [] }, 5, undefined));
       await Promise.resolve();
     });
     await waitFor(() => {
@@ -660,7 +661,7 @@ describe("useSession.selectSession — optimistic swap", () => {
       ],
     };
     await act(async () => {
-      gate!.resolve(SESSION_FETCH, streamingA);
+      gate!.resolve(SESSION_FETCH, chatTreeResponse(streamingA, 5, undefined));
       await Promise.resolve();
     });
     expect(result.current.currentSession?.messages?.[1]?.isStreaming).toBe(true);
@@ -681,7 +682,7 @@ describe("useSession.selectSession — optimistic swap", () => {
       ],
     };
     await act(async () => {
-      gate!.resolve(SESSION_FETCH, finalizedA);
+      gate!.resolve(SESSION_FETCH, chatTreeResponse(finalizedA, 5, undefined));
       await Promise.resolve();
     });
 

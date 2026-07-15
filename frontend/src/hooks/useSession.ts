@@ -14,6 +14,7 @@ import { applyLiveTurnEvent } from "../utils/applyLiveTurnEvent";
 import { belongsToProjectPath } from "../utils/projectMembership";
 import { startOp, completeOp, runThreeStateSync } from "../progress/store";
 import { fetchWithTimeout, responseError } from "src/utils/offlineRequest";
+import { ChatTreeError, chatTreeToMessages, fetchChatTree } from "../chat/chatTreeClient";
 
 import { API } from "../api";
 import { useLocalStorage } from "./useLocalStorage";
@@ -747,6 +748,9 @@ export function useSession(authStatus?: string) {
   // nothing more. N = 5." The localStorage override is a pure UI pref;
   // the spec fixes the default.
   const [exchangePageSize] = useLocalStorage("bc_exchange_page_size", 5);
+  // Older-page turn cursors per ROOT session for the chat-tree
+  // transport (fork panes still page by seq until they migrate).
+  const chatTreeOlderCursorRef = useRef<Map<string, string | null>>(new Map());
   const [sessions, setSessions] = useState<Session[]>([]);
   const [sessionListFilters, setSessionListFilters] =
     useState<SessionListFilters>({});
@@ -1614,25 +1618,56 @@ export function useSession(authStatus?: string) {
       });
     }
     try {
-      const res = await fetch(`${API}/api/sessions/${id}?exchange_count=${exchangePageSize}`, {
-        credentials: "include",
-      });
-      if (!res.ok) {
-        if (res.status === 401) {
-          window.dispatchEvent(new CustomEvent("better-agent-auth-failed"));
+      // Chat content comes from the formal chat tree (BFF rendering
+      // cache: structure + result resolution projected server-side);
+      // session metadata, forks, and WS cursor seeds ride along from
+      // the runtime's root-tree assembly in the same response — one
+      // initial request. chat_tree_rebuilding is a typed warming state
+      // with a server-directed Retry-After; honor it a bounded number
+      // of times before surfacing the error.
+      let chatTree: Awaited<ReturnType<typeof fetchChatTree>> | null = null;
+      for (let attempt = 0; chatTree === null; attempt += 1) {
+        try {
+          chatTree = await fetchChatTree(id, { turns: exchangePageSize });
+        } catch (error) {
+          if (error instanceof ChatTreeError && error.code === "401") {
+            window.dispatchEvent(new CustomEvent("better-agent-auth-failed"));
+            return;
+          }
+          if (
+            error instanceof ChatTreeError
+            && error.code === "chat_tree_rebuilding"
+            && attempt < 2
+          ) {
+            await new Promise((resolve) =>
+              setTimeout(resolve, (error.retryAfterSeconds ?? 2) * 1000));
+            continue;
+          }
+          if (myReqId === selectRequestIdRef.current) {
+            setSessionLoadError({
+              sessionId: id,
+              message: error instanceof Error ? error.message : String(error),
+            });
+          }
           return;
         }
-        const err = await responseError(res);
-        if (myReqId === selectRequestIdRef.current) {
-          setSessionLoadError({ sessionId: id, message: err.message });
-        }
-        return;
       }
-      // Backend returns the FULL root tree containing `id` (id may be
-      // a fork — get_root_tree resolves to its root). The frontend
-      // stores the whole tree in currentSession; the split-pane UI
-      // reads forks from `currentSession.forks`.
-      const tree = (await res.json()) as Session;
+      // The response's session is the FULL root tree containing `id`
+      // (id may be a fork — the runtime resolves to its root). The
+      // split-pane UI reads forks from `currentSession.forks`; only
+      // the ROOT node's messages come from the formal tree.
+      const rootMessages = chatTreeToMessages(chatTree.projection, chatTree.lookup);
+      chatTreeOlderCursorRef.current.set(
+        String(chatTree.session.id ?? id), chatTree.page.older_cursor);
+      const tree = {
+        ...(chatTree.session as unknown as Session),
+        messages: rootMessages,
+        pagination: {
+          total_messages: undefined,
+          oldest_loaded_seq: rootMessages[0]?.seq ?? null,
+          has_older: chatTree.page.has_older,
+        },
+      } as Session;
       if (myReqId !== selectRequestIdRef.current) return;
       const viewedSessionId = tree.id;
       const openedAt = markSessionOpened(viewedSessionId);
@@ -1772,6 +1807,12 @@ export function useSession(authStatus?: string) {
       completeOp(opId);
     }
   }, [cachedSessionTreeFor, exchangePageSize, markSessionOpened]);
+  // Stable handle for callbacks defined before selectSession (stale
+  // turn-cursor recovery in loadOlderMessages refetches the snapshot).
+  const selectSessionRef = useRef<typeof selectSession | null>(null);
+  useEffect(() => {
+    selectSessionRef.current = selectSession;
+  }, [selectSession]);
   const removeSessionLocally = useCallback((id: string) => {
     liveSessionNamesRef.current.delete(id);
     forgetSessionTree(id);
@@ -2826,6 +2867,48 @@ export function useSession(authStatus?: string) {
 
   const loadOlderMessages = useCallback(
     async (sessionId: string, beforeSeq: number) => {
+      // ROOT sessions page by formal-tree turn cursor; fork panes keep
+      // seq paging until they migrate onto the chat tree.
+      const treeCursor = chatTreeOlderCursorRef.current.get(sessionId);
+      if (treeCursor !== undefined) {
+        if (treeCursor === null) return;
+        let chatTree: Awaited<ReturnType<typeof fetchChatTree>>;
+        try {
+          chatTree = await fetchChatTree(sessionId, {
+            turns: exchangePageSize,
+            beforeTurn: treeCursor,
+          });
+        } catch (error) {
+          if (error instanceof ChatTreeError && error.code === "stale_turn_cursor") {
+            // Typed stale cursor: discard paging state and refetch one
+            // current snapshot — never merge mixed revisions.
+            chatTreeOlderCursorRef.current.delete(sessionId);
+            await selectSessionRef.current?.(sessionId);
+          }
+          return;
+        }
+        const older = chatTreeToMessages(chatTree.projection, chatTree.lookup);
+        chatTreeOlderCursorRef.current.set(sessionId, chatTree.page.older_cursor);
+        if (older.length === 0) return;
+        setCurrentSession((prev) => {
+          if (!prev) return prev;
+          return updateNodeById(prev, sessionId, (node) => {
+            const existing = node.messages || [];
+            const known = new Set(existing.map((message) => message.id));
+            const fresh = older.filter((message) => !known.has(message.id));
+            return {
+              ...node,
+              messages: [...fresh, ...existing],
+              pagination: {
+                total_messages: undefined,
+                oldest_loaded_seq: fresh[0]?.seq ?? node.pagination?.oldest_loaded_seq ?? null,
+                has_older: chatTree.page.has_older,
+              },
+            };
+          });
+        });
+        return;
+      }
       const res = await fetch(
         `${API}/api/sessions/${sessionId}/messages?before_seq=${beforeSeq}&exchange_count=${exchangePageSize}`
       );

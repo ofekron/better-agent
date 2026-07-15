@@ -2643,9 +2643,17 @@ export function CanonicalHistoricalEventRow({ event, sessionId, childControl }: 
 }
 
 export function CanonicalHistoricalWorkerRow({ worker, sessionId, childControl }: { worker: WorkerPanel; sessionId?: string; childControl?: HistoricalChildControl }) {
+  // Same funnel as the live timeline: strategy-built entity blocks
+  // through renderTimeline with a flattened primary entity, so
+  // historical worker rows keep byte-identical markup with live ones —
+  // locked by historical-row-parity.
+  const blocks = getStrategy("manager").buildEntityBlocks(
+    { id: `historical-${worker.delegation_id}`, role: "assistant", content: "", events: [], isStreaming: false },
+    [worker],
+  );
   return (
     <CanonicalHistoricalRow className="canonical-worker-row" control={childControl}>
-      {renderManagerStreamLegacy([], [worker], undefined, undefined, undefined, EMPTY_WORKER_DEFAULT_OPEN, undefined, sessionId)}
+      {renderTimeline(blocks, [], [worker], undefined, undefined, undefined, EMPTY_ACTIVE_WORKER_IDS, true, undefined, undefined, sessionId)}
     </CanonicalHistoricalRow>
   );
 }

@@ -1,4 +1,5 @@
 import type {
+  ChatMessage,
   CredentialConsent,
   FileDiscussion,
   PendingApproval,
@@ -612,6 +613,20 @@ export class MockBackend {
       this.state.sessions.unshift(s);
       return s;
     }
+    const chatTreeMatch = path.match(/^\/api\/chat-tree\/([^/]+)$/);
+    if (method === "GET" && chatTreeMatch) {
+      const id = decodeURIComponent(chatTreeMatch[1]);
+      for (const root of this.state.sessions) {
+        if (findNodeInTree(root, id)) {
+          return chatTreeResponse(
+            root,
+            Number(query.turns ?? 5),
+            query.before_turn,
+          );
+        }
+      }
+      return notFound();
+    }
     const sessionMatch = path.match(/^\/api\/sessions\/([^/]+)(\/.*)?$/);
     if (sessionMatch) {
       const id = decodeURIComponent(sessionMatch[1]);
@@ -1113,10 +1128,18 @@ export class MockBackend {
 
 function jsonResponse(data: unknown, status: number = 200): Response {
   if (data && typeof data === "object" && (data as { __notFound?: true }).__notFound) {
-    return new Response(JSON.stringify({ error: "not found" }), {
-      status: 404,
-      headers: { "Content-Type": "application/json" },
-    });
+    const overridden = (data as { __status?: number }).__status;
+    return new Response(
+      JSON.stringify(
+        overridden === 409
+          ? { detail: { code: "stale_turn_cursor", message: "stale cursor" } }
+          : { error: "not found" },
+      ),
+      {
+        status: overridden ?? 404,
+        headers: { "Content-Type": "application/json" },
+      },
+    );
   }
   return new Response(JSON.stringify(data ?? null), {
     status,
@@ -1135,6 +1158,123 @@ function findNodeInTree(root: Session, id: string): Session | null {
 
 function notFound(): { __notFound: true } {
   return { __notFound: true };
+}
+
+/** Mirror of the BFF /api/chat-tree contract over seeded sessions:
+ * user→assistant pairs become formal Turn items (result = the
+ * assistant's final text), assistant model_switched events become
+ * ModelChange items heading the NEXT turn, and the lookup sidecar
+ * carries content + stripped snapshots. Initial snapshots are
+ * spec-compact (no body items) — event enrichment arrives via the
+ * tests' own WS replay frames, as in production. */
+export function chatTreeResponse(
+  root: Session,
+  turns: number,
+  beforeTurn: string | undefined,
+): Record<string, unknown> | { __notFound: true; __status?: number } {
+  type Pair = { user: ChatMessage; assistant?: ChatMessage; anchors: ChatMessage[] };
+  const pairs: Pair[] = [];
+  for (const message of root.messages ?? []) {
+    if (message.role === "user") {
+      pairs.push({ user: message, anchors: [] });
+    } else if (message.role === "assistant" && pairs.length > 0) {
+      const current = pairs[pairs.length - 1];
+      if (!current.assistant) {
+        current.assistant = message;
+      } else {
+        // Anchor-style assistant (e.g. selector_change): not a turn of
+        // its own — only its model_switched events matter, as
+        // ModelChange items after the owning turn.
+        current.anchors.push(message);
+      }
+    }
+  }
+  let end = pairs.length;
+  if (beforeTurn !== undefined) {
+    const at = pairs.findIndex((pair) => pair.user.id === beforeTurn);
+    if (at < 0) {
+      return { __notFound: true, __status: 409 };
+    }
+    end = at;
+  }
+  const start = Math.max(0, end - turns);
+  const window = pairs.slice(start, end);
+  const items: Record<string, unknown>[] = [];
+  const lookup: Record<string, unknown> = {};
+  const strip = (message: ChatMessage): Record<string, unknown> => {
+    const { events: _e, workers: _w, manager: _m, ...rest } = message as ChatMessage & {
+      manager?: unknown;
+    };
+    return rest as Record<string, unknown>;
+  };
+  window.forEach((pair, index) => {
+    lookup[pair.user.id] = {
+      kind: "message", role: "user", text: pair.user.content,
+      seq: pair.user.seq ?? null, snapshot: strip(pair.user),
+    };
+    const assistant = pair.assistant;
+    let result: Record<string, unknown> | null = null;
+    if (assistant) {
+      const partId = `${assistant.id}:final`;
+      lookup[partId] = {
+        kind: "event", type: "assistant_text",
+        data: { text: assistant.content ?? "" },
+        message_id: assistant.id,
+        message_seq: assistant.seq ?? null,
+      };
+      lookup[assistant.id] = {
+        kind: "message", role: "assistant", text: assistant.content ?? "",
+        seq: assistant.seq ?? null, snapshot: strip(assistant),
+      };
+      result = { type: "ProviderResult", part_ids: [partId], text: assistant.content ?? "" };
+    }
+    items.push({
+      type: "Turn", id: pair.user.id, prompt: pair.user.id, body: [], result,
+    });
+    const switchCarriers = [
+      ...(assistant?.events ?? []),
+      ...pair.anchors.flatMap((anchor) => anchor.events ?? []),
+    ];
+    for (const event of switchCarriers) {
+      if (event.type !== "model_switched") continue;
+      const data = (event.data ?? {}) as Record<string, unknown>;
+      const changeId = String(data.uuid ?? `switch-${pair.user.id}`);
+      const next = window[index + 1];
+      items.push({
+        type: "ModelChange", id: changeId,
+        before_turn: next ? next.user.id : `${pair.user.id}:next`,
+      });
+      lookup[changeId] = {
+        kind: "event", type: "model_change",
+        data: {
+          from: data.previous_provider_id || data.previous_model ? {
+            provider: data.previous_provider_id ?? "", model: data.previous_model ?? "",
+            effort: data.previous_reasoning_effort ?? "",
+          } : null,
+          to: {
+            provider: data.provider_id ?? "", model: data.model ?? "",
+            effort: data.reasoning_effort ?? "",
+          },
+        },
+        message_id: assistant?.id ?? null,
+      };
+    }
+  });
+  const { messages: _messages, ...sessionMeta } = root;
+  return {
+    session_id: root.id,
+    schema_version: 1,
+    session: sessionMeta,
+    items,
+    lookup,
+    page: {
+      turns,
+      before_turn: beforeTurn ?? null,
+      older_cursor: start > 0 ? window[0]?.user.id ?? null : null,
+      has_older: start > 0,
+    },
+    dropped: [],
+  };
 }
 
 function escapeRegExp(s: string): string {
