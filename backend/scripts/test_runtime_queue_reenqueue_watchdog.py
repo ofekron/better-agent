@@ -88,7 +88,24 @@ class _Coordinator:
         task = self._processor_tasks.get(sid)
         return task is not None and not task.done()
 
+    def try_claim_queued_item(self, sid: str, item_id: str) -> bool:
+        # Mirror the real atomic claim: check-and-reserve with no gap.
+        if self.is_prompt_item_in_flight(sid, item_id):
+            return False
+        self._queued_ids.setdefault(sid, []).append(item_id)
+        return True
+
+    def release_claimed_queued_item(self, sid: str, item_id: str) -> None:
+        ids = self._queued_ids.get(sid)
+        if ids and item_id in ids:
+            ids.remove(item_id)
+
     async def submit_prompt_async(self, sid: str, params: dict) -> str:
+        # Real submit_prompt_async awaits asyncio.to_thread(...) before
+        # registering the item — a genuine yield point. Mirror it so a
+        # concurrency test can actually interleave two overlapping
+        # re-enqueue passes the way production does.
+        await asyncio.sleep(0)
         self.submitted.append((sid, params))
         return params.get("_queued_id") or "runtime-id"
 
@@ -234,12 +251,48 @@ def _watchdog_recovers_case() -> int:
         _restore(*restored)
 
 
+def _concurrent_passes_no_double_submit_case() -> int:
+    """The exact bug reported in production: the one-time startup recovery
+    pass overlapping the periodic re-enqueue watchdog pass (recovery
+    outlasting the watchdog interval). Both scan the same persisted
+    queue concurrently; without an atomic claim, both can observe
+    "not in flight" and both submit the same prompt, running it twice.
+    ``try_claim_queued_item`` must let exactly one of the two concurrent
+    passes win."""
+    sm = _SessionManager([{
+        "id": "racy-1",
+        "content": "seen by two overlapping passes",
+        "client_id": "client-racy",
+        "lifecycle_msg_id": "life-racy",
+        "orchestration_mode": "native",
+    }])
+    co = _Coordinator(in_flight=set())
+    restored = _patch({"sm": sm, "co": co})
+    try:
+        async def _run_both():
+            await asyncio.gather(
+                main._re_enqueue_queued_prompts(runtime=False),
+                main._re_enqueue_queued_prompts(runtime=True),
+            )
+        asyncio.run(_run_both())
+        assert len(co.submitted) == 1, (
+            f"expected exactly 1 submit from two overlapping re-enqueue "
+            f"passes, got {len(co.submitted)}"
+        )
+        assert co.submitted[0][1]["_queued_id"] == "racy-1"
+        print("PASS overlapping startup + watchdog passes submit exactly once")
+        return 0
+    finally:
+        _restore(*restored)
+
+
 def main_test() -> int:
     rc = _lost_prompt_case()
     rc |= _inflight_skip_case()
     rc |= _claimed_live_task_skip_case()
     rc |= _dead_processor_stale_claim_case()
     rc |= _watchdog_recovers_case()
+    rc |= _concurrent_passes_no_double_submit_case()
     shutil.rmtree(_TMP_HOME, ignore_errors=True)
     return rc
 

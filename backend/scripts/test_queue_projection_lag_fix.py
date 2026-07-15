@@ -31,9 +31,21 @@ FAIL = "\x1b[31mFAIL\x1b[0m"
 class _Coordinator:
     def __init__(self) -> None:
         self.submitted: list[tuple[str, dict]] = []
+        self._queued_ids: dict[str, list[str]] = {}
 
     def is_prompt_item_in_flight(self, sid: str, item_id: str) -> bool:
-        return False
+        return item_id in self._queued_ids.get(sid, [])
+
+    def try_claim_queued_item(self, sid: str, item_id: str) -> bool:
+        if self.is_prompt_item_in_flight(sid, item_id):
+            return False
+        self._queued_ids.setdefault(sid, []).append(item_id)
+        return True
+
+    def release_claimed_queued_item(self, sid: str, item_id: str) -> None:
+        ids = self._queued_ids.get(sid)
+        if ids and item_id in ids:
+            ids.remove(item_id)
 
     async def submit_prompt_async(self, sid: str, params: dict) -> str:
         self.submitted.append((sid, params))

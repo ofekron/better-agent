@@ -11882,10 +11882,14 @@ async def _re_enqueue_queued_prompts(*, runtime: bool = False) -> None:
                                 target_session_id=sid,
                             )
                         raise
-                    # submit_prompt_async succeeded: the item is now tracked
-                    # in _queued_ids by the real queuing path, so the claim
-                    # reservation must not be released.
-                    claimed = False
+                    # submit_prompt_async succeeded. If it actually queued
+                    # under our claimed item_id, _queued_ids already holds
+                    # it via the real queuing path — don't release. If it
+                    # instead redirected to a pre-existing claim on the same
+                    # client_id (item_id != qp_id), our reservation was
+                    # never turned into a real queue entry and must be
+                    # released like any other non-queued outcome.
+                    claimed = item_id != qp_id
                     logger.info(
                         "re-enqueue: re-submitted queued prompt %s -> %s "
                         "for session %s",
@@ -11917,8 +11921,12 @@ async def _queue_reenqueue_watchdog() -> None:
     interrupted before submit. Without this the prompt would sit in the
     persisted queue forever (startup re-enqueue only fires on a restart,
     and no restart may ever come). Reuses the canonical
-    ``_re_enqueue_queued_prompts`` drain; idempotent and double-run-safe via
-    ``is_prompt_item_in_flight``."""
+    ``_re_enqueue_queued_prompts`` drain; idempotent and double-run-safe
+    because that drain claims each item atomically via
+    ``coordinator.try_claim_queued_item`` before it does anything else —
+    this watchdog pass can safely overlap the one-time startup recovery
+    pass (e.g. when recovery outlasts the watchdog interval) without
+    double-submitting a prompt."""
     while True:
         try:
             await asyncio.sleep(_QUEUE_REENQUEUE_WATCHDOG_INTERVAL)

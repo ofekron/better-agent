@@ -62,10 +62,22 @@ class _SessionManager:
 class _Coordinator:
     def __init__(self) -> None:
         self.submitted: list[tuple[str, dict]] = []
+        self._queued_ids: dict[str, list[str]] = {}
 
     def is_prompt_item_in_flight(self, sid: str, item_id: str) -> bool:
         # Startup re-enqueue runs against a cold coordinator; nothing is in-flight.
-        return False
+        return item_id in self._queued_ids.get(sid, [])
+
+    def try_claim_queued_item(self, sid: str, item_id: str) -> bool:
+        if self.is_prompt_item_in_flight(sid, item_id):
+            return False
+        self._queued_ids.setdefault(sid, []).append(item_id)
+        return True
+
+    def release_claimed_queued_item(self, sid: str, item_id: str) -> None:
+        ids = self._queued_ids.get(sid)
+        if ids and item_id in ids:
+            ids.remove(item_id)
 
     def submit_prompt(self, sid: str, params: dict) -> str:
         self.submitted.append((sid, params))
