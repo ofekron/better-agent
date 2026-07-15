@@ -12148,6 +12148,18 @@ async def _promote_recovered_session(app_session_id: str) -> None:
             _RECOVERED_COLD_ACTIVE.discard(app_session_id)
 
 
+async def _import_off_loop(module_name: str):
+    """Run importlib.import_module off the event loop.
+
+    A plain `import` statement executes module-level code (including any file
+    I/O in the import chain) synchronously on the calling thread; when called
+    directly from an async function on the event loop thread, that blocks
+    every concurrent session/websocket/request for the import's duration.
+    """
+    import importlib
+    return await asyncio.to_thread(importlib.import_module, module_name)
+
+
 async def _to_thread_join_on_cancel(fn, *args, **kwargs):
     worker = asyncio.create_task(asyncio.to_thread(fn, *args, **kwargs))
     try:
@@ -13033,7 +13045,8 @@ async def on_startup():
                 extension_store.extension_id_for_role("requirements"),
                 "requirement_analysis",
             )
-            from requirement_analysis.session_tags import bind_event_loop as bind_requirement_tags_loop
+            session_tags_module = await _import_off_loop("requirement_analysis.session_tags")
+            bind_requirement_tags_loop = session_tags_module.bind_event_loop
         except (extension_package_loader.ExtensionPackageUnavailable, ModuleNotFoundError):
             pass
         else:
