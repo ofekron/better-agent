@@ -98,20 +98,32 @@ def test_delete_tombstones_generation_and_reuse_mints_next_generation():
     journal.close()
 
 
-def test_gap_cannot_skip_missing_jsonl_row():
+def test_gap_skips_write_and_waits_for_read_path_resync():
+    """mirror_event never repairs a gap itself -- it's a hot write path,
+    and the canonical journal is a rebuildable, on-demand projection of
+    jsonl. On a gap it must skip the write (no raise, no partial
+    coverage) and leave repair to the read path (`ensure_cutover`,
+    invoked by `ensure_canonical_authority_sync` before every BFF
+    read)."""
     root_id = "gap-root"
     session = {"id": root_id, "messages": []}
     journal = CanonicalRuntimeJournal(HOME / "gap-catalog.sqlite")
     row1 = {"root_id": root_id, "sid": root_id, "seq": 1, "type": "turn_start", "data": {"uuid": "g1"}}
     journal.ensure_cutover(root_id, rows=[row1], session=session)
-    try:
-        journal.mirror_event(
-            root_id=root_id, sid=root_id, seq=3, event_type="turn_complete",
-            data={}, source="claude", msg_id=None, event_id="g3", turn_id=None,
-        )
-        raise AssertionError("non-contiguous coverage must fail")
-    except Exception as exc:
-        assert "coverage gap" in str(exc)
+
+    # seq 2 is missing on disk too (not just unmirrored) -- mirror_event
+    # must not raise, it must simply decline to advance coverage.
+    journal.mirror_event(
+        root_id=root_id, sid=root_id, seq=3, event_type="turn_complete",
+        data={}, source="claude", msg_id=None, event_id="g3", turn_id=None,
+    )
+    assert journal.current_authority(root_id).journal_through_seq == 1
+    page = journal.read_page(root_id, after_seq=0, limit=100)
+    assert {fact["payload"]["uuid"] for fact in page["facts"]} == {"g1"}
+
+    # The read path (ensure_cutover, as called by
+    # ensure_canonical_authority_sync before every projection-source
+    # read) fills the gap on demand once jsonl actually has the rows.
     row2 = {"root_id": root_id, "sid": root_id, "seq": 2, "type": "progress", "data": {"uuid": "g2"}}
     row3 = {"root_id": root_id, "sid": root_id, "seq": 3, "type": "turn_complete", "data": {"uuid": "g3"}}
     journal.ensure_cutover(root_id, rows=[row1, row2, row3], session=session)
@@ -120,13 +132,15 @@ def test_gap_cannot_skip_missing_jsonl_row():
     journal.close()
 
 
-def test_mirror_gap_self_heals_from_jsonl():
-    """A prior mirror_event call for one seq can fail for reasons
-    unrelated to seq contiguity (transient store error, a
-    fire-and-forget caller that never awaited/checked the result) even
-    though the jsonl row was already durably written. The next live
-    mirror_event call must replay the missed rows from jsonl (the
-    source of truth) instead of raising forever."""
+def test_mirror_gap_leaves_coverage_for_read_path_to_fill():
+    """A mirror_event call can be dropped for reasons unrelated to seq
+    contiguity (transient store error, a fire-and-forget caller that
+    never awaited/checked the result) even though the jsonl rows were
+    already durably written. The next live mirror_event call for a
+    later seq must not raise and must not attempt to repair inline --
+    it just leaves journal_through_seq where it is. Coverage is only
+    guaranteed again once something runs the read-path resync
+    (ensure_cutover) against the current jsonl contents."""
     from event_ingester import event_ingester as ingester
 
     root_id = "gap-heal-root"
@@ -162,13 +176,20 @@ def test_mirror_gap_self_heals_from_jsonl():
     assert seq4 == 4
 
     # The live mirror call for seq 4 arrives with journal_through_seq
-    # still stuck at 1. It must self-heal by replaying seq 2/3 from
-    # jsonl rather than raising a coverage-gap error.
+    # still stuck at 1 -- it must not raise, and must not advance
+    # coverage on its own.
     journal.mirror_event(
         root_id=root_id, sid=root_id, seq=seq4, event_type="turn_complete",
         data={"uuid": "h4"}, source="test", msg_id=None, event_id="h4",
         turn_id=None,
     )
+    assert journal.current_authority(root_id).journal_through_seq == 1
+
+    # Only the read-path resync (what ensure_canonical_authority_sync
+    # runs before serving projection-source) catches the projection up
+    # to what's actually on disk.
+    rows, _, _ = ingester.read_events(root_id, after_seq=0, limit=100)
+    journal.ensure_cutover(root_id, rows=rows, session=session)
 
     authority = journal.current_authority(root_id)
     assert authority.journal_through_seq == 4
@@ -412,8 +433,8 @@ if __name__ == "__main__":
     test_import_cutover_mirror_and_page_read()
     test_reconcile_gap_and_new_messages_after_cutover()
     test_delete_tombstones_generation_and_reuse_mints_next_generation()
-    test_gap_cannot_skip_missing_jsonl_row()
-    test_mirror_gap_self_heals_from_jsonl()
+    test_gap_skips_write_and_waits_for_read_path_resync()
+    test_mirror_gap_leaves_coverage_for_read_path_to_fill()
     test_sequence_zero_is_not_skipped()
     test_unchanged_steady_read_does_no_store_work_or_fsync()
     test_interrupted_delete_resolves_from_durable_session_presence()

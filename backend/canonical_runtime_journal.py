@@ -5,7 +5,6 @@ import threading
 from pathlib import Path
 from typing import Any
 
-from canonical_event import CommittedFact
 from canonical_event_adapter import (
     canonical_facts_from_rows,
     canonical_message_facts,
@@ -98,17 +97,17 @@ class CanonicalRuntimeJournal:
         if seq <= authority.journal_through_seq:
             return
         if seq != authority.journal_through_seq + 1:
-            # The mirror lagged behind the durable jsonl (e.g. a prior
+            # The mirror fell behind the durable jsonl (e.g. a prior
             # mirror attempt raised/was dropped by a fire-and-forget
             # caller). jsonl is the source of truth and the canonical
-            # journal is a rebuildable projection of it — replay the
-            # missing rows instead of leaving the root permanently
-            # stuck raising on every future event.
-            authority = self._resync_gap(root_id, authority, upto_seq=seq)
-            if seq <= authority.journal_through_seq:
-                return
-            if seq != authority.journal_through_seq + 1:
-                raise AuthorityError("canonical journal coverage gap")
+            # journal is a rebuildable, on-demand projection of it —
+            # don't try to repair the gap on this hot write path.
+            # `ensure_canonical_authority_sync`/`ensure_cutover` fully
+            # catches the projection up from jsonl before every BFF
+            # read, so the gap is filled lazily on next demand rather
+            # than eagerly (and fatally) here.
+            _notify_advance(root_id, seq)
+            return
         payload = dict(data)
         if event_id and not payload.get("uuid"):
             payload["uuid"] = event_id
@@ -123,8 +122,8 @@ class CanonicalRuntimeJournal:
             "msg_id": msg_id,
             "turn_id": turn_id,
         }]
-        facts, _ = self._gap_row_facts(
-            root_id, authority.root_generation, rows, authority.journal_through_seq,
+        facts = canonical_facts_from_rows(
+            [row for row in rows if not provider_stream_render_row_is_shadow(row)]
         )
         store = self._store()
         if facts:
@@ -137,69 +136,6 @@ class CanonicalRuntimeJournal:
         )
         _notify_advance(root_id, seq)
 
-    def _gap_row_facts(
-        self,
-        root_id: str,
-        generation: int,
-        rows: list[dict[str, Any]],
-        journal_through_seq: int,
-    ) -> tuple[list[CommittedFact], int]:
-        """Validate `rows` against `journal_through_seq` and turn the gap
-        tail into canonical facts. Shared by initial cutover and by
-        steady-state gap self-heal in `mirror_event` — jsonl is the
-        source of truth; this is how the canonical projection catches
-        up to it."""
-        gap_rows = self._validated_gap_rows(rows, journal_through_seq)
-        normalized_rows = [
-            {**row, "root_id": root_id, "root_generation": generation}
-            for row in gap_rows
-            if not provider_stream_render_row_is_shadow(row)
-        ]
-        new_journal_through_seq = max(
-            (int(row.get("seq") or 0) for row in rows), default=journal_through_seq,
-        )
-        return canonical_facts_from_rows(normalized_rows), new_journal_through_seq
-
-    def _resync_gap(self, root_id: str, authority, *, upto_seq: int):
-        """Catch the canonical journal up to jsonl for `root_id`, reading
-        every row after `authority.journal_through_seq`. Returns the
-        refreshed authority. Raises if jsonl itself doesn't cover
-        `upto_seq` (an unrecoverable, not merely lagging, gap)."""
-        import event_ingester as event_ingester_module
-
-        rows: list[dict[str, Any]] = []
-        after_seq = authority.journal_through_seq
-        while True:
-            page, _, has_more = event_ingester_module.event_ingester.read_events(
-                root_id, after_seq=after_seq, limit=2_000,
-            )
-            rows.extend(page)
-            next_seq = max(
-                (int(row.get("seq") or 0) for row in page), default=after_seq,
-            )
-            if not has_more or next_seq >= upto_seq:
-                break
-            if next_seq <= after_seq:
-                raise AuthorityError("canonical journal coverage gap")
-            after_seq = next_seq
-
-        facts, new_journal_through_seq = self._gap_row_facts(
-            root_id, authority.root_generation, rows, authority.journal_through_seq,
-        )
-        if new_journal_through_seq <= authority.journal_through_seq:
-            return authority
-        store = self._store()
-        if facts:
-            store.submit_many(facts)
-        head = store.barrier(root_id, authority.root_generation).canonical_through_seq
-        self._catalog.advance_coverage(
-            root_id, authority.root_generation,
-            canonical_through_seq=head, journal_through_seq=new_journal_through_seq,
-            message_through_seq=authority.message_through_seq,
-        )
-        _notify_advance(root_id, new_journal_through_seq)
-        return self._catalog.current(root_id)
-
     def ensure_cutover(
         self,
         root_id: str,
@@ -211,12 +147,14 @@ class CanonicalRuntimeJournal:
         if authority.authority == "deleting":
             raise AuthorityError("root deletion is pending")
         generation = authority.root_generation
-        gap_facts, journal_through_seq_candidate = self._gap_row_facts(
-            root_id, generation, rows, authority.journal_through_seq,
-        )
-        normalized_rows_present = journal_through_seq_candidate > authority.journal_through_seq
+        gap_rows = self._validated_gap_rows(rows, authority.journal_through_seq)
+        normalized_rows = [
+            {**row, "root_id": root_id, "root_generation": generation}
+            for row in gap_rows
+            if not provider_stream_render_row_is_shadow(row)
+        ]
         message_through_seq = self._message_head(session, authority.message_through_seq)
-        if (authority.authority == "sqlite" and not normalized_rows_present
+        if (authority.authority == "sqlite" and not normalized_rows
                 and message_through_seq <= authority.message_through_seq):
             return generation
         message_facts = canonical_message_facts(
@@ -226,13 +164,15 @@ class CanonicalRuntimeJournal:
         )
         facts = [
             *message_facts,
-            *gap_facts,
+            *canonical_facts_from_rows(normalized_rows),
         ]
         store = self._store()
         if facts:
             store.submit_many(facts)
         barrier = store.barrier(root_id, generation)
-        journal_through_seq = journal_through_seq_candidate
+        journal_through_seq = max(
+            (int(row.get("seq") or 0) for row in rows), default=authority.journal_through_seq,
+        )
         database_path = self._database_path()
         if authority.authority == "jsonl":
             persisted_ids: set[str] = set()
