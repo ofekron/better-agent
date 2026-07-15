@@ -1166,6 +1166,11 @@ export interface Note {
   created_at: string;
 }
 
+/** Main-panel layout preference. `"chat"` = full-height conversation;
+ * `"status"` = conversation docked in a small bottom-left panel with a
+ * live status workspace filling the rest. Pure UI pref, per-session. */
+export type ViewMode = "chat" | "status";
+
 export interface TodoItem {
   /** Display text. Claude: `todos[i].content`. Gemini: `update_topic.title`. */
   content: string;

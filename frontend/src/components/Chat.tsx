@@ -549,6 +549,11 @@ interface Props {
    * `rightPanelOpen` prop so the button can show an "active" style. */
   onToggleRightPanel?: () => void;
   rightPanelOpen?: boolean;
+  /** Main-panel view mode for this session (`"chat"` full-height,
+   * `"status"` docks chat bottom-left with a status workspace).
+   * When omitted, the view-mode toggle is hidden. */
+  viewMode?: import("../types").ViewMode;
+  onToggleViewMode?: () => void;
   /** Configured shortcut responses from user prefs. */
   shortcutResponses?: string[];
   /** Projects available for @mention in the prompt input. */
@@ -650,6 +655,8 @@ export function Chat({
   toolbarActionsNode,
   onToggleRightPanel,
   rightPanelOpen,
+  viewMode,
+  onToggleViewMode,
   shortcutResponses = [],
   projects = [],
   sessions = [],
@@ -1492,6 +1499,28 @@ export function Chat({
               aria-pressed={rightPanelOpen ? true : false}
             >
               <Icon name="memo" size={18} />
+            </button>
+          )}
+          {onToggleViewMode && (
+            <button
+              className={
+                "chat-toolbar-view-mode-toggle" +
+                (viewMode === "status" ? " active" : "")
+              }
+              onClick={onToggleViewMode}
+              title={
+                viewMode === "status"
+                  ? t("statusView.switchToChat")
+                  : t("statusView.switchToStatus")
+              }
+              aria-label={
+                viewMode === "status"
+                  ? t("statusView.switchToChat")
+                  : t("statusView.switchToStatus")
+              }
+              aria-pressed={viewMode === "status"}
+            >
+              <Icon name="activity" size={18} />
             </button>
           )}
           <VoiceActivation onEnabledChange={setVoicePlaybackEnabled} />

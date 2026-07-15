@@ -47,7 +47,8 @@ export type IconName =
   | "circle"
   | "info"
   | "assistant-start"
-  | "testape";
+  | "testape"
+  | "activity";
 
 interface IconProps {
   name: IconName;
@@ -122,6 +123,7 @@ const PATHS: Record<IconName, string> = {
   mic: "M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3zM19 10v2a7 7 0 0 1-14 0v-2M12 19v3M8 22h8",
   testape:
     "M5 10a3 3 0 1 0 0 6 M19 10a3 3 0 1 1 0 6 M12 6a6 6 0 0 0-6 6c0 3.3 2.7 6 6 6s6-2.7 6-6a6 6 0 0 0-6-6z M10 11h.01 M14 11h.01 M11 14h2 M10 16a2 2 0 0 0 4 0",
+  activity: "M22 12h-4l-3 9L9 3l-3 9H2",
 };
 
 /** Known icon names — the single source extensions validate their manifest

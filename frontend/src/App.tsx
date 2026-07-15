@@ -22,6 +22,7 @@ import {
   type PendingOfflineQueueDraft,
 } from "./lib/offlineQueueProjection";
 import { useResizable } from "./hooks/useResizable";
+import { useLocalStorage } from "./hooks/useLocalStorage";
 import { useViewport } from "./hooks/useViewport";
 import { useVisualViewport } from "./hooks/useVisualViewport";
 import {
@@ -105,6 +106,8 @@ import { DownloadRedirect } from "./components/DownloadRedirect";
 import { ServerSetup } from "./components/ServerSetup";
 import { NotesPanel } from "./components/NotesPanel";
 import { TodosPanel, todoProgress } from "./components/TodosPanel";
+import { StatusViewLayout } from "./components/StatusViewLayout";
+import { StatusWorkspace } from "./components/StatusWorkspace";
 import { CommentsPanel } from "./components/CommentsPanel";
 import { ChangesPanel } from "./components/ChangesPanel";
 import Icon from "./components/Icon";
@@ -130,7 +133,7 @@ import {
 } from "./lib/voiceActivation";
 import { useRoute, sessionPath, extensionPanelPath } from "./hooks/useRoute";
 import { ackSessionSeen, sessionRegistry, useSessionMeta } from "./lib/sessionRegistry";
-import type { CapabilityContext, ChatMessage, FileAttachment, FileDiscussion, FileFocus, OrchestrationMode, PastedImage, Project, Provider, QueuedPrompt, SendMode, Session, WorkerCreationPolicy, WorkerInfo } from "./types";
+import type { CapabilityContext, ChatMessage, FileAttachment, FileDiscussion, FileFocus, OrchestrationMode, PastedImage, Project, Provider, QueuedPrompt, SendMode, Session, ViewMode, WorkerCreationPolicy, WorkerInfo } from "./types";
 import { SharePicker } from "./components/SharePicker";
 import { useShareTarget } from "./hooks/useShareTarget";
 import { buildShareDraftPatch } from "./utils/shareAttach";
@@ -1066,6 +1069,24 @@ function AppMain({
     sidebarMinimized?: boolean;
     optimistic?: boolean;
   };
+
+  // Per-session main-panel layout. "chat" = full-height conversation
+  // (default); "status" = conversation docked bottom-left, rest is a live
+  // status workspace. Pure UI preference, stored in localStorage (no
+  // backend behavior depends on it).
+  const [viewModeBySession, setViewModeBySession] = useLocalStorage<
+    Record<string, ViewMode>
+  >("better-agent-view-modes", {});
+  const currentViewMode: ViewMode = currentSession
+    ? viewModeBySession[currentSession.id] ?? "chat"
+    : "chat";
+  const setSessionViewMode = useCallback(
+    (sessionId: string, mode: ViewMode) => {
+      setViewModeBySession((prev) => ({ ...prev, [sessionId]: mode }));
+    },
+    [setViewModeBySession],
+  );
+
   const patchRightPanel = useCallback(
     (sessionId: string, patch: RightPanelPatch) => {
       if (patch.optimistic !== false) {
@@ -1144,6 +1165,15 @@ function AppMain({
       clearAutoReasons: true,
     });
   }, [isMobile, mobileRightOpen, currentSession, patchRightPanel]);
+
+  /** Toggle the main-panel view mode (chat ↔ status) for the current
+   *  session. Desktop only — on mobile the status layout is not offered,
+   *  so the button is hidden (the prop is withheld). */
+  const handleToggleViewMode = useCallback(() => {
+    if (!currentSession) return;
+    const next: ViewMode = currentViewMode === "status" ? "chat" : "status";
+    setSessionViewMode(currentSession.id, next);
+  }, [currentSession, currentViewMode, setSessionViewMode]);
 
   /** Switch to a specific tab AND ensure the panel is open. Marks as auto-opened. */
   const openRightPanelWithTab = useCallback(
@@ -3712,8 +3742,14 @@ function AppMain({
         timers.delete(id);
       }
     }
-    await Promise.all(ids.map((id) => offlineQueue.removeAllForSession(id)));
-    await Promise.all(ids.map((id) => deleteSession(id)));
+    await Promise.all(ids.map(async (id) => {
+      try {
+        await deleteSession(id);
+      } catch {
+        return;
+      }
+      await offlineQueue.removeAllForSession(id);
+    }));
   }, [sessionsToDelete, deleteSession, offlineQueue]);
 
   const sessionBeingDeleted = useMemo(() => {
@@ -7951,6 +7987,8 @@ function AppMain({
               }
               onToggleRightPanel={handleToggleRightPanel}
               rightPanelOpen={rightPanelVisible}
+              viewMode={currentViewMode}
+              onToggleViewMode={!isMobile ? handleToggleViewMode : undefined}
               shortcutResponses={shortcutResponses}
               projects={projects}
               sessions={sessions}
@@ -7961,6 +7999,27 @@ function AppMain({
           );
 
           if (!promptEngState && !fileEditingState) {
+            // Status view: dock the conversation bottom-left, fill the
+            // rest with a live status workspace. Desktop only — on mobile
+            // the layout collapses, so the normal full-height chat renders.
+            if (currentViewMode === "status" && !isMobile && currentSession) {
+              return (
+                <>
+                  {supervisorBannerElement}
+                  <StatusViewLayout
+                    chatSlot={chatElement}
+                    storageScope={`statusView.${currentSession.id}`}
+                    statusSlot={
+                      <StatusWorkspace
+                        session={currentSession}
+                        runs={runStateBySession[currentSession.id] ?? []}
+                      />
+                    }
+                  />
+                  {prToastElement}
+                </>
+              );
+            }
             return (
               <>
                 {supervisorBannerElement}
