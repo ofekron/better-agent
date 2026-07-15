@@ -35,6 +35,7 @@ from bff_event_hub import hub
 from bff_runtime_service import RuntimeServiceError, runtime_service
 from bff_runtime_upstream import RuntimeUpstreamUnavailable, runtime_upstream
 import bff_chat_feed
+from bff_chat_tree import router as chat_tree_router
 import bff_projection
 import app_chat_draft_store
 from frontend_assets import (
@@ -45,6 +46,7 @@ from frontend_assets import (
 
 app = FastAPI(title="better-agent-bff")
 app.include_router(app_router)
+app.include_router(chat_tree_router)
 
 _HOP_BY_HOP = {
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",

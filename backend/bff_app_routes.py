@@ -25,10 +25,13 @@ router = APIRouter()
 _CHAT_DRAFT_PATH = re.compile(r"^/api/sessions/[A-Za-z0-9_-]+/draft$")
 _PROJECT_MAPPING_PATH = re.compile(r"^/api/project-mappings/[^/]+$")
 _CHAT_FEED_STATUS_PATH = re.compile(r"^/api/chat-feed/[A-Za-z0-9_-]+/status$")
+_CHAT_TREE_PATH = re.compile(r"^/api/chat-tree/[A-Za-z0-9_-]+$")
 
 
 def owns_path(method: str, path: str) -> bool:
     if _CHAT_FEED_STATUS_PATH.fullmatch(path):
+        return method == "GET"
+    if _CHAT_TREE_PATH.fullmatch(path):
         return method == "GET"
     if path == "/api/file/draft":
         return method in {"GET", "POST", "DELETE"}
