@@ -123,6 +123,15 @@ def resolve_fresh(token: str | None) -> str | None:
     return resolve(token)
 
 
+def candidate_tokens() -> list[str]:
+    """Fresh snapshot of every per-extension token — signature-verification
+    candidates for signed internal requests."""
+    global _last_fingerprint_check
+    with _LOCK:
+        _last_fingerprint_check = 0.0
+        return list(_load_locked().values())
+
+
 def revoke(extension_id: str) -> None:
     """Drop an extension's token (e.g. on uninstall) so it stops authenticating."""
     extension_id = (extension_id or "").strip()

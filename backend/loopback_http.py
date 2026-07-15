@@ -14,6 +14,7 @@ import random
 import time
 from typing import Callable
 
+import internal_request_auth
 import runtime_endpoints
 
 _HTTP_ERROR_BODY_LIMIT = 4096
@@ -77,15 +78,16 @@ def request_internal(
     one of ``LOOPBACK_RETRYABLE_ERRORS`` on connection/descriptor
     failure. Callers own their retry policy."""
     descriptor = runtime_endpoints.read_app_endpoint()
+    headers = {"Content-Type": "application/json"}
+    # HMAC request signing: `internal_token` is the signing key; the raw
+    # secret never travels as a bearer header.
+    headers.update(internal_request_auth.sign(internal_token, method, url_path, body))
     status, raw = runtime_endpoints.http_request(
         descriptor,
         method,
         url_path,
         body=body,
-        headers={
-            "Content-Type": "application/json",
-            "X-Internal-Token": internal_token,
-        },
+        headers=headers,
         timeout=timeout,
     )
     if status >= 400:

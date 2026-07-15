@@ -27,10 +27,41 @@ def runtime_dir() -> Path:
     return ba_home() / "runtime"
 
 
+def _apply_windows_owner_only_acl(path: Path) -> None:
+    """Restrict the runtime dir to the current user: drop inherited ACEs
+    and grant only the current user full control (mirrors POSIX 0o700)."""
+    import getpass
+    import subprocess
+
+    user = getpass.getuser()
+    if not user:
+        raise RuntimeOwnershipError(
+            f"cannot resolve current user to secure runtime dir at {path}"
+        )
+    result = subprocess.run(
+        [
+            "icacls",
+            str(path),
+            "/inheritance:r",
+            "/grant:r",
+            f"{user}:(OI)(CI)F",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()
+        raise RuntimeOwnershipError(
+            f"icacls failed (rc={result.returncode}) securing runtime dir at {path}: {detail}"
+        )
+
+
 def ensure_runtime_dir() -> Path:
     path = runtime_dir()
     path.mkdir(mode=0o700, parents=True, exist_ok=True)
-    if os.name != "nt":
+    if os.name == "nt":
+        _apply_windows_owner_only_acl(path)
+    else:
         path.chmod(0o700)
     return path
 

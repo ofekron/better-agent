@@ -1877,27 +1877,70 @@ async def auth_gate(request, call_next):
     ):
         return await call_next(request)
     if path.startswith("/api/internal/"):
+        import internal_request_auth
+
         token = request.headers.get("X-Internal-Token")
-        # Authn: accept the core/runner token OR a registered per-extension
-        # token. Identity (which extension) is derived from the token by the
-        # per-endpoint gates — never from a self-asserted X-Extension-Id.
         ambient = None
-        try:
-            principal = await coordinator.resolve_principal_async(token)
+        principal = None
+        if internal_request_auth.has_signature(request.headers):
+            # Signed internal request: possession of the secret is proven by
+            # an HMAC over method|path|body|nonce|timestamp — the secret
+            # never travels. Identity is classified from the matched key
+            # exactly as a bearer was. Fail closed: a signed request never
+            # falls back to bearer auth.
+            body = await request.body()
+
+            async def _replay_body():
+                return {"type": "http.request", "body": body, "more_body": False}
+
+            request._receive = _replay_body
+            try:
+                matched = await coordinator.match_internal_request_async(
+                    request.method, path, body, request.headers
+                )
+                if matched is not None:
+                    token = matched
+                    principal = await coordinator.resolve_principal_async(matched)
+                    if principal is None:
+                        import ambient_principal
+                        ambient = ambient_principal.registry.resolve(matched)
+                        if ambient is not None:
+                            principal = PrincipalAuthority("ambient", ambient.principal_id)
+            except AdmissionOverloaded:
+                return JSONResponse(
+                    {"detail": "internal authentication is busy; retry shortly"},
+                    status_code=503,
+                    headers={"Retry-After": "1"},
+                )
             if principal is None:
-                import ambient_principal
-                ambient = ambient_principal.registry.resolve(token)
-                if ambient is not None:
-                    principal = PrincipalAuthority("ambient", ambient.principal_id)
-        except AdmissionOverloaded:
-            return JSONResponse(
-                {"detail": "internal authentication is busy; retry shortly"},
-                status_code=503,
-                headers={"Retry-After": "1"},
-            )
-        if principal is None:
-            from fastapi.responses import JSONResponse
-            return JSONResponse({"detail": "invalid internal token"}, status_code=403)
+                return JSONResponse(
+                    {"detail": "invalid internal request signature"}, status_code=403
+                )
+        else:
+            # Bearer fallback: per-extension and ambient credentials only —
+            # their client SDKs ship signing separately. The core secret
+            # authenticates via signatures exclusively; a raw core bearer is
+            # rejected (harvest/replay hardening).
+            try:
+                principal = await coordinator.resolve_principal_async(token)
+                if principal is not None and principal[0] == "core":
+                    return JSONResponse(
+                        {"detail": "core internal calls require a signed request"},
+                        status_code=403,
+                    )
+                if principal is None:
+                    import ambient_principal
+                    ambient = ambient_principal.registry.resolve(token)
+                    if ambient is not None:
+                        principal = PrincipalAuthority("ambient", ambient.principal_id)
+            except AdmissionOverloaded:
+                return JSONResponse(
+                    {"detail": "internal authentication is busy; retry shortly"},
+                    status_code=503,
+                    headers={"Retry-After": "1"},
+                )
+            if principal is None:
+                return JSONResponse({"detail": "invalid internal token"}, status_code=403)
         narrow_extension_routes = {
             "/api/internal/capabilities/invoke",
             "/api/internal/extension-call",

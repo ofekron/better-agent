@@ -76,6 +76,9 @@ _TOKEN_AUTH_EXECUTOR = BoundedAsyncExecutor(
     capacity=16,
     timeout_seconds=0.1,
 )
+# Replay guard for signed internal requests (internal_request_auth).
+import internal_request_auth as _internal_request_auth  # noqa: E402
+_INTERNAL_REQUEST_NONCES = _internal_request_auth.NonceCache()
 _BOUND_PRINCIPAL: ContextVar["_RequestAuthorityBinding" | None] = ContextVar(
     "bound_internal_principal",
     default=None,
@@ -922,6 +925,40 @@ class Coordinator:
                     return PrincipalAuthority("core", None)
             return None
         return await _TOKEN_AUTH_EXECUTOR.run(_resolve_disk_aware)
+
+    async def match_internal_request_async(
+        self,
+        method: str,
+        path: str,
+        body: bytes | None,
+        headers,
+    ) -> Optional[str]:
+        """The secret that signed this internal request, or None.
+
+        Candidates: the core token (memory, on-disk, rotation-grace),
+        per-extension tokens, and ambient MCP credentials. Possession is
+        proven by the HMAC; identity is then classified from the matched
+        key exactly as a bearer token was."""
+        import internal_request_auth
+
+        def _match() -> Optional[str]:
+            keys: list[str] = [self.internal_token or ""]
+            try:
+                keys.append(_internal_token_path().read_text(encoding="utf-8").strip())
+            except OSError:
+                pass
+            if self._prev_token and _time.monotonic() < self._prev_token_grace_expires_at:
+                keys.append(self._prev_token)
+            import extension_token_registry
+            keys.extend(extension_token_registry.candidate_tokens())
+            import ambient_principal
+            keys.extend(ambient_principal.registry.active_tokens())
+            return internal_request_auth.match_signature(
+                keys, method, path, body, headers,
+                nonce_cache=_INTERNAL_REQUEST_NONCES,
+            )
+
+        return await _TOKEN_AUTH_EXECUTOR.run(_match)
 
     async def extension_internal_loopback_allowed_async(self, extension_id: str) -> bool:
         def check() -> bool:

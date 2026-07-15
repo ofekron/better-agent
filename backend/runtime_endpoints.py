@@ -83,9 +83,27 @@ def http_request(
     through the BFF's httpx client, not this."""
     import http.client
     import socket
+    import stat as stat_module
 
     if descriptor.get("kind") == "uds":
         uds_path = descriptor["path"]
+        # Fail closed on a squatted/replaced socket: it must exist, be a
+        # socket, and be owned by the current effective user (POSIX only —
+        # the uds descriptor kind never validates on Windows).
+        try:
+            socket_stat = os.stat(uds_path)
+        except OSError as exc:
+            raise RuntimeEndpointError(
+                f"runtime app socket unavailable at {uds_path}"
+            ) from exc
+        if not stat_module.S_ISSOCK(socket_stat.st_mode):
+            raise RuntimeEndpointError(
+                f"runtime app endpoint at {uds_path} is not a unix socket"
+            )
+        if socket_stat.st_uid != os.geteuid():
+            raise RuntimeEndpointError(
+                f"runtime app socket at {uds_path} is not owned by the current user"
+            )
 
         class _UDSConnection(http.client.HTTPConnection):
             def connect(self) -> None:

@@ -26,6 +26,7 @@ import _test_home
 
 _TEST_HOME = _test_home.isolate(prefix="ba-ipc-transport-")
 
+import internal_request_auth
 import loopback_http
 import runtime_endpoints
 
@@ -37,12 +38,20 @@ class _Handler(BaseHTTPRequestHandler):
     respond_status = 200
     respond_body = b'{"ok": true}'
 
+    verify_key = ""
+
     def do_POST(self):
         length = int(self.headers.get("Content-Length") or 0)
+        body = self.rfile.read(length)
         _Handler.seen.append({
             "path": self.path,
-            "token": self.headers.get("X-Internal-Token"),
-            "body": self.rfile.read(length),
+            "signed_by_key": internal_request_auth.verify(
+                [_Handler.verify_key], "POST", self.path, body,
+                dict(self.headers.items()),
+                nonce_cache=internal_request_auth.NonceCache(),
+            ),
+            "bearer": self.headers.get("X-Internal-Token"),
+            "body": body,
         })
         self.send_response(_Handler.respond_status)
         self.send_header("Content-Type", "application/json")
@@ -90,16 +99,17 @@ def test_request_internal_over_uds():
     _serve(server)
     runtime_endpoints.write_app_endpoint({"kind": "uds", "path": str(socket_path)})
     try:
+        _Handler.verify_key = "tkn-uds"
         raw = loopback_http.request_internal(
             "POST", "/api/internal/echo", b'{"a": 1}',
             internal_token="tkn-uds", timeout=5.0,
         )
         assert json.loads(raw) == {"ok": True}
-        assert _Handler.seen == [{
-            "path": "/api/internal/echo",
-            "token": "tkn-uds",
-            "body": b'{"a": 1}',
-        }]
+        seen = _Handler.seen[0]
+        assert seen["path"] == "/api/internal/echo"
+        assert seen["body"] == b'{"a": 1}'
+        assert seen["signed_by_key"] is True
+        assert seen["bearer"] is None, "raw secret must not travel as a bearer" 
 
         _Handler.respond_status = 403
         _Handler.respond_body = json.dumps({"detail": "internal token rejected"}).encode()
@@ -127,12 +137,14 @@ def test_request_internal_over_tcp_descriptor():
     _serve(server)
     runtime_endpoints.write_app_endpoint({"kind": "tcp", "host": "127.0.0.1", "port": port})
     try:
+        _Handler.verify_key = "tkn-tcp"
         raw = loopback_http.request_internal(
             "POST", "/api/internal/echo", b'{"win": 1}',
             internal_token="tkn-tcp", timeout=5.0,
         )
         assert json.loads(raw) == {"ok": True}
-        assert _Handler.seen[0]["token"] == "tkn-tcp"
+        assert _Handler.seen[0]["signed_by_key"] is True
+        assert _Handler.seen[0]["bearer"] is None
     finally:
         server.shutdown()
         server.server_close()

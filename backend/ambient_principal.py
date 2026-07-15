@@ -94,6 +94,14 @@ class AmbientPrincipalRegistry:
             self._records[principal.principal_id] = _Record(token=token, principal=principal)
         return token, principal
 
+    def active_tokens(self) -> list[str]:
+        """Snapshot of live credential tokens — signature-verification
+        candidates for signed internal requests."""
+        now = self._clock()
+        with self._lock:
+            self._expire_locked(now)
+            return [record.token for record in self._records.values()]
+
     def resolve(self, token: str | None, *, permission: str = "") -> AmbientPrincipal | None:
         if not token:
             return None
