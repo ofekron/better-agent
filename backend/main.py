@@ -9089,14 +9089,14 @@ async def bff_projection_source(
     if after_seq < 0 or not 1 <= limit <= 2000:
         raise HTTPException(status_code=400, detail="invalid projection cursor")
 
-    def _read() -> dict:
+    def _read() -> Response:
         from canonical_event import SCHEMA_VERSION as FACT_SCHEMA_VERSION
         from canonical_runtime_journal import canonical_runtime_journal
         from event_journal import event_journal_writer
 
         session = session_store.get_session(session_id)
         if session is None:
-            return {"found": False}
+            return _json_bytes_response({"found": False})
         event_journal_writer.ensure_canonical_authority_sync(session_id)
         page = canonical_runtime_journal().read_page(
             session_id, after_seq=after_seq, limit=limit,
@@ -9108,13 +9108,19 @@ async def bff_projection_source(
             kind = provider.get("kind") if isinstance(provider, dict) else None
             if kind in {"claude", "codex", "gemini"}:
                 provider_kind = kind
-        return {
+        # Pre-serialize on this worker thread (json.dumps here, not FastAPI's
+        # default post-return jsonable_encoder+json.dumps back on the event
+        # loop) -- this is a high-frequency-polled endpoint whose payload
+        # (a full event page) can be large enough to stall the loop for
+        # 1-2s+ (lag-watchdog: json.dumps/iterencode pinned in
+        # starlette.responses.JSONResponse.render).
+        return _json_bytes_response({
             "found": True,
             "session": session,
             "provider_kind": provider_kind,
             **page,
             "fact_schema_version": FACT_SCHEMA_VERSION,
-        }
+        })
 
     return await asyncio.to_thread(_read)
 

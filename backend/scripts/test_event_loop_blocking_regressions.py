@@ -3758,6 +3758,15 @@ SOURCE_GREP_CASES: tuple = (
       ('session_manager.get_lite(target_session_id)',), ('session_manager.get(target_session_id)',),
      ),
     )),
+    ('bff_projection_source_pre_serializes_off_loop', (
+     ('grep', 'main.py',
+      (('async def bff_projection_source(', '@app.websocket("/api/bff-runtime/feed")'),),
+      ('return _json_bytes_response({"found": False})',
+       'return _json_bytes_response({\n            "found": True,',
+      ),
+      ('return {"found": False}', 'return {\n            "found": True,'),
+     ),
+    )),
 )
 
 
@@ -3825,7 +3834,7 @@ def _grep_check_failures(check: tuple) -> list[str]:
 
 
 def test_source_grep_regressions() -> None:
-    assert len(SOURCE_GREP_CASES) == 187
+    assert len(SOURCE_GREP_CASES) == 188
     executed = 0
     failing: list[str] = []
     report: list[str] = []
