@@ -7,6 +7,7 @@ import { setBuiltinExtensionIds } from "../../src/extensionIds";
 import { MockBackend, type BackendState } from "./mockBackend";
 import { MockWebSocketController, type OutboundFrame } from "./mockWebSocket";
 import { extractView, type AppView } from "./view";
+import { sessionRegistry } from "../../src/lib/sessionRegistry";
 
 export interface RenderAppOptions {
   seed?: Partial<BackendState>;
@@ -68,6 +69,10 @@ export interface Harness {
 }
 
 export async function renderApp(options: RenderAppOptions = {}): Promise<Harness> {
+  // The registry is a module singleton; without a per-render reset,
+  // per-session state from one test leaks into the next (same default
+  // fixture session id) and skews render assertions.
+  sessionRegistry.__resetForTests();
   const builtinExtensionIds = options.builtinExtensionIds ?? {
     credentialBroker: "ofek-dev.credential-broker",
   };
@@ -173,6 +178,7 @@ export async function renderApp(options: RenderAppOptions = {}): Promise<Harness
     flush: flushAll,
     unmount: () => {
       result.unmount();
+      sessionRegistry.__resetForTests();
       wsController.uninstall();
       backend.uninstall();
     },
@@ -249,11 +255,16 @@ function escapeRegex(s: string): string {
 
 async function flushAll(): Promise<void> {
   // Drain microtasks (fetch resolves, queueMicrotask in MockWebSocket)
-  // and let React's commit phase finish via act().
+  // and let React's commit phase finish via act(). Session open settles
+  // over chained fetch->commit->fetch rounds, so drain several macrotask
+  // rounds — flush()'s contract is "all pending work settled", and one
+  // round under-delivers when a prior test's teardown shares the loop.
   await act(async () => {
-    await Promise.resolve();
-    await new Promise((r) => setTimeout(r, 0));
-    await Promise.resolve();
+    for (let round = 0; round < 4; round += 1) {
+      await Promise.resolve();
+      await new Promise((r) => setTimeout(r, 0));
+      await Promise.resolve();
+    }
   });
 }
 

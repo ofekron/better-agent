@@ -25,7 +25,7 @@ async function renderHistorical(renderPayload: WSEvent | WorkerPanel) {
     }],
     next_cursor: null, has_more: false,
   }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
-  const rendered = render(<HistoricalTurnDetails sessionId="s1" messageId="a1" manifest={root} active />)
+  const rendered = render(<HistoricalTurnDetails sessionId="s1" messageId="a1" manifest={root} active onTerminal={() => {}} />)
   await waitFor(() => expect(rendered.container.querySelector('.canonical-row-core')).not.toBeNull())
   return rendered.container
 }
