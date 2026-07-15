@@ -1222,6 +1222,15 @@ def _run_owner(
             _owner_basename=owner_basename,
         )
         if test_fault == "startup_stop":
+            store.close()
+            for suffix in ("-wal", "-shm"):
+                descriptor = os.open(
+                    f"{owner_basename}{suffix}", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600,
+                )
+                try:
+                    os.write(descriptor, b"startup sidecar sentinel")
+                finally:
+                    os.close(descriptor)
             os.kill(os.getpid(), signal.SIGSTOP)
         return store
 

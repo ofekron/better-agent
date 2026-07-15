@@ -8,9 +8,6 @@ from pathlib import Path
 from chat_projection_store import ChatProjectionStoreError
 
 
-SidecarIdentity = tuple[int, int, int, int, int, int]
-
-
 def validate_secure_file_stat(metadata: os.stat_result) -> None:
     if not stat.S_ISREG(metadata.st_mode):
         raise ChatProjectionStoreError("insecure_store_file", "chat store must be a regular file")
@@ -31,28 +28,7 @@ def verify_anchored_file(file_fd: int, basename: str) -> None:
         raise ChatProjectionStoreError("path_race", "chat store file changed during owner open")
 
 
-def snapshot_sidecars(parent_fd: int, basename: str) -> dict[str, SidecarIdentity | None]:
-    snapshots = {}
-    for name in (f"{basename}-wal", f"{basename}-shm"):
-        try:
-            metadata = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
-            snapshots[name] = (
-                metadata.st_dev, metadata.st_ino, stat.S_IFMT(metadata.st_mode), metadata.st_uid,
-                stat.S_IMODE(metadata.st_mode), metadata.st_nlink,
-            )
-        except OSError as exc:
-            if exc.errno != ENOENT:
-                raise ChatProjectionStoreError(
-                    "path_open_failed", "cannot inspect store sidecar",
-                ) from exc
-            snapshots[name] = None
-    return snapshots
-
-
-def cleanup_created_store(
-    parent_fd: int, file_fd: int, basename: str, *,
-    sidecars_before: dict[str, SidecarIdentity | None] | None,
-) -> None:
+def cleanup_created_store(parent_fd: int, file_fd: int, basename: str) -> None:
     try:
         expected = os.fstat(file_fd)
         visible = os.stat(basename, dir_fd=parent_fd, follow_symlinks=False)
@@ -60,23 +36,23 @@ def cleanup_created_store(
         return
     if (expected.st_dev, expected.st_ino) != (visible.st_dev, visible.st_ino):
         return
-    for name, before in (sidecars_before or {}).items():
-        if before is not None:
-            continue
-        try:
-            metadata = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
-            if (
-                not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid()
-                or stat.S_IMODE(metadata.st_mode) != 0o600 or metadata.st_nlink != 1
-            ):
-                continue
-            os.unlink(name, dir_fd=parent_fd)
-        except OSError:
-            pass
     try:
         os.unlink(basename, dir_fd=parent_fd)
     except OSError:
         pass
+
+
+def _reject_orphan_sidecars(parent_fd: int, basename: str) -> None:
+    for suffix in ("-wal", "-shm"):
+        try:
+            os.stat(f"{basename}{suffix}", dir_fd=parent_fd, follow_symlinks=False)
+        except OSError as exc:
+            if exc.errno == ENOENT:
+                continue
+            raise ChatProjectionStoreError("path_open_failed", "cannot inspect store sidecar") from exc
+        raise ChatProjectionStoreError(
+            "orphan_sidecars", "store recovery is required before opening",
+        )
 
 
 def _open_directory_chain(root: Path, relative_parts: tuple[str, ...]) -> int:
@@ -118,6 +94,20 @@ def secure_open(root_path: Path, path: Path) -> tuple[Path, int, int, bool]:
     if not relative.parts or candidate.name in ("", ".", ".."):
         raise ChatProjectionStoreError("invalid_path", "chat store file name is required")
     parent_fd = _open_directory_chain(root, relative.parts[:-1])
+    main_exists = True
+    try:
+        os.stat(candidate.name, dir_fd=parent_fd, follow_symlinks=False)
+    except OSError as exc:
+        if exc.errno != ENOENT:
+            os.close(parent_fd)
+            raise ChatProjectionStoreError("path_open_failed", "cannot inspect chat store") from exc
+        main_exists = False
+    if not main_exists:
+        try:
+            _reject_orphan_sidecars(parent_fd, candidate.name)
+        except BaseException:
+            os.close(parent_fd)
+            raise
     created = False
     flags = os.O_RDWR | os.O_NOFOLLOW
     try:
@@ -136,6 +126,8 @@ def secure_open(root_path: Path, path: Path) -> tuple[Path, int, int, bool]:
     try:
         validate_secure_file_stat(os.fstat(file_fd))
         validate_secure_file_stat(os.stat(candidate.name, dir_fd=parent_fd, follow_symlinks=False))
+        if created:
+            _reject_orphan_sidecars(parent_fd, candidate.name)
     except BaseException:
         if created:
             try:

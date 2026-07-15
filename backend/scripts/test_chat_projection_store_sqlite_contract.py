@@ -714,6 +714,8 @@ def test_response_page_budget_timeout_admission_and_close_failure() -> None:
 
     missing_path = _path("init-missing-script")
     missing_path.parent.mkdir(parents=True, exist_ok=True)
+    missing_path.write_bytes(b"")
+    missing_path.chmod(0o600)
     sentinels = [missing_path.with_name(f"{missing_path.name}{suffix}") for suffix in ("-wal", "-shm")]
     for sentinel in sentinels:
         sentinel.write_bytes(f"sentinel:{sentinel.name}".encode())
@@ -734,8 +736,16 @@ def test_response_page_budget_timeout_admission_and_close_failure() -> None:
             ),
         )
     assert missing_processes and all(process.poll() is not None for process in missing_processes)
-    assert not missing_path.exists()
+    assert missing_path.exists()
     assert all(sentinel.read_bytes() == f"sentinel:{sentinel.name}".encode() for sentinel in sentinels)
+
+    orphan_path = _path("init-orphan-sidecars")
+    orphan_wal = orphan_path.with_name(f"{orphan_path.name}-wal")
+    orphan_wal.write_bytes(b"orphan sentinel")
+    orphan_wal.chmod(0o600)
+    _assert_error("orphan_sidecars", lambda: SQLiteChatProjectionStore(orphan_path))
+    assert not orphan_path.exists()
+    assert orphan_wal.read_bytes() == b"orphan sentinel"
 
     post_popen_path = _path("init-post-popen-failure")
     real_socketpair = socket.socketpair
@@ -764,11 +774,17 @@ def test_response_page_budget_timeout_admission_and_close_failure() -> None:
         _assert_error("owner_start_failed", lambda: SQLiteChatProjectionStore(post_popen_path))
     assert post_popen_processes and all(process.poll() is not None for process in post_popen_processes)
     assert not post_popen_path.exists()
-    assert not post_popen_path.with_name(f"{post_popen_path.name}-wal").exists()
-    assert not post_popen_path.with_name(f"{post_popen_path.name}-shm").exists()
+    post_sidecars = [
+        post_popen_path.with_name(f"{post_popen_path.name}{suffix}") for suffix in ("-wal", "-shm")
+    ]
+    assert all(sidecar.read_bytes() == b"new owner sidecar" for sidecar in post_sidecars)
+    _assert_error("orphan_sidecars", lambda: SQLiteChatProjectionStore(post_popen_path))
+    assert all(sidecar.read_bytes() == b"new owner sidecar" for sidecar in post_sidecars)
 
     replacement_path = _path("init-sidecar-replacement")
     replacement_path.parent.mkdir(parents=True, exist_ok=True)
+    replacement_path.write_bytes(b"")
+    replacement_path.chmod(0o600)
     replacement_wal = replacement_path.with_name(f"{replacement_path.name}-wal")
     replacement_wal.write_bytes(b"original sentinel")
     replacement_wal.chmod(0o600)
@@ -793,7 +809,7 @@ def test_response_page_budget_timeout_admission_and_close_failure() -> None:
                 validate_result=lambda _operation, result, _arguments: result,
             ),
         )
-    assert not replacement_path.exists()
+    assert replacement_path.exists()
     assert replacement_wal.read_bytes() == b"replacement sentinel"
 
     timeout_path = _path("invalid-timeout")
@@ -819,8 +835,11 @@ def test_response_page_budget_timeout_admission_and_close_failure() -> None:
         ),
     )
     assert not startup_path.exists()
-    assert not startup_path.with_name(f"{startup_path.name}-wal").exists()
-    assert not startup_path.with_name(f"{startup_path.name}-shm").exists()
+    startup_sidecars = [
+        startup_path.with_name(f"{startup_path.name}{suffix}") for suffix in ("-wal", "-shm")
+    ]
+    assert all(sidecar.read_bytes() == b"startup sidecar sentinel" for sidecar in startup_sidecars)
+    _assert_error("orphan_sidecars", lambda: SQLiteChatProjectionStore(startup_path))
     for invalid in (float("nan"), float("inf"), 0.01, 301, True):
         _assert_error(
             "invalid_input",
