@@ -113,54 +113,10 @@ def _uid_idx_for(owner: dict, evs: list) -> dict:
     return idx
 
 
-def _event_uuid(event: dict) -> Optional[str]:
-    """Extract the claude event uuid from an event dict.
-
-    Handles top-level event UUIDs, legacy manager_event wrappers
-    (`data.event.data.uuid`), and canonical agent_message shape
-    (`data.uuid`).
-    """
-    if not isinstance(event, dict):
-        return None
-    uid = event.get("uuid")
-    if isinstance(uid, str) and uid:
-        return uid
-    data = event.get("data")
-    if not isinstance(data, dict):
-        return None
-    uid = data.get("uuid")
-    if uid:
-        return uid
-    # Legacy manager_event wrapper: {"data": {"event": {"data": {"uuid": ...}}}}
-    inner = data.get("event")
-    if isinstance(inner, dict):
-        inner_data = inner.get("data")
-        if isinstance(inner_data, dict):
-            return inner_data.get("uuid")
-    return None
-
-
-def _normalize_for_render(event: dict) -> dict:
-    """Normalize to canonical agent_message shape.
-
-    Unwraps legacy manager_event wrappers.  Passes agent_message
-    through unchanged.  Returns the inner event dict for storage on
-    msg.events (uniform shape regardless of which path produced it).
-    """
-    if not isinstance(event, dict):
-        return event
-    if event.get("type") == "manager_event":
-        data = event.get("data") or {}
-        inner = data.get("event")
-        if isinstance(inner, dict):
-            return inner
-    if event.get("type") == "agent_message":
-        data = event.get("data")
-        if isinstance(data, dict) and data.get("type") == "agent_message":
-            inner_data = data.get("data")
-            if isinstance(inner_data, dict):
-                return {"type": "agent_message", "data": inner_data}
-    return event
+from event_shape import (  # noqa: E402
+    event_uuid as _event_uuid,
+    normalize_agent_event as _normalize_for_render,
+)
 
 
 def _agent_message_text(data: dict) -> str:

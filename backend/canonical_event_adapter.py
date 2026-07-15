@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, Iterable
 
 from canonical_event import CanonicalFact, SourceOrder
+from event_shape import normalize_agent_event
 
 
 def _uuid(data: dict[str, Any], fallback: str) -> str:
@@ -28,8 +29,14 @@ def canonical_facts_from_journal_row(row: dict[str, Any]) -> list[CanonicalFact]
     seq = row.get("seq")
     if not root_id or not isinstance(seq, int) or isinstance(seq, bool) or seq < 0:
         raise ValueError("journal row requires root/sid and non-negative seq")
-    event_type = str(row.get("type") or "unknown")
-    data = row.get("data")
+    raw_type = str(row.get("type") or "unknown")
+    raw_data = row.get("data")
+    normalized = normalize_agent_event({
+        "type": raw_type,
+        "data": raw_data if isinstance(raw_data, dict) else {},
+    })
+    event_type = str(normalized.get("type") or "unknown")
+    data = normalized.get("data")
     if not isinstance(data, dict):
         data = {}
     source = str(row.get("source") or "legacy")
@@ -71,7 +78,20 @@ def canonical_facts_from_journal_row(row: dict[str, Any]) -> list[CanonicalFact]
                 update_semantics="final" if data.get("final_answer") is True else "snapshot",
             ))
         for index, block in enumerate(content if isinstance(content, list) else []):
-            if not isinstance(block, dict) or block.get("type") != "tool_use":
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "thinking":
+                thought = block.get("thinking") or block.get("text")
+                if isinstance(thought, str) and thought:
+                    facts.append(CanonicalFact.create(
+                        **common,
+                        source_event_id=f"{event_id}:think:{index}",
+                        payload_type="thinking",
+                        payload={"message_id": message_id, "text": thought},
+                        update_semantics="snapshot",
+                    ))
+                continue
+            if block.get("type") != "tool_use":
                 continue
             facts.append(CanonicalFact.create(
                 **common,

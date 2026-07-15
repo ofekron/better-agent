@@ -50,6 +50,30 @@ def event_uuid(event: dict) -> str | None:
 _event_uuid = event_uuid
 
 
+def normalize_agent_event(event: dict) -> dict:
+    """Normalize to canonical agent_message shape.
+
+    Unwraps legacy manager_event wrappers. Passes agent_message through
+    unchanged. Returns the inner event dict (uniform shape regardless of
+    which path produced it). The one normalizer shared by the render
+    funnel (`orchs.base.apply_event`) and the canonical fact adapter.
+    """
+    if not isinstance(event, dict):
+        return event
+    if event.get("type") == "manager_event":
+        data = event.get("data") or {}
+        inner = data.get("event")
+        if isinstance(inner, dict):
+            return inner
+    if event.get("type") == "agent_message":
+        data = event.get("data")
+        if isinstance(data, dict) and data.get("type") == "agent_message":
+            inner_data = data.get("data")
+            if isinstance(inner_data, dict):
+                return {"type": "agent_message", "data": inner_data}
+    return event
+
+
 def frontend_event_from_journal_row(
     row: dict, *, include_seq: bool = False,
 ) -> dict | None:
