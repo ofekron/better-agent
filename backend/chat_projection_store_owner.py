@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from chat_projection_store import ChatProjectionStoreError
-from chat_projection_store_owner_path import cleanup_created_store, secure_open
+from chat_projection_store_owner_path import cleanup_created_store, secure_open, snapshot_sidecars
 
 
 MIN_TIMEOUT_SECONDS = 0.05
@@ -98,10 +98,12 @@ class OwnerClient:
         parent_channel = None
         child_channel = None
         child_started = False
+        sidecars_before = None
         startup_response_received = False
         try:
             parent_channel, child_channel = socket.socketpair()
             parent_channel.settimeout(self.startup_timeout_seconds)
+            sidecars_before = snapshot_sidecars(self.parent_fd, self.path.name)
             launcher = "import os,runpy,sys;sys.argv=sys.argv[1:];sys.path.insert(0,os.path.dirname(sys.argv[0]));runpy.run_path(sys.argv[0],run_name='__main__')"
             command = [
                 sys.executable, "-I", "-c", launcher, str(owner_script.resolve()), "--projection-owner",
@@ -144,7 +146,7 @@ class OwnerClient:
             if created and self.parent_fd is not None and self.file_fd is not None:
                 cleanup_created_store(
                     self.parent_fd, self.file_fd, self.path.name,
-                    include_sidecars=child_started,
+                    sidecars_before=sidecars_before if child_started else None,
                 )
             self._close_handles()
             if startup_response_received and isinstance(exc, ChatProjectionStoreError):

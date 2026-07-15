@@ -712,6 +712,90 @@ def test_response_page_budget_timeout_admission_and_close_failure() -> None:
         _assert_error("owner_start_failed", lambda: SQLiteChatProjectionStore(existing_path))
     assert existing_path.exists()
 
+    missing_path = _path("init-missing-script")
+    missing_path.parent.mkdir(parents=True, exist_ok=True)
+    sentinels = [missing_path.with_name(f"{missing_path.name}{suffix}") for suffix in ("-wal", "-shm")]
+    for sentinel in sentinels:
+        sentinel.write_bytes(f"sentinel:{sentinel.name}".encode())
+        sentinel.chmod(0o600)
+    missing_processes = []
+    real_popen = owner_transport.subprocess.Popen
+    def capture_missing(*args, **kwargs):
+        process = real_popen(*args, **kwargs)
+        missing_processes.append(process)
+        return process
+    with mock.patch.object(owner_transport.subprocess, "Popen", side_effect=capture_missing):
+        _assert_error(
+            "owner_start_failed",
+            lambda: owner_transport.OwnerClient(
+                root_path=STATE_HOME, path=missing_path,
+                owner_script=STATE_HOME / "missing-owner.py", owner_arguments=(),
+                validate_result=lambda _operation, result, _arguments: result,
+            ),
+        )
+    assert missing_processes and all(process.poll() is not None for process in missing_processes)
+    assert not missing_path.exists()
+    assert all(sentinel.read_bytes() == f"sentinel:{sentinel.name}".encode() for sentinel in sentinels)
+
+    post_popen_path = _path("init-post-popen-failure")
+    real_socketpair = socket.socketpair
+    post_popen_processes = []
+    def post_popen_socketpair():
+        parent, child = real_socketpair()
+        class FailingCloseSocket:
+            def fileno(self) -> int:
+                return child.fileno()
+            def close(self) -> None:
+                child.close()
+                for suffix in ("-wal", "-shm"):
+                    sidecar = post_popen_path.with_name(f"{post_popen_path.name}{suffix}")
+                    sidecar.write_bytes(b"new owner sidecar")
+                    sidecar.chmod(0o600)
+                raise OSError("injected post-Popen failure")
+        return parent, FailingCloseSocket()
+    def capture_post_popen(*args, **kwargs):
+        process = real_popen(*args, **kwargs)
+        post_popen_processes.append(process)
+        return process
+    with (
+        mock.patch.object(owner_transport.socket, "socketpair", side_effect=post_popen_socketpair),
+        mock.patch.object(owner_transport.subprocess, "Popen", side_effect=capture_post_popen),
+    ):
+        _assert_error("owner_start_failed", lambda: SQLiteChatProjectionStore(post_popen_path))
+    assert post_popen_processes and all(process.poll() is not None for process in post_popen_processes)
+    assert not post_popen_path.exists()
+    assert not post_popen_path.with_name(f"{post_popen_path.name}-wal").exists()
+    assert not post_popen_path.with_name(f"{post_popen_path.name}-shm").exists()
+
+    replacement_path = _path("init-sidecar-replacement")
+    replacement_path.parent.mkdir(parents=True, exist_ok=True)
+    replacement_wal = replacement_path.with_name(f"{replacement_path.name}-wal")
+    replacement_wal.write_bytes(b"original sentinel")
+    replacement_wal.chmod(0o600)
+    def replacement_socketpair():
+        parent, child = real_socketpair()
+        class ReplacingCloseSocket:
+            def fileno(self) -> int:
+                return child.fileno()
+            def close(self) -> None:
+                child.close()
+                replacement_wal.unlink()
+                replacement_wal.write_bytes(b"replacement sentinel")
+                replacement_wal.chmod(0o600)
+                raise OSError("injected replacement failure")
+        return parent, ReplacingCloseSocket()
+    with mock.patch.object(owner_transport.socket, "socketpair", side_effect=replacement_socketpair):
+        _assert_error(
+            "owner_start_failed",
+            lambda: owner_transport.OwnerClient(
+                root_path=STATE_HOME, path=replacement_path,
+                owner_script=STATE_HOME / "missing-owner.py", owner_arguments=(),
+                validate_result=lambda _operation, result, _arguments: result,
+            ),
+        )
+    assert not replacement_path.exists()
+    assert replacement_wal.read_bytes() == b"replacement sentinel"
+
     timeout_path = _path("invalid-timeout")
     for invalid in (float("nan"), float("inf"), float("-inf"), 0.01, 301, True):
         _assert_error(

@@ -8,6 +8,9 @@ from pathlib import Path
 from chat_projection_store import ChatProjectionStoreError
 
 
+SidecarIdentity = tuple[int, int, int, int, int, int]
+
+
 def validate_secure_file_stat(metadata: os.stat_result) -> None:
     if not stat.S_ISREG(metadata.st_mode):
         raise ChatProjectionStoreError("insecure_store_file", "chat store must be a regular file")
@@ -28,7 +31,28 @@ def verify_anchored_file(file_fd: int, basename: str) -> None:
         raise ChatProjectionStoreError("path_race", "chat store file changed during owner open")
 
 
-def cleanup_created_store(parent_fd: int, file_fd: int, basename: str, *, include_sidecars: bool) -> None:
+def snapshot_sidecars(parent_fd: int, basename: str) -> dict[str, SidecarIdentity | None]:
+    snapshots = {}
+    for name in (f"{basename}-wal", f"{basename}-shm"):
+        try:
+            metadata = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+            snapshots[name] = (
+                metadata.st_dev, metadata.st_ino, stat.S_IFMT(metadata.st_mode), metadata.st_uid,
+                stat.S_IMODE(metadata.st_mode), metadata.st_nlink,
+            )
+        except OSError as exc:
+            if exc.errno != ENOENT:
+                raise ChatProjectionStoreError(
+                    "path_open_failed", "cannot inspect store sidecar",
+                ) from exc
+            snapshots[name] = None
+    return snapshots
+
+
+def cleanup_created_store(
+    parent_fd: int, file_fd: int, basename: str, *,
+    sidecars_before: dict[str, SidecarIdentity | None] | None,
+) -> None:
     try:
         expected = os.fstat(file_fd)
         visible = os.stat(basename, dir_fd=parent_fd, follow_symlinks=False)
@@ -36,15 +60,23 @@ def cleanup_created_store(parent_fd: int, file_fd: int, basename: str, *, includ
         return
     if (expected.st_dev, expected.st_ino) != (visible.st_dev, visible.st_ino):
         return
-    names = (f"{basename}-wal", f"{basename}-shm", basename) if include_sidecars else (basename,)
-    for name in names:
+    for name, before in (sidecars_before or {}).items():
+        if before is not None:
+            continue
         try:
             metadata = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
-            if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid():
+            if (
+                not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid()
+                or stat.S_IMODE(metadata.st_mode) != 0o600 or metadata.st_nlink != 1
+            ):
                 continue
             os.unlink(name, dir_fd=parent_fd)
         except OSError:
             pass
+    try:
+        os.unlink(basename, dir_fd=parent_fd)
+    except OSError:
+        pass
 
 
 def _open_directory_chain(root: Path, relative_parts: tuple[str, ...]) -> int:
