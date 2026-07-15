@@ -900,7 +900,7 @@ def _normalize_response_tool_call(payload: dict, parent_uuid: str) -> tuple[dict
     if payload_type == "tool_search_call":
         name = "tool_search_tool"
 
-    if name == "exec_command":
+    if name in ("exec", "exec_command"):
         name = "Bash"
         if "cmd" in args and "command" not in args:
             args = {**args, "command": args["cmd"]}

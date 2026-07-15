@@ -154,6 +154,29 @@ def test_response_item_function_call_normalizes_exec_command() -> bool:
     return True
 
 
+def test_response_item_function_call_normalizes_exec_alias() -> bool:
+    event, tool_use_id = _normalize_response_tool_call(
+        {
+            "type": "function_call",
+            "name": "exec",
+            "arguments": (
+                '{"cmd":"sed -n \'1,80p\' backend/codex_normalize.py",'
+                '"workdir":"/workspace/better-agent"}'
+            ),
+            "call_id": "call_exec_alias",
+        },
+        "parent",
+    )
+    block = event["message"]["content"][0]
+    assert tool_use_id == "call_exec_alias"
+    assert block["type"] == "tool_use"
+    assert block["id"] == "call_exec_alias"
+    assert block["name"] == "Bash"
+    assert block["input"]["cmd"] == "sed -n '1,80p' backend/codex_normalize.py"
+    assert block["input"]["command"] == "sed -n '1,80p' backend/codex_normalize.py"
+    return True
+
+
 def test_response_item_function_call_maps_update_plan_to_todowrite() -> bool:
     import json as _json
     event, tool_use_id = _normalize_response_tool_call(
@@ -1641,6 +1664,10 @@ TESTS = [
     (
         "response_item function_call normalizes exec_command",
         test_response_item_function_call_normalizes_exec_command,
+    ),
+    (
+        "response_item function_call normalizes exec alias",
+        test_response_item_function_call_normalizes_exec_alias,
     ),
     (
         "response_item function_call maps update_plan to TodoWrite",
