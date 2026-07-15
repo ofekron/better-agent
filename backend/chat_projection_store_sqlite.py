@@ -25,7 +25,7 @@ from chat_projection_store import (
 from paths import ba_home
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 MAX_JSON_BYTES = 16 * 1024 * 1024
 MAX_READ_LIMIT = 10_000
 MAX_JSON_DEPTH = 64
@@ -51,11 +51,13 @@ TABLE_DDL = {
     "turn_manifests": "CREATE TABLE turn_manifests(root_id TEXT NOT NULL, root_generation INTEGER NOT NULL, turn_id TEXT NOT NULL, event_count INTEGER NOT NULL, direct_child_count INTEGER NOT NULL, PRIMARY KEY(root_id,root_generation,turn_id))",
     "revisions": "CREATE TABLE revisions(root_id TEXT NOT NULL, root_generation INTEGER NOT NULL, revision INTEGER NOT NULL, fact_sequence INTEGER NOT NULL, visible_delta_json TEXT NOT NULL, historical_json TEXT NOT NULL, PRIMARY KEY(root_id,root_generation,revision))",
     "source_watermarks": "CREATE TABLE source_watermarks(root_id TEXT NOT NULL, root_generation INTEGER NOT NULL, stream_id TEXT NOT NULL, source_generation INTEGER NOT NULL, source_sequence INTEGER NOT NULL, PRIMARY KEY(root_id,root_generation,stream_id))",
+    "source_admissions": "CREATE TABLE source_admissions(root_id TEXT NOT NULL, root_generation INTEGER NOT NULL, stream_id TEXT NOT NULL, source_generation INTEGER NOT NULL, source_sequence INTEGER NOT NULL, event_id TEXT NOT NULL, content_hash TEXT NOT NULL, fact_sequence INTEGER NOT NULL, revision INTEGER NOT NULL, projection_cursor INTEGER NOT NULL, PRIMARY KEY(root_id,root_generation,stream_id,source_generation,source_sequence))",
 }
 AUTOINDEX_COUNTS = {
     "selected_roots": 1, "root_generation_heads": 1, "canonical_facts": 2,
     "render_nodes": 1, "ownership": 1, "turn_manifests": 1, "revisions": 1,
     "source_watermarks": 1,
+    "source_admissions": 1,
 }
 
 
@@ -177,6 +179,13 @@ class SQLiteChatProjectionStore:
             ("root_id", "TEXT", 1, 1, None), ("root_generation", "INTEGER", 1, 2, None),
             ("stream_id", "TEXT", 1, 3, None), ("source_generation", "INTEGER", 1, 0, None),
             ("source_sequence", "INTEGER", 1, 0, None),
+        ),
+        "source_admissions": (
+            ("root_id", "TEXT", 1, 1, None), ("root_generation", "INTEGER", 1, 2, None),
+            ("stream_id", "TEXT", 1, 3, None), ("source_generation", "INTEGER", 1, 4, None),
+            ("source_sequence", "INTEGER", 1, 5, None), ("event_id", "TEXT", 1, 0, None),
+            ("content_hash", "TEXT", 1, 0, None), ("fact_sequence", "INTEGER", 1, 0, None),
+            ("revision", "INTEGER", 1, 0, None), ("projection_cursor", "INTEGER", 1, 0, None),
         ),
     }
     _UNIQUE_INDEXES = {
@@ -656,6 +665,26 @@ class SQLiteChatProjectionStore:
         ).fetchone()
         if head is None or self._stored_int(head[0]) != request.root_generation:
             raise ChatProjectionStoreError("stale_generation", "root generation is not selected")
+        admission = self._connection.execute(
+            "SELECT event_id,content_hash,fact_sequence,revision,projection_cursor "
+            "FROM source_admissions WHERE root_id=? AND root_generation=? AND stream_id=? "
+            "AND source_generation=? AND source_sequence=?",
+            (
+                request.root_id, request.root_generation, request.watermark.stream_id,
+                request.watermark.generation, request.watermark.sequence,
+            ),
+        ).fetchone()
+        if admission is not None:
+            if (self._stored_text(admission[0]), self._stored_text(admission[1])) != (
+                request.event_id, request.content_hash,
+            ):
+                raise ChatProjectionStoreError(
+                    "source_conflict", "source sequence carries different content",
+                )
+            return CommitResult(
+                True, self._stored_int(admission[2]), self._stored_int(admission[3]),
+                self._stored_int(admission[4]),
+            )
         duplicate = self._connection.execute(
             "SELECT fact_sequence FROM canonical_facts WHERE root_id=? AND root_generation=? "
             "AND event_id=? AND content_hash=?",
@@ -663,10 +692,12 @@ class SQLiteChatProjectionStore:
         ).fetchone()
         self._advance_watermark(request)
         if duplicate:
-            return CommitResult(
+            result = CommitResult(
                 True, self._stored_int(duplicate[0]), self._stored_int(head[2]),
                 self._stored_int(head[3]),
             )
+            self._record_source_admission(request, result)
+            return result
         fact_sequence = self._increment_stored(head[1], "fact sequence")
         revision = self._increment_stored(head[2], "revision")
         cursor = self._increment_stored(head[3], "projection cursor")
@@ -702,7 +733,22 @@ class SQLiteChatProjectionStore:
             "WHERE root_id=? AND root_generation=?",
             (fact_sequence, revision, cursor, *values),
         )
-        return CommitResult(False, fact_sequence, revision, cursor)
+        result = CommitResult(False, fact_sequence, revision, cursor)
+        self._record_source_admission(request, result)
+        return result
+
+    def _record_source_admission(
+        self, request: ProjectionCommit, result: CommitResult,
+    ) -> None:
+        self._connection.execute(
+            "INSERT INTO source_admissions VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (
+                request.root_id, request.root_generation, request.watermark.stream_id,
+                request.watermark.generation, request.watermark.sequence,
+                request.event_id, request.content_hash, result.fact_sequence,
+                result.revision, result.projection_cursor,
+            ),
+        )
 
     def _advance_watermark(self, request: ProjectionCommit) -> None:
         values = (request.root_id, request.root_generation, request.watermark.stream_id)
@@ -933,7 +979,7 @@ class SQLiteChatProjectionStore:
                     raise ChatProjectionStoreError("missing_root", "root does not exist")
                 for table in (
                     "canonical_facts", "render_nodes", "ownership", "turn_manifests", "revisions",
-                    "source_watermarks", "root_generation_heads", "selected_roots",
+                    "source_watermarks", "source_admissions", "root_generation_heads", "selected_roots",
                 ):
                     self._connection.execute(f'DELETE FROM "{table}" WHERE root_id=?', (root_id,))
                 if self._before_commit:
@@ -951,7 +997,7 @@ class SQLiteChatProjectionStore:
     def _delete_generation_rows(self, root_id: str, root_generation: int) -> None:
         for table in (
             "canonical_facts", "render_nodes", "ownership", "turn_manifests", "revisions",
-            "source_watermarks", "root_generation_heads",
+            "source_watermarks", "source_admissions", "root_generation_heads",
         ):
             self._connection.execute(
                 f'DELETE FROM "{table}" WHERE root_id=? AND root_generation=?',

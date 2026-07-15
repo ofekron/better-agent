@@ -41,6 +41,18 @@ def request(sequence: int, *, root: str = "root", generation: int = 0) -> Projec
     )
 
 
+def conflicting_request(
+    sequence: int, *, root: str, marker: str,
+) -> ProjectionCommit:
+    original = request(sequence, root=root)
+    fact = {**original.canonical_fact, "text": marker}
+    digest = hashlib.sha256(canonical_json(fact).encode("utf-8")).hexdigest()
+    return replace(
+        original, canonical_fact=fact, content_hash=digest,
+        render_node={"type": "Explanation", "text": marker},
+    )
+
+
 def assert_error(code: str, callback) -> None:
     try:
         callback()
@@ -168,6 +180,12 @@ def test_post_fsync_failure_recovers_through_same_apply_path() -> None:
     )
     assert recovered.projection_cursor(authority) == 1
     assert recovered.read_projection(authority, "event-1").render_node["text"] == "answer-1"
+    assert recovered.append_apply(
+        authority, request(1, root="crash-root"),
+    ).duplicate
+    assert_error("sequence_conflict", lambda: recovered.append_apply(
+        authority, conflicting_request(1, root="crash-root", marker="crash-conflict"),
+    ))
     recovered.close()
 
 
@@ -212,15 +230,12 @@ def test_concurrency_sqlite_selection_and_lifecycle_errors() -> None:
         thread.join()
     assert not failures and len(results) == 20
     assert service.projection_cursor(authority) == 20
+    service._admissions.pop(admission_key)
     assert service.append_apply(
         authority, request(20, root="concurrent-root"),
     ).duplicate
     assert_error("sequence_conflict", lambda: service.append_apply(
-        authority,
-        replace(
-            request(20, root="concurrent-root"), event_id="different-event",
-            content_hash="1" * 64,
-        ),
+        authority, conflicting_request(20, root="concurrent-root", marker="different"),
     ))
     assert_error("watermark_regression", lambda: service.append_apply(
         authority, request(19, root="concurrent-root"),
@@ -231,6 +246,10 @@ def test_concurrency_sqlite_selection_and_lifecycle_errors() -> None:
         root_generation=0, store_kind="sqlite",
     )
     assert service.append_apply(sqlite_authority, request(1, root="sqlite-root")).projection_cursor == 1
+    service._admissions.pop((sqlite_authority.authority_id, "provider", 0))
+    assert service.append_apply(
+        sqlite_authority, request(1, root="sqlite-root"),
+    ).duplicate
     assert_error("rebuild_unsupported", lambda: service.rebuild(sqlite_authority))
     assert_error("hash_mismatch", lambda: service.append_apply(
         authority, replace(request(21, root="concurrent-root"), content_hash="0" * 64),
@@ -241,6 +260,26 @@ def test_concurrency_sqlite_selection_and_lifecycle_errors() -> None:
     service.close()
     assert_error("service_closed", lambda: service.projection_cursor(authority))
     service.close()
+
+    restarted = CanonicalChatProjectionService(registry())
+    authority = restarted.register(
+        provider="codex", session_id="concurrent", root_id="concurrent-root",
+        root_generation=0, store_kind="jsonl",
+    )
+    sqlite_authority = restarted.register(
+        provider="claude", session_id="sqlite", root_id="sqlite-root",
+        root_generation=0, store_kind="sqlite",
+    )
+    assert restarted.append_apply(
+        authority, request(20, root="concurrent-root"),
+    ).duplicate
+    assert restarted.append_apply(
+        sqlite_authority, request(1, root="sqlite-root"),
+    ).duplicate
+    assert_error("sequence_conflict", lambda: restarted.append_apply(
+        authority, conflicting_request(20, root="concurrent-root", marker="restart-conflict"),
+    ))
+    restarted.close()
 
 
 def test_registry_version_multiprocess_and_symlink_security() -> None:
@@ -262,6 +301,29 @@ def test_registry_version_multiprocess_and_symlink_security() -> None:
         "SELECT 1 FROM sqlite_master WHERE type='table'"
     ).fetchone()
     connection.close()
+
+    swap_dir = HOME / "connect-swap"
+    swap_path = swap_dir / "authority.sqlite3"
+    initialized = ProjectionAuthorityRegistry(swap_path)
+    initialized.close()
+    replacement = swap_dir / "replacement.sqlite3"
+    replacement_connection = sqlite3.connect(replacement)
+    replacement_connection.execute("PRAGMA user_version=77")
+    replacement_connection.commit()
+    replacement_connection.close()
+    replacement.chmod(0o600)
+    replacement_bytes = replacement.read_bytes()
+    try:
+        ProjectionAuthorityRegistry(
+            swap_path, _test_connect_swap_basename=replacement.name,
+        )
+        raise AssertionError("connect-window basename swap must fail")
+    except ProjectionAuthorityError as exc:
+        assert exc.code == "path_race"
+    assert swap_path.read_bytes() == replacement_bytes
+    assert (swap_dir / "authority.sqlite3.anchored").is_file()
+    assert not (swap_dir / "authority.sqlite3-wal").exists()
+    assert not (swap_dir / "authority.sqlite3-shm").exists()
 
     context = multiprocessing.get_context("fork")
     base = {

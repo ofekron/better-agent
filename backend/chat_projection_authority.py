@@ -77,14 +77,33 @@ def _authority_id(provider: str, session_id: str, root_id: str) -> str:
 
 
 class _AuthorityOwner:
-    def __init__(self, directory_fd: int, file_fd: int, basename: str) -> None:
+    def __init__(
+        self, directory_fd: int, file_fd: int, basename: str,
+        connect_swap_basename: str | None = None,
+    ) -> None:
         self._directory_fd = directory_fd
         self._file_fd = file_fd
         self._basename = basename
         verify_anchored_file(file_fd, basename)
+        if connect_swap_basename is not None:
+            os.replace(basename, f"{basename}.anchored")
+            os.replace(connect_swap_basename, basename)
         uri = f"file:{quote(basename, safe='')}?mode=rw"
         try:
             self._connection = sqlite3.connect(uri, uri=True, isolation_level=None)
+            databases = self._connection.execute("PRAGMA database_list").fetchall()
+            main = [row for row in databases if row[1] == "main"]
+            if len(main) != 1:
+                raise ChatProjectionStoreError(
+                    "path_race", "authority database identity is unavailable",
+                )
+            connected = os.stat(main[0][2], follow_symlinks=False)
+            anchored = os.fstat(file_fd)
+            if (connected.st_dev, connected.st_ino) != (anchored.st_dev, anchored.st_ino):
+                raise ChatProjectionStoreError(
+                    "path_race", "authority database changed during SQLite connect",
+                )
+            verify_anchored_file(file_fd, basename)
             self._connection.execute("PRAGMA busy_timeout=30000")
             self._install_schema()
             self._connection.execute("PRAGMA journal_mode=WAL")
@@ -238,14 +257,22 @@ class _AuthorityOwner:
 class ProjectionAuthorityRegistry:
     SCHEMA_VERSION = SCHEMA_VERSION
 
-    def __init__(self, path: Path | None = None) -> None:
+    def __init__(
+        self, path: Path | None = None, *, _test_connect_swap_basename: str | None = None,
+    ) -> None:
         root = Path(os.path.abspath(ba_home().expanduser()))
         self._projection_root = root / "chat" / "canonical-projections"
         selected = path or root / "chat" / "projection-authority.sqlite3"
         selected = Path(os.path.abspath(selected.expanduser()))
+        if _test_connect_swap_basename is not None and (
+            not _test_connect_swap_basename
+            or Path(_test_connect_swap_basename).name != _test_connect_swap_basename
+        ):
+            raise ProjectionAuthorityError("invalid_authority", "connect swap basename is invalid")
         try:
             self._owner = OwnerClient(
-                root_path=root, path=selected, owner_script=Path(__file__), owner_arguments=(),
+                root_path=root, path=selected, owner_script=Path(__file__),
+                owner_arguments=(_test_connect_swap_basename or "none",),
                 validate_result=self._validate_result, require_sqlite_header=True,
             )
         except ChatProjectionStoreError as exc:
@@ -335,7 +362,10 @@ class ProjectionAuthorityRegistry:
                 raise self._translate(exc) from exc
 
 
-def _run_owner(channel_fd: int, directory_fd: int, file_fd: int, basename: str) -> None:
+def _run_owner(
+    channel_fd: int, directory_fd: int, file_fd: int, basename: str,
+    connect_swap_basename: str,
+) -> None:
     def dispatch(store: _AuthorityOwner, operation: str, arguments: Mapping[str, Any], _request_id: int):
         if operation == "register" and set(arguments) == ROW_KEYS:
             return store.register(arguments)
@@ -346,10 +376,14 @@ def _run_owner(channel_fd: int, directory_fd: int, file_fd: int, basename: str) 
         raise ChatProjectionStoreError("owner_protocol_error", "operation is not allowed")
     serve_owner(
         channel_fd, directory_fd, file_fd, basename,
-        _AuthorityOwner, dispatch, lambda store: store.close(),
+        lambda owner_directory_fd, owner_file_fd, owner_basename: _AuthorityOwner(
+            owner_directory_fd, owner_file_fd, owner_basename,
+            None if connect_swap_basename == "none" else connect_swap_basename,
+        ),
+        dispatch, lambda store: store.close(),
         lambda _channel, _request_id, _operation, result: (result, False), 64 * 1024,
     )
 
 
-if __name__ == "__main__" and len(sys.argv) == 6 and sys.argv[1] == "--projection-owner":
-    _run_owner(int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4]), sys.argv[5])
+if __name__ == "__main__" and len(sys.argv) == 7 and sys.argv[1] == "--projection-owner":
+    _run_owner(int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4]), sys.argv[5], sys.argv[6])

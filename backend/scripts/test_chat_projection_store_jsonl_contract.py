@@ -251,7 +251,10 @@ def test_partial_tail_index_rebuild_corruption_and_concurrency() -> None:
     concurrent.select_generation("root", 0)
     outcomes = []
     threads = [threading.Thread(target=lambda version=version: outcomes.append(
-        concurrent.commit(request(version=version, sequence=5))
+        concurrent.commit(replace(
+            request(version=version, sequence=1),
+            watermark=SourceWatermark(f"provider-{version}", 0, 1),
+        ))
     )) for version in range(1, 6)]
     for thread in threads:
         thread.start()

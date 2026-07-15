@@ -351,7 +351,10 @@ def test_text_aggregate_and_sqlite_error_boundaries() -> None:
         canonical_json(request.visible_delta),
     ))
     padding = MAX_COMMIT_BYTES - other_bytes - len('{"pad":""}'.encode("utf-8"))
-    exact_commit = replace(request, historical_revision={"pad": "x" * padding})
+    exact_commit = replace(
+        request, historical_revision={"pad": "x" * padding},
+        watermark=replace(request.watermark, sequence=request.watermark.sequence + 1),
+    )
     assert store.commit(exact_commit).fact_sequence == 2
     _assert_error(
         "commit_too_large",
@@ -428,7 +431,7 @@ def test_generation_and_root_deletion_are_atomic_and_durable() -> None:
     connection = sqlite3.connect(rollback_path)
     for table in (
         "canonical_facts", "render_nodes", "ownership", "turn_manifests", "revisions",
-        "source_watermarks", "root_generation_heads", "selected_roots",
+        "source_watermarks", "source_admissions", "root_generation_heads", "selected_roots",
     ):
         assert connection.execute(
             f'SELECT COUNT(*) FROM "{table}" WHERE root_id=?', ("root-1",),

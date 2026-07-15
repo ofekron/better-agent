@@ -553,6 +553,20 @@ class _JsonlOwnerStore:
         self._index._validate_commit(request)
         if self._selected_generation(request.root_id) != request.root_generation:
             raise ChatProjectionStoreError("stale_generation", "root generation is not selected")
+        admission = self._index._connection.execute(
+            "SELECT event_id,content_hash FROM source_admissions WHERE root_id=? "
+            "AND root_generation=? AND stream_id=? AND source_generation=? AND source_sequence=?",
+            (
+                request.root_id, request.root_generation, request.watermark.stream_id,
+                request.watermark.generation, request.watermark.sequence,
+            ),
+        ).fetchone()
+        if admission is not None:
+            if tuple(admission) != (request.event_id, request.content_hash):
+                raise ChatProjectionStoreError(
+                    "source_conflict", "source sequence carries different content",
+                )
+            return self._index.commit(request)
         duplicate = self._index._connection.execute(
             "SELECT fact_sequence FROM canonical_facts WHERE root_id=? AND root_generation=? AND event_id=? AND content_hash=?",
             (request.root_id, request.root_generation, request.event_id, request.content_hash),

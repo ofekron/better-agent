@@ -55,7 +55,6 @@ class _StreamAdmission:
     next_sequence: int
     pending: dict[int, _PendingCommit]
     draining: bool = False
-    last_signature: tuple[str, str] | None = None
 
 
 class CanonicalChatProjectionService:
@@ -184,14 +183,13 @@ class CanonicalChatProjectionService:
     ) -> CommitResult:
         if request.watermark.sequence != admission.next_sequence - 1:
             raise ProjectionServiceError("watermark_regression", "source sequence cannot regress")
-        signature = (request.event_id, request.content_hash)
-        if admission.last_signature != signature:
-            raise ProjectionServiceError(
-                "sequence_conflict", "committed source sequence carries different content",
-            )
         try:
             result = self._store(authority).commit(request)
         except ChatProjectionStoreError as exc:
+            if exc.code == "source_conflict":
+                raise ProjectionServiceError(
+                    "sequence_conflict", "committed source sequence carries different content",
+                ) from exc
             self._raise(exc)
         if not result.duplicate:
             raise ProjectionServiceError(
@@ -218,9 +216,6 @@ class CanonicalChatProjectionService:
                     pending.future.set_exception(exc)
                 else:
                     admission.next_sequence += 1
-                    admission.last_signature = (
-                        pending.request.event_id, pending.request.content_hash,
-                    )
                     pending.future.set_result(result)
                 finally:
                     admission.condition.acquire()
