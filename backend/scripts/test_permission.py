@@ -22,7 +22,10 @@ from runner_codex import (
 )
 
 import config_store
+import runtime_ownership
 import session_manager
+
+runtime_ownership.register_current_process_writer()
 
 _failures: list[str] = []
 

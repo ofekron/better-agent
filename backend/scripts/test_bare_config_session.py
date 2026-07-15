@@ -20,7 +20,10 @@ def main() -> int:
     os.environ["BETTER_AGENT_HOME"] = tmp
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+    import runtime_ownership
     import session_store
+
+    runtime_ownership.register_current_process_writer()
 
     ok = True
 

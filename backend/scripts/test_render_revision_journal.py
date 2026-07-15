@@ -14,9 +14,12 @@ BACKEND = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BACKEND))
 
 import render_revision_store
+import runtime_ownership
 import session_store
 from event_ingester import event_ingester
 from session_manager import SessionManager
+
+runtime_ownership.register_current_process_writer()
 
 
 def _session(sid: str) -> dict:
