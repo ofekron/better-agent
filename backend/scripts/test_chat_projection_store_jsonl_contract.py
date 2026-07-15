@@ -63,8 +63,11 @@ def test_commit_duplicate_mutation_restart_and_delete() -> None:
     first = store.commit(request())
     assert (first.fact_sequence, first.revision, first.projection_cursor) == (1, 1, 1)
     lines_before = path.read_bytes().count(b"\n")
-    duplicate = store.commit(request(sequence=2))
+    duplicate = store.commit(request(sequence=1))
     assert duplicate.duplicate and path.read_bytes().count(b"\n") == lines_before
+    advanced = store.commit(request(sequence=2))
+    assert advanced.duplicate and path.read_bytes().count(b"\n") == lines_before + 1
+    assert store.source_watermark("root", 0, "provider-neutral").sequence == 2
     second = store.commit(request(version=2, sequence=2))
     assert (second.fact_sequence, second.revision) == (2, 2)
     assert store.read_projection("root", 0, request().event_id).render_node["text"] == "answer-2"
@@ -97,11 +100,13 @@ def test_partial_tail_index_rebuild_corruption_and_concurrency() -> None:
     reopened.close()
     assert path.read_bytes().endswith(b"\n")
 
-    index_path = path.with_name(f"{path.name}.index.sqlite3")
-    index_path.unlink()
+    newest_index = max(path.parent.glob(f"{path.name}.index.*.sqlite3"), key=lambda item: item.stat().st_mtime_ns)
+    newest_index.write_bytes(b"corrupt disposable epoch")
+    newest_index.chmod(0o600)
     rebuilt = JsonlChatProjectionStore(path)
     assert rebuilt.projection_cursor("root", 0) == 1
     rebuilt.close()
+    assert newest_index.read_bytes() == b"corrupt disposable epoch"
 
     crash_path = STATE_HOME / "chat" / "crash-window.jsonl"
     crash = JsonlChatProjectionStore(crash_path)
@@ -144,12 +149,31 @@ def test_partial_tail_index_rebuild_corruption_and_concurrency() -> None:
     assert_error("storage_corrupt", lambda: JsonlChatProjectionStore(path))
 
 
+def test_invalid_requests_do_not_append_and_writer_is_exclusive() -> None:
+    path = STATE_HOME / "chat" / "validation.jsonl"
+    store = JsonlChatProjectionStore(path)
+    store.select_generation("root", 0)
+    size = path.stat().st_size
+    assert_error("hash_mismatch", lambda: store.commit(replace(request(), content_hash="0" * 64)))
+    assert path.stat().st_size == size
+    assert_error("missing_generation", lambda: store.delete_generation("root", 7))
+    assert path.stat().st_size == size
+    assert_error("writer_active", lambda: JsonlChatProjectionStore(path))
+    assert path.stat().st_size == size
+    store.close()
+    reopened = JsonlChatProjectionStore(path)
+    assert reopened.projection_cursor("root", 0) == 0
+    reopened.close()
+
+
 def main() -> None:
     try:
         test_commit_duplicate_mutation_restart_and_delete()
         print("PASS test_commit_duplicate_mutation_restart_and_delete")
         test_partial_tail_index_rebuild_corruption_and_concurrency()
         print("PASS test_partial_tail_index_rebuild_corruption_and_concurrency")
+        test_invalid_requests_do_not_append_and_writer_is_exclusive()
+        print("PASS test_invalid_requests_do_not_append_and_writer_is_exclusive")
     finally:
         shutil.rmtree(STATE_HOME, ignore_errors=True)
 
