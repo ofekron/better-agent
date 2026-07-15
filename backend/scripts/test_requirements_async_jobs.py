@@ -553,6 +553,50 @@ def test_processor_hands_fork_text_through_without_revalidation() -> None:
     assert dispatches["count"] == 1, "unparseable text must not trigger a re-dispatch"
 
 
+def test_backend_requirements_processor_uses_in_process_dispatch() -> None:
+    original_get_spec = requirement_context.get_requirements_processor_spec
+    original_run_sync = requirement_context.provisioning.run_sync
+
+    class ProcessorSpec:
+        key = requirement_context.GET_REQUIREMENTS_PROCESSOR_KEY
+        dispatch = "http"
+
+    class OtherSpec:
+        key = "other_processor"
+        dispatch = "http"
+
+    processor_spec = ProcessorSpec()
+    seen: list[object] = []
+
+    def _run_sync(spec, _query, _ctx):
+        seen.append(spec)
+        return SimpleNamespace(
+            text="ok",
+            value={"text": "ok"},
+            base_session_id="base",
+            caller_session_id="caller",
+            dispatch_result={},
+        )
+
+    try:
+        requirement_context.get_requirements_processor_spec = lambda: processor_spec
+        requirement_context.provisioning.run_sync = _run_sync
+        processed = requirement_context._run_requirements_processor(
+            query="q",
+            cwd="/repo",
+            debug_request_id="job-in-process-dispatch",
+        )
+    finally:
+        requirement_context.get_requirements_processor_spec = original_get_spec
+        requirement_context.provisioning.run_sync = original_run_sync
+
+    assert processed.get("error") is None
+    assert seen and seen[0] is not processor_spec
+    assert getattr(seen[0], "dispatch") == "in_process"
+    assert processor_spec.dispatch == "http"
+    assert requirement_context._backend_processor_spec(OtherSpec()).dispatch == "http"
+
+
 def test_disk_sweep_removes_expired_records() -> None:
     async def scenario():
         task = _fire("job-old", {"query": "q4"}, _ok_runner)
@@ -818,6 +862,7 @@ def main() -> int:
         test_phase_progress_includes_processor_queue_state,
         test_processor_on_queued_observes_registered_waiter,
         test_processor_hands_fork_text_through_without_revalidation,
+        test_backend_requirements_processor_uses_in_process_dispatch,
         test_disk_sweep_removes_expired_records,
         test_completed_delegation_recovers_running_async_job,
         test_completed_run_dir_recovers_running_async_job,

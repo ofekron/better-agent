@@ -35,6 +35,7 @@ def _runtime_inputs() -> dict:
             for item in get_env("BETTER_CLAUDE_ACTIVE_CAPABILITY_IDS").split(",")
             if item
         ],
+        "extension_mcp_launcher_context": True,
     }
 
 
