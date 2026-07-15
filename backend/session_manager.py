@@ -3787,6 +3787,35 @@ class SessionManager:
             if root is not None:
                 root["updated_at"] = value
 
+    def set_draft(
+        self,
+        sid: str,
+        draft: str,
+        client_seq: int,
+        *,
+        images: Optional[list] = None,
+        client_id: Optional[str] = None,
+    ) -> None:
+        """Persist the user's draft input (autosave). Stored as
+        ``draft_input`` / ``draft_input_seq`` / ``draft_images`` /
+        ``draft_client_id`` on the session record. Does NOT bump
+        ``updated_at`` — draft typing is background activity that
+        shouldn't reorder the sidebar."""
+        def _mutate(s: dict) -> None:
+            s["draft_input"] = draft
+            s["draft_input_seq"] = client_seq
+            if images is not None:
+                s["draft_images"] = images
+            if client_id is not None:
+                s["draft_client_id"] = client_id
+
+        self._run(
+            sid,
+            _mutate,
+            {"kind": "draft_changed"},
+            bump_updated_at=False,
+        )
+
     def list(self) -> list[dict]:
         """Return the sidebar summary of every root session."""
         return session_store.list_sessions()
