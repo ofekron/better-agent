@@ -189,6 +189,7 @@ class SQLiteChatProjectionStore:
         *,
         before_commit: Callable[[], None] | None = None,
         after_commit: Callable[[], None] | None = None,
+        _before_transaction_commit: Callable[[sqlite3.Connection], None] | None = None,
         _owner_directory_fd: int | None = None,
         _owner_file_fd: int | None = None,
         _owner_basename: str | None = None,
@@ -199,6 +200,7 @@ class SQLiteChatProjectionStore:
         self._owner_client = _owner_directory_fd is None
         self._before_commit = before_commit
         self._after_commit = after_commit
+        self._before_transaction_commit = _before_transaction_commit
         self._lock = threading.RLock()
         self._closed = False
         self._ipc_timeout_seconds = _ipc_timeout_seconds
@@ -544,6 +546,8 @@ class SQLiteChatProjectionStore:
                     (root_id, root_generation, 0, 0, 0),
                 )
                 self._file_checkpoint()
+                if self._before_transaction_commit:
+                    self._before_transaction_commit(self._connection)
                 self._connection.commit()
             except BaseException:
                 self._connection.rollback()
@@ -585,6 +589,8 @@ class SQLiteChatProjectionStore:
                 if self._before_commit:
                     self._before_commit()
                 self._file_checkpoint()
+                if self._before_transaction_commit:
+                    self._before_transaction_commit(self._connection)
                 self._connection.commit()
             except BaseException:
                 self._connection.rollback()
@@ -849,6 +855,8 @@ class SQLiteChatProjectionStore:
                 self._delete_generation_rows(root_id, root_generation)
                 if self._before_commit:
                     self._before_commit()
+                if self._before_transaction_commit:
+                    self._before_transaction_commit(self._connection)
                 self._file_checkpoint()
                 self._connection.commit()
             except BaseException:
@@ -884,6 +892,8 @@ class SQLiteChatProjectionStore:
                     self._connection.execute(f'DELETE FROM "{table}" WHERE root_id=?', (root_id,))
                 if self._before_commit:
                     self._before_commit()
+                if self._before_transaction_commit:
+                    self._before_transaction_commit(self._connection)
                 self._file_checkpoint()
                 self._connection.commit()
             except BaseException:

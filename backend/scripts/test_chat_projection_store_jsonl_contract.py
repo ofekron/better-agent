@@ -19,7 +19,7 @@ os.environ["BETTER_AGENT_HOME"] = str(STATE_HOME)
 sys.path.insert(0, str(ROOT / "backend"))
 
 from chat_projection_store import ChatProjectionStoreError, ProjectionCommit, SourceWatermark, TurnManifest
-from chat_projection_store_jsonl import JsonlChatProjectionStore, _record_line
+from chat_projection_store_jsonl import JsonlChatProjectionStore, MAX_JSONL_ROW_BYTES, _record_line
 from chat_projection_store_sqlite import SQLiteChatProjectionStore, canonical_json
 
 
@@ -108,6 +108,46 @@ def test_partial_tail_index_rebuild_corruption_and_concurrency() -> None:
     rebuilt.close()
     assert newest_index.read_bytes() == b"corrupt disposable epoch"
 
+    reusable_path = STATE_HOME / "chat" / "reusable.jsonl"
+    reusable = JsonlChatProjectionStore(reusable_path)
+    reusable.select_generation("root", 0)
+    reusable.commit(request())
+    reusable.close()
+    slots_before = sorted(reusable_path.parent.glob(f"{reusable_path.name}.index.*.sqlite3"))
+    for _ in range(3):
+        repeated = JsonlChatProjectionStore(reusable_path)
+        assert repeated.projection_cursor("root", 0) == 1
+        assert repeated.startup_read_bytes() == 0
+        repeated.close()
+    assert sorted(reusable_path.parent.glob(f"{reusable_path.name}.index.*.sqlite3")) == slots_before
+    fallback_slot = reusable_path.with_name(f"{reusable_path.name}.index.1.sqlite3")
+    shutil.copyfile(slots_before[0], fallback_slot)
+    fallback_slot.chmod(0o600)
+    slots_before[0].write_bytes(b"corrupt newest epoch")
+    slots_before[0].chmod(0o600)
+    fallback = JsonlChatProjectionStore(reusable_path)
+    assert fallback.projection_cursor("root", 0) == 1
+    assert fallback.startup_read_bytes() == 0
+    fallback.close()
+    assert slots_before[0].read_bytes() == b"corrupt newest epoch"
+
+    eof_path = STATE_HOME / "chat" / "valid-eof.jsonl"
+    eof = JsonlChatProjectionStore(eof_path)
+    eof.select_generation("root", 0)
+    eof.close()
+    eof_bytes = eof_path.read_bytes()
+    eof_path.write_bytes(eof_bytes[:-1])
+    retained = JsonlChatProjectionStore(eof_path)
+    retained.close()
+    assert eof_path.read_bytes() == eof_bytes
+
+    oversized_path = STATE_HOME / "chat" / "oversized-eof.jsonl"
+    oversized_path.write_bytes(b"x" * (MAX_JSONL_ROW_BYTES + 1))
+    oversized_path.chmod(0o600)
+    oversized_size = oversized_path.stat().st_size
+    assert_error("storage_corrupt", lambda: JsonlChatProjectionStore(oversized_path))
+    assert oversized_path.stat().st_size == oversized_size
+
     crash_path = STATE_HOME / "chat" / "crash-window.jsonl"
     crash = JsonlChatProjectionStore(crash_path)
     crash.select_generation("root", 0)
@@ -146,7 +186,9 @@ def test_partial_tail_index_rebuild_corruption_and_concurrency() -> None:
     corrupt = bytearray(path.read_bytes())
     corrupt[10] ^= 1
     path.write_bytes(corrupt)
-    assert_error("storage_corrupt", lambda: JsonlChatProjectionStore(path))
+    fast = JsonlChatProjectionStore(path)
+    assert_error("rebuild_required", fast.audit_prefix)
+    fast.close()
 
 
 def test_invalid_requests_do_not_append_and_writer_is_exclusive() -> None:
@@ -166,6 +208,38 @@ def test_invalid_requests_do_not_append_and_writer_is_exclusive() -> None:
     reopened.close()
 
 
+def test_hundred_thousand_record_checkpoint_is_tail_only() -> None:
+    path = STATE_HOME / "chat" / "large-checkpoint.jsonl"
+    store = JsonlChatProjectionStore(path)
+    store.select_generation("root", 0)
+    store.close()
+    slot = next(path.parent.glob(f"{path.name}.index.*.sqlite3"))
+    connection = sqlite3.connect(slot)
+    checkpoint = connection.execute("SELECT * FROM jsonl_checkpoint").fetchone()
+    sequence, chain, prefix = checkpoint[4], checkpoint[5], checkpoint[6]
+    with path.open("ab", buffering=1024 * 1024) as journal:
+        for _ in range(100_000):
+            line, chain = _record_line(
+                sequence + 1, chain, "select_generation",
+                {"root_id": "root", "root_generation": 0},
+            )
+            journal.write(line)
+            prefix = hashlib.sha256(bytes.fromhex(prefix) + line).hexdigest()
+            sequence += 1
+        journal.flush()
+        os.fsync(journal.fileno())
+    connection.execute(
+        "UPDATE jsonl_checkpoint SET slot_generation=?,byte_offset=?,record_sequence=?,chain_head=?,prefix_digest=?",
+        (sequence, path.stat().st_size, sequence, chain, prefix),
+    )
+    connection.commit()
+    connection.close()
+    fast = JsonlChatProjectionStore(path)
+    assert fast.startup_read_bytes() == 0
+    fast.audit_prefix()
+    fast.close()
+
+
 def main() -> None:
     try:
         test_commit_duplicate_mutation_restart_and_delete()
@@ -174,6 +248,8 @@ def main() -> None:
         print("PASS test_partial_tail_index_rebuild_corruption_and_concurrency")
         test_invalid_requests_do_not_append_and_writer_is_exclusive()
         print("PASS test_invalid_requests_do_not_append_and_writer_is_exclusive")
+        test_hundred_thousand_record_checkpoint_is_tail_only()
+        print("PASS test_hundred_thousand_record_checkpoint_is_tail_only")
     finally:
         shutil.rmtree(STATE_HOME, ignore_errors=True)
 

@@ -4,7 +4,8 @@ import hashlib
 import json
 import os
 import fcntl
-import secrets
+import stat
+import sqlite3
 import sys
 from pathlib import Path
 from typing import Any, Mapping
@@ -22,6 +23,13 @@ from paths import ba_home
 
 
 JOURNAL_VERSION = 1
+MAX_JSONL_ROW_BYTES = 16 * 1024 * 1024
+INDEX_SLOTS = 4
+CHECKPOINT_DDL = (
+    "CREATE TABLE jsonl_checkpoint(slot_generation INTEGER NOT NULL,journal_dev INTEGER NOT NULL,"
+    "journal_ino INTEGER NOT NULL,byte_offset INTEGER NOT NULL,record_sequence INTEGER NOT NULL,"
+    "chain_head TEXT NOT NULL,prefix_digest TEXT NOT NULL,heads_json TEXT NOT NULL)"
+)
 
 
 def _record_payload(sequence: int, previous_hash: str, operation: str, arguments: Mapping[str, Any]) -> dict[str, Any]:
@@ -51,23 +59,167 @@ class _JsonlOwnerStore:
         flags = fcntl.fcntl(journal_fd, fcntl.F_GETFL)
         fcntl.fcntl(journal_fd, fcntl.F_SETFL, flags | os.O_APPEND)
         verify_anchored_file(journal_fd, basename)
-        index_name = f"{basename}.index.{os.getpid()}.{secrets.token_hex(8)}.sqlite3"
+        checkpoint = self._select_checkpoint()
+        if checkpoint is None:
+            index_name = self._absent_slot()
+            start_offset, start_sequence, start_hash, prefix_digest = 0, 0, "0" * 64, "0" * 64
+        else:
+            index_name, start_offset, start_sequence, start_hash, prefix_digest = checkpoint
+            connection = sqlite3.connect(f"file:{index_name}?mode=rw", uri=True)
+            connection.execute("DROP TABLE jsonl_checkpoint")
+            connection.commit()
+            connection.close()
         _, index_directory_fd, index_fd, _ = secure_open(Path.cwd(), Path.cwd() / index_name)
+        self._index_directory_fd = index_directory_fd
+        self._index_fd = index_fd
         try:
             self._index = SQLiteChatProjectionStore(
                 _owner_directory_fd=index_directory_fd, _owner_file_fd=index_fd,
                 _owner_basename=index_name,
+                _before_transaction_commit=lambda connection: self._write_checkpoint(
+                    connection, standalone=False,
+                ),
             )
         except BaseException:
             os.close(index_fd)
             os.close(index_directory_fd)
             raise
-        self._rebuild()
+        if checkpoint is None:
+            self._clear_index()
+        self._sequence = start_sequence
+        self._last_hash = start_hash
+        self._prefix_digest = prefix_digest
+        self._startup_read_bytes = 0
+        self._replay(start_offset)
+        self._write_checkpoint()
+
+    def _slot_names(self) -> list[str]:
+        return [f"{self._basename}.index.{slot}.sqlite3" for slot in range(INDEX_SLOTS)]
+
+    def _safe_slot(self, name: str) -> bool:
+        try:
+            metadata = os.stat(name, follow_symlinks=False)
+        except OSError:
+            return False
+        return (
+            stat.S_ISREG(metadata.st_mode) and metadata.st_uid == os.getuid()
+            and stat.S_IMODE(metadata.st_mode) == 0o600 and metadata.st_nlink == 1
+        )
+
+    def _heads_snapshot(self, connection: sqlite3.Connection) -> str:
+        heads = connection.execute(
+            "SELECT root_id,root_generation,fact_sequence,revision,projection_cursor FROM root_generation_heads ORDER BY 1,2"
+        ).fetchall()
+        watermarks = connection.execute(
+            "SELECT root_id,root_generation,stream_id,source_generation,source_sequence FROM source_watermarks ORDER BY 1,2,3"
+        ).fetchall()
+        return canonical_json({"heads": [list(row) for row in heads], "watermarks": [list(row) for row in watermarks]})
+
+    def _select_checkpoint(self):
+        journal = os.fstat(self._journal_fd)
+        candidates = []
+        for name in self._slot_names():
+            if not self._safe_slot(name):
+                continue
+            try:
+                connection = sqlite3.connect(f"file:{name}?mode=rw", uri=True)
+                tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+                if tables != set(SQLiteChatProjectionStore._TABLES) | {"jsonl_checkpoint"}:
+                    connection.close()
+                    continue
+                columns = tuple(
+                    (item[1], item[2].upper(), int(item[3]))
+                    for item in connection.execute("PRAGMA table_info('jsonl_checkpoint')")
+                )
+                if columns != (
+                    ("slot_generation", "INTEGER", 1), ("journal_dev", "INTEGER", 1),
+                    ("journal_ino", "INTEGER", 1), ("byte_offset", "INTEGER", 1),
+                    ("record_sequence", "INTEGER", 1), ("chain_head", "TEXT", 1),
+                    ("prefix_digest", "TEXT", 1), ("heads_json", "TEXT", 1),
+                ):
+                    connection.close()
+                    continue
+                row = connection.execute("SELECT * FROM jsonl_checkpoint").fetchone()
+                if row is None or connection.execute("SELECT COUNT(*) FROM jsonl_checkpoint").fetchone()[0] != 1:
+                    connection.close()
+                    continue
+                generation, dev, ino, offset, sequence, chain, prefix, heads = row
+                valid = (
+                    type(generation) is int and type(offset) is int and type(sequence) is int
+                    and (dev, ino) == (journal.st_dev, journal.st_ino) and 0 <= offset <= journal.st_size
+                    and len(chain) == 64 and len(prefix) == 64
+                    and all(character in "0123456789abcdef" for character in chain + prefix)
+                    and heads == self._heads_snapshot(connection)
+                    and self._checkpoint_boundary_valid(offset, sequence, chain)
+                )
+                connection.close()
+                if valid:
+                    candidates.append((offset, sequence, generation, name, chain, prefix))
+            except (sqlite3.Error, OSError, TypeError):
+                continue
+        if not candidates:
+            return None
+        offset, sequence, _generation, name, chain, prefix = max(candidates)
+        return name, offset, sequence, chain, prefix
+
+    def _checkpoint_boundary_valid(self, offset: int, sequence: int, chain_head: str) -> bool:
+        if offset == 0:
+            return sequence == 0 and chain_head == "0" * 64
+        if os.pread(self._journal_fd, 1, offset - 1) != b"\n":
+            return False
+        size = min(offset, MAX_JSONL_ROW_BYTES + 2)
+        window = os.pread(self._journal_fd, size, offset - size)
+        content = window[:-1]
+        separator = content.rfind(b"\n")
+        raw = content[separator + 1:]
+        try:
+            record = json.loads(raw.decode("utf-8"))
+        except (UnicodeError, ValueError, json.JSONDecodeError):
+            return False
+        if not isinstance(record, Mapping) or record.get("sequence") != sequence:
+            return False
+        payload = {key: record[key] for key in record if key != "checksum"}
+        checksum = hashlib.sha256(canonical_json(payload).encode("utf-8")).hexdigest()
+        return record.get("checksum") == checksum == chain_head
+
+    def _absent_slot(self) -> str:
+        for name in self._slot_names():
+            try:
+                os.stat(name, follow_symlinks=False)
+            except FileNotFoundError:
+                return name
+            except OSError:
+                continue
+        raise ChatProjectionStoreError("projection_slots_exhausted", "no safe projection index slot is available")
+
+    def _clear_index(self) -> None:
+        with self._index._lock:
+            self._index._connection.execute("BEGIN IMMEDIATE")
+            for table in self._index._TABLES:
+                self._index._connection.execute(f'DELETE FROM "{table}"')
+            self._index._connection.commit()
+
+    def _write_checkpoint(
+        self, connection: sqlite3.Connection | None = None, *, standalone: bool = True,
+    ) -> None:
+        connection = connection or self._index._connection
+        journal = os.fstat(self._journal_fd)
+        if standalone:
+            connection.execute("BEGIN IMMEDIATE")
+        connection.execute(CHECKPOINT_DDL.replace("CREATE TABLE ", "CREATE TABLE IF NOT EXISTS ", 1))
+        connection.execute("DELETE FROM jsonl_checkpoint")
+        connection.execute(
+            "INSERT INTO jsonl_checkpoint VALUES(?,?,?,?,?,?,?,?)",
+            (self._sequence, journal.st_dev, journal.st_ino, os.lseek(self._journal_fd, 0, os.SEEK_END),
+             self._sequence, self._last_hash, self._prefix_digest, self._heads_snapshot(connection)),
+        )
+        if standalone:
+            connection.commit()
 
     def _decode_record(
         self, raw: bytes, expected_sequence: int, previous_hash: str,
     ) -> Mapping[str, Any]:
-        if len(raw) > 16 * 1024 * 1024:
+        if len(raw) > MAX_JSONL_ROW_BYTES:
             raise ChatProjectionStoreError("storage_corrupt", "JSONL journal row exceeds limit")
         def strict_object(pairs):
             result = {}
@@ -103,19 +255,26 @@ class _JsonlOwnerStore:
             raise ChatProjectionStoreError("storage_corrupt", "JSONL journal checksum is invalid")
         return record
 
-    def _iter_records(self):
-        os.lseek(self._journal_fd, 0, os.SEEK_SET)
+    def _iter_records(
+        self, start_offset: int = 0, start_sequence: int = 0,
+        start_hash: str = "0" * 64, start_prefix: str = "0" * 64,
+    ):
+        os.lseek(self._journal_fd, start_offset, os.SEEK_SET)
         stream = os.fdopen(os.dup(self._journal_fd), "rb", buffering=1024 * 1024)
-        previous_hash = "0" * 64
-        sequence = 0
+        previous_hash = start_hash
+        prefix_digest = start_prefix
+        sequence = start_sequence
         try:
             while True:
                 start = stream.tell()
                 raw = stream.readline(16 * 1024 * 1024 + 2)
                 if not raw:
                     break
+                self._startup_read_bytes += len(raw)
                 terminated = raw.endswith(b"\n")
                 content = raw[:-1] if terminated else raw
+                if len(content) > MAX_JSONL_ROW_BYTES:
+                    raise ChatProjectionStoreError("storage_corrupt", "JSONL journal row exceeds limit")
                 try:
                     record = self._decode_record(content, sequence + 1, previous_hash)
                 except ChatProjectionStoreError:
@@ -129,19 +288,18 @@ class _JsonlOwnerStore:
                     os.fsync(self._journal_fd)
                 sequence += 1
                 previous_hash = record["checksum"]
+                prefix_digest = hashlib.sha256(bytes.fromhex(prefix_digest) + content + b"\n").hexdigest()
                 yield record
         finally:
             stream.close()
             self._sequence = sequence
             self._last_hash = previous_hash
+            self._prefix_digest = prefix_digest
 
-    def _rebuild(self) -> None:
-        with self._index._lock:
-            self._index._connection.execute("BEGIN IMMEDIATE")
-            for table in self._index._TABLES:
-                self._index._connection.execute(f'DELETE FROM "{table}"')
-            self._index._connection.commit()
-        for record in self._iter_records():
+    def _replay(self, start_offset: int) -> None:
+        for record in self._iter_records(
+            start_offset, self._sequence, self._last_hash, self._prefix_digest,
+        ):
             try:
                 self._apply(record["operation"], record["arguments"])
             except BaseException as exc:
@@ -161,6 +319,7 @@ class _JsonlOwnerStore:
         os.fsync(self._journal_fd)
         self._sequence += 1
         self._last_hash = checksum
+        self._prefix_digest = hashlib.sha256(bytes.fromhex(self._prefix_digest) + line).hexdigest()
 
     def _apply(self, operation: str, arguments: Mapping[str, Any]) -> Any:
         if operation == "commit":
@@ -174,6 +333,20 @@ class _JsonlOwnerStore:
             self._index._text("stream_id", arguments["stream_id"])
             self._index._integer("source_generation", arguments["source_generation"])
             self._index._integer("source_sequence", arguments["source_sequence"])
+            selected = self._selected_generation(arguments["root_id"])
+            head = self._index._connection.execute(
+                "SELECT 1 FROM root_generation_heads WHERE root_id=? AND root_generation=?",
+                (arguments["root_id"], arguments["root_generation"]),
+            ).fetchone()
+            if selected != arguments["root_generation"] or head is None:
+                raise ChatProjectionStoreError("storage_corrupt", "watermark control generation is invalid")
+            current = self._index._connection.execute(
+                "SELECT source_generation,source_sequence FROM source_watermarks WHERE root_id=? AND root_generation=? AND stream_id=?",
+                (arguments["root_id"], arguments["root_generation"], arguments["stream_id"]),
+            ).fetchone()
+            candidate = (arguments["source_generation"], arguments["source_sequence"])
+            if current is not None and candidate <= tuple(map(self._index._stored_int, current)):
+                raise ChatProjectionStoreError("storage_corrupt", "watermark control does not advance")
             values = (
                 arguments["root_id"], arguments["root_generation"], arguments["stream_id"],
                 arguments["source_generation"], arguments["source_sequence"],
@@ -183,6 +356,7 @@ class _JsonlOwnerStore:
                 "DO UPDATE SET source_generation=excluded.source_generation,source_sequence=excluded.source_sequence",
                 values,
             )
+            self._write_checkpoint(self._index._connection, standalone=False)
             self._index._connection.commit()
             return None
         return getattr(self._index, operation)(**arguments)
@@ -240,7 +414,8 @@ class _JsonlOwnerStore:
             )
         arguments = {"request": self._index._commit_to_dict(request)}
         self._append("commit", arguments)
-        return self._apply("commit", arguments)
+        result = self._apply("commit", arguments)
+        return result
 
     def delete_generation(self, root_id: str, root_generation: int) -> None:
         self._index._identity(root_id, root_generation)
@@ -270,6 +445,23 @@ class _JsonlOwnerStore:
 
     def close(self) -> None:
         self._index.close()
+        for name in ("_index_fd", "_index_directory_fd"):
+            descriptor = getattr(self, name, None)
+            if descriptor is not None:
+                setattr(self, name, None)
+                os.close(descriptor)
+
+    def audit_prefix(self) -> None:
+        expected = (self._sequence, self._last_hash, self._prefix_digest)
+        try:
+            for _record in self._iter_records():
+                pass
+        except ChatProjectionStoreError as exc:
+            self._sequence, self._last_hash, self._prefix_digest = expected
+            raise ChatProjectionStoreError("rebuild_required", "JSONL prefix audit failed") from exc
+        if (self._sequence, self._last_hash, self._prefix_digest) != expected:
+            self._sequence, self._last_hash, self._prefix_digest = expected
+            raise ChatProjectionStoreError("rebuild_required", "JSONL prefix audit mismatch")
 
     def __getattr__(self, name: str):
         return getattr(self._index, name)
@@ -280,9 +472,19 @@ class JsonlChatProjectionStore:
         root = Path(os.path.abspath(ba_home().expanduser()))
         selected = path or root / "chat" / "selected.jsonl"
         validator = SQLiteChatProjectionStore.__new__(SQLiteChatProjectionStore)
+        def validate_result(operation: str, result: Any, arguments: Mapping[str, Any]):
+            if operation == "audit_prefix":
+                if result is not None or arguments:
+                    raise ChatProjectionStoreError("owner_protocol_error", "invalid audit result")
+                return None
+            if operation == "startup_read_bytes":
+                if type(result) is not int or result < 0 or arguments:
+                    raise ChatProjectionStoreError("owner_protocol_error", "invalid startup metric")
+                return result
+            return validator._validate_rpc_result(operation, result, arguments)
         self._owner = OwnerClient(
             root_path=root, path=selected, owner_script=Path(__file__), owner_arguments=(),
-            validate_result=validator._validate_rpc_result,
+            validate_result=validate_result,
             ipc_timeout_seconds=_ipc_timeout_seconds, max_error_text_bytes=MAX_TEXT_BYTES,
             require_sqlite_header=False,
         )
@@ -325,14 +527,30 @@ class JsonlChatProjectionStore:
     def close(self) -> None:
         self._owner.close()
 
+    def audit_prefix(self) -> None:
+        self._owner.rpc("audit_prefix")
+
+    def startup_read_bytes(self) -> int:
+        return self._owner.rpc("startup_read_bytes")
+
 
 def _run_owner(channel_fd: int, directory_fd: int, file_fd: int, basename: str) -> None:
+    def dispatch(store, operation: str, arguments: Mapping[str, Any], request_id: int):
+        if operation == "audit_prefix":
+            if arguments:
+                raise ChatProjectionStoreError("owner_protocol_error", "audit arguments are invalid")
+            return store.audit_prefix()
+        if operation == "startup_read_bytes":
+            if arguments:
+                raise ChatProjectionStoreError("owner_protocol_error", "metric arguments are invalid")
+            return store._startup_read_bytes
+        return _owner_dispatch(store, operation, arguments, request_id)
     serve_owner(
         channel_fd, directory_fd, file_fd, basename,
         lambda owner_directory_fd, owner_file_fd, owner_basename: _JsonlOwnerStore(
             owner_directory_fd, owner_file_fd, owner_basename,
         ),
-        _owner_dispatch, lambda store: store.close(),
+        dispatch, lambda store: store.close(),
         lambda _channel, _request_id, _operation, result: (result, False), MAX_RESPONSE_BYTES,
     )
 
