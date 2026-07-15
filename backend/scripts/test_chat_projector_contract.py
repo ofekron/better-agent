@@ -33,11 +33,12 @@ def _body(value):
     if isinstance(value, Explanation):
         return {
             "type": "Explanation",
+            "text": value.text,
             "text_event_ids": list(value.text_event_ids),
             "item_ids": list(value.item_ids),
         }
     if isinstance(value, SteeringMessage):
-        return {"type": "SteeringMessage", "id": value.id}
+        return {"type": "SteeringMessage", "id": value.id, "text": value.text}
     assert isinstance(value, ScopedTurn)
     return {
         "type": value.type,
@@ -49,26 +50,53 @@ def _body(value):
     }
 
 
-def _oracle_shape(value):
-    if isinstance(value, list):
-        return [_oracle_shape(item) for item in value]
-    if not isinstance(value, dict):
-        return value
-    projected = {
-        key: _oracle_shape(item)
-        for key, item in value.items()
-        if key not in {"text", "concatenated_text"}
+def _accepted_fixture_oracle(fixture):
+    expected = json.loads(json.dumps(fixture["expected"]["chat_tree_completed"]))
+    events = {event["event_id"]: event for event in fixture["events"]}
+    turn4 = next(item for item in expected if item.get("id") == "turn-4")
+    turn4["body"][1] = {
+        "type": "WorkerTurn", "id": "e-live-worker", "prompt": "Run nested work.",
+        "body": [{
+            "type": "NativeSubagentTurn", "id": "e-live-native",
+            "prompt": "Inspect deepest branch.", "body": [],
+            "result": {"type": "DerivedResult", "part_ids": ["e-live-leaf"]},
+            "children": ["e-live-leaf"],
+        }],
+        "result": None, "children": ["e-live-native"],
     }
-    if projected.get("type") in {"NativeSubagentTurn", "WorkerTurn"} and projected.get("children"):
-        return {"type": projected["type"], "id": projected["id"], "children": projected["children"]}
-    for key in ("children",):
-        if projected.get(key) == []:
-            projected.pop(key)
-    return projected
+
+    def enrich(value):
+        if isinstance(value, list):
+            for item in value:
+                enrich(item)
+            return
+        if not isinstance(value, dict):
+            return
+        if value.get("type") == "Explanation":
+            value["text"] = "".join(events[event_id]["data"].get("text", "") for event_id in value["text_event_ids"])
+        if value.get("type") == "SteeringMessage":
+            value["text"] = events[value["id"]]["data"]["text"]
+        if "result" in value and value["result"] is not None:
+            result = value["result"]
+            result["text"] = result.pop("concatenated_text", "".join(
+                events[event_id]["data"].get("text", events[event_id]["data"].get("result", ""))
+                for event_id in result["part_ids"]
+            ))
+        if value.get("type") in {"NativeSubagentTurn", "WorkerTurn"}:
+            value.setdefault("children", [])
+        for child in value.values():
+            enrich(child)
+
+    enrich(expected)
+    return expected
 
 
 def _provider(identity="p", model="m", effort="medium"):
     return {"id": identity, "model": model, "effort": effort}
+
+
+def _model_identity(provider="p", model="m", effort="medium"):
+    return {"provider": provider, "model": model, "effort": effort}
 
 
 def _event(event_id, sequence, event_type, *, turn_id="turn", message_id="assistant",
@@ -126,10 +154,7 @@ def _chat(value):
 def test_completed_chat_matches_shared_oracle() -> None:
     fixture = _fixture()
     projected = _chat(project_chat(fixture["messages"], fixture["events"], schema_version=fixture["schema_version"]))
-    expected = json.loads(json.dumps(fixture["expected"]["chat_tree_completed"]))
-    assert _oracle_shape(projected) == _oracle_shape(expected)
-    turn1 = next(item for item in project_chat(fixture["messages"], fixture["events"], schema_version=1).items if isinstance(item, Turn) and item.id == "turn-1")
-    assert turn1.result.text == "The report is ready."
+    assert projected == _accepted_fixture_oracle(fixture)
 
 
 def test_order_dedup_ownership_and_metadata_contract() -> None:
@@ -268,7 +293,7 @@ def test_recursive_scoped_turn_uses_full_funnel_and_filters_metadata() -> None:
         "type": "WorkerTurn", "id": "worker", "prompt": "Delegate",
         "body": [{
             "type": "NativeSubagentTurn", "id": "native", "prompt": "Inspect",
-            "body": [{"type": "Explanation", "text_event_ids": ["thought"], "item_ids": ["tool"]}],
+            "body": [{"type": "Explanation", "text": "Reasoning", "text_event_ids": ["thought"], "item_ids": ["tool"]}],
             "result": {"type": "ProviderResult", "part_ids": ["final", "answer"], "text": "Nested answer"},
             "children": ["thought", "tool", "final"],
         }],
@@ -315,7 +340,7 @@ def test_strict_schema_rejects_malformed_unknown_and_duplicate_inputs() -> None:
 
 
 def test_metadata_model_change_is_filtered_before_projection() -> None:
-    event = _event("model", 1, "model_change", metadata_only=True, data={"to": _provider("p2", "m2", "high")})
+    event = _event("model", 1, "model_change", metadata_only=True, data={"to": _model_identity("p2", "m2", "high")})
     chat = project_chat(_messages(), [event], schema_version=1)
     assert all(not isinstance(item, ModelChange) for item in chat.items)
 
@@ -344,6 +369,95 @@ def test_quick_reply_skips_textless_results() -> None:
     ]
     chat = project_chat(messages, events, schema_version=1)
     assert canonical_quick_reply_text(chat, events, schema_version=1) == "Use me"
+
+
+def test_ownership_cannot_duplicate_scoped_structural_child() -> None:
+    events = [
+        _event("worker", 1, "worker_turn"),
+        _event("child", 2, "assistant_text", context_id="nested", turn_id="nested", parent_event_id="worker", data={"text": "nested"}),
+        _event("owner", 3, "message_ownership_declared", metadata_only=True, data={"owns_event_ids": ["child"]}),
+    ]
+    _assert_rejected(_messages(), events)
+
+
+def test_metadata_descendant_is_excluded_from_provider_result() -> None:
+    events = [
+        _event("final", 1, "other_typed_work", provider_final=True),
+        _event("hidden-text", 2, "assistant_text", parent_event_id="final", metadata_only=True, data={"text": "secret"}),
+        _event("visible-text", 3, "assistant_text", parent_event_id="final", data={"text": "visible"}),
+    ]
+    turn = next(item for item in project_chat(_messages(), events, schema_version=1).items if isinstance(item, Turn))
+    assert turn.result.part_ids == ("final", "visible-text")
+    assert turn.result.text == "visible"
+    assert "hidden-text" not in repr(turn)
+
+
+def test_provider_result_association_stops_at_nested_scoped_turn() -> None:
+    events = [
+        _event("final", 1, "other_typed_work", provider_final=True),
+        _event("worker", 2, "worker_turn", parent_event_id="final", data={"prompt": "nested"}),
+        _event("nested-text", 3, "assistant_text", parent_event_id="worker", context_id="nested", turn_id="nested", data={"text": "nested only"}),
+    ]
+    turn = next(item for item in project_chat(_messages(), events, schema_version=1).items if isinstance(item, Turn))
+    assert turn.result.part_ids == ("final",)
+    assert "nested-text" not in turn.result.part_ids
+
+
+def test_same_id_versions_require_stable_identity_and_versioned_render_updates() -> None:
+    base = _event("versioned", 1, "assistant_text", data={"text": "one"})
+    for field, value in (
+        ("context_id", "other-context"), ("turn_id", "other-turn"),
+        ("message_id", "other-message"), ("parent_event_id", "parent"),
+        ("type", "tool_interaction"), ("provider", _provider("other")),
+    ):
+        changed = dict(base)
+        changed.update({field: value, "journal_seq": 2, "content_version": 2})
+        _assert_rejected(_messages(), [base, changed])
+    unversioned = dict(base)
+    unversioned.update({"journal_seq": 2, "data": {"text": "two"}})
+    _assert_rejected(_messages(), [base, unversioned])
+    updated = dict(unversioned)
+    updated["content_version"] = 2
+    turn = next(item for item in project_chat(_messages(), [base, updated], schema_version=1).items if isinstance(item, Turn))
+    assert turn.result.text == "two"
+
+
+def test_closed_envelopes_and_nested_identities_reject_unknown_fields() -> None:
+    base = _event("valid", 1, "assistant_text", data={"text": "ok"})
+    extra_event = dict(base, surprise=True)
+    _assert_rejected(_messages(), [extra_event])
+    extra_provider = dict(base)
+    extra_provider["provider"] = dict(_provider(), surprise=True)
+    _assert_rejected(_messages(), [extra_provider])
+    extra_message = [dict(_messages()[0], surprise=True), _messages()[1]]
+    _assert_rejected(extra_message, [base])
+    model_change = _event(
+        "model", 1, "model_change",
+        data={"to": dict(_model_identity(), surprise=True)},
+    )
+    _assert_rejected(_messages(), [model_change])
+    ownership = _event(
+        "owner", 1, "message_ownership_declared", metadata_only=True,
+        data={"owns_event_ids": [], "surprise": True},
+    )
+    _assert_rejected(_messages(), [ownership])
+    invalid_json_key = _event("invalid-json", 1, "assistant_text", data={1: "value"})
+    _assert_rejected(_messages(), [invalid_json_key])
+
+
+def test_timestamps_require_canonical_utc_and_sort_as_instants() -> None:
+    base = _event("valid", 1, "assistant_text", data={"text": "ok"})
+    for timestamp in ("2026-01-02", "2026-01-02T00:00:00+00:00", "2026-01-02T02:00:00+02:00"):
+        malformed = dict(base, timestamp=timestamp)
+        _assert_rejected(_messages(), [malformed])
+    first = dict(_event("first", 2, "assistant_text", data={"text": "A"}), timestamp="2026-01-02T00:00:00Z")
+    second = dict(_event("second", 1, "assistant_text", data={"text": "B"}), timestamp="2026-01-02T00:00:00.1Z")
+    turn = next(item for item in project_chat(_messages(), [second, first], schema_version=1).items if isinstance(item, Turn))
+    assert turn.result.text == "AB"
+    older_version = dict(_event("same", 2, "assistant_text", data={"text": "old"}), timestamp="2026-01-02T00:00:00Z")
+    newer_version = dict(older_version, timestamp="2026-01-02T00:00:00.1Z", journal_seq=1, content_version=2, data={"text": "new"})
+    updated = next(event for event in project_chat(_messages(), [newer_version, older_version], schema_version=1).items if isinstance(event, Turn))
+    assert updated.result.text == "new"
 
 
 def main() -> None:

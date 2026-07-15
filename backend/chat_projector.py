@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
+from datetime import datetime
 from typing import Any
 
 from chat_models import (
@@ -27,6 +28,14 @@ _SCOPED_TYPES = {
     "native_subagent_turn": "NativeSubagentTurn",
     "worker_turn": "WorkerTurn",
 }
+_EVENT_FIELDS = {
+    "event_id", "timestamp", "journal_seq", "content_version", "context_id",
+    "turn_id", "message_id", "parent_event_id", "type", "data", "provider",
+    "provider_final", "metadata_only", "source",
+}
+_PROVIDER_FIELDS = {"id", "model", "effort"}
+_MESSAGE_FIELDS = {"id", "turn_id", "seq", "role", "content"}
+_MODEL_IDENTITY_FIELDS = {"provider", "model", "effort"}
 
 
 def project_chat(
@@ -144,8 +153,12 @@ def _resolve_result(
         marked_ids = {event.event_id for event in marked}
         associated = [
             event for event in all_events
-            if event.type in _TEXT_TYPES
-            and (event.event_id in marked_ids or _has_ancestor(event, marked_ids, event_by_id))
+            if not event.metadata_only
+            and event.type in _TEXT_TYPES
+            and (
+                event.event_id in marked_ids
+                or _has_ancestor_without_scoped_boundary(event, marked_ids, event_by_id)
+            )
         ]
         result_events = _ordered({event.event_id: event for event in marked + associated}.values())
         ids = tuple(event.event_id for event in result_events)
@@ -245,8 +258,12 @@ def _canonical_events(
         if event.schema_version != schema_version:
             raise ValueError("event schema version does not match request")
         position = (event.timestamp, event.sequence)
-        positions[event.event_id] = min(positions.get(event.event_id, position), position)
+        current_position = positions.get(event.event_id)
+        if current_position is None or _position_key(position) < _position_key(current_position):
+            positions[event.event_id] = position
         current = latest.get(event.event_id)
+        if current is not None:
+            _validate_version_update(current, event)
         if current is None or (event.content_version, event.sequence) > (current.content_version, current.sequence):
             latest[event.event_id] = event
     return tuple(_ordered(
@@ -265,17 +282,19 @@ def _event_from_mapping(raw: Mapping[str, Any], schema_version: int) -> Canonica
     missing = sorted(required - raw.keys())
     if missing:
         raise ValueError(f"missing canonical event fields: {', '.join(missing)}")
+    _reject_extra_keys(raw, _EVENT_FIELDS, "event")
     provider = raw["provider"]
     if not isinstance(provider, Mapping):
         raise ValueError("event provider must be an object")
-    provider_fields = {"id", "model", "effort"}
-    if provider_fields - provider.keys():
+    if _PROVIDER_FIELDS - provider.keys():
         raise ValueError("provider id, model, and effort are required")
+    _reject_extra_keys(provider, _PROVIDER_FIELDS, "provider")
     if not isinstance(raw["data"], Mapping):
         raise ValueError("event data must be an object")
     for flag in ("provider_final", "metadata_only"):
         if flag in raw and not isinstance(raw[flag], bool):
             raise ValueError(f"{flag} must be a boolean")
+    _validate_nested_data(_required_str(raw["type"], "type"), raw["data"])
     return CanonicalEvent(
         _required_str(raw["event_id"], "event_id"),
         _required_str(raw["timestamp"], "timestamp"),
@@ -309,6 +328,7 @@ def _validated_messages(
         missing = sorted(required - message.keys())
         if missing:
             raise ValueError(f"missing message fields: {', '.join(missing)}")
+        _reject_extra_keys(message, _MESSAGE_FIELDS, "message")
         message_id = _required_str(message["id"], "message.id")
         turn_id = _required_str(message["turn_id"], "message.turn_id")
         role = _required_str(message["role"], "message.role")
@@ -349,6 +369,10 @@ def _ownership(
             if owned_id in result and result[owned_id] != owner:
                 raise ValueError("event has conflicting ownership declarations")
             result[owned_id] = owner
+    event_by_id = {event.event_id: event for event in events}
+    for owned_id in result:
+        if _has_scoped_ancestor(event_by_id[owned_id], event_by_id):
+            raise ValueError("ownership declaration conflicts with scoped structural ownership")
     return result
 
 
@@ -438,6 +462,22 @@ def _has_ancestor(
     return False
 
 
+def _has_ancestor_without_scoped_boundary(
+    event: CanonicalEvent,
+    ancestor_ids: set[str],
+    event_by_id: Mapping[str, CanonicalEvent],
+) -> bool:
+    parent_id = event.parent_event_id
+    while parent_id is not None:
+        if parent_id in ancestor_ids:
+            return True
+        parent = event_by_id[parent_id]
+        if parent.type in _SCOPED_TYPES:
+            return False
+        parent_id = parent.parent_event_id
+    return False
+
+
 def _has_scoped_ancestor(
     event: CanonicalEvent, event_by_id: Mapping[str, CanonicalEvent],
 ) -> bool:
@@ -463,8 +503,12 @@ def _ordered(events: Iterable[CanonicalEvent]) -> list[CanonicalEvent]:
     return sorted(events, key=_sort_key)
 
 
-def _sort_key(event: CanonicalEvent) -> tuple[str, int]:
-    return event.timestamp, event.sequence
+def _sort_key(event: CanonicalEvent) -> tuple[datetime, int]:
+    return datetime.fromisoformat(event.timestamp[:-1] + "+00:00"), event.sequence
+
+
+def _position_key(position: tuple[str, int]) -> tuple[datetime, int]:
+    return datetime.fromisoformat(position[0][:-1] + "+00:00"), position[1]
 
 
 def _event_text(event: CanonicalEvent) -> str:
@@ -502,3 +546,50 @@ def _optional_str(value: Any, field: str) -> str | None:
     if not isinstance(value, str) or not value:
         raise ValueError(f"{field} must be a non-empty string or null")
     return value
+
+
+def _reject_extra_keys(value: Mapping[str, Any], allowed: set[str], name: str) -> None:
+    unexpected = sorted(value.keys() - allowed)
+    if unexpected:
+        raise ValueError(f"unexpected {name} fields: {', '.join(unexpected)}")
+
+
+def _validate_nested_data(event_type: str, data: Mapping[str, Any]) -> None:
+    if event_type == "model_change":
+        _reject_extra_keys(data, {"from", "to"}, "model_change data")
+        for field in ("from", "to"):
+            identity = data.get(field)
+            if identity is None:
+                continue
+            if not isinstance(identity, Mapping):
+                raise ValueError(f"model_change data.{field} must be an object or null")
+            if set(identity) != _MODEL_IDENTITY_FIELDS:
+                raise ValueError(f"model_change data.{field} has invalid identity fields")
+            for key in _MODEL_IDENTITY_FIELDS:
+                _required_str(identity[key], f"model_change data.{field}.{key}")
+    if event_type == "message_ownership_declared":
+        _reject_extra_keys(
+            data,
+            {"owns_event_ids", "boundary_seq", "source_timestamp"},
+            "ownership data",
+        )
+        owned = data.get("owns_event_ids")
+        if not isinstance(owned, (list, tuple)):
+            raise ValueError("ownership data.owns_event_ids must be a sequence")
+        if any(not isinstance(event_id, str) or not event_id for event_id in owned):
+            raise ValueError("ownership data.owns_event_ids must contain event ids")
+
+
+def _validate_version_update(current: CanonicalEvent, candidate: CanonicalEvent) -> None:
+    identity = (
+        "context_id", "turn_id", "message_id", "parent_event_id", "type", "provider",
+    )
+    if any(getattr(current, field) != getattr(candidate, field) for field in identity):
+        raise ValueError("event identity changed across content versions")
+    render_changed = (
+        current.data != candidate.data
+        or current.provider_final != candidate.provider_final
+        or current.metadata_only != candidate.metadata_only
+    )
+    if render_changed and current.content_version == candidate.content_version:
+        raise ValueError("event render update requires a new content_version")

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
+import re
 from types import MappingProxyType
 from typing import Any, Literal, Mapping, TypeAlias
 
@@ -14,11 +15,16 @@ KNOWN_EVENT_TYPES = frozenset({
     "steering_message", "text", "thinking", "tool_interaction", "turn_completed",
     "turn_started", "worker_turn",
 })
+_UTC_TIMESTAMP = re.compile(
+    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$"
+)
 
 
 def freeze_json(value: Any) -> ImmutableJson:
     if isinstance(value, Mapping):
-        return MappingProxyType({str(key): freeze_json(item) for key, item in value.items()})
+        if any(not isinstance(key, str) for key in value):
+            raise TypeError("canonical JSON object keys must be strings")
+        return MappingProxyType({key: freeze_json(item) for key, item in value.items()})
     if isinstance(value, (list, tuple)):
         return tuple(freeze_json(item) for item in value)
     if value is None or isinstance(value, (str, int, float, bool)):
@@ -63,12 +69,14 @@ class CanonicalEvent:
             raise ValueError("event sequence must be a positive integer")
         if not isinstance(self.content_version, int) or isinstance(self.content_version, bool) or self.content_version < 1:
             raise ValueError("content_version must be a positive integer")
-        if not isinstance(self.timestamp, str) or not self.timestamp:
-            raise ValueError("event timestamp is required")
+        if not isinstance(self.timestamp, str) or not _UTC_TIMESTAMP.fullmatch(self.timestamp):
+            raise ValueError("event timestamp must be a canonical UTC datetime ending in Z")
         try:
-            datetime.fromisoformat(self.timestamp.replace("Z", "+00:00"))
+            parsed = datetime.fromisoformat(self.timestamp[:-1] + "+00:00")
         except ValueError as exc:
-            raise ValueError("event timestamp must be ISO-8601") from exc
+            raise ValueError("event timestamp must be a valid UTC datetime") from exc
+        if parsed.tzinfo != timezone.utc:
+            raise ValueError("event timestamp must be UTC")
         if not isinstance(self.context_id, str) or not self.context_id:
             raise ValueError("event context_id is required")
         if self.type not in KNOWN_EVENT_TYPES:
