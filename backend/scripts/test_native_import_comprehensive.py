@@ -43,6 +43,9 @@ import _test_home
 _TMP_HOME = _test_home.isolate("bc-test-native-import-comprehensive-")
 os.environ["BETTER_CLAUDE_API_ONLY"] = "1"
 
+import runtime_ownership  # noqa: E402
+runtime_ownership.register_current_process_writer()
+
 import native_import  # noqa: E402
 logging.getLogger(native_import.__name__).setLevel(logging.CRITICAL)  # silence intentional error logs
 logging.getLogger("config_store").setLevel(logging.CRITICAL)  # silence provider-removal audit logs
@@ -636,10 +639,12 @@ def test_ingest_claude_matrix() -> None:
         ("single turn", [_cuser("hello"), _cassistant([{"type": "text", "text": "hi"}])], 1),
         ("two turns", [_cuser("q1"), _cassistant([{"type": "text", "text": "a1"}]),
                        _cuser("q2"), _cassistant([{"type": "text", "text": "a2"}])], 2),
-        ("tool turn", [_cuser("run"), _cassistant([{"type": "tool_use", "id": "tu", "name": "Bash", "input": {}}]),
+        ("tool turn", [_cuser("run"), _cassistant([{"type": "text", "text": "checking"}]),
+                       _cassistant([{"type": "tool_use", "id": "tu", "name": "Bash", "input": {}}]),
                        json.dumps({"type": "user", "uuid": str(uuid.uuid4()), "timestamp": "2026-01-01T00:00:00Z",
                                    "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "tu", "content": "out"}]}}),
-                       _cassistant([{"type": "text", "text": "done"}])], 1),
+                       _cassistant([{"type": "text", "text": "done"}]),
+                       _cuser("thanks"), _cassistant([{"type": "text", "text": "welcome"}])], 2),
         ("multi-block assistant", [_cuser("q"), _cassistant([
             {"type": "text", "text": "thinking"}, {"type": "tool_use", "id": "t1", "name": "Read", "input": {}},
             {"type": "text", "text": "more"}])], 1),
@@ -656,6 +661,12 @@ def test_ingest_claude_matrix() -> None:
         loaded = session_manager.get(root_id)
         user_count = sum(1 for m in loaded["messages"] if m["role"] == "user")
         check(user_count == expected_turns, f"[{name}] turns {user_count} != {expected_turns}")
+        if name == "tool turn":
+            asst = [m for m in loaded["messages"] if m["role"] == "assistant"]
+            # Turn 1 folds exactly: text + tool_use + tool_result + text.
+            check(len(asst[0]["events"]) == 4, f"[{name}] turn1 events {len(asst[0]['events'])} != 4")
+            # Turn 2 folds to exactly one text event.
+            check(len(asst[1]["events"]) == 1, f"[{name}] turn2 events {len(asst[1]['events'])} != 1")
         # idempotent re-import
         before = len(session_store.list_sessions())
         check(native_import.import_session(sess) == root_id, f"[{name}] idempotent root")

@@ -52,6 +52,7 @@ import asyncio
 import os
 import shutil
 import sys
+import threading
 import time
 
 import _test_home
@@ -78,7 +79,7 @@ def test_a_worker_coalesces_and_flush_now_waits() -> bool:
     w = CursorLedgerWorker(name="test-a-worker")
     try:
         results: list[int] = []
-        started = __import__("threading").Event()
+        started = threading.Event()
 
         def slow_write(val: int) -> None:
             started.set()
@@ -134,22 +135,26 @@ def test_b_record_discovered_writes_sid_once() -> bool:
 
 def test_c_note_never_blocks_caller() -> bool:
     w = CursorLedgerWorker(name="test-c-worker")
+    release = threading.Event()
     try:
         def very_slow_write() -> None:
-            time.sleep(2.0)
+            # Blocks until the caller-side latency assertion is made
+            # (generous backstop timeout), emulating arbitrarily slow I/O.
+            release.wait(timeout=30.0)
 
         start = time.monotonic()
         for i in range(100):
             w.note(f"run-{i}", very_slow_write)
         elapsed = time.monotonic() - start
-
-        ok = elapsed < 0.5  # 100 note() calls, each would cost 2s if blocking
+        ok = elapsed < 0.5  # 100 note() calls, each blocking if coupled
+        release.set()
         print(
             f"{PASS if ok else FAIL} C: 100 note() calls (each scheduling a "
-            f"2s write) returned in {elapsed:.3f}s (want < 0.5s)"
+            f"blocked write) returned in {elapsed:.3f}s (want < 0.5s)"
         )
         return ok
     finally:
+        release.set()
         w.stop()
 
 

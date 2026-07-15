@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, screen } from "@testing-library/react";
 import { renderApp } from "./harness";
 import "../src/i18n";
@@ -10,10 +10,11 @@ async function openRefreshModal(h: Awaited<ReturnType<typeof renderApp>>) {
   await h.clickByText(/Rebuild frontend \+ restart backend/);
 }
 
+// Advances the useRefreshApp 500ms status-poll timer instantly (fake timers).
 async function waitForRestartStatus(h: Awaited<ReturnType<typeof renderApp>>) {
   for (let i = 0; i < 5; i += 1) {
     await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 550));
+      await vi.advanceTimersByTimeAsync(550);
     });
     await h.flush();
     const call = h.restCalls.find(
@@ -28,6 +29,17 @@ describe("app refresh", () => {
   beforeEach(() => {
     vi.stubGlobal("__BUILD_HASH__", "test-hash");
     vi.stubGlobal("__BUILD_TIME__", "2026-06-23T00:00:00Z");
+    // Fake setTimeout so the restart-status poll can be advanced instantly.
+    // shouldAdvanceTime keeps the harness's setTimeout(0) flushes alive.
+    vi.useFakeTimers({
+      shouldAdvanceTime: true,
+      advanceTimeDelta: 1,
+      toFake: ["setTimeout", "clearTimeout"],
+    });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   it("opens a restart mode modal and sends the idle mode", async () => {

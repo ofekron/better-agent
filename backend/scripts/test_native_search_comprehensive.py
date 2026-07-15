@@ -1770,9 +1770,12 @@ def test_idx_wait_fresh_serves_delta() -> bool:
         fpath = claude / encode_cwd("/p") / "a.jsonl"
         _w(fpath, [_claude_user("waitneedle here", "u1")])
         idx.refresh_once()
-        time.sleep(1.05)
         with fpath.open("a", encoding="utf-8") as f:
             f.write(json.dumps(_claude_user("deltawaitneedle new", "u2")) + "\n")
+        # Advance mtime strictly past the stamp the index recorded at refresh
+        # time so the append is detectable on 1s-granularity filesystems.
+        st = fpath.stat()
+        os.utime(fpath, (st.st_atime, st.st_mtime + 1.1))
         idx._last_refresh_at = 0.0  # force stale
         assert idx.is_covered() and not idx.is_usable()
         idx.ensure_started()

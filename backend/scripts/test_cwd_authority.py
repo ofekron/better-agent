@@ -84,7 +84,7 @@ class _BackgroundUvicorn:
                 ):
                     return
             except OSError:
-                time.sleep(0.2)
+                time.sleep(0.02)
         raise RuntimeError("uvicorn did not come up")
 
     def stop(self) -> None:
@@ -93,8 +93,8 @@ class _BackgroundUvicorn:
 
 
 async def _send_one(
-    ws_url: str, app_session_id: str, frontend_cwd: str,
-) -> None:
+    ws_url: str, app_session_id: str, frontend_cwd: str, timeout: float,
+) -> dict | None:
     async with websockets.connect(ws_url) as ws:
         await ws.send(json.dumps({
             "type": "subscribe",
@@ -102,7 +102,9 @@ async def _send_one(
             "app_session_id": app_session_id,
             "cwd": frontend_cwd,
         }))
-        await asyncio.sleep(0.3)
+        # The server answers every subscribe frame; receiving the reply
+        # proves the subscribe was consumed before send_message.
+        await asyncio.wait_for(ws.recv(), timeout=10.0)
         await ws.send(json.dumps({
             "type": "send_message",
             "prompt": "hi",
@@ -111,12 +113,12 @@ async def _send_one(
             "app_session_id": app_session_id,
             "send_mode": "send",
         }))
-        # Keep the socket open briefly so the queue processor spawns the
-        # run (writes input.json). We don't need the turn to finish.
-        await asyncio.sleep(2.0)
+        # Keep the socket open only until the queue processor spawns the
+        # run (input.json written). We don't need the turn to finish.
+        return await _await_input_json(app_session_id, timeout=timeout)
 
 
-def _await_input_json(sid: str, timeout: float) -> dict | None:
+async def _await_input_json(sid: str, timeout: float) -> dict | None:
     deadline = time.monotonic() + timeout
     root = _runs_root()
     while time.monotonic() < deadline:
@@ -128,7 +130,7 @@ def _await_input_json(sid: str, timeout: float) -> dict | None:
                     continue
                 if data.get("app_session_id") == sid:
                     return data
-        time.sleep(0.25)
+        await asyncio.sleep(0.02)
     return None
 
 
@@ -152,9 +154,7 @@ async def main() -> int:
         # free; input.json (with cwd) is still written at spawn.
         session_manager.set_agent_sid(sid, "native", str(uuid.uuid4()))
 
-        await _send_one(ws_url, sid, frontend_cwd=dir_b)
-
-        data = _await_input_json(sid, timeout=30.0)
+        data = await _send_one(ws_url, sid, frontend_cwd=dir_b, timeout=30.0)
         if data is None:
             print(f"{FAIL}  no run input.json appeared for session {sid[:8]}")
             return 1

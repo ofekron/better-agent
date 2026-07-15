@@ -28,12 +28,6 @@ class _ModeEchoStrategy:
         return {"mode": self.mode}
 
 
-def test_hook_runner_loads_config_off_loop() -> None:
-    source = (ROOT / "hook_runner.py").read_text(encoding="utf-8")
-    assert "hooks = await asyncio.to_thread(hook_store.list_hooks)" in source
-    assert "hooks = hook_store.list_hooks()" not in source
-
-
 def test_session_projection_uses_bounded_off_loop_drainer() -> None:
     import event_bus_subscribers
     from event_bus import BusEvent
@@ -128,85 +122,6 @@ def test_session_projection_uses_bounded_off_loop_drainer() -> None:
         drainer.shutdown()
 
 
-def test_wire_tailer_gap_fill_reads_journal_off_loop() -> None:
-    source = (ROOT / "jsonl_tailer.py").read_text(encoding="utf-8")
-    assert "await asyncio.to_thread(\n                event_journal_reader.read_events" in source
-    assert "cursor = await asyncio.to_thread(event_journal_reader.cursor" in source
-    assert "events, _, _ = event_journal_reader.read_events(" not in source
-    assert "cursor = event_journal_reader.cursor(" not in source
-
-
-def test_hot_path_warning_logs_are_off_loop() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
-    assert "_LOG_WRITE_EXECUTOR = ThreadPoolExecutor(" in source
-    assert "def _warning_off_loop(" in source
-    assert "def _frontend_log_off_loop(" in source
-
-    monitor_start = source.index("async def _event_loop_lag_monitor()")
-    monitor_end = source.index("asyncio.create_task(", monitor_start)
-    monitor_source = source[monitor_start:monitor_end]
-    assert '_warning_off_loop("event loop lag %.3fs", lag)' in monitor_source
-    assert 'logger.warning("event loop lag %.3fs", lag)' not in monitor_source
-
-    outbox_start = source.index("class _WebSocketOutbox:")
-    outbox_end = source.index("@app.websocket(\"/ws/chat\")", outbox_start)
-    outbox_source = source[outbox_start:outbox_end]
-    assert "_warning_off_loop(" in outbox_source
-    assert "logger.warning(\n                \"slow WebSocket send type=%s elapsed_ms=%.1f\"" not in outbox_source
-
-    frontend_start = source.index("async def frontend_log(")
-    frontend_end = source.index("@app.get(\"/api/mobile/bundle/manifest\")", frontend_start)
-    frontend_source = source[frontend_start:frontend_end]
-    assert "_frontend_log_off_loop(log_level, line)" in frontend_source
-    assert "frontend_logger.log(log_level, line)" not in frontend_source
-
-
-def test_websocket_json_serializes_off_loop() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
-    outbox_start = source.index("class _WebSocketOutbox:")
-    outbox_end = source.index("@app.websocket(\"/ws/chat\")", outbox_start)
-    outbox_source = source[outbox_start:outbox_end]
-    ws_start = source.index("async def ws_callback(event_dict):")
-    ws_end = source.index("# Per-connection token", ws_start)
-    ws_source = source[ws_start:ws_end]
-    assert "perf.LaggedQueue(" in outbox_source
-    assert "asyncio.create_task(self._writer())" in outbox_source
-    assert "self._queue.put_nowait(queued_item)" in outbox_source
-    assert "await self._websocket.send_text(text)" in outbox_source
-    assert "timeout=self._send_timeout_s" not in outbox_source
-    assert "await self._on_close()" in outbox_source
-    assert 'serialized_task = getattr(event_dict, "_bc_serialized_json_task", None)' in outbox_source
-    assert "text = await asyncio.shield(serialized_task)" in outbox_source
-    assert "text = await dumps_ws_json(event_dict)" in outbox_source
-    assert "await websocket.send_text(text)" not in ws_source
-    assert "await _send_ws_callback_event(snapshot_transport, event_dict)" in ws_source
-    assert "ws.send_json.lock_wait" not in outbox_source
-    assert "ws.send_json.serialize_off_loop" in outbox_source
-    assert "ws.phase.serializer_submit_start" in outbox_source
-    assert "ws.phase.serializer_start_done" in outbox_source
-    assert "ws.phase.serializer_done_writer_dequeue" in outbox_source
-    assert "ws.phase.writer_dequeue_await_start" in outbox_source
-    assert "ws.phase.serializer_done_await_resume" in outbox_source
-    assert "ws.phase.serializer_resume_wire_start" in outbox_source
-    assert "ws.phase.wire_start_resume" in outbox_source
-    assert "ws.phase.lag_overlap" in outbox_source
-    assert "await websocket.send_json(event_dict)" not in ws_source
-    ws_json_source = (ROOT / "ws_serialization.py").read_text(encoding="utf-8")
-    assert "ThreadPoolExecutor(" in ws_json_source
-    assert "thread_name_prefix=\"ws-json\"" in ws_json_source
-    assert "async def dumps_ws_json(" in ws_json_source
-    assert "def shutdown_ws_json_executor()" in ws_json_source
-    orchestrator_source = (ROOT / "orchestrator.py").read_text(encoding="utf-8")
-    global_start = orchestrator_source.index("def _schedule_prepared_global(")
-    global_end = orchestrator_source.index("async def _schedule_prepared_global_async(", global_start)
-    global_source = orchestrator_source[global_start:global_end]
-    assert "SerializedGlobalEvent" in orchestrator_source
-    assert "_bc_serialized_json_task" in global_source
-    assert "dumps_ws_json(event)" in global_source
-    snapshot_source = (ROOT / "ws_snapshot_transport.py").read_text(encoding="utf-8")
-    assert "await asyncio.shield(serialized_task)" in snapshot_source
-
-
 def test_stub_invalidated_broadcast_is_batched() -> None:
     source = (ROOT / "main.py").read_text(encoding="utf-8")
     flush_start = source.index("def _flush_stub_invalidated(")
@@ -218,562 +133,6 @@ def test_stub_invalidated_broadcast_is_batched() -> None:
     assert "_stub_invalidated_pending.extend(changes)" in emit_source
     assert 'broadcast_global("stub_invalidated", ch)' not in flush_source + emit_source
     assert "for ch in changes:" not in flush_source + emit_source
-
-
-def test_resolved_event_reader_keeps_unfiltered_reads_paged() -> None:
-    source = (ROOT / "event_journal.py").read_text(encoding="utf-8")
-    start = source.index("    def read_events(", source.index("class EventJournalReader"))
-    end = source.index("    def read_orphan_events(", start)
-    read_source = source[start:end]
-    assert "if msg_id_filter:" in read_source
-    assert "limit=999_999" in read_source
-    assert "limit=page_limit + 1" in read_source
-    unfiltered_start = read_source.index("else:")
-    unfiltered_source = read_source[unfiltered_start:]
-    assert "limit=999_999" not in unfiltered_source
-
-
-def test_ws_gap_fill_paginates_until_target_seq() -> None:
-    source = (ROOT / "jsonl_tailer.py").read_text(encoding="utf-8")
-    start = source.index("    async def _fill_gap(")
-    end = source.index("    async def _send(", start)
-    fill_source = source[start:end]
-    assert "while self.next_seq <= until_seq:" in fill_source
-    assert "has_more" in fill_source
-    assert "if not has_more:" in fill_source
-    assert "break" in fill_source
-
-
-def test_jsonl_dispatch_reads_session_lite_off_loop() -> None:
-    source = (ROOT / "jsonl_tailer.py").read_text(encoding="utf-8")
-    assert "await asyncio.to_thread(session_manager.get_lite, self.app_session_id)" in source
-    assert "sess = session_manager.get_lite(self.app_session_id)" not in source
-
-
-def test_gemini_polling_tailer_reads_file_off_loop() -> None:
-    source = (ROOT / "jsonl_tailer.py").read_text(encoding="utf-8")
-    start = source.index("class GeminiJsonlTailer")
-    end = source.index("class OwnedClaudeJsonlTailer", start)
-    gemini_source = source[start:end]
-    assert "new_lines = await asyncio.to_thread(self._read_new_lines)" in gemini_source
-    assert "new_lines = self._read_new_lines()" not in gemini_source
-
-
-def test_codex_rollout_tailer_reads_file_off_loop() -> None:
-    source = (ROOT / "codex_native.py").read_text(encoding="utf-8")
-    start = source.index("class CodexRolloutTailer")
-    end = source.index("async def _dispatch(", start)
-    tailer_source = source[start:end]
-    drain_start = tailer_source.index("async def _drain_available_locked(")
-    drain_end = tailer_source.index("def _read_available_lines(", drain_start)
-    drain_source = tailer_source[drain_start:drain_end]
-    assert "lines = await asyncio.to_thread(" in drain_source
-    assert "self._read_available_lines" in drain_source
-    assert "self.path.open" not in drain_source
-    assert ".readline()" not in drain_source
-
-    read_source = tailer_source[drain_end:]
-    assert "with self.path.open(\"rb\") as f:" in read_source
-    assert "raw = f.readline()" in read_source
-
-
-def test_event_ingester_file_ref_context_uses_summary_projection() -> None:
-    source = (ROOT / "event_ingester.py").read_text(encoding="utf-8")
-    start = source.index("def _ref_ctx_for_root(")
-    end = source.index("class EventIngester:", start)
-    helper_source = source[start:end]
-    assert 'session_store.summary_fields_many([root_id], ("cwd", "node_id"))' in helper_source
-    assert "session_manager.get_lite(" not in helper_source
-    assert "session_manager.get(" not in helper_source
-    root_dir_start = source.index("def _root_dir(")
-    root_dir_end = source.index("def _events_path(", root_dir_start)
-    root_dir_source = source[root_dir_start:root_dir_end]
-    assert "session_store.session_file_path(root_id)" in root_dir_source
-    assert "bc_home()" not in root_dir_source
-    assert "ba_home()" not in root_dir_source
-
-
-def test_ui_selection_uses_cached_path_and_snapshots_written_data() -> None:
-    source = (ROOT / "ui_selection.py").read_text(encoding="utf-8")
-    assert '_PATH = ba_home() / "app-state" / "ui-selection.json"' in source
-    path_start = source.index("def _path():")
-    path_end = source.index("def _load()", path_start)
-    assert "ba_home()" not in source[path_start:path_end]
-    selected_start = source.index("def set_selected_project(")
-    selected_end = source.index("def _remembered_sessions_from(", selected_start)
-    selected_source = source[selected_start:selected_end]
-    assert "return _snapshot(data)" in selected_source
-    remembered_start = source.index("def set_remembered_session(")
-    remembered_end = source.index("def _snapshot(", remembered_start)
-    remembered_source = source[remembered_start:remembered_end]
-    assert "return _snapshot(data)" in remembered_source
-    assert "return get_all()" not in selected_source
-    assert "return get_all()" not in remembered_source
-
-
-def test_ui_selection_routes_use_hot_path_executor() -> None:
-    source = (ROOT / "bff_app_routes.py").read_text(encoding="utf-8")
-    get_start = source.index("async def get_ui_selection(")
-    get_end = source.index('@router.patch("/api/ui-selection")', get_start)
-    get_source = source[get_start:get_end]
-    assert "await asyncio.to_thread(ui_selection.get_all)" in get_source
-
-    patch_start = source.index("async def patch_ui_selection(")
-    patch_source = source[patch_start:]
-    assert "await asyncio.to_thread(_patch_sync)" in patch_source
-
-
-def test_user_prefs_uses_cached_path_for_hot_reads() -> None:
-    source = (ROOT / "user_prefs.py").read_text(encoding="utf-8")
-    assert "_PREFS_PATH = bc_home() / \"user_prefs.json\"" in source
-    path_start = source.index("def _prefs_path():")
-    path_end = source.index("def _load()", path_start)
-    path_source = source[path_start:path_end]
-    assert "bc_home()" not in path_source
-    assert "ba_home()" not in path_source
-
-
-def test_auto_restart_pref_read_is_off_loop() -> None:
-    source = (ROOT / "auto_restart_on_idle.py").read_text(encoding="utf-8")
-    tick_start = source.index("async def _tick(")
-    tick_end = source.index("busy = await asyncio.to_thread(self._is_busy)", tick_start)
-    tick_source = source[tick_start:tick_end]
-    assert "await asyncio.to_thread(self._is_enabled)" in tick_source
-    assert "if not self._is_enabled():" not in tick_source
-
-
-def test_session_opened_avoids_full_session_copy() -> None:
-    main_source = (ROOT / "main.py").read_text(encoding="utf-8")
-    route_start = main_source.index("async def mark_session_opened(")
-    route_end = main_source.index("@app.", route_start)
-    route_source = main_source[route_start:route_end]
-    assert "return_session=False" in route_source
-    assert 'await _run_hot_path(\n        "session.opened.set_last_opened_at"' in route_source
-    assert "asyncio.to_thread(" not in route_source
-    manager_source = (ROOT / "session_manager.py").read_text(encoding="utf-8")
-    method_start = manager_source.index("def set_last_opened_at(")
-    method_end = manager_source.index("def set_archived(", method_start)
-    method_source = manager_source[method_start:method_end]
-    assert "return_session: bool = True" in method_source
-    assert '{"id": sid, "last_opened_at": at}' in method_source
-
-
-def test_jsonl_fallback_followers_poll_files_off_loop() -> None:
-    source = (ROOT / "jsonl_tailer.py").read_text(encoding="utf-8")
-    file_start = source.index("class _FileTailFollower:")
-    byte_start = source.index("class _AppendOnlyByteFollower:")
-    file_source = source[file_start:byte_start]
-    byte_end = source.index("class ClaudeJsonlTailer", byte_start)
-    byte_source = source[byte_start:byte_end]
-    # File polling runs on `_FILE_POLL_EXECUTOR` — split from
-    # `_CURSOR_EXECUTOR` (cursor-advance persistence) so slow,
-    # occasionally-blocking persistence work can't starve the frequent
-    # lightweight stat()/read() polling every tailer does. Both are still
-    # off the event loop; only the pool differs now.
-    assert "_FILE_POLL_EXECUTOR" in file_source
-    assert "_FILE_POLL_EXECUTOR" in byte_source
-    assert "size = self._path.stat().st_size" not in file_source
-    assert "st = self._path.stat()" not in byte_source
-    assert "with open(self._path, \"rb\") as f:" not in file_source.split("def _read_from_sync", 1)[0]
-    assert "with open(self._path, \"rb\") as f:" not in byte_source.split("def _read_from_sync", 1)[0]
-
-
-def test_live_provider_stream_mutation_skips_cold_event_hydration() -> None:
-    source = (ROOT / "turn_manager.py").read_text(encoding="utf-8")
-    assert "_STREAM_EVENT_APPLY_EXECUTOR = ThreadPoolExecutor(" in source
-    assert "thread_name_prefix=\"stream-event-apply\"" in source
-    helper_start = source.index("    def _apply_provider_stream_event_sync(")
-    helper_end = source.index("    async def _publish_provider_stream_event(", helper_start)
-    helper_source = source[helper_start:helper_end]
-    assert "session_manager.message_batch(" in helper_source
-    assert "hydrate_events=False" in helper_source
-    start = source.index("async def save_ws_callback(")
-    end = source.index("            if event_dict.get(\"type\") in _BRIDGE_EVENT_TYPES:", start)
-    callback_source = source[start:end]
-    assert "run_in_executor(\n                        _STREAM_EVENT_APPLY_EXECUTOR" in callback_source
-    assert "session_manager.message_batch(" not in callback_source
-    assert "with session_manager.batch(persist_to):" not in callback_source
-
-
-def test_provider_context_runtime_discovery_runs_off_loop() -> None:
-    source = (ROOT / "turn_manager.py").read_text(encoding="utf-8")
-    start = source.index("        runtime_capability_contexts = await asyncio.to_thread(")
-    end = source.index("        transient_attempt = 0", start)
-    initial_source = source[start:end]
-    refresh_start = source.index("        async def _refresh_provider_context()")
-    refresh_end = source.index("        async def _start_selector_change_continuation(", refresh_start)
-    refresh_source = source[refresh_start:refresh_end]
-    loop_start = source.index("        while True:", refresh_end)
-    loop_end = source.index("            if cancel_event.is_set():", loop_start)
-    loop_source = source[loop_start:loop_end]
-    for block in (initial_source, refresh_source):
-        assert "runtime_capability_contexts = await asyncio.to_thread(" in block
-        assert "runtime_skill_contexts," in block
-        assert "dynamic_capability_contexts = await asyncio.to_thread(" in block
-        assert "extension_audit_context," in block
-    assert "await _refresh_provider_context()" in loop_source
-
-
-def test_continuation_start_boundary_runs_off_loop() -> None:
-    source = (ROOT / "turn_manager.py").read_text(encoding="utf-8")
-    startup_start = source.index("        loop = asyncio.get_running_loop()")
-    startup_end = source.index("        async def _clear_continuation_active()", startup_start)
-    startup_source = source[startup_start:startup_end]
-    assert "_session_rec = await asyncio.to_thread(\n            session_manager.get," in startup_source
-    assert "provider = await asyncio.to_thread(\n            self._c.provider_for_run," in startup_source
-    assert '_session_rec_chain = (_session_rec or {}).get("continuation_chain") or []' in startup_source
-    assert "session_manager.get(primary_session_id or app_session_id)" not in startup_source
-
-    clear_start = source.index("        async def _clear_continuation_active()")
-    context_start = source.index("        def _should_preempt_context_continuation_sync()", clear_start)
-    clear_source = source[clear_start:context_start]
-    assert "await asyncio.to_thread(\n                session_manager.set_msg_continuation_active" in clear_source
-
-    sync_start = source.index("        def _start_continuation_sync(")
-    context_async_start = source.index("        async def _start_context_continuation(", sync_start)
-    sync_source = source[sync_start:context_async_start]
-    assert "start_continuation_for(" in sync_source
-    assert "session_manager.set_msg_continuation_active(" in sync_source
-
-    context_source = source[
-        context_async_start:
-        source.index("        def _should_preempt_selector_change_continuation_sync()", context_async_start)
-    ]
-    assert "continuation = await asyncio.to_thread(\n                _start_continuation_sync," in context_source
-    assert "start_continuation_for(" not in context_source
-    assert "session_manager.set_msg_continuation_active(" not in context_source
-
-    selector_start = source.index("        async def _start_selector_change_continuation(")
-    selector_source = source[selector_start:source.index("        while True:", selector_start)]
-    assert "continuation = await asyncio.to_thread(\n                _start_continuation_sync," in selector_source
-    assert "start_continuation_for(" not in selector_source
-    assert "session_manager.set_msg_continuation_active(" not in selector_source
-
-    refresh_start = source.index("        async def _refresh_provider_context()")
-    refresh_source = source[refresh_start:selector_start]
-    assert "_session_rec = await asyncio.to_thread(\n                session_manager.get," in refresh_source
-    assert "provider = await asyncio.to_thread(\n                self._c.provider_for_session," in refresh_source
-
-    strategy_start = source.index("        async def _context_strategy_is_continuation()")
-    strategy_source = source[strategy_start:refresh_start]
-    assert "await asyncio.to_thread(user_prefs.get_context_strategy)" in strategy_source
-    overflow_start = source.index("            # \u2500\u2500 Context-window overflow", selector_start)
-    overflow_end = source.index("            if (not success", overflow_start + 1)
-    overflow_source = source[overflow_start:overflow_end]
-    assert "if await _context_strategy_is_continuation():" in overflow_source
-    assert "user_prefs.get_context_strategy()" not in overflow_source
-
-
-def test_provisioning_run_lifecycle_runs_off_loop() -> None:
-    source = (ROOT / "provisioning" / "manager.py").read_text(encoding="utf-8")
-    run_start = source.index("async def run(")
-    run_end = source.index("def _lifecycle_lock(", run_start)
-    run_source = source[run_start:run_end]
-    assert "await _ensure_ready_lifecycle(" in run_source
-    assert "with _acquired_lifecycle_lock(spec, cfg):" not in run_source
-    assert "base_session_id = ensure_session(spec, cfg)" not in run_source
-    assert "caller_session_id = ensure_caller(spec, cfg)" not in run_source
-
-    helper_start = source.index("async def _ensure_ready_lifecycle(")
-    helper_end = source.index("@asynccontextmanager", helper_start)
-    helper_source = source[helper_start:helper_end]
-    assert "async with _async_acquired_lifecycle_lock(spec, cfg):" in helper_source
-    assert "await _ensure_ready_base_locked(spec, cfg, ctx)" in helper_source
-    assert "await asyncio.to_thread(ensure_caller, spec, cfg)" in helper_source
-
-
-def test_requirements_internal_routes_use_dedicated_executor() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
-    assert "_REQUIREMENTS_QUERY_EXECUTOR" not in source
-    assert "_run_requirements_query" not in source
-    assert "run_requirements_processor_query(\n            \"requirements.processed.processor\"," in source
-    assert "run_requirements_query(\n        \"requirements.processed.finalize\"," in source
-    assert "except TimeoutError as exc:\n        processed = requirement_context.processor_failure_result(exc)" in source
-    assert "executor=REQUIREMENTS_PROCESSOR_EXECUTOR" in source
-    assert "run_requirements_query(\n        \"requirements.search\"," in source
-    assert "executor=REQUIREMENTS_SEARCH_EXECUTOR" in source
-    assert "asyncio.to_thread(\n        requirement_context.get_processed_requirements," not in source
-    assert "asyncio.to_thread(\n        requirement_context.search_requirements," not in source
-
-
-def test_worker_panel_mutations_skip_cold_event_hydration() -> None:
-    source = (ROOT / "session_manager.py").read_text(encoding="utf-8")
-    run_start = source.index("    def _run(")
-    run_end = source.index("    @perf.timed_fn(\"session.persist_root\")", run_start)
-    run_source = source[run_start:run_end]
-    assert "hydrate_events: bool = True" in run_source
-    assert "self._cached(sid, hydrate_events=hydrate_events)" in run_source
-
-    for name in (
-        "snapshot_workers",
-        "upsert_worker_panel",
-        "update_worker_panel",
-        "apply_worker_panel_event",
-    ):
-        start = source.index(f"    def {name}(")
-        end = source.index("\n    def ", start + 1)
-        helper_source = source[start:end]
-        assert "hydrate_events=False" in helper_source
-
-
-def test_native_event_mutations_skip_cold_event_hydration() -> None:
-    source = (ROOT / "session_manager.py").read_text(encoding="utf-8")
-
-    for name in ("append_native_event", "replace_native_event"):
-        start = source.index(f"    def {name}(")
-        end = source.index("\n    def ", start + 1)
-        helper_source = source[start:end]
-        assert "hydrate_events=False" in helper_source
-
-
-def test_subagent_watcher_scans_files_off_loop() -> None:
-    source = (ROOT / "jsonl_tailer.py").read_text(encoding="utf-8")
-    assert "_SUBAGENT_SCAN_EXECUTOR = ThreadPoolExecutor(" in source
-    assert 'thread_name_prefix="subagent-scan"' in source
-    assert "_SUBAGENT_SCAN_MAX_PENDING_FUTURES = 2" in source
-    assert "def _subagent_scan_semaphore() -> asyncio.Semaphore:" in source
-    assert "_SUB_DIR_IDLE_POLL_INTERVAL" in source
-    assert "_SUB_DIR_IDLE_BACKOFF" in source
-    assert "_SUB_DIR_PENDING_FAST_SECONDS" in source
-    assert "self._subagent_scan_wakeup: Optional[asyncio.Event] = None" in source
-    assert "self._subagent_pending_fast_until = 0.0" in source
-    assert "def _should_scan_subagents(self) -> bool:" in source
-    decode_start = source.index("    def _decode_line(")
-    decode_end = source.index("    def _advance_cursor(", decode_start)
-    decode_source = source[decode_start:decode_end]
-    assert "pending_before = self._subagent_pending_count()" in decode_source
-    assert "self._mark_subagent_pending_fast()" in decode_source
-    watch_start = source.index("async def _watch_subagents(")
-    watch_end = source.index("def _scan_subagent_files(", watch_start)
-    watch_source = source[watch_start:watch_end]
-    assert "if self._should_scan_subagents():" in watch_source
-    assert "async with _subagent_scan_semaphore():" in watch_source
-    assert "await loop.run_in_executor(" in watch_source
-    assert watch_source.index("if self._should_scan_subagents():") < watch_source.index(
-        "async with _subagent_scan_semaphore():"
-    )
-    assert "_SUBAGENT_SCAN_EXECUTOR" in watch_source
-    assert 'perf.timed("tailer.subagent_scan")' in watch_source
-    assert "poll_interval = self._next_subagent_poll_interval(" in watch_source
-    assert "await asyncio.wait_for(wakeup.wait(), timeout=poll_interval)" in watch_source
-    assert "self._has_fresh_subagent_pending()" in watch_source
-    assert "self._mark_subagent_pending_fast()" in watch_source
-    assert "await asyncio.to_thread(\n                    self._scan_subagent_files" not in watch_source
-    assert ".exists()" not in watch_source
-    assert ".glob(" not in watch_source
-    assert ".iterdir(" not in watch_source
-    assert ".read_text(" not in watch_source
-    apply_start = source.index("    def _apply_subagent_scan(")
-    apply_end = source.index("    def _spawn_sub_tailer(", apply_start)
-    apply_source = source[apply_start:apply_end]
-    assert ") -> int:" in apply_source
-    assert "return applied" in apply_source
-
-
-def test_delegation_locked_reuses_worker_session_snapshot() -> None:
-    source = (ROOT / "orchs" / "manager" / "_delegation.py").read_text(encoding="utf-8")
-    locked_start = source.index("async def run_delegation_locked(")
-    locked_end = source.index("    if machine_completion:", locked_start)
-    locked_source = source[locked_start:locked_end]
-    assert "worker_session: dict" in locked_source
-    assert "worker_session_for_path = session_manager.get(worker_agent_session_id)" not in locked_source
-    assert "session_manager.get(worker_agent_session_id)" not in locked_source
-    assert "provider_run_config = worker_session.get(\"provider_run_config\")" in locked_source
-    assert "capability_contexts = worker_session.get(\"capability_contexts\")" in locked_source
-    assert "worker_session.get(\"reasoning_effort\")" in locked_source
-
-
-def test_async_provider_resolution_runs_off_loop() -> None:
-    delegation_source = (ROOT / "orchs" / "manager" / "_delegation.py").read_text(encoding="utf-8")
-    run_start = delegation_source.index("async def run_delegation(")
-    locked_start = delegation_source.index("async def run_delegation_locked(")
-    run_source = delegation_source[run_start:locked_start]
-    locked_source = delegation_source[locked_start:]
-    assert "await asyncio.to_thread(\n                    coordinator.provider_for_session" in run_source
-    assert "coordinator.provider_for_session(worker_session_id)" not in run_source
-    assert "coordinator.provider_for_session,\n            worker_session_id" in run_source
-    assert "coordinator.provider_for_run(worker_agent_session_id, provider_id)" not in locked_source
-    assert "coordinator.provider_for_run,\n        worker_agent_session_id" in locked_source
-
-    main_source = (ROOT / "main.py").read_text(encoding="utf-8")
-    route_start = main_source.index("@app.post(\"/api/internal/headless-generate\")")
-    route_end = main_source.index("@app.post(\"/api/internal/headless-run\")", route_start)
-    route_source = main_source[route_start:route_end]
-    assert "provider = await asyncio.to_thread(coordinator.provider_for_session, session_id)" in route_source
-
-
-def test_delegation_state_store_calls_run_off_loop() -> None:
-    source = (ROOT / "orchs" / "manager" / "_delegation.py").read_text(encoding="utf-8")
-    run_start = source.index("async def run_delegation(")
-    locked_start = source.index("async def run_delegation_locked(")
-    run_source = source[run_start:locked_start]
-    locked_source = source[locked_start:]
-
-    assert "caller_session = await asyncio.to_thread(session_manager.get" in run_source
-    assert "worker_session = await asyncio.to_thread(session_manager.get" in run_source
-    assert "worker_record_result = await asyncio.to_thread(\n        _find_worker_record" in run_source
-    assert "session_manager.get(worker_session_id)" not in run_source
-    assert "worker_store.get_worker(candidate_cwd, worker_session_id)" not in run_source
-    assert "worker_store.remove_worker(candidate_cwd, worker_session_id)" not in run_source
-
-    assert "await asyncio.to_thread(\n                session_fork_store.get_fork_record" in locked_source
-    assert "await asyncio.to_thread(session_manager.get, fork_agent_session_id)" in locked_source
-    assert "await asyncio.to_thread(session_manager.delete, fork_agent_session_id)" in locked_source
-    assert "fork_bc = await asyncio.to_thread(\n                session_manager.create_delegate_fork" in locked_source
-    assert "manager_session = await asyncio.to_thread(session_manager.get, app_session_id)" in locked_source
-    assert "session_fork_store.get_fork_record(cwd, app_session_id" not in locked_source
-    assert "session_manager.get(fork_agent_session_id)" not in locked_source
-    assert "session_manager.create_delegate_fork(" not in locked_source
-
-
-def test_provider_event_rewrite_uses_file_ref_context_not_lite_copy() -> None:
-    source = (ROOT / "orchs" / "base.py").read_text(encoding="utf-8")
-    start = source.index("def prepare_provider_event_for_journal(")
-    end = source.index("    def _apply_worker_event(", start)
-    method_source = source[start:end]
-    assert "session_manager.get_file_ref_context(app_session_id)" in method_source
-    assert "session_manager.get_lite(app_session_id)" not in method_source
-    assert "assume_exists_for_node(node_id)" in method_source
-
-
-def test_publish_event_sync_resolves_cwd_without_full_session_copy() -> None:
-    source = (ROOT / "event_journal.py").read_text(encoding="utf-8")
-    start = source.index("def publish_event_sync(")
-    end = source.index("class _RootExecutor(", start)
-    publish_source = source[start:end]
-    assert "session_manager.get_file_ref_context(context_id or session_id)" in publish_source
-    assert "session_manager.get_lite(" not in publish_source
-    assert "session_manager.get(" not in publish_source
-
-
-def test_jsonl_dispatch_ingests_orphans_off_loop() -> None:
-    source = (ROOT / "jsonl_tailer.py").read_text(encoding="utf-8")
-    assert "accepted, _ = await asyncio.to_thread(\n                    session_manager.run_if_owner" in source
-    assert "lambda: strategy.ingest_orphan(" in source
-
-
-def test_wire_tailer_subscribe_resolves_root_off_loop() -> None:
-    source = (ROOT / "orchestrator.py").read_text(encoding="utf-8")
-    subscribe_start = source.index("async def _subscribe_to_wire_tailer(")
-    subscribe_end = source.index("    def _publish_native_demand(", subscribe_start)
-    subscribe_source = source[subscribe_start:subscribe_end]
-    assert "root_id = await asyncio.to_thread(\n            session_manager._root_id_for" in subscribe_source
-    assert "root_id = session_manager._root_id_for(app_session_id)" not in subscribe_source
-    assert "root_id=root_id" in subscribe_source
-
-
-def test_native_demand_publish_does_not_leak_coroutine_without_loop() -> None:
-    source = (ROOT / "orchestrator.py").read_text(encoding="utf-8")
-    publish_start = source.index("    def _publish_native_demand(")
-    publish_end = source.index("    def _unsubscribe_from_wire_tailer(", publish_start)
-    publish_source = source[publish_start:publish_end]
-    assert "loop = asyncio.get_running_loop()" in publish_source
-    assert "except RuntimeError:\n            return" in publish_source
-    assert "asyncio.create_task(\n                bus.publish(" not in publish_source
-    assert "loop.create_task(\n            bus.publish(" in publish_source
-
-
-def test_wire_tailer_unsubscribe_uses_cached_subscriber_root() -> None:
-    source = (ROOT / "orchestrator.py").read_text(encoding="utf-8")
-    unsubscribe_start = source.index("    def _unsubscribe_from_wire_tailer(")
-    unsubscribe_end = source.index("    def _maybe_stop_wire_tailer(", unsubscribe_start)
-    unsubscribe_source = source[unsubscribe_start:unsubscribe_end]
-    maybe_start = source.index("    def _maybe_stop_wire_tailer(")
-    maybe_end = source.index("    async def _await_tailer_stop(", maybe_start)
-    maybe_source = source[maybe_start:maybe_end]
-    assert "root_ids.add(sub.root_id)" in unsubscribe_source
-    assert "session_manager._root_id_for" not in unsubscribe_source
-    assert "def _maybe_stop_wire_tailer(self, root_id: str, app_session_id: str)" in maybe_source
-    assert "session_manager._root_id_for" not in maybe_source
-
-
-def test_root_session_write_does_not_resolve_root_id() -> None:
-    source = (ROOT / "session_store.py").read_text(encoding="utf-8")
-    write_start = source.index("def write_session_full(")
-    write_end = source.index("def delete_session(", write_start)
-    write_source = source[write_start:write_end]
-    assert 'path = _root_file_path(root["id"])' in write_source
-    assert "_session_path(root[\"id\"])" not in write_source
-    assert "_resolve_root_id(root" not in write_source
-
-
-def test_session_first_prompt_search_uses_summary_index() -> None:
-    source = (ROOT / "session_store.py").read_text(encoding="utf-8")
-    summary_start = source.index("def _build_summary_for_root(")
-    summary_end = source.index("def set_requirement_tags_projection(", summary_start)
-    summary_source = source[summary_start:summary_end]
-    search_start = source.index("def _metadata_search_scores(")
-    search_end = source.index("def grep_session_scores(", search_start)
-    search_source = source[search_start:search_end]
-    assert '"first_prompt": _first_user_prompt(root)' in summary_source
-    assert "rows = _metadata_search_rows()" in search_source
-    assert "for sid, title, first_prompt in rows:" in search_source
-    assert "score = first_prompt.count(query_lower)" in search_source
-    assert "json.loads(path.read_text" not in search_source
-    assert "_migrate_session(" not in search_source
-
-
-def test_session_content_search_aggregates_in_sqlite() -> None:
-    source = (ROOT / "session_search_index.py").read_text(encoding="utf-8")
-    search_start = source.index("def search(")
-    search_end = source.index("def has_indexed_rows(", search_start)
-    search_source = source[search_start:search_end]
-    candidate_start = source.index("def _candidate_scores(")
-    candidate_end = source.index("def _match_literal(", candidate_start)
-    candidate_source = source[candidate_start:candidate_end]
-    assert "_candidate_scores(conn, q, limit)" in search_source
-    assert "def _inflight_event_for_limit(" in source
-    assert "event = _inflight_event_for_limit(q, limit)" in search_source
-    assert "COUNT(*) AS score" in candidate_source
-    assert "GROUP BY session_id ORDER BY score DESC LIMIT ?" in candidate_source
-    assert "SELECT session_id, text" not in candidate_source
-    assert "lower().count" not in search_source
-
-
-def test_bounded_session_content_search_stops_sqlite_scan() -> None:
-    source = (ROOT / "session_search_index.py").read_text(encoding="utf-8")
-    search_start = source.index("def search(")
-    search_end = source.index("def has_indexed_rows(", search_start)
-    search_source = source[search_start:search_end]
-    fill_start = source.index("def _run_search_cache_fill(")
-    fill_end = source.index("def has_indexed_rows(", fill_start)
-    fill_source = source[fill_start:fill_end]
-    candidate_start = source.index("def _candidate_scores(")
-    candidate_end = source.index("def _match_literal(", candidate_start)
-    candidate_source = source[candidate_start:candidate_end]
-    assert "args=(cache_key, q, limit, max_wait_seconds, event)" in search_source
-    assert "deadline = (" in fill_source
-    assert "_candidate_scores(conn, query, limit, deadline=deadline)" in fill_source
-    assert "conn.set_progress_handler(" in candidate_source
-    assert "time.monotonic() >= deadline" in candidate_source
-    assert "conn.set_progress_handler(None, 0)" in candidate_source
-    assert "interrupted" in candidate_source
-
-
-def test_session_content_search_uses_readonly_connection_without_writer_lock() -> None:
-    source = (ROOT / "session_search_index.py").read_text(encoding="utf-8")
-    search_start = source.index("def search(")
-    search_end = source.index("def has_indexed_rows(", search_start)
-    search_source = source[search_start:search_end]
-    connect_start = source.index("def _connect_readonly(")
-    connect_end = source.index("def _configure_connection(", connect_start)
-    connect_source = source[connect_start:connect_end]
-    config_start = source.index("def _configure_connection(")
-    config_end = source.index("def _event_text(", config_start)
-    config_source = source[config_start:config_end]
-    assert "_readonly_conn_local = threading.local()" in source
-    assert "def _readonly_connection()" in source
-    assert "conn = _readonly_connection()" in search_source
-    assert "conn.close()" not in search_source
-    assert "with _lock:" not in search_source
-    assert "_connect()" not in search_source
-    assert "_WRITER_CACHE_KIB = 200_000" in source
-    assert "_READONLY_CACHE_KIB = 8_192" in source
-    assert "_configure_connection(conn, readonly=True)" in connect_source
-    assert "cache_kib = _READONLY_CACHE_KIB if readonly else _WRITER_CACHE_KIB" in config_source
-    assert 'conn.execute(f"PRAGMA cache_size=-{cache_kib}")' in config_source
-    assert "PRAGMA temp_store=MEMORY" in config_source
-    assert "PRAGMA mmap_size=268435456" in config_source
 
 
 def test_session_search_sqlite_connection_cache_sizes_are_bounded() -> None:
@@ -837,58 +196,6 @@ def test_native_transcript_sqlite_readonly_connections_use_bounded_cache() -> No
     assert readonly_cache_size == -8_192
 
 
-def test_session_search_delete_is_queued_projection_work() -> None:
-    source = (ROOT / "session_search_index.py").read_text(encoding="utf-8")
-    assert "_writer_conn" in source
-    assert "def _writer_connection()" in source
-    delete_start = source.index("def delete_session(")
-    delete_end = source.index("def search(", delete_start)
-    delete_source = source[delete_start:delete_end]
-    worker_start = source.index("def _worker_main(")
-    worker_end = source.index("def _apply_rows(", worker_start)
-    worker_source = source[worker_start:worker_end]
-    apply_start = source.index("def _apply_rows_to_conn(")
-    apply_end = source.index("def _drain_pending(", apply_start)
-    apply_source = source[apply_start:apply_end]
-    assert "_queue.put((session_id, None))" in delete_source
-    assert "with _lock:" not in delete_source
-    assert "conn = _writer_connection()" in apply_source
-    assert "conn.close()" not in apply_source
-    assert "conn = _connect()" not in apply_source
-    assert "DELETE FROM session_event_fts" in apply_source
-
-
-def test_event_journal_rejects_late_writes_after_close() -> None:
-    source = (ROOT / "event_journal.py").read_text(encoding="utf-8")
-    assert "self._closed = False" in source
-    assert "self._closed = True" in source
-    assert 'raise EventJournalWriteError("event journal writer is closed")' in source
-
-
-def test_publish_event_default_path_skips_temp_ack_subscribers() -> None:
-    source = (ROOT / "event_journal.py").read_text(encoding="utf-8")
-    start = source.index("async def publish_event(")
-    end = source.index("def publish_event_sync(", start)
-    publish_source = source[start:end]
-    default_start = publish_source.index("if bus_instance is bus:")
-    fallback_start = publish_source.index("loop = asyncio.get_running_loop()")
-    default_source = publish_source[default_start:fallback_start]
-    assert "event_journal_writer.submit_event_async(Event(" in default_source
-    assert "bus_instance.subscribe(" not in default_source
-    assert "event_journal_ack_" not in default_source
-
-
-def test_broadcast_session_journal_write_runs_off_loop() -> None:
-    source = (ROOT / "orchestrator.py").read_text(encoding="utf-8")
-    start = source.index("async def broadcast_session(")
-    end = source.index("async def broadcast_global(", start)
-    broadcast_source = source[start:end]
-    assert "await publish_event(" in broadcast_source
-    assert "await asyncio.to_thread(" not in broadcast_source
-    assert "_broadcast_session_sync" not in broadcast_source
-    assert "publish_event_sync(" not in broadcast_source
-
-
 def test_build_assistant_msg_skips_same_session_lookup() -> None:
     import orchestrator
     import orchs
@@ -930,46 +237,6 @@ def test_build_assistant_msg_uses_app_session_for_cross_session_mode() -> None:
 
     assert result == {"mode": "supervisor"}
     get_session.assert_called_once_with("app-session")
-
-
-def test_provider_complete_watcher_filesystem_poll_runs_off_loop() -> None:
-    provider_source = (ROOT / "provider.py").read_text(encoding="utf-8")
-    assert "def _new_provider_poll_executor()" in provider_source
-    assert "def reopen_provider_tasks() -> None:" in provider_source
-    assert "thread_name_prefix=\"provider-poll\"" in provider_source
-    assert "async def path_exists_off_loop(path: Path) -> bool:" in provider_source
-    assert "run_in_executor(_PROVIDER_POLL_EXECUTOR, path.exists)" in provider_source
-    assert "async def shutdown_provider_tasks() -> None:" in provider_source
-    assert "_PROVIDER_TASKS_ACCEPTING = False" in provider_source
-    assert "await asyncio.gather(*tasks, return_exceptions=True)" in provider_source
-    for filename in (
-        "provider_claude.py",
-        "provider_codex.py",
-        "provider_gemini.py",
-        "provider_openai.py",
-    ):
-        source = (ROOT / filename).read_text(encoding="utf-8")
-        start = source.index("async def _watch_complete(")
-        if filename == "provider_claude.py":
-            end = source.index("async def _watch_process_exit(", start)
-        elif filename == "provider_codex.py":
-            end = source.index("async def _ensure_child_tailer(", start)
-        elif filename == "provider_openai.py":
-            end = source.index("async def _emit_complete_from_file(", start)
-        else:
-            end = source.index("# ------------------------------------------------------------------\n    # _emit_complete_from_file", start)
-        watcher_source = source[start:end]
-        assert "await path_exists_off_loop(complete_path)" in watcher_source
-        assert "await asyncio.to_thread(complete_path.exists)" not in watcher_source
-        assert "complete_path.exists()" not in watcher_source
-        bootstrap_start = source.index("async def _bootstrap_run(")
-        bootstrap_end = source.index("if runner_state is None:", bootstrap_start)
-        bootstrap_source = source[bootstrap_start:bootstrap_end]
-        assert "await path_exists_off_loop(state_path)" in bootstrap_source or "await path_exists_off_loop(runner_state_path)" in bootstrap_source
-        assert "await path_exists_off_loop(complete_path)" in bootstrap_source
-        assert "state_path.exists()" not in bootstrap_source
-        assert "runner_state_path.exists()" not in bootstrap_source
-        assert "complete_path.exists()" not in bootstrap_source
 
 
 def test_provider_run_process_poll_runs_off_loop() -> None:
@@ -1018,26 +285,6 @@ def test_provider_run_process_poll_runs_off_loop() -> None:
             watcher_source = source[start:end]
             assert "await popen_is_running_off_loop(rs.popen)" in watcher_source
             assert "rs.popen.poll()" not in watcher_source
-
-
-def test_codex_cursor_state_write_is_coalesced_off_loop() -> None:
-    source = (ROOT / "provider_codex.py").read_text(encoding="utf-8")
-    root_cursor_start = source.index("        def _on_cursor(")
-    root_cursor_end = source.index("        rs.tailer = CodexRolloutTailer(", root_cursor_start)
-    root_cursor_source = source[root_cursor_start:root_cursor_end]
-    assert "self._schedule_backend_state_flush(_rs)" in root_cursor_source
-    assert "self._write_backend_state(_rs)" not in root_cursor_source
-
-    child_cursor_start = source.index("        def _on_child_cursor(")
-    child_cursor_end = source.index("        tailer = CodexRolloutTailer(", child_cursor_start)
-    child_cursor_source = source[child_cursor_start:child_cursor_end]
-    assert "self._schedule_backend_state_flush(_rs)" in child_cursor_source
-    assert "self._write_backend_state(_rs)" not in child_cursor_source
-
-    flush_start = source.index("    async def _flush_backend_state_async(")
-    flush_end = source.index("    def attach_recovered_run(", flush_start)
-    flush_source = source[flush_start:flush_end]
-    assert "await asyncio.to_thread(self._write_backend_state, rs)" in flush_source
 
 
 def test_jsonl_line_count_uses_fingerprint_cache() -> None:
@@ -1104,243 +351,6 @@ def test_jsonl_line_count_singleflights_concurrent_cold_reads() -> None:
     assert open_calls == 1
 
 
-def test_internal_workers_list_runs_projection_off_loop() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
-    route_start = source.index("async def internal_list_workers_for_cwd(")
-    route_end = source.index("@app.", route_start)
-    route_source = source[route_start:route_end]
-    assert "return await asyncio.to_thread(_internal_list_workers_for_cwd_sync, cwd)" in route_source
-    assert "compute_jsonl_path(" not in route_source
-    assert "count_jsonl_lines(" not in route_source
-    assert "session_manager.get_lite(" not in route_source
-    projection_source = (ROOT / "team_orchestration_read.py").read_text(encoding="utf-8")
-    assert "session_store.summary_fields_many(worker_sids, fields)" in projection_source
-    assert 'with perf.timed(f"{_METRIC}.session")' in projection_source
-    assert "extension.team_orchestration.workers.fallback_fields" not in projection_source
-    assert "session_manager.get_fields_many(" not in projection_source
-    assert "session_manager.get_fields(\n            bc_sid" not in projection_source
-    assert "session_manager.get_lite(" not in projection_source
-    assert "pair_records: list[dict[str, Any]] = []" in projection_source
-    assert projection_source.index("pair_records.append(rec)") < projection_source.index("compute_jsonl_path(")
-
-
-def test_message_delta_replay_skips_full_snapshot_rebuild() -> None:
-    source = (ROOT / "session_manager.py").read_text(encoding="utf-8")
-    start = source.index("def get_messages_since(")
-    end = source.index("def _get_cached_snapshot(", start)
-    method_source = source[start:end]
-    delta_start = method_source.index("if since_seq > 0:")
-    snapshot_start = method_source.index("snapshot = self._get_cached_snapshot(")
-    delta_source = method_source[delta_start:snapshot_start]
-    assert "_get_cached_messages_window(" in delta_source
-    assert "_compute_messages_window(" not in delta_source
-    assert "_get_cached_snapshot(" not in delta_source
-    cached_window_start = source.index("def _get_cached_messages_window(")
-    cached_window_end = source.index("def _tree_stub_cache_key(", cached_window_start)
-    cached_window_source = source[cached_window_start:cached_window_end]
-    assert "_compute_messages_window(" in cached_window_source
-    assert "_copy_jsonish(cached)" in cached_window_source
-    window_start = source.index("def _compute_messages_window(")
-    window_end = source.index("def get_ref(", window_start)
-    window_source = source[window_start:window_end]
-    assert "summary_ids = {" in window_source
-    assert "summaries = self._native_event_summaries(\n            rid, node_sid, summary_ids," in window_source
-
-
-def test_message_summary_reader_filters_requested_message_ids() -> None:
-    ingester_source = (ROOT / "event_ingester.py").read_text(encoding="utf-8")
-    start = ingester_source.index("def message_event_summaries(")
-    end = ingester_source.index("@staticmethod\n    def _public_message_summary", start)
-    summary_source = ingester_source[start:end]
-    assert "msg_ids: Optional[set[str]] = None" in summary_source
-    assert "if not sid_filter and msg_ids is None:" in summary_source
-    assert "self._summary_matches_filter(k, v, sid_filter=sid_filter, msg_ids=msg_ids)" in summary_source
-    journal_source = (ROOT / "event_journal.py").read_text(encoding="utf-8")
-    start = journal_source.index("def message_event_summaries(")
-    end = journal_source.index("def current_seq(", start)
-    facade_source = journal_source[start:end]
-    assert "msg_ids: Optional[set[str]] = None" in facade_source
-    assert "msg_ids=msg_ids" in facade_source
-
-
-def test_event_summary_sidecar_load_populates_memory_cache() -> None:
-    source = (ROOT / "event_ingester.py").read_text(encoding="utf-8")
-    assert "_EVENT_SUMMARIES_VERSION = 5" in source
-    assert "def _valid_seq_offsets(" in source
-    assert "isinstance(item, bool)" in source
-    start = source.index("def _summaries_state(")
-    end = source.index("def _seq_byte_range(", start)
-    state_source = source[start:end]
-    assert "sid_filter: Optional[str] = None" in state_source
-    assert "msg_ids: Optional[set[str]] = None" in state_source
-    assert "if loaded is not None:" in state_source
-    loaded_start = state_source.index("if loaded is not None:")
-    loaded_end = state_source.index("else:", loaded_start)
-    loaded_source = state_source[loaded_start:loaded_end]
-    assert "_rebuild_seq_offsets_locked" not in loaded_source
-    assert "self._summaries_cache[root_id] = (\n                        file_size, summaries, resolutions," in state_source
-
-
-def test_connected_session_fallback_sorts_only_requested_page() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
-    assert "def _filter_sort_page_for_list(" in source
-    route_start = source.index("async def get_sessions(")
-    route_end = source.index("@app.post(\"/api/sessions/search-content\")", route_start)
-    route_source = source[route_start:route_end]
-    fallback_start = route_source.index("if can_page_remote_local_order:")
-    fallback_source = route_source[fallback_start:route_source.index("elif _can_preserve_summary_order", fallback_start)]
-    assert "_filter_sort_page_for_list" in fallback_source
-    assert "_filter_sort_sessions_for_list" not in fallback_source
-
-
-def test_message_cache_hydration_has_substep_perf_metrics() -> None:
-    source = (ROOT / "event_journal.py").read_text(encoding="utf-8")
-    assert "DEFAULT_MESSAGE_CACHE_SIZE = 128" in source
-    assert "message_cache_size: int = DEFAULT_MESSAGE_CACHE_SIZE" in source
-    start = source.index("def _ensure_message_cache(")
-    end = source.index("def read_message_frontend_events(", start)
-    cache_source = source[start:end]
-    assert "event_journal.message_cache.summaries" in cache_source
-    assert "summary: Optional[dict] = None" in cache_source
-    assert "msg_ids={message_id}" in cache_source
-    assert "event_journal.message_cache.summary_provided" in cache_source
-    assert "event_ingester.ownership_resolutions_range(" in cache_source
-    assert "event_ingester.ownership_resolutions(session_id)" not in cache_source
-    assert "event_journal.message_cache.resolutions" in cache_source
-    assert "event_journal.message_cache.read_full" in cache_source
-    assert "event_journal.message_cache.read_grow" in cache_source
-
-
-def test_session_snapshot_hydration_reuses_existing_message_summary() -> None:
-    source = (ROOT / "session_manager.py").read_text(encoding="utf-8")
-    start = source.index("def _compute_messages_snapshot(")
-    end = source.index("def _compute_messages_window(", start)
-    snapshot_source = source[start:end]
-    assert "summary = summaries.get(msg_id, {})" in snapshot_source
-    assert "message_id=msg_id,\n                        summary=summary," in snapshot_source
-    window_start = source.index("def _compute_messages_window(")
-    window_end = source.index("def get_ref(", window_start)
-    window_source = source[window_start:window_end]
-    assert "message_id=msg_id,\n                    summary=summary," in window_source
-
-
-def test_written_journal_projection_avoids_full_event_list_copy() -> None:
-    source = (ROOT / "session_manager.py").read_text(encoding="utf-8")
-    start = source.index("    def apply_written_journal_event(")
-    end = source.index("    def _root_id_for(", start)
-    projection_source = source[start:end]
-    assert "event_uuid = _event_uuid_safe" in projection_source
-    assert "before = copy.deepcopy(strategy._events_list(msg))" not in projection_source
-    assert '"msg": _copy_jsonish(msg)' not in projection_source
-    assert "compact_message_delta_payload(msg)" in projection_source
-    assert '"delta": delta' in projection_source
-
-
-def test_slow_path_instrumentation_separates_queue_wait_from_work() -> None:
-    manager_source = (ROOT / "session_manager.py").read_text(encoding="utf-8")
-    assert '"session.tail_persist.root_lock_wait"' in manager_source
-    assert '"session.tail_persist.root_lock_held"' in manager_source
-
-    turn_source = (ROOT / "turn_manager.py").read_text(encoding="utf-8")
-    for metric in (
-        "provider.start_run.recovery_gate",
-        "provider.start_run.flush_root_persist",
-        "provider.start_run.provider_call",
-    ):
-        assert metric in turn_source
-    assert 'with perf.timed("provider.start_run.recovery_gate")' in turn_source
-    assert 'with perf.timed("provider.start_run.provider_call")' in turn_source
-    provider_start = turn_source[turn_source.index(
-        'with perf.timed("provider.start_run.recovery_gate")'
-    ):turn_source.index("                target_message_id =", turn_source.index(
-        'with perf.timed("provider.start_run.recovery_gate")'
-    ))]
-    assert "wait_for_session_recovery_ready(\n                        app_session_id," in provider_start
-    assert "wait_for_recovery_ready()" not in provider_start
-
-    delegation_source = (ROOT / "orchs" / "manager" / "_delegation.py").read_text(encoding="utf-8")
-    assert '"delegate.provider_start_run.recovery_gate"' in delegation_source
-    assert '"delegate.provider_start_run.provider_call"' in delegation_source
-
-    subprocess_source = (ROOT / "orchs" / "_subprocess_agent.py").read_text(encoding="utf-8")
-    assert subprocess_source.count("await asyncio.to_thread(") >= 2
-    assert "\n                provider.start_run(" not in subprocess_source
-    assert '"subprocess_agent.init.start_run.provider_call"' in subprocess_source
-    assert '"subprocess_agent.run.start_run.provider_call"' in subprocess_source
-
-    node_source = (ROOT / "node_rpc_handlers.py").read_text(encoding="utf-8")
-    assert '"node_rpc.provider_start_run.provider_call"' in node_source
-
-    main_source = (ROOT / "main.py").read_text(encoding="utf-8")
-    assert 'perf.LaggedQueue(' in main_source
-    assert '_perf_name="ws.outbox"' in main_source
-
-
-def test_duplicate_journal_acks_do_not_enter_row_projections() -> None:
-    journal_source = (ROOT / "event_journal.py").read_text(encoding="utf-8")
-    assert '"appended": written.seq > 0' in journal_source
-
-    subscriber_source = (ROOT / "event_bus_subscribers.py").read_text(encoding="utf-8")
-    assert subscriber_source.count('int(payload.get("seq") or 0) <= 0') >= 2
-    bind_start = subscriber_source.index("def bind_session_content_projection()")
-    bind_end = subscriber_source.index("def bind_requirement_tags_projection()", bind_start)
-    assert 'name="session_search_projection"' not in subscriber_source[bind_start:bind_end]
-
-
-def test_completion_file_read_runs_on_bounded_provider_executor() -> None:
-    provider_source = (ROOT / "provider.py").read_text(encoding="utf-8")
-    assert "async def run_provider_poll_off_loop" in provider_source
-    assert "run_in_executor(_PROVIDER_POLL_EXECUTOR, fn, *args)" in provider_source
-
-    claude_source = (ROOT / "provider_claude.py").read_text(encoding="utf-8")
-    emit_start = claude_source.index("    async def _emit_complete_from_file(")
-    emit_end = claude_source.index("    async def _emit_early_failure(", emit_start)
-    emit_source = claude_source[emit_start:emit_end]
-    assert "await run_provider_poll_off_loop(read_best_complete, rs.run_dir)" in emit_source
-    assert "best = read_best_complete(rs.run_dir)" not in emit_source
-
-
-def test_perf_counts_are_not_reported_as_latency() -> None:
-    perf_source = (ROOT / "perf.py").read_text(encoding="utf-8")
-    assert "def record_count(" in perf_source
-    assert "count_total=" in perf_source
-    assert "count_max=" in perf_source
-
-    manager_source = (ROOT / "session_manager.py").read_text(encoding="utf-8")
-    assert 'perf.record_count("session.hydrate_todos.rows", len(all_rows))' in manager_source
-    assert 'perf.record("session.hydrate_todos.rows"' not in manager_source
-
-
-def test_ingester_and_ownership_hydration_expose_lock_phases() -> None:
-    ingester_source = (ROOT / "event_ingester.py").read_text(encoding="utf-8")
-    assert '"ingest.live.root_lock_wait"' in ingester_source
-    assert '"ingest.live.root_lock_held"' in ingester_source
-    assert '"ingest.batch.root_lock_wait"' in ingester_source
-    assert '"ingest.batch.root_lock_held"' in ingester_source
-    assert '"ingest.read_events.root_lock_wait"' in ingester_source
-    assert '"ingest.read_events.root_lock_held"' in ingester_source
-    assert "self._enqueue_search_projection(root_id, search_entry)" in ingester_source
-    journal_source = (ROOT / "event_journal.py").read_text(encoding="utf-8")
-    for metric in (
-        "ejw.ownership_hydrate.snapshot",
-        "ejw.ownership_hydrate.read",
-        "ejw.ownership_hydrate.replay",
-        "ejw.ownership_hydrate.resolve_pending",
-    ):
-        assert metric in journal_source
-
-
-def test_node_link_runtime_readiness_uses_ttl_cache() -> None:
-    source = (ROOT / "node_link.py").read_text(encoding="utf-8")
-    assert "_MACHINE_NODES_READY_CACHE_TTL_S" in source
-    start = source.index("def _machine_nodes_not_ready_reason(")
-    end = source.index("def set_registration_listener(", start)
-    readiness_source = source[start:end]
-    assert "time.monotonic()" in readiness_source
-    assert "_machine_nodes_ready_cache" in readiness_source
-    assert "runtime_not_ready_message(" in readiness_source
-
-
 def test_models_catalog_uses_fingerprinted_in_process_cache() -> None:
     source = (ROOT / "models.py").read_text(encoding="utf-8")
     assert "_cache_by_path: dict[Path, tuple[tuple[int, int], dict]] = {}" in source
@@ -1370,484 +380,6 @@ def test_models_catalog_uses_fingerprinted_in_process_cache() -> None:
     assert "models, retired, has_cache, cached = _read_catalog_models(rec)" in catalog_source
     after_helper = catalog_source.split("models, retired, has_cache, cached = _read_catalog_models(rec)", 1)[1]
     assert "_read_cache(" not in after_helper
-
-
-def test_projection_preserving_summary_reuses_existing_projection() -> None:
-    source = (ROOT / "session_store.py").read_text(encoding="utf-8")
-    helper_start = source.index("def _build_summary_for_root_preserving_projections(")
-    helper_end = source.index("def _tag_filter_ids(", helper_start)
-    helper_source = source[helper_start:helper_end]
-    assert "projection_snapshot=(" in helper_source
-    assert "organization_projection=(" in helper_source
-    assert "existing.get(\"requirement_tags\")" in helper_source
-    assert "existing.get(\"markers\")" in helper_source
-    assert "existing.get(\"session_tags\")" in helper_source
-    assert "_requirement_tags_for_session(" not in helper_source
-    assert "_markers_for_session(" not in helper_source
-    assert "enrich_session_summary(summary)" not in helper_source
-
-    upsert_start = source.index("def _upsert_summary(")
-    upsert_end = source.index("def _seen_cursor_path(", upsert_start)
-    upsert_source = source[upsert_start:upsert_end]
-    assert "if preserve_projection_fields:" in upsert_source
-    assert "_build_summary_for_root_preserving_projections(root, existing)" in upsert_source
-    assert "for field in _SUMMARY_PROJECTION_FIELDS:" in upsert_source
-
-
-def test_connected_session_list_pages_virtual_candidates() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
-    connected_start = source.index("    if connected:")
-    connected_source = source[connected_start:source.index("@app.post(\"/api/sessions/search-content\")", connected_start)]
-    virtual_start = connected_source.index("if may_include_virtual:")
-    virtual_source = connected_source[virtual_start:connected_source.index("try:", virtual_start)]
-    assert "if can_page_remote_local_order:" in virtual_source
-    assert "virtual_session_store.list_recent" in virtual_source
-    assert "max(offset + limit, 1)" in virtual_source
-    assert "virtual_session_store.list_all" in virtual_source
-
-
-def test_connected_session_list_skips_full_sort_without_remote_merge() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
-    start = source.index("async def get_sessions(")
-    end = source.index("@app.post(\"/api/sessions/search-content\")", start)
-    route_source = source[start:end]
-    assert "appended_remote_sessions = False" in route_source
-    fast_path = (
-        "can_page_remote_local_order\n"
-        "        and not appended_virtual_sessions\n"
-        "        and not appended_remote_sessions\n"
-        "        and local_total is not None"
-    )
-    assert fast_path in route_source
-    assert route_source.index(fast_path) < route_source.index("with perf.timed(\"sessions.list.filter_sort\")")
-
-
-def test_delegation_status_writes_run_off_loop() -> None:
-    impl_source = (ROOT / "operation_status_store.py").read_text(encoding="utf-8")
-    assert "async def write_status_async(" in impl_source
-    assert "await asyncio.to_thread(self.write_status" in impl_source
-    store_source = (ROOT / "delegation_status_store.py").read_text(encoding="utf-8")
-    assert "write_status_async = _store.write_status_async" in store_source
-    source = (ROOT / "orchs" / "manager" / "_delegation.py").read_text(encoding="utf-8")
-    start = source.index("async def run_delegation(")
-    run_source = source[start:]
-    assert "await delegation_status_store.write_status_async(" in run_source
-    assert "delegation_status_store.write_status(" not in run_source
-
-
-def test_team_ask_status_writes_run_off_loop() -> None:
-    impl_source = (ROOT / "operation_status_store.py").read_text(encoding="utf-8")
-    assert "async def write_status_async(" in impl_source
-    assert "await asyncio.to_thread(self.write_status" in impl_source
-    store_source = (ROOT / "ask_status_store.py").read_text(encoding="utf-8")
-    assert "write_status_async = _store.write_status_async" in store_source
-    source = (ROOT / "orchestrator.py").read_text(encoding="utf-8")
-    start = source.index("async def ask_team_message(")
-    end = source.index("    def _team_message_turn_response(", start)
-    ask_source = source[start:end]
-    assert "sender, target = await asyncio.to_thread(\n            team_messaging.validate_message_route" in ask_source
-    assert "metadata = await asyncio.to_thread(\n            team_messaging.build_message_metadata" in ask_source
-    assert "queue_item = await asyncio.to_thread(\n                    team_messaging.queue_payload" in ask_source
-    assert "await asyncio.to_thread(\n                    session_manager.add_queued_prompt" in ask_source
-    assert "cli_prompt = await asyncio.to_thread(\n                    team_messaging.format_team_message_prompt" in ask_source
-    assert "await ask_status_store.write_status_async(" in ask_source
-    assert "session_manager.add_queued_prompt(" not in ask_source
-    assert "cli_prompt = team_messaging.format_team_message_prompt(" not in ask_source
-    assert "ask_status_store.write_status(" not in ask_source
-
-
-def test_team_message_context_uses_lite_session_read() -> None:
-    source = (ROOT / "team_messaging.py").read_text(encoding="utf-8")
-    start = source.index("def _target_team_context(")
-    end = source.index("def format_team_message_prompt(", start)
-    context_source = source[start:end]
-    assert "session_manager.get_lite(target_session_id)" in context_source
-    assert "session_manager.get(target_session_id)" not in context_source
-
-
-def test_team_message_validation_uses_lite_session_read() -> None:
-    source = (ROOT / "team_messaging.py").read_text(encoding="utf-8")
-    start = source.index("def validate_message_route(")
-    end = source.index("def build_message_metadata(", start)
-    validation_source = source[start:end]
-    assert "session_manager.get_lite(sender_session_id)" in validation_source
-    assert "session_manager.get_lite(target_session_id)" in validation_source
-    assert "session_manager.exists(" not in validation_source
-    assert "session_manager.get(" not in validation_source
-
-
-def test_known_worker_projection_uses_field_reads() -> None:
-    source = (ROOT / "stores" / "worker_store.py").read_text(encoding="utf-8")
-    start = source.index("def list_worker_projection(")
-    end = source.index("@perf.timed_fn(\"store.worker.upsert\")", start)
-    projection_source = source[start:end]
-    assert "_sm.get_fields_many(" in projection_source
-    assert "_sm.get_fields(agent_session_id" not in projection_source
-    assert "_sm.get(agent_session_id)" not in projection_source
-    assert "_sm.get_lite(agent_session_id)" not in projection_source
-
-
-def test_session_exists_uses_index_without_cold_root_load() -> None:
-    source = (ROOT / "session_manager.py").read_text(encoding="utf-8")
-    start = source.index("    def exists(self, sid: str) -> bool:")
-    end = source.index("    def get_field(", start)
-    exists_source = source[start:end]
-    assert "session_store._resolve_root_id(sid)" in exists_source
-    assert "session_store._loaded_root_id_for(sid)" in exists_source
-    assert "session_store.session_file_fingerprint(sid)" in exists_source
-    assert exists_source.index("session_store._loaded_root_id_for(sid)") < exists_source.index(
-        "session_store.session_file_fingerprint(sid)"
-    )
-    assert exists_source.index("session_store.session_file_fingerprint(sid)") < exists_source.index(
-        "session_store._resolve_root_id(sid)"
-    )
-    assert "self._load_root(" not in exists_source
-    assert exists_source.count("session_store._find_in_tree(root, sid)") == 1
-
-
-def test_root_id_resolution_caches_successful_store_lookup() -> None:
-    source = (ROOT / "session_manager.py").read_text(encoding="utf-8")
-    start = source.index("    def _root_id_for(")
-    end = source.index("    def _lock_for_root(", start)
-    helper_source = source[start:end]
-    assert "rid = self._node_root_id.get(sid)" in helper_source
-    assert "session_store._loaded_root_id_for(sid)" in helper_source
-    assert "session_store.session_file_fingerprint(sid)" in helper_source
-    assert helper_source.index("session_store._loaded_root_id_for(sid)") < helper_source.index(
-        "session_store.session_file_fingerprint(sid)"
-    )
-    assert helper_source.index("session_store.session_file_fingerprint(sid)") < helper_source.index(
-        "rid = session_store._resolve_root_id(sid)"
-    )
-    assert "self._node_root_missing_until.get(sid, 0.0) > now" in helper_source
-    assert "rid = session_store._resolve_root_id(sid)" in helper_source
-    assert "if rid is not None:\n            self._node_root_id[sid] = rid" in helper_source
-    assert "self._node_root_missing_until[sid] = (" in helper_source
-    assert "_NEGATIVE_NODE_ROOT_TTL_SECONDS = 5.0" in source
-    index_start = source.index("    def _index_root(")
-    index_end = source.index("    def _ensure_root_loaded(", index_start)
-    index_source = source[index_start:index_end]
-    assert "self._node_root_missing_until.pop(rid, None)" in index_source
-    assert "self._node_root_missing_until.pop(fork[\"id\"], None)" in index_source
-
-
-def test_unknown_root_resolution_uses_owner_projection_without_rescan() -> None:
-    source = (ROOT / "session_store.py").read_text(encoding="utf-8")
-    resolve_start = source.index("def _resolve_root_id(")
-    resolve_end = source.index("def _session_path(", resolve_start)
-    resolve_source = source[resolve_start:resolve_end]
-    assert "_wait_root_change_owner_ready()" in resolve_source
-    assert "generation = owner.observation_generation" in resolve_source
-    assert "_wait_root_change_observation(generation)" in resolve_source
-    assert "_dir_fingerprint_cached()" not in resolve_source
-    assert "_refresh_index(" not in resolve_source
-
-
-def test_fork_index_refresh_sidecar_write_is_backgrounded() -> None:
-    source = (ROOT / "session_store.py").read_text(encoding="utf-8")
-    assert "_index_sidecar_write_queue" in source
-    assert "def _schedule_index_sidecar_write(" in source
-    refresh_start = source.index("def _refresh_index(")
-    refresh_end = source.index("def _ensure_index(", refresh_start)
-    refresh_source = source[refresh_start:refresh_end]
-    assert "_schedule_index_sidecar_write(fp, fork_index, root_forks, root_signatures)" in refresh_source
-    assert "_write_index_sidecar_best_effort(fp, fork_index, root_forks, root_signatures)" not in refresh_source
-    ensure_start = source.index("def _ensure_index(")
-    ensure_end = source.index("def _resolve_root_id(", ensure_start)
-    ensure_source = source[ensure_start:ensure_end]
-    assert "_schedule_index_sidecar_write(fp, fork_index, root_forks, root_signatures)" in ensure_source
-
-
-def test_fork_index_refresh_updates_changed_roots_incrementally() -> None:
-    source = (ROOT / "session_store.py").read_text(encoding="utf-8")
-    assert "_INDEX_INCREMENTAL_REFRESH_MAX_CHANGED = 32" in source
-    assert "def _refresh_index_incremental(" in source
-    helper_start = source.index("def _refresh_index_incremental(")
-    helper_end = source.index("def _load_index_sidecar(", helper_start)
-    helper_source = source[helper_start:helper_end]
-    assert "changed_roots = {" in helper_source
-    assert "deleted_roots = set(old_signatures) - set(current_signatures)" in helper_source
-    assert "if len(touched_roots) > _INDEX_INCREMENTAL_REFRESH_MAX_CHANGED:" in helper_source
-    assert "_fork_index_entry_from_summary_or_root(current_paths[root_id])" in helper_source
-    refresh_start = source.index("def _refresh_index(")
-    refresh_end = source.index("def _ensure_index(", refresh_start)
-    refresh_source = source[refresh_start:refresh_end]
-    incremental_idx = refresh_source.index("incremental = _refresh_index_incremental(live_fp)")
-    full_idx = refresh_source.index('with perf.timed("store.session.index.refresh.build")')
-    assert incremental_idx < full_idx
-
-
-def test_session_detail_reuses_migrated_root_cache() -> None:
-    source = (ROOT / "session_store.py").read_text(encoding="utf-8")
-    assert "_migrated_root_cache" in source
-    assert "def _cached_migrated_root(" in source
-    helper_start = source.index("def _cached_migrated_root(")
-    helper_end = source.index("def read_node_kind_record(", helper_start)
-    helper_source = source[helper_start:helper_end]
-    assert "cache_key = (root_id, file_signature)" in helper_source
-    assert "return _copy_jsonish(cached)" in helper_source
-    detail_start = source.index("def get_root_tree(")
-    detail_end = source.index("def _strip_volatile_from_tree(", detail_start)
-    detail_source = source[detail_start:detail_end]
-    assert "_cached_migrated_root(root_id, file_signature, root)" in detail_source
-
-
-def test_extension_plain_load_is_read_only() -> None:
-    source = (ROOT / "extension_store.py").read_text(encoding="utf-8")
-    load_start = source.index("def _load()")
-    load_end = source.index("def _save(", load_start)
-    load_source = source[load_start:load_end]
-    assert "_read_store_unlocked()" in load_source
-    assert "_load_with_changes()" not in load_source
-
-
-def test_recovery_dispatch_skips_reconciled_runs_before_owner_read() -> None:
-    source = (ROOT / "provider.py").read_text(encoding="utf-8")
-    start = source.index("def recover_all_in_flight(")
-    end = len(source)
-    recover_source = source[start:end]
-    index_idx = recover_source.index("indexed_marker = reconciled_index.get(child.name)")
-    marker_idx = recover_source.index('marker_path = child / "reconciled.marker"')
-    backend_state_idx = recover_source.index('bs_path = child / "backend_state.json"')
-    assert index_idx < marker_idx
-    assert marker_idx < backend_state_idx
-    assert "load_reconciled_marker_index(" in recover_source[:index_idx]
-    assert "marker_data_matches_current(" in recover_source[marker_idx:backend_state_idx]
-    assert "marker_matches_current(" not in recover_source[marker_idx:backend_state_idx]
-
-
-def test_filtered_provider_recovery_does_not_rescan_all_runs() -> None:
-    runs_source = (ROOT / "runs_dir.py").read_text(encoding="utf-8")
-    assert "def iter_run_dirs(run_id_filter: Optional[set[str]] = None)" in runs_source
-    assert "for run_id in run_id_filter:" in runs_source
-
-    for filename in (
-        "provider_claude.py",
-        "provider_codex.py",
-        "provider_gemini.py",
-        "provider_openai.py",
-    ):
-        source = (ROOT / filename).read_text(encoding="utf-8")
-        start = source.index("    def recover_in_flight(")
-        end = source.index("    # ------------------------------------------------------------------", start)
-        recover_source = source[start:end]
-        assert "iter_run_dirs(run_id_filter)" in recover_source
-        assert "child.name not in run_id_filter" not in recover_source
-
-
-def test_filtered_remote_recovery_does_not_rescan_all_runs() -> None:
-    source = (ROOT / "run_recovery.py").read_text(encoding="utf-8")
-    start = source.index("def _pending_remote_runs_for_node(")
-    end = source.index("async def integrate_remote_runs_for_node(", start)
-    helper_source = source[start:end]
-    assert "iter_run_dirs(run_id_filter)" in helper_source
-    assert "children = sorted(children)" in helper_source
-    assert "child.name not in run_id_filter" not in helper_source
-
-
-def test_provider_prune_uses_shared_scandir_helper() -> None:
-    runs_source = (ROOT / "runs_dir.py").read_text(encoding="utf-8")
-    assert "def prune_old_completed_runs(max_age_days: int = 7) -> int" in runs_source
-    assert "with os.scandir(root) as entries:" in runs_source
-
-    for filename in (
-        "provider_claude.py",
-        "provider_codex.py",
-        "provider_gemini.py",
-        "provider_openai.py",
-    ):
-        source = (ROOT / filename).read_text(encoding="utf-8")
-        start = source.index("    def prune_old_runs(")
-        end = source.index("    # ------------------------------------------------------------------", start + 1)
-        prune_source = source[start:end]
-        assert "prune_old_completed_runs(max_age_days)" in prune_source
-        assert "_runs_root().iterdir()" not in prune_source
-
-
-def test_session_fork_index_refresh_is_root_scoped() -> None:
-    source = (ROOT / "session_store.py").read_text(encoding="utf-8")
-    start = source.index("def _index_tree(")
-    end = source.index("def _index_set(", start)
-    index_source = source[start:end]
-    assert "_root_forks.get(rid" in index_source
-    assert "_fork_index.items()" not in index_source
-    assert "_reconcile_loaded_store" not in index_source
-    assert "_root_index_signatures.get(rid) == file_signature" in index_source
-    assert index_source.index("_root_index_signatures.get(rid)") < index_source.index("for fork in _walk_forks(root)")
-
-    get_start = source.index("def get_root_tree(")
-    get_end = source.index("def _strip_volatile_from_tree(", get_start)
-    get_source = source[get_start:get_end]
-    assert "file_signature = _session_file_signature(path)" in get_source
-    assert "_index_tree(root, file_signature=file_signature)" in get_source
-    assert "if session_id != root_id:" in get_source
-    assert get_source.index("if session_id != root_id:") < get_source.index("_index_tree(root, file_signature=file_signature)")
-
-
-def test_session_organization_reads_are_cached() -> None:
-    source = (ROOT / "session_organization_store.py").read_text(encoding="utf-8")
-    assert "_cache_signature" in source
-    assert "_cache_data" in source
-    assert "_path_cache" in source
-    path_start = source.index("def _path():")
-    path_end = source.index("def _now()", path_start)
-    path_source = source[path_start:path_end]
-    assert "ba_home()" in path_source
-    assert "if _path_cache is not None" in path_source
-    assert "return _path_cache[1]" in path_source
-    assert "def _load_shared()" in source
-    load_start = source.index("def _load()")
-    load_end = source.index("def _save(", load_start)
-    load_source = source[load_start:load_end]
-    assert "return copy.deepcopy(data)" in load_source
-    shared_start = source.index("def _load_shared()")
-    shared_end = source.index("def _load()", shared_start)
-    shared_source = source[shared_start:shared_end]
-    assert "_cache_signature == signature" in shared_source
-    assert "return _cache_data" in shared_source
-    enrich_start = source.index("def enrich_session_summaries(")
-    enrich_end = source.index("def create_folder(", enrich_start)
-    enrich_source = source[enrich_start:enrich_end]
-    assert "data = _load_shared()" in enrich_source
-    assert "_assignment(" not in enrich_source
-
-
-def test_jsonl_cursor_advance_is_synchronous_and_non_blocking() -> None:
-    # `on_cursor_advance` runs inline on the tailer's own read loop — no
-    # executor indirection, no await. It MUST be non-blocking by
-    # contract; implementations hand actual I/O off to
-    # `cursor_ledger_worker` instead of doing it here. A prior design
-    # ran this callback through a shared `_CURSOR_EXECUTOR` thread pool
-    # and awaited it — that pool is gone; blocking work belongs in the
-    # dedicated ledger worker, not back on this call path.
-    source = (ROOT / "jsonl_tailer.py").read_text(encoding="utf-8")
-    assert "_CURSOR_EXECUTOR" not in source
-    notify_start = source.index("async def _notify_cursor(")
-    notify_end = source.index("def _advance_cursor(", notify_start)
-    notify_source = source[notify_start:notify_end]
-    assert "self.on_cursor_advance(self.processed_offset)" in notify_source
-    assert "run_in_executor" not in notify_source
-
-    for provider_file, callback_marker in (
-        ("provider_claude.py", "def _on_tailer_progress("),
-        ("provider_gemini.py", "def _on_cursor("),
-        ("provider_openai.py", "def _on_cursor("),
-    ):
-        provider_source = (ROOT / provider_file).read_text(encoding="utf-8")
-        cb_start = provider_source.index(callback_marker)
-        cb_end = provider_source.index("\n\n", cb_start)
-        cb_source = provider_source[cb_start:cb_end]
-        # The write is handed to the worker as a lambda, not called
-        # directly on this path — proves persistence is deferred, not
-        # performed inline.
-        assert "cursor_ledger_worker.note(" in cb_source, provider_file
-        assert "lambda: self._write_backend_state(" in cb_source, provider_file
-
-
-def test_event_ingester_indexes_search_outside_root_lock() -> None:
-    source = (ROOT / "event_ingester.py").read_text(encoding="utf-8")
-    assert "session_search_index" not in source
-
-
-def test_local_extension_reconcile_skips_current_snapshot() -> None:
-    source = (ROOT / "extension_store.py").read_text(encoding="utf-8")
-    local_start = source.index("def _ensure_local_extensions(")
-    local_end = source.index("def _install_required_marketplace_from_ofekdev(", local_start)
-    local_source = source[local_start:local_end]
-    assert 'source.get("package_sha256") == package_sha' in local_source
-    assert 'manifest == record.get("manifest")' in local_source
-    assert "install_path.is_dir()" in local_source
-    skip_pos = local_source.index("continue", local_source.index("install_path.is_dir()"))
-    refresh_pos = local_source.index("_refresh_local_extension_snapshot(", skip_pos)
-    assert skip_pos < refresh_pos
-
-
-def test_frontend_entrypoints_do_not_run_smoke_subprocesses() -> None:
-    source = (ROOT / "extension_store.py").read_text(encoding="utf-8")
-    ready_start = source.index("def _record_runtime_ready(")
-    ready_end = source.index("def _record_has_required_runtime_paths(", ready_start)
-    ready_source = source[ready_start:ready_end]
-    frontend_start = source.index("def frontend_entrypoints(")
-    frontend_end = source.index("def resolve_frontend_asset(", frontend_start)
-    frontend_source = source[frontend_start:frontend_end]
-    assert "_record_smoke_test_current(record)" in ready_source
-    assert "_record_smoke_test_passes(record)" not in ready_source
-    assert "_run_extension_smoke_test(" not in ready_source
-    assert "_run_python_module_smoke(" not in ready_source
-    assert "_record_runtime_ready(record)" in frontend_source
-    assert "_run_extension_smoke_test(" not in frontend_source
-
-
-def test_extension_list_uses_projection_cache() -> None:
-    source = (ROOT / "extension_store.py").read_text(encoding="utf-8")
-    start = source.index("def list_extensions(")
-    end = source.index("def _active_records(", start)
-    list_source = source[start:end]
-    assert '_projection_cache_get("list_extensions"' in list_source
-    assert '_projection_cache_put(\n        "list_extensions",' in list_source
-    assert "return list_extensions(include_hidden=include_hidden), False" in list_source
-
-
-def test_extension_projection_routes_cache_json_bytes() -> None:
-    source = (ROOT / "extension_api.py").read_text(encoding="utf-8")
-    assert "_projection_response_cache" in source
-    assert "def _projection_response_cache_get(" in source
-    assert "def _projection_response_cache_put(" in source
-    assert "def _cached_json_projection_response(" in source
-    assert "async def _cached_json_projection_response_threaded(" in source
-    assert "json.dumps(" in source
-    assert "Response(content=content, media_type=\"application/json\")" in source
-
-    frontend_start = source.index("async def get_frontend_entrypoints(")
-    frontend_end = source.index("@router.get(\"/ui-hooks\")", frontend_start)
-    frontend_source = source[frontend_start:frontend_end]
-    assert "await _cached_json_projection_response_threaded(" in frontend_source
-    assert "extension_store.frontend_entrypoints_cache_key," in frontend_source
-    assert "extension_store.frontend_entrypoints()" in frontend_source
-
-    hooks_start = source.index("async def get_ui_hooks(")
-    hooks_end = source.index("@router.get(\"/{extension_id}/frontend/{asset_path:path}\")", hooks_start)
-    hooks_source = source[hooks_start:hooks_end]
-    assert "await _cached_json_projection_response_threaded(" in hooks_source
-    assert "extension_store.ui_hooks_cache_key," in hooks_source
-    assert "extension_store.ui_hooks()" in hooks_source
-
-
-def test_startup_reenqueue_reads_sessions_off_loop() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
-    assert "await asyncio.to_thread(\n                    session_manager.get_lite" in source
-
-
-def test_queue_projection_scans_user_messages_once() -> None:
-    source = (ROOT / "session_queue_projection.py").read_text(encoding="utf-8")
-    assert "def _user_message_projection(" in source
-    assert "def _user_message_keys(" not in source
-    assert "def _user_messages(" not in source
-    project_start = source.index("def project_session(")
-    project_end = source.index("def upsert_from_session(", project_start)
-    project_source = source[project_start:project_end]
-    assert "user_projection = _user_message_projection(" in project_source
-    assert "**user_projection" in project_source
-
-
-def test_queue_projection_skips_unchanged_disk_write() -> None:
-    source = (ROOT / "session_queue_projection.py").read_text(encoding="utf-8")
-    start = source.index("def upsert_from_session(")
-    end = source.index("def get(", start)
-    upsert_source = source[start:end]
-    assert "if _records.get(session_id) == owned:" in upsert_source
-    assert "if not changed and not _needs_durable_write(" in upsert_source
-
-
-def test_queue_projection_overlay_reads_records_in_bulk() -> None:
-    queue_source = (ROOT / "session_queue_projection.py").read_text(encoding="utf-8")
-    assert "def get_many(" in queue_source
-    store_source = (ROOT / "session_store.py").read_text(encoding="utf-8")
-    start = store_source.index("def _overlay_queue_projection(")
-    end = store_source.index("@perf.timed_fn(\"store.session.write_full\")", start)
-    overlay_source = store_source[start:end]
-    assert "session_queue_projection.get_many(sids)" in overlay_source
-    assert "session_queue_projection.get(sid)" not in overlay_source
 
 
 def test_queue_projection_upsert_backgrounds_from_event_loop() -> None:
@@ -1944,19 +476,6 @@ def test_queue_projection_submission_coalesces_and_shutdown_rejection_is_dirty()
             manager_module._queue_projection_accepting = True
             manager_module._queue_projection_failure = None
             manager_module._queue_projection_pending.clear()
-
-
-def test_queue_projection_shutdown_always_closes_executor() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
-    start = source.index("        begin_queue_projection_shutdown()")
-    end = source.index("    except Exception:", start)
-    shutdown_source = source[start:end]
-    assert "try:" in shutdown_source
-    assert "finally:" in shutdown_source
-    assert "await asyncio.to_thread(shutdown_queue_projection_executor)" in shutdown_source
-    assert shutdown_source.index("finally:") < shutdown_source.index(
-        "await asyncio.to_thread(shutdown_queue_projection_executor)",
-    )
 
 
 def test_queue_projection_certification_rejects_late_mutations() -> None:
@@ -2403,12 +922,6 @@ def test_queue_projection_slow_writer_does_not_block_event_loop_upsert() -> None
             session_queue_projection._loaded = original_loaded
 
 
-def test_startup_does_not_warm_unread_by_hydrating_sessions() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
-    assert "startup-unread-warm" not in source
-    assert "_warm_unread_counts" not in source
-
-
 def test_startup_does_not_shadow_extension_store_import() -> None:
     source = (ROOT / "main.py").read_text(encoding="utf-8")
     module_symbols = symtable.symtable(source, str(ROOT / "main.py"), "exec")
@@ -2419,326 +932,6 @@ def test_startup_does_not_shadow_extension_store_import() -> None:
         return
     extension_store_symbol = startup_symbols.lookup("extension_store")
     assert not extension_store_symbol.is_local()
-
-
-def test_startup_defers_requirement_and_project_match_warmers() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
-    startup_start = source.index("async def on_startup()")
-    startup_end = source.index("async def on_shutdown()", startup_start)
-    startup_source = source[startup_start:startup_end]
-    # Requirements prewarm must be deferred via create_task, never awaited at
-    # on_startup body level (a direct await pays the provision turn inline and
-    # blocks the loop during boot). The symbol may appear inside the deferred
-    # coroutine; what must not appear is a base-indentation direct await.
-    assert 'name="requirements-processor-prewarm"' in startup_source
-    assert "\n    await requirement_prewarm.run_requirements_prewarm" not in startup_source
-    assert "project-match-warm" not in startup_source
-    assert "_ensure_project_match_warm_task()" in source
-
-
-def test_requirement_unprocessed_fallback_reuses_freshness_projection() -> None:
-    source = (ROOT / "requirement_context.py").read_text(encoding="utf-8")
-    start = source.index("def _load_unprocessed_prompt_records(")
-    end = source.index("def _prompt_fallback_record(", start)
-    loader = source[start:end]
-    assert 'freshness.get("_unhandled_prompt_records")' in loader
-    assert "for prompt in load_prompts()" not in loader
-    assert '"freshness": _public_freshness(freshness)' in source
-
-
-def test_startup_defers_shortcut_http_prewarm() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
-    startup_start = source.index("async def on_startup()")
-    startup_end = source.index("async def on_shutdown()", startup_start)
-    startup_source = source[startup_start:startup_end]
-    assert "shortcut_picker.prewarm_http_stack" in startup_source
-    assert "await asyncio.to_thread(shortcut_picker.prewarm_http_stack)" not in startup_source
-    assert "_fire_and_forget(asyncio.to_thread(shortcut_picker.prewarm_http_stack))" in startup_source
-
-
-def test_sidebar_organization_enrichment_stays_in_summary_index() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
-    local_start = source.index("def _local_session_summaries_for_sidebar()")
-    local_end = source.index("def _root_session_file_path(", local_start)
-    local_source = source[local_start:local_end]
-    assert "enrich_session_summaries(" not in local_source
-    assert "enrich_session_summary(" not in local_source
-    assert "session_store._ensure_summary_index(blocking=True)" not in local_source
-
-    store_source = (ROOT / "session_store.py").read_text(encoding="utf-8")
-    build_start = store_source.index("def _build_summary_for_root(")
-    build_end = store_source.index("def set_requirement_tags_projection(", build_start)
-    build_source = store_source[build_start:build_end]
-    assert "enrich_session_summary(summary)" in build_source
-    assert "enrich_session_summary_from_projection(" in build_source
-
-    org_source = (ROOT / "session_organization_store.py").read_text(encoding="utf-8")
-    enrich_start = org_source.index("def enrich_session_summary(")
-    enrich_end = org_source.index("def enrich_session_summaries(", enrich_start)
-    enrich_source = org_source[enrich_start:enrich_end]
-    assert "_load_shared()" in enrich_source
-    assert "organization_for_session(" not in enrich_source
-    assert "_load()" not in enrich_source
-
-
-def test_session_organization_facets_are_version_cached() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
-    assert "_session_org_facets_cache" in source
-    start = source.index("def _session_organization_snapshot_with_facets(")
-    end = source.index("@app.get(\"/api/session-organization\")", start)
-    facets_source = source[start:end]
-    assert "session_organization_store.version_token()" in facets_source
-    assert "session_store.summary_version()" in facets_source
-    assert "_session_org_facets_cache.get(cache_key)" in facets_source
-    assert "_local_session_summaries_for_sidebar()" in facets_source
-
-
-def test_session_organization_query_builds_tag_sets_only_for_tag_filter() -> None:
-    source = (ROOT / "session_organization_store.py").read_text(encoding="utf-8")
-    start = source.index("def query_sessions(")
-    end = len(source)
-    query_source = source[start:end]
-    tag_branch = query_source.index("if tag_set:")
-    session_tags = query_source.index("session_tags = {")
-    assert tag_branch < session_tags
-
-
-def test_sidebar_decoration_uses_bulk_cached_state() -> None:
-    main_source = (ROOT / "main.py").read_text(encoding="utf-8")
-    assert "def _sidebar_state_snapshot()" in main_source
-    assert "_sidebar_state_snapshot_cache" in main_source
-    snapshot_start = main_source.index("def _sidebar_state_snapshot()")
-    snapshot_end = main_source.index("def _decorate_local_sidebar_sessions(", snapshot_start)
-    snapshot_source = main_source[snapshot_start:snapshot_end]
-    assert "version = _sessions_list_transient_state_version()" in snapshot_source
-    assert "cached is not None and cached[0] == version" in snapshot_source
-    assert "pending_input_by_sid = user_input_store.pending_counts_by_session()" in snapshot_source
-    payload_start = main_source.index("def _sidebar_session_payload(")
-    payload_end = main_source.index("def _sidebar_state_snapshot(", payload_start)
-    payload_source = main_source[payload_start:payload_end]
-    assert 'if key != "first_prompt"' in payload_source
-    assert 'payload.pop("first_prompt", None)' not in payload_source
-    start = main_source.index("def _decorate_local_sidebar_sessions(")
-    end = main_source.index("def _local_sessions_for_sidebar(", start)
-    decorate_source = main_source[start:end]
-    assert "_sidebar_state_snapshot()" in decorate_source
-    assert "is_running_cached(" not in decorate_source
-    assert "monitoring_state_cached(" not in decorate_source
-    helper_start = main_source.index("def _build_local_sessions_page_for_list(")
-    helper_end = main_source.index("async def _sidebar_search_scores(", helper_start)
-    helper_source = main_source[helper_start:helper_end]
-    assert "state_snapshot = _sidebar_state_snapshot() if status_sort else None" in helper_source
-    assert "_decorate_local_sidebar_sessions(out[offset:end], state_snapshot)" in helper_source
-
-    turn_source = (ROOT / "turn_manager.py").read_text(encoding="utf-8")
-    assert "def cached_state_snapshot(" in turn_source
-
-
-def test_session_discovery_reads_mode_without_deepcopy() -> None:
-    source = (ROOT / "turn_manager.py").read_text(encoding="utf-8")
-    start = source.index('if event.type == "session_discovered":')
-    end = source.index('if event.type in ("complete", "error"):', start)
-    discovery_source = source[start:end]
-    assert 'session_manager.get_field(' in discovery_source
-    assert '"orchestration_mode"' in discovery_source
-    assert 'session_manager.get(' not in discovery_source
-
-
-def test_project_aggregates_use_bulk_cached_state() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
-    start = source.index("def _project_aggregates(")
-    end = source.index("def _invalidate_project_aggregates(", start)
-    aggregate_source = source[start:end]
-    assert "monitoring_projection_snapshot()" in aggregate_source
-    assert "unread_counts_snapshot()" in aggregate_source
-    assert "is_running_cached(" not in aggregate_source
-    assert "peek_unread_count(" not in aggregate_source
-
-
-def test_sidebar_file_paths_use_cached_sessions_dir() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
-    assert "def _root_sessions_dir_path(" in source
-    start = source.index("def _decorate_local_sidebar_sessions(")
-    end = source.index("def _local_sessions_for_sidebar(", start)
-    decorate_source = source[start:end]
-    assert "sessions_dir = _root_sessions_dir_path()" in decorate_source
-    assert '"file_path": f"{sessions_dir}/{sid}.json"' in decorate_source
-    assert "ba_home()" not in decorate_source
-    assert "_root_session_file_path(sid)" not in decorate_source
-
-
-def test_session_list_uses_sorted_summary_cache() -> None:
-    source = (ROOT / "session_store.py").read_text(encoding="utf-8")
-    assert "_summary_sorted_cache_version" in source
-    assert "_summary_sorted_id_cache" in source
-    assert "_summary_sorted_id_caches" in source
-    assert "_summary_order_version" in source
-    assert "_summary_projected_cache_version" not in source
-    assert "_summary_projected_cache" not in source
-    assert "_replace_summary_projection_field" in source
-    assert "def ordered_session_summary_ids(" in source
-    assert "def _summary_order_changed(" in source
-    assert '"last_user_prompt_at"' in source
-    start = source.index("def list_sessions()")
-    end = source.index("def iter_all_sessions()", start)
-    list_source = source[start:end]
-    assert "_summary_sorted_cache_version != _summary_order_version" in list_source
-    assert "_summary_sorted_id_cache = [" in list_source
-    assert "sorted(\n                    _summary_index.values()" in list_source
-    assert "_summary_index[sid]" in list_source
-    assert "_requirement_tags_snapshot()" not in list_source
-    assert "_markers_snapshot()" not in list_source
-
-
-def test_session_list_pages_last_user_prompt_order_before_full_sort() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
-    helper_start = source.index("def _local_session_page_for_sidebar_preserving_order(")
-    helper_end = source.index("def _root_session_file_path(", helper_start)
-    helper_source = source[helper_start:helper_end]
-    assert "session_manager.ordered_summary_ids(sort_by, folder_view)" in helper_source
-    assert "_filter_sort_sessions_for_list(" not in helper_source
-    assert "sessions.list.local.ordered_filter" in helper_source
-
-    route_start = source.index("def _build_local_sessions_page_for_list(")
-    route_end = source.index("@app.get(\"/api/sessions\")", route_start)
-    route_source = source[route_start:route_end]
-    gate_start = source.index("def _can_page_local_summary_order(")
-    gate_end = source.index("def _build_local_sessions_page_for_list(", gate_start)
-    gate_source = source[gate_start:gate_end]
-    assert 'sort_by in {"updated_at", "last_user_prompt_at", "last_opened_at"}' in gate_source
-    assert 'sort_by == "last_user_prompt_at"' in route_source
-    assert "sessions.list.local_order_page" in route_source
-    assert "sessions.list.virtual_count" in route_source
-    assert "if default_virtual_page:" in route_source
-    assert "limit=max(offset + limit, 1)" in route_source
-    assert route_source.index("sessions.list.local_order_page") < route_source.index(
-        'sessions.list.local"):'
-    )
-    connected_start = source.index("async def get_sessions(")
-    connected_end = source.index("@app.post(\"/api/sessions/search-content\")", connected_start)
-    connected_source = source[connected_start:connected_end]
-    assert "sessions.list.remote.local_order_candidates" in connected_source
-    assert "can_page_remote_local_order" in connected_source
-    assert connected_source.index("sessions.list.remote.local_order_candidates") < connected_source.index(
-        'sessions.list.local"):'
-    )
-
-
-def test_visible_order_cache_uses_dual_generation_singleflight_projection() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
-    cache_decl_start = source.index("_local_visible_order_cache: collections.OrderedDict[")
-    cache_decl_end = source.index("_session_detail_response_cache", cache_decl_start)
-    cache_decl_source = source[cache_decl_start:cache_decl_end]
-    assert "tuple[str, str | None, int, int]" in cache_decl_source
-    assert "_local_visible_order_inflight" in cache_decl_source
-    assert "_local_visible_order_lock = threading.Lock()" in cache_decl_source
-
-    helper_start = source.index("def _local_visible_order_page_ids(")
-    helper_end = source.index("def _local_session_page_for_sidebar_preserving_order(", helper_start)
-    helper_source = source[helper_start:helper_end]
-    assert "expected_summary_index_version: int" in helper_source
-    assert "expected_summary_order_version: int" in helper_source
-    assert "expected_summary_index_version," in helper_source
-    assert "expected_summary_order_version," in helper_source
-    assert "get_indexed_session_summary_if_current" in helper_source
-    assert "visible_order_singleflight.wait" in helper_source
-    assert "visible_order_singleflight.stale" in helper_source
-
-    page_start = source.index("def _local_session_page_for_sidebar_preserving_order(")
-    page_end = source.index("def _root_session_file_path(", page_start)
-    page_source = source[page_start:page_end]
-    assert "expected_summary_index_version = session_store.summary_index_version()" in page_source
-    assert "expected_summary_order_version = session_store.summary_order_version()" in page_source
-    assert "expected_summary_index_version,\n                expected_summary_order_version," in page_source
-    assert "get_indexed_session_summaries_by_ids_if_current" in page_source
-
-
-def test_session_list_skips_impossible_virtual_filters() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
-    helper_start = source.index("def _session_filters_may_include_virtual(")
-    helper_end = source.index("def _build_local_sessions_page_for_list(", helper_start)
-    helper_source = source[helper_start:helper_end]
-    assert "if file_edit_mode is True:" in helper_source
-    assert "if folder_ids or tag_ids:" in helper_source
-    assert 'if modes and "virtual" not in modes:' in helper_source
-    assert 'if sources and not ({"extension", "system"} & sources):' in helper_source
-
-    local_start = source.index("def _build_local_sessions_page_for_list(")
-    local_end = source.index("@app.get(\"/api/sessions\")", local_start)
-    local_source = source[local_start:local_end]
-    assert "_session_filters_may_include_virtual(" in local_source
-    assert "virtual_session_store.list_recent(" in local_source
-    assert "max(offset + limit, 1)" in local_source
-    assert 'perf.record("sessions.list.virtual.skipped", 1.0)' in local_source
-
-    route_start = source.index("async def get_sessions(")
-    route_end = source.index("@app.post(\"/api/sessions/search-content\")", route_start)
-    route_source = source[route_start:route_end]
-    assert "_session_filters_may_include_virtual(" in route_source
-    assert "virtual_session_store.list_all" in route_source
-    assert 'perf.record("sessions.list.virtual.skipped", 1.0)' in route_source
-
-
-def test_session_list_preserves_summary_order_when_no_virtual_rows() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
-    helper_start = source.index("def _can_preserve_summary_order(")
-    helper_end = source.index("def _session_filters_may_include_virtual(", helper_start)
-    helper_source = source[helper_start:helper_end]
-    assert "appended_virtual_sessions: bool" in helper_source
-    assert "and not appended_virtual_sessions" in helper_source
-    assert "virtual_sessions: list[dict]" not in helper_source
-
-    local_start = source.index("def _build_local_sessions_page_for_list(")
-    local_end = source.index("@app.get(\"/api/sessions\")", local_start)
-    local_source = source[local_start:local_end]
-    assert "appended_virtual_sessions = False" in local_source
-    assert "virtual_sidebar_sessions = [" in local_source
-    assert "_can_page_default_updated_at_with_virtual(" in local_source
-    assert "_merge_updated_at_page(" in local_source
-    assert "if virtual_sidebar_sessions:" in local_source
-    assert "appended_virtual_sessions = True" in local_source
-    assert "appended_virtual_sessions=appended_virtual_sessions" in local_source
-    assert "_filter_page_for_list_preserving_order(" in local_source
-    assert "_decorate_local_sidebar_sessions(page_source, state_snapshot)" in local_source
-    page_start = source.index("def _filter_page_for_list_preserving_order(")
-    page_end = source.index("def _can_preserve_summary_order(", page_start)
-    page_source = source[page_start:page_end]
-    assert "page.append(session)" in page_source
-    assert "return page, total" in page_source
-
-    route_start = source.index("async def get_sessions(")
-    route_end = source.index("@app.post(\"/api/sessions/search-content\")", route_start)
-    route_source = source[route_start:route_end]
-    assert "appended_virtual_sessions = False" in route_source
-    assert "virtual_sidebar_sessions = [" in route_source
-    assert "if virtual_sidebar_sessions:" in route_source
-    assert "appended_virtual_sessions = True" in route_source
-    assert "_filter_sessions_for_list_preserving_order" in route_source
-
-
-def test_session_tag_filter_uses_summary_projection() -> None:
-    store_source = (ROOT / "session_store.py").read_text(encoding="utf-8")
-    assert '"tag_filter_ids": _tag_filter_ids(' in store_source
-    assert 'summary["tag_filter_ids"] = _tag_filter_ids(' in store_source
-    assert '"tag_filter_ids": tag_filter_ids' in store_source
-    main_source = (ROOT / "main.py").read_text(encoding="utf-8")
-    match_start = main_source.index("def _session_matches_list_filters(")
-    match_end = main_source.index("def _session_filtered_sort_key(", match_start)
-    match_source = main_source[match_start:match_end]
-    assert 'filter_ids = session.get("tag_filter_ids")' in match_source
-    assert "_session_tag_filter_ids(session)" in match_source
-    assert "manual_tags = {" not in match_source
-    assert "requirement_tags = {" not in match_source
-
-
-def test_session_timestamp_sort_value_is_cached() -> None:
-    source = (ROOT / "session_store.py").read_text(encoding="utf-8")
-    assert "from functools import lru_cache" in source
-    assert "@lru_cache(maxsize=4096)\ndef _timestamp_sort_value_str" in source
-    start = source.index("def timestamp_sort_value(")
-    end = source.index("def _newer_timestamp(", start)
-    helper_source = source[start:end]
-    assert "return _timestamp_sort_value_str(value)" in helper_source
 
 
 def test_user_input_file_store_calls_are_off_loop() -> None:
@@ -2780,601 +973,6 @@ def test_user_input_file_store_calls_are_off_loop() -> None:
         "user_input_store.create_or_get_pending_request,\n",
         "",
     )
-
-
-def test_shortcut_picker_wait_budget_is_small() -> None:
-    source = (ROOT / "shortcut_picker.py").read_text(encoding="utf-8")
-    assert "_PICK_WAIT_TIMEOUT_SECS = 0.25" in source
-    pick_start = source.index("async def pick_shortcuts(")
-    pick_source = source[pick_start:]
-    timeout_start = pick_source.index("except asyncio.TimeoutError:")
-    exception_start = pick_source.index("except Exception:")
-    timeout_source = pick_source[timeout_start:exception_start]
-    assert "asyncio.wait_for(" in pick_source
-    assert "await asyncio.to_thread(\n            _shortcut_picker_inputs," in pick_source
-    assert "fallback_shortcuts = list(all_shortcuts)" in pick_source
-    assert "if fallback_shortcuts is not None:" in timeout_source
-    assert timeout_source.index("if fallback_shortcuts is not None:") < timeout_source.index(
-        "await asyncio.to_thread(user_prefs.get_shortcut_responses)"
-    )
-    assert "return await asyncio.shield(_cached_pick(key, _pick_uncached))" in pick_source
-    assert "user_prefs.get_shortcut_responses()" not in pick_source
-    assert "config_store.get_default_provider()" not in pick_source
-    assert "return all_shortcuts" in pick_source
-
-
-def test_stubbed_tree_build_does_not_search_tree_per_node() -> None:
-    source = (ROOT / "session_manager.py").read_text(encoding="utf-8")
-    start = source.index("def _build_stubbed_tree(")
-    end = source.index("def _compute_messages_snapshot(", start)
-    build_source = source[start:end]
-    assert "session_store._find_in_tree(root, node_sid)" not in build_source
-    assert "node_sid, rid, node_src" in build_source
-
-
-def test_tree_stub_cache_key_reads_render_seq_once() -> None:
-    source = (ROOT / "session_manager.py").read_text(encoding="utf-8")
-    start = source.index("def _tree_stub_cache_key(")
-    end = source.index("def _build_stubbed_tree(", start)
-    key_source = source[start:end]
-    assert "render_seq_by_sid = event_ingester.render_seq_by_sid(rid)" in key_source
-    assert "render_seq_for_sid(" not in key_source
-
-
-def test_session_event_meta_uses_combined_ingester_read() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
-    roots_start = source.index("def _session_event_meta_roots_for_page(")
-    roots_end = source.index("async def _warm_session_event_meta_roots(", roots_start)
-    roots_source = source[roots_start:roots_end]
-    assert "_session_event_file_fingerprint(root_id) == (0, 0)" not in roots_source
-    helper_start = source.index("def _session_event_meta(")
-    helper_end = source.index("def _session_event_meta_cache_fresh(", helper_start)
-    helper_source = source[helper_start:helper_end]
-    assert "event_ingester.session_event_meta(root_id)" in helper_source
-    assert "event_ingester.max_seq_by_sid(root_id)" not in helper_source
-    assert "event_ingester.cursor(root_id)" not in helper_source
-    assert "event_ingester.render_seq_by_sid(root_id)" not in helper_source
-
-    ingester_source = (ROOT / "event_ingester.py").read_text(encoding="utf-8")
-    assert "def session_event_meta(self, root_id: str)" in ingester_source
-    scan_start = ingester_source.index("def _scan_max_seq(")
-    scan_end = ingester_source.index("def close(", scan_start)
-    scan_source = ingester_source[scan_start:scan_end]
-    assert "summaries: dict[str, dict] = {}" in scan_source
-    assert "self._update_summary_line(" in scan_source
-    assert "self._summaries_cache[root_id] = (cur_offset, summaries, resolutions)" in scan_source
-
-
-def test_event_summary_scan_reuses_full_scan_cache() -> None:
-    source = (ROOT / "event_ingester.py").read_text(encoding="utf-8")
-    max_start = source.index("def _scan_max_seq(")
-    max_end = source.index("    @staticmethod\n    def _affects_render_projection", max_start)
-    max_source = source[max_start:max_end]
-    assert "all_entries: list[dict] = []" in max_source
-    assert "self._remember_full_scan_cache_locked(root_id, cur_offset, all_entries)" in max_source
-    assert "self._seq_offsets[root_id] = seq_offsets" in max_source
-
-    summary_start = source.index("def _scan_summaries(")
-    summary_end = source.index("    def close(", summary_start)
-    summary_source = source[summary_start:summary_end]
-    assert "cached = self._full_scan_cache.get(root_id)" in summary_source
-    assert "entries = cached[1]" in summary_source
-    assert "self._update_summary_line(" in summary_source
-    assert "for index, entry in enumerate(entries):" in summary_source
-
-
-def test_message_hydration_reuses_full_scan_cache() -> None:
-    ingester_source = (ROOT / "event_ingester.py").read_text(encoding="utf-8")
-    assert "def cached_rows_for_byte_range(" in ingester_source
-    cache_start = ingester_source.index("def cached_rows_for_byte_range(")
-    cache_end = ingester_source.index("def root_events_by_sid(", cache_start)
-    cache_source = ingester_source[cache_start:cache_end]
-    assert "cached = self._full_scan_cache.get(root_id)" in cache_source
-    assert "bisect.bisect_left(offsets, byte_start)" in cache_source
-    assert "line_start >= byte_end" in cache_source
-    assert "rows.append(entry)" in cache_source
-
-    journal_source = (ROOT / "event_journal.py").read_text(encoding="utf-8")
-    owned_start = journal_source.index("def _read_owned_range(")
-    owned_end = journal_source.index("def _read_raw_range(", owned_start)
-    owned_source = journal_source[owned_start:owned_end]
-    assert "event_ingester.cached_rows_for_byte_range(" in owned_source
-    assert "if raw is None:" in owned_source
-    assert "self._read_raw_range(" in owned_source
-
-
-def test_read_events_collects_page_without_filtered_copies() -> None:
-    source = (ROOT / "event_ingester.py").read_text(encoding="utf-8")
-    start = source.index("    @perf.timed_fn(\"ingest.read_events\")")
-    end = source.index("    def _extend_full_scan(", start)
-    read_source = source[start:end]
-    assert "out: list[dict] = []" in read_source
-    assert "if len(out) < page_limit:" in read_source
-    assert "return out, total, has_more" in read_source
-    assert "filtered = [e for e in filtered" not in read_source
-
-
-def test_metadata_session_search_uses_metadata_version_cache() -> None:
-    source = (ROOT / "session_store.py").read_text(encoding="utf-8")
-    assert "_metadata_search_cache" in source
-    assert "_metadata_text_cache" in source
-    assert "_metadata_text_by_id_cache" in source
-    assert "_metadata_trigram_index" in source
-    assert "_METADATA_NGRAM_MAX_SIZE = 3" in source
-    assert "_start_metadata_search_index_warm()" in source
-    assert "_metadata_text_cache: tuple[tuple[str, str, str], ...] = ()" in source
-    assert "_summary_metadata_version" in source
-    rows_start = source.index("def _metadata_search_rows(")
-    rows_end = source.index("def _metadata_search_scores(", rows_start)
-    rows_source = source[rows_start:rows_end]
-    assert "str(summary.get(\"name\") or \"\").lower()" in rows_source
-    assert "str(summary.get(\"first_prompt\") or \"\").lower()" in rows_source
-    assert "_metadata_text_cache_version == _summary_metadata_version" in rows_source
-    assert "return _metadata_text_cache" in rows_source
-    assert "rows = tuple(" in rows_source
-    assert "return list(_metadata_text_cache)" not in rows_source
-    map_start = source.index("def _metadata_search_row_map(")
-    map_end = source.index("def _metadata_ngrams(", map_start)
-    map_source = source[map_start:map_end]
-    assert "_metadata_text_by_id_cache_version == version" in map_source
-    assert "row_map = {sid: (title, first_prompt) for sid, title, first_prompt in rows}" in map_source
-    start = source.index("def _metadata_search_scores(")
-    end = source.index("def grep_session_scores(", start)
-    search_source = source[start:end]
-    assert "cache_key = (query_lower, metadata_fields, _summary_metadata_version)" in search_source
-    assert "cached = _metadata_search_cache.get(cache_key)" in search_source
-    assert "return dict(cached)" in search_source
-    assert "candidate_ids = _metadata_candidate_ids(query_lower, metadata_fields)" in search_source
-    assert "row_map = _metadata_search_row_map()" in search_source
-    assert "for sid in candidate_ids" in search_source
-    assert "if candidate_ids is not None and sid not in candidate_ids:" not in search_source
-    assert "rows = _metadata_search_rows()" in search_source
-    assert "for sid, title, first_prompt in rows:" in search_source
-    assert "title.count(query_lower)" in search_source
-    assert "first_prompt.count(query_lower)" in search_source
-    assert "_metadata_search_cache[cache_key] = dict(scores)" in search_source
-    candidate_start = source.index("def _metadata_candidate_ids(")
-    candidate_end = source.index("def _metadata_search_scores(", candidate_start)
-    candidate_source = source[candidate_start:candidate_end]
-    assert "grams = _metadata_query_grams(query_lower)" in candidate_source
-    assert "_start_metadata_search_index_warm()" in candidate_source
-    assert "return None" in candidate_source
-    assert "_metadata_search_index_for_current_version()" not in candidate_source
-    assert "_metadata_trigrams(query_lower)" not in candidate_source
-
-
-def test_search_summary_lookup_uses_maintained_projection() -> None:
-    source = (ROOT / "session_store.py").read_text(encoding="utf-8")
-    start = source.index("def get_session_summaries_by_ids(")
-    end = source.index("def iter_all_sessions()", start)
-    lookup_source = source[start:end]
-    assert "_requirement_tags_for_sessions" not in source
-    assert "_markers_for_sessions" not in source
-    assert "return [\n            _summary_index[sid]" in lookup_source
-
-
-def test_sessions_response_cache_stores_serialized_bytes() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
-    cache_start = source.index("def _sessions_list_cache_get(")
-    cache_end = source.index("_GIT_STATUS_TTL_SECONDS", cache_start)
-    cache_source = source[cache_start:cache_end]
-    assert "tuple[float, bytes, tuple[int, int, int]]" in source
-    assert "return _sessions_list_response(cached[1])" in cache_source
-    assert "json.dumps(" in cache_source
-    assert "copy.deepcopy" not in cache_source
-    assert "_SESSIONS_LIST_RESPONSE_TTL_SECONDS = 15.0" in source
-    assert "def _sessions_list_transient_fingerprint(" not in source
-    assert "def _sessions_list_transient_state_version()" in source
-    assert "session_manager.monitoring_projection_version()" in source
-    assert "session_manager.unread_counts_version()" in source
-    assert "user_input_store.pending_counts_version_loaded()" in source
-    assert "cached[2] != _sessions_list_transient_state_version()" in cache_source
-
-
-def test_sidebar_payload_reuses_summary_projection_cache() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
-    assert "_sidebar_payload_cache" in source
-    assert "_SIDEBAR_PAYLOAD_CACHE_MAX" in source
-    assert "_sidebar_decorated_cache" in source
-    assert "_SIDEBAR_DECORATED_CACHE_MAX" in source
-    start = source.index("def _sidebar_session_payload(")
-    end = source.index("def _sidebar_state_snapshot(", start)
-    helper_source = source[start:end]
-    assert "cache_key = id(session)" in helper_source
-    assert "_sidebar_payload_cache.get(cache_key)" in helper_source
-    assert "return cached[1]" in helper_source
-    assert "_sidebar_payload_cache[cache_key] = (sid, payload)" in helper_source
-    decorate_start = source.index("def _decorate_local_sidebar_sessions(")
-    decorate_end = source.index("def _local_sessions_for_sidebar(", decorate_start)
-    decorate_source = source[decorate_start:decorate_end]
-    assert "decorated_cache_key = (" in decorate_source
-    assert "summary_version = session_store.summary_index_version()" in decorate_source
-    assert "sid,\n                summary_version," in decorate_source
-    assert "pending_user_input_count," in decorate_source
-    assert "_sidebar_decorated_cache.get(decorated_cache_key)" in decorate_source
-    assert "_sidebar_decorated_cache[decorated_cache_key] = decorated" in decorate_source
-
-
-def test_search_sessions_response_cache_uses_metadata_version() -> None:
-    main_source = (ROOT / "main.py").read_text(encoding="utf-8")
-    helper_start = main_source.index("def _sessions_list_cache_version(")
-    helper_end = main_source.index("_GIT_STATUS_TTL_SECONDS", helper_start)
-    helper_source = main_source[helper_start:helper_end]
-    assert "session_store.search_metadata_version()" in helper_source
-    assert "session_search_index.generation()" in helper_source
-    assert "session_store.SEARCH_FIELD_CONTENT in search_fields" in helper_source
-    assert "session_store.summary_version()" in helper_source
-    assert "virtual_session_store.version_token()" in helper_source
-    route_start = main_source.index("async def get_sessions(")
-    route_end = main_source.index("@app.post(\"/api/sessions/search-content\")", route_start)
-    route_source = main_source[route_start:route_end]
-    assert "_sessions_list_cache_version(search_query, effective_search_fields)" in route_source
-    assert "_sessions_list_transient_state_version()" not in route_source
-    cache_start = route_source.index("cache_key = (")
-    cache_end = route_source.index(")", cache_start)
-    cache_source = route_source[cache_start:cache_end]
-    assert "cached_response = _sessions_list_cache_get(cache_key)" in route_source
-    assert "cache_response = not (" not in route_source
-    assert "search_query" in cache_source
-    assert "\n        search,\n" not in cache_source
-    assert "effective_search_fields = _split_session_search_fields(search_fields)" in route_source
-    assert "tuple(sorted(effective_search_fields))" in route_source
-    store_source = (ROOT / "session_store.py").read_text(encoding="utf-8")
-    assert "def search_metadata_version()" in store_source
-    assert "return _summary_metadata_version" in store_source
-
-
-def test_session_summaries_response_cache_precedes_lookup() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
-    route_start = source.index("@app.get(\"/api/sessions/summaries\")")
-    route_end = source.index("@app.get(\"/api/sessions/{session_id}/stats\")", route_start)
-    route_source = source[route_start:route_end]
-    assert "cached_response = _session_summaries_cache_get(cache_key)" in route_source
-    assert route_source.index("cached_response = _session_summaries_cache_get(cache_key)") < route_source.index(
-        "_local_session_summaries_by_ids"
-    )
-    assert route_source.index("cached_response = _session_summaries_cache_get(cache_key)") < route_source.index(
-        "_decorate_local_sidebar_sessions"
-    )
-    cache_start = route_source.index("cache_key = (")
-    cache_end = route_source.index("cached_response = _session_summaries_cache_get(cache_key)", cache_start)
-    cache_source = route_source[cache_start:cache_end]
-    assert "_sessions_list_transient_state_version()" not in cache_source
-
-
-def test_session_list_waits_briefly_for_partial_summary_warm() -> None:
-    main_source = (ROOT / "main.py").read_text(encoding="utf-8")
-    assert "_SESSION_LIST_SUMMARY_WARM_WAIT_SECONDS = 0.08" in main_source
-    assert "_SESSION_LIST_SUMMARY_WARM_MIN_PUBLISHED = 50" in main_source
-    local_start = main_source.index("def _local_session_summaries_for_sidebar()")
-    local_end = main_source.index(
-        "def _local_session_summaries_by_ids_for_sidebar(",
-        local_start,
-    )
-    local_source = main_source[local_start:local_end]
-    assert "sessions.list.local.summary_warm_wait" in local_source
-    assert (
-        "min_published=_SESSION_LIST_SUMMARY_WARM_MIN_PUBLISHED"
-        in local_source
-    )
-
-    store_source = (ROOT / "session_store.py").read_text(encoding="utf-8")
-    wait_start = store_source.index("def wait_for_summary_index(")
-    wait_end = store_source.index("def _replace_summary_projection_field(", wait_start)
-    wait_source = store_source[wait_start:wait_end]
-    assert "_ensure_summary_index(blocking=False)" in wait_source
-    assert "min_published: int | None = None" in wait_source
-    assert "len(_summary_index) >= target" in wait_source
-    assert "_summary_build_lock.acquire(timeout=max(0.0, timeout_seconds))" in wait_source
-    assert "_do_build_summary_index_unsafe()" not in wait_source
-
-
-def test_session_search_projection_enqueue_stays_on_event_loop() -> None:
-    source = (ROOT / "event_bus_subscribers.py").read_text(encoding="utf-8")
-    start = source.index("async def _refresh_session_search_projection(")
-    end = source.index("async def _refresh_requirement_tags(", start)
-    projection_source = source[start:end]
-    assert "_enqueue_session_search_projection(event.root_id, entry)" in projection_source
-    assert "asyncio.to_thread(" not in projection_source
-
-
-def test_sidebar_session_search_bounds_content_scoring() -> None:
-    main_source = (ROOT / "main.py").read_text(encoding="utf-8")
-    assert "_SESSION_LIST_CONTENT_SEARCH_MAX_WAIT_SECONDS" in main_source
-    helper_start = main_source.index("async def _sidebar_search_scores(")
-    helper_end = main_source.index("@app.get(\"/api/sessions\")", helper_start)
-    helper_source = main_source[helper_start:helper_end]
-    assert "if session_store.SEARCH_FIELD_CONTENT in selected_search_fields" in helper_source
-    assert "metadata_max_wait_seconds" not in helper_source
-    route_start = main_source.index("def _build_local_sessions_page_for_list(")
-    route_end = main_source.index("@app.post(\"/api/sessions/search-content\")", route_start)
-    route_source = main_source[route_start:route_end]
-    assert route_source.count("content_max_wait_seconds = (") == 2
-    assert "metadata_max_wait_seconds" not in route_source
-
-    search_route_start = main_source.index("@app.post(\"/api/sessions/search-content\")")
-    search_route_end = main_source.index("@app.post(\"/api/session-organization/query\")", search_route_start)
-    search_route_source = main_source[search_route_start:search_route_end]
-    assert "content_max_wait_seconds" not in search_route_source
-    assert "metadata_max_wait_seconds" not in search_route_source
-
-    index_source = (ROOT / "session_search_index.py").read_text(encoding="utf-8")
-    searchable_start = index_source.index("def _searchable_event_text(")
-    searchable_end = index_source.index("def _content_searchable_text(", searchable_start)
-    searchable_source = index_source[searchable_start:searchable_end]
-    assert 'role = message.get("role") if isinstance(message, dict) else None' in searchable_source
-    assert 'role = data.get("type")' in searchable_source
-
-
-def test_pending_node_polling_uses_public_projection_cache() -> None:
-    main_source = (ROOT / "main.py").read_text(encoding="utf-8")
-    route_start = main_source.index("async def internal_list_pending_nodes(")
-    route_end = main_source.index("@app.post(\"/api/internal/machine-nodes/approve\")", route_start)
-    route_source = main_source[route_start:route_end]
-    assert "node_link.public_pending_nodes_cached()" in route_source
-    assert "await asyncio.to_thread(node_link.public_pending_nodes)" in route_source
-    assert "pending_node_registrations.list_pending()" not in route_source
-
-    extension_source = (ROOT / "extension_api.py").read_text(encoding="utf-8")
-    dispatch_start = extension_source.index("async def _dispatch_machine_nodes_core_backend(")
-    dispatch_end = extension_source.index("async def _dispatch_project_structure_core_backend(", dispatch_start)
-    dispatch_source = extension_source[dispatch_start:dispatch_end]
-    assert "node_link.public_pending_nodes_cached()" in dispatch_source
-    assert "await asyncio.to_thread(node_link.public_pending_nodes)" in dispatch_source
-
-
-def test_machine_node_snapshot_reads_are_off_loop() -> None:
-    main_source = (ROOT / "main.py").read_text(encoding="utf-8")
-    list_start = main_source.index("async def internal_get_nodes(")
-    list_end = main_source.index("@app.get(\"/api/providers\")", list_start)
-    list_source = main_source[list_start:list_end]
-    pending_start = main_source.index("async def internal_list_pending_nodes(")
-    pending_end = main_source.index("@app.post(\"/api/internal/machine-nodes/approve\")", pending_start)
-    pending_source = main_source[pending_start:pending_end]
-    assert "await asyncio.to_thread(node_store.snapshot)" in list_source
-    assert "node_store.snapshot()" not in list_source
-    assert "node_link.public_pending_nodes_cached()" in pending_source
-    assert "await asyncio.to_thread(node_link.public_pending_nodes)" in pending_source
-
-    extension_source = (ROOT / "extension_api.py").read_text(encoding="utf-8")
-    dispatch_start = extension_source.index("async def _dispatch_machine_nodes_core_backend(")
-    dispatch_end = extension_source.index("async def _dispatch_project_structure_core_backend(", dispatch_start)
-    dispatch_source = extension_source[dispatch_start:dispatch_end]
-    assert "await asyncio.to_thread(node_store.snapshot)" in dispatch_source
-    assert "node_store.snapshot()" not in dispatch_source
-    assert "node_link.public_pending_nodes_cached()" in dispatch_source
-    assert "await asyncio.to_thread(node_link.public_pending_nodes)" in dispatch_source
-    assert "_local_node_id_or_primary_cached()" in dispatch_source
-    assert "await asyncio.to_thread(_local_node_id_or_primary" not in dispatch_source
-
-
-def test_node_snapshot_caches_static_specs() -> None:
-    source = (ROOT / "node_store.py").read_text(encoding="utf-8")
-    assert "_snapshot_static_cache_key" in source
-    assert "_snapshot_static_cache" in source
-    assert "def _node_registry_fingerprint()" in source
-    registry_source = (ROOT / "node_registry_store.py").read_text(encoding="utf-8")
-    assert "def version_token()" in registry_source
-    assert "_cache_lock = threading.Lock()" in registry_source
-    assert "_ensure_cache_locked()" in registry_source
-    token_start = registry_source.index("def version_token()")
-    token_end = registry_source.index("def hash_secret(", token_start)
-    token_source = registry_source[token_start:token_end]
-    assert "_sync_generation_locked()" in token_source
-    assert "_ensure_cache_locked()" not in token_source
-    assert "_dir().glob" not in token_source
-    assert ".stat()" not in token_source
-    list_start = registry_source.index("def list_all()")
-    list_end = registry_source.index("def remove(", list_start)
-    list_source = registry_source[list_start:list_end]
-    assert "_ensure_cache_locked()" in list_source
-    assert "_dir().glob" not in list_source
-    assert "node_registry_store.version_token()" in source
-    assert "def _snapshot_static_specs()" in source
-    snapshot_start = source.index("def snapshot()")
-    snapshot_end = source.index("def connected_worker_node_ids_snapshot()", snapshot_start)
-    snapshot_source = source[snapshot_start:snapshot_end]
-    assert "specs = _snapshot_static_specs()" in snapshot_source
-    assert "node_registry_store.list_all()" not in snapshot_source
-    assert "load_topology().all_nodes()" not in snapshot_source
-
-
-def test_pending_approval_listing_uses_cached_projection_off_loop() -> None:
-    source = (ROOT / "stores" / "pending_approvals.py").read_text(encoding="utf-8")
-    assert "_pending_cache_lock = threading.Lock()" in source
-    assert "_pending_cache:" in source
-    assert "def _invalidate_pending_cache()" in source
-    assert "def _pending_snapshot()" in source
-    list_start = source.index("def list_pending(")
-    list_end = source.index("@perf.timed_fn(\"store.approval.transition\")", list_start)
-    list_source = source[list_start:list_end]
-    assert "records = _pending_snapshot()" in list_source
-    assert "_dir().glob(\"*.json\")" not in list_source
-    assert "path.read_text" not in list_source
-
-    create_start = source.index("def create(")
-    create_end = source.index("def get(", create_start)
-    create_source = source[create_start:create_end]
-    transition_start = source.index("def _transition_locked(")
-    transition_end = source.index("def approve(", transition_start)
-    transition_source = source[transition_start:transition_end]
-    assert "_invalidate_pending_cache()" in create_source
-    assert "_invalidate_pending_cache()" in transition_source
-
-    main_source = (ROOT / "main.py").read_text(encoding="utf-8")
-    route_start = main_source.index("async def internal_list_pending_approvals(")
-    route_end = main_source.index("@app.post(\"/api/internal/tool-approvals/request\")", route_start)
-    route_source = main_source[route_start:route_end]
-    assert "await asyncio.to_thread(pending_approvals.list_pending, cwd=cwd)" in route_source
-    assert "pending_approvals.list_pending(cwd=cwd)" not in route_source
-
-
-def test_credential_consent_listing_uses_cached_projection_off_loop() -> None:
-    source = (ROOT / "credential_broker" / "consent_store.py").read_text(encoding="utf-8")
-    assert "_pending_cache_lock = threading.Lock()" in source
-    assert "def _pending_snapshot()" in source
-    list_start = source.index("def list_pending(")
-    list_end = source.index("def _expired(", list_start)
-    list_source = source[list_start:list_end]
-    assert "records = _pending_snapshot()" in list_source
-    assert "_dir().glob" not in list_source
-    assert "path.read_text" not in list_source
-
-    main_source = (ROOT / "main.py").read_text(encoding="utf-8")
-    route_start = main_source.index("async def internal_list_pending_credentials(")
-    route_end = main_source.index("@app.post(\"/api/internal/credential-ui/approve\")", route_start)
-    route_source = main_source[route_start:route_end]
-    assert "await asyncio.to_thread(_cs.list_pending, app_session_id=app_session_id)" in route_source
-    assert "_cs.list_pending(app_session_id=app_session_id)" not in route_source
-
-
-def test_project_update_counts_batch_uses_single_store_call() -> None:
-    store_source = (ROOT / "project_update_store.py").read_text(encoding="utf-8")
-    assert "def unseen_counts(project_ids: list[str])" in store_source
-    assert "def peek_unseen_counts(project_ids: list[str])" in store_source
-
-    main_source = (ROOT / "main.py").read_text(encoding="utf-8")
-    route_start = main_source.index("async def internal_project_update_counts_batch(")
-    route_end = main_source.index("@app.post(\"/api/internal/project-updates/unseen\")", route_start)
-    route_source = main_source[route_start:route_end]
-    assert "counts = project_update_store.peek_unseen_counts(project_ids)" in route_source
-    assert "if counts is None:" in route_source
-    assert "await asyncio.to_thread(project_update_store.unseen_counts, project_ids)" in route_source
-    assert "project_update_store.unseen_count(project_id)" not in route_source
-
-
-def test_session_list_does_not_prewarm_snapshots() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
-    assert "_schedule_session_snapshot_prewarm" not in source
-    assert "sessions.snapshot_prewarm" not in source
-    route_start = source.index("async def get_sessions(")
-    route_end = source.index("@app.post(\"/api/sessions/search-content\")", route_start)
-    route_source = source[route_start:route_end]
-    assert "get_root_tree_stubbed" not in route_source
-    assert "get_root_tree_paginated" not in route_source
-
-
-def test_session_list_warms_event_meta_off_path() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
-    assert "def _schedule_session_event_meta_warm(" in source
-    assert "await asyncio.to_thread(_warm_session_event_meta_roots_sync, pending)" in source
-    assert "_SESSION_DETAIL_WARM_EXECUTOR" not in source
-    assert "async def _run_session_detail_warm_path(" not in source
-    assert "def _session_detail_projection_roots_for_page(" not in source
-    assert "def _warm_session_detail_projection_roots(" not in source
-    assert "def _warm_session_detail_projection_roots_sync(" not in source
-    assert "async def _warm_session_event_projections()" not in source
-    warm_start = source.index("def _schedule_session_event_meta_warm(")
-    warm_end = source.index("def _machine_nodes_enabled_cached(", warm_start)
-    warm_source = source[warm_start:warm_end]
-    assert "_warm_session_event_meta_roots(root_ids)" in warm_source
-    assert "_session_detail_snapshot_sync(" not in warm_source
-    assert "schedule_reconcile_if_needed" not in warm_source
-    assert "_session_event_file_fingerprint(" not in warm_source
-    assert "_session_event_meta_cache_fresh(" not in warm_source
-    roots_start = source.index("def _session_event_meta_roots_for_page(")
-    roots_end = source.index("async def _warm_session_event_meta_roots(", roots_start)
-    roots_source = source[roots_start:roots_end]
-    assert "_session_event_file_fingerprint(" not in roots_source
-    route_start = source.index("async def get_sessions(")
-    route_end = source.index("@app.post(\"/api/sessions/search-content\")", route_start)
-    route_source = source[route_start:route_end]
-    assert "_schedule_session_event_meta_warm(page)" in route_source
-    assert "_session_event_meta(" not in route_source
-
-
-def test_session_list_reads_user_prefs_once() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
-    assert "def _session_list_user_prefs(" in source
-    assert "_session_list_user_prefs_cache" in source
-    assert "_SESSION_LIST_USER_PREFS_TTL_SECONDS" in source
-    prefs_start = source.index("def _session_list_user_prefs(")
-    prefs_end = source.index("_GIT_STATUS_TTL_SECONDS", prefs_start)
-    prefs_source = source[prefs_start:prefs_end]
-    assert "time.monotonic()" in prefs_source
-    assert "user_prefs.get_all()" in prefs_source
-    route_start = source.index("async def get_sessions(")
-    route_end = source.index("@app.post(\"/api/sessions/search-content\")", route_start)
-    route_source = source[route_start:route_end]
-    assert "_session_list_user_prefs()" in route_source
-    assert "await asyncio.to_thread(_session_list_user_prefs)" not in route_source
-    assert "user_prefs.get_folder_view_enabled()" not in route_source
-    assert "user_prefs.get_session_sort()" not in route_source
-    assert "user_prefs.get_session_status_sort()" not in route_source
-
-
-def test_session_detail_has_split_perf_timers() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
-    route_start = source.index("async def get_session(")
-    route_end = source.index("@app.get(\"/api/sessions/{session_id}/turns\")", route_start)
-    route_source = source[route_start:route_end]
-    helper_start = source.index("def _session_detail_snapshot_sync(")
-    helper_end = source.index("def _floor_events_from_seq(", helper_start)
-    helper_source = source[helper_start:helper_end]
-    assert "await _run_session_detail_hot_path(\n        \"sessions.detail.worker\"" in route_source
-    assert "await _run_hot_path(\n        \"sessions.detail.worker\"" not in route_source
-    assert "session_manager.get_root_tree_stubbed" not in route_source
-    assert 'perf.record("sessions.detail.worker"' not in route_source
-    miss_cache_start = route_source.index(
-        'cache_key_parts = tree.pop("_detail_response_cache_key_parts", None)'
-    )
-    miss_cache_end = route_source.index("    else:", miss_cache_start)
-    miss_cache_source = route_source[miss_cache_start:miss_cache_end]
-    assert "_session_event_meta(" not in miss_cache_source
-    assert "_session_event_file_fingerprint(" not in miss_cache_source
-    assert "return await _json_bytes_response_async(tree)" in route_source
-    json_response_start = source.index("def _json_bytes_response(")
-    json_response_end = source.index("def _sessions_list_cache_get(", json_response_start)
-    json_response_source = source[json_response_start:json_response_end]
-    assert "separators=(\",\", \":\")" in json_response_source
-    assert "Response(content=content, media_type=\"application/json\")" in json_response_source
-    assert "async def _json_bytes_response_async(" in json_response_source
-    assert "content = await asyncio.to_thread(" in json_response_source
-    for timer in (
-        "sessions.detail.root_id",
-        "sessions.detail.event_meta",
-        "sessions.detail.tree",
-        "sessions.detail.strip_synthetic",
-        "sessions.detail.reconcile_snapshot",
-        "sessions.detail.max_context_copy",
-        "sessions.detail.total",
-        "sessions.detail.file_path",
-        "sessions.detail.cache_marker",
-    ):
-        assert f'perf.record("{timer}"' in helper_source
-
-
-def test_session_hot_paths_use_dedicated_executor_with_queue_wait_metrics() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
-    helper_start = source.index("async def _run_hot_path(")
-    helper_end = source.index("def _streaming_assistant_message_id(", helper_start)
-    helper_source = source[helper_start:helper_end]
-    assert "_HOT_PATH_EXECUTOR = ThreadPoolExecutor(" in source
-    assert "max_workers=8" in source
-    assert "thread_name_prefix=\"hot-path\"" in source
-    assert "run_in_executor(\n            _HOT_PATH_EXECUTOR" in helper_source
-    assert "_SESSION_DETAIL_EXECUTOR = ThreadPoolExecutor(" in source
-    assert "thread_name_prefix=\"session-detail\"" in source
-    assert "async def _run_session_detail_hot_path(" in helper_source
-    assert "run_in_executor(\n            _SESSION_DETAIL_EXECUTOR" in helper_source
-    assert "_SESSION_LIST_EXECUTOR = ThreadPoolExecutor(" in source
-    assert "thread_name_prefix=\"session-list\"" in source
-    assert "async def _run_session_list_hot_path(" in helper_source
-    assert "run_in_executor(\n            _SESSION_LIST_EXECUTOR" in helper_source
-    assert 'perf.record(f"{name}.queue_wait"' in helper_source
-    assert "perf.record(name," in helper_source
-
-    route_start = source.index("async def get_sessions(")
-    route_end = source.index("@app.post(\"/api/sessions/search-content\")", route_start)
-    route_source = source[route_start:route_end]
-    assert "await _run_session_list_hot_path(\n            \"sessions.list.local_page_thread\"" in route_source
-    assert "await asyncio.to_thread(_build_local_sessions_page_for_list" not in route_source
-    assert "await _run_session_list_hot_path(\n            \"sessions.list.search_local_page.worker\"" in route_source
-    assert "await _run_session_list_hot_path(\n                    \"sessions.list.remote.local_order_candidates.worker\"" in route_source
-    assert "\"sessions.list.page_decorate.worker\"" in route_source
-    assert "await asyncio.to_thread(\n                _decorate_local_sidebar_sessions" not in route_source
-    assert "await asyncio.to_thread(\n            _decorate_local_sidebar_sessions" not in route_source
-    assert "await _run_hot_path(\n            \"sessions.list." not in route_source
 
 
 def test_session_reconcile_uses_dedicated_executor_with_context() -> None:
@@ -3432,237 +1030,6 @@ def test_session_reconcile_uses_dedicated_executor_with_context() -> None:
     assert observed["root_id"] == "root-x"
     assert str(observed["thread_name"]).startswith("session-reconcile")
     assert observed["marker"] == "ctx-ok"
-
-
-def test_sidebar_decoration_cache_uses_stable_session_version_key() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
-    start = source.index("def _decorate_local_sidebar_sessions(")
-    end = source.index("def _sidebar_stats_payload(", start)
-    decorate_source = source[start:end]
-    assert "summary_version = session_store.summary_index_version()" in decorate_source
-    assert "id(s)," not in decorate_source
-    assert "sid,\n                summary_version," in decorate_source
-
-
-def test_sidebar_summary_omits_worker_refs() -> None:
-    source = (ROOT / "session_store.py").read_text(encoding="utf-8")
-    start = source.index("def _build_summary_for_root(")
-    end = source.index("def set_requirement_tags_projection(", start)
-    build_source = source[start:end]
-    assert "\"worker_count\"" in build_source
-    assert "\"workers\"" not in build_source
-    assert "def _sanitize_summary(" in source
-    assert "summary, cleaned = _sanitize_summary(summary)" in source
-
-
-def test_summary_worker_count_uses_count_projection() -> None:
-    source = (ROOT / "session_store.py").read_text(encoding="utf-8")
-    start = source.index("def _worker_summary_count()")
-    end = source.index("def _refresh_summaries_for_cwd_from(", start)
-    count_source = source[start:end]
-    assert "worker_store.worker_count(\"\")" in count_source
-    assert "worker_store.list_workers(\"\")" not in count_source
-
-    worker_source = (ROOT / "stores" / "worker_store.py").read_text(encoding="utf-8")
-    assert "_worker_count_cache" in worker_source
-    assert "_registry_cache_signature" in worker_source
-    assert "_registry_cache" in worker_source
-    assert "_workers_dir_cache" in worker_source
-    assert "return _merge_activity(deepcopy(_registry_cache))" in worker_source
-    assert "_WORKER_COUNT_HOT_TTL_SECONDS" in worker_source
-    assert "now < _worker_count_cache_until" in worker_source
-    assert "def worker_count(" in worker_source
-    assert "_worker_count_cache.clear()" in worker_source
-
-
-def test_summary_sidecar_stat_only_for_unchanged_summary() -> None:
-    source = (ROOT / "session_store.py").read_text(encoding="utf-8")
-    assert "_summary_sidecar_write_queue" in source
-    assert "def _schedule_summary_sidecar_write(" in source
-    start = source.index("def _upsert_summary(")
-    end = source.index("def _seen_cursor_path(", start)
-    upsert_source = source[start:end]
-    assert "sidecar_current = True" in upsert_source
-    assert "if not summary_changed:" in upsert_source
-    assert "root_mtime_ns=root_mtime_ns" in upsert_source
-    assert "if summary_changed or not sidecar_current:" in upsert_source
-    assert "if sync_sidecar:" in upsert_source
-    assert "_write_summary_file(" in upsert_source
-    assert "_schedule_summary_sidecar_write(" in upsert_source
-    write_start = source.index("def write_session_full(")
-    write_end = source.index("def list_sessions(", write_start)
-    write_source = source[write_start:write_end]
-    assert "root_mtime_ns=file_signature[3] if file_signature is not None else None" in write_source
-    assert "sync_sidecar=bool(root.get(\"forks\"))" in write_source
-
-
-def test_root_resolution_consults_loaded_index_before_filesystem_shortcut() -> None:
-    source = (ROOT / "session_store.py").read_text(encoding="utf-8")
-    start = source.index("def _resolve_root_id(")
-    end = source.index("def _session_path(", start)
-    helper_source = source[start:end]
-    loaded_start = source.index("def _loaded_root_id_for(")
-    loaded_end = source.index("def _resolve_root_id(", loaded_start)
-    loaded_source = source[loaded_start:loaded_end]
-    assert "_root_file_path(sid).exists()" in helper_source
-    assert "_ensure_index()" in helper_source
-    assert "_loaded_root_id_for(sid)" in helper_source
-    assert "if not _index_loaded:" in loaded_source
-    assert "sid in _root_index_signatures" in loaded_source
-    assert "_fork_index.get(sid)" in loaded_source
-    assert helper_source.index("_loaded_root_id_for(sid)") < helper_source.index(
-        "_root_file_path(sid).exists()"
-    )
-    assert helper_source.index("_root_file_path(sid).exists()") < helper_source.index(
-        "_ensure_index()"
-    )
-
-
-def test_summary_index_skips_empty_projection_scan() -> None:
-    source = (ROOT / "session_store.py").read_text(encoding="utf-8")
-    assert "def _projection_snapshot()" in source
-    assert "def _has_projection_snapshot()" not in source
-    assert "def _start_summary_projection_repair(" in source
-    assert "_summary_projection_repair_lock = threading.Lock()" in source
-    assert "_summary_projection_repair_running = False" in source
-    repair_start = source.index("def _start_summary_projection_repair()")
-    repair_end = source.index("def summary_version()", repair_start)
-    repair_source = source[repair_start:repair_end]
-    assert "if _summary_projection_repair_running:" in repair_source
-    assert "_summary_projection_repair_running = True" in repair_source
-    assert "_summary_projection_repair_running = False" in repair_source
-    assert "finally:" in repair_source
-    assert "updates: dict[str, dict] = {}" in repair_source
-    assert "projection_snapshot = _projection_snapshot()" in repair_source
-    assert "_requirement_tags_for_session(sid)" not in repair_source
-    assert "_markers_for_session(sid)" not in repair_source
-    assert repair_source.count("_summary_index_version += 1") == 1
-    build_start = source.index("def _do_build_summary_index_unsafe()")
-    build_end = source.index("def _refresh_summaries_for_cwd(", build_start)
-    build_source = source[build_start:build_end]
-    cache_start = build_source.index("cached_summaries = _load_summary_index_cache(")
-    pass_start = build_source.index("# Trees migrated in Pass 2")
-    cache_source = build_source[cache_start:pass_start]
-    assert "if _has_projection_snapshot()" not in cache_source
-    assert "_start_summary_projection_repair()" in cache_source
-    assert "return" in cache_source
-    assert "projection_snapshot = _projection_snapshot()" in build_source
-    assert "organization_projection = session_organization_store.enrichment_projection()" in build_source
-    assert "_build_summary_for_root(" in build_source
-    assert "organization_projection," in build_source
-    assert "_start_summary_projection_repair()" in build_source
-    assert "_summary_has_projection(" not in build_source
-    assert "summary_projection_present" not in build_source
-    assert "if _has_projection_snapshot()" not in build_source
-    assert "summary_items = list(_summary_index.items())" not in build_source
-
-
-def test_summary_index_validates_missing_summary_before_provider_context() -> None:
-    source = (ROOT / "session_store.py").read_text(encoding="utf-8")
-    build_start = source.index("def _do_build_summary_index_unsafe()")
-    build_end = source.index("def _refresh_summaries_for_cwd(", build_start)
-    build_source = source[build_start:build_end]
-    assert "provider_ctx: Optional[dict] = None" in build_source
-    parse_idx = build_source.index("raw = json.loads(fpath.read_text")
-    validate_idx = build_source.index("if not isinstance(raw, dict) or \"id\" not in raw:")
-    provider_idx = build_source.index("provider_ctx = _provider_backfill_context()")
-    migrate_idx = build_source.index("data = _migrate_session(raw, provider_ctx)")
-    assert parse_idx < validate_idx < provider_idx < migrate_idx
-
-
-def test_extension_audit_inventory_refresh_is_off_provider_hot_path() -> None:
-    source = (ROOT / "extension_context_audit.py").read_text(encoding="utf-8")
-    runtime_start = source.index("def runtime_context(")
-    runtime_end = source.index("def _inventory_projection(", runtime_start)
-    runtime_source = source[runtime_start:runtime_end]
-    assert "build_inventory(" not in runtime_source
-    assert "_trigger_projection_refresh(cwd)" in runtime_source
-    assert "_read_cache_cached()" in runtime_source
-    refresh_start = source.index("def _refresh_projection(")
-    refresh_end = source.index("def build_inventory(", refresh_start)
-    refresh_source = source[refresh_start:refresh_end]
-    assert "inventory = build_inventory(cwd)" in refresh_source
-    assert "_trigger_refresh(fingerprint, inventory)" in refresh_source
-
-
-def test_summary_index_indexes_seen_sidecars_once() -> None:
-    source = (ROOT / "session_store.py").read_text(encoding="utf-8")
-    build_start = source.index("def _do_build_summary_index_unsafe()")
-    build_end = source.index("def _refresh_summaries_for_cwd(", build_start)
-    build_source = source[build_start:build_end]
-    assert "seen_cursor_ids: set[str] = set()" in build_source
-    assert "for storage_dir in _session_storage_dirs():" in build_source
-    assert "entries = list(storage_dir.iterdir())" in build_source
-    assert ".glob(\"*.summary.json\")" not in build_source
-    assert ".glob(\"*.seen.json\")" not in build_source
-    assert "read_seen_cursors(sid) if sid in seen_cursor_ids else {}" in build_source
-    assert "_summary_index_cache_fingerprint(" in build_source
-    assert "_load_summary_index_cache(summary_cache_fingerprint)" in build_source
-    assert "_write_summary_index_cache(summary_cache_fingerprint, summaries)" in build_source
-    assert "\"skipped_root_ids\"" in source
-
-
-def test_summary_index_cache_is_sidecar() -> None:
-    source = (ROOT / "session_store.py").read_text(encoding="utf-8")
-    assert "def _summary_index_cache_path()" in source
-    assert "\".summary-index.json\"" in source
-    sidecar_start = source.index("_SIDECAR_JSON_SUFFIXES = (")
-    sidecar_end = source.index("def _is_sidecar_json", sidecar_start)
-    sidecar_source = source[sidecar_start:sidecar_end]
-    assert "\".summary-index.json\"" in sidecar_source
-
-
-def test_session_store_sessions_dir_is_env_aware_cached() -> None:
-    source = (ROOT / "session_store.py").read_text(encoding="utf-8")
-    assert "_SESSIONS_DIR: Path | None = None" in source
-    assert "_SESSIONS_DIR_READY = False" in source
-    assert "_SESSIONS_DIR_READY_LOCK = threading.Lock()" in source
-    sessions_dir_start = source.index("def _sessions_dir()")
-    sessions_dir_end = source.index("def _ensure_dir()", sessions_dir_start)
-    sessions_dir_source = source[sessions_dir_start:sessions_dir_end]
-    assert "resolved = ba_home() / \"sessions\"" in sessions_dir_source
-    assert "if _SESSIONS_DIR == resolved:" in sessions_dir_source
-    assert "_reset_home_scoped_caches()" in sessions_dir_source
-    ensure_start = source.index("def _ensure_dir()")
-    ensure_end = source.index("# ── Fork index", ensure_start)
-    ensure_source = source[ensure_start:ensure_end]
-    assert "sessions_dir = _sessions_dir()" in ensure_source
-    assert "if _SESSIONS_DIR_READY:\n        return" in ensure_source
-    assert "sessions_dir.mkdir(parents=True, exist_ok=True)" in ensure_source
-    assert "_SESSIONS_DIR_READY = True" in ensure_source
-
-
-def test_event_journal_watch_path_uses_cached_sessions_dir() -> None:
-    source = (ROOT / "event_journal.py").read_text(encoding="utf-8")
-    assert "def _sessions_dir()" in source
-    assert "_SESSIONS_DIR_CACHE" in source
-    read_start = source.index("def _read_appended_entries(")
-    read_end = source.index("def read_events(", read_start)
-    read_source = source[read_start:read_end]
-    assert "_sessions_dir() / session_id / \"events.jsonl\"" in read_source
-    assert "ba_home()" not in read_source
-    assert ".exists(" not in read_source
-    assert ".stat(" not in read_source
-    assert "os.SEEK_END" in read_source
-
-
-def test_run_state_emit_debug_logging_is_gated() -> None:
-    source = (ROOT / "turn_manager.py").read_text(encoding="utf-8")
-    start = source.index("def _dbg_runstate(")
-    end = source.index("# ======================================================================", start)
-    run_state_source = source[start:end]
-    assert "logger.isEnabledFor(logging.DEBUG)" in run_state_source
-    assert "logger.debug(" in run_state_source
-    assert "logger.info(" not in run_state_source
-    assert "await self._c.broadcast_session" in run_state_source
-
-
-def test_startup_session_search_rebuild_skips_persisted_index() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
-    startup_start = source.index("async def on_startup()")
-    startup_end = source.index("async def on_shutdown()", startup_start)
-    startup_source = source[startup_start:startup_end]
-    assert "session_search_index.needs_rebuild()" in startup_source
 
 
 def test_session_search_rebuild_streams_insert_batches() -> None:
@@ -3749,40 +1116,6 @@ def test_session_search_index_file_rows_are_consumed_incrementally() -> None:
     assert lines_read_at_insert == [2, 3]
 
 
-def test_event_projections_do_not_eager_warm_detail_snapshots() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
-    assert "def _session_event_projection_warm_roots(" not in source
-    assert "def _warm_session_detail_projection_roots_sync(" not in source
-    assert "async def _warm_session_event_projections()" not in source
-    assert "_SESSION_DETAIL_WARM_EXECUTOR" not in source
-    assert "async def _run_session_detail_warm_path(" not in source
-    shutdown_start = source.index("async def on_shutdown()")
-    shutdown_end = source.index("# Internal Endpoints", shutdown_start)
-    shutdown_source = source[shutdown_start:shutdown_end]
-    assert "_SESSION_DETAIL_EXECUTOR.shutdown(" in shutdown_source
-    assert "_SESSION_DETAIL_WARM_EXECUTOR.shutdown(" not in shutdown_source
-    startup_start = source.index("async def on_startup()")
-    startup_end = source.index("async def on_shutdown()", startup_start)
-    startup_source = source[startup_start:startup_end]
-    assert "startup-session-event-meta-projection-warm" not in startup_source
-    assert "session_event_projection_warm" not in startup_source
-    warm_start = source.index("def _schedule_session_event_meta_warm(")
-    warm_end = source.index("def _machine_nodes_enabled_cached(", warm_start)
-    warm_source = source[warm_start:warm_end]
-    assert "_session_detail_snapshot_sync(" not in warm_source
-    assert "session_manager.schedule_reconcile_if_needed" not in warm_source
-
-
-def test_render_hydrate_worker_fingerprint_is_batched() -> None:
-    source = (ROOT / "render_tree_hydrate.py").read_text(encoding="utf-8")
-    start = source.index("            pre_worker_fingerprint = (")
-    end = source.index("            for raw in orphan_rows:", start)
-    worker_source = source[start:end]
-    assert "before_worker" not in worker_source
-    assert worker_source.count("_message_timeline_fingerprint(m)") == 2
-    assert "pre_worker_fingerprint is not None" in worker_source
-
-
 def test_session_detail_cache_hit_validation_uses_cheap_fingerprint() -> None:
     source = (ROOT / "main.py").read_text(encoding="utf-8")
     manager_source = (ROOT / "session_manager.py").read_text(encoding="utf-8")
@@ -3820,59 +1153,6 @@ def test_session_detail_cache_hit_validation_uses_cheap_fingerprint() -> None:
     assert "_rebuild_session_search_index_if_empty" in startup_source
 
 
-def test_project_match_rebuild_skips_unchanged_session_state() -> None:
-    main_source = (ROOT / "main.py").read_text(encoding="utf-8")
-    warm_start = main_source.index("async def _project_match_warm_loop()")
-    warm_end = main_source.index("def _ensure_project_match_warm_task()", warm_start)
-    warm_source = main_source[warm_start:warm_end]
-    assert "fingerprint = None" in warm_source
-    assert "rebuild_index,\n                fingerprint," in warm_source
-    assert 'result.get("fingerprint")' in warm_source
-    assert 'result.get("rebuilt") is False' in warm_source
-
-    worker_source = (ROOT / "project_match" / "worker.py").read_text(encoding="utf-8")
-    assert "def sessions_fingerprint()" in worker_source
-    assert "previous_fingerprint is not None and fingerprint == previous_fingerprint" in worker_source
-    assert '{"rebuilt": False, "fingerprint": fingerprint}' in worker_source
-
-
-def test_stubbed_tree_cache_key_does_not_scan_message_events() -> None:
-    source = (ROOT / "session_manager.py").read_text(encoding="utf-8")
-    key_start = source.index("def _tree_stub_cache_key(")
-    key_end = source.index("def _build_stubbed_tree(", key_start)
-    key_source = source[key_start:key_end]
-    assert "render_seq_by_sid = event_ingester.render_seq_by_sid(rid)" in key_source
-    assert 'msg.get("events")' not in key_source
-    assert "event_shape" not in key_source
-    assert "root_events_version" not in key_source
-
-
-def test_worker_panel_anchor_derivation_is_cached() -> None:
-    render_source = (ROOT / "render_stub.py").read_text(encoding="utf-8")
-    assert "_PANEL_ANCHOR_CACHE" in render_source
-    helper_start = render_source.index("def _panel_anchors(")
-    helper_end = render_source.index("def timeline_events(", helper_start)
-    helper_source = render_source[helper_start:helper_end]
-    assert "cached.get(\"key\") == key" in helper_source
-    assert "return anchors" in helper_source
-    assert "anchors = _panel_anchors(msg, manager_events, workers)" in render_source
-
-    manager_source = (ROOT / "session_manager.py").read_text(encoding="utf-8")
-    append_start = manager_source.index("def append_native_event(")
-    append_end = manager_source.index("def replace_native_event(", append_start)
-    assert "invalidate_panel_anchor_cache(m)" in manager_source[append_start:append_end]
-    replace_start = manager_source.index("def replace_native_event(")
-    replace_end = manager_source.index("def set_agent_sid_on_msg(", replace_start)
-    assert "invalidate_panel_anchor_cache(m)" in manager_source[replace_start:replace_end]
-
-    store_source = (ROOT / "session_store.py").read_text(encoding="utf-8")
-    strip_start = store_source.index("def _strip_volatile_from_tree(")
-    strip_end = store_source.index("def copy_persistable_tree(", strip_start)
-    strip_source = store_source[strip_start:strip_end]
-    assert '"_panel_anchor_cache"' in strip_source
-    assert "panel_anchor_caches" in strip_source
-
-
 def test_stubbed_tree_cache_attaches_root_events_after_cache_copy() -> None:
     source = (ROOT / "session_manager.py").read_text(encoding="utf-8")
     build_start = source.index("def _build_stubbed_tree(")
@@ -3897,623 +1177,6 @@ def test_stubbed_tree_cache_attaches_root_events_after_cache_copy() -> None:
     assert "self._scan_max_seq(root_id)" in version_source
     assert "_build_root_events_projection" not in version_source
     assert "_read_all_events_locked" not in version_source
-
-
-def test_startup_recovery_defers_cold_runs() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
-    recover_start = source.index("async def _recover_in_flight_task()")
-    recover_end = source.index("async def _housekeeping_task()", recover_start)
-    recover_source = source[recover_start:recover_end]
-    assert "live = [r for r in recovered if bool(r.get(\"alive\"))]" in recover_source
-    assert "cold = [r for r in recovered if not bool(r.get(\"alive\"))]" in recover_source
-    assert "_enqueue_recovered_cold_runs(cold)" in recover_source
-
-
-def test_startup_recovery_gate_opens_after_live_before_background_recovery() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
-    recover_start = source.index("async def _recover_in_flight_task()")
-    recover_end = source.index("async def _housekeeping_task()", recover_start)
-    recover_source = source[recover_start:recover_end]
-    opened = recover_source.index("startup_recovery_gate.mark_recovery_done()")
-    registered = recover_source.index(
-        "startup_recovery_gate.mark_recovery_sessions_registered()"
-    )
-    assert registered < recover_source.index("await integrate_recovered_runs(coordinator, batch)")
-    assert recover_source.index("await integrate_recovered_runs(coordinator, batch)") < opened
-    assert opened < recover_source.index("_enqueue_recovered_cold_runs(cold)")
-    assert opened < recover_source.index("await _re_enqueue_queued_prompts()")
-
-
-def test_hydration_uses_local_projection_not_extension_backend() -> None:
-    source = (ROOT / "session_manager.py").read_text(encoding="utf-8")
-    hydrate_start = source.index("    def _derive_current_todos_from_events_jsonl(")
-    hydrate_end = source.index("    def _cached(", hydrate_start)
-    hydrate_source = source[hydrate_start:hydrate_end]
-    assert "session_local_projection.project_event_fields(" in hydrate_source
-    assert "session_event_extensions" not in hydrate_source
-    assert "extension_backend_loader" not in hydrate_source
-
-
-def test_session_event_extension_callbacks_are_worker_only() -> None:
-    source = (ROOT / "session_event_extensions.py").read_text(encoding="utf-8")
-    project_start = source.index("def project_event(")
-    project_end = source.index("def _apply_builtin_event(", project_start)
-    project_source = source[project_start:project_end]
-    apply_start = source.index("def apply_event(")
-    apply_end = source.index("def _apply_event_locked(", apply_start)
-    apply_source = source[apply_start:apply_end]
-    worker_start = source.index("def _run_extension_hook_job(")
-    worker_end = source.index("def _run_builtin_todos_job(", worker_start)
-    worker_source = source[worker_start:worker_end]
-    assert "invoke_extension_backend_sync" not in project_source
-    assert "invoke_extension_backend_sync" not in apply_source
-    assert "invoke_extension_backend_sync" in worker_source
-
-
-def test_session_event_apply_event_uses_cached_hook_snapshot() -> None:
-    source = (ROOT / "session_event_extensions.py").read_text(encoding="utf-8")
-    apply_start = source.index("def apply_event(")
-    apply_end = source.index("def _apply_event_locked(", apply_start)
-    apply_source = source[apply_start:apply_end]
-    assert "hook_snapshot_nonblocking()" in apply_source
-    assert "hook_snapshot()" not in apply_source
-    assert "session_event_hook_specs()" not in apply_source
-    assert "_builtin_todos_enabled()" not in apply_source
-
-
-def test_requirement_tag_refresh_is_off_startup_loop() -> None:
-    subscribers_source = (ROOT / "event_bus_subscribers.py").read_text(encoding="utf-8")
-    refresh_start = subscribers_source.index("async def _refresh_requirement_tags(")
-    refresh_end = subscribers_source.index("async def _apply_requirement_tags_projection(", refresh_start)
-    refresh_source = subscribers_source[refresh_start:refresh_end]
-    assert "await asyncio.to_thread(_refresh_requirement_tags_sync)" in refresh_source
-    assert "ModuleNotFoundError" in refresh_source
-
-    main_source = (ROOT / "main.py").read_text(encoding="utf-8")
-    startup_start = main_source.index("async def on_startup()")
-    startup_end = main_source.index("async def on_shutdown()", startup_start)
-    startup_source = main_source[startup_start:startup_end]
-    assert 'name="requirement-tags-startup-refresh"' not in startup_source
-    assert 'type="requirement_tags.refresh_requested"' not in startup_source
-    assert 'await event_bus.publish(BusEvent(\\n            type="requirement_tags.refresh_requested"' not in startup_source
-    assert "ModuleNotFoundError" in startup_source
-
-
-def test_machine_nodes_readiness_check_is_off_startup_loop() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
-    startup_start = source.index("async def on_startup()")
-    startup_end = source.index("async def on_shutdown()", startup_start)
-    startup_source = source[startup_start:startup_end]
-    assert "async def _start_node_offset_loop_if_ready()" in startup_source
-    assert "await asyncio.to_thread(\n                extension_store.is_extension_runtime_ready" in startup_source
-    assert 'name="node-offset-flush-startup"' in startup_source
-
-
-def test_sessions_route_does_not_runtime_check_machine_nodes() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
-    route_start = source.index('@app.get("/api/sessions")')
-    route_end = source.index('@app.get("/api/sessions/{session_id}")', route_start)
-    route_source = source[route_start:route_end]
-    assert "connected_worker_node_ids_snapshot()" in route_source
-    assert "_ns.snapshot()" not in route_source
-    assert "sessions.list.node_snapshot" not in route_source
-    assert "_builtin_extension_runtime_ready_fast" not in route_source
-    assert "_builtin_extension_runtime_ready(" not in route_source
-    helper_start = source.index("def _machine_nodes_enabled_cached(")
-    helper_end = source.index("def _sessions_list_response(", helper_start)
-    helper_source = source[helper_start:helper_end]
-    assert "asyncio.create_task(_refresh())" in helper_source
-    assert "await asyncio.to_thread(\n                        _builtin_extension_runtime_ready" in helper_source
-    assert "return cached[1]" in helper_source
-
-
-def test_sessions_route_uses_cached_remote_node_sessions() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
-    helper_start = source.index("async def _remote_sessions_for_sidebar(")
-    helper_end = source.index("def _session_list_user_prefs(", helper_start)
-    helper_source = source[helper_start:helper_end]
-    route_start = source.index('@app.get("/api/sessions")')
-    route_end = source.index('@app.get("/api/sessions/{session_id}")', route_start)
-    route_source = source[route_start:route_end]
-    assert "_REMOTE_SESSIONS_CACHE_TTL_SECONDS = 2.0" in source
-    assert "def _remote_sessions_cache_get(\n    node_id: str," in source
-    assert "limit: int | None = None" in source
-    assert "def _schedule_remote_sessions_refresh(node_id: str)" in source
-    assert "async def _fetch_remote_sessions_live(node_id: str)" in source
-    assert "sessions.list.remote_cache.hit" in helper_source
-    assert "sessions.list.remote_cache.stale" in helper_source
-    assert "sessions.list.remote_cache.miss" in helper_source
-    assert "_remote_sessions_cache_version_snapshot() if connected else 0" in route_source
-    assert "with perf.timed(\"sessions.list.remote\")" in route_source
-    assert "_remote_sessions_for_sidebar(nid)" in route_source
-    assert "rs[\"node_id\"] = nid" in route_source
-
-
-def test_connected_session_list_defers_cold_sidebar_projections() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
-    route_start = source.index('@app.get("/api/sessions")')
-    route_end = source.index('@app.get("/api/sessions/{session_id}")', route_start)
-    route_source = source[route_start:route_end]
-    remote_helper_start = source.index("def _remote_sessions_for_sidebar_cached(")
-    remote_helper_end = source.index("def _schedule_virtual_sessions_recent_refresh(", remote_helper_start)
-    remote_helper_source = source[remote_helper_start:remote_helper_end]
-    virtual_helper_start = source.index("def _schedule_virtual_sessions_recent_refresh(")
-    virtual_helper_end = source.index("def _session_list_user_prefs(", virtual_helper_start)
-    virtual_helper_source = source[virtual_helper_start:virtual_helper_end]
-    virtual_store_source = (ROOT / "virtual_session_store.py").read_text(encoding="utf-8")
-    assert "def list_recent_cached(" in virtual_store_source
-    assert "sessions.list.remote_cache.deferred_miss" in remote_helper_source
-    assert "_schedule_remote_sessions_refresh(node_id)" in remote_helper_source
-    assert "asyncio.to_thread(\n            virtual_session_store.list_recent," in virtual_helper_source
-    assert "sessions.list.virtual.cached_first_page" in route_source
-    assert "_remote_sessions_for_sidebar_cached(\n                        nid," in route_source
-    assert "limit=max(offset + limit, 1)" in route_source
-    assert "deferred_sidebar_projection and not appended_virtual_sessions and not appended_remote_sessions" in route_source
-    assert "projected_first_page_sessions" in route_source
-    assert "sessions.list.projected_first_page_merge" in route_source
-    assert route_source.index("sessions.list.projected_first_page_merge") < route_source.index(
-        'with perf.timed("sessions.list.filter_sort")'
-    )
-    assert "_sessions_list_response(\n                    json.dumps(" in route_source
-
-
-def test_local_session_first_page_prefers_cached_virtual_projection() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
-    build_start = source.index("def _build_local_sessions_page_for_list(")
-    build_end = source.index("async def _sidebar_search_scores(", build_start)
-    build_source = source[build_start:build_end]
-    assert "virtual_session_store.list_recent_cached(" in build_source
-    assert build_source.index("virtual_session_store.list_recent_cached(") < build_source.index(
-        "virtual_session_store.list_recent("
-    )
-
-
-def test_submit_team_message_sync_store_work_off_loop() -> None:
-    source = (ROOT / "orchestrator.py").read_text(encoding="utf-8")
-    start = source.index("async def submit_team_message(")
-    end = source.index("    def _resolve_delegation_run_config(", start)
-    submit_source = source[start:end]
-    assert "sender, target = await asyncio.to_thread(\n            team_messaging.validate_message_route" in submit_source
-    assert "metadata = await asyncio.to_thread(\n            team_messaging.build_message_metadata" in submit_source
-    assert "queue_item = await asyncio.to_thread(\n                team_messaging.queue_payload" in submit_source
-    assert "await asyncio.to_thread(\n                session_manager.add_queued_prompt" in submit_source
-    assert "cli_prompt = await asyncio.to_thread(\n                team_messaging.format_team_message_prompt" in submit_source
-    assert "await asyncio.to_thread(\n                session_manager.remove_queued_prompt" in submit_source
-    assert "session_manager.add_queued_prompt(" not in submit_source
-    assert "cli_prompt = team_messaging.format_team_message_prompt(" not in submit_source
-    assert "await self.submit_prompt_async(target_session_id, {" in submit_source
-    assert "self.submit_prompt(target_session_id, {" not in submit_source
-
-
-def test_default_session_page_uses_visible_order_cache() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
-    helper_start = source.index("def _local_visible_order_page_ids(")
-    helper_end = source.index("def _local_session_page_for_sidebar_preserving_order(", helper_start)
-    helper_source = source[helper_start:helper_end]
-    assert "_local_visible_order_cache" in source
-    assert "sessions.list.local.visible_order_cache.hit" in helper_source
-    assert "sessions.list.local.visible_order_build" in helper_source
-    assert "expected_summary_index_version" in helper_source
-    assert "get_indexed_session_summary_if_current" in helper_source
-    assert "visible_ids.append(ordered_id)" in helper_source
-    assert "return list(cached[offset:offset + limit]), len(cached)" in helper_source
-    assert "session_matches_project(summary, project_path)" in helper_source
-
-    page_start = source.index("def _local_session_page_for_sidebar_preserving_order(")
-    page_end = source.index("def _root_session_file_path(", page_start)
-    page_source = source[page_start:page_end]
-    assert "_can_page_default_local_visible_order(" in page_source
-    assert "sessions.list.local.visible_order_page" in page_source
-    assert "_local_visible_order_page_ids(" in page_source
-    assert "expected_summary_index_version = session_store.summary_index_version()" in page_source
-    assert page_source.index("sessions.list.local.visible_order_page") < page_source.index(
-        "sessions.list.local.ordered_ids"
-    )
-
-
-def test_session_search_uses_bounded_candidate_window() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
-    helper_start = source.index("def _session_search_candidate_limit(")
-    helper_end = source.index("@app.get(\"/api/sessions\")", helper_start)
-    helper_source = source[helper_start:helper_end]
-    assert "_SESSION_LIST_SEARCH_MIN_CANDIDATES = 200" in source
-    assert "max(offset + limit, _SESSION_LIST_SEARCH_MIN_CANDIDATES)" in helper_source
-
-    route_start = source.index("@app.get(\"/api/sessions\")")
-    route_end = source.index("@app.post(\"/api/sessions/search-content\")", route_start)
-    route_source = source[route_start:route_end]
-    assert "content_limit=_session_search_candidate_limit(offset, limit)" in route_source
-    assert "content_limit=max(offset + limit, 1)" not in route_source
-    assert "cache_response = not (" not in route_source
-    assert "session_store.SEARCH_FIELD_CONTENT in effective_search_fields" in route_source
-    assert "cached_response = _sessions_list_cache_get(cache_key)" in route_source
-    assert "sessions.list.search_local_page.worker" in route_source
-    assert route_source.index("sessions.list.search_local_page.worker") < route_source.index(
-        "with perf.timed(\"sessions.list.remote\")"
-    )
-
-
-def test_session_list_filter_sort_keeps_only_page_candidates() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
-    start = source.index("def _filter_sort_page_for_list(")
-    end = source.index("def _filter_sessions_for_list_preserving_order(", start)
-    helper_source = source[start:end]
-    assert "heapq.heapreplace(selected, item)" in helper_source
-    assert "heapq.heappush(selected, item)" in helper_source
-    assert "heapq.nlargest(" not in helper_source
-    assert "selected.append(" not in helper_source
-    assert "total += 1" in helper_source
-
-
-def test_startup_warms_virtual_session_summaries_off_loop() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
-    startup_start = source.index("async def on_startup()")
-    startup_end = source.index("async def on_shutdown()", startup_start)
-    startup_source = source[startup_start:startup_end]
-    assert '"virtual_session_summaries_warm"' in startup_source
-    assert '"startup_tasks.virtual_session_summaries_warm"' in startup_source
-    assert "virtual_session_store.list_all" in startup_source
-    assert 'name="startup-virtual-session-summaries-warm"' in startup_source
-
-
-def test_startup_warms_recent_git_statuses_off_hot_path() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
-    helper_start = source.index("async def _warm_recent_git_statuses()")
-    helper_end = source.index("def _shutdown_kill_runners_flag()", helper_start)
-    helper_source = source[helper_start:helper_end]
-    startup_start = source.index("async def on_startup()")
-    startup_end = source.index("async def on_shutdown()", startup_start)
-    startup_source = source[startup_start:startup_end]
-    assert "_GIT_STATUS_STARTUP_WARM_LIMIT = 8" in source
-    assert "await asyncio.to_thread(project_store.list_projects)" in helper_source
-    assert 'node_id != "primary"' in helper_source
-    assert "await _cached_git_status(node_id, cwd)" in helper_source
-    assert "warmed >= _GIT_STATUS_STARTUP_WARM_LIMIT" in helper_source
-    assert '"git_status_warm"' in startup_source
-    assert '"startup_tasks.git_status_warm"' in startup_source
-    assert "_warm_recent_git_statuses" in startup_source
-    assert "in_thread=False" in startup_source
-    assert 'name="startup-git-status-warm"' in startup_source
-
-
-def test_session_organization_refresh_is_coalesced_background_work() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
-    helper_start = source.index("async def _broadcast_session_organization_changed(")
-    helper_end = source.index("async def _apply_initial_session_folder(", helper_start)
-    helper_source = source[helper_start:helper_end]
-    assert "_session_organization_refresh_pending = True" in helper_source
-    assert "asyncio.create_task(_refresh_loop())" in helper_source
-    assert "await asyncio.to_thread(session_store.refresh_organization_projection, session_ids)" in helper_source
-    assert "if _session_organization_refresh_task is not None and not _session_organization_refresh_task.done()" in helper_source
-
-
-def test_get_session_strips_synthetic_events_off_loop() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
-    assert "def _tree_has_loaded_events(" in source
-    route_start = source.index("async def get_session(")
-    route_end = source.index("@app.get(\"/api/sessions/{session_id}/turns\")", route_start)
-    route_source = source[route_start:route_end]
-    helper_start = source.index("def _session_detail_snapshot_sync(")
-    helper_end = source.index("def _floor_events_from_seq(", helper_start)
-    helper_source = source[helper_start:helper_end]
-    assert "_strip_synthetic_events_from_tree(tree)" not in route_source
-    assert "if _tree_has_loaded_events(tree):" in helper_source
-    assert "_strip_synthetic_events_from_tree(tree)" in helper_source
-    assert "strip_ms" in helper_source
-
-
-def test_session_detail_response_bytes_are_cached() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
-    assert "_session_detail_response_cache" in source
-    assert "_SESSION_DETAIL_RESPONSE_CACHE_MAX = 64" in source
-    assert "def _session_detail_cache_get(" in source
-    assert "def _session_detail_cache_put(" in source
-    assert "def _session_detail_response_cache_key_sync(" in source
-    assert "_SESSION_DETAIL_RESPONSE_TTL_SECONDS" not in source
-    cache_get_start = source.index("def _session_detail_cache_get(")
-    cache_get_end = source.index("def _session_detail_cache_put(", cache_get_start)
-    cache_get_source = source[cache_get_start:cache_get_end]
-    assert "time.monotonic()" not in cache_get_source
-    route_start = source.index("async def get_session(")
-    route_end = source.index("@app.get(\"/api/sessions/{session_id}/turns\")", route_start)
-    route_source = source[route_start:route_end]
-    assert "_session_detail_cache_get(cache_key)" in route_source
-    assert "_session_detail_response_cache_latest.get(simple_cache_key)" in route_source
-    assert "if cached_full_key is not None:" in route_source
-    assert "_session_reconcile_snapshot_and_schedule" in route_source
-    assert "include_cache_key=True" in route_source
-    assert "await _session_detail_cache_put_async(cache_key, tree)" in route_source
-    assert "def _session_detail_cache_put_async(" in source
-
-
-def test_stubbed_tree_cache_covers_broad_session_loads() -> None:
-    source = (ROOT / "session_manager.py").read_text(encoding="utf-8")
-    assert "self._tree_stub_cache_max = 256" in source
-
-
-def test_run_recovery_finalize_session_manager_calls_are_off_loop() -> None:
-    source = (ROOT / "run_recovery.py").read_text(encoding="utf-8")
-    finalize_start = source.index("async def _finalize_when_done(")
-    finalize_end = source.index("# ============================================================================", finalize_start)
-    finalize_source = source[finalize_start:finalize_end]
-    integrate_start = source.index("async def _integrate_one(")
-    integrate_end = source.index("async def _retry_recovered_run(", integrate_start)
-    integrate_source = source[integrate_start:integrate_end]
-    retry_start = source.index("async def _retry_recovered_run(")
-    retry_end = source.index("def _cleanup_active_run_id(", retry_start)
-    retry_source = source[retry_start:retry_end]
-    assert "await asyncio.to_thread(\n            _recovery_target_snapshot" in finalize_source
-    assert "await asyncio.to_thread(\n                    session_manager.set_msg_recovering" in finalize_source
-    assert "await _to_thread_joined(\n                coordinator.turn_manager.run_state_add" in integrate_source
-    assert "await asyncio.to_thread(\n        coordinator.turn_manager.run_state_add" in retry_source
-    assert "\n            coordinator.turn_manager.run_state_add(" not in integrate_source
-    assert "\n    coordinator.turn_manager.run_state_add(" not in retry_source
-    assert "session_manager.get(persist_sid)" not in finalize_source
-    assert "session_manager.set_msg_recovering(persist_sid" not in finalize_source
-
-
-def test_delegation_run_state_mutations_run_off_loop() -> None:
-    source = (ROOT / "orchs/manager/_delegation.py").read_text(encoding="utf-8")
-    start = source.index("async def run_delegation(")
-    locked_start = source.index("async def run_delegation_locked(", start)
-    delegation_source = source[start:locked_start]
-    locked_end = source.index("def _remove_run_id() -> None:", locked_start)
-    locked_source = source[locked_start:locked_end]
-    assert "await asyncio.to_thread(\n        coordinator.turn_manager.run_state_add" in delegation_source
-    assert "await asyncio.to_thread(\n            coordinator.turn_manager.run_state_remove" in delegation_source
-    assert "await asyncio.to_thread(\n            coordinator.turn_manager.run_state_set_pid" in locked_source
-    assert "\n    coordinator.turn_manager.run_state_add(" not in delegation_source
-    assert "\n        coordinator.turn_manager.run_state_remove(" not in delegation_source
-    assert "\n        coordinator.turn_manager.run_state_set_pid(" not in locked_source
-
-
-def test_run_recovery_summarizes_repeated_skip_logs() -> None:
-    source = (ROOT / "run_recovery.py").read_text(encoding="utf-8")
-    assert "class _RecoveryLogSummary:" in source
-    assert "summary.record_skip(\"missing target_message_id\", run_id)" in source
-    assert "summary.record_tombstoned(reason, run_id)" in source
-    assert "summary.emit()" in source
-    assert "integrate_recovered_runs: skip %s (missing target_message_id)" in source
-    assert "integrate_recovered_runs: skipped %d run(s): %s%s" in source
-
-
-def test_provider_start_run_is_off_loop_everywhere() -> None:
-    """provider.start_run is synchronous and does blocking session-manager
-    reads (get_fields via _build_input_payload), input.json writes, and a
-    Popen. Running it on the asyncio event loop freezes the whole app for
-    tens of seconds during worker delegations, recovery retries, and
-    remote-node runs. Every call site MUST offload it via asyncio.to_thread
-    — parity with turn_manager's top-level spawn path."""
-    delegation = (ROOT / "orchs/manager/_delegation.py").read_text(encoding="utf-8")
-    assert "await asyncio.to_thread(\n                    provider.start_run," in delegation
-    assert "await asyncio.to_thread(session_manager.flush_pending_persists)" in delegation
-    assert "\n            provider.start_run(" not in delegation
-
-    recovery = (ROOT / "run_recovery.py").read_text(encoding="utf-8")
-    assert "await asyncio.to_thread(\n        provider.start_run," in recovery
-    assert "await asyncio.to_thread(session_manager.flush_pending_persists)" in recovery
-    assert "\n    provider.start_run(" not in recovery
-
-    node_rpc = (ROOT / "node_rpc_handlers.py").read_text(encoding="utf-8")
-    assert "await asyncio.to_thread(\n                provider.start_run," in node_rpc
-    assert "await asyncio.to_thread(session_manager.flush_pending_persists)" in node_rpc
-    assert "\n        provider.start_run(" not in node_rpc
-
-
-def test_extension_backend_get_skips_body_stream() -> None:
-    source = (ROOT / "extension_backend_loader.py").read_text(encoding="utf-8")
-    assert '_METHODS_WITH_REQUEST_BODY = {"POST", "PUT", "PATCH", "DELETE"}' in source
-    dispatch_start = source.index("async def dispatch_extension_backend_request(")
-    dispatch_end = source.index("async def invoke_extension_backend(", dispatch_start)
-    dispatch_source = source[dispatch_start:dispatch_end]
-    assert 'method = str(getattr(request, "method", "POST") or "POST").upper()' in dispatch_source
-    assert "if method in _METHODS_WITH_REQUEST_BODY" in dispatch_source
-    assert "else b\"\"" in dispatch_source
-
-
-def test_extension_backend_invoke_has_split_perf_timers() -> None:
-    source = (ROOT / "extension_backend_loader.py").read_text(encoding="utf-8")
-    assert "_EMPTY_B64 = \"\"" in source
-    start = source.index("async def _invoke_backend(")
-    end = source.index("async def dispatch_extension_backend_request(", start)
-    invoke_source = source[start:end]
-    for timer in (
-        "extension.backend.invoke.payload",
-        "extension.backend.invoke.handle",
-        "extension.backend.invoke.timeout",
-        "extension.backend.invoke.roundtrip",
-        "extension.backend.invoke.decode",
-        "extension.backend.invoke.response",
-    ):
-        assert timer in invoke_source
-    assert "body_b64 = (" in invoke_source
-    assert "if body_bytes" in invoke_source
-    dispatch_start = source.index("async def dispatch_extension_backend_request(")
-    dispatch_end = source.index("async def invoke_extension_backend(", dispatch_start)
-    dispatch_source = source[dispatch_start:dispatch_end]
-    assert "else _EMPTY_B64" in dispatch_source
-
-
-def test_builtin_extension_core_dispatch_precedes_backend_spec_lookup() -> None:
-    source = (ROOT / "extension_api.py").read_text(encoding="utf-8")
-    dispatch_start = source.index("async def dispatch_backend_extension(")
-    dispatch_end = source.index("async def _dispatch_core_builtin_backend(", dispatch_start)
-    dispatch_source = source[dispatch_start:dispatch_end]
-    assert dispatch_source.index("_dispatch_core_builtin_backend(") < dispatch_source.index(
-        "_backend_entrypoint_spec_async("
-    )
-    core_start = source.index("async def _dispatch_core_builtin_backend(")
-    core_end = source.index("async def _dispatch_machine_nodes_core_backend(", core_start)
-    core_source = source[core_start:core_end]
-    assert "roles, enabled = await _CORE_ROLE_EXECUTOR.run(" in core_source
-    assert "_core_routing_projection" in core_source
-    assert "owner == extension_id" in core_source
-    assert "owned_roles = {name for name, owner in roles.items()" in core_source
-    assert '("team-orchestration", _dispatch_team_orchestration_core_backend)' in core_source
-    assert '("scheduler", _dispatch_scheduler_core_backend)' in core_source
-    assert "_dispatch_scheduler_core_backend" in core_source
-    assert '("routines", _dispatch_routines_core_backend)' in core_source
-    assert "_dispatch_routines_core_backend" in core_source
-    assert '("project-structure", _dispatch_project_structure_core_backend)' in core_source
-    assert "if role not in owned_roles:" in core_source
-    assert "if not enabled:" in core_source
-    routing_start = source.index("def _core_routing_projection(")
-    routing_end = source.index("async def shutdown_hot_path_executors(", routing_start)
-    assert "extension_store.is_extension_enabled_cached(extension_id)" in source[routing_start:routing_end]
-    routines_start = source.index("async def _dispatch_routines_core_backend(")
-    routines_end = source.index("async def _dispatch_scheduler_core_backend(", routines_start)
-    routines_source = source[routines_start:routines_end]
-    assert 'request.method != "GET" or path != "routines"' in routines_source
-    assert "task_store.list_for_project" in routines_source
-    assert "extension_backend_loader" not in routines_source
-    scheduler_start = source.index("async def _dispatch_scheduler_core_backend(")
-    scheduler_end = source.index("async def _dispatch_team_orchestration_core_backend(", scheduler_start)
-    scheduler_source = source[scheduler_start:scheduler_end]
-    assert 'request.method != "GET"' in scheduler_source
-    assert 'parts[0] != "sessions"' in scheduler_source
-    assert 'parts[2] != "schedules"' in scheduler_source
-    assert "_run_scheduler_read(app_session_id)" in scheduler_source
-    helper_start = source.index("def _scheduler_session_snapshot(")
-    helper_end = source.index("def _local_node_id_or_primary_cached(", helper_start)
-    helper_source = source[helper_start:helper_end]
-    assert "session_manager.manager.get" in helper_source
-    assert 'session.get("id") != app_session_id' in helper_source
-    assert "schedule_store.list_for_session" in helper_source
-    assert "_SCHEDULER_READ_EXECUTOR" in helper_source
-    assert 'name="extension.scheduler.read"' in source
-    executor_source = (ROOT / "bounded_async_executor.py").read_text(encoding="utf-8")
-    assert 'f"{self._name}.queue_wait"' in executor_source
-    assert 'f"{self._name}.run"' in executor_source
-    assert 'f"{self._name}.rejected"' in executor_source
-    assert "extension_backend_loader" not in scheduler_source
-    team_start = source.index("async def _dispatch_team_orchestration_core_backend(")
-    team_end = source.index("async def _dispatch_machine_nodes_core_backend(", team_start)
-    team_source = source[team_start:team_end]
-    assert 'request.method == "GET" and path == "workers"' in team_source
-    assert 'request.method == "GET" and path == "pending_approvals"' in team_source
-    assert "team_orchestration_read.workers_response_bytes" in team_source
-    assert "pending_approvals.list_pending" in team_source
-    project_start = source.index("async def _dispatch_project_structure_core_backend(")
-    project_end = source.index("@router.post(\"/install\")", project_start)
-    project_source = source[project_start:project_end]
-    assert 'request.method == "GET" and path == "project-updates/total"' in project_source
-    assert 'request.method != "POST" or path != "project-updates/counts-batch"' in project_source
-    assert "project_update_store.peek_total_unseen()" in project_source
-    assert "project_update_store.peek_unseen_counts(project_ids)" in project_source
-    assert "await asyncio.to_thread(project_update_store.total_unseen)" in project_source
-    assert "await asyncio.to_thread(project_update_store.unseen_counts, project_ids)" in project_source
-
-
-def test_project_update_total_is_maintained_projection() -> None:
-    source = (ROOT / "project_update_store.py").read_text(encoding="utf-8")
-    assert "_total_unseen_count = 0" in source
-    assert "_counts_version = 0" in source
-    assert "def version_token(" in source
-    assert "def warm_counts(" in source
-    load_start = source.index("def _ensure_counts_locked(")
-    load_end = source.index("def _set_count_locked(", load_start)
-    load_source = source[load_start:load_end]
-    set_start = source.index("def _set_count_locked(")
-    set_end = source.index("def append(", set_start)
-    set_source = source[set_start:set_end]
-    total_start = source.index("def total_unseen(")
-    total_end = source.index("def mark_seen(", total_start)
-    total_source = source[total_start:total_end]
-    append_start = source.index("def append(")
-    append_end = source.index("def list_unseen(", append_start)
-    append_source = source[append_start:append_end]
-    mark_start = source.index("def mark_seen(")
-    mark_end = source.index("def list_all(", mark_start)
-    mark_source = source[mark_start:mark_end]
-    assert "_total_unseen_count = total" in load_source
-    assert "_read_entries_path_locked(path)" in load_source
-    assert "_read_entries_locked(path.stem)" not in load_source
-    assert "def _project_path(project_id: str, *, create_dir: bool = True)" in source
-    assert "_project_path(project_id, create_dir=False)" in source
-    assert "if count == previous:\n        return" in set_source
-    assert "_total_unseen_count += count - previous" in set_source
-    assert "_total_unseen_count -= previous" in set_source
-    assert "_counts_version += 1" in set_source
-    assert "_set_count_locked(project_id, _unseen_counts.get(project_id, 0) + 1)" in append_source
-    assert "_set_count_locked(project_id, _unseen_counts.get(project_id, 0) - count)" in mark_source
-    assert "return _total_unseen_count" in total_source
-    assert "sum(_unseen_counts.values())" not in total_source
-
-    main_source = (ROOT / "main.py").read_text(encoding="utf-8")
-    startup_start = main_source.index("async def on_startup()")
-    startup_end = main_source.index("async def on_shutdown()", startup_start)
-    startup_source = main_source[startup_start:startup_end]
-    assert '"project_update_counts_warm"' in startup_source
-    assert "project_update_store.warm_counts" in startup_source
-    assert 'name="startup-project-update-counts-warm"' in startup_source
-    helper_start = startup_source.index("def _warm_pending_node_projection()")
-    helper_end = startup_source.index("asyncio.create_task(", helper_start)
-    helper_source = startup_source[helper_start:helper_end]
-    assert "node_link.public_pending_nodes()" in helper_source
-    assert '"pending_node_projection_warm"' in startup_source
-    assert '"startup_tasks.pending_node_projection_warm"' in startup_source
-    assert 'name="startup-pending-node-projection-warm"' in startup_source
-
-
-def test_builtin_feature_enabled_has_cached_projection() -> None:
-    source = (ROOT / "extension_store.py").read_text(encoding="utf-8")
-    assert "_BUILTIN_FEATURE_CACHE" in source
-    assert "def is_builtin_feature_enabled_cached(" in source
-    assert "_STORE_FINGERPRINT_CACHE" in source
-    assert "_STORE_FINGERPRINT_TTL_SECONDS" in source
-    store_path_start = source.index("def _store_path(")
-    store_path_end = source.index("def store_fingerprint(", store_path_start)
-    store_path_source = source[store_path_start:store_path_end]
-    assert "_STORE_PATH" in source
-    assert "_STORE_PATH_HOME_KEY" in store_path_source
-    assert "_STORE_PATH_HOME_KEY != home_key" in store_path_source
-    assert "ba_home()" in store_path_source
-    start = source.index("def is_builtin_feature_enabled_cached(")
-    end = source.index("def is_extension_runtime_ready(", start)
-    helper_source = source[start:end]
-    assert "fingerprint = store_fingerprint()" in helper_source
-    assert "_BUILTIN_FEATURE_CACHE.get(extension_id)" in helper_source
-    assert "is_builtin_feature_enabled(extension_id)" in helper_source
-    fingerprint_start = source.index("def store_fingerprint(")
-    fingerprint_end = source.index("def _refresh_store_fingerprint_cache(", fingerprint_start)
-    fingerprint_source = source[fingerprint_start:fingerprint_end]
-    assert "_STORE_FINGERPRINT_CACHE_LOCK" in fingerprint_source
-    assert "hashlib.sha256(path.read_bytes()).hexdigest()" in fingerprint_source
-    assert "return cached[1]" in fingerprint_source
-    write_start = source.index("def _write_store_unlocked(")
-    write_end = source.index("def _merge_store_for_save(", write_start)
-    write_source = source[write_start:write_end]
-    assert "_refresh_store_fingerprint_cache(path)" in write_source
-    assert write_source.index("os.replace(tmp_name, path)") < write_source.index("_refresh_store_fingerprint_cache(path)")
-
-
-def test_extension_list_reconciliation_is_off_loop() -> None:
-    source = (ROOT / "extension_api.py").read_text(encoding="utf-8")
-    route_start = source.index("async def list_extensions(")
-    route_end = source.index("@router.get(\"/builtin-ids\")", route_start)
-    route_source = source[route_start:route_end]
-    assert "fingerprint = await _extension_store_fingerprint_async()" in route_source
-    assert "cache_key = (fingerprint, include_hidden)" in route_source
-    assert '_projection_response_cache_get("list", cache_key)' in route_source
-    assert "await asyncio.to_thread(\n        extension_store.list_extensions_with_reconciliation" in route_source
-    assert "extensions, changed = extension_store.list_extensions_with_reconciliation" not in route_source
-    assert '_projection_response_cache_put("list", cache_key, {"extensions": extensions})' in route_source
-
-
-def test_internal_communication_worker_lookup_is_off_loop() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
-    resolver_start = source.index("async def _resolve_communication_target(")
-    resolver_end = source.index("@app.post(\"/api/internal/ask\")", resolver_start)
-    resolver_source = source[resolver_start:resolver_end]
-    assert "await asyncio.to_thread(_find_worker_by_agent_session_id" in resolver_source
-    assert "await asyncio.to_thread(\n        _pick_pool_worker_for_sender" in resolver_source
-
-    async_start = source.index("async def _ask_continue_and_expect_mssg_back_async(")
-    async_end = source.index("async def _ask_wait_and_grab_last_assistant_mssg_in_turn(", async_start)
-    async_source = source[async_start:async_end]
-    assert "await asyncio.to_thread(\n            _pick_pool_worker_for_sender" in async_source
-    assert "await _resolve_communication_target(body)" in async_source
-    assert "target = _pick_idle_pool_worker(target_worker_pool)" not in async_source
 
 
 def test_ba_home_memoizes_resolution_off_loop() -> None:
@@ -4724,3 +1387,2554 @@ if __name__ == "__main__":
     test_ba_home_memoizes_resolution_off_loop()
     test_provider_start_run_is_off_loop_everywhere()
     print("PASS event loop blocking regressions")
+
+
+# Static source-grep regression cases collapsed into one data-driven test.
+# Entry: (label, checks). Check kinds:
+#   ("grep", file, steps, must, must_not) — containment within the region
+#   ("any_in", file, steps, needles) — at least one needle in the region
+#   ("ordered", file, steps, paths) — anchor-path positions strictly increase
+#   ("count_eq"/"count_ge", file, steps, needle, n) — occurrence count bound
+# steps narrow the file text: each (start, end) keeps text from the first
+# occurrence of start (file head if None) up to the first following end
+# (file tail if None).
+SOURCE_GREP_CASES: tuple = (
+    ('hook_runner_loads_config_off_loop', (
+     ('grep', 'hook_runner.py', (), ('hooks = await asyncio.to_thread(hook_store.list_hooks)',),
+      ('hooks = hook_store.list_hooks()',),
+     ),
+    )),
+    ('wire_tailer_gap_fill_reads_journal_off_loop', (
+     ('grep', 'jsonl_tailer.py', (),
+      ('await asyncio.to_thread(\n                event_journal_reader.read_events',
+       'cursor = await asyncio.to_thread(event_journal_reader.cursor',
+      ),
+      ('events, _, _ = event_journal_reader.read_events(', 'cursor = event_journal_reader.cursor('),
+     ),
+    )),
+    ('hot_path_warning_logs_are_off_loop', (
+     ('grep', 'main.py', (),
+      ('_LOG_WRITE_EXECUTOR = ThreadPoolExecutor(', 'def _warning_off_loop(', 'def _frontend_log_off_loop('), (),
+     ),
+     ('grep', 'main.py', (('async def _event_loop_lag_monitor()', 'asyncio.create_task('),),
+      ('_warning_off_loop("event loop lag %.3fs", lag)',), ('logger.warning("event loop lag %.3fs", lag)',),
+     ),
+     ('grep', 'main.py', (('class _WebSocketOutbox:', '@app.websocket("/ws/chat")'),), ('_warning_off_loop(',),
+      ('logger.warning(\n                "slow WebSocket send type=%s elapsed_ms=%.1f"',),
+     ),
+     ('grep', 'main.py', (('async def frontend_log(', '@app.get("/api/mobile/bundle/manifest")'),),
+      ('_frontend_log_off_loop(log_level, line)',), ('frontend_logger.log(log_level, line)',),
+     ),
+    )),
+    ('websocket_json_serializes_off_loop', (
+     ('grep', 'main.py', (('class _WebSocketOutbox:', '@app.websocket("/ws/chat")'),),
+      ('perf.LaggedQueue(', 'asyncio.create_task(self._writer())', 'self._queue.put_nowait(queued_item)',
+       'await self._websocket.send_text(text)', 'await self._on_close()',
+       'serialized_task = getattr(event_dict, "_bc_serialized_json_task", None)',
+       'text = await asyncio.shield(serialized_task)', 'text = await dumps_ws_json(event_dict)',
+       'ws.send_json.serialize_off_loop', 'ws.phase.serializer_submit_start', 'ws.phase.serializer_start_done',
+       'ws.phase.serializer_done_writer_dequeue', 'ws.phase.writer_dequeue_await_start',
+       'ws.phase.serializer_done_await_resume', 'ws.phase.serializer_resume_wire_start', 'ws.phase.wire_start_resume',
+       'ws.phase.lag_overlap',
+      ),
+      ('timeout=self._send_timeout_s', 'ws.send_json.lock_wait'),
+     ),
+     ('grep', 'main.py', (('async def ws_callback(event_dict):', '# Per-connection token'),),
+      ('await _send_ws_callback_event(snapshot_transport, event_dict)',),
+      ('await websocket.send_text(text)', 'await websocket.send_json(event_dict)'),
+     ),
+     ('grep', 'ws_serialization.py', (),
+      ('ThreadPoolExecutor(', 'thread_name_prefix="ws-json"', 'async def dumps_ws_json(',
+       'def shutdown_ws_json_executor()',
+      ),
+      (),
+     ),
+     ('grep', 'orchestrator.py', (), ('SerializedGlobalEvent',), ()),
+     ('grep', 'orchestrator.py', (('def _schedule_prepared_global(', 'async def _schedule_prepared_global_async('),),
+      ('_bc_serialized_json_task', 'dumps_ws_json(event)'), (),
+     ),
+     ('grep', 'ws_snapshot_transport.py', (), ('await asyncio.shield(serialized_task)',), ()),
+    )),
+    ('resolved_event_reader_keeps_unfiltered_reads_paged', (
+     ('grep', 'event_journal.py',
+      (('class EventJournalReader', None), ('    def read_events(', '    def read_orphan_events(')),
+      ('if msg_id_filter:', 'limit=999_999', 'limit=page_limit + 1'), (),
+     ),
+     ('grep', 'event_journal.py',
+      (('class EventJournalReader', None), ('    def read_events(', '    def read_orphan_events('), ('else:', None)),
+      (), ('limit=999_999',),
+     ),
+    )),
+    ('ws_gap_fill_paginates_until_target_seq', (
+     ('grep', 'jsonl_tailer.py', (('    async def _fill_gap(', '    async def _send('),),
+      ('while self.next_seq <= until_seq:', 'has_more', 'if not has_more:', 'break'), (),
+     ),
+    )),
+    ('jsonl_dispatch_reads_session_lite_off_loop', (
+     ('grep', 'jsonl_tailer.py', (), ('await asyncio.to_thread(session_manager.get_lite, self.app_session_id)',),
+      ('sess = session_manager.get_lite(self.app_session_id)',),
+     ),
+    )),
+    ('gemini_polling_tailer_reads_file_off_loop', (
+     ('grep', 'jsonl_tailer.py', (('class GeminiJsonlTailer', 'class OwnedClaudeJsonlTailer'),),
+      ('new_lines = await asyncio.to_thread(self._read_new_lines)',), ('new_lines = self._read_new_lines()',),
+     ),
+    )),
+    ('codex_rollout_tailer_reads_file_off_loop', (
+     ('grep', 'codex_native.py',
+      (('class CodexRolloutTailer', 'async def _dispatch('),
+       ('async def _drain_available_locked(', 'def _read_available_lines('),
+      ),
+      ('lines = await asyncio.to_thread(', 'self._read_available_lines'), ('self.path.open', '.readline()'),
+     ),
+     ('grep', 'codex_native.py',
+      (('class CodexRolloutTailer', 'async def _dispatch('), ('async def _drain_available_locked(', None),
+       ('def _read_available_lines(', None),
+      ),
+      ('with self.path.open("rb") as f:', 'raw = f.readline()'), (),
+     ),
+    )),
+    ('event_ingester_file_ref_context_uses_summary_projection', (
+     ('grep', 'event_ingester.py', (('def _ref_ctx_for_root(', 'class EventIngester:'),),
+      ('session_store.summary_fields_many([root_id], ("cwd", "node_id"))',),
+      ('session_manager.get_lite(', 'session_manager.get('),
+     ),
+     ('grep', 'event_ingester.py', (('def _root_dir(', 'def _events_path('),),
+      ('session_store.session_file_path(root_id)',), ('bc_home()', 'ba_home()'),
+     ),
+    )),
+    ('ui_selection_uses_cached_path_and_snapshots_written_data', (
+     ('grep', 'ui_selection.py', (), ('_PATH = ba_home() / "app-state" / "ui-selection.json"',), ()),
+     ('grep', 'ui_selection.py', (('def _path():', 'def _load()'),), (), ('ba_home()',)),
+     ('grep', 'ui_selection.py', (('def set_selected_project(', 'def _remembered_sessions_from('),),
+      ('return _snapshot(data)',), ('return get_all()',),
+     ),
+     ('grep', 'ui_selection.py', (('def set_remembered_session(', 'def _snapshot('),), ('return _snapshot(data)',),
+      ('return get_all()',),
+     ),
+    )),
+    ('ui_selection_routes_use_hot_path_executor', (
+     ('grep', 'bff_app_routes.py', (('async def get_ui_selection(', '@router.patch("/api/ui-selection")'),),
+      ('await asyncio.to_thread(ui_selection.get_all)',), (),
+     ),
+     ('grep', 'bff_app_routes.py', (('async def patch_ui_selection(', None),),
+      ('await asyncio.to_thread(_patch_sync)',), (),
+     ),
+    )),
+    ('user_prefs_uses_cached_path_for_hot_reads', (
+     ('grep', 'user_prefs.py', (), ('_PREFS_PATH = bc_home() / "user_prefs.json"',), ()),
+     ('grep', 'user_prefs.py', (('def _prefs_path():', 'def _load()'),), (), ('bc_home()', 'ba_home()')),
+    )),
+    ('auto_restart_pref_read_is_off_loop', (
+     ('grep', 'auto_restart_on_idle.py', (('async def _tick(', 'busy = await asyncio.to_thread(self._is_busy)'),),
+      ('await asyncio.to_thread(self._is_enabled)',), ('if not self._is_enabled():',),
+     ),
+    )),
+    ('session_opened_avoids_full_session_copy', (
+     ('grep', 'main.py', (('async def mark_session_opened(', '@app.'),),
+      ('return_session=False', 'await _run_hot_path(\n        "session.opened.set_last_opened_at"'),
+      ('asyncio.to_thread(',),
+     ),
+     ('grep', 'session_manager.py', (('def set_last_opened_at(', 'def set_archived('),),
+      ('return_session: bool = True', '{"id": sid, "last_opened_at": at}'), (),
+     ),
+    )),
+    ('jsonl_fallback_followers_poll_files_off_loop', (
+     ('grep', 'jsonl_tailer.py', (('class _FileTailFollower:', 'class _AppendOnlyByteFollower:'),),
+      ('_FILE_POLL_EXECUTOR',), ('size = self._path.stat().st_size',),
+     ),
+     ('grep', 'jsonl_tailer.py', (('class _AppendOnlyByteFollower:', 'class ClaudeJsonlTailer'),),
+      ('_FILE_POLL_EXECUTOR',), ('st = self._path.stat()',),
+     ),
+     ('grep', 'jsonl_tailer.py',
+      (('class _FileTailFollower:', 'class _AppendOnlyByteFollower:'), (None, 'def _read_from_sync')), (),
+      ('with open(self._path, "rb") as f:',),
+     ),
+     ('grep', 'jsonl_tailer.py',
+      (('class _AppendOnlyByteFollower:', 'class ClaudeJsonlTailer'), (None, 'def _read_from_sync')), (),
+      ('with open(self._path, "rb") as f:',),
+     ),
+    )),
+    ('live_provider_stream_mutation_skips_cold_event_hydration', (
+     ('grep', 'turn_manager.py', (),
+      ('_STREAM_EVENT_APPLY_EXECUTOR = ThreadPoolExecutor(', 'thread_name_prefix="stream-event-apply"'), (),
+     ),
+     ('grep', 'turn_manager.py',
+      (('    def _apply_provider_stream_event_sync(', '    async def _publish_provider_stream_event('),),
+      ('session_manager.message_batch(', 'hydrate_events=False'), (),
+     ),
+     ('grep', 'turn_manager.py',
+      (('async def save_ws_callback(', '            if event_dict.get("type") in _BRIDGE_EVENT_TYPES:'),),
+      ('run_in_executor(\n                        _STREAM_EVENT_APPLY_EXECUTOR',),
+      ('session_manager.message_batch(', 'with session_manager.batch(persist_to):'),
+     ),
+    )),
+    ('provider_context_runtime_discovery_runs_off_loop', (
+     ('grep', 'turn_manager.py',
+      (('        runtime_capability_contexts = await asyncio.to_thread(', '        transient_attempt = 0'),),
+      ('runtime_capability_contexts = await asyncio.to_thread(', 'runtime_skill_contexts,',
+       'dynamic_capability_contexts = await asyncio.to_thread(', 'extension_audit_context,',
+      ),
+      (),
+     ),
+     ('grep', 'turn_manager.py',
+      (('        async def _refresh_provider_context()', '        async def _start_selector_change_continuation('),),
+      ('runtime_capability_contexts = await asyncio.to_thread(', 'runtime_skill_contexts,',
+       'dynamic_capability_contexts = await asyncio.to_thread(', 'extension_audit_context,',
+      ),
+      (),
+     ),
+     ('grep', 'turn_manager.py',
+      (('        async def _refresh_provider_context()', None),
+       ('        async def _start_selector_change_continuation(', None),
+       ('        while True:', '            if cancel_event.is_set():'),
+      ),
+      ('await _refresh_provider_context()',), (),
+     ),
+    )),
+    ('continuation_start_boundary_runs_off_loop', (
+     ('grep', 'turn_manager.py',
+      (('        loop = asyncio.get_running_loop()', '        async def _clear_continuation_active()'),),
+      ('_session_rec = await asyncio.to_thread(\n            session_manager.get,',
+       'provider = await asyncio.to_thread(\n            self._c.provider_for_run,',
+       '_session_rec_chain = (_session_rec or {}).get("continuation_chain") or []',
+      ),
+      ('session_manager.get(primary_session_id or app_session_id)',),
+     ),
+     ('grep', 'turn_manager.py',
+      (('        async def _clear_continuation_active()', '        def _should_preempt_context_continuation_sync()'),),
+      ('await asyncio.to_thread(\n                session_manager.set_msg_continuation_active',), (),
+     ),
+     ('grep', 'turn_manager.py',
+      (('        def _start_continuation_sync(', '        async def _start_context_continuation('),),
+      ('start_continuation_for(', 'session_manager.set_msg_continuation_active('), (),
+     ),
+     ('grep', 'turn_manager.py',
+      (('        def _start_continuation_sync(', None),
+       ('        async def _start_context_continuation(',
+        '        def _should_preempt_selector_change_continuation_sync()',
+       ),
+      ),
+      ('continuation = await asyncio.to_thread(\n                _start_continuation_sync,',),
+      ('start_continuation_for(', 'session_manager.set_msg_continuation_active('),
+     ),
+     ('grep', 'turn_manager.py', (('        async def _start_selector_change_continuation(', '        while True:'),),
+      ('continuation = await asyncio.to_thread(\n                _start_continuation_sync,',),
+      ('start_continuation_for(', 'session_manager.set_msg_continuation_active('),
+     ),
+     ('grep', 'turn_manager.py',
+      (('        async def _refresh_provider_context()', '        async def _start_selector_change_continuation('),),
+      ('_session_rec = await asyncio.to_thread(\n                session_manager.get,',
+       'provider = await asyncio.to_thread(\n                self._c.provider_for_session,',
+      ),
+      (),
+     ),
+     ('grep', 'turn_manager.py',
+      (('        async def _context_strategy_is_continuation()', '        async def _refresh_provider_context()'),),
+      ('await asyncio.to_thread(user_prefs.get_context_strategy)',), (),
+     ),
+     ('grep', 'turn_manager.py',
+      (('        async def _start_selector_change_continuation(', None),
+       ('            # ── Context-window overflow', '            if (not success'),
+      ),
+      ('if await _context_strategy_is_continuation():',), ('user_prefs.get_context_strategy()',),
+     ),
+    )),
+    ('provisioning_run_lifecycle_runs_off_loop', (
+     ('grep', 'provisioning/manager.py', (('async def run(', 'def _lifecycle_lock('),),
+      ('await _ensure_ready_lifecycle(',),
+      ('with _acquired_lifecycle_lock(spec, cfg):', 'base_session_id = ensure_session(spec, cfg)',
+       'caller_session_id = ensure_caller(spec, cfg)',
+      ),
+     ),
+     ('grep', 'provisioning/manager.py', (('async def _ensure_ready_lifecycle(', '@asynccontextmanager'),),
+      ('async with _async_acquired_lifecycle_lock(spec, cfg):', 'await _ensure_ready_base_locked(spec, cfg, ctx)',
+       'await asyncio.to_thread(ensure_caller, spec, cfg)',
+      ),
+      (),
+     ),
+    )),
+    ('requirements_internal_routes_use_dedicated_executor', (
+     ('grep', 'main.py', (),
+      ('run_requirements_processor_query(\n            "requirements.processed.processor",',
+       'run_requirements_query(\n        "requirements.processed.finalize",',
+       'except TimeoutError as exc:\n        processed = requirement_context.processor_failure_result(exc)',
+       'executor=REQUIREMENTS_PROCESSOR_EXECUTOR', 'run_requirements_query(\n        "requirements.search",',
+       'executor=REQUIREMENTS_SEARCH_EXECUTOR',
+      ),
+      ('_REQUIREMENTS_QUERY_EXECUTOR', '_run_requirements_query',
+       'asyncio.to_thread(\n        requirement_context.get_processed_requirements,',
+       'asyncio.to_thread(\n        requirement_context.search_requirements,',
+      ),
+     ),
+    )),
+    ('worker_panel_mutations_skip_cold_event_hydration', (
+     ('grep', 'session_manager.py', (('    def _run(', '    @perf.timed_fn("session.persist_root")'),),
+      ('hydrate_events: bool = True', 'self._cached(sid, hydrate_events=hydrate_events)'), (),
+     ),
+     ('grep', 'session_manager.py', (('    def snapshot_workers(', '\n    def '),), ('hydrate_events=False',), ()),
+     ('grep', 'session_manager.py', (('    def upsert_worker_panel(', '\n    def '),), ('hydrate_events=False',), ()),
+     ('grep', 'session_manager.py', (('    def update_worker_panel(', '\n    def '),), ('hydrate_events=False',), ()),
+     ('grep', 'session_manager.py', (('    def apply_worker_panel_event(', '\n    def '),), ('hydrate_events=False',),
+      (),
+     ),
+    )),
+    ('native_event_mutations_skip_cold_event_hydration', (
+     ('grep', 'session_manager.py', (('    def append_native_event(', '\n    def '),), ('hydrate_events=False',), ()),
+     ('grep', 'session_manager.py', (('    def replace_native_event(', '\n    def '),), ('hydrate_events=False',), ()),
+    )),
+    ('subagent_watcher_scans_files_off_loop', (
+     ('grep', 'jsonl_tailer.py', (),
+      ('_SUBAGENT_SCAN_EXECUTOR = ThreadPoolExecutor(', 'thread_name_prefix="subagent-scan"',
+       '_SUBAGENT_SCAN_MAX_PENDING_FUTURES = 2', 'def _subagent_scan_semaphore() -> asyncio.Semaphore:',
+       '_SUB_DIR_IDLE_POLL_INTERVAL', '_SUB_DIR_IDLE_BACKOFF', '_SUB_DIR_PENDING_FAST_SECONDS',
+       'self._subagent_scan_wakeup: Optional[asyncio.Event] = None', 'self._subagent_pending_fast_until = 0.0',
+       'def _should_scan_subagents(self) -> bool:',
+      ),
+      (),
+     ),
+     ('grep', 'jsonl_tailer.py', (('    def _decode_line(', '    def _advance_cursor('),),
+      ('pending_before = self._subagent_pending_count()', 'self._mark_subagent_pending_fast()'), (),
+     ),
+     ('grep', 'jsonl_tailer.py', (('async def _watch_subagents(', 'def _scan_subagent_files('),),
+      ('if self._should_scan_subagents():', 'async with _subagent_scan_semaphore():', 'await loop.run_in_executor(',
+       '_SUBAGENT_SCAN_EXECUTOR', 'perf.timed("tailer.subagent_scan")',
+       'poll_interval = self._next_subagent_poll_interval(',
+       'await asyncio.wait_for(wakeup.wait(), timeout=poll_interval)', 'self._has_fresh_subagent_pending()',
+       'self._mark_subagent_pending_fast()',
+      ),
+      ('await asyncio.to_thread(\n                    self._scan_subagent_files', '.exists()', '.glob(', '.iterdir(',
+       '.read_text(',
+      ),
+     ),
+     ('ordered', 'jsonl_tailer.py', (('async def _watch_subagents(', 'def _scan_subagent_files('),),
+      (('if self._should_scan_subagents():',), ('async with _subagent_scan_semaphore():',)),
+     ),
+     ('grep', 'jsonl_tailer.py', (('    def _apply_subagent_scan(', '    def _spawn_sub_tailer('),),
+      (') -> int:', 'return applied'), (),
+     ),
+    )),
+    ('delegation_locked_reuses_worker_session_snapshot', (
+     ('grep', 'orchs/manager/_delegation.py', (('async def run_delegation_locked(', '    if machine_completion:'),),
+      ('worker_session: dict', 'provider_run_config = worker_session.get("provider_run_config")',
+       'capability_contexts = worker_session.get("capability_contexts")', 'worker_session.get("reasoning_effort")',
+      ),
+      ('worker_session_for_path = session_manager.get(worker_agent_session_id)',
+       'session_manager.get(worker_agent_session_id)',
+      ),
+     ),
+    )),
+    ('async_provider_resolution_runs_off_loop', (
+     ('grep', 'orchs/manager/_delegation.py', (('async def run_delegation(', 'async def run_delegation_locked('),),
+      ('await asyncio.to_thread(\n                    coordinator.provider_for_session',
+       'coordinator.provider_for_session,\n            worker_session_id',
+      ),
+      ('coordinator.provider_for_session(worker_session_id)',),
+     ),
+     ('grep', 'orchs/manager/_delegation.py', (('async def run_delegation_locked(', None),),
+      ('coordinator.provider_for_run,\n        worker_agent_session_id',),
+      ('coordinator.provider_for_run(worker_agent_session_id, provider_id)',),
+     ),
+     ('grep', 'main.py',
+      (('@app.post("/api/internal/headless-generate")', '@app.post("/api/internal/headless-run")'),),
+      ('provider = await asyncio.to_thread(coordinator.provider_for_session, session_id)',), (),
+     ),
+    )),
+    ('delegation_state_store_calls_run_off_loop', (
+     ('grep', 'orchs/manager/_delegation.py', (('async def run_delegation(', 'async def run_delegation_locked('),),
+      ('caller_session = await asyncio.to_thread(session_manager.get',
+       'worker_session = await asyncio.to_thread(session_manager.get',
+       'worker_record_result = await asyncio.to_thread(\n        _find_worker_record',
+      ),
+      ('session_manager.get(worker_session_id)', 'worker_store.get_worker(candidate_cwd, worker_session_id)',
+       'worker_store.remove_worker(candidate_cwd, worker_session_id)',
+      ),
+     ),
+     ('grep', 'orchs/manager/_delegation.py', (('async def run_delegation_locked(', None),),
+      ('await asyncio.to_thread(\n                session_fork_store.get_fork_record',
+       'await asyncio.to_thread(session_manager.get, fork_agent_session_id)',
+       'await asyncio.to_thread(session_manager.delete, fork_agent_session_id)',
+       'fork_bc = await asyncio.to_thread(\n                session_manager.create_delegate_fork',
+       'manager_session = await asyncio.to_thread(session_manager.get, app_session_id)',
+      ),
+      ('session_fork_store.get_fork_record(cwd, app_session_id', 'session_manager.get(fork_agent_session_id)',
+       'session_manager.create_delegate_fork(',
+      ),
+     ),
+    )),
+    ('provider_event_rewrite_uses_file_ref_context_not_lite_copy', (
+     ('grep', 'orchs/base.py', (('def prepare_provider_event_for_journal(', '    def _apply_worker_event('),),
+      ('session_manager.get_file_ref_context(app_session_id)', 'assume_exists_for_node(node_id)'),
+      ('session_manager.get_lite(app_session_id)',),
+     ),
+    )),
+    ('publish_event_sync_resolves_cwd_without_full_session_copy', (
+     ('grep', 'event_journal.py', (('def publish_event_sync(', 'class _RootExecutor('),),
+      ('session_manager.get_file_ref_context(context_id or session_id)',),
+      ('session_manager.get_lite(', 'session_manager.get('),
+     ),
+    )),
+    ('jsonl_dispatch_ingests_orphans_off_loop', (
+     ('grep', 'jsonl_tailer.py', (),
+      ('accepted, _ = await asyncio.to_thread(\n                    session_manager.run_if_owner',
+       'lambda: strategy.ingest_orphan(',
+      ),
+      (),
+     ),
+    )),
+    ('wire_tailer_subscribe_resolves_root_off_loop', (
+     ('grep', 'orchestrator.py', (('async def _subscribe_to_wire_tailer(', '    def _publish_native_demand('),),
+      ('root_id = await asyncio.to_thread(\n            session_manager._root_id_for', 'root_id=root_id'),
+      ('root_id = session_manager._root_id_for(app_session_id)',),
+     ),
+    )),
+    ('native_demand_publish_does_not_leak_coroutine_without_loop', (
+     ('grep', 'orchestrator.py', (('    def _publish_native_demand(', '    def _unsubscribe_from_wire_tailer('),),
+      ('loop = asyncio.get_running_loop()', 'except RuntimeError:\n            return',
+       'loop.create_task(\n            bus.publish(',
+      ),
+      ('asyncio.create_task(\n                bus.publish(',),
+     ),
+    )),
+    ('wire_tailer_unsubscribe_uses_cached_subscriber_root', (
+     ('grep', 'orchestrator.py', (('    def _unsubscribe_from_wire_tailer(', '    def _maybe_stop_wire_tailer('),),
+      ('root_ids.add(sub.root_id)',), ('session_manager._root_id_for',),
+     ),
+     ('grep', 'orchestrator.py', (('    def _maybe_stop_wire_tailer(', '    async def _await_tailer_stop('),),
+      ('def _maybe_stop_wire_tailer(self, root_id: str, app_session_id: str)',), ('session_manager._root_id_for',),
+     ),
+    )),
+    ('root_session_write_does_not_resolve_root_id', (
+     ('grep', 'session_store.py', (('def write_session_full(', 'def delete_session('),),
+      ('path = _root_file_path(root["id"])',), ('_session_path(root["id"])', '_resolve_root_id(root'),
+     ),
+    )),
+    ('session_first_prompt_search_uses_summary_index', (
+     ('grep', 'session_store.py', (('def _build_summary_for_root(', 'def set_requirement_tags_projection('),),
+      ('"first_prompt": _first_user_prompt(root)',), (),
+     ),
+     ('grep', 'session_store.py', (('def _metadata_search_scores(', 'def grep_session_scores('),),
+      ('rows = _metadata_search_rows()', 'for sid, title, first_prompt in rows:',
+       'score = first_prompt.count(query_lower)',
+      ),
+      ('json.loads(path.read_text', '_migrate_session('),
+     ),
+    )),
+    ('session_content_search_aggregates_in_sqlite', (
+     ('grep', 'session_search_index.py', (('def search(', 'def has_indexed_rows('),),
+      ('_candidate_scores(conn, q, limit)', 'event = _inflight_event_for_limit(q, limit)'), ('lower().count',),
+     ),
+     ('grep', 'session_search_index.py', (), ('def _inflight_event_for_limit(',), ()),
+     ('grep', 'session_search_index.py', (('def _candidate_scores(', 'def _match_literal('),),
+      ('COUNT(*) AS score', 'GROUP BY session_id ORDER BY score DESC LIMIT ?'), ('SELECT session_id, text',),
+     ),
+    )),
+    ('bounded_session_content_search_stops_sqlite_scan', (
+     ('grep', 'session_search_index.py', (('def search(', 'def has_indexed_rows('),),
+      ('args=(cache_key, q, limit, max_wait_seconds, event)',), (),
+     ),
+     ('grep', 'session_search_index.py', (('def _run_search_cache_fill(', 'def has_indexed_rows('),),
+      ('deadline = (', '_candidate_scores(conn, query, limit, deadline=deadline)'), (),
+     ),
+     ('grep', 'session_search_index.py', (('def _candidate_scores(', 'def _match_literal('),),
+      ('conn.set_progress_handler(', 'time.monotonic() >= deadline', 'conn.set_progress_handler(None, 0)',
+       'interrupted',
+      ),
+      (),
+     ),
+    )),
+    ('session_content_search_uses_readonly_connection_without_writer_lock', (
+     ('grep', 'session_search_index.py', (),
+      ('_readonly_conn_local = threading.local()', 'def _readonly_connection()', '_WRITER_CACHE_KIB = 200_000',
+       '_READONLY_CACHE_KIB = 8_192',
+      ),
+      (),
+     ),
+     ('grep', 'session_search_index.py', (('def search(', 'def has_indexed_rows('),),
+      ('conn = _readonly_connection()',), ('conn.close()', 'with _lock:', '_connect()'),
+     ),
+     ('grep', 'session_search_index.py', (('def _connect_readonly(', 'def _configure_connection('),),
+      ('_configure_connection(conn, readonly=True)',), (),
+     ),
+     ('grep', 'session_search_index.py', (('def _configure_connection(', 'def _event_text('),),
+      ('cache_kib = _READONLY_CACHE_KIB if readonly else _WRITER_CACHE_KIB',
+       'conn.execute(f"PRAGMA cache_size=-{cache_kib}")', 'PRAGMA temp_store=MEMORY', 'PRAGMA mmap_size=268435456',
+      ),
+      (),
+     ),
+    )),
+    ('session_search_delete_is_queued_projection_work', (
+     ('grep', 'session_search_index.py', (), ('_writer_conn', 'def _writer_connection()'), ()),
+     ('grep', 'session_search_index.py', (('def delete_session(', 'def search('),),
+      ('_queue.put((session_id, None))',), ('with _lock:',),
+     ),
+     ('grep', 'session_search_index.py', (('def _apply_rows_to_conn(', 'def _drain_pending('),),
+      ('conn = _writer_connection()', 'DELETE FROM session_event_fts'), ('conn.close()', 'conn = _connect()'),
+     ),
+    )),
+    ('event_journal_rejects_late_writes_after_close', (
+     ('grep', 'event_journal.py', (),
+      ('self._closed = False', 'self._closed = True',
+       'raise EventJournalWriteError("event journal writer is closed")',
+      ),
+      (),
+     ),
+    )),
+    ('publish_event_default_path_skips_temp_ack_subscribers', (
+     ('grep', 'event_journal.py',
+      (('async def publish_event(', 'def publish_event_sync('),
+       ('if bus_instance is bus:', 'loop = asyncio.get_running_loop()'),
+      ),
+      ('event_journal_writer.submit_event_async(Event(',), ('bus_instance.subscribe(', 'event_journal_ack_'),
+     ),
+    )),
+    ('broadcast_session_journal_write_runs_off_loop', (
+     ('grep', 'orchestrator.py', (('async def broadcast_session(', 'async def broadcast_global('),),
+      ('await publish_event(',), ('await asyncio.to_thread(', '_broadcast_session_sync', 'publish_event_sync('),
+     ),
+    )),
+    ('provider_complete_watcher_filesystem_poll_runs_off_loop', (
+     ('grep', 'provider.py', (),
+      ('def _new_provider_poll_executor()', 'def reopen_provider_tasks() -> None:',
+       'thread_name_prefix="provider-poll"', 'async def path_exists_off_loop(path: Path) -> bool:',
+       'run_in_executor(_PROVIDER_POLL_EXECUTOR, path.exists)', 'async def shutdown_provider_tasks() -> None:',
+       '_PROVIDER_TASKS_ACCEPTING = False', 'await asyncio.gather(*tasks, return_exceptions=True)',
+      ),
+      (),
+     ),
+     ('grep', 'provider_claude.py', (('async def _watch_complete(', 'async def _watch_process_exit('),),
+      ('await path_exists_off_loop(complete_path)',),
+      ('await asyncio.to_thread(complete_path.exists)', 'complete_path.exists()'),
+     ),
+     ('any_in', 'provider_claude.py', (('async def _bootstrap_run(', 'if runner_state is None:'),),
+      ('await path_exists_off_loop(state_path)', 'await path_exists_off_loop(runner_state_path)'),
+     ),
+     ('grep', 'provider_claude.py', (('async def _bootstrap_run(', 'if runner_state is None:'),),
+      ('await path_exists_off_loop(complete_path)',),
+      ('state_path.exists()', 'runner_state_path.exists()', 'complete_path.exists()'),
+     ),
+     ('grep', 'provider_codex.py', (('async def _watch_complete(', 'async def _ensure_child_tailer('),),
+      ('await path_exists_off_loop(complete_path)',),
+      ('await asyncio.to_thread(complete_path.exists)', 'complete_path.exists()'),
+     ),
+     ('any_in', 'provider_codex.py', (('async def _bootstrap_run(', 'if runner_state is None:'),),
+      ('await path_exists_off_loop(state_path)', 'await path_exists_off_loop(runner_state_path)'),
+     ),
+     ('grep', 'provider_codex.py', (('async def _bootstrap_run(', 'if runner_state is None:'),),
+      ('await path_exists_off_loop(complete_path)',),
+      ('state_path.exists()', 'runner_state_path.exists()', 'complete_path.exists()'),
+     ),
+     ('grep', 'provider_gemini.py',
+      (('async def _watch_complete(',
+        '# ------------------------------------------------------------------\n    # _emit_complete_from_file',
+       ),
+      ),
+      ('await path_exists_off_loop(complete_path)',),
+      ('await asyncio.to_thread(complete_path.exists)', 'complete_path.exists()'),
+     ),
+     ('any_in', 'provider_gemini.py', (('async def _bootstrap_run(', 'if runner_state is None:'),),
+      ('await path_exists_off_loop(state_path)', 'await path_exists_off_loop(runner_state_path)'),
+     ),
+     ('grep', 'provider_gemini.py', (('async def _bootstrap_run(', 'if runner_state is None:'),),
+      ('await path_exists_off_loop(complete_path)',),
+      ('state_path.exists()', 'runner_state_path.exists()', 'complete_path.exists()'),
+     ),
+     ('grep', 'provider_openai.py', (('async def _watch_complete(', 'async def _emit_complete_from_file('),),
+      ('await path_exists_off_loop(complete_path)',),
+      ('await asyncio.to_thread(complete_path.exists)', 'complete_path.exists()'),
+     ),
+     ('any_in', 'provider_openai.py', (('async def _bootstrap_run(', 'if runner_state is None:'),),
+      ('await path_exists_off_loop(state_path)', 'await path_exists_off_loop(runner_state_path)'),
+     ),
+     ('grep', 'provider_openai.py', (('async def _bootstrap_run(', 'if runner_state is None:'),),
+      ('await path_exists_off_loop(complete_path)',),
+      ('state_path.exists()', 'runner_state_path.exists()', 'complete_path.exists()'),
+     ),
+    )),
+    ('codex_cursor_state_write_is_coalesced_off_loop', (
+     ('grep', 'provider_codex.py', (('        def _on_cursor(', '        rs.tailer = CodexRolloutTailer('),),
+      ('self._schedule_backend_state_flush(_rs)',), ('self._write_backend_state(_rs)',),
+     ),
+     ('grep', 'provider_codex.py', (('        def _on_child_cursor(', '        tailer = CodexRolloutTailer('),),
+      ('self._schedule_backend_state_flush(_rs)',), ('self._write_backend_state(_rs)',),
+     ),
+     ('grep', 'provider_codex.py', (('    async def _flush_backend_state_async(', '    def attach_recovered_run('),),
+      ('await asyncio.to_thread(self._write_backend_state, rs)',), (),
+     ),
+    )),
+    ('internal_workers_list_runs_projection_off_loop', (
+     ('grep', 'main.py', (('async def internal_list_workers_for_cwd(', '@app.'),),
+      ('return await asyncio.to_thread(_internal_list_workers_for_cwd_sync, cwd)',),
+      ('compute_jsonl_path(', 'count_jsonl_lines(', 'session_manager.get_lite('),
+     ),
+     ('grep', 'team_orchestration_read.py', (),
+      ('session_store.summary_fields_many(worker_sids, fields)', 'with perf.timed(f"{_METRIC}.session")',
+       'pair_records: list[dict[str, Any]] = []',
+      ),
+      ('extension.team_orchestration.workers.fallback_fields', 'session_manager.get_fields_many(',
+       'session_manager.get_fields(\n            bc_sid', 'session_manager.get_lite(',
+      ),
+     ),
+     ('ordered', 'team_orchestration_read.py', (), (('pair_records.append(rec)',), ('compute_jsonl_path(',))),
+    )),
+    ('message_delta_replay_skips_full_snapshot_rebuild', (
+     ('grep', 'session_manager.py',
+      (('def get_messages_since(', 'def _get_cached_snapshot('),
+       ('if since_seq > 0:', 'snapshot = self._get_cached_snapshot('),
+      ),
+      ('_get_cached_messages_window(',), ('_compute_messages_window(', '_get_cached_snapshot('),
+     ),
+     ('grep', 'session_manager.py', (('def _get_cached_messages_window(', 'def _tree_stub_cache_key('),),
+      ('_compute_messages_window(', '_copy_jsonish(cached)'), (),
+     ),
+     ('grep', 'session_manager.py', (('def _compute_messages_window(', 'def get_ref('),),
+      ('summary_ids = {', 'summaries = self._native_event_summaries(\n            rid, node_sid, summary_ids,'), (),
+     ),
+    )),
+    ('message_summary_reader_filters_requested_message_ids', (
+     ('grep', 'event_ingester.py',
+      (('def message_event_summaries(', '@staticmethod\n    def _public_message_summary'),),
+      ('msg_ids: Optional[set[str]] = None', 'if not sid_filter and msg_ids is None:',
+       'self._summary_matches_filter(k, v, sid_filter=sid_filter, msg_ids=msg_ids)',
+      ),
+      (),
+     ),
+     ('grep', 'event_journal.py', (('def message_event_summaries(', 'def current_seq('),),
+      ('msg_ids: Optional[set[str]] = None', 'msg_ids=msg_ids'), (),
+     ),
+    )),
+    ('event_summary_sidecar_load_populates_memory_cache', (
+     ('grep', 'event_ingester.py', (),
+      ('_EVENT_SUMMARIES_VERSION = 5', 'def _valid_seq_offsets(', 'isinstance(item, bool)'), (),
+     ),
+     ('grep', 'event_ingester.py', (('def _summaries_state(', 'def _seq_byte_range('),),
+      ('sid_filter: Optional[str] = None', 'msg_ids: Optional[set[str]] = None', 'if loaded is not None:',
+       'self._summaries_cache[root_id] = (\n                        file_size, summaries, resolutions,',
+      ),
+      (),
+     ),
+     ('grep', 'event_ingester.py',
+      (('def _summaries_state(', 'def _seq_byte_range('), ('if loaded is not None:', 'else:')), (),
+      ('_rebuild_seq_offsets_locked',),
+     ),
+    )),
+    ('connected_session_fallback_sorts_only_requested_page', (
+     ('grep', 'main.py', (), ('def _filter_sort_page_for_list(',), ()),
+     ('grep', 'main.py',
+      (('async def get_sessions(', '@app.post("/api/sessions/search-content")'),
+       ('if can_page_remote_local_order:', 'elif _can_preserve_summary_order'),
+      ),
+      ('_filter_sort_page_for_list',), ('_filter_sort_sessions_for_list',),
+     ),
+    )),
+    ('message_cache_hydration_has_substep_perf_metrics', (
+     ('grep', 'event_journal.py', (),
+      ('DEFAULT_MESSAGE_CACHE_SIZE = 128', 'message_cache_size: int = DEFAULT_MESSAGE_CACHE_SIZE'), (),
+     ),
+     ('grep', 'event_journal.py', (('def _ensure_message_cache(', 'def read_message_frontend_events('),),
+      ('event_journal.message_cache.summaries', 'summary: Optional[dict] = None', 'msg_ids={message_id}',
+       'event_journal.message_cache.summary_provided', 'event_ingester.ownership_resolutions_range(',
+       'event_journal.message_cache.resolutions', 'event_journal.message_cache.read_full',
+       'event_journal.message_cache.read_grow',
+      ),
+      ('event_ingester.ownership_resolutions(session_id)',),
+     ),
+    )),
+    ('session_snapshot_hydration_reuses_existing_message_summary', (
+     ('grep', 'session_manager.py', (('def _compute_messages_snapshot(', 'def _compute_messages_window('),),
+      ('summary = summaries.get(msg_id, {})', 'message_id=msg_id,\n                        summary=summary,'), (),
+     ),
+     ('grep', 'session_manager.py', (('def _compute_messages_window(', 'def get_ref('),),
+      ('message_id=msg_id,\n                    summary=summary,',), (),
+     ),
+    )),
+    ('written_journal_projection_avoids_full_event_list_copy', (
+     ('grep', 'session_manager.py', (('    def apply_written_journal_event(', '    def _root_id_for('),),
+      ('event_uuid = _event_uuid_safe', 'compact_message_delta_payload(msg)', '"delta": delta'),
+      ('before = copy.deepcopy(strategy._events_list(msg))', '"msg": _copy_jsonish(msg)'),
+     ),
+    )),
+    ('slow_path_instrumentation_separates_queue_wait_from_work', (
+     ('grep', 'session_manager.py', (),
+      ('"session.tail_persist.root_lock_wait"', '"session.tail_persist.root_lock_held"'), (),
+     ),
+     ('grep', 'turn_manager.py', (),
+      ('provider.start_run.recovery_gate', 'provider.start_run.flush_root_persist',
+       'provider.start_run.provider_call', 'with perf.timed("provider.start_run.recovery_gate")',
+       'with perf.timed("provider.start_run.provider_call")',
+      ),
+      (),
+     ),
+     ('grep', 'turn_manager.py',
+      (('with perf.timed("provider.start_run.recovery_gate")', '                target_message_id ='),),
+      ('wait_for_session_recovery_ready(\n                        app_session_id,',), ('wait_for_recovery_ready()',),
+     ),
+     ('grep', 'orchs/manager/_delegation.py', (),
+      ('"delegate.provider_start_run.recovery_gate"', '"delegate.provider_start_run.provider_call"'), (),
+     ),
+     ('count_ge', 'orchs/_subprocess_agent.py', (), 'await asyncio.to_thread(', 2),
+     ('grep', 'orchs/_subprocess_agent.py', (),
+      ('"subprocess_agent.init.start_run.provider_call"', '"subprocess_agent.run.start_run.provider_call"'),
+      ('\n                provider.start_run(',),
+     ),
+     ('grep', 'node_rpc_handlers.py', (), ('"node_rpc.provider_start_run.provider_call"',), ()),
+     ('grep', 'main.py', (), ('perf.LaggedQueue(', '_perf_name="ws.outbox"'), ()),
+    )),
+    ('duplicate_journal_acks_do_not_enter_row_projections', (
+     ('grep', 'event_journal.py', (), ('"appended": written.seq > 0',), ()),
+     ('count_ge', 'event_bus_subscribers.py', (), 'int(payload.get("seq") or 0) <= 0', 2),
+     ('grep', 'event_bus_subscribers.py',
+      (('def bind_session_content_projection()', 'def bind_requirement_tags_projection()'),), (),
+      ('name="session_search_projection"',),
+     ),
+    )),
+    ('completion_file_read_runs_on_bounded_provider_executor', (
+     ('grep', 'provider.py', (),
+      ('async def run_provider_poll_off_loop', 'run_in_executor(_PROVIDER_POLL_EXECUTOR, fn, *args)'), (),
+     ),
+     ('grep', 'provider_claude.py',
+      (('    async def _emit_complete_from_file(', '    async def _emit_early_failure('),),
+      ('await run_provider_poll_off_loop(read_best_complete, rs.run_dir)',),
+      ('best = read_best_complete(rs.run_dir)',),
+     ),
+    )),
+    ('perf_counts_are_not_reported_as_latency', (
+     ('grep', 'perf.py', (), ('def record_count(', 'count_total=', 'count_max='), ()),
+     ('grep', 'session_manager.py', (), ('perf.record_count("session.hydrate_todos.rows", len(all_rows))',),
+      ('perf.record("session.hydrate_todos.rows"',),
+     ),
+    )),
+    ('ingester_and_ownership_hydration_expose_lock_phases', (
+     ('grep', 'event_ingester.py', (),
+      ('"ingest.live.root_lock_wait"', '"ingest.live.root_lock_held"', '"ingest.batch.root_lock_wait"',
+       '"ingest.batch.root_lock_held"', '"ingest.read_events.root_lock_wait"', '"ingest.read_events.root_lock_held"',
+       'self._enqueue_search_projection(root_id, search_entry)',
+      ),
+      (),
+     ),
+     ('grep', 'event_journal.py', (),
+      ('ejw.ownership_hydrate.snapshot', 'ejw.ownership_hydrate.read', 'ejw.ownership_hydrate.replay',
+       'ejw.ownership_hydrate.resolve_pending',
+      ),
+      (),
+     ),
+    )),
+    ('node_link_runtime_readiness_uses_ttl_cache', (
+     ('grep', 'node_link.py', (), ('_MACHINE_NODES_READY_CACHE_TTL_S',), ()),
+     ('grep', 'node_link.py', (('def _machine_nodes_not_ready_reason(', 'def set_registration_listener('),),
+      ('time.monotonic()', '_machine_nodes_ready_cache', 'runtime_not_ready_message('), (),
+     ),
+    )),
+    ('projection_preserving_summary_reuses_existing_projection', (
+     ('grep', 'session_store.py', (('def _build_summary_for_root_preserving_projections(', 'def _tag_filter_ids('),),
+      ('projection_snapshot=(', 'organization_projection=(', 'existing.get("requirement_tags")',
+       'existing.get("markers")', 'existing.get("session_tags")',
+      ),
+      ('_requirement_tags_for_session(', '_markers_for_session(', 'enrich_session_summary(summary)'),
+     ),
+     ('grep', 'session_store.py', (('def _upsert_summary(', 'def _seen_cursor_path('),),
+      ('if preserve_projection_fields:', '_build_summary_for_root_preserving_projections(root, existing)',
+       'for field in _SUMMARY_PROJECTION_FIELDS:',
+      ),
+      (),
+     ),
+    )),
+    ('connected_session_list_pages_virtual_candidates', (
+     ('grep', 'main.py',
+      (('    if connected:', '@app.post("/api/sessions/search-content")'), ('if may_include_virtual:', 'try:')),
+      ('if can_page_remote_local_order:', 'virtual_session_store.list_recent', 'max(offset + limit, 1)',
+       'virtual_session_store.list_all',
+      ),
+      (),
+     ),
+    )),
+    ('connected_session_list_skips_full_sort_without_remote_merge', (
+     ('grep', 'main.py', (('async def get_sessions(', '@app.post("/api/sessions/search-content")'),),
+      ('appended_remote_sessions = False',
+       'can_page_remote_local_order\n        and not appended_virtual_sessions\n        and not appended_remote_sessions\n        and local_total is not None',
+      ),
+      (),
+     ),
+     ('ordered', 'main.py', (('async def get_sessions(', '@app.post("/api/sessions/search-content")'),),
+      (('can_page_remote_local_order\n        and not appended_virtual_sessions\n        and not appended_remote_sessions\n        and local_total is not None',
+       ),
+       ('with perf.timed("sessions.list.filter_sort")',),
+      ),
+     ),
+    )),
+    ('delegation_status_writes_run_off_loop', (
+     ('grep', 'operation_status_store.py', (),
+      ('async def write_status_async(', 'await asyncio.to_thread(self.write_status'), (),
+     ),
+     ('grep', 'delegation_status_store.py', (), ('write_status_async = _store.write_status_async',), ()),
+     ('grep', 'orchs/manager/_delegation.py', (('async def run_delegation(', None),),
+      ('await delegation_status_store.write_status_async(',), ('delegation_status_store.write_status(',),
+     ),
+    )),
+    ('team_ask_status_writes_run_off_loop', (
+     ('grep', 'operation_status_store.py', (),
+      ('async def write_status_async(', 'await asyncio.to_thread(self.write_status'), (),
+     ),
+     ('grep', 'ask_status_store.py', (), ('write_status_async = _store.write_status_async',), ()),
+     ('grep', 'orchestrator.py', (('async def ask_team_message(', '    def _team_message_turn_response('),),
+      ('sender, target = await asyncio.to_thread(\n            team_messaging.validate_message_route',
+       'metadata = await asyncio.to_thread(\n            team_messaging.build_message_metadata',
+       'queue_item = await asyncio.to_thread(\n                    team_messaging.queue_payload',
+       'await asyncio.to_thread(\n                    session_manager.add_queued_prompt',
+       'cli_prompt = await asyncio.to_thread(\n                    team_messaging.format_team_message_prompt',
+       'await ask_status_store.write_status_async(',
+      ),
+      ('session_manager.add_queued_prompt(', 'cli_prompt = team_messaging.format_team_message_prompt(',
+       'ask_status_store.write_status(',
+      ),
+     ),
+    )),
+    ('team_message_context_uses_lite_session_read', (
+     ('grep', 'team_messaging.py', (('def _target_team_context(', 'def format_team_message_prompt('),),
+      ('session_manager.get_lite(target_session_id)',), ('session_manager.get(target_session_id)',),
+     ),
+    )),
+    ('team_message_validation_uses_lite_session_read', (
+     ('grep', 'team_messaging.py', (('def validate_message_route(', 'def build_message_metadata('),),
+      ('session_manager.get_lite(sender_session_id)', 'session_manager.get_lite(target_session_id)'),
+      ('session_manager.exists(', 'session_manager.get('),
+     ),
+    )),
+    ('known_worker_projection_uses_field_reads', (
+     ('grep', 'stores/worker_store.py', (('def list_worker_projection(', '@perf.timed_fn("store.worker.upsert")'),),
+      ('_sm.get_fields_many(',),
+      ('_sm.get_fields(agent_session_id', '_sm.get(agent_session_id)', '_sm.get_lite(agent_session_id)'),
+     ),
+    )),
+    ('session_exists_uses_index_without_cold_root_load', (
+     ('grep', 'session_manager.py', (('    def exists(self, sid: str) -> bool:', '    def get_field('),),
+      ('session_store._resolve_root_id(sid)', 'session_store._loaded_root_id_for(sid)',
+       'session_store.session_file_fingerprint(sid)',
+      ),
+      ('self._load_root(',),
+     ),
+     ('ordered', 'session_manager.py', (('    def exists(self, sid: str) -> bool:', '    def get_field('),),
+      (('session_store._loaded_root_id_for(sid)',), ('session_store.session_file_fingerprint(sid)',)),
+     ),
+     ('ordered', 'session_manager.py', (('    def exists(self, sid: str) -> bool:', '    def get_field('),),
+      (('session_store.session_file_fingerprint(sid)',), ('session_store._resolve_root_id(sid)',)),
+     ),
+     ('count_eq', 'session_manager.py', (('    def exists(self, sid: str) -> bool:', '    def get_field('),),
+      'session_store._find_in_tree(root, sid)', 1,
+     ),
+    )),
+    ('root_id_resolution_caches_successful_store_lookup', (
+     ('grep', 'session_manager.py', (('    def _root_id_for(', '    def _lock_for_root('),),
+      ('rid = self._node_root_id.get(sid)', 'session_store._loaded_root_id_for(sid)',
+       'session_store.session_file_fingerprint(sid)', 'self._node_root_missing_until.get(sid, 0.0) > now',
+       'rid = session_store._resolve_root_id(sid)', 'if rid is not None:\n            self._node_root_id[sid] = rid',
+       'self._node_root_missing_until[sid] = (',
+      ),
+      (),
+     ),
+     ('ordered', 'session_manager.py', (('    def _root_id_for(', '    def _lock_for_root('),),
+      (('session_store._loaded_root_id_for(sid)',), ('session_store.session_file_fingerprint(sid)',)),
+     ),
+     ('ordered', 'session_manager.py', (('    def _root_id_for(', '    def _lock_for_root('),),
+      (('session_store.session_file_fingerprint(sid)',), ('rid = session_store._resolve_root_id(sid)',)),
+     ),
+     ('grep', 'session_manager.py', (), ('_NEGATIVE_NODE_ROOT_TTL_SECONDS = 5.0',), ()),
+     ('grep', 'session_manager.py', (('    def _index_root(', '    def _ensure_root_loaded('),),
+      ('self._node_root_missing_until.pop(rid, None)', 'self._node_root_missing_until.pop(fork["id"], None)'), (),
+     ),
+    )),
+    ('unknown_root_resolution_uses_owner_projection_without_rescan', (
+     ('grep', 'session_store.py', (('def _resolve_root_id(', 'def _session_path('),),
+      ('_wait_root_change_owner_ready()', 'generation = owner.observation_generation',
+       '_wait_root_change_observation(generation)',
+      ),
+      ('_dir_fingerprint_cached()', '_refresh_index('),
+     ),
+    )),
+    ('fork_index_refresh_sidecar_write_is_backgrounded', (
+     ('grep', 'session_store.py', (), ('_index_sidecar_write_queue', 'def _schedule_index_sidecar_write('), ()),
+     ('grep', 'session_store.py', (('def _refresh_index(', 'def _ensure_index('),),
+      ('_schedule_index_sidecar_write(fp, fork_index, root_forks, root_signatures)',),
+      ('_write_index_sidecar_best_effort(fp, fork_index, root_forks, root_signatures)',),
+     ),
+     ('grep', 'session_store.py', (('def _ensure_index(', 'def _resolve_root_id('),),
+      ('_schedule_index_sidecar_write(fp, fork_index, root_forks, root_signatures)',), (),
+     ),
+    )),
+    ('fork_index_refresh_updates_changed_roots_incrementally', (
+     ('grep', 'session_store.py', (),
+      ('_INDEX_INCREMENTAL_REFRESH_MAX_CHANGED = 32', 'def _refresh_index_incremental('), (),
+     ),
+     ('grep', 'session_store.py', (('def _refresh_index_incremental(', 'def _load_index_sidecar('),),
+      ('changed_roots = {', 'deleted_roots = set(old_signatures) - set(current_signatures)',
+       'if len(touched_roots) > _INDEX_INCREMENTAL_REFRESH_MAX_CHANGED:',
+       '_fork_index_entry_from_summary_or_root(current_paths[root_id])',
+      ),
+      (),
+     ),
+     ('ordered', 'session_store.py', (('def _refresh_index(', 'def _ensure_index('),),
+      (('incremental = _refresh_index_incremental(live_fp)',),
+       ('with perf.timed("store.session.index.refresh.build")',),
+      ),
+     ),
+    )),
+    ('session_detail_reuses_migrated_root_cache', (
+     ('grep', 'session_store.py', (), ('_migrated_root_cache', 'def _cached_migrated_root('), ()),
+     ('grep', 'session_store.py', (('def _cached_migrated_root(', 'def read_node_kind_record('),),
+      ('cache_key = (root_id, file_signature)', 'return _copy_jsonish(cached)'), (),
+     ),
+     ('grep', 'session_store.py', (('def get_root_tree(', 'def _strip_volatile_from_tree('),),
+      ('_cached_migrated_root(root_id, file_signature, root)',), (),
+     ),
+    )),
+    ('extension_plain_load_is_read_only', (
+     ('grep', 'extension_store.py', (('def _load()', 'def _save('),), ('_read_store_unlocked()',),
+      ('_load_with_changes()',),
+     ),
+    )),
+    ('recovery_dispatch_skips_reconciled_runs_before_owner_read', (
+     ('ordered', 'provider.py', (('def recover_all_in_flight(', None),),
+      (('indexed_marker = reconciled_index.get(child.name)',), ('marker_path = child / "reconciled.marker"',)),
+     ),
+     ('ordered', 'provider.py', (('def recover_all_in_flight(', None),),
+      (('marker_path = child / "reconciled.marker"',), ('bs_path = child / "backend_state.json"',)),
+     ),
+     ('grep', 'provider.py',
+      (('def recover_all_in_flight(', None), (None, 'indexed_marker = reconciled_index.get(child.name)')),
+      ('load_reconciled_marker_index(',), (),
+     ),
+     ('grep', 'provider.py',
+      (('def recover_all_in_flight(', None),
+       ('marker_path = child / "reconciled.marker"', 'bs_path = child / "backend_state.json"'),
+      ),
+      ('marker_data_matches_current(',), ('marker_matches_current(',),
+     ),
+    )),
+    ('filtered_provider_recovery_does_not_rescan_all_runs', (
+     ('grep', 'runs_dir.py', (),
+      ('def iter_run_dirs(run_id_filter: Optional[set[str]] = None)', 'for run_id in run_id_filter:'), (),
+     ),
+     ('grep', 'provider_claude.py',
+      (('    def recover_in_flight(', '    # ------------------------------------------------------------------'),),
+      ('iter_run_dirs(run_id_filter)',), ('child.name not in run_id_filter',),
+     ),
+     ('grep', 'provider_codex.py',
+      (('    def recover_in_flight(', '    # ------------------------------------------------------------------'),),
+      ('iter_run_dirs(run_id_filter)',), ('child.name not in run_id_filter',),
+     ),
+     ('grep', 'provider_gemini.py',
+      (('    def recover_in_flight(', '    # ------------------------------------------------------------------'),),
+      ('iter_run_dirs(run_id_filter)',), ('child.name not in run_id_filter',),
+     ),
+     ('grep', 'provider_openai.py',
+      (('    def recover_in_flight(', '    # ------------------------------------------------------------------'),),
+      ('iter_run_dirs(run_id_filter)',), ('child.name not in run_id_filter',),
+     ),
+    )),
+    ('filtered_remote_recovery_does_not_rescan_all_runs', (
+     ('grep', 'run_recovery.py',
+      (('def _pending_remote_runs_for_node(', 'async def integrate_remote_runs_for_node('),),
+      ('iter_run_dirs(run_id_filter)', 'children = sorted(children)'), ('child.name not in run_id_filter',),
+     ),
+    )),
+    ('provider_prune_uses_shared_scandir_helper', (
+     ('grep', 'runs_dir.py', (),
+      ('def prune_old_completed_runs(max_age_days: int = 7) -> int', 'with os.scandir(root) as entries:'), (),
+     ),
+     ('grep', 'provider_claude.py',
+      (('    def prune_old_runs(', '    # ------------------------------------------------------------------'),),
+      ('prune_old_completed_runs(max_age_days)',), ('_runs_root().iterdir()',),
+     ),
+     ('grep', 'provider_codex.py',
+      (('    def prune_old_runs(', '    # ------------------------------------------------------------------'),),
+      ('prune_old_completed_runs(max_age_days)',), ('_runs_root().iterdir()',),
+     ),
+     ('grep', 'provider_gemini.py',
+      (('    def prune_old_runs(', '    # ------------------------------------------------------------------'),),
+      ('prune_old_completed_runs(max_age_days)',), ('_runs_root().iterdir()',),
+     ),
+     ('grep', 'provider_openai.py',
+      (('    def prune_old_runs(', '    # ------------------------------------------------------------------'),),
+      ('prune_old_completed_runs(max_age_days)',), ('_runs_root().iterdir()',),
+     ),
+    )),
+    ('session_fork_index_refresh_is_root_scoped', (
+     ('grep', 'session_store.py', (('def _index_tree(', 'def _index_set('),),
+      ('_root_forks.get(rid', '_root_index_signatures.get(rid) == file_signature'),
+      ('_fork_index.items()', '_reconcile_loaded_store'),
+     ),
+     ('ordered', 'session_store.py', (('def _index_tree(', 'def _index_set('),),
+      (('_root_index_signatures.get(rid)',), ('for fork in _walk_forks(root)',)),
+     ),
+     ('grep', 'session_store.py', (('def get_root_tree(', 'def _strip_volatile_from_tree('),),
+      ('file_signature = _session_file_signature(path)', '_index_tree(root, file_signature=file_signature)',
+       'if session_id != root_id:',
+      ),
+      (),
+     ),
+     ('ordered', 'session_store.py', (('def get_root_tree(', 'def _strip_volatile_from_tree('),),
+      (('if session_id != root_id:',), ('_index_tree(root, file_signature=file_signature)',)),
+     ),
+    )),
+    ('session_organization_reads_are_cached', (
+     ('grep', 'session_organization_store.py', (),
+      ('_cache_signature', '_cache_data', '_path_cache', 'def _load_shared()'), (),
+     ),
+     ('grep', 'session_organization_store.py', (('def _path():', 'def _now()'),),
+      ('ba_home()', 'if _path_cache is not None', 'return _path_cache[1]'), (),
+     ),
+     ('grep', 'session_organization_store.py', (('def _load()', 'def _save('),), ('return copy.deepcopy(data)',), ()),
+     ('grep', 'session_organization_store.py', (('def _load_shared()', 'def _load()'),),
+      ('_cache_signature == signature', 'return _cache_data'), (),
+     ),
+     ('grep', 'session_organization_store.py', (('def enrich_session_summaries(', 'def create_folder('),),
+      ('data = _load_shared()',), ('_assignment(',),
+     ),
+    )),
+    ('jsonl_cursor_advance_is_synchronous_and_non_blocking', (
+     ('grep', 'jsonl_tailer.py', (), (), ('_CURSOR_EXECUTOR',)),
+     ('grep', 'jsonl_tailer.py', (('async def _notify_cursor(', 'def _advance_cursor('),),
+      ('self.on_cursor_advance(self.processed_offset)',), ('run_in_executor',),
+     ),
+     ('grep', 'provider_claude.py', (('def _on_tailer_progress(', '\n\n'),),
+      ('cursor_ledger_worker.note(', 'lambda: self._write_backend_state('), (),
+     ),
+     ('grep', 'provider_gemini.py', (('def _on_cursor(', '\n\n'),),
+      ('cursor_ledger_worker.note(', 'lambda: self._write_backend_state('), (),
+     ),
+     ('grep', 'provider_openai.py', (('def _on_cursor(', '\n\n'),),
+      ('cursor_ledger_worker.note(', 'lambda: self._write_backend_state('), (),
+     ),
+    )),
+    ('event_ingester_indexes_search_outside_root_lock', (
+     ('grep', 'event_ingester.py', (), (), ('session_search_index',)),
+    )),
+    ('local_extension_reconcile_skips_current_snapshot', (
+     ('grep', 'extension_store.py',
+      (('def _ensure_local_extensions(', 'def _install_required_marketplace_from_ofekdev('),),
+      ('source.get("package_sha256") == package_sha', 'manifest == record.get("manifest")', 'install_path.is_dir()'),
+      (),
+     ),
+     ('ordered', 'extension_store.py',
+      (('def _ensure_local_extensions(', 'def _install_required_marketplace_from_ofekdev('),),
+      (('install_path.is_dir()', 'continue'),
+       ('install_path.is_dir()', 'continue', '_refresh_local_extension_snapshot('),
+      ),
+     ),
+    )),
+    ('frontend_entrypoints_do_not_run_smoke_subprocesses', (
+     ('grep', 'extension_store.py', (('def _record_runtime_ready(', 'def _record_has_required_runtime_paths('),),
+      ('_record_smoke_test_current(record)',),
+      ('_record_smoke_test_passes(record)', '_run_extension_smoke_test(', '_run_python_module_smoke('),
+     ),
+     ('grep', 'extension_store.py', (('def frontend_entrypoints(', 'def resolve_frontend_asset('),),
+      ('_record_runtime_ready(record)',), ('_run_extension_smoke_test(',),
+     ),
+    )),
+    ('extension_list_uses_projection_cache', (
+     ('grep', 'extension_store.py', (('def list_extensions(', 'def _active_records('),),
+      ('_projection_cache_get("list_extensions"', '_projection_cache_put(\n        "list_extensions",',
+       'return list_extensions(include_hidden=include_hidden), False',
+      ),
+      (),
+     ),
+    )),
+    ('extension_projection_routes_cache_json_bytes', (
+     ('grep', 'extension_api.py', (),
+      ('_projection_response_cache', 'def _projection_response_cache_get(', 'def _projection_response_cache_put(',
+       'def _cached_json_projection_response(', 'async def _cached_json_projection_response_threaded(', 'json.dumps(',
+       'Response(content=content, media_type="application/json")',
+      ),
+      (),
+     ),
+     ('grep', 'extension_api.py', (('async def get_frontend_entrypoints(', '@router.get("/ui-hooks")'),),
+      ('await _cached_json_projection_response_threaded(', 'extension_store.frontend_entrypoints_cache_key,',
+       'extension_store.frontend_entrypoints()',
+      ),
+      (),
+     ),
+     ('grep', 'extension_api.py',
+      (('async def get_ui_hooks(', '@router.get("/{extension_id}/frontend/{asset_path:path}")'),),
+      ('await _cached_json_projection_response_threaded(', 'extension_store.ui_hooks_cache_key,',
+       'extension_store.ui_hooks()',
+      ),
+      (),
+     ),
+    )),
+    ('startup_reenqueue_reads_sessions_off_loop', (
+     ('grep', 'main.py', (), ('await asyncio.to_thread(\n                    session_manager.get_lite',), ()),
+    )),
+    ('queue_projection_scans_user_messages_once', (
+     ('grep', 'session_queue_projection.py', (), ('def _user_message_projection(',),
+      ('def _user_message_keys(', 'def _user_messages('),
+     ),
+     ('grep', 'session_queue_projection.py', (('def project_session(', 'def upsert_from_session('),),
+      ('user_projection = _user_message_projection(', '**user_projection'), (),
+     ),
+    )),
+    ('queue_projection_skips_unchanged_disk_write', (
+     ('grep', 'session_queue_projection.py', (('def upsert_from_session(', 'def get('),),
+      ('if _records.get(session_id) == owned:', 'if not changed and not _needs_durable_write('), (),
+     ),
+    )),
+    ('queue_projection_overlay_reads_records_in_bulk', (
+     ('grep', 'session_queue_projection.py', (), ('def get_many(',), ()),
+     ('grep', 'session_store.py', (('def _overlay_queue_projection(', '@perf.timed_fn("store.session.write_full")'),),
+      ('session_queue_projection.get_many(sids)',), ('session_queue_projection.get(sid)',),
+     ),
+    )),
+    ('queue_projection_shutdown_always_closes_executor', (
+     ('grep', 'main.py', (('        begin_queue_projection_shutdown()', '    except Exception:'),),
+      ('try:', 'finally:', 'await asyncio.to_thread(shutdown_queue_projection_executor)'), (),
+     ),
+     ('ordered', 'main.py', (('        begin_queue_projection_shutdown()', '    except Exception:'),),
+      (('finally:',), ('await asyncio.to_thread(shutdown_queue_projection_executor)',)),
+     ),
+    )),
+    ('startup_does_not_warm_unread_by_hydrating_sessions', (
+     ('grep', 'main.py', (), (), ('startup-unread-warm', '_warm_unread_counts')),
+    )),
+    ('startup_defers_requirement_and_project_match_warmers', (
+     ('grep', 'main.py', (('async def on_startup()', 'async def on_shutdown()'),),
+      ('name="requirements-processor-prewarm"',),
+      ('\n    await requirement_prewarm.run_requirements_prewarm', 'project-match-warm'),
+     ),
+     ('grep', 'main.py', (), ('_ensure_project_match_warm_task()',), ()),
+    )),
+    ('requirement_unprocessed_fallback_reuses_freshness_projection', (
+     ('grep', 'requirement_context.py', (('def _load_unprocessed_prompt_records(', 'def _prompt_fallback_record('),),
+      ('freshness.get("_unhandled_prompt_records")',), ('for prompt in load_prompts()',),
+     ),
+     ('grep', 'requirement_context.py', (), ('"freshness": _public_freshness(freshness)',), ()),
+    )),
+    ('startup_defers_shortcut_http_prewarm', (
+     ('grep', 'main.py', (('async def on_startup()', 'async def on_shutdown()'),),
+      ('shortcut_picker.prewarm_http_stack',
+       '_fire_and_forget(asyncio.to_thread(shortcut_picker.prewarm_http_stack))',
+      ),
+      ('await asyncio.to_thread(shortcut_picker.prewarm_http_stack)',),
+     ),
+    )),
+    ('sidebar_organization_enrichment_stays_in_summary_index', (
+     ('grep', 'main.py', (('def _local_session_summaries_for_sidebar()', 'def _root_session_file_path('),), (),
+      ('enrich_session_summaries(', 'enrich_session_summary(', 'session_store._ensure_summary_index(blocking=True)'),
+     ),
+     ('grep', 'session_store.py', (('def _build_summary_for_root(', 'def set_requirement_tags_projection('),),
+      ('enrich_session_summary(summary)', 'enrich_session_summary_from_projection('), (),
+     ),
+     ('grep', 'session_organization_store.py', (('def enrich_session_summary(', 'def enrich_session_summaries('),),
+      ('_load_shared()',), ('organization_for_session(', '_load()'),
+     ),
+    )),
+    ('session_organization_facets_are_version_cached', (
+     ('grep', 'main.py', (), ('_session_org_facets_cache',), ()),
+     ('grep', 'main.py',
+      (('def _session_organization_snapshot_with_facets(', '@app.get("/api/session-organization")'),),
+      ('session_organization_store.version_token()', 'session_store.summary_version()',
+       '_session_org_facets_cache.get(cache_key)', '_local_session_summaries_for_sidebar()',
+      ),
+      (),
+     ),
+    )),
+    ('session_organization_query_builds_tag_sets_only_for_tag_filter', (
+     ('ordered', 'session_organization_store.py', (('def query_sessions(', None),),
+      (('if tag_set:',), ('session_tags = {',)),
+     ),
+    )),
+    ('sidebar_decoration_uses_bulk_cached_state', (
+     ('grep', 'main.py', (), ('def _sidebar_state_snapshot()', '_sidebar_state_snapshot_cache'), ()),
+     ('grep', 'main.py', (('def _sidebar_state_snapshot()', 'def _decorate_local_sidebar_sessions('),),
+      ('version = _sessions_list_transient_state_version()', 'cached is not None and cached[0] == version',
+       'pending_input_by_sid = user_input_store.pending_counts_by_session()',
+      ),
+      (),
+     ),
+     ('grep', 'main.py', (('def _sidebar_session_payload(', 'def _sidebar_state_snapshot('),),
+      ('if key != "first_prompt"',), ('payload.pop("first_prompt", None)',),
+     ),
+     ('grep', 'main.py', (('def _decorate_local_sidebar_sessions(', 'def _local_sessions_for_sidebar('),),
+      ('_sidebar_state_snapshot()',), ('is_running_cached(', 'monitoring_state_cached('),
+     ),
+     ('grep', 'main.py', (('def _build_local_sessions_page_for_list(', 'async def _sidebar_search_scores('),),
+      ('state_snapshot = _sidebar_state_snapshot() if status_sort else None',
+       '_decorate_local_sidebar_sessions(out[offset:end], state_snapshot)',
+      ),
+      (),
+     ),
+     ('grep', 'turn_manager.py', (), ('def cached_state_snapshot(',), ()),
+    )),
+    ('session_discovery_reads_mode_without_deepcopy', (
+     ('grep', 'turn_manager.py',
+      (('if event.type == "session_discovered":', 'if event.type in ("complete", "error"):'),),
+      ('session_manager.get_field(', '"orchestration_mode"'), ('session_manager.get(',),
+     ),
+    )),
+    ('project_aggregates_use_bulk_cached_state', (
+     ('grep', 'main.py', (('def _project_aggregates(', 'def _invalidate_project_aggregates('),),
+      ('monitoring_projection_snapshot()', 'unread_counts_snapshot()'), ('is_running_cached(', 'peek_unread_count('),
+     ),
+    )),
+    ('sidebar_file_paths_use_cached_sessions_dir', (
+     ('grep', 'main.py', (), ('def _root_sessions_dir_path(',), ()),
+     ('grep', 'main.py', (('def _decorate_local_sidebar_sessions(', 'def _local_sessions_for_sidebar('),),
+      ('sessions_dir = _root_sessions_dir_path()', '"file_path": f"{sessions_dir}/{sid}.json"'),
+      ('ba_home()', '_root_session_file_path(sid)'),
+     ),
+    )),
+    ('session_list_uses_sorted_summary_cache', (
+     ('grep', 'session_store.py', (),
+      ('_summary_sorted_cache_version', '_summary_sorted_id_cache', '_summary_sorted_id_caches',
+       '_summary_order_version', '_replace_summary_projection_field', 'def ordered_session_summary_ids(',
+       'def _summary_order_changed(', '"last_user_prompt_at"',
+      ),
+      ('_summary_projected_cache_version', '_summary_projected_cache'),
+     ),
+     ('grep', 'session_store.py', (('def list_sessions()', 'def iter_all_sessions()'),),
+      ('_summary_sorted_cache_version != _summary_order_version', '_summary_sorted_id_cache = [',
+       'sorted(\n                    _summary_index.values()', '_summary_index[sid]',
+      ),
+      ('_requirement_tags_snapshot()', '_markers_snapshot()'),
+     ),
+    )),
+    ('session_list_pages_last_user_prompt_order_before_full_sort', (
+     ('grep', 'main.py', (('def _local_session_page_for_sidebar_preserving_order(', 'def _root_session_file_path('),),
+      ('session_manager.ordered_summary_ids(sort_by, folder_view)', 'sessions.list.local.ordered_filter'),
+      ('_filter_sort_sessions_for_list(',),
+     ),
+     ('grep', 'main.py', (('def _can_page_local_summary_order(', 'def _build_local_sessions_page_for_list('),),
+      ('sort_by in {"updated_at", "last_user_prompt_at", "last_opened_at"}',), (),
+     ),
+     ('grep', 'main.py', (('def _build_local_sessions_page_for_list(', '@app.get("/api/sessions")'),),
+      ('sort_by == "last_user_prompt_at"', 'sessions.list.local_order_page', 'sessions.list.virtual_count',
+       'if default_virtual_page:', 'limit=max(offset + limit, 1)',
+      ),
+      (),
+     ),
+     ('ordered', 'main.py', (('def _build_local_sessions_page_for_list(', '@app.get("/api/sessions")'),),
+      (('sessions.list.local_order_page',), ('sessions.list.local"):',)),
+     ),
+     ('grep', 'main.py', (('async def get_sessions(', '@app.post("/api/sessions/search-content")'),),
+      ('sessions.list.remote.local_order_candidates', 'can_page_remote_local_order'), (),
+     ),
+     ('ordered', 'main.py', (('async def get_sessions(', '@app.post("/api/sessions/search-content")'),),
+      (('sessions.list.remote.local_order_candidates',), ('sessions.list.local"):',)),
+     ),
+    )),
+    ('visible_order_cache_uses_dual_generation_singleflight_projection', (
+     ('grep', 'main.py',
+      (('_local_visible_order_cache: collections.OrderedDict[', '_session_detail_response_cache'),),
+      ('tuple[str, str | None, int, int]', '_local_visible_order_inflight',
+       '_local_visible_order_lock = threading.Lock()',
+      ),
+      (),
+     ),
+     ('grep', 'main.py',
+      (('def _local_visible_order_page_ids(', 'def _local_session_page_for_sidebar_preserving_order('),),
+      ('expected_summary_index_version: int', 'expected_summary_order_version: int',
+       'expected_summary_index_version,', 'expected_summary_order_version,', 'get_indexed_session_summary_if_current',
+       'visible_order_singleflight.wait', 'visible_order_singleflight.stale',
+      ),
+      (),
+     ),
+     ('grep', 'main.py', (('def _local_session_page_for_sidebar_preserving_order(', 'def _root_session_file_path('),),
+      ('expected_summary_index_version = session_store.summary_index_version()',
+       'expected_summary_order_version = session_store.summary_order_version()',
+       'expected_summary_index_version,\n                expected_summary_order_version,',
+       'get_indexed_session_summaries_by_ids_if_current',
+      ),
+      (),
+     ),
+    )),
+    ('session_list_skips_impossible_virtual_filters', (
+     ('grep', 'main.py', (('def _session_filters_may_include_virtual(', 'def _build_local_sessions_page_for_list('),),
+      ('if file_edit_mode is True:', 'if folder_ids or tag_ids:', 'if modes and "virtual" not in modes:',
+       'if sources and not ({"extension", "system"} & sources):',
+      ),
+      (),
+     ),
+     ('grep', 'main.py', (('def _build_local_sessions_page_for_list(', '@app.get("/api/sessions")'),),
+      ('_session_filters_may_include_virtual(', 'virtual_session_store.list_recent(', 'max(offset + limit, 1)',
+       'perf.record("sessions.list.virtual.skipped", 1.0)',
+      ),
+      (),
+     ),
+     ('grep', 'main.py', (('async def get_sessions(', '@app.post("/api/sessions/search-content")'),),
+      ('_session_filters_may_include_virtual(', 'virtual_session_store.list_all',
+       'perf.record("sessions.list.virtual.skipped", 1.0)',
+      ),
+      (),
+     ),
+    )),
+    ('session_list_preserves_summary_order_when_no_virtual_rows', (
+     ('grep', 'main.py', (('def _can_preserve_summary_order(', 'def _session_filters_may_include_virtual('),),
+      ('appended_virtual_sessions: bool', 'and not appended_virtual_sessions'), ('virtual_sessions: list[dict]',),
+     ),
+     ('grep', 'main.py', (('def _build_local_sessions_page_for_list(', '@app.get("/api/sessions")'),),
+      ('appended_virtual_sessions = False', 'virtual_sidebar_sessions = [',
+       '_can_page_default_updated_at_with_virtual(', '_merge_updated_at_page(', 'if virtual_sidebar_sessions:',
+       'appended_virtual_sessions = True', 'appended_virtual_sessions=appended_virtual_sessions',
+       '_filter_page_for_list_preserving_order(', '_decorate_local_sidebar_sessions(page_source, state_snapshot)',
+      ),
+      (),
+     ),
+     ('grep', 'main.py', (('def _filter_page_for_list_preserving_order(', 'def _can_preserve_summary_order('),),
+      ('page.append(session)', 'return page, total'), (),
+     ),
+     ('grep', 'main.py', (('async def get_sessions(', '@app.post("/api/sessions/search-content")'),),
+      ('appended_virtual_sessions = False', 'virtual_sidebar_sessions = [', 'if virtual_sidebar_sessions:',
+       'appended_virtual_sessions = True', '_filter_sessions_for_list_preserving_order',
+      ),
+      (),
+     ),
+    )),
+    ('session_tag_filter_uses_summary_projection', (
+     ('grep', 'session_store.py', (),
+      ('"tag_filter_ids": _tag_filter_ids(', 'summary["tag_filter_ids"] = _tag_filter_ids(',
+       '"tag_filter_ids": tag_filter_ids',
+      ),
+      (),
+     ),
+     ('grep', 'main.py', (('def _session_matches_list_filters(', 'def _session_filtered_sort_key('),),
+      ('filter_ids = session.get("tag_filter_ids")', '_session_tag_filter_ids(session)'),
+      ('manual_tags = {', 'requirement_tags = {'),
+     ),
+    )),
+    ('session_timestamp_sort_value_is_cached', (
+     ('grep', 'session_store.py', (),
+      ('from functools import lru_cache', '@lru_cache(maxsize=4096)\ndef _timestamp_sort_value_str'), (),
+     ),
+     ('grep', 'session_store.py', (('def timestamp_sort_value(', 'def _newer_timestamp('),),
+      ('return _timestamp_sort_value_str(value)',), (),
+     ),
+    )),
+    ('shortcut_picker_wait_budget_is_small', (
+     ('grep', 'shortcut_picker.py', (), ('_PICK_WAIT_TIMEOUT_SECS = 0.25',), ()),
+     ('grep', 'shortcut_picker.py', (('async def pick_shortcuts(', None),),
+      ('asyncio.wait_for(', 'await asyncio.to_thread(\n            _shortcut_picker_inputs,',
+       'fallback_shortcuts = list(all_shortcuts)', 'return await asyncio.shield(_cached_pick(key, _pick_uncached))',
+       'return all_shortcuts',
+      ),
+      ('user_prefs.get_shortcut_responses()', 'config_store.get_default_provider()'),
+     ),
+     ('grep', 'shortcut_picker.py',
+      (('async def pick_shortcuts(', None), ('except asyncio.TimeoutError:', 'except Exception:')),
+      ('if fallback_shortcuts is not None:',), (),
+     ),
+     ('ordered', 'shortcut_picker.py',
+      (('async def pick_shortcuts(', None), ('except asyncio.TimeoutError:', 'except Exception:')),
+      (('if fallback_shortcuts is not None:',), ('await asyncio.to_thread(user_prefs.get_shortcut_responses)',)),
+     ),
+    )),
+    ('stubbed_tree_build_does_not_search_tree_per_node', (
+     ('grep', 'session_manager.py', (('def _build_stubbed_tree(', 'def _compute_messages_snapshot('),),
+      ('node_sid, rid, node_src',), ('session_store._find_in_tree(root, node_sid)',),
+     ),
+    )),
+    ('tree_stub_cache_key_reads_render_seq_once', (
+     ('grep', 'session_manager.py', (('def _tree_stub_cache_key(', 'def _build_stubbed_tree('),),
+      ('render_seq_by_sid = event_ingester.render_seq_by_sid(rid)',), ('render_seq_for_sid(',),
+     ),
+    )),
+    ('session_event_meta_uses_combined_ingester_read', (
+     ('grep', 'main.py', (('def _session_event_meta_roots_for_page(', 'async def _warm_session_event_meta_roots('),),
+      (), ('_session_event_file_fingerprint(root_id) == (0, 0)',),
+     ),
+     ('grep', 'main.py', (('def _session_event_meta(', 'def _session_event_meta_cache_fresh('),),
+      ('event_ingester.session_event_meta(root_id)',),
+      ('event_ingester.max_seq_by_sid(root_id)', 'event_ingester.cursor(root_id)',
+       'event_ingester.render_seq_by_sid(root_id)',
+      ),
+     ),
+     ('grep', 'event_ingester.py', (), ('def session_event_meta(self, root_id: str)',), ()),
+     ('grep', 'event_ingester.py', (('def _scan_max_seq(', 'def close('),),
+      ('summaries: dict[str, dict] = {}', 'self._update_summary_line(',
+       'self._summaries_cache[root_id] = (cur_offset, summaries, resolutions)',
+      ),
+      (),
+     ),
+    )),
+    ('event_summary_scan_reuses_full_scan_cache', (
+     ('grep', 'event_ingester.py', (('def _scan_max_seq(', '    @staticmethod\n    def _affects_render_projection'),),
+      ('all_entries: list[dict] = []', 'self._remember_full_scan_cache_locked(root_id, cur_offset, all_entries)',
+       'self._seq_offsets[root_id] = seq_offsets',
+      ),
+      (),
+     ),
+     ('grep', 'event_ingester.py', (('def _scan_summaries(', '    def close('),),
+      ('cached = self._full_scan_cache.get(root_id)', 'entries = cached[1]', 'self._update_summary_line(',
+       'for index, entry in enumerate(entries):',
+      ),
+      (),
+     ),
+    )),
+    ('message_hydration_reuses_full_scan_cache', (
+     ('grep', 'event_ingester.py', (), ('def cached_rows_for_byte_range(',), ()),
+     ('grep', 'event_ingester.py', (('def cached_rows_for_byte_range(', 'def root_events_by_sid('),),
+      ('cached = self._full_scan_cache.get(root_id)', 'bisect.bisect_left(offsets, byte_start)',
+       'line_start >= byte_end', 'rows.append(entry)',
+      ),
+      (),
+     ),
+     ('grep', 'event_journal.py', (('def _read_owned_range(', 'def _read_raw_range('),),
+      ('event_ingester.cached_rows_for_byte_range(', 'if raw is None:', 'self._read_raw_range('), (),
+     ),
+    )),
+    ('read_events_collects_page_without_filtered_copies', (
+     ('grep', 'event_ingester.py', (('    @perf.timed_fn("ingest.read_events")', '    def _extend_full_scan('),),
+      ('out: list[dict] = []', 'if len(out) < page_limit:', 'return out, total, has_more'),
+      ('filtered = [e for e in filtered',),
+     ),
+    )),
+    ('metadata_session_search_uses_metadata_version_cache', (
+     ('grep', 'session_store.py', (),
+      ('_metadata_search_cache', '_metadata_text_cache', '_metadata_text_by_id_cache', '_metadata_trigram_index',
+       '_METADATA_NGRAM_MAX_SIZE = 3', '_start_metadata_search_index_warm()',
+       '_metadata_text_cache: tuple[tuple[str, str, str], ...] = ()', '_summary_metadata_version',
+      ),
+      (),
+     ),
+     ('grep', 'session_store.py', (('def _metadata_search_rows(', 'def _metadata_search_scores('),),
+      ('str(summary.get("name") or "").lower()', 'str(summary.get("first_prompt") or "").lower()',
+       '_metadata_text_cache_version == _summary_metadata_version', 'return _metadata_text_cache', 'rows = tuple(',
+      ),
+      ('return list(_metadata_text_cache)',),
+     ),
+     ('grep', 'session_store.py', (('def _metadata_search_row_map(', 'def _metadata_ngrams('),),
+      ('_metadata_text_by_id_cache_version == version',
+       'row_map = {sid: (title, first_prompt) for sid, title, first_prompt in rows}',
+      ),
+      (),
+     ),
+     ('grep', 'session_store.py', (('def _metadata_search_scores(', 'def grep_session_scores('),),
+      ('cache_key = (query_lower, metadata_fields, _summary_metadata_version)',
+       'cached = _metadata_search_cache.get(cache_key)', 'return dict(cached)',
+       'candidate_ids = _metadata_candidate_ids(query_lower, metadata_fields)',
+       'row_map = _metadata_search_row_map()', 'for sid in candidate_ids', 'rows = _metadata_search_rows()',
+       'for sid, title, first_prompt in rows:', 'title.count(query_lower)', 'first_prompt.count(query_lower)',
+       '_metadata_search_cache[cache_key] = dict(scores)',
+      ),
+      ('if candidate_ids is not None and sid not in candidate_ids:',),
+     ),
+     ('grep', 'session_store.py', (('def _metadata_candidate_ids(', 'def _metadata_search_scores('),),
+      ('grams = _metadata_query_grams(query_lower)', '_start_metadata_search_index_warm()', 'return None'),
+      ('_metadata_search_index_for_current_version()', '_metadata_trigrams(query_lower)'),
+     ),
+    )),
+    ('search_summary_lookup_uses_maintained_projection', (
+     ('grep', 'session_store.py', (), (), ('_requirement_tags_for_sessions', '_markers_for_sessions')),
+     ('grep', 'session_store.py', (('def get_session_summaries_by_ids(', 'def iter_all_sessions()'),),
+      ('return [\n            _summary_index[sid]',), (),
+     ),
+    )),
+    ('sessions_response_cache_stores_serialized_bytes', (
+     ('grep', 'main.py', (),
+      ('tuple[float, bytes, tuple[int, int, int]]', '_SESSIONS_LIST_RESPONSE_TTL_SECONDS = 15.0',
+       'def _sessions_list_transient_state_version()', 'session_manager.monitoring_projection_version()',
+       'session_manager.unread_counts_version()', 'user_input_store.pending_counts_version_loaded()',
+      ),
+      ('def _sessions_list_transient_fingerprint(',),
+     ),
+     ('grep', 'main.py', (('def _sessions_list_cache_get(', '_GIT_STATUS_TTL_SECONDS'),),
+      ('return _sessions_list_response(cached[1])', 'json.dumps(',
+       'cached[2] != _sessions_list_transient_state_version()',
+      ),
+      ('copy.deepcopy',),
+     ),
+    )),
+    ('sidebar_payload_reuses_summary_projection_cache', (
+     ('grep', 'main.py', (),
+      ('_sidebar_payload_cache', '_SIDEBAR_PAYLOAD_CACHE_MAX', '_sidebar_decorated_cache',
+       '_SIDEBAR_DECORATED_CACHE_MAX',
+      ),
+      (),
+     ),
+     ('grep', 'main.py', (('def _sidebar_session_payload(', 'def _sidebar_state_snapshot('),),
+      ('cache_key = id(session)', '_sidebar_payload_cache.get(cache_key)', 'return cached[1]',
+       '_sidebar_payload_cache[cache_key] = (sid, payload)',
+      ),
+      (),
+     ),
+     ('grep', 'main.py', (('def _decorate_local_sidebar_sessions(', 'def _local_sessions_for_sidebar('),),
+      ('decorated_cache_key = (', 'summary_version = session_store.summary_index_version()',
+       'sid,\n                summary_version,', 'pending_user_input_count,',
+       '_sidebar_decorated_cache.get(decorated_cache_key)',
+       '_sidebar_decorated_cache[decorated_cache_key] = decorated',
+      ),
+      (),
+     ),
+    )),
+    ('search_sessions_response_cache_uses_metadata_version', (
+     ('grep', 'main.py', (('def _sessions_list_cache_version(', '_GIT_STATUS_TTL_SECONDS'),),
+      ('session_store.search_metadata_version()', 'session_search_index.generation()',
+       'session_store.SEARCH_FIELD_CONTENT in search_fields', 'session_store.summary_version()',
+       'virtual_session_store.version_token()',
+      ),
+      (),
+     ),
+     ('grep', 'main.py', (('async def get_sessions(', '@app.post("/api/sessions/search-content")'),),
+      ('_sessions_list_cache_version(search_query, effective_search_fields)',
+       'cached_response = _sessions_list_cache_get(cache_key)',
+       'effective_search_fields = _split_session_search_fields(search_fields)',
+       'tuple(sorted(effective_search_fields))',
+      ),
+      ('_sessions_list_transient_state_version()', 'cache_response = not ('),
+     ),
+     ('grep', 'main.py',
+      (('async def get_sessions(', '@app.post("/api/sessions/search-content")'), ('cache_key = (', ')')),
+      ('search_query',), ('\n        search,\n',),
+     ),
+     ('grep', 'session_store.py', (), ('def search_metadata_version()', 'return _summary_metadata_version'), ()),
+    )),
+    ('session_summaries_response_cache_precedes_lookup', (
+     ('grep', 'main.py', (('@app.get("/api/sessions/summaries")', '@app.get("/api/sessions/{session_id}/stats")'),),
+      ('cached_response = _session_summaries_cache_get(cache_key)',), (),
+     ),
+     ('ordered', 'main.py',
+      (('@app.get("/api/sessions/summaries")', '@app.get("/api/sessions/{session_id}/stats")'),),
+      (('cached_response = _session_summaries_cache_get(cache_key)',), ('_local_session_summaries_by_ids',)),
+     ),
+     ('ordered', 'main.py',
+      (('@app.get("/api/sessions/summaries")', '@app.get("/api/sessions/{session_id}/stats")'),),
+      (('cached_response = _session_summaries_cache_get(cache_key)',), ('_decorate_local_sidebar_sessions',)),
+     ),
+     ('grep', 'main.py',
+      (('@app.get("/api/sessions/summaries")', '@app.get("/api/sessions/{session_id}/stats")'),
+       ('cache_key = (', 'cached_response = _session_summaries_cache_get(cache_key)'),
+      ),
+      (), ('_sessions_list_transient_state_version()',),
+     ),
+    )),
+    ('session_list_waits_briefly_for_partial_summary_warm', (
+     ('grep', 'main.py', (),
+      ('_SESSION_LIST_SUMMARY_WARM_WAIT_SECONDS = 0.08', '_SESSION_LIST_SUMMARY_WARM_MIN_PUBLISHED = 50'), (),
+     ),
+     ('grep', 'main.py',
+      (('def _local_session_summaries_for_sidebar()', 'def _local_session_summaries_by_ids_for_sidebar('),),
+      ('sessions.list.local.summary_warm_wait', 'min_published=_SESSION_LIST_SUMMARY_WARM_MIN_PUBLISHED'), (),
+     ),
+     ('grep', 'session_store.py', (('def wait_for_summary_index(', 'def _replace_summary_projection_field('),),
+      ('_ensure_summary_index(blocking=False)', 'min_published: int | None = None', 'len(_summary_index) >= target',
+       '_summary_build_lock.acquire(timeout=max(0.0, timeout_seconds))',
+      ),
+      ('_do_build_summary_index_unsafe()',),
+     ),
+    )),
+    ('session_search_projection_enqueue_stays_on_event_loop', (
+     ('grep', 'event_bus_subscribers.py',
+      (('async def _refresh_session_search_projection(', 'async def _refresh_requirement_tags('),),
+      ('_enqueue_session_search_projection(event.root_id, entry)',), ('asyncio.to_thread(',),
+     ),
+    )),
+    ('sidebar_session_search_bounds_content_scoring', (
+     ('grep', 'main.py', (), ('_SESSION_LIST_CONTENT_SEARCH_MAX_WAIT_SECONDS',), ()),
+     ('grep', 'main.py', (('async def _sidebar_search_scores(', '@app.get("/api/sessions")'),),
+      ('if session_store.SEARCH_FIELD_CONTENT in selected_search_fields',), ('metadata_max_wait_seconds',),
+     ),
+     ('count_eq', 'main.py',
+      (('def _build_local_sessions_page_for_list(', '@app.post("/api/sessions/search-content")'),),
+      'content_max_wait_seconds = (', 2,
+     ),
+     ('grep', 'main.py', (('def _build_local_sessions_page_for_list(', '@app.post("/api/sessions/search-content")'),),
+      (), ('metadata_max_wait_seconds',),
+     ),
+     ('grep', 'main.py',
+      (('@app.post("/api/sessions/search-content")', '@app.post("/api/session-organization/query")'),), (),
+      ('content_max_wait_seconds', 'metadata_max_wait_seconds'),
+     ),
+     ('grep', 'session_search_index.py', (('def _searchable_event_text(', 'def _content_searchable_text('),),
+      ('role = message.get("role") if isinstance(message, dict) else None', 'role = data.get("type")'), (),
+     ),
+    )),
+    ('pending_node_polling_uses_public_projection_cache', (
+     ('grep', 'main.py',
+      (('async def internal_list_pending_nodes(', '@app.post("/api/internal/machine-nodes/approve")'),),
+      ('node_link.public_pending_nodes_cached()', 'await asyncio.to_thread(node_link.public_pending_nodes)'),
+      ('pending_node_registrations.list_pending()',),
+     ),
+     ('grep', 'extension_api.py',
+      (('async def _dispatch_machine_nodes_core_backend(', 'async def _dispatch_project_structure_core_backend('),),
+      ('node_link.public_pending_nodes_cached()', 'await asyncio.to_thread(node_link.public_pending_nodes)'), (),
+     ),
+    )),
+    ('machine_node_snapshot_reads_are_off_loop', (
+     ('grep', 'main.py', (('async def internal_get_nodes(', '@app.get("/api/providers")'),),
+      ('await asyncio.to_thread(node_store.snapshot)',), ('node_store.snapshot()',),
+     ),
+     ('grep', 'main.py',
+      (('async def internal_list_pending_nodes(', '@app.post("/api/internal/machine-nodes/approve")'),),
+      ('node_link.public_pending_nodes_cached()', 'await asyncio.to_thread(node_link.public_pending_nodes)'), (),
+     ),
+     ('grep', 'extension_api.py',
+      (('async def _dispatch_machine_nodes_core_backend(', 'async def _dispatch_project_structure_core_backend('),),
+      ('await asyncio.to_thread(node_store.snapshot)', 'node_link.public_pending_nodes_cached()',
+       'await asyncio.to_thread(node_link.public_pending_nodes)', '_local_node_id_or_primary_cached()',
+      ),
+      ('node_store.snapshot()', 'await asyncio.to_thread(_local_node_id_or_primary'),
+     ),
+    )),
+    ('node_snapshot_caches_static_specs', (
+     ('grep', 'node_store.py', (),
+      ('_snapshot_static_cache_key', '_snapshot_static_cache', 'def _node_registry_fingerprint()',
+       'node_registry_store.version_token()', 'def _snapshot_static_specs()',
+      ),
+      (),
+     ),
+     ('grep', 'node_registry_store.py', (),
+      ('def version_token()', '_cache_lock = threading.Lock()', '_ensure_cache_locked()'), (),
+     ),
+     ('grep', 'node_registry_store.py', (('def version_token()', 'def hash_secret('),),
+      ('_sync_generation_locked()',), ('_ensure_cache_locked()', '_dir().glob', '.stat()'),
+     ),
+     ('grep', 'node_registry_store.py', (('def list_all()', 'def remove('),), ('_ensure_cache_locked()',),
+      ('_dir().glob',),
+     ),
+     ('grep', 'node_store.py', (('def snapshot()', 'def connected_worker_node_ids_snapshot()'),),
+      ('specs = _snapshot_static_specs()',), ('node_registry_store.list_all()', 'load_topology().all_nodes()'),
+     ),
+    )),
+    ('pending_approval_listing_uses_cached_projection_off_loop', (
+     ('grep', 'stores/pending_approvals.py', (),
+      ('_pending_cache_lock = threading.Lock()', '_pending_cache:', 'def _invalidate_pending_cache()',
+       'def _pending_snapshot()',
+      ),
+      (),
+     ),
+     ('grep', 'stores/pending_approvals.py', (('def list_pending(', '@perf.timed_fn("store.approval.transition")'),),
+      ('records = _pending_snapshot()',), ('_dir().glob("*.json")', 'path.read_text'),
+     ),
+     ('grep', 'stores/pending_approvals.py', (('def create(', 'def get('),), ('_invalidate_pending_cache()',), ()),
+     ('grep', 'stores/pending_approvals.py', (('def _transition_locked(', 'def approve('),),
+      ('_invalidate_pending_cache()',), (),
+     ),
+     ('grep', 'main.py',
+      (('async def internal_list_pending_approvals(', '@app.post("/api/internal/tool-approvals/request")'),),
+      ('await asyncio.to_thread(pending_approvals.list_pending, cwd=cwd)',),
+      ('pending_approvals.list_pending(cwd=cwd)',),
+     ),
+    )),
+    ('credential_consent_listing_uses_cached_projection_off_loop', (
+     ('grep', 'credential_broker/consent_store.py', (),
+      ('_pending_cache_lock = threading.Lock()', 'def _pending_snapshot()'), (),
+     ),
+     ('grep', 'credential_broker/consent_store.py', (('def list_pending(', 'def _expired('),),
+      ('records = _pending_snapshot()',), ('_dir().glob', 'path.read_text'),
+     ),
+     ('grep', 'main.py',
+      (('async def internal_list_pending_credentials(', '@app.post("/api/internal/credential-ui/approve")'),),
+      ('await asyncio.to_thread(_cs.list_pending, app_session_id=app_session_id)',),
+      ('_cs.list_pending(app_session_id=app_session_id)',),
+     ),
+    )),
+    ('project_update_counts_batch_uses_single_store_call', (
+     ('grep', 'project_update_store.py', (),
+      ('def unseen_counts(project_ids: list[str])', 'def peek_unseen_counts(project_ids: list[str])'), (),
+     ),
+     ('grep', 'main.py',
+      (('async def internal_project_update_counts_batch(', '@app.post("/api/internal/project-updates/unseen")'),),
+      ('counts = project_update_store.peek_unseen_counts(project_ids)', 'if counts is None:',
+       'await asyncio.to_thread(project_update_store.unseen_counts, project_ids)',
+      ),
+      ('project_update_store.unseen_count(project_id)',),
+     ),
+    )),
+    ('session_list_does_not_prewarm_snapshots', (
+     ('grep', 'main.py', (), (), ('_schedule_session_snapshot_prewarm', 'sessions.snapshot_prewarm')),
+     ('grep', 'main.py', (('async def get_sessions(', '@app.post("/api/sessions/search-content")'),), (),
+      ('get_root_tree_stubbed', 'get_root_tree_paginated'),
+     ),
+    )),
+    ('session_list_warms_event_meta_off_path', (
+     ('grep', 'main.py', (),
+      ('def _schedule_session_event_meta_warm(',
+       'await asyncio.to_thread(_warm_session_event_meta_roots_sync, pending)',
+      ),
+      ('_SESSION_DETAIL_WARM_EXECUTOR', 'async def _run_session_detail_warm_path(',
+       'def _session_detail_projection_roots_for_page(', 'def _warm_session_detail_projection_roots(',
+       'def _warm_session_detail_projection_roots_sync(', 'async def _warm_session_event_projections()',
+      ),
+     ),
+     ('grep', 'main.py', (('def _schedule_session_event_meta_warm(', 'def _machine_nodes_enabled_cached('),),
+      ('_warm_session_event_meta_roots(root_ids)',),
+      ('_session_detail_snapshot_sync(', 'schedule_reconcile_if_needed', '_session_event_file_fingerprint(',
+       '_session_event_meta_cache_fresh(',
+      ),
+     ),
+     ('grep', 'main.py', (('def _session_event_meta_roots_for_page(', 'async def _warm_session_event_meta_roots('),),
+      (), ('_session_event_file_fingerprint(',),
+     ),
+     ('grep', 'main.py', (('async def get_sessions(', '@app.post("/api/sessions/search-content")'),),
+      ('_schedule_session_event_meta_warm(page)',), ('_session_event_meta(',),
+     ),
+    )),
+    ('session_list_reads_user_prefs_once', (
+     ('grep', 'main.py', (),
+      ('def _session_list_user_prefs(', '_session_list_user_prefs_cache', '_SESSION_LIST_USER_PREFS_TTL_SECONDS'), (),
+     ),
+     ('grep', 'main.py', (('def _session_list_user_prefs(', '_GIT_STATUS_TTL_SECONDS'),),
+      ('time.monotonic()', 'user_prefs.get_all()'), (),
+     ),
+     ('grep', 'main.py', (('async def get_sessions(', '@app.post("/api/sessions/search-content")'),),
+      ('_session_list_user_prefs()',),
+      ('await asyncio.to_thread(_session_list_user_prefs)', 'user_prefs.get_folder_view_enabled()',
+       'user_prefs.get_session_sort()', 'user_prefs.get_session_status_sort()',
+      ),
+     ),
+    )),
+    ('session_detail_has_split_perf_timers', (
+     ('grep', 'main.py', (('async def get_session(', '@app.get("/api/sessions/{session_id}/turns")'),),
+      ('await _run_session_detail_hot_path(\n        "sessions.detail.worker"',
+       'return await _json_bytes_response_async(tree)',
+      ),
+      ('await _run_hot_path(\n        "sessions.detail.worker"', 'session_manager.get_root_tree_stubbed',
+       'perf.record("sessions.detail.worker"',
+      ),
+     ),
+     ('grep', 'main.py',
+      (('async def get_session(', '@app.get("/api/sessions/{session_id}/turns")'),
+       ('cache_key_parts = tree.pop("_detail_response_cache_key_parts", None)', '    else:'),
+      ),
+      (), ('_session_event_meta(', '_session_event_file_fingerprint('),
+     ),
+     ('grep', 'main.py', (('def _json_bytes_response(', 'def _sessions_list_cache_get('),),
+      ('separators=(",", ":")', 'Response(content=content, media_type="application/json")',
+       'async def _json_bytes_response_async(', 'content = await asyncio.to_thread(',
+      ),
+      (),
+     ),
+     ('grep', 'main.py', (('def _session_detail_snapshot_sync(', 'def _floor_events_from_seq('),),
+      ('perf.record("sessions.detail.root_id"', 'perf.record("sessions.detail.event_meta"',
+       'perf.record("sessions.detail.tree"', 'perf.record("sessions.detail.strip_synthetic"',
+       'perf.record("sessions.detail.reconcile_snapshot"', 'perf.record("sessions.detail.max_context_copy"',
+       'perf.record("sessions.detail.total"', 'perf.record("sessions.detail.file_path"',
+       'perf.record("sessions.detail.cache_marker"',
+      ),
+      (),
+     ),
+    )),
+    ('session_hot_paths_use_dedicated_executor_with_queue_wait_metrics', (
+     ('grep', 'main.py', (),
+      ('_HOT_PATH_EXECUTOR = ThreadPoolExecutor(', 'max_workers=8', 'thread_name_prefix="hot-path"',
+       '_SESSION_DETAIL_EXECUTOR = ThreadPoolExecutor(', 'thread_name_prefix="session-detail"',
+       '_SESSION_LIST_EXECUTOR = ThreadPoolExecutor(', 'thread_name_prefix="session-list"',
+      ),
+      (),
+     ),
+     ('grep', 'main.py', (('async def _run_hot_path(', 'def _streaming_assistant_message_id('),),
+      ('run_in_executor(\n            _HOT_PATH_EXECUTOR', 'async def _run_session_detail_hot_path(',
+       'run_in_executor(\n            _SESSION_DETAIL_EXECUTOR', 'async def _run_session_list_hot_path(',
+       'run_in_executor(\n            _SESSION_LIST_EXECUTOR', 'perf.record(f"{name}.queue_wait"',
+       'perf.record(name,',
+      ),
+      (),
+     ),
+     ('grep', 'main.py', (('async def get_sessions(', '@app.post("/api/sessions/search-content")'),),
+      ('await _run_session_list_hot_path(\n            "sessions.list.local_page_thread"',
+       'await _run_session_list_hot_path(\n            "sessions.list.search_local_page.worker"',
+       'await _run_session_list_hot_path(\n                    "sessions.list.remote.local_order_candidates.worker"',
+       '"sessions.list.page_decorate.worker"',
+      ),
+      ('await asyncio.to_thread(_build_local_sessions_page_for_list',
+       'await asyncio.to_thread(\n                _decorate_local_sidebar_sessions',
+       'await asyncio.to_thread(\n            _decorate_local_sidebar_sessions',
+       'await _run_hot_path(\n            "sessions.list.',
+      ),
+     ),
+    )),
+    ('sidebar_decoration_cache_uses_stable_session_version_key', (
+     ('grep', 'main.py', (('def _decorate_local_sidebar_sessions(', 'def _sidebar_stats_payload('),),
+      ('summary_version = session_store.summary_index_version()', 'sid,\n                summary_version,'),
+      ('id(s),',),
+     ),
+    )),
+    ('sidebar_summary_omits_worker_refs', (
+     ('grep', 'session_store.py', (('def _build_summary_for_root(', 'def set_requirement_tags_projection('),),
+      ('"worker_count"',), ('"workers"',),
+     ),
+     ('grep', 'session_store.py', (), ('def _sanitize_summary(', 'summary, cleaned = _sanitize_summary(summary)'), ()),
+    )),
+    ('summary_worker_count_uses_count_projection', (
+     ('grep', 'session_store.py', (('def _worker_summary_count()', 'def _refresh_summaries_for_cwd_from('),),
+      ('worker_store.worker_count("")',), ('worker_store.list_workers("")',),
+     ),
+     ('grep', 'stores/worker_store.py', (),
+      ('_worker_count_cache', '_registry_cache_signature', '_registry_cache', '_workers_dir_cache',
+       'return _merge_activity(deepcopy(_registry_cache))', '_WORKER_COUNT_HOT_TTL_SECONDS',
+       'now < _worker_count_cache_until', 'def worker_count(', '_worker_count_cache.clear()',
+      ),
+      (),
+     ),
+    )),
+    ('summary_sidecar_stat_only_for_unchanged_summary', (
+     ('grep', 'session_store.py', (), ('_summary_sidecar_write_queue', 'def _schedule_summary_sidecar_write('), ()),
+     ('grep', 'session_store.py', (('def _upsert_summary(', 'def _seen_cursor_path('),),
+      ('sidecar_current = True', 'if not summary_changed:', 'root_mtime_ns=root_mtime_ns',
+       'if summary_changed or not sidecar_current:', 'if sync_sidecar:', '_write_summary_file(',
+       '_schedule_summary_sidecar_write(',
+      ),
+      (),
+     ),
+     ('grep', 'session_store.py', (('def write_session_full(', 'def list_sessions('),),
+      ('root_mtime_ns=file_signature[3] if file_signature is not None else None',
+       'sync_sidecar=bool(root.get("forks"))',
+      ),
+      (),
+     ),
+    )),
+    ('root_resolution_consults_loaded_index_before_filesystem_shortcut', (
+     ('grep', 'session_store.py', (('def _resolve_root_id(', 'def _session_path('),),
+      ('_root_file_path(sid).exists()', '_ensure_index()', '_loaded_root_id_for(sid)'), (),
+     ),
+     ('grep', 'session_store.py', (('def _loaded_root_id_for(', 'def _resolve_root_id('),),
+      ('if not _index_loaded:', 'sid in _root_index_signatures', '_fork_index.get(sid)'), (),
+     ),
+     ('ordered', 'session_store.py', (('def _resolve_root_id(', 'def _session_path('),),
+      (('_loaded_root_id_for(sid)',), ('_root_file_path(sid).exists()',)),
+     ),
+     ('ordered', 'session_store.py', (('def _resolve_root_id(', 'def _session_path('),),
+      (('_root_file_path(sid).exists()',), ('_ensure_index()',)),
+     ),
+    )),
+    ('summary_index_skips_empty_projection_scan', (
+     ('grep', 'session_store.py', (),
+      ('def _projection_snapshot()', 'def _start_summary_projection_repair(',
+       '_summary_projection_repair_lock = threading.Lock()', '_summary_projection_repair_running = False',
+      ),
+      ('def _has_projection_snapshot()',),
+     ),
+     ('grep', 'session_store.py', (('def _start_summary_projection_repair()', 'def summary_version()'),),
+      ('if _summary_projection_repair_running:', '_summary_projection_repair_running = True',
+       '_summary_projection_repair_running = False', 'finally:', 'updates: dict[str, dict] = {}',
+       'projection_snapshot = _projection_snapshot()',
+      ),
+      ('_requirement_tags_for_session(sid)', '_markers_for_session(sid)'),
+     ),
+     ('count_eq', 'session_store.py', (('def _start_summary_projection_repair()', 'def summary_version()'),),
+      '_summary_index_version += 1', 1,
+     ),
+     ('grep', 'session_store.py',
+      (('def _do_build_summary_index_unsafe()', 'def _refresh_summaries_for_cwd('),
+       ('cached_summaries = _load_summary_index_cache(', '# Trees migrated in Pass 2'),
+      ),
+      ('_start_summary_projection_repair()', 'return'), ('if _has_projection_snapshot()',),
+     ),
+     ('grep', 'session_store.py', (('def _do_build_summary_index_unsafe()', 'def _refresh_summaries_for_cwd('),),
+      ('projection_snapshot = _projection_snapshot()',
+       'organization_projection = session_organization_store.enrichment_projection()', '_build_summary_for_root(',
+       'organization_projection,', '_start_summary_projection_repair()',
+      ),
+      ('_summary_has_projection(', 'summary_projection_present', 'if _has_projection_snapshot()',
+       'summary_items = list(_summary_index.items())',
+      ),
+     ),
+    )),
+    ('summary_index_validates_missing_summary_before_provider_context', (
+     ('grep', 'session_store.py', (('def _do_build_summary_index_unsafe()', 'def _refresh_summaries_for_cwd('),),
+      ('provider_ctx: Optional[dict] = None',), (),
+     ),
+     ('ordered', 'session_store.py', (('def _do_build_summary_index_unsafe()', 'def _refresh_summaries_for_cwd('),),
+      (('raw = json.loads(fpath.read_text',), ('if not isinstance(raw, dict) or "id" not in raw:',),
+       ('provider_ctx = _provider_backfill_context()',), ('data = _migrate_session(raw, provider_ctx)',),
+      ),
+     ),
+    )),
+    ('extension_audit_inventory_refresh_is_off_provider_hot_path', (
+     ('grep', 'extension_context_audit.py', (('def runtime_context(', 'def _inventory_projection('),),
+      ('_trigger_projection_refresh(cwd)', '_read_cache_cached()'), ('build_inventory(',),
+     ),
+     ('grep', 'extension_context_audit.py', (('def _refresh_projection(', 'def build_inventory('),),
+      ('inventory = build_inventory(cwd)', '_trigger_refresh(fingerprint, inventory)'), (),
+     ),
+    )),
+    ('summary_index_indexes_seen_sidecars_once', (
+     ('grep', 'session_store.py', (('def _do_build_summary_index_unsafe()', 'def _refresh_summaries_for_cwd('),),
+      ('seen_cursor_ids: set[str] = set()', 'for storage_dir in _session_storage_dirs():',
+       'entries = list(storage_dir.iterdir())', 'read_seen_cursors(sid) if sid in seen_cursor_ids else {}',
+       '_summary_index_cache_fingerprint(', '_load_summary_index_cache(summary_cache_fingerprint)',
+       '_write_summary_index_cache(summary_cache_fingerprint, summaries)',
+      ),
+      ('.glob("*.summary.json")', '.glob("*.seen.json")'),
+     ),
+     ('grep', 'session_store.py', (), ('"skipped_root_ids"',), ()),
+    )),
+    ('summary_index_cache_is_sidecar', (
+     ('grep', 'session_store.py', (), ('def _summary_index_cache_path()', '".summary-index.json"'), ()),
+     ('grep', 'session_store.py', (('_SIDECAR_JSON_SUFFIXES = (', 'def _is_sidecar_json'),),
+      ('".summary-index.json"',), (),
+     ),
+    )),
+    ('session_store_sessions_dir_is_env_aware_cached', (
+     ('grep', 'session_store.py', (),
+      ('_SESSIONS_DIR: Path | None = None', '_SESSIONS_DIR_READY = False',
+       '_SESSIONS_DIR_READY_LOCK = threading.Lock()',
+      ),
+      (),
+     ),
+     ('grep', 'session_store.py', (('def _sessions_dir()', 'def _ensure_dir()'),),
+      ('resolved = ba_home() / "sessions"', 'if _SESSIONS_DIR == resolved:', '_reset_home_scoped_caches()'), (),
+     ),
+     ('grep', 'session_store.py', (('def _ensure_dir()', '# ── Fork index'),),
+      ('sessions_dir = _sessions_dir()', 'if _SESSIONS_DIR_READY:\n        return',
+       'sessions_dir.mkdir(parents=True, exist_ok=True)', '_SESSIONS_DIR_READY = True',
+      ),
+      (),
+     ),
+    )),
+    ('event_journal_watch_path_uses_cached_sessions_dir', (
+     ('grep', 'event_journal.py', (), ('def _sessions_dir()', '_SESSIONS_DIR_CACHE'), ()),
+     ('grep', 'event_journal.py', (('def _read_appended_entries(', 'def read_events('),),
+      ('_sessions_dir() / session_id / "events.jsonl"', 'os.SEEK_END'), ('ba_home()', '.exists(', '.stat('),
+     ),
+    )),
+    ('run_state_emit_debug_logging_is_gated', (
+     ('grep', 'turn_manager.py',
+      (('def _dbg_runstate(', '# ======================================================================'),),
+      ('logger.isEnabledFor(logging.DEBUG)', 'logger.debug(', 'await self._c.broadcast_session'), ('logger.info(',),
+     ),
+    )),
+    ('startup_session_search_rebuild_skips_persisted_index', (
+     ('grep', 'main.py', (('async def on_startup()', 'async def on_shutdown()'),),
+      ('session_search_index.needs_rebuild()',), (),
+     ),
+    )),
+    ('event_projections_do_not_eager_warm_detail_snapshots', (
+     ('grep', 'main.py', (), (),
+      ('def _session_event_projection_warm_roots(', 'def _warm_session_detail_projection_roots_sync(',
+       'async def _warm_session_event_projections()', '_SESSION_DETAIL_WARM_EXECUTOR',
+       'async def _run_session_detail_warm_path(',
+      ),
+     ),
+     ('grep', 'main.py', (('async def on_shutdown()', '# Internal Endpoints'),),
+      ('_SESSION_DETAIL_EXECUTOR.shutdown(',), ('_SESSION_DETAIL_WARM_EXECUTOR.shutdown(',),
+     ),
+     ('grep', 'main.py', (('async def on_startup()', 'async def on_shutdown()'),), (),
+      ('startup-session-event-meta-projection-warm', 'session_event_projection_warm'),
+     ),
+     ('grep', 'main.py', (('def _schedule_session_event_meta_warm(', 'def _machine_nodes_enabled_cached('),), (),
+      ('_session_detail_snapshot_sync(', 'session_manager.schedule_reconcile_if_needed'),
+     ),
+    )),
+    ('render_hydrate_worker_fingerprint_is_batched', (
+     ('grep', 'render_tree_hydrate.py',
+      (('            pre_worker_fingerprint = (', '            for raw in orphan_rows:'),),
+      ('pre_worker_fingerprint is not None',), ('before_worker',),
+     ),
+     ('count_eq', 'render_tree_hydrate.py',
+      (('            pre_worker_fingerprint = (', '            for raw in orphan_rows:'),),
+      '_message_timeline_fingerprint(m)', 2,
+     ),
+    )),
+    ('project_match_rebuild_skips_unchanged_session_state', (
+     ('grep', 'main.py', (('async def _project_match_warm_loop()', 'def _ensure_project_match_warm_task()'),),
+      ('fingerprint = None', 'rebuild_index,\n                fingerprint,', 'result.get("fingerprint")',
+       'result.get("rebuilt") is False',
+      ),
+      (),
+     ),
+     ('grep', 'project_match/worker.py', (),
+      ('def sessions_fingerprint()', 'previous_fingerprint is not None and fingerprint == previous_fingerprint',
+       '{"rebuilt": False, "fingerprint": fingerprint}',
+      ),
+      (),
+     ),
+    )),
+    ('stubbed_tree_cache_key_does_not_scan_message_events', (
+     ('grep', 'session_manager.py', (('def _tree_stub_cache_key(', 'def _build_stubbed_tree('),),
+      ('render_seq_by_sid = event_ingester.render_seq_by_sid(rid)',),
+      ('msg.get("events")', 'event_shape', 'root_events_version'),
+     ),
+    )),
+    ('worker_panel_anchor_derivation_is_cached', (
+     ('grep', 'render_stub.py', (), ('_PANEL_ANCHOR_CACHE', 'anchors = _panel_anchors(msg, manager_events, workers)'),
+      (),
+     ),
+     ('grep', 'render_stub.py', (('def _panel_anchors(', 'def timeline_events('),),
+      ('cached.get("key") == key', 'return anchors'), (),
+     ),
+     ('grep', 'session_manager.py', (('def append_native_event(', 'def replace_native_event('),),
+      ('invalidate_panel_anchor_cache(m)',), (),
+     ),
+     ('grep', 'session_manager.py', (('def replace_native_event(', 'def set_agent_sid_on_msg('),),
+      ('invalidate_panel_anchor_cache(m)',), (),
+     ),
+     ('grep', 'session_store.py', (('def _strip_volatile_from_tree(', 'def copy_persistable_tree('),),
+      ('"_panel_anchor_cache"', 'panel_anchor_caches'), (),
+     ),
+    )),
+    ('startup_recovery_defers_cold_runs', (
+     ('grep', 'main.py', (('async def _recover_in_flight_task()', 'async def _housekeeping_task()'),),
+      ('live = [r for r in recovered if bool(r.get("alive"))]',
+       'cold = [r for r in recovered if not bool(r.get("alive"))]', '_enqueue_recovered_cold_runs(cold)',
+      ),
+      (),
+     ),
+    )),
+    ('startup_recovery_gate_opens_after_live_before_background_recovery', (
+     ('ordered', 'main.py', (('async def _recover_in_flight_task()', 'async def _housekeeping_task()'),),
+      (('startup_recovery_gate.mark_recovery_sessions_registered()',),
+       ('await integrate_recovered_runs(coordinator, batch)',),
+      ),
+     ),
+     ('ordered', 'main.py', (('async def _recover_in_flight_task()', 'async def _housekeeping_task()'),),
+      (('await integrate_recovered_runs(coordinator, batch)',), ('startup_recovery_gate.mark_recovery_done()',)),
+     ),
+     ('ordered', 'main.py', (('async def _recover_in_flight_task()', 'async def _housekeeping_task()'),),
+      (('startup_recovery_gate.mark_recovery_done()',), ('_enqueue_recovered_cold_runs(cold)',)),
+     ),
+     ('ordered', 'main.py', (('async def _recover_in_flight_task()', 'async def _housekeeping_task()'),),
+      (('startup_recovery_gate.mark_recovery_done()',), ('await _re_enqueue_queued_prompts()',)),
+     ),
+    )),
+    ('hydration_uses_local_projection_not_extension_backend', (
+     ('grep', 'session_manager.py', (('    def _derive_current_todos_from_events_jsonl(', '    def _cached('),),
+      ('session_local_projection.project_event_fields(',), ('session_event_extensions', 'extension_backend_loader'),
+     ),
+    )),
+    ('session_event_extension_callbacks_are_worker_only', (
+     ('grep', 'session_event_extensions.py', (('def project_event(', 'def _apply_builtin_event('),), (),
+      ('invoke_extension_backend_sync',),
+     ),
+     ('grep', 'session_event_extensions.py', (('def apply_event(', 'def _apply_event_locked('),), (),
+      ('invoke_extension_backend_sync',),
+     ),
+     ('grep', 'session_event_extensions.py', (('def _run_extension_hook_job(', 'def _run_builtin_todos_job('),),
+      ('invoke_extension_backend_sync',), (),
+     ),
+    )),
+    ('session_event_apply_event_uses_cached_hook_snapshot', (
+     ('grep', 'session_event_extensions.py', (('def apply_event(', 'def _apply_event_locked('),),
+      ('hook_snapshot_nonblocking()',), ('hook_snapshot()', 'session_event_hook_specs()', '_builtin_todos_enabled()'),
+     ),
+    )),
+    ('requirement_tag_refresh_is_off_startup_loop', (
+     ('grep', 'event_bus_subscribers.py',
+      (('async def _refresh_requirement_tags(', 'async def _apply_requirement_tags_projection('),),
+      ('await asyncio.to_thread(_refresh_requirement_tags_sync)', 'ModuleNotFoundError'), (),
+     ),
+     ('grep', 'main.py', (('async def on_startup()', 'async def on_shutdown()'),), ('ModuleNotFoundError',),
+      ('name="requirement-tags-startup-refresh"', 'type="requirement_tags.refresh_requested"',
+       'await event_bus.publish(BusEvent(\\n            type="requirement_tags.refresh_requested"',
+      ),
+     ),
+    )),
+    ('machine_nodes_readiness_check_is_off_startup_loop', (
+     ('grep', 'main.py', (('async def on_startup()', 'async def on_shutdown()'),),
+      ('async def _start_node_offset_loop_if_ready()',
+       'await asyncio.to_thread(\n                extension_store.is_extension_runtime_ready',
+       'name="node-offset-flush-startup"',
+      ),
+      (),
+     ),
+    )),
+    ('sessions_route_does_not_runtime_check_machine_nodes', (
+     ('grep', 'main.py', (('@app.get("/api/sessions")', '@app.get("/api/sessions/{session_id}")'),),
+      ('connected_worker_node_ids_snapshot()',),
+      ('_ns.snapshot()', 'sessions.list.node_snapshot', '_builtin_extension_runtime_ready_fast',
+       '_builtin_extension_runtime_ready(',
+      ),
+     ),
+     ('grep', 'main.py', (('def _machine_nodes_enabled_cached(', 'def _sessions_list_response('),),
+      ('asyncio.create_task(_refresh())',
+       'await asyncio.to_thread(\n                        _builtin_extension_runtime_ready', 'return cached[1]',
+      ),
+      (),
+     ),
+    )),
+    ('sessions_route_uses_cached_remote_node_sessions', (
+     ('grep', 'main.py', (),
+      ('_REMOTE_SESSIONS_CACHE_TTL_SECONDS = 2.0', 'def _remote_sessions_cache_get(\n    node_id: str,',
+       'limit: int | None = None', 'def _schedule_remote_sessions_refresh(node_id: str)',
+       'async def _fetch_remote_sessions_live(node_id: str)',
+      ),
+      (),
+     ),
+     ('grep', 'main.py', (('async def _remote_sessions_for_sidebar(', 'def _session_list_user_prefs('),),
+      ('sessions.list.remote_cache.hit', 'sessions.list.remote_cache.stale', 'sessions.list.remote_cache.miss'), (),
+     ),
+     ('grep', 'main.py', (('@app.get("/api/sessions")', '@app.get("/api/sessions/{session_id}")'),),
+      ('_remote_sessions_cache_version_snapshot() if connected else 0', 'with perf.timed("sessions.list.remote")',
+       '_remote_sessions_for_sidebar(nid)', 'rs["node_id"] = nid',
+      ),
+      (),
+     ),
+    )),
+    ('connected_session_list_defers_cold_sidebar_projections', (
+     ('grep', 'virtual_session_store.py', (), ('def list_recent_cached(',), ()),
+     ('grep', 'main.py',
+      (('def _remote_sessions_for_sidebar_cached(', 'def _schedule_virtual_sessions_recent_refresh('),),
+      ('sessions.list.remote_cache.deferred_miss', '_schedule_remote_sessions_refresh(node_id)'), (),
+     ),
+     ('grep', 'main.py', (('def _schedule_virtual_sessions_recent_refresh(', 'def _session_list_user_prefs('),),
+      ('asyncio.to_thread(\n            virtual_session_store.list_recent,',), (),
+     ),
+     ('grep', 'main.py', (('@app.get("/api/sessions")', '@app.get("/api/sessions/{session_id}")'),),
+      ('sessions.list.virtual.cached_first_page',
+       '_remote_sessions_for_sidebar_cached(\n                        nid,', 'limit=max(offset + limit, 1)',
+       'deferred_sidebar_projection and not appended_virtual_sessions and not appended_remote_sessions',
+       'projected_first_page_sessions', 'sessions.list.projected_first_page_merge',
+       '_sessions_list_response(\n                    json.dumps(',
+      ),
+      (),
+     ),
+     ('ordered', 'main.py', (('@app.get("/api/sessions")', '@app.get("/api/sessions/{session_id}")'),),
+      (('sessions.list.projected_first_page_merge',), ('with perf.timed("sessions.list.filter_sort")',)),
+     ),
+    )),
+    ('local_session_first_page_prefers_cached_virtual_projection', (
+     ('grep', 'main.py', (('def _build_local_sessions_page_for_list(', 'async def _sidebar_search_scores('),),
+      ('virtual_session_store.list_recent_cached(',), (),
+     ),
+     ('ordered', 'main.py', (('def _build_local_sessions_page_for_list(', 'async def _sidebar_search_scores('),),
+      (('virtual_session_store.list_recent_cached(',), ('virtual_session_store.list_recent(',)),
+     ),
+    )),
+    ('submit_team_message_sync_store_work_off_loop', (
+     ('grep', 'orchestrator.py', (('async def submit_team_message(', '    def _resolve_delegation_run_config('),),
+      ('sender, target = await asyncio.to_thread(\n            team_messaging.validate_message_route',
+       'metadata = await asyncio.to_thread(\n            team_messaging.build_message_metadata',
+       'queue_item = await asyncio.to_thread(\n                team_messaging.queue_payload',
+       'await asyncio.to_thread(\n                session_manager.add_queued_prompt',
+       'cli_prompt = await asyncio.to_thread(\n                team_messaging.format_team_message_prompt',
+       'await asyncio.to_thread(\n                session_manager.remove_queued_prompt',
+       'await self.submit_prompt_async(target_session_id, {',
+      ),
+      ('session_manager.add_queued_prompt(', 'cli_prompt = team_messaging.format_team_message_prompt(',
+       'self.submit_prompt(target_session_id, {',
+      ),
+     ),
+    )),
+    ('default_session_page_uses_visible_order_cache', (
+     ('grep', 'main.py', (), ('_local_visible_order_cache',), ()),
+     ('grep', 'main.py',
+      (('def _local_visible_order_page_ids(', 'def _local_session_page_for_sidebar_preserving_order('),),
+      ('sessions.list.local.visible_order_cache.hit', 'sessions.list.local.visible_order_build',
+       'expected_summary_index_version', 'get_indexed_session_summary_if_current', 'visible_ids.append(ordered_id)',
+       'return list(cached[offset:offset + limit]), len(cached)', 'session_matches_project(summary, project_path)',
+      ),
+      (),
+     ),
+     ('grep', 'main.py', (('def _local_session_page_for_sidebar_preserving_order(', 'def _root_session_file_path('),),
+      ('_can_page_default_local_visible_order(', 'sessions.list.local.visible_order_page',
+       '_local_visible_order_page_ids(', 'expected_summary_index_version = session_store.summary_index_version()',
+      ),
+      (),
+     ),
+     ('ordered', 'main.py',
+      (('def _local_session_page_for_sidebar_preserving_order(', 'def _root_session_file_path('),),
+      (('sessions.list.local.visible_order_page',), ('sessions.list.local.ordered_ids',)),
+     ),
+    )),
+    ('session_search_uses_bounded_candidate_window', (
+     ('grep', 'main.py', (), ('_SESSION_LIST_SEARCH_MIN_CANDIDATES = 200',), ()),
+     ('grep', 'main.py', (('def _session_search_candidate_limit(', '@app.get("/api/sessions")'),),
+      ('max(offset + limit, _SESSION_LIST_SEARCH_MIN_CANDIDATES)',), (),
+     ),
+     ('grep', 'main.py', (('@app.get("/api/sessions")', '@app.post("/api/sessions/search-content")'),),
+      ('content_limit=_session_search_candidate_limit(offset, limit)',
+       'session_store.SEARCH_FIELD_CONTENT in effective_search_fields',
+       'cached_response = _sessions_list_cache_get(cache_key)', 'sessions.list.search_local_page.worker',
+      ),
+      ('content_limit=max(offset + limit, 1)', 'cache_response = not ('),
+     ),
+     ('ordered', 'main.py', (('@app.get("/api/sessions")', '@app.post("/api/sessions/search-content")'),),
+      (('sessions.list.search_local_page.worker',), ('with perf.timed("sessions.list.remote")',)),
+     ),
+    )),
+    ('session_list_filter_sort_keeps_only_page_candidates', (
+     ('grep', 'main.py', (('def _filter_sort_page_for_list(', 'def _filter_sessions_for_list_preserving_order('),),
+      ('heapq.heapreplace(selected, item)', 'heapq.heappush(selected, item)', 'total += 1'),
+      ('heapq.nlargest(', 'selected.append('),
+     ),
+    )),
+    ('startup_warms_virtual_session_summaries_off_loop', (
+     ('grep', 'main.py', (('async def on_startup()', 'async def on_shutdown()'),),
+      ('"virtual_session_summaries_warm"', '"startup_tasks.virtual_session_summaries_warm"',
+       'virtual_session_store.list_all', 'name="startup-virtual-session-summaries-warm"',
+      ),
+      (),
+     ),
+    )),
+    ('startup_warms_recent_git_statuses_off_hot_path', (
+     ('grep', 'main.py', (), ('_GIT_STATUS_STARTUP_WARM_LIMIT = 8',), ()),
+     ('grep', 'main.py', (('async def _warm_recent_git_statuses()', 'def _shutdown_kill_runners_flag()'),),
+      ('await asyncio.to_thread(project_store.list_projects)', 'node_id != "primary"',
+       'await _cached_git_status(node_id, cwd)', 'warmed >= _GIT_STATUS_STARTUP_WARM_LIMIT',
+      ),
+      (),
+     ),
+     ('grep', 'main.py', (('async def on_startup()', 'async def on_shutdown()'),),
+      ('"git_status_warm"', '"startup_tasks.git_status_warm"', '_warm_recent_git_statuses', 'in_thread=False',
+       'name="startup-git-status-warm"',
+      ),
+      (),
+     ),
+    )),
+    ('session_organization_refresh_is_coalesced_background_work', (
+     ('grep', 'main.py',
+      (('async def _broadcast_session_organization_changed(', 'async def _apply_initial_session_folder('),),
+      ('_session_organization_refresh_pending = True', 'asyncio.create_task(_refresh_loop())',
+       'await asyncio.to_thread(session_store.refresh_organization_projection, session_ids)',
+       'if _session_organization_refresh_task is not None and not _session_organization_refresh_task.done()',
+      ),
+      (),
+     ),
+    )),
+    ('get_session_strips_synthetic_events_off_loop', (
+     ('grep', 'main.py', (), ('def _tree_has_loaded_events(',), ()),
+     ('grep', 'main.py', (('async def get_session(', '@app.get("/api/sessions/{session_id}/turns")'),), (),
+      ('_strip_synthetic_events_from_tree(tree)',),
+     ),
+     ('grep', 'main.py', (('def _session_detail_snapshot_sync(', 'def _floor_events_from_seq('),),
+      ('if _tree_has_loaded_events(tree):', '_strip_synthetic_events_from_tree(tree)', 'strip_ms'), (),
+     ),
+    )),
+    ('session_detail_response_bytes_are_cached', (
+     ('grep', 'main.py', (),
+      ('_session_detail_response_cache', '_SESSION_DETAIL_RESPONSE_CACHE_MAX = 64', 'def _session_detail_cache_get(',
+       'def _session_detail_cache_put(', 'def _session_detail_response_cache_key_sync(',
+       'def _session_detail_cache_put_async(',
+      ),
+      ('_SESSION_DETAIL_RESPONSE_TTL_SECONDS',),
+     ),
+     ('grep', 'main.py', (('def _session_detail_cache_get(', 'def _session_detail_cache_put('),), (),
+      ('time.monotonic()',),
+     ),
+     ('grep', 'main.py', (('async def get_session(', '@app.get("/api/sessions/{session_id}/turns")'),),
+      ('_session_detail_cache_get(cache_key)', '_session_detail_response_cache_latest.get(simple_cache_key)',
+       'if cached_full_key is not None:', '_session_reconcile_snapshot_and_schedule', 'include_cache_key=True',
+       'await _session_detail_cache_put_async(cache_key, tree)',
+      ),
+      (),
+     ),
+    )),
+    ('stubbed_tree_cache_covers_broad_session_loads', (
+     ('grep', 'session_manager.py', (), ('self._tree_stub_cache_max = 256',), ()),
+    )),
+    ('run_recovery_finalize_session_manager_calls_are_off_loop', (
+     ('grep', 'run_recovery.py',
+      (('async def _finalize_when_done(',
+        '# ============================================================================',
+       ),
+      ),
+      ('await asyncio.to_thread(\n            _recovery_target_snapshot',
+       'await asyncio.to_thread(\n                    session_manager.set_msg_recovering',
+      ),
+      ('session_manager.get(persist_sid)', 'session_manager.set_msg_recovering(persist_sid'),
+     ),
+     ('grep', 'run_recovery.py', (('async def _integrate_one(', 'async def _retry_recovered_run('),),
+      ('await _to_thread_joined(\n                coordinator.turn_manager.run_state_add',),
+      ('\n            coordinator.turn_manager.run_state_add(',),
+     ),
+     ('grep', 'run_recovery.py', (('async def _retry_recovered_run(', 'def _cleanup_active_run_id('),),
+      ('await asyncio.to_thread(\n        coordinator.turn_manager.run_state_add',),
+      ('\n    coordinator.turn_manager.run_state_add(',),
+     ),
+    )),
+    ('delegation_run_state_mutations_run_off_loop', (
+     ('grep', 'orchs/manager/_delegation.py', (('async def run_delegation(', 'async def run_delegation_locked('),),
+      ('await asyncio.to_thread(\n        coordinator.turn_manager.run_state_add',
+       'await asyncio.to_thread(\n            coordinator.turn_manager.run_state_remove',
+      ),
+      ('\n    coordinator.turn_manager.run_state_add(', '\n        coordinator.turn_manager.run_state_remove('),
+     ),
+     ('grep', 'orchs/manager/_delegation.py',
+      (('async def run_delegation(', None), ('async def run_delegation_locked(', 'def _remove_run_id() -> None:')),
+      ('await asyncio.to_thread(\n            coordinator.turn_manager.run_state_set_pid',),
+      ('\n        coordinator.turn_manager.run_state_set_pid(',),
+     ),
+    )),
+    ('run_recovery_summarizes_repeated_skip_logs', (
+     ('grep', 'run_recovery.py', (),
+      ('class _RecoveryLogSummary:', 'summary.record_skip("missing target_message_id", run_id)',
+       'summary.record_tombstoned(reason, run_id)', 'summary.emit()',
+       'integrate_recovered_runs: skip %s (missing target_message_id)',
+       'integrate_recovered_runs: skipped %d run(s): %s%s',
+      ),
+      (),
+     ),
+    )),
+    ('provider_start_run_is_off_loop_everywhere', (
+     ('grep', 'orchs/manager/_delegation.py', (),
+      ('await asyncio.to_thread(\n                    provider.start_run,',
+       'await asyncio.to_thread(session_manager.flush_pending_persists)',
+      ),
+      ('\n            provider.start_run(',),
+     ),
+     ('grep', 'run_recovery.py', (),
+      ('await asyncio.to_thread(\n        provider.start_run,',
+       'await asyncio.to_thread(session_manager.flush_pending_persists)',
+      ),
+      ('\n    provider.start_run(',),
+     ),
+     ('grep', 'node_rpc_handlers.py', (),
+      ('await asyncio.to_thread(\n                provider.start_run,',
+       'await asyncio.to_thread(session_manager.flush_pending_persists)',
+      ),
+      ('\n        provider.start_run(',),
+     ),
+    )),
+    ('extension_backend_get_skips_body_stream', (
+     ('grep', 'extension_backend_loader.py', (), ('_METHODS_WITH_REQUEST_BODY = {"POST", "PUT", "PATCH", "DELETE"}',),
+      (),
+     ),
+     ('grep', 'extension_backend_loader.py',
+      (('async def dispatch_extension_backend_request(', 'async def invoke_extension_backend('),),
+      ('method = str(getattr(request, "method", "POST") or "POST").upper()',
+       'if method in _METHODS_WITH_REQUEST_BODY', 'else b""',
+      ),
+      (),
+     ),
+    )),
+    ('extension_backend_invoke_has_split_perf_timers', (
+     ('grep', 'extension_backend_loader.py', (), ('_EMPTY_B64 = ""',), ()),
+     ('grep', 'extension_backend_loader.py',
+      (('async def _invoke_backend(', 'async def dispatch_extension_backend_request('),),
+      ('extension.backend.invoke.payload', 'extension.backend.invoke.handle', 'extension.backend.invoke.timeout',
+       'extension.backend.invoke.roundtrip', 'extension.backend.invoke.decode', 'extension.backend.invoke.response',
+       'body_b64 = (', 'if body_bytes',
+      ),
+      (),
+     ),
+     ('grep', 'extension_backend_loader.py',
+      (('async def dispatch_extension_backend_request(', 'async def invoke_extension_backend('),),
+      ('else _EMPTY_B64',), (),
+     ),
+    )),
+    ('builtin_extension_core_dispatch_precedes_backend_spec_lookup', (
+     ('ordered', 'extension_api.py',
+      (('async def dispatch_backend_extension(', 'async def _dispatch_core_builtin_backend('),),
+      (('_dispatch_core_builtin_backend(',), ('_backend_entrypoint_spec_async(',)),
+     ),
+     ('grep', 'extension_api.py',
+      (('async def _dispatch_core_builtin_backend(', 'async def _dispatch_machine_nodes_core_backend('),),
+      ('roles, enabled = await _CORE_ROLE_EXECUTOR.run(', '_core_routing_projection', 'owner == extension_id',
+       'owned_roles = {name for name, owner in roles.items()',
+       '("team-orchestration", _dispatch_team_orchestration_core_backend)',
+       '("scheduler", _dispatch_scheduler_core_backend)', '_dispatch_scheduler_core_backend',
+       '("routines", _dispatch_routines_core_backend)', '_dispatch_routines_core_backend',
+       '("project-structure", _dispatch_project_structure_core_backend)', 'if role not in owned_roles:',
+       'if not enabled:',
+      ),
+      (),
+     ),
+     ('grep', 'extension_api.py', (('def _core_routing_projection(', 'async def shutdown_hot_path_executors('),),
+      ('extension_store.is_extension_enabled_cached(extension_id)',), (),
+     ),
+     ('grep', 'extension_api.py',
+      (('async def _dispatch_routines_core_backend(', 'async def _dispatch_scheduler_core_backend('),),
+      ('request.method != "GET" or path != "routines"', 'task_store.list_for_project'), ('extension_backend_loader',),
+     ),
+     ('grep', 'extension_api.py',
+      (('async def _dispatch_scheduler_core_backend(', 'async def _dispatch_team_orchestration_core_backend('),),
+      ('request.method != "GET"', 'parts[0] != "sessions"', 'parts[2] != "schedules"',
+       '_run_scheduler_read(app_session_id)',
+      ),
+      ('extension_backend_loader',),
+     ),
+     ('grep', 'extension_api.py', (('def _scheduler_session_snapshot(', 'def _local_node_id_or_primary_cached('),),
+      ('session_manager.manager.get', 'session.get("id") != app_session_id', 'schedule_store.list_for_session',
+       '_SCHEDULER_READ_EXECUTOR',
+      ),
+      (),
+     ),
+     ('grep', 'extension_api.py', (), ('name="extension.scheduler.read"',), ()),
+     ('grep', 'bounded_async_executor.py', (),
+      ('f"{self._name}.queue_wait"', 'f"{self._name}.run"', 'f"{self._name}.rejected"'), (),
+     ),
+     ('grep', 'extension_api.py',
+      (('async def _dispatch_team_orchestration_core_backend(', 'async def _dispatch_machine_nodes_core_backend('),),
+      ('request.method == "GET" and path == "workers"', 'request.method == "GET" and path == "pending_approvals"',
+       'team_orchestration_read.workers_response_bytes', 'pending_approvals.list_pending',
+      ),
+      (),
+     ),
+     ('grep', 'extension_api.py',
+      (('async def _dispatch_project_structure_core_backend(', '@router.post("/install")'),),
+      ('request.method == "GET" and path == "project-updates/total"',
+       'request.method != "POST" or path != "project-updates/counts-batch"',
+       'project_update_store.peek_total_unseen()', 'project_update_store.peek_unseen_counts(project_ids)',
+       'await asyncio.to_thread(project_update_store.total_unseen)',
+       'await asyncio.to_thread(project_update_store.unseen_counts, project_ids)',
+      ),
+      (),
+     ),
+    )),
+    ('project_update_total_is_maintained_projection', (
+     ('grep', 'project_update_store.py', (),
+      ('_total_unseen_count = 0', '_counts_version = 0', 'def version_token(', 'def warm_counts(',
+       'def _project_path(project_id: str, *, create_dir: bool = True)',
+       '_project_path(project_id, create_dir=False)',
+      ),
+      (),
+     ),
+     ('grep', 'project_update_store.py', (('def _ensure_counts_locked(', 'def _set_count_locked('),),
+      ('_total_unseen_count = total', '_read_entries_path_locked(path)'), ('_read_entries_locked(path.stem)',),
+     ),
+     ('grep', 'project_update_store.py', (('def _set_count_locked(', 'def append('),),
+      ('if count == previous:\n        return', '_total_unseen_count += count - previous',
+       '_total_unseen_count -= previous', '_counts_version += 1',
+      ),
+      (),
+     ),
+     ('grep', 'project_update_store.py', (('def append(', 'def list_unseen('),),
+      ('_set_count_locked(project_id, _unseen_counts.get(project_id, 0) + 1)',), (),
+     ),
+     ('grep', 'project_update_store.py', (('def mark_seen(', 'def list_all('),),
+      ('_set_count_locked(project_id, _unseen_counts.get(project_id, 0) - count)',), (),
+     ),
+     ('grep', 'project_update_store.py', (('def total_unseen(', 'def mark_seen('),), ('return _total_unseen_count',),
+      ('sum(_unseen_counts.values())',),
+     ),
+     ('grep', 'main.py', (('async def on_startup()', 'async def on_shutdown()'),),
+      ('"project_update_counts_warm"', 'project_update_store.warm_counts',
+       'name="startup-project-update-counts-warm"', '"pending_node_projection_warm"',
+       '"startup_tasks.pending_node_projection_warm"', 'name="startup-pending-node-projection-warm"',
+      ),
+      (),
+     ),
+     ('grep', 'main.py',
+      (('async def on_startup()', 'async def on_shutdown()'),
+       ('def _warm_pending_node_projection()', 'asyncio.create_task('),
+      ),
+      ('node_link.public_pending_nodes()',), (),
+     ),
+    )),
+    ('builtin_feature_enabled_has_cached_projection', (
+     ('grep', 'extension_store.py', (),
+      ('_BUILTIN_FEATURE_CACHE', 'def is_builtin_feature_enabled_cached(', '_STORE_FINGERPRINT_CACHE',
+       '_STORE_FINGERPRINT_TTL_SECONDS', '_STORE_PATH',
+      ),
+      (),
+     ),
+     ('grep', 'extension_store.py', (('def _store_path(', 'def store_fingerprint('),),
+      ('_STORE_PATH_HOME_KEY', '_STORE_PATH_HOME_KEY != home_key', 'ba_home()'), (),
+     ),
+     ('grep', 'extension_store.py', (('def is_builtin_feature_enabled_cached(', 'def is_extension_runtime_ready('),),
+      ('fingerprint = store_fingerprint()', '_BUILTIN_FEATURE_CACHE.get(extension_id)',
+       'is_builtin_feature_enabled(extension_id)',
+      ),
+      (),
+     ),
+     ('grep', 'extension_store.py', (('def store_fingerprint(', 'def _refresh_store_fingerprint_cache('),),
+      ('_STORE_FINGERPRINT_CACHE_LOCK', 'hashlib.sha256(path.read_bytes()).hexdigest()', 'return cached[1]'), (),
+     ),
+     ('grep', 'extension_store.py', (('def _write_store_unlocked(', 'def _merge_store_for_save('),),
+      ('_refresh_store_fingerprint_cache(path)',), (),
+     ),
+     ('ordered', 'extension_store.py', (('def _write_store_unlocked(', 'def _merge_store_for_save('),),
+      (('os.replace(tmp_name, path)',), ('_refresh_store_fingerprint_cache(path)',)),
+     ),
+    )),
+    ('extension_list_reconciliation_is_off_loop', (
+     ('grep', 'extension_api.py', (('async def list_extensions(', '@router.get("/builtin-ids")'),),
+      ('fingerprint = await _extension_store_fingerprint_async()', 'cache_key = (fingerprint, include_hidden)',
+       '_projection_response_cache_get("list", cache_key)',
+       'await asyncio.to_thread(\n        extension_store.list_extensions_with_reconciliation',
+       '_projection_response_cache_put("list", cache_key, {"extensions": extensions})',
+      ),
+      ('extensions, changed = extension_store.list_extensions_with_reconciliation',),
+     ),
+    )),
+    ('internal_communication_worker_lookup_is_off_loop', (
+     ('grep', 'main.py', (('async def _resolve_communication_target(', '@app.post("/api/internal/ask")'),),
+      ('await asyncio.to_thread(_find_worker_by_agent_session_id',
+       'await asyncio.to_thread(\n        _pick_pool_worker_for_sender',
+      ),
+      (),
+     ),
+     ('grep', 'main.py',
+      (('async def _ask_continue_and_expect_mssg_back_async(',
+        'async def _ask_wait_and_grab_last_assistant_mssg_in_turn(',
+       ),
+      ),
+      ('await asyncio.to_thread(\n            _pick_pool_worker_for_sender',
+       'await _resolve_communication_target(body)',
+      ),
+      ('target = _pick_idle_pool_worker(target_worker_pool)',),
+     ),
+    )),
+)
+
+
+_GREP_SOURCE_CACHE: dict[str, str] = {}
+
+
+def _grep_source(rel: str) -> str:
+    text = _GREP_SOURCE_CACHE.get(rel)
+    if text is None:
+        text = (ROOT / rel).read_text(encoding="utf-8")
+        _GREP_SOURCE_CACHE[rel] = text
+    return text
+
+
+def _grep_region(rel: str, steps: tuple) -> str:
+    text = _grep_source(rel)
+    for start, end in steps:
+        lo = text.index(start) if start is not None else 0
+        hi = text.index(end, lo) if end is not None else len(text)
+        text = text[lo:hi]
+    return text
+
+
+def _grep_check_failures(check: tuple) -> list[str]:
+    kind, rel, steps = check[0], check[1], check[2]
+    try:
+        region = _grep_region(rel, steps)
+    except ValueError:
+        return [f"{rel}: region marker missing for steps {steps!r}"]
+    failures: list[str] = []
+    if kind == "grep":
+        failures.extend(
+            f"{rel}: expected {needle!r}" for needle in check[3] if needle not in region
+        )
+        failures.extend(
+            f"{rel}: forbidden {needle!r}" for needle in check[4] if needle in region
+        )
+    elif kind == "any_in":
+        if not any(needle in region for needle in check[3]):
+            failures.append(f"{rel}: none of {check[3]!r} present")
+    elif kind == "ordered":
+        try:
+            positions = []
+            for path in check[3]:
+                pos = 0
+                for needle in path:
+                    pos = region.index(needle, pos)
+                positions.append(pos)
+        except ValueError as exc:
+            failures.append(f"{rel}: ordered needle missing: {exc}")
+        else:
+            if not all(a < b for a, b in zip(positions, positions[1:])):
+                failures.append(f"{rel}: order violated for {check[3]!r}")
+    elif kind == "count_eq":
+        found = region.count(check[3])
+        if found != check[4]:
+            failures.append(f"{rel}: count({check[3]!r}) == {found}, expected {check[4]}")
+    elif kind == "count_ge":
+        found = region.count(check[3])
+        if found < check[4]:
+            failures.append(f"{rel}: count({check[3]!r}) == {found}, expected >= {check[4]}")
+    else:
+        failures.append(f"unknown check kind {kind!r}")
+    return failures
+
+
+def test_source_grep_regressions() -> None:
+    assert len(SOURCE_GREP_CASES) == 186
+    executed = 0
+    failing: list[str] = []
+    report: list[str] = []
+    for label, checks in SOURCE_GREP_CASES:
+        executed += 1
+        entry_failures = [
+            failure for check in checks for failure in _grep_check_failures(check)
+        ]
+        if entry_failures:
+            failing.append(label)
+            report.append(f"{label}:")
+            report.extend(f"  {failure}" for failure in entry_failures)
+    assert executed == len(SOURCE_GREP_CASES)
+    if failing:
+        raise AssertionError(
+            f"{len(failing)} of {len(SOURCE_GREP_CASES)} grep cases failed:\n"
+            + "\n".join(report)
+        )

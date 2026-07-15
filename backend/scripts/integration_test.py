@@ -18,14 +18,14 @@ claude CLI runs through provider_bridge / runner.py:
      fork (no re-fork), and total_bytes_now should grow vs the prior
      run while the recorded fork_agent_sid stays the same.
 
-  4. Nested-delegation guard test: simulate a depth>0 delegate call
-     with worker_session_id=None and verify the response is an error,
-     not a pending approval.
-
-  5. Fresh-worker approval flow: a real delegate call with
+  4. Fresh-worker approval flow: a real delegate call with
      worker_session_id=None creates a pending approval. Approve via
      REST. Verify a new worker Better Agent session is spawned and a
      worker_creation_approved event lands on the WS.
+
+  5. Multi-tab approve idempotency: a second fresh-worker request is
+     approved, then the same delegation is denied again and the second
+     action must report idempotent instead of double-resolving.
 
   6. Cleanup: deletes the Better Agent sessions created during the test and
      verifies fan-out (worker_store entry + fork records gone).
@@ -88,7 +88,7 @@ class BackgroundUvicorn:
                 with socket.create_connection(("127.0.0.1", self.port), 0.2):
                     return
             except OSError:
-                time.sleep(0.2)
+                time.sleep(0.05)
         raise RuntimeError("uvicorn failed to start in 30s")
 
     def stop(self) -> None:
@@ -104,6 +104,21 @@ def _ok(label: str) -> None:
 
 def _fail(label: str, why: str) -> None:
     print(f"\033[91mFAIL\033[0m  {label}: {why}")
+
+
+async def wait_for(cond, timeout_s: float, interval: float = 0.02) -> bool:
+    """Bounded condition poll — True as soon as `cond()` (sync or async
+    callable) is truthy, False once the deadline passes."""
+    deadline = time.monotonic() + timeout_s
+    while True:
+        res = cond()
+        if asyncio.iscoroutine(res):
+            res = await res
+        if res:
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        await asyncio.sleep(interval)
 
 
 async def collect_ws_events(
@@ -226,7 +241,17 @@ async def main() -> int:
             ws_task = asyncio.create_task(
                 collect_ws_events(ws_url, caller_bc, stop_event, ws_events, cwd)
             )
-            await asyncio.sleep(0.3)  # let subscribe register
+            # The server registers the ws_callback and then immediately
+            # sends `user_input_pending_snapshot` — the first collected
+            # frame proves the subscription is live.
+            import main as _main
+            if not await wait_for(
+                lambda: ws_events
+                and _main.coordinator.ws_callbacks.get(caller_bc),
+                15,
+            ):
+                _fail("ws subscribe", "subscription never registered on server")
+                failures += 1
 
             # Read the internal token from the ISOLATED home.
             token = (Path(ba_home) / "internal_token").read_text().strip()
@@ -317,13 +342,25 @@ async def main() -> int:
                     listing = rr.json()["approvals"]
                     if listing:
                         d = listing[0]
-                        await asyncio.sleep(0.3)  # let WS event land
+                        did = d["delegation_id"]
+                        # Approve only once the worker_creation_requested
+                        # frame landed on the WS AND the backend's waiter
+                        # Future is registered for this delegation.
+                        await wait_for(
+                            lambda: any(
+                                e.get("type") == "worker_creation_requested"
+                                and e.get("data", {}).get("delegation_id") == did
+                                for e in ws_events
+                            )
+                            and did in _main.coordinator.approval_waiters,
+                            15,
+                        )
                         ar = await client.post(
-                            f"/api/pending_approvals/{d['delegation_id']}/approve",
+                            f"/api/pending_approvals/{did}/approve",
                             json={"description": "AutoApprovedWorker", "orchestration_mode": "native"},
                         )
                         return ar.json()
-                    await asyncio.sleep(0.3)
+                    await asyncio.sleep(0.05)
                 return None
 
             approve_task = asyncio.create_task(auto_approve())
@@ -361,7 +398,15 @@ async def main() -> int:
 
             # Verify worker_creation_requested AND worker_creation_approved
             # came over the WS.
-            await asyncio.sleep(0.5)
+            await wait_for(
+                lambda: any(
+                    e.get("type") == "worker_creation_requested" for e in ws_events
+                )
+                and any(
+                    e.get("type") == "worker_creation_approved" for e in ws_events
+                ),
+                15,
+            )
             req_evt = next(
                 (e for e in ws_events if e.get("type") == "worker_creation_requested"),
                 None,
@@ -425,7 +470,16 @@ async def main() -> int:
             # ----------------------------------------------------------
             print("\n[6] Better Agent session delete fan-out")
             await client.delete(f"/api/sessions/{worker1_bc}")
-            await asyncio.sleep(0.3)
+
+            async def _delete_fanned_out() -> bool:
+                rr = await client.get("/api/workers", params={"cwd": cwd})
+                gone = all(
+                    w["agent_session_id"] != worker1_bc
+                    for w in rr.json()["workers"]
+                )
+                return gone and not _ws.get_fork(cwd, caller_bc, worker1_bc)
+
+            await wait_for(_delete_fanned_out, 15)
             r = await client.get("/api/workers", params={"cwd": cwd})
             workers_after = r.json()["workers"]
             still_there = next(

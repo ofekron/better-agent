@@ -25,6 +25,9 @@ import _test_home
 _test_home.isolate("bc_test_recovl_")
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import runtime_ownership  # noqa: E402
+runtime_ownership.register_current_process_writer()
+
 from orchestrator import Coordinator  # noqa: E402
 from turn_manager import TurnManager  # noqa: E402
 import startup_recovery_gate  # noqa: E402
@@ -39,6 +42,35 @@ def check(name: str, ok: bool) -> None:
     print(("  PASS" if ok else "  FAIL") + f": {name}")
     if not ok:
         failures.append(name)
+
+
+async def _wait_for(predicate, timeout: float = 5.0, interval: float = 0.02):
+    """Poll `predicate` until truthy or the deadline passes; returns the
+    last value. Deadline is generous — only the happy path is fast."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while True:
+        value = predicate()
+        if value or loop.time() >= deadline:
+            return value
+        await asyncio.sleep(interval)
+
+
+def _processor_parked(c: "Coordinator", sid: str) -> bool:
+    """True once the processor has dequeued the item (claimed it in
+    `_in_flight_prompts`, emptied the queue) without handling it — i.e.
+    it is parked on the startup-recovery gate / run barrier."""
+    q = c._prompt_queues.get(sid)
+    return (
+        c._in_flight_prompts.get(sid, 0) > 0
+        and (q is None or q.qsize() == 0)
+        and not c.handled
+    )
+
+
+def _gate_waiter_registered(event) -> bool:
+    """True once a waiter is parked on the gate's asyncio.Event."""
+    return len(getattr(event, "_waiters", ())) > 0
 
 
 class _UPM:
@@ -93,14 +125,13 @@ def test_barrier_blocks_prompt_during_recovered_run() -> None:
 
     async def _go() -> tuple[bool, bool]:
         c.submit_prompt(sid, {"prompt": "hi", "app_session_id": sid})
-        await asyncio.sleep(1.2)
-        blocked = len(c.handled) == 0
+        parked = await _wait_for(lambda: _processor_parked(c, sid))
+        # Confirm-stability re-read: still unhandled after two more yields.
+        await asyncio.sleep(0.02)
+        blocked = bool(parked) and len(c.handled) == 0
         # Recovered run finishes (what _finalize_when_done does).
         c.turn_manager.active_run_ids.pop(sid, None)
-        for _ in range(40):
-            if c.handled:
-                break
-            await asyncio.sleep(0.25)
+        await _wait_for(lambda: bool(c.handled))
         return blocked, len(c.handled) == 1
 
     blocked, ran = asyncio.run(_go())
@@ -159,13 +190,14 @@ def test_startup_recovery_gate_blocks_pre_registration_window() -> None:
     async def _go() -> tuple[bool, bool]:
         startup_recovery_gate.begin_recovery()
         c.submit_prompt(sid, {"prompt": "hi", "app_session_id": sid})
-        await asyncio.sleep(0.8)
-        blocked = len(c.handled) == 0
+        # Wait until the processor is actually parked on the gate's
+        # pre-registration event, then assert it never handled.
+        parked = await _wait_for(lambda: _gate_waiter_registered(
+            startup_recovery_gate._sessions_registered_ready,
+        ))
+        blocked = bool(parked) and len(c.handled) == 0
         startup_recovery_gate.mark_recovery_done()
-        for _ in range(40):
-            if c.handled:
-                break
-            await asyncio.sleep(0.25)
+        await _wait_for(lambda: bool(c.handled))
         return blocked, len(c.handled) == 1
 
     blocked, ran = asyncio.run(_go())
@@ -319,13 +351,13 @@ def test_startup_recovery_failure_fails_closed() -> None:
     async def _go() -> bool:
         startup_recovery_gate.begin_recovery()
         c.submit_prompt(sid, {"prompt": "hi", "app_session_id": sid})
-        await asyncio.sleep(0.2)
+        await _wait_for(lambda: _gate_waiter_registered(
+            startup_recovery_gate._sessions_registered_ready,
+        ))
         startup_recovery_gate.mark_recovery_failed("boom")
-        for _ in range(20):
-            task = c._processor_tasks.get(sid)
-            if task is None or task.done():
-                break
-            await asyncio.sleep(0.1)
+        await _wait_for(
+            lambda: (lambda t: t is None or t.done())(c._processor_tasks.get(sid)),
+        )
         return len(c.handled) == 0
 
     blocked = asyncio.run(_go())
@@ -339,9 +371,14 @@ def test_startup_recovery_gate_default_wait_is_fail_closed() -> None:
     async def _go() -> tuple[bool, bool]:
         startup_recovery_gate.begin_recovery()
         task = asyncio.create_task(startup_recovery_gate.wait_for_recovery_ready())
-        await asyncio.sleep(0.2)
-        still_waiting_initially = not task.done()
-        await asyncio.sleep(2.1)
+        # Wait until the waiter is parked on the gate event (no default
+        # timeout may release it), then confirm-stability with re-reads.
+        registered = await _wait_for(lambda: _gate_waiter_registered(
+            startup_recovery_gate._ready,
+        ))
+        still_waiting_initially = bool(registered) and not task.done()
+        await asyncio.sleep(0.02)
+        await asyncio.sleep(0.02)
         remained_blocked = not task.done()
         startup_recovery_gate.mark_recovery_done()
         await asyncio.wait_for(task, timeout=1.0)
@@ -444,6 +481,10 @@ def test_session_recovery_gate_first_waiter_foreign_loop_releases_promptly() -> 
     async def _main_marks_done_after_foreign_bind() -> tuple[bool, bool, float, str | None]:
         startup_recovery_gate.begin_recovery()
         startup_recovery_gate.register_session_recovery({"sid-foreign"})
+        # Registration must be marked complete, or the waiter parks on the
+        # pre-registration event and never reaches the session-ready event
+        # this test is about.
+        startup_recovery_gate.mark_recovery_sessions_registered()
         result: dict[str, object] = {}
 
         def _foreign_wait() -> None:
@@ -490,7 +531,7 @@ def test_interrupt_during_overlap_fans_out_and_displaces() -> None:
 
     async def _go() -> tuple[bool, bool]:
         c.submit_prompt(sid, {"prompt": "hi", "app_session_id": sid})
-        await asyncio.sleep(0.6)  # processor dequeued, parked on barrier
+        await _wait_for(lambda: _processor_parked(c, sid))  # dequeued, parked on barrier
         landed = await c.turn_manager.cancel_turn(
             sid, interrupted_by_msg_id="lm-1",
         )
@@ -515,17 +556,15 @@ def test_stale_pending_cleared_by_item_finally() -> None:
         # Park a pending cancel mid-item, as a gap-window cancel would.
         c._in_flight_prompts[sid] = c._in_flight_prompts.get(sid, 0)  # no-op read
         c.turn_manager._pending_cancel[sid] = True
-        for _ in range(40):
-            if c.handled and not c._processor_tasks.get(sid):
-                break
-            await asyncio.sleep(0.25)
+        # Item finished ⇔ handled AND the in-flight claim was released by
+        # the processor's finally (which also pops the pending cancel).
+        await _wait_for(
+            lambda: bool(c.handled) and sid not in c._in_flight_prompts,
+        )
         cleared = sid not in c.turn_manager._pending_cancel
         # Next prompt must run normally.
         c.submit_prompt(sid, {"prompt": "two", "app_session_id": sid})
-        for _ in range(40):
-            if len(c.handled) == 2:
-                break
-            await asyncio.sleep(0.25)
+        await _wait_for(lambda: len(c.handled) == 2)
         return cleared, len(c.handled) == 2
 
     cleared, second_ran = asyncio.run(_go())
@@ -553,7 +592,7 @@ def test_claimed_queued_prompt_removed_from_persisted_queue() -> None:
             "_queued_id": queued_id,
             "client_id": "client-1",
         })
-        await asyncio.sleep(0.4)
+        await _wait_for(lambda: _processor_parked(c, sid))
         blocked_queued = (session_manager.get(sid) or {}).get("queued_prompts") or []
         persisted_while_blocked = any(item.get("id") == queued_id for item in blocked_queued)
         no_consumed_while_blocked = not any(
@@ -602,11 +641,13 @@ def test_blocked_queued_prompt_can_be_cancelled_before_start() -> None:
             "_queued_id": queued_id,
             "client_id": "client-cancel",
         })
-        await asyncio.sleep(0.4)
+        await _wait_for(lambda: _processor_parked(c, sid))
         cancelled = c.cancel_queued(sid, queued_id)
         await asyncio.to_thread(session_manager.remove_queued_prompt, sid, queued_id)
         c.turn_manager.active_run_ids.pop(sid, None)
-        await asyncio.sleep(0.4)
+        # Skipped-item completion: the processor's finally releases the
+        # in-flight claim once the cancelled item is discarded.
+        await _wait_for(lambda: sid not in c._in_flight_prompts)
         queued = (session_manager.get(sid) or {}).get("queued_prompts") or []
         consumed = any(
             event.get("type") == "queue_consumed"

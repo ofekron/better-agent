@@ -446,6 +446,12 @@ describe("FileViewer title", () => {
   });
 
   it("autosaves editor changes to the persistent draft only", async () => {
+    // Fake setTimeout so the 1s autosave debounce can be advanced instantly.
+    vi.useFakeTimers({
+      shouldAdvanceTime: true,
+      advanceTimeDelta: 1,
+      toFake: ["setTimeout", "clearTimeout"],
+    });
     const writes: Array<{ url: string; body: Record<string, unknown> | null; method: string }> = [];
     vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
       const text = String(url);
@@ -492,7 +498,7 @@ describe("FileViewer title", () => {
 
     fireEvent.change(await screen.findByTestId("mock-editor"), { target: { value: "draft" } });
     await act(async () => {
-      await new Promise((resolve) => window.setTimeout(resolve, 1100));
+      await vi.advanceTimersByTimeAsync(1100);
     });
 
     await waitFor(() => {

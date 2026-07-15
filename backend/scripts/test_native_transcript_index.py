@@ -62,6 +62,16 @@ def _setup_roots():
     return claude, codex
 
 
+def _bump_mtime_past_index(path: Path) -> None:
+    """Advance the file's mtime strictly past the (mtime, size) stamp the
+    index recorded at the previous refresh, so the change is detectable even
+    on filesystems with 1s mtime granularity — no wall-clock wait needed.
+    The recorded stamp is the file's st_mtime at index time; the current
+    st_mtime is >= that, so current + 1.1 is strictly past it."""
+    st = path.stat()
+    os.utime(path, (st.st_atime, st.st_mtime + 1.1))
+
+
 def _write_claude(path: Path, prompts: list[str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     lines = []
@@ -504,11 +514,10 @@ def test_freshness_reindexes_changed_files() -> bool:
     _write_claude(fpath, ["orignalneedle here"])  # intentional typo stays put
     idx.refresh_once()
     before = idx.search_rows(["orignalneedle"], limit=10)
-    # mtime granularity on some FS is 1s; wait so the append is detectable.
-    time.sleep(1.05)
     with fpath.open("a") as f:
         f.write(json.dumps({"type": "user", "uuid": "u9", "timestamp": "2024-02-02",
                             "message": {"role": "user", "content": "deltaneedle added"}}) + "\n")
+    _bump_mtime_past_index(fpath)
     r = idx.refresh_once()
     after = idx.search_rows(["deltaneedle"], limit=10)
     ok = len(before) >= 1 and r["touched"] >= 1 and len(after) == 1
@@ -528,10 +537,10 @@ def test_covered_refresh_does_not_full_walk() -> bool:
     original = idx._stat_walk
     idx._stat_walk = lambda: called.__setitem__("stat_walk", called["stat_walk"] + 1) or original()
     try:
-        time.sleep(1.05)
         with fpath.open("a", encoding="utf-8") as f:
             f.write(json.dumps({"type": "user", "uuid": "u9", "timestamp": "2024-02-02",
                                 "message": {"role": "user", "content": "steadyneedle added"}}) + "\n")
+        _bump_mtime_past_index(fpath)
         r = idx.refresh_once()
         rows = idx.search_rows(["steadyneedle"], limit=10)
     finally:
@@ -1352,8 +1361,8 @@ def test_reindex_deletes_fts_rows_by_rowid_not_path_scan() -> bool:
         def __getattr__(self, name):
             return getattr(self.inner, name)
 
-    time.sleep(1.05)
     _write_claude(fpath, ["rowiddeleteneedle second"])
+    _bump_mtime_past_index(fpath)
     real_conn = idx._writer_conn
     guarded = GuardedConn(real_conn)
     idx._writer_conn = guarded
@@ -1612,10 +1621,10 @@ def test_wait_fresh_serves_delta_instead_of_falling_back() -> bool:
     idx.refresh_once()  # covered + fresh
     # A known indexed file grows after the last walk.
     fpath = claude / encode_cwd("/proj") / "a.jsonl"
-    time.sleep(1.05)
     with fpath.open("a", encoding="utf-8") as f:
         f.write(json.dumps({"type": "user", "uuid": "u9", "timestamp": "2024-02-02",
                             "message": {"role": "user", "content": "deltawaitneedle new"}}) + "\n")
+    _bump_mtime_past_index(fpath)
     conn = idx._writer_connection()
     idx._state_set(conn, "last_walk_at", str(time.time() - 60.0))
     conn.commit()

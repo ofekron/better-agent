@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
 import { act, fireEvent } from "@testing-library/react";
 import { renderApp } from "./harness";
 import { makeSession } from "./fixtures";
@@ -6,10 +6,24 @@ import type { RestCall } from "./harness/mockBackend";
 
 const DEBOUNCE_MS = 300;
 
-/** Wait for the App.tsx debounce timer to fire, then drain effects. */
+// Fake setTimeout so the App.tsx draft debounce can be advanced instantly.
+// shouldAdvanceTime keeps the harness's real-time setTimeout(0) flushes alive.
+beforeEach(() => {
+  vi.useFakeTimers({
+    shouldAdvanceTime: true,
+    advanceTimeDelta: 1,
+    toFake: ["setTimeout", "clearTimeout"],
+  });
+});
+
+afterEach(() => {
+  vi.useRealTimers();
+});
+
+/** Advance past the App.tsx debounce timer, then drain effects. */
 async function waitDebounce(ms = DEBOUNCE_MS + 50): Promise<void> {
   await act(async () => {
-    await new Promise((r) => setTimeout(r, ms));
+    await vi.advanceTimersByTimeAsync(ms);
   });
 }
 

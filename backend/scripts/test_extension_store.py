@@ -1193,80 +1193,58 @@ def test_manifest_rejects_reserved_mcp_server_names() -> None:
         raise AssertionError("reserved MCP server name was accepted")
 
 
-def test_manifest_allows_matching_builtin_mcp_replacement() -> None:
-    manifest = _validate_manifest(
-        {
+# (extension id, core_roles or None, display name, mcp name, replaces_builtin)
+_BUILTIN_MCP_REPLACEMENT_CASES = (
+    (
+        "fixture.project-structure",
+        ["project-structure"],
+        "Project Structure",
+        "better-agent-project-updates",
+        "project-updates",
+    ),
+    (
+        "fixture.requirements",
+        ["requirements"],
+        "Requirements",
+        "better-agent-requirements",
+        "get-requirements",
+    ),
+    (
+        extension_store.BUILTIN_COORDINATION_EXTENSION_ID,
+        None,
+        "Coordination",
+        "ofek-dev-coordination",
+        "better-agent-coordination",
+    ),
+)
+
+
+def test_manifest_allows_builtin_mcp_replacements() -> None:
+    if len(_BUILTIN_MCP_REPLACEMENT_CASES) != 3:
+        raise AssertionError(_BUILTIN_MCP_REPLACEMENT_CASES)
+    for ext_id, core_roles, name, mcp_name, replaces_builtin in _BUILTIN_MCP_REPLACEMENT_CASES:
+        manifest_data = {
             "kind": "better-agent-extension",
-            "id": "fixture.project-structure",
-        "core_roles": ["project-structure"],
-            "core_roles": ["project-structure"],
-            "name": "Project Structure",
+            "id": ext_id,
+            "name": name,
             "version": "1.0.0",
             "surfaces": ["runtime_mcp"],
             "entrypoints": {
                 "mcp": [
                     {
-                        "name": "better-agent-project-updates",
-                        "replaces_builtin": "project-updates",
+                        "name": mcp_name,
+                        "replaces_builtin": replaces_builtin,
                         "python": "mcp/server.py",
                     }
                 ]
             },
         }
-    )
-    mcp = manifest["entrypoints"]["mcp"][0]
-    if mcp["replaces_builtin"] != "project-updates":
-        raise AssertionError(mcp)
-
-
-def test_manifest_allows_requirements_builtin_mcp_replacement() -> None:
-    manifest = _validate_manifest(
-        {
-            "kind": "better-agent-extension",
-            "id": "fixture.requirements",
-        "core_roles": ["requirements"],
-            "core_roles": ["requirements"],
-            "name": "Requirements",
-            "version": "1.0.0",
-            "surfaces": ["runtime_mcp"],
-            "entrypoints": {
-                "mcp": [
-                    {
-                        "name": "better-agent-requirements",
-                        "replaces_builtin": "get-requirements",
-                        "python": "mcp/server.py",
-                    }
-                ]
-            },
-        }
-    )
-    mcp = manifest["entrypoints"]["mcp"][0]
-    if mcp["replaces_builtin"] != "get-requirements":
-        raise AssertionError(mcp)
-
-
-def test_manifest_allows_coordination_builtin_mcp_replacement() -> None:
-    manifest = _validate_manifest(
-        {
-            "kind": "better-agent-extension",
-            "id": extension_store.BUILTIN_COORDINATION_EXTENSION_ID,
-            "name": "Coordination",
-            "version": "1.0.0",
-            "surfaces": ["runtime_mcp"],
-            "entrypoints": {
-                "mcp": [
-                    {
-                        "name": "ofek-dev-coordination",
-                        "replaces_builtin": "better-agent-coordination",
-                        "python": "mcp/server.py",
-                    }
-                ]
-            },
-        }
-    )
-    mcp = manifest["entrypoints"]["mcp"][0]
-    if mcp["replaces_builtin"] != "better-agent-coordination":
-        raise AssertionError(mcp)
+        if core_roles is not None:
+            manifest_data["core_roles"] = core_roles
+        manifest = _validate_manifest(manifest_data)
+        mcp = manifest["entrypoints"]["mcp"][0]
+        if mcp["replaces_builtin"] != replaces_builtin:
+            raise AssertionError((ext_id, mcp))
 
 
 def test_manifest_validates_managed_run_env_permission() -> None:
@@ -5491,9 +5469,7 @@ if __name__ == "__main__":
         test_manifest_accepts_extension_protocol_smoke_test()
         test_manifest_rejects_string_only_mcp_entrypoints()
         test_manifest_rejects_reserved_mcp_server_names()
-        test_manifest_allows_matching_builtin_mcp_replacement()
-        test_manifest_allows_requirements_builtin_mcp_replacement()
-        test_manifest_allows_coordination_builtin_mcp_replacement()
+        test_manifest_allows_builtin_mcp_replacements()
         test_manifest_validates_managed_run_env_permission()
         test_manifest_accepts_remote_services_with_network_permission()
         test_manifest_rejects_remote_services_without_network_permission()

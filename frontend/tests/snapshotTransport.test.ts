@@ -44,9 +44,13 @@ async function frames(event: WSEvent, chunkBytes = 9) {
   };
 }
 
+// Drain the transport's yieldToBrowser setTimeout(0) hops, the async
+// crypto.subtle digest, and the post-apply queue flush — a few zero-delay
+// macrotask turns cover the whole chain without real waiting.
 async function settle() {
-  await new Promise((resolve) => setTimeout(resolve, 5));
-  await new Promise((resolve) => setTimeout(resolve, 5));
+  for (let i = 0; i < 5; i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
 }
 
 describe("SnapshotTransport", () => {

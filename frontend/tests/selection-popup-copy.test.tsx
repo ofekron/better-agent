@@ -8,6 +8,7 @@ const { SelectionPopup } = await import("../src/components/SelectionPopup");
 const { MobileActionSheetProvider } = await import("../src/components/MobileActionSheet");
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
   Object.defineProperty(window, "innerWidth", {
@@ -159,14 +160,21 @@ describe("SelectionPopup copy", () => {
       await waitFor(() => {
         expect(captured.some((listener) => listener.type === "touchend")).toBe(true);
       });
+      // Fake setTimeout so the 400ms touch-selection delay advances instantly.
+      vi.useFakeTimers({
+        shouldAdvanceTime: true,
+        advanceTimeDelta: 1,
+        toFake: ["setTimeout", "clearTimeout"],
+      });
       act(() => {
         captured.find((listener) => listener.type === "touchend")!.fn(
           new TouchEvent("touchend", { bubbles: true }),
         );
       });
       await act(async () => {
-        await new Promise((resolve) => setTimeout(resolve, 450));
+        await vi.advanceTimersByTimeAsync(450);
       });
+      vi.useRealTimers();
 
       await screen.findByText("Cancel");
       await act(async () => {

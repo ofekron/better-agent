@@ -291,15 +291,17 @@ describe("InputArea queued prompt promote action", () => {
   });
 
   it("does not submit Steer twice on rapid double click", async () => {
+    let resolveSteer!: (accepted: boolean) => void;
     const onSteer = vi.fn(
-      () => new Promise<boolean>((resolve) => setTimeout(() => resolve(true), 10)),
+      () => new Promise<boolean>((resolve) => { resolveSteer = resolve; }),
     );
     renderInputArea(true, "active work", { onSteer });
 
     await act(async () => {
       fireEvent.click(screen.getByTestId("send-btn"));
       fireEvent.click(screen.getByTestId("send-btn"));
-      await new Promise((resolve) => setTimeout(resolve, 20));
+      resolveSteer(true);
+      await new Promise((resolve) => setTimeout(resolve, 0));
     });
 
     expect(onSteer).toHaveBeenCalledTimes(1);

@@ -76,19 +76,39 @@ async def _unrelated_default_pool_latency() -> float:
     return time.monotonic() - start
 
 
-async def test_a_native_import_scan_saturation_does_not_block_default_pool() -> bool:
+async def _saturate_executor(executor) -> tuple[list, threading.Event]:
+    """Fill `executor` with Event-released blockers (max_workers + 2 of them)
+    and wait until every worker slot is actually occupied. Returns the
+    futures and the release Event the caller sets once its assertion ran."""
     loop = asyncio.get_running_loop()
+    workers = executor._max_workers
+    release = threading.Event()
+    started = [threading.Event() for _ in range(workers + 2)]
+
+    def _blocker(started_evt: threading.Event) -> None:
+        started_evt.set()
+        release.wait(timeout=10.0)
+
+    futures = [loop.run_in_executor(executor, _blocker, evt) for evt in started]
+    deadline = time.monotonic() + 5.0
+    while sum(1 for evt in started if evt.is_set()) < workers:
+        if time.monotonic() >= deadline:
+            release.set()
+            await asyncio.gather(*futures, return_exceptions=True)
+            raise AssertionError("saturating blockers never occupied all worker slots")
+        await asyncio.sleep(0.005)
+    return futures, release
+
+
+async def test_a_native_import_scan_saturation_does_not_block_default_pool() -> bool:
     workers = native_import._SCAN_EXECUTOR._max_workers
-    futures = [
-        loop.run_in_executor(native_import._SCAN_EXECUTOR, lambda: time.sleep(1.5))
-        for _ in range(workers + 2)
-    ]
-    await asyncio.sleep(0.1)  # let the saturating work actually start
+    futures, release = await _saturate_executor(native_import._SCAN_EXECUTOR)
     elapsed = await _unrelated_default_pool_latency()
+    release.set()
     ok = elapsed < 0.5
     print(
         f"{PASS if ok else FAIL} A: unrelated default-pool call took "
-        f"{elapsed:.3f}s while {workers + 2} slow tasks saturated "
+        f"{elapsed:.3f}s while {workers + 2} blocked tasks saturated "
         f"native_import._SCAN_EXECUTOR ({workers} workers) (want < 0.5s)"
     )
     await asyncio.gather(*futures, return_exceptions=True)
@@ -96,18 +116,14 @@ async def test_a_native_import_scan_saturation_does_not_block_default_pool() -> 
 
 
 async def test_b_lag_incident_spool_io_saturation_does_not_block_default_pool() -> bool:
-    loop = asyncio.get_running_loop()
     workers = lag_incident_queue._SPOOL_IO_EXECUTOR._max_workers
-    futures = [
-        loop.run_in_executor(lag_incident_queue._SPOOL_IO_EXECUTOR, lambda: time.sleep(1.5))
-        for _ in range(workers + 2)
-    ]
-    await asyncio.sleep(0.1)
+    futures, release = await _saturate_executor(lag_incident_queue._SPOOL_IO_EXECUTOR)
     elapsed = await _unrelated_default_pool_latency()
+    release.set()
     ok = elapsed < 0.5
     print(
         f"{PASS if ok else FAIL} B: unrelated default-pool call took "
-        f"{elapsed:.3f}s while {workers + 2} slow tasks saturated "
+        f"{elapsed:.3f}s while {workers + 2} blocked tasks saturated "
         f"lag_incident_queue._SPOOL_IO_EXECUTOR ({workers} workers) (want < 0.5s)"
     )
     await asyncio.gather(*futures, return_exceptions=True)

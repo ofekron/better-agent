@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { act } from "@testing-library/react";
 import { renderApp } from "./harness";
 import { makeSession } from "./fixtures";
 import {
@@ -27,6 +28,7 @@ function tabIds(h: Awaited<ReturnType<typeof renderApp>>): string[] {
 
 describe("session tabs with paged sessions", () => {
   afterEach(() => {
+    vi.useRealTimers();
     vi.restoreAllMocks();
     vi.stubGlobal(
       "fetch",
@@ -962,13 +964,22 @@ describe("session tabs with paged sessions", () => {
     const h = await renderApp({ seed: { sessions } });
 
     expect(await waitFor(h, () => h.$$(".session-tab-wrapper").length === 2)).toBe(true);
+    // Fake setTimeout so the 500ms long-press timer can be advanced instantly.
+    vi.useFakeTimers({
+      shouldAdvanceTime: true,
+      advanceTimeDelta: 1,
+      toFake: ["setTimeout", "clearTimeout"],
+    });
     h.$('[data-tab-movement-key="sess-2"] .session-tab')?.dispatchEvent(
       new PointerEvent("pointerdown", { bubbles: true, pointerType: "touch", button: 0, clientX: 100, clientY: 80 }),
     );
-    await new Promise((resolve) => setTimeout(resolve, 600));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(600);
+    });
     h.$('[data-tab-movement-key="sess-2"] .session-tab')?.dispatchEvent(
       new PointerEvent("pointerup", { bubbles: true, pointerType: "touch", button: 0 }),
     );
+    vi.useRealTimers();
     await h.flush();
 
     expect(await waitFor(h, () => Boolean(h.$(".mobile-action-sheet")))).toBe(true);

@@ -83,7 +83,7 @@ class BackgroundUvicorn:
                 with socket.create_connection(("127.0.0.1", self.port), 0.2):
                     return
             except OSError:
-                time.sleep(0.2)
+                time.sleep(0.05)
         raise RuntimeError("uvicorn failed to start in 30s")
 
     def stop(self):
@@ -95,6 +95,21 @@ class BackgroundUvicorn:
 
 def _ok(label: str): print(f"\033[92mPASS\033[0m  {label}")
 def _fail(label: str, why: str): print(f"\033[91mFAIL\033[0m  {label}: {why}")
+
+
+async def wait_for(cond, timeout_s: float, interval: float = 0.02) -> bool:
+    """Bounded condition poll — True as soon as `cond()` (sync or async
+    callable) is truthy, False once the deadline passes."""
+    deadline = time.monotonic() + timeout_s
+    while True:
+        res = cond()
+        if asyncio.iscoroutine(res):
+            res = await res
+        if res:
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        await asyncio.sleep(interval)
 
 
 async def main() -> int:
@@ -137,6 +152,7 @@ async def main() -> int:
             # we need a live WS subscription. Open one for the test.
             stop_a = asyncio.Event()
             ws_a_done = asyncio.Event()
+            ws_a_ready = asyncio.Event()
             async def ws_a_keep():
                 try:
                     async with websockets.connect(ws_url) as ws:
@@ -150,10 +166,20 @@ async def main() -> int:
                                 continue
                             except websockets.ConnectionClosed:
                                 return
+                            # First frame (user_input_pending_snapshot is
+                            # sent right after server-side registration)
+                            # proves the subscription is live.
+                            ws_a_ready.set()
                 finally:
                     ws_a_done.set()
             ws_a_task = asyncio.create_task(ws_a_keep())
-            await asyncio.sleep(0.5)  # let subscribe register
+            if not await wait_for(
+                lambda: ws_a_ready.is_set()
+                and coord.ws_callbacks.get(caller_bc),
+                15,
+            ):
+                _fail("A subscribe", "subscription never registered on server")
+                failures += 1
 
             # Simulate depth>0 by bumping the counter manually.
             coord.active_delegations[caller_bc] = 1
@@ -229,7 +255,13 @@ async def main() -> int:
                     ws_b_done.set()
 
             ws_b_task = asyncio.create_task(ws_b())
-            await asyncio.sleep(0.3)
+            # First collected frame proves the subscription is live.
+            if not await wait_for(
+                lambda: ws_events_b and coord.ws_callbacks.get(caller_bc),
+                15,
+            ):
+                _fail("B subscribe", "subscription never registered on server")
+                failures += 1
 
             # First call — abandon it after the disk record appears.
             async def first_call_b():
@@ -260,7 +292,7 @@ async def main() -> int:
                 pa_path = Path(ba_home) / "pending_approvals" / f"{stable_did}.json"
                 if pa_path.exists():
                     break
-                await asyncio.sleep(0.1)
+                await asyncio.sleep(0.05)
             if not pa_path.exists():
                 _fail("pending_approvals disk record", "never appeared for stable_did")
                 failures += 1
@@ -275,7 +307,9 @@ async def main() -> int:
 
             # Approval Future from the first call should be cleaned up
             # (asyncio.wait... in the finally block pops it).
-            await asyncio.sleep(0.3)
+            await wait_for(
+                lambda: stable_did not in coord.approval_waiters, 15,
+            )
 
             # Now retry with the same client_delegation_id (simulating runner retry).
             async def auto_approve_b():
@@ -285,13 +319,18 @@ async def main() -> int:
                     if rec_path.exists():
                         rec = json.loads(rec_path.read_text())
                         if rec.get("status") == "pending":
-                            await asyncio.sleep(0.5)  # let waiter Future register
+                            # Approve only once the waiter Future for the
+                            # retried call is registered on the backend.
+                            await wait_for(
+                                lambda: stable_did in coord.approval_waiters,
+                                15,
+                            )
                             r = await client.post(
                                 f"/api/pending_approvals/{stable_did}/approve",
                                 json={"description": "ReentryWorker", "orchestration_mode": "native"},
                             )
                             return r.json()
-                    await asyncio.sleep(0.2)
+                    await asyncio.sleep(0.05)
                 return None
 
             approve_task = asyncio.create_task(auto_approve_b())
@@ -352,13 +391,18 @@ async def main() -> int:
                     if rp.exists():
                         rec = json.loads(rp.read_text())
                         if rec.get("status") == "pending":
-                            await asyncio.sleep(0.5)
+                            # Approve only once the waiter Future is
+                            # registered on the backend.
+                            await wait_for(
+                                lambda: stable_did_c in coord.approval_waiters,
+                                15,
+                            )
                             await client.post(
                                 f"/api/pending_approvals/{stable_did_c}/approve",
                                 json={"description": "C", "orchestration_mode": "native"},
                             )
                             return
-                    await asyncio.sleep(0.2)
+                    await asyncio.sleep(0.05)
 
             ap_c = asyncio.create_task(auto_approve_c())
             r3 = await client.post(
@@ -377,7 +421,12 @@ async def main() -> int:
                 headers={"X-Internal-Token": token},
             )
             await ap_c
-            await asyncio.sleep(0.5)
+            # The subscribe re-emit is gated on `approval_waiters` — wait
+            # until the resolved delegation's waiter is gone so the gate
+            # under test is actually in its post-resolution state.
+            await wait_for(
+                lambda: stable_did_c not in coord.approval_waiters, 15,
+            )
 
             # Now subscribe and verify NO worker_creation_requested
             ws_events_c: list[dict] = []
@@ -449,6 +498,7 @@ async def main() -> int:
             # WS must be subscribed for run_delegation to fan out events.
             stop_d = asyncio.Event()
             done_d = asyncio.Event()
+            ws_d_ready = asyncio.Event()
             async def ws_d_keep():
                 try:
                     async with websockets.connect(ws_url) as ws:
@@ -462,10 +512,18 @@ async def main() -> int:
                                 continue
                             except websockets.ConnectionClosed:
                                 return
+                            # First frame proves the subscription is live.
+                            ws_d_ready.set()
                 finally:
                     done_d.set()
             ws_d_task = asyncio.create_task(ws_d_keep())
-            await asyncio.sleep(0.5)
+            if not await wait_for(
+                lambda: ws_d_ready.is_set()
+                and coord.ws_callbacks.get(caller_bc),
+                15,
+            ):
+                _fail("D subscribe", "subscription never registered on server")
+                failures += 1
 
             r = await client.post(
                 "/api/workers",

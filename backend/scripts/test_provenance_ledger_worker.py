@@ -122,7 +122,15 @@ def test_a_notes_accumulate_without_loss() -> bool:
 def test_b_note_never_blocks_caller() -> bool:
     sid = "regress-provenance-b"
     orig_record_from_event = provenance_store.record_from_event
-    provenance_store.record_from_event = lambda *a, **k: (time.sleep(2.0), 1)[1]
+    release = threading.Event()
+
+    def blocked_record_from_event(*a, **k):
+        # Blocks until the caller-side latency assertion is made (generous
+        # backstop timeout), emulating arbitrarily slow I/O.
+        release.wait(timeout=30.0)
+        return 1
+
+    provenance_store.record_from_event = blocked_record_from_event
 
     w = ProvenanceLedgerWorker(name="test-b-worker")
     try:
@@ -130,14 +138,15 @@ def test_b_note_never_blocks_caller() -> bool:
         for i in range(100):
             w.note(sid, _event(f"toolu-b{i}", "Bash", "slow"))
         elapsed = time.monotonic() - start
-
-        ok = elapsed < 0.5  # 100 note() calls, each would cost 2s if blocking
+        ok = elapsed < 0.5  # 100 note() calls, each blocking if coupled
+        release.set()
         print(
             f"{PASS if ok else FAIL} B: 100 note() calls (each scheduling a "
-            f"2s write) returned in {elapsed:.3f}s (want < 0.5s)"
+            f"blocked write) returned in {elapsed:.3f}s (want < 0.5s)"
         )
         return ok
     finally:
+        release.set()
         w.stop()
         provenance_store.record_from_event = orig_record_from_event
 

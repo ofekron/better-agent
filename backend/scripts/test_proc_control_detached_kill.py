@@ -28,6 +28,24 @@ def check(cond, msg):
         failures.append(msg)
 
 
+def poll_until(cond, timeout: float = 5.0, interval: float = 0.02) -> bool:
+    """Bounded condition poll — returns True as soon as cond() holds."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if cond():
+            return True
+        time.sleep(interval)
+    return cond()
+
+
+def read_child_pid(pid_file: str) -> int:
+    """Poll until the leader has written its detached child's pid."""
+    assert poll_until(
+        lambda: os.path.exists(pid_file) and open(pid_file).read().strip() != ""
+    ), f"pid file {pid_file} never appeared"
+    return int(open(pid_file).read().strip())
+
+
 def really_dead(pid: int) -> bool:
     """Gone or a zombie (killed, awaiting reap) — both mean 'not running'.
     `pid_alive` (os.kill(pid,0)) returns True for a zombie whose parent
@@ -54,16 +72,17 @@ leader = subprocess.Popen(
     start_new_session=True,
 )
 try:
-    time.sleep(0.8)
-    child = int(open(CHILD_PID_FILE).read().strip())
+    child = read_child_pid(CHILD_PID_FILE)
 
     check(pc.pid_alive(child), "detached child is alive")
     check(os.getpgid(child) != os.getpgid(leader.pid),
           "detached child is in its OWN process group")
 
     # killpg on the leader's own group must NOT reach the detached child.
+    # SIGKILL delivery to group members is synchronous at kill time; once the
+    # leader itself is reaped, the child either got the signal or never will.
     os.killpg(os.getpgid(leader.pid), signal.SIGKILL)
-    time.sleep(0.5)
+    leader.wait(timeout=5)
     check(pc.pid_alive(child),
           "detached child SURVIVES killpg(leader group) — the gap")
 
@@ -94,13 +113,11 @@ leader2 = subprocess.Popen(
     start_new_session=True,
 )
 try:
-    time.sleep(0.8)
-    child2 = int(open(CHILD_PID_FILE).read().strip())
+    child2 = read_child_pid(CHILD_PID_FILE)
     check(pc.pid_alive(child2), "second detached child alive before sweep")
     n = pc.kill_detached_descendant_groups(leader2.pid)
     check(n >= 1, f"sweep signalled >=1 detached group (got {n})")
-    time.sleep(0.5)
-    check(really_dead(child2),
+    check(poll_until(lambda: really_dead(child2)),
           "detached child KILLED by kill_detached_descendant_groups")
 finally:
     try:

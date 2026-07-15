@@ -41,6 +41,32 @@ def _heartbeat(age: float = 0.0, process_cpu: float | None = None) -> dict[str, 
     }
 
 
+def _wait_until(predicate, timeout: float = 10.0, interval: float = 0.02):
+    """Poll `predicate` until truthy or the deadline passes; returns the
+    last value. Deadline is generous — only the happy path is fast."""
+    deadline = time.monotonic() + timeout
+    while True:
+        value = predicate()
+        if value or time.monotonic() >= deadline:
+            return value
+        time.sleep(interval)
+
+
+def _wait_watchdog_cycle_after(t0: float, timeout: float = 5.0) -> bool:
+    """Wait until the watchdog thread has completed a poll cycle strictly
+    after `t0` (it appends an attribution sample each 0.5s cycle, right
+    before reading the heartbeat)."""
+    def _cycled() -> bool:
+        samples = list(main._LAG_ATTRIBUTION_SAMPLES)
+        return bool(samples) and float(samples[-1]["at"]) > t0
+
+    return bool(_wait_until(_cycled, timeout=timeout))
+
+
+def _dump_text(dump_path) -> str:
+    return dump_path.read_text(encoding="utf-8") if dump_path.exists() else ""
+
+
 def test_incident_window_classification() -> None:
     idle = ["run_until_complete"] * 3
     assert main._classify_lag_incident(
@@ -270,11 +296,9 @@ def test_watchdog_dumps_when_heartbeat_stale() -> None:
     main._report_lag_watchdog_issue = lambda **payload: reports.append(payload)
     main._start_lag_watchdog(threshold=0.2, cooldown=0.0)
 
-    # Watchdog polls every 0.5s; give it a few cycles to notice + dump.
-    for _ in range(20):
-        if dump_path.exists() and reports:
-            break
-        time.sleep(0.2)
+    # Watchdog polls every 0.5s; the report fires only after the dump file
+    # is fully written and closed, so this condition implies a complete dump.
+    _wait_until(lambda: dump_path.exists() and reports)
 
     assert dump_path.exists(), "watchdog did not write a dump for a stale heartbeat"
     content = dump_path.read_text(encoding="utf-8")
@@ -299,16 +323,20 @@ def test_watchdog_dumps_when_heartbeat_stale() -> None:
     assert "event loop lag evidence" in reports[0]["evidence"]
     assert len(reports[0]["stack_names"]) == 3
     first_count = content.count("=== event loop lag evidence")
-    time.sleep(1.1)
+    # No re-dump for the SAME stale heartbeat generation: wait until the
+    # watchdog has demonstrably completed another poll cycle, then assert
+    # the dump count is unchanged.
+    assert _wait_watchdog_cycle_after(time.monotonic())
     assert dump_path.read_text(encoding="utf-8").count("=== event loop lag evidence") == first_count
 
     main._LAG_HEARTBEAT[0] = _heartbeat()
-    time.sleep(0.6)
+    # Let the watchdog observe the FRESH heartbeat (resets its
+    # per-generation dedup) before staging the next stale generation.
+    assert _wait_watchdog_cycle_after(time.monotonic())
     main._LAG_HEARTBEAT[0] = _heartbeat(5.0, time.process_time() - 0.1)
-    for _ in range(20):
-        if dump_path.read_text(encoding="utf-8").count("=== event loop lag evidence") > first_count:
-            break
-        time.sleep(0.2)
+    _wait_until(
+        lambda: _dump_text(dump_path).count("=== event loop lag evidence") > first_count,
+    )
     assert dump_path.read_text(encoding="utf-8").count("=== event loop lag evidence") == first_count + 1
     main._report_lag_watchdog_issue = lambda **_payload: None
 
@@ -332,7 +360,16 @@ def test_real_loop_flood_and_block_have_distinct_evidence() -> None:
             loop.call_soon(short_callback)
         main._LAG_HEARTBEAT[0] = _heartbeat()
         main._start_lag_watchdog(threshold=0.1, cooldown=0.0)
-        await asyncio.sleep(1.4)
+        # Keep the loop alive until the watchdog dumped the asserted
+        # evidence; the first await parks until the flood drains, which
+        # is the starvation being measured.
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline:
+            content = _dump_text(dump_path)
+            if ("ready-queue CPU starvation candidate" in content
+                    and "ready_depth=" in content):
+                break
+            await asyncio.sleep(0.02)
 
     asyncio.run(flood())
     flood_content = dump_path.read_text(encoding="utf-8")
@@ -347,8 +384,19 @@ def test_real_loop_flood_and_block_have_distinct_evidence() -> None:
         await asyncio.sleep(0)
         main._LAG_HEARTBEAT[0] = _heartbeat()
         main._start_lag_watchdog(threshold=0.1, cooldown=0.0)
+        # The synchronous block IS the tested property. The watchdog's poll
+        # cadence is a fixed 0.5s (not injectable), and its 3x0.05s stack
+        # sampling must land INSIDE the block to capture "in block" frames —
+        # so this duration cannot shrink below ~0.7s without flaking.
         time.sleep(1.0)
-        await asyncio.sleep(0.2)
+        # Wait (bounded) until the watchdog wrote the asserted evidence.
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline:
+            content = _dump_text(dump_path)
+            if ("blocking stack candidate" in content
+                    and content.count("in block") >= 3):
+                break
+            await asyncio.sleep(0.02)
 
     asyncio.run(block())
     block_content = dump_path.read_text(encoding="utf-8")

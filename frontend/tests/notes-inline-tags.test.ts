@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent } from "@testing-library/react";
 import "../src/i18n";
 import { renderApp } from "./harness";
@@ -7,9 +7,20 @@ import { getMobileHandlers } from "../src/contexts/MobileHandlersContext";
 import type { InlineTag } from "../src/types/inlineTag";
 import type { Note } from "../src/types";
 
+// Requires fake timers (see engageFakeTimers) to be active in the test.
 async function waitDraftDebounce(): Promise<void> {
   await act(async () => {
-    await new Promise((resolve) => setTimeout(resolve, 350));
+    await vi.advanceTimersByTimeAsync(350);
+  });
+}
+
+// Fake setTimeout so the App.tsx draft debounce can be advanced instantly.
+// shouldAdvanceTime keeps the harness's real-time setTimeout(0) flushes alive.
+function engageFakeTimers(): void {
+  vi.useFakeTimers({
+    shouldAdvanceTime: true,
+    advanceTimeDelta: 1,
+    toFake: ["setTimeout", "clearTimeout"],
   });
 }
 
@@ -31,6 +42,7 @@ describe("notes and inline comments", () => {
 
   afterEach(() => {
     setViewport(defaultViewport.width, defaultViewport.height);
+    vi.useRealTimers();
   });
 
   it("keeps newly added comments in the comments panel while a prompt is queued", async () => {
@@ -330,6 +342,7 @@ describe("notes and inline comments", () => {
   });
 
   it("clears inline comments when the final applied note is deleted before send", async () => {
+    engageFakeTimers();
     const note: Note = {
       id: "note-1",
       text: "apply this note",

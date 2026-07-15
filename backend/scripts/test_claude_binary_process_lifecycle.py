@@ -234,18 +234,8 @@ def test_sdk_orphan_daemon():
     result = _drain_until(p, lambda ev: ev.get("type") == "result", timeout=60)
     check("turn completed", result is not None)
 
-    # Check daemon is alive
-    time.sleep(2)
-    out = subprocess.run(
-        ["ps", "-axo", "pid=,ppid=,command="], capture_output=True, text=True
-    ).stdout
-    daemon_pid = None
-    for ln in out.splitlines():
-        if marker in ln and "grep" not in ln and "claude" not in ln:
-            parts = ln.split(None, 2)
-            daemon_pid = int(parts[0])
-            daemon_ppid = int(parts[1])
-            break
+    # Wait for the daemon to appear (bounded poll).
+    daemon_pid, daemon_ppid = _wait_for_process(marker, timeout=15)
 
     if daemon_pid:
         check("undeclared daemon is running", True, f"pid={daemon_pid} ppid={daemon_ppid}")
@@ -305,16 +295,16 @@ def test_sdk_sigterm_no_respawn():
     check("claude dies on SIGTERM", p.poll() is not None,
           f"rc={p.returncode}")
 
-    # Wait and verify no respawn — only check if THIS process came back.
+    # Verify no respawn — only check if THIS process came back.
     # There may be other BC-managed claude processes; we only care that
     # the one we killed didn't respawn with the same PID.
-    time.sleep(3)
-    # Check the specific PID didn't come back
-    still_alive = subprocess.run(
-        ["ps", "-o", "pid=", "-p", str(claude_pid)],
-        capture_output=True, text=True,
-    ).stdout.strip()
-    check("killed PID did not respawn", not still_alive,
+    def _pid_gone():
+        return not subprocess.run(
+            ["ps", "-o", "pid=", "-p", str(claude_pid)],
+            capture_output=True, text=True,
+        ).stdout.strip()
+
+    check("killed PID did not respawn", _wait_until(_pid_gone),
           f"pid={claude_pid} still in process table")
 
 
@@ -340,8 +330,21 @@ def _wait_for_process(marker, timeout=30):
         pid, ppid = _find_process(marker)
         if pid:
             return pid, ppid
-        time.sleep(0.5)
+        time.sleep(0.05)
     return None, None
+
+
+def _wait_until(predicate, timeout=10.0, interval=0.05):
+    """Poll `predicate` until it returns truthy or the deadline passes.
+
+    Returns the last predicate value — callers assert on the CONDITION,
+    the wait itself is just a bounded poll for it to settle."""
+    deadline = time.monotonic() + timeout
+    while True:
+        value = predicate()
+        if value or time.monotonic() >= deadline:
+            return value
+        time.sleep(interval)
 
 
 # ---------------------------------------------------------------------------
@@ -429,8 +432,8 @@ def test_multiturn_declared_bg_work():
     check("claude exits on disconnect", p.poll() is not None,
           f"rc={p.returncode}")
 
-    # Check bg shell after claude exit
-    time.sleep(3)
+    # Check bg shell after claude exit — wait for the reap to settle.
+    _wait_until(lambda: _find_process(marker)[0] is None)
     bg_pid3, _ = _find_process(marker)
     check("declared bg shell reaped on claude exit (disconnect)",
           bg_pid3 is None, f"bg_pid after exit={bg_pid3}")
@@ -500,8 +503,13 @@ def test_multiturn_undeclared_daemon():
     check("claude exits on disconnect", p.poll() is not None,
           f"rc={p.returncode}")
 
-    # Check daemon after claude exit — should be orphaned (ppid→1)
-    time.sleep(2)
+    # Check daemon after claude exit — should be orphaned (ppid→1).
+    # Wait for the reparenting (or exit) to settle.
+    def _orphan_settled():
+        pid, ppid = _find_process(marker)
+        return pid is None or ppid == 1
+
+    _wait_until(_orphan_settled)
     d_pid3, d_ppid3 = _find_process(marker)
     if d_pid3:
         check("undeclared daemon still running after claude exit (orphaned)",
@@ -564,7 +572,8 @@ def test_sigterm_with_declared_bg():
           f"rc={p.returncode}")
 
     # Check bg shell — does SIGTERM to claude also kill it?
-    time.sleep(3)
+    # Wait for the reap to settle.
+    _wait_until(lambda: _find_process(marker)[0] is None)
     bg_pid_after, _ = _find_process(marker)
     if bg_pid:
         check("declared bg shell reaped when claude SIGTERM'd",
@@ -620,8 +629,12 @@ def test_sigterm_with_undeclared_daemon():
     check("claude dies on SIGTERM", p.poll() is not None,
           f"rc={p.returncode}")
 
-    # Check daemon — should survive
-    time.sleep(2)
+    # Check daemon — should survive. Wait for reparenting (or exit) to settle.
+    def _orphan_settled():
+        pid, ppid = _find_process(marker)
+        return pid is None or ppid == 1
+
+    _wait_until(_orphan_settled)
     d_pid_after, d_ppid_after = _find_process(marker)
     if d_pid:
         check("undeclared daemon survives claude SIGTERM (orphaned)",
@@ -691,8 +704,17 @@ def test_sigkill_hard_crash():
     check("claude dies on SIGKILL", p.poll() is not None,
           f"rc={p.returncode}")
 
-    # After SIGKILL: declared bg shell is NOT reaped (no graceful cleanup)
-    time.sleep(3)
+    # After SIGKILL: declared bg shell is NOT reaped (no graceful cleanup).
+    # Wait until the survivors' reparenting settles (bg shell no longer
+    # parented by the dead claude pid, daemon still present).
+    def _survivors_settled():
+        bg_p, bg_pp = _find_process(marker_bg)
+        d_p, _ = _find_process(marker_daemon)
+        bg_ok = bg_pid is None or (bg_p is not None and bg_pp != claude_pid)
+        d_ok = daemon_pid is None or d_p is not None
+        return bg_ok and d_ok
+
+    _wait_until(_survivors_settled)
     bg_pid_after, bg_ppid_after = _find_process(marker_bg)
     daemon_pid_after, daemon_ppid_after = _find_process(marker_daemon)
 
@@ -964,8 +986,12 @@ def test_monitor_keeps_process_alive():
         pass
     p.wait(timeout=5)
 
-    # Check monitor script after claude exit
-    time.sleep(2)
+    # Check monitor script after claude exit — wait for reparent/exit to settle.
+    def _monitor_script_settled():
+        pid, ppid = _find_process(monitor_marker)
+        return pid is None or ppid != claude_pid
+
+    _wait_until(_monitor_script_settled, timeout=5)
     script_pid_after, script_ppid_after = _find_process(monitor_marker)
     if script_pid:
         check("monitor script status after claude exit",
@@ -1039,13 +1065,9 @@ def test_reap_signal_bg_shell():
             os.kill(bg_pid, signal.SIGKILL)
         except (ProcessLookupError, OSError):
             pass
-        dropped = False
-        deadline = time.monotonic() + 10
-        while time.monotonic() < deadline:
-            if pc.has_detached_descendants(claude_pid) is False:
-                dropped = True
-                break
-            time.sleep(0.5)
+        dropped = bool(_wait_until(
+            lambda: pc.has_detached_descendants(claude_pid) is False,
+        ))
         check("signal drops to False after bg work ends", dropped)
 
     p.stdin.close()
