@@ -207,10 +207,8 @@ class SQLiteChatProjectionStore:
         if self._owner_client:
             self._start_owner(path)
             return
-        self._path = Path(_owner_basename)
+        self._store_path = Path(_owner_basename)
         self._connection = None
-        self._parent_fd = None
-        self._file_fd = None
         self._owner_identity_fd = _owner_file_fd
         self._owner_basename = _owner_basename
         self._file_checkpoint()
@@ -240,11 +238,14 @@ class SQLiteChatProjectionStore:
             startup_timeout_seconds=self._startup_timeout_seconds,
             max_error_text_bytes=MAX_TEXT_BYTES,
         )
-        self._path = self._owner.path
-        self._parent_fd = self._owner.parent_fd
-        self._file_fd = self._owner.file_fd
-        self._process = self._owner.process
-        self._channel = self._owner.channel
+
+    @property
+    def _path(self) -> Path:
+        return self._owner.path if self._owner_client else self._store_path
+
+    @property
+    def _process(self):
+        return self._owner.process
 
     @staticmethod
     def _verify_owner_file(file_fd: int, basename: str) -> None:
@@ -254,10 +255,7 @@ class SQLiteChatProjectionStore:
         self._verify_owner_file(self._owner_identity_fd, self._owner_basename)
 
     def _rpc(self, operation: str, **arguments: Any) -> Any:
-        result = self._owner.rpc(operation, **arguments)
-        self._process = self._owner.process
-        self._channel = self._owner.channel
-        return result
+        return self._owner.rpc(operation, **arguments)
 
     def _validate_rpc_result(
         self, operation: str, result: Any, arguments: Mapping[str, Any],
@@ -1109,10 +1107,6 @@ class SQLiteChatProjectionStore:
     def close(self) -> None:
         if self._owner_client:
             self._owner.close()
-            self._process = None
-            self._channel = None
-            self._parent_fd = None
-            self._file_fd = None
             self._closed = True
             return
         connection = getattr(self, "_connection", None)
@@ -1265,7 +1259,7 @@ def _run_owner(
 
     serve_owner(
         channel_fd, directory_fd, file_fd, basename, create_store, _owner_dispatch,
-        mutate_result, MAX_RESPONSE_BYTES,
+        lambda store: store.close(), mutate_result, MAX_RESPONSE_BYTES,
     )
 
 

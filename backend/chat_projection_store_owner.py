@@ -121,9 +121,18 @@ class OwnerClient:
                 raise ChatProjectionStoreError("owner_protocol_error", "projection owner did not initialize")
             parent_channel.settimeout(self.ipc_timeout_seconds)
         except BaseException as exc:
-            parent_channel.close()
-            child_channel.close()
-            self._terminate_process()
+            try:
+                parent_channel.close()
+            except BaseException:
+                pass
+            try:
+                child_channel.close()
+            except BaseException:
+                pass
+            try:
+                self._terminate_process()
+            except BaseException:
+                pass
             if created:
                 try:
                     os.unlink(self.path.name, dir_fd=self.parent_fd)
@@ -145,15 +154,13 @@ class OwnerClient:
         return value
 
     def rpc(self, operation: str, **arguments: Any) -> Any:
-        if self._poisoned or self._closed:
-            raise ChatProjectionStoreError("owner_unavailable", "projection owner exited")
         with self._lock:
             if self._poisoned or self._closed or self.channel is None or self.process is None or self.process.poll() is not None:
-                self.poison()
+                self._poison_locked()
                 raise ChatProjectionStoreError("owner_unavailable", "projection owner exited")
             request_id = self._next_request_id
             if request_id > MAX_REQUEST_ID:
-                self.poison()
+                self._poison_locked()
                 raise ChatProjectionStoreError("owner_protocol_error", "request id exhausted")
             self._next_request_id += 1
             dispatched = False
@@ -165,16 +172,16 @@ class OwnerClient:
             except ChatProjectionStoreError as exc:
                 domain = exc.__cause__ if exc.code == "owner_domain_error" else None
                 if not isinstance(domain, ChatProjectionStoreError):
-                    self.poison()
+                    self._poison_locked()
                 else:
                     if domain.code in {"insecure_store_file", "path_race", "owner_protocol_error", "owner_internal_error"}:
-                        self.poison()
+                        self._poison_locked()
                     raise domain
                 if operation == "commit" and dispatched:
                     raise ChatProjectionStoreError("commit_outcome_unknown", "owner response was lost after commit dispatch") from exc
                 raise
             except (OSError, TimeoutError, UnicodeError) as exc:
-                self.poison()
+                self._poison_locked()
                 code = "commit_outcome_unknown" if operation == "commit" and dispatched else "owner_unavailable"
                 raise ChatProjectionStoreError(code, "projection owner response unavailable") from exc
 
@@ -193,7 +200,14 @@ class OwnerClient:
             raise wrapped
         if set(response) != base | {"result"}:
             raise ChatProjectionStoreError("owner_protocol_error", "invalid owner result envelope")
-        return self._validate_result(operation, response["result"], arguments)
+        try:
+            return self._validate_result(operation, response["result"], arguments)
+        except ChatProjectionStoreError:
+            raise
+        except BaseException as exc:
+            raise ChatProjectionStoreError(
+                "owner_protocol_error", "owner result validation failed",
+            ) from exc
 
     def _valid_error_text(self, value: Any) -> bool:
         if not isinstance(value, str) or not value:
@@ -203,12 +217,18 @@ class OwnerClient:
         except UnicodeError:
             return False
 
-    def poison(self) -> None:
+    def _poison_locked(self) -> None:
         self._poisoned = True
         channel, self.channel = self.channel, None
-        self._terminate_process()
+        try:
+            self._terminate_process()
+        except BaseException:
+            pass
         if channel is not None:
-            channel.close()
+            try:
+                channel.close()
+            except BaseException:
+                pass
         self._close_handles()
 
     def _terminate_process(self) -> None:
@@ -225,14 +245,20 @@ class OwnerClient:
                     process.kill()
                 except OSError:
                     pass
-                process.wait()
+                try:
+                    process.wait()
+                except OSError:
+                    pass
 
     def _close_handles(self) -> None:
         for name in ("file_fd", "parent_fd"):
             descriptor = getattr(self, name, None)
             if descriptor is not None:
-                os.close(descriptor)
                 setattr(self, name, None)
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
 
     def close(self) -> None:
         with self._lock:
@@ -245,7 +271,7 @@ class OwnerClient:
             except ChatProjectionStoreError as exc:
                 close_error = exc
                 if not self._poisoned:
-                    self.poison()
+                    self._poison_locked()
             process = self.process
             if process is not None and process.poll() is None:
                 try:
@@ -253,11 +279,14 @@ class OwnerClient:
                 except subprocess.TimeoutExpired as exc:
                     close_error = close_error or ChatProjectionStoreError("owner_unavailable", "projection owner did not close")
                     close_error.__cause__ = exc
-                    self.poison()
+                    self._poison_locked()
             channel, self.channel = self.channel, None
             self.process = None
             if channel is not None:
-                channel.close()
+                try:
+                    channel.close()
+                except BaseException:
+                    pass
             self._close_handles()
             self._closed = True
             if close_error is not None:
@@ -267,13 +296,15 @@ class OwnerClient:
 def serve_owner(
     channel_fd: int, directory_fd: int, file_fd: int, basename: str,
     create_store: Callable[[int, int, str], Any], dispatch: Callable[[Any, str, Mapping[str, Any], int], Any],
+    close_store: Callable[[Any], None],
     mutate_result: Callable[[socket.socket, int, str, Any], tuple[Any, bool]], response_limit: int,
 ) -> None:
-    os.environ.clear()
-    os.fchdir(directory_fd)
-    channel = socket.socket(fileno=channel_fd)
+    channel = None
     store = None
     try:
+        os.environ.clear()
+        os.fchdir(directory_fd)
+        channel = socket.socket(fileno=channel_fd)
         store = create_store(directory_fd, file_fd, basename)
         send_frame(channel, {"ready": True})
         while True:
@@ -303,17 +334,34 @@ def serve_owner(
             except BaseException:
                 send_frame(channel, {"request_id": request_id, "operation": operation, "error": {"code": "owner_internal_error", "detail": "owner operation failed"}})
     except ChatProjectionStoreError as exc:
-        if exc.code == "owner_unavailable":
-            os._exit(1)
-        send_frame(channel, {"error": {"code": exc.code, "detail": exc.detail}})
+        if channel is not None and exc.code != "owner_unavailable":
+            try:
+                send_frame(channel, {"error": {"code": exc.code, "detail": exc.detail}})
+            except BaseException:
+                pass
     except BaseException:
         try:
             send_frame(channel, {"error": {"code": "owner_init_failed", "detail": "owner initialization failed"}})
         except BaseException:
             pass
     finally:
-        if store is not None and store._connection is not None:
-            store._connection.close()
-        channel.close()
-        os.close(file_fd)
-        os.close(directory_fd)
+        try:
+            if store is not None:
+                close_store(store)
+        except BaseException:
+            pass
+        try:
+            if channel is not None:
+                channel.close()
+            else:
+                os.close(channel_fd)
+        except BaseException:
+            pass
+        try:
+            os.close(file_fd)
+        except OSError:
+            pass
+        try:
+            os.close(directory_fd)
+        except OSError:
+            pass

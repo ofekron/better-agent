@@ -28,7 +28,7 @@ from chat_projection_store_sqlite import (
     MAX_SQLITE_INTEGER, MAX_TEXT_BYTES, MIN_IPC_TIMEOUT_SECONDS,
     SQLiteChatProjectionStore, _encode_json_bounded, canonical_json,
 )
-from chat_projection_store_owner import encode_frame, receive_frame
+from chat_projection_store_owner import encode_frame, receive_frame, send_frame, serve_owner
 
 
 FIXTURE = ROOT / "test-contracts" / "chat-panel" / "v1" / "canonical-session.json"
@@ -72,6 +72,14 @@ def _assert_error(code: str, callback) -> None:
         assert exc.code == code
         return
     raise AssertionError(f"expected ChatProjectionStoreError({code})")
+
+
+def _fd_is_closed(descriptor: int) -> bool:
+    try:
+        os.fstat(descriptor)
+    except OSError:
+        return True
+    return False
 
 
 def test_atomic_commit_duplicate_mutation_and_projection_surfaces() -> None:
@@ -642,6 +650,31 @@ def test_owner_timeout_ambiguity_protocol_poison_and_idempotent_close() -> None:
     _assert_error("owner_unavailable", lambda: mismatch.projection_cursor("root-1", 0))
     mismatch.close()
 
+    concurrent = SQLiteChatProjectionStore(
+        _path("owner-concurrent-close"), _ipc_timeout_seconds=0.1,
+    )
+    os.kill(concurrent._process.pid, signal.SIGSTOP)
+    failures = []
+    def invoke(callback) -> None:
+        try:
+            callback()
+        except ChatProjectionStoreError as exc:
+            failures.append(exc.code)
+    readers = [
+        threading.Thread(target=invoke, args=(lambda: concurrent.read_facts("root-1", 0),)),
+        threading.Thread(target=invoke, args=(concurrent.close,)),
+    ]
+    for thread in readers:
+        thread.start()
+    for thread in readers:
+        thread.join()
+    assert failures and set(failures) == {"owner_unavailable"}
+    reused = [os.open(os.devnull, os.O_RDONLY) for _ in range(8)]
+    concurrent.close()
+    for descriptor in reused:
+        os.fstat(descriptor)
+        os.close(descriptor)
+
 
 def test_response_page_budget_timeout_admission_and_close_failure() -> None:
     timeout_path = _path("invalid-timeout")
@@ -719,6 +752,59 @@ def test_exact_correlated_response_cap_and_commit_protocol_uncertainty() -> None
         finally:
             sender.close()
             receiver.close()
+
+    generic_parent, generic_child = socket.socketpair()
+    generic_directory = os.open(STATE_HOME, os.O_RDONLY | os.O_DIRECTORY)
+    generic_file_path = STATE_HOME / "generic-owner.file"
+    generic_file = os.open(generic_file_path, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600)
+    child_pid = os.fork()
+    if child_pid == 0:
+        generic_parent.close()
+        channel_fd = generic_child.detach()
+        class GenericStore:
+            pass
+        try:
+            serve_owner(
+                channel_fd, generic_directory, generic_file, generic_file_path.name,
+                lambda *_: GenericStore(),
+                lambda _store, operation, arguments, _request_id: (
+                    None if operation == "close" and not arguments else
+                    (_ for _ in ()).throw(ChatProjectionStoreError("owner_protocol_error", "unexpected"))
+                ),
+                lambda _store: (_ for _ in ()).throw(RuntimeError("close failed")),
+                lambda _channel, _request_id, _operation, result: (result, False),
+                MAX_RESPONSE_BYTES,
+            )
+            assert all(_fd_is_closed(fd) for fd in (channel_fd, generic_file, generic_directory))
+            os._exit(0)
+        except BaseException:
+            os._exit(1)
+    generic_child.close()
+    assert receive_frame(generic_parent) == {"ready": True}
+    send_frame(generic_parent, {"request_id": 1, "operation": "close", "arguments": {}})
+    assert receive_frame(generic_parent) == {"request_id": 1, "operation": "close", "result": None}
+    generic_parent.close()
+    os.close(generic_file)
+    os.close(generic_directory)
+    assert os.waitpid(child_pid, 0)[1] == 0
+
+    validator = SQLiteChatProjectionStore(_path("validator-runtime-error"))
+    validator.select_generation("root-1", 0)
+    validator_process = validator._process
+    validator._owner._validate_result = lambda *_: (_ for _ in ()).throw(RuntimeError("bad validator"))
+    _assert_error("owner_protocol_error", lambda: validator.projection_cursor("root-1", 0))
+    assert validator_process.poll() is not None
+    _assert_error("owner_unavailable", lambda: validator.projection_cursor("root-1", 0))
+    validator.close()
+
+    domain_validator = SQLiteChatProjectionStore(_path("validator-domain-error"))
+    domain_validator.select_generation("root-1", 0)
+    domain_validator._owner._validate_result = lambda *_: (_ for _ in ()).throw(
+        ChatProjectionStoreError("validator_domain", "validator rejected result")
+    )
+    _assert_error("validator_domain", lambda: domain_validator.projection_cursor("root-1", 0))
+    _assert_error("owner_unavailable", lambda: domain_validator.projection_cursor("root-1", 0))
+    domain_validator.close()
 
     def install_fact(path: Path, extra_bytes: int) -> None:
         setup = SQLiteChatProjectionStore(path)
