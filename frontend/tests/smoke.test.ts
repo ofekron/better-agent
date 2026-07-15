@@ -252,7 +252,7 @@ describe("harness smoke", () => {
     h.unmount();
   });
 
-  it("correlated send error keeps the failed prompt visible and clears retry backlog", async () => {
+  it("correlated send error keeps the failed prompt and durable retry intent", async () => {
     const session = makeSession();
     const h = await renderApp({ seed: { sessions: [session] } });
     await h.selectSession(session.id);
@@ -275,9 +275,42 @@ describe("harness smoke", () => {
 
     const failed = h.toJSON().chat.messages.find((m) => m.id === clientId);
     expect(failed?.status).toBe("error");
-    await expect.poll(async () => (await loadOfflineActions()).length).toBe(0);
+    await expect.poll(async () => await loadOfflineActions()).toEqual([
+      expect.objectContaining({
+        sessionId: session.id,
+        clientId,
+        failure: { errorText: "capability_contexts must be a list" },
+      }),
+    ]);
 
+    const sendsBeforeReload = h.outbound.filter((frame) => frame.type === "send_message").length;
     h.unmount();
+
+    const reloaded = await renderApp({ seed: { sessions: [session] } });
+    await reloaded.selectSession(session.id);
+    await reloaded.flush();
+    expect(reloaded.toJSON().chat.messages).toContainEqual(
+      expect.objectContaining({
+        id: clientId,
+        status: "error",
+        text: expect.stringContaining("bad payload"),
+      }),
+    );
+    expect(reloaded.outbound.filter((frame) => frame.type === "send_message")).toHaveLength(0);
+    expect(sendsBeforeReload).toBe(1);
+
+    await reloaded.clickByText(/^(Retry|message\.retry)$/);
+    await expect.poll(() =>
+      reloaded.outbound.filter((frame) => frame.type === "send_message").length
+    ).toBe(1);
+    expect(reloaded.outbound.find((frame) => frame.type === "send_message")).toEqual(
+      expect.objectContaining({ client_id: clientId }),
+    );
+    await expect.poll(async () => await loadOfflineActions()).toEqual([
+      expect.not.objectContaining({ failure: expect.anything() }),
+    ]);
+
+    reloaded.unmount();
   });
 
   it("native-mode session does not show the manager-scope chip", async () => {

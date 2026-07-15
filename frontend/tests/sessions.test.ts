@@ -525,6 +525,72 @@ describe("sessions CRUD + subscribe lifecycle", () => {
     h.unmount();
   });
 
+  it("keeps the initial prompt when a local-first session is rejected before admission", async () => {
+    const h = await renderApp({
+      seed: {
+        sessions: [],
+        projects: [{
+          path: "/tmp/project",
+          name: "project",
+          created_at: new Date().toISOString(),
+          last_used: new Date().toISOString(),
+        }],
+      },
+    });
+    h.backend.failNextWithStatus(503, "/api/sessions", true);
+    await clickNewSession(h);
+
+    const prompt = h.$(".ns-investigation-textarea") as HTMLTextAreaElement;
+    Object.getOwnPropertyDescriptor(
+      window.HTMLTextAreaElement.prototype,
+      "value",
+    )!.set!.call(prompt, "Don't see projects on mobile");
+    prompt.dispatchEvent(new Event("input", { bubbles: true }));
+    await h.click(".modal-footer .btn-primary");
+
+    await expect.poll(async () => (await loadOfflineActions()).length).toBe(1);
+    h.backend.setOffline(false);
+    h.reopenConnection();
+    await h.flush();
+
+    await expect.poll(async () => {
+      await h.flush();
+      return h.outbound.some(
+        (frame) => frame.type === "send_message" && frame.prompt === "Don't see projects on mobile",
+      );
+    }, { timeout: 5_000 }).toBe(true);
+    const sent = h.outbound.find(
+      (frame) => frame.type === "send_message" && frame.prompt === "Don't see projects on mobile",
+    )!;
+    const sessionId = sent.app_session_id as string;
+    const clientId = sent.client_id as string;
+    expect(h.toJSON().sidebar.sessions).toContainEqual(expect.objectContaining({
+      id: sessionId,
+      name: "Don't see projects on mobile",
+    }));
+
+    h.emit({
+      type: "error",
+      data: {
+        app_session_id: sessionId,
+        session_id: sessionId,
+        client_id: clientId,
+        error: "Provider is suspended and cannot run turns",
+      },
+    });
+    await h.flush();
+
+    await expect.poll(async () => await loadOfflineActions()).toEqual([
+      expect.objectContaining({
+        type: "create_session",
+        clientId,
+        session: expect.objectContaining({ id: sessionId, name: "Don't see projects on mobile" }),
+        failure: { errorText: "Provider is suspended and cannot run turns" },
+      }),
+    ]);
+    h.unmount();
+  });
+
   it("creates an empty session offline, then queues a prompt in it before sync", async () => {
     const h = await renderApp({
       seed: {

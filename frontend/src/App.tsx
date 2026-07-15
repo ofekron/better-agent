@@ -9,6 +9,7 @@ import {
 } from "./hooks/useWebSocket";
 import {
   offlineEntryIsEditing,
+  offlineEntryIsHeld,
   offlineEntrySessionId,
   useOfflineQueue,
   type OfflineQueueEntry,
@@ -1656,7 +1657,8 @@ function AppMain({
             ? entry.session.created_at || new Date().toISOString()
             : new Date().toISOString(),
           isStreaming: false,
-          status: "offline",
+          status: entry.failure ? "error" : "offline",
+          errorText: entry.failure?.errorText,
         }];
       });
       if (entry.type !== "create_session" && entry.sendMode === "queue") {
@@ -1705,7 +1707,7 @@ function AppMain({
     );
     setOfflineRetryScheduleVersion((version) => version + 1);
   }, [offlineDispatchKey]);
-  const hasHeldOfflineEdits = offlineQueue.queue.some(offlineEntryIsEditing);
+  const hasHeldOfflineActions = offlineQueue.queue.some(offlineEntryIsHeld);
   const sessionSnapshotHasClientId = useCallback((session: Session, clientId: string) => {
     const hasPersistedUserMessage = (session.messages || []).some(
       (message) => message.role === "user" && message.client_id === clientId,
@@ -1883,8 +1885,7 @@ function AppMain({
         client_id: promptClientId,
         error: errorText,
       }, "error");
-      offlineDispatchedRef.current.delete(offlineDispatchKey(sessionId, promptClientId));
-      removeAckedOfflineAction(sessionId, promptClientId);
+      void offlineQueue.markFailed(sessionId, promptClientId, errorText);
       setPendingForSession(sessionId, (prev) =>
         prev.map((m) =>
           m.id === promptClientId
@@ -1893,7 +1894,7 @@ function AppMain({
         )
       );
     },
-    [removeAckedOfflineAction, setPendingForSession, offlineDispatchKey]
+    [offlineQueue, setPendingForSession]
   );
 
   // refreshProjects is declared below; this stable adapter is patched once
@@ -2273,9 +2274,9 @@ function AppMain({
           const entrySessionId = offlineEntrySessionId(entry);
           const dispatchKey = offlineDispatchKey(entrySessionId, entry.clientId);
           if (offlineDispatchedRef.current.has(dispatchKey)) continue;
-          if (offlineEntryIsEditing(entry)) {
+          if (offlineEntryIsHeld(entry)) {
             if (entry.type === "create_session") heldCreateSessionIds.add(entry.session.id);
-            logPromptSend("offline_flush_skip_editing", {
+            logPromptSend("offline_flush_skip_held", {
               type: entry.type,
               app_session_id: entry.type === "create_session" ? entry.session.id : entry.sessionId,
               client_id: entry.clientId,
@@ -5325,6 +5326,24 @@ function AppMain({
     (message: ChatMessage) => {
       if (!currentSession) return;
       const sessionId = currentSession.id;
+      const failedOfflineEntry = offlineQueue.getAll().find(
+        (entry) =>
+          offlineEntrySessionId(entry) === sessionId
+          && entry.clientId === message.id
+          && entry.failure,
+      );
+      if (failedOfflineEntry) {
+        offlineDispatchedRef.current.delete(offlineDispatchKey(sessionId, message.id));
+        setPendingForSession(sessionId, (prev) =>
+          prev.map((pending) =>
+            pending.id === message.id
+              ? { ...pending, status: "sending" as const, errorText: undefined }
+              : pending
+          )
+        );
+        void offlineQueue.retryFailed(failedOfflineEntry);
+        return;
+      }
       const images = retryPayloadsRef.current.get(message.id) ?? [];
 
       // Replace failed message with a fresh "sending" one
@@ -5365,7 +5384,7 @@ function AppMain({
         );
       }
     },
-    [currentSession, model, cwd, sendMessage, setPendingForSession]
+    [currentSession, model, cwd, sendMessage, setPendingForSession, offlineQueue, offlineDispatchKey]
   );
 
   const handleStop = useCallback(() => {
@@ -6612,7 +6631,7 @@ function AppMain({
     (currentSession?.cwd || selectedProjectPath || cwd) &&
     routinesSidebarModules.length > 0
   );
-  const showOfflineQueueBanner = offlineQueue.queue.length > 0 && (!connected || hasHeldOfflineEdits);
+  const showOfflineQueueBanner = offlineQueue.queue.length > 0 && (!connected || hasHeldOfflineActions);
 
   return (
     <MobileActionSheetProvider>

@@ -31,6 +31,7 @@ export interface OfflinePromptEntry {
   sendTarget?: "worker" | "supervisor" | null;
   capabilityContexts?: CapabilityContext[];
   editing?: OfflineQueueEditState;
+  failure?: OfflineQueueFailureState;
 }
 
 export interface OfflineCreateSessionEntry {
@@ -60,12 +61,17 @@ export interface OfflineCreateSessionEntry {
   files?: FilePayload[];
   capabilityContexts?: CapabilityContext[];
   editing?: OfflineQueueEditState;
+  failure?: OfflineQueueFailureState;
 }
 
 export type OfflineQueueEntry = OfflinePromptEntry | OfflineCreateSessionEntry;
 
 export interface OfflineQueueEditState {
   draftPrompt: string;
+}
+
+export interface OfflineQueueFailureState {
+  errorText: string;
 }
 
 const CANONICAL_UUID =
@@ -81,6 +87,10 @@ export function offlineEntrySessionId(entry: OfflineQueueEntry): string {
 
 export function offlineEntryIsEditing(entry: OfflineQueueEntry): boolean {
   return typeof entry.editing?.draftPrompt === "string";
+}
+
+export function offlineEntryIsHeld(entry: OfflineQueueEntry): boolean {
+  return offlineEntryIsEditing(entry) || typeof entry.failure?.errorText === "string";
 }
 
 /** A `create_session` entry persisted by older code (or minted in a context
@@ -252,6 +262,55 @@ export function useOfflineQueue() {
     [persist],
   );
 
+  const markFailed = useCallback((sessionId: string, clientId: string, errorText: string) => {
+    const key = offlineActionKeyFor(sessionId, clientId);
+    const update = (item: OfflineQueueEntry): OfflineQueueEntry => ({
+      ...item,
+      failure: { errorText },
+    });
+    const next = queueRef.current.map((item) =>
+      offlineActionKey(item) === key ? update(item) : item
+    );
+    queueRef.current = next;
+    setQueue(next);
+    const operation = () => updateOfflineAction(key, update);
+    const write = writeTailRef.current.then(operation, operation);
+    writeTailRef.current = write.catch(() => undefined);
+    return write.then(() => {
+      setPersistFailed(false);
+      notifyChanged();
+      return true;
+    }, () => {
+      setPersistFailed(true);
+      return false;
+    });
+  }, [notifyChanged]);
+
+  const retryFailed = useCallback((entry: OfflineQueueEntry) => {
+    const key = offlineActionKey(entry);
+    const update = (item: OfflineQueueEntry): OfflineQueueEntry => {
+      const { failure: _failure, ...rest } = item;
+      void _failure;
+      return rest;
+    };
+    const next = queueRef.current.map((item) =>
+      offlineActionKey(item) === key ? update(item) : item
+    );
+    queueRef.current = next;
+    setQueue(next);
+    const operation = () => updateOfflineAction(key, update);
+    const write = writeTailRef.current.then(operation, operation);
+    writeTailRef.current = write.catch(() => undefined);
+    return write.then(() => {
+      setPersistFailed(false);
+      notifyChanged();
+      return true;
+    }, () => {
+      setPersistFailed(true);
+      return false;
+    });
+  }, [notifyChanged]);
+
   const updateEditDraft = useCallback(
     (entry: OfflineQueueEntry, draftPrompt: string) => {
       const key = offlineActionKey(entry);
@@ -279,8 +338,9 @@ export function useOfflineQueue() {
       const update = (item: OfflineQueueEntry): OfflineQueueEntry => {
         if (!item.editing) return item;
         const prompt = item.editing.draftPrompt;
-        const { editing: _editing, ...rest } = item;
+        const { editing: _editing, failure: _failure, ...rest } = item;
         void _editing;
+        void _failure;
         if (rest.type !== "create_session") return { ...rest, prompt };
         const name = prompt ? prompt.split("\n")[0].slice(0, 80) : rest.session.name;
         return { ...rest, prompt, session: { ...rest.session, name } };
@@ -352,6 +412,8 @@ export function useOfflineQueue() {
   }, [refresh]);
 
   return {
+    markFailed,
+    retryFailed,
     queue,
     enqueue,
     getAll,

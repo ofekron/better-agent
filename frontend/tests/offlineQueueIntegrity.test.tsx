@@ -2,6 +2,7 @@ import { act, renderHook, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import {
   offlineEntryIsEditing,
+  offlineEntryIsHeld,
   useOfflineQueue,
   type OfflineCreateSessionEntry,
   type OfflinePromptEntry,
@@ -97,6 +98,23 @@ describe("useOfflineQueue — IndexedDB persistence integrity", () => {
     expect(offlineEntryIsEditing(reloaded.result.current.getAll()[0])).toBe(true);
     await act(() => reloaded.result.current.finishEdit(reloaded.result.current.getAll()[0]));
     expect((reloaded.result.current.getAll()[0] as OfflinePromptEntry).prompt).toBe("edited");
+  });
+
+  it("persists a failed hold until an explicit retry releases it", async () => {
+    const { result, unmount } = renderHook(() => useOfflineQueue());
+    await waitFor(() => expect(result.current.ready).toBe(true));
+    await act(() => result.current.enqueue(entry("a", "failed", "keep me")));
+    await act(() => result.current.markFailed("a", "failed", "provider suspended"));
+    expect(offlineEntryIsHeld(result.current.getAll()[0])).toBe(true);
+    unmount();
+
+    const reloaded = renderHook(() => useOfflineQueue());
+    await waitFor(() => expect(reloaded.result.current.ready).toBe(true));
+    expect(reloaded.result.current.getAll()[0]).toEqual(expect.objectContaining({
+      failure: { errorText: "provider suspended" },
+    }));
+    await act(() => reloaded.result.current.retryFailed(reloaded.result.current.getAll()[0]));
+    expect(offlineEntryIsHeld(reloaded.result.current.getAll()[0])).toBe(false);
   });
 
   it("edits attachment-heavy actions without scaling with payload size", async () => {
