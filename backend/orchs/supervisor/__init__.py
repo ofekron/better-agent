@@ -170,7 +170,14 @@ async def maybe_run_verdict_loop(
             )
             return
 
-        fresh = session_manager.get(app_session_id)
+        # Lite read: the gate reads supervisor_enabled, and `fresh` is
+        # passed as primary_session to request_verdict -> run_turn, which
+        # uses the session object ONLY as read-only context (metadata +
+        # parent_id derivation); persistence is by-id on the live record
+        # and events arrive via the ingestion path, so stripped events
+        # cannot be lost. Full get() deepcopies the whole events-laden
+        # tree on the event loop each iteration.
+        fresh = session_manager.get_lite(app_session_id)
         if not fresh or not fresh.get("supervisor_enabled"):
             return
 

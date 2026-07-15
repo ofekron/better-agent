@@ -465,7 +465,10 @@ async def request_review(
     hands the review off to the PRIMARY as a new turn — so the primary
     acts on the review.
     """
-    primary = session_manager.get(app_session_id)
+    # Lite read: primary feeds only metadata/content readers + run_turn
+    # (which uses the session as read-only context; persistence is by-id,
+    # events via ingestion). Stripped events cannot be lost.
+    primary = session_manager.get_lite(app_session_id)
     if not primary:
         logger.warning("review: missing session %s", app_session_id)
         return

@@ -27,18 +27,13 @@ def test_verdict_loop_read_sites_use_lite_reads() -> None:
     # message text/role + metadata and never touch msg.events, so they must
     # use get_lite (same data minus events, ~100x cheaper) instead of full
     # get() which deepcopies the whole events-laden tree per iteration and
-    # blocks the loop on large sessions.
-    verdict_src = inspect.getsource(request_verdict)
-    assert "session_manager.get_lite(" in verdict_src
-    assert "session_manager.get(app_session_id)" not in verdict_src
-
-    # request_review's verdict-text extraction read is also event-free.
-    review_src = inspect.getsource(request_review)
-    assert "session_manager.get_lite(app_session_id)" in review_src
-
-    loop_src = inspect.getsource(maybe_run_verdict_loop)
-    # The supervisor_enabled re-check gate must be a lite read.
-    assert "session_manager.get_lite(app_session_id)" in loop_src
+    # blocks the loop on large sessions. The session passed into run_turn is
+    # read-only context there (persistence is by-id; events arrive via the
+    # ingestion path), so these sites are safe as lite reads.
+    for fn in (request_verdict, request_review, maybe_run_verdict_loop):
+        source = inspect.getsource(fn)
+        assert "session_manager.get_lite(" in source, fn.__name__
+        assert "session_manager.get(app_session_id)" not in source, fn.__name__
 
 
 if __name__ == "__main__":
