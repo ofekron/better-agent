@@ -251,6 +251,11 @@ class _RoundtripResult:
     line: bytes
     request_id: str
     elapsed_ms: float
+    # Timeouts are reported as a result rather than raised from the executor
+    # thread: an awaiter cancelled mid-flight (client disconnect) would leave a
+    # raised exception unretrieved in the shielded future, which asyncio logs
+    # as "exception in shielded future".
+    timed_out: bool = False
 
 
 @dataclass(frozen=True)
@@ -460,9 +465,10 @@ def _roundtrip(
 ) -> _RoundtripResult:
     """Send one id-tagged request over the multiplexed pipe and wait up to
     ``timeout`` for its response. Concurrent calls share the subprocess without
-    serializing. Raises ``TimeoutError`` if the response does not arrive in
-    time (the request is abandoned; the subprocess is NOT killed, so other
-    in-flight requests keep running). Returns ``b""`` if the process died."""
+    serializing. A response that does not arrive in time returns a
+    ``timed_out`` result (the request is abandoned; the subprocess is NOT
+    killed, so other in-flight requests keep running). Returns ``b""`` if the
+    process died."""
     rid = uuid.uuid4().hex
     started = time.monotonic()
     line = json.dumps({**request_payload, "id": rid}).encode("utf-8") + b"\n"
@@ -481,8 +487,10 @@ def _roundtrip(
                 return _RoundtripResult(b"", rid, (time.monotonic() - started) * 1000.0)
         try:
             response = waiter.get(timeout=timeout)
-        except queue.Empty as exc:
-            raise TimeoutError("extension backend roundtrip timed out") from exc
+        except queue.Empty:
+            return _RoundtripResult(
+                b"", rid, (time.monotonic() - started) * 1000.0, timed_out=True
+            )
         return _RoundtripResult(response, rid, (time.monotonic() - started) * 1000.0)
     finally:
         with channel.lock:
@@ -513,9 +521,12 @@ def _roundtrip_sync_admitted(
     if not _acquire_admission(handle):
         raise BlockingIOError("extension backend capacity is exhausted")
     try:
-        return _roundtrip(handle, spec, base_url, request_payload, timeout)
+        result = _roundtrip(handle, spec, base_url, request_payload, timeout)
     finally:
         _release_admission(handle)
+    if result.timed_out:
+        raise TimeoutError("extension backend roundtrip timed out")
+    return result
 
 
 async def _roundtrip_async_admitted(
@@ -541,7 +552,13 @@ async def _roundtrip_async_admitted(
     except BaseException:
         _release_admission(handle)
         raise
-    return await asyncio.shield(future)
+    # The shield keeps admission accounting intact when the awaiter is
+    # cancelled; the roundtrip completes with a plain result even on timeout,
+    # so an abandoned future never holds an unretrieved exception.
+    result = await asyncio.shield(future)
+    if result.timed_out:
+        raise TimeoutError("extension backend roundtrip timed out")
+    return result
 
 
 def _kill_and_reap(proc: Any, *, wait: bool) -> None:
@@ -688,6 +705,7 @@ async def _invoke_backend(
     query_b64: str,
     safe_headers: list[tuple[str, str]],
     base_url: str,
+    timeout_ceiling: float | None = None,
 ) -> Response:
     """Dispatch one request to the extension's persistent backend process and
     return its Response. The router is loaded once per process (amortized over
@@ -695,6 +713,12 @@ async def _invoke_backend(
     concurrently — a slow route does not block others. On a per-route timeout
     the request is abandoned (504) without killing the process; on process exit
     the next request respawns it.
+
+    ``timeout_ceiling`` caps the TOTAL invocation (including the exit-retry)
+    regardless of the manifest-declared route timeout. Latency-budgeted hot
+    paths own their budget here — never by cancelling the awaited call from
+    outside, which would abandon the roundtrip mid-flight and bypass timeout
+    accounting.
 
     Shared by the public ``/api/extensions/{id}/backend/*`` route (sourced from
     a FastAPI Request) and the inter-extension call endpoint (sourced from a
@@ -718,7 +742,10 @@ async def _invoke_backend(
         handle = _get_handle(spec)
     with perf.timed("extension.backend.invoke.timeout"):
         timeout = _resolve_host_timeout(spec, path)
+        if timeout_ceiling is not None:
+            timeout = min(timeout, timeout_ceiling)
     invocation_started = time.monotonic()
+    deadline = None if timeout_ceiling is None else invocation_started + timeout_ceiling
     try:
         with perf.timed("extension.backend.invoke.roundtrip"):
             roundtrip = await _roundtrip_async_admitted(
@@ -748,13 +775,19 @@ async def _invoke_backend(
         evict_persistent_backend(spec["extension_id"])
         try:
             with perf.timed("extension.backend.invoke.retry_after_exit"):
+                retry_timeout = timeout
+                if deadline is not None:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise TimeoutError("extension backend call budget exhausted")
+                    retry_timeout = min(timeout, remaining)
                 retry_handle = _get_handle(spec)
                 roundtrip = await _roundtrip_async_admitted(
                     retry_handle,
                     spec,
                     base_url,
                     request_payload,
-                    timeout,
+                    retry_timeout,
                 )
         except BlockingIOError as exc:
             perf.record_count("extension.backend.overloaded")
@@ -917,13 +950,15 @@ async def invoke_extension_backend(
     method: str = "POST",
     body_bytes: bytes = b"",
     base_url: str = "",
+    timeout_ceiling: float | None = None,
 ) -> Response:
     """Invoke an extension's backend handler from core (inter-extension calls).
 
     Same trust boundary as :func:`dispatch_extension_backend_request` — the
     caller must already be authenticated (internal token + active extension).
     Lets one extension reach another's exposed surface without core baking in
-    any feature logic."""
+    any feature logic. ``timeout_ceiling`` caps the total invocation for
+    latency-budgeted callers (see :func:`_invoke_backend`)."""
     spec = backend_entrypoint_spec_cached(extension_id)
     if spec is None:
         surface_status = extension_store.backend_surface_status(extension_id)
@@ -942,6 +977,7 @@ async def invoke_extension_backend(
         query_b64=_EMPTY_B64,
         safe_headers=[("content-type", "application/json")] if body_bytes else [],
         base_url=base_url,
+        timeout_ceiling=timeout_ceiling,
     )
 
 

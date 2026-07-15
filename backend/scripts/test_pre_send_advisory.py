@@ -76,18 +76,18 @@ def test_hook_enumerator_filters_records() -> None:
     orig = (
         extension_store.list_extensions,
         extension_store._record_active,
-        extension_store._record_runtime_ready,
+        extension_store._record_runtime_ready_projected,
     )
     extension_store.list_extensions = lambda: records
     extension_store._record_active = lambda r: r["manifest"]["id"] != "c.inactive"
-    extension_store._record_runtime_ready = lambda r: True
+    extension_store._record_runtime_ready_projected = lambda r: True
     try:
         hooks = extension_store.pre_send_advisory_hooks()
     finally:
         (
             extension_store.list_extensions,
             extension_store._record_active,
-            extension_store._record_runtime_ready,
+            extension_store._record_runtime_ready_projected,
         ) = orig
     assert hooks == [("a.with-hook", "/advise")], hooks
     print("ok test_hook_enumerator_filters_records")
@@ -96,7 +96,7 @@ def test_hook_enumerator_filters_records() -> None:
 def test_collect_normalizes_and_isolates_failures() -> None:
     calls: list[tuple[str, str, dict]] = []
 
-    async def fake_invoke(extension_id: str, path: str, *, method="POST", body_bytes=b"", base_url=""):
+    async def fake_invoke(extension_id: str, path: str, *, method="POST", body_bytes=b"", base_url="", timeout_ceiling=None):
         calls.append((extension_id, path, json.loads(body_bytes)))
         if extension_id == "bad.extension":
             raise RuntimeError("subprocess died")
@@ -140,8 +140,44 @@ def test_collect_normalizes_and_isolates_failures() -> None:
         "provider_kind": "claude",
         "config_dir": "~/.claude",
         "model": "opus",
+        "provider_mode": "",
+        "provider_base_url": "",
+        "provider_name": "",
     }
     print("ok test_collect_normalizes_and_isolates_failures")
+
+
+def test_collect_owns_timeout_inside_loader() -> None:
+    """The 2s send-path budget is passed down as the loader's roundtrip
+    timeout ceiling (single timeout owner), and a loader timeout (HTTP 504)
+    is dropped without failing the fan-out."""
+    seen_ceilings: list[float | None] = []
+
+    async def fake_invoke(extension_id: str, path: str, *, method="POST", body_bytes=b"", base_url="", timeout_ceiling=None):
+        seen_ceilings.append(timeout_ceiling)
+        if extension_id == "slow.extension":
+            raise pre_send_advisory.HTTPException(status_code=504, detail="Extension backend timed out")
+        payload = {"advisories": [{"title": "ok", "severity": "info"}]}
+        return Response(content=json.dumps(payload), media_type="application/json")
+
+    orig_hooks = extension_store.pre_send_advisory_hooks
+    orig_invoke = pre_send_advisory.invoke_extension_backend
+    extension_store.pre_send_advisory_hooks = lambda: [
+        ("slow.extension", "/advise"),
+        ("good.extension", "/advise"),
+    ]
+    pre_send_advisory.invoke_extension_backend = fake_invoke
+    try:
+        advisories = asyncio.run(
+            pre_send_advisory.collect_pre_send_advisories("sid", "prov", "claude", "", "m")
+        )
+    finally:
+        extension_store.pre_send_advisory_hooks = orig_hooks
+        pre_send_advisory.invoke_extension_backend = orig_invoke
+
+    assert seen_ceilings == [pre_send_advisory._PER_EXTENSION_TIMEOUT_SECONDS] * 2, seen_ceilings
+    assert [a["extension_id"] for a in advisories] == ["good.extension"], advisories
+    print("ok test_collect_owns_timeout_inside_loader")
 
 
 def test_collect_no_hooks_short_circuits() -> None:
@@ -168,6 +204,7 @@ if __name__ == "__main__":
         test_validate_hooks_accepts_pre_send_advisory()
         test_hook_enumerator_filters_records()
         test_collect_normalizes_and_isolates_failures()
+        test_collect_owns_timeout_inside_loader()
         test_collect_no_hooks_short_circuits()
         print("ALL PRE-SEND ADVISORY TESTS PASSED")
     finally:

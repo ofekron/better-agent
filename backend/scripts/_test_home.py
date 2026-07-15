@@ -163,6 +163,11 @@ def unlock_prod_home() -> None:
 def engage(home: str, lock: bool = False) -> str:
     if "runtime_ownership" in sys.modules:
         sys.modules["runtime_ownership"].release_runtime_writer_lock()
+    # Callers invoke this before any backend import; make backend/ importable
+    # regardless of the caller's own sys.path setup.
+    backend_dir = str(Path(__file__).resolve().parent.parent)
+    if backend_dir not in sys.path:
+        sys.path.insert(0, backend_dir)
     import paths
     resolved = paths.engage_test_home(home)
     install_deletion_guard()

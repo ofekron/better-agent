@@ -18,17 +18,21 @@ from typing import Any
 
 import extension_store
 from extension_backend_loader import invoke_extension_backend
+from fastapi import HTTPException
 
 log = logging.getLogger(__name__)
 
 _SEVERITIES = {"info", "warn"}
 _MAX_TEXT_CHARS = 500
 _MAX_ADVISORIES_PER_EXTENSION = 5
-# Snappy ceiling for the send hot path: the extension route reads a cached
-# provider_status (60s TTL), so a warm cache returns in milliseconds. Kept
-# under the frontend FETCH_TIMEOUT so a slow extension is abandoned here
-# before the frontend gives up — no orphaned work, and a miss just yields
-# no advisory (the next send picks up the warmed cache).
+# Snappy ceiling for the send hot path, enforced INSIDE the loader as the
+# roundtrip timeout (single timeout owner — an outer wait_for would race the
+# loader's own per-route timeout, abandon the shielded roundtrip mid-flight,
+# and bypass timeout accounting). The extension route reads a cached
+# provider_status (60s TTL), so a warm cache returns in milliseconds; a
+# cold-cache miss just yields no advisory and the next send picks up the
+# warmed cache. Kept under the frontend FETCH_TIMEOUT so a slow extension is
+# abandoned here before the frontend gives up.
 _PER_EXTENSION_TIMEOUT_SECONDS = 2.0
 
 
@@ -64,13 +68,25 @@ def _normalize_advisory(raw: Any, extension_id: str) -> dict[str, Any] | None:
 
 async def _collect_one(extension_id: str, path: str, body_bytes: bytes) -> list[dict[str, Any]]:
     try:
-        response = await asyncio.wait_for(
-            invoke_extension_backend(extension_id, path, body_bytes=body_bytes),
-            timeout=_PER_EXTENSION_TIMEOUT_SECONDS,
+        response = await invoke_extension_backend(
+            extension_id,
+            path,
+            body_bytes=body_bytes,
+            timeout_ceiling=_PER_EXTENSION_TIMEOUT_SECONDS,
         )
         if response.status_code != 200:
             return []
         payload = json.loads(response.body or b"{}")
+    except HTTPException as exc:
+        # Defined loader outcome (504 timeout, 503 busy/unavailable) — an
+        # expected advisory miss, not a core fault; no traceback needed.
+        log.warning(
+            "pre_send_advisory: extension %s advisory call failed (HTTP %s: %s); skipping",
+            extension_id,
+            exc.status_code,
+            exc.detail,
+        )
+        return []
     except Exception:
         log.warning(
             "pre_send_advisory: extension %s advisory call failed; skipping",

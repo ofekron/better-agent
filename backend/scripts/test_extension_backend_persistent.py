@@ -12,9 +12,9 @@ import time
 from pathlib import Path
 
 TMP = Path(tempfile.mkdtemp(prefix="bc-test-ext-backend-persistent-"))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import _test_home
 _test_home.isolate("ba-test-")
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from fastapi import FastAPI  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
@@ -27,6 +27,7 @@ FAILURES: list[str] = []
 
 _ROUTES = (
     "import os\n"
+    "import time\n"
     "from pathlib import Path\n"
     "from fastapi import APIRouter\n"
     "_count = 0\n"
@@ -34,6 +35,10 @@ _ROUTES = (
     "    r = APIRouter()\n"
     "    @r.get('/pid')\n"
     "    def pid(): return {'pid': os.getpid()}\n"
+    "    @r.get('/slow')\n"
+    "    def slow():\n"
+    "        time.sleep(1.0)\n"
+    "        return {'ok': True}\n"
     "    @r.get('/bump')\n"
     "    def bump():\n"
     "        global _count; _count += 1\n"
@@ -129,6 +134,32 @@ def main() -> None:
         r6 = client.post("/api/extensions/ofek.persist/backend/exit-never-retry")
         check(r6.status_code == 500,
               "undeclared route keeps fail-closed process-exit behavior")
+
+        # A roundtrip timeout surfaces as a timed_out RESULT, never an
+        # exception raised into a possibly-abandoned shielded future (which
+        # asyncio would log as "exception in shielded future").
+        client.get("/api/extensions/ofek.persist/backend/pid")  # ensure live channel
+        handle = L._PERSISTENT_PROCS["ofek.persist"]
+        spec = L.backend_entrypoint_spec_cached("ofek.persist")
+        payload = {"method": "GET", "path": "/slow", "query_string": "",
+                   "headers": [], "body": ""}
+        result = L._roundtrip(handle, spec, "", payload, 0.15)
+        check(result.timed_out and not result.line,
+              "roundtrip timeout reported via result.timed_out, not raised")
+
+        # timeout_ceiling caps the invocation below the manifest/route timeout
+        # and maps to the defined 504 outcome.
+        import asyncio
+        from fastapi import HTTPException
+        started = time.monotonic()
+        try:
+            asyncio.run(L.invoke_extension_backend(
+                "ofek.persist", "slow", method="GET", timeout_ceiling=0.2))
+            check(False, "timeout_ceiling should raise HTTP 504")
+        except HTTPException as exc:
+            elapsed = time.monotonic() - started
+            check(exc.status_code == 504 and elapsed < 0.9,
+                  f"timeout_ceiling caps the roundtrip and raises 504 ({elapsed:.2f}s)")
     finally:
         L.shutdown_persistent_backends()
         from shutil import rmtree
