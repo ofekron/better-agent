@@ -36,6 +36,20 @@ _EVENT_FIELDS = {
 _PROVIDER_FIELDS = {"id", "model", "effort"}
 _MESSAGE_FIELDS = {"id", "turn_id", "seq", "role", "content"}
 _MODEL_IDENTITY_FIELDS = {"provider", "model", "effort"}
+MAX_CANONICAL_ROWS = 200_000
+MAX_CANONICAL_JSON_BYTES = 128 * 1024 * 1024
+MAX_STRING_LENGTH = 4 * 1024 * 1024
+MAX_LIST_ITEMS = 100_000
+MAX_OPTIONS = 10_000
+MAX_SESSIONS = 10_000
+MAX_PAYLOAD_DEPTH = 64
+
+
+class ChatProjectionInputError(ValueError):
+    def __init__(self, code: str, detail: str) -> None:
+        self.code = code
+        self.detail = detail
+        super().__init__(f"{code}: {detail}")
 
 
 def project_chat(
@@ -45,10 +59,11 @@ def project_chat(
     schema_version: int,
 ) -> Chat:
     canonical = _canonical_events(events, schema_version)
+    event_by_id = {event.event_id: event for event in canonical}
+    _validate_parent_graph(canonical, event_by_id)
     prompts, message_turns = _validated_messages(messages)
     ownership = _ownership(canonical, message_turns)
-    event_by_id = {event.event_id: event for event in canonical}
-    _validate_edges(canonical, event_by_id, ownership, message_turns)
+    _validate_boundaries(canonical, event_by_id, ownership, message_turns)
     scoped_turns = _project_scoped_turns(canonical, event_by_id)
 
     changes = defaultdict(list)
@@ -272,19 +287,22 @@ def _canonical_events(
     events: Sequence[CanonicalEvent | Mapping[str, Any]], schema_version: int,
 ) -> tuple[CanonicalEvent, ...]:
     _validate_schema_version(schema_version)
+    _admit_canonical_rows(events)
     latest: dict[str, CanonicalEvent] = {}
     positions: dict[str, tuple[str, int]] = {}
-    sequences: dict[tuple[str, int], str] = {}
+    sequences: dict[int, str] = {}
     for raw in events:
         event = raw if isinstance(raw, CanonicalEvent) else _event_from_mapping(raw, schema_version)
         if event.schema_version != schema_version:
             raise ValueError("event schema version does not match request")
         _validate_nested_data(event.type, event.data)
         _validate_model_change_provider(event)
-        stream_position = (event.context_id, event.sequence)
-        if stream_position in sequences:
-            raise ValueError("duplicate journal_seq within canonical context stream")
-        sequences[stream_position] = event.event_id
+        if event.sequence in sequences:
+            raise ChatProjectionInputError(
+                "duplicate_journal_seq",
+                f"journal_seq {event.sequence} is already owned by {sequences[event.sequence]}",
+            )
+        sequences[event.sequence] = event.event_id
         position = (event.timestamp, event.sequence)
         current_position = positions.get(event.event_id)
         if current_position is None or _position_key(position) < _position_key(current_position):
@@ -322,6 +340,8 @@ def _event_from_mapping(raw: Mapping[str, Any], schema_version: int) -> Canonica
     for flag in ("provider_final", "metadata_only"):
         if flag in raw and not isinstance(raw[flag], bool):
             raise ValueError(f"{flag} must be a boolean")
+    if "source" in raw:
+        _required_str(raw["source"], "source")
     _validate_nested_data(_required_str(raw["type"], "type"), raw["data"])
     return CanonicalEvent(
         _required_str(raw["event_id"], "event_id"),
@@ -348,6 +368,7 @@ def _event_from_mapping(raw: Mapping[str, Any], schema_version: int) -> Canonica
 def _validated_messages(
     messages: Sequence[Mapping[str, Any]],
 ) -> tuple[dict[str, TypedPrompt], dict[str, str]]:
+    _measure_json(messages)
     prompts: dict[str, TypedPrompt] = {}
     message_turns: dict[str, str] = {}
     message_ids = set()
@@ -404,7 +425,35 @@ def _ownership(
     return result
 
 
-def _validate_edges(
+def _validate_parent_graph(
+    events: Sequence[CanonicalEvent],
+    event_by_id: Mapping[str, CanonicalEvent],
+    observe: Any = None,
+) -> None:
+    colors: dict[str, int] = {}
+    for event in events:
+        if event.parent_event_id is not None and event.parent_event_id not in event_by_id:
+            raise ChatProjectionInputError(
+                "unknown_parent", f"unknown parent event: {event.parent_event_id}",
+            )
+    for event in events:
+        if colors.get(event.event_id) == 2:
+            continue
+        path = []
+        current_id: str | None = event.event_id
+        while current_id is not None and colors.get(current_id, 0) == 0:
+            colors[current_id] = 1
+            path.append(current_id)
+            if observe is not None:
+                observe(current_id)
+            current_id = event_by_id[current_id].parent_event_id
+        if current_id is not None and colors.get(current_id) == 1:
+            raise ChatProjectionInputError("parent_cycle", f"cycle includes event: {current_id}")
+        for visited_id in path:
+            colors[visited_id] = 2
+
+
+def _validate_boundaries(
     events: Sequence[CanonicalEvent],
     event_by_id: Mapping[str, CanonicalEvent],
     ownership: Mapping[str, tuple[str, str]],
@@ -413,9 +462,7 @@ def _validate_edges(
     for child in events:
         if child.parent_event_id is None:
             continue
-        parent = event_by_id.get(child.parent_event_id)
-        if parent is None:
-            raise ValueError(f"unknown parent event: {child.parent_event_id}")
+        parent = event_by_id[child.parent_event_id]
         child_turn, child_message = _boundary(child, ownership, message_turns)
         parent_turn, parent_message = _boundary(parent, ownership, message_turns)
         if child_message != parent_message:
@@ -423,19 +470,6 @@ def _validate_edges(
         if parent.type not in _SCOPED_TYPES:
             if child_turn != parent_turn or child.context_id != parent.context_id:
                 raise ValueError("parent edge crosses context or turn boundary")
-        _validate_acyclic_parent_chain(child, event_by_id)
-
-
-def _validate_acyclic_parent_chain(
-    event: CanonicalEvent, event_by_id: Mapping[str, CanonicalEvent],
-) -> None:
-    seen = {event.event_id}
-    parent_id = event.parent_event_id
-    while parent_id is not None:
-        if parent_id in seen:
-            raise ValueError("event parent cycle")
-        seen.add(parent_id)
-        parent_id = event_by_id[parent_id].parent_event_id
 
 
 def _boundary(
@@ -472,7 +506,7 @@ def _effective_turn_id(
     return message_turns.get(event.message_id or "") or event.turn_id
 
 
-def _has_ancestor(
+def _has_ancestor_without_scoped_boundary(
     event: CanonicalEvent,
     ancestor_ids: set[str],
     event_by_id: Mapping[str, CanonicalEvent],
@@ -481,25 +515,13 @@ def _has_ancestor(
     seen = set()
     while parent_id is not None:
         if parent_id in seen:
-            raise ValueError("event parent cycle")
+            raise ChatProjectionInputError("parent_cycle", f"cycle includes event: {parent_id}")
         seen.add(parent_id)
         if parent_id in ancestor_ids:
             return True
         parent = event_by_id.get(parent_id)
-        parent_id = parent.parent_event_id if parent else None
-    return False
-
-
-def _has_ancestor_without_scoped_boundary(
-    event: CanonicalEvent,
-    ancestor_ids: set[str],
-    event_by_id: Mapping[str, CanonicalEvent],
-) -> bool:
-    parent_id = event.parent_event_id
-    while parent_id is not None:
-        if parent_id in ancestor_ids:
-            return True
-        parent = event_by_id[parent_id]
+        if parent is None:
+            raise ChatProjectionInputError("unknown_parent", f"unknown parent event: {parent_id}")
         if parent.type in _SCOPED_TYPES:
             return False
         parent_id = parent.parent_event_id
@@ -510,8 +532,14 @@ def _has_scoped_ancestor(
     event: CanonicalEvent, event_by_id: Mapping[str, CanonicalEvent],
 ) -> bool:
     parent_id = event.parent_event_id
+    seen = set()
     while parent_id is not None:
-        parent = event_by_id[parent_id]
+        if parent_id in seen:
+            raise ChatProjectionInputError("parent_cycle", f"cycle includes event: {parent_id}")
+        seen.add(parent_id)
+        parent = event_by_id.get(parent_id)
+        if parent is None:
+            raise ChatProjectionInputError("unknown_parent", f"unknown parent event: {parent_id}")
         if parent.type in _SCOPED_TYPES:
             return True
         parent_id = parent.parent_event_id
@@ -654,6 +682,14 @@ def _validate_nested_data(event_type: str, data: Mapping[str, Any]) -> None:
     for field in {"session_ids", "sessions", "options"} & data.keys():
         if not isinstance(data[field], (list, tuple)):
             raise ValueError(f"{event_type} data.{field} must be a sequence")
+    if len(data.get("options", ())) > MAX_OPTIONS:
+        raise ChatProjectionInputError(
+            "too_many_options", f"options exceed {MAX_OPTIONS}",
+        )
+    if len(data.get("sessions", ())) > MAX_SESSIONS:
+        raise ChatProjectionInputError(
+            "too_many_sessions", f"sessions exceed {MAX_SESSIONS}",
+        )
     for field in {"session_ids", "options"} & data.keys():
         if any(not isinstance(value, str) or not value for value in data[field]):
             raise ValueError(f"{event_type} data.{field} must contain strings")
@@ -673,6 +709,88 @@ def _validate_model_change_provider(event: CanonicalEvent) -> None:
     expected = ProviderIdentity(target["provider"], target["model"], target["effort"])
     if event.provider != expected:
         raise ValueError("model_change provider must match data.to")
+
+
+def _admit_canonical_rows(
+    events: Sequence[CanonicalEvent | Mapping[str, Any]],
+) -> None:
+    if len(events) > MAX_CANONICAL_ROWS:
+        raise ChatProjectionInputError(
+            "too_many_rows", f"canonical rows exceed {MAX_CANONICAL_ROWS}",
+        )
+    total_bytes = 0
+    for raw in events:
+        value: Any
+        if isinstance(raw, CanonicalEvent):
+            value = {
+                "event_id": raw.event_id, "timestamp": raw.timestamp,
+                "context_id": raw.context_id, "turn_id": raw.turn_id,
+                "message_id": raw.message_id, "parent_event_id": raw.parent_event_id,
+                "type": raw.type, "data": raw.data,
+                "provider": {
+                    "id": raw.provider.id if raw.provider else "",
+                    "model": raw.provider.model if raw.provider else "",
+                    "effort": raw.provider.effort if raw.provider else "",
+                },
+            }
+        else:
+            value = raw
+        total_bytes += _measure_json(value)
+        if total_bytes > MAX_CANONICAL_JSON_BYTES:
+            raise ChatProjectionInputError(
+                "canonical_bytes_exceeded",
+                f"canonical JSON bytes exceed {MAX_CANONICAL_JSON_BYTES}",
+            )
+
+
+def _measure_json(value: Any) -> int:
+    total_bytes = 0
+    stack = [(value, 0)]
+    containers = set()
+    while stack:
+        item, depth = stack.pop()
+        if depth > MAX_PAYLOAD_DEPTH:
+            raise ChatProjectionInputError(
+                "payload_depth_exceeded", f"payload depth exceeds {MAX_PAYLOAD_DEPTH}",
+            )
+        if isinstance(item, str):
+            length = len(item)
+            if length > MAX_STRING_LENGTH:
+                raise ChatProjectionInputError(
+                    "string_too_long", f"string length exceeds {MAX_STRING_LENGTH}",
+                )
+            total_bytes += len(item.encode("utf-8"))
+            continue
+        if isinstance(item, Mapping):
+            identity = id(item)
+            if identity in containers:
+                raise ChatProjectionInputError(
+                    "payload_not_tree", "payload contains a cyclic or aliased object",
+                )
+            containers.add(identity)
+            if len(item) > MAX_LIST_ITEMS:
+                raise ChatProjectionInputError(
+                    "list_too_large", f"object size exceeds {MAX_LIST_ITEMS}",
+                )
+            for key, child in item.items():
+                stack.append((key, depth + 1))
+                stack.append((child, depth + 1))
+            continue
+        if isinstance(item, (list, tuple)):
+            identity = id(item)
+            if identity in containers:
+                raise ChatProjectionInputError(
+                    "payload_not_tree", "payload contains a cyclic or aliased list",
+                )
+            containers.add(identity)
+            if len(item) > MAX_LIST_ITEMS:
+                raise ChatProjectionInputError(
+                    "list_too_large", f"list size exceeds {MAX_LIST_ITEMS}",
+                )
+            stack.extend((child, depth + 1) for child in item)
+            continue
+        total_bytes += 8
+    return total_bytes
 
 
 def _validate_version_update(current: CanonicalEvent, candidate: CanonicalEvent) -> None:

@@ -11,7 +11,8 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "backend"))
 
 from chat_models import CanonicalEvent, Explanation, ModelChange, ProviderIdentity, ScopedTurn, SteeringMessage, Turn, VisibilityPlan
-from chat_projector import canonical_quick_reply_text, model_marker_targets, project_chat
+import chat_projector
+from chat_projector import ChatProjectionInputError, canonical_quick_reply_text, model_marker_targets, project_chat
 
 
 FIXTURE = ROOT / "test-contracts" / "chat-panel" / "v1" / "canonical-session.json"
@@ -111,6 +112,25 @@ def _assert_rejected(messages, events, schema_version=1):
     except (TypeError, ValueError):
         return
     raise AssertionError("malformed canonical input was accepted")
+
+
+def _assert_input_error(code, messages, events):
+    try:
+        project_chat(messages, events, schema_version=1)
+    except ChatProjectionInputError as exc:
+        assert exc.code == code
+        assert exc.detail
+        return
+    raise AssertionError(f"expected ChatProjectionInputError({code})")
+
+
+def _with_limit(name, value, callback):
+    original = getattr(chat_projector, name)
+    setattr(chat_projector, name, value)
+    try:
+        callback()
+    finally:
+        setattr(chat_projector, name, original)
 
 
 def _chat(value):
@@ -444,13 +464,14 @@ def test_timestamps_require_canonical_utc_and_sort_as_instants() -> None:
     assert updated.result.text == "new"
 
 
-def test_duplicate_context_sequence_is_rejected_in_both_input_orders() -> None:
+def test_duplicate_root_sequence_is_rejected_across_contexts_in_both_orders() -> None:
     first = _event("first", 1, "assistant_text", data={"text": "first"})
     second = _event("second", 1, "assistant_text", data={"text": "second"})
     _assert_rejected(_messages(), [first, second])
     _assert_rejected(_messages(), [second, first])
     other_context = dict(second, context_id="other")
-    project_chat(_messages(), [first, other_context], schema_version=1)
+    _assert_input_error("duplicate_journal_seq", _messages(), [first, other_context])
+    _assert_input_error("duplicate_journal_seq", _messages(), [other_context, first])
 
 
 def test_scoped_projection_and_serialization_are_stack_safe_beyond_1100_depth() -> None:
@@ -514,6 +535,92 @@ def test_every_supported_event_type_has_closed_required_payload() -> None:
         },
     )
     _assert_rejected(_messages(), [malformed_session])
+
+
+def test_owned_parent_cycle_fails_before_ownership_traversal() -> None:
+    events = [
+        _event("a", 1, "worker_turn", parent_event_id="b"),
+        _event("b", 2, "worker_turn", parent_event_id="a"),
+        _event(
+            "owner", 3, "message_ownership_declared", metadata_only=True,
+            data={"owns_event_ids": ["a", "b"]},
+        ),
+    ]
+    _assert_input_error("parent_cycle", _messages(), events)
+
+
+def test_parent_graph_validation_observer_is_linear_on_large_chain() -> None:
+    events = []
+    for index in range(5000):
+        event = _event(
+            f"node-{index}", index + 1, "worker_turn",
+            parent_event_id=f"node-{index - 1}" if index else None,
+        )
+        event["timestamp"] = "2026-01-02T00:00:00Z"
+        events.append(event)
+    canonical = chat_projector._canonical_events(events, 1)
+    observed = []
+    chat_projector._validate_parent_graph(
+        canonical, {event.event_id: event for event in canonical}, observed.append,
+    )
+    assert len(observed) == len(events)
+    assert len(set(observed)) == len(events)
+
+
+def test_admission_bounds_and_source_fail_closed_with_typed_errors() -> None:
+    base = _event("base", 1, "assistant_text", data={"text": "ok"})
+    _with_limit(
+        "MAX_CANONICAL_ROWS", 0,
+        lambda: _assert_input_error("too_many_rows", _messages(), [base]),
+    )
+    _with_limit(
+        "MAX_CANONICAL_JSON_BYTES", 1,
+        lambda: _assert_input_error("canonical_bytes_exceeded", _messages(), [base]),
+    )
+    _with_limit(
+        "MAX_STRING_LENGTH", 2,
+        lambda: _assert_input_error("string_too_long", _messages(), [base]),
+    )
+    oversized_list = _event(
+        "list", 1, "tool_interaction",
+        data={
+            "tool_name": "tool", "tool_use_id": "use", "status": "complete",
+            "options": ["a", "b"],
+        },
+    )
+    _with_limit(
+        "MAX_LIST_ITEMS", 1,
+        lambda: _assert_input_error("list_too_large", _messages(), [oversized_list]),
+    )
+    _with_limit(
+        "MAX_OPTIONS", 1,
+        lambda: _assert_input_error("too_many_options", _messages(), [oversized_list]),
+    )
+    sessions = _event(
+        "sessions", 1, "tool_interaction",
+        data={
+            "tool_name": "tool", "tool_use_id": "use", "status": "complete",
+            "sessions": [{"id": "a", "title": "A"}, {"id": "b", "title": "B"}],
+        },
+    )
+    _with_limit(
+        "MAX_SESSIONS", 1,
+        lambda: _assert_input_error("too_many_sessions", _messages(), [sessions]),
+    )
+    nested = _event("nested", 1, "assistant_text", data={"text": "ok"})
+    nested["data"]["text"] = "ok"
+    nested["data"]["extra"] = {"deeper": {"value": "x"}}
+    _with_limit(
+        "MAX_PAYLOAD_DEPTH", 2,
+        lambda: _assert_input_error("payload_depth_exceeded", _messages(), [nested]),
+    )
+    for source in ("", 1, None):
+        invalid_source = dict(base, source=source)
+        _assert_rejected(_messages(), [invalid_source])
+    cyclic = {}
+    cyclic["self"] = cyclic
+    cyclic_event = dict(base, data=cyclic)
+    _assert_input_error("payload_not_tree", _messages(), [cyclic_event])
 
 
 def main() -> None:
