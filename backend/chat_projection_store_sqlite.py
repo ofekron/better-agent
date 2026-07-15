@@ -2,17 +2,25 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import socket
 import sqlite3
+import struct
+import subprocess
+import sys
 import threading
+from dataclasses import asdict
+from errno import EEXIST, ENOENT
 from functools import wraps
 from pathlib import Path
 from typing import Any, Callable, Mapping
+from urllib.parse import quote
 
 from chat_projection_store import (
     ChatProjectionStoreError, CommitResult, ProjectionCommit, SourceWatermark, StoredFact,
     StoredProjection, StoredRevision, TurnManifest,
 )
-from paths import ba_home, is_test_mode
+from paths import ba_home
 
 
 SCHEMA_VERSION = 2
@@ -24,6 +32,9 @@ MAX_JSON_LIST_ITEMS = 50_000
 MAX_JSON_OBJECT_ITEMS = 50_000
 MAX_TEXT_BYTES = 4_096
 MAX_COMMIT_BYTES = MAX_JSON_BYTES
+MAX_SQLITE_INTEGER = 2**63 - 1
+MAX_IPC_BYTES = 64 * 1024 * 1024
+IPC_TIMEOUT_SECONDS = 30
 
 TABLE_DDL = {
     "selected_roots": "CREATE TABLE selected_roots(root_id TEXT PRIMARY KEY, root_generation INTEGER NOT NULL)",
@@ -91,6 +102,8 @@ def _translate_sqlite(code: str):
                 return function(*args, **kwargs)
             except ChatProjectionStoreError:
                 raise
+            except UnicodeError as exc:
+                raise ChatProjectionStoreError("invalid_input", "text is not valid UTF-8") from exc
             except sqlite3.Error as exc:
                 raise ChatProjectionStoreError(code, "SQLite projection store operation failed") from exc
         return wrapped
@@ -103,11 +116,45 @@ def canonical_json(value: Mapping[str, Any]) -> str:
         encoded = json.dumps(
             value, ensure_ascii=False, separators=(",", ":"), sort_keys=True, allow_nan=False,
         )
-    except (TypeError, ValueError) as exc:
+    except (TypeError, ValueError, UnicodeError) as exc:
         raise ChatProjectionStoreError("invalid_json", "payload must be canonical JSON") from exc
-    if len(encoded.encode("utf-8")) > MAX_JSON_BYTES:
+    try:
+        encoded_bytes = encoded.encode("utf-8")
+    except UnicodeError as exc:
+        raise ChatProjectionStoreError("invalid_input", "text is not valid UTF-8") from exc
+    if len(encoded_bytes) > MAX_JSON_BYTES:
         raise ChatProjectionStoreError("payload_too_large", "payload exceeds store admission limit")
     return encoded
+
+
+def _send_frame(channel: socket.socket, payload: Mapping[str, Any]) -> None:
+    encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8")
+    if len(encoded) > MAX_IPC_BYTES:
+        raise ChatProjectionStoreError("ipc_too_large", "projection owner frame limit exceeded")
+    channel.sendall(struct.pack("!I", len(encoded)) + encoded)
+
+
+def _receive_exact(channel: socket.socket, length: int) -> bytes:
+    chunks = bytearray()
+    while len(chunks) < length:
+        chunk = channel.recv(length - len(chunks))
+        if not chunk:
+            raise ChatProjectionStoreError("owner_unavailable", "projection owner exited")
+        chunks.extend(chunk)
+    return bytes(chunks)
+
+
+def _receive_frame(channel: socket.socket) -> Mapping[str, Any]:
+    size = struct.unpack("!I", _receive_exact(channel, 4))[0]
+    if size > MAX_IPC_BYTES:
+        raise ChatProjectionStoreError("ipc_too_large", "projection owner frame limit exceeded")
+    try:
+        payload = json.loads(_receive_exact(channel, size).decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise ChatProjectionStoreError("owner_protocol_error", "invalid projection owner frame") from exc
+    if not isinstance(payload, Mapping):
+        raise ChatProjectionStoreError("owner_protocol_error", "invalid projection owner frame")
+    return payload
 
 
 class SQLiteChatProjectionStore:
@@ -162,33 +209,166 @@ class SQLiteChatProjectionStore:
         *,
         before_commit: Callable[[], None] | None = None,
         after_commit: Callable[[], None] | None = None,
+        _owner_directory_fd: int | None = None,
+        _owner_file_fd: int | None = None,
+        _owner_basename: str | None = None,
     ) -> None:
-        self._path = self._confined_path(path)
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._connection = sqlite3.connect(self._path, check_same_thread=False)
+        self._owner_client = _owner_directory_fd is None
+        self._before_commit = before_commit
+        self._after_commit = after_commit
+        self._lock = threading.RLock()
+        if self._owner_client:
+            self._start_owner(path)
+            return
+        os.fchdir(_owner_directory_fd)
+        self._path = Path(_owner_basename)
+        self._connection = None
+        self._parent_fd = None
+        self._file_fd = None
+        self._verify_owner_file(_owner_file_fd, _owner_basename)
+        uri = f"file:{quote(_owner_basename, safe='')}?mode=rw"
+        self._connection = sqlite3.connect(uri, uri=True, check_same_thread=False)
+        self._verify_owner_file(_owner_file_fd, _owner_basename)
         self._connection.row_factory = sqlite3.Row
         self._connection.execute("PRAGMA journal_mode=WAL")
         self._connection.execute("PRAGMA synchronous=FULL")
         self._connection.execute("PRAGMA foreign_keys=ON")
-        self._before_commit = before_commit
-        self._after_commit = after_commit
-        self._lock = threading.RLock()
         self._install_schema()
 
+    def _start_owner(self, path: Path | None) -> None:
+        self._connection = None
+        self._process = None
+        self._channel = None
+        self._path, self._parent_fd, self._file_fd, created = self._secure_open(path)
+        parent_channel, child_channel = socket.socketpair()
+        parent_channel.settimeout(IPC_TIMEOUT_SECONDS)
+        launcher = "import os,runpy,sys;sys.argv=sys.argv[1:];sys.path.insert(0,os.path.dirname(sys.argv[0]));runpy.run_path(sys.argv[0],run_name='__main__')"
+        command = [
+            sys.executable, "-I", "-c", launcher, str(Path(__file__).resolve()), "--projection-owner",
+            str(child_channel.fileno()), str(self._parent_fd), str(self._file_fd), self._path.name,
+        ]
+        environment = {"PATH": "/usr/bin:/bin", "PYTHONIOENCODING": "utf-8"}
+        try:
+            self._process = subprocess.Popen(
+                command, pass_fds=(child_channel.fileno(), self._parent_fd, self._file_fd), env=environment,
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                close_fds=True,
+            )
+            child_channel.close()
+            self._channel = parent_channel
+            response = _receive_frame(self._channel)
+            self._raise_owner_error(response)
+            if response.get("result") != "ready":
+                raise ChatProjectionStoreError("owner_protocol_error", "projection owner did not initialize")
+        except BaseException:
+            parent_channel.close()
+            child_channel.close()
+            if self._process is not None:
+                self._process.kill()
+                self._process.wait()
+            if created:
+                try:
+                    os.unlink(self._path.name, dir_fd=self._parent_fd)
+                except OSError:
+                    pass
+            self._close_secure_handles()
+            raise
+
     @staticmethod
-    def _confined_path(path: Path | None) -> Path:
-        root = ba_home().resolve()
-        candidate = (path or root / "chat" / "selected.sqlite3").expanduser()
-        if not candidate.is_absolute():
+    def _verify_owner_file(file_fd: int, basename: str) -> None:
+        expected = os.fstat(file_fd)
+        visible = os.stat(basename, follow_symlinks=False)
+        if (expected.st_dev, expected.st_ino) != (visible.st_dev, visible.st_ino):
+            raise ChatProjectionStoreError("path_race", "chat store file changed during owner open")
+
+    @staticmethod
+    def _raise_owner_error(response: Mapping[str, Any]) -> None:
+        error = response.get("error")
+        if error is None:
+            return
+        if not isinstance(error, Mapping) or not isinstance(error.get("code"), str):
+            raise ChatProjectionStoreError("owner_protocol_error", "invalid projection owner error")
+        raise ChatProjectionStoreError(error["code"], str(error.get("detail", "owner operation failed")))
+
+    def _rpc(self, operation: str, **arguments: Any) -> Any:
+        if self._channel is None or self._process is None or self._process.poll() is not None:
+            raise ChatProjectionStoreError("owner_unavailable", "projection owner exited")
+        with self._lock:
+            try:
+                _send_frame(self._channel, {"operation": operation, "arguments": arguments})
+                response = _receive_frame(self._channel)
+            except (OSError, TimeoutError, ChatProjectionStoreError) as exc:
+                if isinstance(exc, ChatProjectionStoreError):
+                    raise
+                raise ChatProjectionStoreError("owner_unavailable", "projection owner unavailable") from exc
+        self._raise_owner_error(response)
+        if set(response) != {"result"}:
+            raise ChatProjectionStoreError("owner_protocol_error", "invalid projection owner response")
+        return response["result"]
+
+    @classmethod
+    def _secure_open(cls, path: Path | None) -> tuple[Path, int, int, bool]:
+        declared_root = Path(os.path.abspath(ba_home().expanduser()))
+        declared_candidate = (path or declared_root / "chat" / "selected.sqlite3").expanduser()
+        if not declared_candidate.is_absolute():
             raise ChatProjectionStoreError("invalid_path", "chat store path must be absolute")
-        if candidate.is_symlink():
-            raise ChatProjectionStoreError("path_escape", "chat store path cannot be a symlink")
-        resolved_parent = candidate.parent.resolve()
-        resolved = candidate.resolve() if candidate.exists() else resolved_parent / candidate.name
-        if resolved_parent != root and root not in resolved_parent.parents:
-            mode = "test" if is_test_mode() else "runtime"
-            raise ChatProjectionStoreError("path_escape", f"{mode} store path escapes Better Agent home")
-        return resolved
+        declared_candidate = Path(os.path.abspath(declared_candidate))
+        try:
+            relative = declared_candidate.relative_to(declared_root)
+        except ValueError as exc:
+            raise ChatProjectionStoreError("path_escape", "store path escapes Better Agent home") from exc
+        root = Path(os.path.realpath(declared_root))
+        candidate = root / relative
+        if not relative.parts or candidate.name in ("", ".", ".."):
+            raise ChatProjectionStoreError("invalid_path", "chat store file name is required")
+        parent_fd = cls._open_directory_chain(root, relative.parts[:-1])
+        created = False
+        flags = os.O_RDWR | os.O_NOFOLLOW
+        try:
+            file_fd = os.open(candidate.name, flags | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=parent_fd)
+            created = True
+        except OSError as exc:
+            if exc.errno != EEXIST:
+                os.close(parent_fd)
+                raise ChatProjectionStoreError("path_open_failed", "cannot securely create chat store") from exc
+            try:
+                file_fd = os.open(candidate.name, flags, dir_fd=parent_fd)
+            except OSError as open_exc:
+                os.close(parent_fd)
+                code = "path_escape" if open_exc.errno != ENOENT else "path_race"
+                raise ChatProjectionStoreError(code, "cannot securely open chat store") from open_exc
+        return candidate, parent_fd, file_fd, created
+
+    @staticmethod
+    def _open_directory_chain(root: Path, relative_parts: tuple[str, ...]) -> int:
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        current = os.open("/", flags)
+        try:
+            for component in (*root.parts[1:], *relative_parts):
+                try:
+                    next_fd = os.open(component, flags, dir_fd=current)
+                except OSError as exc:
+                    if exc.errno != ENOENT:
+                        raise ChatProjectionStoreError("path_escape", "directory path is not secure") from exc
+                    try:
+                        os.mkdir(component, 0o700, dir_fd=current)
+                    except OSError as mkdir_exc:
+                        if mkdir_exc.errno != EEXIST:
+                            raise ChatProjectionStoreError("path_open_failed", "cannot create store directory") from mkdir_exc
+                    next_fd = os.open(component, flags, dir_fd=current)
+                os.close(current)
+                current = next_fd
+            return current
+        except BaseException:
+            os.close(current)
+            raise
+
+    def _close_secure_handles(self) -> None:
+        for name in ("_file_fd", "_parent_fd"):
+            descriptor = getattr(self, name, None)
+            if descriptor is not None:
+                os.close(descriptor)
+                setattr(self, name, None)
 
     def _install_schema(self) -> None:
         existing_tables = {
@@ -271,6 +451,9 @@ class SQLiteChatProjectionStore:
 
     @_translate_sqlite("storage_write_failed")
     def select_generation(self, root_id: str, root_generation: int) -> None:
+        if self._owner_client:
+            self._rpc("select_generation", root_id=root_id, root_generation=root_generation)
+            return
         self._identity(root_id, root_generation)
         with self._lock:
             try:
@@ -278,11 +461,12 @@ class SQLiteChatProjectionStore:
                 row = self._connection.execute(
                     "SELECT root_generation FROM selected_roots WHERE root_id=?", (root_id,),
                 ).fetchone()
-                if row and root_generation < int(row[0]):
+                current_generation = self._stored_int(row[0]) if row else None
+                if current_generation is not None and root_generation < current_generation:
                     raise ChatProjectionStoreError("stale_generation", "root generation is fenced")
                 if row is None:
                     self._connection.execute("INSERT INTO selected_roots VALUES(?,?)", (root_id, root_generation))
-                elif root_generation > int(row[0]):
+                elif root_generation > current_generation:
                     self._connection.execute(
                         "UPDATE selected_roots SET root_generation=? WHERE root_id=? AND root_generation<?",
                         (root_generation, root_id, root_generation),
@@ -298,6 +482,14 @@ class SQLiteChatProjectionStore:
 
     @_translate_sqlite("storage_write_failed")
     def commit(self, request: ProjectionCommit) -> CommitResult:
+        if self._owner_client:
+            self._validate_commit(request)
+            if self._before_commit:
+                self._before_commit()
+            result = self._rpc("commit", request=self._commit_to_dict(request))
+            if self._after_commit:
+                self._after_commit()
+            return CommitResult(**result)
         self._validate_commit(request)
         fact_json = canonical_json(request.canonical_fact)
         node_json = canonical_json(request.render_node)
@@ -339,7 +531,7 @@ class SQLiteChatProjectionStore:
             "FROM selected_roots s JOIN root_generation_heads h USING(root_id,root_generation) "
             "WHERE s.root_id=?", (request.root_id,),
         ).fetchone()
-        if head is None or int(head[0]) != request.root_generation:
+        if head is None or self._stored_int(head[0]) != request.root_generation:
             raise ChatProjectionStoreError("stale_generation", "root generation is not selected")
         duplicate = self._connection.execute(
             "SELECT fact_sequence FROM canonical_facts WHERE root_id=? AND root_generation=? "
@@ -348,9 +540,13 @@ class SQLiteChatProjectionStore:
         ).fetchone()
         self._advance_watermark(request)
         if duplicate:
-            return CommitResult(True, int(duplicate[0]), int(head[2]), int(head[3]))
-        fact_sequence, revision = int(head[1]) + 1, int(head[2]) + 1
-        cursor = int(head[3]) + 1
+            return CommitResult(
+                True, self._stored_int(duplicate[0]), self._stored_int(head[2]),
+                self._stored_int(head[3]),
+            )
+        fact_sequence = self._increment_stored(head[1], "fact sequence")
+        revision = self._increment_stored(head[2], "revision")
+        cursor = self._increment_stored(head[3], "projection cursor")
         values = (request.root_id, request.root_generation)
         self._connection.execute(
             "INSERT INTO canonical_facts VALUES(?,?,?,?,?,?)",
@@ -392,7 +588,7 @@ class SQLiteChatProjectionStore:
             "WHERE root_id=? AND root_generation=? AND stream_id=?", values,
         ).fetchone()
         candidate = (request.watermark.generation, request.watermark.sequence)
-        if current and candidate < (int(current[0]), int(current[1])):
+        if current and candidate < (self._stored_int(current[0]), self._stored_int(current[1])):
             raise ChatProjectionStoreError("watermark_regression", "source watermark cannot regress")
         self._connection.execute(
             "INSERT INTO source_watermarks VALUES(?,?,?,?,?) "
@@ -406,40 +602,68 @@ class SQLiteChatProjectionStore:
         self, root_id: str, root_generation: int, *, after: int = 0, limit: int = 1000,
     ) -> list[StoredFact]:
         self._read_args(root_id, root_generation, after, limit)
+        if self._owner_client:
+            rows = self._rpc("read_facts", root_id=root_id, root_generation=root_generation,
+                             after=after, limit=limit)
+            return [StoredFact(**row) for row in rows]
         with self._lock:
             rows = self._connection.execute(
                 "SELECT fact_sequence,event_id,content_hash,fact_json FROM canonical_facts "
                 "WHERE root_id=? AND root_generation=? AND fact_sequence>? "
                 "ORDER BY fact_sequence LIMIT ?", (root_id, root_generation, after, limit),
             ).fetchall()
-        return [StoredFact(int(row[0]), row[1], row[2], json.loads(row[3])) for row in rows]
+        return [
+            StoredFact(
+                self._stored_int(row[0]), self._stored_text(row[1]), self._stored_text(row[2]),
+                self._stored_json(row[3]),
+            ) for row in rows
+        ]
 
     @_translate_sqlite("storage_read_failed")
     def read_revisions(
         self, root_id: str, root_generation: int, *, after: int = 0, limit: int = 1000,
     ) -> list[StoredRevision]:
         self._read_args(root_id, root_generation, after, limit)
+        if self._owner_client:
+            rows = self._rpc("read_revisions", root_id=root_id, root_generation=root_generation,
+                             after=after, limit=limit)
+            return [StoredRevision(**row) for row in rows]
         with self._lock:
             rows = self._connection.execute(
                 "SELECT revision,fact_sequence,visible_delta_json,historical_json FROM revisions "
                 "WHERE root_id=? AND root_generation=? AND revision>? ORDER BY revision LIMIT ?",
                 (root_id, root_generation, after, limit),
             ).fetchall()
-        return [StoredRevision(int(row[0]), int(row[1]), json.loads(row[2]), json.loads(row[3])) for row in rows]
+        return [
+            StoredRevision(
+                self._stored_int(row[0]), self._stored_int(row[1]), self._stored_json(row[2]),
+                self._stored_json(row[3]),
+            ) for row in rows
+        ]
 
     @_translate_sqlite("storage_read_failed")
     def projection_cursor(self, root_id: str, root_generation: int) -> int:
         self._identity(root_id, root_generation)
+        if self._owner_client:
+            result = self._rpc("projection_cursor", root_id=root_id, root_generation=root_generation)
+            return self._stored_int(result)
         with self._lock:
             row = self._connection.execute(
                 "SELECT projection_cursor FROM root_generation_heads WHERE root_id=? AND root_generation=?",
                 (root_id, root_generation),
             ).fetchone()
-        return int(row[0]) if row else 0
+        return self._stored_int(row[0]) if row else 0
 
     @_translate_sqlite("storage_write_failed")
     def delete_generation(self, root_id: str, root_generation: int) -> None:
         self._identity(root_id, root_generation)
+        if self._owner_client:
+            if self._before_commit:
+                self._before_commit()
+            self._rpc("delete_generation", root_id=root_id, root_generation=root_generation)
+            if self._after_commit:
+                self._after_commit()
+            return
         with self._lock:
             try:
                 self._connection.execute("BEGIN IMMEDIATE")
@@ -452,7 +676,7 @@ class SQLiteChatProjectionStore:
                 ).fetchone()
                 if exists is None:
                     raise ChatProjectionStoreError("missing_generation", "root generation does not exist")
-                if selected and int(selected[0]) == root_generation:
+                if selected and self._stored_int(selected[0]) == root_generation:
                     raise ChatProjectionStoreError("current_generation", "selected generation cannot be deleted")
                 self._delete_generation_rows(root_id, root_generation)
                 if self._before_commit:
@@ -467,6 +691,13 @@ class SQLiteChatProjectionStore:
     @_translate_sqlite("storage_write_failed")
     def delete_root(self, root_id: str) -> None:
         self._identity(root_id, 0)
+        if self._owner_client:
+            if self._before_commit:
+                self._before_commit()
+            self._rpc("delete_root", root_id=root_id)
+            if self._after_commit:
+                self._after_commit()
+            return
         with self._lock:
             try:
                 self._connection.execute("BEGIN IMMEDIATE")
@@ -506,6 +737,13 @@ class SQLiteChatProjectionStore:
     ) -> StoredProjection | None:
         self._identity(root_id, root_generation)
         self._text("event_id", event_id)
+        if self._owner_client:
+            result = self._rpc("read_projection", root_id=root_id,
+                               root_generation=root_generation, event_id=event_id)
+            if result is None:
+                return None
+            manifest = TurnManifest(**result.pop("manifest"))
+            return StoredProjection(manifest=manifest, **result)
         with self._lock:
             row = self._connection.execute(
                 "SELECT n.node_json,o.turn_id,o.message_id,o.parent_event_id,o.owner_scope,"
@@ -518,8 +756,10 @@ class SQLiteChatProjectionStore:
         if row is None:
             return None
         return StoredProjection(
-            event_id, json.loads(row[0]), row[1], row[2], row[3], row[4],
-            TurnManifest(row[1], int(row[5]), int(row[6])),
+            event_id, self._stored_json(row[0]), self._stored_text(row[1]),
+            self._stored_nullable_text(row[2]), self._stored_nullable_text(row[3]),
+            self._stored_text(row[4]),
+            TurnManifest(self._stored_text(row[1]), self._stored_int(row[5]), self._stored_int(row[6])),
         )
 
     @_translate_sqlite("storage_read_failed")
@@ -528,13 +768,19 @@ class SQLiteChatProjectionStore:
     ) -> SourceWatermark | None:
         self._identity(root_id, root_generation)
         self._text("stream_id", stream_id)
+        if self._owner_client:
+            result = self._rpc("source_watermark", root_id=root_id,
+                               root_generation=root_generation, stream_id=stream_id)
+            return SourceWatermark(**result) if result is not None else None
         with self._lock:
             row = self._connection.execute(
                 "SELECT source_generation,source_sequence FROM source_watermarks "
                 "WHERE root_id=? AND root_generation=? AND stream_id=?",
                 (root_id, root_generation, stream_id),
             ).fetchone()
-        return SourceWatermark(stream_id, int(row[0]), int(row[1])) if row else None
+        return SourceWatermark(
+            stream_id, self._stored_int(row[0]), self._stored_int(row[1]),
+        ) if row else None
 
     @staticmethod
     def _validate_commit(request: ProjectionCommit) -> None:
@@ -567,37 +813,219 @@ class SQLiteChatProjectionStore:
             raise ChatProjectionStoreError("hash_mismatch", "content hash does not match canonical fact")
         if request.manifest.turn_id != request.turn_id:
             raise ChatProjectionStoreError("invalid_input", "manifest turn does not match ownership")
-        numbers = (
-            request.manifest.event_count, request.manifest.direct_child_count,
-            request.watermark.generation, request.watermark.sequence,
-        )
-        if any(type(value) is not int or value < 0 for value in numbers):
-            raise ChatProjectionStoreError("invalid_input", "counts and watermarks must be non-negative")
+        for name, value in (
+            ("manifest.event_count", request.manifest.event_count),
+            ("manifest.direct_child_count", request.manifest.direct_child_count),
+            ("watermark.generation", request.watermark.generation),
+            ("watermark.sequence", request.watermark.sequence),
+        ):
+            SQLiteChatProjectionStore._integer(name, value)
+
+    @staticmethod
+    def _commit_to_dict(request: ProjectionCommit) -> dict[str, Any]:
+        return {
+            "root_id": request.root_id, "root_generation": request.root_generation,
+            "event_id": request.event_id, "content_hash": request.content_hash,
+            "canonical_fact": request.canonical_fact, "render_node": request.render_node,
+            "turn_id": request.turn_id, "message_id": request.message_id,
+            "parent_event_id": request.parent_event_id, "owner_scope": request.owner_scope,
+            "manifest": {
+                "turn_id": request.manifest.turn_id, "event_count": request.manifest.event_count,
+                "direct_child_count": request.manifest.direct_child_count,
+            },
+            "visible_delta": request.visible_delta,
+            "historical_revision": request.historical_revision,
+            "watermark": {
+                "stream_id": request.watermark.stream_id,
+                "generation": request.watermark.generation,
+                "sequence": request.watermark.sequence,
+            },
+        }
+
+    @staticmethod
+    def _commit_from_dict(payload: Mapping[str, Any]) -> ProjectionCommit:
+        if not isinstance(payload, Mapping):
+            raise ChatProjectionStoreError("owner_protocol_error", "commit payload must be an object")
+        expected = {
+            "root_id", "root_generation", "event_id", "content_hash", "canonical_fact",
+            "render_node", "turn_id", "message_id", "parent_event_id", "owner_scope",
+            "manifest", "visible_delta", "historical_revision", "watermark",
+        }
+        if set(payload) != expected or not isinstance(payload["manifest"], Mapping) or not isinstance(payload["watermark"], Mapping):
+            raise ChatProjectionStoreError("owner_protocol_error", "commit payload shape is invalid")
+        if set(payload["manifest"]) != {"turn_id", "event_count", "direct_child_count"}:
+            raise ChatProjectionStoreError("owner_protocol_error", "manifest payload shape is invalid")
+        if set(payload["watermark"]) != {"stream_id", "generation", "sequence"}:
+            raise ChatProjectionStoreError("owner_protocol_error", "watermark payload shape is invalid")
+        values = dict(payload)
+        values["manifest"] = TurnManifest(**payload["manifest"])
+        values["watermark"] = SourceWatermark(**payload["watermark"])
+        return ProjectionCommit(**values)
 
     @staticmethod
     def _identity(root_id: str, root_generation: int) -> None:
         SQLiteChatProjectionStore._text("root_id", root_id)
-        if type(root_generation) is not int or root_generation < 0:
-            raise ChatProjectionStoreError("invalid_input", "root_generation must be non-negative")
+        SQLiteChatProjectionStore._integer("root_generation", root_generation)
+
+    @staticmethod
+    def _integer(name: str, value: int, *, code: str = "invalid_input") -> None:
+        if type(value) is not int or not 0 <= value <= MAX_SQLITE_INTEGER:
+            raise ChatProjectionStoreError(code, f"{name} must fit a non-negative SQLite integer")
+
+    @staticmethod
+    def _stored_int(value: Any) -> int:
+        if type(value) is not int or not 0 <= value <= MAX_SQLITE_INTEGER:
+            raise ChatProjectionStoreError("storage_corrupt", "persisted integer is invalid")
+        return value
+
+    @staticmethod
+    def _increment_stored(value: Any, name: str) -> int:
+        current = SQLiteChatProjectionStore._stored_int(value)
+        if current == MAX_SQLITE_INTEGER:
+            raise ChatProjectionStoreError("storage_corrupt", f"persisted {name} is exhausted")
+        return current + 1
+
+    @staticmethod
+    def _stored_text(value: Any) -> str:
+        if not isinstance(value, str):
+            raise ChatProjectionStoreError("storage_corrupt", "persisted text is invalid")
+        try:
+            value.encode("utf-8")
+        except UnicodeError as exc:
+            raise ChatProjectionStoreError("storage_corrupt", "persisted text is invalid") from exc
+        return value
+
+    @staticmethod
+    def _stored_nullable_text(value: Any) -> str | None:
+        return None if value is None else SQLiteChatProjectionStore._stored_text(value)
+
+    @staticmethod
+    def _stored_json(value: Any) -> Mapping[str, Any]:
+        text = SQLiteChatProjectionStore._stored_text(value)
+        try:
+            decoded = json.loads(text)
+        except (json.JSONDecodeError, UnicodeError, TypeError, ValueError) as exc:
+            raise ChatProjectionStoreError("storage_corrupt", "persisted JSON is invalid") from exc
+        if not isinstance(decoded, Mapping):
+            raise ChatProjectionStoreError("storage_corrupt", "persisted JSON is not an object")
+        try:
+            _validate_json(decoded)
+        except ChatProjectionStoreError as exc:
+            raise ChatProjectionStoreError("storage_corrupt", "persisted JSON violates store limits") from exc
+        return decoded
 
     @staticmethod
     def _text(name: str, value: str) -> None:
         if not isinstance(value, str) or not value:
             raise ChatProjectionStoreError("invalid_input", f"{name} is required")
-        if len(value.encode("utf-8")) > MAX_TEXT_BYTES:
+        try:
+            size = len(value.encode("utf-8"))
+        except UnicodeError as exc:
+            raise ChatProjectionStoreError("invalid_input", f"{name} is not valid UTF-8") from exc
+        if size > MAX_TEXT_BYTES:
             raise ChatProjectionStoreError("text_too_large", f"{name} exceeds UTF-8 byte limit")
 
     @staticmethod
     def _read_args(root_id: str, generation: int, after: int, limit: int) -> None:
         SQLiteChatProjectionStore._identity(root_id, generation)
-        if type(after) is not int or after < 0:
-            raise ChatProjectionStoreError("invalid_cursor", "cursor must be non-negative")
-        if type(limit) is not int or not 1 <= limit <= MAX_READ_LIMIT:
+        SQLiteChatProjectionStore._integer("cursor", after, code="invalid_cursor")
+        if type(limit) is not int or not 1 <= limit <= min(MAX_READ_LIMIT, MAX_SQLITE_INTEGER):
             raise ChatProjectionStoreError("invalid_limit", f"limit must be 1..{MAX_READ_LIMIT}")
 
     @_translate_sqlite("storage_close_failed")
     def close(self) -> None:
+        if self._owner_client:
+            channel = getattr(self, "_channel", None)
+            process = getattr(self, "_process", None)
+            close_error = None
+            if channel is not None and process is not None and process.poll() is None:
+                try:
+                    self._rpc("close")
+                    process.wait(timeout=IPC_TIMEOUT_SECONDS)
+                except (ChatProjectionStoreError, subprocess.TimeoutExpired) as exc:
+                    process.kill()
+                    process.wait()
+                    close_error = exc
+            if channel is not None:
+                channel.close()
+                self._channel = None
+            self._process = None
+            self._close_secure_handles()
+            if close_error is not None:
+                raise ChatProjectionStoreError("owner_unavailable", "projection owner did not close") from close_error
+            return
         connection = getattr(self, "_connection", None)
         if connection is not None:
             connection.close()
             self._connection = None
+        self._close_secure_handles()
+
+
+def _owner_dispatch(store: SQLiteChatProjectionStore, operation: str, arguments: Mapping[str, Any]) -> Any:
+    allowed = {
+        "select_generation": {"root_id", "root_generation"},
+        "commit": {"request"},
+        "read_facts": {"root_id", "root_generation", "after", "limit"},
+        "read_revisions": {"root_id", "root_generation", "after", "limit"},
+        "projection_cursor": {"root_id", "root_generation"},
+        "delete_generation": {"root_id", "root_generation"},
+        "delete_root": {"root_id"},
+        "read_projection": {"root_id", "root_generation", "event_id"},
+        "source_watermark": {"root_id", "root_generation", "stream_id"},
+        "close": set(),
+    }
+    if operation not in allowed or set(arguments) != allowed[operation]:
+        raise ChatProjectionStoreError("owner_protocol_error", "operation is not allowed")
+    if operation == "commit":
+        return asdict(store.commit(store._commit_from_dict(arguments["request"])))
+    method = getattr(store, operation)
+    result = method(**arguments)
+    if result is None:
+        return None
+    if isinstance(result, list):
+        return [asdict(item) for item in result]
+    if isinstance(result, (StoredProjection, SourceWatermark)):
+        return asdict(result)
+    return result
+
+
+def _run_owner(channel_fd: int, directory_fd: int, file_fd: int, basename: str) -> None:
+    os.environ.clear()
+    channel = socket.socket(fileno=channel_fd)
+    store = None
+    try:
+        store = SQLiteChatProjectionStore(
+            _owner_directory_fd=directory_fd, _owner_file_fd=file_fd, _owner_basename=basename,
+        )
+        _send_frame(channel, {"result": "ready"})
+        while True:
+            request = _receive_frame(channel)
+            if set(request) != {"operation", "arguments"} or not isinstance(request["operation"], str) or not isinstance(request["arguments"], Mapping):
+                raise ChatProjectionStoreError("owner_protocol_error", "request shape is invalid")
+            operation = request["operation"]
+            try:
+                result = _owner_dispatch(store, operation, request["arguments"])
+                _send_frame(channel, {"result": result})
+                if operation == "close":
+                    break
+            except ChatProjectionStoreError as exc:
+                _send_frame(channel, {"error": {"code": exc.code, "detail": exc.detail}})
+            except BaseException:
+                _send_frame(channel, {"error": {"code": "owner_internal_error", "detail": "owner operation failed"}})
+    except ChatProjectionStoreError as exc:
+        _send_frame(channel, {"error": {"code": exc.code, "detail": exc.detail}})
+    except BaseException:
+        try:
+            _send_frame(channel, {"error": {"code": "owner_init_failed", "detail": "owner initialization failed"}})
+        except BaseException:
+            pass
+    finally:
+        if store is not None and store._connection is not None:
+            store._connection.close()
+        channel.close()
+        os.close(file_fd)
+        os.close(directory_fd)
+
+
+if __name__ == "__main__" and len(sys.argv) == 6 and sys.argv[1] == "--projection-owner":
+    _run_owner(int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4]), sys.argv[5])

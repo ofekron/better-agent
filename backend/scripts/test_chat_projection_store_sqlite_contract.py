@@ -21,7 +21,8 @@ sys.path.insert(0, str(ROOT / "backend"))
 from chat_projection_store import ChatProjectionStoreError, ProjectionCommit, SourceWatermark, TurnManifest
 from chat_projection_store_sqlite import (
     MAX_COMMIT_BYTES, MAX_JSON_DEPTH, MAX_JSON_LIST_ITEMS, MAX_JSON_NODES,
-    MAX_JSON_OBJECT_ITEMS, MAX_READ_LIMIT, MAX_TEXT_BYTES, SQLiteChatProjectionStore, canonical_json,
+    MAX_JSON_OBJECT_ITEMS, MAX_READ_LIMIT, MAX_SQLITE_INTEGER, MAX_TEXT_BYTES,
+    SQLiteChatProjectionStore, canonical_json,
 )
 
 
@@ -335,12 +336,16 @@ def test_text_aggregate_and_sqlite_error_boundaries() -> None:
         "commit_too_large",
         lambda: store.commit(replace(exact_commit, historical_revision={"pad": "x" * (padding + 1)})),
     )
-    store._connection.close()
-    _assert_error("storage_read_failed", lambda: store.read_facts("root-1", 0))
+    store._process.kill()
+    store._process.wait()
+    _assert_error("owner_unavailable", lambda: store.read_facts("root-1", 0))
+    store.close()
 
     write_failure = SQLiteChatProjectionStore(_path("write-failure"))
-    write_failure._connection.close()
-    _assert_error("storage_write_failed", lambda: write_failure.select_generation("root-1", 0))
+    write_failure._process.kill()
+    write_failure._process.wait()
+    _assert_error("owner_unavailable", lambda: write_failure.select_generation("root-1", 0))
+    write_failure.close()
 
     corrupt = _path("corrupt")
     corrupt.parent.mkdir(parents=True, exist_ok=True)
@@ -398,14 +403,150 @@ def test_generation_and_root_deletion_are_atomic_and_durable() -> None:
     _assert_error("missing_root", lambda: durable.delete_root("root-1"))
     durable.close()
     restarted = SQLiteChatProjectionStore(rollback_path)
+    restarted.close()
+    connection = sqlite3.connect(rollback_path)
     for table in (
         "canonical_facts", "render_nodes", "ownership", "turn_manifests", "revisions",
         "source_watermarks", "root_generation_heads", "selected_roots",
     ):
-        assert restarted._connection.execute(
+        assert connection.execute(
             f'SELECT COUNT(*) FROM "{table}" WHERE root_id=?', ("root-1",),
         ).fetchone()[0] == 0
-    restarted.close()
+    connection.close()
+
+
+def test_sqlite_integer_boundaries_unicode_and_persisted_corruption() -> None:
+    path = _path("integer-boundaries")
+    store = SQLiteChatProjectionStore(path)
+    store.select_generation("max-root", MAX_SQLITE_INTEGER)
+    request = replace(
+        _request(_fixture_event(), generation=MAX_SQLITE_INTEGER), root_id="max-root",
+        manifest=TurnManifest(_fixture_event()["turn_id"], MAX_SQLITE_INTEGER, MAX_SQLITE_INTEGER),
+        watermark=SourceWatermark("provider-neutral", MAX_SQLITE_INTEGER, MAX_SQLITE_INTEGER),
+    )
+    assert store.commit(request).fact_sequence == 1
+    assert store.read_facts("max-root", MAX_SQLITE_INTEGER, after=MAX_SQLITE_INTEGER) == []
+    for invalid in (MAX_SQLITE_INTEGER + 1, True):
+        _assert_error("invalid_input", lambda invalid=invalid: store.select_generation("overflow", invalid))
+        _assert_error(
+            "invalid_input",
+            lambda invalid=invalid: store.commit(replace(request, manifest=replace(request.manifest, event_count=invalid))),
+        )
+        _assert_error(
+            "invalid_input",
+            lambda invalid=invalid: store.commit(replace(request, watermark=replace(request.watermark, sequence=invalid))),
+        )
+    _assert_error(
+        "invalid_cursor",
+        lambda: store.read_facts("max-root", MAX_SQLITE_INTEGER, after=MAX_SQLITE_INTEGER + 1),
+    )
+    _assert_error("invalid_cursor", lambda: store.read_facts("max-root", MAX_SQLITE_INTEGER, after=True))
+    _assert_error("invalid_limit", lambda: store.read_facts("max-root", MAX_SQLITE_INTEGER, limit=True))
+    _assert_error("invalid_input", lambda: store.select_generation("bad\ud800", 0))
+    _assert_error("invalid_input", lambda: canonical_json({"bad": "\ud800"}))
+    store.close()
+
+    def corrupt(name: str, statement: str, callback) -> None:
+        corrupt_path = _path(f"corrupt-{name}")
+        target = SQLiteChatProjectionStore(corrupt_path)
+        target.select_generation("root-1", 0)
+        target.commit(_request(_fixture_event()))
+        connection = sqlite3.connect(corrupt_path)
+        connection.execute(statement)
+        connection.commit()
+        connection.close()
+        _assert_error("storage_corrupt", lambda: callback(target))
+        target.close()
+
+    corrupt("fact-json", "UPDATE canonical_facts SET fact_json='[]'", lambda target: target.read_facts("root-1", 0))
+    corrupt("fact-nan", "UPDATE canonical_facts SET fact_json='{\"value\":NaN}'", lambda target: target.read_facts("root-1", 0))
+    corrupt("fact-seq", "UPDATE canonical_facts SET fact_sequence='bad'", lambda target: target.read_facts("root-1", 0))
+    corrupt("revision-json", "UPDATE revisions SET visible_delta_json='bad'", lambda target: target.read_revisions("root-1", 0))
+    corrupt("revision-int", "UPDATE revisions SET revision='bad'", lambda target: target.read_revisions("root-1", 0))
+    corrupt("cursor", "UPDATE root_generation_heads SET projection_cursor='bad'", lambda target: target.projection_cursor("root-1", 0))
+    corrupt("projection-json", "UPDATE render_nodes SET node_json='[]'", lambda target: target.read_projection("root-1", 0, _fixture_event()["event_id"]))
+    corrupt("projection-count", "UPDATE turn_manifests SET event_count='bad'", lambda target: target.read_projection("root-1", 0, _fixture_event()["event_id"]))
+    corrupt("watermark", "UPDATE source_watermarks SET source_sequence='bad'", lambda target: target.source_watermark("root-1", 0, "provider-neutral"))
+
+    rollback_path = _path("corrupt-transaction")
+    rollback = SQLiteChatProjectionStore(rollback_path)
+    rollback.select_generation("root-1", 0)
+    original = _request(_fixture_event())
+    rollback.commit(original)
+    connection = sqlite3.connect(rollback_path)
+    connection.execute("UPDATE root_generation_heads SET fact_sequence='bad'")
+    connection.commit()
+    connection.close()
+    changed_fact = dict(original.canonical_fact)
+    changed_fact["content_version"] = 99
+    digest = __import__("hashlib").sha256(canonical_json(changed_fact).encode()).hexdigest()
+    changed = replace(original, canonical_fact=changed_fact, content_hash=digest,
+                      watermark=replace(original.watermark, sequence=original.watermark.sequence + 1))
+    _assert_error("storage_corrupt", lambda: rollback.commit(changed))
+    connection = sqlite3.connect(rollback_path)
+    assert connection.execute("SELECT COUNT(*) FROM canonical_facts").fetchone()[0] == 1
+    assert connection.execute("SELECT source_sequence FROM source_watermarks").fetchone()[0] == original.watermark.sequence
+    connection.close()
+    rollback.close()
+
+
+def test_owner_anchors_database_wal_and_lifecycle_through_path_swaps() -> None:
+    path = _path("owner-race")
+    store = SQLiteChatProjectionStore(path)
+    process = store._process
+    store.select_generation("root-1", 0)
+    base = _request(_fixture_event())
+    store.commit(base)
+    anchored_parent = store._path.parent
+    held_parent = anchored_parent.with_name(f"{anchored_parent.name}-held")
+    outside = STATE_HOME / "outside-owner-race"
+    outside.mkdir()
+    os.rename(anchored_parent, held_parent)
+    os.symlink(outside, anchored_parent)
+    try:
+        for version in range(2, 22):
+            fact = json.loads(json.dumps(base.canonical_fact))
+            fact["content_version"] = version
+            digest = __import__("hashlib").sha256(canonical_json(fact).encode()).hexdigest()
+            store.commit(replace(
+                base, canonical_fact=fact, content_hash=digest,
+                historical_revision={"content_version": version},
+                watermark=replace(base.watermark, sequence=base.watermark.sequence + version),
+            ))
+        assert list(outside.iterdir()) == []
+    finally:
+        anchored_parent.unlink()
+        os.rename(held_parent, anchored_parent)
+    store.close()
+    assert process.poll() is not None
+    reopened = SQLiteChatProjectionStore(path)
+    assert len(reopened.read_facts("root-1", 0)) == 21
+    reopened.close()
+
+    os.rename(anchored_parent, held_parent)
+    os.symlink(outside, anchored_parent)
+    try:
+        _assert_error("path_escape", lambda: SQLiteChatProjectionStore(path))
+        assert list(outside.iterdir()) == []
+    finally:
+        anchored_parent.unlink()
+        os.rename(held_parent, anchored_parent)
+
+    file_store = SQLiteChatProjectionStore(path)
+    database = file_store._path
+    moved_database = database.with_name(f"{database.name}.held")
+    outside_database = outside / database.name
+    outside_database.write_bytes(b"outside sentinel")
+    os.rename(database, moved_database)
+    os.symlink(outside_database, database)
+    try:
+        assert len(file_store.read_facts("root-1", 0)) == 21
+        assert outside_database.read_bytes() == b"outside sentinel"
+    finally:
+        database.unlink()
+        os.rename(moved_database, database)
+    file_store.close()
+    assert not any(item.name.endswith(("-wal", "-shm")) for item in outside.iterdir())
 
 
 def main() -> None:
