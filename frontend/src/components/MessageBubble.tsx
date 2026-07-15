@@ -2632,12 +2632,17 @@ const AssistantMessage = memo(function AssistantMessage({
   /** Id of the parent turn initiator — level-0 events jump to this. */
   initiatorMessageId,
   renderWork = true,
+  showRunMeta = true,
 }: {
   message: ChatMessage;
   sessionId?: string;
   /** Provider/model/effort to show when this message predates
    * `run_meta`. Only passed by the caller for the latest turn. */
   fallbackRunMeta?: ModelRunMeta;
+  /** Spec: one provider/model/effort marker per contiguous run, on the
+   * run's last visible message (decorateModelRuns decides). False on
+   * messages inside a run so only the run tail shows the chips. */
+  showRunMeta?: boolean;
   onFileClick?: (path: string, focus?: FileFocus) => void;
   onViewDiff?: (path: string, oldStr: string, newStr: string) => void;
   onRetry?: () => void;
@@ -2911,7 +2916,9 @@ const AssistantMessage = memo(function AssistantMessage({
             </span>
           </div>
         )}
-        <AssistantRunMeta message={message} fallbackMeta={fallbackRunMeta} />
+        {showRunMeta && (
+          <AssistantRunMeta message={message} fallbackMeta={fallbackRunMeta} />
+        )}
         {(runs.length > 0 || (activelyStreaming && !message.stopped_at && !message.isStale)) && (
           <div className="streaming-footer">
             {runs.length > 0 ? (
@@ -3115,7 +3122,7 @@ function UserFiles({ files }: { files?: ChatMessage["files"] }) {
  *  streaming updates — those mutate only the in-flight assistant message
  *  (last in the list), leaving every earlier turn group's props
  *  referentially stable. */
-function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, sessionId, userDisplayName, onFileClick, onViewDiff, onRetry, onRetryStopped, onContinueRateLimitOnAnotherProvider, rateLimitFallbackLabel, onChooseAnotherProviderForRateLimit, onAlterTurnMessage, threadColorMap, defaultCollapsed = false, expandAllTrigger, tags, advSyncOverlays, onAdvSyncClick, scrollEl: scrollElProp, orchestrationMode, runs, sessionRunning = false, activelyStreaming = false, loadPhase, enterAnimation, precedingModelSwitchEvents = [], trailingModelSwitchEvents = [], renderWorkDetails, historicalDirectChildCount = 0, fallbackRunMeta }: {
+function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, sessionId, userDisplayName, onFileClick, onViewDiff, onRetry, onRetryStopped, onContinueRateLimitOnAnotherProvider, rateLimitFallbackLabel, onChooseAnotherProviderForRateLimit, onAlterTurnMessage, threadColorMap, defaultCollapsed = false, expandAllTrigger, tags, advSyncOverlays, onAdvSyncClick, scrollEl: scrollElProp, orchestrationMode, runs, sessionRunning = false, activelyStreaming = false, loadPhase, enterAnimation, precedingModelSwitchEvents = [], trailingModelSwitchEvents = [], renderWorkDetails, historicalDirectChildCount = 0, fallbackRunMeta, showRunMeta = true }: {
   initiatorMessage: ChatMessage;
   responseMessage?: ChatMessage;
   precedingModelSwitchEvents?: WSEvent[];
@@ -3127,6 +3134,9 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
    * used when its own `run_meta` predates the field. Only the caller's
    * latest group should pass this — see `AssistantMessage`. */
   fallbackRunMeta?: ModelRunMeta;
+  /** Marker gate from decorateModelRuns: true only when this turn's
+   * assistant message ends a contiguous provider/model/effort run. */
+  showRunMeta?: boolean;
   userDisplayName?: string | null;
   onFileClick?: (path: string, focus?: FileFocus) => void;
   onViewDiff?: (path: string, oldStr: string, newStr: string) => void;
@@ -3712,6 +3722,7 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
               message={responseMessage}
               sessionId={sessionId}
               fallbackRunMeta={fallbackRunMeta}
+              showRunMeta={showRunMeta}
               onFileClick={onFileClick}
               onViewDiff={onViewDiff}
               onRetry={onRetry ? () => onRetry(initiatorMessage) : undefined}

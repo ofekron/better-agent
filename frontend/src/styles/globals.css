@@ -5816,14 +5816,45 @@ button.run-badge-clickable:focus-visible {
   }
 }
 
+/* Model-switch boundary: a true dividing line between runs — hairline
+   gradient rules flank the switch description so the boundary reads as
+   structure, not a stray text row. */
 .event-model-switched {
   display: flex;
   flex-wrap: wrap;
   gap: 6px 10px;
   align-items: center;
-  padding: 6px 0;
-  font-size: calc(12px * var(--app-font-scale));
+  padding: 4px 0;
+  font-size: calc(11.5px * var(--app-font-scale));
   color: var(--text-muted);
+}
+
+.event-model-switched::before,
+.event-model-switched::after {
+  content: "";
+  flex: 1 1 16px;
+  height: 1px;
+  background: linear-gradient(
+    to var(--boundary-rule-end, right),
+    transparent,
+    color-mix(in srgb, var(--accent) 32%, transparent)
+  );
+}
+
+.event-model-switched::after {
+  background: linear-gradient(
+    to var(--boundary-rule-start, left),
+    transparent,
+    color-mix(in srgb, var(--accent) 32%, transparent)
+  );
+}
+
+[dir="rtl"] .event-model-switched::before {
+  --boundary-rule-end: left;
+}
+
+[dir="rtl"] .event-model-switched::after {
+  --boundary-rule-start: right;
 }
 
 .event-model-switched span:first-child {
@@ -9086,36 +9117,67 @@ button.run-badge-clickable:focus-visible {
   letter-spacing: 0.5px;
 }
 
+/* Run signature: one quiet pill per contiguous provider/model/effort run
+   (placement decided by decorateModelRuns). Reads as `provider · model ·
+   effort`; the per-part labels stay in the tooltip and as visually-hidden
+   text for screen readers. */
 .run-meta-chips {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 0;
   min-width: 0;
   max-width: 100%;
   overflow: hidden;
+  padding: 2px 9px;
+  border: 1px solid color-mix(in srgb, var(--accent) 24%, var(--border));
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 7%, transparent);
   text-transform: none;
-  letter-spacing: 0;
+  letter-spacing: 0.1px;
+}
+
+.run-meta-chips::before {
+  content: "";
+  flex: 0 0 auto;
+  width: 5px;
+  height: 5px;
+  margin-inline-end: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  opacity: 0.75;
 }
 
 .run-meta-chip {
   display: inline-flex;
   align-items: center;
-  gap: 3px;
   min-width: 0;
   max-width: 180px;
-  padding: 1px 5px;
-  border: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
-  border-radius: 4px;
   color: var(--text-secondary);
-  background: color-mix(in srgb, var(--bg-secondary) 74%, transparent);
-  font-size: calc(10px * var(--app-font-scale));
+  font-size: calc(10.5px * var(--app-font-scale));
   font-weight: 500;
-  line-height: 1.35;
+  line-height: 1.4;
+}
+
+.run-meta-chip + .run-meta-chip::before {
+  content: "\00B7";
+  flex: 0 0 auto;
+  margin: 0 6px;
+  color: var(--text-muted);
+  opacity: 0.8;
+}
+
+.run-meta-chip:first-child .run-meta-chip-value {
+  color: color-mix(in srgb, var(--purple-80) 55%, var(--text-secondary));
+  font-weight: 600;
 }
 
 .run-meta-chip-label {
-  color: var(--text-muted);
-  flex: 0 0 auto;
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
 }
 
 .run-meta-chip-value {
@@ -9128,8 +9190,25 @@ button.run-badge-clickable:focus-visible {
 .assistant-run-meta-footer {
   display: flex;
   justify-content: flex-end;
-  margin-top: 4px;
-  opacity: 0.85;
+  margin-top: 6px;
+  animation: run-meta-in 0.3s ease-out both;
+}
+
+@keyframes run-meta-in {
+  from {
+    opacity: 0;
+    transform: translateY(3px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .assistant-run-meta-footer {
+    animation: none;
+  }
 }
 
 .timeline-block-body {

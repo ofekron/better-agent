@@ -4,6 +4,7 @@ import { mergeMessagesSorted, oldestNumericSeq } from "../utils/mergeMessages";
 import { useThrottledValue } from "../hooks/useThrottledValue";
 import { isGroupRunning } from "../utils/groupRunning";
 import { isUnanchoredRun } from "../utils/runTargets";
+import { runMetaMarkedMessageIds } from "../chat/runMetaMarkers";
 import { useTranslation } from "react-i18next";
 import { scrollToLatest, useScrollLoadOlder } from "../hooks/useScrollLoadOlder";
 import type {
@@ -1226,6 +1227,11 @@ export function Chat({
   // pass through immediately so user interactions stay snappy.
   const displayTurnGroups = useThrottledValue(turnGroups, sessionRunning && isStreaming ? 140 : 0);
 
+  const runMetaMarkedIds = useMemo(
+    () => runMetaMarkedMessageIds(displayTurnGroups, session),
+    [displayTurnGroups, session],
+  );
+
   // Sync scroll to bottom when the RENDERED content changes (if stickToBottom).
   // Keyed on displayTurnGroups (the throttled render data), not raw messages, so
   // the snap runs in the same commit that grows the DOM — otherwise throttling
@@ -1543,6 +1549,9 @@ export function Chat({
                               reasoningEffort: session.reasoning_effort ?? null,
                             }
                           : undefined
+                      }
+                      showRunMeta={
+                        !!g.responseMessage && runMetaMarkedIds.has(g.responseMessage.id)
                       }
                       // Never auto-collapse a group that is still running.
                       defaultCollapsed={

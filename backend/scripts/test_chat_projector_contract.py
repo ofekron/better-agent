@@ -13,6 +13,11 @@ sys.path.insert(0, str(ROOT / "backend"))
 from chat_models import CanonicalEvent, Explanation, ModelChange, ProviderIdentity, ScopedTurn, SteeringMessage, Turn, VisibilityPlan
 import chat_projector
 from chat_projector import ChatProjectionInputError, canonical_quick_reply_text, model_marker_targets, project_chat
+from chat_tree_wire import (
+    body_item_to_wire as _body,
+    chat_to_wire as _chat,
+    result_to_wire as _result,
+)
 
 
 FIXTURE = ROOT / "test-contracts" / "chat-panel" / "v1" / "canonical-session.json"
@@ -20,39 +25,6 @@ FIXTURE = ROOT / "test-contracts" / "chat-panel" / "v1" / "canonical-session.jso
 
 def _fixture() -> dict:
     return json.loads(FIXTURE.read_text(encoding="utf-8"))
-
-
-def _result(value):
-    if value is None:
-        return None
-    result = {"type": value.type, "part_ids": list(value.part_ids)}
-    result["text"] = value.text
-    return result
-
-
-def _body(value):
-    projected = {}
-    stack = [(value, projected)]
-    while stack:
-        item, target = stack.pop()
-        if isinstance(item, Explanation):
-            target.update({
-                "type": "Explanation", "text": item.text,
-                "text_event_ids": list(item.text_event_ids), "item_ids": list(item.item_ids),
-            })
-            continue
-        if isinstance(item, SteeringMessage):
-            target.update({"type": "SteeringMessage", "id": item.id, "text": item.text})
-            continue
-        assert isinstance(item, ScopedTurn)
-        target.update({
-            "type": item.type, "id": item.id, "prompt": item.prompt.text,
-            "body": [{} for _ in item.body], "result": _result(item.result),
-            "children": list(item.children),
-        })
-        for child, child_target in reversed(list(zip(item.body, target["body"]))):
-            stack.append((child, child_target))
-    return projected
 
 
 def _provider(identity="p", model="m", effort="medium"):
@@ -133,23 +105,6 @@ def _with_limit(name, value, callback):
         callback()
     finally:
         setattr(chat_projector, name, original)
-
-
-def _chat(value):
-    result = []
-    for item in value.items:
-        if isinstance(item, ModelChange):
-            result.append({"type": "ModelChange", "id": item.id, "before_turn": item.before_turn})
-            continue
-        assert isinstance(item, Turn)
-        result.append({
-            "type": "Turn",
-            "id": item.id,
-            "prompt": item.prompt.id,
-            "body": [_body(body) for body in item.body],
-            "result": _result(item.result),
-        })
-    return result
 
 
 def test_completed_chat_matches_shared_oracle() -> None:
