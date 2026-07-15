@@ -19,6 +19,9 @@ class _Coordinator:
     def __init__(self) -> None:
         self.calls: list[dict] = []
 
+    def bound_request_principal(self):
+        return ("core", "test")
+
     def is_internal_caller(self, _token: str) -> bool:
         return True
 

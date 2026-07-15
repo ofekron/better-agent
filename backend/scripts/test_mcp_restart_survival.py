@@ -26,7 +26,9 @@ import builtin_mcp_config  # noqa: E402
 import communicate_mcp  # noqa: E402
 import extension_jobs  # noqa: E402
 import extension_store  # noqa: E402
+import internal_request_auth  # noqa: E402
 import main as backend_main  # noqa: E402
+import runtime_endpoints  # noqa: E402
 
 
 FAILURES: list[str] = []
@@ -59,6 +61,11 @@ class _FakeBackend:
         handler = self._handler()
         self._server = _ReusableHTTPServer(("127.0.0.1", self.port), handler)
         self.port = int(self._server.server_address[1])
+        runtime_endpoints.write_app_endpoint({
+            "kind": "tcp",
+            "host": "127.0.0.1",
+            "port": self.port,
+        })
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
         self._thread.start()
 
@@ -75,6 +82,7 @@ class _FakeBackend:
             self._thread.join(timeout=2.0)
         self._server = None
         self._thread = None
+        runtime_endpoints.clear_app_endpoint()
 
     def _handler(self) -> type[BaseHTTPRequestHandler]:
         owner = self
@@ -87,14 +95,17 @@ class _FakeBackend:
                     payload = json.loads(raw.decode("utf-8") or "{}")
                 except json.JSONDecodeError:
                     payload = {}
+                headers = dict(self.headers.items())
                 token = self.headers.get("X-Internal-Token") or ""
+                signed = internal_request_auth.has_signature(headers)
                 owner.requests.append({
                     "generation": owner.generation,
                     "path": self.path,
                     "token": token,
+                    "signed": signed,
                     "payload": payload,
                 })
-                if self.path == "/api/internal/mssg" and payload.get("_mcp_job_id"):
+                if self.path in {"/api/internal/mssg", "/api/internal/ask"} and payload.get("_mcp_job_id"):
                     body = json.dumps({
                         "success": True,
                         "id": payload["_mcp_job_id"],
@@ -108,16 +119,24 @@ class _FakeBackend:
                     self.wfile.write(body)
                     return
                 if self.path == "/api/internal/mcp-jobs/results":
+                    result = {
+                        "success": True,
+                        "message_id": "durable-message",
+                        "generation": owner.generation,
+                    }
+                    if payload.get("operation") == "ask":
+                        result = {
+                            "success": True,
+                            "response": "durable-answer",
+                            "turn_id": "turn-durable",
+                            "generation": owner.generation,
+                        }
                     body = json.dumps({
                         "success": True,
                         "id": payload.get("id"),
                         "status": "complete",
                         "ready": True,
-                        "result": {
-                            "success": True,
-                            "message_id": "durable-message",
-                            "generation": owner.generation,
-                        },
+                        "result": result,
                     }).encode("utf-8")
                     self.send_response(200)
                     self.send_header("Content-Type", "application/json")
@@ -131,6 +150,7 @@ class _FakeBackend:
                     "path": self.path,
                     "payload": payload,
                     "token_present": bool(token),
+                    "signed": signed,
                 }).encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
@@ -156,6 +176,8 @@ class _McpSession:
         env = {
             "PATH": os.environ.get("PATH", ""),
             "PYTHONIOENCODING": "utf-8",
+            "BETTER_AGENT_HOME": os.environ.get("BETTER_AGENT_HOME", ""),
+            "BETTER_CLAUDE_HOME": os.environ.get("BETTER_CLAUDE_HOME", ""),
             **{str(k): str(v) for k, v in (self._config.get("env") or {}).items()},
         }
         self._proc = await asyncio.create_subprocess_exec(
@@ -386,7 +408,10 @@ async def _assert_process_survives_restart(
         backend.restart(2)
         second = _tool_payload(await session.call_tool(tool_name, second_args))
         check(second.get("generation") == 2, f"{label} same MCP process calls fake backend after restart")
-        check(second.get("token_present") is True, f"{label} sends auth after restart")
+        check(
+            second.get("token_present") is True or second.get("signed") is True,
+            f"{label} sends auth after restart",
+        )
 
 
 async def test_core_mcp_process_survives_backend_restart() -> None:
@@ -399,8 +424,8 @@ async def test_core_mcp_process_survives_backend_restart() -> None:
             "core capabilities MCP",
             config,
             "list_capabilities",
-            {},
-            {},
+            {"app_session_id": "restart-survival-sid"},
+            {"app_session_id": "restart-survival-sid"},
             backend,
         )
     finally:
@@ -479,6 +504,13 @@ async def test_communicate_mcp_uses_durable_job_polling() -> None:
         paths = [request["path"] for request in backend.requests]
         check(paths[:2] == ["/api/internal/mssg", "/api/internal/mcp-jobs/results"], "communicate mssg fires then polls")
         check("_mcp_job_id" in backend.requests[0]["payload"], "communicate mssg sends durable job id")
+        ask_result = await asyncio.to_thread(
+            communicate_mcp.ask_response,
+            "answer me",
+            target_session_id="target-sid",
+        )
+        check(ask_result.get("response") == "durable-answer", "communicate ask unwraps terminal durable job result")
+        check(ask_result.get("turn_id") == "turn-durable", "communicate ask keeps terminal metadata")
     finally:
         backend.stop()
         for key, value in previous.items():
@@ -503,10 +535,20 @@ def test_stale_nonresumable_core_mcp_job_fails_closed() -> None:
         phase="running",
         message="MCP job is running",
     )
+    body = json.dumps({"operation": "mssg", "id": job_id, "_mcp_job_wait": 0}).encode("utf-8")
+    headers = {
+        "Content-Type": "application/json",
+        **internal_request_auth.sign(
+            backend_main.coordinator.internal_token,
+            "POST",
+            "/api/internal/mcp-jobs/results",
+            body,
+        ),
+    }
     response = TestClient(backend_main.app).post(
         "/api/internal/mcp-jobs/results",
-        headers={"X-Internal-Token": backend_main.coordinator.internal_token},
-        json={"operation": "mssg", "id": job_id, "_mcp_job_wait": 0},
+        headers=headers,
+        content=body,
     )
     check(response.status_code == 200, "stale mssg job status endpoint responds")
     payload = response.json()
