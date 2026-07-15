@@ -258,6 +258,75 @@ def main() -> None:
         check("stale turn cursor is a typed 409",
               response.status_code == 409
               and isinstance(detail, dict) and detail.get("code") == "stale_turn_cursor")
+
+        # Worker delegation + todos content survives from raw canonical
+        # facts (worker_start, tool_call with TodoWrite args) all the way
+        # through render_chat's lookup sidecar, and the runtime session
+        # snapshot's `workers` panel array is no longer stripped.
+        worker_todo_session = {
+            **SESSION, "id": "worker-todo-root",
+            "messages": [
+                {"id": "wu1", "role": "user"},
+                {"id": "wa1", "role": "assistant",
+                 "run_meta": {"provider_id": "claude", "model": "sonnet-4-6",
+                              "reasoning_effort": "high"},
+                 "workers": [{
+                     "delegation_id": "d1", "worker_session_id": "w1",
+                     "worker_description": "Do thing", "panel_kind": "worker",
+                     "is_new": False, "instructions_preview": "", "events": [],
+                 }]},
+            ],
+        }
+        SESSIONS_BY_ID["worker-todo-root"] = worker_todo_session
+        for seq, payload_type, payload in [
+            (1, "user_prompt", {"message_id": "wu1", "text": "delegate it"}),
+            (2, "message_ownership_declared", {"message_id": "wa1", "prompt_message_id": "wu1"}),
+            (3, "worker_start", {
+                "message_id": "wa1", "delegation_id": "d1", "worker_session_id": "w1",
+                "worker_description": "Do thing", "panel_kind": "worker", "insert_at": 0,
+            }),
+            (4, "tool_call", {
+                "message_id": "wa1", "tool_use_id": "tool-1", "tool": "TodoWrite",
+                "args": {"todos": [{"content": "do X", "status": "pending"}]},
+            }),
+            (5, "assistant_output", {"message_id": "wa1", "text": "Delegated.", "final": True}),
+        ]:
+            fact = wire_fact(seq, payload_type, payload)
+            fact["root_id"] = "worker-todo-root"
+            fact["sid"] = "worker-todo-root"
+            fact["turn_id"] = "wu1"
+            chat_projection_ingestion.admit_canonical_fact(fact, provider="claude")
+
+        response = client.get("/api/chat-tree/worker-todo-root")
+        body = response.json()
+        check("worker/todo root serves 200", response.status_code == 200)
+        check("no typed drops for worker/todo root", body.get("dropped") == [])
+        check("assistant snapshot carries the worker panel array (no longer stripped)",
+              body["lookup"]["wa1"]["snapshot"]["workers"] == [{
+                  "delegation_id": "d1", "worker_session_id": "w1",
+                  "worker_description": "Do thing", "panel_kind": "worker",
+                  "is_new": False, "instructions_preview": "", "events": [],
+              }])
+        worker_lookup_entry = next(
+            (entry for entry in body["lookup"].values()
+             if entry.get("kind") == "event" and entry.get("type") == "other_typed_work"
+             and entry.get("data", {}).get("kind") == "worker_start"),
+            None,
+        )
+        check("worker_start fact reaches the lookup sidecar with its full payload",
+              worker_lookup_entry is not None
+              and worker_lookup_entry["data"]["payload"]["delegation_id"] == "d1"
+              and worker_lookup_entry["data"]["payload"]["worker_session_id"] == "w1")
+        todo_lookup_entry = next(
+            (entry for entry in body["lookup"].values()
+             if entry.get("kind") == "event" and entry.get("type") == "tool_interaction"
+             and entry.get("data", {}).get("tool_name") == "TodoWrite"),
+            None,
+        )
+        check("tool_call args (todos) reach the lookup sidecar",
+              todo_lookup_entry is not None
+              and todo_lookup_entry["data"]["args"]["todos"]
+              == [{"content": "do X", "status": "pending"}])
     finally:
         runtime_service.session_tree = original
         bff_chat_feed.feed_client = original_feed_client

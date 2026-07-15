@@ -174,7 +174,7 @@ def _build_lookup(
     return lookup
 
 
-_HEAVY_MESSAGE_FIELDS = frozenset({"events", "workers", "manager"})
+_HEAVY_MESSAGE_FIELDS = frozenset({"events", "manager"})
 
 
 def _strip_heavy_message_fields(message: dict[str, Any]) -> dict[str, Any]:

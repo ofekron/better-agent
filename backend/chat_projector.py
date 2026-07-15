@@ -699,14 +699,16 @@ def _validate_nested_data(event_type: str, data: Mapping[str, Any]) -> None:
         "output_text": ({"text"}, {"text", "source_timestamp"}),
         "file_history_snapshot": ({"snapshot_id"}, {"snapshot_id"}),
         "native_subagent_turn": ({"prompt"}, {"prompt", "status", "text", "result"}),
-        "other_typed_work": ({"kind", "label"}, {"kind", "label", "source_timestamp"}),
+        "other_typed_work": (
+            {"kind", "label"}, {"kind", "label", "source_timestamp", "payload"},
+        ),
         "steering_message": ({"text"}, {"text"}),
         "thinking": ({"text", "status"}, {"text", "status"}),
         "tool_interaction": (
             {"tool_name", "tool_use_id", "status"},
             {
                 "tool_name", "tool_use_id", "status", "assistant_text", "selected_session_id",
-                "session_ids", "sessions", "options", "question", "summary", "output",
+                "session_ids", "sessions", "options", "question", "summary", "output", "args",
             },
         ),
         "turn_completed": (set(), set()),

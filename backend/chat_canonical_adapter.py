@@ -259,11 +259,13 @@ def adapt_chat_inputs(
                 "message_id": message_id,
                 "tool_name": tool_name,
             }
-            emit(
-                fact, "tool_interaction",
-                {"tool_name": tool_name, "tool_use_id": key, "status": "running"},
-                message_id=message_id,
-            )
+            call_data: dict[str, Any] = {
+                "tool_name": tool_name, "tool_use_id": key, "status": "running",
+            }
+            args = payload.get("args")
+            if args is not None:
+                call_data["args"] = args
+            emit(fact, "tool_interaction", call_data, message_id=message_id)
             continue
 
         if payload_type == "tool_result":
@@ -342,9 +344,13 @@ def adapt_chat_inputs(
             if payload_type == "unsupported_block" and isinstance(block_type, str)
             else payload_type or "unknown"
         )
+        # Generic passthrough for payload types with no dedicated canonical
+        # shape (worker_start/_event/_complete, todos_snapshot, unsupported
+        # blocks, ...): carry the full raw payload so the BFF chat-tree
+        # lookup sidecar can serve it, instead of reducing it to kind+label.
         emit(
             fact, "other_typed_work",
-            {"kind": payload_type or "unknown", "label": label},
+            {"kind": payload_type or "unknown", "label": label, "payload": dict(payload)},
             message_id=message_id,
         )
 

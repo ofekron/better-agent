@@ -155,6 +155,8 @@ def test_unsupported_block_facts_stay_visible_as_typed_work() -> None:
           len(work) == 1 and work[0]["data"] == {
               "kind": "unsupported_block",
               "label": "unsupported block: server_tool_search",
+              "payload": {"message_id": "a1", "block_type": "server_tool_search",
+                          "block": {"type": "server_tool_search"}},
           })
 
 
