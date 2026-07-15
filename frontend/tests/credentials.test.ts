@@ -1,12 +1,9 @@
-import React from "react";
 import { waitFor } from "@testing-library/react";
 import { describe, it, expect } from "vitest";
 import { renderApp } from "./harness";
 import { makeSession } from "./fixtures";
 import type { CredentialConsent } from "../src/types";
-import App from "../src/App";
 import { eventBus } from "../src/lib/eventBus";
-import { setBuiltinExtensionIds } from "../src/extensionIds";
 
 function makeConsent(overrides: Partial<CredentialConsent> = {}): CredentialConsent {
   return {
@@ -73,9 +70,15 @@ describe("credential consent cards", () => {
     await h.selectSession(session.id);
     expect(h.backend.calls.filter((call) => call.path.includes("/credentials"))).toEqual([]);
 
-    setBuiltinExtensionIds({ credentialBroker: "ofek-dev.credential-broker" });
+    // The backend is the id map's source of truth: `extensions_changed`
+    // makes the app re-pull /api/extensions/builtin-ids, so hydrate the
+    // late id there rather than poking the in-memory map (a manual poke
+    // would be clobbered by that reload).
+    h.backend.state.builtinExtensionIds = {
+      credentialBroker: "ofek-dev.credential-broker",
+    };
     eventBus.publish("extensions_changed", {});
-    h.raw.rerender(React.createElement(App));
+    await h.flush();
     await h.flush();
 
     const calls = h.backend.calls.filter((call) => call.path.includes("/credentials/pending"));

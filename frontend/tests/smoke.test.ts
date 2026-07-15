@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import i18n from "../src/i18n";
 import { renderApp } from "./harness";
 import { makeAssistantMsg, makeSession, makeUserMsg } from "./fixtures";
 import { loadOfflineActions } from "src/lib/offlineQueueStore";
@@ -11,7 +12,12 @@ describe("harness smoke", () => {
 
     const view = h.toJSON();
     expect(view.sidebar.sessions).toEqual([
-      { id: "sess-1", name: expect.stringContaining("test session"), active: false },
+      {
+        id: "sess-1",
+        name: expect.stringContaining("test session"),
+        active: false,
+        teamWorkerCount: null,
+      },
     ]);
     expect(view.input.disabled).toBe(true);
 
@@ -50,7 +56,9 @@ describe("harness smoke", () => {
 
     await h.click('[data-testid="empty-file-editor-pick-files"]');
 
-    expect(h.raw.getByRole("heading", { name: "fileChooser.title" })).toBeTruthy();
+    expect(
+      h.raw.getByRole("heading", { name: i18n.t("fileChooser.title") }),
+    ).toBeTruthy();
 
     h.unmount();
   });
@@ -210,7 +218,10 @@ describe("harness smoke", () => {
     await h.approveWorker("deleg-1");
     expect(
       h.restCalls.find(
-        (c) => c.path === "/api/pending_approvals/deleg-1/approve" && c.method === "POST",
+        (c) =>
+          c.path ===
+            "/api/extensions/ofek-dev.team-orchestration/backend/pending_approvals/deleg-1/approve" &&
+          c.method === "POST",
       ),
     ).toBeDefined();
 
@@ -290,14 +301,15 @@ describe("harness smoke", () => {
     const container = h.raw.container as HTMLElement;
     expect(container.querySelector(".manager-scope")).toBeNull();
     expect(container.querySelector(".role-label-manager")).toBeNull();
-    // The workers panel only renders in manager mode + cwd present.
-    expect(view.sidebar.workersPanelVisible).toBe(false);
+    // Native-mode rows never render the team-workers summary.
+    expect(view.sidebar.sessions[0].teamWorkerCount).toBeNull();
 
     h.unmount();
   });
 
-  it("workers_changed WS event triggers a refetch of /api/workers", async () => {
-    const session = makeSession();
+  it("workers_changed WS event triggers a refetch of the team workers registry", async () => {
+    const workersPath = "/api/extensions/ofek-dev.team-orchestration/backend/workers";
+    const session = makeSession({ orchestration_mode: "team" });
     const h = await renderApp({
       seed: { sessions: [session] },
     });
@@ -305,28 +317,36 @@ describe("harness smoke", () => {
     await h.flush();
 
     const callsBefore = h.restCalls.filter(
-      (c) => c.method === "GET" && c.path === "/api/workers",
+      (c) => c.method === "GET" && c.path === workersPath,
     ).length;
     expect(callsBefore).toBeGreaterThan(0);
 
-    // Simulate the backend mutating worker registry, then pushing.
-    h.backend.state.workers = [
+    // Simulate the backend mutating the team worker registry, then pushing.
+    h.backend.state.teamWorkers = [
       {
-        agent_session_id: "w1",
-        name: "Indexer",
-        orchestration_mode: "native",
-        initialized: true,
-        delegation_count: 3,
+        root_session_id: session.id,
+        workers: [
+          {
+            agent_session_id: "w1",
+            name: "Indexer",
+            orchestration_mode: "native",
+            initialized: true,
+            delegation_count: 3,
+            team_binding: "bound",
+          },
+        ],
       },
     ];
     h.emit({ type: "workers_changed", data: { cwd: session.cwd } });
     await h.flush();
 
     const callsAfter = h.restCalls.filter(
-      (c) => c.method === "GET" && c.path === "/api/workers",
+      (c) => c.method === "GET" && c.path === workersPath,
     ).length;
     expect(callsAfter).toBeGreaterThan(callsBefore);
-    expect(h.toJSON().sidebar.workerCount).toBe(1);
+    expect(
+      h.toJSON().sidebar.sessions.find((s) => s.id === session.id)?.teamWorkerCount,
+    ).toBe(1);
 
     h.unmount();
   });

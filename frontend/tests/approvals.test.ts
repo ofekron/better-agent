@@ -57,7 +57,10 @@ describe("worker approval cards", () => {
 
     expect(
       h.restCalls.find(
-        (c) => c.method === "POST" && c.path === "/api/pending_approvals/d-deny/deny",
+        (c) =>
+          c.method === "POST" &&
+          c.path ===
+            "/api/extensions/ofek-dev.team-orchestration/backend/pending_approvals/d-deny/deny",
       ),
     ).toBeDefined();
     expect(h.toJSON().chat.approvals).toHaveLength(0);
@@ -160,7 +163,9 @@ describe("worker approval cards", () => {
 
     const call = h.backend.calls.find(
       (c) =>
-        c.method === "POST" && c.path === "/api/pending_approvals/d-edit/approve",
+        c.method === "POST" &&
+        c.path ===
+          "/api/extensions/ofek-dev.team-orchestration/backend/pending_approvals/d-edit/approve",
     );
     expect(call).toBeDefined();
     // The card initial value was "Researcher"; after our manual input
