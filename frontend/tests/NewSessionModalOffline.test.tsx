@@ -113,6 +113,7 @@ describe("NewSessionModal offline provider cache", () => {
         main: { providerId: provider.id, model: "cached-opus", reasoningEffort: "high", permission: {} },
       }),
       undefined,
+      true,
     );
   });
 
@@ -155,6 +156,7 @@ describe("NewSessionModal offline provider cache", () => {
         orchestrationMode: "native",
       }),
       undefined,
+      true,
     );
   });
 
@@ -188,6 +190,7 @@ describe("NewSessionModal offline provider cache", () => {
         browserHarnessHeadless: false,
       }),
       undefined,
+      true,
     );
   });
 
@@ -225,6 +228,7 @@ describe("NewSessionModal offline provider cache", () => {
         fileEditPath: undefined,
       }),
       undefined,
+      true,
     );
   });
 
@@ -283,6 +287,7 @@ describe("NewSessionModal offline provider cache", () => {
         ],
       }),
       undefined,
+      true,
     );
   });
 
@@ -333,6 +338,7 @@ describe("NewSessionModal offline provider cache", () => {
         browserHarnessHeadless: true,
       }),
       undefined,
+      true,
     );
   });
 });

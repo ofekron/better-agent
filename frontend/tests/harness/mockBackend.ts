@@ -109,6 +109,8 @@ function emptyState(): BackendState {
     builtinExtensionIds: {
       credentialBroker: "ofek-dev.credential-broker",
       team: "ofek-dev.team-orchestration",
+      promptEngineer: "ofek-dev.prompt-engineer",
+      providerConfigSync: "ofek-dev.provider-config-sync",
     },
     traces: {},
     models: [
@@ -371,11 +373,19 @@ export class MockBackend {
       return { ids: this.state.builtinExtensionIds };
     }
     if (method === "GET" && path === "/api/extensions") {
+      // One record per builtin id currently resolved (the harness models
+      // "installed by default" the way a fresh Better Agent install
+      // ships these) — enabled:true except credentialBroker, which has
+      // a dedicated toggle a few tests flip off.
       return {
-        extensions: [{
-          manifest: { id: "ofek-dev.credential-broker" },
-          enabled: this.state.credentialBrokerEnabled,
-        }],
+        extensions: Object.values(this.state.builtinExtensionIds)
+          .filter((id, index, all) => id && all.indexOf(id) === index)
+          .map((id) => ({
+            manifest: { id },
+            enabled: id === "ofek-dev.credential-broker"
+              ? this.state.credentialBrokerEnabled
+              : true,
+          })),
       };
     }
     if (method === "GET" && path === "/api/ui-selection") {
@@ -582,8 +592,9 @@ export class MockBackend {
     }
     if (
       method === "GET" &&
-      (path === "/api/provider-config-sync/capability-picker" ||
-        path === "/api/provider-config-sync/capability-picker")
+      path === `/api/extensions/${
+        this.state.builtinExtensionIds.providerConfigSync ?? "ofek-dev.provider-config-sync"
+      }/backend/capability-picker`
     ) {
       return { sources: this.state.capabilitySources };
     }

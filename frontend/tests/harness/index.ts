@@ -76,6 +76,8 @@ export async function renderApp(options: RenderAppOptions = {}): Promise<Harness
   const builtinExtensionIds = options.builtinExtensionIds ?? {
     credentialBroker: "ofek-dev.credential-broker",
     team: "ofek-dev.team-orchestration",
+    promptEngineer: "ofek-dev.prompt-engineer",
+    providerConfigSync: "ofek-dev.provider-config-sync",
   };
   setBuiltinExtensionIds(builtinExtensionIds);
   const backend = new MockBackend();
