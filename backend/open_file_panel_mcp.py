@@ -3,67 +3,38 @@ from __future__ import annotations
 import json
 import os
 import sys
-import urllib.error
-import urllib.request
 from typing import Any
 
 from env_compat import require_env
+from loopback_http import (
+    LoopbackHTTPStatusError,
+    loopback_http_error_message,
+    request_internal,
+)
 from mcp.server.fastmcp import FastMCP
 
 
-def _env_required(name: str) -> str:
-    return require_env(name)
+def _post_internal(url_path: str, payload: dict[str, Any], timeout: float) -> dict[str, Any]:
+    raw = request_internal(
+        "POST",
+        url_path,
+        json.dumps(payload).encode("utf-8"),
+        internal_token=require_env("BETTER_CLAUDE_INTERNAL_TOKEN"),
+        timeout=timeout,
+    )
+    return json.loads(raw.decode("utf-8"))
 
 
 def _post_open_file_panel(payload: dict[str, Any]) -> dict[str, Any]:
-    backend_url = _env_required("BETTER_CLAUDE_BACKEND_URL").rstrip("/")
-    internal_token = _env_required("BETTER_CLAUDE_INTERNAL_TOKEN")
-    req = urllib.request.Request(
-        backend_url + "/api/internal/open-file-panel",
-        data=json.dumps(payload).encode("utf-8"),
-        method="POST",
-        headers={
-            "Content-Type": "application/json",
-            "X-Internal-Token": internal_token,
-        },
-    )
-    with urllib.request.urlopen(req, timeout=10.0) as resp:
-        raw = resp.read()
-    return json.loads(raw.decode("utf-8"))
+    return _post_internal("/api/internal/open-file-panel", payload, 10.0)
 
 
 def _post_user_input(payload: dict[str, Any]) -> dict[str, Any]:
-    backend_url = _env_required("BETTER_CLAUDE_BACKEND_URL").rstrip("/")
-    internal_token = _env_required("BETTER_CLAUDE_INTERNAL_TOKEN")
-    req = urllib.request.Request(
-        backend_url + "/api/internal/user-input/request",
-        data=json.dumps(payload).encode("utf-8"),
-        method="POST",
-        headers={
-            "Content-Type": "application/json",
-            "X-Internal-Token": internal_token,
-        },
-    )
-    with urllib.request.urlopen(req, timeout=24 * 60 * 60) as resp:
-        raw = resp.read()
-    return json.loads(raw.decode("utf-8"))
+    return _post_internal("/api/internal/user-input/request", payload, 24 * 60 * 60)
 
 
 def _post_start_discussion(payload: dict[str, Any]) -> dict[str, Any]:
-    backend_url = _env_required("BETTER_CLAUDE_BACKEND_URL").rstrip("/")
-    internal_token = _env_required("BETTER_CLAUDE_INTERNAL_TOKEN")
-    req = urllib.request.Request(
-        backend_url + "/api/internal/file-editor/start-discussion",
-        data=json.dumps(payload).encode("utf-8"),
-        method="POST",
-        headers={
-            "Content-Type": "application/json",
-            "X-Internal-Token": internal_token,
-        },
-    )
-    with urllib.request.urlopen(req, timeout=10.0) as resp:
-        raw = resp.read()
-    return json.loads(raw.decode("utf-8"))
+    return _post_internal("/api/internal/file-editor/start-discussion", payload, 10.0)
 
 
 def open_file_panel_response(
@@ -92,8 +63,8 @@ def open_file_panel_response(
             "selected_start": selected_start,
             "selected_end": selected_end,
         })
-    except urllib.error.HTTPError as exc:
-        return {"success": False, "error": f"HTTP {exc.code}: {exc.reason}"}
+    except LoopbackHTTPStatusError as exc:
+        return {"success": False, "error": f"HTTP {exc.code}: {loopback_http_error_message(exc)}"}
     except Exception as exc:
         return {"success": False, "error": str(exc)}
 
@@ -114,8 +85,8 @@ def request_user_input_response(
             "questions": questions,
             "timeout_seconds": timeout_seconds,
         })
-    except urllib.error.HTTPError as exc:
-        return {"success": False, "error": f"HTTP {exc.code}: {exc.reason}"}
+    except LoopbackHTTPStatusError as exc:
+        return {"success": False, "error": f"HTTP {exc.code}: {loopback_http_error_message(exc)}"}
     except Exception as exc:
         return {"success": False, "error": str(exc)}
 
@@ -141,8 +112,8 @@ def start_file_discussion_response(
             "line": line,
             "title": title,
         })
-    except urllib.error.HTTPError as exc:
-        return {"success": False, "error": f"HTTP {exc.code}: {exc.reason}"}
+    except LoopbackHTTPStatusError as exc:
+        return {"success": False, "error": f"HTTP {exc.code}: {loopback_http_error_message(exc)}"}
     except Exception as exc:
         return {"success": False, "error": str(exc)}
 

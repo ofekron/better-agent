@@ -24,9 +24,9 @@ import runner
 def _instrument():
     captured: list[tuple] = []
 
-    def fake_post(payload, *, backend_url, internal_token, url_path,
+    def fake_post(payload, *, internal_token, url_path,
                   timeout, non_json_t_key, log_prefix, backoff_cap, recover=None):
-        captured.append((url_path, payload))
+        captured.append((url_path, payload, internal_token))
         return {"success": True}
 
     runner._post_loopback_sync = fake_post  # type: ignore[assignment]
@@ -39,18 +39,19 @@ def test_ask_direct_routes_to_team_endpoint():
     captured = _instrument()
     ask = runner._build_ask_tool(
         sender_session_id="s1", app_session_id="app1", model="m", cwd="/r",
-        backend_url="http://x", internal_token="t",
+        internal_token="t",
     )
     asyncio.run(ask.handler({"target_session_id": "w1", "message": "hi"}))
     assert captured[0][0] == "/api/internal/ask"
     assert captured[0][1]["ask_id"].startswith("ask_")
+    assert captured[0][2] == "t"
 
 
 def test_ask_fork_routes_to_delegate_engine():
     captured = _instrument()
     ask = runner._build_ask_tool(
         sender_session_id="s1", app_session_id="app1", model="m", cwd="/r",
-        backend_url="http://x", internal_token="t",
+        internal_token="t",
     )
     asyncio.run(ask.handler({
         "target_session_id": "w1",
@@ -59,7 +60,8 @@ def test_ask_fork_routes_to_delegate_engine():
         "worker_description": "auditor",
         "worker_registry_cwd": "/r",
     }))
-    url, payload = captured[0]
+    url, payload, token = captured[0]
+    assert token == "t"
     assert url == "/api/internal/ask-fork"
     assert payload["instructions"] == "audit the auth layer"
     assert payload["worker_session_id"] == "w1"
@@ -75,7 +77,7 @@ def test_ask_fork_routes_ephemeral():
     captured = _instrument()
     ask = runner._build_ask_tool(
         sender_session_id="s1", app_session_id="app1", model="m", cwd="/r",
-        backend_url="http://x", internal_token="t",
+        internal_token="t",
     )
     asyncio.run(ask.handler({
         "target_session_id": "w1",
@@ -84,7 +86,7 @@ def test_ask_fork_routes_ephemeral():
         "worker_description": "auditor",
         "ephemeral": True,
     }))
-    url, payload = captured[0]
+    url, payload, _token = captured[0]
     assert url == "/api/internal/ask-fork"
     assert payload["ephemeral"] is True
 
@@ -93,7 +95,7 @@ def test_ask_direct_rejects_ephemeral():
     captured = _instrument()
     ask = runner._build_ask_tool(
         sender_session_id="s1", app_session_id="app1", model="m", cwd="/r",
-        backend_url="http://x", internal_token="t",
+        internal_token="t",
     )
     res = asyncio.run(ask.handler({
         "target_session_id": "w1",
@@ -108,7 +110,7 @@ def test_ask_fork_allows_missing_worker_description():
     captured = _instrument()
     ask = runner._build_ask_tool(
         sender_session_id="s1", app_session_id="app1", model="m", cwd="/r",
-        backend_url="http://x", internal_token="t",
+        internal_token="t",
     )
     asyncio.run(ask.handler({
         "target_session_id": "w1", "message": "x", "run_mode": "fork",

@@ -13,6 +13,7 @@ import asyncio
 import os
 import sys
 import tempfile
+import threading
 from pathlib import Path
 
 _TMP_HOME = tempfile.mkdtemp(prefix="openai_appr_test_home_")
@@ -38,14 +39,15 @@ def test_approval_routes_through_http_client_approved(monkeypatch):
 
     verdict = asyncio.run(runner_better_agent._request_approval(
         app_session_id="sid-1", run_id="run-1", tool_name="Bash",
-        args={"command": "ls"}, backend_url="http://backend",
+        args={"command": "ls"},
         internal_token="tok", cancel_path=Path(_TMP_HOME) / "nope-cancel",
     ))
 
     assert verdict == "approved"
     assert len(calls) == 1
     assert calls[0]["provider_kind"] == "openai"
-    assert calls[0]["backend_url"] == "http://backend"
+    assert calls[0]["app_session_id"] == "sid-1"
+    assert calls[0]["run_id"] == "run-1"
     assert calls[0]["internal_token"] == "tok"
     assert calls[0]["tool_name"] == "Bash"
     # Unified summary shape shared with the Claude/Codex runners: {"tool",
@@ -58,7 +60,7 @@ def test_approval_routes_through_http_client_denied(monkeypatch):
     monkeypatch.setattr(runner_better_agent, "request_tool_approval", lambda **kw: False)
     verdict = asyncio.run(runner_better_agent._request_approval(
         app_session_id="sid-2", run_id="run-2", tool_name="Write",
-        args={"path": "x"}, backend_url="http://backend",
+        args={"path": "x"},
         internal_token="tok", cancel_path=Path(_TMP_HOME) / "nope-cancel-2",
     ))
     assert verdict == "denied"
@@ -73,7 +75,7 @@ def test_approval_does_not_touch_in_process_registry(monkeypatch):
     monkeypatch.setattr(runner_better_agent, "request_tool_approval", lambda **kw: False)
     asyncio.run(runner_better_agent._request_approval(
         app_session_id="sid-3", run_id="run-3", tool_name="Edit",
-        args={}, backend_url="http://backend", internal_token="tok",
+        args={}, internal_token="tok",
         cancel_path=Path(_TMP_HOME) / "nope-cancel-3",
     ))
 
@@ -92,7 +94,7 @@ def test_request_approval_swallows_exception_as_denial(monkeypatch):
     monkeypatch.setattr(runner_better_agent, "request_tool_approval", raising)
     verdict = asyncio.run(runner_better_agent._request_approval(
         app_session_id="sid-2b", run_id="run-2b", tool_name="Bash",
-        args={}, backend_url="http://backend", internal_token="tok",
+        args={}, internal_token="tok",
         cancel_path=Path(_TMP_HOME) / "nope-cancel-2b",
     ))
     assert verdict == "denied"
@@ -103,22 +105,32 @@ def test_cancel_aborts_in_flight_approval(monkeypatch):
     the backend's fail-closed timeout."""
     cancel_path = Path(_TMP_HOME) / "cancel-marker"
     cancel_path.write_text("")
+    release = threading.Event()
 
     def slow_request(**kwargs):
         # Emulate the backend blocking until its timeout. The cancel race must
-        # interrupt this well before 6 minutes.
-        import time as _t
-        _t.sleep(2)
+        # interrupt this well before 6 minutes; the test releases the block
+        # once the cancel verdict is asserted (generous backstop timeout).
+        release.wait(timeout=30.0)
         return True
 
     monkeypatch.setattr(runner_better_agent, "request_tool_approval", slow_request)
-    verdict = asyncio.run(runner_better_agent._request_approval(
-        app_session_id="sid-4", run_id="run-4", tool_name="Bash",
-        args={"command": "x"}, backend_url="http://backend",
-        internal_token="tok", cancel_path=cancel_path,
-    ))
 
-    assert verdict == "cancelled"
+    async def _run() -> str:
+        try:
+            verdict = await runner_better_agent._request_approval(
+                app_session_id="sid-4", run_id="run-4", tool_name="Bash",
+                args={"command": "x"},
+                internal_token="tok", cancel_path=cancel_path,
+            )
+            # Assert before loop shutdown so the blocked approval thread is
+            # released before asyncio.run joins the default executor.
+            assert verdict == "cancelled"
+            return verdict
+        finally:
+            release.set()
+
+    assert asyncio.run(_run()) == "cancelled"
 
 
 class _FakeEmitter:
@@ -139,7 +151,7 @@ def test_dispatch_tool_gates_bash_and_emits_denial(monkeypatch):
     res = asyncio.run(runner_better_agent._dispatch_tool(
         call, cwd=Path(_TMP_HOME), app_session_id="sid-5",
         run_dir=Path(_TMP_HOME), bypass=False, interactive=True,
-        backend_url="http://backend", internal_token="tok",
+        internal_token="tok",
         emitter=em, loopback_handlers={},
         lock_registry=runner_better_agent.LockRegistry(),
         enforce_file_locks=False,
@@ -162,7 +174,7 @@ def test_dispatch_tool_non_interactive_fails_closed_without_blaming_user(monkeyp
     res = asyncio.run(runner_better_agent._dispatch_tool(
         call, cwd=Path(_TMP_HOME), app_session_id="sid-6",
         run_dir=Path(_TMP_HOME), bypass=False, interactive=False,
-        backend_url="", internal_token="",
+        internal_token="",
         emitter=em, loopback_handlers={},
         lock_registry=runner_better_agent.LockRegistry(),
         enforce_file_locks=False,
@@ -192,7 +204,7 @@ def test_dispatch_tool_approval_sees_normalized_file_link(monkeypatch):
         res = asyncio.run(runner_better_agent._dispatch_tool(
             call, cwd=cwdp, app_session_id="sid-link",
             run_dir=Path(_TMP_HOME), bypass=False, interactive=True,
-            backend_url="http://backend", internal_token="tok",
+            internal_token="tok",
             emitter=em, loopback_handlers={},
             lock_registry=runner_better_agent.LockRegistry(),
             enforce_file_locks=False,
@@ -215,7 +227,7 @@ def test_dispatch_tool_bypass_runs_handler(monkeypatch):
     res = asyncio.run(runner_better_agent._dispatch_tool(
         call, cwd=Path(_TMP_HOME), app_session_id="sid-7",
         run_dir=Path(_TMP_HOME), bypass=True, interactive=False,
-        backend_url="", internal_token="",
+        internal_token="",
         emitter=em, loopback_handlers={},
         lock_registry=runner_better_agent.LockRegistry(),
         enforce_file_locks=False,

@@ -4,16 +4,20 @@ Called from inside a runner (Claude `can_use_tool` callback, Codex app-server
 approval handler) to ask the backend for a human decision. Blocks (sync, in a
 thread) until the backend returns a verdict — the backend only responds once
 the frontend decides or the fail-closed timeout fires. Any transport error or
-non-approved response is treated as a DENIAL (fail-closed: never auto-approve)."""
+non-approved response is treated as a DENIAL (fail-closed: never auto-approve).
+
+Requests travel over the runtime app-endpoint descriptor (loopback_http) —
+never through the browser-facing BFF port."""
 from __future__ import annotations
 
 import http.client
 import json
 import logging
 import time
-import urllib.error
-import urllib.request
 from typing import Optional
+
+import runtime_endpoints
+from loopback_http import LoopbackHTTPStatusError, request_internal
 
 logger = logging.getLogger("tool_approval_client")
 
@@ -69,19 +73,22 @@ def _load_internal_token() -> Optional[str]:
 
 
 def _is_transient_approval_error(exc: BaseException) -> bool:
-    if isinstance(exc, urllib.error.HTTPError):
-        return 500 <= int(exc.code) < 600
-    if isinstance(exc, urllib.error.URLError):
-        reason = getattr(exc, "reason", None)
-        if isinstance(reason, (ConnectionError, TimeoutError, OSError)):
-            return True
-        return True
-    return isinstance(exc, (ConnectionError, TimeoutError, http.client.HTTPException, OSError))
+    if isinstance(exc, LoopbackHTTPStatusError):
+        return 500 <= exc.code < 600
+    return isinstance(
+        exc,
+        (
+            ConnectionError,
+            TimeoutError,
+            http.client.HTTPException,
+            OSError,
+            runtime_endpoints.RuntimeEndpointError,
+        ),
+    )
 
 
 def request_tool_approval(
     *,
-    backend_url: str,
     internal_token: str,
     app_session_id: str,
     run_id: str,
@@ -93,7 +100,7 @@ def request_tool_approval(
     error (fail-closed). Detached runners can outlive backend restarts/token
     rotations, so transient transport failures retry within the approval HTTP
     deadline and 403 retries once with the current disk token."""
-    if not backend_url or not internal_token or not app_session_id:
+    if not internal_token or not app_session_id:
         return False
     body = json.dumps(
         {
@@ -109,18 +116,15 @@ def request_tool_approval(
     token = internal_token
 
     def _request_once(use_token: str) -> dict:
-        req = urllib.request.Request(
-            backend_url.rstrip("/") + "/api/internal/tool-approvals/request",
-            data=body,
-            method="POST",
-            headers={
-                "Content-Type": "application/json",
-                "X-Internal-Token": use_token,
-            },
-        )
         remaining = max(1.0, deadline - time.monotonic())
-        with urllib.request.urlopen(req, timeout=remaining) as resp:
-            return json.loads(resp.read().decode("utf-8") or "{}")
+        raw = request_internal(
+            "POST",
+            "/api/internal/tool-approvals/request",
+            body,
+            internal_token=use_token,
+            timeout=remaining,
+        )
+        return json.loads(raw.decode("utf-8") or "{}")
 
     while True:
         remaining = deadline - time.monotonic()
@@ -130,7 +134,7 @@ def request_tool_approval(
         try:
             payload = _request_once(token)
             return bool(payload.get("approved"))
-        except urllib.error.HTTPError as exc:
+        except LoopbackHTTPStatusError as exc:
             live_token = _load_internal_token()
             if (
                 exc.code == 403

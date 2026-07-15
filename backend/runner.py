@@ -40,10 +40,7 @@ import logging
 import os
 import sys
 import time
-import http.client
 import threading
-import urllib.error
-import urllib.request
 from contextlib import suppress
 from datetime import datetime
 from pathlib import Path
@@ -57,8 +54,13 @@ from communication_modes import (
     ASK_MODE_WAIT_AND_GRAB_LAST_ASSISTANT_MSSG_IN_TURN,
     normalize_ask_mode,
 )
-from env_compat import get_env
-from loopback_http import raise_loopback_http_error
+from loopback_http import (
+    LOOPBACK_RETRYABLE_ERRORS,
+    LoopbackHTTPStatusError,
+    loopback_http_error_message,
+    raise_loopback_http_error,
+    request_internal,
+)
 from trace_collector import aggregate_claude_turn_usage
 from user_input_contract import USER_INPUT_MAX_QUESTIONS, build_request_user_input_schema
 from user_input_identity import logical_request_id as user_input_logical_request_id
@@ -1062,8 +1064,9 @@ def _tool_success_result(result: dict) -> dict:
 def _tool_error_response(prefix: str, exc: BaseException) -> dict:
     """Common @tool error-return for tools whose error messages are
     plain f-strings (NOT i18n). Dispatches on `exc` type:
-      - HTTPError: log warning, message includes status + body preview
-      - URLError:  log warning, message includes reason
+      - LoopbackHTTPStatusError: log warning, message includes status +
+                   body preview
+      - LOOPBACK_RETRYABLE_ERRORS: log warning, message includes reason
       - other:     log.exception (uses live sys.exc_info from caller's
                    except block), message is "<prefix> error: <exc>"
 
@@ -1071,16 +1074,11 @@ def _tool_error_response(prefix: str, exc: BaseException) -> dict:
     `logger.exception` fallback sees the live traceback. Delegate uses
     i18n strings and does NOT use this helper — keep it untouched.
     """
-    if isinstance(exc, urllib.error.HTTPError):
-        body = ""
-        try:
-            body = exc.read().decode("utf-8", errors="replace")[:500]
-        except Exception:
-            pass
-        msg = f"{prefix} HTTP {exc.code}: {exc.reason} {body}"
+    if isinstance(exc, LoopbackHTTPStatusError):
+        msg = f"{prefix} HTTP {exc.code}: {loopback_http_error_message(exc)}"
         logger.warning(msg)
-    elif isinstance(exc, urllib.error.URLError):
-        msg = f"{prefix} connection error: {exc.reason}"
+    elif isinstance(exc, LOOPBACK_RETRYABLE_ERRORS):
+        msg = f"{prefix} connection error: {getattr(exc, 'reason', exc)}"
         logger.warning(msg)
     else:
         logger.exception("%s tool handler failed", prefix)
@@ -1109,7 +1107,6 @@ def _is_network_error(exc: BaseException) -> bool:
 def _post_loopback_sync(
     payload: dict,
     *,
-    backend_url: str,
     internal_token: str,
     url_path: str,
     timeout: float,
@@ -1119,17 +1116,18 @@ def _post_loopback_sync(
     recover: Optional[Callable[[], Optional[dict]]] = None,
 ) -> dict:
     """Shared retry loop for the runner's loopback POSTs into the
-    backend (delegate, open-file-panel). Retries on
-    transient connection loss with exponential backoff. HTTPError
-    responses are terminal and re-raised. If `recover` returns a dict
-    after a connection loss, that durable result is returned instead of
-    retrying. `log_prefix` is interpolated into the retry warning.
-    `non_json_t_key` is the i18n key for the "response body did not
-    parse" RuntimeError each tool uses.
+    runtime internal API (delegate, open-file-panel), transported over
+    the runtime app-endpoint descriptor via `request_internal`. Retries
+    on transient connection/descriptor loss with exponential backoff.
+    `LoopbackHTTPStatusError` responses are terminal and re-raised. If
+    `recover` returns a dict after a connection loss, that durable
+    result is returned instead of retrying. `log_prefix` is interpolated
+    into the retry warning. `non_json_t_key` is the i18n key for the
+    "response body did not parse" RuntimeError each tool uses.
 
     INVARIANT: matches the inlined retry loop each `_post_*_sync`
-    previously implemented — same headers, same JSON envelope, same
-    deadline/backoff math, same exception classification.
+    previously implemented — same JSON envelope, same deadline/backoff
+    math, same exception classification.
     """
     import time
     body = json.dumps(payload).encode("utf-8")
@@ -1138,18 +1136,14 @@ def _post_loopback_sync(
     tried_live_token_after_forbidden = False
 
     def _request_once(token: str) -> dict:
-        req = urllib.request.Request(
-            url=backend_url.rstrip("/") + url_path,
-            data=body,
-            method="POST",
-            headers={
-                "Content-Type": "application/json",
-                "X-Internal-Token": token,
-            },
-        )
         remaining = max(1.0, deadline - time.monotonic())
-        with urllib.request.urlopen(req, timeout=remaining) as resp:
-            raw = resp.read()
+        raw = request_internal(
+            "POST",
+            url_path,
+            body,
+            internal_token=token,
+            timeout=remaining,
+        )
         try:
             return json.loads(raw.decode("utf-8"))
         except Exception as e:
@@ -1161,7 +1155,7 @@ def _post_loopback_sync(
         try:
             _mark_runner_activity()
             return _request_once(internal_token)
-        except urllib.error.HTTPError as e:
+        except LoopbackHTTPStatusError as e:
             _mark_runner_activity()
             live_token = _load_internal_token()
             if (
@@ -1174,13 +1168,13 @@ def _post_loopback_sync(
                 try:
                     _mark_runner_activity()
                     return _request_once(live_token)
-                except urllib.error.HTTPError:
+                except LoopbackHTTPStatusError:
                     _mark_runner_activity()
                     raise e
             if e.code != 403:
                 raise_loopback_http_error(e)
             raise
-        except (urllib.error.URLError, http.client.RemoteDisconnected) as e:
+        except LOOPBACK_RETRYABLE_ERRORS as e:
             _mark_runner_activity()
             recovered = recover() if recover is not None else None
             if recovered is not None:
@@ -1189,7 +1183,7 @@ def _post_loopback_sync(
                 raise
             reason = getattr(e, "reason", e)
             logger.warning(
-                "%s URLError (%s); retrying in %.1fs",
+                "%s connection error (%s); retrying in %.1fs",
                 log_prefix, reason, backoff,
             )
             time.sleep(min(backoff, max(0.5, deadline - time.monotonic())))
@@ -1208,7 +1202,7 @@ def _byte_size_if_exists(path: Optional[str]) -> int:
 def _recover_ask_result(ask_id: str) -> Optional[dict]:
     """Restart re-attach for the `ask` tool: if the target turn already
     completed and its result was persisted to ask_status_store (shared disk),
-    return it so the runner's URLError-retry resolves without re-POSTing.
+    return it so the runner's connection-retry resolves without re-POSTing.
     Mirrors `_recover_delegate_result`.
     """
     try:
@@ -1274,7 +1268,6 @@ def _resolve_tool_cwd(args: dict[str, Any], inherited_cwd: str) -> str:
 def _build_create_worker_tool(
     *,
     app_session_id: str,
-    backend_url: str,
     internal_token: str,
     model: Optional[str],
     cwd: str,
@@ -1282,7 +1275,6 @@ def _build_create_worker_tool(
     def _post_create_worker_sync(payload: dict) -> dict:
         return _post_loopback_sync(
             payload,
-            backend_url=backend_url,
             internal_token=internal_token,
             url_path="/api/internal/create-worker",
             timeout=_DELEGATE_HTTP_TIMEOUT,
@@ -1331,13 +1323,11 @@ def _build_create_worker_tool(
 def _build_ensure_named_worker_tool(
     *,
     cwd: str,
-    backend_url: str,
     internal_token: str,
 ):
     def _post_ensure_sync(payload: dict) -> dict:
         return _post_loopback_sync(
             payload,
-            backend_url=backend_url,
             internal_token=internal_token,
             url_path="/api/internal/workers/provision",
             timeout=_DELEGATE_HTTP_TIMEOUT,
@@ -1408,13 +1398,11 @@ def _build_ensure_named_worker_tool(
 def _build_mssg_tool(
     *,
     sender_session_id: str,
-    backend_url: str,
     internal_token: str,
 ):
     def _post_mssg_sync(payload: dict) -> dict:
         return _post_loopback_sync(
             payload,
-            backend_url=backend_url,
             internal_token=internal_token,
             url_path="/api/internal/mssg",
             timeout=30,
@@ -1608,13 +1596,11 @@ def _build_delegate_task_tool(
     sender_session_id: str,
     cwd: str,
     model: Optional[str],
-    backend_url: str,
     internal_token: str,
 ):
     def _post_delegate_task_sync(payload: dict) -> dict:
         return _post_loopback_sync(
             payload,
-            backend_url=backend_url,
             internal_token=internal_token,
             url_path="/api/internal/delegate-task",
             timeout=_DELEGATE_HTTP_TIMEOUT,  # approval modes can block long
@@ -1671,7 +1657,6 @@ _CAPABILITY_HTTP_TIMEOUT = 30.0
 def _build_capability_tools(
     *,
     app_session_id: str,
-    backend_url: str,
     internal_token: str,
 ):
     """Better Agent runtime-capability management. Lets the model scope its own
@@ -1683,7 +1668,6 @@ def _build_capability_tools(
     def _post(payload: dict) -> dict:
         return _post_loopback_sync(
             payload,
-            backend_url=backend_url,
             internal_token=internal_token,
             url_path=url_path,
             timeout=_CAPABILITY_HTTP_TIMEOUT,
@@ -1748,13 +1732,11 @@ def _build_create_session_tool(
     sender_session_id: str,
     cwd: str,
     model: Optional[str],
-    backend_url: str,
     internal_token: str,
 ):
     def _post_create_session_sync(payload: dict) -> dict:
         return _post_loopback_sync(
             payload,
-            backend_url=backend_url,
             internal_token=internal_token,
             url_path="/api/internal/create-session",
             timeout=30,
@@ -1800,13 +1782,11 @@ def _build_create_sub_session_tool(
     sender_session_id: str,
     cwd: str,
     model: Optional[str],
-    backend_url: str,
     internal_token: str,
 ):
     def _post_create_sub_session_sync(payload: dict) -> dict:
         return _post_loopback_sync(
             payload,
-            backend_url=backend_url,
             internal_token=internal_token,
             url_path="/api/internal/create-sub-session",
             timeout=30,
@@ -1846,7 +1826,6 @@ def _build_ask_tool(
     app_session_id: str,
     model: Optional[str],
     cwd: str,
-    backend_url: str,
     internal_token: str,
 ):
     @tool("ask", _ASK_DESCRIPTION, _ASK_INPUT_SCHEMA)
@@ -1925,7 +1904,6 @@ def _build_ask_tool(
             def _post_fork_sync() -> dict:
                 return _post_loopback_sync(
                     payload,
-                    backend_url=backend_url,
                     internal_token=internal_token,
                     url_path="/api/internal/ask-fork",
                     timeout=_DELEGATE_HTTP_TIMEOUT,
@@ -1961,7 +1939,6 @@ def _build_ask_tool(
         def _post_ask_sync() -> dict:
             return _post_loopback_sync(
                 payload,
-                backend_url=backend_url,
                 internal_token=internal_token,
                 url_path="/api/internal/ask",
                 timeout=30 if mode == ASK_MODE_CONTINUE_AND_EXPECT_MSSG_BACK_ASYNC else _DELEGATE_HTTP_TIMEOUT,
@@ -1986,7 +1963,6 @@ def _build_ask_tool(
 def _build_open_file_panel_tool(
     *,
     app_session_id: str,
-    backend_url: str,
     internal_token: str,
 ):
     """Build an in-process SDK MCP tool that opens a file in the user's
@@ -1996,7 +1972,6 @@ def _build_open_file_panel_tool(
     def _post_open_file_panel_sync(payload: dict) -> dict:
         return _post_loopback_sync(
             payload,
-            backend_url=backend_url,
             internal_token=internal_token,
             url_path="/api/internal/open-file-panel",
             timeout=_OPEN_FILE_PANEL_HTTP_TIMEOUT,
@@ -2040,14 +2015,12 @@ def _build_open_file_panel_tool(
 def _build_request_user_input_tool(
     *,
     app_session_id: str,
-    backend_url: str,
     internal_token: str,
     run_id: str,
 ):
     def _post_request_user_input_sync(payload: dict) -> dict:
         return _post_loopback_sync(
             payload,
-            backend_url=backend_url,
             internal_token=internal_token,
             url_path="/api/internal/user-input/request",
             timeout=_DELEGATE_HTTP_TIMEOUT,
@@ -2082,13 +2055,11 @@ def _build_request_user_input_tool(
 def _build_start_file_discussion_tool(
     *,
     app_session_id: str,
-    backend_url: str,
     internal_token: str,
 ):
     def _post_start_file_discussion_sync(payload: dict) -> dict:
         return _post_loopback_sync(
             payload,
-            backend_url=backend_url,
             internal_token=internal_token,
             url_path="/api/internal/file-editor/start-discussion",
             timeout=_OPEN_FILE_PANEL_HTTP_TIMEOUT,
@@ -2156,7 +2127,7 @@ _PROPOSE_SESSIONS_DESCRIPTION = (
 
 
 def _build_propose_sessions_tool(
-    *, app_session_id: str, backend_url: str, internal_token: str,
+    *, app_session_id: str, internal_token: str,
 ):
     """The `propose_sessions` MCP tool — stamps the picker on the calling
     session's in-flight assistant message."""
@@ -2176,7 +2147,6 @@ def _build_propose_sessions_tool(
             result = await asyncio.to_thread(
                 _post_loopback_sync,
                 payload,
-                backend_url=backend_url,
                 internal_token=internal_token,
                 url_path="/api/internal/ask-propose",
                 timeout=10.0,
@@ -3019,7 +2989,6 @@ async def _run(run_dir: Path, inputs: dict) -> int:
     # Build MCP server config
     mcp_servers: dict = {}
     app_session_id = inputs.get("app_session_id")
-    backend_url = inputs.get("backend_url")
     internal_token = inputs.get("internal_token")
     disabled_builtin_tools = _disabled_builtin_tools(inputs)
     # Bare (TestApe-isolated) sessions are capability-stripped and also
@@ -3034,12 +3003,11 @@ async def _run(run_dir: Path, inputs: dict) -> int:
         extension_store.extension_id_for_role('team-orchestration')
     )
 
-    if mssg_sender_session_id and backend_url and internal_token:
+    if mssg_sender_session_id and internal_token:
         communicate_tools = []
         if "mssg" not in disabled_builtin_tools:
             communicate_tools.append(_build_mssg_tool(
                 sender_session_id=str(mssg_sender_session_id),
-                backend_url=backend_url,
                 internal_token=internal_token,
             ))
         if "ask" not in disabled_builtin_tools:
@@ -3048,13 +3016,11 @@ async def _run(run_dir: Path, inputs: dict) -> int:
                 app_session_id=app_session_id or "",
                 model=model,
                 cwd=cwd,
-                backend_url=backend_url,
                 internal_token=internal_token,
             ))
         if "ensure_named_worker" not in disabled_builtin_tools:
             communicate_tools.append(_build_ensure_named_worker_tool(
                 cwd=cwd,
-                backend_url=backend_url,
                 internal_token=internal_token,
             ))
         if "list_available_provider_models" not in disabled_builtin_tools:
@@ -3087,14 +3053,13 @@ async def _run(run_dir: Path, inputs: dict) -> int:
     # just team. delegate (detached off-topic handoff) + create_session (spin
     # up a fresh standalone session to hand work off to). Gated only on loopback
     # credentials; the sender is the calling session itself.
-    if app_session_id and backend_url and internal_token:
+    if app_session_id and internal_token:
         handoff_tools = []
         if "delegate_task" not in disabled_builtin_tools:
             handoff_tools.append(_build_delegate_task_tool(
                 sender_session_id=str(app_session_id),
                 cwd=cwd,
                 model=model,
-                backend_url=backend_url,
                 internal_token=internal_token,
             ))
         if "create_session" not in disabled_builtin_tools:
@@ -3102,7 +3067,6 @@ async def _run(run_dir: Path, inputs: dict) -> int:
                 sender_session_id=str(app_session_id),
                 cwd=cwd,
                 model=model,
-                backend_url=backend_url,
                 internal_token=internal_token,
             ))
         if "create_sub_session" not in disabled_builtin_tools:
@@ -3110,7 +3074,6 @@ async def _run(run_dir: Path, inputs: dict) -> int:
                 sender_session_id=str(app_session_id),
                 cwd=cwd,
                 model=model,
-                backend_url=backend_url,
                 internal_token=internal_token,
             ))
         if handoff_tools:
@@ -3124,19 +3087,18 @@ async def _run(run_dir: Path, inputs: dict) -> int:
     # Capability management — let the model scope its own session (load/release/
     # list scoped capabilities). Internal, non-bare sessions only; bare sessions
     # are deliberately capability-stripped.
-    if app_session_id and backend_url and internal_token and not _bare:
+    if app_session_id and internal_token and not _bare:
         mcp_servers["capabilities"] = create_sdk_mcp_server(
             name="capabilities",
             version="1.0.0",
             tools=_build_capability_tools(
                 app_session_id=str(app_session_id),
-                backend_url=backend_url,
                 internal_token=internal_token,
             ),
         )
 
     if mode == "manager" and team_orchestration_enabled:
-        if not app_session_id or not backend_url or not internal_token:
+        if not app_session_id or not internal_token:
             _fail(
                 run_dir,
                 t("runner.manager_mode_missing_fields"),
@@ -3147,7 +3109,6 @@ async def _run(run_dir: Path, inputs: dict) -> int:
         # delegation surface; its fork engine lives behind /api/internal/ask-fork.
         create_worker_tool = _build_create_worker_tool(
             app_session_id=app_session_id,
-            backend_url=backend_url,
             internal_token=internal_token,
             model=model,
             cwd=cwd,
@@ -3174,20 +3135,16 @@ async def _run(run_dir: Path, inputs: dict) -> int:
     _user_facing_extras = open_file_panel_enabled and not _bare
     _cred_enabled = open_file_panel_enabled or _bare
 
-    if (_user_facing_extras or _cred_enabled) and not backend_url:
-        backend_url = get_env("BETTER_CLAUDE_BACKEND_URL", "http://localhost:8000")
     if _user_facing_extras:
         if not internal_token:
             _fail(run_dir, "open-file-panel requires internal_token but none provided")
             return 1
         ofp_tool = _build_open_file_panel_tool(
             app_session_id=app_session_id or "",
-            backend_url=backend_url,
             internal_token=internal_token,
         )
         request_user_input_tool = _build_request_user_input_tool(
             app_session_id=app_session_id or "",
-            backend_url=backend_url,
             internal_token=internal_token,
             run_id=run_dir.name,
         )
@@ -3195,7 +3152,6 @@ async def _run(run_dir: Path, inputs: dict) -> int:
         if file_editing_mode:
             tools.append(_build_start_file_discussion_tool(
                 app_session_id=app_session_id or "",
-                backend_url=backend_url,
                 internal_token=internal_token,
             ))
         ofp_server = create_sdk_mcp_server(
@@ -3303,7 +3259,6 @@ async def _run(run_dir: Path, inputs: dict) -> int:
     # never ask, so no callback (and no async-iterable prompt constraint).
     interactive_permissions = (
         permission_mode in ("default", "acceptEdits", "plan", "auto")
-        and bool(backend_url)
         and bool(internal_token)
         and bool(app_session_id)
     )
@@ -3311,7 +3266,6 @@ async def _run(run_dir: Path, inputs: dict) -> int:
     if interactive_permissions:
         _approval_run_id = run_dir.name
         _approval_cancel_path = run_dir / "cancel"
-        _approval_backend_url = backend_url
         _approval_token = internal_token
         _approval_session = app_session_id
 
@@ -3328,7 +3282,6 @@ async def _run(run_dir: Path, inputs: dict) -> int:
             # backend timeout. The losing task is cancelled.
             approval_task = asyncio.ensure_future(asyncio.to_thread(
                 request_tool_approval,
-                backend_url=_approval_backend_url,
                 internal_token=_approval_token,
                 app_session_id=_approval_session,
                 run_id=_approval_run_id,

@@ -201,13 +201,13 @@ async def test_better_agent_runner_lock_ops_handler_defaults_provider_id() -> No
         registry = LockRegistry()
         handlers = runner_better_agent._build_loopback_tool_handlers(
             {
-                "backend_url": "http://127.0.0.1:1",
                 "internal_token": "token",
                 "app_session_id": "session-a",
             },
             cwd="/repo",
             model="model-a",
             lock_registry=registry,
+            run_id="run-lock-1",
         )
         file_path = Path("/tmp/better-agent-handler-lock-test.txt")
         single_text = await handlers["lock_ops"]({
@@ -218,7 +218,6 @@ async def test_better_agent_runner_lock_ops_handler_defaults_provider_id() -> No
         })
         provided_provider_handlers = runner_better_agent._build_loopback_tool_handlers(
             {
-                "backend_url": "http://127.0.0.1:1",
                 "internal_token": "token",
                 "app_session_id": "session-a",
                 "provider_id": "provider-a",
@@ -226,6 +225,7 @@ async def test_better_agent_runner_lock_ops_handler_defaults_provider_id() -> No
             cwd="/repo",
             model="model-a",
             lock_registry=LockRegistry(),
+            run_id="run-lock-2",
         )
         provider_text = await provided_provider_handlers["lock_ops"]({
             "arguments": {"key": "git_ops:/repo"},
@@ -335,7 +335,6 @@ async def test_runner_write_gate_validates_backend_liveness() -> None:
     try:
         runner_better_agent._post_loopback_sync = fake_not_locked
         err = await runner_better_agent._validate_backend_file_lock(
-            backend_url="http://backend",
             internal_token="tok",
             app_session_id="session-a",
             cwd=Path("/tmp"),
@@ -374,7 +373,6 @@ async def test_runner_write_gate_reattaches_same_owner_lock() -> None:
     try:
         runner_better_agent._post_loopback_sync = fake_reattach
         err = await runner_better_agent._validate_backend_file_lock(
-            backend_url="http://backend",
             internal_token="tok",
             app_session_id="session-a",
             cwd=Path("/tmp"),

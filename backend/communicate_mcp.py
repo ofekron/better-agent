@@ -4,12 +4,15 @@ import json
 import os
 import sys
 import time
-import urllib.error
-import urllib.request
 import uuid
 from typing import Any
 
 from env_compat import get_env, require_env
+from loopback_http import (
+    LoopbackHTTPStatusError,
+    loopback_http_error_message,
+    request_internal,
+)
 from mcp.server.fastmcp import FastMCP
 
 from communication_modes import (
@@ -81,19 +84,13 @@ def _disabled_builtin_tools() -> set[str]:
 
 
 def _post_json(endpoint: str, payload: dict, timeout: float) -> dict[str, Any]:
-    backend_url = _env_required("BETTER_CLAUDE_BACKEND_URL").rstrip("/")
-    internal_token = _env_required("BETTER_CLAUDE_INTERNAL_TOKEN")
-    req = urllib.request.Request(
-        backend_url + endpoint,
-        data=json.dumps(payload).encode("utf-8"),
-        method="POST",
-        headers={
-            "Content-Type": "application/json",
-            "X-Internal-Token": internal_token,
-        },
+    raw = request_internal(
+        "POST",
+        endpoint,
+        json.dumps(payload).encode("utf-8"),
+        internal_token=_env_required("BETTER_CLAUDE_INTERNAL_TOKEN"),
+        timeout=timeout,
     )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        raw = resp.read()
     return json.loads(raw.decode("utf-8"))
 
 
@@ -135,8 +132,8 @@ def _safe_result(fn):
     def wrapper(*a, **kw) -> dict[str, Any]:
         try:
             return fn(*a, **kw)
-        except urllib.error.HTTPError as exc:
-            return {"success": False, "error": f"HTTP {exc.code}: {exc.reason}"}
+        except LoopbackHTTPStatusError as exc:
+            return {"success": False, "error": f"HTTP {exc.code}: {loopback_http_error_message(exc)}"}
         except Exception as exc:  # noqa: BLE001 — surface to the model
             return {"success": False, "error": str(exc)}
     return wrapper

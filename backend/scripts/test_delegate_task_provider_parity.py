@@ -9,7 +9,6 @@ from pathlib import Path
 import _test_home
 
 _test_home.isolate("bc-test-delegate-task-provider-parity-")
-os.environ["BETTER_CLAUDE_BACKEND_URL"] = "http://backend"
 os.environ["BETTER_CLAUDE_INTERNAL_TOKEN"] = "tok"
 os.environ["BETTER_CLAUDE_MSSG_SENDER_SESSION_ID"] = "sender-1"
 os.environ["BETTER_CLAUDE_CWD"] = "/tmp/project"
@@ -31,14 +30,12 @@ def test_delegate_task_schema_is_shared_by_runner_providers() -> None:
         sender_session_id="sender-1",
         cwd="/tmp/project",
         model="model-x",
-        backend_url="http://backend",
         internal_token="tok",
     )
     codex_tool = runner_codex._build_delegate_task_dynamic_tool()
     openai_tool = next(
         schema for schema in runner_better_agent._tool_schemas_for_run(
             inputs={
-                "backend_url": "http://backend",
                 "internal_token": "tok",
                 "app_session_id": "sender-1",
             },
@@ -64,12 +61,22 @@ def test_delegate_task_schema_is_shared_by_runner_providers() -> None:
         "reasoning_effort",
         "sub_session",
         "cwd",
+        "search_cwd",
+        "search_folder",
+        "search_tags",
+        "folder_id",
+        "tag_ids",
     }
     assert properties["target_session_id"]["type"] == "string"
     assert properties["provider_id"]["type"] == "string"
     assert properties["model"]["type"] == "string"
     assert properties["reasoning_effort"]["type"] == "string"
     assert properties["cwd"]["type"] == "string"
+    assert properties["search_cwd"]["type"] == "string"
+    assert properties["search_folder"]["type"] == "string"
+    assert properties["search_tags"]["type"] == "array"
+    assert properties["folder_id"]["type"] == "string"
+    assert properties["tag_ids"]["type"] == "array"
 
 
 def test_claude_delegate_task_posts_shared_payload() -> None:
@@ -77,9 +84,9 @@ def test_claude_delegate_task_posts_shared_payload() -> None:
     original_post = runner._post_loopback_sync
     original_success = runner._tool_success_result
 
-    def fake_post(payload, *, backend_url, internal_token, url_path,
+    def fake_post(payload, *, internal_token, url_path,
                   timeout, non_json_t_key, log_prefix, backoff_cap, recover=None):
-        captured.append((url_path, payload, timeout))
+        captured.append((url_path, payload, timeout, internal_token))
         return {"success": True, "target_session_id": "target-1"}
 
     runner._post_loopback_sync = fake_post  # type: ignore[assignment]
@@ -89,7 +96,6 @@ def test_claude_delegate_task_posts_shared_payload() -> None:
             sender_session_id="sender-1",
             cwd="/tmp/project",
             model="model-x",
-            backend_url="http://backend",
             internal_token="tok",
         )
         result = asyncio.run(tool.handler({
@@ -105,9 +111,10 @@ def test_claude_delegate_task_posts_shared_payload() -> None:
         runner._tool_success_result = original_success  # type: ignore[assignment]
 
     assert result["success"] is True
-    endpoint, payload, timeout = captured[0]
+    endpoint, payload, timeout, token = captured[0]
     assert endpoint == "/api/internal/delegate-task"
     assert timeout == runner._DELEGATE_HTTP_TIMEOUT
+    assert token == "tok"
     assert payload == {
         "sender_session_id": "sender-1",
         "task": "do work",
@@ -117,6 +124,8 @@ def test_claude_delegate_task_posts_shared_payload() -> None:
         "model": "model-1",
         "reasoning_effort": "high",
         "sub_session": False,
+        "folder_id": None,
+        "tag_ids": [],
     }
 
 
@@ -124,7 +133,7 @@ def test_codex_delegate_task_posts_shared_payload() -> None:
     captured: list[tuple[str, dict, float]] = []
     original_post = runner_codex._post_loopback_sync
 
-    def fake_post(payload: dict, *, backend_url: str, internal_token: str, **kwargs) -> dict:
+    def fake_post(payload: dict, *, internal_token: str, **kwargs) -> dict:
         captured.append((kwargs["url_path"], payload, kwargs["timeout_s"]))
         return {"success": True, "target_session_id": "target-1"}
 
@@ -134,7 +143,6 @@ def test_codex_delegate_task_posts_shared_payload() -> None:
             sender_session_id="sender-1",
             cwd="/tmp/project",
             model="model-x",
-            backend_url="http://backend",
             internal_token="tok",
         )
         result = asyncio.run(handler({"arguments": {
@@ -161,13 +169,13 @@ def test_codex_delegate_task_posts_shared_payload() -> None:
 
 def test_gemini_delegate_task_posts_shared_payload() -> None:
     captured: list[tuple[str, dict, float]] = []
-    original_post = communicate_mcp._post_json
+    original_post = communicate_mcp._post_mcp_job
 
-    def fake_post(endpoint: str, payload: dict, timeout: float) -> dict:
+    def fake_post(endpoint: str, operation: str, payload: dict, timeout: float) -> dict:
         captured.append((endpoint, payload, timeout))
         return {"success": True, "target_session_id": "target-1"}
 
-    communicate_mcp._post_json = fake_post  # type: ignore[assignment]
+    communicate_mcp._post_mcp_job = fake_post  # type: ignore[assignment]
     try:
         result = communicate_mcp.delegate_task_response(
             "do work",
@@ -178,7 +186,7 @@ def test_gemini_delegate_task_posts_shared_payload() -> None:
             sub_session=False,
         )
     finally:
-        communicate_mcp._post_json = original_post  # type: ignore[assignment]
+        communicate_mcp._post_mcp_job = original_post  # type: ignore[assignment]
 
     assert result["success"] is True
     endpoint, payload, timeout = captured[0]
@@ -195,7 +203,7 @@ def test_openai_delegate_task_posts_shared_payload() -> None:
     captured: list[tuple[str, dict, float]] = []
     original_post = runner_better_agent._post_loopback_sync
 
-    def fake_post(payload: dict, *, backend_url: str, internal_token: str, **kwargs) -> dict:
+    def fake_post(payload: dict, *, internal_token: str, **kwargs) -> dict:
         captured.append((kwargs["url_path"], payload, kwargs["timeout_s"]))
         return {"success": True, "target_session_id": "target-1"}
 
@@ -203,13 +211,13 @@ def test_openai_delegate_task_posts_shared_payload() -> None:
     try:
         handlers = runner_better_agent._build_loopback_tool_handlers(
             {
-                "backend_url": "http://backend",
                 "internal_token": "tok",
                 "app_session_id": "sender-1",
             },
             cwd="/tmp/project",
             model="model-x",
             lock_registry=runner_better_agent.LockRegistry(),
+            run_id="run-parity-1",
         )
         result = asyncio.run(handlers["delegate_task"]({"arguments": {
             "task": "do work",

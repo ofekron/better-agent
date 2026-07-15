@@ -33,7 +33,6 @@ import asyncio
 import base64
 import contextlib
 import copy
-import http.client
 import json
 import logging
 import os
@@ -42,9 +41,7 @@ import subprocess
 import sys
 import time
 import uuid
-import urllib.error
 import urllib.parse
-import urllib.request
 from pathlib import Path
 from typing import Any, AsyncIterator, Awaitable, Callable, Optional
 
@@ -71,7 +68,13 @@ from orchestration_tool_schemas import (
 )
 from capability_contexts import prepend_capability_context, render_capability_context
 from json_store import write_json as _write_json
-from loopback_http import raise_loopback_http_error
+from loopback_http import (
+    LOOPBACK_RETRYABLE_ERRORS,
+    LoopbackHTTPStatusError,
+    loopback_http_error_message,
+    raise_loopback_http_error,
+    request_internal,
+)
 from stream_limits import SUBPROCESS_LINE_LIMIT_BYTES
 from tool_approval_client import describe_tool_call, request_tool_approval
 from user_input_identity import logical_request_id as user_input_logical_request_id
@@ -1490,7 +1493,6 @@ def _lock_result_is_error(result: dict) -> bool:
 def _post_loopback_sync(
     payload: dict,
     *,
-    backend_url: str,
     internal_token: str,
     url_path: str,
     timeout_s: float,
@@ -1502,18 +1504,14 @@ def _post_loopback_sync(
     tried_live_token_after_forbidden = False
 
     def _request_once(token: str) -> dict:
-        req = urllib.request.Request(
-            backend_url.rstrip("/") + url_path,
-            data=body,
-            method="POST",
-            headers={
-                "Content-Type": "application/json",
-                "X-Internal-Token": token,
-            },
-        )
         remaining = max(1.0, deadline - time.monotonic())
-        with urllib.request.urlopen(req, timeout=remaining) as resp:
-            raw = resp.read()
+        raw = request_internal(
+            "POST",
+            url_path,
+            body,
+            internal_token=token,
+            timeout=remaining,
+        )
         try:
             return json.loads(raw.decode("utf-8"))
         except Exception as e:
@@ -1522,7 +1520,7 @@ def _post_loopback_sync(
     while True:
         try:
             return _request_once(internal_token)
-        except urllib.error.HTTPError as e:
+        except LoopbackHTTPStatusError as e:
             live_token = _load_internal_token()
             if (
                 e.code == 403
@@ -1533,17 +1531,12 @@ def _post_loopback_sync(
                 tried_live_token_after_forbidden = True
                 try:
                     return _request_once(live_token)
-                except urllib.error.HTTPError:
+                except LoopbackHTTPStatusError:
                     raise e
             if e.code != 403:
                 raise_loopback_http_error(e)
             raise
-        except (
-            urllib.error.URLError,
-            http.client.RemoteDisconnected,
-            ConnectionError,
-            TimeoutError,
-        ) as e:
+        except LOOPBACK_RETRYABLE_ERRORS as e:
             recovered = recover() if recover is not None else None
             if recovered is not None:
                 return recovered
@@ -1631,7 +1624,6 @@ def _args(params: dict) -> dict:
 def _build_loopback_tool_handlers(
     inputs: dict, *, cwd: str, model: str, lock_registry: LockRegistry, run_id: str,
 ) -> dict[str, DynamicToolHandler]:
-    backend_url = inputs.get("backend_url") or ""
     internal_token = inputs.get("internal_token") or ""
     app_session_id = str(inputs.get("app_session_id") or "").strip()
     # Metadata stamped on loopback calls for ownership/audit. Some tools
@@ -1639,7 +1631,7 @@ def _build_loopback_tool_handlers(
     # resolve it once from the run inputs rather than referencing an
     # unbound local inside individual handlers.
     provider_id = str(inputs.get("provider_id") or "").strip()
-    if not backend_url or not internal_token or not app_session_id:
+    if not internal_token or not app_session_id:
         return {}
     handlers: dict[str, DynamicToolHandler] = {}
     disabled = _disabled_builtin_tools(inputs)
@@ -1674,7 +1666,6 @@ def _build_loopback_tool_handlers(
                     "folder_id": args.get("folder_id"),
                     "tag_ids": args.get("tag_ids") or [],
                 },
-                backend_url=backend_url,
                 internal_token=internal_token,
                 url_path="/api/internal/create-worker",
                 timeout_s=DELEGATE_HTTP_TIMEOUT_S,
@@ -1724,7 +1715,6 @@ def _build_loopback_tool_handlers(
             result = await asyncio.to_thread(
                 _post_loopback_sync,
                 {"cwd": worker_cwd, "workers": [spec]},
-                backend_url=backend_url,
                 internal_token=internal_token,
                 url_path="/api/internal/workers/provision",
                 timeout_s=DELEGATE_HTTP_TIMEOUT_S,
@@ -1772,7 +1762,6 @@ def _build_loopback_tool_handlers(
                     "collapse_key": str(args.get("collapse_key") or "").strip(),
                     "collapse_policy": str(args.get("collapse_policy") or "").strip(),
                 },
-                backend_url=backend_url,
                 internal_token=internal_token,
                 url_path="/api/internal/mssg",
                 timeout_s=30.0,
@@ -1847,7 +1836,6 @@ def _build_loopback_tool_handlers(
             result = await asyncio.to_thread(
                 _post_loopback_sync,
                 payload,
-                backend_url=backend_url,
                 internal_token=internal_token,
                 url_path=url_path,
                 timeout_s=30.0 if mode == ASK_MODE_CONTINUE_AND_EXPECT_MSSG_BACK_ASYNC else DELEGATE_HTTP_TIMEOUT_S,
@@ -1885,7 +1873,6 @@ def _build_loopback_tool_handlers(
                     "search_folder": args.get("search_folder"),
                     "search_tags": args.get("search_tags"),
                 },
-                backend_url=backend_url,
                 internal_token=internal_token,
                 url_path="/api/internal/delegate-task",
                 timeout_s=DELEGATE_HTTP_TIMEOUT_S,
@@ -1919,7 +1906,6 @@ def _build_loopback_tool_handlers(
                     "folder_id": args.get("folder_id"),
                     "tag_ids": args.get("tag_ids") or [],
                 },
-                backend_url=backend_url,
                 internal_token=internal_token,
                 url_path="/api/internal/create-session",
                 timeout_s=30.0,
@@ -1949,7 +1935,6 @@ def _build_loopback_tool_handlers(
                     "folder_id": args.get("folder_id"),
                     "tag_ids": args.get("tag_ids") or [],
                 },
-                backend_url=backend_url,
                 internal_token=internal_token,
                 url_path="/api/internal/create-sub-session",
                 timeout_s=30.0,
@@ -1978,7 +1963,6 @@ def _build_loopback_tool_handlers(
                     "selected_start": args.get("selected_start"),
                     "selected_end": args.get("selected_end"),
                 },
-                backend_url=backend_url,
                 internal_token=internal_token,
                 url_path="/api/internal/open-file-panel",
                 timeout_s=_OPEN_FILE_PANEL_HTTP_TIMEOUT_S,
@@ -2003,7 +1987,6 @@ def _build_loopback_tool_handlers(
                     "timeout_seconds": args.get("timeout_seconds"),
                     "logical_request_id": user_input_logical_request_id("better-agent", run_id, questions),
                 },
-                backend_url=backend_url,
                 internal_token=internal_token,
                 url_path="/api/internal/user-input/request",
                 timeout_s=DELEGATE_HTTP_TIMEOUT_S,
@@ -2029,7 +2012,6 @@ def _build_loopback_tool_handlers(
                     "line": line,
                     "title": args.get("title") or "",
                 },
-                backend_url=backend_url,
                 internal_token=internal_token,
                 url_path="/api/internal/file-editor/start-discussion",
                 timeout_s=_OPEN_FILE_PANEL_HTTP_TIMEOUT_S,
@@ -2064,7 +2046,6 @@ def _build_loopback_tool_handlers(
                         "source": "runner_better_agent.lock_ops",
                     },
                 },
-                backend_url=backend_url,
                 internal_token=internal_token,
                 url_path="/api/internal/coordination/lock-ops",
                 timeout_s=70.0,
@@ -2202,12 +2183,12 @@ async def _run(run_dir: Path, inputs: dict) -> int:
     app_session_id = inputs.get("app_session_id") or _new_uuid()
     permission = inputs.get("permission")
     bypass = _is_bypass(permission)
-    backend_url = inputs.get("backend_url") or ""
     internal_token = inputs.get("internal_token") or ""
-    # Interactive approval needs the backend HTTP channel. Without it the gate
-    # can't surface a prompt — fail closed with a clear message rather than a
-    # user-blaming "denied" (mirrors runner.py's interactive_permissions guard).
-    interactive = bool(backend_url) and bool(internal_token) and bool(app_session_id)
+    # Interactive approval needs the internal backend channel. Without it the
+    # gate can't surface a prompt — fail closed with a clear message rather
+    # than a user-blaming "denied" (mirrors runner.py's interactive_permissions
+    # guard).
+    interactive = bool(internal_token) and bool(app_session_id)
     # Capability-management tools ride the same backend channel and are stripped
     # from bare (TestApe-isolated) sessions, matching runner.py / the stdio
     # capabilities MCP injected for the CLI providers.
@@ -2379,7 +2360,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
             # order. History is persisted once after the whole batch balances.
             batch_results, batch_cancelled = await _dispatch_tool_batch(
                 tool_calls, cwd, app_session_id, run_dir, bypass,
-                interactive, backend_url, internal_token, emitter,
+                interactive, internal_token, emitter,
                 loopback_handlers, lock_registry, coordination_enabled,
                 extension_mcp_handlers,
             )
@@ -2484,7 +2465,6 @@ async def _one_round(
 
 async def _validate_backend_file_lock(
     *,
-    backend_url: str,
     internal_token: str,
     app_session_id: str,
     cwd: Path,
@@ -2492,13 +2472,12 @@ async def _validate_backend_file_lock(
     token: str,
     lock_registry: LockRegistry,
 ) -> str | None:
-    if not backend_url or not internal_token or not app_session_id:
+    if not internal_token or not app_session_id:
         return None
 
     def _call(payload: dict, timeout_s: float = 10.0) -> dict:
         return _post_loopback_sync(
             payload,
-            backend_url=backend_url,
             internal_token=internal_token,
             url_path="/api/internal/coordination/lock-ops",
             timeout_s=timeout_s,
@@ -2540,7 +2519,7 @@ async def _validate_backend_file_lock(
 
 async def _dispatch_tool(
     call: dict, cwd: Path, app_session_id: str, run_dir: Path,
-    bypass: bool, interactive: bool, backend_url: str, internal_token: str,
+    bypass: bool, interactive: bool, internal_token: str,
     emitter: EventEmitter, loopback_handlers: dict[str, DynamicToolHandler],
     lock_registry: LockRegistry, enforce_file_locks: bool,
     extension_mcp_handlers: Optional[dict[str, dict[str, Any]]] = None,
@@ -2558,7 +2537,7 @@ async def _dispatch_tool(
     # gate. They POST to the core capabilities endpoint over the loopback.
     if name in _CAPABILITY_TOOL_NAMES:
         return await _dispatch_capability_tool(
-            name=name, args=args, backend_url=backend_url,
+            name=name, args=args,
             internal_token=internal_token, app_session_id=app_session_id,
             interactive=interactive, emitter=emitter, tool_call_id=call["id"],
         )
@@ -2604,9 +2583,8 @@ async def _dispatch_tool(
         lock_error = lock_registry.error_for_write(target_path)
         key = f"file_edit:{target_path}"
         token = lock_registry.token_for_key(key)
-        if lock_error and backend_url and internal_token and app_session_id:
+        if lock_error and internal_token and app_session_id:
             backend_lock_error = await _validate_backend_file_lock(
-                backend_url=backend_url,
                 internal_token=internal_token,
                 app_session_id=app_session_id,
                 cwd=cwd,
@@ -2620,7 +2598,6 @@ async def _dispatch_tool(
             emitter.emit_tool_result(call["id"], lock_error)
             return lock_error
         backend_lock_error = await _validate_backend_file_lock(
-            backend_url=backend_url,
             internal_token=internal_token,
             app_session_id=app_session_id,
             cwd=cwd,
@@ -2643,7 +2620,7 @@ async def _dispatch_tool(
         verdict = await _request_approval(
             app_session_id=app_session_id, run_id=run_dir.name,
             tool_name=name, args=args,
-            backend_url=backend_url, internal_token=internal_token,
+            internal_token=internal_token,
             cancel_path=run_dir / "cancel",
         )
         if verdict == "cancelled":
@@ -2673,7 +2650,7 @@ async def _dispatch_tool(
 
 async def _dispatch_tool_batch(
     tool_calls: list[dict], cwd: Path, app_session_id: str, run_dir: Path,
-    bypass: bool, interactive: bool, backend_url: str, internal_token: str,
+    bypass: bool, interactive: bool, internal_token: str,
     emitter: EventEmitter, loopback_handlers: dict[str, DynamicToolHandler],
     lock_registry: LockRegistry, enforce_file_locks: bool,
     extension_mcp_handlers: Optional[dict[str, dict[str, Any]]] = None,
@@ -2747,7 +2724,7 @@ async def _dispatch_tool_batch(
             else:
                 task = asyncio.create_task(_dispatch_tool(
                     call, cwd, app_session_id, run_dir, bypass,
-                    interactive, backend_url, internal_token, emitter,
+                    interactive, internal_token, emitter,
                     loopback_handlers, lock_registry, enforce_file_locks,
                     extension_mcp_handlers,
                 ))
@@ -2768,28 +2745,29 @@ async def _wait_cancel(cancel_path: Path) -> bool:
 
 
 def _capabilities_endpoint_post(
-    *, backend_url: str, internal_token: str, app_session_id: str, payload: dict,
+    *, internal_token: str, app_session_id: str, payload: dict,
 ) -> str:
     """POST a capability action (list/load/release) to the core endpoint and
     return a JSON-string result. Core owns the active-capability write; this is
     the authorized trigger. Errors are returned as text, never raised, so a
     failed call doesn't abort the turn."""
-    url = backend_url.rstrip("/") + f"/api/internal/sessions/{app_session_id}/capabilities"
-    headers = {
-        "Content-Type": "application/json",
-        "X-Internal-Token": internal_token,
-    }
     try:
-        resp = httpx.post(url, json=payload, headers=headers, timeout=30.0)
-        if resp.status_code >= 400:
-            return f"Error: HTTP {resp.status_code}: {resp.text[:500]}"
-        return resp.text or "{}"
+        raw = request_internal(
+            "POST",
+            f"/api/internal/sessions/{app_session_id}/capabilities",
+            json.dumps(payload).encode("utf-8"),
+            internal_token=internal_token,
+            timeout=30.0,
+        )
+        return raw.decode("utf-8") or "{}"
+    except LoopbackHTTPStatusError as e:
+        return f"Error: HTTP {e.code}: {loopback_http_error_message(e)[:500]}"
     except Exception as e:  # noqa: BLE001 — surface to the model
         return f"Error: {type(e).__name__}: {e}"
 
 
 async def _dispatch_capability_tool(
-    *, name: str, args: dict, backend_url: str, internal_token: str,
+    *, name: str, args: dict, internal_token: str,
     app_session_id: str, interactive: bool, emitter: EventEmitter, tool_call_id: str,
 ) -> str:
     if not interactive:
@@ -2808,7 +2786,6 @@ async def _dispatch_capability_tool(
         payload = {"action": action, "capability_id": capability_id}
     result = await asyncio.to_thread(
         _capabilities_endpoint_post,
-        backend_url=backend_url,
         internal_token=internal_token,
         app_session_id=app_session_id,
         payload=payload,
@@ -2820,7 +2797,7 @@ async def _dispatch_capability_tool(
 async def _request_approval(
     *,
     app_session_id: str, run_id: str, tool_name: str, args: dict,
-    backend_url: str, internal_token: str, cancel_path: Path,
+    internal_token: str, cancel_path: Path,
 ) -> str:
     """Ask the backend for a human decision. Returns 'approved' | 'denied' |
     'cancelled'. The backend (not this client) is the fail-closed authority:
@@ -2829,7 +2806,6 @@ async def _request_approval(
     for the backend timeout."""
     approval_task = asyncio.ensure_future(asyncio.to_thread(
         request_tool_approval,
-        backend_url=backend_url,
         internal_token=internal_token,
         app_session_id=app_session_id,
         run_id=run_id,

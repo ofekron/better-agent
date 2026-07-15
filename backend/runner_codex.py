@@ -20,7 +20,6 @@ codex subprocess.
 import argparse
 import asyncio
 import base64
-import http.client
 import json
 import logging
 import os
@@ -30,8 +29,6 @@ import uuid
 from tool_approval_client import request_tool_approval
 from user_input_contract import USER_INPUT_MAX_QUESTIONS, build_request_user_input_schema
 from user_input_identity import logical_request_id as user_input_logical_request_id
-import urllib.error
-import urllib.request
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
@@ -60,7 +57,12 @@ from runner_guard import (
     apply_ghost_completion_guard,
     should_retry_ghost,
 )
-from loopback_http import raise_loopback_http_error
+from loopback_http import (
+    LOOPBACK_RETRYABLE_ERRORS,
+    LoopbackHTTPStatusError,
+    raise_loopback_http_error,
+    request_internal,
+)
 from communication_modes import (
     ASK_MODE_CONTINUE_AND_EXPECT_MSSG_BACK_ASYNC,
     ASK_MODE_WAIT_AND_GRAB_LAST_ASSISTANT_MSSG_IN_TURN,
@@ -541,7 +543,6 @@ def _dynamic_tool_json_result(result: dict, *, success: bool) -> dict:
 def _post_loopback_sync(
     payload: dict,
     *,
-    backend_url: str,
     internal_token: str,
     url_path: str = "/api/internal/ask-fork",
     timeout_s: float = DELEGATE_HTTP_TIMEOUT_S,
@@ -552,18 +553,14 @@ def _post_loopback_sync(
     tried_live_token_after_forbidden = False
 
     def _request_once(token: str) -> dict:
-        req = urllib.request.Request(
-            backend_url.rstrip("/") + url_path,
-            data=body,
-            method="POST",
-            headers={
-                "Content-Type": "application/json",
-                "X-Internal-Token": token,
-            },
-        )
         remaining = max(1.0, deadline - time.monotonic())
-        with urllib.request.urlopen(req, timeout=remaining) as resp:
-            raw = resp.read()
+        raw = request_internal(
+            "POST",
+            url_path,
+            body,
+            internal_token=token,
+            timeout=remaining,
+        )
         try:
             return json.loads(raw.decode("utf-8"))
         except Exception as e:
@@ -572,7 +569,7 @@ def _post_loopback_sync(
     while True:
         try:
             return _request_once(internal_token)
-        except urllib.error.HTTPError as e:
+        except LoopbackHTTPStatusError as e:
             live_token = _load_internal_token()
             if (
                 e.code == 403
@@ -583,17 +580,12 @@ def _post_loopback_sync(
                 tried_live_token_after_forbidden = True
                 try:
                     return _request_once(live_token)
-                except urllib.error.HTTPError:
+                except LoopbackHTTPStatusError:
                     raise e
             if e.code != 403:
                 raise_loopback_http_error(e)
             raise
-        except (
-            urllib.error.URLError,
-            http.client.RemoteDisconnected,
-            ConnectionError,
-            TimeoutError,
-        ) as e:
+        except LOOPBACK_RETRYABLE_ERRORS as e:
             if time.monotonic() >= deadline:
                 raise
             reason = getattr(e, "reason", e)
@@ -618,7 +610,6 @@ def _build_create_worker_dynamic_tool() -> dict:
 def _build_create_worker_tool_handler(
     *,
     app_session_id: str,
-    backend_url: str,
     internal_token: str,
     model: Optional[str],
     cwd: str,
@@ -655,7 +646,6 @@ def _build_create_worker_tool_handler(
                     "folder_id": args.get("folder_id"),
                     "tag_ids": args.get("tag_ids") or [],
                 },
-                backend_url=backend_url,
                 internal_token=internal_token,
                 url_path="/api/internal/create-worker",
             )
@@ -679,7 +669,6 @@ def _build_ensure_named_worker_dynamic_tool() -> dict:
 def _build_ensure_named_worker_tool_handler(
     *,
     cwd: str,
-    backend_url: str,
     internal_token: str,
 ):
     async def ensure_named_worker(params: dict) -> dict:
@@ -726,7 +715,6 @@ def _build_ensure_named_worker_tool_handler(
             result = await asyncio.to_thread(
                 _post_loopback_sync,
                 {"cwd": worker_cwd, "workers": [spec]},
-                backend_url=backend_url,
                 internal_token=internal_token,
                 url_path="/api/internal/workers/provision",
             )
@@ -861,7 +849,6 @@ def _build_delete_chat_dynamic_tool() -> dict:
 def _build_mssg_tool_handler(
     *,
     sender_session_id: str,
-    backend_url: str,
     internal_token: str,
 ):
     async def mssg(params: dict) -> dict:
@@ -894,7 +881,6 @@ def _build_mssg_tool_handler(
                     "collapse_key": str(args.get("collapse_key") or "").strip(),
                     "collapse_policy": str(args.get("collapse_policy") or "").strip(),
                 },
-                backend_url=backend_url,
                 internal_token=internal_token,
                 url_path="/api/internal/mssg",
                 timeout_s=30.0,
@@ -1074,7 +1060,6 @@ def _build_delegate_task_tool_handler(
     sender_session_id: str,
     cwd: str,
     model: Optional[str],
-    backend_url: str,
     internal_token: str,
 ):
     async def delegate_task(params: dict) -> dict:
@@ -1105,7 +1090,6 @@ def _build_delegate_task_tool_handler(
                     "search_folder": args.get("search_folder"),
                     "search_tags": args.get("search_tags"),
                 },
-                backend_url=backend_url,
                 internal_token=internal_token,
                 url_path="/api/internal/delegate-task",
                 timeout_s=DELEGATE_HTTP_TIMEOUT_S,
@@ -1124,7 +1108,6 @@ def _build_create_session_tool_handler(
     sender_session_id: str,
     cwd: str,
     model: Optional[str],
-    backend_url: str,
     internal_token: str,
 ):
     async def create_session(params: dict) -> dict:
@@ -1152,7 +1135,6 @@ def _build_create_session_tool_handler(
                     "folder_id": args.get("folder_id"),
                     "tag_ids": args.get("tag_ids") or [],
                 },
-                backend_url=backend_url,
                 internal_token=internal_token,
                 url_path="/api/internal/create-session",
                 timeout_s=30.0,
@@ -1171,7 +1153,6 @@ def _build_create_sub_session_tool_handler(
     sender_session_id: str,
     cwd: str,
     model: Optional[str],
-    backend_url: str,
     internal_token: str,
 ):
     async def create_sub_session(params: dict) -> dict:
@@ -1198,7 +1179,6 @@ def _build_create_sub_session_tool_handler(
                     "folder_id": args.get("folder_id"),
                     "tag_ids": args.get("tag_ids") or [],
                 },
-                backend_url=backend_url,
                 internal_token=internal_token,
                 url_path="/api/internal/create-sub-session",
                 timeout_s=30.0,
@@ -1218,7 +1198,6 @@ def _build_ask_tool_handler(
     app_session_id: str,
     model: Optional[str],
     cwd: str,
-    backend_url: str,
     internal_token: str,
 ):
     async def ask(params: dict) -> dict:
@@ -1298,7 +1277,6 @@ def _build_ask_tool_handler(
             result = await asyncio.to_thread(
                 _post_loopback_sync,
                 payload,
-                backend_url=backend_url,
                 internal_token=internal_token,
                 url_path=url_path,
                 timeout_s=30.0 if mode == ASK_MODE_CONTINUE_AND_EXPECT_MSSG_BACK_ASYNC else DELEGATE_HTTP_TIMEOUT_S,
@@ -1315,7 +1293,6 @@ def _build_ask_tool_handler(
 def _build_open_file_panel_tool_handler(
     *,
     app_session_id: str,
-    backend_url: str,
     internal_token: str,
 ):
     async def open_file_panel(params: dict) -> dict:
@@ -1344,7 +1321,6 @@ def _build_open_file_panel_tool_handler(
                     "selected_start": args.get("selected_start"),
                     "selected_end": args.get("selected_end"),
                 },
-                backend_url=backend_url,
                 internal_token=internal_token,
                 url_path="/api/internal/open-file-panel",
                 timeout_s=10.0,
@@ -1361,7 +1337,6 @@ def _build_open_file_panel_tool_handler(
 def _build_request_user_input_tool_handler(
     *,
     app_session_id: str,
-    backend_url: str,
     internal_token: str,
     run_id: str = "",
 ):
@@ -1387,7 +1362,6 @@ def _build_request_user_input_tool_handler(
                     "timeout_seconds": args.get("timeout_seconds"),
                     "logical_request_id": user_input_logical_request_id("codex", run_id, questions),
                 },
-                backend_url=backend_url,
                 internal_token=internal_token,
                 url_path="/api/internal/user-input/request",
                 timeout_s=DELEGATE_HTTP_TIMEOUT_S,
@@ -1404,7 +1378,6 @@ def _build_request_user_input_tool_handler(
 def _build_start_file_discussion_tool_handler(
     *,
     app_session_id: str,
-    backend_url: str,
     internal_token: str,
 ):
     async def start_file_discussion(params: dict) -> dict:
@@ -1430,7 +1403,6 @@ def _build_start_file_discussion_tool_handler(
                     "line": line,
                     "title": args.get("title") or "",
                 },
-                backend_url=backend_url,
                 internal_token=internal_token,
                 url_path="/api/internal/file-editor/start-discussion",
                 timeout_s=10.0,
@@ -1448,7 +1420,6 @@ def _build_dynamic_tool_set(
     *,
     mode: str,
     app_session_id: str,
-    backend_url: str,
     internal_token: str,
     mssg_sender_session_id: str,
     cwd: str,
@@ -1464,7 +1435,7 @@ def _build_dynamic_tool_set(
     dynamic_tools: list[dict] = []
     tool_handlers: dict[str, Any] = {}
     if mode == "manager" and team_orchestration_enabled:
-        if not app_session_id or not backend_url or not internal_token:
+        if not app_session_id or not internal_token:
             raise RuntimeError(t("runner.manager_mode_missing_fields"))
         _add_dynamic_tool(
             dynamic_tools,
@@ -1472,7 +1443,6 @@ def _build_dynamic_tool_set(
             _build_create_worker_dynamic_tool(),
             _build_create_worker_tool_handler(
                 app_session_id=app_session_id,
-                backend_url=backend_url,
                 internal_token=internal_token,
                 model=model,
                 cwd=cwd,
@@ -1480,8 +1450,8 @@ def _build_dynamic_tool_set(
             existing_tool_names=existing_tool_names,
         )
     if open_file_panel_enabled or request_user_input_enabled:
-        if not app_session_id or not backend_url or not internal_token:
-            raise RuntimeError("UI loopback tools require app_session_id, backend_url, and internal_token")
+        if not app_session_id or not internal_token:
+            raise RuntimeError("UI loopback tools require app_session_id and internal_token")
     if open_file_panel_enabled:
         _add_dynamic_tool(
             dynamic_tools,
@@ -1489,7 +1459,6 @@ def _build_dynamic_tool_set(
             _build_open_file_panel_dynamic_tool(),
             _build_open_file_panel_tool_handler(
                 app_session_id=app_session_id,
-                backend_url=backend_url,
                 internal_token=internal_token,
             ),
             existing_tool_names=existing_tool_names,
@@ -1501,7 +1470,6 @@ def _build_dynamic_tool_set(
             _build_request_user_input_dynamic_tool(),
             _build_request_user_input_tool_handler(
                 app_session_id=app_session_id,
-                backend_url=backend_url,
                 internal_token=internal_token,
                 run_id=run_id,
             ),
@@ -1515,12 +1483,11 @@ def _build_dynamic_tool_set(
                 _build_start_file_discussion_dynamic_tool(),
                 _build_start_file_discussion_tool_handler(
                     app_session_id=app_session_id,
-                    backend_url=backend_url,
                     internal_token=internal_token,
                 ),
                 existing_tool_names=existing_tool_names,
             )
-    if mssg_sender_session_id and backend_url and internal_token:
+    if mssg_sender_session_id and internal_token:
         if "mssg" not in disabled_builtin_tools:
             _add_dynamic_tool(
                 dynamic_tools,
@@ -1528,7 +1495,6 @@ def _build_dynamic_tool_set(
                 _build_mssg_dynamic_tool(),
                 _build_mssg_tool_handler(
                     sender_session_id=mssg_sender_session_id,
-                    backend_url=backend_url,
                     internal_token=internal_token,
                 ),
                 existing_tool_names=existing_tool_names,
@@ -1543,7 +1509,6 @@ def _build_dynamic_tool_set(
                     app_session_id=app_session_id or "",
                     model=model,
                     cwd=cwd,
-                    backend_url=backend_url,
                     internal_token=internal_token,
                 ),
                 existing_tool_names=existing_tool_names,
@@ -1555,7 +1520,6 @@ def _build_dynamic_tool_set(
                 _build_ensure_named_worker_dynamic_tool(),
                 _build_ensure_named_worker_tool_handler(
                     cwd=cwd,
-                    backend_url=backend_url,
                     internal_token=internal_token,
                 ),
                 existing_tool_names=existing_tool_names,
@@ -1608,7 +1572,7 @@ def _build_dynamic_tool_set(
                 _build_delete_chat_tool_handler(),
                 existing_tool_names=existing_tool_names,
             )
-    if app_session_id and backend_url and internal_token:
+    if app_session_id and internal_token:
         if "delegate_task" not in disabled_builtin_tools:
             _add_dynamic_tool(
                 dynamic_tools,
@@ -1618,7 +1582,6 @@ def _build_dynamic_tool_set(
                     sender_session_id=app_session_id,
                     cwd=cwd,
                     model=model,
-                    backend_url=backend_url,
                     internal_token=internal_token,
                 ),
                 existing_tool_names=existing_tool_names,
@@ -1632,7 +1595,6 @@ def _build_dynamic_tool_set(
                     sender_session_id=app_session_id,
                     cwd=cwd,
                     model=model,
-                    backend_url=backend_url,
                     internal_token=internal_token,
                 ),
                 existing_tool_names=existing_tool_names,
@@ -1646,7 +1608,6 @@ def _build_dynamic_tool_set(
                     sender_session_id=app_session_id,
                     cwd=cwd,
                     model=model,
-                    backend_url=backend_url,
                     internal_token=internal_token,
                 ),
                 existing_tool_names=existing_tool_names,
@@ -1933,7 +1894,6 @@ class _AppServerProcess:
             if ctx:
                 approved = await asyncio.to_thread(
                     request_tool_approval,
-                    backend_url=ctx.get("backend_url", ""),
                     internal_token=ctx.get("internal_token", ""),
                     app_session_id=ctx.get("app_session_id", ""),
                     run_id=ctx.get("run_id", ""),
@@ -2670,10 +2630,6 @@ async def _run(run_dir: Path, inputs: dict) -> int:
         cwd=cwd,
         bare_config=bare_config,
     ))
-    backend_url = inputs.get("backend_url") or get_env(
-        "BETTER_CLAUDE_BACKEND_URL",
-        "http://localhost:8000",
-    )
     internal_token = inputs.get("internal_token") or ""
     mssg_sender_session_id = str(
         inputs.get("mssg_sender_session_id") or app_session_id or ""
@@ -2691,7 +2647,6 @@ async def _run(run_dir: Path, inputs: dict) -> int:
         dynamic_tools, tool_handlers = _build_dynamic_tool_set(
             mode=mode,
             app_session_id=app_session_id,
-            backend_url=backend_url,
             internal_token=internal_token,
             mssg_sender_session_id=mssg_sender_session_id,
             cwd=cwd,
@@ -2799,13 +2754,12 @@ async def _run(run_dir: Path, inputs: dict) -> int:
                 sandbox=_codex_sandbox_mode(permission),
                 approval_ctx=(
                     {
-                        "backend_url": backend_url,
                         "internal_token": internal_token,
                         "app_session_id": app_session_id,
                         "run_id": run_dir.name,
                     }
                     if _codex_approval_policy(permission) != "never"
-                    and backend_url and internal_token and app_session_id
+                    and internal_token and app_session_id
                     else None
                 ),
                 profile=(inputs or {}).get("codex_profile") or None,

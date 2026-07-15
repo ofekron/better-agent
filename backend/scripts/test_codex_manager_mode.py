@@ -96,7 +96,6 @@ def test_native_loopback_registers_mssg_tool(failures: list[str]) -> None:
     tools, handlers = runner_codex._build_dynamic_tool_set(
         mode="native",
         app_session_id="sender-1",
-        backend_url="http://backend",
         internal_token="tok",
         mssg_sender_session_id="sender-1",
         cwd="/tmp",
@@ -164,9 +163,8 @@ async def _exercise_ask_direct_handler(failures: list[str]) -> None:
     captured = {}
     original = runner_codex._post_loopback_sync
 
-    def fake_post(payload: dict, *, backend_url: str, internal_token: str, **kwargs) -> dict:
+    def fake_post(payload: dict, *, internal_token: str, **kwargs) -> dict:
         captured["payload"] = payload
-        captured["backend_url"] = backend_url
         captured["internal_token"] = internal_token
         captured["url_path"] = kwargs.get("url_path")
         return {"success": True, "response": "ok"}
@@ -178,7 +176,6 @@ async def _exercise_ask_direct_handler(failures: list[str]) -> None:
             app_session_id="app1",
             model="gpt-5.4",
             cwd="/tmp/project",
-            backend_url="http://backend",
             internal_token="tok",
         )
         result = await handler({
@@ -191,7 +188,6 @@ async def _exercise_ask_direct_handler(failures: list[str]) -> None:
         runner_codex._post_loopback_sync = original
 
     check(result["success"] is True, "ask direct handler reports success", failures)
-    check(captured["backend_url"] == "http://backend", "ask uses backend URL", failures)
     check(captured["internal_token"] == "tok", "ask uses internal token", failures)
     check(captured["url_path"] == "/api/internal/ask", "ask direct uses ask endpoint", failures)
     payload = captured["payload"]
@@ -205,7 +201,7 @@ async def _exercise_ask_fork_handler(failures: list[str]) -> None:
     captured = {}
     original = runner_codex._post_loopback_sync
 
-    def fake_post(payload: dict, *, backend_url: str, internal_token: str, **kwargs) -> dict:
+    def fake_post(payload: dict, *, internal_token: str, **kwargs) -> dict:
         captured["payload"] = payload
         captured["url_path"] = kwargs.get("url_path")
         return {"success": True, "worker_session_id": "w1"}
@@ -217,7 +213,6 @@ async def _exercise_ask_fork_handler(failures: list[str]) -> None:
             app_session_id="app1",
             model="gpt-5.4",
             cwd="/tmp/project",
-            backend_url="http://backend",
             internal_token="tok",
         )
         result = await handler({
@@ -246,7 +241,7 @@ async def _exercise_create_worker_handler(failures: list[str]) -> None:
     captured = {}
     original = runner_codex._post_loopback_sync
 
-    def fake_post(payload: dict, *, backend_url: str, internal_token: str, **kwargs) -> dict:
+    def fake_post(payload: dict, *, internal_token: str, **kwargs) -> dict:
         captured["payload"] = payload
         captured["url_path"] = kwargs.get("url_path")
         return {"success": True, "worker_session_id": "w-new"}
@@ -255,7 +250,6 @@ async def _exercise_create_worker_handler(failures: list[str]) -> None:
     try:
         handler = runner_codex._build_create_worker_tool_handler(
             app_session_id="app1",
-            backend_url="http://backend",
             internal_token="tok",
             model="gpt-5.4",
             cwd="/tmp/project",
@@ -283,7 +277,7 @@ async def _exercise_ensure_named_worker_handler(failures: list[str]) -> None:
     captured = {}
     original = runner_codex._post_loopback_sync
 
-    def fake_post(payload: dict, *, backend_url: str, internal_token: str, **kwargs) -> dict:
+    def fake_post(payload: dict, *, internal_token: str, **kwargs) -> dict:
         captured["payload"] = payload
         captured["url_path"] = kwargs.get("url_path")
         return {
@@ -300,7 +294,6 @@ async def _exercise_ensure_named_worker_handler(failures: list[str]) -> None:
     try:
         handler = runner_codex._build_ensure_named_worker_tool_handler(
             cwd="/inherited",
-            backend_url="http://backend",
             internal_token="tok",
         )
         result = await handler({
@@ -329,7 +322,6 @@ async def _exercise_ensure_named_worker_handler(failures: list[str]) -> None:
     try:
         handler = runner_codex._build_ensure_named_worker_tool_handler(
             cwd="/inherited",
-            backend_url="http://backend",
             internal_token="tok",
         )
         inherited_result = await handler({
@@ -349,7 +341,7 @@ async def _exercise_delegate_task_handler(failures: list[str]) -> None:
     captured = {}
     original = runner_codex._post_loopback_sync
 
-    def fake_post(payload: dict, *, backend_url: str, internal_token: str, **kwargs) -> dict:
+    def fake_post(payload: dict, *, internal_token: str, **kwargs) -> dict:
         captured["payload"] = payload
         captured["url_path"] = kwargs.get("url_path")
         return {"success": True, "target_session_id": "target-1"}
@@ -360,7 +352,6 @@ async def _exercise_delegate_task_handler(failures: list[str]) -> None:
             sender_session_id="sender-1",
             cwd="/tmp/project",
             model="gpt-5.4",
-            backend_url="http://backend",
             internal_token="tok",
         )
         result = await handler({
@@ -389,7 +380,7 @@ async def _exercise_ask_async_mode_handler(failures: list[str]) -> None:
     captured = {}
     original = runner_codex._post_loopback_sync
 
-    def fake_post(payload: dict, *, backend_url: str, internal_token: str, **kwargs) -> dict:
+    def fake_post(payload: dict, *, internal_token: str, **kwargs) -> dict:
         captured["payload"] = payload
         captured["url_path"] = kwargs.get("url_path")
         return {"success": True, "queued_id": "queued-1", "expects_response": True}
@@ -401,7 +392,6 @@ async def _exercise_ask_async_mode_handler(failures: list[str]) -> None:
             app_session_id="app1",
             model="gpt-5.4",
             cwd="/tmp/project",
-            backend_url="http://backend",
             internal_token="tok",
         )
         result = await handler({
@@ -427,7 +417,7 @@ async def _exercise_create_session_handler(failures: list[str]) -> None:
     captured = {}
     original = runner_codex._post_loopback_sync
 
-    def fake_post(payload: dict, *, backend_url: str, internal_token: str, **kwargs) -> dict:
+    def fake_post(payload: dict, *, internal_token: str, **kwargs) -> dict:
         captured["payload"] = payload
         captured["url_path"] = kwargs.get("url_path")
         return {"success": True, "session_id": "session-new"}
@@ -438,7 +428,6 @@ async def _exercise_create_session_handler(failures: list[str]) -> None:
             sender_session_id="sender-1",
             cwd="/tmp/project",
             model="gpt-5.4",
-            backend_url="http://backend",
             internal_token="tok",
         )
         result = await handler({
@@ -466,7 +455,7 @@ async def _exercise_create_sub_session_handler(failures: list[str]) -> None:
     captured = {}
     original = runner_codex._post_loopback_sync
 
-    def fake_post(payload: dict, *, backend_url: str, internal_token: str, **kwargs) -> dict:
+    def fake_post(payload: dict, *, internal_token: str, **kwargs) -> dict:
         captured["payload"] = payload
         captured["url_path"] = kwargs.get("url_path")
         return {"success": True, "target_session_id": "sub-new"}
@@ -477,7 +466,6 @@ async def _exercise_create_sub_session_handler(failures: list[str]) -> None:
             sender_session_id="sender-1",
             cwd="/tmp/project",
             model="gpt-5.4",
-            backend_url="http://backend",
             internal_token="tok",
         )
         result = await handler({

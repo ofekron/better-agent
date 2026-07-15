@@ -99,13 +99,25 @@ def _main(argv: Optional[list[str]] = None) -> int:
     import uvicorn
     if mode == "node_server":
         import main_node
-        uvicorn.run(
-            main_node.app,
-            host="0.0.0.0",
-            port=_env_port("BETTER_CLAUDE_NODE_PORT", 8002),
-            proxy_headers=False,
-            ws_per_message_deflate=False,
+        import runtime_endpoints
+        node_port = _env_port("BETTER_CLAUDE_NODE_PORT", 8002)
+        # Runners (and their stdio tool MCPs) spawned on this node resolve
+        # their local loopback app through the same app-endpoint descriptor
+        # as on the primary — main_node.app proxies the internal endpoints
+        # they call.
+        runtime_endpoints.write_app_endpoint(
+            {"kind": "tcp", "host": "127.0.0.1", "port": node_port}
         )
+        try:
+            uvicorn.run(
+                main_node.app,
+                host="0.0.0.0",
+                port=node_port,
+                proxy_headers=False,
+                ws_per_message_deflate=False,
+            )
+        finally:
+            runtime_endpoints.clear_app_endpoint()
         return 0
     import main
     import user_prefs

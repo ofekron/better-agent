@@ -19,13 +19,13 @@ import sys
 import tempfile
 from pathlib import Path
 
-import _test_home
-_TMP_HOME = _test_home.isolate("bc-test-frozen-")
-
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _BACKEND = os.path.dirname(_HERE)
 if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
+
+import _test_home
+_TMP_HOME = _test_home.isolate("bc-test-frozen-")
 
 from provider import runner_argv          # noqa: E402
 from app_entry import _dispatch, _env_port  # noqa: E402
@@ -108,23 +108,31 @@ def test_dispatch() -> bool:
 
 
 def test_env_port() -> bool:
-    os.environ.pop("BA_TEST_PORT", None)
-    if _env_port("BA_TEST_PORT", 8000) != 8000:
+    legacy = "BETTER_CLAUDE_TEST_PORT"
+    agent = "BETTER_AGENT_TEST_PORT"
+    os.environ.pop(legacy, None)
+    os.environ.pop(agent, None)
+    if _env_port(legacy, 8000) != 8000:
         print("  missing env should use default")
         return False
-    os.environ["BA_TEST_PORT"] = "9123"
-    if _env_port("BA_TEST_PORT", 8000) != 9123:
-        print("  env override was not used")
+    os.environ[legacy] = "9123"
+    if _env_port(legacy, 8000) != 9123:
+        print("  legacy env override was not used")
         return False
+    os.environ[agent] = "9124"
+    if _env_port(legacy, 8000) != 9124:
+        print("  agent-prefixed env override should win over legacy")
+        return False
+    os.environ.pop(agent, None)
     for value in ("0", "70000", "abc"):
-        os.environ["BA_TEST_PORT"] = value
+        os.environ[legacy] = value
         try:
-            _env_port("BA_TEST_PORT", 8000)
+            _env_port(legacy, 8000)
         except (RuntimeError, ValueError):
             continue
         print(f"  expected invalid port to fail: {value}")
         return False
-    os.environ.pop("BA_TEST_PORT", None)
+    os.environ.pop(legacy, None)
     return True
 
 

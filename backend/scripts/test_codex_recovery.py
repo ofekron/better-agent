@@ -18,7 +18,6 @@ Run with:
 from __future__ import annotations
 
 import asyncio
-import io
 import json
 import os
 import shutil
@@ -27,7 +26,6 @@ import sys
 import tempfile
 import threading
 import time
-import urllib.error
 import uuid
 from types import SimpleNamespace
 from pathlib import Path
@@ -691,38 +689,27 @@ def test_loopback_post_retries_transient_reset() -> bool:
 
     calls = 0
 
-    class _Resp:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_):
-            return False
-
-        def read(self):
-            return b'{"ok": true}'
-
-    original_urlopen = runner_codex.urllib.request.urlopen
+    original_request = runner_codex.request_internal
     original_sleep = runner_codex.time.sleep
 
-    def fake_urlopen(*_args, **_kwargs):
+    def fake_request(method, url_path, body, *, internal_token, timeout):
         nonlocal calls
         calls += 1
         if calls == 1:
-            raise urllib.error.URLError(ConnectionResetError(54, "reset"))
-        return _Resp()
+            raise ConnectionResetError(54, "reset")
+        return b'{"ok": true}'
 
     try:
-        runner_codex.urllib.request.urlopen = fake_urlopen
+        runner_codex.request_internal = fake_request
         runner_codex.time.sleep = lambda *_args, **_kwargs: None
         res = _post_loopback_sync(
             {"x": 1},
-            backend_url="http://127.0.0.1:8000",
             internal_token="token",
             url_path="/api/internal/ask",
             timeout_s=10,
         )
     finally:
-        runner_codex.urllib.request.urlopen = original_urlopen
+        runner_codex.request_internal = original_request
         runner_codex.time.sleep = original_sleep
 
     if res != {"ok": True}:
@@ -743,42 +730,24 @@ def test_loopback_post_retries_disk_token_after_forbidden() -> bool:
     runner_codex._token_cache["mtime"] = 0.0
     seen_tokens: list[str | None] = []
 
-    class _Resp:
-        def __enter__(self):
-            return self
+    original_request = runner_codex.request_internal
 
-        def __exit__(self, *_):
-            return False
-
-        def read(self):
-            return b'{"success": true}'
-
-    original_urlopen = runner_codex.urllib.request.urlopen
-
-    def fake_urlopen(req, *_args, **_kwargs):
-        token = req.headers.get("X-internal-token")
-        seen_tokens.append(token)
-        if token == "spawn-token":
-            raise urllib.error.HTTPError(
-                req.full_url,
-                403,
-                "Forbidden",
-                hdrs=None,
-                fp=None,
-            )
-        return _Resp()
+    def fake_request(method, url_path, body, *, internal_token, timeout):
+        seen_tokens.append(internal_token)
+        if internal_token == "spawn-token":
+            raise runner_codex.LoopbackHTTPStatusError(403, b"Forbidden")
+        return b'{"success": true}'
 
     try:
-        runner_codex.urllib.request.urlopen = fake_urlopen
+        runner_codex.request_internal = fake_request
         res = _post_loopback_sync(
             {"x": 1},
-            backend_url="http://127.0.0.1:8000",
             internal_token="spawn-token",
             url_path="/api/internal/ask",
             timeout_s=10,
         )
     finally:
-        runner_codex.urllib.request.urlopen = original_urlopen
+        runner_codex.request_internal = original_request
 
     if res != {"success": True}:
         print(f"  expected success response, got {res!r}")
@@ -792,23 +761,18 @@ def test_loopback_post_retries_disk_token_after_forbidden() -> bool:
 def test_loopback_post_surfaces_http_error_detail() -> bool:
     import runner_codex
 
-    original_urlopen = runner_codex.urllib.request.urlopen
+    original_request = runner_codex.request_internal
 
-    def fake_urlopen(req, *_args, **_kwargs):
-        raise urllib.error.HTTPError(
-            req.full_url,
-            409,
-            "Conflict",
-            hdrs=None,
-            fp=io.BytesIO(b'{"detail":"no idle worker in target_worker_pool"}'),
+    def fake_request(method, url_path, body, *, internal_token, timeout):
+        raise runner_codex.LoopbackHTTPStatusError(
+            409, b'{"detail":"no idle worker in target_worker_pool"}',
         )
 
     try:
-        runner_codex.urllib.request.urlopen = fake_urlopen
+        runner_codex.request_internal = fake_request
         try:
             _post_loopback_sync(
                 {"x": 1},
-                backend_url="http://127.0.0.1:8000",
                 internal_token="token",
                 url_path="/api/internal/ask",
                 timeout_s=10,
@@ -821,7 +785,7 @@ def test_loopback_post_surfaces_http_error_detail() -> bool:
         print("  expected HTTP error detail to be surfaced")
         return False
     finally:
-        runner_codex.urllib.request.urlopen = original_urlopen
+        runner_codex.request_internal = original_request
 
 
 def test_schedule_loop_task_from_worker_thread() -> bool:

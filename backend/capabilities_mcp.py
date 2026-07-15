@@ -18,12 +18,14 @@ from __future__ import annotations
 
 import json
 import sys
-import urllib.error
-import urllib.request
 from typing import Any
 
 from env_compat import get_env, require_env
-from loopback_http import loopback_urlopen
+from loopback_http import (
+    LoopbackHTTPStatusError,
+    loopback_http_error_message,
+    loopback_request,
+)
 from mcp.server.fastmcp import FastMCP
 
 
@@ -34,22 +36,16 @@ def _post_capabilities(app_session_id: str, payload: dict) -> dict[str, Any]:
     """POST an action to the core capabilities endpoint for the current
     session. Core owns the active-capability write; this is the authorized
     trigger."""
-    backend_url = require_env("BETTER_CLAUDE_BACKEND_URL").rstrip("/")
-    internal_token = require_env("BETTER_CLAUDE_INTERNAL_TOKEN")
     app_session_id = str(app_session_id or "").strip()
     if not app_session_id:
         raise ValueError("app_session_id is required")
-    endpoint = f"{backend_url}/api/internal/sessions/{app_session_id}/capabilities"
-    req = urllib.request.Request(
-        endpoint,
-        data=json.dumps(payload).encode("utf-8"),
-        method="POST",
-        headers={
-            "Content-Type": "application/json",
-            "X-Internal-Token": internal_token,
-        },
+    raw = loopback_request(
+        "POST",
+        f"/api/internal/sessions/{app_session_id}/capabilities",
+        json.dumps(payload).encode("utf-8"),
+        internal_token=require_env("BETTER_CLAUDE_INTERNAL_TOKEN"),
+        timeout=_TIMEOUT,
     )
-    raw = loopback_urlopen(req, timeout=_TIMEOUT)
     return json.loads(raw.decode("utf-8") or "{}")
 
 
@@ -60,9 +56,8 @@ def _safe_result(fn):
     def wrapper(*a, **kw) -> dict[str, Any]:
         try:
             return fn(*a, **kw)
-        except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", "replace") if exc.fp else exc.reason
-            return {"success": False, "error": f"HTTP {exc.code}: {detail}"}
+        except LoopbackHTTPStatusError as exc:
+            return {"success": False, "error": f"HTTP {exc.code}: {loopback_http_error_message(exc)}"}
         except Exception as exc:  # noqa: BLE001 — surface to the model
             return {"success": False, "error": str(exc)}
 
@@ -143,7 +138,6 @@ def _enabled() -> bool:
         return False
     return bool(
         get_env("BETTER_CLAUDE_APP_SESSION_ID").strip()
-        and get_env("BETTER_CLAUDE_BACKEND_URL").strip()
         and get_env("BETTER_CLAUDE_INTERNAL_TOKEN").strip()
     )
 

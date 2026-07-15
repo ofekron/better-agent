@@ -2,17 +2,15 @@ from __future__ import annotations
 
 import json
 import sys
-import urllib.error
-import urllib.request
 from typing import Any
 
 from env_compat import get_env_stripped, require_env
-from loopback_http import loopback_urlopen
+from loopback_http import (
+    LoopbackHTTPStatusError,
+    loopback_http_error_message,
+    loopback_request,
+)
 from mcp.server.fastmcp import FastMCP
-
-
-def _env_required(name: str) -> str:
-    return require_env(name)
 
 
 def _env_optional(name: str) -> str:
@@ -20,18 +18,13 @@ def _env_optional(name: str) -> str:
 
 
 def _post_open_config_panel(payload: dict[str, Any]) -> dict[str, Any]:
-    backend_url = _env_required("BETTER_CLAUDE_BACKEND_URL").rstrip("/")
-    internal_token = _env_required("BETTER_CLAUDE_INTERNAL_TOKEN")
-    req = urllib.request.Request(
-        backend_url + "/api/internal/open-config-panel",
-        data=json.dumps(payload).encode("utf-8"),
-        method="POST",
-        headers={
-            "Content-Type": "application/json",
-            "X-Internal-Token": internal_token,
-        },
+    raw = loopback_request(
+        "POST",
+        "/api/internal/open-config-panel",
+        json.dumps(payload).encode("utf-8"),
+        internal_token=require_env("BETTER_CLAUDE_INTERNAL_TOKEN"),
+        timeout=10.0,
     )
-    raw = loopback_urlopen(req, timeout=10.0)
     return json.loads(raw.decode("utf-8"))
 
 
@@ -57,8 +50,8 @@ def open_config_panel_response(
             "scope": scope,
             "cwd": (cwd or _env_optional("BETTER_CLAUDE_CWD") or ""),
         })
-    except urllib.error.HTTPError as exc:
-        return {"success": False, "error": f"HTTP {exc.code}: {exc.reason}"}
+    except LoopbackHTTPStatusError as exc:
+        return {"success": False, "error": f"HTTP {exc.code}: {loopback_http_error_message(exc)}"}
     except Exception as exc:
         return {"success": False, "error": str(exc)}
 

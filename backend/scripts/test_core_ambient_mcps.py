@@ -45,11 +45,15 @@ def main() -> None:
         "session-1",
         {"action": "load", "capability_id": "ext:cap", "app_session_id": "session-1"},
     )]
-    asyncio.run(test_launcher_from_non_repo_cwd())
+    test_launcher_from_non_repo_cwd()
     print("PASS authenticated core ambient MCP schemas and calls")
 
 
-async def test_launcher_from_non_repo_cwd() -> None:
+def test_launcher_from_non_repo_cwd() -> None:
+    asyncio.run(_launcher_from_non_repo_cwd())
+
+
+async def _launcher_from_non_repo_cwd() -> None:
     broker = ambient_mcp_broker.AmbientMcpBroker()
     broker.start()
     try:
@@ -57,7 +61,7 @@ async def test_launcher_from_non_repo_cwd() -> None:
         env = {
             "PATH": os.environ.get("PATH", ""),
             "BETTER_AGENT_HOME": os.environ["BETTER_AGENT_HOME"],
-            "BETTER_CLAUDE_BACKEND_URL": "http://127.0.0.1:1",
+            "BETTER_CLAUDE_INTERNAL_TOKEN": "test-token",
         }
         params = StdioServerParameters(
             command=sys.executable,
