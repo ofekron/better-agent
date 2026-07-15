@@ -178,7 +178,10 @@ class OwnerClient:
                 if not isinstance(domain, ChatProjectionStoreError):
                     self._poison_locked()
                 else:
-                    if domain.code in {"insecure_store_file", "path_race", "owner_protocol_error", "owner_internal_error"}:
+                    if domain.code in {
+                        "insecure_store_file", "path_race", "owner_protocol_error",
+                        "owner_internal_error", "rebuild_required",
+                    }:
                         self._poison_locked()
                     raise domain
                 if operation == "commit" and dispatched:

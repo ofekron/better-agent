@@ -9,6 +9,7 @@ import sqlite3
 import sys
 import tempfile
 import threading
+import time
 from dataclasses import replace
 from pathlib import Path
 
@@ -236,8 +237,98 @@ def test_hundred_thousand_record_checkpoint_is_tail_only() -> None:
     connection.close()
     fast = JsonlChatProjectionStore(path)
     assert fast.startup_read_bytes() == 0
+    started = time.monotonic()
+    assert fast.projection_cursor("root", 0) == 0
+    assert time.monotonic() - started < 1.0
     fast.audit_prefix()
     fast.close()
+
+
+def test_epoch_reuse_tamper_fallback_and_automatic_quarantine() -> None:
+    crash_path = STATE_HOME / "chat" / "repeated-crash.jsonl"
+    initial = JsonlChatProjectionStore(crash_path)
+    initial.select_generation("root", 0)
+    initial.commit(request())
+    initial.close()
+    slots = sorted(crash_path.parent.glob(f"{crash_path.name}.index.*.sqlite3"))
+    for _ in range(4):
+        crashed = JsonlChatProjectionStore(crash_path)
+        crashed._owner.process.kill()
+        crashed._owner.process.wait()
+        assert_error("owner_unavailable", crashed.close)
+    assert sorted(crash_path.parent.glob(f"{crash_path.name}.index.*.sqlite3")) == slots
+
+    tamper_path = STATE_HOME / "chat" / "row-tamper.jsonl"
+    tamper = JsonlChatProjectionStore(tamper_path)
+    tamper.select_generation("root", 0)
+    tamper.commit(request())
+    tamper.close()
+    tampered_slot = next(tamper_path.parent.glob(f"{tamper_path.name}.index.*.sqlite3"))
+    connection = sqlite3.connect(tampered_slot)
+    connection.execute("UPDATE render_nodes SET node_json='{}'")
+    connection.commit()
+    connection.close()
+    recovered = JsonlChatProjectionStore(tamper_path)
+    assert recovered.read_projection("root", 0, request().event_id).render_node["text"] == "answer-1"
+    recovered.close()
+    tampered_connection = sqlite3.connect(tampered_slot)
+    assert tampered_connection.execute("SELECT node_json FROM render_nodes").fetchone()[0] == "{}"
+    tampered_connection.close()
+
+    trigger_path = STATE_HOME / "chat" / "trigger-tamper.jsonl"
+    trigger_store = JsonlChatProjectionStore(trigger_path)
+    trigger_store.select_generation("root", 0)
+    trigger_store.commit(request())
+    trigger_store.close()
+    trigger_slot = next(trigger_path.parent.glob(f"{trigger_path.name}.index.*.sqlite3"))
+    trigger_connection = sqlite3.connect(trigger_slot)
+    trigger_name = trigger_connection.execute(
+        "SELECT name FROM sqlite_master WHERE type='trigger' ORDER BY name LIMIT 1"
+    ).fetchone()[0]
+    trigger_connection.execute(f'DROP TRIGGER "{trigger_name}"')
+    trigger_connection.commit()
+    trigger_connection.close()
+    trigger_recovered = JsonlChatProjectionStore(trigger_path)
+    assert trigger_recovered.projection_cursor("root", 0) == 1
+    trigger_recovered.close()
+    trigger_connection = sqlite3.connect(trigger_slot)
+    assert trigger_connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='trigger' AND name=?", (trigger_name,),
+    ).fetchone() is None
+    trigger_connection.close()
+
+    digest_path = STATE_HOME / "chat" / "digest-tamper.jsonl"
+    digest_store = JsonlChatProjectionStore(digest_path)
+    digest_store.select_generation("root", 0)
+    digest_store.close()
+    digest_slot = next(digest_path.parent.glob(f"{digest_path.name}.index.*.sqlite3"))
+    digest_connection = sqlite3.connect(digest_slot)
+    digest_connection.execute("UPDATE jsonl_checkpoint SET state_digest=?", ("f" * 64,))
+    digest_connection.commit()
+    digest_connection.close()
+    digest_recovered = JsonlChatProjectionStore(digest_path)
+    assert digest_recovered.projection_cursor("root", 0) == 0
+    digest_recovered.close()
+
+    prefix_path = STATE_HOME / "chat" / "automatic-audit.jsonl"
+    prefix = JsonlChatProjectionStore(prefix_path)
+    prefix.select_generation("root", 0)
+    prefix.commit(request())
+    prefix.close()
+    mutated = bytearray(prefix_path.read_bytes())
+    mutated[10] ^= 1
+    prefix_path.write_bytes(mutated)
+    quarantined = JsonlChatProjectionStore(prefix_path)
+    statuses = []
+    for _ in range(100_000):
+        status = quarantined.audit_status()
+        statuses.append(status)
+        if status == "failed":
+            break
+    assert statuses and statuses[-1] == "failed"
+    assert_error("rebuild_required", lambda: quarantined.projection_cursor("root", 0))
+    assert_error("owner_unavailable", lambda: quarantined.commit(request(version=2, sequence=2)))
+    quarantined.close()
 
 
 def main() -> None:
@@ -250,6 +341,8 @@ def main() -> None:
         print("PASS test_invalid_requests_do_not_append_and_writer_is_exclusive")
         test_hundred_thousand_record_checkpoint_is_tail_only()
         print("PASS test_hundred_thousand_record_checkpoint_is_tail_only")
+        test_epoch_reuse_tamper_fallback_and_automatic_quarantine()
+        print("PASS test_epoch_reuse_tamper_fallback_and_automatic_quarantine")
     finally:
         shutil.rmtree(STATE_HOME, ignore_errors=True)
 

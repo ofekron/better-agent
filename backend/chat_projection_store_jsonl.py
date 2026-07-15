@@ -6,6 +6,7 @@ import os
 import fcntl
 import stat
 import sqlite3
+import threading
 import sys
 from pathlib import Path
 from typing import Any, Mapping
@@ -28,8 +29,32 @@ INDEX_SLOTS = 4
 CHECKPOINT_DDL = (
     "CREATE TABLE jsonl_checkpoint(slot_generation INTEGER NOT NULL,journal_dev INTEGER NOT NULL,"
     "journal_ino INTEGER NOT NULL,byte_offset INTEGER NOT NULL,record_sequence INTEGER NOT NULL,"
-    "chain_head TEXT NOT NULL,prefix_digest TEXT NOT NULL,heads_json TEXT NOT NULL)"
+    "chain_head TEXT NOT NULL,prefix_digest TEXT NOT NULL,heads_json TEXT NOT NULL,"
+    "state_digest TEXT NOT NULL,state_counts_json TEXT NOT NULL)"
 )
+CHECKPOINT_SPEC = (
+    ("slot_generation", "INTEGER", 1, 0, None), ("journal_dev", "INTEGER", 1, 0, None),
+    ("journal_ino", "INTEGER", 1, 0, None), ("byte_offset", "INTEGER", 1, 0, None),
+    ("record_sequence", "INTEGER", 1, 0, None), ("chain_head", "TEXT", 1, 0, None),
+    ("prefix_digest", "TEXT", 1, 0, None), ("heads_json", "TEXT", 1, 0, None),
+    ("state_digest", "TEXT", 1, 0, None), ("state_counts_json", "TEXT", 1, 0, None),
+)
+
+
+def _guard_triggers() -> dict[str, tuple[str, str]]:
+    triggers = {}
+    for table in SQLiteChatProjectionStore._TABLES:
+        for operation in ("INSERT", "UPDATE", "DELETE"):
+            name = f"jsonl_guard_{table}_{operation.lower()}"
+            triggers[name] = (
+                table,
+                f'CREATE TRIGGER "{name}" AFTER {operation} ON "{table}" '
+                "BEGIN DELETE FROM jsonl_checkpoint; END",
+            )
+    return triggers
+
+
+GUARD_TRIGGERS = _guard_triggers()
 
 
 def _record_payload(sequence: int, previous_hash: str, operation: str, arguments: Mapping[str, Any]) -> dict[str, Any]:
@@ -65,10 +90,6 @@ class _JsonlOwnerStore:
             start_offset, start_sequence, start_hash, prefix_digest = 0, 0, "0" * 64, "0" * 64
         else:
             index_name, start_offset, start_sequence, start_hash, prefix_digest = checkpoint
-            connection = sqlite3.connect(f"file:{index_name}?mode=rw", uri=True)
-            connection.execute("DROP TABLE jsonl_checkpoint")
-            connection.commit()
-            connection.close()
         _, index_directory_fd, index_fd, _ = secure_open(Path.cwd(), Path.cwd() / index_name)
         self._index_directory_fd = index_directory_fd
         self._index_fd = index_fd
@@ -79,6 +100,9 @@ class _JsonlOwnerStore:
                 _before_transaction_commit=lambda connection: self._write_checkpoint(
                     connection, standalone=False,
                 ),
+                _extra_table_ddl={"jsonl_checkpoint": CHECKPOINT_DDL},
+                _extra_table_specs={"jsonl_checkpoint": CHECKPOINT_SPEC},
+                _extra_schema_objects=GUARD_TRIGGERS,
             )
         except BaseException:
             os.close(index_fd)
@@ -92,6 +116,14 @@ class _JsonlOwnerStore:
         self._startup_read_bytes = 0
         self._replay(start_offset)
         self._write_checkpoint()
+        self._audit_lock = threading.Lock()
+        self._audit_done = threading.Event()
+        self._audit_status = "valid" if checkpoint is None else "pending"
+        self._audit_fatal = False
+        self._audit_offset = start_offset
+        self._audit_expected = (start_sequence, start_hash, prefix_digest)
+        if checkpoint is not None:
+            threading.Thread(target=self._audit_worker, daemon=True).start()
 
     def _slot_names(self) -> list[str]:
         return [f"{self._basename}.index.{slot}.sqlite3" for slot in range(INDEX_SLOTS)]
@@ -115,6 +147,16 @@ class _JsonlOwnerStore:
         ).fetchall()
         return canonical_json({"heads": [list(row) for row in heads], "watermarks": [list(row) for row in watermarks]})
 
+    def _state_integrity(self, connection: sqlite3.Connection) -> tuple[str, str]:
+        state = {}
+        counts = {}
+        for table in sorted(SQLiteChatProjectionStore._TABLES):
+            rows = connection.execute(f'SELECT * FROM "{table}" ORDER BY rowid').fetchall()
+            state[table] = [list(row) for row in rows]
+            counts[table] = len(rows)
+        encoded = canonical_json(state)
+        return hashlib.sha256(encoded.encode("utf-8")).hexdigest(), canonical_json(counts)
+
     def _select_checkpoint(self):
         journal = os.fstat(self._journal_fd)
         candidates = []
@@ -127,6 +169,19 @@ class _JsonlOwnerStore:
                 if tables != set(SQLiteChatProjectionStore._TABLES) | {"jsonl_checkpoint"}:
                     connection.close()
                     continue
+                triggers = {
+                    row[0]: (row[1], "".join((row[2] or "").lower().split()))
+                    for row in connection.execute(
+                        "SELECT name,tbl_name,sql FROM sqlite_master WHERE type='trigger'"
+                    )
+                }
+                expected_triggers = {
+                    name: (table, "".join(ddl.lower().split()))
+                    for name, (table, ddl) in GUARD_TRIGGERS.items()
+                }
+                if triggers != expected_triggers:
+                    connection.close()
+                    continue
                 columns = tuple(
                     (item[1], item[2].upper(), int(item[3]))
                     for item in connection.execute("PRAGMA table_info('jsonl_checkpoint')")
@@ -136,6 +191,7 @@ class _JsonlOwnerStore:
                     ("journal_ino", "INTEGER", 1), ("byte_offset", "INTEGER", 1),
                     ("record_sequence", "INTEGER", 1), ("chain_head", "TEXT", 1),
                     ("prefix_digest", "TEXT", 1), ("heads_json", "TEXT", 1),
+                    ("state_digest", "TEXT", 1), ("state_counts_json", "TEXT", 1),
                 ):
                     connection.close()
                     continue
@@ -143,13 +199,15 @@ class _JsonlOwnerStore:
                 if row is None or connection.execute("SELECT COUNT(*) FROM jsonl_checkpoint").fetchone()[0] != 1:
                     connection.close()
                     continue
-                generation, dev, ino, offset, sequence, chain, prefix, heads = row
+                generation, dev, ino, offset, sequence, chain, prefix, heads, state_digest, state_counts = row
+                actual_digest, actual_counts = self._state_integrity(connection)
                 valid = (
                     type(generation) is int and type(offset) is int and type(sequence) is int
                     and (dev, ino) == (journal.st_dev, journal.st_ino) and 0 <= offset <= journal.st_size
                     and len(chain) == 64 and len(prefix) == 64
                     and all(character in "0123456789abcdef" for character in chain + prefix)
                     and heads == self._heads_snapshot(connection)
+                    and state_digest == actual_digest and state_counts == actual_counts
                     and self._checkpoint_boundary_valid(offset, sequence, chain)
                 )
                 connection.close()
@@ -182,6 +240,46 @@ class _JsonlOwnerStore:
         checksum = hashlib.sha256(canonical_json(payload).encode("utf-8")).hexdigest()
         return record.get("checksum") == checksum == chain_head
 
+    def _audit_worker(self) -> None:
+        sequence, offset = 0, 0
+        chain = prefix = "0" * 64
+        failed = False
+        try:
+            while offset < self._audit_offset:
+                line = bytearray()
+                while offset + len(line) < self._audit_offset:
+                    remaining = min(64 * 1024, self._audit_offset - offset - len(line))
+                    chunk = os.pread(self._journal_fd, remaining, offset + len(line))
+                    if not chunk:
+                        break
+                    newline = chunk.find(b"\n")
+                    line.extend(chunk if newline < 0 else chunk[:newline + 1])
+                    if newline >= 0 or len(line) > MAX_JSONL_ROW_BYTES + 1:
+                        break
+                raw = bytes(line)
+                if not raw.endswith(b"\n") or offset + len(raw) > self._audit_offset:
+                    failed = True
+                    break
+                record = self._decode_record(raw[:-1], sequence + 1, chain)
+                sequence += 1
+                chain = record["checksum"]
+                prefix = hashlib.sha256(bytes.fromhex(prefix) + raw).hexdigest()
+                offset += len(raw)
+            failed = failed or offset != self._audit_offset
+            failed = failed or (sequence, chain, prefix) != self._audit_expected
+        except BaseException:
+            failed = True
+        finally:
+            with self._audit_lock:
+                self._audit_status = "failed" if failed else "valid"
+                self._audit_fatal = failed
+                self._audit_done.set()
+
+    def _ensure_healthy(self) -> None:
+        with self._audit_lock:
+            if self._audit_fatal:
+                raise ChatProjectionStoreError("rebuild_required", "JSONL prefix audit failed")
+
     def _absent_slot(self) -> str:
         for name in self._slot_names():
             try:
@@ -209,9 +307,10 @@ class _JsonlOwnerStore:
         connection.execute(CHECKPOINT_DDL.replace("CREATE TABLE ", "CREATE TABLE IF NOT EXISTS ", 1))
         connection.execute("DELETE FROM jsonl_checkpoint")
         connection.execute(
-            "INSERT INTO jsonl_checkpoint VALUES(?,?,?,?,?,?,?,?)",
+            "INSERT INTO jsonl_checkpoint VALUES(?,?,?,?,?,?,?,?,?,?)",
             (self._sequence, journal.st_dev, journal.st_ino, os.lseek(self._journal_fd, 0, os.SEEK_END),
-             self._sequence, self._last_hash, self._prefix_digest, self._heads_snapshot(connection)),
+             self._sequence, self._last_hash, self._prefix_digest, self._heads_snapshot(connection),
+             *self._state_integrity(connection)),
         )
         if standalone:
             connection.commit()
@@ -368,6 +467,7 @@ class _JsonlOwnerStore:
         return self._index._stored_int(row[0]) if row else None
 
     def select_generation(self, root_id: str, root_generation: int) -> None:
+        self._ensure_healthy()
         self._index._identity(root_id, root_generation)
         current = self._selected_generation(root_id)
         if current is not None and root_generation < current:
@@ -379,6 +479,7 @@ class _JsonlOwnerStore:
         self._apply("select_generation", arguments)
 
     def commit(self, request: ProjectionCommit) -> CommitResult:
+        self._ensure_healthy()
         self._index._validate_commit(request)
         if self._selected_generation(request.root_id) != request.root_generation:
             raise ChatProjectionStoreError("stale_generation", "root generation is not selected")
@@ -418,6 +519,7 @@ class _JsonlOwnerStore:
         return result
 
     def delete_generation(self, root_id: str, root_generation: int) -> None:
+        self._ensure_healthy()
         self._index._identity(root_id, root_generation)
         exists = self._index._connection.execute(
             "SELECT 1 FROM root_generation_heads WHERE root_id=? AND root_generation=?",
@@ -432,6 +534,7 @@ class _JsonlOwnerStore:
         self._apply("delete_generation", arguments)
 
     def delete_root(self, root_id: str) -> None:
+        self._ensure_healthy()
         self._index._identity(root_id, 0)
         exists = self._index._connection.execute(
             "SELECT 1 FROM selected_roots WHERE root_id=? UNION SELECT 1 FROM root_generation_heads WHERE root_id=? LIMIT 1",
@@ -452,19 +555,21 @@ class _JsonlOwnerStore:
                 os.close(descriptor)
 
     def audit_prefix(self) -> None:
-        expected = (self._sequence, self._last_hash, self._prefix_digest)
-        try:
-            for _record in self._iter_records():
-                pass
-        except ChatProjectionStoreError as exc:
-            self._sequence, self._last_hash, self._prefix_digest = expected
-            raise ChatProjectionStoreError("rebuild_required", "JSONL prefix audit failed") from exc
-        if (self._sequence, self._last_hash, self._prefix_digest) != expected:
-            self._sequence, self._last_hash, self._prefix_digest = expected
-            raise ChatProjectionStoreError("rebuild_required", "JSONL prefix audit mismatch")
+        self._audit_done.wait()
+        self._ensure_healthy()
+
+    def audit_status(self) -> str:
+        with self._audit_lock:
+            return self._audit_status
 
     def __getattr__(self, name: str):
-        return getattr(self._index, name)
+        value = getattr(self._index, name)
+        if not callable(value):
+            return value
+        def guarded(*args, **kwargs):
+            self._ensure_healthy()
+            return value(*args, **kwargs)
+        return guarded
 
 
 class JsonlChatProjectionStore:
@@ -480,6 +585,10 @@ class JsonlChatProjectionStore:
             if operation == "startup_read_bytes":
                 if type(result) is not int or result < 0 or arguments:
                     raise ChatProjectionStoreError("owner_protocol_error", "invalid startup metric")
+                return result
+            if operation == "audit_status":
+                if result not in {"pending", "valid", "failed"} or arguments:
+                    raise ChatProjectionStoreError("owner_protocol_error", "invalid audit status")
                 return result
             return validator._validate_rpc_result(operation, result, arguments)
         self._owner = OwnerClient(
@@ -533,6 +642,9 @@ class JsonlChatProjectionStore:
     def startup_read_bytes(self) -> int:
         return self._owner.rpc("startup_read_bytes")
 
+    def audit_status(self) -> str:
+        return self._owner.rpc("audit_status")
+
 
 def _run_owner(channel_fd: int, directory_fd: int, file_fd: int, basename: str) -> None:
     def dispatch(store, operation: str, arguments: Mapping[str, Any], request_id: int):
@@ -544,6 +656,10 @@ def _run_owner(channel_fd: int, directory_fd: int, file_fd: int, basename: str) 
             if arguments:
                 raise ChatProjectionStoreError("owner_protocol_error", "metric arguments are invalid")
             return store._startup_read_bytes
+        if operation == "audit_status":
+            if arguments:
+                raise ChatProjectionStoreError("owner_protocol_error", "audit status arguments are invalid")
+            return store.audit_status()
         return _owner_dispatch(store, operation, arguments, request_id)
     serve_owner(
         channel_fd, directory_fd, file_fd, basename,

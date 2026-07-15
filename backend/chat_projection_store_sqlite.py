@@ -190,6 +190,9 @@ class SQLiteChatProjectionStore:
         before_commit: Callable[[], None] | None = None,
         after_commit: Callable[[], None] | None = None,
         _before_transaction_commit: Callable[[sqlite3.Connection], None] | None = None,
+        _extra_table_ddl: Mapping[str, str] | None = None,
+        _extra_table_specs: Mapping[str, tuple[tuple[str, str, int, int, str | None], ...]] | None = None,
+        _extra_schema_objects: Mapping[str, tuple[str, str]] | None = None,
         _owner_directory_fd: int | None = None,
         _owner_file_fd: int | None = None,
         _owner_basename: str | None = None,
@@ -201,6 +204,9 @@ class SQLiteChatProjectionStore:
         self._before_commit = before_commit
         self._after_commit = after_commit
         self._before_transaction_commit = _before_transaction_commit
+        self._table_ddl = {**TABLE_DDL, **(_extra_table_ddl or {})}
+        self._TABLES = {**type(self)._TABLES, **(_extra_table_specs or {})}
+        self._extra_schema_objects = dict(_extra_schema_objects or {})
         self._lock = threading.RLock()
         self._closed = False
         self._ipc_timeout_seconds = _ipc_timeout_seconds
@@ -453,9 +459,20 @@ class SQLiteChatProjectionStore:
             raise ChatProjectionStoreError("unsupported_schema", "wipe the selected chat store")
         install_sql = ";".join(
             sql.replace("CREATE TABLE ", "CREATE TABLE IF NOT EXISTS ", 1)
-            for sql in TABLE_DDL.values()
+            for sql in self._table_ddl.values()
         )
         self._connection.executescript(f"{install_sql};")
+        if self._extra_schema_objects:
+            existing = {
+                row[0] for row in self._connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='trigger'"
+                )
+            }
+            missing = [
+                ddl for name, (_table, ddl) in self._extra_schema_objects.items() if name not in existing
+            ]
+            if missing:
+                self._connection.executescript(";".join(missing) + ";")
         self._connection.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
         self._file_checkpoint()
         self._connection.commit()
@@ -511,11 +528,13 @@ class SQLiteChatProjectionStore:
 
     def _expected_schema_objects(self) -> set[tuple[str, str, str, str | None]]:
         objects = {
-            ("table", name, name, self._normalize_sql(sql)) for name, sql in TABLE_DDL.items()
+            ("table", name, name, self._normalize_sql(sql)) for name, sql in self._table_ddl.items()
         }
         for table, count in AUTOINDEX_COUNTS.items():
             for number in range(1, count + 1):
                 objects.add(("index", f"sqlite_autoindex_{table}_{number}", table, None))
+        for name, (table, ddl) in self._extra_schema_objects.items():
+            objects.add(("trigger", name, table, self._normalize_sql(ddl)))
         return objects
 
     @_translate_sqlite("storage_write_failed")
