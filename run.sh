@@ -193,6 +193,20 @@ port_in_use() {
   (echo >"/dev/tcp/127.0.0.1/$port") >/dev/null 2>&1
 }
 
+# Callers capture resolve_port_conflict via command substitution, so any
+# stray stdout in its call chain corrupts the resolved port (a leaked
+# "Stopping previous ..." line once produced a multi-line BACKEND_PORT that
+# broke every consumer of BETTER_*_BACKEND_URL). Fail closed on anything
+# that is not exactly one in-range port number.
+require_single_numeric_port() {
+  local value="$1"
+  local label="$2"
+  if ! [[ "$value" =~ ^[0-9]+$ ]] || [ "$value" -lt 1 ] || [ "$value" -gt 65535 ]; then
+    printf 'FATAL: resolved %s port is not a single numeric port (got %q); refusing to start.\n' "$label" "$value" >&2
+    return 1
+  fi
+}
+
 resolve_port_conflict() {
   local port="$1"
   local label="$2"
@@ -517,12 +531,14 @@ ensure_base_prereqs
 echo "Checking startup ports..."
 kill_backend_lock_holder
 BACKEND_PORT="$(resolve_port_conflict "$BACKEND_PORT" "backend")"
+require_single_numeric_port "$BACKEND_PORT" "backend"
 export BETTER_CLAUDE_BACKEND_PORT="$BACKEND_PORT"
 export BETTER_CLAUDE_BACKEND_URL="http://127.0.0.1:$BACKEND_PORT"
 export BETTER_AGENT_BACKEND_PORT="$BACKEND_PORT"
 export BETTER_AGENT_BACKEND_URL="http://127.0.0.1:$BACKEND_PORT"
 export BA_BACKEND_PORT="$BACKEND_PORT"
 FRONTEND_PORT="$(resolve_port_conflict "$FRONTEND_PORT" "frontend")"
+require_single_numeric_port "$FRONTEND_PORT" "frontend"
 export BETTER_CLAUDE_FRONTEND_PORT="$FRONTEND_PORT"
 export BETTER_AGENT_FRONTEND_PORT="$FRONTEND_PORT"
 
@@ -899,6 +915,7 @@ start_bff() {
   echo "Starting BFF (browser-facing proxy) on $bind_host:$BACKEND_PORT..."
   stop_known_better_agent_port_users "$BACKEND_PORT"
   BACKEND_PORT="$(resolve_port_conflict "$BACKEND_PORT" "backend")"
+  require_single_numeric_port "$BACKEND_PORT" "backend"
   export BETTER_CLAUDE_BACKEND_PORT="$BACKEND_PORT"
   export BETTER_CLAUDE_BACKEND_URL="http://127.0.0.1:$BACKEND_PORT"
   export BETTER_AGENT_BACKEND_PORT="$BACKEND_PORT"

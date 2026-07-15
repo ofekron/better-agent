@@ -14,6 +14,7 @@ import os
 import base64
 import random
 import urllib.error
+import urllib.parse
 import urllib.request
 from typing import Any
 
@@ -78,13 +79,41 @@ def _http_error_message(exc: "urllib.error.HTTPError") -> str:
     return f"core returned HTTP {exc.code}{suffix}"
 
 
+def _validated_backend_url(raw: str) -> str:
+    """Reject a malformed backend URL up front with an actionable message.
+
+    A corrupted BETTER_*_BACKEND_URL (e.g. a multi-line port leaked into the
+    env by a startup script) otherwise surfaces deep inside urllib as an
+    opaque ``nonnumeric port`` failure at request time."""
+    url = raw.strip().rstrip("/")
+    problem = ""
+    if any(ch.isspace() for ch in url):
+        problem = "contains whitespace"
+    else:
+        parsed = urllib.parse.urlsplit(url)
+        if parsed.scheme not in ("http", "https") or not parsed.netloc:
+            problem = "is not an http(s) URL"
+        else:
+            try:
+                parsed.port
+            except ValueError:
+                problem = "has an invalid port"
+    if problem:
+        raise BetterAgentError(
+            f"invalid backend URL {url!r} ({problem}); "
+            "check BETTER_AGENT_BACKEND_URL / BETTER_CLAUDE_BACKEND_URL "
+            "or the backend_url override"
+        )
+    return url
+
+
 class Client:
     """One core loopback client. kwargs override env-derived defaults."""
 
     def __init__(self, **overrides: Any) -> None:
-        self.backend_url = (
+        self.backend_url = _validated_backend_url(
             overrides.get("backend_url") or _env("BETTER_CLAUDE_BACKEND_URL") or "http://localhost:8000"
-        ).rstrip("/")
+        )
         self.internal_token = overrides.get("internal_token") or _env("BETTER_CLAUDE_INTERNAL_TOKEN")
         self.app_session_id = overrides.get("app_session_id") or _env("BETTER_CLAUDE_APP_SESSION_ID")
         self.cwd = overrides.get("cwd") or _env("BETTER_CLAUDE_CWD")

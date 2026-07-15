@@ -83,6 +83,23 @@ def test_lock_ops_validates_key_before_loopback() -> None:
     assert module.lock_ops_response("   ") == {"success": False, "error": "key_required"}
 
 
+def test_lock_ops_surfaces_clear_error_for_malformed_backend_url(monkeypatch) -> None:
+    """A corrupted BETTER_*_BACKEND_URL (multi-line port leaked into the env)
+    must fail closed with an actionable message, not urllib's opaque
+    "nonnumeric port" raised mid-request."""
+    module = _load_mcp_module()
+    dirty = "http://127.0.0.1:Stopping previous Better Agent BFF process(es): 58127\n18765"
+    for name in ("BETTER_AGENT_BACKEND_URL", "BETTER_CLAUDE_BACKEND_URL"):
+        monkeypatch.setenv(name, dirty)
+    monkeypatch.setenv("BETTER_AGENT_INTERNAL_TOKEN", "test-token")
+
+    result = module.lock_ops_response("file_edit:/tmp/example")
+
+    assert result["success"] is False
+    assert "invalid backend URL" in result["error"]
+    assert "nonnumeric port" not in result["error"]
+
+
 def test_manifest_declares_git_ops_lock_instruction() -> None:
     root = Path(__file__).resolve().parents[1]
     manifest = json.loads((root / "better-agent-extension.json").read_text(encoding="utf-8"))
