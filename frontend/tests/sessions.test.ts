@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { fireEvent } from "@testing-library/react";
 import { renderApp } from "./harness";
 import { makeSession, makeUserMsg } from "./fixtures";
-import { loadOfflineActions } from "src/lib/offlineQueueStore";
+import { loadOfflineActions, putOfflineAction } from "src/lib/offlineQueueStore";
 
 async function waitForSend(
   h: Awaited<ReturnType<typeof renderApp>>,
@@ -938,6 +938,29 @@ describe("sessions CRUD + subscribe lifecycle", () => {
       h.restCalls.find((c) => c.method === "DELETE" && c.path === "/api/sessions/a"),
     ).toBeDefined();
     expect(h.toJSON().sidebar.sessions.map((s) => s.id)).toEqual(["b"]);
+    h.unmount();
+  });
+
+  it("keeps offline intent when the backend rejects session deletion", async () => {
+    const session = makeSession({ id: "delete-fails" });
+    await putOfflineAction({
+      sessionId: session.id,
+      clientId: "queued-before-delete",
+      prompt: "keep this prompt",
+      model: session.model,
+      cwd: session.cwd,
+    });
+    const h = await renderApp({ seed: { sessions: [session] } });
+    h.backend.failNextWithStatus(500, `/api/sessions/${session.id}`);
+
+    await h.deleteSession(session.id);
+
+    await expect.poll(() => loadOfflineActions()).toEqual([
+      expect.objectContaining({
+        sessionId: session.id,
+        clientId: "queued-before-delete",
+      }),
+    ]);
     h.unmount();
   });
 

@@ -304,4 +304,31 @@ describe("useOfflineQueue — IndexedDB persistence integrity", () => {
       expect.objectContaining({ sessionId: "kept-session", clientId: "prompt-kept" }),
     ]);
   });
+
+  it("quarantines live replay when the deleted-session IndexedDB purge fails", async () => {
+    const sessionId = "22222222-2222-4222-8222-222222222222";
+    const { result } = renderHook(() => useOfflineQueue());
+    await waitFor(() => expect(result.current.ready).toBe(true));
+    await act(() => result.current.enqueue(entry(sessionId, "stale-after-delete")));
+    const originalDelete = IDBObjectStore.prototype.delete;
+    IDBObjectStore.prototype.delete = function () {
+      throw new DOMException("forced purge failure", "InvalidStateError");
+    };
+
+    let removed = true;
+    try {
+      await act(async () => {
+        removed = await result.current.removeAllForSession(sessionId);
+      });
+    } finally {
+      IDBObjectStore.prototype.delete = originalDelete;
+    }
+
+    expect(removed).toBe(false);
+    expect(result.current.persistFailed).toBe(true);
+    expect(result.current.getAll()).toEqual([]);
+    expect(await loadOfflineActions()).toEqual([
+      expect.objectContaining({ sessionId, clientId: "stale-after-delete" }),
+    ]);
+  });
 });
