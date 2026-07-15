@@ -298,7 +298,7 @@ class SQLiteChatProjectionStore:
             )
         if self._test_owner_fault not in (
             None, "post_commit_stop", "malformed_response", "semantic_mismatch",
-            "startup_stop", "malformed_commit_response",
+            "startup_stop", "malformed_commit_response", "revision_pair_mismatch",
         ):
             raise ChatProjectionStoreError("invalid_input", "unknown owner test fault")
         self._connection = None
@@ -507,7 +507,7 @@ class SQLiteChatProjectionStore:
             expected = (
                 {"root_id", "root_generation", "fact_sequence", "event_id", "content_hash", "canonical_fact"}
                 if operation == "read_facts" else
-                {"root_id", "root_generation", "revision", "fact_sequence", "visible_delta", "historical_revision"}
+                {"root_id", "root_generation", "revision", "fact_sequence", "event_id", "content_hash", "visible_delta", "historical_revision"}
             )
             previous = arguments["after"]
             for row in rows:
@@ -517,7 +517,7 @@ class SQLiteChatProjectionStore:
                     self._wire_integer(row[key])
                 for key in expected & {"event_id", "content_hash"}:
                     self._wire_text(row[key])
-                if operation == "read_facts" and (
+                if "content_hash" in row and (
                     len(row["content_hash"]) != 64
                     or any(character not in "0123456789abcdef" for character in row["content_hash"])
                 ):
@@ -532,10 +532,22 @@ class SQLiteChatProjectionStore:
                     expected_hash = hashlib.sha256(canonical_json(row["canonical_fact"]).encode("utf-8")).hexdigest()
                     if row["content_hash"] != expected_hash or row["canonical_fact"].get("event_id") != row["event_id"]:
                         raise ChatProjectionStoreError("owner_protocol_error", "owner fact hash mismatch")
+                else:
+                    if row["revision"] != row["fact_sequence"]:
+                        raise ChatProjectionStoreError(
+                            "owner_protocol_error", "owner revision fact pairing mismatch",
+                        )
+                    self._validate_delta_identity(
+                        row["visible_delta"], row["historical_revision"], row["event_id"],
+                        row["content_hash"], "owner_protocol_error",
+                    )
             if rows and previous > cursor:
                 raise ChatProjectionStoreError("owner_protocol_error", "owner cursor precedes page")
+            transport_only = {"root_id", "root_generation"}
+            if operation == "read_revisions":
+                transport_only |= {"event_id", "content_hash"}
             return [
-                {key: value for key, value in row.items() if key not in {"root_id", "root_generation"}}
+                {key: value for key, value in row.items() if key not in transport_only}
                 for row in rows
             ]
         if operation == "read_projection":
@@ -991,7 +1003,7 @@ class SQLiteChatProjectionStore:
             head_cursor = self.projection_cursor(root_id, root_generation)
             cursor = self._connection.execute(
                 "SELECT r.revision,r.fact_sequence,r.visible_delta_json,r.historical_json,"
-                "f.fact_sequence FROM revisions r LEFT JOIN canonical_facts f ON "
+                "f.fact_sequence,f.event_id,f.content_hash,f.fact_json FROM revisions r LEFT JOIN canonical_facts f ON "
                 "f.root_id=r.root_id AND f.root_generation=r.root_generation "
                 "AND f.fact_sequence=r.fact_sequence "
                 "WHERE r.root_id=? AND r.root_generation=? AND r.revision>? "
@@ -1011,11 +1023,30 @@ class SQLiteChatProjectionStore:
                         raise ChatProjectionStoreError(
                             "storage_corrupt", "revision canonical fact reference is invalid",
                         )
+                    if item.revision != item.fact_sequence:
+                        raise ChatProjectionStoreError(
+                            "storage_corrupt", "revision and canonical fact sequences diverge",
+                        )
+                    event_id = self._stored_text(row[5])
+                    content_hash = self._stored_text(row[6])
+                    canonical_fact = self._stored_json(row[7])
+                    expected_hash = hashlib.sha256(
+                        canonical_json(canonical_fact).encode("utf-8"),
+                    ).hexdigest()
+                    if content_hash != expected_hash or canonical_fact.get("event_id") != event_id:
+                        raise ChatProjectionStoreError(
+                            "storage_corrupt", "revision canonical fact identity is invalid",
+                        )
+                    self._validate_delta_identity(
+                        item.visible_delta, item.historical_revision, event_id, content_hash,
+                        "storage_corrupt",
+                    )
                     if item.revision <= previous:
                         raise ChatProjectionStoreError("storage_corrupt", "persisted revisions are unordered")
                     previous = item.revision
                     wire_item = {
                         **asdict(item), "root_id": root_id, "root_generation": root_generation,
+                        "event_id": event_id, "content_hash": content_hash,
                     }
                     row_bytes = len(_encode_json_bounded(wire_item, MAX_RESPONSE_BYTES))
                     added_bytes = row_bytes + (1 if results else 0)
@@ -1026,6 +1057,31 @@ class SQLiteChatProjectionStore:
             finally:
                 cursor.close()
         return results
+
+    def _revision_identity(
+        self, root_id: str, root_generation: int, fact_sequence: int,
+    ) -> tuple[str, str]:
+        row = self._connection.execute(
+            "SELECT event_id,content_hash FROM canonical_facts WHERE root_id=? "
+            "AND root_generation=? AND fact_sequence=?",
+            (root_id, root_generation, fact_sequence),
+        ).fetchone()
+        if row is None:
+            raise ChatProjectionStoreError("storage_corrupt", "revision canonical fact is missing")
+        return self._stored_text(row[0]), self._stored_text(row[1])
+
+    @staticmethod
+    def _validate_delta_identity(
+        visible: Mapping[str, Any], historical: Mapping[str, Any], event_id: str,
+        content_hash: str, code: str,
+    ) -> None:
+        for payload in (visible, historical):
+            if "event_id" in payload and payload["event_id"] != event_id:
+                raise ChatProjectionStoreError(code, "revision event identity mismatch")
+            if "content_hash" in payload and payload["content_hash"] != content_hash:
+                raise ChatProjectionStoreError(code, "revision content identity mismatch")
+        if "replace" in visible and visible["replace"] != event_id:
+            raise ChatProjectionStoreError(code, "revision replacement identity mismatch")
 
     @_translate_sqlite("storage_read_failed")
     def projection_cursor(self, root_id: str, root_generation: int) -> int:
@@ -1420,10 +1476,16 @@ def _owner_dispatch(
         rows = store.read_revisions(**arguments, _page_base_bytes=base_bytes)
         if rows and rows[-1].revision > cursor:
             raise ChatProjectionStoreError("storage_corrupt", "revision page exceeds projection head")
-        result["rows"] = [
-            {**asdict(item), "root_id": arguments["root_id"],
-             "root_generation": arguments["root_generation"]} for item in rows
-        ]
+        result["rows"] = []
+        for item in rows:
+            event_id, content_hash = store._revision_identity(
+                arguments["root_id"], arguments["root_generation"], item.fact_sequence,
+            )
+            result["rows"].append({
+                **asdict(item), "root_id": arguments["root_id"],
+                "root_generation": arguments["root_generation"],
+                "event_id": event_id, "content_hash": content_hash,
+            })
         return result
     if operation == "projection_cursor":
         return {
@@ -1504,6 +1566,14 @@ def _run_owner(
                 if test_fault == "semantic_mismatch" and isinstance(result, Mapping):
                     result = dict(result)
                     result["root_id"] = "mismatched-root"
+                    test_fault = "none"
+                if (
+                    test_fault == "revision_pair_mismatch" and operation == "read_revisions"
+                    and isinstance(result, Mapping) and result.get("rows")
+                ):
+                    result = dict(result)
+                    result["rows"] = [dict(row) for row in result["rows"]]
+                    result["rows"][0]["fact_sequence"] += 1
                     test_fault = "none"
                 try:
                     _send_frame(channel, {

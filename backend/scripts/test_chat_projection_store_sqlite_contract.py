@@ -763,6 +763,51 @@ def test_exact_correlated_response_cap_and_commit_protocol_uncertainty() -> None
     restarted.close()
 
 
+def test_revision_fact_pairing_and_delta_identity_are_atomic() -> None:
+    def two_fact_store(path: Path, *, fault: str | None = None) -> SQLiteChatProjectionStore:
+        store = SQLiteChatProjectionStore(path, _test_owner_fault=fault)
+        store.select_generation("root-1", 0)
+        base = _request(_fixture_event())
+        store.commit(base)
+        fact = json.loads(json.dumps(base.canonical_fact))
+        fact["content_version"] = 2
+        fact["data"]["text"] = "second revision"
+        digest = __import__("hashlib").sha256(canonical_json(fact).encode()).hexdigest()
+        store.commit(replace(
+            base, canonical_fact=fact, content_hash=digest,
+            historical_revision={"event_id": base.event_id, "content_version": 2},
+            watermark=replace(base.watermark, sequence=base.watermark.sequence + 1),
+        ))
+        return store
+
+    repointed_path = _path("revision-repointed")
+    repointed = two_fact_store(repointed_path)
+    connection = sqlite3.connect(repointed_path)
+    connection.execute("UPDATE revisions SET fact_sequence=2 WHERE revision=1")
+    connection.commit()
+    connection.close()
+    _assert_error("storage_corrupt", lambda: repointed.read_revisions("root-1", 0))
+    repointed.close()
+
+    identity_path = _path("revision-identity-mismatch")
+    identity = two_fact_store(identity_path)
+    connection = sqlite3.connect(identity_path)
+    connection.execute(
+        "UPDATE revisions SET historical_json='{\"event_id\":\"wrong-event\"}' WHERE revision=1"
+    )
+    connection.commit()
+    connection.close()
+    _assert_error("storage_corrupt", lambda: identity.read_revisions("root-1", 0))
+    identity.close()
+
+    malformed = two_fact_store(
+        _path("revision-wire-mismatch"), fault="revision_pair_mismatch",
+    )
+    _assert_error("owner_protocol_error", lambda: malformed.read_revisions("root-1", 0))
+    _assert_error("owner_unavailable", lambda: malformed.read_revisions("root-1", 0))
+    malformed.close()
+
+
 def main() -> None:
     try:
         tests = [value for name, value in globals().items() if name.startswith("test_")]
