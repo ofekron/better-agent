@@ -763,10 +763,18 @@ def test_run_sync_times_out_stuck_dispatch() -> bool:
     original_request_cancel = prov_manager.request_delegation_cancel
     dispatch_cancelled = threading.Event()
     requested_cancels: list[str] = []
+    cancellations = 0
 
     async def stuck_dispatch(*args, **kwargs):
+        nonlocal cancellations
         try:
-            await asyncio.Event().wait()
+            while True:
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    cancellations += 1
+                    if cancellations >= 2:
+                        raise
         finally:
             dispatch_cancelled.set()
 
@@ -775,8 +783,8 @@ def test_run_sync_times_out_stuck_dispatch() -> bool:
         prov_manager.ensure_caller = lambda spec, cfg: "caller"
         prov_manager.dispatch = stuck_dispatch
         prov_manager._ensure_ready_base_locked = _ready_base_without_provider
-        prov_manager.request_delegation_cancel = lambda delegation_id: (
-            requested_cancels.append(delegation_id) or True
+        prov_manager.request_delegation_cancel = lambda delegation_id, **kwargs: (
+            requested_cancels.append(f"{delegation_id}:{kwargs.get('interrupt_provider')}") or True
         )
         started = time.monotonic()
         try:
@@ -795,7 +803,7 @@ def test_run_sync_times_out_stuck_dispatch() -> bool:
             if any(thread.name == "provisioning-dispatch_timeout_test" for thread in threading.enumerate()):
                 print(f"{FAIL} dispatch timeout: worker thread still alive")
                 return False
-            if len(requested_cancels) != 1 or not requested_cancels[0].startswith("dispatch_timeout_test_"):
+            if len(requested_cancels) != 1 or not requested_cancels[0].startswith("dispatch_timeout_test_") or not requested_cancels[0].endswith(":False"):
                 print(f"{FAIL} dispatch timeout: provider cancellation not requested {requested_cancels!r}")
                 return False
             print(f"{PASS} dispatch timeout surfaces")
@@ -929,17 +937,25 @@ def test_in_process_dispatch_timeout_cancels_provider_run() -> bool:
     )
     coroutine_cancelled = asyncio.Event()
     requested_cancels: list[str] = []
+    cancellations = 0
 
     class Coordinator:
         async def run_delegation(self, **kwargs):
+            nonlocal cancellations
             try:
-                await asyncio.Event().wait()
+                while True:
+                    try:
+                        await asyncio.Event().wait()
+                    except asyncio.CancelledError:
+                        cancellations += 1
+                        if cancellations >= 2:
+                            raise
             finally:
                 coroutine_cancelled.set()
 
     original_request_cancel = prov_dispatch.request_delegation_cancel
-    prov_dispatch.request_delegation_cancel = lambda delegation_id: (
-        requested_cancels.append(delegation_id) or True
+    prov_dispatch.request_delegation_cancel = lambda delegation_id, **kwargs: (
+        requested_cancels.append(f"{delegation_id}:{kwargs.get('interrupt_provider')}") or True
     )
     try:
         with _fake_runtime.bind_coordinator(Coordinator()):
@@ -960,7 +976,7 @@ def test_in_process_dispatch_timeout_cancels_provider_run() -> bool:
     if not coroutine_cancelled.is_set():
         print(f"{FAIL} in-process dispatch timeout: coroutine was not cancelled")
         return False
-    if requested_cancels != ["timed-in-process"]:
+    if requested_cancels != ["timed-in-process:False"]:
         print(f"{FAIL} in-process dispatch timeout: cancellation mismatch {requested_cancels!r}")
         return False
     print(f"{PASS} in-process dispatch timeout cancels coroutine and provider run")

@@ -33,6 +33,7 @@ from provisioning.spec import ProvisionedSessionSpec
 _LIFECYCLE_LOCKS: dict[tuple[str, str, str, str, str], threading.Lock] = {}
 _LIFECYCLE_LOCKS_GUARD = threading.Lock()
 logger = logging.getLogger(__name__)
+_CANCEL_JOIN_SECONDS = 0.25
 
 
 @dataclass
@@ -403,19 +404,27 @@ def run_sync(
             return value
         t.join(timeout=min(0.1, max(0.0, deadline - time.monotonic())))
     cancel_started = time.monotonic()
-    signalled = request_delegation_cancel(delegation_id)
+    signalled = request_delegation_cancel(
+        delegation_id,
+        interrupt_provider=False,
+    )
     control_ready.wait()
     loop = control["loop"]
     task = control["task"]
     loop.call_soon_threadsafe(task.cancel)
-    t.join()
+    t.join(timeout=_CANCEL_JOIN_SECONDS)
+    if t.is_alive():
+        loop.call_soon_threadsafe(task.cancel)
+        t.join(timeout=_CANCEL_JOIN_SECONDS)
+    thread_alive = t.is_alive()
     logger.warning(
         "provisioned_run_sync_timeout spec=%s delegation_id=%s budget_ms=%.3f "
-        "cancel_signalled=%s cancel_join_ms=%.3f",
+        "cancel_signalled=%s cancel_join_ms=%.3f thread_alive=%s",
         spec.key,
         delegation_id,
         timeout * 1000,
         signalled,
         (time.monotonic() - cancel_started) * 1000,
+        thread_alive,
     )
     raise TimeoutError(f"{spec.key} provisioned run timed out after {timeout:g}s")

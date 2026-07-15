@@ -33,6 +33,7 @@ logger = logging.getLogger(__name__)
 _AUTHORIZED_TOOL_PROFILE_TTL_SECONDS = 900.0
 _AUTHORIZED_TOOL_PROFILE_DISPATCHES: dict[str, tuple[str, float]] = {}
 _AUTHORIZED_TOOL_PROFILE_LOCK = threading.Lock()
+_CANCEL_SETTLE_SECONDS = 0.25
 
 
 def authorize_tool_profile_dispatch(client_delegation_id: str, profile: str) -> None:
@@ -209,35 +210,50 @@ async def _dispatch_in_process(
     from runtime_client import runtime as _runtime
     delegation_id = client_delegation_id or client_delegation_id_for_request(spec.key, "")
     started = time.monotonic()
-    try:
-        async with asyncio.timeout(spec.effective_dispatch_timeout):
-            return await _runtime.run_delegation(
-                app_session_id=caller_session_id,
-                instructions=instructions,
-                worker_session_id=base_session_id,
-                worker_description=cfg.worker_description,
-                model=cfg.model,
-                cwd=cfg.cwd,
-                client_delegation_id=delegation_id,
-                run_mode=cfg.run_mode,
-                worker_registry_cwd=cfg.cwd,
-                ephemeral=cfg.run_mode == "fork" and spec.ephemeral_forks,
-                machine_completion=spec.machine_completion,
-                provision_prompt=provision_prompt,
-                provisioned_tool_profile=spec.tool_profile,
-                include_events=True,
-            )
-    except TimeoutError:
-        signalled = await asyncio.to_thread(request_delegation_cancel, delegation_id)
-        logger.warning(
-            "provisioned_in_process_dispatch_timeout spec=%s delegation_id=%s "
-            "elapsed_ms=%.3f cancel_signalled=%s",
-            spec.key,
-            delegation_id,
-            (time.monotonic() - started) * 1000,
-            signalled,
-        )
-        raise
+    task = asyncio.create_task(_runtime.run_delegation(
+        app_session_id=caller_session_id,
+        instructions=instructions,
+        worker_session_id=base_session_id,
+        worker_description=cfg.worker_description,
+        model=cfg.model,
+        cwd=cfg.cwd,
+        client_delegation_id=delegation_id,
+        run_mode=cfg.run_mode,
+        worker_registry_cwd=cfg.cwd,
+        ephemeral=cfg.run_mode == "fork" and spec.ephemeral_forks,
+        machine_completion=spec.machine_completion,
+        provision_prompt=provision_prompt,
+        provisioned_tool_profile=spec.tool_profile,
+        include_events=True,
+    ))
+    done, _pending = await asyncio.wait(
+        {task},
+        timeout=spec.effective_dispatch_timeout,
+    )
+    if done:
+        return task.result()
+    signalled = request_delegation_cancel(
+        delegation_id,
+        interrupt_provider=False,
+    )
+    task.cancel()
+    done, _pending = await asyncio.wait({task}, timeout=_CANCEL_SETTLE_SECONDS)
+    if not done:
+        task.cancel()
+        await asyncio.wait({task}, timeout=_CANCEL_SETTLE_SECONDS)
+    logger.warning(
+        "provisioned_in_process_dispatch_timeout spec=%s delegation_id=%s "
+        "elapsed_ms=%.3f cancel_signalled=%s task_done=%s",
+        spec.key,
+        delegation_id,
+        (time.monotonic() - started) * 1000,
+        signalled,
+        task.done(),
+    )
+    raise TimeoutError(
+        f"{spec.key} in-process dispatch timed out after "
+        f"{spec.effective_dispatch_timeout:g}s"
+    )
 
 
 # ── shared helpers ────────────────────────────────────────────────────
@@ -407,7 +423,11 @@ def recover_delegation_result(client_delegation_id: str) -> dict[str, Any] | Non
     }
 
 
-def request_delegation_cancel(client_delegation_id: str) -> bool:
+def request_delegation_cancel(
+    client_delegation_id: str,
+    *,
+    interrupt_provider: bool = True,
+) -> bool:
     delegation_id = str(client_delegation_id or "").strip()
     if not delegation_id:
         return False
@@ -422,14 +442,21 @@ def request_delegation_cancel(client_delegation_id: str) -> bool:
     status = delegation_status_store.read_status(delegation_id)
     if not isinstance(status, dict):
         return False
-    return _cancel_delegation_status_run(status)
+    return _cancel_delegation_status_run(
+        status,
+        interrupt_provider=interrupt_provider,
+    )
 
 
 def _delegation_status_terminal(status: dict[str, Any]) -> bool:
     return status.get("status") == "complete" or isinstance(status.get("result"), dict)
 
 
-def _cancel_delegation_status_run(status: dict[str, Any]) -> bool:
+def _cancel_delegation_status_run(
+    status: dict[str, Any],
+    *,
+    interrupt_provider: bool = True,
+) -> bool:
     run_id = status.get("provider_run_id")
     if not isinstance(run_id, str) or not run_id:
         return False
@@ -437,6 +464,13 @@ def _cancel_delegation_status_run(status: dict[str, Any]) -> bool:
     run_dir = _owned_run_dir(run_dir_value) if isinstance(run_dir_value, str) else None
     if run_dir is None or run_dir.name != run_id:
         return False
+    try:
+        (run_dir / "cancel").touch()
+    except OSError:
+        logger.debug("request_delegation_cancel sentinel write failed run_id=%s", run_id, exc_info=True)
+        return False
+    if not interrupt_provider:
+        return True
     provider_id = status.get("provider_id")
     if not isinstance(provider_id, str) or not provider_id:
         provider_id = _provider_id_from_run_dir(run_dir)
@@ -454,13 +488,6 @@ def _cancel_delegation_status_run(status: dict[str, Any]) -> bool:
                 provider_id,
                 exc_info=True,
             )
-    if run_dir is None:
-        return False
-    try:
-        (run_dir / "cancel").touch()
-    except OSError:
-        logger.debug("request_delegation_cancel sentinel write failed run_id=%s", run_id, exc_info=True)
-        return False
     return True
 
 
