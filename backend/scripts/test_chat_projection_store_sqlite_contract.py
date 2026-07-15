@@ -21,8 +21,9 @@ sys.path.insert(0, str(ROOT / "backend"))
 
 from chat_projection_store import ChatProjectionStoreError, ProjectionCommit, SourceWatermark, TurnManifest
 from chat_projection_store_sqlite import (
-    MAX_COMMIT_BYTES, MAX_JSON_DEPTH, MAX_JSON_LIST_ITEMS, MAX_JSON_NODES,
-    MAX_JSON_OBJECT_ITEMS, MAX_READ_LIMIT, MAX_SQLITE_INTEGER, MAX_TEXT_BYTES,
+    MAX_COMMIT_BYTES, MAX_IPC_TIMEOUT_SECONDS, MAX_JSON_DEPTH, MAX_JSON_LIST_ITEMS,
+    MAX_JSON_NODES, MAX_JSON_OBJECT_ITEMS, MAX_READ_LIMIT, MAX_RESPONSE_BYTES,
+    MAX_SQLITE_INTEGER, MAX_TEXT_BYTES, MIN_IPC_TIMEOUT_SECONDS,
     SQLiteChatProjectionStore, canonical_json,
 )
 
@@ -461,10 +462,12 @@ def test_sqlite_integer_boundaries_unicode_and_persisted_corruption() -> None:
 
     corrupt("fact-json", "UPDATE canonical_facts SET fact_json='[]'", lambda target: target.read_facts("root-1", 0))
     corrupt("fact-nan", "UPDATE canonical_facts SET fact_json='{\"value\":NaN}'", lambda target: target.read_facts("root-1", 0))
+    corrupt("fact-hash", "UPDATE canonical_facts SET content_hash=printf('%064d',0)", lambda target: target.read_facts("root-1", 0))
     corrupt("fact-seq", "UPDATE canonical_facts SET fact_sequence='bad'", lambda target: target.read_facts("root-1", 0))
     corrupt("revision-json", "UPDATE revisions SET visible_delta_json='bad'", lambda target: target.read_revisions("root-1", 0))
     corrupt("revision-int", "UPDATE revisions SET revision='bad'", lambda target: target.read_revisions("root-1", 0))
     corrupt("cursor", "UPDATE root_generation_heads SET projection_cursor='bad'", lambda target: target.projection_cursor("root-1", 0))
+    corrupt("cursor-behind", "UPDATE root_generation_heads SET projection_cursor=0", lambda target: target.read_revisions("root-1", 0))
     corrupt("projection-json", "UPDATE render_nodes SET node_json='[]'", lambda target: target.read_projection("root-1", 0, _fixture_event()["event_id"]))
     corrupt("projection-count", "UPDATE turn_manifests SET event_count='bad'", lambda target: target.read_projection("root-1", 0, _fixture_event()["event_id"]))
     corrupt("watermark", "UPDATE source_watermarks SET source_sequence='bad'", lambda target: target.source_watermark("root-1", 0, "provider-neutral"))
@@ -621,6 +624,63 @@ def test_owner_timeout_ambiguity_protocol_poison_and_idempotent_close() -> None:
     _assert_error("owner_unavailable", lambda: malformed.select_generation("root-1", 1))
     malformed.close()
     malformed.close()
+
+    mismatch = SQLiteChatProjectionStore(
+        _path("owner-semantic-mismatch"), _test_owner_fault="semantic_mismatch",
+    )
+    mismatch.select_generation("root-1", 0)
+    _assert_error("owner_protocol_error", lambda: mismatch.projection_cursor("root-1", 0))
+    _assert_error("owner_unavailable", lambda: mismatch.projection_cursor("root-1", 0))
+    mismatch.close()
+
+
+def test_response_page_budget_timeout_admission_and_close_failure() -> None:
+    timeout_path = _path("invalid-timeout")
+    for invalid in (float("nan"), float("inf"), float("-inf"), 0.01, 301, True):
+        _assert_error(
+            "invalid_input",
+            lambda invalid=invalid: SQLiteChatProjectionStore(
+                timeout_path, _ipc_timeout_seconds=invalid,
+            ),
+        )
+        assert not timeout_path.exists()
+    for boundary in (MIN_IPC_TIMEOUT_SECONDS, MAX_IPC_TIMEOUT_SECONDS):
+        boundary_store = SQLiteChatProjectionStore(
+            _path(f"timeout-{boundary}"), _ipc_timeout_seconds=boundary,
+        )
+        boundary_store.close()
+
+    page_path = _path("response-page-budget")
+    store = SQLiteChatProjectionStore(page_path)
+    store.select_generation("root-1", 0)
+    base = _request(_fixture_event())
+    blob = "x" * (MAX_RESPONSE_BYTES // 4)
+    for version in range(1, 6):
+        fact = json.loads(json.dumps(base.canonical_fact))
+        fact["content_version"] = version
+        fact["data"]["text"] = blob
+        digest = __import__("hashlib").sha256(canonical_json(fact).encode()).hexdigest()
+        store.commit(replace(
+            base, canonical_fact=fact, content_hash=digest,
+            historical_revision={"blob": blob, "version": version},
+            watermark=replace(base.watermark, sequence=base.watermark.sequence + version),
+        ))
+    _assert_error("response_too_large", lambda: store.read_facts("root-1", 0, limit=5))
+    first_facts = store.read_facts("root-1", 0, limit=3)
+    assert [item.fact_sequence for item in first_facts] == [1, 2, 3]
+    assert [item.fact_sequence for item in store.read_facts("root-1", 0, after=3, limit=2)] == [4, 5]
+    _assert_error("response_too_large", lambda: store.read_revisions("root-1", 0, limit=5))
+    assert [item.revision for item in store.read_revisions("root-1", 0, limit=3)] == [1, 2, 3]
+    store.close()
+
+    close_path = _path("close-checkpoint-failure")
+    closing = SQLiteChatProjectionStore(close_path)
+    closing.select_generation("root-1", 0)
+    close_peer = close_path.with_name("close-checkpoint-peer.sqlite3")
+    os.link(close_path, close_peer)
+    _assert_error("insecure_store_file", closing.close)
+    close_peer.unlink()
+    closing.close()
 
 
 def main() -> None:

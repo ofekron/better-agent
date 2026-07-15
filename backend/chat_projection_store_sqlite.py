@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import socket
 import sqlite3
@@ -35,7 +36,10 @@ MAX_TEXT_BYTES = 4_096
 MAX_COMMIT_BYTES = MAX_JSON_BYTES
 MAX_SQLITE_INTEGER = 2**63 - 1
 MAX_IPC_BYTES = 64 * 1024 * 1024
+MAX_RESPONSE_BYTES = 16 * 1024 * 1024
 IPC_TIMEOUT_SECONDS = 30
+MIN_IPC_TIMEOUT_SECONDS = 0.05
+MAX_IPC_TIMEOUT_SECONDS = 300
 
 TABLE_DDL = {
     "selected_roots": "CREATE TABLE selected_roots(root_id TEXT PRIMARY KEY, root_generation INTEGER NOT NULL)",
@@ -128,10 +132,24 @@ def canonical_json(value: Mapping[str, Any]) -> str:
     return encoded
 
 
-def _send_frame(channel: socket.socket, payload: Mapping[str, Any]) -> None:
-    encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8")
-    if len(encoded) > MAX_IPC_BYTES:
-        raise ChatProjectionStoreError("ipc_too_large", "projection owner frame limit exceeded")
+def _encode_json_bounded(payload: Any, limit: int) -> bytearray:
+    encoder = json.JSONEncoder(ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+    encoded = bytearray()
+    try:
+        for chunk in encoder.iterencode(payload):
+            chunk_bytes = chunk.encode("utf-8")
+            if len(encoded) + len(chunk_bytes) > limit:
+                raise ChatProjectionStoreError("ipc_too_large", "projection owner frame limit exceeded")
+            encoded.extend(chunk_bytes)
+    except (TypeError, ValueError, UnicodeError) as exc:
+        raise ChatProjectionStoreError("owner_protocol_error", "projection owner frame is invalid") from exc
+    return encoded
+
+
+def _send_frame(
+    channel: socket.socket, payload: Mapping[str, Any], *, limit: int = MAX_IPC_BYTES,
+) -> None:
+    encoded = _encode_json_bounded(payload, limit)
     channel.sendall(struct.pack("!I", len(encoded)) + encoded)
 
 
@@ -258,9 +276,19 @@ class SQLiteChatProjectionStore:
         self._install_schema()
 
     def _start_owner(self, path: Path | None) -> None:
-        if not isinstance(self._ipc_timeout_seconds, (int, float)) or isinstance(self._ipc_timeout_seconds, bool) or self._ipc_timeout_seconds <= 0:
-            raise ChatProjectionStoreError("invalid_input", "IPC timeout must be positive")
-        if self._test_owner_fault not in (None, "post_commit_stop", "malformed_response"):
+        if (
+            not isinstance(self._ipc_timeout_seconds, (int, float))
+            or isinstance(self._ipc_timeout_seconds, bool)
+            or not math.isfinite(self._ipc_timeout_seconds)
+            or not MIN_IPC_TIMEOUT_SECONDS <= self._ipc_timeout_seconds <= MAX_IPC_TIMEOUT_SECONDS
+        ):
+            raise ChatProjectionStoreError(
+                "invalid_input",
+                f"IPC timeout must be {MIN_IPC_TIMEOUT_SECONDS}..{MAX_IPC_TIMEOUT_SECONDS} seconds",
+            )
+        if self._test_owner_fault not in (
+            None, "post_commit_stop", "malformed_response", "semantic_mismatch",
+        ):
             raise ChatProjectionStoreError("invalid_input", "unknown owner test fault")
         self._connection = None
         self._process = None
@@ -416,24 +444,51 @@ class SQLiteChatProjectionStore:
                 raise ChatProjectionStoreError("owner_protocol_error", "owner result must be null")
             return None
         if operation == "projection_cursor":
-            return self._wire_integer(result)
+            self._wire_mapping(result, {"root_id", "root_generation", "projection_cursor"})
+            self._wire_correlation(result, arguments, ("root_id", "root_generation"))
+            return self._wire_integer(result["projection_cursor"])
         if operation == "commit":
-            self._wire_mapping(result, {"duplicate", "fact_sequence", "revision", "projection_cursor"})
+            self._wire_mapping(result, {
+                "duplicate", "fact_sequence", "revision", "projection_cursor", "root_id",
+                "root_generation", "event_id", "content_hash", "source_generation",
+                "source_sequence",
+            })
             if type(result["duplicate"]) is not bool:
                 raise ChatProjectionStoreError("owner_protocol_error", "invalid commit duplicate flag")
-            for key in ("fact_sequence", "revision", "projection_cursor"):
+            for key in (
+                "fact_sequence", "revision", "projection_cursor", "root_generation",
+                "source_generation", "source_sequence",
+            ):
                 self._wire_integer(result[key])
-            return result
+            request = arguments["request"]
+            for key in ("root_id", "root_generation", "event_id", "content_hash"):
+                if result[key] != request[key]:
+                    raise ChatProjectionStoreError("owner_protocol_error", "commit correlation mismatch")
+            if (
+                result["source_generation"] != request["watermark"]["generation"]
+                or result["source_sequence"] != request["watermark"]["sequence"]
+                or not result["fact_sequence"] == result["revision"] == result["projection_cursor"]
+            ):
+                raise ChatProjectionStoreError("owner_protocol_error", "commit sequence mismatch")
+            return {key: result[key] for key in ("duplicate", "fact_sequence", "revision", "projection_cursor")}
         if operation in {"read_facts", "read_revisions"}:
-            if not isinstance(result, list) or len(result) > arguments["limit"]:
+            self._wire_mapping(result, {
+                "root_id", "root_generation", "after", "projection_cursor", "rows",
+            })
+            self._wire_correlation(result, arguments, ("root_id", "root_generation", "after"))
+            rows = result["rows"]
+            cursor = self._wire_integer(result["projection_cursor"])
+            if not isinstance(rows, list) or len(rows) > arguments["limit"]:
                 raise ChatProjectionStoreError("owner_protocol_error", "invalid bounded read result")
             expected = (
-                {"fact_sequence", "event_id", "content_hash", "canonical_fact"}
+                {"root_id", "root_generation", "fact_sequence", "event_id", "content_hash", "canonical_fact"}
                 if operation == "read_facts" else
-                {"revision", "fact_sequence", "visible_delta", "historical_revision"}
+                {"root_id", "root_generation", "revision", "fact_sequence", "visible_delta", "historical_revision"}
             )
-            for row in result:
+            previous = arguments["after"]
+            for row in rows:
                 self._wire_mapping(row, expected)
+                self._wire_correlation(row, arguments, ("root_id", "root_generation"))
                 for key in expected & {"fact_sequence", "revision"}:
                     self._wire_integer(row[key])
                 for key in expected & {"event_id", "content_hash"}:
@@ -445,8 +500,24 @@ class SQLiteChatProjectionStore:
                     raise ChatProjectionStoreError("owner_protocol_error", "owner hash is invalid")
                 for key in expected & {"canonical_fact", "visible_delta", "historical_revision"}:
                     self._wire_json(row[key])
-            return result
+                sequence_key = "fact_sequence" if operation == "read_facts" else "revision"
+                if row[sequence_key] <= previous:
+                    raise ChatProjectionStoreError("owner_protocol_error", "owner rows are not strictly ordered")
+                previous = row[sequence_key]
+                if operation == "read_facts":
+                    expected_hash = hashlib.sha256(canonical_json(row["canonical_fact"]).encode("utf-8")).hexdigest()
+                    if row["content_hash"] != expected_hash or row["canonical_fact"].get("event_id") != row["event_id"]:
+                        raise ChatProjectionStoreError("owner_protocol_error", "owner fact hash mismatch")
+            if rows and previous > cursor:
+                raise ChatProjectionStoreError("owner_protocol_error", "owner cursor precedes page")
+            return [
+                {key: value for key, value in row.items() if key not in {"root_id", "root_generation"}}
+                for row in rows
+            ]
         if operation == "read_projection":
+            self._wire_mapping(result, {"root_id", "root_generation", "event_id", "projection"})
+            self._wire_correlation(result, arguments, ("root_id", "root_generation", "event_id"))
+            result = result["projection"]
             if result is None:
                 return None
             self._wire_mapping(result, {
@@ -465,8 +536,15 @@ class SQLiteChatProjectionStore:
             self._wire_text(result["manifest"]["turn_id"])
             self._wire_integer(result["manifest"]["event_count"])
             self._wire_integer(result["manifest"]["direct_child_count"])
+            if result["manifest"]["turn_id"] != result["turn_id"]:
+                raise ChatProjectionStoreError("owner_protocol_error", "owner manifest ownership mismatch")
             return result
         if operation == "source_watermark":
+            self._wire_mapping(result, {
+                "root_id", "root_generation", "stream_id", "watermark",
+            })
+            self._wire_correlation(result, arguments, ("root_id", "root_generation", "stream_id"))
+            result = result["watermark"]
             if result is None:
                 return None
             self._wire_mapping(result, {"stream_id", "generation", "sequence"})
@@ -477,6 +555,13 @@ class SQLiteChatProjectionStore:
             self._wire_integer(result["sequence"])
             return result
         raise ChatProjectionStoreError("owner_protocol_error", "unknown owner result operation")
+
+    @staticmethod
+    def _wire_correlation(
+        result: Mapping[str, Any], arguments: Mapping[str, Any], keys: tuple[str, ...],
+    ) -> None:
+        if any(result[key] != arguments[key] for key in keys):
+            raise ChatProjectionStoreError("owner_protocol_error", "owner result correlation mismatch")
 
     @staticmethod
     def _wire_mapping(value: Any, keys: set[str]) -> None:
@@ -832,17 +917,36 @@ class SQLiteChatProjectionStore:
                              after=after, limit=limit)
             return [StoredFact(**row) for row in rows]
         with self._lock:
-            rows = self._connection.execute(
+            cursor = self._connection.execute(
                 "SELECT fact_sequence,event_id,content_hash,fact_json FROM canonical_facts "
                 "WHERE root_id=? AND root_generation=? AND fact_sequence>? "
                 "ORDER BY fact_sequence LIMIT ?", (root_id, root_generation, after, limit),
-            ).fetchall()
-        return [
-            StoredFact(
-                self._stored_int(row[0]), self._stored_text(row[1]), self._stored_text(row[2]),
-                self._stored_json(row[3]),
-            ) for row in rows
-        ]
+            )
+            results = []
+            page_bytes = 1024
+            previous = after
+            try:
+                for row in cursor:
+                    item = StoredFact(
+                        self._stored_int(row[0]), self._stored_text(row[1]),
+                        self._stored_text(row[2]), self._stored_json(row[3]),
+                    )
+                    expected_hash = hashlib.sha256(
+                        canonical_json(item.canonical_fact).encode("utf-8"),
+                    ).hexdigest()
+                    if item.content_hash != expected_hash or item.canonical_fact.get("event_id") != item.event_id:
+                        raise ChatProjectionStoreError("storage_corrupt", "persisted fact identity is invalid")
+                    if item.fact_sequence <= previous:
+                        raise ChatProjectionStoreError("storage_corrupt", "persisted facts are unordered")
+                    previous = item.fact_sequence
+                    row_bytes = len(_encode_json_bounded(asdict(item), MAX_RESPONSE_BYTES))
+                    if page_bytes + row_bytes > MAX_RESPONSE_BYTES:
+                        raise ChatProjectionStoreError("response_too_large", "fact page exceeds response budget")
+                    results.append(item)
+                    page_bytes += row_bytes
+            finally:
+                cursor.close()
+        return results
 
     @_translate_sqlite("storage_read_failed")
     def read_revisions(
@@ -854,17 +958,31 @@ class SQLiteChatProjectionStore:
                              after=after, limit=limit)
             return [StoredRevision(**row) for row in rows]
         with self._lock:
-            rows = self._connection.execute(
+            cursor = self._connection.execute(
                 "SELECT revision,fact_sequence,visible_delta_json,historical_json FROM revisions "
                 "WHERE root_id=? AND root_generation=? AND revision>? ORDER BY revision LIMIT ?",
                 (root_id, root_generation, after, limit),
-            ).fetchall()
-        return [
-            StoredRevision(
-                self._stored_int(row[0]), self._stored_int(row[1]), self._stored_json(row[2]),
-                self._stored_json(row[3]),
-            ) for row in rows
-        ]
+            )
+            results = []
+            page_bytes = 1024
+            previous = after
+            try:
+                for row in cursor:
+                    item = StoredRevision(
+                        self._stored_int(row[0]), self._stored_int(row[1]),
+                        self._stored_json(row[2]), self._stored_json(row[3]),
+                    )
+                    if item.revision <= previous:
+                        raise ChatProjectionStoreError("storage_corrupt", "persisted revisions are unordered")
+                    previous = item.revision
+                    row_bytes = len(_encode_json_bounded(asdict(item), MAX_RESPONSE_BYTES))
+                    if page_bytes + row_bytes > MAX_RESPONSE_BYTES:
+                        raise ChatProjectionStoreError("response_too_large", "revision page exceeds response budget")
+                    results.append(item)
+                    page_bytes += row_bytes
+            finally:
+                cursor.close()
+        return results
 
     @_translate_sqlite("storage_read_failed")
     def projection_cursor(self, root_id: str, root_generation: int) -> int:
@@ -1167,16 +1285,23 @@ class SQLiteChatProjectionStore:
             with self._lock:
                 if self._closed:
                     return
+                close_error = None
                 try:
                     if not self._poisoned:
                         self._rpc("close")
-                except ChatProjectionStoreError:
-                    pass
+                except ChatProjectionStoreError as exc:
+                    close_error = exc
+                    if not self._poisoned:
+                        self._poison_owner_locked()
                 process = self._process
                 if process is not None and process.poll() is None:
                     try:
                         process.wait(timeout=self._ipc_timeout_seconds)
-                    except subprocess.TimeoutExpired:
+                    except subprocess.TimeoutExpired as exc:
+                        close_error = close_error or ChatProjectionStoreError(
+                            "owner_unavailable", "projection owner did not close",
+                        )
+                        close_error.__cause__ = exc
                         self._poison_owner_locked()
                 channel = self._channel
                 self._channel = None
@@ -1185,6 +1310,8 @@ class SQLiteChatProjectionStore:
                     channel.close()
                 self._close_secure_handles()
                 self._closed = True
+                if close_error is not None:
+                    raise close_error
             return
         connection = getattr(self, "_connection", None)
         if connection is not None:
@@ -1209,7 +1336,56 @@ def _owner_dispatch(store: SQLiteChatProjectionStore, operation: str, arguments:
     if operation not in allowed or set(arguments) != allowed[operation]:
         raise ChatProjectionStoreError("owner_protocol_error", "operation is not allowed")
     if operation == "commit":
-        return asdict(store.commit(store._commit_from_dict(arguments["request"])))
+        request = store._commit_from_dict(arguments["request"])
+        result = asdict(store.commit(request))
+        result.update({
+            "root_id": request.root_id, "root_generation": request.root_generation,
+            "event_id": request.event_id, "content_hash": request.content_hash,
+            "source_generation": request.watermark.generation,
+            "source_sequence": request.watermark.sequence,
+        })
+        return result
+    if operation == "read_facts":
+        rows = store.read_facts(**arguments)
+        cursor = store.projection_cursor(arguments["root_id"], arguments["root_generation"])
+        if rows and rows[-1].fact_sequence > cursor:
+            raise ChatProjectionStoreError("storage_corrupt", "fact page exceeds projection head")
+        return {
+            "root_id": arguments["root_id"], "root_generation": arguments["root_generation"],
+            "after": arguments["after"], "projection_cursor": cursor, "rows": [
+                {**asdict(item), "root_id": arguments["root_id"],
+                 "root_generation": arguments["root_generation"]} for item in rows
+            ],
+        }
+    if operation == "read_revisions":
+        rows = store.read_revisions(**arguments)
+        cursor = store.projection_cursor(arguments["root_id"], arguments["root_generation"])
+        if rows and rows[-1].revision > cursor:
+            raise ChatProjectionStoreError("storage_corrupt", "revision page exceeds projection head")
+        return {
+            "root_id": arguments["root_id"], "root_generation": arguments["root_generation"],
+            "after": arguments["after"], "projection_cursor": cursor, "rows": [
+                {**asdict(item), "root_id": arguments["root_id"],
+                 "root_generation": arguments["root_generation"]} for item in rows
+            ],
+        }
+    if operation == "projection_cursor":
+        return {
+            "root_id": arguments["root_id"], "root_generation": arguments["root_generation"],
+            "projection_cursor": store.projection_cursor(**arguments),
+        }
+    if operation == "read_projection":
+        result = store.read_projection(**arguments)
+        return {
+            "root_id": arguments["root_id"], "root_generation": arguments["root_generation"],
+            "event_id": arguments["event_id"], "projection": asdict(result) if result else None,
+        }
+    if operation == "source_watermark":
+        result = store.source_watermark(**arguments)
+        return {
+            "root_id": arguments["root_id"], "root_generation": arguments["root_generation"],
+            "stream_id": arguments["stream_id"], "watermark": asdict(result) if result else None,
+        }
     if operation == "close":
         store._file_checkpoint()
     method = getattr(store, operation)
@@ -1260,9 +1436,20 @@ def _run_owner(
                     })
                     test_fault = "none"
                     continue
-                _send_frame(channel, {
-                    "request_id": request_id, "operation": operation, "result": result,
-                })
+                if test_fault == "semantic_mismatch" and isinstance(result, Mapping):
+                    result = dict(result)
+                    result["root_id"] = "mismatched-root"
+                    test_fault = "none"
+                try:
+                    _send_frame(channel, {
+                        "request_id": request_id, "operation": operation, "result": result,
+                    }, limit=MAX_RESPONSE_BYTES)
+                except ChatProjectionStoreError as exc:
+                    if exc.code != "ipc_too_large":
+                        raise
+                    raise ChatProjectionStoreError(
+                        "response_too_large", "owner result exceeds response budget",
+                    ) from exc
                 if operation == "close":
                     break
             except ChatProjectionStoreError as exc:
