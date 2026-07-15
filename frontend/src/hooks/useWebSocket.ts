@@ -243,74 +243,6 @@ interface UseWebSocketOptions {
    * turn_complete, turn_start, etc.) and resolve in-flight ops
    * whose backend work continues past the originating REST call. */
   onAnyEvent?: (event: WSEvent) => void;
-  /** Per-message transient pill fired by backend run_recovery while it
-   * reconciles an in-flight run after a backend restart. Caller flips
-   * the matching assistant message's `isRecovering` field so the
-   * MessageBubble renders an "Updating state…" indicator until the
-   * value flips back to false. */
-  onMessageRecoveringChanged?: (
-    appSessionId: string,
-    msgId: string,
-    value: boolean
-  ) => void;
-  /** Per-message pill fired by the orchestrator while it sleeps between
-   * a rate-limited (429) attempt and the next retry. `retryAt` is the
-   * absolute ISO timestamp of the next attempt; `null` clears the pill
-   * (next attempt is firing now). The bubble renders "Retrying in Ns…"
-   * with a locally-ticking countdown until `retryAt` passes or the
-   * field clears. */
-  onMessageRetryingChanged?: (
-    appSessionId: string,
-    msgId: string,
-    retryAt: string | null,
-    errorText: string | null
-  ) => void;
-  /** A turn that succeeded only after >=1 automatic retry — durable
-   * badge so the recovery is distinguishable from a clean first-try run. */
-  onMessageAutoRetryChanged?: (
-    appSessionId: string,
-    msgId: string,
-    autoRetry: { count: number; kind: string } | null
-  ) => void;
-  onMessageContentUpdated?: (
-    appSessionId: string,
-    msgId: string,
-    content: string
-  ) => void;
-  onMessageContinuationChanged?: (
-    appSessionId: string,
-    msgId: string,
-    chainDepth: number | null
-  ) => void;
-  /** Per-turn provider/model/effort actually used. Re-stamped on each retry
-   *  iteration so a mid-message selector switch updates the badge live. */
-  onMessageRunMetaChanged?: (
-    appSessionId: string,
-    msgId: string,
-    runMeta: import("../types").ChatMessage["run_meta"]
-  ) => void;
-  /** Per-turn picker payload (`ask_result`) stamped on an assistant
-   * message — drives the inline session picker rendered below that turn. */
-  onMessageAskResultChanged?: (
-    appSessionId: string,
-    msgId: string,
-    askResult: import("../types").AskResult | null
-  ) => void;
-  /** The session the user chose from a turn's picker (highlighted row). */
-  onMessageAskChoiceChanged?: (
-    appSessionId: string,
-    msgId: string,
-    chosenSessionId: string | null
-  ) => void;
-  /** Backend's async-reconcile progress notifier. Fires only when a
-   * reconcile crosses the 0.3s threshold: `started` lands when the
-   * timer fires, `finished` when the reconcile completes (or fails).
-   * `root_id` keys the per-root tree. Caller renders a tiny
-   * "reconciling…" badge while the flag is `started`. */
-  onSessionProcessing?: (
-    rootId: string,
-    kind: "started" | "finished"
-  ) => void;
   /** Backend reconcile completed (fast or slow). The initial GET may
    * have returned stale cache; the frontend should silently refetch
    * if the user is viewing this root's session. */
@@ -386,29 +318,6 @@ export function useWebSocket(
   const onSupervisorEventRef = useRef(options.onSupervisorEvent);
   const onPrLinkRef = useRef(options.onPrLink);
   const onAnyEventRef = useRef(options.onAnyEvent);
-  const onMessageRecoveringChangedRef = useRef(
-    options.onMessageRecoveringChanged
-  );
-  const onMessageRetryingChangedRef = useRef(
-    options.onMessageRetryingChanged
-  );
-  const onMessageAutoRetryChangedRef = useRef(
-    options.onMessageAutoRetryChanged
-  );
-  const onMessageContentUpdatedRef = useRef(
-    options.onMessageContentUpdated
-  );
-  const onMessageContinuationChangedRef = useRef(
-    options.onMessageContinuationChanged
-  );
-  const onMessageRunMetaChangedRef = useRef(options.onMessageRunMetaChanged);
-  const onMessageAskResultChangedRef = useRef(
-    options.onMessageAskResultChanged
-  );
-  const onMessageAskChoiceChangedRef = useRef(
-    options.onMessageAskChoiceChanged
-  );
-  const onSessionProcessingRef = useRef(options.onSessionProcessing);
   const onSessionReconciledRef = useRef(options.onSessionReconciled);
   const clientIdRef = useRef(options.clientId);
   useEffect(() => {
@@ -432,15 +341,6 @@ export function useWebSocket(
     onSupervisorEventRef.current = options.onSupervisorEvent;
     onPrLinkRef.current = options.onPrLink;
     onAnyEventRef.current = options.onAnyEvent;
-    onMessageRecoveringChangedRef.current = options.onMessageRecoveringChanged;
-    onMessageRetryingChangedRef.current = options.onMessageRetryingChanged;
-    onMessageAutoRetryChangedRef.current = options.onMessageAutoRetryChanged;
-    onMessageContentUpdatedRef.current = options.onMessageContentUpdated;
-    onMessageContinuationChangedRef.current = options.onMessageContinuationChanged;
-    onMessageRunMetaChangedRef.current = options.onMessageRunMetaChanged;
-    onMessageAskResultChangedRef.current = options.onMessageAskResultChanged;
-    onMessageAskChoiceChangedRef.current = options.onMessageAskChoiceChanged;
-    onSessionProcessingRef.current = options.onSessionProcessing;
     onSessionReconciledRef.current = options.onSessionReconciled;
     clientIdRef.current = options.clientId;
   }, [
@@ -462,14 +362,6 @@ export function useWebSocket(
     options.onEventSeqAdvance,
     options.onSessionMetadataUpdated,
     options.onAnyEvent,
-    options.onMessageRecoveringChanged,
-    options.onMessageRetryingChanged,
-    options.onMessageAutoRetryChanged,
-    options.onMessageContentUpdated,
-    options.onMessageContinuationChanged,
-    options.onMessageAskResultChanged,
-    options.onMessageAskChoiceChanged,
-    options.onSessionProcessing,
     options.onSessionReconciled,
     options.clientId,
   ]);
@@ -730,14 +622,6 @@ export function useWebSocket(
           event.type === "session_processing_started" ||
           event.type === "session_processing_finished"
         ) {
-          const d = event.data as { root_id?: string };
-          if (d.root_id) {
-            const kind =
-              event.type === "session_processing_started"
-                ? "started"
-                : "finished";
-            onSessionProcessingRef.current?.(d.root_id, kind);
-          }
           return;
         }
 
@@ -1019,120 +903,6 @@ export function useWebSocket(
           };
           if (d.session_id && Array.isArray(d.messages)) {
             onRewindCompleteRef.current?.(d.session_id, d.messages);
-          }
-        }
-        if (event.type === "message_recovering_changed") {
-          const d = event.data as {
-            session_id: string;
-            msg_id: string;
-            value: boolean;
-          };
-          if (d.session_id && d.msg_id) {
-            onMessageRecoveringChangedRef.current?.(
-              d.session_id,
-              d.msg_id,
-              !!d.value
-            );
-          }
-        }
-        if (event.type === "message_retrying_changed") {
-          const d = event.data as {
-            session_id: string;
-            msg_id: string;
-            retry_at: string | null;
-            error_text?: string;
-          };
-          if (d.session_id && d.msg_id) {
-            onMessageRetryingChangedRef.current?.(
-              d.session_id,
-              d.msg_id,
-              d.retry_at ?? null,
-              d.error_text ?? null
-            );
-          }
-        }
-        if (event.type === "message_auto_retry_changed") {
-          const d = event.data as {
-            session_id: string;
-            msg_id: string;
-            auto_retry: { count: number; kind: string } | null;
-          };
-          if (d.session_id && d.msg_id) {
-            onMessageAutoRetryChangedRef.current?.(
-              d.session_id,
-              d.msg_id,
-              d.auto_retry ?? null
-            );
-          }
-        }
-        if (event.type === "message_content_updated") {
-          const d = event.data as {
-            session_id: string;
-            msg_id: string;
-            content: string;
-          };
-          if (d.session_id && d.msg_id) {
-            onMessageContentUpdatedRef.current?.(
-              d.session_id,
-              d.msg_id,
-              d.content ?? ""
-            );
-          }
-        }
-        if (event.type === "message_continuation_changed") {
-          const d = event.data as {
-            session_id: string;
-            msg_id: string;
-            chain_depth: number | null;
-          };
-          if (d.session_id && d.msg_id) {
-            onMessageContinuationChangedRef.current?.(
-              d.session_id,
-              d.msg_id,
-              d.chain_depth ?? null
-            );
-          }
-        }
-        if (event.type === "message_run_meta_changed") {
-          const d = event.data as {
-            session_id: string;
-            msg_id: string;
-            run_meta: import("../types").ChatMessage["run_meta"];
-          };
-          if (d.session_id && d.msg_id) {
-            onMessageRunMetaChangedRef.current?.(
-              d.session_id,
-              d.msg_id,
-              d.run_meta ?? null
-            );
-          }
-        }
-        if (event.type === "message_ask_result_changed") {
-          const d = event.data as {
-            session_id: string;
-            msg_id: string;
-            ask_result: import("../types").AskResult | null;
-          };
-          if (d.session_id && d.msg_id) {
-            onMessageAskResultChangedRef.current?.(
-              d.session_id,
-              d.msg_id,
-              d.ask_result ?? null
-            );
-          }
-        }
-        if (event.type === "message_ask_choice_changed") {
-          const d = event.data as {
-            session_id: string;
-            msg_id: string;
-            chosen_session_id: string | null;
-          };
-          if (d.session_id && d.msg_id) {
-            onMessageAskChoiceChangedRef.current?.(
-              d.session_id,
-              d.msg_id,
-              d.chosen_session_id ?? null
-            );
           }
         }
         if (event.type === "session_metadata_updated") {

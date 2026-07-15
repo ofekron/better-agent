@@ -14,7 +14,7 @@
  * App.tsx.
  */
 
-import type { Schedule, Session } from "../types";
+import type { ChatMessage, Schedule, Session } from "../types";
 
 // Map of event type → payload shape. Only events that have a typed
 // consumer need to be enumerated here; everything else falls back to
@@ -94,6 +94,49 @@ export interface BusEventMap {
   user_message_received: UserMessageLifecyclePayload;
   user_message_done: UserMessageLifecyclePayload;
   user_message_failed: UserMessageLifecyclePayload;
+  message_recovering_changed: {
+    session_id?: string;
+    msg_id?: string;
+    value?: boolean;
+  };
+  message_retrying_changed: {
+    session_id?: string;
+    msg_id?: string;
+    retry_at?: string | null;
+    error_text?: string;
+  };
+  message_auto_retry_changed: {
+    session_id?: string;
+    msg_id?: string;
+    auto_retry?: { count: number; kind: string } | null;
+  };
+  message_content_updated: {
+    session_id?: string;
+    msg_id?: string;
+    content?: string;
+  };
+  message_continuation_changed: {
+    session_id?: string;
+    msg_id?: string;
+    chain_depth?: number | null;
+  };
+  message_run_meta_changed: {
+    session_id?: string;
+    msg_id?: string;
+    run_meta?: ChatMessage["run_meta"];
+  };
+  message_ask_result_changed: {
+    session_id?: string;
+    msg_id?: string;
+    ask_result?: import("../types").AskResult | null;
+  };
+  message_ask_choice_changed: {
+    session_id?: string;
+    msg_id?: string;
+    chosen_session_id?: string | null;
+  };
+  session_processing_started: { root_id?: string };
+  session_processing_finished: { root_id?: string };
   run_state: {
     app_session_id: string;
     runs: unknown[];

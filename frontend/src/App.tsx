@@ -190,6 +190,7 @@ import {
   useSessionInventoryEvents,
 } from "./hooks/useDomainEventAdapters";
 import { usePromptLifecycleEvents } from "./hooks/usePromptLifecycleEvents";
+import { useMessageProjectionEvents } from "./hooks/useMessageProjectionEvents";
 
 type RightPanelTab = "files" | "canvas" | "notes" | "comments" | "todos" | "screen" | "changes" | "communications" | "board";
 
@@ -1942,6 +1943,17 @@ function AppMain({
     patchMessageStatus,
     markPendingFailed,
   });
+  useMessageProjectionEvents({
+    applyRecovering: applyMessageRecovering,
+    applyRetrying: applyMessageRetrying,
+    applyAutoRetry: applyMessageAutoRetry,
+    applyContent: applyMessageContent,
+    applyContinuation: applyMessageContinuation,
+    applyRunMeta: applyMessageRunMeta,
+    applyAskResult: applyMessageAskResult,
+    applyAskChoice: applyMessageAskChoice,
+    applySessionProcessing,
+  });
 
   const {
     connected,
@@ -1980,15 +1992,6 @@ function AppMain({
     onTurnTerminal: markTurnTerminal,
     onTurnDetached: markTurnDetached,
     onTurnStale: markTurnStale,
-    onMessageRecoveringChanged: applyMessageRecovering,
-    onMessageRetryingChanged: applyMessageRetrying,
-    onMessageAutoRetryChanged: applyMessageAutoRetry,
-    onMessageContentUpdated: applyMessageContent,
-    onMessageContinuationChanged: applyMessageContinuation,
-    onMessageRunMetaChanged: applyMessageRunMeta,
-    onMessageAskResultChanged: applyMessageAskResult,
-    onMessageAskChoiceChanged: applyMessageAskChoice,
-    onSessionProcessing: applySessionProcessing,
     onSessionReconciled: applySessionReconciled,
     getSinceSeq,
     getEventsFromSeq,
