@@ -3752,6 +3752,12 @@ SOURCE_GREP_CASES: tuple = (
       ('target = _pick_idle_pool_worker(target_worker_pool)',),
      ),
     )),
+    ('detached_lifecycle_check_uses_lite_session_read', (
+     ('grep', 'turn_manager.py',
+      (('    def _detached_lifecycle_is_active(', '    def _reconcile_inbound_detached('),),
+      ('session_manager.get_lite(target_session_id)',), ('session_manager.get(target_session_id)',),
+     ),
+    )),
 )
 
 
@@ -3819,7 +3825,7 @@ def _grep_check_failures(check: tuple) -> list[str]:
 
 
 def test_source_grep_regressions() -> None:
-    assert len(SOURCE_GREP_CASES) == 186
+    assert len(SOURCE_GREP_CASES) == 187
     executed = 0
     failing: list[str] = []
     report: list[str] = []

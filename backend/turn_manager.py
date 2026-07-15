@@ -1531,7 +1531,11 @@ class TurnManager:
             for link in links.values()
         ):
             return True
-        target = session_manager.get(target_session_id) or {}
+        # get_lite: only reads the root-level `queued_prompts` field below,
+        # never message events -- get()'s full deepcopy (incl. every
+        # message's events list) is unneeded CPU-bound work directly on the
+        # event loop (lag-watchdog: ~3.1s stall recursing copy.deepcopy here).
+        target = session_manager.get_lite(target_session_id) or {}
         if any(
             queued.get("lifecycle_msg_id") == lifecycle_msg_id
             for queued in target.get("queued_prompts") or []
