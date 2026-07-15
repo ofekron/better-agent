@@ -426,6 +426,10 @@ function ScaledMarkdown({
   return <>{nodes}</>;
 }
 
+function userMarkdownSource(text: string): string {
+  return sessionMarkersToMarkdown(text);
+}
+
 /**
  * A collapsible boxed prose container with a "💬 Message" header — gives
  * assistant text the same visual structure as ToolCall blocks. Click the
@@ -3694,7 +3698,7 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
                   components={markdownLinkifyComponents(onFileClick)}
                   urlTransform={(url) => url}
                 >
-                  {rawInitiatorContent}
+                  {userMarkdownSource(rawInitiatorContent)}
                 </ReactMarkdown>
               )}
               <MessageStatus
@@ -3879,7 +3883,7 @@ function UserContentSegments({
               components={markdownLinkifyComponents(onFileClick)}
               urlTransform={(url) => url}
             >
-              {seg.text}
+              {userMarkdownSource(seg.text)}
             </ReactMarkdown>
           );
         }
@@ -4109,7 +4113,7 @@ export function MessageBubble({ message, sessionId, userDisplayName, onFileClick
               components={markdownLinkifyComponents(onFileClick)}
               urlTransform={(url) => url}
             >
-              {rawContent}
+              {userMarkdownSource(rawContent)}
             </ReactMarkdown>
           )}
           <MessageStatus
