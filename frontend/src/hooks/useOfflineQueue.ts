@@ -212,15 +212,32 @@ export function useOfflineQueue() {
     return queueRef.current;
   }, []);
 
+  // Removals hit the in-memory projection synchronously: the offline
+  // flush loop decides redispatch from queueRef, so an acked/failed entry
+  // must never linger there while the durable delete is still in flight
+  // (it would be re-sent and its pending bubble re-stamped "sending").
+  // A durable delete that later fails leaves only a stale IndexedDB row,
+  // which the ack-based dedupe reconciles on the next load.
+  const persistRemoval = useCallback((key: string) => {
+    const next = queueRef.current.filter((item) => offlineActionKey(item) !== key);
+    queueRef.current = next;
+    setQueue(next);
+    const operation = () => deleteOfflineAction(key);
+    const write = writeTailRef.current.then(operation, operation);
+    writeTailRef.current = write.catch(() => undefined);
+    return write.then(() => {
+      setPersistFailed(false);
+      notifyChanged();
+      return true;
+    }, () => {
+      setPersistFailed(true);
+      return false;
+    });
+  }, [notifyChanged]);
+
   const removeEntry = useCallback(
-    (entry: OfflineQueueEntry) => {
-      const key = offlineActionKey(entry);
-      return persist(
-        () => deleteOfflineAction(key),
-        (items) => items.filter((item) => offlineActionKey(item) !== key),
-      );
-    },
-    [persist],
+    (entry: OfflineQueueEntry) => persistRemoval(offlineActionKey(entry)),
+    [persistRemoval],
   );
 
   const beginEdit = useCallback(
@@ -294,14 +311,9 @@ export function useOfflineQueue() {
   );
 
   const removeBySessionAndClient = useCallback(
-    (sessionId: string, clientId: string) => {
-      const key = offlineActionKeyFor(sessionId, clientId);
-      return persist(
-        () => deleteOfflineAction(key),
-        (items) => items.filter((item) => offlineActionKey(item) !== key),
-      );
-    },
-    [persist],
+    (sessionId: string, clientId: string) =>
+      persistRemoval(offlineActionKeyFor(sessionId, clientId)),
+    [persistRemoval],
   );
 
   useEffect(() => {

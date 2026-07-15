@@ -219,7 +219,7 @@ describe("sessions CRUD + subscribe lifecycle", () => {
       h.restCalls.filter((c) => c.method === "POST" && c.path === "/api/sessions"),
     ).toHaveLength(1);
     expect(h.toJSON().sidebar.sessions).toHaveLength(1);
-    expect(await loadOfflineActions()).toHaveLength(0);
+    await expect.poll(async () => (await loadOfflineActions()).length).toBe(0);
     h.unmount();
   });
 
@@ -260,7 +260,7 @@ describe("sessions CRUD + subscribe lifecycle", () => {
     expect(h.toJSON().chat.messages[0].text).toContain(
       "remember to implement offline sessions",
     );
-    expect(await loadOfflineActions()).toHaveLength(1);
+    await expect.poll(async () => (await loadOfflineActions()).length).toBe(1);
 
     h.backend.setOffline(false);
     h.reopenConnection();
@@ -275,7 +275,7 @@ describe("sessions CRUD + subscribe lifecycle", () => {
         prompt: "remember to implement offline sessions",
       }),
     );
-    expect(await loadOfflineActions()).toHaveLength(1);
+    await expect.poll(async () => (await loadOfflineActions()).length).toBe(1);
 
     const sent = h.outbound.find(
       (frame) =>
@@ -294,7 +294,7 @@ describe("sessions CRUD + subscribe lifecycle", () => {
     });
     await h.flush();
 
-    expect(await loadOfflineActions()).toHaveLength(0);
+    await expect.poll(async () => (await loadOfflineActions()).length).toBe(0);
     h.unmount();
   });
 
@@ -521,7 +521,7 @@ describe("sessions CRUD + subscribe lifecycle", () => {
         text: expect.stringContaining("queue during disconnect race"),
       }),
     );
-    expect(await loadOfflineActions()).toHaveLength(1);
+    await expect.poll(async () => (await loadOfflineActions()).length).toBe(1);
     h.unmount();
   });
 
@@ -544,7 +544,7 @@ describe("sessions CRUD + subscribe lifecycle", () => {
     await h.click(".modal-footer .btn-primary");
 
     expect(h.toJSON().sidebar.sessions).toHaveLength(1);
-    expect(await loadOfflineActions()).toEqual([
+    await expect.poll(() => loadOfflineActions()).toEqual([
       expect.objectContaining({ type: "create_session", prompt: "" }),
     ]);
 
@@ -552,7 +552,7 @@ describe("sessions CRUD + subscribe lifecycle", () => {
     expect(
       h.outbound.filter((frame) => frame.type === "send_message"),
     ).toHaveLength(0);
-    expect(await loadOfflineActions()).toEqual([
+    await expect.poll(() => loadOfflineActions()).toEqual([
       expect.objectContaining({ type: "create_session", prompt: "" }),
       expect.objectContaining({
         prompt: "prompt after empty offline session",
@@ -592,8 +592,10 @@ describe("sessions CRUD + subscribe lifecycle", () => {
     await clickNewSession(h);
     await h.click(".modal-footer .btn-primary");
 
-    expect(h.toJSON().sidebar.sessions).toHaveLength(1);
-    expect(await loadOfflineActions()).toEqual([
+    // The optimistic sidebar entry appears only after the durable-first
+    // IndexedDB commit resolves, so both assertions are eventual.
+    await expect.poll(() => h.toJSON().sidebar.sessions.length).toBe(1);
+    await expect.poll(() => loadOfflineActions()).toEqual([
       expect.objectContaining({ type: "create_session" }),
     ]);
     h.unmount();
@@ -638,7 +640,7 @@ describe("sessions CRUD + subscribe lifecycle", () => {
     await h.flush();
 
     expect(localStorage.getItem("better_agent_offline_queue")).toBeNull();
-    expect(await loadOfflineActions()).toHaveLength(0);
+    await expect.poll(async () => (await loadOfflineActions()).length).toBe(0);
     h.unmount();
   });
 
@@ -677,7 +679,7 @@ describe("sessions CRUD + subscribe lifecycle", () => {
     });
     await h.flush();
 
-    expect(await loadOfflineActions()).toHaveLength(0);
+    await expect.poll(async () => (await loadOfflineActions()).length).toBe(0);
     h.unmount();
   });
 
@@ -705,7 +707,7 @@ describe("sessions CRUD + subscribe lifecycle", () => {
     });
     await h.flush();
 
-    expect(await loadOfflineActions()).toHaveLength(0);
+    await expect.poll(async () => (await loadOfflineActions()).length).toBe(0);
     h.unmount();
   });
 
@@ -734,7 +736,7 @@ describe("sessions CRUD + subscribe lifecycle", () => {
     await h.selectSession("s1");
     await h.flush();
 
-    expect(await loadOfflineActions()).toHaveLength(0);
+    await expect.poll(async () => (await loadOfflineActions()).length).toBe(0);
     expect(
       h.outbound.filter(
         (frame) => frame.type === "send_message" && frame.client_id === "queued-client-1",

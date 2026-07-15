@@ -249,7 +249,7 @@ describe("harness smoke", () => {
 
     const sentFrame = h.outbound.find((f) => f.type === "send_message")!;
     const clientId = sentFrame.client_id as string;
-    expect(await loadOfflineActions()).not.toHaveLength(0);
+    await expect.poll(async () => (await loadOfflineActions()).length).toBeGreaterThan(0);
 
     h.emit({
       type: "error",
@@ -264,7 +264,7 @@ describe("harness smoke", () => {
 
     const failed = h.toJSON().chat.messages.find((m) => m.id === clientId);
     expect(failed?.status).toBe("error");
-    expect(await loadOfflineActions()).toHaveLength(0);
+    await expect.poll(async () => (await loadOfflineActions()).length).toBe(0);
 
     h.unmount();
   });
