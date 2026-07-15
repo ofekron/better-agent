@@ -375,6 +375,24 @@ function modelSwitchEvents(message?: ChatMessage): WSEvent[] {
   return events.length > 0 ? events : EMPTY_MODEL_SWITCH_EVENTS;
 }
 
+function joinModelSwitchEvents(left: WSEvent[], right: WSEvent[]): WSEvent[] {
+  if (left.length === 0) return right;
+  if (right.length === 0) return left;
+  return [...left, ...right];
+}
+
+function assistantHasVisibleTurnBody(message: ChatMessage, activeTargetIds: ReadonlySet<string>): boolean {
+  if (message.role !== "assistant") return false;
+  if (message.isStreaming) return true;
+  if (activeTargetIds.has(message.id)) return true;
+  if (typeof message.content === "string" && message.content.trim()) return true;
+  if (message.error || message.status === "error") return true;
+  if (message.ask_result || message.chosen_session_id) return true;
+  if ((message.workers?.length ?? 0) > 0) return true;
+  if (message.historical_hydration_root) return true;
+  return (message.events ?? []).some((event) => event.type !== "model_switched");
+}
+
 interface Props {
   messages: ChatMessage[];
   pendingMessages: ChatMessage[];
@@ -1177,18 +1195,56 @@ export function Chat({
     const finishProfile = perfSpan("chat_projection", {
       session: perfId(session?.id), messages: allMessages.length, runs: visibleRuns.length,
     });
+    const activeTargetIds = new Set(
+      visibleRuns
+        .map((run) => run.target_message_id)
+        .filter((id): id is string => typeof id === "string" && id.length > 0),
+    );
     // Pair consecutive turn initiators + assistant messages into turn groups.
-    const pairs: { initiatorMessage: ChatMessage; responseMessage?: ChatMessage }[] = [];
+    const pairs: {
+      initiatorMessage: ChatMessage;
+      responseMessage?: ChatMessage;
+      precedingModelSwitchEvents: WSEvent[];
+    }[] = [];
     let pendingUser: ChatMessage | null = null;
+    let pendingUserPrecedingModelSwitchEvents: WSEvent[] = EMPTY_MODEL_SWITCH_EVENTS;
+    let unclaimedModelSwitchEvents: WSEvent[] = EMPTY_MODEL_SWITCH_EVENTS;
+
+    const consumeUnclaimedModelSwitchEvents = () => {
+      const events = unclaimedModelSwitchEvents;
+      unclaimedModelSwitchEvents = EMPTY_MODEL_SWITCH_EVENTS;
+      return events;
+    };
 
     for (const m of allMessages) {
       if (m.role === "user") {
-        if (pendingUser) pairs.push({ initiatorMessage: pendingUser });
-        pendingUser = m;
-      } else if (m.role === "assistant") {
         if (pendingUser) {
-          pairs.push({ initiatorMessage: pendingUser, responseMessage: m });
+          pairs.push({
+            initiatorMessage: pendingUser,
+            precedingModelSwitchEvents: pendingUserPrecedingModelSwitchEvents,
+          });
+        }
+        pendingUser = m;
+        pendingUserPrecedingModelSwitchEvents = consumeUnclaimedModelSwitchEvents();
+      } else if (m.role === "assistant") {
+        if (!assistantHasVisibleTurnBody(m, activeTargetIds)) {
+          const events = modelSwitchEvents(m);
+          if (events.length > 0) {
+            unclaimedModelSwitchEvents =
+              unclaimedModelSwitchEvents.length > 0
+                ? [...unclaimedModelSwitchEvents, ...events]
+                : events;
+          }
+          continue;
+        }
+        if (pendingUser) {
+          pairs.push({
+            initiatorMessage: pendingUser,
+            responseMessage: m,
+            precedingModelSwitchEvents: pendingUserPrecedingModelSwitchEvents,
+          });
           pendingUser = null;
+          pendingUserPrecedingModelSwitchEvents = EMPTY_MODEL_SWITCH_EVENTS;
         } else {
           // Orphan assistant (user msg was cancelled / never persisted).
           // Synthesize an empty user stub so the assistant renders in
@@ -1203,11 +1259,17 @@ export function Chat({
               isStreaming: false,
             },
             responseMessage: m,
+            precedingModelSwitchEvents: consumeUnclaimedModelSwitchEvents(),
           });
         }
       }
     }
-    if (pendingUser) pairs.push({ initiatorMessage: pendingUser });
+    if (pendingUser) {
+      pairs.push({
+        initiatorMessage: pendingUser,
+        precedingModelSwitchEvents: pendingUserPrecedingModelSwitchEvents,
+      });
+    }
 
     const lastGroupIdx = pairs.length - 1;
     const projected = pairs.map((pair, idx) => {
@@ -1225,10 +1287,14 @@ export function Chat({
         ...pair,
         turnRuns: collected.length > 0 ? collected : EMPTY_CHAT_RUNS,
         isLatest: idx === lastGroupIdx,
-        precedingModelSwitchEvents:
+        precedingModelSwitchEvents: joinModelSwitchEvents(
+          pair.precedingModelSwitchEvents,
           idx > 0 ? modelSwitchEvents(pairs[idx - 1].responseMessage) : EMPTY_MODEL_SWITCH_EVENTS,
+        ),
         trailingModelSwitchEvents:
-          idx === lastGroupIdx ? modelSwitchEvents(pair.responseMessage) : EMPTY_MODEL_SWITCH_EVENTS,
+          idx === lastGroupIdx
+            ? joinModelSwitchEvents(modelSwitchEvents(pair.responseMessage), unclaimedModelSwitchEvents)
+            : EMPTY_MODEL_SWITCH_EVENTS,
       };
     });
     finishProfile();
