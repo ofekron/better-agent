@@ -211,14 +211,16 @@ async def get_chat_tree(
     if before_turn is not None and not _SESSION_ID.fullmatch(before_turn):
         raise HTTPException(status_code=400, detail="invalid turn cursor")
     try:
-        source = await runtime_service.projection_source(
-            session_id, after_seq=0, limit=1,
+        source = await runtime_service.session_tree(
+            session_id, exchange_count=turns,
         )
-    except (RuntimeServiceError, RuntimeUpstreamUnavailable) as exc:
+    except RuntimeServiceError as exc:
+        if exc.status_code == 404:
+            raise HTTPException(status_code=404, detail="session not found") from exc
         raise HTTPException(status_code=503, detail="runtime unavailable") from exc
-    if source.get("found") is not True:
-        raise HTTPException(status_code=404, detail="session not found")
-    session = source.get("session")
+    except RuntimeUpstreamUnavailable as exc:
+        raise HTTPException(status_code=503, detail="runtime unavailable") from exc
+    session = source.get("tree")
     provider = source.get("provider_kind")
     if not isinstance(session, dict) or provider not in _PROVIDER_KINDS:
         raise HTTPException(
@@ -226,8 +228,11 @@ async def get_chat_tree(
             detail={"code": "provider_identity_unresolvable",
                     "message": "session provider identity is unavailable"},
         )
+    # The requested id may be a fork; the tree resolves to its root, and
+    # the rendering cache keys facts by root.
+    root_id = str(session.get("id") or session_id)
     try:
-        facts = await asyncio.to_thread(_read_stored_facts, session_id, provider)
+        facts = await asyncio.to_thread(_read_stored_facts, root_id, provider)
     except ProjectionServiceError as exc:
         raise HTTPException(
             status_code=503, detail={"code": exc.code, "message": exc.detail},
@@ -235,7 +240,7 @@ async def get_chat_tree(
     if not facts:
         # Cache miss (e.g. root created while the feed was offline): ask
         # the feed to pull; the client retries after the cache warms.
-        bff_chat_feed.feed_client.mark_dirty(session_id)
+        bff_chat_feed.feed_client.mark_dirty(root_id)
         raise HTTPException(
             status_code=503,
             detail={"code": "chat_tree_rebuilding",

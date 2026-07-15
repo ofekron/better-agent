@@ -88,13 +88,13 @@ SESSIONS_BY_ID: dict = {
 }
 
 
-async def fake_projection_source(session_id: str, *, after_seq: int = 0, limit: int = 2000):
+async def fake_session_tree(session_id: str, *, exchange_count=None):
+    from bff_runtime_service import RuntimeServiceError
+
     session = SESSIONS_BY_ID.get(session_id)
     if session is None:
-        return {"found": False}
-    return {"found": True, "session": session,
-            "provider_kind": "claude", "facts": [], "next_seq": 0,
-            "has_more": False, "canonical_through_seq": 0}
+        raise RuntimeServiceError(404, "session not found")
+    return {"tree": session, "provider_kind": "claude"}
 
 
 def main() -> None:
@@ -107,8 +107,8 @@ def main() -> None:
             wire_fact(seq, payload_type, payload), provider="claude",
         )
 
-    original = runtime_service.projection_source
-    runtime_service.projection_source = fake_projection_source
+    original = runtime_service.session_tree
+    runtime_service.session_tree = fake_session_tree
     app = FastAPI()
     app.include_router(bff_chat_tree.router)
     client = TestClient(app)
@@ -201,7 +201,7 @@ def main() -> None:
               response.status_code == 409
               and isinstance(detail, dict) and detail.get("code") == "stale_turn_cursor")
     finally:
-        runtime_service.projection_source = original
+        runtime_service.session_tree = original
         chat_projection_ingestion.close()
 
 

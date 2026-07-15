@@ -9158,6 +9158,40 @@ async def internal_get_local_node_id(
     return {"node_id": _local_node_id_or_primary()}
 
 
+@app.get("/api/bff-runtime/sessions/{session_id}/tree")
+async def bff_session_tree(
+    session_id: str,
+    msg_limit: int = Query(default=50, ge=1, le=200),
+    exchange_count: Optional[int] = Query(default=None, ge=1, le=100),
+    x_bff_token: str | None = Header(default=None, alias=BFF_SERVICE_TOKEN_HEADER),
+):
+    """UI-snapshot contract for the BFF: the SAME root-tree assembly as
+    GET /api/sessions/{id} (fork resolution, per-node message windows,
+    pagination, max_seq_by_sid WS cursor seeds) plus the session's
+    provider kind. Distinct from the feed contract (projection-source),
+    which stays facts-only."""
+    _require_bff_service(x_bff_token)
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", session_id):
+        raise HTTPException(status_code=400, detail="invalid session id")
+    tree = await _run_session_detail_hot_path(
+        "sessions.detail.worker",
+        _session_detail_snapshot_sync,
+        session_id,
+        msg_limit=msg_limit,
+        exchange_count=exchange_count,
+    )
+    if not tree:
+        raise HTTPException(status_code=404, detail="session not found")
+    provider_kind = None
+    provider_id = tree.get("provider_id")
+    if isinstance(provider_id, str) and provider_id:
+        provider = config_store.get_provider(provider_id)
+        kind = provider.get("kind") if isinstance(provider, dict) else None
+        if kind in {"claude", "codex", "gemini"}:
+            provider_kind = kind
+    return {"tree": tree, "provider_kind": provider_kind}
+
+
 @app.post("/api/bff-runtime/sessions")
 async def create_session(
     body: Any = Body(default=None),
@@ -18748,16 +18782,16 @@ async def websocket_chat(websocket: WebSocket):
                 prompt = msg.get("prompt", "").strip()
                 images = msg.get("images") or []
                 files = msg.get("files") or []
-                async def _send_message_error(error: str) -> None:
+                async def _reject_send_message(error: str) -> None:
                     data = {
                         "error": error,
                         "app_session_id": msg.get("app_session_id"),
                         "session_id": msg.get("app_session_id"),
                         "client_id": msg.get("client_id"),
                     }
-                    await ws_callback({"type": "error", "data": data})
+                    await ws_callback({"type": "delivery_rejected", "data": data})
                 if not prompt and not images and not files:
-                    await _send_message_error(t("error.ws_empty_prompt"))
+                    await _reject_send_message(t("error.ws_empty_prompt"))
                     continue
 
                 # Validate file attachments — reject oversized or malformed entries.
@@ -18779,7 +18813,7 @@ async def websocket_chat(websocket: WebSocket):
                         _file_error = f"File \"{f.get('name', '?')}\" exceeds 10 MB limit"
                         break
                 if _file_error:
-                    await _send_message_error(_file_error)
+                    await _reject_send_message(_file_error)
                     continue
 
                 # Sample the active provider RIGHT NOW so the next CLI spawn
@@ -18798,7 +18832,7 @@ async def websocket_chat(websocket: WebSocket):
                 logger.info("Received message: prompt=%s, images=%d, files=%d, send_mode=%s", prompt[:50], len(images), len(files), send_mode)
 
                 if not app_session_id:
-                    await _send_message_error(t("error.ws_no_session_selected"))
+                    await _reject_send_message(t("error.ws_no_session_selected"))
                     continue
 
                 _offline_session = await asyncio.to_thread(
@@ -18807,11 +18841,11 @@ async def websocket_chat(websocket: WebSocket):
                 )
                 _offline_err = _node_offline_error(_offline_session)
                 if _offline_err:
-                    await _send_message_error(_offline_err)
+                    await _reject_send_message(_offline_err)
                     continue
                 _provider_id_for_send = (_offline_session or {}).get("provider_id")
                 if _provider_id_for_send and config_store.provider_suspended(_provider_id_for_send):
-                    await _send_message_error(t("error.provider_suspended", action="run turns"))
+                    await _reject_send_message(t("error.provider_suspended", action="run turns"))
                     continue
                 if _offline_session:
                     model = _offline_session.get("model") or model
@@ -18827,7 +18861,7 @@ async def websocket_chat(websocket: WebSocket):
                         extension_store.extension_id_for_role('team-orchestration')
                     )
                     if team_not_ready is not None:
-                        await _send_message_error(team_not_ready)
+                        await _reject_send_message(team_not_ready)
                         continue
 
                 # Ask-singleton entry point: when the user sends a prompt
@@ -18845,7 +18879,7 @@ async def websocket_chat(websocket: WebSocket):
                         msg.get("disabled_builtin_extensions")
                     )
                 except ValueError as e:
-                    await _send_message_error(str(e))
+                    await _reject_send_message(str(e))
                     continue
                 backend_url = msg.get("backend_url")
                 if backend_url is not None:
@@ -18853,7 +18887,7 @@ async def websocket_chat(websocket: WebSocket):
                         backend_url.startswith("http://127.0.0.1:")
                         or backend_url.startswith("http://localhost:")
                     ):
-                        await _send_message_error("backend_url must be a loopback HTTP URL")
+                        await _reject_send_message("backend_url must be a loopback HTTP URL")
                         continue
                     backend_url = backend_url.rstrip("/")
                     os.environ.update(dual_env("BETTER_CLAUDE_BACKEND_URL", backend_url))
@@ -18870,7 +18904,7 @@ async def websocket_chat(websocket: WebSocket):
                 known_worker_registry_cwds = msg.get("known_worker_registry_cwds")
                 if known_worker_registry_cwds is not None:
                     if not isinstance(known_worker_registry_cwds, dict):
-                        await _send_message_error("known_worker_registry_cwds must be an object")
+                        await _reject_send_message("known_worker_registry_cwds must be an object")
                         continue
                     parsed_worker_registry_cwds: dict[str, str] = {}
                     registry_error = None
@@ -18887,13 +18921,13 @@ async def websocket_chat(websocket: WebSocket):
                             break
                         parsed_worker_registry_cwds[key] = str(expanded.resolve())
                     if registry_error:
-                        await _send_message_error(registry_error)
+                        await _reject_send_message(registry_error)
                         continue
                     known_worker_registry_cwds = parsed_worker_registry_cwds or None
                 try:
                     capability_contexts = normalize_capability_contexts(msg.get("capability_contexts"))
                 except ValueError as e:
-                    await _send_message_error(str(e))
+                    await _reject_send_message(str(e))
                     continue
 
                 # Register this WS so /api/internal/ask-fork can fan out worker events.
@@ -18910,7 +18944,7 @@ async def websocket_chat(websocket: WebSocket):
                         extension_store.BUILTIN_ASK_EXTENSION_ID
                     )
                     if not_ready_msg is not None:
-                        await _send_message_error(not_ready_msg)
+                        await _reject_send_message(not_ready_msg)
                         continue
                     ask_client_id = msg.get("client_id")
                     already_done = await asyncio.to_thread(
@@ -19084,7 +19118,7 @@ async def websocket_chat(websocket: WebSocket):
                             capability_contexts,
                         )
                         if not queued_id:
-                            await _send_message_error(t("error.ws_no_queued_prompt"))
+                            await _reject_send_message(t("error.ws_no_queued_prompt"))
                             continue
                         await asyncio.to_thread(
                             session_manager.update_queued_prompt,
@@ -19115,7 +19149,7 @@ async def websocket_chat(websocket: WebSocket):
                         try:
                             rewind_data = await _rewind_latest_user_for_alter(app_session_id)
                         except HTTPException as e:
-                            await _send_message_error(str(e.detail))
+                            await _reject_send_message(str(e.detail))
                             continue
                         model = rewind_data.get("retry_model") or model
                         cwd = rewind_data.get("retry_cwd") or cwd
@@ -19313,7 +19347,7 @@ async def websocket_chat(websocket: WebSocket):
                     raise
                 if not admission.get("session"):
                     _release_claim_on_failure()
-                    await _send_message_error(t("error.session_not_found_retry"))
+                    await _reject_send_message(t("error.session_not_found_retry"))
                     continue
                 existing_user_message = admission.get("existing_user_message")
                 if existing_user_message:
@@ -19440,7 +19474,7 @@ async def websocket_chat(websocket: WebSocket):
                 if app_session_id:
                     action = msg.get("action")
                     if action not in ("interrupt", "steer"):
-                        await _send_message_error(t("error.ws_invalid_send_mode"))
+                        await ws_callback({"type": "error", "data": {"error": t("error.ws_invalid_send_mode")}})
                         continue
                     queued_ids_raw = msg.get("queued_ids")
                     queued_ids = (

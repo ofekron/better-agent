@@ -121,6 +121,18 @@ class BffRuntimeService:
             timeout=30.0,
         )
 
+    async def session_tree(
+        self, session_id: str, *, exchange_count: int | None = None,
+    ) -> dict[str, Any]:
+        if not session_id or any(not (ch.isalnum() or ch in "-_") for ch in session_id):
+            raise ValueError("invalid session id")
+        query = f"?exchange_count={exchange_count}" if exchange_count is not None else ""
+        return await self._request(
+            "GET",
+            f"/api/bff-runtime/sessions/{session_id}/tree{query}",
+            timeout=30.0,
+        )
+
 
 def read_service_token() -> str:
     try:
