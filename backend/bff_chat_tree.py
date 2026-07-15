@@ -22,13 +22,13 @@ import re
 
 import bff_chat_feed
 import chat_projection_ingestion
+from bff_chat_render import render_chat
 from bff_runtime_service import RuntimeServiceError, runtime_service
 from bff_runtime_upstream import RuntimeUpstreamUnavailable
-from chat_canonical_adapter import ChatAdapterError, adapt_chat_inputs
+from chat_canonical_adapter import ChatAdapterError
 from chat_models import CHAT_SCHEMA_VERSION
-from chat_projector import ChatProjectionInputError, project_chat
+from chat_projector import ChatProjectionInputError
 from chat_projection_service import ProjectionServiceError
-from chat_tree_wire import chat_to_wire
 
 router = APIRouter()
 
@@ -263,17 +263,12 @@ async def get_chat_tree(
         # client can show a warming state instead of an empty success.
         _raise_chat_tree_rebuilding(root_id)
     try:
-        adapted = await asyncio.to_thread(adapt_chat_inputs, facts, session)
-        chat = await asyncio.to_thread(
-            project_chat, adapted.messages, adapted.events,
-            schema_version=CHAT_SCHEMA_VERSION,
-        )
+        rendered = await asyncio.to_thread(render_chat, facts, session)
     except (ChatAdapterError, ChatProjectionInputError) as exc:
         raise HTTPException(
             status_code=422, detail={"code": exc.code, "message": str(exc)},
         ) from exc
-    all_items = chat_to_wire(chat)
-    window, older_cursor = _window_items(all_items, turns, before_turn)
+    window, older_cursor = _window_items(rendered.items, turns, before_turn)
     return {
         "session_id": session_id,
         "schema_version": CHAT_SCHEMA_VERSION,
@@ -281,12 +276,14 @@ async def get_chat_tree(
         # messages travel as tree + lookup, never as a second copy here.
         "session": {k: v for k, v in session.items() if k != "messages"},
         "items": window,
-        "lookup": _build_lookup(window, adapted.messages, adapted.events, session),
+        "lookup": _build_lookup(
+            window, rendered.adapted.messages, rendered.adapted.events, session,
+        ),
         "page": {
             "turns": turns,
             "before_turn": before_turn,
             "older_cursor": older_cursor,
             "has_older": older_cursor is not None,
         },
-        "dropped": list(adapted.dropped),
+        "dropped": list(rendered.adapted.dropped),
     }
