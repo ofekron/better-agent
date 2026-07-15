@@ -1,14 +1,13 @@
 import { useEffect, useLayoutEffect, useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
-import type { CompactManifest } from 'src/lib/compactTurns'
-import { createHistoricalChildrenClient, toHistoricalManifest } from 'src/lib/historicalChildrenClient'
+import { createHistoricalChildrenClient, toHistoricalManifest, type RawHistoricalManifest } from 'src/lib/historicalChildrenClient'
 import { HistoricalHydrationStore, type HistoricalNodeManifest } from 'src/lib/historicalHydrationStore'
 import { useHistoricalNodeHydration } from 'src/hooks/useHistoricalNodeHydration'
 import type { WSEvent, WorkerPanel } from 'src/types'
 import { HistoricalNodeTree, type HistoricalNodeRendererProps } from './HistoricalNodeTree'
 import { CanonicalHistoricalEventRow, CanonicalHistoricalWorkerRow } from './MessageBubble'
 
-type Props = { sessionId: string; messageId: string; manifest: CompactManifest; active: boolean; onTerminal: () => void }
+type Props = { sessionId: string; messageId: string; manifest: RawHistoricalManifest; active: boolean; onTerminal: () => void }
 
 function isWorkerPanel(value: unknown): value is WorkerPanel {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false

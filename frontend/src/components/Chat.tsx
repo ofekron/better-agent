@@ -55,7 +55,6 @@ import { logTiming } from "../lib/frontendLogger";
  *  rather than silently corrupting every other group's array. */
 const EMPTY_CHAT_RUNS: RunInfo[] = Object.freeze([]) as unknown as RunInfo[];
 const EMPTY_MODEL_SWITCH_EVENTS: WSEvent[] = Object.freeze([]) as unknown as WSEvent[];
-const EMPTY_PENDING_USER_INPUTS: UserInputRequest[] = Object.freeze([]) as unknown as UserInputRequest[];
 const NO_ENTERING: ReadonlySet<string> = new Set();
 const ASSISTANT_SPEECH_LIMIT = 4000;
 
@@ -480,8 +479,6 @@ interface Props {
   onLoadOlderMessages?: (sessionId: string, beforeSeq: number) => Promise<void>;
   /** Whether the focused session has older messages to load. */
   hasOlderMessages?: boolean;
-  /** Authoritative pending input requests from the compact session snapshot. */
-  initialPendingUserInputs?: UserInputRequest[];
   /** True while REST fetch for the session is in flight. */
   sessionLoading?: boolean;
   /** Set when the session REST fetch failed — renders an error state with retry. */
@@ -607,7 +604,6 @@ export function Chat({
   onSendTargetChange,
   onLoadOlderMessages,
   hasOlderMessages,
-  initialPendingUserInputs = EMPTY_PENDING_USER_INPUTS,
   sessionLoading = false,
   sessionLoadError = null,
   onRetrySessionLoad,
@@ -871,21 +867,41 @@ export function Chat({
   }, [streamingEvents, refetchCredentials]);
   const [pendingUserInputs, setPendingUserInputs] = useState<UserInputRequest[]>([]);
   const pendingUserInputsSessionRef = useRef<string | null>(null);
+  const pendingUserInputsFetchSeqRef = useRef(0);
   pendingUserInputsSessionRef.current = session?.id ?? null;
   useEffect(() => {
-    const sid = session?.id;
-    const next = sid
-      ? initialPendingUserInputs.filter((request) => request.app_session_id === sid)
-      : EMPTY_PENDING_USER_INPUTS;
-    setPendingUserInputs((current) => (
-      current.length === next.length && current.every((request, index) => request === next[index])
-        ? current
-        : next
-    ));
-  }, [initialPendingUserInputs, session?.id]);
+    // <Chat> is a long-lived singleton across session switches. Clear
+    // immediately so a pending card from the previously viewed session never
+    // paints in the newly selected session while its REST snapshot loads.
+    setPendingUserInputs([]);
+  }, [session?.id]);
   const removePendingUserInput = useCallback((requestId: string) => {
     setPendingUserInputs((prev) => prev.filter((req) => req.request_id !== requestId));
   }, []);
+  const refetchUserInputs = useCallback(async () => {
+    const sid = session?.id;
+    const fetchSeq = ++pendingUserInputsFetchSeqRef.current;
+    if (!sid) {
+      setPendingUserInputs([]);
+      return;
+    }
+    try {
+      const res = await fetch(
+        `${API}/api/user-input/pending?app_session_id=${encodeURIComponent(sid)}`,
+        { credentials: "include" },
+      );
+      if (!res.ok) return;
+      const data = await res.json();
+      if (fetchSeq !== pendingUserInputsFetchSeqRef.current || pendingUserInputsSessionRef.current !== sid) return;
+      const fetched = Array.isArray(data.requests) ? (data.requests as UserInputRequest[]) : [];
+      setPendingUserInputs(fetched.filter((req) => req.app_session_id === sid));
+    } catch {
+      // ignore
+    }
+  }, [session?.id]);
+  useEffect(() => {
+    refetchUserInputs();
+  }, [refetchUserInputs]);
   useEffect(() => {
     const onRequested = (e: Event) => {
       const detail = (e as CustomEvent<UserInputRequest>).detail;

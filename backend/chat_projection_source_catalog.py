@@ -216,12 +216,23 @@ class ChatProjectionSourceCatalog:
 
 def _run_owner(channel_fd: int, directory_fd: int, file_fd: int, basename: str) -> None:
     def dispatch(store, operation, arguments, _request_id):
-        if operation in {"root_generation", "advance_root_generation"} and set(arguments) == {"root_id"}:
-            return getattr(store, operation)(**arguments)
-        if operation == "admit" and set(arguments) == {"root_id", "provider", "stream_id", "event_id", "content_hash"}:
-            return store.admit(**arguments).__dict__
-        if operation == "close" and not arguments:
-            return None
+        # Domain-level rejections from the store (validation failures, stream
+        # provider conflicts, ...) are per-fact `SourceCatalogError`s. They must
+        # surface as non-fatal domain errors so the caller can skip the one
+        # offending fact; otherwise `serve_owner`'s catch-all maps them to fatal
+        # `owner_internal_error`, which permanently poisons the owner client and
+        # bricks the whole catalog for the lifetime of the process.
+        try:
+            if operation in {"root_generation", "advance_root_generation"} and set(arguments) == {"root_id"}:
+                return getattr(store, operation)(**arguments)
+            if operation == "admit" and set(arguments) == {"root_id", "provider", "stream_id", "event_id", "content_hash"}:
+                return store.admit(**arguments).__dict__
+            if operation == "close" and not arguments:
+                return None
+        except SourceCatalogError as exc:
+            raise ChatProjectionStoreError(
+                "source_catalog_rejected", str(exc) or "source catalog rejected",
+            ) from exc
         raise ChatProjectionStoreError("owner_protocol_error", "source operation is not allowed")
 
     serve_owner(

@@ -41,7 +41,7 @@ _METADATA_KINDS = {
     "tag_updated",
     "tags_cleared",
     "open_panels_set",
-    "draft_set",
+    "draft_changed",
     "fork_closed_set",
     "supervisor_enabled_set",
     "supervisor_separated",
@@ -151,17 +151,6 @@ class SessionWSBroadcaster:
         )
         if project_fact_changed and self._invalidate_project_facts:
             self._invalidate_project_facts()
-        render_delta = change.get("render_delta")
-        if isinstance(render_delta, dict):
-            self._dispatch({
-                "type": "render_delta",
-                "data": {
-                    "app_session_id": sid,
-                    "incarnation": change.get("render_incarnation"),
-                    "render_revision": change.get("render_revision"),
-                    "delta": render_delta,
-                },
-            })
         if kind == "provenance_changed":
             # New provenance row(s) appended. The Details panel refetches
             # GET /api/sessions/{id}/details on this ping. Payload is just
@@ -654,6 +643,15 @@ class SessionWSBroadcaster:
             }
         elif kind == "last_opened_set":
             patch = {"last_opened_at": change.get("at")}
+        elif kind == "draft_changed":
+            # Autosaved chat-input draft. Enriched by the caller with the
+            # post-mutation draft fields directly (no reach-back needed).
+            patch = {
+                "draft_input": change.get("draft_input", ""),
+                "draft_input_seq": change.get("draft_input_seq"),
+            }
+            if "draft_images" in change:
+                patch["draft_images"] = list(change.get("draft_images") or [])
         else:
             # Tag changes. Enriched payload carries the full
             # post-mutation inline_tags list.

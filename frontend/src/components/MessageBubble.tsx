@@ -2583,21 +2583,60 @@ function renderManagerStreamLegacy(
 
 export type HistoricalChildControl = { hasChildren: boolean; expanded: boolean; toggle: () => void; loading: boolean; label?: string }
 
-function HistoricalChildControlSlot({ control }: { control?: HistoricalChildControl }) {
+/** Spec (chat-panel.md): expanded historical rows use the same canonical
+ * visible representation as live rows, and descendants never justify a
+ * plus-only wrapper. A node with hidden children therefore renders as the
+ * SAME collapsible entity the live path uses — its own visible content is
+ * the header/control (arrow + row core), never a separate +/- button. */
+function CanonicalHistoricalRow({ className, control, children: core }: {
+  className: string;
+  control?: HistoricalChildControl;
+  children: React.ReactNode;
+}) {
   const { t } = useTranslation();
-  if (!control?.hasChildren) return null;
+  if (!control?.hasChildren) {
+    return <div className={`canonical-historical-row ${className}`}><div className="canonical-row-core">{core}</div></div>;
+  }
   const fallbackLabel = t(control.expanded ? "message.collapseProcessAria" : "message.expandProcessAria");
-  return <button type="button" className="historical-child-toggle" aria-label={control.label ?? fallbackLabel} aria-expanded={control.expanded} aria-busy={control.loading} onClick={control.toggle}>{control.expanded ? '−' : '+'}</button>;
+  return (
+    <div className={`canonical-historical-row ${className} auto-action-group${control.expanded ? " open" : ""}`} data-testid="historical-entity-group">
+      <div
+        className="auto-action-group-header"
+        role="button"
+        tabIndex={0}
+        aria-expanded={control.expanded}
+        aria-busy={control.loading}
+        aria-label={control.label ?? fallbackLabel}
+        onClick={control.toggle}
+        onKeyDown={(e) => {
+          if (e.key !== "Enter" && e.key !== " ") return;
+          e.preventDefault();
+          control.toggle();
+        }}
+      >
+        <span className="collapse-arrow">{"▶"}</span>
+        <div className="canonical-row-core">{core}</div>
+      </div>
+    </div>
+  );
 }
 
 export function CanonicalHistoricalEventRow({ event, sessionId, childControl }: { event: WSEvent; sessionId?: string; childControl?: HistoricalChildControl }) {
   const { flat, toolResultById } = flattenClaudeMessages([event]);
   const { topLevel, children } = partitionEventsByParent(flat);
-  return <div className="canonical-historical-row canonical-event-row"><HistoricalChildControlSlot control={childControl} /><div className="canonical-row-core">{renderTreeLevel(topLevel, children, undefined, undefined, false, toolResultById, undefined, undefined, sessionId)}</div></div>;
+  return (
+    <CanonicalHistoricalRow className="canonical-event-row" control={childControl}>
+      {renderTreeLevel(topLevel, children, undefined, undefined, false, toolResultById, undefined, undefined, sessionId)}
+    </CanonicalHistoricalRow>
+  );
 }
 
 export function CanonicalHistoricalWorkerRow({ worker, sessionId, childControl }: { worker: WorkerPanel; sessionId?: string; childControl?: HistoricalChildControl }) {
-  return <div className="canonical-historical-row canonical-worker-row"><HistoricalChildControlSlot control={childControl} /><div className="canonical-row-core">{renderManagerStreamLegacy([], [worker], undefined, undefined, undefined, EMPTY_WORKER_DEFAULT_OPEN, undefined, sessionId)}</div></div>;
+  return (
+    <CanonicalHistoricalRow className="canonical-worker-row" control={childControl}>
+      {renderManagerStreamLegacy([], [worker], undefined, undefined, undefined, EMPTY_WORKER_DEFAULT_OPEN, undefined, sessionId)}
+    </CanonicalHistoricalRow>
+  );
 }
 
 /**

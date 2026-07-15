@@ -7,7 +7,6 @@ import { setBuiltinExtensionIds } from "../../src/extensionIds";
 import { MockBackend, type BackendState } from "./mockBackend";
 import { MockWebSocketController, type OutboundFrame } from "./mockWebSocket";
 import { extractView, type AppView } from "./view";
-import { compactProjectionCache } from "../../src/lib/compactProjectionCache";
 
 export interface RenderAppOptions {
   seed?: Partial<BackendState>;
@@ -69,7 +68,6 @@ export interface Harness {
 }
 
 export async function renderApp(options: RenderAppOptions = {}): Promise<Harness> {
-  compactProjectionCache.reset();
   const builtinExtensionIds = options.builtinExtensionIds ?? {
     credentialBroker: "ofek-dev.credential-broker",
   };
@@ -175,7 +173,6 @@ export async function renderApp(options: RenderAppOptions = {}): Promise<Harness
     flush: flushAll,
     unmount: () => {
       result.unmount();
-      compactProjectionCache.reset();
       wsController.uninstall();
       backend.uninstall();
     },

@@ -19,6 +19,7 @@ os.environ["BETTER_AGENT_HOME"] = str(HOME)
 sys.path.insert(0, str(ROOT / "backend"))
 
 from chat_projection_source_catalog import ChatProjectionSourceCatalog
+from chat_projection_store import ChatProjectionStoreError
 import chat_projection_ingestion
 
 
@@ -140,6 +141,34 @@ def test_provider_switch_admits_one_neutral_root_and_missing_identity_fails_clos
     chat_projection_ingestion.close()
 
 
+def test_provider_conflict_does_not_poison_catalog() -> None:
+    path = HOME / "conflict.sqlite3"
+    catalog = ChatProjectionSourceCatalog(path)
+    catalog.admit(
+        root_id="root", provider="claude", stream_id="shared-run",
+        event_id="e1", content_hash=digest("c1"),
+    )
+    # Reusing the same stream_id under a different provider is a domain-level
+    # rejection. It must NOT be elevated to fatal `owner_internal_error`, which
+    # would poison the owner client and brick the catalog for every other root.
+    try:
+        catalog.admit(
+            root_id="root", provider="codex", stream_id="shared-run",
+            event_id="e2", content_hash=digest("c2"),
+        )
+        raise AssertionError("provider conflict was admitted")
+    except ChatProjectionStoreError as exc:
+        assert exc.code == "source_catalog_rejected", exc.code
+    # The catalog must still be alive and serve unrelated roots.
+    assert catalog.root_generation("other-root") == 1
+    other = catalog.admit(
+        root_id="other-root", provider="claude", stream_id="run-claude",
+        event_id="e3", content_hash=digest("c3"),
+    )
+    assert (other.generation, other.sequence) == (1, 1)
+    catalog.close()
+
+
 def main() -> None:
     try:
         test_restart_switch_mutation_and_root_generation()
@@ -148,6 +177,8 @@ def main() -> None:
         print("PASS test_concurrent_exact_allocation")
         test_provider_switch_admits_one_neutral_root_and_missing_identity_fails_closed()
         print("PASS test_provider_switch_admits_one_neutral_root_and_missing_identity_fails_closed")
+        test_provider_conflict_does_not_poison_catalog()
+        print("PASS test_provider_conflict_does_not_poison_catalog")
     finally:
         shutil.rmtree(HOME, ignore_errors=True)
 

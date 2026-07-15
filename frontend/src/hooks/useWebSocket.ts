@@ -7,7 +7,6 @@ import type {
   RunInfo,
   SendMode,
   Session,
-  UserInputRequest,
   WSEvent,
 } from "../types";
 import type { InlineTag } from "../types/inlineTag";
@@ -17,7 +16,6 @@ import { getActiveExtensionAuthScope } from "../components/ExtensionSlots";
 import { logPromptSend } from "../lib/promptSendLog";
 import { SnapshotTransport } from "../lib/snapshotTransport";
 import { logFailure, logTiming } from "../lib/frontendLogger";
-import { buildCompactSubscriptionModes, type CompactSubscriptionMode } from "../lib/compactSubscriptionIntents";
 
 export interface ImagePayload {
   data: string;
@@ -79,15 +77,6 @@ export function resolveLiveFrameSessionId(
 }
 
 interface UseWebSocketOptions {
-  getCompactCursor?: (appSessionId: string) => { incarnation: string; renderRevision: number } | null;
-  onRenderDelta?: (data: {
-    app_session_id: string;
-    incarnation: string;
-    render_revision: number;
-    delta: import("src/lib/compactTurns").CompactRenderDelta;
-  }) => void;
-  onResnapshotRequired?: (appSessionId: string) => void | Promise<void>;
-  onUserInputPendingSnapshot?: (appSessionId: string, revision: number, requests: UserInputRequest[]) => void;
   /** The app_session_id currently being viewed in the UI. When this
    * changes, the hook sends `unsubscribe` for the previous id and
    * `subscribe` for the new one so the backend's SessionWatcher knows
@@ -101,7 +90,6 @@ interface UseWebSocketOptions {
    * frames flow in. Live `manager_event`/`worker_event` frames route
    * only when the backend provides their owning `app_session_id`. */
   additionalAppSessionIds?: string[];
-  compactWarmAppSessionIds?: string[];
   onRewindComplete?: (appSessionId: string, messages: ChatMessage[]) => void;
   /** Backend's response to a subscribe with `since_seq=N`. Carries
    * every persisted message with `seq >= N` plus the live in-flight
@@ -379,10 +367,6 @@ export function useWebSocket(
   // Latest-callback refs so onmessage sees fresh handlers without
   // triggering a WebSocket reconnect every time App re-renders.
   const onRewindCompleteRef = useRef(options.onRewindComplete);
-  const getCompactCursorRef = useRef(options.getCompactCursor);
-  const onRenderDeltaRef = useRef(options.onRenderDelta);
-  const onResnapshotRequiredRef = useRef(options.onResnapshotRequired);
-  const onUserInputPendingSnapshotRef = useRef(options.onUserInputPendingSnapshot);
   const onMessagesReplayRef = useRef(options.onMessagesReplay);
   const onStubInvalidatedRef = useRef(options.onStubInvalidated);
   const onMessagesDeltaRef = useRef(options.onMessagesDelta);
@@ -429,10 +413,6 @@ export function useWebSocket(
   const clientIdRef = useRef(options.clientId);
   useEffect(() => {
     onRewindCompleteRef.current = options.onRewindComplete;
-    getCompactCursorRef.current = options.getCompactCursor;
-    onRenderDeltaRef.current = options.onRenderDelta;
-    onResnapshotRequiredRef.current = options.onResnapshotRequired;
-    onUserInputPendingSnapshotRef.current = options.onUserInputPendingSnapshot;
     onMessagesReplayRef.current = options.onMessagesReplay;
     onStubInvalidatedRef.current = options.onStubInvalidated;
     onMessagesDeltaRef.current = options.onMessagesDelta;
@@ -465,10 +445,6 @@ export function useWebSocket(
     clientIdRef.current = options.clientId;
   }, [
     options.onRewindComplete,
-    options.getCompactCursor,
-    options.onRenderDelta,
-    options.onResnapshotRequired,
-    options.onUserInputPendingSnapshot,
     options.onMessagesReplay,
     options.onStubInvalidated,
     options.onMessagesDelta,
@@ -506,7 +482,6 @@ export function useWebSocket(
     currentAppSessionIdRef.current = options.currentAppSessionId ?? null;
   }, [options.currentAppSessionId]);
   const [connected, setConnected] = useState(false);
-  const [subscriptionRefreshEpoch, setSubscriptionRefreshEpoch] = useState(0);
   const [events, setEvents] = useState<WSEvent[]>([]);
   const [isStreaming, setIsStreaming] = useState(false);
   const [isStopping, setIsStopping] = useState(false);
@@ -533,8 +508,6 @@ export function useWebSocket(
     [],
   );
   const wsRef = useRef<WebSocket | null>(null);
-  const subscriptionGenerationsRef = useRef<Map<string, number>>(new Map());
-  const nextSubscriptionGenerationRef = useRef(1);
   const snapshotTransportRef = useRef(new SnapshotTransport());
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   // Mirror isStreaming into a ref so onmessage can gate the "loose
@@ -597,7 +570,6 @@ export function useWebSocket(
 
     ws.onclose = (ev) => {
       setConnected(false);
-      subscriptionGenerationsRef.current.clear();
       setIsStreaming(false);
       setIsStopping(false);
       setStreamingPhase(null);
@@ -632,17 +604,6 @@ export function useWebSocket(
           byteSize,
         )) return;
 
-        const subscriptionSid =
-          (event.data as { app_session_id?: string } | undefined)?.app_session_id;
-        if (
-          typeof event.subscription_generation === "number" &&
-          (!subscriptionSid ||
-            subscriptionGenerationsRef.current.get(subscriptionSid) !==
-              event.subscription_generation)
-        ) {
-          return;
-        }
-
         // Catch-all dispatch (progress bus extenders) BEFORE any typed
         // path so even early-return events (messages_replay etc.) still
         // resolve pending ops waiting on them.
@@ -661,64 +622,6 @@ export function useWebSocket(
           eventBus.publish(event.type, event.data ?? {});
         } catch {
           // see onAnyEvent comment
-        }
-
-        if (event.type === "subscription_ready") {
-          const sid =
-            (event.data as { app_session_id?: string } | undefined)
-              ?.app_session_id ?? currentAppSessionIdRef.current ?? null;
-          if (sid) {
-            window.dispatchEvent(
-              new CustomEvent("session_subscription_ready", {
-                detail: { app_session_id: sid },
-              }),
-            );
-          }
-          return;
-        }
-        if (event.type === "subscription_failed") {
-          return;
-        }
-
-        if (event.type === "render_delta") {
-          const data = event.data as {
-            app_session_id?: string;
-            incarnation?: string;
-            render_revision?: number;
-            delta?: import("src/lib/compactTurns").CompactRenderDelta;
-          };
-          if (
-            data.app_session_id &&
-            typeof data.incarnation === "string" &&
-            typeof data.render_revision === "number" &&
-            data.delta
-          ) {
-            onRenderDeltaRef.current?.({
-              app_session_id: data.app_session_id,
-              incarnation: data.incarnation,
-              render_revision: data.render_revision,
-              delta: data.delta,
-            });
-          }
-          return;
-        }
-
-        if (event.type === "resnapshot_required") {
-          const appSessionId = (event.data as { app_session_id?: string } | undefined)?.app_session_id;
-          if (appSessionId) {
-            void Promise.resolve(onResnapshotRequiredRef.current?.(appSessionId)).finally(() => {
-              subscribedIdsRef.current.delete(appSessionId);
-              setSubscriptionRefreshEpoch((epoch) => epoch + 1);
-            });
-          }
-          return;
-        }
-        if (event.type === "user_input_pending_snapshot") {
-          const data = event.data as { app_session_id?: string; revision?: number; requests?: UserInputRequest[] };
-          if (data.app_session_id && typeof data.revision === "number" && Array.isArray(data.requests)) {
-            onUserInputPendingSnapshotRef.current?.(data.app_session_id, data.revision, data.requests);
-          }
-          return;
         }
 
         // Advance the events.jsonl watermark for this session BEFORE
@@ -1470,10 +1373,9 @@ export function useWebSocket(
   // any additional pane ids from the split-fork view). Diff-driven: on
   // every change of the desired set, send subscribe frames for new ids
   // and unsubscribe for dropped ids.
-  const subscribedIdsRef = useRef<Map<string, CompactSubscriptionMode>>(new Map());
+  const subscribedIdsRef = useRef<Set<string>>(new Set());
   const targetAppSessionId = options.currentAppSessionId ?? null;
   const additionalIds = options.additionalAppSessionIds;
-  const compactWarmIds = options.compactWarmAppSessionIds;
   // Memoize the joined key so this effect only re-runs when the set
   // actually changes (not on every parent render).
   const desiredSetKey = (() => {
@@ -1482,64 +1384,49 @@ export function useWebSocket(
     for (const id of additionalIds ?? []) {
       if (id) ids.add(id);
     }
-    const warm = new Set(compactWarmIds ?? []);
-    return Array.from(ids).sort().map((id) => `${id}:foreground`).concat(
-      Array.from(warm).filter((id) => !ids.has(id)).sort().map((id) => `${id}:cache`),
-    ).join("|") + `#${subscriptionRefreshEpoch}`;
+    return Array.from(ids).sort().join("|");
   })();
   useEffect(() => {
     if (!connected) {
       // WS went down — drop our local record of subscriptions so that
       // the reconnect re-subscribes the full desired set fresh.
-      subscribedIdsRef.current = new Map();
-      subscriptionGenerationsRef.current.clear();
+      subscribedIdsRef.current = new Set();
       return;
     }
     const ws = wsRef.current;
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    const desired = buildCompactSubscriptionModes(targetAppSessionId, additionalIds ?? [], compactWarmIds ?? []);
+    const desired = new Set<string>();
+    if (targetAppSessionId) desired.add(targetAppSessionId);
+    for (const id of additionalIds ?? []) {
+      if (id) desired.add(id);
+    }
     const prev = subscribedIdsRef.current;
     // Unsubscribe ids that fell out of the desired set.
-    for (const [id, previousIntent] of prev) {
-      if (!desired.has(id) || desired.get(id) !== previousIntent) {
+    for (const id of prev) {
+      if (!desired.has(id)) {
         try {
-          const generation = subscriptionGenerationsRef.current.get(id);
           ws.send(
-            JSON.stringify({
-              type: "unsubscribe",
-              app_session_id: id,
-              generation,
-            })
+            JSON.stringify({ type: "unsubscribe", app_session_id: id })
           );
-          subscriptionGenerationsRef.current.delete(id);
         } catch {
           // ignore
         }
       }
     }
     // Subscribe ids that are newly desired.
-    for (const [id, subscriptionIntent] of desired) {
-      if (!prev.has(id) || prev.get(id) !== subscriptionIntent) {
+    for (const id of desired) {
+      if (!prev.has(id)) {
         try {
-          const generation = nextSubscriptionGenerationRef.current++;
-          subscriptionGenerationsRef.current.set(id, generation);
           const sinceSeq = getSinceSeqRef.current?.(id) ?? 0;
           const eventsFromSeq = getEventsFromSeqRef.current?.(id) ?? 0;
           const eventsCursorKnown = getEventsCursorKnownRef.current?.(id) ?? false;
-          const compactCursor = getCompactCursorRef.current?.(id) ?? null;
           ws.send(
             JSON.stringify({
               type: "subscribe",
               app_session_id: id,
-              subscription_class: subscriptionIntent,
               since_seq: sinceSeq,
               events_from_seq: eventsFromSeq,
               events_cursor_known: eventsCursorKnown,
-              ...(compactCursor ? {
-                incarnation: compactCursor.incarnation,
-                render_revision: compactCursor.renderRevision,
-              } : {}),
-              generation,
             })
           );
         } catch {

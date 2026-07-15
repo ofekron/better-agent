@@ -1,22 +1,29 @@
 import { API } from 'src/api'
-import type { CompactManifest } from 'src/lib/compactTurns'
 import type {
   HistoricalChildrenClient,
   HistoricalNodeManifest,
 } from 'src/lib/historicalHydrationStore'
+
+export type RawHistoricalManifest = {
+  id: string
+  type: string
+  revision: string
+  direct_child_count: number
+  display_summary: string
+}
 
 type BackendChildrenResponse = {
   session_id: string
   message_id: string
   parent_id: string
   revision: string
-  parent: CompactManifest
-  children: Array<CompactManifest & { render_payload: unknown }>
+  parent: RawHistoricalManifest
+  children: Array<RawHistoricalManifest & { render_payload: unknown }>
   next_cursor?: string | null
   has_more?: boolean
 }
 
-export function toHistoricalManifest(sessionId: string, manifest: CompactManifest): HistoricalNodeManifest {
+export function toHistoricalManifest(sessionId: string, manifest: RawHistoricalManifest): HistoricalNodeManifest {
   return {
     sessionId,
     nodeId: manifest.id,

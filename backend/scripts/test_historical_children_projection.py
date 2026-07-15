@@ -1027,9 +1027,7 @@ def test_current_waiters_cover_zero_manifest_coalescing_and_cancellation():
     snapshot = {"id": empty_root, "messages": [], "forks": []}
     ready = projection.ensure_current(empty_root, snapshot, priority=True)
     ready.result(timeout=5)
-    revision, manifests = projection.root_manifests(empty_root, empty_root, [])
-    assert isinstance(revision, int)
-    assert manifests == {}
+    assert projection._is_current(empty_root)
 
     waiting_root = "projection-ready-waiters"
     with (
@@ -1067,9 +1065,7 @@ def test_projection_executor_reopens_for_a_new_app_lifespan():
     root = "reopened-projection-root"
     snapshot = {"id": root, "messages": [], "forks": []}
     projection.ensure_current(root, snapshot).result(timeout=5)
-    revision, manifests = projection.root_manifests(root, root, [])
-    assert isinstance(revision, int)
-    assert manifests == {}
+    assert projection._is_current(root)
 
 
 if __name__ == "__main__":

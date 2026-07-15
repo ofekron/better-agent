@@ -73,7 +73,12 @@ def _load_locked() -> dict[str, str]:
 def _persist_locked(data: dict[str, str]) -> None:
     path = _path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
+    # Unique tmp per writer: the backend AND every runner subprocess persist
+    # this registry, so a fixed tmp name races across processes — writer A's
+    # os.replace consumes the tmp out from under writer B's. The in-process
+    # _LOCK cannot serialize that; per-writer tmp names keep each
+    # write-then-replace pair atomic and collision-free.
+    tmp = path.with_suffix(f".{os.getpid()}.{os.urandom(4).hex()}.tmp")
     tmp.write_text(json.dumps(data), encoding="utf-8")
     try:
         os.chmod(tmp, 0o600)

@@ -34,8 +34,16 @@ function expectParity(liveCore: Element, historical: HTMLElement) {
   const historicalCore = historical.querySelector('.canonical-row-core')!
   expect(historicalCore.className).toBe('canonical-row-core')
   expect(historicalCore.innerHTML).toBe(liveCore.innerHTML)
-  expect(liveCore.querySelectorAll('.historical-child-toggle')).toHaveLength(0)
-  expect(historical.querySelectorAll('.historical-child-toggle')).toHaveLength(1)
+  // Spec: no plus-only wrapper — a node with hidden children renders as
+  // the SAME collapsible entity the live path uses; its own row is the
+  // header/control.
+  expect(historical.querySelectorAll('.historical-child-toggle')).toHaveLength(0)
+  const group = historical.querySelector('[data-testid="historical-entity-group"]')!
+  expect(group).not.toBeNull()
+  const header = group.querySelector('.auto-action-group-header')!
+  expect(header.getAttribute('role')).toBe('button')
+  expect(header.getAttribute('aria-expanded')).toBe('false')
+  expect(header.querySelector('.canonical-row-core')).toBe(historicalCore)
   expect(historical.querySelectorAll('.raw-toggle')).toHaveLength(0)
 }
 

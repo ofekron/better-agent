@@ -705,18 +705,6 @@ def locked_root_manifest(
         yield {"id": row["root_node"], "type": "turn_root", "revision": row["revision"], "direct_child_count": int(row["direct_child_count"]), "display_summary": summary[:160]}
 
 
-@contextmanager
-def locked_projection_revision(root_id: str):
-    with _timed_lock(root_id, "compact_validation"), _connection(root_id, create=False) as conn:
-        _validate_current_locked(root_id, conn)
-        revision = conn.execute(
-            "SELECT value FROM meta WHERE key='projection_revision'"
-        ).fetchone()
-        if revision is None:
-            raise ProjectionUnavailable("historical projection is rebuilding")
-        yield int(revision[0])
-
-
 def _validate_current_locked(root_id: str, conn: sqlite3.Connection) -> _JournalSnapshot:
     ready = conn.execute("SELECT value FROM meta WHERE key='ready'").fetchone()
     indexed = conn.execute("SELECT value FROM meta WHERE key='indexed_end'").fetchone()
@@ -729,40 +717,6 @@ def _validate_current_locked(root_id: str, conn: sqlite3.Connection) -> _Journal
     ):
         raise ProjectionUnavailable("historical projection is not current")
     return journal
-
-
-def root_manifests(
-    root_id: str, sid: str, messages: list[tuple[str, str]],
-) -> tuple[int, dict[str, dict[str, Any]]]:
-    if not messages:
-        with locked_projection_revision(root_id) as revision:
-            return revision, {}
-    ids = [msg_id for msg_id, _summary in messages]
-    placeholders = ",".join("?" for _ in ids)
-    with _timed_lock(root_id, "manifest_batch"), _connection(root_id, create=False) as conn:
-        _validate_current_locked(root_id, conn)
-        revision = conn.execute(
-            "SELECT value FROM meta WHERE key='projection_revision'"
-        ).fetchone()
-        if revision is None:
-            raise ProjectionUnavailable("historical projection is rebuilding")
-        rows = conn.execute(
-            f"SELECT msg_id,root_node,revision,direct_child_count FROM messages WHERE sid=? AND msg_id IN ({placeholders})",
-            (sid, *ids),
-        ).fetchall()
-        by_id = {str(row["msg_id"]): row for row in rows}
-        if any(msg_id not in by_id for msg_id in ids):
-            raise ProjectionUnavailable("historical projection is rebuilding")
-        summaries = dict(messages)
-        return int(revision[0]), {
-            msg_id: {
-                "id": row["root_node"], "type": "turn_root",
-                "revision": row["revision"],
-                "direct_child_count": int(row["direct_child_count"]),
-                "display_summary": summaries[msg_id][:160],
-            }
-            for msg_id, row in by_id.items()
-        }
 
 
 def root_manifest(root_id: str, sid: str, msg_id: str, summary: str = "") -> dict[str, Any]:

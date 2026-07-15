@@ -16,7 +16,78 @@ timeline the frontend expands: primary events plus worker-panel events
 interleaved by the backend-stamped `insert_at` delegation point.
 """
 
-from typing import Optional
+import hashlib
+import json
+from typing import Any, Optional
+
+_TEXT_EVENT_TYPES = {
+    "assistant_text",
+    "output_text",
+    "text",
+    "text_delta",
+    "text_group",
+}
+_TEXT_KEYS = ("text", "content", "message")
+
+
+def _visible_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        parts = [_visible_text(item) for item in value]
+        return "".join(part for part in parts if part)
+    if isinstance(value, dict):
+        if value.get("type") in {"text", "output_text"}:
+            return _visible_text(value.get("text"))
+    return ""
+
+
+def _event_text(event: dict[str, Any]) -> str:
+    event_type = event.get("type")
+    data = event.get("data")
+    if event_type == "agent_message" and isinstance(data, dict):
+        message = data.get("message")
+        if isinstance(message, dict):
+            return _visible_text(message.get("content"))
+        return _visible_text(message)
+    if event_type not in _TEXT_EVENT_TYPES:
+        return ""
+    if isinstance(data, dict):
+        for key in _TEXT_KEYS:
+            text = _visible_text(data.get(key))
+            if text:
+                return text
+    return _visible_text(data)
+
+
+def event_display_summary(event: dict[str, Any]) -> str:
+    return _event_text(event)[:160]
+
+
+def assistant_display_summary(message: dict[str, Any]) -> str:
+    return _visible_text(message.get("content"))[:160]
+
+
+def _content_revision(value: Any) -> str:
+    return hashlib.sha256(
+        json.dumps(value, sort_keys=True, separators=(",", ":"), default=str).encode()
+    ).hexdigest()
+
+
+def historical_root_revision(message: dict[str, Any]) -> str:
+    stub = message.get("stub")
+    event_count = (
+        int(stub.get("event_count") or 0)
+        if isinstance(stub, dict)
+        else len(message.get("events") or [])
+    )
+    return _content_revision({
+        "message_id": message.get("id"),
+        "seq": message.get("seq"),
+        "event_count": event_count,
+        "worker_count": len(message.get("workers") or []),
+    })
+
 
 # Lifecycle / non-rendered event types excluded from the collapsed
 # count + preview. Mirrors the frontend:
@@ -229,8 +300,6 @@ def build_stub(msg: dict, *, tail: int = STUB_TAIL) -> dict:
     """Compute `{event_count, last_events}` from a msg's timeline.
     `last_events` references live event dicts — caller deepcopies if it
     will outlive the live tree."""
-    from compact_turn_projection import historical_root_revision
-
     rendered = timeline_events(msg)
     existing = msg.get("stub") if isinstance(msg.get("stub"), dict) else {}
     direct_child_count = existing.get("direct_child_count")

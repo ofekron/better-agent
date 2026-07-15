@@ -12044,28 +12044,14 @@ button.run-badge-clickable:focus-visible {
   color: var(--text-primary);
 }
 
-.historical-child-toggle {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex: 0 0 auto;
-  min-width: 44px;
+/* Historical rows with hidden children render as the same collapsible
+   entity the live path uses (.auto-action-group markup); the row core is
+   the header content, so the whole row is the >=44px control. */
+.canonical-historical-row .auto-action-group-header {
   min-height: 44px;
-  border: none;
-  border-radius: 8px;
-  background: transparent;
-  color: var(--text-secondary);
-  cursor: pointer;
-  font-size: calc(16px * var(--app-font-scale));
-  transition: background 0.15s ease, color 0.15s ease;
 }
 
-.historical-child-toggle:hover {
-  background: var(--bg-hover);
-  color: var(--text-primary);
-}
-
-.historical-child-toggle:focus-visible {
+.canonical-historical-row .auto-action-group-header:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }

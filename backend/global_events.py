@@ -46,8 +46,6 @@ _EVENT_OWNERS: Mapping[str, tuple[str, ...]] = {
         "session_monitoring_changed",
         "session_provenance_changed", "session_unread_changed",
         "session_marker_changed",
-        "render_delta",
-        "resnapshot_required",
     ),
     "startup_tasks": ("startup_task_changed",),
     "machine_nodes": (

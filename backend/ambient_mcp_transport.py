@@ -7,6 +7,7 @@ import struct
 from pathlib import Path
 from typing import Any
 
+import runtime_ipc
 from paths import ba_home
 
 
@@ -17,15 +18,17 @@ def endpoint() -> str:
         owner = os.environ.get("USERNAME", "")
         suffix = hashlib.sha256(f"{ba_home()}:{owner}".encode()).hexdigest()[:20]
         return rf"\\.\pipe\better-agent-ambient-mcp-{suffix}"
-    return str(ba_home() / "runtime" / "ambient-mcp.sock")
+    # AF_UNIX paths are capped (~104 bytes on macOS) and homes can be
+    # deep, so the socket lives in the short per-user 0700 socket dir
+    # under a per-home hashed name — the POSIX mirror of the pipe hash.
+    return str(runtime_ipc.socket_dir() / f"{runtime_ipc.home_digest()}-mcp.sock")
 
 
 def prepare_posix_listener() -> socket.socket:
     if os.name == "nt":
         raise RuntimeError("POSIX listener requested on Windows")
+    runtime_ipc.ensure_socket_dir()
     path = Path(endpoint())
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    os.chmod(path.parent, 0o700)
     try:
         path.unlink()
     except FileNotFoundError:

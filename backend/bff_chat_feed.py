@@ -24,6 +24,7 @@ from typing import Any, Awaitable, Callable
 import websockets
 
 import chat_projection_ingestion
+from chat_projection_store import ChatProjectionStoreError
 from bff_runtime_contract import BFF_SERVICE_TOKEN_HEADER
 from bff_runtime_service import RuntimeServiceError, runtime_service
 from bff_runtime_upstream import RuntimeUpstreamUnavailable, runtime_upstream
@@ -34,6 +35,11 @@ logger = logging.getLogger(__name__)
 _PROVIDER_KINDS = {"claude", "codex", "gemini"}
 _PAGE_LIMIT = 500
 _RECONNECT_MAX_SECONDS = 30.0
+# Admission error codes that reject a single fact (conflict / bad shape) rather
+# than indicating a store-level failure. Such a fact is un-admittable by
+# construction, so we drop it and keep advancing the cursor; aborting would
+# stall the whole root's pull on every advance and re-log the same error.
+_SOFT_ADMISSION_ERROR_CODES = frozenset({"source_catalog_rejected"})
 
 SourceReader = Callable[..., Awaitable[dict[str, Any]]]
 
@@ -182,10 +188,18 @@ class ChatFeedClient:
                 return
             facts = page.get("facts")
             for fact in facts if isinstance(facts, list) else []:
-                await asyncio.to_thread(
-                    chat_projection_ingestion.admit_canonical_fact,
-                    fact, provider=provider,
-                )
+                try:
+                    await asyncio.to_thread(
+                        chat_projection_ingestion.admit_canonical_fact,
+                        fact, provider=provider,
+                    )
+                except ChatProjectionStoreError as exc:
+                    if exc.code not in _SOFT_ADMISSION_ERROR_CODES:
+                        raise
+                    logger.warning(
+                        "chat feed: skipping un-admittable fact for %s (%s: %s)",
+                        root_id, exc.code, exc.detail,
+                    )
             next_seq = page.get("next_seq")
             if isinstance(next_seq, int) and not isinstance(next_seq, bool) and next_seq > cursor:
                 cursor = next_seq
