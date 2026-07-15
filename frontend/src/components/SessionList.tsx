@@ -35,6 +35,7 @@ import { copyToClipboard } from "../utils/clipboard";
 import { shouldStartAgentBoardSessionDrag, type SessionDragPoint } from "../utils/sessionDragThreshold";
 import { logTiming } from "../lib/frontendLogger";
 import { runThreeStateSync } from "../progress/store";
+import { groupSessionsByStatusRank, statusGroupI18nKey } from "../lib/sessionStatusGroups";
 
 const SESSION_BULK_SELECT_LONG_PRESS_MS = 500;
 interface Props {
@@ -111,38 +112,6 @@ type SessionSelectHandler = (id: string, session?: Session) => void;
 // Empty children map for the pinned selected-session anchor, which
 // renders as a single row without its sub-session sub-tree.
 const EMPTY_CHILDREN: Map<string, Session[]> = new Map();
-
-// Backend-owned rank buckets (highest first), mapped to their group
-// heading i18n keys for the status-grouped sidebar view.
-const STATUS_GROUP_I18N_KEY: Record<number, string> = {
-  6: "session.statusGroup.errors",
-  5: "session.statusGroup.needsDecision",
-  4: "session.statusGroup.unread",
-  3: "session.statusGroup.openWork",
-  2: "session.statusGroup.running",
-  1: "session.statusGroup.done",
-  0: "session.statusGroup.new",
-};
-
-type SessionStatusGroupRun = { rank: number; sessions: Session[] };
-
-/** Partitions an already status-sorted session list into contiguous
- * same-rank runs for rendering group headers. Never reorders — the
- * backend `status_rank` sort order is the source of truth; this only
- * decides where to insert a header. */
-function groupSessionsByStatusRank(sessions: Session[]): SessionStatusGroupRun[] {
-  const runs: SessionStatusGroupRun[] = [];
-  for (const session of sessions) {
-    const rank = session.status_rank ?? 0;
-    const last = runs[runs.length - 1];
-    if (last && last.rank === rank) {
-      last.sessions.push(session);
-    } else {
-      runs.push({ rank, sessions: [session] });
-    }
-  }
-  return runs;
-}
 
 function orchestrationLabel(t: (key: string) => string, mode?: string): string {
   if (mode === "virtual") return "Virtual";
@@ -3680,7 +3649,7 @@ export function SessionList({
                       size={12}
                       className="session-folder-chevron"
                     />
-                    <span>{t(STATUS_GROUP_I18N_KEY[run.rank] ?? "session.statusGroup.new")}</span>
+                    <span>{t(statusGroupI18nKey(run.rank))}</span>
                     <span className="session-status-group-count">{run.sessions.length}</span>
                     {bulkSelectMode && groupIds.length > 0 && (
                       <label

@@ -1,10 +1,10 @@
 """Status-sort rank + sort-key regression tests.
 
 Locks the backend half of the "group by status" sort option:
-  1. `_session_status_rank` buckets correctly (6 error, 5 waiting-for-user,
-     4 has-new, 3 open-todo, 2 running, 1 all-done, 0 none) with
-     highest-wins precedence, reading monitoring snapshot first then row
-     fallback, and marker TAG (not color).
+  1. `_session_status_rank` buckets correctly (7 new-empty, 6 error,
+     5 waiting-for-user, 4 has-new, 3 open-todo, 2 running, 1 all-done,
+     0 inactive), reading monitoring snapshot first then row fallback and
+     marker TAG (not color). Actionable states take precedence over newness.
   2. `_session_list_sort_key` puts status BELOW empty-new + pinned and ABOVE
      the timestamp (the decided precedence: empty > pinned > status > ts),
      and only when status_sort=True.
@@ -87,7 +87,22 @@ check(
     "rank.alldone.marker_tag",
     main._session_status_rank({"id": "idle", "markers": marker(DONE)}, mon, unread) == 1,
 )
-check("rank.none", main._session_status_rank({"id": "idle"}, mon, unread) == 0)
+check(
+    "rank.new.empty",
+    main._session_status_rank({"id": "empty", "message_count": 0}, mon, unread) == 7,
+)
+check(
+    "rank.precedence.error_over_new",
+    main._session_status_rank(
+        {"id": "empty-error", "message_count": 0, "has_error": True},
+        mon,
+        unread,
+    ) == 6,
+)
+check(
+    "rank.inactive",
+    main._session_status_rank({"id": "idle", "message_count": 1}, mon, unread) == 0,
+)
 
 # precedence: waiting-for-user beats running (both via the snapshot)
 check(
@@ -142,7 +157,11 @@ check(
 check(
     "rank.untagged_marker_inert",
     main._session_status_rank(
-        {"id": "idle", "markers": {"ext": {"color": "#d29922", "tooltip": "x"}}},
+        {
+            "id": "idle",
+            "message_count": 1,
+            "markers": {"ext": {"color": "#d29922", "tooltip": "x"}},
+        },
         mon, unread,
     ) == 0,
 )
@@ -197,15 +216,20 @@ def fkey(sess):
     )
 
 
-hi_idle = {"id": "hi", "updated_at": "2020-01-01T00:00:00"}
-lo_running = {"id": "lo", "updated_at": "2020-01-01T00:00:00"}
+hi_idle = {"id": "hi", "updated_at": "2020-01-01T00:00:00", "message_count": 1}
+lo_running = {"id": "lo", "updated_at": "2020-01-01T00:00:00", "message_count": 1}
 # higher search score wins even though the other is running → status BELOW score
 # (lo_running's id isn't in `mon` as running; give it running via markers)
 lo_running["markers"] = marker(NEEDS)
 check("searchkey.relevance_dominates", fkey(hi_idle) > fkey(lo_running))
 # within equal score, status breaks the tie above ts
-a = {"id": "hi", "updated_at": "2020-01-01T00:00:00", "markers": marker(NEEDS)}
-b = {"id": "hi", "updated_at": "2025-01-01T00:00:00"}
+a = {
+    "id": "hi",
+    "updated_at": "2020-01-01T00:00:00",
+    "message_count": 1,
+    "markers": marker(NEEDS),
+}
+b = {"id": "hi", "updated_at": "2025-01-01T00:00:00", "message_count": 1}
 check("searchkey.status_tiebreak_within_score", fkey(a) > fkey(b))
 
 

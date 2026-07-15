@@ -5743,6 +5743,10 @@ _MARKER_TAG_ALL_TASKS_DONE = "ALL_TASKS__DONE"
 _RUNNING_STATES = ("active", "waiting_on_background")
 
 
+def _is_new_session(session: dict) -> bool:
+    return int(session.get("message_count", 0) or 0) == 0
+
+
 def _has_open_work_items(session: dict) -> bool:
     items = (
         list(session.get("current_todos") or [])
@@ -5804,6 +5808,8 @@ def _session_status_rank(
         return 2
     if _MARKER_TAG_ALL_TASKS_DONE in tags:
         return 1
+    if _is_new_session(session):
+        return 7
     return 0
 
 
@@ -5824,10 +5830,10 @@ def _session_list_sort_key(
     unread_by_sid: dict[str, int] | None = None,
     pending_input_by_sid: dict[str, int] | None = None,
 ) -> tuple:
-    # empty-new and pinned stay above status; status is the strongest key
+    # New and pinned stay above status; status is the strongest key
     # below them, time the tie-break: (isEmpty, pinned, [status], ts).
     inner: tuple = (
-        int(session.get("message_count", 0) or 0) == 0,
+        _is_new_session(session),
         bool(session.get("pinned", False)),
     )
     if status_sort:
