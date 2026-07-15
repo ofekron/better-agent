@@ -120,6 +120,65 @@ def test_gap_cannot_skip_missing_jsonl_row():
     journal.close()
 
 
+def test_mirror_gap_self_heals_from_jsonl():
+    """A prior mirror_event call for one seq can fail for reasons
+    unrelated to seq contiguity (transient store error, a
+    fire-and-forget caller that never awaited/checked the result) even
+    though the jsonl row was already durably written. The next live
+    mirror_event call must replay the missed rows from jsonl (the
+    source of truth) instead of raising forever."""
+    from event_ingester import event_ingester as ingester
+
+    root_id = "gap-heal-root"
+    session = {"id": root_id, "messages": []}
+
+    seq1 = ingester.ingest(
+        root_id, sid=root_id, event_type="turn_start", data={"uuid": "h1"},
+        source="test",
+    )
+    assert seq1 == 1
+
+    journal = CanonicalRuntimeJournal(HOME / "gap-heal-catalog.sqlite")
+    rows, _, _ = ingester.read_events(root_id, after_seq=0, limit=100)
+    journal.ensure_cutover(root_id, rows=rows, session=session)
+
+    # Two events land on disk but their mirror is never invoked --
+    # simulates a dropped/failed `mirror_event` call for those seqs.
+    seq2 = ingester.ingest(
+        root_id, sid=root_id, event_type="progress", data={"uuid": "h2"},
+        source="test",
+    )
+    seq3 = ingester.ingest(
+        root_id, sid=root_id, event_type="progress", data={"uuid": "h3"},
+        source="test",
+    )
+    assert (seq2, seq3) == (2, 3)
+    assert journal.current_authority(root_id).journal_through_seq == 1
+
+    seq4 = ingester.ingest(
+        root_id, sid=root_id, event_type="turn_complete", data={"uuid": "h4"},
+        source="test",
+    )
+    assert seq4 == 4
+
+    # The live mirror call for seq 4 arrives with journal_through_seq
+    # still stuck at 1. It must self-heal by replaying seq 2/3 from
+    # jsonl rather than raising a coverage-gap error.
+    journal.mirror_event(
+        root_id=root_id, sid=root_id, seq=seq4, event_type="turn_complete",
+        data={"uuid": "h4"}, source="test", msg_id=None, event_id="h4",
+        turn_id=None,
+    )
+
+    authority = journal.current_authority(root_id)
+    assert authority.journal_through_seq == 4
+    page = journal.read_page(root_id, after_seq=0, limit=100)
+    assert {fact["payload"]["uuid"] for fact in page["facts"]} == {
+        "h1", "h2", "h3", "h4",
+    }
+    journal.close()
+
+
 def test_sequence_zero_is_not_skipped():
     root_id = "zero-root"
     row = {"root_id": root_id, "sid": root_id, "seq": 0, "type": "turn_start", "data": {"uuid": "zero"}}
@@ -354,6 +413,7 @@ if __name__ == "__main__":
     test_reconcile_gap_and_new_messages_after_cutover()
     test_delete_tombstones_generation_and_reuse_mints_next_generation()
     test_gap_cannot_skip_missing_jsonl_row()
+    test_mirror_gap_self_heals_from_jsonl()
     test_sequence_zero_is_not_skipped()
     test_unchanged_steady_read_does_no_store_work_or_fsync()
     test_interrupted_delete_resolves_from_durable_session_presence()
