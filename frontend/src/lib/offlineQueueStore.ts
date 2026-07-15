@@ -6,7 +6,9 @@ const ACTIONS = "actions";
 const PAYLOADS = "payloads";
 const SEQUENCE = "sequence";
 
-type StoredAction = Omit<OfflineQueueEntry, "images" | "files"> & {
+type DistributiveOmit<T, K extends keyof any> = T extends unknown ? Omit<T, K> : never;
+
+type StoredAction = DistributiveOmit<OfflineQueueEntry, "images" | "files"> & {
   key: string;
   order: number;
 };

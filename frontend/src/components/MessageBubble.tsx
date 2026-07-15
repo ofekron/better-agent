@@ -2287,7 +2287,7 @@ function renderEntityBlock(
         </div>
       );
     }
-    return <React.Fragment key={key}>{timelineBlock}</React.Fragment>;
+    return <Fragment key={key}>{timelineBlock}</Fragment>;
   }
 
   return (

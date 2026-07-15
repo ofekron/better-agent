@@ -34,6 +34,9 @@ export type WSEventType =
   | "session_discovered"
   | "complete"
   | "error"
+  // Backend rejected a prompt send outright (e.g. no in-flight turn to
+  // steer, or the target session/turn no longer exists).
+  | "delivery_rejected"
   // Turn lifecycle + worker events
   | "turn_start"
   | "manager_event" // legacy backward compat
@@ -920,7 +923,7 @@ export interface Session {
   moved_to_session_id?: string | null;
   moved_from_session_id?: string | null;
   pagination?: {
-    total_messages: number;
+    total_messages: number | undefined;
     oldest_loaded_seq: number | null;
     has_older: boolean;
   };

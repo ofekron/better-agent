@@ -275,11 +275,6 @@ export function useOfflineQueue() {
   const updateEditDraft = useCallback(
     (entry: OfflineQueueEntry, draftPrompt: string) => {
       const key = offlineActionKey(entry);
-      const updateLocal = (items: OfflineQueueEntry[]) => items.map((item) => (
-        offlineActionKey(item) === key && item.editing
-          ? { ...item, editing: { draftPrompt } }
-          : item
-      ));
       const update = (item: OfflineQueueEntry) => item.editing
         ? { ...item, editing: { draftPrompt } }
         : item;
