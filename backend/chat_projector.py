@@ -49,6 +49,7 @@ def project_chat(
     ownership = _ownership(canonical, message_turns)
     event_by_id = {event.event_id: event for event in canonical}
     _validate_edges(canonical, event_by_id, ownership, message_turns)
+    scoped_turns = _project_scoped_turns(canonical, event_by_id)
 
     changes = defaultdict(list)
     top_level = defaultdict(list)
@@ -74,7 +75,7 @@ def project_chat(
         items.append(Turn(
             turn_id,
             prompt,
-            *_derive_content(top_level[turn_id], canonical, event_by_id),
+            *_derive_content(top_level[turn_id], canonical, event_by_id, scoped_turns),
         ))
     return Chat(tuple(items))
 
@@ -132,6 +133,7 @@ def _derive_content(
     events: Sequence[CanonicalEvent],
     all_events: Sequence[CanonicalEvent],
     event_by_id: Mapping[str, CanonicalEvent],
+    scoped_turns: Mapping[str, ScopedTurn],
 ) -> tuple[tuple[BodyItem, ...], Result | None]:
     ordered = _ordered(event for event in events if not event.metadata_only)
     result, result_ids = _resolve_result(ordered, all_events, event_by_id)
@@ -139,6 +141,7 @@ def _derive_content(
         [event for event in ordered if event.event_id not in result_ids],
         all_events,
         event_by_id,
+        scoped_turns,
     )
     return body, result
 
@@ -183,6 +186,7 @@ def _derive_body(
     events: Sequence[CanonicalEvent],
     all_events: Sequence[CanonicalEvent],
     event_by_id: Mapping[str, CanonicalEvent],
+    scoped_turns: Mapping[str, ScopedTurn],
 ) -> tuple[BodyItem, ...]:
     body: list[BodyItem] = []
     partition: list[CanonicalEvent] = []
@@ -210,7 +214,7 @@ def _derive_body(
     for event in events:
         if event.type in _SCOPED_TYPES:
             flush()
-            body.append(_scoped_turn(event, all_events, event_by_id))
+            body.append(scoped_turns[event.event_id])
         elif event.type == "steering_message":
             flush()
             body.append(SteeringMessage(event.event_id, _event_text(event)))
@@ -223,28 +227,45 @@ def _derive_body(
     return tuple(body)
 
 
-def _scoped_turn(
-    event: CanonicalEvent,
+def _project_scoped_turns(
     all_events: Sequence[CanonicalEvent],
     event_by_id: Mapping[str, CanonicalEvent],
-) -> ScopedTurn:
-    children = _ordered(
-        child for child in all_events
-        if child.parent_event_id == event.event_id and not child.metadata_only
-    )
-    body, result = _derive_content(children, all_events, event_by_id)
-    embedded = event.data.get("result") or event.data.get("text")
-    if result is None and isinstance(embedded, str) and embedded:
-        kind = "ProviderResult" if event.provider_final else "DerivedResult"
-        result = Result(kind, (event.event_id,), embedded)
-    return ScopedTurn(
-        _SCOPED_TYPES[event.type],
-        event.event_id,
-        TypedPrompt(f"prompt-{event.event_id}", str(event.data.get("prompt") or "")),
-        body,
-        result,
-        tuple(child.event_id for child in children),
-    )
+) -> dict[str, ScopedTurn]:
+    children_by_parent: dict[str, list[CanonicalEvent]] = defaultdict(list)
+    scoped = [event for event in all_events if event.type in _SCOPED_TYPES]
+    for child in all_events:
+        if child.parent_event_id is not None and not child.metadata_only:
+            children_by_parent[child.parent_event_id].append(child)
+    projected: dict[str, ScopedTurn] = {}
+    roots = [
+        event for event in scoped
+        if event.parent_event_id is None
+        or event_by_id[event.parent_event_id].type not in _SCOPED_TYPES
+    ]
+    stack = [(event, False) for event in reversed(_ordered(roots))]
+    while stack:
+        event, expanded = stack.pop()
+        children = _ordered(children_by_parent[event.event_id])
+        if not expanded:
+            stack.append((event, True))
+            for child in reversed(children):
+                if child.type in _SCOPED_TYPES:
+                    stack.append((child, False))
+            continue
+        body, result = _derive_content(children, all_events, event_by_id, projected)
+        embedded = event.data.get("result") or event.data.get("text")
+        if result is None and isinstance(embedded, str) and embedded:
+            kind = "ProviderResult" if event.provider_final else "DerivedResult"
+            result = Result(kind, (event.event_id,), embedded)
+        projected[event.event_id] = ScopedTurn(
+            _SCOPED_TYPES[event.type],
+            event.event_id,
+            TypedPrompt(f"prompt-{event.event_id}", event.data["prompt"]),
+            body,
+            result,
+            tuple(child.event_id for child in children),
+        )
+    return projected
 
 
 def _canonical_events(
@@ -253,10 +274,17 @@ def _canonical_events(
     _validate_schema_version(schema_version)
     latest: dict[str, CanonicalEvent] = {}
     positions: dict[str, tuple[str, int]] = {}
+    sequences: dict[tuple[str, int], str] = {}
     for raw in events:
         event = raw if isinstance(raw, CanonicalEvent) else _event_from_mapping(raw, schema_version)
         if event.schema_version != schema_version:
             raise ValueError("event schema version does not match request")
+        _validate_nested_data(event.type, event.data)
+        _validate_model_change_provider(event)
+        stream_position = (event.context_id, event.sequence)
+        if stream_position in sequences:
+            raise ValueError("duplicate journal_seq within canonical context stream")
+        sequences[stream_position] = event.event_id
         position = (event.timestamp, event.sequence)
         current_position = positions.get(event.event_id)
         if current_position is None or _position_key(position) < _position_key(current_position):
@@ -555,8 +583,31 @@ def _reject_extra_keys(value: Mapping[str, Any], allowed: set[str], name: str) -
 
 
 def _validate_nested_data(event_type: str, data: Mapping[str, Any]) -> None:
+    schemas = {
+        "ai_title": ({"title"}, {"title"}),
+        "assistant_text": ({"text"}, {"text", "source_timestamp"}),
+        "text": ({"text"}, {"text", "source_timestamp"}),
+        "output_text": ({"text"}, {"text", "source_timestamp"}),
+        "file_history_snapshot": ({"snapshot_id"}, {"snapshot_id"}),
+        "native_subagent_turn": ({"prompt"}, {"prompt", "status", "text", "result"}),
+        "other_typed_work": ({"kind", "label"}, {"kind", "label", "source_timestamp"}),
+        "steering_message": ({"text"}, {"text"}),
+        "thinking": ({"text", "status"}, {"text", "status"}),
+        "tool_interaction": (
+            {"tool_name", "tool_use_id", "status"},
+            {
+                "tool_name", "tool_use_id", "status", "assistant_text", "selected_session_id",
+                "session_ids", "sessions", "options", "question", "summary",
+            },
+        ),
+        "turn_completed": (set(), set()),
+        "turn_started": (set(), set()),
+        "worker_turn": ({"prompt"}, {"prompt", "status", "text", "result"}),
+    }
     if event_type == "model_change":
         _reject_extra_keys(data, {"from", "to"}, "model_change data")
+        if "to" not in data or data["to"] is None:
+            raise ValueError("model_change data.to is required")
         for field in ("from", "to"):
             identity = data.get(field)
             if identity is None:
@@ -567,6 +618,7 @@ def _validate_nested_data(event_type: str, data: Mapping[str, Any]) -> None:
                 raise ValueError(f"model_change data.{field} has invalid identity fields")
             for key in _MODEL_IDENTITY_FIELDS:
                 _required_str(identity[key], f"model_change data.{field}.{key}")
+        return
     if event_type == "message_ownership_declared":
         _reject_extra_keys(
             data,
@@ -578,6 +630,49 @@ def _validate_nested_data(event_type: str, data: Mapping[str, Any]) -> None:
             raise ValueError("ownership data.owns_event_ids must be a sequence")
         if any(not isinstance(event_id, str) or not event_id for event_id in owned):
             raise ValueError("ownership data.owns_event_ids must contain event ids")
+        if "boundary_seq" in data:
+            _positive_int(data["boundary_seq"], "ownership data.boundary_seq")
+        if "source_timestamp" in data:
+            _required_str(data["source_timestamp"], "ownership data.source_timestamp")
+        return
+    if event_type not in schemas:
+        raise ValueError(f"unknown canonical event type: {event_type}")
+    required, allowed = schemas[event_type]
+    missing = required - data.keys()
+    if missing:
+        raise ValueError(f"missing {event_type} data fields: {', '.join(sorted(missing))}")
+    _reject_extra_keys(data, allowed, f"{event_type} data")
+    for field in required:
+        _required_str(data[field], f"{event_type} data.{field}")
+    string_fields = {
+        "text", "source_timestamp", "snapshot_id", "prompt", "status", "result", "kind",
+        "label", "tool_name", "tool_use_id", "assistant_text", "selected_session_id",
+        "question", "summary", "title",
+    }
+    for field in string_fields & data.keys():
+        _required_str(data[field], f"{event_type} data.{field}")
+    for field in {"session_ids", "sessions", "options"} & data.keys():
+        if not isinstance(data[field], (list, tuple)):
+            raise ValueError(f"{event_type} data.{field} must be a sequence")
+    for field in {"session_ids", "options"} & data.keys():
+        if any(not isinstance(value, str) or not value for value in data[field]):
+            raise ValueError(f"{event_type} data.{field} must contain strings")
+    for session in data.get("sessions", ()):
+        if not isinstance(session, Mapping):
+            raise ValueError(f"{event_type} data.sessions must contain objects")
+        if set(session) != {"id", "title"}:
+            raise ValueError(f"{event_type} data.sessions has invalid fields")
+        _required_str(session["id"], f"{event_type} data.sessions.id")
+        _required_str(session["title"], f"{event_type} data.sessions.title")
+
+
+def _validate_model_change_provider(event: CanonicalEvent) -> None:
+    if event.type != "model_change":
+        return
+    target = event.data["to"]
+    expected = ProviderIdentity(target["provider"], target["model"], target["effort"])
+    if event.provider != expected:
+        raise ValueError("model_change provider must match data.to")
 
 
 def _validate_version_update(current: CanonicalEvent, candidate: CanonicalEvent) -> None:

@@ -30,65 +30,28 @@ def _result(value):
 
 
 def _body(value):
-    if isinstance(value, Explanation):
-        return {
-            "type": "Explanation",
-            "text": value.text,
-            "text_event_ids": list(value.text_event_ids),
-            "item_ids": list(value.item_ids),
-        }
-    if isinstance(value, SteeringMessage):
-        return {"type": "SteeringMessage", "id": value.id, "text": value.text}
-    assert isinstance(value, ScopedTurn)
-    return {
-        "type": value.type,
-        "id": value.id,
-        "prompt": value.prompt.text,
-        "body": [_body(item) for item in value.body],
-        "result": _result(value.result),
-        "children": list(value.children),
-    }
-
-
-def _accepted_fixture_oracle(fixture):
-    expected = json.loads(json.dumps(fixture["expected"]["chat_tree_completed"]))
-    events = {event["event_id"]: event for event in fixture["events"]}
-    turn4 = next(item for item in expected if item.get("id") == "turn-4")
-    turn4["body"][1] = {
-        "type": "WorkerTurn", "id": "e-live-worker", "prompt": "Run nested work.",
-        "body": [{
-            "type": "NativeSubagentTurn", "id": "e-live-native",
-            "prompt": "Inspect deepest branch.", "body": [],
-            "result": {"type": "DerivedResult", "part_ids": ["e-live-leaf"]},
-            "children": ["e-live-leaf"],
-        }],
-        "result": None, "children": ["e-live-native"],
-    }
-
-    def enrich(value):
-        if isinstance(value, list):
-            for item in value:
-                enrich(item)
-            return
-        if not isinstance(value, dict):
-            return
-        if value.get("type") == "Explanation":
-            value["text"] = "".join(events[event_id]["data"].get("text", "") for event_id in value["text_event_ids"])
-        if value.get("type") == "SteeringMessage":
-            value["text"] = events[value["id"]]["data"]["text"]
-        if "result" in value and value["result"] is not None:
-            result = value["result"]
-            result["text"] = result.pop("concatenated_text", "".join(
-                events[event_id]["data"].get("text", events[event_id]["data"].get("result", ""))
-                for event_id in result["part_ids"]
-            ))
-        if value.get("type") in {"NativeSubagentTurn", "WorkerTurn"}:
-            value.setdefault("children", [])
-        for child in value.values():
-            enrich(child)
-
-    enrich(expected)
-    return expected
+    projected = {}
+    stack = [(value, projected)]
+    while stack:
+        item, target = stack.pop()
+        if isinstance(item, Explanation):
+            target.update({
+                "type": "Explanation", "text": item.text,
+                "text_event_ids": list(item.text_event_ids), "item_ids": list(item.item_ids),
+            })
+            continue
+        if isinstance(item, SteeringMessage):
+            target.update({"type": "SteeringMessage", "id": item.id, "text": item.text})
+            continue
+        assert isinstance(item, ScopedTurn)
+        target.update({
+            "type": item.type, "id": item.id, "prompt": item.prompt.text,
+            "body": [{} for _ in item.body], "result": _result(item.result),
+            "children": list(item.children),
+        })
+        for child, child_target in reversed(list(zip(item.body, target["body"]))):
+            stack.append((child, child_target))
+    return projected
 
 
 def _provider(identity="p", model="m", effort="medium"):
@@ -102,6 +65,22 @@ def _model_identity(provider="p", model="m", effort="medium"):
 def _event(event_id, sequence, event_type, *, turn_id="turn", message_id="assistant",
            context_id="root", parent_event_id=None, data=None, provider_final=False,
            metadata_only=False, provider=None):
+    defaults = {
+        "ai_title": {"title": "Title"},
+        "assistant_text": {"text": "Text"}, "text": {"text": "Text"},
+        "output_text": {"text": "Text"},
+        "file_history_snapshot": {"snapshot_id": "snapshot"},
+        "message_ownership_declared": {"owns_event_ids": []},
+        "model_change": {"to": _model_identity()},
+        "native_subagent_turn": {"prompt": "Native"},
+        "other_typed_work": {"kind": "work", "label": "Work"},
+        "steering_message": {"text": "Steer"},
+        "thinking": {"text": "Think", "status": "complete"},
+        "tool_interaction": {"tool_name": "tool", "tool_use_id": event_id, "status": "complete"},
+        "turn_completed": {}, "turn_started": {},
+        "worker_turn": {"prompt": "Worker"},
+    }
+    payload = defaults[event_type] if data is None else data
     return {
         "event_id": event_id,
         "timestamp": f"2026-01-02T00:00:{sequence:02d}.000Z",
@@ -115,7 +94,7 @@ def _event(event_id, sequence, event_type, *, turn_id="turn", message_id="assist
         "metadata_only": metadata_only,
         "provider_final": provider_final,
         "provider": provider or _provider(),
-        "data": data or {},
+        "data": payload,
     }
 
 
@@ -154,7 +133,7 @@ def _chat(value):
 def test_completed_chat_matches_shared_oracle() -> None:
     fixture = _fixture()
     projected = _chat(project_chat(fixture["messages"], fixture["events"], schema_version=fixture["schema_version"]))
-    assert projected == _accepted_fixture_oracle(fixture)
+    assert projected == fixture["expected"]["chat_tree_completed"]
 
 
 def test_order_dedup_ownership_and_metadata_contract() -> None:
@@ -224,10 +203,11 @@ def test_multiple_leading_text_is_concatenated() -> None:
     edge = _fixture()["expected"]["formal_edge_cases"]["multiple_leading_assistant_text"]
     events = []
     for sequence, item in enumerate(edge["source_items"], 1):
+        event_type = "assistant_text" if item["type"] == "AssistantText" else "tool_interaction"
         events.append(_event(
-            item["event_id"], sequence,
-            "assistant_text" if item["type"] == "AssistantText" else "tool_interaction",
-            turn_id=edge["case_id"], message_id=None, data={"text": item.get("text", "")},
+            item["event_id"], sequence, event_type,
+            turn_id=edge["case_id"], message_id=None,
+            data={"text": item.get("text", "")} if event_type == "assistant_text" else None,
         ))
     chat = project_chat(
         [{"id": "edge-user", "turn_id": edge["case_id"], "seq": 1, "role": "user", "content": "Run it"}],
@@ -340,7 +320,11 @@ def test_strict_schema_rejects_malformed_unknown_and_duplicate_inputs() -> None:
 
 
 def test_metadata_model_change_is_filtered_before_projection() -> None:
-    event = _event("model", 1, "model_change", metadata_only=True, data={"to": _model_identity("p2", "m2", "high")})
+    event = _event(
+        "model", 1, "model_change", metadata_only=True,
+        data={"to": _model_identity("p2", "m2", "high")},
+        provider=_provider("p2", "m2", "high"),
+    )
     chat = project_chat(_messages(), [event], schema_version=1)
     assert all(not isinstance(item, ModelChange) for item in chat.items)
 
@@ -458,6 +442,78 @@ def test_timestamps_require_canonical_utc_and_sort_as_instants() -> None:
     newer_version = dict(older_version, timestamp="2026-01-02T00:00:00.1Z", journal_seq=1, content_version=2, data={"text": "new"})
     updated = next(event for event in project_chat(_messages(), [newer_version, older_version], schema_version=1).items if isinstance(event, Turn))
     assert updated.result.text == "new"
+
+
+def test_duplicate_context_sequence_is_rejected_in_both_input_orders() -> None:
+    first = _event("first", 1, "assistant_text", data={"text": "first"})
+    second = _event("second", 1, "assistant_text", data={"text": "second"})
+    _assert_rejected(_messages(), [first, second])
+    _assert_rejected(_messages(), [second, first])
+    other_context = dict(second, context_id="other")
+    project_chat(_messages(), [first, other_context], schema_version=1)
+
+
+def test_scoped_projection_and_serialization_are_stack_safe_beyond_1100_depth() -> None:
+    depth = 1101
+    events = []
+    for index in range(depth):
+        event = _event(
+            f"worker-{index}", index + 1, "worker_turn",
+            parent_event_id=f"worker-{index - 1}" if index else None,
+            data={"prompt": f"Depth {index}"},
+        )
+        event["timestamp"] = "2026-01-02T00:00:00.000Z"
+        events.append(event)
+    chat = project_chat(_messages(), events, schema_version=1)
+    serialized = _chat(chat)
+    node = serialized[0]["body"][0]
+    visited = 1
+    while node["body"]:
+        node = node["body"][0]
+        visited += 1
+    assert visited == depth
+    assert node["prompt"] == f"Depth {depth - 1}"
+
+
+def test_model_change_requires_closed_non_null_matching_target() -> None:
+    provider = _provider("p2", "m2", "high")
+    valid = _event(
+        "model", 1, "model_change", provider=provider,
+        data={"from": None, "to": _model_identity("p2", "m2", "high")},
+    )
+    project_chat(_messages(), [valid], schema_version=1)
+    for data in ({}, {"to": None}, {"to": _model_identity(), "extra": True}):
+        _assert_rejected(_messages(), [_event("bad-model", 1, "model_change", data=data)])
+    conflict = dict(valid, provider=_provider("p3", "m2", "high"))
+    _assert_rejected(_messages(), [conflict])
+
+
+def test_every_supported_event_type_has_closed_required_payload() -> None:
+    malformed = {
+        "ai_title": {}, "assistant_text": {}, "file_history_snapshot": {},
+        "message_ownership_declared": {}, "model_change": {},
+        "native_subagent_turn": {}, "other_typed_work": {"kind": "work"},
+        "output_text": {}, "steering_message": {}, "text": {},
+        "thinking": {"text": "thinking"}, "tool_interaction": {"tool_name": "tool"},
+        "turn_completed": {"extra": True}, "turn_started": {"extra": True},
+        "worker_turn": {},
+    }
+    for index, (event_type, data) in enumerate(malformed.items(), 1):
+        event = _event(f"bad-{event_type}", index, event_type, data=data)
+        _assert_rejected(_messages(), [event])
+    bad_typed_work = _event(
+        "bad-work", 20, "other_typed_work",
+        data={"kind": "", "label": "Work"},
+    )
+    _assert_rejected(_messages(), [bad_typed_work])
+    malformed_session = _event(
+        "bad-session", 21, "tool_interaction",
+        data={
+            "tool_name": "tool", "tool_use_id": "use", "status": "complete",
+            "sessions": [{"id": "session", "title": "Title", "extra": True}],
+        },
+    )
+    _assert_rejected(_messages(), [malformed_session])
 
 
 def main() -> None:
