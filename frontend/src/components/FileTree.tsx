@@ -7,6 +7,7 @@ import { SearchInput } from "./SearchInput";
 import { API } from "../api";
 import { fetchWithRetry } from "../utils/fetchRetry";
 import { joinPickerPath } from "src/utils/pathJoin";
+import { runThreeStateSync } from "src/progress/store";
 
 interface Props {
   cwd: string;
@@ -249,16 +250,24 @@ export function FileTree({
     setCreateError("");
     const path = joinPickerPath(cwd, name);
     try {
-      const res = await fetchWithRetry(`${API}/api/files/create`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ path, kind: createKind, node_id: nodeId }),
+      const { result: created } = await runThreeStateSync({
+        operationId: `file:create:${nodeId}:${path}`,
+        action: t("files.header"),
+        info: path,
+        reconcile: refresh,
+        mutate: async () => {
+          const res = await fetchWithRetry(`${API}/api/files/create`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ path, kind: createKind, node_id: nodeId }),
+          });
+          if (!res.ok) {
+            const body = await res.json().catch(() => ({}));
+            throw new Error(body.detail || `HTTP ${res.status}`);
+          }
+          return res.json() as Promise<FileNode>;
+        },
       });
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
-        throw new Error(body.detail || `HTTP ${res.status}`);
-      }
-      const created = await res.json();
       setNewName("");
       await refresh();
       if (created.type === "file") onFileClick(created.path);

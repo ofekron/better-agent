@@ -18,6 +18,7 @@ from typing import Any
 
 from paths import ba_home
 import perf
+import portable_lock
 
 
 SCHEMA = 5
@@ -60,6 +61,14 @@ def reopen() -> None:
 
 
 class ProjectionUnavailable(RuntimeError):
+    pass
+
+
+class ProjectionBusy(ProjectionUnavailable):
+    pass
+
+
+class _ProjectionInvalid(ProjectionUnavailable):
     pass
 
 
@@ -170,51 +179,178 @@ def _journal(root_id: str) -> Path:
     return candidate
 
 
+def _lock_path(root_id: str) -> Path:
+    return Path(str(_path(root_id)) + ".lock")
+
+
+@contextmanager
+def _sidecar_lock(root_id: str):
+    path = _lock_path(root_id)
+    try:
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    except OSError as exc:
+        raise ProjectionUnavailable("historical projection serializer is unavailable") from exc
+    acquired = False
+    try:
+        try:
+            portable_lock.lock_ex(fd)
+            acquired = True
+        except OSError as exc:
+            raise ProjectionUnavailable("historical projection serializer is unavailable") from exc
+        yield
+    finally:
+        try:
+            if acquired:
+                portable_lock.unlock(fd)
+        finally:
+            os.close(fd)
+
+
+_SCHEMA_SQL = (
+    "CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT NOT NULL)",
+    "CREATE TABLE messages(sid TEXT NOT NULL,msg_id TEXT NOT NULL,root_node TEXT NOT NULL,revision TEXT NOT NULL,generation INTEGER NOT NULL,direct_child_count INTEGER NOT NULL,PRIMARY KEY(sid,msg_id))",
+    "CREATE TABLE orphans(sid TEXT NOT NULL,seq INTEGER NOT NULL,payload_start INTEGER NOT NULL,payload_end INTEGER NOT NULL,PRIMARY KEY(sid,seq))",
+    "CREATE TABLE nodes(sid TEXT NOT NULL,msg_id TEXT NOT NULL,node_id TEXT NOT NULL,parent_id TEXT NOT NULL,parent_key TEXT,ordinal INTEGER NOT NULL,type TEXT NOT NULL,revision TEXT NOT NULL,summary TEXT NOT NULL,payload_start INTEGER,payload_end INTEGER,worker_json TEXT,renderable INTEGER NOT NULL,PRIMARY KEY(sid,msg_id,node_id))",
+    "CREATE TABLE parent_aggregates(sid TEXT NOT NULL,msg_id TEXT NOT NULL,parent_id TEXT NOT NULL,child_count INTEGER NOT NULL,xor_hash TEXT NOT NULL,PRIMARY KEY(sid,msg_id,parent_id))",
+    "CREATE INDEX nodes_parent ON nodes(sid,msg_id,parent_id,ordinal)",
+)
+
+
+def _validate_schema(conn: sqlite3.Connection) -> None:
+    try:
+        schema = conn.execute("SELECT value FROM meta WHERE key='schema'").fetchone()
+        if schema is None or int(schema[0]) != SCHEMA:
+            raise _ProjectionInvalid("historical projection schema mismatch")
+    except sqlite3.OperationalError as exc:
+        message = str(exc).lower()
+        if "locked" in message or "busy" in message:
+            raise ProjectionBusy("historical projection is busy") from exc
+        if "no such table" in message or "malformed" in message:
+            raise _ProjectionInvalid("historical projection schema is corrupt") from exc
+        raise ProjectionUnavailable("historical projection is unavailable") from exc
+    except (sqlite3.DatabaseError, ValueError) as exc:
+        if isinstance(exc, _ProjectionInvalid):
+            raise
+        raise _ProjectionInvalid("historical projection schema is corrupt") from exc
+
+
 def _connect(root_id: str, *, create: bool) -> sqlite3.Connection:
     path = _path(root_id)
     if not create and not path.is_file():
         raise ProjectionUnavailable("historical projection is rebuilding")
-    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = None
     try:
-        conn = sqlite3.connect(path)
+        if not create:
+            if Path(str(path) + "-wal").exists() and not Path(str(path) + "-shm").exists():
+                raise ProjectionUnavailable("historical projection WAL is unavailable")
+            uri = f"file:{path.as_posix()}?mode=ro"
+            conn = sqlite3.connect(uri, uri=True, timeout=0)
+            conn.row_factory = sqlite3.Row
+            if _query_observer is not None:
+                conn.set_trace_callback(_query_observer)
+            _validate_schema(conn)
+            return conn
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        existed = path.exists()
+        conn = sqlite3.connect(path, timeout=0)
         if _query_observer is not None:
             conn.set_trace_callback(_query_observer)
         conn.row_factory = sqlite3.Row
+        if not existed:
+            conn.execute("BEGIN IMMEDIATE")
+            for statement in _SCHEMA_SQL:
+                conn.execute(statement)
+            conn.execute("INSERT INTO meta VALUES('schema',?)", (str(SCHEMA),))
+            conn.execute("INSERT INTO meta VALUES('ready','0')")
+            conn.execute("INSERT INTO meta VALUES('projection_revision','0')")
+            conn.execute("INSERT INTO meta VALUES('cursor_secret',?)", (os.urandom(32).hex(),))
+            conn.commit()
+        _validate_schema(conn)
         conn.execute("PRAGMA journal_mode=WAL")
-        conn.executescript(
-        "CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);"
-        "CREATE TABLE IF NOT EXISTS messages(sid TEXT NOT NULL,msg_id TEXT NOT NULL,root_node TEXT NOT NULL,revision TEXT NOT NULL,generation INTEGER NOT NULL,direct_child_count INTEGER NOT NULL,PRIMARY KEY(sid,msg_id));"
-        "CREATE TABLE IF NOT EXISTS orphans(sid TEXT NOT NULL,seq INTEGER NOT NULL,payload_start INTEGER NOT NULL,payload_end INTEGER NOT NULL,PRIMARY KEY(sid,seq));"
-        "CREATE TABLE IF NOT EXISTS nodes(sid TEXT NOT NULL,msg_id TEXT NOT NULL,node_id TEXT NOT NULL,parent_id TEXT NOT NULL,parent_key TEXT,ordinal INTEGER NOT NULL,type TEXT NOT NULL,revision TEXT NOT NULL,summary TEXT NOT NULL,payload_start INTEGER,payload_end INTEGER,worker_json TEXT,renderable INTEGER NOT NULL,PRIMARY KEY(sid,msg_id,node_id));"
-        "CREATE TABLE IF NOT EXISTS parent_aggregates(sid TEXT NOT NULL,msg_id TEXT NOT NULL,parent_id TEXT NOT NULL,child_count INTEGER NOT NULL,xor_hash TEXT NOT NULL,PRIMARY KEY(sid,msg_id,parent_id));"
-        "CREATE INDEX IF NOT EXISTS nodes_parent ON nodes(sid,msg_id,parent_id,ordinal);"
-        )
-        conn.execute("INSERT OR IGNORE INTO meta VALUES('schema',?)", (str(SCHEMA),))
-        conn.execute("INSERT OR IGNORE INTO meta VALUES('ready','0')")
-        conn.execute("INSERT OR IGNORE INTO meta VALUES('projection_revision','0')")
-        conn.execute("INSERT OR IGNORE INTO meta VALUES('cursor_secret',?)", (os.urandom(32).hex(),))
-        schema = conn.execute("SELECT value FROM meta WHERE key='schema'").fetchone()
-        if schema is None or int(schema[0]) != SCHEMA:
-            raise ProjectionUnavailable("historical projection schema mismatch")
         return conn
-    except (sqlite3.DatabaseError, OSError, ValueError) as exc:
+    except sqlite3.OperationalError as exc:
         try:
-            conn.close()
+            if conn is not None:
+                conn.close()
         except Exception:
             pass
-        if isinstance(exc, ProjectionUnavailable):
+        message = str(exc).lower()
+        if "locked" in message or "busy" in message:
+            raise ProjectionBusy("historical projection is busy") from exc
+        raise ProjectionUnavailable("historical projection is unavailable") from exc
+    except sqlite3.DatabaseError as exc:
+        if conn is not None:
+            conn.close()
+        raise _ProjectionInvalid("historical projection is corrupt") from exc
+    except (OSError, ValueError) as exc:
+        if conn is not None:
+            conn.close()
+        if isinstance(exc, _ProjectionInvalid):
             raise
-        raise ProjectionUnavailable("historical projection is corrupt or rebuilding") from exc
+        raise ProjectionUnavailable("historical projection is unavailable") from exc
 
 
 @contextmanager
 def _connection(root_id: str, *, create: bool):
-    conn = _connect(root_id, create=create)
-    try:
-        with conn:
+    if not create:
+        conn = _connect(root_id, create=False)
+        try:
             yield conn
-    finally:
-        conn.close()
+        finally:
+            conn.close()
+        return
+    with _sidecar_lock(root_id):
+        conn = _connect(root_id, create=True)
+        try:
+            try:
+                with conn:
+                    yield conn
+                conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            except sqlite3.OperationalError as exc:
+                message = str(exc).lower()
+                if "locked" in message or "busy" in message:
+                    raise ProjectionBusy("historical projection is busy") from exc
+                raise ProjectionUnavailable("historical projection is unavailable") from exc
+            except sqlite3.DatabaseError as exc:
+                raise _ProjectionInvalid("historical projection is corrupt") from exc
+        finally:
+            conn.close()
+
+
+def _clear_projection(conn: sqlite3.Connection) -> None:
+    conn.execute("INSERT OR REPLACE INTO meta VALUES('ready','0')")
+    conn.execute("DELETE FROM messages")
+    conn.execute("DELETE FROM nodes")
+    conn.execute("DELETE FROM parent_aggregates")
+    conn.execute("DELETE FROM orphans")
+    conn.execute("INSERT OR REPLACE INTO meta VALUES('indexed_end','0')")
+
+
+def _replace_invalid_projection(root_id: str) -> None:
+    with _sidecar_lock(root_id):
+        try:
+            conn = _connect(root_id, create=True)
+        except _ProjectionInvalid:
+            conn = None
+        if conn is not None:
+            try:
+                with conn:
+                    _clear_projection(conn)
+                conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                return
+            finally:
+                conn.close()
+        path = _path(root_id)
+        for candidate in (path, Path(str(path) + "-wal"), Path(str(path) + "-shm")):
+            candidate.unlink(missing_ok=True)
+        conn = _connect(root_id, create=True)
+        try:
+            with conn:
+                _clear_projection(conn)
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        finally:
+            conn.close()
 
 
 def _digest(value: Any) -> str:
@@ -762,7 +898,7 @@ def _resume_at_eof(root_id: str, root_snapshot: dict[str, Any] | None) -> list[d
 
     if isinstance(root_snapshot, dict):
         visit(root_snapshot)
-    with _lock(root_id), _connection(root_id, create=False) as conn:
+    with _lock(root_id), _connection(root_id, create=True) as conn:
         current = _journal_snapshot(root_id)
         indexed = conn.execute("SELECT value FROM meta WHERE key='indexed_end'").fetchone()
         identity = conn.execute("SELECT value FROM meta WHERE key='journal_identity'").fetchone()
@@ -821,24 +957,12 @@ def schedule_rebuild(root_id: str, root_snapshot: dict[str, Any] | None, *, prio
                         source = journal.open("rb")
                     except FileNotFoundError as exc:
                         raise ProjectionUnavailable("historical projection rebuild lost journal race") from exc
-            with _lock(root_id):
-                try:
-                    conn_context = _connect(root_id, create=True)
-                except ProjectionUnavailable:
-                    path = _path(root_id)
-                    for candidate in (path, Path(str(path) + "-wal"), Path(str(path) + "-shm")):
-                        candidate.unlink(missing_ok=True)
-                    conn_context = _connect(root_id, create=True)
-                try:
-                    with conn_context as conn:
-                        conn.execute("INSERT OR REPLACE INTO meta VALUES('ready','0')")
-                        conn.execute("DELETE FROM messages")
-                        conn.execute("DELETE FROM nodes")
-                        conn.execute("DELETE FROM parent_aggregates")
-                        conn.execute("DELETE FROM orphans")
-                        conn.execute("INSERT OR REPLACE INTO meta VALUES('indexed_end','0')")
-                finally:
-                    conn_context.close()
+                with _lock(root_id):
+                    try:
+                        with _connection(root_id, create=True) as conn:
+                            _clear_projection(conn)
+                    except _ProjectionInvalid:
+                        _replace_invalid_projection(root_id)
 
             def scan(source) -> None:
                 while True:

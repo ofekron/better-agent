@@ -2,7 +2,7 @@ import { useState, type FormEvent } from "react";
 import { useTranslation } from "react-i18next";
 import { API } from "../api";
 import { setStoredToken } from "../bearerAuth";
-import { trackPromise } from "../progress/store";
+import { runThreeStateSync } from "../progress/store";
 
 export function AuthCredentialsSetting() {
   const { t } = useTranslation();
@@ -21,26 +21,31 @@ export function AuthCredentialsSetting() {
     setSaved(false);
     const nextUsername = newUsername.trim();
     try {
-      const response = await trackPromise(
-        "authCredentials:save",
-        () => fetch(`${API}/api/auth/change_credentials`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          credentials: "include",
-          body: JSON.stringify({
-            current_username: currentUsername.trim(),
-            current_password: currentPassword,
-            new_username: nextUsername,
-            new_password: newPassword,
-          }),
-        }),
-      ).promise;
-      if (!response.ok) {
-        setError(response.status === 401
-          ? t("settings.authCredentialsInvalid")
-          : t("settings.authCredentialsFailed"));
-        return;
-      }
+      const { result: response } = await runThreeStateSync({
+        operationId: "authCredentials:save",
+        action: t("settings.authCredentialsSave"),
+        info: nextUsername,
+        reconcile: () => undefined,
+        mutate: async () => {
+          const response = await fetch(`${API}/api/auth/change_credentials`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            credentials: "include",
+            body: JSON.stringify({
+              current_username: currentUsername.trim(),
+              current_password: currentPassword,
+              new_username: nextUsername,
+              new_password: newPassword,
+            }),
+          });
+          if (!response.ok) {
+            throw new Error(response.status === 401
+              ? t("settings.authCredentialsInvalid")
+              : t("settings.authCredentialsFailed"));
+          }
+          return response;
+        },
+      });
       const body = await response.json() as { username?: unknown; token?: unknown };
       if (typeof body.token === "string") setStoredToken(body.token);
       if (typeof body.username === "string") {
@@ -51,8 +56,8 @@ export function AuthCredentialsSetting() {
       setNewUsername("");
       setNewPassword("");
       setSaved(true);
-    } catch {
-      setError(t("settings.authCredentialsNetworkFailed"));
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : t("settings.authCredentialsNetworkFailed"));
     } finally {
       setSaving(false);
     }

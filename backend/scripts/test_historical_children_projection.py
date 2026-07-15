@@ -4,6 +4,8 @@ import shutil
 import tempfile
 import time
 import sqlite3
+import subprocess
+import sys
 import threading
 from unittest.mock import patch
 from pathlib import Path
@@ -793,7 +795,7 @@ def test_rebuild_requests_coalesce_and_executors_are_bounded():
 
 def test_ready_zero_at_indexed_eof_resumes_without_rescan_and_replays_pending_bootstrap():
     current = manifest(MSG)
-    with projection._lock(ROOT), projection._connection(ROOT, create=False) as conn:
+    with projection._lock(ROOT), projection._connection(ROOT, create=True) as conn:
         conn.execute("INSERT OR REPLACE INTO meta VALUES('ready','0')")
 
     resume_entered = threading.Event()
@@ -843,6 +845,181 @@ def test_emfile_open_failure_does_not_corrupt_valid_sidecar():
         except projection.ProjectionUnavailable:
             pass
     assert path.read_bytes() == before
+
+
+def _child(code: str) -> subprocess.Popen:
+    env = {**os.environ, "BETTER_AGENT_HOME": HOME, "PYTHONPATH": str(Path(__file__).parents[1])}
+    return subprocess.Popen(
+        [sys.executable, "-c", code], env=env, text=True,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+
+
+def _sidecar_bytes(root_id: str) -> dict[str, bytes]:
+    path = projection._path(root_id)
+    return {
+        suffix: candidate.read_bytes()
+        for suffix in ("", "-wal", "-shm")
+        if (candidate := Path(str(path) + suffix)).exists()
+    }
+
+
+def _authoritative_bytes(root_id: str) -> dict[str, bytes]:
+    return {key: value for key, value in _sidecar_bytes(root_id).items() if key != "-shm"}
+
+
+def test_read_only_open_sees_committed_wal_without_mutating_sidecars():
+    root = "readonly-wal-root"
+    projection.note_event(root, {}, 0, 0)
+    projection.note_workers(root, root, "message", [])
+    path = projection._path(root)
+    writer = sqlite3.connect(path)
+    writer.execute("PRAGMA journal_mode=WAL")
+    writer.execute("UPDATE messages SET direct_child_count=7 WHERE sid=? AND msg_id=?", (root, "message"))
+    writer.commit()
+    before = _authoritative_bytes(root)
+    sidecars = set(_sidecar_bytes(root))
+    meta = writer.execute("SELECT key,value FROM meta ORDER BY key").fetchall()
+    assert projection.root_manifest(root, root, "message")["direct_child_count"] == 7
+    assert _authoritative_bytes(root) == before
+    assert set(_sidecar_bytes(root)) == sidecars
+    assert writer.execute("SELECT key,value FROM meta ORDER BY key").fetchall() == meta
+    writer.close()
+
+
+def test_missing_read_only_open_creates_nothing_and_executes_no_initialization():
+    root = "missing-readonly-root"
+    path = projection._path(root)
+    before = set(path.parent.iterdir()) if path.parent.exists() else set()
+    queries = []
+    prior = projection._query_observer
+    projection._query_observer = queries.append
+    try:
+        try:
+            projection.root_manifest(root, root, "message")
+            raise AssertionError("missing projection was served")
+        except projection.ProjectionUnavailable:
+            pass
+    finally:
+        projection._query_observer = prior
+    after = set(path.parent.iterdir()) if path.parent.exists() else set()
+    assert after == before
+    assert queries == []
+
+
+def test_external_writer_does_not_block_or_mutate_read_only_manifest():
+    root = "external-writer-root"
+    projection.note_event(root, {}, 0, 0)
+    projection.note_workers(root, root, "message", [])
+    writer = sqlite3.connect(projection._path(root))
+    writer.execute("BEGIN IMMEDIATE")
+    before = _authoritative_bytes(root)
+    sidecars = set(_sidecar_bytes(root))
+    meta = writer.execute("SELECT key,value FROM meta ORDER BY key").fetchall()
+    assert projection.root_manifest(root, root, "message")["id"] == "message-message"
+    assert _authoritative_bytes(root) == before
+    assert set(_sidecar_bytes(root)) == sidecars
+    assert writer.execute("SELECT key,value FROM meta ORDER BY key").fetchall() == meta
+    writer.rollback()
+    writer.close()
+
+
+def test_cooperating_writer_waits_for_serializer_then_commits():
+    root = "serializer-wait-root"
+    projection.note_event(root, {}, 0, 0)
+    projection.note_workers(root, root, "message", [])
+    child = _child(
+        "import time; import historical_children_projection as p\n"
+        f"with p._lock({root!r}), p._connection({root!r}, create=True) as c:\n"
+        " c.execute(\"UPDATE meta SET value=value WHERE key='ready'\")\n"
+        " print('locked', flush=True)\n"
+        " time.sleep(1.2)\n"
+    )
+    assert child.stdout.readline().strip() == "locked"
+    started = time.monotonic()
+    projection.note_workers(root, root, "message", [{"id": "waited"}])
+    assert time.monotonic() - started >= 1.0
+    stdout, stderr = child.communicate(timeout=5)
+    assert child.returncode == 0, stdout + stderr
+    assert projection.root_manifest(root, root, "message")["direct_child_count"] == 1
+
+
+def test_simultaneous_first_create_and_crashed_lock_release():
+    root = "simultaneous-create-root"
+    code = (
+        "import historical_children_projection as p\n"
+        f"p.note_event({root!r}, {{}}, 0, 0)\n"
+        f"p.note_workers({root!r}, {root!r}, 'message', [])\n"
+    )
+    children = [_child(code), _child(code)]
+    for child in children:
+        stdout, stderr = child.communicate(timeout=10)
+        assert child.returncode == 0, stdout + stderr
+    assert projection.root_manifest(root, root, "message")["direct_child_count"] == 0
+
+    crash_root = "crashed-lock-root"
+    child = _child(
+        "import os; import historical_children_projection as p\n"
+        f"with p._sidecar_lock({crash_root!r}):\n"
+        " print('locked', flush=True)\n"
+        " os._exit(0)\n"
+    )
+    assert child.stdout.readline().strip() == "locked"
+    child.wait(timeout=5)
+    projection.note_event(crash_root, {}, 0, 0)
+    projection.note_workers(crash_root, crash_root, "message", [])
+    assert projection.root_manifest(crash_root, crash_root, "message")
+
+
+def test_busy_preserves_sidecars_and_never_schedules_rebuild():
+    root = "busy-preservation-root"
+    projection.note_event(root, {}, 0, 0)
+    projection.note_workers(root, root, "message", [])
+    writer = sqlite3.connect(projection._path(root))
+    writer.execute("BEGIN IMMEDIATE")
+    writer.execute("UPDATE meta SET value=value WHERE key='ready'")
+    before = _sidecar_bytes(root)
+    with patch.object(projection, "schedule_rebuild", side_effect=AssertionError("busy scheduled rebuild")):
+        try:
+            projection.note_workers(root, root, "message", [{"id": "blocked"}])
+            raise AssertionError("busy mutation succeeded")
+        except projection.ProjectionBusy:
+            pass
+    assert _sidecar_bytes(root) == before
+    writer.rollback()
+    writer.close()
+
+
+def test_mutation_and_rebuild_follow_global_lock_order():
+    import hydration_index_store
+
+    root = "lock-order-root"
+    journal_held = False
+    original_guard = hydration_index_store.journal_guard
+    original_sidecar = projection._sidecar_lock
+
+    @projection.contextmanager
+    def observed_guard(*args, **kwargs):
+        nonlocal journal_held
+        with original_guard(*args, **kwargs):
+            journal_held = True
+            try:
+                yield
+            finally:
+                journal_held = False
+
+    @projection.contextmanager
+    def observed_sidecar(root_id):
+        assert projection._lock(root_id)._is_owned()
+        if getattr(projection._rebuild_local, "root_id", None) == root_id:
+            assert journal_held
+        with original_sidecar(root_id):
+            yield
+
+    with patch.object(projection, "_sidecar_lock", observed_sidecar):
+        projection.note_event(root, {}, 0, 0)
+        with patch.object(hydration_index_store, "journal_guard", observed_guard):
+            projection.schedule_rebuild(root, None).result(timeout=10)
 
 
 def test_current_waiters_cover_zero_manifest_coalescing_and_cancellation():
@@ -929,6 +1106,13 @@ if __name__ == "__main__":
         test_ready_zero_at_indexed_eof_resumes_without_rescan_and_replays_pending_bootstrap,
         test_current_waiters_cover_zero_manifest_coalescing_and_cancellation,
         test_emfile_open_failure_does_not_corrupt_valid_sidecar,
+        test_read_only_open_sees_committed_wal_without_mutating_sidecars,
+        test_missing_read_only_open_creates_nothing_and_executes_no_initialization,
+        test_external_writer_does_not_block_or_mutate_read_only_manifest,
+        test_cooperating_writer_waits_for_serializer_then_commits,
+        test_simultaneous_first_create_and_crashed_lock_release,
+        test_busy_preserves_sidecars_and_never_schedules_rebuild,
+        test_mutation_and_rebuild_follow_global_lock_order,
         test_100k_unrelated_rows_do_not_widen_read_bytes,
         test_long_turn_append_queries_are_constant_and_rebuild_converges,
         test_projection_executor_reopens_for_a_new_app_lifespan,

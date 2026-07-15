@@ -2,6 +2,7 @@ import { useState, type FormEvent } from "react";
 import { useTranslation } from "react-i18next";
 import { API } from "../api";
 import { setStoredToken } from "../bearerAuth";
+import { runThreeStateSync } from "../progress/store";
 
 interface Props {
   /** Called after credentials are created + the session is established.
@@ -26,11 +27,24 @@ export function Setup({ onComplete }: Props) {
     setBusy(true);
     setError(null);
     try {
-      const res = await fetch(`${API}/api/auth/setup`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
-        body: JSON.stringify({ username, password }),
+      const { result: res } = await runThreeStateSync({
+        operationId: "auth:setup",
+        action: t("setup.submit", "Create account"),
+        reconcile: onComplete,
+        isAcknowledged: (response) => response.ok || response.status === 409,
+        mutate: async () => {
+          const response = await fetch(`${API}/api/auth/setup`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            credentials: "include",
+            body: JSON.stringify({ username, password }),
+          });
+          if (!response.ok && response.status !== 409) {
+            const detail = await response.json().catch(() => null);
+            throw new Error(detail?.detail || t("setup.unknownError", { status: response.status }));
+          }
+          return response;
+        },
       });
       if (res.ok) {
         // Capture the bearer token (native) — browsers ignore it.
@@ -49,15 +63,8 @@ export function Setup({ onComplete }: Props) {
         onComplete();
         return;
       }
-      const detail = await res.json().catch(() => null);
-      setError(
-        detail?.detail ||
-          t("setup.unknownError", "Could not save credentials (status {{status}}).", {
-            status: res.status,
-          })
-      );
-    } catch {
-      setError(t("setup.networkError", "Network error — is the backend running?"));
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : t("setup.networkError", "Network error — is the backend running?"));
     } finally {
       setBusy(false);
     }

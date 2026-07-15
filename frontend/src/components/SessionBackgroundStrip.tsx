@@ -4,6 +4,7 @@ import { useTranslation } from "react-i18next";
 
 import { cancelSchedule, fetchSessionSchedules } from "../api";
 import { eventBus } from "../lib/eventBus";
+import { runThreeStateSync } from "../progress/store";
 import type { Schedule } from "../types";
 
 /** Compact strip above the input area surfacing pending model-created
@@ -43,11 +44,21 @@ export function SessionBackgroundStrip({ sessionId }: { sessionId?: string }) {
     };
   }, [sessionId]);
 
-  const handleCancelSchedule = useCallback(async (schedule: Schedule) => {
-    await cancelSchedule(schedule.id, schedule.app_session_id);
-    // Optimistic removal; the schedules_updated frame re-converges.
-    setSchedules((prev) => prev.filter((s) => s.id !== schedule.id));
-  }, []);
+  const handleCancelSchedule = useCallback(
+    async (schedule: Schedule) => {
+      await runThreeStateSync({
+        operationId: `schedule:cancel:${schedule.id}`,
+        action: t("schedules.cancelTitle"),
+        reconcile: async () => {
+          const data = await fetchSessionSchedules(schedule.app_session_id);
+          setSchedules(data.schedules ?? []);
+        },
+        mutate: () => cancelSchedule(schedule.id, schedule.app_session_id),
+      });
+      setSchedules((prev) => prev.filter((s) => s.id !== schedule.id));
+    },
+    [t],
+  );
 
   const visibleSignature = useMemo(
     () => schedules.map((s) => s.id).sort().join(","),

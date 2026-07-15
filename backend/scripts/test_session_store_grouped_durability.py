@@ -12,8 +12,11 @@ os.environ["BETTER_AGENT_HOME"] = tempfile.mkdtemp(prefix="session-store-durabil
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from grouped_durability_writer import BatchSnapshot, GroupedDurabilityWriter
+import runtime_ownership
 import session_store
 from paths import ba_home
+
+runtime_ownership.register_current_process_writer()
 
 
 class AckBarrier:

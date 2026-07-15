@@ -83,6 +83,18 @@ def _browser_identity_headers(request: Request) -> list[tuple[bytes, bytes]]:
     client_host = request.client.host if request.client else "127.0.0.1"
     headers.append((b"x-forwarded-for", client_host.encode("latin-1")))
     headers.append((b"x-forwarded-proto", request.url.scheme.encode("latin-1")))
+    # The runtime's own Host header reflects this loopback hop (e.g.
+    # 127.0.0.1:<runtime-port>), not what the browser actually addressed —
+    # httpx sets Host from the upstream connection, and the inbound Host is
+    # dropped above (spoofable, like the other _HOP_BY_HOP entries). Without
+    # this, backend/browser_trust.py's Origin-vs-Host same-origin check
+    # compares the browser's real port against the runtime's internal port
+    # and always fails. Trusted the same way X-Forwarded-For already is:
+    # the runtime binds loopback-only, so only a same-uid local process
+    # (this BFF) can ever be the one setting it.
+    browser_host = request.headers.get("host") or request.url.netloc
+    if browser_host:
+        headers.append((b"x-forwarded-host", browser_host.encode("latin-1")))
     return headers
 
 
@@ -269,6 +281,12 @@ def _ws_forward_headers(websocket: WebSocket) -> list[tuple[str, str]]:
     client_host = websocket.client.host if websocket.client else "127.0.0.1"
     forwarded.append(("x-forwarded-for", client_host))
     forwarded.append(("x-forwarded-proto", websocket.url.scheme))
+    # See the matching comment in _browser_identity_headers: the runtime's
+    # own Host reflects this loopback hop, not what the browser addressed,
+    # so browser_trust's Origin-vs-Host check needs the real one.
+    browser_host = websocket.headers.get("host")
+    if browser_host:
+        forwarded.append(("x-forwarded-host", browser_host))
     return forwarded
 
 

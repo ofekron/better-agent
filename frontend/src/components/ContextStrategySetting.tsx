@@ -2,7 +2,7 @@ import { useState, useEffect } from "react";
 import { useTranslation } from "react-i18next";
 import { Select } from "./Select";
 import { API } from "../api";
-import { trackPromise } from "../progress/store";
+import { runThreeStateSync, trackPromise } from "../progress/store";
 
 /** Toggle for `context_strategy` (user_prefs). Controls what happens when a
  * session's context window is exceeded:
@@ -25,22 +25,34 @@ export function ContextStrategySetting() {
   }, []);
 
   const change = async (next: string) => {
+    const previous = strategy;
+    setStrategy(next);
     setSaving(true);
     try {
-      await trackPromise(
-        "contextStrategy:save",
-        () => fetch(`${API}/api/user-prefs`, {
+      await runThreeStateSync({
+        operationId: "contextStrategy:save",
+        action: t("settings.contextStrategy"),
+        reconcile: async () => {
+          const response = await fetch(`${API}/api/user-prefs`);
+          if (!response.ok) { setStrategy(previous); return; }
+          const prefs = await response.json() as { context_strategy?: string };
+          setStrategy(prefs.context_strategy || "native_compact");
+        },
+        mutate: async () => {
+          const response = await fetch(`${API}/api/user-prefs`, {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ context_strategy: next }),
-        }),
-      ).promise;
+          });
+          if (!response.ok) throw new Error(await response.text());
+          return response;
+        },
+      });
     } catch {
       return;
     } finally {
       setSaving(false);
     }
-    setStrategy(next);
   };
 
   return (

@@ -13,10 +13,14 @@ os.environ["BETTER_AGENT_HOME"] = HOME
 BACKEND = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BACKEND))
 
+import historical_children_projection
 import render_revision_store
+import runtime_ownership
 import session_store
 from event_ingester import event_ingester
 from session_manager import SessionManager
+
+runtime_ownership.register_current_process_writer()
 
 
 def _session(sid: str) -> dict:
@@ -36,6 +40,41 @@ def _manager(sid: str) -> SessionManager:
     manager = SessionManager()
     assert manager.get_lite(sid)
     return manager
+
+
+def _append_turn(manager: SessionManager, sid: str, index: int) -> None:
+    """Append a user+assistant turn AND drive it through the same
+    projection steps a real turn drives: ingest a matching event for the
+    assistant msg_id (production assistant messages are only ever
+    finalized after their provider events flowed through
+    `event_ingester.ingest` -> `note_event`, which is what materializes
+    the `messages` row `root_manifests` looks up), then apply the
+    resulting manifest onto the message's `stub` (production does this via
+    the `historical_projection.changed` bus event ->
+    `apply_historical_projection_changed`; skipping it would leave
+    `msg.stub.historical_revision` unset, which is what
+    `project_compact_turn_for_message`'s replay-delta path falls back to
+    when no live `historical_manifest_loader` is supplied)."""
+    manager.append_user_msg(
+        sid, {"id": f"u{index}", "role": "user", "content": str(index)},
+    )
+    assistant_id = f"a{index}"
+    manager.append_assistant_msg(
+        sid, {"id": assistant_id, "role": "assistant", "content": str(index)},
+    )
+    event_ingester.ingest(
+        sid,
+        sid=sid,
+        event_type="agent_message",
+        data={"type": "assistant", "uuid": assistant_id},
+        source="test",
+        msg_id=assistant_id,
+    )
+    manifest = historical_children_projection.root_manifest(sid, sid, assistant_id)
+    manager.apply_historical_projection_changed(
+        sid, sid, assistant_id,
+        manifest["revision"], manifest["direct_child_count"],
+    )
 
 
 def test_snapshot_subscribe_boundary() -> None:
@@ -66,12 +105,7 @@ def test_atomic_compact_page_fence_and_older_page() -> None:
     sid = "compact-page"
     manager = _manager(sid)
     for index in range(3):
-        manager.append_user_msg(
-            sid, {"id": f"u{index}", "role": "user", "content": str(index)},
-        )
-        manager.append_assistant_msg(
-            sid, {"id": f"a{index}", "role": "assistant", "content": str(index)},
-        )
+        _append_turn(manager, sid, index)
     latest = manager.get_compact_turn_page(sid, turn_limit=2)
     assert latest is not None
     assert [turn["prompt"]["id"] for turn in latest["turns"]] == ["u1", "u2"]
@@ -79,6 +113,7 @@ def test_atomic_compact_page_fence_and_older_page() -> None:
         sid,
         turn_limit=2,
         before_seq=latest["page_cursor"]["before_seq"],
+        cursor_revision=latest["page_cursor"]["revision"],
     )
     assert older is not None
     assert [turn["prompt"]["id"] for turn in older["turns"]] == ["u0"]
@@ -96,6 +131,14 @@ def test_atomic_compact_page_fence_and_older_page() -> None:
 def test_live_event_after_rest_page_is_above_snapshot_watermark() -> None:
     sid = "event-watermark-gap"
     manager = _manager(sid)
+    # No turns exist yet, so no event has ever been ingested for this root
+    # and the historical-children sidecar was never created. A real
+    # backend builds it via `on_startup`'s `schedule_all`; here we build it
+    # the same way `_bootstrap_subscription` (main.py) does on a live
+    # cold miss: `ensure_current` then wait.
+    historical_children_projection.ensure_current(
+        sid, {"id": sid, "messages": [], "forks": []}, priority=True,
+    ).result(timeout=10)
     page = manager.get_compact_turn_page(sid, turn_limit=1)
     assert page is not None
     watermark = page["events_watermark"]
@@ -233,12 +276,7 @@ def test_rest_page_plus_turn_deltas_converges_exactly() -> None:
     sid = "turn-convergence"
     manager = _manager(sid)
     for index in range(3):
-        manager.append_user_msg(
-            sid, {"id": f"u{index}", "role": "user", "content": str(index)},
-        )
-        manager.append_assistant_msg(
-            sid, {"id": f"a{index}", "role": "assistant", "content": str(index)},
-        )
+        _append_turn(manager, sid, index)
     snapshot = manager.get_compact_turn_page(sid, turn_limit=10)
     assert snapshot is not None
     turns = snapshot["turns"]

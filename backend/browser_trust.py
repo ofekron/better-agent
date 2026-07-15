@@ -181,8 +181,23 @@ def _allowed_host(host: str, port: int | None) -> bool:
     return False
 
 
+def effective_host_header(headers: dict[str, str]) -> str:
+    """The host the browser actually addressed.
+
+    Prefers X-Forwarded-Host, stamped only by the trusted local BFF proxy
+    (backend/bff_server.py). The runtime binds loopback-only, so only a
+    same-uid local process can ever be the one setting it — same trust
+    boundary already relied on for X-Forwarded-For elsewhere in this
+    codebase (see auth_routes._is_loopback_request). Without this, a
+    proxied request's raw Host header reflects the BFF-to-runtime hop
+    (e.g. 127.0.0.1:<runtime-port>), not what the browser used, and every
+    same-origin check below fails. Falls back to Host for a direct
+    (non-proxied) connection."""
+    return headers.get("x-forwarded-host") or headers.get("host", "")
+
+
 def _request_host(headers: dict[str, str]) -> tuple[str, int | None] | None:
-    parsed = _split_host_port(headers.get("host", ""))
+    parsed = _split_host_port(effective_host_header(headers))
     if parsed is None:
         return None
     host, port = parsed

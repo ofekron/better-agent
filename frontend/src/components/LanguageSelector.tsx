@@ -1,6 +1,6 @@
 import { useTranslation } from "react-i18next";
 import { Select } from "./Select";
-import { trackedFetch } from "../progress/store";
+import { runThreeStateSync } from "../progress/store";
 import { API } from "../api";
 
 // Each option shows its autonym (native name) so a user who switched to a
@@ -31,17 +31,27 @@ export function LanguageSelector() {
     <Select
       value={current}
       onChange={(lng) => {
-        i18n.changeLanguage(lng);
-        trackedFetch(
-          "language:save",
-          `${API}/api/user-prefs`,
-          {
+        const previous = i18n.language;
+        void i18n.changeLanguage(lng);
+        void runThreeStateSync({
+          operationId: "language:save",
+          action: t("language.label", "Language"),
+          reconcile: async () => {
+            const response = await fetch(`${API}/api/user-prefs`);
+            if (!response.ok) { await i18n.changeLanguage(previous); return; }
+            const prefs = await response.json() as { language?: string };
+            await i18n.changeLanguage(prefs.language || previous);
+          },
+          mutate: async () => {
+            const response = await fetch(`${API}/api/user-prefs`, {
             method: "PATCH",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ language: lng }),
+            });
+            if (!response.ok) throw new Error(await response.text());
+            return response;
           },
-          { silent: true },
-        ).catch(() => {});
+        }).catch(() => {});
       }}
       aria-label={t("language.label", "Language")}
       options={LANGUAGES.map((lang) => ({ value: lang.code, label: lang.autonym }))}

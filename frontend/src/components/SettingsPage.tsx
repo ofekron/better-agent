@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import { useTranslation } from "react-i18next";
 import { Capacitor } from "@capacitor/core";
 import type { Project, Provider, ProvidersState, ReasoningEffort, Permission } from "../types";
-import { trackPromise } from "../progress/store";
+import { runThreeStateSync, trackPromise } from "../progress/store";
 import { ShortcutSettings } from "./ShortcutSettings";
 import { CrossSessionDelegateSetting } from "./CrossSessionDelegateSetting";
 import { AutoRestartOnIdleSetting } from "./AutoRestartOnIdleSetting";
@@ -61,7 +61,12 @@ async function runBusyAction(
   setBusy(true);
   setError("");
   try {
-    await fn();
+    await runThreeStateSync({
+      operationId: `settings:${fallback}`,
+      action: fallback,
+      reconcile: async () => undefined,
+      mutate: fn,
+    });
   } catch (e) {
     setError(e instanceof Error ? e.message : fallback);
   } finally {
@@ -1180,15 +1185,22 @@ export function AmbientMcpSettings() {
     setSavingPolicy(true);
     setError("");
     try {
-      const response = await fetch(`${API}/api/ambient-mcps/policy`, {
-        method: "PATCH",
-        credentials: "include",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(next),
+      await runThreeStateSync({
+        operationId: "settings:ambient-mcp-policy",
+        action: t("settings.ambientMcpsTitle"),
+        reconcile: refresh,
+        mutate: async () => {
+          const response = await fetch(`${API}/api/ambient-mcps/policy`, {
+            method: "PATCH",
+            credentials: "include",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(next),
+          });
+          const payload = await response.json();
+          if (!response.ok) throw new Error(payload?.detail || t("settings.ambientMcpsPolicyFailed"));
+          await refresh();
+        },
       });
-      const payload = await response.json();
-      if (!response.ok) throw new Error(payload?.detail || t("settings.ambientMcpsPolicyFailed"));
-      await refresh();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : t("settings.ambientMcpsPolicyFailed"));
     } finally {
@@ -1212,21 +1224,22 @@ export function AmbientMcpSettings() {
       const args = JSON.parse(draft.args);
       const env = JSON.parse(draft.env);
       const policy = JSON.parse(draft.policy);
-      const response = await fetch(`${API}/api/ambient-mcps/user/${encodeURIComponent(draft.id)}`, {
-        method: "PUT",
-        credentials: "include",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          id: draft.id,
-          name: draft.name,
-          launcher: { command: draft.command, args, env },
-          policy,
-          enabled: draft.enabled,
-        }),
+      await runThreeStateSync({
+        operationId: "settings:ambient-mcp-save",
+        action: t("settings.ambientMcpsTitle"),
+        reconcile: refresh,
+        mutate: async () => {
+          const response = await fetch(`${API}/api/ambient-mcps/user/${encodeURIComponent(draft.id)}`, {
+            method: "PUT",
+            credentials: "include",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ id: draft.id, name: draft.name, launcher: { command: draft.command, args, env }, policy, enabled: draft.enabled }),
+          });
+          const payload = await response.json();
+          if (!response.ok) throw new Error(payload?.detail || t("settings.ambientMcpsSaveFailed"));
+          await refresh();
+        },
       });
-      const payload = await response.json();
-      if (!response.ok) throw new Error(payload?.detail || t("settings.ambientMcpsSaveFailed"));
-      await refresh();
       setDraft(null);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : t("settings.ambientMcpsSaveFailed"));
@@ -1240,13 +1253,17 @@ export function AmbientMcpSettings() {
     setDeleting(id);
     setError("");
     try {
-      const response = await fetch(`${API}/api/ambient-mcps/user/${encodeURIComponent(id)}`, {
-        method: "DELETE",
-        credentials: "include",
+      await runThreeStateSync({
+        operationId: "settings:ambient-mcp-delete",
+        action: t("settings.ambientMcpsTitle"),
+        reconcile: refresh,
+        mutate: async () => {
+          const response = await fetch(`${API}/api/ambient-mcps/user/${encodeURIComponent(id)}`, { method: "DELETE", credentials: "include" });
+          const payload = await response.json();
+          if (!response.ok) throw new Error(payload?.detail || t("settings.ambientMcpsDeleteFailed"));
+          await refresh();
+        },
       });
-      const payload = await response.json();
-      if (!response.ok) throw new Error(payload?.detail || t("settings.ambientMcpsDeleteFailed"));
-      await refresh();
       if (draft?.id === id) setDraft(null);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : t("settings.ambientMcpsDeleteFailed"));
@@ -1460,20 +1477,22 @@ export function ExtensionUiSettingsSection() {
   const patch = useCallback(
     async (path: string, body: unknown, onError?: () => void) => {
       try {
-        await fetch(`${API}${path}`, {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          credentials: "include",
-          body: JSON.stringify(body),
-        }).then((res) => {
-          if (!res.ok) throw new Error("patch failed");
+        await runThreeStateSync({
+          operationId: "settings:extension-patch",
+          action: t("settings.extensionsTitle"),
+          reconcile: refresh,
+          mutate: async () => {
+            const res = await fetch(`${API}${path}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, credentials: "include", body: JSON.stringify(body) });
+            if (!res.ok) throw new Error("patch failed");
+            await refresh();
+          },
         });
       } catch {
         if (onError) onError();
         void refresh();
       }
     },
-    [refresh],
+    [refresh, t],
   );
 
   const toggleSurface = useCallback(
@@ -1532,7 +1551,11 @@ export function ExtensionUiSettingsSection() {
             : r,
         ),
       );
-      void (async () => {
+      void runThreeStateSync({
+        operationId: "settings:frontend-module",
+        action: t("settings.extensionsTitle"),
+        reconcile: refresh,
+        mutate: async () => {
         const res = await fetch(
           `${API}/api/extensions/${encodeURIComponent(id)}/frontend-modules/${encodeURIComponent(slot)}/${encodeURIComponent(moduleId)}/enabled`,
           {
@@ -1544,11 +1567,12 @@ export function ExtensionUiSettingsSection() {
         );
         if (!res.ok) throw new Error("patch failed");
         await refresh();
-      })().catch(() => {
+        },
+      }).catch(() => {
         void refresh();
       });
     },
-    [refresh],
+    [refresh, t],
   );
 
   const setNativeExposure = useCallback(
@@ -1561,7 +1585,11 @@ export function ExtensionUiSettingsSection() {
         return next;
       });
       try {
-        const res = await fetch(
+        const { result: res } = await runThreeStateSync({
+          operationId: "settings:native-exposure",
+          action: t("settings.extensionsTitle"),
+          reconcile: refresh,
+          mutate: () => fetch(
           `${API}/api/extensions/${encodeURIComponent(extensionId)}/harness-additions/${encodeURIComponent(addition.kind)}/${encodeURIComponent(addition.name)}/native-exposure`,
           {
             method: "PATCH",
@@ -1569,7 +1597,8 @@ export function ExtensionUiSettingsSection() {
             credentials: "include",
             body: JSON.stringify({ enabled }),
           },
-        );
+          ),
+        });
         if (!res.ok) {
           const payload = await res.json().catch(() => null);
           throw new Error(typeof payload?.detail === "string" ? payload.detail : t("settings.extensionsNativeExposureFailed"));
@@ -1599,7 +1628,7 @@ export function ExtensionUiSettingsSection() {
         });
       }
     },
-    [t],
+    [refresh, t],
   );
 
   const toggleInstructions = useCallback(
@@ -1683,22 +1712,17 @@ export function ExtensionUiSettingsSection() {
       setDeletingIds((prev) => new Set(prev).add(id));
       setError("");
       try {
-        const res = await fetch(`${API}/api/extensions/${encodeURIComponent(id)}`, {
-          method: "DELETE",
-          credentials: "include",
+        await runThreeStateSync({
+          operationId: "settings:extension-uninstall",
+          action: t("settings.extensionsTitle"),
+          reconcile: refresh,
+          mutate: async () => {
+            const res = await fetch(`${API}/api/extensions/${encodeURIComponent(id)}`, { method: "DELETE", credentials: "include" });
+            if (!res.ok) throw new Error(t("settings.extensionsUninstallFailed"));
+            await refresh();
+          },
         });
-        if (!res.ok) {
-          let detail = "";
-          try {
-            const payload = await res.json();
-            detail = typeof payload.detail === "string" ? payload.detail : "";
-          } catch {
-            detail = await res.text();
-          }
-          throw new Error(detail || t("settings.extensionsUninstallFailed"));
-        }
         setRows((prev) => prev.filter((row) => row.id !== id));
-        void refresh();
       } catch (e) {
         setError(e instanceof Error ? e.message : t("settings.extensionsUninstallFailed"));
       } finally {
@@ -1716,21 +1740,16 @@ export function ExtensionUiSettingsSection() {
     setCreatingPersonalHarness(true);
     setError("");
     try {
-      const res = await fetch(`${API}/api/extensions/personal-harness`, {
-        method: "POST",
-        credentials: "include",
+      await runThreeStateSync({
+        operationId: "settings:personal-harness",
+        action: t("settings.extensionsTitle"),
+        reconcile: refresh,
+        mutate: async () => {
+          const res = await fetch(`${API}/api/extensions/personal-harness`, { method: "POST", credentials: "include" });
+          if (!res.ok) throw new Error(t("settings.extensionsPersonalHarnessFailed"));
+          await refresh();
+        },
       });
-      if (!res.ok) {
-        let detail = "";
-        try {
-          const payload = await res.json();
-          detail = typeof payload.detail === "string" ? payload.detail : "";
-        } catch {
-          detail = await res.text();
-        }
-        throw new Error(detail || t("settings.extensionsPersonalHarnessFailed"));
-      }
-      await refresh();
     } catch (e) {
       setError(e instanceof Error ? e.message : t("settings.extensionsPersonalHarnessFailed"));
     } finally {

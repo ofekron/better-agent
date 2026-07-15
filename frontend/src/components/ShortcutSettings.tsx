@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { API } from "../api";
-import { trackPromise } from "../progress/store";
+import { runThreeStateSync, trackPromise } from "../progress/store";
+import { useTranslation } from "react-i18next";
 
 const DEFAULTS = [
   "TLDR",
@@ -10,6 +11,7 @@ const DEFAULTS = [
 ];
 
 export function ShortcutSettings() {
+  const { t } = useTranslation();
   const [shortcuts, setShortcuts] = useState<string[]>(DEFAULTS);
   const [newShortcut, setNewShortcut] = useState("");
   const [saving, setSaving] = useState(false);
@@ -26,22 +28,34 @@ export function ShortcutSettings() {
   }, []);
 
   const save = async (updated: string[]) => {
+    const previous = shortcuts;
+    setShortcuts(updated);
     setSaving(true);
     try {
-      await trackPromise(
-        "shortcuts:save",
-        () => fetch(`${API}/api/user-prefs`, {
+      await runThreeStateSync({
+        operationId: "shortcuts:save",
+        action: t("settings.quickReplies", "Quick Replies"),
+        reconcile: async () => {
+          const response = await fetch(`${API}/api/user-prefs`);
+          if (!response.ok) { setShortcuts(previous); return; }
+          const prefs = await response.json() as { shortcut_responses?: string[] };
+          setShortcuts(prefs.shortcut_responses || previous);
+        },
+        mutate: async () => {
+          const response = await fetch(`${API}/api/user-prefs`, {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ shortcut_responses: updated }),
-        }),
-      ).promise;
+          });
+          if (!response.ok) throw new Error(await response.text());
+          return response;
+        },
+      });
     } catch {
       return;
     } finally {
       setSaving(false);
     }
-    setShortcuts(updated);
     window.dispatchEvent(
       new CustomEvent("shortcut_responses_changed", { detail: updated }),
     );

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import type { FormEvent } from "react";
 import { useTranslation } from "react-i18next";
 import { extBackendBase } from "../extensionIds";
-import { trackPromise } from "../progress/store";
+import { runThreeStateSync, trackPromise } from "../progress/store";
 
 interface PasswordManagerItem {
   service: string;
@@ -52,14 +52,17 @@ export function PasswordManagerSetting() {
     setStatus("");
     setError("");
     try {
-      const response = await trackPromise("passwordManager:store", () =>
-        fetch(`${extBackendBase("credentialBroker")}/settings/password-manager/store`, {
+      const { result: response } = await runThreeStateSync({
+        operationId: "passwordManager:store",
+        action: t("settings.passwordManagerStore"),
+        reconcile: loadItems,
+        mutate: async () => fetch(`${extBackendBase("credentialBroker")}/settings/password-manager/store`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           credentials: "include",
           body: JSON.stringify({ service, account, password }),
         }),
-      ).promise;
+      });
       if (!response.ok) throw new Error(await response.text());
       setPassword("");
       setStatus(t("settings.passwordManagerSaved"));
@@ -86,14 +89,18 @@ export function PasswordManagerSetting() {
     setStatus("");
     setError("");
     try {
-      const response = await trackPromise("passwordManager:delete", () =>
-        fetch(`${extBackendBase("credentialBroker")}/settings/password-manager`, {
+      const { result: response } = await runThreeStateSync({
+        operationId: `passwordManager:delete:${key}`,
+        action: t("settings.passwordManagerDelete"),
+        info: `${item.service} / ${item.account}`,
+        reconcile: loadItems,
+        mutate: async () => fetch(`${extBackendBase("credentialBroker")}/settings/password-manager`, {
           method: "DELETE",
           headers: { "Content-Type": "application/json" },
           credentials: "include",
           body: JSON.stringify(item),
         }),
-      ).promise;
+      });
       if (!response.ok) throw new Error(await response.text());
       setStatus(t("settings.passwordManagerDeleted"));
       if (service === item.service && account === item.account) {

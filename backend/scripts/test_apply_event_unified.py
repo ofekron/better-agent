@@ -44,6 +44,9 @@ if _BACKEND not in sys.path:
 import _test_home
 _TMP_HOME = _test_home.isolate("bc-test-apply-event-")
 
+import runtime_ownership  # noqa: E402
+runtime_ownership.register_current_process_writer()
+
 from event_ingester import event_ingester  # noqa: E402
 from event_shape import frontend_events_from_journal_rows  # noqa: E402
 from event_journal import event_journal_writer  # noqa: E402

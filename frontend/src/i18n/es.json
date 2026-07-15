@@ -1105,5 +1105,11 @@
   "marketingHome.laneAct": "Act",
   "marketingHome.laneActBody": "Agents edit files, coordinate workers, and stream every meaningful step.",
   "marketingHome.laneVerify": "Verify",
-  "marketingHome.laneVerifyBody": "Builds, UI checks, notes, todos, and diffs stay attached to the session."
+  "marketingHome.laneVerifyBody": "Builds, UI checks, notes, todos, and diffs stay attached to the session.",
+  "sync.failureTitle": "Error al {{action}}",
+  "sync.failureReconciled": "Se restauró el estado guardado actual.",
+  "sync.showDetails": "Mostrar detalles",
+  "sync.hideDetails": "Ocultar detalles",
+  "sync.dismiss": "Cerrar",
+  "sync.pending": "Guardando cambios ({{count}})…"
 }

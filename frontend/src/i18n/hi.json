@@ -1107,5 +1107,11 @@
   "marketingHome.laneAct": "Act",
   "marketingHome.laneActBody": "Agents edit files, coordinate workers, and stream every meaningful step.",
   "marketingHome.laneVerify": "Verify",
-  "marketingHome.laneVerifyBody": "Builds, UI checks, notes, todos, and diffs stay attached to the session."
+  "marketingHome.laneVerifyBody": "Builds, UI checks, notes, todos, and diffs stay attached to the session.",
+  "sync.failureTitle": "{{action}} विफल",
+  "sync.failureReconciled": "वर्तमान सहेजी गई स्थिति बहाल कर दी गई है।",
+  "sync.showDetails": "विवरण दिखाएँ",
+  "sync.hideDetails": "विवरण छिपाएँ",
+  "sync.dismiss": "बंद करें",
+  "sync.pending": "बदलाव सहेजे जा रहे हैं ({{count}})…"
 }

@@ -631,7 +631,7 @@ class CodexRolloutNormalizer:
                 # event_msg.agent_message; drop the echo. Messages without
                 # assistant text (e.g. subagent notifications) pass through.
                 return []
-            if payload.get("role") == "assistant" and payload.get("phase") == "final_answer":
+            if event is not None and payload.get("role") == "assistant" and payload.get("phase") == "final_answer":
                 _mark_final_answer(event)
             return self._push(event)
         if payload_type == "reasoning":

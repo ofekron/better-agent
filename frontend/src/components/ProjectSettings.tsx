@@ -3,7 +3,7 @@ import Icon, { type IconName } from "./Icon";
 import { useTranslation } from "react-i18next";
 import type { ProjectConfigFile } from "../types";
 import { ProgressButton } from "../progress/ProgressButton";
-import { trackedFetch, useOpProgress } from "../progress/store";
+import { runThreeStateSync, trackedFetch, useOpProgress } from "../progress/store";
 import { useBackButtonDismiss } from "../hooks/useBackButtonDismiss";
 
 interface Props {
@@ -65,10 +65,27 @@ export function ProjectSettings({ cwd, onFileClick, onEngineerFile, onClose }: P
   const handleCreateFile = useCallback(
     async (filePath: string) => {
       try {
-        await trackedFetch(`file:create:${filePath}`, `${API}/api/file`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ path: filePath, content: "" }),
+        await runThreeStateSync({
+          operationId: `project:file:create:${filePath}`,
+          action: t("projectSettings.settings"),
+          info: filePath,
+          reconcile: async () => {
+            const refresh = await trackedFetch(
+              configOpId,
+              `${API}/api/project-config?cwd=${encodeURIComponent(cwd)}`,
+            );
+            const data = await refresh.json();
+            setFiles(data.files ?? []);
+          },
+          mutate: async () => {
+            const response = await trackedFetch(`file:create:${filePath}`, `${API}/api/file`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ path: filePath, content: "" }),
+            });
+            if (!response.ok) throw new Error(await response.text());
+            return response;
+          },
         });
         // Refresh the list
         const refresh = await trackedFetch(

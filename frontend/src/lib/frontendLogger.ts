@@ -73,6 +73,35 @@ function postFrontendLog(level: FrontendLogLevel, source: string, message: strin
   window.setTimeout(send, 0);
 }
 
+export type MutationFailureDiagnostic = {
+  actionKey: string;
+  correlationId: string;
+  failureKind: "network" | "rejected" | "unknown";
+};
+
+export function logMutationFailure(diagnostic: MutationFailureDiagnostic): void {
+  if (!frontendLogFetch) return;
+  const actionKey = diagnostic.actionKey.replace(/[^a-z0-9._-]/gi, "_").slice(0, 96);
+  const correlationId = diagnostic.correlationId.match(
+    /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+  )?.[0];
+  if (!actionKey || !correlationId) return;
+  window.setTimeout(() => {
+    frontendLogFetch(`${API}/api/logs/frontend-mutation`, {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        event: "mutation_failed",
+        action_key: actionKey,
+        correlation_id: correlationId,
+        failure_kind: diagnostic.failureKind,
+      }),
+      keepalive: true,
+    }).catch(() => {});
+  }, 0);
+}
+
 /** Durable diagnostic channel: ships a structured line to the backend
  * `frontend.log` regardless of console wiring. Use for transient frontend
  * state transitions that must survive a backend restart for post-hoc

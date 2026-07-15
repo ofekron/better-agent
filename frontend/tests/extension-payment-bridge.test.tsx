@@ -1,6 +1,7 @@
 import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ExtensionModuleSlot, type ExtensionFrontendModule } from "../src/components/ExtensionSlots";
+import { dismissSyncFailure, useSyncStatus } from "../src/progress/store";
 
 vi.mock("react-i18next", () => ({
   useTranslation: () => ({ t: (key: string) => key }),
@@ -123,6 +124,28 @@ describe("extension payment bridge", () => {
     await waitFor(() => expect(screen.getByText("extensionPayment.title")).toBeTruthy());
     // Price/name rendered from the server-side checkout response, not the message.
     await waitFor(() => expect(screen.getByText(/Pro/)).toBeTruthy());
+  });
+
+  it("reports checkout creation failures through the generic sync control", async () => {
+    vi.mocked(fetch).mockImplementation(async (url) => {
+      if (String(url).endsWith("/billing/config")) return Response.json({ client_token: "token" });
+      return new Response("checkout failed", { status: 500 });
+    });
+    render(<ExtensionModuleSlot module={makeModule()} />);
+    const iframe = renderedIframe();
+    dispatchBridgeMessage(
+      { source: "ba-extension", nonce: "00000000-0000-4000-8000-000000000001", action: "marketplace-purchase", requestId: "failed", productId: "pro" },
+      iframe.contentWindow,
+    );
+    await waitFor(() => expect(screen.getByText("checkout failed")).toBeTruthy());
+
+    function Probe() {
+      const status = useSyncStatus();
+      return <span>{status.failures[0]?.action}</span>;
+    }
+    render(<Probe />);
+    await waitFor(() => expect(screen.getAllByText("extensionPayment.title")).toHaveLength(2));
+    act(() => dismissSyncFailure("extensions:payment:ofek-dev.marketplace:pro"));
   });
 
   it("ignores purchase requests when the extension lacks the payments permission", () => {

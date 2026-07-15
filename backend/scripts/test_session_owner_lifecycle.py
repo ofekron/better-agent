@@ -16,9 +16,12 @@ BACKEND = Path(__file__).parents[1]
 if str(BACKEND) not in sys.path:
     sys.path.insert(0, str(BACKEND))
 
+import runtime_ownership
 from ingestion_versions import current_ingestion_version
 from run_recovery import _drain_recovered_live_queue, _mark_reconciled_terminal
 from session_manager import SessionManager, manager
+
+runtime_ownership.register_current_process_writer()
 
 
 def test_create_invalidates_cached_miss_without_unrelated_generation_effect() -> None:

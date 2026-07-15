@@ -1,0 +1,53 @@
+export type MutationExclusion = {
+  file: string;
+  method: "POST" | "PUT" | "PATCH" | "DELETE";
+  routeIncludes: string;
+  reason: "auth" | "telemetry" | "read-like" | "idempotent-ensure" | "explicit-ack-backlog" | "canonical-caller";
+};
+
+export const frontendBackendMutationExclusions: readonly MutationExclusion[] = [
+  { file: "src/bearerAuth.ts", method: "POST", routeIncludes: "refreshUrl", reason: "auth" },
+  { file: "src/bearerAuth.ts", method: "POST", routeIncludes: "/auth/", reason: "auth" },
+  { file: "src/components/Login.tsx", method: "POST", routeIncludes: "/auth/", reason: "auth" },
+  { file: "src/lib/frontendLogger.ts", method: "POST", routeIncludes: "/api/logs/", reason: "telemetry" },
+  { file: "src/hooks/useQuotaStatus.ts", method: "POST", routeIncludes: "/quota", reason: "read-like" },
+  { file: "src/hooks/useQuotaStatus.ts", method: "POST", routeIncludes: "quotaStatusUrl", reason: "read-like" },
+  { file: "src/components/ShortcutResponses.tsx", method: "POST", routeIncludes: "/api/shortcuts/pick", reason: "read-like" },
+  { file: "src/components/ExtensionSlots.tsx", method: "POST", routeIncludes: "/backend/auth/start", reason: "auth" },
+  { file: "src/components/ExtensionUiHooks.tsx", method: "POST", routeIncludes: "${API}${endpoint}", reason: "idempotent-ensure" },
+  { file: "src/utils/preSendAdvisory.ts", method: "POST", routeIncludes: "/pre-send", reason: "read-like" },
+  { file: "src/utils/uiSelection.ts", method: "PATCH", routeIncludes: "/api/ui-selection", reason: "explicit-ack-backlog" },
+  { file: "src/App.tsx", method: "POST", routeIncludes: "/ask/ensure", reason: "idempotent-ensure" },
+  { file: "src/App.tsx", method: "POST", routeIncludes: "/file-before-edit", reason: "read-like" },
+  { file: "src/App.tsx", method: "PUT", routeIncludes: "topbar-pin", reason: "explicit-ack-backlog" },
+  { file: "src/api.ts", method: "POST", routeIncludes: "/api/session-folders", reason: "canonical-caller" },
+  { file: "src/api.ts", method: "POST", routeIncludes: "/api/session-tags", reason: "canonical-caller" },
+  { file: "src/api.ts", method: "PATCH", routeIncludes: "/organization", reason: "canonical-caller" },
+  { file: "src/api.ts", method: "POST", routeIncludes: "/api/chats/", reason: "canonical-caller" },
+  { file: "src/api.ts", method: "POST", routeIncludes: "/backend/sessions/", reason: "canonical-caller" },
+  { file: "src/api.ts", method: "DELETE", routeIncludes: "/api/schedules/", reason: "canonical-caller" },
+  { file: "src/api.ts", method: "DELETE", routeIncludes: "/backend/schedules/", reason: "canonical-caller" },
+  { file: "src/components/SessionTabsSettings.tsx", method: "PATCH", routeIncludes: "/api/user-prefs", reason: "explicit-ack-backlog" },
+  { file: "src/hooks/useSession.ts", method: "POST", routeIncludes: "/sessions/search", reason: "read-like" },
+  { file: "src/App.tsx", method: "POST", routeIncludes: "/api/auth/logout", reason: "auth" },
+  { file: "src/App.tsx", method: "PATCH", routeIncludes: "draft:save:", reason: "explicit-ack-backlog" },
+  { file: "src/App.tsx", method: "POST", routeIncludes: "project-updates/counts-batch", reason: "read-like" },
+  { file: "src/App.tsx", method: "POST", routeIncludes: "project:suggest:", reason: "read-like" },
+  { file: "src/App.tsx", method: "PATCH", routeIncludes: "selectors:cwd:", reason: "canonical-caller" },
+  { file: "src/App.tsx", method: "POST", routeIncludes: "rateLimitContinue:", reason: "canonical-caller" },
+  { file: "src/App.tsx", method: "POST", routeIncludes: "/rewind_and_retry", reason: "canonical-caller" },
+  { file: "src/App.tsx", method: "POST", routeIncludes: "project-structure-edit/ensure", reason: "idempotent-ensure" },
+  { file: "src/App.tsx", method: "POST", routeIncludes: "/delegate/${delegationId}/resolve", reason: "canonical-caller" },
+  { file: "src/App.tsx", method: "POST", routeIncludes: "/ask-choice", reason: "canonical-caller" },
+  { file: "src/components/Chat.tsx", method: "POST", routeIncludes: "/api/user-input/", reason: "canonical-caller" },
+  { file: "src/hooks/useSession.ts", method: "POST", routeIncludes: "/opened", reason: "read-like" },
+  { file: "src/hooks/useSession.ts", method: "POST", routeIncludes: "/api/sessions", reason: "canonical-caller" },
+  { file: "src/hooks/useSession.ts", method: "POST", routeIncludes: "/unpin-others", reason: "canonical-caller" },
+  { file: "src/hooks/useSession.ts", method: "PUT", routeIncludes: "/archive", reason: "canonical-caller" },
+  { file: "src/hooks/useSession.ts", method: "POST", routeIncludes: "/move-to-project", reason: "canonical-caller" },
+  { file: "src/hooks/useSession.ts", method: "PUT", routeIncludes: "/worker_eligible", reason: "canonical-caller" },
+  { file: "src/hooks/useSession.ts", method: "PUT", routeIncludes: "/agent_rename_allowed", reason: "canonical-caller" },
+  { file: "src/lib/firstRunWizard.ts", method: "PATCH", routeIncludes: "userPrefs:firstRunWizardSeen", reason: "idempotent-ensure" },
+  { file: "src/lib/sessionRegistry.ts", method: "POST", routeIncludes: "/seen", reason: "read-like" },
+  { file: "src/lib/sessionRegistry.ts", method: "POST", routeIncludes: "/unread", reason: "canonical-caller" },
+];

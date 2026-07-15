@@ -10292,6 +10292,44 @@ async def frontend_log(request: Request):
     return {"ok": True}
 
 
+_MUTATION_FAILURE_ACTION_RE = re.compile(r"^[a-zA-Z0-9._-]{1,96}$")
+_MUTATION_FAILURE_CORRELATION_RE = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
+)
+_MUTATION_FAILURE_KINDS = {"network", "rejected", "unknown"}
+
+
+@app.post("/api/logs/frontend-mutation")
+async def frontend_mutation_log(request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        return {"ok": True, "dropped": True}
+    if not isinstance(body, dict) or set(body) != {
+        "event", "action_key", "correlation_id", "failure_kind"
+    }:
+        return {"ok": True, "dropped": True}
+    event = body.get("event")
+    action_key = body.get("action_key")
+    correlation_id = body.get("correlation_id")
+    failure_kind = body.get("failure_kind")
+    if (
+        event != "mutation_failed"
+        or not isinstance(action_key, str)
+        or _MUTATION_FAILURE_ACTION_RE.fullmatch(action_key) is None
+        or not isinstance(correlation_id, str)
+        or _MUTATION_FAILURE_CORRELATION_RE.fullmatch(correlation_id) is None
+        or failure_kind not in _MUTATION_FAILURE_KINDS
+    ):
+        return {"ok": True, "dropped": True}
+    _frontend_log_off_loop(
+        logging.ERROR,
+        "[mutation] event=mutation_failed "
+        f"action={action_key} correlation={correlation_id} kind={failure_kind}",
+    )
+    return {"ok": True}
+
+
 @app.get("/api/mobile/bundle/manifest")
 async def mobile_bundle_manifest():
     """Current web-bundle version for the Capacitor OTA updater. Gated by
@@ -11844,14 +11882,15 @@ async def _recover_in_flight_task() -> None:
         loop = asyncio.get_running_loop()
         with perf.timed("startup.recovery.classification"):
             recovered = await _to_thread_join_on_cancel(recover_all_in_flight, loop)
+        live = [r for r in recovered if bool(r.get("alive"))]
+        cold = [r for r in recovered if not bool(r.get("alive"))]
+        startup_recovery_gate.register_session_recovery(
+            _recovered_run_session_ids(live),
+        )
+        startup_recovery_gate.mark_recovery_sessions_registered()
         if recovered:
             logger.info("recover_all_in_flight: %d run(s) recovered", len(recovered))
-            live = [r for r in recovered if bool(r.get("alive"))]
-            cold = [r for r in recovered if not bool(r.get("alive"))]
             if live:
-                startup_recovery_gate.register_session_recovery(
-                    _recovered_run_session_ids(live),
-                )
                 live = _sort_recovered_runs_by_session_priority(live)
                 logger.info("recover_all_in_flight: integrating %d live run(s)", len(live))
                 with perf.timed("startup.recovery.integration"):
@@ -12585,6 +12624,8 @@ async def on_startup():
     loop = asyncio.get_running_loop()
     native_files.bind_owner_loop(loop)
     acquire_backend_instance_lock()
+    import runtime_ownership
+    runtime_ownership.register_current_process_writer()
     from canonical_runtime_journal import canonical_runtime_journal
     journal = canonical_runtime_journal()
     await asyncio.to_thread(journal.resolve_pending_deletions)
@@ -13306,6 +13347,11 @@ async def on_shutdown():
         await asyncio.to_thread(shutdown_session_content_projection)
     except Exception:
         logger.exception("session content projection shutdown failed")
+    try:
+        from event_bus_subscribers import shutdown_chat_projection_ingestion
+        await asyncio.to_thread(shutdown_chat_projection_ingestion)
+    except Exception:
+        logger.exception("chat projection ingestion shutdown failed")
     try:
         event_ingester.close_all()
     except Exception:

@@ -223,6 +223,31 @@ def test_response_item_final_echo_is_stamped_when_not_deduped() -> bool:
     return True
 
 
+def test_final_answer_message_with_empty_text_does_not_crash() -> bool:
+    # Exact malformed line replayed from a real Codex rollout (line 316 of
+    # rollout-2026-07-14T23-36-47-019f6258-aff6-7202-9d71-9998cc35e99a.jsonl):
+    # a final_answer message whose only content block normalizes to empty
+    # text used to crash _mark_final_answer with a None event.
+    rows = _normalize({
+        "timestamp": "2026-07-15T08:35:11.721Z",
+        "type": "response_item",
+        "payload": {
+            "type": "message",
+            "id": "msg_0102aa8f02acf98d016a57463f83c081918f3f9678b552913e",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": ""}],
+            "phase": "final_answer",
+            "internal_chat_message_metadata_passthrough": {
+                "turn_id": "019f64ea-4fa6-72f0-bede-21cf99e95ff7",
+            },
+        },
+    })
+    if rows:
+        print(f"  expected no render rows for empty final-answer text, got {rows!r}")
+        return False
+    return True
+
+
 def test_unmapped_subagent_final_answer_is_stamped_with_origin() -> bool:
     rows = _normalize_many([
         _subagent_message(
@@ -396,6 +421,10 @@ TESTS = [
     (
         "response_item final echo stamped when not deduped",
         test_response_item_final_echo_is_stamped_when_not_deduped,
+    ),
+    (
+        "final_answer message with empty text does not crash",
+        test_final_answer_message_with_empty_text_does_not_crash,
     ),
     (
         "unmapped subagent final stamped with origin",
