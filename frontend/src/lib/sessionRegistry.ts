@@ -794,7 +794,7 @@ class SessionRegistry {
         agg = { running_count: 0, unread_session_count: 0 };
         out.set(key, agg);
       }
-      if (entryRunning(entry)) agg.running_count += 1;
+      if (entry.testape_active) agg.running_count += 1;
     }
     return out;
   }
@@ -812,7 +812,7 @@ class SessionRegistry {
     for (const entry of this.sessions.values()) {
       if (!entry.cwd) continue;
       if (this._aggregateKey(entry.cwd, entry.node_id) !== key) continue;
-      if (entryRunning(entry)) running += 1;
+      if (entry.testape_active) running += 1;
     }
     if (running === 0 && unreadSessions === 0) {
       this.projects.delete(key);
