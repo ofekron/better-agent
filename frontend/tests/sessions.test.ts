@@ -638,7 +638,7 @@ describe("sessions CRUD + subscribe lifecycle", () => {
     }));
 
     h.emit({
-      type: "error",
+      type: "delivery_rejected",
       data: {
         app_session_id: sessionId,
         session_id: sessionId,

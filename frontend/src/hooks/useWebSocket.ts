@@ -866,7 +866,7 @@ export function useWebSocket(
           if (sid) onTurnDetachedRef.current?.(sid);
         }
 
-        if (event.type === "error") {
+        if (event.type === "error" || event.type === "delivery_rejected") {
           const d = event.data as {
             app_session_id?: string;
             session_id?: string;
@@ -881,12 +881,12 @@ export function useWebSocket(
           });
           const sid =
             d?.app_session_id ?? d?.session_id ?? currentAppSessionIdRef.current ?? null;
-          logPromptSend("backend_error", {
+          logPromptSend(event.type === "delivery_rejected" ? "delivery_rejected" : "backend_error", {
             app_session_id: sid,
             client_id: d?.client_id ?? null,
             error: errorText,
           }, "error");
-          if (sid && d?.client_id) {
+          if (event.type === "delivery_rejected" && sid && d?.client_id) {
             onPromptSendErrorRef.current?.(sid, d.client_id, errorText);
           }
           if (sid) onTurnTerminalRef.current?.(sid);

@@ -25,25 +25,26 @@ from starlette.websockets import WebSocketDisconnect  # noqa: E402
 
 import main  # noqa: E402
 import auth  # noqa: E402
+import runtime_ownership  # noqa: E402
 from session_manager import manager as session_manager  # noqa: E402
 
 PASS = "\x1b[32mPASS\x1b[0m"
 FAIL = "\x1b[31mFAIL\x1b[0m"
 
 
-def _next_error(ws) -> dict:
+def _next_rejection(ws) -> dict:
     for _ in range(20):
         frame = ws.receive_json()
-        if frame.get("type") == "error":
+        if frame.get("type") == "delivery_rejected":
             return frame
-    raise AssertionError("no error frame received")
+    raise AssertionError("no delivery_rejected frame received")
 
 
 async def _raise_alter_error(_session_id: str) -> dict:
     raise HTTPException(status_code=400, detail="Message has no agent_message_uuid")
 
 
-def main_test() -> bool:
+def _main_test() -> bool:
     session = session_manager.create(
         name="alter-ws",
         model="m",
@@ -65,9 +66,9 @@ def main_test() -> bool:
                     "app_session_id": sid,
                     "send_mode": "alter",
                 })
-                first = _next_error(ws)
+                first = _next_rejection(ws)
                 ws.send_json({"type": "send_message", "prompt": ""})
-                second = _next_error(ws)
+                second = _next_rejection(ws)
                 disconnected = False
                 try:
                     ws.send_json({"type": "stop_message", "app_session_id": sid})
@@ -77,16 +78,21 @@ def main_test() -> bool:
         main._rewind_latest_user_for_alter = original
 
     ok = (
-        first.get("type") == "error"
+        first.get("type") == "delivery_rejected"
         and first.get("data", {}).get("error") == "Message has no agent_message_uuid"
-        and second.get("type") == "error"
+        and second.get("type") == "delivery_rejected"
         and not disconnected
     )
     print(
-        f"{PASS if ok else FAIL} invalid alter emits error and keeps websocket alive "
+        f"{PASS if ok else FAIL} invalid alter rejects delivery and keeps websocket alive "
         f"-- first={first!r} second={second!r}",
     )
     return ok
+
+
+def main_test() -> bool:
+    with runtime_ownership.runtime_writer():
+        return _main_test()
 
 
 if __name__ == "__main__":

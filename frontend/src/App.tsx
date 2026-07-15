@@ -1747,14 +1747,15 @@ function AppMain({
       (prompt) => prompt.client_id === clientId,
     );
   }, []);
-  const offlineEntryAcceptedByBackendSnapshot = useCallback(async (entry: OfflineQueueEntry) => {
-    if (entry.type === "create_session") return false;
-    const session = getNode(entry.sessionId) || sessions.find((item) => item.id === entry.sessionId);
+  const offlineEntryAcceptanceByBackendSnapshot = useCallback(async (entry: OfflineQueueEntry) => {
+    const sessionId = offlineEntrySessionId(entry);
+    const session = getNode(sessionId) || sessions.find((item) => item.id === sessionId);
     if (session && sessionSnapshotHasClientId(session, entry.clientId)) return true;
-    const response = await fetch(`${API}/api/sessions/${encodeURIComponent(entry.sessionId)}`, {
+    const response = await fetch(`${API}/api/sessions/${encodeURIComponent(sessionId)}`, {
       credentials: "include",
     });
-    if (!response.ok) return false;
+    if (response.status === 404) return false;
+    if (!response.ok) return null;
     const snapshot = (await response.json()) as Session;
     return sessionSnapshotHasClientId(snapshot, entry.clientId);
   }, [getNode, sessionSnapshotHasClientId, sessions]);
@@ -2331,7 +2332,7 @@ function AppMain({
           }
           if (
             entry.type !== "create_session"
-            && await offlineEntryAcceptedByBackendSnapshot(entry)
+            && await offlineEntryAcceptanceByBackendSnapshot(entry) === true
           ) {
             logPromptSend("offline_flush_skip_accepted_snapshot", {
               type: entry.type,
@@ -2520,7 +2521,7 @@ function AppMain({
     sendMessage,
     setPendingForSession,
     offlineRetryTick,
-    offlineEntryAcceptedByBackendSnapshot,
+    offlineEntryAcceptanceByBackendSnapshot,
     removeAckedOfflineAction,
     removePendingForSessionByClientId,
     takePendingQueueDraft,
@@ -5360,15 +5361,17 @@ function AppMain({
   }, [currentSession, handleDraftChange, handleSend, handleVoiceNewSession]);
 
   const handleRetry = useCallback(
-    (message: ChatMessage) => {
+    async (message: ChatMessage) => {
       if (!currentSession) return;
       const sessionId = currentSession.id;
-      const failedOfflineEntry = offlineQueue.getAll().find(
+      const unresolvedOfflineEntry = offlineQueue.getAll().find(
         (entry) =>
           offlineEntrySessionId(entry) === sessionId
-          && entry.clientId === message.id
-          && entry.failure,
+          && entry.clientId === message.id,
       );
+      const failedOfflineEntry = unresolvedOfflineEntry?.failure
+        ? unresolvedOfflineEntry
+        : undefined;
       if (failedOfflineEntry) {
         offlineDispatchedRef.current.delete(offlineDispatchKey(sessionId, message.id));
         setPendingForSession(sessionId, (prev) =>
@@ -5379,6 +5382,25 @@ function AppMain({
           )
         );
         void offlineQueue.retryFailed(failedOfflineEntry);
+        return;
+      }
+      if (unresolvedOfflineEntry) {
+        const acceptance = await offlineEntryAcceptanceByBackendSnapshot(unresolvedOfflineEntry);
+        if (acceptance === null) return;
+        if (acceptance) {
+          await removeAckedOfflineAction(sessionId, message.id);
+          removePendingForSessionByClientId(sessionId, message.id);
+          return;
+        }
+        offlineDispatchedRef.current.delete(offlineDispatchKey(sessionId, message.id));
+        setPendingForSession(sessionId, (prev) =>
+          prev.map((pending) =>
+            pending.id === message.id
+              ? { ...pending, status: "sending" as const, errorText: undefined }
+              : pending
+          )
+        );
+        setOfflineRetryTick((tick) => tick + 1);
         return;
       }
       const images = retryPayloadsRef.current.get(message.id) ?? [];
@@ -5421,7 +5443,18 @@ function AppMain({
         );
       }
     },
-    [currentSession, model, cwd, sendMessage, setPendingForSession, offlineQueue, offlineDispatchKey]
+    [
+      currentSession,
+      model,
+      cwd,
+      sendMessage,
+      setPendingForSession,
+      offlineQueue,
+      offlineDispatchKey,
+      offlineEntryAcceptanceByBackendSnapshot,
+      removeAckedOfflineAction,
+      removePendingForSessionByClientId,
+    ]
   );
 
   const handleStop = useCallback(() => {

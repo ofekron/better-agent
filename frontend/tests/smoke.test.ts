@@ -233,9 +233,15 @@ describe("harness smoke", () => {
     const h = await renderApp({ seed: { sessions: [session] } });
     await h.selectSession(session.id);
     await h.typeAndSend("oops");
+    const sent = h.outbound.find((frame) => frame.type === "send_message")!;
+    const clientId = sent.client_id as string;
+    await expect.poll(async () => (await loadOfflineActions()).length).toBeGreaterThan(0);
 
     h.emit({ type: "turn_start", data: { session_id: session.id } });
-    h.emit({ type: "error", data: { error: "boom", session_id: session.id } });
+    h.emit({
+      type: "error",
+      data: { error: "boom", session_id: session.id, client_id: clientId },
+    });
     await h.flush();
 
     const view = h.toJSON();
@@ -248,6 +254,22 @@ describe("harness smoke", () => {
     // No active runs — error event drives the streaming flag back to false.
     expect(view.chat.running).toBe(false);
     expect(view.input.disabled).toBe(false);
+    await expect.poll(async () => await loadOfflineActions()).toEqual([
+      expect.objectContaining({
+        sessionId: session.id,
+        clientId,
+      }),
+    ]);
+    expect((await loadOfflineActions())[0]).not.toHaveProperty("failure");
+
+    h.backend.state.sessions[0].messages = [makeUserMsg({
+      id: "accepted-after-ambiguous-error",
+      content: "oops",
+      client_id: clientId,
+    })];
+    await h.clickByText(/^(Retry|message\.retry)$/);
+    await expect.poll(async () => (await loadOfflineActions()).length).toBe(0);
+    expect(h.outbound.filter((frame) => frame.type === "send_message")).toHaveLength(1);
 
     h.unmount();
   });
@@ -263,7 +285,7 @@ describe("harness smoke", () => {
     await expect.poll(async () => (await loadOfflineActions()).length).toBeGreaterThan(0);
 
     h.emit({
-      type: "error",
+      type: "delivery_rejected",
       data: {
         app_session_id: session.id,
         session_id: session.id,
