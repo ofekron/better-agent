@@ -9520,16 +9520,19 @@ async def delete_session(session_id: str):
                 )
             except PermissionError:
                 raise HTTPException(status_code=403, detail="extension does not own this virtual session")
-            if deleted:
-                await coordinator.broadcast_global(
-                    "session_deleted",
-                    {"session_id": session_id},
-                )
-            return {"deleted": deleted}
+            if not deleted:
+                raise HTTPException(status_code=404, detail="session not found")
+            await coordinator.broadcast_global(
+                "session_deleted",
+                {"session_id": session_id},
+            )
+            return {"deleted": True}
         _t = _time.perf_counter()
         ok = await _delete_session_tree(session_id)
         _mark("delete_session_tree", _t)
-        return {"deleted": ok}
+        if not ok:
+            raise HTTPException(status_code=404, detail="session not found")
+        return {"deleted": True}
     finally:
         total_ms = (_time.perf_counter() - _t_total) * 1000.0
         per_step = ", ".join(f"{name}={ms:.0f}ms" for name, ms in _steps)
