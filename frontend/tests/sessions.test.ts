@@ -197,6 +197,74 @@ describe("sessions CRUD + subscribe lifecycle", () => {
     h.unmount();
   });
 
+  it("keeps first-prompt auto-title when the user-message ack refresh returns an older list row", async () => {
+    const h = await renderApp({
+      seed: {
+        sessions: [],
+        projects: [{
+          path: "/tmp/project",
+          name: "project",
+          created_at: new Date().toISOString(),
+          last_used: new Date().toISOString(),
+        }],
+      },
+    });
+    await clickNewSession(h);
+    await h.click(".modal-footer .btn-primary");
+    await h.flush();
+
+    h.emit({
+      type: "session_renamed",
+      data: { session_id: "sess-1", name: "first prompt title" },
+    });
+    await h.flush();
+
+    expect(h.backend.state.sessions[0].name).toBe("New Session");
+    h.emit({
+      type: "user_message_persisted",
+      data: {
+        session_id: "sess-1",
+        user_message: makeUserMsg({
+          content: "first prompt title",
+          client_id: "first-prompt-client",
+        }),
+      },
+    });
+    await h.flush();
+
+    expect(h.toJSON().sidebar.sessions[0].name).toContain("first prompt title");
+    expect(h.toJSON().chat.title).toContain("first prompt title");
+
+    h.backend.state.sessions[0].name = "first prompt title";
+    h.emit({
+      type: "user_message_persisted",
+      data: {
+        session_id: "sess-1",
+        user_message: makeUserMsg({
+          content: "refresh after backend catch-up",
+          client_id: "catch-up-client",
+        }),
+      },
+    });
+    await h.flush();
+
+    h.backend.state.sessions[0].name = "authoritative later title";
+    h.emit({
+      type: "user_message_persisted",
+      data: {
+        session_id: "sess-1",
+        user_message: makeUserMsg({
+          content: "refresh after authoritative rename",
+          client_id: "authoritative-client",
+        }),
+      },
+    });
+    await h.flush();
+
+    expect(h.toJSON().sidebar.sessions[0].name).toContain("authoritative later title");
+    h.unmount();
+  });
+
   it("creates a session through REST when WebSocket is disconnected but HTTP is online", async () => {
     const h = await renderApp({
       seed: {

@@ -811,6 +811,7 @@ export function useSession(authStatus?: string) {
   const pendingReplayRef = useRef<
     { sessionId: string; messages: ChatMessage[] }[]
   >([]);
+  const liveSessionNamesRef = useRef<Map<string, string>>(new Map());
   const sessionTreeCacheRef = useRef<Map<string, Session>>(new Map());
   const sessionTreeRootByNodeRef = useRef<Map<string, string>>(new Map());
 
@@ -1123,16 +1124,25 @@ export function useSession(authStatus?: string) {
       // subscribes to (SessionStatusBadge) mid-render triggers React's
       // "getSnapshot should be cached" infinite loop (#185). Registry
       // seeding happens in `fetchSessionPage`, outside the updater.
+      const pageWithLiveNames = page.map((session) => {
+        const liveName = liveSessionNamesRef.current.get(session.id);
+        if (!liveName) return session;
+        if (session.name === liveName) {
+          liveSessionNamesRef.current.delete(session.id);
+          return session;
+        }
+        return { ...session, name: liveName };
+      });
       if (replace) {
-        const backendIds = new Set(page.map((s) => s.id));
+        const backendIds = new Set(pageWithLiveNames.map((s) => s.id));
         const pendingOffline = prev.filter(
           (s) => s.offline_pending && !backendIds.has(s.id),
         );
-        return sortForList([...pendingOffline, ...page]);
+        return sortForList([...pendingOffline, ...pageWithLiveNames]);
       }
       const existingIds = new Set(prev.map((s) => s.id));
       return sortForList(
-        [...prev, ...page.filter((s) => !existingIds.has(s.id))],
+        [...prev, ...pageWithLiveNames.filter((s) => !existingIds.has(s.id))],
       );
     },
     [sortForList],
@@ -1763,6 +1773,7 @@ export function useSession(authStatus?: string) {
     }
   }, [cachedSessionTreeFor, exchangePageSize, markSessionOpened]);
   const removeSessionLocally = useCallback((id: string) => {
+    liveSessionNamesRef.current.delete(id);
     forgetSessionTree(id);
     setSessions((prev) => {
       if (!prev.some((s) => s.id === id)) return prev;
@@ -2507,6 +2518,7 @@ export function useSession(authStatus?: string) {
 
   const updateSessionName = useCallback(
     (sessionId: string, name: string) => {
+      liveSessionNamesRef.current.set(sessionId, name);
       setSessions((prev) =>
         prev.map((s) => (s.id === sessionId ? { ...s, name } : s))
       );
