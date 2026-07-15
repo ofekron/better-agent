@@ -85,6 +85,99 @@ def test_projected_proxy_recomputes_length_and_preserves_duplicate_headers():
         asyncio.run(client.aclose())
 
 
+def test_bff_websocket_close_code_sanitizer_maps_reserved_codes():
+    from websockets.frames import CloseCode
+
+    import bff_server
+
+    assert bff_server._browser_ws_close_code(1008) == 1008
+    assert bff_server._browser_ws_close_code(CloseCode.INTERNAL_ERROR) == 1011
+    assert bff_server._browser_ws_close_code(3000) == 3000
+    assert bff_server._browser_ws_close_code(4999) == 4999
+
+    for code in (None, object(), 999, 1005, 1006, 1015, 5000):
+        assert bff_server._browser_ws_close_code(code) == 1000
+
+
+def test_bff_websocket_proxy_maps_abnormal_upstream_close_to_normal():
+    import asyncio
+    from types import SimpleNamespace
+
+    from websockets.frames import CloseCode
+
+    import bff_server
+
+    class FakeLease:
+        descriptor = {"kind": "tcp", "host": "127.0.0.1", "port": 1}
+
+        async def release(self) -> None:
+            pass
+
+    class FakeRuntimeUpstream:
+        async def acquire(self) -> FakeLease:
+            return FakeLease()
+
+    class FakeUpstream:
+        close_code = CloseCode.ABNORMAL_CLOSURE
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise StopAsyncIteration
+
+        async def send(self, _data):
+            pass
+
+        async def close(self) -> None:
+            pass
+
+    class FakeWebSocket:
+        url = SimpleNamespace(path="/ws/chat", query="", scheme="ws")
+        headers = SimpleNamespace(raw=[], get=lambda _key: None)
+        client = SimpleNamespace(host="127.0.0.1")
+
+        def __init__(self) -> None:
+            self.accepted = False
+            self.close_code: int | None = None
+
+        async def accept(self) -> None:
+            self.accepted = True
+
+        async def receive(self):
+            await asyncio.Future()
+
+        async def send_text(self, _frame: str) -> None:
+            pass
+
+        async def send_bytes(self, _frame: bytes) -> None:
+            pass
+
+        async def close(self, code: int = 1000, reason: str | None = None) -> None:
+            self.close_code = code
+
+    async def exercise() -> FakeWebSocket:
+        previous_runtime = bff_server.runtime_upstream
+        previous_connect = bff_server.websockets.connect
+        websocket = FakeWebSocket()
+
+        async def fake_connect(*_args, **_kwargs):
+            return FakeUpstream()
+
+        bff_server.runtime_upstream = FakeRuntimeUpstream()
+        bff_server.websockets.connect = fake_connect
+        try:
+            await bff_server.proxy_ws(websocket, "chat")
+        finally:
+            bff_server.websockets.connect = previous_connect
+            bff_server.runtime_upstream = previous_runtime
+        return websocket
+
+    websocket = asyncio.run(exercise())
+    assert websocket.accepted is True
+    assert websocket.close_code == 1000
+
+
 def test_runtime_upstream_rotates_endpoint_and_drains_active_generation():
     import asyncio
     import httpx

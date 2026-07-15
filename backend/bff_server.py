@@ -53,11 +53,35 @@ _HOP_BY_HOP = {
     "te", "trailers", "transfer-encoding", "upgrade", "host", "content-length",
 }
 _PROXY_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"]
+_BROWSER_WS_CLOSE_CODES = frozenset({
+    1000,
+    1001,
+    1002,
+    1003,
+    1007,
+    1008,
+    1009,
+    1010,
+    1011,
+    1012,
+    1013,
+    1014,
+})
 
 
 def _dist_dir() -> Path:
     override = os.environ.get("BETTER_AGENT_BFF_DIST")
     return Path(override) if override else frontend_dist_dir()
+
+
+def _browser_ws_close_code(upstream_code: object) -> int:
+    try:
+        code = int(upstream_code)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 1000
+    if code in _BROWSER_WS_CLOSE_CODES or 3000 <= code < 5000:
+        return code
+    return 1000
 
 
 @app.on_event("startup")
@@ -365,9 +389,7 @@ async def proxy_ws(websocket: WebSocket, _path: str) -> None:
     hub.detach(connection)
     close_code = getattr(upstream, "close_code", None)
     with contextlib.suppress(RuntimeError):
-        await websocket.close(
-            code=close_code if isinstance(close_code, int) and 1000 <= close_code < 5000 else 1000
-        )
+        await websocket.close(code=_browser_ws_close_code(close_code))
 
 
 def _mount_spa() -> None:
