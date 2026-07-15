@@ -12624,6 +12624,8 @@ async def on_startup():
     loop = asyncio.get_running_loop()
     native_files.bind_owner_loop(loop)
     acquire_backend_instance_lock()
+    import runtime_ownership
+    runtime_ownership.register_current_process_writer()
     from canonical_runtime_journal import canonical_runtime_journal
     journal = canonical_runtime_journal()
     await asyncio.to_thread(journal.resolve_pending_deletions)

@@ -101,6 +101,56 @@ raise SystemExit(1)
             )
 
 
+def test_importing_session_manager_does_not_claim_runtime_writer_lock():
+    """Regression: SessionManager.__init__ must not auto-claim the runtime
+    writer lock. A per-turn runner subprocess transitively imports
+    session_manager (e.g. via extension_store -> extension_backend_loader
+    -> orchestrator) without ever intending to be the exclusive session-root
+    writer; if construction alone claimed the lock, that subprocess would
+    hold it for its entire lifetime and block every backend restart while
+    any turn is in flight."""
+    with tempfile.TemporaryDirectory(prefix="ba-runtime-import-only-") as home:
+        importer_script = """
+import os
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path.cwd() / "backend"))
+import session_manager
+assert session_manager.manager is not None
+print("imported", flush=True)
+sys.stdin.read()
+"""
+        importer = subprocess.Popen(
+            [sys.executable, "-c", importer_script],
+            cwd=Path(__file__).resolve().parents[2],
+            env={**os.environ, "BETTER_AGENT_HOME": home},
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            assert importer.stdout is not None
+            assert importer.stdout.readline().strip() == "imported"
+            check_script = """
+import os
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path.cwd() / "backend"))
+import runtime_ownership
+raise SystemExit(0 if runtime_ownership.acquire_runtime_writer_lock() else 1)
+"""
+            still_free = subprocess.run(
+                [sys.executable, "-c", check_script],
+                cwd=Path(__file__).resolve().parents[2],
+                env={**os.environ, "BETTER_AGENT_HOME": home},
+            )
+            assert still_free.returncode == 0
+        finally:
+            if importer.poll() is None:
+                importer.kill()
+                importer.wait(timeout=10)
+
+
 def test_runtime_writer_lock_rejects_second_live_holder_and_releases_on_kill():
     with tempfile.TemporaryDirectory(prefix="ba-runtime-crash-lock-") as home:
         script = """
