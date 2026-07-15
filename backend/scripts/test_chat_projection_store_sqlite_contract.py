@@ -11,6 +11,7 @@ import struct
 import sys
 import tempfile
 import threading
+from unittest import mock
 from dataclasses import replace
 from pathlib import Path
 
@@ -29,6 +30,7 @@ from chat_projection_store_sqlite import (
     SQLiteChatProjectionStore, _encode_json_bounded, canonical_json,
 )
 from chat_projection_store_owner import encode_frame, receive_frame, send_frame, serve_owner
+import chat_projection_store_owner as owner_transport
 
 
 FIXTURE = ROOT / "test-contracts" / "chat-panel" / "v1" / "canonical-session.json"
@@ -677,6 +679,39 @@ def test_owner_timeout_ambiguity_protocol_poison_and_idempotent_close() -> None:
 
 
 def test_response_page_budget_timeout_admission_and_close_failure() -> None:
+    for failure_name in ("socketpair", "settimeout"):
+        failure_path = _path(f"init-{failure_name}-failure")
+        descriptors_before = len(os.listdir("/dev/fd"))
+        real_socketpair = socket.socketpair
+        sockets = []
+        def failing_socketpair():
+            if failure_name == "socketpair":
+                raise OSError("injected socketpair failure")
+            parent, child = real_socketpair()
+            sockets.extend((parent, child))
+            class FailingTimeoutSocket:
+                def settimeout(self, _value) -> None:
+                    raise OSError("injected settimeout failure")
+                def close(self) -> None:
+                    parent.close()
+            return FailingTimeoutSocket(), child
+        with (
+            mock.patch.object(owner_transport.socket, "socketpair", side_effect=failing_socketpair),
+            mock.patch.object(owner_transport.subprocess, "Popen") as launch,
+        ):
+            _assert_error("owner_start_failed", lambda: SQLiteChatProjectionStore(failure_path))
+            launch.assert_not_called()
+        assert not failure_path.exists()
+        assert all(item.fileno() == -1 for item in sockets)
+        assert len(os.listdir("/dev/fd")) == descriptors_before
+
+    existing_path = _path("init-failure-existing")
+    existing = SQLiteChatProjectionStore(existing_path)
+    existing.close()
+    with mock.patch.object(owner_transport.socket, "socketpair", side_effect=OSError("injected")):
+        _assert_error("owner_start_failed", lambda: SQLiteChatProjectionStore(existing_path))
+    assert existing_path.exists()
+
     timeout_path = _path("invalid-timeout")
     for invalid in (float("nan"), float("inf"), float("-inf"), 0.01, 301, True):
         _assert_error(
@@ -700,6 +735,8 @@ def test_response_page_budget_timeout_admission_and_close_failure() -> None:
         ),
     )
     assert not startup_path.exists()
+    assert not startup_path.with_name(f"{startup_path.name}-wal").exists()
+    assert not startup_path.with_name(f"{startup_path.name}-shm").exists()
     for invalid in (float("nan"), float("inf"), 0.01, 301, True):
         _assert_error(
             "invalid_input",

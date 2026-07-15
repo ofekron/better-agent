@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from chat_projection_store import ChatProjectionStoreError
-from chat_projection_store_owner_path import secure_open
+from chat_projection_store_owner_path import cleanup_created_store, secure_open
 
 
 MIN_TIMEOUT_SECONDS = 0.05
@@ -95,24 +95,28 @@ class OwnerClient:
         self.path, self.parent_fd, self.file_fd, created = secure_open(root_path, path)
         self.process: subprocess.Popen | None = None
         self.channel: socket.socket | None = None
-        parent_channel, child_channel = socket.socketpair()
-        parent_channel.settimeout(self.startup_timeout_seconds)
-        launcher = "import os,runpy,sys;sys.argv=sys.argv[1:];sys.path.insert(0,os.path.dirname(sys.argv[0]));runpy.run_path(sys.argv[0],run_name='__main__')"
-        command = [
-            sys.executable, "-I", "-c", launcher, str(owner_script.resolve()), "--projection-owner",
-            str(child_channel.fileno()), str(self.parent_fd), str(self.file_fd), self.path.name,
-            *owner_arguments,
-        ]
+        parent_channel = None
+        child_channel = None
+        child_started = False
         startup_response_received = False
         try:
+            parent_channel, child_channel = socket.socketpair()
+            parent_channel.settimeout(self.startup_timeout_seconds)
+            launcher = "import os,runpy,sys;sys.argv=sys.argv[1:];sys.path.insert(0,os.path.dirname(sys.argv[0]));runpy.run_path(sys.argv[0],run_name='__main__')"
+            command = [
+                sys.executable, "-I", "-c", launcher, str(owner_script.resolve()), "--projection-owner",
+                str(child_channel.fileno()), str(self.parent_fd), str(self.file_fd), self.path.name,
+                *owner_arguments,
+            ]
             self.process = subprocess.Popen(
                 command, pass_fds=(child_channel.fileno(), self.parent_fd, self.file_fd),
                 env={"PATH": "/usr/bin:/bin", "PYTHONIOENCODING": "utf-8"},
                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 close_fds=True,
             )
+            child_started = True
             child_channel.close()
-            self.channel = parent_channel
+            child_channel = None
             response = receive_frame(parent_channel)
             startup_response_received = True
             if set(response) == {"error"} and isinstance(response["error"], Mapping) and set(response["error"]) == {"code", "detail"}:
@@ -120,24 +124,28 @@ class OwnerClient:
             if response != {"ready": True}:
                 raise ChatProjectionStoreError("owner_protocol_error", "projection owner did not initialize")
             parent_channel.settimeout(self.ipc_timeout_seconds)
+            self.channel = parent_channel
+            parent_channel = None
         except BaseException as exc:
             try:
-                parent_channel.close()
+                if parent_channel is not None:
+                    parent_channel.close()
             except BaseException:
                 pass
             try:
-                child_channel.close()
+                if child_channel is not None:
+                    child_channel.close()
             except BaseException:
                 pass
             try:
                 self._terminate_process()
             except BaseException:
                 pass
-            if created:
-                try:
-                    os.unlink(self.path.name, dir_fd=self.parent_fd)
-                except OSError:
-                    pass
+            if created and self.parent_fd is not None and self.file_fd is not None:
+                cleanup_created_store(
+                    self.parent_fd, self.file_fd, self.path.name,
+                    include_sidecars=child_started,
+                )
             self._close_handles()
             if startup_response_received and isinstance(exc, ChatProjectionStoreError):
                 raise

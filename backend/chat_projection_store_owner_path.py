@@ -28,6 +28,25 @@ def verify_anchored_file(file_fd: int, basename: str) -> None:
         raise ChatProjectionStoreError("path_race", "chat store file changed during owner open")
 
 
+def cleanup_created_store(parent_fd: int, file_fd: int, basename: str, *, include_sidecars: bool) -> None:
+    try:
+        expected = os.fstat(file_fd)
+        visible = os.stat(basename, dir_fd=parent_fd, follow_symlinks=False)
+    except OSError:
+        return
+    if (expected.st_dev, expected.st_ino) != (visible.st_dev, visible.st_ino):
+        return
+    names = (f"{basename}-wal", f"{basename}-shm", basename) if include_sidecars else (basename,)
+    for name in names:
+        try:
+            metadata = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid():
+                continue
+            os.unlink(name, dir_fd=parent_fd)
+        except OSError:
+            pass
+
+
 def _open_directory_chain(root: Path, relative_parts: tuple[str, ...]) -> int:
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
     current = os.open("/", flags)
