@@ -74,7 +74,7 @@ from extension_run_policy import disabled_builtin_extensions_for_run
 from provider_env import is_ollama_base_url
 from reasoning_effort import CLAUDE_REASONING_EFFORTS, DEFAULT_REASONING_EFFORT
 import git_policy
-from provider_lifecycle import LifecycleOutcome, RunLifecycleCoordinator
+from provider_lifecycle import LifecycleOutcome, RunLifecycleCoordinator, ensure_runtime_owner
 
 logger = logging.getLogger(__name__)
 
@@ -549,8 +549,7 @@ class ClaudeProvider(Provider):
             provisioned_tool_profile=provisioned_tool_profile,
         )
 
-        if self._lifecycle is None:
-            self._lifecycle = RunLifecycleCoordinator(loop)
+        self._lifecycle = ensure_runtime_owner(self._lifecycle, loop)
         task = schedule_loop_task(
             loop,
             self._admit_and_spawn(spawn_kwargs),
@@ -1686,8 +1685,7 @@ class ClaudeProvider(Provider):
             cwd=str(desc.get("cwd") or ""),
         )
         rs.recovered_attach = True
-        if self._lifecycle is None:
-            self._lifecycle = RunLifecycleCoordinator(loop)
+        self._lifecycle = ensure_runtime_owner(self._lifecycle, loop)
         self._recovery_attach_pending.add(run_id)
         self._recovery_pending_states[run_id] = rs
         task = schedule_loop_task(

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import copy
+import threading
 import time
 import uuid
 from dataclasses import dataclass
@@ -14,6 +15,26 @@ import perf
 
 
 T = TypeVar("T")
+
+
+_RUNTIME_OWNER_LOOP: asyncio.AbstractEventLoop | None = None
+_RUNTIME_OWNER_LOCK = threading.Lock()
+
+
+def bind_runtime_owner_loop(loop: asyncio.AbstractEventLoop) -> None:
+    if loop.is_closed():
+        raise ValueError("provider lifecycle runtime owner loop must be open")
+    global _RUNTIME_OWNER_LOOP
+    with _RUNTIME_OWNER_LOCK:
+        _RUNTIME_OWNER_LOOP = loop
+
+
+def runtime_owner_loop(
+    calling_loop: asyncio.AbstractEventLoop,
+) -> asyncio.AbstractEventLoop:
+    with _RUNTIME_OWNER_LOCK:
+        owner = _RUNTIME_OWNER_LOOP
+    return owner if owner is not None and not owner.is_closed() else calling_loop
 
 
 class LifecycleOutcome(str, Enum):
@@ -120,6 +141,16 @@ class RunLifecycleCoordinator(Generic[T]):
     @property
     def owner_loop(self) -> asyncio.AbstractEventLoop:
         return self._loop
+
+    @property
+    def pristine(self) -> bool:
+        return (
+            self._generation == 0
+            and self._accepting
+            and not self._reservations
+            and not self._published
+            and self._shutdown_inventory is None
+        )
 
     def _submit(self, callback: Callable[[], None]) -> None:
         if self._loop.is_closed():
@@ -267,3 +298,19 @@ class RunLifecycleCoordinator(Generic[T]):
             return self._shutdown_inventory
 
         return await self._request(apply)
+
+
+def ensure_runtime_owner(
+    lifecycle: RunLifecycleCoordinator[T] | None,
+    calling_loop: asyncio.AbstractEventLoop,
+) -> RunLifecycleCoordinator[T]:
+    owner = runtime_owner_loop(calling_loop)
+    if lifecycle is None:
+        return RunLifecycleCoordinator(owner)
+    if lifecycle.owner_loop is owner:
+        return lifecycle
+    if lifecycle.owner_loop.is_closed() or lifecycle.pristine:
+        return RunLifecycleCoordinator(owner)
+    raise LifecycleUnavailableError(
+        "active provider lifecycle belongs to a different owner loop"
+    )

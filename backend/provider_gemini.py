@@ -47,7 +47,7 @@ from provider import (
     runner_argv,
 )
 from provider_run_config import normalize_provider_run_config
-from provider_lifecycle import LifecycleOutcome, RunLifecycleCoordinator
+from provider_lifecycle import LifecycleOutcome, RunLifecycleCoordinator, ensure_runtime_owner
 from cli_paths import resolve_cli_binary
 from ingestion_versions import marker_matches_current
 from proc_control import process_control as _process_control
@@ -736,8 +736,7 @@ class GeminiProvider(Provider):
         spawn_kwargs["lifecycle_msg_id"] = spawn_kwargs.get("lifecycle_msg_id")
         loop = spawn_kwargs["loop"]
         run_id = spawn_kwargs["run_id"]
-        if self._lifecycle is None:
-            self._lifecycle = RunLifecycleCoordinator(loop)
+        self._lifecycle = ensure_runtime_owner(self._lifecycle, loop)
         task = schedule_loop_task(
             loop, self._admit_and_spawn(spawn_kwargs),
             name=f"{self.KIND}-admit-spawn-{run_id[:8]}",
@@ -1100,8 +1099,7 @@ class GeminiProvider(Provider):
             lifecycle_msg_id=desc.get("lifecycle_msg_id"),
         )
         rs.recovered_attach = True
-        if self._lifecycle is None:
-            self._lifecycle = RunLifecycleCoordinator(loop)
+        self._lifecycle = ensure_runtime_owner(self._lifecycle, loop)
         self._recovery_attach_pending.add(run_id)
         self._recovery_pending_states[run_id] = rs
         task = schedule_loop_task(

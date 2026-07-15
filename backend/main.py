@@ -12593,6 +12593,8 @@ async def on_startup():
     scheduled, not awaited inline.
     """
     loop = asyncio.get_running_loop()
+    from provider_lifecycle import bind_runtime_owner_loop
+    bind_runtime_owner_loop(loop)
     native_files.bind_owner_loop(loop)
     acquire_backend_instance_lock()
     import runtime_ownership

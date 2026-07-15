@@ -63,7 +63,7 @@ from runs_dir import (
 from ingestion_versions import CODEX_INGESTION_VERSION, marker_matches_current
 from codex_normalize import _codex_terminal_state
 from codex_usage import token_usage_from_codex_usage
-from provider_lifecycle import LifecycleOutcome, RunLifecycleCoordinator
+from provider_lifecycle import LifecycleOutcome, RunLifecycleCoordinator, ensure_runtime_owner
 
 logger = logging.getLogger(__name__)
 
@@ -585,8 +585,7 @@ class CodexProvider(Provider):
             disabled_builtin_extensions=disabled_builtin_extensions,
             provisioned_tool_profile=provisioned_tool_profile,
         )
-        if self._lifecycle is None:
-            self._lifecycle = RunLifecycleCoordinator(loop)
+        self._lifecycle = ensure_runtime_owner(self._lifecycle, loop)
         task = schedule_loop_task(
             loop, self._admit_and_spawn(spawn_kwargs),
             name=f"codex-admit-spawn-{run_id[:8]}",
@@ -1529,8 +1528,7 @@ class CodexProvider(Provider):
             lifecycle_msg_id=desc.get("lifecycle_msg_id"),
         )
         rs.recovered_attach = True
-        if self._lifecycle is None:
-            self._lifecycle = RunLifecycleCoordinator(loop)
+        self._lifecycle = ensure_runtime_owner(self._lifecycle, loop)
         self._recovery_attach_pending.add(run_id)
         self._recovery_pending_states[run_id] = rs
         task = schedule_loop_task(

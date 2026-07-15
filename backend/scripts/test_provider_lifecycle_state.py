@@ -17,6 +17,8 @@ from provider_lifecycle import (
     LifecycleOutcome,
     MutationResult,
     RunLifecycleCoordinator,
+    bind_runtime_owner_loop,
+    ensure_runtime_owner,
 )
 from provider import StreamEvent
 
@@ -69,6 +71,42 @@ async def deterministic_state_machine() -> None:
     assert len(inventory.reserved) == 1
     assert await lifecycle.shutdown() is inventory
     assert (await lifecycle.admit("late")).outcome is LifecycleOutcome.SHUTDOWN
+
+
+def runtime_generation_replaces_stale_provider_state() -> None:
+    first_loop = asyncio.new_event_loop()
+    second_loop = asyncio.new_event_loop()
+    calling_loop = asyncio.new_event_loop()
+    try:
+        bind_runtime_owner_loop(first_loop)
+        lifecycle = ensure_runtime_owner(None, calling_loop)
+        assert lifecycle.owner_loop is first_loop
+        first_loop.run_until_complete(lifecycle.admit("survives-restart"))
+        first_loop.close()
+
+        bind_runtime_owner_loop(second_loop)
+        replacement = ensure_runtime_owner(lifecycle, calling_loop)
+        assert replacement is not lifecycle
+        assert replacement.owner_loop is second_loop
+        result = second_loop.run_until_complete(replacement.admit("survives-restart"))
+        assert result.accepted
+
+        prebound = RunLifecycleCoordinator(calling_loop)
+        assert ensure_runtime_owner(prebound, calling_loop).owner_loop is second_loop
+
+        active_foreign = RunLifecycleCoordinator(calling_loop)
+        calling_loop.run_until_complete(active_foreign.admit("active"))
+        try:
+            ensure_runtime_owner(active_foreign, calling_loop)
+        except RuntimeError as exc:
+            assert "different owner loop" in str(exc)
+        else:
+            raise AssertionError("active foreign lifecycle must fail closed")
+    finally:
+        if not first_loop.is_closed():
+            first_loop.close()
+        second_loop.close()
+        calling_loop.close()
 
 
 async def real_descendant_inventory() -> None:
@@ -1585,6 +1623,7 @@ async def shared_provider_shutdown_hook_is_single_and_policy_aware() -> None:
 
 
 async def main() -> None:
+    await asyncio.to_thread(runtime_generation_replaces_stale_provider_state)
     await deterministic_state_machine()
     await real_descendant_inventory()
     await claude_shutdown_terminates_tree_and_cleans()
