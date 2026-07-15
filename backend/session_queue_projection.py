@@ -175,6 +175,29 @@ def _compact_loaded_record(record: dict[str, Any]) -> dict[str, Any]:
     return copy.deepcopy(record)
 
 
+def _queue_revision(record: dict[str, Any]) -> int:
+    try:
+        return int(record.get("queue_revision") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _regresses_queue_revision(
+    current: Optional[dict[str, Any]], incoming: Optional[dict[str, Any]],
+) -> bool:
+    """True when `incoming` was projected from a session state older than
+    the one `current` came from. `queue_revision` is bumped under the
+    per-root lock on every queued_prompts mutation, so within the single
+    runtime writer a lower revision always means a stale snapshot (e.g.
+    a debounced tail-persist tree copy taken before a newer mutation).
+    Applying it would resurrect consumed/removed queued prompts."""
+    return (
+        current is not None
+        and incoming is not None
+        and _queue_revision(incoming) < _queue_revision(current)
+    )
+
+
 def _decode_database(path_raw: str) -> tuple[dict[str, dict[str, Any]], int, int, int]:
     loaded: dict[str, dict[str, Any]] = {}
     bytes_read = 0
@@ -440,7 +463,12 @@ def _apply_mutation(session_id: str, record: Optional[dict[str, Any]]) -> tuple[
     _ensure_loaded()
     owned = copy.deepcopy(record)
     with _lock:
-        if (record is None and session_id not in _records) or _records.get(session_id) == owned:
+        current_record = _records.get(session_id)
+        if (
+            (record is None and session_id not in _records)
+            or current_record == owned
+            or _regresses_queue_revision(current_record, owned)
+        ):
             current = _journal.get(session_id)
             return (current[0] if current else _durable_sequence), False
         _sequence += 1
@@ -486,7 +514,8 @@ def note_persisted_tree(root: dict[str, Any]) -> int:
         for record in records:
             sid = record["id"]
             owned = copy.deepcopy(record)
-            if _records.get(sid) == owned:
+            current_record = _records.get(sid)
+            if current_record == owned or _regresses_queue_revision(current_record, owned):
                 continue
             _records[sid] = owned
             _journal[sid] = (high_water, owned)

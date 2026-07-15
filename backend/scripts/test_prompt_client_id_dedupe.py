@@ -27,6 +27,16 @@ PASS = "\x1b[32mPASS\x1b[0m"
 FAIL = "\x1b[31mFAIL\x1b[0m"
 
 
+def _report(name: str, checks: list[tuple[str, bool, object]]) -> bool:
+    ok = all(passed for _label, passed, _detail in checks)
+    print(f"{PASS if ok else FAIL} {name}")
+    if not ok:
+        for label, passed, detail in checks:
+            if not passed:
+                print(f"    failed invariant: {label} — got {detail!r}")
+    return ok
+
+
 def _reset_home() -> None:
     sessions_dir = Path(_TMP_HOME) / "sessions"
     if sessions_dir.exists():
@@ -86,13 +96,21 @@ def test_duplicate_client_id_dedupes_during_dequeue_gap() -> bool:
         })
         session_manager.flush_pending_persists()
         raw = session_store.get_session(sid) or {}
-        ok = (
-            first_id == "queued-first"
-            and second_id == "queued-first"
-            and q.empty()
-            and coord._active_prompt_client_ids.get((sid, "client-race")) == "queued-first"
-            and not (raw.get("queued_prompts") or [])
-        )
+        checks = [
+            ("first submit returns its own id", first_id == "queued-first", first_id),
+            ("second submit dedupes to first id", second_id == "queued-first", second_id),
+            ("queue drained", q.empty(), q.qsize()),
+            (
+                "client id claim held by first item",
+                coord._active_prompt_client_ids.get((sid, "client-race")) == "queued-first",
+                coord._active_prompt_client_ids.get((sid, "client-race")),
+            ),
+            (
+                "no queued_prompts persisted on disk",
+                not (raw.get("queued_prompts") or []),
+                raw.get("queued_prompts"),
+            ),
+        ]
     finally:
         coord._processor_tasks.pop(sid, None)
         coord._prompt_queues.pop(sid, None)
@@ -100,8 +118,7 @@ def test_duplicate_client_id_dedupes_during_dequeue_gap() -> bool:
         coord._active_prompt_client_ids.clear()
         coord._prompt_client_id_by_item.clear()
 
-    print(f"{PASS if ok else FAIL} duplicate client id dedupes during dequeue gap")
-    return ok
+    return _report("duplicate client id dedupes during dequeue gap", checks)
 
 
 def test_append_user_msg_dedupes_client_id() -> bool:
@@ -129,14 +146,13 @@ def test_append_user_msg_dedupes_client_id() -> bool:
         m for m in raw.get("messages") or []
         if m.get("client_id") == "client-final-guard"
     ]
-    ok = (
-        stored_first and stored_first.get("id") == "user-1"
-        and stored_second and stored_second.get("id") == "user-1"
-        and len(matches) == 1
-        and matches[0].get("content") == "first"
-    )
-    print(f"{PASS if ok else FAIL} append_user_msg dedupes client id")
-    return ok
+    checks = [
+        ("first append stored", bool(stored_first) and stored_first.get("id") == "user-1", stored_first),
+        ("second append dedupes to first", bool(stored_second) and stored_second.get("id") == "user-1", stored_second),
+        ("one persisted message for client id", len(matches) == 1, matches),
+        ("persisted content is first", bool(matches) and matches[0].get("content") == "first", matches),
+    ]
+    return _report("append_user_msg dedupes client id", checks)
 
 
 def test_queued_prompt_rejects_existing_user_client_id() -> bool:
@@ -156,13 +172,20 @@ def test_queued_prompt_rejects_existing_user_client_id() -> bool:
     })
     session_manager.flush_pending_persists()
     raw = session_store.get_session(sid) or {}
-    ok = (
-        admission.get("admitted") is False
-        and (admission.get("existing_user_message") or {}).get("id") == "user-existing"
-        and not (raw.get("queued_prompts") or [])
-    )
-    print(f"{PASS if ok else FAIL} queued prompt rejects existing user client id")
-    return ok
+    checks = [
+        ("admission rejected", admission.get("admitted") is False, admission.get("admitted")),
+        (
+            "existing user message surfaced",
+            (admission.get("existing_user_message") or {}).get("id") == "user-existing",
+            admission.get("existing_user_message"),
+        ),
+        (
+            "no queued_prompts persisted on disk",
+            not (raw.get("queued_prompts") or []),
+            raw.get("queued_prompts"),
+        ),
+    ]
+    return _report("queued prompt rejects existing user client id", checks)
 
 
 def test_queued_prompt_rejects_existing_queued_client_id() -> bool:
@@ -183,15 +206,18 @@ def test_queued_prompt_rejects_existing_queued_client_id() -> bool:
     session_manager.flush_pending_persists()
     raw = session_store.get_session(sid) or {}
     queued = raw.get("queued_prompts") or []
-    ok = (
-        first.get("admitted") is True
-        and second.get("admitted") is False
-        and (second.get("existing_queued_prompt") or {}).get("id") == "queued-existing"
-        and len(queued) == 1
-        and queued[0].get("content") == "first"
-    )
-    print(f"{PASS if ok else FAIL} queued prompt rejects existing queued client id")
-    return ok
+    checks = [
+        ("first admission accepted", first.get("admitted") is True, first.get("admitted")),
+        ("second admission rejected", second.get("admitted") is False, second.get("admitted")),
+        (
+            "existing queued prompt surfaced",
+            (second.get("existing_queued_prompt") or {}).get("id") == "queued-existing",
+            second.get("existing_queued_prompt"),
+        ),
+        ("one queued prompt persisted", len(queued) == 1, queued),
+        ("persisted content is first", bool(queued) and queued[0].get("content") == "first", queued),
+    ]
+    return _report("queued prompt rejects existing queued client id", checks)
 
 
 def test_append_user_msg_queue_projection_uses_locked_snapshot() -> bool:
@@ -216,20 +242,55 @@ def test_append_user_msg_queue_projection_uses_locked_snapshot() -> bool:
         session_queue_projection.upsert_from_session = original
 
     record = session_queue_projection.get(sid) or {}
-    ok = (
-        live_ref_seen["value"] is False
-        and (record.get("user_message_acks") or {}).get("client-projection", {}).get("id")
-        == "user-projection"
-    )
-    print(
-        f"{PASS if ok else FAIL} append_user_msg queue projection uses locked snapshot",
-    )
-    return ok
+    checks = [
+        ("projection received a snapshot, not the live ref", live_ref_seen["value"] is False, live_ref_seen["value"]),
+        (
+            "projection ack recorded",
+            (record.get("user_message_acks") or {}).get("client-projection", {}).get("id")
+            == "user-projection",
+            record.get("user_message_acks"),
+        ),
+    ]
+    return _report("append_user_msg queue projection uses locked snapshot", checks)
+
+
+def test_stale_tail_persist_cannot_resurrect_removed_prompt() -> bool:
+    _reset_home()
+    sid = _create_session()
+    session_manager.add_queued_prompt(sid, {
+        "id": "queued-stale",
+        "kind": "send",
+        "content": "stale",
+        "client_id": "client-stale",
+    })
+    # Tail-persist snapshot taken while the prompt is still queued.
+    stale_copy = session_store.copy_persistable_tree(session_manager.get_ref(sid))
+    session_manager.remove_queued_prompt(sid, "queued-stale")
+    # Delayed tail write lands after the remove: its note_persisted_tree
+    # must not regress the projection past the newer remove.
+    session_queue_projection.note_persisted_tree(stale_copy)
+    session_manager.flush_pending_persists()
+    raw = session_store.get_session(sid) or {}
+    record = session_queue_projection.get(sid) or {}
+    checks = [
+        (
+            "projection not regressed by stale tree",
+            not (record.get("queued_prompts") or []),
+            record.get("queued_prompts"),
+        ),
+        (
+            "no queued_prompts persisted on disk",
+            not (raw.get("queued_prompts") or []),
+            raw.get("queued_prompts"),
+        ),
+    ]
+    return _report("stale tail persist cannot resurrect removed prompt", checks)
 
 
 def main_runner() -> int:
     tests = [
         test_duplicate_client_id_dedupes_during_dequeue_gap,
+        test_stale_tail_persist_cannot_resurrect_removed_prompt,
         test_append_user_msg_dedupes_client_id,
         test_queued_prompt_rejects_existing_user_client_id,
         test_queued_prompt_rejects_existing_queued_client_id,

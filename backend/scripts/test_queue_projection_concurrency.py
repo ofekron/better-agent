@@ -152,6 +152,35 @@ def test_sigkill_mid_transaction_preserves_committed_snapshot() -> None:
     assert projection.get("crash-row")["value"] == "old"
 
 
+def test_stale_lower_queue_revision_never_regresses_projection() -> None:
+    sid = "revision-guard"
+    stale = {
+        "id": sid, "messages": [], "forks": [],
+        "queued_prompts": [{"id": "q-stale"}], "queue_revision": 1,
+    }
+    newer = {
+        "id": sid, "messages": [], "forks": [],
+        "queued_prompts": [], "queue_revision": 2,
+    }
+    projection.upsert_record(projection.project_session(newer))
+    projection.note_persisted_tree(stale)
+    record = projection.get(sid)
+    assert record["queued_prompts"] == [], f"note_persisted_tree regressed: {record}"
+    assert record["queue_revision"] == 2, f"note_persisted_tree regressed: {record}"
+    projection.upsert_record_background(projection.project_session(stale))
+    record = projection.get(sid)
+    assert record["queued_prompts"] == [], f"background upsert regressed: {record}"
+    assert record["queue_revision"] == 2, f"background upsert regressed: {record}"
+    # Equal-or-newer revisions still apply.
+    projection.note_persisted_tree({
+        "id": sid, "messages": [], "forks": [],
+        "queued_prompts": [{"id": "q-new"}], "queue_revision": 3,
+    })
+    record = projection.get(sid)
+    assert record["queue_revision"] == 3, f"newer revision refused: {record}"
+    assert [p["id"] for p in record["queued_prompts"]] == ["q-new"], record
+
+
 def main() -> None:
     if len(sys.argv) == 4 and sys.argv[1] == "--crash-child":
         _crash_child(sys.argv[2], sys.argv[3])
@@ -162,6 +191,7 @@ def main() -> None:
             test_concurrent_upsert_delete_and_queue_consumption_converge,
             test_slow_transaction_keeps_event_loop_heartbeat_alive,
             test_sigkill_mid_transaction_preserves_committed_snapshot,
+            test_stale_lower_queue_revision_never_regresses_projection,
         ):
             test()
             print(f"PASS {test.__name__}")
