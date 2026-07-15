@@ -4,6 +4,7 @@ import hashlib
 import json
 import sqlite3
 import threading
+from functools import wraps
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
@@ -17,26 +18,83 @@ from paths import ba_home, is_test_mode
 SCHEMA_VERSION = 2
 MAX_JSON_BYTES = 16 * 1024 * 1024
 MAX_READ_LIMIT = 10_000
+MAX_JSON_DEPTH = 64
+MAX_JSON_NODES = 100_000
+MAX_JSON_LIST_ITEMS = 50_000
+MAX_JSON_OBJECT_ITEMS = 50_000
+MAX_TEXT_BYTES = 4_096
+MAX_COMMIT_BYTES = MAX_JSON_BYTES
+
+TABLE_DDL = {
+    "selected_roots": "CREATE TABLE selected_roots(root_id TEXT PRIMARY KEY, root_generation INTEGER NOT NULL)",
+    "root_generation_heads": "CREATE TABLE root_generation_heads(root_id TEXT NOT NULL, root_generation INTEGER NOT NULL, fact_sequence INTEGER NOT NULL, revision INTEGER NOT NULL, projection_cursor INTEGER NOT NULL, PRIMARY KEY(root_id,root_generation))",
+    "canonical_facts": "CREATE TABLE canonical_facts(root_id TEXT NOT NULL, root_generation INTEGER NOT NULL, fact_sequence INTEGER NOT NULL, event_id TEXT NOT NULL, content_hash TEXT NOT NULL, fact_json TEXT NOT NULL, PRIMARY KEY(root_id,root_generation,fact_sequence), UNIQUE(root_id,root_generation,event_id,content_hash))",
+    "render_nodes": "CREATE TABLE render_nodes(root_id TEXT NOT NULL, root_generation INTEGER NOT NULL, event_id TEXT NOT NULL, node_json TEXT NOT NULL, PRIMARY KEY(root_id,root_generation,event_id))",
+    "ownership": "CREATE TABLE ownership(root_id TEXT NOT NULL, root_generation INTEGER NOT NULL, event_id TEXT NOT NULL, turn_id TEXT NOT NULL, message_id TEXT, parent_event_id TEXT, owner_scope TEXT NOT NULL, PRIMARY KEY(root_id,root_generation,event_id))",
+    "turn_manifests": "CREATE TABLE turn_manifests(root_id TEXT NOT NULL, root_generation INTEGER NOT NULL, turn_id TEXT NOT NULL, event_count INTEGER NOT NULL, direct_child_count INTEGER NOT NULL, PRIMARY KEY(root_id,root_generation,turn_id))",
+    "revisions": "CREATE TABLE revisions(root_id TEXT NOT NULL, root_generation INTEGER NOT NULL, revision INTEGER NOT NULL, fact_sequence INTEGER NOT NULL, visible_delta_json TEXT NOT NULL, historical_json TEXT NOT NULL, PRIMARY KEY(root_id,root_generation,revision))",
+    "source_watermarks": "CREATE TABLE source_watermarks(root_id TEXT NOT NULL, root_generation INTEGER NOT NULL, stream_id TEXT NOT NULL, source_generation INTEGER NOT NULL, source_sequence INTEGER NOT NULL, PRIMARY KEY(root_id,root_generation,stream_id))",
+}
+AUTOINDEX_COUNTS = {
+    "selected_roots": 1, "root_generation_heads": 1, "canonical_facts": 2,
+    "render_nodes": 1, "ownership": 1, "turn_manifests": 1, "revisions": 1,
+    "source_watermarks": 1,
+}
 
 
 def _validate_json(value: Any) -> None:
-    if isinstance(value, Mapping):
-        if any(not isinstance(key, str) for key in value):
-            raise ChatProjectionStoreError("invalid_json", "JSON object keys must be strings")
-        for nested in value.values():
-            _validate_json(nested)
-        return
-    if isinstance(value, list):
-        for nested in value:
-            _validate_json(nested)
-        return
-    if value is None or isinstance(value, (str, bool)):
-        return
-    if type(value) is int:
-        return
-    if isinstance(value, float) and value == value and value not in (float("inf"), float("-inf")):
-        return
-    raise ChatProjectionStoreError("invalid_json", "payload contains a non-JSON value")
+    active: set[int] = set()
+    nodes = 0
+    stack: list[tuple[str, Any, int]] = [("visit", value, 0)]
+    while stack:
+        action, current, depth = stack.pop()
+        if action == "leave":
+            active.remove(id(current))
+            continue
+        nodes += 1
+        if nodes > MAX_JSON_NODES:
+            raise ChatProjectionStoreError("json_node_limit", "JSON node limit exceeded")
+        if depth > MAX_JSON_DEPTH:
+            raise ChatProjectionStoreError("json_depth_limit", "JSON depth limit exceeded")
+        if isinstance(current, Mapping):
+            if len(current) > MAX_JSON_OBJECT_ITEMS:
+                raise ChatProjectionStoreError("json_object_limit", "JSON object limit exceeded")
+            if id(current) in active:
+                raise ChatProjectionStoreError("json_cycle", "JSON payload contains a cycle")
+            if any(not isinstance(key, str) for key in current):
+                raise ChatProjectionStoreError("invalid_json", "JSON object keys must be strings")
+            active.add(id(current))
+            stack.append(("leave", current, depth))
+            stack.extend(("visit", nested, depth + 1) for nested in reversed(tuple(current.values())))
+            continue
+        if isinstance(current, list):
+            if len(current) > MAX_JSON_LIST_ITEMS:
+                raise ChatProjectionStoreError("json_list_limit", "JSON array limit exceeded")
+            if id(current) in active:
+                raise ChatProjectionStoreError("json_cycle", "JSON payload contains a cycle")
+            active.add(id(current))
+            stack.append(("leave", current, depth))
+            stack.extend(("visit", nested, depth + 1) for nested in reversed(current))
+            continue
+        if current is None or isinstance(current, (str, bool)) or type(current) is int:
+            continue
+        if isinstance(current, float) and current == current and current not in (float("inf"), float("-inf")):
+            continue
+        raise ChatProjectionStoreError("invalid_json", "payload contains a non-JSON value")
+
+
+def _translate_sqlite(code: str):
+    def decorate(function):
+        @wraps(function)
+        def wrapped(*args, **kwargs):
+            try:
+                return function(*args, **kwargs)
+            except ChatProjectionStoreError:
+                raise
+            except sqlite3.Error as exc:
+                raise ChatProjectionStoreError(code, "SQLite projection store operation failed") from exc
+        return wrapped
+    return decorate
 
 
 def canonical_json(value: Mapping[str, Any]) -> str:
@@ -97,6 +155,7 @@ class SQLiteChatProjectionStore:
     _UNIQUE_INDEXES = {
         "canonical_facts": {("root_id", "root_generation", "event_id", "content_hash")},
     }
+    @_translate_sqlite("storage_init_failed")
     def __init__(
         self,
         path: Path | None = None,
@@ -144,53 +203,11 @@ class SQLiteChatProjectionStore:
         if not existing_tables and version not in (0, SCHEMA_VERSION):
             self.close()
             raise ChatProjectionStoreError("unsupported_schema", "wipe the selected chat store")
-        self._connection.executescript("""
-            CREATE TABLE IF NOT EXISTS selected_roots(
-              root_id TEXT PRIMARY KEY, root_generation INTEGER NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS root_generation_heads(
-              root_id TEXT NOT NULL, root_generation INTEGER NOT NULL,
-              fact_sequence INTEGER NOT NULL, revision INTEGER NOT NULL,
-              projection_cursor INTEGER NOT NULL,
-              PRIMARY KEY(root_id,root_generation)
-            );
-            CREATE TABLE IF NOT EXISTS canonical_facts(
-              root_id TEXT NOT NULL, root_generation INTEGER NOT NULL,
-              fact_sequence INTEGER NOT NULL, event_id TEXT NOT NULL,
-              content_hash TEXT NOT NULL, fact_json TEXT NOT NULL,
-              PRIMARY KEY(root_id,root_generation,fact_sequence),
-              UNIQUE(root_id,root_generation,event_id,content_hash)
-            );
-            CREATE TABLE IF NOT EXISTS render_nodes(
-              root_id TEXT NOT NULL, root_generation INTEGER NOT NULL,
-              event_id TEXT NOT NULL, node_json TEXT NOT NULL,
-              PRIMARY KEY(root_id,root_generation,event_id)
-            );
-            CREATE TABLE IF NOT EXISTS ownership(
-              root_id TEXT NOT NULL, root_generation INTEGER NOT NULL,
-              event_id TEXT NOT NULL, turn_id TEXT NOT NULL, message_id TEXT,
-              parent_event_id TEXT, owner_scope TEXT NOT NULL,
-              PRIMARY KEY(root_id,root_generation,event_id)
-            );
-            CREATE TABLE IF NOT EXISTS turn_manifests(
-              root_id TEXT NOT NULL, root_generation INTEGER NOT NULL,
-              turn_id TEXT NOT NULL, event_count INTEGER NOT NULL,
-              direct_child_count INTEGER NOT NULL,
-              PRIMARY KEY(root_id,root_generation,turn_id)
-            );
-            CREATE TABLE IF NOT EXISTS revisions(
-              root_id TEXT NOT NULL, root_generation INTEGER NOT NULL,
-              revision INTEGER NOT NULL, fact_sequence INTEGER NOT NULL,
-              visible_delta_json TEXT NOT NULL, historical_json TEXT NOT NULL,
-              PRIMARY KEY(root_id,root_generation,revision)
-            );
-            CREATE TABLE IF NOT EXISTS source_watermarks(
-              root_id TEXT NOT NULL, root_generation INTEGER NOT NULL,
-              stream_id TEXT NOT NULL, source_generation INTEGER NOT NULL,
-              source_sequence INTEGER NOT NULL,
-              PRIMARY KEY(root_id,root_generation,stream_id)
-            );
-        """)
+        install_sql = ";".join(
+            sql.replace("CREATE TABLE ", "CREATE TABLE IF NOT EXISTS ", 1)
+            for sql in TABLE_DDL.values()
+        )
+        self._connection.executescript(f"{install_sql};")
         self._connection.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
         self._connection.commit()
         try:
@@ -200,6 +217,19 @@ class SQLiteChatProjectionStore:
             raise
 
     def _validate_schema(self) -> None:
+        expected_objects = self._expected_schema_objects()
+        rows = self._connection.execute(
+            "SELECT type,name,tbl_name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' "
+            "OR name LIKE 'sqlite_autoindex_%'"
+        ).fetchall()
+        actual_objects = {
+            (row[0], row[1], row[2], self._normalize_sql(row[3])) for row in rows
+            if row[0] in ("table", "index", "trigger", "view")
+        }
+        if actual_objects != expected_objects:
+            raise ChatProjectionStoreError("unsupported_schema", "wipe the selected chat store")
+        if self._connection.execute("PRAGMA foreign_key_list('canonical_facts')").fetchall():
+            raise ChatProjectionStoreError("unsupported_schema", "wipe the selected chat store")
         for table, expected in self._TABLES.items():
             rows = self._connection.execute(f'PRAGMA table_info("{table}")').fetchall()
             actual = tuple((row[1], row[2].upper(), int(row[3]), int(row[5]), row[4]) for row in rows)
@@ -224,31 +254,66 @@ class SQLiteChatProjectionStore:
             if unique_columns != self._UNIQUE_INDEXES.get(table, set()):
                 raise ChatProjectionStoreError("unsupported_schema", "wipe the selected chat store")
 
+    @staticmethod
+    def _normalize_sql(sql: str | None) -> str | None:
+        if sql is None:
+            return None
+        return "".join(sql.lower().split())
+
+    def _expected_schema_objects(self) -> set[tuple[str, str, str, str | None]]:
+        objects = {
+            ("table", name, name, self._normalize_sql(sql)) for name, sql in TABLE_DDL.items()
+        }
+        for table, count in AUTOINDEX_COUNTS.items():
+            for number in range(1, count + 1):
+                objects.add(("index", f"sqlite_autoindex_{table}_{number}", table, None))
+        return objects
+
+    @_translate_sqlite("storage_write_failed")
     def select_generation(self, root_id: str, root_generation: int) -> None:
         self._identity(root_id, root_generation)
-        with self._lock, self._connection:
-            row = self._connection.execute(
-                "SELECT root_generation FROM selected_roots WHERE root_id=?", (root_id,),
-            ).fetchone()
-            if row and root_generation <= int(row[0]):
-                if root_generation == int(row[0]):
-                    return
-                raise ChatProjectionStoreError("stale_generation", "root generation is fenced")
-            self._connection.execute(
-                "INSERT INTO selected_roots VALUES(?,?) ON CONFLICT(root_id) DO UPDATE SET "
-                "root_generation=excluded.root_generation", (root_id, root_generation),
-            )
-            self._connection.execute(
-                "INSERT OR IGNORE INTO root_generation_heads VALUES(?,?,?,?,?)",
-                (root_id, root_generation, 0, 0, 0),
-            )
+        with self._lock:
+            try:
+                self._connection.execute("BEGIN IMMEDIATE")
+                row = self._connection.execute(
+                    "SELECT root_generation FROM selected_roots WHERE root_id=?", (root_id,),
+                ).fetchone()
+                if row and root_generation < int(row[0]):
+                    raise ChatProjectionStoreError("stale_generation", "root generation is fenced")
+                if row is None:
+                    self._connection.execute("INSERT INTO selected_roots VALUES(?,?)", (root_id, root_generation))
+                elif root_generation > int(row[0]):
+                    self._connection.execute(
+                        "UPDATE selected_roots SET root_generation=? WHERE root_id=? AND root_generation<?",
+                        (root_generation, root_id, root_generation),
+                    )
+                self._connection.execute(
+                    "INSERT OR IGNORE INTO root_generation_heads VALUES(?,?,?,?,?)",
+                    (root_id, root_generation, 0, 0, 0),
+                )
+                self._connection.commit()
+            except BaseException:
+                self._connection.rollback()
+                raise
 
+    @_translate_sqlite("storage_write_failed")
     def commit(self, request: ProjectionCommit) -> CommitResult:
         self._validate_commit(request)
         fact_json = canonical_json(request.canonical_fact)
         node_json = canonical_json(request.render_node)
         delta_json = canonical_json(request.visible_delta)
         historical_json = canonical_json(request.historical_revision)
+        text_values = (
+            request.root_id, request.event_id, request.content_hash, request.turn_id,
+            request.message_id or "", request.parent_event_id or "", request.owner_scope,
+            request.manifest.turn_id, request.watermark.stream_id,
+        )
+        aggregate_bytes = sum(len(value.encode("utf-8")) for value in text_values)
+        aggregate_bytes += sum(
+            len(value.encode("utf-8")) for value in (fact_json, node_json, delta_json, historical_json)
+        )
+        if aggregate_bytes > MAX_COMMIT_BYTES:
+            raise ChatProjectionStoreError("commit_too_large", "aggregate commit limit exceeded")
         with self._lock:
             try:
                 self._connection.execute("BEGIN IMMEDIATE")
@@ -336,6 +401,7 @@ class SQLiteChatProjectionStore:
             (*values, *candidate),
         )
 
+    @_translate_sqlite("storage_read_failed")
     def read_facts(
         self, root_id: str, root_generation: int, *, after: int = 0, limit: int = 1000,
     ) -> list[StoredFact]:
@@ -348,6 +414,7 @@ class SQLiteChatProjectionStore:
             ).fetchall()
         return [StoredFact(int(row[0]), row[1], row[2], json.loads(row[3])) for row in rows]
 
+    @_translate_sqlite("storage_read_failed")
     def read_revisions(
         self, root_id: str, root_generation: int, *, after: int = 0, limit: int = 1000,
     ) -> list[StoredRevision]:
@@ -360,6 +427,7 @@ class SQLiteChatProjectionStore:
             ).fetchall()
         return [StoredRevision(int(row[0]), int(row[1]), json.loads(row[2]), json.loads(row[3])) for row in rows]
 
+    @_translate_sqlite("storage_read_failed")
     def projection_cursor(self, root_id: str, root_generation: int) -> int:
         self._identity(root_id, root_generation)
         with self._lock:
@@ -369,6 +437,7 @@ class SQLiteChatProjectionStore:
             ).fetchone()
         return int(row[0]) if row else 0
 
+    @_translate_sqlite("storage_write_failed")
     def delete_generation(self, root_id: str, root_generation: int) -> None:
         self._identity(root_id, root_generation)
         with self._lock:
@@ -395,6 +464,7 @@ class SQLiteChatProjectionStore:
         if self._after_commit:
             self._after_commit()
 
+    @_translate_sqlite("storage_write_failed")
     def delete_root(self, root_id: str) -> None:
         self._identity(root_id, 0)
         with self._lock:
@@ -430,12 +500,12 @@ class SQLiteChatProjectionStore:
                 (root_id, root_generation),
             )
 
+    @_translate_sqlite("storage_read_failed")
     def read_projection(
         self, root_id: str, root_generation: int, event_id: str,
     ) -> StoredProjection | None:
         self._identity(root_id, root_generation)
-        if not event_id:
-            raise ChatProjectionStoreError("invalid_input", "event_id is required")
+        self._text("event_id", event_id)
         with self._lock:
             row = self._connection.execute(
                 "SELECT n.node_json,o.turn_id,o.message_id,o.parent_event_id,o.owner_scope,"
@@ -452,12 +522,12 @@ class SQLiteChatProjectionStore:
             TurnManifest(row[1], int(row[5]), int(row[6])),
         )
 
+    @_translate_sqlite("storage_read_failed")
     def source_watermark(
         self, root_id: str, root_generation: int, stream_id: str,
     ) -> SourceWatermark | None:
         self._identity(root_id, root_generation)
-        if not stream_id:
-            raise ChatProjectionStoreError("invalid_input", "stream_id is required")
+        self._text("stream_id", stream_id)
         with self._lock:
             row = self._connection.execute(
                 "SELECT source_generation,source_sequence FROM source_watermarks "
@@ -474,13 +544,13 @@ class SQLiteChatProjectionStore:
             ("turn_id", request.turn_id), ("owner_scope", request.owner_scope),
             ("stream_id", request.watermark.stream_id),
         ):
-            if not isinstance(value, str) or not value:
-                raise ChatProjectionStoreError("invalid_input", f"{name} is required")
+            SQLiteChatProjectionStore._text(name, value)
         for name, value in (
             ("message_id", request.message_id), ("parent_event_id", request.parent_event_id),
         ):
-            if value is not None and (not isinstance(value, str) or not value):
-                raise ChatProjectionStoreError("invalid_input", f"{name} must be a string or null")
+            if value is not None:
+                SQLiteChatProjectionStore._text(name, value)
+        SQLiteChatProjectionStore._text("manifest.turn_id", request.manifest.turn_id)
         for name, value in (
             ("canonical_fact", request.canonical_fact), ("render_node", request.render_node),
             ("visible_delta", request.visible_delta),
@@ -491,6 +561,8 @@ class SQLiteChatProjectionStore:
         if request.canonical_fact.get("event_id") != request.event_id:
             raise ChatProjectionStoreError("invalid_input", "canonical fact event_id does not match")
         expected = hashlib.sha256(canonical_json(request.canonical_fact).encode("utf-8")).hexdigest()
+        if len(request.content_hash) != 64 or any(character not in "0123456789abcdef" for character in request.content_hash):
+            raise ChatProjectionStoreError("invalid_input", "content_hash must be lowercase SHA-256")
         if request.content_hash != expected:
             raise ChatProjectionStoreError("hash_mismatch", "content hash does not match canonical fact")
         if request.manifest.turn_id != request.turn_id:
@@ -504,10 +576,16 @@ class SQLiteChatProjectionStore:
 
     @staticmethod
     def _identity(root_id: str, root_generation: int) -> None:
-        if not isinstance(root_id, str) or not root_id:
-            raise ChatProjectionStoreError("invalid_input", "root_id is required")
+        SQLiteChatProjectionStore._text("root_id", root_id)
         if type(root_generation) is not int or root_generation < 0:
             raise ChatProjectionStoreError("invalid_input", "root_generation must be non-negative")
+
+    @staticmethod
+    def _text(name: str, value: str) -> None:
+        if not isinstance(value, str) or not value:
+            raise ChatProjectionStoreError("invalid_input", f"{name} is required")
+        if len(value.encode("utf-8")) > MAX_TEXT_BYTES:
+            raise ChatProjectionStoreError("text_too_large", f"{name} exceeds UTF-8 byte limit")
 
     @staticmethod
     def _read_args(root_id: str, generation: int, after: int, limit: int) -> None:
@@ -517,6 +595,7 @@ class SQLiteChatProjectionStore:
         if type(limit) is not int or not 1 <= limit <= MAX_READ_LIMIT:
             raise ChatProjectionStoreError("invalid_limit", f"limit must be 1..{MAX_READ_LIMIT}")
 
+    @_translate_sqlite("storage_close_failed")
     def close(self) -> None:
         connection = getattr(self, "_connection", None)
         if connection is not None:

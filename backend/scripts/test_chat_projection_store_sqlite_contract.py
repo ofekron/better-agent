@@ -7,6 +7,7 @@ import shutil
 import sqlite3
 import sys
 import tempfile
+import threading
 from dataclasses import replace
 from pathlib import Path
 
@@ -18,7 +19,10 @@ os.environ["BETTER_AGENT_TEST_MODE"] = "1"
 sys.path.insert(0, str(ROOT / "backend"))
 
 from chat_projection_store import ChatProjectionStoreError, ProjectionCommit, SourceWatermark, TurnManifest
-from chat_projection_store_sqlite import MAX_READ_LIMIT, SQLiteChatProjectionStore, canonical_json
+from chat_projection_store_sqlite import (
+    MAX_COMMIT_BYTES, MAX_JSON_DEPTH, MAX_JSON_LIST_ITEMS, MAX_JSON_NODES,
+    MAX_JSON_OBJECT_ITEMS, MAX_READ_LIMIT, MAX_TEXT_BYTES, SQLiteChatProjectionStore, canonical_json,
+)
 
 
 FIXTURE = ROOT / "test-contracts" / "chat-panel" / "v1" / "canonical-session.json"
@@ -42,6 +46,13 @@ def _request(event: dict, *, generation: int = 0, watermark: int | None = None) 
         historical_revision={"event_id": event["event_id"], "content_version": event["content_version"]},
         watermark=SourceWatermark("provider-neutral", 0, watermark or event["journal_seq"]),
     )
+
+
+def _with_event_id(request: ProjectionCommit, event_id: str) -> ProjectionCommit:
+    fact = dict(request.canonical_fact)
+    fact["event_id"] = event_id
+    digest = __import__("hashlib").sha256(canonical_json(fact).encode("utf-8")).hexdigest()
+    return replace(request, event_id=event_id, canonical_fact=fact, content_hash=digest)
 
 
 def _path(name: str) -> Path:
@@ -175,6 +186,33 @@ def test_strict_json_and_same_version_schema_validation() -> None:
         _assert_error("invalid_json", lambda invalid=invalid: canonical_json({"value": invalid}))
     _assert_error("invalid_json", lambda: canonical_json({"nested": [{1: "not a JSON object"}]}))
     _assert_error("invalid_json", lambda: canonical_json({"not_an_array": (1, 2)}))
+    shared = {"ok": True}
+    assert canonical_json({"left": shared, "right": shared})
+    cycle = []
+    cycle.append(cycle)
+    _assert_error("json_cycle", lambda: canonical_json({"cycle": cycle}))
+    exact_depth = True
+    for _ in range(MAX_JSON_DEPTH):
+        exact_depth = {"nested": exact_depth}
+    assert canonical_json(exact_depth)
+    _assert_error("json_depth_limit", lambda: canonical_json({"nested": exact_depth}))
+    assert canonical_json({"items": [None] * MAX_JSON_LIST_ITEMS})
+    _assert_error(
+        "json_list_limit",
+        lambda: canonical_json({"items": [None] * (MAX_JSON_LIST_ITEMS + 1)}),
+    )
+    assert canonical_json({str(index): None for index in range(MAX_JSON_OBJECT_ITEMS)})
+    _assert_error(
+        "json_object_limit",
+        lambda: canonical_json({str(index): None for index in range(MAX_JSON_OBJECT_ITEMS + 1)}),
+    )
+    exact_nodes = {
+        "left": [None] * (MAX_JSON_LIST_ITEMS - 1),
+        "right": [None] * (MAX_JSON_LIST_ITEMS - 2),
+    }
+    assert canonical_json(exact_nodes)
+    exact_nodes["right"].append(None)
+    _assert_error("json_node_limit", lambda: canonical_json(exact_nodes))
 
     malformed_column = _path("malformed-column")
     valid = SQLiteChatProjectionStore(malformed_column)
@@ -193,6 +231,121 @@ def test_strict_json_and_same_version_schema_validation() -> None:
     connection.commit()
     connection.close()
     _assert_error("unsupported_schema", lambda: SQLiteChatProjectionStore(malformed_index))
+
+    unexpected_objects = _path("unexpected-objects")
+    valid = SQLiteChatProjectionStore(unexpected_objects)
+    valid.close()
+    connection = sqlite3.connect(unexpected_objects)
+    connection.execute("CREATE VIEW unexpected_view AS SELECT root_id FROM selected_roots")
+    connection.execute("CREATE TRIGGER unexpected_trigger AFTER INSERT ON selected_roots BEGIN SELECT 1; END")
+    connection.commit()
+    connection.close()
+    _assert_error("unsupported_schema", lambda: SQLiteChatProjectionStore(unexpected_objects))
+
+    modified_sql = _path("modified-sql")
+    valid = SQLiteChatProjectionStore(modified_sql)
+    valid.close()
+    connection = sqlite3.connect(modified_sql)
+    connection.execute("PRAGMA writable_schema=ON")
+    connection.execute(
+        "UPDATE sqlite_master SET sql=replace(sql, 'root_id TEXT PRIMARY KEY', "
+        "'root_id TEXT COLLATE NOCASE PRIMARY KEY') WHERE name='selected_roots'"
+    )
+    connection.execute("PRAGMA writable_schema=OFF")
+    connection.commit()
+    connection.close()
+    _assert_error("unsupported_schema", lambda: SQLiteChatProjectionStore(modified_sql))
+
+    unexpected_fk = _path("unexpected-fk")
+    valid = SQLiteChatProjectionStore(unexpected_fk)
+    valid.close()
+    connection = sqlite3.connect(unexpected_fk)
+    connection.execute("PRAGMA writable_schema=ON")
+    connection.execute(
+        "UPDATE sqlite_master SET sql=substr(sql,1,length(sql)-1) || "
+        "', FOREIGN KEY(root_id) REFERENCES selected_roots(root_id))' WHERE name='ownership'"
+    )
+    connection.execute("PRAGMA writable_schema=OFF")
+    connection.commit()
+    connection.close()
+    _assert_error("unsupported_schema", lambda: SQLiteChatProjectionStore(unexpected_fk))
+
+
+def test_concurrent_generation_selection_never_regresses() -> None:
+    path = _path("concurrent-generation")
+    stores = [SQLiteChatProjectionStore(path) for _ in range(8)]
+    barrier = threading.Barrier(len(stores))
+    failures = []
+
+    def select(store, generation: int) -> None:
+        barrier.wait()
+        try:
+            store.select_generation("race-root", generation)
+        except ChatProjectionStoreError as exc:
+            if exc.code != "stale_generation":
+                failures.append(exc.code)
+
+    threads = [threading.Thread(target=select, args=(store, generation)) for generation, store in enumerate(stores)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert failures == []
+    _assert_error("stale_generation", lambda: stores[0].select_generation("race-root", 6))
+    request = replace(_request(_fixture_event(), generation=7), root_id="race-root")
+    assert stores[0].commit(request).fact_sequence == 1
+    for store in stores:
+        store.close()
+    reopened = SQLiteChatProjectionStore(path)
+    _assert_error("stale_generation", lambda: reopened.select_generation("race-root", 0))
+    reopened.close()
+
+
+def test_text_aggregate_and_sqlite_error_boundaries() -> None:
+    path = _path("text-limits")
+    store = SQLiteChatProjectionStore(path)
+    exact_root = "é" * (MAX_TEXT_BYTES // 2)
+    store.select_generation(exact_root, 0)
+    _assert_error("text_too_large", lambda: store.select_generation(exact_root + "é", 0))
+    store.select_generation("root-1", 0)
+    request = _request(_fixture_event())
+    exact_event = _with_event_id(request, "é" * (MAX_TEXT_BYTES // 2))
+    assert store.commit(exact_event).fact_sequence == 1
+    oversized = "é" * (MAX_TEXT_BYTES // 2 + 1)
+    cases = [
+        replace(request, root_id=oversized), _with_event_id(request, oversized),
+        replace(request, turn_id=oversized), replace(request, owner_scope=oversized),
+        replace(request, message_id=oversized), replace(request, parent_event_id=oversized),
+        replace(request, manifest=replace(request.manifest, turn_id=oversized)),
+        replace(request, watermark=replace(request.watermark, stream_id=oversized)),
+    ]
+    for invalid in cases:
+        _assert_error("text_too_large", lambda invalid=invalid: store.commit(invalid))
+    other_bytes = sum(len(value.encode("utf-8")) for value in (
+        request.root_id, request.event_id, request.content_hash, request.turn_id,
+        request.message_id or "", request.parent_event_id or "", request.owner_scope,
+        request.manifest.turn_id, request.watermark.stream_id,
+        canonical_json(request.canonical_fact), canonical_json(request.render_node),
+        canonical_json(request.visible_delta),
+    ))
+    padding = MAX_COMMIT_BYTES - other_bytes - len('{"pad":""}'.encode("utf-8"))
+    exact_commit = replace(request, historical_revision={"pad": "x" * padding})
+    assert store.commit(exact_commit).fact_sequence == 2
+    _assert_error(
+        "commit_too_large",
+        lambda: store.commit(replace(exact_commit, historical_revision={"pad": "x" * (padding + 1)})),
+    )
+    store._connection.close()
+    _assert_error("storage_read_failed", lambda: store.read_facts("root-1", 0))
+
+    write_failure = SQLiteChatProjectionStore(_path("write-failure"))
+    write_failure._connection.close()
+    _assert_error("storage_write_failed", lambda: write_failure.select_generation("root-1", 0))
+
+    corrupt = _path("corrupt")
+    corrupt.parent.mkdir(parents=True, exist_ok=True)
+    corrupt.write_bytes(b"not sqlite")
+    _assert_error("storage_init_failed", lambda: SQLiteChatProjectionStore(corrupt))
 
 
 def test_generation_and_root_deletion_are_atomic_and_durable() -> None:
