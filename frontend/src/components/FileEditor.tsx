@@ -18,6 +18,12 @@ type ViewMode = "diff" | "file";
 import { API } from "../api";
 const POLL_MS = 1500;
 
+// Stable default identities: inline `= []` defaults mint a new array
+// every render, which retriggers identity-keyed effects and can spin
+// an infinite render loop.
+const EMPTY_FILE_DISCUSSIONS: FileDiscussion[] = [];
+const EMPTY_SESSION_MESSAGES: ChatMessage[] = [];
+
 export interface FileAnchorComment {
   filePath: string;
   startLine: number;
@@ -79,8 +85,8 @@ export function FileEditor({
   onSubmitComment,
   pendingTagCount = 0,
   diskWritable = true,
-  fileDiscussions = [],
-  sessionMessages = [],
+  fileDiscussions = EMPTY_FILE_DISCUSSIONS,
+  sessionMessages = EMPTY_SESSION_MESSAGES,
   onStartDiscussion,
   onPatchDiscussion,
   onSendDiscussionMessage,
@@ -228,15 +234,20 @@ export function FileEditor({
   );
 
   useEffect(() => {
-    setPendingDiscussionMessages((pending) => pending.filter(
-      (message) => {
-        if (!message.file_discussion_id) return false;
-        if (!fileDiscussionIds.has(message.file_discussion_id)) return false;
-        return !sessionMessages.some(
-          (sessionMessage) => sessionMessage.client_id === message.client_id,
-        );
-      },
-    ));
+    setPendingDiscussionMessages((pending) => {
+      const kept = pending.filter(
+        (message) => {
+          if (!message.file_discussion_id) return false;
+          if (!fileDiscussionIds.has(message.file_discussion_id)) return false;
+          return !sessionMessages.some(
+            (sessionMessage) => sessionMessage.client_id === message.client_id,
+          );
+        },
+      );
+      // Keep the previous identity when nothing was pruned so this
+      // effect can never feed a render→effect→setState loop.
+      return kept.length === pending.length ? pending : kept;
+    });
   }, [fileDiscussionIds, sessionMessages]);
 
   const acceptServerChanges = useCallback(() => {

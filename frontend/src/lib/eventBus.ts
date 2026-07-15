@@ -14,7 +14,7 @@
  * App.tsx.
  */
 
-import type { Schedule, Session } from "../types";
+import type { PendingApproval, Schedule, Session } from "../types";
 
 // Map of event type → payload shape. Only events that have a typed
 // consumer need to be enumerated here; everything else falls back to
@@ -74,6 +74,11 @@ export interface BusEventMap {
     unseen_count: number;
   };
   workers_changed: Record<string, unknown>;
+  // Fresh-worker creation approval lifecycle. `requested` carries the
+  // full pending-approval record; the resolutions carry the id only.
+  worker_creation_requested: PendingApproval;
+  worker_creation_approved: { delegation_id: string };
+  worker_creation_failed: { delegation_id: string; error?: string };
   session_organization_changed: Record<string, unknown>;
   project_mappings_changed: Record<string, unknown>;
   prompt_queued: {

@@ -73,6 +73,29 @@ vi.mock("react-markdown", () => ({
     React.createElement("div", { "data-test-md": "true" }, children ?? ""),
 }));
 
+// Serve harness-registered extension modules (worker-approval /
+// credential-consent stub cards) through the real ExtensionModuleSlot
+// machinery; every other URL keeps the real dynamic-import loader.
+// Test files that vi.mock the loader themselves still win — their mock
+// is registered after this one.
+vi.mock("../src/components/extensionModuleLoader", async (importOriginal) => {
+  const real = await importOriginal<
+    typeof import("../src/components/extensionModuleLoader")
+  >();
+  const { harnessExtensionModules } = await import("./harness/inlineActionsStub");
+  return {
+    ...real,
+    loadExtensionModule: (url: string, authScopeKey?: string) => {
+      const path = url.startsWith("/")
+        ? url
+        : new URL(url, "http://localhost").pathname;
+      const stub = harnessExtensionModules[path];
+      if (stub) return Promise.resolve(stub);
+      return real.loadExtensionModule(url, authScopeKey);
+    },
+  };
+});
+
 vi.mock("../src/components/FileTree", () => ({ FileTree: () => null }));
 vi.mock("../src/components/FileViewer", () => ({ FileViewer: () => null }));
 vi.mock("../src/components/SetupModal", () => ({ SetupModal: () => null }));
