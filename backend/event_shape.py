@@ -25,6 +25,23 @@ RENDER_EVENT_TYPES = frozenset({
 })
 
 
+def provider_stream_render_row_is_shadow(row: dict) -> bool:
+    return (
+        row.get("source") == "provider_stream"
+        and row.get("type") in RENDER_EVENT_TYPES
+    )
+
+
+def journal_row_projects_to_render_tree(row: dict) -> bool:
+    return (
+        row.get("type") == "event_ownership_resolved"
+        or (
+            row.get("type") in RENDER_EVENT_TYPES
+            and not provider_stream_render_row_is_shadow(row)
+        )
+    )
+
+
 def event_uuid(event: dict) -> str | None:
     if not isinstance(event, dict):
         return None

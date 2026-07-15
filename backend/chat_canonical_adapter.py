@@ -42,6 +42,51 @@ _TURN_MARKERS = {"turn_start": "turn_started", "turn_complete": "turn_completed"
 _IDENTITY_FIELDS = ("provider", "model", "effort")
 
 
+def _drop_shadow_provider_stream_facts(
+    facts: Sequence[Mapping[str, Any]],
+) -> tuple[Mapping[str, Any], ...]:
+    authoritative_event_ids = {
+        str(fact.get("source_event_id") or fact.get("fact_id") or "")
+        for fact in facts
+        if fact.get("source") != "provider_stream"
+    }
+    return tuple(
+        fact for fact in facts
+        if (
+            fact.get("source") != "provider_stream"
+            or str(fact.get("source_event_id") or fact.get("fact_id") or "")
+            not in authoritative_event_ids
+        )
+    )
+
+
+def _payload_message_id(fact: Mapping[str, Any]) -> str | None:
+    payload = fact.get("payload")
+    payload = payload if isinstance(payload, Mapping) else {}
+    value = payload.get("message_id")
+    return value if isinstance(value, str) and value else None
+
+
+def _projected_event_ids(
+    facts: Sequence[Mapping[str, Any]],
+) -> dict[int, str]:
+    identities_by_base: dict[str, set[tuple[str | None, str]]] = {}
+    for fact in facts:
+        base = str(fact.get("source_event_id") or fact.get("fact_id") or "")
+        identities_by_base.setdefault(base, set()).add((
+            _payload_message_id(fact),
+            str(fact.get("payload_type") or ""),
+        ))
+    projected: dict[int, str] = {}
+    for fact in facts:
+        base = str(fact.get("source_event_id") or fact.get("fact_id") or "")
+        if len(identities_by_base.get(base, ())) <= 1:
+            projected[id(fact)] = base
+            continue
+        projected[id(fact)] = str(fact.get("fact_id") or base)
+    return projected
+
+
 def _text_of(payload: Mapping[str, Any]) -> str:
     for key in _TEXT_KEYS:
         value = payload.get(key)
@@ -106,10 +151,13 @@ def adapt_chat_inputs(
         if isinstance(message_id, str) and message_id and isinstance(meta, Mapping):
             run_meta_by_message[message_id] = meta
 
-    ordered = sorted(
-        (fact for fact in facts if isinstance(fact, Mapping)),
-        key=lambda fact: int(fact.get("canonical_seq") or 0),
+    ordered = _drop_shadow_provider_stream_facts(
+        tuple(sorted(
+            (fact for fact in facts if isinstance(fact, Mapping)),
+            key=lambda fact: int(fact.get("canonical_seq") or 0),
+        ))
     )
+    projected_event_ids = _projected_event_ids(ordered)
 
     messages: list[dict[str, Any]] = []
     events: list[dict[str, Any]] = []
@@ -142,7 +190,7 @@ def adapt_chat_inputs(
         if seq < 1:
             dropped.append({"fact_id": fact_id, "code": "missing_canonical_seq"})
             return
-        eid = event_id or str(fact.get("source_event_id") or fact_id)
+        eid = event_id or projected_event_ids.get(id(fact), fact_id)
         versions[eid] = versions.get(eid, 0) + 1
         events.append({
             "event_id": eid,

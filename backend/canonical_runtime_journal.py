@@ -13,6 +13,7 @@ from canonical_event_adapter import (
 )
 from canonical_event_authority import AuthorityError, RuntimeAuthorityCatalog
 from canonical_event_store import CanonicalEventStore
+from event_shape import provider_stream_render_row_is_shadow
 from paths import ba_home
 
 # Advance observer: notified (root_id, journal_seq) whenever the canonical
@@ -112,7 +113,9 @@ class CanonicalRuntimeJournal:
             "msg_id": msg_id,
             "turn_id": turn_id,
         }]
-        facts = canonical_facts_from_rows(rows)
+        facts = canonical_facts_from_rows(
+            [row for row in rows if not provider_stream_render_row_is_shadow(row)]
+        )
         store = self._store()
         if facts:
             store.submit_many(facts)
@@ -139,6 +142,7 @@ class CanonicalRuntimeJournal:
         normalized_rows = [
             {**row, "root_id": root_id, "root_generation": generation}
             for row in gap_rows
+            if not provider_stream_render_row_is_shadow(row)
         ]
         message_through_seq = self._message_head(session, authority.message_through_seq)
         if (authority.authority == "sqlite" and not normalized_rows

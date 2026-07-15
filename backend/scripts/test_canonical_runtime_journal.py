@@ -206,6 +206,105 @@ def test_zero_fact_live_row_advances_contiguous_coverage():
     journal.close()
 
 
+def test_provider_stream_render_rows_do_not_enter_canonical_projection():
+    root_id = "provider-stream-root"
+    session = {
+        "id": root_id,
+        "messages": [
+            {"id": "u1", "seq": 1, "role": "user", "content": "first"},
+            {"id": "a1", "seq": 2, "role": "assistant", "content": "stream copy"},
+            {"id": "u2", "seq": 3, "role": "user", "content": "second"},
+            {"id": "a2", "seq": 4, "role": "assistant", "content": "authoritative"},
+        ],
+    }
+    duplicate_stream = {
+        "root_id": root_id, "sid": root_id, "seq": 1,
+        "type": "agent_message", "source": "provider_stream", "msg_id": "a1",
+        "data": {"uuid": "dup", "type": "assistant", "message": {
+            "content": [{"type": "text", "text": "same"}],
+        }},
+    }
+    authoritative_apply = {
+        "root_id": root_id, "sid": root_id, "seq": 2,
+        "type": "agent_message", "source": "apply_event", "msg_id": "a2",
+        "data": {"uuid": "dup", "type": "assistant", "message": {
+            "content": [{"type": "text", "text": "same"}],
+        }},
+    }
+    provider_stream_non_render = {
+        "root_id": root_id, "sid": root_id, "seq": 3,
+        "type": "turn_complete", "source": "provider_stream", "msg_id": "a2",
+        "data": {"uuid": "complete", "message_id": "a2"},
+    }
+    ownership = {
+        "root_id": root_id, "sid": root_id, "seq": 4,
+        "type": "event_ownership_resolved", "source": "provider_stream", "msg_id": "a2",
+        "data": {"uuid": "ownership", "message_id": "a2"},
+    }
+    journal = CanonicalRuntimeJournal(HOME / "provider-stream-catalog.sqlite")
+    journal.ensure_cutover(
+        root_id,
+        rows=[
+            duplicate_stream,
+            authoritative_apply,
+            provider_stream_non_render,
+            ownership,
+        ],
+        session=session,
+    )
+    page = journal.read_page(root_id, after_seq=0, limit=100)
+    facts = page["facts"]
+    duplicate_facts = [
+        fact for fact in facts
+        if fact["source_event_id"] == "dup"
+    ]
+    assert len(duplicate_facts) == 1
+    assert duplicate_facts[0]["source"] == "apply_event"
+    assert duplicate_facts[0]["payload"]["message_id"] == "a2"
+    assert not any(
+        fact["source"] == "provider_stream"
+        and fact["payload_type"] == "agent_message"
+        for fact in facts
+    )
+    assert any(
+        fact["source_event_id"] == "complete"
+        and fact["source"] == "provider_stream"
+        for fact in facts
+    )
+    assert any(
+        fact["payload_type"] == "event_ownership_resolved"
+        and fact["source"] == "provider_stream"
+        for fact in facts
+    )
+    assert journal.current_authority(root_id).journal_through_seq == 4
+    journal.close()
+
+
+def test_live_provider_stream_render_row_advances_without_fact():
+    root_id = "live-provider-stream-root"
+    journal = CanonicalRuntimeJournal(HOME / "live-provider-stream-catalog.sqlite")
+    journal.ensure_cutover(root_id, rows=[], session={"id": root_id, "messages": []})
+    journal.mirror_event(
+        root_id=root_id, sid=root_id, seq=0, event_type="agent_message",
+        data={"uuid": "stream-only", "type": "assistant", "message": {
+            "content": [{"type": "text", "text": "skip"}],
+        }},
+        source="provider_stream", msg_id="a1", event_id="stream-only", turn_id="u1",
+    )
+    assert journal.current_authority(root_id).journal_through_seq == 0
+    assert journal.read_page(root_id, after_seq=0, limit=100)["facts"] == []
+    journal.mirror_event(
+        root_id=root_id, sid=root_id, seq=1, event_type="agent_message",
+        data={"uuid": "apply", "type": "assistant", "message": {
+            "content": [{"type": "text", "text": "keep"}],
+        }},
+        source="apply_event", msg_id="a1", event_id="apply", turn_id="u1",
+    )
+    page = journal.read_page(root_id, after_seq=0, limit=100)
+    assert [fact["source_event_id"] for fact in page["facts"]] == ["apply"]
+    journal.close()
+
+
 def test_event_writer_reads_jsonl_only_after_catalog_cursor():
     from unittest import mock
     from event_journal import EventJournalWriter
@@ -260,6 +359,8 @@ if __name__ == "__main__":
     test_interrupted_delete_resolves_from_durable_session_presence()
     test_reconciliation_rejects_non_contiguous_duplicate_and_malformed_sequences()
     test_zero_fact_live_row_advances_contiguous_coverage()
+    test_provider_stream_render_rows_do_not_enter_canonical_projection()
+    test_live_provider_stream_render_row_advances_without_fact()
     test_event_writer_reads_jsonl_only_after_catalog_cursor()
     test_first_singleton_access_does_not_wait_on_root_lifecycle_gate()
     print("canonical runtime journal tests passed")

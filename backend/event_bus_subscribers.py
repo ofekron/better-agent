@@ -32,9 +32,9 @@ from event_journal import (
     EVENT_JOURNAL_EVENT,
     EVENT_JOURNAL_WRITTEN,
     EventJournalWriter,
-    RENDER_EVENT_TYPES,
     event_journal_writer,
 )
+from event_shape import journal_row_projects_to_render_tree
 from session_manager import manager as session_manager
 import perf
 
@@ -68,13 +68,10 @@ class _ProjectionRootState:
 
 
 def _projection_command_is_applicable(command: SessionProjectionCommand) -> bool:
-    return (
-        command.event_type == "event_ownership_resolved"
-        or (
-            command.source != "provider_stream"
-            and command.event_type in RENDER_EVENT_TYPES
-        )
-    )
+    return journal_row_projects_to_render_tree({
+        "type": command.event_type,
+        "source": command.source,
+    })
 
 
 class SessionProjectionDrainer:
@@ -328,13 +325,7 @@ class SessionProjectionDrainer:
 
 
 def _projection_row_is_applicable(row: dict) -> bool:
-    return (
-        row.get("type") == "event_ownership_resolved"
-        or (
-            row.get("source") != "provider_stream"
-            and row.get("type") in RENDER_EVENT_TYPES
-        )
-    )
+    return journal_row_projects_to_render_tree(row)
 
 
 # Declare event schemas at MODULE LOAD time (not inside

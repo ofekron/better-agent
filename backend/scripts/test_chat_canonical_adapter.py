@@ -170,10 +170,75 @@ def test_identity_fails_closed() -> None:
           and {"fact_id": "fact-2", "code": "provider_identity_unresolvable"} in adapted.dropped)
 
 
+def test_provider_stream_shadow_duplicate_is_ignored() -> None:
+    session = {
+        **SESSION,
+        "messages": [
+            *SESSION["messages"],
+            {"id": "u2", "role": "user"},
+            {"id": "a2", "role": "assistant",
+             "run_meta": {"provider_id": "claude", "model": "sonnet-4-6", "reasoning_effort": "high"}},
+        ],
+    }
+    adapted = adapt_chat_inputs(
+        [
+            fact(1, "user_prompt", {"message_id": "u1", "text": "first"}),
+            fact(2, "message_ownership_declared", {"message_id": "a1", "prompt_message_id": "u1"}),
+            fact(3, "user_prompt", {"message_id": "u2", "text": "second"}),
+            fact(4, "message_ownership_declared", {"message_id": "a2", "prompt_message_id": "u2"}),
+            fact(5, "assistant_output", {"message_id": "a1", "text": "same", "final": False},
+                 source="provider_stream", source_event_id="dup"),
+            fact(6, "assistant_output", {"message_id": "a2", "text": "same", "final": False},
+                 source="apply_event", source_event_id="dup"),
+            fact(7, "assistant_output", {"message_id": "a1", "text": "stream-only", "final": False},
+                 source="provider_stream", source_event_id="stream-only"),
+        ],
+        session,
+    )
+    events_by_id = {event["event_id"]: event for event in adapted.events}
+    check("authoritative duplicate replaces provider_stream shadow",
+          events_by_id["dup"]["message_id"] == "a2"
+          and events_by_id["dup"]["journal_seq"] == 6)
+    check("provider_stream-only fact remains visible",
+          events_by_id["stream-only"]["message_id"] == "a1")
+    project_chat(adapted.messages, adapted.events, schema_version=CHAT_SCHEMA_VERSION)
+
+
+def test_reused_source_event_id_across_messages_gets_scoped_projector_ids() -> None:
+    session = {
+        **SESSION,
+        "messages": [
+            *SESSION["messages"],
+            {"id": "u2", "role": "user"},
+            {"id": "a2", "role": "assistant",
+             "run_meta": {"provider_id": "claude", "model": "sonnet-4-6", "reasoning_effort": "high"}},
+        ],
+    }
+    adapted = adapt_chat_inputs(
+        [
+            fact(1, "user_prompt", {"message_id": "u1", "text": "first"}),
+            fact(2, "message_ownership_declared", {"message_id": "a1", "prompt_message_id": "u1"}),
+            fact(3, "user_prompt", {"message_id": "u2", "text": "second"}),
+            fact(4, "message_ownership_declared", {"message_id": "a2", "prompt_message_id": "u2"}),
+            fact(5, "assistant_output", {"message_id": "a1", "text": "same", "final": False},
+                 source="apply_event", source_event_id="reused"),
+            fact(6, "assistant_output", {"message_id": "a2", "text": "same", "final": False},
+                 source="apply_event", source_event_id="reused"),
+        ],
+        session,
+    )
+    ids = [event["event_id"] for event in adapted.events if event["data"].get("text") == "same"]
+    check("reused source event ids across messages are separated",
+          ids == ["fact-5", "fact-6"])
+    project_chat(adapted.messages, adapted.events, schema_version=CHAT_SCHEMA_VERSION)
+
+
 if __name__ == "__main__":
     test_full_pipeline()
     test_unsupported_block_facts_stay_visible_as_typed_work()
     test_identity_fails_closed()
+    test_provider_stream_shadow_duplicate_is_ignored()
+    test_reused_source_event_id_across_messages_gets_scoped_projector_ids()
     if _failures:
         print(f"{len(_failures)} test(s) FAILED")
         sys.exit(1)
