@@ -26,7 +26,7 @@ _load_executor_lock = threading.Lock()
 _records: dict[str, dict[str, Any]] = {}
 _sequence = 0
 _durable_sequence = 0
-_persisted_sequence = 0
+_certification_generation = 0
 _journal: dict[str, tuple[int, Optional[dict[str, Any]]]] = {}
 _mutation_log: dict[str, tuple[int, Optional[dict[str, Any]]]] = {}
 
@@ -46,11 +46,6 @@ def _projection_dir() -> Path:
 
 def _database_path() -> Path:
     return _projection_dir() / "projection.sqlite3"
-
-
-def _record_path(session_id: str, generation: Optional[str] = None) -> Path:
-    del generation
-    return _database_path()
 
 
 def _connect() -> sqlite3.Connection:
@@ -126,25 +121,31 @@ def projection_is_current() -> bool:
 
 def certification_generation() -> int:
     with _lock:
-        return _persisted_sequence
+        return _certification_generation
 
 
 def mark_dirty() -> int:
-    global _sequence
+    """Signal a lost/rejected projection write: invalidate every
+    certification generation captured before this point AND the durable
+    'current' fingerprint, so startup falls back to a full rebuild."""
+    global _certification_generation
     with _lock:
-        _sequence += 1
-        return _sequence
+        _certification_generation += 1
+        generation = _certification_generation
+    try:
+        with _connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute("DELETE FROM metadata WHERE key='fingerprint'")
+            connection.commit()
+    except (OSError, sqlite3.Error, RuntimeError):
+        logger.exception("failed to invalidate queue projection fingerprint")
+    return generation
 
 
-def mark_current_if_generation(
-    expected_generation: int,
-    expected_fingerprint: Optional[dict[str, list[int]]] = None,
-    projection_generation: Optional[str] = None,
-) -> bool:
-    del projection_generation
-    fingerprint = expected_fingerprint or _session_files_fingerprint()
+def mark_current_if_generation(expected_generation: int) -> bool:
+    fingerprint = _session_files_fingerprint()
     with _lock:
-        if expected_generation != _persisted_sequence or _journal:
+        if expected_generation != _certification_generation or _journal:
             return False
     try:
         with _connect() as connection:
@@ -277,7 +278,7 @@ def shutdown_loader() -> None:
 
 
 def _ensure_loaded() -> None:
-    global _loaded, _loading, _durable_sequence, _sequence, _persisted_sequence
+    global _loaded, _loading, _durable_sequence, _sequence
     wait_started = time.perf_counter()
     with _load_cv:
         while _loading and not _loaded:
@@ -302,7 +303,6 @@ def _ensure_loaded() -> None:
         _records.clear()
         _records.update(candidate)
         _durable_sequence = max(_durable_sequence, durable)
-        _persisted_sequence = max(_persisted_sequence, durable)
         _sequence = max(_sequence, durable)
         _loaded = True
         _loading = False
@@ -335,7 +335,7 @@ def _enqueue_write(session_id: str, sequence: int, record: Optional[dict[str, An
 
 
 def _compact_batch(batch: dict[str, tuple[int, Optional[dict[str, Any]]]]) -> None:
-    global _durable_sequence, _persisted_sequence
+    global _durable_sequence
     if not batch:
         return
     started = time.perf_counter()
@@ -374,8 +374,6 @@ def _compact_batch(batch: dict[str, tuple[int, Optional[dict[str, Any]]]]) -> No
             current = _journal.get(sid)
             if current is not None and current[0] <= sequence:
                 _journal.pop(sid, None)
-        if not _journal:
-            _persisted_sequence = max(_persisted_sequence, high_water)
     perf.record_count("queue_projection.transaction.inserted", inserted)
     perf.record_count("queue_projection.transaction.updated", updated)
     perf.record_count("queue_projection.transaction.deleted", deleted)
@@ -504,7 +502,7 @@ def upsert_record_background(record: dict[str, Any]) -> None:
 
 
 def note_persisted_tree(root: dict[str, Any]) -> int:
-    global _persisted_sequence, _sequence
+    global _sequence
     records = [record for node in _walk_nodes(root) if (record := project_session(node)) is not None]
     _ensure_loaded()
     with _lock:
@@ -521,8 +519,7 @@ def note_persisted_tree(root: dict[str, Any]) -> int:
             _journal[sid] = (high_water, owned)
             _mutation_log[sid] = (high_water, owned)
             changed_records.append(owned)
-        _persisted_sequence = high_water
-        perf.record_count("queue_projection.persisted.high_water", _persisted_sequence)
+        perf.record_count("queue_projection.persisted.high_water", high_water)
         perf.record_count("queue_projection.persisted.changed_rows", len(changed_records))
     for record in changed_records:
         _enqueue_write(record["id"], high_water, record)
@@ -655,7 +652,7 @@ def _scan_complete_snapshot() -> tuple[dict[str, dict[str, Any]], dict[str, list
 
 
 def rebuild_from_disk() -> int:
-    global _loaded, _pending_rebuild, _persisted_sequence
+    global _loaded, _pending_rebuild
     rebuilt, fingerprint = _scan_complete_snapshot()
     with _lock:
         for sid, (_sequence_value, record) in _mutation_log.items():
@@ -666,7 +663,6 @@ def rebuild_from_disk() -> int:
         _records.clear()
         _records.update(rebuilt)
         _loaded = True
-        _persisted_sequence = max(_persisted_sequence, _sequence)
         snapshot_sequence = _sequence
         for sid, (sequence, _record) in tuple(_mutation_log.items()):
             if sequence <= snapshot_sequence:

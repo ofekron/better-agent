@@ -19,6 +19,19 @@ ROOT = Path(__file__).parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+import atexit
+import shutil
+
+import paths
+
+_TEST_HOME = tempfile.mkdtemp(prefix="ba-event-loop-regressions-")
+paths.engage_test_home(_TEST_HOME)
+atexit.register(shutil.rmtree, _TEST_HOME, True)
+
+import runtime_ownership
+
+runtime_ownership.register_current_process_writer()
+
 
 class _ModeEchoStrategy:
     def __init__(self, mode: str):
@@ -546,12 +559,10 @@ def test_provider_spawn_flushes_only_target_root() -> None:
 
 def test_queue_projection_rebuild_retries_concurrent_upsert() -> None:
     import session_queue_projection
+    import session_store
 
     original_files = session_queue_projection._session_files_fingerprint
-    import session_store
     original_session_files = session_store._session_json_files
-    original_write = session_queue_projection._write_record_locked
-    original_validate = session_queue_projection._validate_generation
     scan_started = threading.Event()
     release_scan = threading.Event()
     scan_calls = 0
@@ -563,14 +574,9 @@ def test_queue_projection_rebuild_retries_concurrent_upsert() -> None:
         release_scan.wait(timeout=5)
         return []
 
-    def write(_record: dict, _generation=None) -> None:
-        return
-
     try:
         session_queue_projection._session_files_fingerprint = lambda: {}
         session_store._session_json_files = session_files
-        session_queue_projection._write_record_locked = write
-        session_queue_projection._validate_generation = lambda *_args: True
         with session_queue_projection._lock:
             session_queue_projection._loaded = True
             session_queue_projection._records.clear()
@@ -582,14 +588,16 @@ def test_queue_projection_rebuild_retries_concurrent_upsert() -> None:
         thread.join(timeout=5)
         assert not thread.is_alive()
         assert scan_calls == 1
+        assert session_queue_projection.flush_pending_writes(timeout=5)
         assert session_queue_projection.get("concurrent") == {"id": "concurrent", "value": 2}
-        assert "concurrent" not in session_queue_projection._record_generations
+        # The rebuild snapshot covers the concurrent upsert's sequence, so the
+        # replay-overlay entry must be pruned instead of leaking forever.
+        with session_queue_projection._lock:
+            assert "concurrent" not in session_queue_projection._mutation_log
     finally:
         release_scan.set()
         session_queue_projection._session_files_fingerprint = original_files
         session_store._session_json_files = original_session_files
-        session_queue_projection._write_record_locked = original_write
-        session_queue_projection._validate_generation = original_validate
 
 
 def test_flush_root_persist_waits_for_same_root_inflight() -> None:
@@ -677,7 +685,29 @@ def test_projection_delete_records_removes_nested_subtree_atomically() -> None:
     with session_queue_projection._write_cv:
         assert not set(ids) & set(session_queue_projection._pending_writes)
     manager_source = (ROOT / "session_manager.py").read_text(encoding="utf-8")
-    assert manager_source.count("session_queue_projection.delete_records(") == 2
+    assert manager_source.count("session_queue_projection.delete_records(") == 1
+    assert "session_queue_projection.delete_records(deleted_sids)" in manager_source
+
+
+def _projection_db_rows(ids: list[str]) -> set[str]:
+    import sqlite3
+
+    import session_queue_projection
+
+    path = session_queue_projection._database_path()
+    if not path.exists():
+        return set()
+    connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        marks = ",".join("?" for _ in ids)
+        return {
+            row[0]
+            for row in connection.execute(
+                f"SELECT id FROM records WHERE id IN ({marks})", list(ids),
+            )
+        }
+    finally:
+        connection.close()
 
 
 def test_evicted_root_delete_removes_all_nested_projection_state() -> None:
@@ -693,11 +723,11 @@ def test_evicted_root_delete_removes_all_nested_projection_state() -> None:
     ids = [root["id"], child["id"], grandchild["id"]]
     for sid in ids:
         session_queue_projection.upsert_record({"id": sid, "queued_prompts": []})
-        assert session_queue_projection._record_path(sid).exists()
+    assert _projection_db_rows(ids) == set(ids)
     manager._roots.pop(root["id"], None)
     assert manager.delete(root["id"])
     assert session_queue_projection.get_many(ids) == {}
-    assert all(not session_queue_projection._record_path(sid).exists() for sid in ids)
+    assert _projection_db_rows(ids) == set()
     with session_queue_projection._write_cv:
         assert not set(ids) & set(session_queue_projection._pending_writes)
 
@@ -711,7 +741,6 @@ def test_queue_projection_rebuild_concurrent_delete_wins() -> None:
     release_scan = threading.Event()
     original_session_files = session_store._session_json_files
     original_fingerprint = session_queue_projection._session_files_fingerprint
-    original_write = session_queue_projection._write_record_locked
 
     def session_files() -> list:
         scan_started.set()
@@ -721,7 +750,6 @@ def test_queue_projection_rebuild_concurrent_delete_wins() -> None:
     try:
         session_store._session_json_files = session_files
         session_queue_projection._session_files_fingerprint = lambda: {}
-        session_queue_projection._write_record_locked = lambda _record: None
         with session_queue_projection._lock:
             session_queue_projection._loaded = True
             session_queue_projection._records[sid] = {"id": sid, "value": 1}
@@ -732,13 +760,15 @@ def test_queue_projection_rebuild_concurrent_delete_wins() -> None:
         release_scan.set()
         thread.join(timeout=5)
         assert not thread.is_alive()
+        assert session_queue_projection.flush_pending_writes(timeout=5)
         assert session_queue_projection.get(sid) is None
-        assert sid not in session_queue_projection._deleted_generations
+        assert not _projection_db_rows([sid])
+        with session_queue_projection._lock:
+            assert sid not in session_queue_projection._mutation_log
     finally:
         release_scan.set()
         session_store._session_json_files = original_session_files
         session_queue_projection._session_files_fingerprint = original_fingerprint
-        session_queue_projection._write_record_locked = original_write
 
 
 def test_shutdown_global_drain_flushes_all_and_certifies_exact_generation() -> None:
@@ -817,14 +847,16 @@ def test_queue_projection_background_upsert_latest_wins() -> None:
 
     writes: list[dict] = []
 
-    def record_write(record: dict, _generation=None) -> None:
-        writes.append(dict(record))
+    def record_batch(batch: dict) -> None:
+        for _sid, (_sequence, record) in batch.items():
+            if record is not None:
+                writes.append(dict(record))
 
     try:
         with mock.patch.object(
             session_queue_projection,
-            "_write_record_locked",
-            side_effect=record_write,
+            "_compact_batch",
+            side_effect=record_batch,
         ):
             session_queue_projection.upsert_record_background({
                 "id": "latest-session",
@@ -847,12 +879,15 @@ def test_queue_projection_background_upsert_latest_wins() -> None:
         with session_queue_projection._write_cv:
             session_queue_projection._pending_writes.clear()
         with session_queue_projection._lock:
+            session_queue_projection._journal.pop("latest-session", None)
+            session_queue_projection._mutation_log.pop("latest-session", None)
             session_queue_projection._records.clear()
             session_queue_projection._records.update(original_records)
             session_queue_projection._loaded = original_loaded
 
 
 def test_queue_projection_slow_writer_does_not_block_event_loop_upsert() -> None:
+    import session_manager as manager_module
     import session_queue_projection
     from session_manager import manager as session_manager
 
@@ -871,11 +906,13 @@ def test_queue_projection_slow_writer_does_not_block_event_loop_upsert() -> None
     errors: list[BaseException] = []
     writes: list[dict] = []
 
-    def slow_write(record: dict, _generation=None) -> None:
+    def slow_batch(batch: dict) -> None:
         started.set()
         if not release.wait(timeout=5):
             raise TimeoutError("slow queue projection write was not released")
-        writes.append(dict(record))
+        for _sid, (_sequence, record) in batch.items():
+            if record is not None:
+                writes.append(dict(record))
 
     async def event_loop_upsert() -> None:
         session_manager._upsert_queue_record({
@@ -894,8 +931,8 @@ def test_queue_projection_slow_writer_does_not_block_event_loop_upsert() -> None
     try:
         with mock.patch.object(
             session_queue_projection,
-            "_write_record_locked",
-            side_effect=slow_write,
+            "_compact_batch",
+            side_effect=slow_batch,
         ):
             session_queue_projection.upsert_record_background({
                 "id": "slow-writer-session",
@@ -907,6 +944,7 @@ def test_queue_projection_slow_writer_does_not_block_event_loop_upsert() -> None
             assert done.wait(timeout=0.5)
             release.set()
             thread.join(timeout=5)
+            manager_module.drain_queue_projection_submissions()
             assert session_queue_projection.flush_pending_writes(timeout=5)
 
         assert not errors
@@ -917,6 +955,8 @@ def test_queue_projection_slow_writer_does_not_block_event_loop_upsert() -> None
         with session_queue_projection._write_cv:
             session_queue_projection._pending_writes.clear()
         with session_queue_projection._lock:
+            session_queue_projection._journal.pop("slow-writer-session", None)
+            session_queue_projection._mutation_log.pop("slow-writer-session", None)
             session_queue_projection._records.clear()
             session_queue_projection._records.update(original_records)
             session_queue_projection._loaded = original_loaded
@@ -965,7 +1005,7 @@ def test_user_input_file_store_calls_are_off_loop() -> None:
     assert "user_input_store.cancel_request(request_id)" not in cancel_source
 
     internal_start = source.index("async def internal_request_user_input(")
-    internal_end = source.index("@app.post(\"/api/internal/goal/set\")", internal_start)
+    internal_end = source.index("@app.post(\"/api/internal/open-config-panel\")", internal_start)
     internal_source = source[internal_start:internal_end]
     assert "public_req, created = await asyncio.to_thread(" in internal_source
     assert "user_input_store.create_or_get_pending_request" in internal_source
@@ -1125,9 +1165,16 @@ def test_session_detail_cache_hit_validation_uses_cheap_fingerprint() -> None:
     assert "session_manager._root_id_for(session_id)" not in helper_source
     assert "cached_tree_key = key[1]" in helper_source
     assert "session_manager.root_tree_stub_cache_key_for_root(" in helper_source
-    assert "_session_event_file_fingerprint(root_id)" in helper_source
-    assert "_session_event_meta(" not in helper_source
+    assert "_session_event_meta(root_id)" in helper_source
+    assert "_session_detail_watermarks(" in helper_source
     assert "_session_detail_response_cache_key_sync(" not in helper_source
+    # `_session_event_meta` must stay cheap on the cache-hit path: it may only
+    # fall through to the event reader when the stat fingerprint changed.
+    meta_start = source.index("def _session_event_meta(")
+    meta_end = source.index("def _session_detail_watermarks(", meta_start)
+    meta_source = source[meta_start:meta_end]
+    assert "_session_event_file_fingerprint(root_id)" in meta_source
+    assert "if cached is not None and cached[0] == fingerprint:" in meta_source
     assert "known_root_id: Optional[str] = None" in manager_source
     assert "known_root_id=root_id if isinstance(root_id, str) else None" in source
     root_helper_start = manager_source.index("def root_tree_stub_cache_key_for_root(")
@@ -1137,14 +1184,13 @@ def test_session_detail_cache_hit_validation_uses_cheap_fingerprint() -> None:
     assert "self._load_root(root_id" not in root_helper_source
 
     route_start = source.index("async def get_session(")
-    route_end = source.index("@app.get(\"/api/sessions/{session_id}/turns\")", route_start)
+    route_end = source.index("@app.get(\"/api/sessions/{session_id}/messages\")", route_start)
     route_source = source[route_start:route_end]
     assert "_session_detail_cached_key_still_current" in route_source
     assert "_session_detail_response_cache_key_sync" not in route_source[
         route_source.index("if cached_full_key is not None:"):
         route_source.index("perf.record(\"sessions.detail.response_cache.miss\"",)
     ]
-    assert "meta_path" not in roots_source
     startup_start = source.index("async def on_startup()")
     startup_end = source.index("async def on_shutdown()", startup_start)
     startup_source = source[startup_start:startup_end]
@@ -1300,7 +1346,7 @@ SOURCE_GREP_CASES: tuple = (
       ('timeout=self._send_timeout_s', 'ws.send_json.lock_wait'),
      ),
      ('grep', 'main.py', (('async def ws_callback(event_dict):', '# Per-connection token'),),
-      ('await _send_ws_callback_event(snapshot_transport, event_dict)',),
+      ('return await snapshot_transport.send_event(event_dict)',),
       ('await websocket.send_text(text)', 'await websocket.send_json(event_dict)'),
      ),
      ('grep', 'ws_serialization.py', (),
@@ -1431,16 +1477,16 @@ SOURCE_GREP_CASES: tuple = (
     )),
     ('provider_context_runtime_discovery_runs_off_loop', (
      ('grep', 'turn_manager.py',
-      (('        runtime_capability_contexts = await asyncio.to_thread(', '        transient_attempt = 0'),),
-      ('runtime_capability_contexts = await asyncio.to_thread(', 'runtime_skill_contexts,',
-       'dynamic_capability_contexts = await asyncio.to_thread(', 'extension_audit_context,',
+      (('        runtime_capability_contexts = await _to_turn_dispatch_thread(', '        transient_attempt = 0'),),
+      ('runtime_capability_contexts = await _to_turn_dispatch_thread(', 'runtime_skill_contexts,',
+       'dynamic_capability_contexts = await _to_turn_dispatch_thread(', 'extension_audit_context,',
       ),
       (),
      ),
      ('grep', 'turn_manager.py',
       (('        async def _refresh_provider_context()', '        async def _start_selector_change_continuation('),),
-      ('runtime_capability_contexts = await asyncio.to_thread(', 'runtime_skill_contexts,',
-       'dynamic_capability_contexts = await asyncio.to_thread(', 'extension_audit_context,',
+      ('runtime_capability_contexts = await _to_turn_dispatch_thread(', 'runtime_skill_contexts,',
+       'dynamic_capability_contexts = await _to_turn_dispatch_thread(', 'extension_audit_context,',
       ),
       (),
      ),
@@ -1455,15 +1501,15 @@ SOURCE_GREP_CASES: tuple = (
     ('continuation_start_boundary_runs_off_loop', (
      ('grep', 'turn_manager.py',
       (('        loop = asyncio.get_running_loop()', '        async def _clear_continuation_active()'),),
-      ('_session_rec = await asyncio.to_thread(\n            session_manager.get,',
-       'provider = await asyncio.to_thread(\n            self._c.provider_for_run,',
+      ('_session_rec = await _to_turn_dispatch_thread(\n            session_manager.get,',
+       'provider = await _to_turn_dispatch_thread(\n            self._c.provider_for_run,',
        '_session_rec_chain = (_session_rec or {}).get("continuation_chain") or []',
       ),
       ('session_manager.get(primary_session_id or app_session_id)',),
      ),
      ('grep', 'turn_manager.py',
       (('        async def _clear_continuation_active()', '        def _should_preempt_context_continuation_sync()'),),
-      ('await asyncio.to_thread(\n                session_manager.set_msg_continuation_active',), (),
+      ('await _to_turn_dispatch_thread(\n                session_manager.set_msg_continuation_active',), (),
      ),
      ('grep', 'turn_manager.py',
       (('        def _start_continuation_sync(', '        async def _start_context_continuation('),),
@@ -1475,23 +1521,23 @@ SOURCE_GREP_CASES: tuple = (
         '        def _should_preempt_selector_change_continuation_sync()',
        ),
       ),
-      ('continuation = await asyncio.to_thread(\n                _start_continuation_sync,',),
+      ('continuation = await _to_turn_dispatch_thread(\n                _start_continuation_sync,',),
       ('start_continuation_for(', 'session_manager.set_msg_continuation_active('),
      ),
      ('grep', 'turn_manager.py', (('        async def _start_selector_change_continuation(', '        while True:'),),
-      ('continuation = await asyncio.to_thread(\n                _start_continuation_sync,',),
+      ('continuation = await _to_turn_dispatch_thread(\n                _start_continuation_sync,',),
       ('start_continuation_for(', 'session_manager.set_msg_continuation_active('),
      ),
      ('grep', 'turn_manager.py',
       (('        async def _refresh_provider_context()', '        async def _start_selector_change_continuation('),),
-      ('_session_rec = await asyncio.to_thread(\n                session_manager.get,',
-       'provider = await asyncio.to_thread(\n                self._c.provider_for_session,',
+      ('_session_rec = await _to_turn_dispatch_thread(\n                session_manager.get,',
+       'provider = await _to_turn_dispatch_thread(\n                self._c.provider_for_session,',
       ),
       (),
      ),
      ('grep', 'turn_manager.py',
       (('        async def _context_strategy_is_continuation()', '        async def _refresh_provider_context()'),),
-      ('await asyncio.to_thread(user_prefs.get_context_strategy)',), (),
+      ('await _to_turn_dispatch_thread(user_prefs.get_context_strategy)',), (),
      ),
      ('grep', 'turn_manager.py',
       (('        async def _start_selector_change_continuation(', None),
@@ -1518,7 +1564,8 @@ SOURCE_GREP_CASES: tuple = (
      ('grep', 'main.py', (),
       ('run_requirements_processor_query(\n            "requirements.processed.processor",',
        'run_requirements_query(\n        "requirements.processed.finalize",',
-       'except TimeoutError as exc:\n        processed = requirement_context.processor_failure_result(exc)',
+       'requirement_context.recover_processed_requirements_from_delegation',
+       'processed = recovered or requirement_context.processor_failure_result(exc)',
        'executor=REQUIREMENTS_PROCESSOR_EXECUTOR', 'run_requirements_query(\n        "requirements.search",',
        'executor=REQUIREMENTS_SEARCH_EXECUTOR',
       ),
@@ -1813,7 +1860,8 @@ SOURCE_GREP_CASES: tuple = (
     )),
     ('codex_cursor_state_write_is_coalesced_off_loop', (
      ('grep', 'provider_codex.py', (('        def _on_cursor(', '        rs.tailer = CodexRolloutTailer('),),
-      ('self._schedule_backend_state_flush(_rs)',), ('self._write_backend_state(_rs)',),
+      ('_rs.processed_byte_offset = n', 'pending.cursor = n'),
+      ('self._write_backend_state(_rs)', 'self._schedule_backend_state_flush(_rs)'),
      ),
      ('grep', 'provider_codex.py', (('        def _on_child_cursor(', '        tailer = CodexRolloutTailer('),),
       ('self._schedule_backend_state_flush(_rs)',), ('self._write_backend_state(_rs)',),
@@ -1828,7 +1876,7 @@ SOURCE_GREP_CASES: tuple = (
       ('compute_jsonl_path(', 'count_jsonl_lines(', 'session_manager.get_lite('),
      ),
      ('grep', 'team_orchestration_read.py', (),
-      ('session_store.summary_fields_many(worker_sids, fields)', 'with perf.timed(f"{_METRIC}.session")',
+      ('session_store.summary_fields_many(worker_sids, _SESSION_FIELDS)', 'with perf.timed(f"{_METRIC}.session")',
        'pair_records: list[dict[str, Any]] = []',
       ),
       ('extension.team_orchestration.workers.fallback_fields', 'session_manager.get_fields_many(',
@@ -2039,9 +2087,9 @@ SOURCE_GREP_CASES: tuple = (
      ('grep', 'orchestrator.py', (('async def ask_team_message(', '    def _team_message_turn_response('),),
       ('sender, target = await asyncio.to_thread(\n            team_messaging.validate_message_route',
        'metadata = await asyncio.to_thread(\n            team_messaging.build_message_metadata',
-       'queue_item = await asyncio.to_thread(\n                    team_messaging.queue_payload',
-       'await asyncio.to_thread(\n                    session_manager.add_queued_prompt',
-       'cli_prompt = await asyncio.to_thread(\n                    team_messaging.format_team_message_prompt',
+       'queue_item = await asyncio.to_thread(\n                team_messaging.queue_payload',
+       'await asyncio.to_thread(\n                session_manager.add_queued_prompt',
+       'cli_prompt = await asyncio.to_thread(\n                team_messaging.format_team_message_prompt',
        'await ask_status_store.write_status_async(',
       ),
       ('session_manager.add_queued_prompt(', 'cli_prompt = team_messaging.format_team_message_prompt(',
@@ -2161,7 +2209,7 @@ SOURCE_GREP_CASES: tuple = (
      ),
      ('grep', 'provider.py',
       (('def recover_all_in_flight(', None), (None, 'indexed_marker = reconciled_index.get(child.name)')),
-      ('load_reconciled_marker_index(',), (),
+      ('load_reconciled_marker_index_for(',), (),
      ),
      ('grep', 'provider.py',
       (('def recover_all_in_flight(', None),
@@ -2260,10 +2308,12 @@ SOURCE_GREP_CASES: tuple = (
       ('cursor_ledger_worker.note(', 'lambda: self._write_backend_state('), (),
      ),
      ('grep', 'provider_gemini.py', (('def _on_cursor(', '\n\n'),),
-      ('cursor_ledger_worker.note(', 'lambda: self._write_backend_state('), (),
+      ('_rs.processed_line = n', 'pending.cursor = n'),
+      ('self._write_backend_state(', 'run_in_executor'),
      ),
      ('grep', 'provider_openai.py', (('def _on_cursor(', '\n\n'),),
-      ('cursor_ledger_worker.note(', 'lambda: self._write_backend_state('), (),
+      ('_rs.processed_line = n', 'pending.cursor = n'),
+      ('self._write_backend_state(', 'run_in_executor'),
      ),
     )),
     ('event_ingester_indexes_search_outside_root_lock', (
@@ -2328,13 +2378,16 @@ SOURCE_GREP_CASES: tuple = (
      ('grep', 'session_queue_projection.py', (), ('def _user_message_projection(',),
       ('def _user_message_keys(', 'def _user_messages('),
      ),
-     ('grep', 'session_queue_projection.py', (('def project_session(', 'def upsert_from_session('),),
-      ('user_projection = _user_message_projection(', '**user_projection'), (),
+     ('grep', 'session_queue_projection.py', (('def project_session(', 'def _walk_nodes('),),
+      ('users = _user_message_projection(session.get("messages") or [])', '**users'), (),
      ),
     )),
     ('queue_projection_skips_unchanged_disk_write', (
-     ('grep', 'session_queue_projection.py', (('def upsert_from_session(', 'def get('),),
-      ('if _records.get(session_id) == owned:', 'if not changed and not _needs_durable_write('), (),
+     ('grep', 'session_queue_projection.py', (('def _apply_mutation(', 'def upsert_record('),),
+      ('current_record == owned', '_regresses_queue_revision(current_record, owned)'), (),
+     ),
+     ('grep', 'session_queue_projection.py', (('def _compact_batch(', 'def _compact_rebuild('),),
+      ('elif existing[0] != payload:', 'else:\n                continue'), (),
      ),
     )),
     ('queue_projection_overlay_reads_records_in_bulk', (
@@ -2491,28 +2544,16 @@ SOURCE_GREP_CASES: tuple = (
      ),
     )),
     ('visible_order_cache_uses_dual_generation_singleflight_projection', (
-     ('grep', 'main.py',
-      (('_local_visible_order_cache: collections.OrderedDict[', '_session_detail_response_cache'),),
-      ('tuple[str, str | None, int, int]', '_local_visible_order_inflight',
-       '_local_visible_order_lock = threading.Lock()',
-      ),
-      (),
-     ),
-     ('grep', 'main.py',
-      (('def _local_visible_order_page_ids(', 'def _local_session_page_for_sidebar_preserving_order('),),
-      ('expected_summary_index_version: int', 'expected_summary_order_version: int',
-       'expected_summary_index_version,', 'expected_summary_order_version,', 'get_indexed_session_summary_if_current',
-       'visible_order_singleflight.wait', 'visible_order_singleflight.stale',
+     ('grep', 'session_store.py', (('def sidebar_session_summary_page(', 'def get_session_summaries_by_ids('),),
+      ('_summary_order_version,\n            _summary_visibility_version,',
+       'visible_ids = _sidebar_page_projections.get(key)',
+       'store.session.sidebar_page.projection_hit', 'store.session.sidebar_page.projection_miss',
+       'while len(_sidebar_page_projections) > _SIDEBAR_PAGE_PROJECTIONS_MAX:',
       ),
       (),
      ),
      ('grep', 'main.py', (('def _local_session_page_for_sidebar_preserving_order(', 'def _root_session_file_path('),),
-      ('expected_summary_index_version = session_store.summary_index_version()',
-       'expected_summary_order_version = session_store.summary_order_version()',
-       'expected_summary_index_version,\n                expected_summary_order_version,',
-       'get_indexed_session_summaries_by_ids_if_current',
-      ),
-      (),
+      ('session_store.sidebar_session_summary_page(',), (),
      ),
     )),
     ('session_list_skips_impossible_virtual_filters', (
@@ -2625,7 +2666,7 @@ SOURCE_GREP_CASES: tuple = (
     )),
     ('event_summary_scan_reuses_full_scan_cache', (
      ('grep', 'event_ingester.py', (('def _scan_max_seq(', '    @staticmethod\n    def _affects_render_projection'),),
-      ('all_entries: list[dict] = []', 'self._remember_full_scan_cache_locked(root_id, cur_offset, all_entries)',
+      ('entries: list[dict] = []', 'self._remember_full_scan_cache_locked(root_id, cur_offset, entries)',
        'self._seq_offsets[root_id] = seq_offsets',
       ),
       (),
@@ -2951,7 +2992,7 @@ SOURCE_GREP_CASES: tuple = (
      ),
     )),
     ('session_detail_has_split_perf_timers', (
-     ('grep', 'main.py', (('async def get_session(', '@app.get("/api/sessions/{session_id}/turns")'),),
+     ('grep', 'main.py', (('async def get_session(', '@app.get("/api/sessions/{session_id}/messages")'),),
       ('await _run_session_detail_hot_path(\n        "sessions.detail.worker"',
        'return await _json_bytes_response_async(tree)',
       ),
@@ -2960,7 +3001,7 @@ SOURCE_GREP_CASES: tuple = (
       ),
      ),
      ('grep', 'main.py',
-      (('async def get_session(', '@app.get("/api/sessions/{session_id}/turns")'),
+      (('async def get_session(', '@app.get("/api/sessions/{session_id}/messages")'),
        ('cache_key_parts = tree.pop("_detail_response_cache_key_parts", None)', '    else:'),
       ),
       (), ('_session_event_meta(', '_session_event_file_fingerprint('),
@@ -3150,15 +3191,19 @@ SOURCE_GREP_CASES: tuple = (
      ),
     )),
     ('event_journal_watch_path_uses_cached_sessions_dir', (
-     ('grep', 'event_journal.py', (), ('def _sessions_dir()', '_SESSIONS_DIR_CACHE'), ()),
+     ('grep', 'event_journal.py', (), ('def _session_artifacts_dir(', 'session_store.session_file_path('), ()),
      ('grep', 'event_journal.py', (('def _read_appended_entries(', 'def read_events('),),
-      ('_sessions_dir() / session_id / "events.jsonl"', 'os.SEEK_END'), ('ba_home()', '.exists(', '.stat('),
+      ('_session_artifacts_dir(session_id) / "events.jsonl"', 'os.SEEK_END'), ('ba_home()', '.exists(', '.stat('),
      ),
     )),
     ('run_state_emit_debug_logging_is_gated', (
      ('grep', 'turn_manager.py',
-      (('def _dbg_runstate(', '# ======================================================================'),),
-      ('logger.isEnabledFor(logging.DEBUG)', 'logger.debug(', 'await self._c.broadcast_session'), ('logger.info(',),
+      (('def _dbg_runstate(', 'def audit_running_discrepancies('),),
+      ('logger.isEnabledFor(logging.DEBUG)', 'logger.debug('), ('logger.info(',),
+     ),
+     ('grep', 'turn_manager.py',
+      (('def _run_state_touch(', '# ======================================================================'),),
+      ('await self._c.broadcast_session',), ('logger.info(',),
      ),
     )),
     ('startup_session_search_rebuild_skips_persisted_index', (
@@ -3245,13 +3290,10 @@ SOURCE_GREP_CASES: tuple = (
       ),
      ),
      ('ordered', 'main.py', (('async def _recover_in_flight_task()', 'async def _housekeeping_task()'),),
-      (('await integrate_recovered_runs(coordinator, batch)',), ('startup_recovery_gate.mark_recovery_done()',)),
-     ),
-     ('ordered', 'main.py', (('async def _recover_in_flight_task()', 'async def _housekeeping_task()'),),
-      (('startup_recovery_gate.mark_recovery_done()',), ('_enqueue_recovered_cold_runs(cold)',)),
-     ),
-     ('ordered', 'main.py', (('async def _recover_in_flight_task()', 'async def _housekeeping_task()'),),
-      (('startup_recovery_gate.mark_recovery_done()',), ('await _re_enqueue_queued_prompts()',)),
+      (('await integrate_recovered_runs(coordinator, batch)',), ('_enqueue_recovered_cold_runs(cold)',),
+       ('await _re_enqueue_queued_prompts()',), ('coordinator.turn_manager.reconcile_detached_background()',),
+       ('startup_recovery_gate.mark_recovery_done()',),
+      ),
      ),
     )),
     ('hydration_uses_local_projection_not_extension_backend', (
@@ -3361,11 +3403,11 @@ SOURCE_GREP_CASES: tuple = (
      ('grep', 'orchestrator.py', (('async def submit_team_message(', '    def _resolve_delegation_run_config('),),
       ('sender, target = await asyncio.to_thread(\n            team_messaging.validate_message_route',
        'metadata = await asyncio.to_thread(\n            team_messaging.build_message_metadata',
-       'queue_item = await asyncio.to_thread(\n                team_messaging.queue_payload',
+       'queue_item = await asyncio.to_thread(\n            team_messaging.queue_payload',
        'await asyncio.to_thread(\n                session_manager.add_queued_prompt',
-       'cli_prompt = await asyncio.to_thread(\n                team_messaging.format_team_message_prompt',
+       'cli_prompt = await asyncio.to_thread(\n            team_messaging.format_team_message_prompt',
        'await asyncio.to_thread(\n                session_manager.remove_queued_prompt',
-       'await self.submit_prompt_async(target_session_id, {',
+       'await self.submit_prompt_async(target_session_id, prompt_params)',
       ),
       ('session_manager.add_queued_prompt(', 'cli_prompt = team_messaging.format_team_message_prompt(',
        'self.submit_prompt(target_session_id, {',
@@ -3373,18 +3415,12 @@ SOURCE_GREP_CASES: tuple = (
      ),
     )),
     ('default_session_page_uses_visible_order_cache', (
-     ('grep', 'main.py', (), ('_local_visible_order_cache',), ()),
-     ('grep', 'main.py',
-      (('def _local_visible_order_page_ids(', 'def _local_session_page_for_sidebar_preserving_order('),),
-      ('sessions.list.local.visible_order_cache.hit', 'sessions.list.local.visible_order_build',
-       'expected_summary_index_version', 'get_indexed_session_summary_if_current', 'visible_ids.append(ordered_id)',
-       'return list(cached[offset:offset + limit]), len(cached)', 'session_matches_project(summary, project_path)',
-      ),
-      (),
-     ),
+     ('grep', 'session_store.py', (), ('def sidebar_session_summary_page(',), ()),
      ('grep', 'main.py', (('def _local_session_page_for_sidebar_preserving_order(', 'def _root_session_file_path('),),
       ('_can_page_default_local_visible_order(', 'sessions.list.local.visible_order_page',
-       '_local_visible_order_page_ids(', 'expected_summary_index_version = session_store.summary_index_version()',
+       'session_store.sidebar_session_summary_page(',
+       'sessions.list.local.visible_order_page.order_generation',
+       'sessions.list.local.visible_order_page.visibility_generation',
       ),
       (),
      ),
@@ -3398,9 +3434,11 @@ SOURCE_GREP_CASES: tuple = (
      ('grep', 'main.py', (('def _session_search_candidate_limit(', '@app.get("/api/sessions")'),),
       ('max(offset + limit, _SESSION_LIST_SEARCH_MIN_CANDIDATES)',), (),
      ),
+     ('grep', 'main.py', (('async def _sidebar_search_scores(', '@app.get("/api/sessions")'),),
+      ('session_store.SEARCH_FIELD_CONTENT in selected_search_fields',), (),
+     ),
      ('grep', 'main.py', (('@app.get("/api/sessions")', '@app.post("/api/sessions/search-content")'),),
       ('content_limit=_session_search_candidate_limit(offset, limit)',
-       'session_store.SEARCH_FIELD_CONTENT in effective_search_fields',
        'cached_response = _sessions_list_cache_get(cache_key)', 'sessions.list.search_local_page.worker',
       ),
       ('content_limit=max(offset + limit, 1)', 'cache_response = not ('),
@@ -3450,7 +3488,7 @@ SOURCE_GREP_CASES: tuple = (
     )),
     ('get_session_strips_synthetic_events_off_loop', (
      ('grep', 'main.py', (), ('def _tree_has_loaded_events(',), ()),
-     ('grep', 'main.py', (('async def get_session(', '@app.get("/api/sessions/{session_id}/turns")'),), (),
+     ('grep', 'main.py', (('async def get_session(', '@app.get("/api/sessions/{session_id}/messages")'),), (),
       ('_strip_synthetic_events_from_tree(tree)',),
      ),
      ('grep', 'main.py', (('def _session_detail_snapshot_sync(', 'def _floor_events_from_seq('),),
@@ -3468,7 +3506,7 @@ SOURCE_GREP_CASES: tuple = (
      ('grep', 'main.py', (('def _session_detail_cache_get(', 'def _session_detail_cache_put('),), (),
       ('time.monotonic()',),
      ),
-     ('grep', 'main.py', (('async def get_session(', '@app.get("/api/sessions/{session_id}/turns")'),),
+     ('grep', 'main.py', (('async def get_session(', '@app.get("/api/sessions/{session_id}/messages")'),),
       ('_session_detail_cache_get(cache_key)', '_session_detail_response_cache_latest.get(simple_cache_key)',
        'if cached_full_key is not None:', '_session_reconcile_snapshot_and_schedule', 'include_cache_key=True',
        'await _session_detail_cache_put_async(cache_key, tree)',
@@ -3525,9 +3563,9 @@ SOURCE_GREP_CASES: tuple = (
     ('provider_start_run_is_off_loop_everywhere', (
      ('grep', 'orchs/manager/_delegation.py', (),
       ('await asyncio.to_thread(\n                    provider.start_run,',
-       'await asyncio.to_thread(session_manager.flush_pending_persists)',
+       'await asyncio.to_thread(\n                    session_manager.flush_root_persist, app_session_id,',
       ),
-      ('\n            provider.start_run(',),
+      ('\n            provider.start_run(', 'session_manager.flush_pending_persists'),
      ),
      ('grep', 'run_recovery.py', (),
       ('await asyncio.to_thread(\n        provider.start_run,',
@@ -3537,9 +3575,9 @@ SOURCE_GREP_CASES: tuple = (
      ),
      ('grep', 'node_rpc_handlers.py', (),
       ('await asyncio.to_thread(\n                provider.start_run,',
-       'await asyncio.to_thread(session_manager.flush_pending_persists)',
+       'await asyncio.to_thread(session_manager.flush_root_persist, root_id)',
       ),
-      ('\n        provider.start_run(',),
+      ('\n        provider.start_run(', 'session_manager.flush_pending_persists'),
      ),
     )),
     ('extension_backend_get_skips_body_stream', (

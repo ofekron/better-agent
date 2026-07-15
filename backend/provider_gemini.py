@@ -802,10 +802,10 @@ class GeminiProvider(Provider):
                 except (json.JSONDecodeError, OSError):
                     pass
 
-            # Runner is dead — enter regardless of state.json existing.
-            # state.json with null session_id + dead runner is a pre-run
-            # failure (e.g. invalid --resume target); the old
-            # `and not state_path.exists()` gate would spin forever.
+            # Runner is dead — enter regardless of state.json existing:
+            # state.json with a null session_id + dead runner is a pre-run
+            # failure (e.g. invalid --resume target), so gating this branch
+            # on state.json absence would spin forever.
             if not await popen_is_running_off_loop(rs.popen):
                 if await path_exists_off_loop(complete_path):
                     break
