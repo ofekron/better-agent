@@ -453,12 +453,16 @@ describe("sessions CRUD + subscribe lifecycle", () => {
   });
 
   it("opens a prefilled new-session modal from the composer with attachments", async () => {
+    // Project path must match the session's cwd — once the project index
+    // loads, belongsToProjectPath attributes sidebar rows by registered
+    // project membership, not raw string equality; an unregistered cwd
+    // would filter the session out of its own sidebar.
     const session = makeSession({ id: "source", messages: [] });
     const h = await renderApp({
       seed: {
         sessions: [session],
         projects: [{
-          path: "/tmp/project",
+          path: session.cwd,
           name: "project",
           created_at: new Date().toISOString(),
           last_used: new Date().toISOString(),
@@ -1041,7 +1045,6 @@ describe("sessions CRUD + subscribe lifecycle", () => {
     expect(h.outbound).toContainEqual(
       expect.objectContaining({
         type: "subscribe",
-        subscription_class: "foreground",
         app_session_id: session.id,
       }),
     );

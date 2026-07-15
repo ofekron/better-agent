@@ -18,6 +18,19 @@ function engineerBtn(h: { $: (s: string) => HTMLElement | null }):
   return h.$('[data-testid="engineer-btn"]') as HTMLButtonElement | null;
 }
 
+/** The Engineer action lives in InputArea's collapsible "more actions"
+ * overflow menu alongside the other secondary composer actions — open
+ * it before looking for engineer-btn. */
+async function openOverflowMenu(h: {
+  $: (s: string) => HTMLElement | null;
+  flush: () => Promise<void>;
+}): Promise<void> {
+  const trigger = h.$(".input-overflow-trigger") as HTMLButtonElement | null;
+  if (!trigger) throw new Error("prompt-eng: overflow trigger not present");
+  fireEvent.click(trigger);
+  await h.flush();
+}
+
 function overlay(h: { $: (s: string) => HTMLElement | null }): HTMLElement | null {
   return h.$('[data-testid="prompt-eng-overlay"]');
 }
@@ -27,6 +40,7 @@ describe("prompt-engineering — start flow", () => {
     const session = makeSession();
     const h = await renderApp({ seed: { sessions: [session] } });
     await h.selectSession(session.id);
+    await openOverflowMenu(h);
 
     const btn = engineerBtn(h);
     expect(btn).not.toBeNull();
@@ -45,6 +59,7 @@ describe("prompt-engineering — start flow", () => {
     await h.selectSession(session.id);
 
     // Don't type anything. Just click ⚙, pick Fresh.
+    await openOverflowMenu(h);
     await h.clickByText(/⚙ Engineer/);
     fireEvent.click(
       h.$('[data-testid="prompt-eng-mode-new"]') as HTMLButtonElement,
@@ -71,6 +86,7 @@ describe("prompt-engineering — start flow", () => {
 
     typeDraft(h.raw.container as HTMLElement, "refine this");
     await h.flush();
+    await openOverflowMenu(h);
 
     expect(engineerBtn(h)!.disabled).toBe(false);
 
@@ -89,6 +105,7 @@ describe("prompt-engineering — start flow", () => {
 
     typeDraft(h.raw.container as HTMLElement, "draft");
     await h.flush();
+    await openOverflowMenu(h);
     await h.clickByText(/⚙ Engineer/);
 
     const fork = h.$('[data-testid="prompt-eng-mode-fork"]') as
@@ -109,6 +126,7 @@ describe("prompt-engineering — start flow", () => {
 
     typeDraft(h.raw.container as HTMLElement, "draft");
     await h.flush();
+    await openOverflowMenu(h);
     await h.clickByText(/⚙ Engineer/);
 
     const fork = h.$('[data-testid="prompt-eng-mode-fork"]') as
@@ -124,6 +142,7 @@ describe("prompt-engineering — start flow", () => {
 
     typeDraft(h.raw.container as HTMLElement, "improve me");
     await h.flush();
+    await openOverflowMenu(h);
     await h.clickByText(/⚙ Engineer/);
 
     const fresh = h.$('[data-testid="prompt-eng-mode-new"]') as
@@ -154,6 +173,7 @@ describe("prompt-engineering — start flow", () => {
 
     typeDraft(h.raw.container as HTMLElement, "improve me");
     await h.flush();
+    await openOverflowMenu(h);
     await h.clickByText(/⚙ Engineer/);
 
     const fresh = h.$('[data-testid="prompt-eng-mode-new"]') as
@@ -180,6 +200,7 @@ describe("prompt-engineering — cancel flow", () => {
 
     typeDraft(h.raw.container as HTMLElement, "improve me");
     await h.flush();
+    await openOverflowMenu(h);
     await h.clickByText(/⚙ Engineer/);
     fireEvent.click(
       h.$('[data-testid="prompt-eng-mode-new"]') as HTMLButtonElement,
@@ -225,6 +246,7 @@ describe("prompt-engineering — Send flow", () => {
 
     typeDraft(h.raw.container as HTMLElement, "first draft");
     await h.flush();
+    await openOverflowMenu(h);
     await h.clickByText(/⚙ Engineer/);
     fireEvent.click(
       h.$('[data-testid="prompt-eng-mode-new"]') as HTMLButtonElement,
@@ -294,6 +316,7 @@ describe("prompt-engineering — file-anchored comments", () => {
 
     typeDraft(h.raw.container as HTMLElement, "improve me");
     await h.flush();
+    await openOverflowMenu(h);
     await h.clickByText(/⚙ Engineer/);
     fireEvent.click(
       h.$('[data-testid="prompt-eng-mode-new"]') as HTMLButtonElement,
@@ -459,6 +482,7 @@ describe("prompt-engineering — Start failure", () => {
       { target: { value: "improve me" } },
     );
     await h.flush();
+    await openOverflowMenu(h);
     await h.clickByText(/⚙ Engineer/);
 
     // Yank the parent session out of the mock backend's state. The
@@ -517,6 +541,7 @@ describe("prompt-engineering — overlay UX guardrails", () => {
       { target: { value: "improve me" } },
     );
     await h.flush();
+    await openOverflowMenu(h);
     await h.clickByText(/⚙ Engineer/);
     fireEvent.click(
       h.$('[data-testid="prompt-eng-mode-new"]') as HTMLButtonElement,
@@ -562,6 +587,7 @@ describe("prompt-engineering — overlay UX guardrails", () => {
       { target: { value: "first draft" } },
     );
     await h.flush();
+    await openOverflowMenu(h);
     await h.clickByText(/⚙ Engineer/);
     fireEvent.click(
       h.$('[data-testid="prompt-eng-mode-new"]') as HTMLButtonElement,
@@ -593,6 +619,7 @@ describe("prompt-engineering — overlay UX guardrails", () => {
       { target: { value: "different draft" } },
     );
     await h.flush();
+    await openOverflowMenu(h);
     await h.clickByText(/⚙ Engineer/);
     fireEvent.click(
       h.$('[data-testid="prompt-eng-mode-new"]') as HTMLButtonElement,
@@ -624,6 +651,7 @@ describe("prompt-engineering — overlay UX guardrails", () => {
       { target: { value: "improve me" } },
     );
     await h.flush();
+    await openOverflowMenu(h);
     await h.clickByText(/⚙ Engineer/);
     fireEvent.click(
       h.$('[data-testid="prompt-eng-mode-new"]') as HTMLButtonElement,
@@ -675,6 +703,7 @@ describe("prompt-engineering — overlay UX guardrails", () => {
       { target: { value: "improve me" } },
     );
     await h.flush();
+    await openOverflowMenu(h);
     await h.clickByText(/⚙ Engineer/);
     fireEvent.click(
       h.$('[data-testid="prompt-eng-mode-new"]') as HTMLButtonElement,
@@ -721,6 +750,7 @@ describe("prompt-engineering — overlay UX guardrails", () => {
       { target: { value: "improve me" } },
     );
     await h.flush();
+    await openOverflowMenu(h);
     await h.clickByText(/⚙ Engineer/);
     fireEvent.click(
       h.$('[data-testid="prompt-eng-mode-new"]') as HTMLButtonElement,
