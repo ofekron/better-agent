@@ -58,6 +58,29 @@ describe("chatTreeToMessages", () => {
       { provider_id: "claude", model: "sonnet", reasoning_effort: "high" });
   });
 
+  it("preserves body and result events for cold REST rendering", () => {
+    const messages = chatTreeToMessages(parseProjection(items), lookup);
+    expect(messages[1].events?.map((event) => [event.type, event.data])).toEqual([
+      ["tool_call", {
+        uuid: "e-tool",
+        tool_use_id: "t1",
+        tool: "Bash",
+        args: null,
+      }],
+      ["output", { uuid: "e-final", output: "All done." }],
+      ["model_switched", {
+        uuid: "e-switch",
+        previous_provider_id: "claude",
+        previous_model: "sonnet",
+        previous_reasoning_effort: "high",
+        provider_id: "codex",
+        model: "gpt-5-codex",
+        reasoning_effort: "high",
+        changed: ["provider_id", "model"],
+      }],
+    ]);
+  });
+
   it("attaches model changes as boundary events on the preceding assistant message", () => {
     const messages = chatTreeToMessages(parseProjection(items), lookup);
     const boundary = (messages[1].events ?? []).find((e) => e.type === "model_switched");
@@ -68,7 +91,7 @@ describe("chatTreeToMessages", () => {
       model: "gpt-5-codex",
       changed: ["provider_id", "model"],
     });
-    expect(messages[3].events ?? []).toHaveLength(0);
+    expect(messages[3].events?.map((event) => event.type)).toEqual(["output"]);
   });
 
   it("omits the assistant message when the turn has no owned events", () => {

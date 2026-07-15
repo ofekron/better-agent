@@ -503,18 +503,25 @@ describe("messages_replay / messages_delta upsert + since_seq cursor", () => {
     const canonical = makeSession({
       id: "s",
       messages: [
-        makeUserMsg({ id: "u", content: "prompt", seq: 0 }),
+        makeUserMsg({ id: "u0", content: "older prompt", seq: 0 }),
+        makeAssistantMsg({
+          id: "a0",
+          content: "older answer",
+          seq: 1,
+          isStreaming: false,
+        }),
+        makeUserMsg({ id: "u", content: "prompt", seq: 2 }),
         makeAssistantMsg({
           id: "a-real",
           content: "final answer",
-          seq: 1,
+          seq: 3,
           isStreaming: false,
           events: [textEvent("ev-final", "final answer")],
         }),
       ],
     });
     const localDuringFetch = [
-      makeUserMsg({ id: "u", content: "stale local prompt", seq: 0 }),
+      makeUserMsg({ id: "u", content: "stale local prompt", seq: 2 }),
       makeAssistantMsg({
         id: "live-placeholder-1",
         content: "final",
@@ -531,12 +538,14 @@ describe("messages_replay / messages_delta upsert + since_seq cursor", () => {
     );
     const assistantMessages = merged.messages?.filter((message) => message.role === "assistant");
 
+    expect(merged.messages?.find((message) => message.id === "u0")?.content).toBe("older prompt");
+    expect(merged.messages?.find((message) => message.id === "a0")?.content).toBe("older answer");
     expect(merged.messages?.find((message) => message.id === "u")?.content).toBe("prompt");
     expect(merged.messages?.some((message) => message.id === "u-local-only")).toBe(true);
-    expect(assistantMessages).toHaveLength(1);
-    expect(assistantMessages?.[0].id).toBe("a-real");
-    expect(assistantMessages?.[0].content).toBe("final answer");
-    expect(assistantMessages?.[0].events?.map((event) => event.data?.uuid)).toEqual(["ev-final"]);
+    expect(assistantMessages).toHaveLength(2);
+    expect(assistantMessages?.[1].id).toBe("a-real");
+    expect(assistantMessages?.[1].content).toBe("final answer");
+    expect(assistantMessages?.[1].events?.map((event) => event.data?.uuid)).toEqual(["ev-final"]);
   });
 
   it("cold REST select seeds the cursor from the highest seq in the payload", async () => {

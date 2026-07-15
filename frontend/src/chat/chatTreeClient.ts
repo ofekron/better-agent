@@ -1,6 +1,6 @@
 import { API } from '../api'
 import { parseProjection } from './parseProjection'
-import type { ChatProjection, Turn } from './model'
+import type { BodyItem, ChatProjection, Turn } from './model'
 import type { ChatMessage, WSEvent } from '../types'
 
 export type ChatTreeLookupEntry =
@@ -146,6 +146,90 @@ function resolveAssistantMessageId(
   return null
 }
 
+function collectBodyEventIds(items: readonly BodyItem[]): string[] {
+  const ids: string[] = []
+  const stack = [...items]
+  while (stack.length > 0) {
+    const item = stack.shift()
+    if (!item) continue
+    if (item.type === 'Explanation') {
+      ids.push(...item.textEventIds, ...item.itemIds)
+    } else if (item.type === 'SteeringMessage') {
+      ids.push(item.id)
+    } else {
+      ids.push(item.id)
+      stack.unshift(...item.body)
+      if (item.result) ids.push(...item.result.partIds)
+      ids.push(...item.children)
+    }
+  }
+  return ids
+}
+
+function eventForRender(id: string, entry: ChatTreeLookupEntry | undefined): WSEvent | null {
+  if (!entry || entry.kind !== 'event') return null
+  if (entry.type === 'assistant_text') {
+    return { type: 'output', data: { uuid: id, output: String(entry.data.text ?? '') }, _ts: entry.timestamp ?? undefined }
+  }
+  if (entry.type === 'thinking') {
+    return { type: 'thinking', data: { uuid: id, thought: String(entry.data.text ?? '') }, _ts: entry.timestamp ?? undefined }
+  }
+  if (entry.type === 'tool_interaction') {
+    const status = String(entry.data.status ?? '')
+    if (status === 'complete' && entry.data.output !== undefined) {
+      return {
+        type: 'tool_result',
+        data: {
+          uuid: id,
+          tool_use_id: String(entry.data.tool_use_id ?? id),
+          output: String(entry.data.output ?? ''),
+        },
+        _ts: entry.timestamp ?? undefined,
+      }
+    }
+    return {
+      type: 'tool_call',
+      data: {
+        uuid: id,
+        tool_use_id: String(entry.data.tool_use_id ?? id),
+        tool: String(entry.data.tool_name ?? entry.data.tool ?? 'tool'),
+        args: entry.data.args ?? null,
+      },
+      _ts: entry.timestamp ?? undefined,
+    }
+  }
+  if (entry.type === 'steering_message') {
+    return { type: 'steer_prompt', data: { uuid: id, prompt: String(entry.data.text ?? '') }, _ts: entry.timestamp ?? undefined }
+  }
+  if (entry.type === 'model_change') {
+    return modelSwitchEvent(id, entry)
+  }
+  return {
+    type: 'diagnostic',
+    data: { uuid: id, kind: entry.type, raw: entry.data },
+    _ts: entry.timestamp ?? undefined,
+  }
+}
+
+function turnEventsForRender(
+  turn: Turn,
+  lookup: Record<string, ChatTreeLookupEntry>,
+): WSEvent[] {
+  const ids = [
+    ...collectBodyEventIds(turn.body),
+    ...(turn.result?.partIds ?? []),
+  ]
+  const seen = new Set<string>()
+  const events: WSEvent[] = []
+  for (const id of ids) {
+    if (seen.has(id)) continue
+    seen.add(id)
+    const event = eventForRender(id, lookup[id])
+    if (event) events.push(event)
+  }
+  return events
+}
+
 /** Adapt the formal chat tree into the ChatMessage list the existing
  * Chat component renders. Structure and result resolution come from the
  * tree (the backend projector — no client-side rederivation); content
@@ -191,6 +275,10 @@ export function chatTreeToMessages(
       isStreaming: false,
       ...(assistantEntry?.kind === 'message' ? snapshotExtras(assistantEntry) : {}),
     })
+    messages[messages.length - 1].events = [
+      ...(messages[messages.length - 1].events ?? []),
+      ...turnEventsForRender(item, lookup),
+    ]
   }
   return messages
 }

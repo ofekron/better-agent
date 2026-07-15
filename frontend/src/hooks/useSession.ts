@@ -673,9 +673,20 @@ export function preserveLocalMessagesInTree(
   source: ChatMessage[],
 ): Session {
   return updateNodeById(tree, sessionId, (node) => {
-    const existing = node.messages || [];
-    const merged = mergeIncomingMessagesForNode(source, existing);
-    return merged === existing ? node : { ...node, messages: merged };
+    const canonical = node.messages || [];
+    const canonicalIds = new Set(canonical.map((message) => message.id));
+    const localOnly = source.filter((message) => !canonicalIds.has(message.id));
+    const merged = mergeIncomingMessagesForNode(
+      [...canonical, ...localOnly],
+      canonical,
+    );
+    if (
+      merged.length === canonical.length &&
+      merged.every((message, index) => message === canonical[index])
+    ) {
+      return node;
+    }
+    return { ...node, messages: merged };
   });
 }
 
