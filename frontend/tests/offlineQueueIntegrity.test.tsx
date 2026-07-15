@@ -117,6 +117,27 @@ describe("useOfflineQueue — IndexedDB persistence integrity", () => {
     expect(offlineEntryIsHeld(reloaded.result.current.getAll()[0])).toBe(false);
   });
 
+  it("projects failure, retry, and removal across mounted queue consumers", async () => {
+    const first = renderHook(() => useOfflineQueue());
+    const second = renderHook(() => useOfflineQueue());
+    await waitFor(() => {
+      expect(first.result.current.ready).toBe(true);
+      expect(second.result.current.ready).toBe(true);
+    });
+
+    await act(() => first.result.current.enqueue(entry("a", "shared", "keep me")));
+    await waitFor(() => expect(second.result.current.getAll()).toHaveLength(1));
+    await act(() => first.result.current.markFailed("a", "shared", "provider suspended"));
+    await waitFor(() => expect(second.result.current.getAll()[0]).toEqual(expect.objectContaining({
+      failure: { errorText: "provider suspended" },
+    })));
+
+    await act(() => first.result.current.retryFailed(first.result.current.getAll()[0]));
+    await waitFor(() => expect(second.result.current.getAll()[0]).not.toHaveProperty("failure"));
+    await act(() => first.result.current.removeEntry(first.result.current.getAll()[0]));
+    await waitFor(() => expect(second.result.current.getAll()).toEqual([]));
+  });
+
   it("edits attachment-heavy actions without scaling with payload size", async () => {
     const queued: OfflinePromptEntry = {
       ...entry("a", "heavy", "original"),

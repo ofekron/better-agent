@@ -53,6 +53,33 @@ describe("offline queue projection reconciliation", () => {
     expect(reconcileOfflineQueueDrafts(drafts, [offlineEntry])).toBe(drafts);
   });
 
+  it("projects durable failure, retry, and removal into an existing bubble", () => {
+    const pending = { "session-a": [message("offline-a", "sending")] };
+    const failedEntry: OfflinePromptEntry = {
+      ...offlineEntry,
+      failure: { errorText: "Provider is suspended" },
+    };
+
+    const failed = reconcileOfflinePendingMessages(pending, [failedEntry]);
+    expect(failed).toEqual({
+      "session-a": [expect.objectContaining({
+        id: "offline-a",
+        status: "error",
+        errorText: "Provider is suspended",
+      })],
+    });
+
+    const retried = reconcileOfflinePendingMessages(failed, [offlineEntry]);
+    expect(retried).toEqual({
+      "session-a": [expect.objectContaining({
+        id: "offline-a",
+        status: "offline",
+        errorText: undefined,
+      })],
+    });
+    expect(reconcileOfflinePendingMessages(failed, [])).toEqual({});
+  });
+
   it("adopts a matching runtime draft into the authoritative offline projection", () => {
     const runtimeDrafts = {
       "session-a": [{ id: "offline-a", clientId: "offline-a", preview: "offline" }],
