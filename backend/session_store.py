@@ -4906,11 +4906,21 @@ def _overlay_queue_projection(root: dict) -> None:
             continue
         record = records.get(sid)
         if isinstance(record, dict) and "queued_prompts" in record:
+            # A projection record older than the node (async upserts land on a
+            # background thread) must not overwrite the newer tree state —
+            # doing so silently drops a just-admitted prompt from memory and
+            # disk. Mirror of _regresses_queue_revision on the upsert side.
+            if session_queue_projection._regresses_queue_revision(node, record):
+                continue
             node["queued_prompts"] = [
                 copy.deepcopy(prompt)
                 for prompt in record.get("queued_prompts") or []
                 if isinstance(prompt, dict)
             ]
+            node["queue_revision"] = max(
+                int(node.get("queue_revision") or 0),
+                int(record.get("queue_revision") or 0),
+            )
 
 
 @perf.timed_fn("store.session.write_full")

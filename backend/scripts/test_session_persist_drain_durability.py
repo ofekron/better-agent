@@ -27,6 +27,9 @@ import _test_home
 
 _TMP_HOME = _test_home.isolate("bc-test-persist-drain-")
 
+import runtime_ownership  # noqa: E402
+runtime_ownership.register_current_process_writer()
+
 import session_manager as sm_mod  # noqa: E402
 import session_store  # noqa: E402
 from session_manager import manager as sm  # noqa: E402

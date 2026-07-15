@@ -210,6 +210,9 @@ def _run() -> bool:
         "model": root.get("model"),
         "cwd": root.get("cwd"),
         "queued_prompts": [fork_prompt],
+        # Newer than the fork node's snapshot: the overlay applies only when
+        # the projection does not regress the node's queue_revision.
+        "queue_revision": int(fork.get("queue_revision") or 0) + 1,
         "user_messages": [],
         "user_client_ids": [],
         "user_lifecycle_msg_ids": [],

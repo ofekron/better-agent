@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import shutil
 import sys
@@ -14,9 +15,13 @@ _BACKEND = os.path.dirname(_HERE)
 if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
+import runtime_ownership  # noqa: E402
+runtime_ownership.register_current_process_writer()
+
 import main  # noqa: E402
 import session_queue_projection  # noqa: E402
 import session_store  # noqa: E402
+import session_manager as session_manager_module  # noqa: E402
 from session_manager import manager as session_manager  # noqa: E402
 
 PASS = "\x1b[32mPASS\x1b[0m"
@@ -130,25 +135,43 @@ async def test_reenqueue_dedupes_from_projection() -> bool:
     return ok
 
 
+async def test_flush_overlay_does_not_wipe_newer_queue_state() -> bool:
+    """A stale projection record (async upserts land on a background thread)
+    must never overwrite a newer tree's queued_prompts during a
+    preserve_projection_fields write."""
+    sid = _make_session()
+    original_submit = session_manager_module._submit_queue_projection_record
+    # Freeze the projection at its pre-admission (stale) state, exactly as if
+    # the background submission thread had not drained yet.
+    session_manager_module._submit_queue_projection_record = lambda record: None
+    try:
+        session_manager.add_queued_prompt(sid, _queued_prompt("qp-overlay", "client-overlay"))
+        session_manager.flush_pending_persists()
+    finally:
+        session_manager_module._submit_queue_projection_record = original_submit
+
+    in_memory = (session_manager.get_ref(sid) or {}).get("queued_prompts") or []
+    on_disk = json.loads(session_store._root_file_path(sid).read_bytes())
+    disk_queued = on_disk.get("queued_prompts") or []
+    ok = (
+        any(p.get("id") == "qp-overlay" for p in in_memory)
+        and any(p.get("id") == "qp-overlay" for p in disk_queued)
+    )
+    session_manager.remove_queued_prompt(sid, "qp-overlay")
+    print(f"{PASS if ok else FAIL} flush overlay never wipes newer queue state")
+    return ok
+
+
 async def test_get_session_context_scan_is_off_thread() -> bool:
     sid = _make_session()
-    original_max_seq = main.event_ingester.max_seq_by_sid
-    original_cursor = main.event_ingester.cursor
-    original_render_seq = main.event_ingester.render_seq_by_sid
-    original_tree = session_manager.get_root_tree_stubbed
+    original_event_meta = main.event_ingester.session_event_meta
 
-    main.event_ingester.cursor = lambda _root_id: 1
-    session_manager.get_root_tree_stubbed = (
-        lambda _sid, msg_limit=50, exchange_count=None: {"id": sid, "messages": []}
-    )
-
-    def slow_max_seq(_root_id: str) -> dict[str, int]:
+    def slow_event_meta(_root_id: str) -> tuple[bool, int, dict[str, int]]:
         import time
         time.sleep(0.2)
-        return {sid: 1}
+        return True, 1, {sid: 1}
 
-    main.event_ingester.max_seq_by_sid = slow_max_seq
-    main.event_ingester.render_seq_by_sid = lambda _root_id: {sid: 1}
+    main.event_ingester.session_event_meta = slow_event_meta
     ticks = 0
 
     async def heartbeat() -> None:
@@ -162,16 +185,14 @@ async def test_get_session_context_scan_is_off_thread() -> bool:
         result = await main.get_session(sid)
     finally:
         task.cancel()
-        main.event_ingester.max_seq_by_sid = original_max_seq
-        main.event_ingester.cursor = original_cursor
-        main.event_ingester.render_seq_by_sid = original_render_seq
-        session_manager.get_root_tree_stubbed = original_tree
+        main.event_ingester.session_event_meta = original_event_meta
         try:
             await task
         except asyncio.CancelledError:
             pass
 
-    ok = result.get("max_seq_by_sid", {}).get(sid) == 1 and ticks >= 5
+    payload = json.loads(result.body)
+    ok = payload.get("max_seq_by_sid", {}).get(sid) == 1 and ticks >= 5
     print(f"{PASS if ok else FAIL} GET session context scan yields to event loop")
     return ok
 
@@ -180,6 +201,7 @@ async def _run() -> bool:
     results = [
         await test_reenqueue_uses_projection_without_full_root_load(),
         await test_reenqueue_dedupes_from_projection(),
+        await test_flush_overlay_does_not_wipe_newer_queue_state(),
         await test_get_session_context_scan_is_off_thread(),
     ]
     print(f"\n{sum(1 for r in results if r)}/{len(results)} passed")

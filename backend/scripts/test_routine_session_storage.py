@@ -12,6 +12,9 @@ import _test_home  # noqa: E402
 
 _TMP_HOME = _test_home.isolate("bc-test-routine-session-storage-")
 
+import runtime_ownership  # noqa: E402
+runtime_ownership.register_current_process_writer()
+
 import event_ingester  # noqa: E402
 import native_files_manager  # noqa: E402
 import session_manager as session_manager_mod  # noqa: E402
