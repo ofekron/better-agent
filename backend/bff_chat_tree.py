@@ -125,6 +125,10 @@ def _build_lookup(
             snapshot_seq[message_id] = message.get("seq")
             if isinstance(message.get("run_meta"), dict):
                 run_meta[message_id] = message["run_meta"]
+    snapshot_by_id: dict[str, dict[str, Any]] = {}
+    for message in session.get("messages") or []:
+        if isinstance(message, dict) and isinstance(message.get("id"), str):
+            snapshot_by_id[message["id"]] = _strip_heavy_message_fields(message)
     lookup: dict[str, dict[str, Any]] = {}
     for message in adapted_messages:
         if message["id"] not in referenced:
@@ -134,6 +138,10 @@ def _build_lookup(
             "role": message["role"],
             "text": message["content"],
             "seq": snapshot_seq.get(message["id"], message["seq"]),
+            # Runtime snapshot passthrough (minus heavy payloads): liveness,
+            # hydration pointers, run_meta — everything the client's
+            # ChatMessage needs beyond tree structure.
+            "snapshot": snapshot_by_id.get(message["id"]),
         }
     for event in adapted_events:
         if event["event_id"] not in referenced:
@@ -149,6 +157,13 @@ def _build_lookup(
             "run_meta": run_meta.get(message_id) if isinstance(message_id, str) else None,
         }
     return lookup
+
+
+_HEAVY_MESSAGE_FIELDS = frozenset({"events", "workers", "manager"})
+
+
+def _strip_heavy_message_fields(message: dict[str, Any]) -> dict[str, Any]:
+    return {k: v for k, v in message.items() if k not in _HEAVY_MESSAGE_FIELDS}
 
 
 def _read_stored_facts(root_id: str, provider: str) -> list[dict[str, Any]]:
@@ -227,6 +242,9 @@ async def get_chat_tree(
     return {
         "session_id": session_id,
         "schema_version": CHAT_SCHEMA_VERSION,
+        # Session metadata for the client's one-initial-request contract;
+        # messages travel as tree + lookup, never as a second copy here.
+        "session": {k: v for k, v in session.items() if k != "messages"},
         "items": window,
         "lookup": _build_lookup(window, adapted.messages, adapted.events, session),
         "page": {

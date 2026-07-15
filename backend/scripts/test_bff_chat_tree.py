@@ -177,7 +177,10 @@ def main() -> None:
                                "older_cursor": "u3", "has_older": True})
         check("lookup carries prompt text and snapshot seq",
               body["lookup"]["u7"] == {"kind": "message", "role": "user",
-                                       "text": "prompt 7", "seq": 70})
+                                       "text": "prompt 7", "seq": 70,
+                                       "snapshot": {"id": "u7", "role": "user", "seq": 70}})
+        check("response carries session metadata without messages",
+              body["session"]["id"] == "windowroot" and "messages" not in body["session"])
         result_part = next(item for item in body["items"]
                            if item["type"] == "Turn" and item["id"] == "u7")["result"]["part_ids"][0]
         check("lookup resolves result events to their message",
