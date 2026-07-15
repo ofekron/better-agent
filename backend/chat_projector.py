@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections import defaultdict
+from collections import defaultdict, deque
 from collections.abc import Iterable, Mapping, Sequence
 from datetime import datetime
 from typing import Any
@@ -38,15 +38,34 @@ _MESSAGE_FIELDS = {"id", "turn_id", "seq", "role", "content"}
 _MODEL_IDENTITY_FIELDS = {"provider", "model", "effort"}
 MAX_CANONICAL_ROWS = 200_000
 MAX_CANONICAL_JSON_BYTES = 128 * 1024 * 1024
+MAX_MESSAGES = 200_000
+MAX_MESSAGE_JSON_BYTES = 128 * 1024 * 1024
 MAX_STRING_LENGTH = 4 * 1024 * 1024
 MAX_LIST_ITEMS = 100_000
 MAX_OPTIONS = 10_000
 MAX_SESSIONS = 10_000
 MAX_PAYLOAD_DEPTH = 64
+CHAT_PROJECTION_INPUT_ERROR_CODES = frozenset({
+    "unsupported_schema", "invalid_event_model", "event_schema_mismatch",
+    "duplicate_journal_seq", "missing_event_fields", "unexpected_fields",
+    "invalid_provider", "invalid_event_data", "invalid_flag", "invalid_scalar",
+    "too_many_messages", "message_bytes_exceeded", "missing_message_fields",
+    "invalid_message_role", "invalid_message_content", "duplicate_message_id",
+    "duplicate_message_seq", "duplicate_prompt", "invalid_ownership",
+    "ownership_boundary", "ownership_unknown_event", "ownership_conflict",
+    "ownership_scoped_conflict", "unknown_parent", "parent_cycle",
+    "parent_message_boundary", "parent_context_boundary", "invalid_payload",
+    "missing_payload_fields", "model_provider_mismatch", "version_identity_changed",
+    "version_not_incremented", "too_many_rows", "canonical_bytes_exceeded",
+    "string_too_long", "list_too_large", "too_many_options", "too_many_sessions",
+    "payload_depth_exceeded", "payload_not_tree",
+})
 
 
 class ChatProjectionInputError(ValueError):
     def __init__(self, code: str, detail: str) -> None:
+        if code not in CHAT_PROJECTION_INPUT_ERROR_CODES:
+            raise RuntimeError(f"unregistered chat projection input error code: {code}")
         self.code = code
         self.detail = detail
         super().__init__(f"{code}: {detail}")
@@ -64,7 +83,10 @@ def project_chat(
     prompts, message_turns = _validated_messages(messages)
     ownership = _ownership(canonical, message_turns)
     _validate_boundaries(canonical, event_by_id, ownership, message_turns)
-    scoped_turns = _project_scoped_turns(canonical, event_by_id)
+    associations = _build_associated_text_index(
+        canonical, event_by_id, ownership, message_turns,
+    )
+    scoped_turns = _project_scoped_turns(canonical, event_by_id, associations)
 
     changes = defaultdict(list)
     top_level = defaultdict(list)
@@ -90,7 +112,10 @@ def project_chat(
         items.append(Turn(
             turn_id,
             prompt,
-            *_derive_content(top_level[turn_id], canonical, event_by_id, scoped_turns),
+            *_derive_content(
+                top_level[turn_id], canonical, event_by_id, scoped_turns,
+                associations.get(("turn", turn_id), ()),
+            ),
         ))
     return Chat(tuple(items))
 
@@ -149,9 +174,10 @@ def _derive_content(
     all_events: Sequence[CanonicalEvent],
     event_by_id: Mapping[str, CanonicalEvent],
     scoped_turns: Mapping[str, ScopedTurn],
+    associated_text: Sequence[CanonicalEvent],
 ) -> tuple[tuple[BodyItem, ...], Result | None]:
     ordered = _ordered(event for event in events if not event.metadata_only)
-    result, result_ids = _resolve_result(ordered, all_events, event_by_id)
+    result, result_ids = _resolve_result(ordered, associated_text)
     body = _derive_body(
         [event for event in ordered if event.event_id not in result_ids],
         all_events,
@@ -163,22 +189,13 @@ def _derive_content(
 
 def _resolve_result(
     events: Sequence[CanonicalEvent],
-    all_events: Sequence[CanonicalEvent],
-    event_by_id: Mapping[str, CanonicalEvent],
+    associated_text: Sequence[CanonicalEvent],
 ) -> tuple[Result | None, set[str]]:
     marked = [event for event in events if event.provider_final and event.type not in _SCOPED_TYPES]
     if marked:
-        marked_ids = {event.event_id for event in marked}
-        associated = [
-            event for event in all_events
-            if not event.metadata_only
-            and event.type in _TEXT_TYPES
-            and (
-                event.event_id in marked_ids
-                or _has_ancestor_without_scoped_boundary(event, marked_ids, event_by_id)
-            )
-        ]
-        result_events = _ordered({event.event_id: event for event in marked + associated}.values())
+        result_events = _ordered({
+            event.event_id: event for event in (*marked, *associated_text)
+        }.values())
         ids = tuple(event.event_id for event in result_events)
         return Result("ProviderResult", ids, _text_for(result_events)), set(ids)
 
@@ -242,9 +259,53 @@ def _derive_body(
     return tuple(body)
 
 
+def _build_associated_text_index(
+    events: Sequence[CanonicalEvent],
+    event_by_id: Mapping[str, CanonicalEvent],
+    ownership: Mapping[str, tuple[str, str]],
+    message_turns: Mapping[str, str],
+    observe: Any = None,
+) -> dict[tuple[str, str], tuple[CanonicalEvent, ...]]:
+    children: dict[str, list[CanonicalEvent]] = defaultdict(list)
+    queue = deque()
+    for event in events:
+        if event.parent_event_id is None:
+            queue.append(event)
+        else:
+            children[event.parent_event_id].append(event)
+    scope_by_id: dict[str, tuple[str, str]] = {}
+    has_final_by_id: dict[str, bool] = {}
+    associated: dict[tuple[str, str], list[CanonicalEvent]] = defaultdict(list)
+    while queue:
+        event = queue.popleft()
+        parent = event_by_id.get(event.parent_event_id or "")
+        if parent is None:
+            turn_id = _effective_turn_id(event, message_turns, ownership) or ""
+            scope = ("turn", turn_id)
+            inherited_final = False
+        elif parent.type in _SCOPED_TYPES:
+            scope = ("scoped", parent.event_id)
+            inherited_final = False
+        else:
+            scope = scope_by_id[parent.event_id]
+            inherited_final = has_final_by_id[parent.event_id]
+        has_final = inherited_final or (
+            event.provider_final and event.type not in _SCOPED_TYPES
+        )
+        scope_by_id[event.event_id] = scope
+        has_final_by_id[event.event_id] = has_final
+        if has_final and not event.metadata_only and event.type in _TEXT_TYPES:
+            associated[scope].append(event)
+        if observe is not None:
+            observe(event.event_id)
+        queue.extend(children[event.event_id])
+    return {scope: tuple(_ordered(items)) for scope, items in associated.items()}
+
+
 def _project_scoped_turns(
     all_events: Sequence[CanonicalEvent],
     event_by_id: Mapping[str, CanonicalEvent],
+    associations: Mapping[tuple[str, str], Sequence[CanonicalEvent]],
 ) -> dict[str, ScopedTurn]:
     children_by_parent: dict[str, list[CanonicalEvent]] = defaultdict(list)
     scoped = [event for event in all_events if event.type in _SCOPED_TYPES]
@@ -267,7 +328,10 @@ def _project_scoped_turns(
                 if child.type in _SCOPED_TYPES:
                     stack.append((child, False))
             continue
-        body, result = _derive_content(children, all_events, event_by_id, projected)
+        body, result = _derive_content(
+            children, all_events, event_by_id, projected,
+            associations.get(("scoped", event.event_id), ()),
+        )
         embedded = event.data.get("result") or event.data.get("text")
         if result is None and isinstance(embedded, str) and embedded:
             kind = "ProviderResult" if event.provider_final else "DerivedResult"
@@ -292,9 +356,13 @@ def _canonical_events(
     positions: dict[str, tuple[str, int]] = {}
     sequences: dict[int, str] = {}
     for raw in events:
+        if not isinstance(raw, (CanonicalEvent, Mapping)):
+            raise ChatProjectionInputError("invalid_event_data", "event row must be an object")
         event = raw if isinstance(raw, CanonicalEvent) else _event_from_mapping(raw, schema_version)
         if event.schema_version != schema_version:
-            raise ValueError("event schema version does not match request")
+            raise ChatProjectionInputError(
+                "event_schema_mismatch", "event schema version does not match request",
+            )
         _validate_nested_data(event.type, event.data)
         _validate_model_change_provider(event)
         if event.sequence in sequences:
@@ -327,23 +395,26 @@ def _event_from_mapping(raw: Mapping[str, Any], schema_version: int) -> Canonica
     required = {"event_id", "timestamp", "journal_seq", "context_id", "type", "provider", "data", "content_version"}
     missing = sorted(required - raw.keys())
     if missing:
-        raise ValueError(f"missing canonical event fields: {', '.join(missing)}")
+        raise ChatProjectionInputError(
+            "missing_event_fields", f"missing canonical event fields: {', '.join(missing)}",
+        )
     _reject_extra_keys(raw, _EVENT_FIELDS, "event")
     provider = raw["provider"]
     if not isinstance(provider, Mapping):
-        raise ValueError("event provider must be an object")
+        raise ChatProjectionInputError("invalid_provider", "event provider must be an object")
     if _PROVIDER_FIELDS - provider.keys():
-        raise ValueError("provider id, model, and effort are required")
+        raise ChatProjectionInputError("invalid_provider", "provider identity fields are required")
     _reject_extra_keys(provider, _PROVIDER_FIELDS, "provider")
     if not isinstance(raw["data"], Mapping):
-        raise ValueError("event data must be an object")
+        raise ChatProjectionInputError("invalid_event_data", "event data must be an object")
     for flag in ("provider_final", "metadata_only"):
         if flag in raw and not isinstance(raw[flag], bool):
-            raise ValueError(f"{flag} must be a boolean")
+            raise ChatProjectionInputError("invalid_flag", f"{flag} must be a boolean")
     if "source" in raw:
         _required_str(raw["source"], "source")
     _validate_nested_data(_required_str(raw["type"], "type"), raw["data"])
-    return CanonicalEvent(
+    try:
+        return CanonicalEvent(
         _required_str(raw["event_id"], "event_id"),
         _required_str(raw["timestamp"], "timestamp"),
         _positive_int(raw["journal_seq"], "journal_seq"),
@@ -362,36 +433,52 @@ def _event_from_mapping(raw: Mapping[str, Any], schema_version: int) -> Canonica
         raw.get("metadata_only", False),
         schema_version,
         _positive_int(raw["content_version"], "content_version"),
-    )
+        )
+    except ChatProjectionInputError:
+        raise
+    except (TypeError, ValueError) as exc:
+        raise ChatProjectionInputError("invalid_event_model", str(exc)) from exc
 
 
 def _validated_messages(
     messages: Sequence[Mapping[str, Any]],
 ) -> tuple[dict[str, TypedPrompt], dict[str, str]]:
-    _measure_json(messages)
+    _admit_messages(messages)
     prompts: dict[str, TypedPrompt] = {}
     message_turns: dict[str, str] = {}
     message_ids = set()
+    message_sequences = set()
+    for message in messages:
+        if not isinstance(message, Mapping):
+            raise ChatProjectionInputError("invalid_message_content", "message row must be an object")
     for message in sorted(messages, key=lambda row: _positive_int(row.get("seq"), "message.seq")):
         required = {"id", "turn_id", "seq", "role", "content"}
         missing = sorted(required - message.keys())
         if missing:
-            raise ValueError(f"missing message fields: {', '.join(missing)}")
+            raise ChatProjectionInputError(
+                "missing_message_fields", f"missing message fields: {', '.join(missing)}",
+            )
         _reject_extra_keys(message, _MESSAGE_FIELDS, "message")
         message_id = _required_str(message["id"], "message.id")
         turn_id = _required_str(message["turn_id"], "message.turn_id")
         role = _required_str(message["role"], "message.role")
         if role not in {"user", "assistant"}:
-            raise ValueError(f"unsupported message role: {role}")
+            raise ChatProjectionInputError("invalid_message_role", f"unsupported role: {role}")
         if not isinstance(message["content"], str):
-            raise ValueError("message.content must be a string")
+            raise ChatProjectionInputError("invalid_message_content", "content must be a string")
         if message_id in message_ids:
-            raise ValueError(f"duplicate message id: {message_id}")
+            raise ChatProjectionInputError("duplicate_message_id", f"duplicate id: {message_id}")
         message_ids.add(message_id)
+        sequence = _positive_int(message["seq"], "message.seq")
+        if sequence in message_sequences:
+            raise ChatProjectionInputError(
+                "duplicate_message_seq", f"duplicate message seq: {sequence}",
+            )
+        message_sequences.add(sequence)
         message_turns[message_id] = turn_id
         if role == "user":
             if turn_id in prompts:
-                raise ValueError(f"duplicate prompt for turn: {turn_id}")
+                raise ChatProjectionInputError("duplicate_prompt", f"duplicate prompt: {turn_id}")
             prompts[turn_id] = TypedPrompt(message_id, message["content"])
     return prompts, message_turns
 
@@ -405,23 +492,25 @@ def _ownership(
         if event.type != "message_ownership_declared":
             continue
         if not event.metadata_only or event.turn_id is None or event.message_id is None:
-            raise ValueError("ownership declarations require metadata turn and message pointers")
+            raise ChatProjectionInputError("invalid_ownership", "ownership pointers are required")
         if message_turns.get(event.message_id) != event.turn_id:
-            raise ValueError("ownership declaration crosses message/turn boundary")
+            raise ChatProjectionInputError("ownership_boundary", "ownership crosses boundary")
         owned_ids = event.data.get("owns_event_ids")
         if not isinstance(owned_ids, tuple):
-            raise ValueError("ownership declaration owns_event_ids must be a sequence")
+            raise ChatProjectionInputError("invalid_ownership", "owned ids must be a sequence")
         for owned_id in owned_ids:
             if not isinstance(owned_id, str) or owned_id not in event_ids:
-                raise ValueError("ownership declaration references an unknown event")
+                raise ChatProjectionInputError("ownership_unknown_event", "unknown owned event")
             owner = (event.turn_id, event.message_id)
             if owned_id in result and result[owned_id] != owner:
-                raise ValueError("event has conflicting ownership declarations")
+                raise ChatProjectionInputError("ownership_conflict", "conflicting ownership")
             result[owned_id] = owner
     event_by_id = {event.event_id: event for event in events}
     for owned_id in result:
         if _has_scoped_ancestor(event_by_id[owned_id], event_by_id):
-            raise ValueError("ownership declaration conflicts with scoped structural ownership")
+            raise ChatProjectionInputError(
+                "ownership_scoped_conflict", "ownership conflicts with scoped structure",
+            )
     return result
 
 
@@ -466,10 +555,12 @@ def _validate_boundaries(
         child_turn, child_message = _boundary(child, ownership, message_turns)
         parent_turn, parent_message = _boundary(parent, ownership, message_turns)
         if child_message != parent_message:
-            raise ValueError("parent edge crosses message boundary")
+            raise ChatProjectionInputError("parent_message_boundary", "parent crosses message")
         if parent.type not in _SCOPED_TYPES:
             if child_turn != parent_turn or child.context_id != parent.context_id:
-                raise ValueError("parent edge crosses context or turn boundary")
+                raise ChatProjectionInputError(
+                    "parent_context_boundary", "parent crosses context or turn",
+                )
 
 
 def _boundary(
@@ -504,28 +595,6 @@ def _effective_turn_id(
     if owned:
         return owned[0]
     return message_turns.get(event.message_id or "") or event.turn_id
-
-
-def _has_ancestor_without_scoped_boundary(
-    event: CanonicalEvent,
-    ancestor_ids: set[str],
-    event_by_id: Mapping[str, CanonicalEvent],
-) -> bool:
-    parent_id = event.parent_event_id
-    seen = set()
-    while parent_id is not None:
-        if parent_id in seen:
-            raise ChatProjectionInputError("parent_cycle", f"cycle includes event: {parent_id}")
-        seen.add(parent_id)
-        if parent_id in ancestor_ids:
-            return True
-        parent = event_by_id.get(parent_id)
-        if parent is None:
-            raise ChatProjectionInputError("unknown_parent", f"unknown parent event: {parent_id}")
-        if parent.type in _SCOPED_TYPES:
-            return False
-        parent_id = parent.parent_event_id
-    return False
 
 
 def _has_scoped_ancestor(
@@ -581,18 +650,18 @@ def _text_for(events: Iterable[CanonicalEvent]) -> str:
 
 def _validate_schema_version(value: int) -> None:
     if not isinstance(value, int) or isinstance(value, bool) or value != CHAT_SCHEMA_VERSION:
-        raise ValueError("unsupported chat schema version")
+        raise ChatProjectionInputError("unsupported_schema", "unsupported chat schema version")
 
 
 def _positive_int(value: Any, field: str) -> int:
     if not isinstance(value, int) or isinstance(value, bool) or value < 1:
-        raise ValueError(f"{field} must be a positive integer")
+        raise ChatProjectionInputError("invalid_scalar", f"{field} must be a positive integer")
     return value
 
 
 def _required_str(value: Any, field: str) -> str:
     if not isinstance(value, str) or not value:
-        raise ValueError(f"{field} is required")
+        raise ChatProjectionInputError("invalid_scalar", f"{field} is required")
     return value
 
 
@@ -600,14 +669,16 @@ def _optional_str(value: Any, field: str) -> str | None:
     if value is None:
         return None
     if not isinstance(value, str) or not value:
-        raise ValueError(f"{field} must be a non-empty string or null")
+        raise ChatProjectionInputError("invalid_scalar", f"{field} must be a string or null")
     return value
 
 
 def _reject_extra_keys(value: Mapping[str, Any], allowed: set[str], name: str) -> None:
-    unexpected = sorted(value.keys() - allowed)
+    unexpected = sorted(value.keys() - allowed, key=str)
     if unexpected:
-        raise ValueError(f"unexpected {name} fields: {', '.join(unexpected)}")
+        raise ChatProjectionInputError(
+            "unexpected_fields", f"unexpected {name} fields: {', '.join(map(str, unexpected))}",
+        )
 
 
 def _validate_nested_data(event_type: str, data: Mapping[str, Any]) -> None:
@@ -635,15 +706,15 @@ def _validate_nested_data(event_type: str, data: Mapping[str, Any]) -> None:
     if event_type == "model_change":
         _reject_extra_keys(data, {"from", "to"}, "model_change data")
         if "to" not in data or data["to"] is None:
-            raise ValueError("model_change data.to is required")
+            raise ChatProjectionInputError("missing_payload_fields", "model_change data.to required")
         for field in ("from", "to"):
             identity = data.get(field)
             if identity is None:
                 continue
             if not isinstance(identity, Mapping):
-                raise ValueError(f"model_change data.{field} must be an object or null")
+                raise ChatProjectionInputError("invalid_payload", f"model_change {field} invalid")
             if set(identity) != _MODEL_IDENTITY_FIELDS:
-                raise ValueError(f"model_change data.{field} has invalid identity fields")
+                raise ChatProjectionInputError("invalid_payload", f"model_change {field} fields invalid")
             for key in _MODEL_IDENTITY_FIELDS:
                 _required_str(identity[key], f"model_change data.{field}.{key}")
         return
@@ -655,20 +726,22 @@ def _validate_nested_data(event_type: str, data: Mapping[str, Any]) -> None:
         )
         owned = data.get("owns_event_ids")
         if not isinstance(owned, (list, tuple)):
-            raise ValueError("ownership data.owns_event_ids must be a sequence")
+            raise ChatProjectionInputError("invalid_payload", "ownership ids must be a sequence")
         if any(not isinstance(event_id, str) or not event_id for event_id in owned):
-            raise ValueError("ownership data.owns_event_ids must contain event ids")
+            raise ChatProjectionInputError("invalid_payload", "ownership ids invalid")
         if "boundary_seq" in data:
             _positive_int(data["boundary_seq"], "ownership data.boundary_seq")
         if "source_timestamp" in data:
             _required_str(data["source_timestamp"], "ownership data.source_timestamp")
         return
     if event_type not in schemas:
-        raise ValueError(f"unknown canonical event type: {event_type}")
+        raise ChatProjectionInputError("invalid_payload", f"unknown event type: {event_type}")
     required, allowed = schemas[event_type]
     missing = required - data.keys()
     if missing:
-        raise ValueError(f"missing {event_type} data fields: {', '.join(sorted(missing))}")
+        raise ChatProjectionInputError(
+            "missing_payload_fields", f"missing {event_type} fields: {', '.join(sorted(missing))}",
+        )
     _reject_extra_keys(data, allowed, f"{event_type} data")
     for field in required:
         _required_str(data[field], f"{event_type} data.{field}")
@@ -681,7 +754,7 @@ def _validate_nested_data(event_type: str, data: Mapping[str, Any]) -> None:
         _required_str(data[field], f"{event_type} data.{field}")
     for field in {"session_ids", "sessions", "options"} & data.keys():
         if not isinstance(data[field], (list, tuple)):
-            raise ValueError(f"{event_type} data.{field} must be a sequence")
+            raise ChatProjectionInputError("invalid_payload", f"{event_type}.{field} must be a sequence")
     if len(data.get("options", ())) > MAX_OPTIONS:
         raise ChatProjectionInputError(
             "too_many_options", f"options exceed {MAX_OPTIONS}",
@@ -692,12 +765,12 @@ def _validate_nested_data(event_type: str, data: Mapping[str, Any]) -> None:
         )
     for field in {"session_ids", "options"} & data.keys():
         if any(not isinstance(value, str) or not value for value in data[field]):
-            raise ValueError(f"{event_type} data.{field} must contain strings")
+            raise ChatProjectionInputError("invalid_payload", f"{event_type}.{field} strings required")
     for session in data.get("sessions", ()):
         if not isinstance(session, Mapping):
-            raise ValueError(f"{event_type} data.sessions must contain objects")
+            raise ChatProjectionInputError("invalid_payload", "sessions must contain objects")
         if set(session) != {"id", "title"}:
-            raise ValueError(f"{event_type} data.sessions has invalid fields")
+            raise ChatProjectionInputError("invalid_payload", "session fields invalid")
         _required_str(session["id"], f"{event_type} data.sessions.id")
         _required_str(session["title"], f"{event_type} data.sessions.title")
 
@@ -708,7 +781,7 @@ def _validate_model_change_provider(event: CanonicalEvent) -> None:
     target = event.data["to"]
     expected = ProviderIdentity(target["provider"], target["model"], target["effort"])
     if event.provider != expected:
-        raise ValueError("model_change provider must match data.to")
+        raise ChatProjectionInputError("model_provider_mismatch", "provider must match data.to")
 
 
 def _admit_canonical_rows(
@@ -743,6 +816,21 @@ def _admit_canonical_rows(
             )
 
 
+def _admit_messages(messages: Sequence[Mapping[str, Any]]) -> None:
+    if len(messages) > MAX_MESSAGES:
+        raise ChatProjectionInputError(
+            "too_many_messages", f"messages exceed {MAX_MESSAGES}",
+        )
+    total_bytes = 0
+    for message in messages:
+        total_bytes += _measure_json(message)
+        if total_bytes > MAX_MESSAGE_JSON_BYTES:
+            raise ChatProjectionInputError(
+                "message_bytes_exceeded",
+                f"message JSON bytes exceed {MAX_MESSAGE_JSON_BYTES}",
+            )
+
+
 def _measure_json(value: Any) -> int:
     total_bytes = 0
     stack = [(value, 0)]
@@ -759,7 +847,10 @@ def _measure_json(value: Any) -> int:
                 raise ChatProjectionInputError(
                     "string_too_long", f"string length exceeds {MAX_STRING_LENGTH}",
                 )
-            total_bytes += len(item.encode("utf-8"))
+            try:
+                total_bytes += len(item.encode("utf-8"))
+            except UnicodeError as exc:
+                raise ChatProjectionInputError("invalid_scalar", "string must be valid UTF-8") from exc
             continue
         if isinstance(item, Mapping):
             identity = id(item)
@@ -798,11 +889,11 @@ def _validate_version_update(current: CanonicalEvent, candidate: CanonicalEvent)
         "context_id", "turn_id", "message_id", "parent_event_id", "type", "provider",
     )
     if any(getattr(current, field) != getattr(candidate, field) for field in identity):
-        raise ValueError("event identity changed across content versions")
+        raise ChatProjectionInputError("version_identity_changed", "event identity changed")
     render_changed = (
         current.data != candidate.data
         or current.provider_final != candidate.provider_final
         or current.metadata_only != candidate.metadata_only
     )
     if render_changed and current.content_version == candidate.content_version:
-        raise ValueError("event render update requires a new content_version")
+        raise ChatProjectionInputError("version_not_incremented", "content_version must increase")

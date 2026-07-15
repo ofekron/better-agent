@@ -106,12 +106,14 @@ def _messages(turn_id="turn", assistant_id="assistant"):
     ]
 
 
-def _assert_rejected(messages, events, schema_version=1):
+def _assert_rejected(code, messages, events, schema_version=1):
     try:
         project_chat(messages, events, schema_version=schema_version)
-    except (TypeError, ValueError):
+    except ChatProjectionInputError as exc:
+        assert exc.code == code
+        assert exc.detail
         return
-    raise AssertionError("malformed canonical input was accepted")
+    raise AssertionError(f"expected ChatProjectionInputError({code})")
 
 
 def _assert_input_error(code, messages, events):
@@ -308,35 +310,36 @@ def test_cross_boundary_parent_edges_are_rejected() -> None:
         _event("child", 2, "assistant_text", message_id="other", parent_event_id="parent", data={"text": "escape"}),
     ]
     messages = _messages() + [{"id": "other", "turn_id": "turn", "seq": 3, "role": "assistant", "content": ""}]
-    _assert_rejected(messages, events)
+    _assert_rejected("parent_message_boundary", messages, events)
     scoped = [
         _event("worker", 1, "worker_turn"),
         _event("child", 2, "assistant_text", message_id="other", context_id="nested", turn_id="nested", parent_event_id="worker"),
     ]
-    _assert_rejected(messages, scoped)
+    _assert_rejected("parent_message_boundary", messages, scoped)
     cycle = [
         _event("cycle-a", 1, "tool_interaction", parent_event_id="cycle-b"),
         _event("cycle-b", 2, "tool_interaction", parent_event_id="cycle-a"),
     ]
-    _assert_rejected(_messages(), cycle)
+    _assert_rejected("parent_cycle", _messages(), cycle)
 
 
 def test_strict_schema_rejects_malformed_unknown_and_duplicate_inputs() -> None:
     base = _event("valid", 1, "assistant_text", data={"text": "ok"})
-    _assert_rejected(_messages(), [base], schema_version=2)
-    for key, value in (
-        ("journal_seq", 0), ("timestamp", "not-a-time"), ("context_id", ""),
-        ("type", "unknown_event"), ("provider", {"id": "p", "model": "", "effort": "medium"}),
-        ("content_version", "1"), ("data", []),
+    _assert_rejected("unsupported_schema", _messages(), [base], schema_version=2)
+    for key, value, code in (
+        ("journal_seq", 0, "invalid_scalar"), ("timestamp", "not-a-time", "invalid_event_model"),
+        ("context_id", "", "invalid_scalar"), ("type", "unknown_event", "invalid_payload"),
+        ("provider", {"id": "p", "model": "", "effort": "medium"}, "invalid_scalar"),
+        ("content_version", "1", "invalid_scalar"), ("data", [], "invalid_event_data"),
     ):
         malformed = dict(base)
         malformed[key] = value
-        _assert_rejected(_messages(), [malformed])
+        _assert_rejected(code, _messages(), [malformed])
     missing = dict(base)
     missing.pop("provider")
-    _assert_rejected(_messages(), [missing])
+    _assert_rejected("missing_event_fields", _messages(), [missing])
     duplicate_prompts = _messages() + [{"id": "user-2", "turn_id": "turn", "seq": 3, "role": "user", "content": "Again"}]
-    _assert_rejected(duplicate_prompts, [base])
+    _assert_rejected("duplicate_prompt", duplicate_prompts, [base])
 
 
 def test_metadata_model_change_is_filtered_before_projection() -> None:
@@ -381,7 +384,7 @@ def test_ownership_cannot_duplicate_scoped_structural_child() -> None:
         _event("child", 2, "assistant_text", context_id="nested", turn_id="nested", parent_event_id="worker", data={"text": "nested"}),
         _event("owner", 3, "message_ownership_declared", metadata_only=True, data={"owns_event_ids": ["child"]}),
     ]
-    _assert_rejected(_messages(), events)
+    _assert_rejected("ownership_scoped_conflict", _messages(), events)
 
 
 def test_metadata_descendant_is_excluded_from_provider_result() -> None:
@@ -409,17 +412,20 @@ def test_provider_result_association_stops_at_nested_scoped_turn() -> None:
 
 def test_same_id_versions_require_stable_identity_and_versioned_render_updates() -> None:
     base = _event("versioned", 1, "assistant_text", data={"text": "one"})
-    for field, value in (
-        ("context_id", "other-context"), ("turn_id", "other-turn"),
-        ("message_id", "other-message"), ("parent_event_id", "parent"),
-        ("type", "tool_interaction"), ("provider", _provider("other")),
+    for field, value, code in (
+        ("context_id", "other-context", "version_identity_changed"),
+        ("turn_id", "other-turn", "version_identity_changed"),
+        ("message_id", "other-message", "version_identity_changed"),
+        ("parent_event_id", "parent", "version_identity_changed"),
+        ("type", "tool_interaction", "missing_payload_fields"),
+        ("provider", _provider("other"), "version_identity_changed"),
     ):
         changed = dict(base)
         changed.update({field: value, "journal_seq": 2, "content_version": 2})
-        _assert_rejected(_messages(), [base, changed])
+        _assert_rejected(code, _messages(), [base, changed])
     unversioned = dict(base)
     unversioned.update({"journal_seq": 2, "data": {"text": "two"}})
-    _assert_rejected(_messages(), [base, unversioned])
+    _assert_rejected("version_not_incremented", _messages(), [base, unversioned])
     updated = dict(unversioned)
     updated["content_version"] = 2
     turn = next(item for item in project_chat(_messages(), [base, updated], schema_version=1).items if isinstance(item, Turn))
@@ -429,31 +435,31 @@ def test_same_id_versions_require_stable_identity_and_versioned_render_updates()
 def test_closed_envelopes_and_nested_identities_reject_unknown_fields() -> None:
     base = _event("valid", 1, "assistant_text", data={"text": "ok"})
     extra_event = dict(base, surprise=True)
-    _assert_rejected(_messages(), [extra_event])
+    _assert_rejected("unexpected_fields", _messages(), [extra_event])
     extra_provider = dict(base)
     extra_provider["provider"] = dict(_provider(), surprise=True)
-    _assert_rejected(_messages(), [extra_provider])
+    _assert_rejected("unexpected_fields", _messages(), [extra_provider])
     extra_message = [dict(_messages()[0], surprise=True), _messages()[1]]
-    _assert_rejected(extra_message, [base])
+    _assert_rejected("unexpected_fields", extra_message, [base])
     model_change = _event(
         "model", 1, "model_change",
         data={"to": dict(_model_identity(), surprise=True)},
     )
-    _assert_rejected(_messages(), [model_change])
+    _assert_rejected("invalid_payload", _messages(), [model_change])
     ownership = _event(
         "owner", 1, "message_ownership_declared", metadata_only=True,
         data={"owns_event_ids": [], "surprise": True},
     )
-    _assert_rejected(_messages(), [ownership])
+    _assert_rejected("unexpected_fields", _messages(), [ownership])
     invalid_json_key = _event("invalid-json", 1, "assistant_text", data={1: "value"})
-    _assert_rejected(_messages(), [invalid_json_key])
+    _assert_rejected("missing_payload_fields", _messages(), [invalid_json_key])
 
 
 def test_timestamps_require_canonical_utc_and_sort_as_instants() -> None:
     base = _event("valid", 1, "assistant_text", data={"text": "ok"})
     for timestamp in ("2026-01-02", "2026-01-02T00:00:00+00:00", "2026-01-02T02:00:00+02:00"):
         malformed = dict(base, timestamp=timestamp)
-        _assert_rejected(_messages(), [malformed])
+        _assert_rejected("invalid_event_model", _messages(), [malformed])
     first = dict(_event("first", 2, "assistant_text", data={"text": "A"}), timestamp="2026-01-02T00:00:00Z")
     second = dict(_event("second", 1, "assistant_text", data={"text": "B"}), timestamp="2026-01-02T00:00:00.1Z")
     turn = next(item for item in project_chat(_messages(), [second, first], schema_version=1).items if isinstance(item, Turn))
@@ -467,8 +473,8 @@ def test_timestamps_require_canonical_utc_and_sort_as_instants() -> None:
 def test_duplicate_root_sequence_is_rejected_across_contexts_in_both_orders() -> None:
     first = _event("first", 1, "assistant_text", data={"text": "first"})
     second = _event("second", 1, "assistant_text", data={"text": "second"})
-    _assert_rejected(_messages(), [first, second])
-    _assert_rejected(_messages(), [second, first])
+    _assert_rejected("duplicate_journal_seq", _messages(), [first, second])
+    _assert_rejected("duplicate_journal_seq", _messages(), [second, first])
     other_context = dict(second, context_id="other")
     _assert_input_error("duplicate_journal_seq", _messages(), [first, other_context])
     _assert_input_error("duplicate_journal_seq", _messages(), [other_context, first])
@@ -503,10 +509,13 @@ def test_model_change_requires_closed_non_null_matching_target() -> None:
         data={"from": None, "to": _model_identity("p2", "m2", "high")},
     )
     project_chat(_messages(), [valid], schema_version=1)
-    for data in ({}, {"to": None}, {"to": _model_identity(), "extra": True}):
-        _assert_rejected(_messages(), [_event("bad-model", 1, "model_change", data=data)])
+    for data, code in (
+        ({}, "missing_payload_fields"), ({"to": None}, "missing_payload_fields"),
+        ({"to": _model_identity(), "extra": True}, "unexpected_fields"),
+    ):
+        _assert_rejected(code, _messages(), [_event("bad-model", 1, "model_change", data=data)])
     conflict = dict(valid, provider=_provider("p3", "m2", "high"))
-    _assert_rejected(_messages(), [conflict])
+    _assert_rejected("model_provider_mismatch", _messages(), [conflict])
 
 
 def test_every_supported_event_type_has_closed_required_payload() -> None:
@@ -521,12 +530,15 @@ def test_every_supported_event_type_has_closed_required_payload() -> None:
     }
     for index, (event_type, data) in enumerate(malformed.items(), 1):
         event = _event(f"bad-{event_type}", index, event_type, data=data)
-        _assert_rejected(_messages(), [event])
+        code = "unexpected_fields" if event_type in {"turn_completed", "turn_started"} else "missing_payload_fields"
+        if event_type == "message_ownership_declared":
+            code = "invalid_payload"
+        _assert_rejected(code, _messages(), [event])
     bad_typed_work = _event(
         "bad-work", 20, "other_typed_work",
         data={"kind": "", "label": "Work"},
     )
-    _assert_rejected(_messages(), [bad_typed_work])
+    _assert_rejected("invalid_scalar", _messages(), [bad_typed_work])
     malformed_session = _event(
         "bad-session", 21, "tool_interaction",
         data={
@@ -534,7 +546,7 @@ def test_every_supported_event_type_has_closed_required_payload() -> None:
             "sessions": [{"id": "session", "title": "Title", "extra": True}],
         },
     )
-    _assert_rejected(_messages(), [malformed_session])
+    _assert_rejected("invalid_payload", _messages(), [malformed_session])
 
 
 def test_owned_parent_cycle_fails_before_ownership_traversal() -> None:
@@ -616,11 +628,77 @@ def test_admission_bounds_and_source_fail_closed_with_typed_errors() -> None:
     )
     for source in ("", 1, None):
         invalid_source = dict(base, source=source)
-        _assert_rejected(_messages(), [invalid_source])
+        _assert_rejected("invalid_scalar", _messages(), [invalid_source])
     cyclic = {}
     cyclic["self"] = cyclic
     cyclic_event = dict(base, data=cyclic)
     _assert_input_error("payload_not_tree", _messages(), [cyclic_event])
+
+
+def test_message_sequences_are_root_unique_in_both_orders() -> None:
+    messages = _messages()
+    duplicate = dict(messages[1], id="assistant-2", seq=messages[0]["seq"])
+    _assert_rejected("duplicate_message_seq", [messages[0], duplicate], [])
+    _assert_rejected("duplicate_message_seq", [duplicate, messages[0]], [])
+    _assert_rejected("invalid_message_content", ["not-an-object"], [])
+
+
+def test_non_object_event_and_invalid_unicode_are_typed() -> None:
+    _assert_rejected("invalid_event_data", _messages(), ["not-an-object"])
+    invalid_unicode = _event("unicode", 1, "assistant_text", data={"text": "\ud800"})
+    _assert_rejected("invalid_scalar", _messages(), [invalid_unicode])
+
+
+def test_message_count_and_bytes_admission_exact_boundaries() -> None:
+    messages = _messages()
+    _with_limit(
+        "MAX_MESSAGES", len(messages),
+        lambda: project_chat(messages, [], schema_version=1),
+    )
+    _with_limit(
+        "MAX_MESSAGES", len(messages) - 1,
+        lambda: _assert_input_error("too_many_messages", messages, []),
+    )
+    exact_bytes = sum(chat_projector._measure_json(message) for message in messages)
+    _with_limit(
+        "MAX_MESSAGE_JSON_BYTES", exact_bytes,
+        lambda: project_chat(messages, [], schema_version=1),
+    )
+    _with_limit(
+        "MAX_MESSAGE_JSON_BYTES", exact_bytes - 1,
+        lambda: _assert_input_error("message_bytes_exceeded", messages, []),
+    )
+
+
+def test_associated_text_index_is_linear_with_many_scoped_finals() -> None:
+    scope_count = 2000
+    events = []
+    sequence = 0
+    for index in range(scope_count):
+        sequence += 1
+        events.append(_event(f"worker-{index}", sequence, "worker_turn"))
+        sequence += 1
+        events.append(_event(
+            f"final-{index}", sequence, "other_typed_work",
+            parent_event_id=f"worker-{index}", provider_final=True,
+        ))
+        sequence += 1
+        events.append(_event(
+            f"text-{index}", sequence, "assistant_text",
+            parent_event_id=f"final-{index}", data={"text": f"answer-{index}"},
+        ))
+    for event in events:
+        event["timestamp"] = "2026-01-02T00:00:00Z"
+    canonical = chat_projector._canonical_events(events, 1)
+    event_by_id = {event.event_id: event for event in canonical}
+    observed = []
+    index = chat_projector._build_associated_text_index(
+        canonical, event_by_id, {}, {"assistant": "turn"}, observed.append,
+    )
+    assert len(observed) == len(events)
+    assert len(set(observed)) == len(events)
+    assert len(index) == scope_count
+    assert all(len(items) == 1 for items in index.values())
 
 
 def main() -> None:
