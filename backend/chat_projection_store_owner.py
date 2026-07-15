@@ -83,6 +83,7 @@ class OwnerClient:
         ipc_timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
         startup_timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
         max_error_text_bytes: int = 4_096,
+        require_sqlite_header: bool = True,
     ) -> None:
         self._lock = threading.RLock()
         self._closed = False
@@ -92,7 +93,9 @@ class OwnerClient:
         self._max_error_text_bytes = max_error_text_bytes
         self.ipc_timeout_seconds = self._validate_timeout(ipc_timeout_seconds, "IPC")
         self.startup_timeout_seconds = self._validate_timeout(startup_timeout_seconds, "owner startup")
-        self.path, self.parent_fd, self.file_fd, _ = secure_open(root_path, path)
+        self.path, self.parent_fd, self.file_fd, _ = secure_open(
+            root_path, path, require_sqlite_header=require_sqlite_header,
+        )
         self.process: subprocess.Popen | None = None
         self.channel: socket.socket | None = None
         parent_channel = None

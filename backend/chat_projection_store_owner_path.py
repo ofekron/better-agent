@@ -65,7 +65,9 @@ def _open_directory_chain(root: Path, relative_parts: tuple[str, ...]) -> int:
         raise
 
 
-def secure_open(root_path: Path, path: Path) -> tuple[Path, int, int, bool]:
+def secure_open(
+    root_path: Path, path: Path, *, require_sqlite_header: bool = True,
+) -> tuple[Path, int, int, bool]:
     declared_root = Path(os.path.abspath(root_path.expanduser()))
     declared_candidate = path.expanduser()
     if not declared_candidate.is_absolute():
@@ -115,7 +117,9 @@ def secure_open(root_path: Path, path: Path) -> tuple[Path, int, int, bool]:
         validate_secure_file_stat(os.stat(candidate.name, dir_fd=parent_fd, follow_symlinks=False))
         if created:
             _reject_orphan_sidecars(parent_fd, candidate.name)
-        elif file_metadata.st_size < 100 or os.pread(file_fd, 16, 0) != b"SQLite format 3\x00":
+        elif require_sqlite_header and (
+            file_metadata.st_size < 100 or os.pread(file_fd, 16, 0) != b"SQLite format 3\x00"
+        ):
             raise ChatProjectionStoreError(
                 "incomplete_store", "store initialization is incomplete",
             )
