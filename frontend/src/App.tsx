@@ -17,6 +17,11 @@ import { usePromptQueueProjection } from "./hooks/usePromptQueueProjection";
 import { useSession, type SessionMetadataPatch } from "./hooks/useSession";
 import { useCompactTurns } from "./hooks/useCompactTurns";
 import { compactTurnsToMessages, mergeCompactWithLiveMessages } from "./lib/compactTurns";
+import {
+  reconcileOfflinePendingMessages,
+  reconcileOfflineQueueDrafts,
+  type PendingOfflineQueueDraft,
+} from "./lib/offlineQueueProjection";
 import { useResizable } from "./hooks/useResizable";
 import { useViewport } from "./hooks/useViewport";
 import { useVisualViewport } from "./hooks/useVisualViewport";
@@ -208,9 +213,7 @@ interface ViewingFile {
   focus?: FileFocus;
 }
 
-type PendingQueueDraft = QueuedBannerState & {
-  clientId: string | null;
-};
+type PendingQueueDraft = PendingOfflineQueueDraft;
 
 // Frozen module-level empty arrays so the no-data branches of props
 // passed into <Chat> hand referentially-stable values across renders.
@@ -1621,6 +1624,11 @@ function AppMain({
   const promptQueue = usePromptQueueProjection();
   useEffect(() => {
     if (!offlineQueue.ready) return;
+    setPendingBySession((previous) => reconcileOfflinePendingMessages(previous, offlineQueue.queue));
+    pendingQueueDraftsRef.current = reconcileOfflineQueueDrafts(
+      pendingQueueDraftsRef.current,
+      offlineQueue.queue,
+    );
     for (const entry of offlineQueue.queue) {
       if (!entry.prompt) continue;
       const sessionId = offlineEntrySessionId(entry);
@@ -1645,6 +1653,7 @@ function AppMain({
             id: entry.clientId,
             clientId: entry.clientId,
             preview: entry.prompt,
+            offline: true,
             ...(entry.images?.length
               ? { images: entry.images.map((image) => ({
                   dataUrl: `data:${image.media_type};base64,${image.data}`,
