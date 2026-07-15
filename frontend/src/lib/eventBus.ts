@@ -76,6 +76,24 @@ export interface BusEventMap {
   workers_changed: Record<string, unknown>;
   session_organization_changed: Record<string, unknown>;
   project_mappings_changed: Record<string, unknown>;
+  prompt_queued: {
+    app_session_id?: string;
+    queued_id?: string;
+    prompt_preview?: string;
+    send_mode?: string;
+    queue_position?: number;
+    client_id?: string;
+    queue_revision?: number;
+  };
+  queue_consumed: {
+    app_session_id?: string;
+    queued_id?: string | null;
+  };
+  user_message_queued: UserMessageLifecyclePayload;
+  user_message_sent: UserMessageLifecyclePayload;
+  user_message_received: UserMessageLifecyclePayload;
+  user_message_done: UserMessageLifecyclePayload;
+  user_message_failed: UserMessageLifecyclePayload;
   run_state: {
     app_session_id: string;
     runs: unknown[];
@@ -110,6 +128,16 @@ export interface BusEventMap {
   session_drag_start: { session_id: string; name?: string };
   session_drag_end: Record<string, never>;
 }
+
+export type UserMessageLifecyclePayload = {
+  app_session_id?: string;
+  lifecycle_msg_id?: string;
+  client_id?: string;
+  queue_revision?: number;
+  kind?: string;
+  error?: string;
+  reason?: string;
+};
 
 type Handler<T> = (payload: T) => void;
 

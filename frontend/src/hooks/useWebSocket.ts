@@ -172,16 +172,6 @@ interface UseWebSocketOptions {
    * in-flight message as stale so the UI shows a warning instead of a
    * stuck spinner. Clears on the next event or terminal transition. */
   onTurnStale?: (appSessionId: string) => void;
-  /** User-message lifecycle state transitions emitted by the backend's
-   * event bus. Five event types — `user_message_queued`,
-   * `user_message_sent`, `user_message_received`, `user_message_done`,
-   * `user_message_failed`. Caller projects the lifecycle state onto
-   * the message identified by `lifecycle_msg_id` (queued events also
-   * carry `kind` ∈ {send, queued_behind, interrupt} and optional
-   * `interrupts_msg_id`; done events optionally carry
-   * `interrupted_by_msg_id`). All five events are persisted to
-   * events.jsonl so the projection survives reconnects via replay. */
-  onUserMsgLifecycle?: (appSessionId: string, event: WSEvent) => void;
   /** Read the highest seq the caller has applied for a given session.
    * Sent as `since_seq` on every subscribe so the backend knows where
    * to start the replay. Returning 0 means "send everything". */
@@ -258,25 +248,6 @@ interface UseWebSocketOptions {
     prNumber?: number;
     prUrl: string;
     prRepository?: string;
-  }) => void;
-  /** Backend ack that a prompt was queued (not sent immediately
-   * because another turn was running). */
-  onPromptQueued?: (data: {
-    app_session_id: string;
-    queued_id: string;
-    prompt_preview: string;
-    send_mode: string;
-    queue_position: number;
-    client_id?: string;
-    queue_revision: number;
-  }) => void;
-  /** A queued/interrupted turn has started processing (queue drained). */
-  onTurnStarted?: (appSessionId: string) => void;
-  /** Backend consumed a queued prompt (either live or re-emitted on
-   * subscribe to clear stale frontend state). */
-  onQueueConsumed?: (data: {
-    app_session_id: string;
-    queued_id: string | null;
   }) => void;
   /** Catch-all hook called once per parsed WS frame, BEFORE typed
    * handlers run. Used by the progress bus to match `extendUntilWS`
@@ -423,7 +394,6 @@ export function useWebSocket(
   const onTurnTerminalRef = useRef(options.onTurnTerminal);
   const onTurnDetachedRef = useRef(options.onTurnDetached);
   const onTurnStaleRef = useRef(options.onTurnStale);
-  const onUserMsgLifecycleRef = useRef(options.onUserMsgLifecycle);
   const getSinceSeqRef = useRef(options.getSinceSeq);
   const getEventsFromSeqRef = useRef(options.getEventsFromSeq);
   const getEventsCursorKnownRef = useRef(options.getEventsCursorKnown);
@@ -431,9 +401,6 @@ export function useWebSocket(
   const onSessionMetadataUpdatedRef = useRef(options.onSessionMetadataUpdated);
   const onSupervisorEventRef = useRef(options.onSupervisorEvent);
   const onPrLinkRef = useRef(options.onPrLink);
-  const onPromptQueuedRef = useRef(options.onPromptQueued);
-  const onTurnStartedRef = useRef(options.onTurnStarted);
-  const onQueueConsumedRef = useRef(options.onQueueConsumed);
   const onAnyEventRef = useRef(options.onAnyEvent);
   const onMessageRecoveringChangedRef = useRef(
     options.onMessageRecoveringChanged
@@ -477,7 +444,6 @@ export function useWebSocket(
     onTurnTerminalRef.current = options.onTurnTerminal;
     onTurnDetachedRef.current = options.onTurnDetached;
     onTurnStaleRef.current = options.onTurnStale;
-    onUserMsgLifecycleRef.current = options.onUserMsgLifecycle;
     getSinceSeqRef.current = options.getSinceSeq;
     getEventsFromSeqRef.current = options.getEventsFromSeq;
     getEventsCursorKnownRef.current = options.getEventsCursorKnown;
@@ -485,9 +451,6 @@ export function useWebSocket(
     onSessionMetadataUpdatedRef.current = options.onSessionMetadataUpdated;
     onSupervisorEventRef.current = options.onSupervisorEvent;
     onPrLinkRef.current = options.onPrLink;
-    onPromptQueuedRef.current = options.onPromptQueued;
-    onTurnStartedRef.current = options.onTurnStarted;
-    onQueueConsumedRef.current = options.onQueueConsumed;
     onAnyEventRef.current = options.onAnyEvent;
     onMessageRecoveringChangedRef.current = options.onMessageRecoveringChanged;
     onMessageRetryingChangedRef.current = options.onMessageRetryingChanged;
@@ -517,15 +480,11 @@ export function useWebSocket(
     options.onTurnTerminal,
     options.onTurnDetached,
     options.onTurnStale,
-    options.onUserMsgLifecycle,
     options.getSinceSeq,
     options.getEventsFromSeq,
     options.getEventsCursorKnown,
     options.onEventSeqAdvance,
     options.onSessionMetadataUpdated,
-    options.onPromptQueued,
-    options.onTurnStarted,
-    options.onQueueConsumed,
     options.onAnyEvent,
     options.onMessageRecoveringChanged,
     options.onMessageRetryingChanged,
@@ -1004,9 +963,6 @@ export function useWebSocket(
             kind: d?.kind,
             error: d?.error ?? d?.reason,
           }, event.type === "user_message_failed" ? "warn" : "info");
-          if (eventSid) {
-            onUserMsgLifecycleRef.current?.(eventSid, event);
-          }
           // Lifecycle events are pure observability — don't drop into
           // the generic events buffer (would mistakenly show up under
           // run_state's "live events" counter).
@@ -1024,7 +980,6 @@ export function useWebSocket(
             (event.data as { app_session_id?: string })?.app_session_id ?? "";
           if (!managerSid) return;
           setStreamingAppSessionId(managerSid || null);
-          onTurnStartedRef.current?.(managerSid);
         }
 
         // Backend ack that a prompt was queued
@@ -1046,17 +1001,6 @@ export function useWebSocket(
             queue_position: d.queue_position,
             preview_length: d.prompt_preview?.length ?? 0,
           });
-          if (d.queued_id && d.app_session_id) {
-            onPromptQueuedRef.current?.({
-              app_session_id: d.app_session_id,
-              queued_id: d.queued_id,
-              prompt_preview: d.prompt_preview ?? "",
-              send_mode: d.send_mode ?? "queue",
-              queue_position: d.queue_position ?? 1,
-              client_id: d.client_id,
-              queue_revision: d.queue_revision ?? 0,
-            });
-          }
         }
 
         // Backend consumed a queued prompt — clear stale frontend state
@@ -1069,12 +1013,6 @@ export function useWebSocket(
             app_session_id: d.app_session_id,
             queued_id: d.queued_id ?? null,
           });
-          if (d.app_session_id) {
-            onQueueConsumedRef.current?.({
-              app_session_id: d.app_session_id,
-              queued_id: d.queued_id ?? null,
-            });
-          }
         }
 
         // Phase follows whatever is actively producing events.

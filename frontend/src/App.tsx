@@ -191,6 +191,7 @@ import {
   useProjectInventoryEvents,
   useSessionInventoryEvents,
 } from "./hooks/useDomainEventAdapters";
+import { usePromptLifecycleEvents } from "./hooks/usePromptLifecycleEvents";
 
 type RightPanelTab = "files" | "canvas" | "notes" | "comments" | "todos" | "screen" | "changes" | "communications" | "board";
 
@@ -1958,6 +1959,21 @@ function AppMain({
       window.dispatchEvent(new CustomEvent("project_mappings_changed"));
     },
   });
+  usePromptLifecycleEvents({
+    getFocusedSessionId: () => compactWsTargetSessionId,
+    pendingDraftCount: (sessionId) => pendingQueueDraftsRef.current[sessionId]?.length ?? 0,
+    takePendingDraft: takePendingQueueDraft,
+    acknowledgeQueue: promptQueue.acknowledge,
+    consumeQueue: promptQueue.consume,
+    clearOfflineDispatch: (sessionId, promptClientId) => {
+      offlineDispatchedRef.current.delete(offlineDispatchKey(sessionId, promptClientId));
+    },
+    removeOfflineAction: removeAckedOfflineAction,
+    removePending: removePendingByClientId,
+    stampPendingLifecycle: stampPendingLifecycleId,
+    patchMessageStatus,
+    markPendingFailed,
+  });
 
   const {
     connected,
@@ -2072,82 +2088,6 @@ function AppMain({
     },
     onSupervisorEvent: handleSupervisorEvent,
     onPrLink: handlePrLink,
-    onPromptQueued: (data) => {
-      logPromptSend("app_prompt_queued", {
-        app_session_id: data.app_session_id,
-        queued_id: data.queued_id,
-        client_id: data.client_id ?? null,
-        send_mode: data.send_mode,
-        queue_position: data.queue_position,
-        pending_queue_drafts: pendingQueueDraftsRef.current[data.app_session_id]?.length ?? 0,
-      });
-      const pendingDraft = takePendingQueueDraft(data.app_session_id, data.client_id);
-      promptQueue.acknowledge(data.app_session_id, {
-        id: data.queued_id,
-        clientId: data.client_id ?? null,
-        preview: pendingDraft?.preview ?? data.prompt_preview,
-        ...(pendingDraft?.images?.length ? { images: pendingDraft.images } : {}),
-        ...(pendingDraft?.files?.length ? { files: pendingDraft.files } : {}),
-      }, data.queue_revision);
-      // Remove the optimistic pending message bubble — the queued banner
-      // on top of the input area is the single surface for queued state.
-      // The real message will appear via user_message_persisted when the
-      // queue drains and the backend processes the prompt.
-      if (data.client_id) {
-        offlineDispatchedRef.current.delete(offlineDispatchKey(data.app_session_id, data.client_id));
-        removeAckedOfflineAction(data.app_session_id, data.client_id);
-        removePendingByClientId(data.client_id);
-      }
-    },
-    // User-message lifecycle — map the 5 backend states onto the
-    // user message's `status` field so MessageStatus renders them.
-    onUserMsgLifecycle: (_appSessionId: string, event) => {
-      const d = event.data as { lifecycle_msg_id?: string; client_id?: string; kind?: string; error?: string; reason?: string };
-      if (!d.lifecycle_msg_id) return;
-      logPromptSend("app_lifecycle", {
-        app_session_id: _appSessionId,
-        event: event.type,
-        lifecycle_msg_id: d.lifecycle_msg_id,
-        client_id: d.client_id ?? null,
-        kind: d.kind ?? null,
-        error: d.error ?? d.reason,
-      }, event.type === "user_message_failed" ? "warn" : "info");
-      switch (event.type) {
-        case "user_message_queued":
-          if (d.client_id) {
-            offlineDispatchedRef.current.delete(offlineDispatchKey(_appSessionId, d.client_id));
-            removeAckedOfflineAction(_appSessionId, d.client_id);
-            if (d.kind === "queued_behind") {
-              removePendingByClientId(d.client_id);
-            } else if (d.lifecycle_msg_id) {
-              // Bind the optimistic pending entry to its lifecycle id so
-              // a later user_message_failed can mark it failed in place.
-              stampPendingLifecycleId(d.client_id, d.lifecycle_msg_id);
-            }
-          }
-          break;
-        case "user_message_sent":
-          patchMessageStatus(_appSessionId, d.lifecycle_msg_id, "sending");
-          break;
-        case "user_message_received":
-          patchMessageStatus(_appSessionId, d.lifecycle_msg_id, "received");
-          break;
-        case "user_message_done":
-          patchMessageStatus(_appSessionId, d.lifecycle_msg_id, undefined);
-          break;
-        case "user_message_failed":
-          patchMessageStatus(_appSessionId, d.lifecycle_msg_id, "error", d.error ?? d.reason);
-          markPendingFailed(d.lifecycle_msg_id, d.error ?? d.reason);
-          break;
-      }
-    },
-    onTurnStarted: () => {},
-    onQueueConsumed: (data) => {
-      promptQueue.consume(
-        data.app_session_id,
-        data.queued_id ? [data.queued_id] : undefined,
-      );
-    },
     onAnyEvent: progressHandleWSEvent,
     clientId: clientId,
   });
