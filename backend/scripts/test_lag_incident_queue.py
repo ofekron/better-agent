@@ -952,6 +952,39 @@ async def _reserved_quota_crash_restarts_and_drains() -> None:
         await queue.stop()
 
 
+def test_parked_depth_does_not_stat_per_file() -> None:
+    # perf.flush() reads parked_depth() on the event loop every ROLLUP_SECS.
+    # It must NOT issue per-file os.stat — at 1669 parked files that blocked
+    # the loop ~1.6s (lag-watchdog self-amplification). A count needs names only.
+    _reset_spool()
+    root = paths.ba_home() / "lag-incidents"
+    root.mkdir()
+    n = 400
+    for i in range(n):
+        (root / f"{i:08x}.parked").write_bytes(b"{}")
+
+    real_stat = os.stat
+    counts = {"n": 0}
+
+    def counting_stat(*args, **kwargs):
+        counts["n"] += 1
+        return real_stat(*args, **kwargs)
+
+    queue.os.stat = counting_stat
+    try:
+        counts["n"] = 0
+        depth = queue.parked_depth()
+        stat_calls = counts["n"]
+    finally:
+        queue.os.stat = real_stat
+
+    assert depth == n, f"parked_depth miscounted: expected {n}, got {depth}"
+    assert stat_calls <= 16, (
+        f"parked_depth must not stat per file: {stat_calls} os.stat calls for {n} files"
+    )
+    _reset_spool()
+
+
 def main_test() -> None:
     asyncio.run(_blocked_loop_eventual_exactly_once())
     asyncio.run(_restart_and_unavailable_retry())
@@ -984,6 +1017,7 @@ def main_test() -> None:
     asyncio.run(_blocked_generation_survives_restart_without_probe())
     asyncio.run(_blocked_generation_parks_overflow_without_probe())
     test_corrupt_reference_ledger_is_quarantined_and_rebuilt()
+    test_parked_depth_does_not_stat_per_file()
     asyncio.run(_reserved_quota_crash_restarts_and_drains())
     print("PASS: durable lag incident queue")
 

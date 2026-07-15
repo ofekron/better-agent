@@ -401,9 +401,30 @@ def _parked_files(*, strict: bool = False) -> list[Path]:
     return _spool_files(_PARKED_SUFFIX, strict=strict)
 
 
+def _count_spool(suffix: str) -> int:
+    """Count spool entries by suffix WITHOUT per-file os.stat or sorting.
+
+    `parked_depth` is read by the perf rollup (perf.flush) directly on the
+    event loop every ROLLUP_SECS. `_spool_files` stats + sorts every entry,
+    which blocked the loop (~1.6s at 1669 parked files). A depth gauge only
+    needs the count, so list names and count — O(1) syscall regardless of N.
+    """
+    dir_fd: int | None = None
+    try:
+        root = _secure_spool_dir()
+        if not _DIRFD_SUPPORTED:
+            with os.scandir(root) as entries:
+                return sum(1 for entry in entries if entry.name.endswith(suffix))
+        dir_fd = _open_spool_dir_fd(root)
+        return sum(1 for name in os.listdir(dir_fd) if name.endswith(suffix))
+    finally:
+        if dir_fd is not None:
+            os.close(dir_fd)
+
+
 def parked_depth() -> int:
     try:
-        return len(_parked_files(strict=True))
+        return _count_spool(_PARKED_SUFFIX)
     except (OSError, RuntimeError):
         return 0
 
