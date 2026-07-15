@@ -49,7 +49,6 @@ describe("ShortcutResponses", () => {
         session={makeSession()}
         draft=""
         onDraftChange={() => {}}
-        queuedPrompt={null}
         onPromoteQueued={() => {}}
         shortcutResponses={["TLDR"]}
       />,

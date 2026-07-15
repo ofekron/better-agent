@@ -3528,6 +3528,9 @@ class Coordinator:
                                 "prompt_preview": retry_params.get("prompt", ""),
                                 "queue_position": 0,
                                 "client_id": retry_params.get("client_id"),
+                                "queue_revision": int(
+                                    (session_manager.get(app_session_id) or {}).get("queue_revision") or 0
+                                ),
                             },
                         })
                     except Exception:

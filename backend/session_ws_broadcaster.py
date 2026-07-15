@@ -649,7 +649,8 @@ class SessionWSBroadcaster:
                 patch["sidebar_minimized"] = bool(change["sidebar_minimized"])
         elif kind == "queued_prompts_updated":
             patch = {
-                "queued_prompts": list(change.get("queued_prompts") or [])
+                "queued_prompts": list(change.get("queued_prompts") or []),
+                "queue_revision": int(change.get("queue_revision") or 0),
             }
         elif kind == "last_opened_set":
             patch = {"last_opened_at": change.get("at")}

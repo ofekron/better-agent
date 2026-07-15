@@ -1,12 +1,18 @@
-import { act, renderHook } from "@testing-library/react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { act, renderHook, waitFor } from "@testing-library/react";
+import { describe, expect, it, vi } from "vitest";
 import {
   offlineEntryIsEditing,
   useOfflineQueue,
+  type OfflineCreateSessionEntry,
   type OfflinePromptEntry,
 } from "../src/hooks/useOfflineQueue";
-
-const STORAGE_KEY = "better_agent_offline_queue";
+import {
+  deleteOfflineAction,
+  loadOfflineActions,
+  offlineActionKey,
+  putOfflineAction,
+  updateOfflineAction,
+} from "../src/lib/offlineQueueStore";
 
 const entry = (sessionId: string, clientId: string, prompt = clientId): OfflinePromptEntry => ({
   sessionId,
@@ -16,191 +22,226 @@ const entry = (sessionId: string, clientId: string, prompt = clientId): OfflineP
   cwd: "/tmp/project",
 });
 
-beforeEach(() => {
-  localStorage.clear();
-  vi.restoreAllMocks();
+const legacyCreateEntry = (clientId: string): OfflineCreateSessionEntry => ({
+  type: "create_session",
+  clientId,
+  session: {
+    id: "invalid-legacy-session-id",
+    name: "legacy",
+    model: "sonnet",
+    cwd: "/tmp/project",
+    orchestration_mode: "native",
+    created_at: "2026-01-01T00:00:00Z",
+    updated_at: "2026-01-01T00:00:00Z",
+    messages: [],
+  },
+  prompt: "legacy create",
 });
 
-afterEach(() => {
-  localStorage.clear();
-  vi.restoreAllMocks();
-});
-
-describe("useOfflineQueue — persistence integrity", () => {
-  it("flags persistFailed and fails closed when the write throws (quota / private mode)", () => {
-    const { result } = renderHook(() => useOfflineQueue());
-    // Simulate QuotaExceededError on the next setItem only. The setup
-    // polyfill installs a MemoryStorage INSTANCE, so spy the instance
-    // method rather than Storage.prototype.
-    const setItem = vi
-      .spyOn(globalThis.localStorage, "setItem")
-      .mockImplementationOnce(() => {
-        throw new DOMException("quota", "QuotaExceededError");
-      });
-
-    let ok: boolean | undefined;
-    act(() => {
-      ok = result.current.enqueue(entry("a", "a1"));
-    });
-
-    // The write failed...
-    expect(ok).toBe(false);
-    expect(result.current.persistFailed).toBe(true);
-    // ...and it is not advertised as queued/replayable because it is not
-    // durable. The caller restores/keeps the user's draft instead.
-    expect(result.current.getAll()).toEqual([]);
-    setItem.mockRestore();
-  });
-
-  it("recovers persistFailed back to false on the next successful write", () => {
-    const { result } = renderHook(() => useOfflineQueue());
-    vi.spyOn(globalThis.localStorage, "setItem").mockImplementationOnce(() => {
-      throw new DOMException("quota", "QuotaExceededError");
-    });
-    act(() => result.current.enqueue(entry("a", "a1")));
-    expect(result.current.persistFailed).toBe(true);
-
-    // Next write succeeds (mock was once-only).
-    act(() => result.current.enqueue(entry("a", "a2")));
-    expect(result.current.persistFailed).toBe(false);
-    expect(JSON.parse(localStorage.getItem(STORAGE_KEY) || "[]").map((e: OfflinePromptEntry) => e.clientId)).toEqual([
-      "a2",
+describe("useOfflineQueue — IndexedDB persistence integrity", () => {
+  it("commits concurrent tab writes without clobbering", async () => {
+    await Promise.all([
+      putOfflineAction(entry("a", "a1")),
+      putOfflineAction(entry("b", "b1")),
+      putOfflineAction(entry("a", "a2")),
+    ]);
+    expect((await loadOfflineActions()).map((item) => item.clientId).sort()).toEqual([
+      "a1", "a2", "b1",
     ]);
   });
 
-  it("merges concurrent tabs instead of clobbering (read-modify-write against fresh disk)", () => {
-    // Tab A mounts and enqueues a1.
-    const tabA = renderHook(() => useOfflineQueue());
-    act(() => tabA.result.current.enqueue(entry("a", "a1")));
-
-    // Tab B mounts with the same disk (sees a1), then a write from ANOTHER
-    // context (simulating Tab A's later write) lands b1 on disk while Tab B
-    // still holds its older snapshot.
-    const tabB = renderHook(() => useOfflineQueue());
-    const onDisk = JSON.parse(localStorage.getItem(STORAGE_KEY) || "[]");
-    localStorage.setItem(STORAGE_KEY, JSON.stringify([...onDisk, entry("b", "b1")]));
-
-    // Tab B enqueues a2. A naive snapshot-overwrite would drop b1.
-    act(() => tabB.result.current.enqueue(entry("a", "a2")));
-
-    const persisted = JSON.parse(localStorage.getItem(STORAGE_KEY) || "[]").map(
-      (e: OfflinePromptEntry) => e.clientId,
-    );
-    expect(persisted).toContain("a1");
-    expect(persisted).toContain("b1"); // <-- the other tab's entry survived
-    expect(persisted).toContain("a2");
+  it("serializes remove and enqueue without resurrecting or losing actions", async () => {
+    const first = entry("a", "same", "first");
+    await putOfflineAction(first);
+    await Promise.all([
+      deleteOfflineAction(offlineActionKey(first)),
+      putOfflineAction(entry("b", "same", "second")),
+    ]);
+    expect(await loadOfflineActions()).toEqual([
+      expect.objectContaining({ sessionId: "b", clientId: "same", prompt: "second" }),
+    ]);
   });
 
-  it("tolerates a corrupt (non-JSON) blob without throwing — starts clean", () => {
-    localStorage.setItem(STORAGE_KEY, "{not valid json");
-    const { result } = renderHook(() => useOfflineQueue());
-    expect(result.current.getAll()).toEqual([]);
-    act(() => result.current.enqueue(entry("a", "a1")));
-    expect(result.current.getAll().map((e) => e.clientId)).toEqual(["a1"]);
-  });
-
-  it("drops only unusable entries from a partially-corrupt array, salvaging the rest", () => {
-    localStorage.setItem(
-      STORAGE_KEY,
-      JSON.stringify([
-        entry("a", "a1"),
-        { clientId: "broken-no-session", prompt: "x", model: "m", cwd: "/" }, // missing sessionId
-        { sessionId: "b", clientId: "b1", prompt: "", model: "m", cwd: "/" }, // no prompt or payload
-        entry("c", "c1"),
-      ]),
-    );
-    const { result } = renderHook(() => useOfflineQueue());
-    expect(result.current.getAll().map((e) => e.clientId)).toEqual(["a1", "c1"]);
-  });
-
-  it("keeps attachment-only prompt entries (empty text with image/file payloads)", () => {
-    const attachmentOnly: OfflinePromptEntry = {
-      ...entry("a", "a1", ""),
-      images: [{ data: "base64", media_type: "image/png" }],
+  it("keeps attachment payloads separate from editable action metadata", async () => {
+    const queued: OfflinePromptEntry = {
+      ...entry("a", "a1", "original"),
+      images: [{ data: "large-base64", media_type: "image/png" }],
     };
-    localStorage.setItem(STORAGE_KEY, JSON.stringify([attachmentOnly]));
-    const { result } = renderHook(() => useOfflineQueue());
-    expect(result.current.getAll()).toEqual([attachmentOnly]);
-  });
-
-  it("dedupes a re-enqueue of the same (session, client) identity, keeping the latest content", () => {
-    const { result } = renderHook(() => useOfflineQueue());
-    act(() => {
-      result.current.enqueue(entry("a", "a1", "first"));
-      result.current.enqueue(entry("a", "a1", "edited"));
+    await putOfflineAction(queued);
+    const db = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open("better-agent-offline-actions", 1);
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
     });
-    const all = result.current.getAll();
-    expect(all).toHaveLength(1);
-    expect((all[0] as OfflinePromptEntry).prompt).toBe("edited");
-  });
-
-  it("converges on a cross-tab `storage` event (re-reads authoritative disk state)", () => {
-    const { result } = renderHook(() => useOfflineQueue());
-    act(() => result.current.enqueue(entry("a", "a1")));
-    expect(result.current.queue).toHaveLength(1);
-
-    // Another tab appends b1 to disk and the browser fires `storage`.
-    const onDisk = JSON.parse(localStorage.getItem(STORAGE_KEY) || "[]");
-    localStorage.setItem(STORAGE_KEY, JSON.stringify([...onDisk, entry("b", "b1")]));
-    act(() => {
-      window.dispatchEvent(new StorageEvent("storage", { key: STORAGE_KEY }));
+    const action = await new Promise<Record<string, unknown>>((resolve, reject) => {
+      const request = db.transaction("actions").objectStore("actions").get(offlineActionKey(queued));
+      request.onsuccess = () => resolve(request.result as Record<string, unknown>);
+      request.onerror = () => reject(request.error);
     });
-
-    expect(result.current.queue.map((e) => e.clientId).sort()).toEqual(["a1", "b1"]);
+    db.close();
+    expect(action).not.toHaveProperty("images");
+    expect((await loadOfflineActions())[0]).toEqual(queued);
   });
 
-  it("clears the storage key entirely when the last entry is removed", () => {
-    const { result } = renderHook(() => useOfflineQueue());
-    act(() => result.current.enqueue(entry("a", "a1")));
-    act(() => result.current.remove("a1"));
-    expect(localStorage.getItem(STORAGE_KEY)).toBeNull();
-  });
-
-  it("persists queued prompt edits and holds replay until the edit is saved", () => {
-    const { result, rerender } = renderHook(() => useOfflineQueue());
-    act(() => result.current.enqueue(entry("a", "a1", "original")));
-    const queued = result.current.getAll()[0];
-
-    act(() => result.current.beginEdit(queued));
+  it("persists edit hold across reload and saves without rewriting attachments", async () => {
+    const { result, unmount } = renderHook(() => useOfflineQueue());
+    await waitFor(() => expect(result.current.ready).toBe(true));
+    await act(() => result.current.enqueue(entry("a", "a1", "original")));
+    await act(() => result.current.beginEdit(result.current.getAll()[0]));
+    await act(() => result.current.updateEditDraft(result.current.getAll()[0], "edited"));
     expect(offlineEntryIsEditing(result.current.getAll()[0])).toBe(true);
+    unmount();
 
-    act(() => result.current.updateEditDraft(result.current.getAll()[0], "edited"));
-    expect(JSON.parse(localStorage.getItem(STORAGE_KEY) || "[]")[0].editing).toEqual({
-      draftPrompt: "edited",
-    });
-
-    rerender();
-    expect(offlineEntryIsEditing(result.current.getAll()[0])).toBe(true);
-
-    act(() => result.current.finishEdit(result.current.getAll()[0]));
-    const saved = result.current.getAll()[0] as OfflinePromptEntry;
-    expect(saved.prompt).toBe("edited");
-    expect(saved.editing).toBeUndefined();
+    const reloaded = renderHook(() => useOfflineQueue());
+    await waitFor(() => expect(reloaded.result.current.ready).toBe(true));
+    expect(offlineEntryIsEditing(reloaded.result.current.getAll()[0])).toBe(true);
+    await act(() => reloaded.result.current.finishEdit(reloaded.result.current.getAll()[0]));
+    expect((reloaded.result.current.getAll()[0] as OfflinePromptEntry).prompt).toBe("edited");
   });
 
-  it("cancels a queued prompt edit without changing the original prompt", () => {
-    const { result } = renderHook(() => useOfflineQueue());
-    act(() => result.current.enqueue(entry("a", "a1", "original")));
-    act(() => result.current.beginEdit(result.current.getAll()[0]));
-    act(() => result.current.updateEditDraft(result.current.getAll()[0], "draft"));
-    act(() => result.current.cancelEdit(result.current.getAll()[0]));
-
-    const saved = result.current.getAll()[0] as OfflinePromptEntry;
-    expect(saved.prompt).toBe("original");
-    expect(saved.editing).toBeUndefined();
+  it("edits attachment-heavy actions without scaling with payload size", async () => {
+    const queued: OfflinePromptEntry = {
+      ...entry("a", "heavy", "original"),
+      images: [{ data: "x".repeat(20_000_000), media_type: "image/png" }],
+    };
+    await putOfflineAction(queued);
+    const key = offlineActionKey(queued);
+    const started = performance.now();
+    for (let index = 0; index < 25; index += 1) {
+      await updateOfflineAction(key, (current) => ({
+        ...current,
+        editing: { originalPrompt: "original", draftPrompt: `edit-${index}` },
+      }));
+    }
+    expect(performance.now() - started).toBeLessThan(250);
   });
 
-  it("removes the exact queued entry selected for delete", () => {
+  it("keeps rapid hook edits local and ordered with a 20 MB payload", async () => {
     const { result } = renderHook(() => useOfflineQueue());
-    act(() => {
-      result.current.enqueue(entry("a", "same", "first"));
-      result.current.enqueue(entry("b", "same", "second"));
-    });
+    await waitFor(() => expect(result.current.ready).toBe(true));
+    await act(() => result.current.enqueue({
+      ...entry("a", "hook-heavy", "original"),
+      images: [{ data: "x".repeat(20_000_000), media_type: "image/png" }],
+    }));
+    await act(() => result.current.beginEdit(result.current.getAll()[0]));
+    const started = performance.now();
+    for (let index = 0; index < 25; index += 1) {
+      await act(() => result.current.updateEditDraft(result.current.getAll()[0], `draft-${index}`));
+    }
+    expect(performance.now() - started).toBeLessThan(250);
+    expect(result.current.getAll()[0].editing?.draftPrompt).toBe("draft-24");
+  });
 
-    act(() => result.current.removeEntry(result.current.getAll()[0]));
+  it("imports legacy intent once without overwriting newer composite entries", async () => {
+    await putOfflineAction(entry("a", "same", "indexeddb"));
+    localStorage.setItem("better_agent_offline_queue", JSON.stringify([
+      entry("a", "same", "legacy"),
+      entry("b", "other", "legacy-other"),
+    ]));
+    const { result } = renderHook(() => useOfflineQueue());
+    await waitFor(() => expect(result.current.ready).toBe(true));
+    expect(result.current.getAll()).toEqual([
+      expect.objectContaining({ sessionId: "a", clientId: "same", prompt: "indexeddb" }),
+      expect.objectContaining({ sessionId: "b", clientId: "other", prompt: "legacy-other" }),
+    ]);
+    expect(localStorage.getItem("better_agent_offline_queue")).toBeNull();
+  });
 
+  it("atomically retries a multi-entry legacy import under stable normalized identities", async () => {
+    localStorage.setItem("better_agent_offline_queue", JSON.stringify([
+      legacyCreateEntry("create-retry"),
+      entry("a", "send-retry", "legacy send"),
+    ]));
+    const originalPut = IDBObjectStore.prototype.put;
+    let putCount = 0;
+    IDBObjectStore.prototype.put = function (...args: Parameters<IDBObjectStore["put"]>) {
+      putCount += 1;
+      if (putCount === 2) {
+        throw new DOMException("forced", "DataError");
+      }
+      return originalPut.apply(this, args);
+    };
+    const first = renderHook(() => useOfflineQueue());
+    await waitFor(() => expect(first.result.current.ready).toBe(true));
+    expect(await loadOfflineActions()).toEqual([]);
+    const normalizedRaw = localStorage.getItem("better_agent_offline_queue");
+    expect(normalizedRaw).not.toBeNull();
+    const normalized = JSON.parse(normalizedRaw!) as OfflineCreateSessionEntry[];
+    const normalizedSessionId = normalized[0].session.id;
+    expect(normalizedSessionId).not.toBe("invalid-legacy-session-id");
+    first.unmount();
+    IDBObjectStore.prototype.put = originalPut;
+
+    const retry = renderHook(() => useOfflineQueue());
+    await waitFor(() => expect(retry.result.current.ready).toBe(true));
+    expect(retry.result.current.getAll()).toHaveLength(2);
+    expect(retry.result.current.getAll()[0]).toEqual(expect.objectContaining({
+      clientId: "create-retry",
+      session: expect.objectContaining({ id: normalizedSessionId }),
+    }));
+    expect(retry.result.current.getAll()[1]).toEqual(expect.objectContaining({
+      sessionId: "a",
+      clientId: "send-retry",
+    }));
+    expect(localStorage.getItem("better_agent_offline_queue")).toBeNull();
+  });
+
+  it("retries removal failure without reminting or duplicating a legacy create", async () => {
+    localStorage.setItem("better_agent_offline_queue", JSON.stringify([legacyCreateEntry("remove-retry")]));
+    const removeItem = vi.spyOn(localStorage, "removeItem")
+      .mockImplementationOnce(() => { throw new Error("forced removal failure"); });
+    const first = renderHook(() => useOfflineQueue());
+    await waitFor(() => expect(first.result.current.ready).toBe(true));
+    const normalizedRaw = localStorage.getItem("better_agent_offline_queue");
+    expect(normalizedRaw).not.toBeNull();
+    const normalizedSessionId = (JSON.parse(normalizedRaw!)[0] as OfflineCreateSessionEntry).session.id;
+    expect(await loadOfflineActions()).toHaveLength(1);
+    first.unmount();
+    removeItem.mockRestore();
+
+    const retry = renderHook(() => useOfflineQueue());
+    await waitFor(() => expect(retry.result.current.ready).toBe(true));
+    expect(retry.result.current.getAll()).toEqual([
+      expect.objectContaining({
+        clientId: "remove-retry",
+        session: expect.objectContaining({ id: normalizedSessionId }),
+      }),
+    ]);
+    expect(localStorage.getItem("better_agent_offline_queue")).toBeNull();
+  });
+
+  it("becomes ready with an empty failed state when durable storage cannot open", async () => {
+    const legacy = JSON.stringify([entry("a", "open-retry", "legacy")]);
+    localStorage.setItem("better_agent_offline_queue", legacy);
+    const open = vi.spyOn(IDBFactory.prototype, "open")
+      .mockImplementation(() => { throw new Error("forced open failure"); });
+    const failed = renderHook(() => useOfflineQueue());
+    await waitFor(() => expect(failed.result.current.ready).toBe(true));
+    expect(failed.result.current.persistFailed).toBe(true);
+    expect(failed.result.current.getAll()).toEqual([]);
+    expect(localStorage.getItem("better_agent_offline_queue")).toBe(legacy);
+    failed.unmount();
+    open.mockRestore();
+  });
+
+  it("deletes only the selected composite identity", async () => {
+    const { result } = renderHook(() => useOfflineQueue());
+    await waitFor(() => expect(result.current.ready).toBe(true));
+    await act(() => result.current.enqueue(entry("a", "same", "first")));
+    await act(() => result.current.enqueue(entry("b", "same", "second")));
+    await act(() => result.current.removeEntry(result.current.getAll()[0]));
     expect(result.current.getAll()).toEqual([
       expect.objectContaining({ sessionId: "b", clientId: "same" }),
     ]);
+  });
+
+  it("serializes a fast backend acknowledgement after its pending enqueue", async () => {
+    const { result } = renderHook(() => useOfflineQueue());
+    await waitFor(() => expect(result.current.ready).toBe(true));
+    const enqueue = result.current.enqueue(entry("a", "fast-ack"));
+    const acknowledge = result.current.removeBySessionAndClient("a", "fast-ack");
+    await act(() => Promise.all([enqueue, acknowledge]));
+    expect(await loadOfflineActions()).toEqual([]);
+    expect(result.current.getAll()).toEqual([]);
   });
 });

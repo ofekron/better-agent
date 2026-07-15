@@ -90,6 +90,11 @@ def _run() -> bool:
         f"queued={queued}",
     ))
     results.append((
+        "queue admission advances the durable revision",
+        raw.get("queue_revision") == 1,
+        f"queue_revision={raw.get('queue_revision')}",
+    ))
+    results.append((
         "queued prompt is not a chat message",
         not raw.get("messages"),
         f"messages={raw.get('messages')}",
@@ -106,6 +111,11 @@ def _run() -> bool:
         len(queued) == 1 and queued[0].get("content") == "edited queued prompt",
         f"queued={queued}",
     ))
+    results.append((
+        "queue edit advances the durable revision",
+        raw.get("queue_revision") == 2,
+        f"queue_revision={raw.get('queue_revision')}",
+    ))
 
     session_manager.remove_queued_prompt_by_client_id(sid, "pending-1")
     session_manager.flush_pending_persists()
@@ -114,6 +124,11 @@ def _run() -> bool:
         "queued prompt clears only after client id is persisted",
         raw.get("queued_prompts") == [],
         f"queued={raw.get('queued_prompts')}",
+    ))
+    results.append((
+        "queue removal advances the durable revision",
+        raw.get("queue_revision") == 3,
+        f"queue_revision={raw.get('queue_revision')}",
     ))
 
     prompt_no_client = dict(prompt)

@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, vi } from "vitest";
 import { cleanup } from "@testing-library/react";
 import React from "react";
+import "fake-indexeddb/auto";
+import { clearOfflineActions } from "src/lib/offlineQueueStore";
 
 // happy-dom 20 doesn't ship a localStorage by default. Provide a tiny
 // in-memory polyfill so App's `useState(() => localStorage.getItem(...))`
@@ -36,8 +38,9 @@ function installMemoryStorage() {
 
 installMemoryStorage();
 
-beforeEach(() => {
+beforeEach(async () => {
   installMemoryStorage();
+  await clearOfflineActions();
 });
 
 afterEach(() => {

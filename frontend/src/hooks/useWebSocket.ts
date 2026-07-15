@@ -305,6 +305,7 @@ interface UseWebSocketOptions {
     send_mode: string;
     queue_position: number;
     client_id?: string;
+    queue_revision: number;
   }) => void;
   /** A queued/interrupted turn has started processing (queue drained). */
   onTurnStarted?: (appSessionId: string) => void;
@@ -1053,6 +1054,7 @@ export function useWebSocket(
           const d = event.data as {
             lifecycle_msg_id?: string;
             client_id?: string;
+            queue_revision?: number;
             kind?: string;
             error?: string;
             reason?: string;
@@ -1097,6 +1099,7 @@ export function useWebSocket(
             send_mode?: string;
             queue_position?: number;
             client_id?: string;
+            queue_revision?: number;
           };
           logPromptSend("prompt_queued_ack", {
             app_session_id: d.app_session_id,
@@ -1114,6 +1117,7 @@ export function useWebSocket(
               send_mode: d.send_mode ?? "queue",
               queue_position: d.queue_position ?? 1,
               client_id: d.client_id,
+              queue_revision: d.queue_revision ?? 0,
             });
           }
         }

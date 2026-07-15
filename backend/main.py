@@ -19458,6 +19458,7 @@ async def websocket_chat(websocket: WebSocket):
                                         "send_mode": send_mode,
                                         "queue_position": coordinator.get_queued_count(app_session_id),
                                         "client_id": _cid,
+                                        "queue_revision": int(_sess.get("queue_revision") or 0),
                                     },
                                 })
                             continue
@@ -19790,6 +19791,7 @@ async def websocket_chat(websocket: WebSocket):
                                 "send_mode": send_mode,
                                 "queue_position": coordinator.get_queued_count(app_session_id),
                                 "client_id": msg.get("client_id"),
+                                "queue_revision": int(admission.get("queue_revision") or 0),
                             },
                         })
                     continue
@@ -19854,6 +19856,7 @@ async def websocket_chat(websocket: WebSocket):
                             "send_mode": send_mode,
                             "queue_position": queue_position,
                             "client_id": msg.get("client_id"),
+                            "queue_revision": int(admission.get("queue_revision") or 0),
                         },
                     })
 

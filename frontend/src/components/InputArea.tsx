@@ -26,6 +26,7 @@ import {
 } from "./AtMentionDropdown";
 import { ScheduleSendPopover, type ScheduleSendPayload } from "./ScheduleSendPopover";
 import type { NodeSnapshot, Project, Session } from "../types";
+import { executeComposerSubmission } from "../utils/composerSubmission";
 
 export type { PastedImage, FileAttachment } from "../types";
 
@@ -106,7 +107,6 @@ interface Props {
   onFork?: (prompt: string, images: PastedImage[]) => boolean | Promise<boolean>;
   canFork?: boolean;
   forkTargetLabel?: string;
-  queuedPrompt: { id: string; preview: string; images?: PastedImage[]; imagesCount?: number; files?: FileAttachment[]; filesCount?: number } | null;
   queuedPrompts?: { id: string; preview: string; images?: PastedImage[]; imagesCount?: number; files?: FileAttachment[]; filesCount?: number }[];
   onPromoteQueued: (queuedId?: string) => void;
   onPromoteQueuedMulti?: (queuedIds: string[]) => void;
@@ -182,7 +182,6 @@ export function InputArea({
   onFork,
   canFork = false,
   forkTargetLabel,
-  queuedPrompt,
   queuedPrompts,
   onPromoteQueued,
   onPromoteQueuedMulti,
@@ -228,7 +227,7 @@ export function InputArea({
   // user can compose multi-line prompts without surprise submits.
   const enterIsNewline = viewport.mode !== "desktop";
   const compactActionMenus = viewport.mode === "mobile";
-  const visibleQueuedPrompts = queuedPrompts ?? (queuedPrompt ? [queuedPrompt] : []);
+  const visibleQueuedPrompts = queuedPrompts ?? [];
   // Persisted display preference: collapse the whole queued-prompts list to a
   // one-line "n queued prompts" summary strip. Defaults collapsed on mobile
   // where vertical space is scarce; a stored preference always wins.
@@ -619,27 +618,29 @@ export function InputArea({
     const trimmed = localDraft.trim();
     if ((!trimmed && images.length === 0 && files.length === 0 && tagCount === 0) || disabled) return;
     submitInFlightRef.current = true;
-    // Optimistically clear — the text is committed to the message.
-    // The parent's handleDraftClearImmediate will also clear the prop,
-    // but that happens inside the async onSend chain which may not
-    // resolve within the same act() tick in tests. Arm the stale-echo
-    // guard so a parent debounce that was queued BEFORE this send
-    // (carrying `trimmed`) doesn't land mid-await and resurrect the text.
-    setLocalDraft("");
-    lastSyncedRef.current = "";
-    pendingLocalSeq.current = 0;
-    setIgnoreNextDraft(trimmed);
     try {
-      const sent = await submit(trimmed, images, files);
-      if (sent) {
-        setImages([], false);
-        setFiles([]);
-      } else {
-        // Send failed — restore the draft so the user doesn't lose it.
-        setLocalDraft(trimmed);
-        lastSyncedRef.current = trimmed;
-        setIgnoreNextDraft(null);
-      }
+      await executeComposerSubmission({
+        payload: { prompt: trimmed, images, files },
+        allowed: true,
+        submit: ({ prompt, images: payloadImages, files: payloadFiles }) => (
+          submit(prompt, payloadImages, payloadFiles)
+        ),
+        begin: ({ prompt }) => {
+          setLocalDraft("");
+          lastSyncedRef.current = "";
+          pendingLocalSeq.current = 0;
+          setIgnoreNextDraft(prompt);
+        },
+        commit: () => {
+          setImages([], false);
+          setFiles([]);
+        },
+        rollback: ({ prompt }) => {
+          setLocalDraft(prompt);
+          lastSyncedRef.current = prompt;
+          setIgnoreNextDraft(null);
+        },
+      });
     } finally {
       submitInFlightRef.current = false;
     }
@@ -663,19 +664,26 @@ export function InputArea({
     if (!onFork) return;
     const trimmed = localDraft.trim();
     if (!trimmed || disabled || !canFork) return;
-    setLocalDraft("");
-    lastSyncedRef.current = "";
-    pendingLocalSeq.current = 0;
-    setIgnoreNextDraft(trimmed);
-    const sent = await onFork(trimmed, images);
-    if (sent) {
-      setImages([], false);
-      onDraftChange("");
-    } else {
-      setLocalDraft(trimmed);
-      lastSyncedRef.current = trimmed;
-      setIgnoreNextDraft(null);
-    }
+    await executeComposerSubmission({
+      payload: { prompt: trimmed, images },
+      allowed: true,
+      submit: ({ prompt, images: payloadImages }) => onFork(prompt, payloadImages),
+      begin: ({ prompt }) => {
+        setLocalDraft("");
+        lastSyncedRef.current = "";
+        pendingLocalSeq.current = 0;
+        setIgnoreNextDraft(prompt);
+      },
+      commit: () => {
+        setImages([], false);
+        onDraftChange("");
+      },
+      rollback: ({ prompt }) => {
+        setLocalDraft(prompt);
+        lastSyncedRef.current = prompt;
+        setIgnoreNextDraft(null);
+      },
+    });
   }, [localDraft, images, disabled, onFork, canFork, onDraftChange]);
 
   const handleSendToNewSession = useCallback(() => {
@@ -709,7 +717,7 @@ export function InputArea({
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       const trimmed = localDraft.trim();
-      if (!trimmed && images.length === 0 && files.length === 0 && tagCount === 0 && queuedPrompt) {
+      if (!trimmed && images.length === 0 && files.length === 0 && tagCount === 0 && visibleQueuedPrompts.length > 0) {
         if (canSteer && onSteerQueued && _isStreaming) onSteerQueued();
         else onPromoteQueued();
       } else {

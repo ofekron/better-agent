@@ -1039,6 +1039,8 @@ export interface Session {
    * show them as queued banners instead of losing them or rendering them as
    * normal chat messages before the backend actually sends them. */
   queued_prompts?: QueuedPrompt[];
+  /** Monotonic backend-owned revision for queued_prompts snapshots. */
+  queue_revision?: number;
   capability_contexts?: CapabilityContext[];
   /** True if this session is the ephemeral inner side of a prompt-
    * engineering session. Filtered out of the sidebar list — the
