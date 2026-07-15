@@ -82,12 +82,19 @@ SESSION = {
 }
 
 
+SESSIONS_BY_ID: dict = {
+    "root": SESSION,
+    "empty-root": {**SESSION, "id": "empty-root"},
+}
+
+
 async def fake_projection_source(session_id: str, *, after_seq: int = 0, limit: int = 2000):
-    if session_id in ("root", "empty-root"):
-        return {"found": True, "session": {**SESSION, "id": session_id},
-                "provider_kind": "claude", "facts": [], "next_seq": 0,
-                "has_more": False, "canonical_through_seq": 0}
-    return {"found": False}
+    session = SESSIONS_BY_ID.get(session_id)
+    if session is None:
+        return {"found": False}
+    return {"found": True, "session": session,
+            "provider_kind": "claude", "facts": [], "next_seq": 0,
+            "has_more": False, "canonical_through_seq": 0}
 
 
 def main() -> None:
@@ -128,6 +135,68 @@ def main() -> None:
         check("unknown session is 404", response.status_code == 404)
         response = client.get("/api/chat-tree/bad.id")
         check("invalid session id is 400", response.status_code == 400)
+
+        # Windowing: 7 turns on a fresh root; default window = last 5.
+        window_session = {
+            **SESSION, "id": "windowroot",
+            "messages": [
+                entry for turn in range(1, 8) for entry in (
+                    {"id": f"u{turn}", "role": "user", "seq": turn * 10},
+                    {"id": f"a{turn}", "role": "assistant", "seq": turn * 10 + 1,
+                     "run_meta": {"provider_id": "claude", "model": "sonnet-4-6",
+                                  "reasoning_effort": "high"}},
+                )
+            ],
+        }
+        seq = 0
+        for turn in range(1, 8):
+            for payload_type, payload in (
+                ("user_prompt", {"message_id": f"u{turn}", "text": f"prompt {turn}"}),
+                ("message_ownership_declared",
+                 {"message_id": f"a{turn}", "prompt_message_id": f"u{turn}"}),
+                ("assistant_output",
+                 {"message_id": f"a{turn}", "text": f"answer {turn}", "final": True}),
+            ):
+                seq += 1
+                fact_payload = wire_fact(seq, payload_type, payload)
+                fact_payload["root_id"] = "windowroot"
+                fact_payload["sid"] = "windowroot"
+                fact_payload["turn_id"] = f"u{turn}"
+                chat_projection_ingestion.admit_canonical_fact(
+                    fact_payload, provider="claude",
+                )
+        SESSIONS_BY_ID["windowroot"] = window_session
+
+        response = client.get("/api/chat-tree/windowroot")
+        body = response.json()
+        turn_ids = [item["id"] for item in body["items"] if item["type"] == "Turn"]
+        check("default window is the last 5 turns",
+              response.status_code == 200 and turn_ids == ["u3", "u4", "u5", "u6", "u7"])
+        check("older cursor points at the window's first turn",
+              body["page"] == {"turns": 5, "before_turn": None,
+                               "older_cursor": "u3", "has_older": True})
+        check("lookup carries prompt text and snapshot seq",
+              body["lookup"]["u7"] == {"kind": "message", "role": "user",
+                                       "text": "prompt 7", "seq": 70})
+        result_part = next(item for item in body["items"]
+                           if item["type"] == "Turn" and item["id"] == "u7")["result"]["part_ids"][0]
+        check("lookup resolves result events to their message",
+              body["lookup"][result_part]["kind"] == "event"
+              and body["lookup"][result_part]["message_id"] == "a7"
+              and body["lookup"][result_part]["message_seq"] == 71)
+
+        response = client.get("/api/chat-tree/windowroot?before_turn=u3")
+        body = response.json()
+        turn_ids = [item["id"] for item in body["items"] if item["type"] == "Turn"]
+        check("older page returns the exact preceding turns with no overlap",
+              turn_ids == ["u1", "u2"] and body["page"]["has_older"] is False
+              and body["page"]["older_cursor"] is None)
+
+        response = client.get("/api/chat-tree/windowroot?before_turn=nope")
+        detail = response.json().get("detail")
+        check("stale turn cursor is a typed 409",
+              response.status_code == 409
+              and isinstance(detail, dict) and detail.get("code") == "stale_turn_cursor")
     finally:
         runtime_service.projection_source = original
         chat_projection_ingestion.close()

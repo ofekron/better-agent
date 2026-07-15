@@ -37,6 +37,120 @@ _READ_PAGE = 1000
 _PROVIDER_KINDS = {"claude", "codex", "gemini"}
 
 
+def _window_items(
+    items: list[dict[str, Any]], turns: int, before_turn: str | None,
+) -> tuple[list[dict[str, Any]], str | None]:
+    """Slice the wire item list to the requested turn window.
+
+    Turns count Turn items only; each window keeps the ModelChange items
+    that precede its first turn (they render before their affected turn),
+    and only the latest window carries trailing ModelChanges (a switch
+    whose affected turn does not exist yet). Returns (window,
+    older_cursor) where older_cursor is the before_turn for the next
+    older page, or None when nothing older exists.
+    """
+    turn_positions = [i for i, item in enumerate(items) if item["type"] == "Turn"]
+    end = len(turn_positions)
+    if before_turn is not None:
+        cursor_pos = next(
+            (k for k, i in enumerate(turn_positions) if items[i]["id"] == before_turn),
+            None,
+        )
+        if cursor_pos is None:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "stale_turn_cursor",
+                        "message": "cursor turn is no longer in the tree"},
+            )
+        end = cursor_pos
+    start = max(0, end - turns)
+    if end <= 0 or start >= end:
+        return [], None
+    first = turn_positions[start]
+    while first > 0 and items[first - 1]["type"] == "ModelChange":
+        first -= 1
+    is_latest = end == len(turn_positions)
+    stop = len(items) if is_latest else turn_positions[end - 1] + 1
+    older_cursor = items[turn_positions[start]]["id"] if start > 0 else None
+    return items[first:stop], older_cursor
+
+
+def _referenced_ids(items: list[dict[str, Any]]) -> set[str]:
+    referenced: set[str] = set()
+    stack: list[dict[str, Any]] = list(items)
+    while stack:
+        item = stack.pop()
+        kind = item.get("type")
+        if kind == "ModelChange":
+            referenced.add(item["id"])
+            continue
+        if kind in ("Turn", "NativeSubagentTurn", "WorkerTurn"):
+            if kind == "Turn":
+                referenced.add(item["prompt"])
+            else:
+                referenced.add(item["id"])
+                referenced.update(item.get("children") or [])
+            result = item.get("result")
+            if result:
+                referenced.update(result.get("part_ids") or [])
+            stack.extend(item.get("body") or [])
+            continue
+        if kind == "Explanation":
+            referenced.update(item.get("text_event_ids") or [])
+            referenced.update(item.get("item_ids") or [])
+            continue
+        if kind == "SteeringMessage":
+            referenced.add(item["id"])
+    return referenced
+
+
+def _build_lookup(
+    items: list[dict[str, Any]],
+    adapted_messages: tuple[dict[str, Any], ...],
+    adapted_events: tuple[dict[str, Any], ...],
+    session: dict[str, Any],
+) -> dict[str, dict[str, Any]]:
+    """Content sidecar for the ids the window references: the wire tree
+    carries structure and ids; renderers look content up here
+    (lookupForRender). Seqs come from the runtime session snapshot so
+    live WS messages interleave correctly on the client."""
+    referenced = _referenced_ids(items)
+    snapshot_seq: dict[str, Any] = {}
+    run_meta: dict[str, Any] = {}
+    for message in session.get("messages") or []:
+        if not isinstance(message, dict):
+            continue
+        message_id = message.get("id")
+        if isinstance(message_id, str) and message_id:
+            snapshot_seq[message_id] = message.get("seq")
+            if isinstance(message.get("run_meta"), dict):
+                run_meta[message_id] = message["run_meta"]
+    lookup: dict[str, dict[str, Any]] = {}
+    for message in adapted_messages:
+        if message["id"] not in referenced:
+            continue
+        lookup[message["id"]] = {
+            "kind": "message",
+            "role": message["role"],
+            "text": message["content"],
+            "seq": snapshot_seq.get(message["id"], message["seq"]),
+        }
+    for event in adapted_events:
+        if event["event_id"] not in referenced:
+            continue
+        message_id = event.get("message_id")
+        lookup[event["event_id"]] = {
+            "kind": "event",
+            "type": event["type"],
+            "data": event["data"],
+            "message_id": message_id,
+            "timestamp": event["timestamp"],
+            "message_seq": snapshot_seq.get(message_id) if isinstance(message_id, str) else None,
+            "run_meta": run_meta.get(message_id) if isinstance(message_id, str) else None,
+        }
+    return lookup
+
+
 def _read_stored_facts(root_id: str, provider: str) -> list[dict[str, Any]]:
     service, catalog = chat_projection_ingestion._instances()
     generation = catalog.root_generation(root_id)
@@ -55,9 +169,17 @@ def _read_stored_facts(root_id: str, provider: str) -> list[dict[str, Any]]:
 
 
 @router.get("/api/chat-tree/{session_id}")
-async def get_chat_tree(session_id: str):
+async def get_chat_tree(
+    session_id: str,
+    turns: int = 5,
+    before_turn: str | None = None,
+):
     if not _SESSION_ID.fullmatch(session_id):
         raise HTTPException(status_code=400, detail="invalid session id")
+    if not 1 <= turns <= 100:
+        raise HTTPException(status_code=400, detail="invalid turns window")
+    if before_turn is not None and not _SESSION_ID.fullmatch(before_turn):
+        raise HTTPException(status_code=400, detail="invalid turn cursor")
     try:
         source = await runtime_service.projection_source(
             session_id, after_seq=0, limit=1,
@@ -100,9 +222,18 @@ async def get_chat_tree(session_id: str):
         raise HTTPException(
             status_code=422, detail={"code": exc.code, "message": str(exc)},
         ) from exc
+    all_items = chat_to_wire(chat)
+    window, older_cursor = _window_items(all_items, turns, before_turn)
     return {
         "session_id": session_id,
         "schema_version": CHAT_SCHEMA_VERSION,
-        "items": chat_to_wire(chat),
+        "items": window,
+        "lookup": _build_lookup(window, adapted.messages, adapted.events, session),
+        "page": {
+            "turns": turns,
+            "before_turn": before_turn,
+            "older_cursor": older_cursor,
+            "has_older": older_cursor is not None,
+        },
         "dropped": list(adapted.dropped),
     }
