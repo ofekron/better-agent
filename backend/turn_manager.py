@@ -2562,6 +2562,13 @@ class TurnManager:
                 )
             except Exception:
                 logger.exception("Failed to persist user message during error handling")
+            # `_finalize_turn_messages` just removed `assistant_msg` from the
+            # persisted tree (error path always discards it). Clear the local
+            # ref so the `ws_callback` call below — which re-enters
+            # `save_ws_callback` — doesn't try to apply this "error" frame to
+            # a message that no longer exists (`session_manager.message_batch`
+            # raises `KeyError` on the now-deleted `msg_id`).
+            assistant_msg_holder[0] = None
             await ws_callback({"type": "error", "data": {
                 "app_session_id": persist_to, "error": error_text,
             }})
