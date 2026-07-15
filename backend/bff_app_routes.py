@@ -41,6 +41,8 @@ def owns_path(method: str, path: str) -> bool:
         return method in {"GET", "PATCH"}
     if path == "/api/projects":
         return method in {"GET", "POST", "DELETE"}
+    if path == "/api/projects/status":
+        return method == "GET"
     if path == "/api/projects/touch":
         return method == "POST"
     if path == "/api/project-mappings":

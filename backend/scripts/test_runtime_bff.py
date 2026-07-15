@@ -34,6 +34,136 @@ import runtime_endpoints
 _BACKEND_DIR = Path(__file__).resolve().parents[1]
 
 
+def test_bff_mobile_project_routes_have_trusted_cors_and_require_auth():
+    import asyncio
+
+    import httpx
+    from fastapi.testclient import TestClient
+
+    import bff_server
+    import project_store
+    import user_prefs
+    from bff_runtime_service import runtime_service
+    from bff_runtime_upstream import RuntimeUpstream
+
+    requested_paths: list[str] = []
+    previous_runtime = bff_server.runtime_upstream
+    previous_bind = user_prefs.get_network_bind_address()
+
+    async def upstream(request: httpx.Request) -> httpx.Response:
+        requested_paths.append(request.url.path)
+        if request.url.path == "/api/auth/me":
+            if request.headers.get("authorization") != "Bearer mobile-token":
+                return httpx.Response(401, json={"detail": "unauthenticated"})
+            assert request.headers.get("origin") in {"http://localhost", "https://evil.example"}
+            assert request.headers.get("x-forwarded-host") == "100.101.102.103:8000"
+            return httpx.Response(200, json={"username": "mobile"})
+        assert request.headers["x-better-agent-bff-token"] == "service-test"
+        if request.url.path == "/api/bff-runtime/projects/facts":
+            return httpx.Response(200, json={"candidates": [], "aggregates": []})
+        if request.url.path == "/api/bff-runtime/projects/status":
+            return httpx.Response(200, json={"aggregates": []})
+        raise AssertionError(request.url.path)
+
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(upstream),
+        base_url="http://better-agent-runtime",
+    )
+    upstream_proxy = RuntimeUpstream(
+        descriptor_reader=lambda: {"kind": "tcp", "host": "127.0.0.1", "port": 1},
+        token_reader=lambda: "service-test",
+        client_factory=lambda _descriptor: client,
+    )
+    bff_server.runtime_upstream = upstream_proxy
+    runtime_service.bind(upstream_proxy)
+    user_prefs.set_network_bind_address("0.0.0.0")
+    try:
+        project_store.add_project(path="/tmp/mobile-project", node_id="primary")
+        app_client = TestClient(bff_server.app)
+        cors_headers = {
+            "Origin": "http://localhost",
+            "Host": "100.101.102.103:8000",
+        }
+        preflight = app_client.options(
+            "/api/projects",
+            headers={
+                **cors_headers,
+                "Access-Control-Request-Method": "GET",
+                "Access-Control-Request-Headers": "authorization",
+            },
+        )
+        assert preflight.status_code == 200, preflight.text
+        assert preflight.headers.get("access-control-allow-origin") == "http://localhost"
+
+        rejected_preflight = app_client.options(
+            "/api/projects",
+            headers={
+                "Origin": "https://evil.example",
+                "Host": "100.101.102.103:8000",
+                "Access-Control-Request-Method": "GET",
+                "Access-Control-Request-Headers": "authorization",
+            },
+        )
+        assert rejected_preflight.status_code == 400, rejected_preflight.text
+        assert rejected_preflight.headers.get("access-control-allow-origin") is None
+
+        rejected_get = app_client.get(
+            "/api/projects",
+            headers={
+                "Origin": "https://evil.example",
+                "Host": "100.101.102.103:8000",
+                "Authorization": "Bearer mobile-token",
+            },
+        )
+        assert rejected_get.status_code == 200, rejected_get.text
+        assert rejected_get.headers.get("access-control-allow-origin") is None
+
+        invalid_bearer = app_client.get(
+            "/api/projects",
+            headers={**cors_headers, "Authorization": "Bearer wrong-token"},
+        )
+        assert invalid_bearer.status_code == 401, invalid_bearer.text
+        assert invalid_bearer.headers.get("access-control-allow-origin") == "http://localhost"
+
+        unauthenticated = app_client.get("/api/projects/status", headers=cors_headers)
+        assert unauthenticated.status_code == 401, unauthenticated.text
+        assert unauthenticated.headers.get("access-control-allow-origin") == "http://localhost"
+
+        projects = app_client.get(
+            "/api/projects",
+            headers={**cors_headers, "Authorization": "Bearer mobile-token"},
+        )
+        assert projects.status_code == 200, projects.text
+        assert projects.headers.get("access-control-allow-origin") == "http://localhost"
+        assert projects.json()["projects"]
+
+        status = app_client.get(
+            "/api/projects/status",
+            headers={**cors_headers, "Authorization": "Bearer mobile-token"},
+        )
+        assert status.status_code == 200, status.text
+        assert status.headers.get("access-control-allow-origin") == "http://localhost"
+        assert "/api/auth/me" in requested_paths
+        assert "/api/bff-runtime/projects/status" in requested_paths
+    finally:
+        runtime_service.unbind()
+        bff_server.runtime_upstream = previous_runtime
+        user_prefs.set_network_bind_address(previous_bind)
+        asyncio.run(client.aclose())
+
+
+def test_bff_project_routes_are_owned_for_auth():
+    import bff_app_routes
+
+    assert bff_app_routes.owns_path("GET", "/api/projects")
+    assert bff_app_routes.owns_path("POST", "/api/projects")
+    assert bff_app_routes.owns_path("DELETE", "/api/projects")
+    assert bff_app_routes.owns_path("GET", "/api/projects/status")
+    assert bff_app_routes.owns_path("POST", "/api/projects/touch")
+    assert not bff_app_routes.owns_path("OPTIONS", "/api/projects")
+    assert not bff_app_routes.owns_path("GET", "/api/projects/unknown")
+
+
 def test_projected_proxy_recomputes_length_and_preserves_duplicate_headers():
     import httpx
     from fastapi.testclient import TestClient

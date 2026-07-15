@@ -38,6 +38,7 @@ import bff_chat_feed
 from bff_chat_tree import router as chat_tree_router
 import bff_projection
 import app_chat_draft_store
+from browser_cors import BrowserTrustCORSMiddleware
 from frontend_assets import (
     NO_CACHE_HEADERS,
     NoCacheIndexStaticFiles,
@@ -184,6 +185,15 @@ async def authenticate_app_routes(request: Request, call_next):
         if exists.status_code != 200:
             return JSONResponse({"detail": "session validation failed"}, status_code=502)
     return await call_next(request)
+
+
+app.add_middleware(
+    BrowserTrustCORSMiddleware,
+    allow_origins=[],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 @app.get("/bff/healthz")
