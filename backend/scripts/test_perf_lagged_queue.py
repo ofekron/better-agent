@@ -67,8 +67,71 @@ def test_lagged_queue_get_nowait_strips_stamp():
     assert _lag_count("nowait") == 1
 
 
+def test_rollup_loop_runs_flush_off_the_event_loop():
+    """Regression: `_rollup_loop` calling `flush()` directly on the event
+    loop lets ANY registered gauge (e.g. lag_incident_queue.parked_depth
+    scanning an unbounded spool dir -- 1848 files and growing in prod, per
+    faulthandler dump at 2026-07-15T22:23:53, `_count_spool` still O(N) CPU)
+    stall every concurrent session/websocket/request for the gauge's
+    duration. `_rollup_loop` must invoke `flush()` via `asyncio.to_thread` so
+    a slow gauge only blocks a worker thread, never the loop.
+
+    Drives the REAL `_rollup_loop` (with ROLLUP_SECS patched small) rather
+    than calling `asyncio.to_thread(flush)` directly in the test -- a test
+    that wraps flush() itself would pass trivially regardless of what
+    `_rollup_loop`'s own source does.
+    """
+    import time
+
+    def slow_gauge() -> int:
+        time.sleep(0.3)
+        return 42
+
+    perf.register_queue("bc_test_slow_gauge", slow_gauge)
+    original_rollup_secs = perf.ROLLUP_SECS
+    perf.ROLLUP_SECS = 0.01
+    try:
+        async def run() -> tuple[int, int]:
+            heartbeat_ticks = 0
+            stop = False
+
+            async def heartbeat() -> None:
+                nonlocal heartbeat_ticks
+                while not stop:
+                    await asyncio.sleep(0.02)
+                    heartbeat_ticks += 1
+
+            hb_task = asyncio.create_task(heartbeat())
+            rollup_task = asyncio.create_task(perf._rollup_loop())
+            # One rollup fires almost immediately (ROLLUP_SECS=0.01) and
+            # blocks on the slow gauge for ~0.3s; give it 0.5s total.
+            await asyncio.sleep(0.5)
+            rollup_task.cancel()
+            try:
+                await rollup_task
+            except asyncio.CancelledError:
+                pass
+            stop = True
+            await hb_task
+            return heartbeat_ticks
+
+        ticks = asyncio.run(run())
+        # ~0.5s / 20ms = ~25 ticks if the loop stayed responsive throughout
+        # the slow-gauge rollup. If flush() ran synchronously on the loop,
+        # the heartbeat would starve for the full 300ms gauge read.
+        assert ticks >= 15, (
+            f"event loop starved during a rollup with a slow gauge: only "
+            f"{ticks} heartbeat ticks in 0.5s (expected the loop to stay "
+            f"responsive throughout)"
+        )
+    finally:
+        perf.ROLLUP_SECS = original_rollup_secs
+        perf.unregister_queue("bc_test_slow_gauge")
+
+
 if __name__ == "__main__":
     test_lagged_queue_round_trips_dicts_of_any_key_count()
     test_lagged_queue_async_put_does_not_double_wrap()
     test_lagged_queue_get_nowait_strips_stamp()
+    test_rollup_loop_runs_flush_off_the_event_loop()
     print("ok")

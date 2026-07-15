@@ -175,7 +175,12 @@ async def _rollup_loop() -> None:
     while True:
         try:
             await asyncio.sleep(ROLLUP_SECS)
-            flush()
+            # flush() is pure-sync and reads every registered gauge, including
+            # ones that do filesystem I/O (e.g. lag_incident_queue.parked_depth
+            # scanning an unbounded spool dir) -- run it off the event loop so
+            # an expensive/slow gauge can never stall every concurrent
+            # session/websocket/request for the rollup's duration.
+            await asyncio.to_thread(flush)
         except asyncio.CancelledError:
             raise
         except Exception:
