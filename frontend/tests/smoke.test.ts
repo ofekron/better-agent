@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { renderApp } from "./harness";
 import { makeAssistantMsg, makeSession, makeUserMsg } from "./fixtures";
+import { loadOfflineActions } from "src/lib/offlineQueueStore";
 
 describe("harness smoke", () => {
   it("boots with a seeded session and lists it in the sidebar", async () => {
@@ -248,7 +249,7 @@ describe("harness smoke", () => {
 
     const sentFrame = h.outbound.find((f) => f.type === "send_message")!;
     const clientId = sentFrame.client_id as string;
-    expect(localStorage.getItem("better_agent_offline_queue")).not.toBeNull();
+    expect(await loadOfflineActions()).not.toHaveLength(0);
 
     h.emit({
       type: "error",
@@ -263,7 +264,7 @@ describe("harness smoke", () => {
 
     const failed = h.toJSON().chat.messages.find((m) => m.id === clientId);
     expect(failed?.status).toBe("error");
-    expect(localStorage.getItem("better_agent_offline_queue")).toBeNull();
+    expect(await loadOfflineActions()).toHaveLength(0);
 
     h.unmount();
   });

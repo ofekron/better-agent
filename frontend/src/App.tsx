@@ -4960,7 +4960,14 @@ function AppMain({
       // client_id so the backend can echo it back when the queued message
       // is eventually processed (or immediately for non-queued sends).
       const clientIdForMsg = `pending-${uuidv4()}`;
-      const expectedQueued = sendMode === "queue";
+      // Stage into the queued-prompts projection only when a turn is
+      // actually running — an idle "queue" send dispatches immediately and
+      // must keep its optimistic "sending" chat bubble instead.
+      const expectedQueued = sendMode === "queue"
+        && (
+          (isStreaming && streamingAppSessionId === currentSession.id)
+          || (runStateBySession[currentSession.id]?.length ?? 0) > 0
+        );
       if (sendMode === "queue") {
         appendPendingQueueDraft(currentSession.id, {
           id: clientIdForMsg,

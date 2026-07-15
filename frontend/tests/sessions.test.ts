@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import { fireEvent } from "@testing-library/react";
 import { renderApp } from "./harness";
 import { makeSession, makeUserMsg } from "./fixtures";
+import { loadOfflineActions } from "src/lib/offlineQueueStore";
 
 async function waitForSend(
   h: Awaited<ReturnType<typeof renderApp>>,
@@ -218,7 +219,7 @@ describe("sessions CRUD + subscribe lifecycle", () => {
       h.restCalls.filter((c) => c.method === "POST" && c.path === "/api/sessions"),
     ).toHaveLength(1);
     expect(h.toJSON().sidebar.sessions).toHaveLength(1);
-    expect(localStorage.getItem("better_agent_offline_queue")).toBeNull();
+    expect(await loadOfflineActions()).toHaveLength(0);
     h.unmount();
   });
 
@@ -259,7 +260,7 @@ describe("sessions CRUD + subscribe lifecycle", () => {
     expect(h.toJSON().chat.messages[0].text).toContain(
       "remember to implement offline sessions",
     );
-    expect(JSON.parse(localStorage.getItem("better_agent_offline_queue") || "[]")).toHaveLength(1);
+    expect(await loadOfflineActions()).toHaveLength(1);
 
     h.backend.setOffline(false);
     h.reopenConnection();
@@ -274,7 +275,7 @@ describe("sessions CRUD + subscribe lifecycle", () => {
         prompt: "remember to implement offline sessions",
       }),
     );
-    expect(JSON.parse(localStorage.getItem("better_agent_offline_queue") || "[]")).toHaveLength(1);
+    expect(await loadOfflineActions()).toHaveLength(1);
 
     const sent = h.outbound.find(
       (frame) =>
@@ -293,7 +294,7 @@ describe("sessions CRUD + subscribe lifecycle", () => {
     });
     await h.flush();
 
-    expect(localStorage.getItem("better_agent_offline_queue")).toBeNull();
+    expect(await loadOfflineActions()).toHaveLength(0);
     h.unmount();
   });
 
@@ -520,7 +521,7 @@ describe("sessions CRUD + subscribe lifecycle", () => {
         text: expect.stringContaining("queue during disconnect race"),
       }),
     );
-    expect(JSON.parse(localStorage.getItem("better_agent_offline_queue") || "[]")).toHaveLength(1);
+    expect(await loadOfflineActions()).toHaveLength(1);
     h.unmount();
   });
 
@@ -543,7 +544,7 @@ describe("sessions CRUD + subscribe lifecycle", () => {
     await h.click(".modal-footer .btn-primary");
 
     expect(h.toJSON().sidebar.sessions).toHaveLength(1);
-    expect(JSON.parse(localStorage.getItem("better_agent_offline_queue") || "[]")).toEqual([
+    expect(await loadOfflineActions()).toEqual([
       expect.objectContaining({ type: "create_session", prompt: "" }),
     ]);
 
@@ -551,7 +552,7 @@ describe("sessions CRUD + subscribe lifecycle", () => {
     expect(
       h.outbound.filter((frame) => frame.type === "send_message"),
     ).toHaveLength(0);
-    expect(JSON.parse(localStorage.getItem("better_agent_offline_queue") || "[]")).toEqual([
+    expect(await loadOfflineActions()).toEqual([
       expect.objectContaining({ type: "create_session", prompt: "" }),
       expect.objectContaining({
         prompt: "prompt after empty offline session",
@@ -592,7 +593,7 @@ describe("sessions CRUD + subscribe lifecycle", () => {
     await h.click(".modal-footer .btn-primary");
 
     expect(h.toJSON().sidebar.sessions).toHaveLength(1);
-    expect(JSON.parse(localStorage.getItem("better_agent_offline_queue") || "[]")).toEqual([
+    expect(await loadOfflineActions()).toEqual([
       expect.objectContaining({ type: "create_session" }),
     ]);
     h.unmount();
@@ -637,6 +638,7 @@ describe("sessions CRUD + subscribe lifecycle", () => {
     await h.flush();
 
     expect(localStorage.getItem("better_agent_offline_queue")).toBeNull();
+    expect(await loadOfflineActions()).toHaveLength(0);
     h.unmount();
   });
 
@@ -646,7 +648,7 @@ describe("sessions CRUD + subscribe lifecycle", () => {
     await h.selectSession("s1");
     await h.typeAndSend("durable before ack");
 
-    const queue = JSON.parse(localStorage.getItem("better_agent_offline_queue") || "[]");
+    const queue = await loadOfflineActions();
     expect(queue).toEqual([
       expect.objectContaining({
         sessionId: "s1",
@@ -675,7 +677,7 @@ describe("sessions CRUD + subscribe lifecycle", () => {
     });
     await h.flush();
 
-    expect(localStorage.getItem("better_agent_offline_queue")).toBeNull();
+    expect(await loadOfflineActions()).toHaveLength(0);
     h.unmount();
   });
 
@@ -703,7 +705,7 @@ describe("sessions CRUD + subscribe lifecycle", () => {
     });
     await h.flush();
 
-    expect(localStorage.getItem("better_agent_offline_queue")).toBeNull();
+    expect(await loadOfflineActions()).toHaveLength(0);
     h.unmount();
   });
 
@@ -732,7 +734,7 @@ describe("sessions CRUD + subscribe lifecycle", () => {
     await h.selectSession("s1");
     await h.flush();
 
-    expect(localStorage.getItem("better_agent_offline_queue")).toBeNull();
+    expect(await loadOfflineActions()).toHaveLength(0);
     expect(
       h.outbound.filter(
         (frame) => frame.type === "send_message" && frame.client_id === "queued-client-1",
