@@ -1273,7 +1273,6 @@ def _apply_recovered_stream_event_sync(
             user_msg=user_msg,
             root_id=session_manager._root_id_for(persist_sid),
             run_id=run_id,
-            provider_kind=_provider_kind(desc),
         )
         get_strategy(mode).apply_event(
             app_session_id=persist_sid,
@@ -2486,7 +2485,6 @@ def _replay_and_apply(
             user_msg=preceding_user,
             root_id=session_manager._root_id_for(persist_sid),
             run_id=run_id,
-            provider_kind=_provider_kind(desc),
         )
         strategy = get_strategy(mode)
         # Per-event isolation: one poison event must not abort the

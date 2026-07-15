@@ -73,7 +73,6 @@ class ApplyEventCtx:
     user_msg: Optional[dict] = None
     root_id: Optional[str] = None
     run_id: Optional[str] = None
-    provider_kind: Optional[str] = None
     cwd_override: Optional[str] = None
 
 
@@ -599,19 +598,6 @@ class OrchestrationStrategy(ABC):
     ) -> None:
         if not write_journal or not ctx.root_id:
             return
-        if ctx.provider_kind or ctx.run_id:
-            from chat_projection_ingestion import admit_provider_event
-            admit_provider_event(
-                root_id=ctx.root_id,
-                session_id=app_session_id,
-                event_type=etype or "unknown",
-                data=data,
-                source="provider_stream",
-                run_id=ctx.run_id,
-                message_id=msg_id,
-                turn_id=ctx.run_id or msg_id,
-                provider=ctx.provider_kind,
-            )
         from event_journal import EventJournalWriteError, publish_event_sync
         try:
             publish_event_sync(

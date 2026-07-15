@@ -13346,6 +13346,11 @@ async def on_shutdown():
     except Exception:
         logger.exception("session content projection shutdown failed")
     try:
+        from event_bus_subscribers import shutdown_chat_projection_ingestion
+        await asyncio.to_thread(shutdown_chat_projection_ingestion)
+    except Exception:
+        logger.exception("chat projection ingestion shutdown failed")
+    try:
         event_ingester.close_all()
     except Exception:
         logger.exception("EventIngester close_all failed")

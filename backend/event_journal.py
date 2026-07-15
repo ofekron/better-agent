@@ -751,10 +751,8 @@ class EventJournalWriter:
         self._closed = True
         self._executor.shutdown(wait=True)
         from canonical_runtime_journal import close_canonical_runtime_journal
-        from chat_projection_ingestion import close as close_chat_projection_ingestion
 
         close_canonical_runtime_journal()
-        close_chat_projection_ingestion()
 
     def reopen(self) -> None:
         """Recreate writer threads for a new lifespan in this process."""
