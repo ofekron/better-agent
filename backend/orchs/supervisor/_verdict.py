@@ -355,7 +355,11 @@ async def request_verdict(
     # mis-classify the bootstrap-received gate (e.g. the caller is
     # holding a snapshot from before the previous successful verdict
     # flipped the flag).
-    fresh_for_gate = session_manager.get(app_session_id) or primary_session
+    # Lite read: these helpers read only message text/role + session
+    # metadata (agent_session_id, cwd), never msg.events. Full get()
+    # deepcopies the whole events-laden tree (~100x cost on large
+    # sessions) on the event loop each verdict iteration.
+    fresh_for_gate = session_manager.get_lite(app_session_id) or primary_session
     primary_last = _last_message_text(fresh_for_gate, "assistant")
     original_request = _last_user_request(fresh_for_gate)
     ws_path, ws_lines = _primary_jsonl_info(fresh_for_gate)
@@ -409,7 +413,8 @@ async def request_verdict(
 
     # Read the verdict from the last supervisor-sourced assistant message
     # on the same session record (where run_turn just persisted it).
-    fresh = session_manager.get(app_session_id) or primary_session
+    # Lite read: only role/source/content are read, never events.
+    fresh = session_manager.get_lite(app_session_id) or primary_session
     response_text = ""
     for m in reversed(fresh.get("messages") or []):
         if m.get("role") == "assistant" and m.get("source") == "supervisor":
@@ -491,8 +496,9 @@ async def request_review(
         return
 
     # Read the review text (last supervisor-sourced assistant msg) and
-    # hand it off to the primary as a new turn.
-    fresh = session_manager.get(app_session_id) or primary
+    # hand it off to the primary as a new turn. Lite read: only
+    # role/source/content are read, never events.
+    fresh = session_manager.get_lite(app_session_id) or primary
     review_text = ""
     for m in reversed(fresh.get("messages") or []):
         if m.get("role") == "assistant" and m.get("source") == "supervisor":

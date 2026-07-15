@@ -203,7 +203,8 @@ async def maybe_run_verdict_loop(
 
         # Re-check before spending another primary turn — the user may
         # have flipped the toggle off while the verdict was in-flight.
-        check = session_manager.get(app_session_id)
+        # Lite read: only supervisor_enabled is read, never events.
+        check = session_manager.get_lite(app_session_id)
         if not check or not check.get("supervisor_enabled"):
             return
 
