@@ -18352,12 +18352,6 @@ def _snapshot_refresh_authority(scope):
     return authority or None
 
 
-async def _send_ws_callback_event(snapshot_transport, event_dict) -> bool:
-    if snapshot_transport is None:
-        return False
-    return await snapshot_transport.send_event(event_dict)
-
-
 @app.websocket("/ws/chat")
 async def websocket_chat(websocket: WebSocket):
     # Auth gate. SessionMiddleware populates `websocket.session` on
