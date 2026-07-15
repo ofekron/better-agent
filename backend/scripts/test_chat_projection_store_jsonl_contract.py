@@ -113,7 +113,17 @@ def test_commit_duplicate_mutation_restart_and_delete() -> None:
     advanced = store.commit(request(sequence=2))
     assert advanced.duplicate and path.read_bytes().count(b"\n") == lines_before + 1
     assert store.source_watermark("root", 0, "provider-neutral").sequence == 2
-    second = store.commit(request(version=2, sequence=2))
+    admission = store.source_admission("root", 0, "provider-neutral", 0, 2)
+    assert (admission.event_id, admission.content_hash, admission.fact_sequence) == (
+        request().event_id, request().content_hash, 1,
+    )
+    before_conflict = path.read_bytes()
+    assert_error("source_conflict", lambda: store.commit(request(version=2, sequence=2)))
+    assert path.read_bytes() == before_conflict
+    assert store.projection_cursor("root", 0) == 1
+    assert store.source_watermark("root", 0, "provider-neutral").sequence == 2
+    assert store.source_admission("root", 0, "provider-neutral", 0, 2) == admission
+    second = store.commit(request(version=2, sequence=3))
     assert (second.fact_sequence, second.revision) == (2, 2)
     assert store.read_projection("root", 0, request().event_id).render_node["text"] == "answer-2"
     store.close()
@@ -121,6 +131,12 @@ def test_commit_duplicate_mutation_restart_and_delete() -> None:
     reopened = JsonlChatProjectionStore(path)
     assert [item.fact_sequence for item in reopened.read_facts("root", 0)] == [1, 2]
     assert reopened.projection_cursor("root", 0) == 2
+    assert reopened.source_admission("root", 0, "provider-neutral", 0, 2) == admission
+    journal_before_retry = path.read_bytes()
+    assert reopened.commit(request(sequence=2)).duplicate
+    assert path.read_bytes() == journal_before_retry
+    assert_error("source_conflict", lambda: reopened.commit(request(version=4, sequence=2)))
+    assert path.read_bytes() == journal_before_retry
     reopened.select_generation("root", 1)
     reopened.delete_generation("root", 0)
     assert reopened.read_facts("root", 0) == []

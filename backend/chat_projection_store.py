@@ -22,6 +22,15 @@ class SourceWatermark:
 
 
 @dataclass(frozen=True)
+class SourceAdmission:
+    event_id: str
+    content_hash: str
+    fact_sequence: int
+    revision: int
+    projection_cursor: int
+
+
+@dataclass(frozen=True)
 class TurnManifest:
     turn_id: str
     event_count: int
@@ -91,4 +100,5 @@ class ChatProjectionStore(Protocol):
     def projection_cursor(self, root_id: str, root_generation: int) -> int: ...
     def read_projection(self, root_id: str, root_generation: int, event_id: str) -> StoredProjection | None: ...
     def source_watermark(self, root_id: str, root_generation: int, stream_id: str) -> SourceWatermark | None: ...
+    def source_admission(self, root_id: str, root_generation: int, stream_id: str, source_generation: int, source_sequence: int) -> SourceAdmission | None: ...
     def close(self) -> None: ...

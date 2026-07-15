@@ -184,18 +184,23 @@ class CanonicalChatProjectionService:
         if request.watermark.sequence != admission.next_sequence - 1:
             raise ProjectionServiceError("watermark_regression", "source sequence cannot regress")
         try:
-            result = self._store(authority).commit(request)
-        except ChatProjectionStoreError as exc:
-            if exc.code == "source_conflict":
-                raise ProjectionServiceError(
-                    "sequence_conflict", "committed source sequence carries different content",
-                ) from exc
-            self._raise(exc)
-        if not result.duplicate:
-            raise ProjectionServiceError(
-                "sequence_conflict", "committed source sequence was not an exact duplicate",
+            durable = self._store(authority).source_admission(
+                authority.root_id, authority.root_generation, request.watermark.stream_id,
+                request.watermark.generation, request.watermark.sequence,
             )
-        return result
+        except ChatProjectionStoreError as exc:
+            self._raise(exc)
+        if durable is None:
+            raise ProjectionServiceError(
+                "watermark_regression", "source sequence has no durable admission",
+            )
+        if (durable.event_id, durable.content_hash) != (request.event_id, request.content_hash):
+            raise ProjectionServiceError(
+                "sequence_conflict", "committed source sequence carries different content",
+            )
+        return CommitResult(
+            True, durable.fact_sequence, durable.revision, durable.projection_cursor,
+        )
 
     def _drain_locked(
         self, authority: ProjectionAuthority, admission: _StreamAdmission,

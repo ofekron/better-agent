@@ -19,7 +19,7 @@ from chat_projection_store_owner import (
 from chat_projection_store_owner_path import verify_anchored_file
 
 from chat_projection_store import (
-    ChatProjectionStoreError, CommitResult, ProjectionCommit, SourceWatermark, StoredFact,
+    ChatProjectionStoreError, CommitResult, ProjectionCommit, SourceAdmission, SourceWatermark, StoredFact,
     StoredProjection, StoredRevision, TurnManifest,
 )
 from paths import ba_home
@@ -410,6 +410,26 @@ class SQLiteChatProjectionStore:
             self._wire_integer(result["generation"])
             self._wire_integer(result["sequence"])
             return result
+        if operation == "source_admission":
+            self._wire_mapping(result, {
+                "root_id", "root_generation", "stream_id", "source_generation",
+                "source_sequence", "admission",
+            })
+            self._wire_correlation(
+                result, arguments,
+                ("root_id", "root_generation", "stream_id", "source_generation", "source_sequence"),
+            )
+            admission = result["admission"]
+            if admission is None:
+                return None
+            self._wire_mapping(admission, {
+                "event_id", "content_hash", "fact_sequence", "revision", "projection_cursor",
+            })
+            self._wire_text(admission["event_id"])
+            self._wire_text(admission["content_hash"])
+            for key in ("fact_sequence", "revision", "projection_cursor"):
+                self._wire_integer(admission[key])
+            return admission
         raise ChatProjectionStoreError("owner_protocol_error", "unknown owner result operation")
 
     @staticmethod
@@ -1055,6 +1075,36 @@ class SQLiteChatProjectionStore:
             stream_id, self._stored_int(row[0]), self._stored_int(row[1]),
         ) if row else None
 
+    @_translate_sqlite("storage_read_failed")
+    def source_admission(
+        self, root_id: str, root_generation: int, stream_id: str,
+        source_generation: int, source_sequence: int,
+    ) -> SourceAdmission | None:
+        self._identity(root_id, root_generation)
+        self._text("stream_id", stream_id)
+        self._integer("source_generation", source_generation)
+        self._integer("source_sequence", source_sequence)
+        if self._owner_client:
+            result = self._rpc(
+                "source_admission", root_id=root_id, root_generation=root_generation,
+                stream_id=stream_id, source_generation=source_generation,
+                source_sequence=source_sequence,
+            )
+            return SourceAdmission(**result) if result is not None else None
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT event_id,content_hash,fact_sequence,revision,projection_cursor "
+                "FROM source_admissions WHERE root_id=? AND root_generation=? AND stream_id=? "
+                "AND source_generation=? AND source_sequence=?",
+                (root_id, root_generation, stream_id, source_generation, source_sequence),
+            ).fetchone()
+        if row is None:
+            return None
+        return SourceAdmission(
+            self._stored_text(row[0]), self._stored_text(row[1]), self._stored_int(row[2]),
+            self._stored_int(row[3]), self._stored_int(row[4]),
+        )
+
     @staticmethod
     def _validate_commit(request: ProjectionCommit) -> None:
         SQLiteChatProjectionStore._identity(request.root_id, request.root_generation)
@@ -1231,6 +1281,9 @@ def _owner_dispatch(
         "delete_root": {"root_id"},
         "read_projection": {"root_id", "root_generation", "event_id"},
         "source_watermark": {"root_id", "root_generation", "stream_id"},
+        "source_admission": {
+            "root_id", "root_generation", "stream_id", "source_generation", "source_sequence",
+        },
         "close": set(),
     }
     if operation not in allowed or set(arguments) != allowed[operation]:
@@ -1302,6 +1355,11 @@ def _owner_dispatch(
             "root_id": arguments["root_id"], "root_generation": arguments["root_generation"],
             "stream_id": arguments["stream_id"], "watermark": asdict(result) if result else None,
         }
+    if operation == "source_admission":
+        result = store.source_admission(**arguments)
+        return {
+            **arguments, "admission": asdict(result) if result else None,
+        }
     if operation == "close":
         store._file_checkpoint()
     method = getattr(store, operation)
@@ -1310,7 +1368,7 @@ def _owner_dispatch(
         return None
     if isinstance(result, list):
         return [asdict(item) for item in result]
-    if isinstance(result, (StoredProjection, SourceWatermark)):
+    if isinstance(result, (StoredProjection, SourceWatermark, SourceAdmission)):
         return asdict(result)
     return result
 

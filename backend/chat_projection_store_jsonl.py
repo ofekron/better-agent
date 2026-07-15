@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from chat_projection_store import (
-    ChatProjectionStoreError, CommitResult, ProjectionCommit, SourceWatermark, StoredFact,
+    ChatProjectionStoreError, CommitResult, ProjectionCommit, SourceAdmission, SourceWatermark, StoredFact,
     StoredProjection, StoredRevision, TurnManifest,
 )
 from chat_projection_store_owner import OwnerClient, serve_owner
@@ -493,40 +493,95 @@ class _JsonlOwnerStore:
     def _apply(self, operation: str, arguments: Mapping[str, Any]) -> Any:
         if operation == "commit":
             return self._index.commit(self._index._commit_from_dict(arguments["request"]))
-        if operation == "watermark_advanced":
+        if operation == "duplicate_admitted":
             if set(arguments) != {
                 "root_id", "root_generation", "stream_id", "source_generation", "source_sequence",
+                "event_id", "content_hash", "fact_sequence", "revision", "projection_cursor",
             }:
-                raise ChatProjectionStoreError("storage_corrupt", "watermark control shape is invalid")
+                raise ChatProjectionStoreError("storage_corrupt", "duplicate admission shape is invalid")
             self._index._identity(arguments["root_id"], arguments["root_generation"])
-            self._index._text("stream_id", arguments["stream_id"])
-            self._index._integer("source_generation", arguments["source_generation"])
-            self._index._integer("source_sequence", arguments["source_sequence"])
+            for name in ("stream_id", "event_id", "content_hash"):
+                self._index._text(name, arguments[name])
+            for name in (
+                "source_generation", "source_sequence", "fact_sequence", "revision",
+                "projection_cursor",
+            ):
+                self._index._integer(name, arguments[name])
+            if (
+                len(arguments["content_hash"]) != 64
+                or any(character not in "0123456789abcdef" for character in arguments["content_hash"])
+            ):
+                raise ChatProjectionStoreError("storage_corrupt", "duplicate admission hash is invalid")
             selected = self._selected_generation(arguments["root_id"])
             head = self._index._connection.execute(
-                "SELECT 1 FROM root_generation_heads WHERE root_id=? AND root_generation=?",
+                "SELECT revision,projection_cursor FROM root_generation_heads "
+                "WHERE root_id=? AND root_generation=?",
                 (arguments["root_id"], arguments["root_generation"]),
             ).fetchone()
             if selected != arguments["root_generation"] or head is None:
-                raise ChatProjectionStoreError("storage_corrupt", "watermark control generation is invalid")
-            current = self._index._connection.execute(
-                "SELECT source_generation,source_sequence FROM source_watermarks WHERE root_id=? AND root_generation=? AND stream_id=?",
-                (arguments["root_id"], arguments["root_generation"], arguments["stream_id"]),
+                raise ChatProjectionStoreError("storage_corrupt", "duplicate admission generation is invalid")
+            fact = self._index._connection.execute(
+                "SELECT event_id,content_hash FROM canonical_facts WHERE root_id=? "
+                "AND root_generation=? AND fact_sequence=?",
+                (arguments["root_id"], arguments["root_generation"], arguments["fact_sequence"]),
             ).fetchone()
-            candidate = (arguments["source_generation"], arguments["source_sequence"])
-            if current is not None and candidate <= tuple(map(self._index._stored_int, current)):
-                raise ChatProjectionStoreError("storage_corrupt", "watermark control does not advance")
-            values = (
-                arguments["root_id"], arguments["root_generation"], arguments["stream_id"],
-                arguments["source_generation"], arguments["source_sequence"],
-            )
-            self._index._connection.execute(
-                "INSERT INTO source_watermarks VALUES(?,?,?,?,?) ON CONFLICT(root_id,root_generation,stream_id) "
-                "DO UPDATE SET source_generation=excluded.source_generation,source_sequence=excluded.source_sequence",
-                values,
-            )
-            self._write_checkpoint(self._index._connection, standalone=False)
-            self._index._connection.commit()
+            if (
+                fact is None or tuple(fact) != (arguments["event_id"], arguments["content_hash"])
+                or tuple(map(self._index._stored_int, head)) != (
+                    arguments["revision"], arguments["projection_cursor"],
+                )
+            ):
+                raise ChatProjectionStoreError("storage_corrupt", "duplicate admission identity is invalid")
+            connection = self._index._connection
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                admission = connection.execute(
+                    "SELECT event_id,content_hash,fact_sequence,revision,projection_cursor "
+                    "FROM source_admissions WHERE root_id=? AND root_generation=? AND stream_id=? "
+                    "AND source_generation=? AND source_sequence=?",
+                    (
+                        arguments["root_id"], arguments["root_generation"], arguments["stream_id"],
+                        arguments["source_generation"], arguments["source_sequence"],
+                    ),
+                ).fetchone()
+                expected = (
+                    arguments["event_id"], arguments["content_hash"], arguments["fact_sequence"],
+                    arguments["revision"], arguments["projection_cursor"],
+                )
+                if admission is not None and tuple(admission) != expected:
+                    raise ChatProjectionStoreError("storage_corrupt", "duplicate admission conflicts")
+                current = connection.execute(
+                    "SELECT source_generation,source_sequence FROM source_watermarks "
+                    "WHERE root_id=? AND root_generation=? AND stream_id=?",
+                    (arguments["root_id"], arguments["root_generation"], arguments["stream_id"]),
+                ).fetchone()
+                candidate = (arguments["source_generation"], arguments["source_sequence"])
+                if admission is None and current is not None and candidate < tuple(map(self._index._stored_int, current)):
+                    raise ChatProjectionStoreError("storage_corrupt", "duplicate admission watermark regresses")
+                connection.execute(
+                    "INSERT INTO source_watermarks VALUES(?,?,?,?,?) "
+                    "ON CONFLICT(root_id,root_generation,stream_id) DO UPDATE SET "
+                    "source_generation=excluded.source_generation,source_sequence=excluded.source_sequence "
+                    "WHERE (excluded.source_generation,excluded.source_sequence) > "
+                    "(source_watermarks.source_generation,source_watermarks.source_sequence)",
+                    (
+                        arguments["root_id"], arguments["root_generation"], arguments["stream_id"],
+                        *candidate,
+                    ),
+                )
+                if admission is None:
+                    connection.execute(
+                        "INSERT INTO source_admissions VALUES(?,?,?,?,?,?,?,?,?,?)",
+                        (
+                            arguments["root_id"], arguments["root_generation"], arguments["stream_id"],
+                            *candidate, *expected,
+                        ),
+                    )
+                self._write_checkpoint(connection, standalone=False)
+                connection.commit()
+            except BaseException:
+                connection.rollback()
+                raise
             return None
         return getattr(self._index, operation)(**arguments)
 
@@ -590,9 +645,13 @@ class _JsonlOwnerStore:
                     "stream_id": request.watermark.stream_id,
                     "source_generation": request.watermark.generation,
                     "source_sequence": request.watermark.sequence,
+                    "event_id": request.event_id, "content_hash": request.content_hash,
+                    "fact_sequence": self._index._stored_int(duplicate[0]),
+                    "revision": self._index._stored_int(head[0]),
+                    "projection_cursor": self._index._stored_int(head[1]),
                 }
-                self._append("watermark_advanced", arguments)
-                self._apply("watermark_advanced", arguments)
+                self._append("duplicate_admitted", arguments)
+                self._apply("duplicate_admitted", arguments)
             return CommitResult(
                 True, self._index._stored_int(duplicate[0]), self._index._stored_int(head[0]),
                 self._index._stored_int(head[1]),
@@ -727,6 +786,17 @@ class JsonlChatProjectionStore:
     def source_watermark(self, root_id: str, root_generation: int, stream_id: str):
         result = self._owner.rpc("source_watermark", root_id=root_id, root_generation=root_generation, stream_id=stream_id)
         return SourceWatermark(**result) if result else None
+
+    def source_admission(
+        self, root_id: str, root_generation: int, stream_id: str,
+        source_generation: int, source_sequence: int,
+    ) -> SourceAdmission | None:
+        result = self._owner.rpc(
+            "source_admission", root_id=root_id, root_generation=root_generation,
+            stream_id=stream_id, source_generation=source_generation,
+            source_sequence=source_sequence,
+        )
+        return SourceAdmission(**result) if result else None
 
     def close(self) -> None:
         self._owner.close()

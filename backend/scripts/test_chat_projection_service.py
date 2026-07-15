@@ -154,7 +154,13 @@ def test_post_fsync_failure_recovers_through_same_apply_path() -> None:
         provider="gemini", session_id="crash-session", root_id="crash-root",
         root_generation=0, store_kind="jsonl",
     )
+    setup.append_apply(authority, request(1, root="crash-root"))
     setup.close()
+
+    duplicate_at_two = replace(
+        request(1, root="crash-root"),
+        watermark=SourceWatermark("provider", 0, 2),
+    )
 
     faulted = CanonicalChatProjectionService(
         registry(), _store_factories={
@@ -169,7 +175,7 @@ def test_post_fsync_failure_recovers_through_same_apply_path() -> None:
         root_generation=0, store_kind="jsonl",
     )
     assert_error("storage_write_failed", lambda: faulted.append_apply(
-        authority, request(1, root="crash-root"),
+        authority, duplicate_at_two,
     ))
     faulted.close()
 
@@ -180,12 +186,22 @@ def test_post_fsync_failure_recovers_through_same_apply_path() -> None:
     )
     assert recovered.projection_cursor(authority) == 1
     assert recovered.read_projection(authority, "event-1").render_node["text"] == "answer-1"
-    assert recovered.append_apply(
-        authority, request(1, root="crash-root"),
-    ).duplicate
+    assert recovered.source_watermark(authority, "provider").sequence == 2
+    admission = recovered._store(authority).source_admission(
+        "crash-root", 0, "provider", 0, 2,
+    )
+    assert admission is not None
+    assert (admission.event_id, admission.content_hash, admission.fact_sequence,
+            admission.revision, admission.projection_cursor) == (
+        duplicate_at_two.event_id, duplicate_at_two.content_hash, 1, 1, 1,
+    )
+    assert recovered.append_apply(authority, duplicate_at_two).duplicate
+    journal_before = authority.store_path.read_bytes()
     assert_error("sequence_conflict", lambda: recovered.append_apply(
-        authority, conflicting_request(1, root="crash-root", marker="crash-conflict"),
+        authority, conflicting_request(2, root="crash-root", marker="crash-conflict"),
     ))
+    assert authority.store_path.read_bytes() == journal_before
+    assert recovered.projection_cursor(authority) == 1
     recovered.close()
 
 
@@ -279,6 +295,10 @@ def test_concurrency_sqlite_selection_and_lifecycle_errors() -> None:
     assert_error("sequence_conflict", lambda: restarted.append_apply(
         authority, conflicting_request(20, root="concurrent-root", marker="restart-conflict"),
     ))
+    assert_error("sequence_conflict", lambda: restarted.append_apply(
+        sqlite_authority, conflicting_request(1, root="sqlite-root", marker="sqlite-conflict"),
+    ))
+    assert restarted.projection_cursor(sqlite_authority) == 1
     restarted.close()
 
 
