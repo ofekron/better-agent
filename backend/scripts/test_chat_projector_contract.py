@@ -452,7 +452,7 @@ def test_closed_envelopes_and_nested_identities_reject_unknown_fields() -> None:
     )
     _assert_rejected("unexpected_fields", _messages(), [ownership])
     invalid_json_key = _event("invalid-json", 1, "assistant_text", data={1: "value"})
-    _assert_rejected("missing_payload_fields", _messages(), [invalid_json_key])
+    _assert_rejected("invalid_payload", _messages(), [invalid_json_key])
 
 
 def test_timestamps_require_canonical_utc_and_sort_as_instants() -> None:
@@ -659,7 +659,10 @@ def test_message_count_and_bytes_admission_exact_boundaries() -> None:
         "MAX_MESSAGES", len(messages) - 1,
         lambda: _assert_input_error("too_many_messages", messages, []),
     )
-    exact_bytes = sum(chat_projector._measure_json(message) for message in messages)
+    exact_bytes = len(json.dumps(
+        messages, ensure_ascii=False, separators=(",", ":"),
+    ).encode("utf-8"))
+    assert chat_projector._measure_json(messages) == exact_bytes
     _with_limit(
         "MAX_MESSAGE_JSON_BYTES", exact_bytes,
         lambda: project_chat(messages, [], schema_version=1),
@@ -668,6 +671,51 @@ def test_message_count_and_bytes_admission_exact_boundaries() -> None:
         "MAX_MESSAGE_JSON_BYTES", exact_bytes - 1,
         lambda: _assert_input_error("message_bytes_exceeded", messages, []),
     )
+
+
+def test_exact_json_bytes_match_oracle_for_events_escaping_and_unicode() -> None:
+    text = 'quote " slash \\ newline\n control\u0001 עברית 😀'
+    event = _event("escaped", 1, "assistant_text", data={"text": text})
+    expected_event_bytes = len(json.dumps(
+        [event], ensure_ascii=False, separators=(",", ":"),
+    ).encode("utf-8"))
+    assert chat_projector._measure_json([event]) == expected_event_bytes
+    _with_limit(
+        "MAX_CANONICAL_JSON_BYTES", expected_event_bytes,
+        lambda: project_chat(_messages(), [event], schema_version=1),
+    )
+    _with_limit(
+        "MAX_CANONICAL_JSON_BYTES", expected_event_bytes - 1,
+        lambda: _assert_input_error("canonical_bytes_exceeded", _messages(), [event]),
+    )
+    messages = _messages()
+    messages[0]["content"] = text
+    expected_message_bytes = len(json.dumps(
+        messages, ensure_ascii=False, separators=(",", ":"),
+    ).encode("utf-8"))
+    assert chat_projector._measure_json(messages) == expected_message_bytes
+    _with_limit(
+        "MAX_MESSAGE_JSON_BYTES", expected_message_bytes,
+        lambda: project_chat(messages, [], schema_version=1),
+    )
+    _with_limit(
+        "MAX_MESSAGE_JSON_BYTES", expected_message_bytes - 1,
+        lambda: _assert_input_error("message_bytes_exceeded", messages, []),
+    )
+
+
+def test_each_missing_message_field_has_stable_code_before_sorting() -> None:
+    complete = _messages()[0]
+    for field in ("id", "turn_id", "seq", "role", "content"):
+        missing = dict(complete)
+        missing.pop(field)
+        _assert_rejected("missing_message_fields", [missing], [])
+
+
+def test_floats_and_non_json_values_are_rejected() -> None:
+    for value in (1.5, float("nan"), object()):
+        event = _event("non-json", 1, "assistant_text", data={"text": value})
+        _assert_rejected("invalid_payload", _messages(), [event])
 
 
 def test_associated_text_index_is_linear_with_many_scoped_finals() -> None:

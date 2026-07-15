@@ -38,7 +38,7 @@ _MESSAGE_FIELDS = {"id", "turn_id", "seq", "role", "content"}
 _MODEL_IDENTITY_FIELDS = {"provider", "model", "effort"}
 MAX_CANONICAL_ROWS = 200_000
 MAX_CANONICAL_JSON_BYTES = 128 * 1024 * 1024
-MAX_MESSAGES = 200_000
+MAX_MESSAGES = 100_000
 MAX_MESSAGE_JSON_BYTES = 128 * 1024 * 1024
 MAX_STRING_LENGTH = 4 * 1024 * 1024
 MAX_LIST_ITEMS = 100_000
@@ -443,7 +443,10 @@ def _event_from_mapping(raw: Mapping[str, Any], schema_version: int) -> Canonica
 def _validated_messages(
     messages: Sequence[Mapping[str, Any]],
 ) -> tuple[dict[str, TypedPrompt], dict[str, str]]:
-    _admit_messages(messages)
+    if len(messages) > MAX_MESSAGES:
+        raise ChatProjectionInputError(
+            "too_many_messages", f"messages exceed {MAX_MESSAGES}",
+        )
     prompts: dict[str, TypedPrompt] = {}
     message_turns: dict[str, str] = {}
     message_ids = set()
@@ -451,7 +454,6 @@ def _validated_messages(
     for message in messages:
         if not isinstance(message, Mapping):
             raise ChatProjectionInputError("invalid_message_content", "message row must be an object")
-    for message in sorted(messages, key=lambda row: _positive_int(row.get("seq"), "message.seq")):
         required = {"id", "turn_id", "seq", "role", "content"}
         missing = sorted(required - message.keys())
         if missing:
@@ -459,6 +461,8 @@ def _validated_messages(
                 "missing_message_fields", f"missing message fields: {', '.join(missing)}",
             )
         _reject_extra_keys(message, _MESSAGE_FIELDS, "message")
+    _admit_messages(messages)
+    for message in sorted(messages, key=lambda row: _positive_int(row["seq"], "message.seq")):
         message_id = _required_str(message["id"], "message.id")
         turn_id = _required_str(message["turn_id"], "message.turn_id")
         role = _required_str(message["role"], "message.role")
@@ -791,7 +795,12 @@ def _admit_canonical_rows(
         raise ChatProjectionInputError(
             "too_many_rows", f"canonical rows exceed {MAX_CANONICAL_ROWS}",
         )
-    total_bytes = 0
+    total_bytes = 2 + max(0, len(events) - 1)
+    if total_bytes > MAX_CANONICAL_JSON_BYTES:
+        raise ChatProjectionInputError(
+            "canonical_bytes_exceeded",
+            f"canonical JSON bytes exceed {MAX_CANONICAL_JSON_BYTES}",
+        )
     for raw in events:
         value: Any
         if isinstance(raw, CanonicalEvent):
@@ -821,22 +830,23 @@ def _admit_messages(messages: Sequence[Mapping[str, Any]]) -> None:
         raise ChatProjectionInputError(
             "too_many_messages", f"messages exceed {MAX_MESSAGES}",
         )
-    total_bytes = 0
-    for message in messages:
-        total_bytes += _measure_json(message)
-        if total_bytes > MAX_MESSAGE_JSON_BYTES:
-            raise ChatProjectionInputError(
-                "message_bytes_exceeded",
-                f"message JSON bytes exceed {MAX_MESSAGE_JSON_BYTES}",
-            )
+    total_bytes = _measure_json(messages)
+    if total_bytes > MAX_MESSAGE_JSON_BYTES:
+        raise ChatProjectionInputError(
+            "message_bytes_exceeded",
+            f"message JSON bytes exceed {MAX_MESSAGE_JSON_BYTES}",
+        )
 
 
 def _measure_json(value: Any) -> int:
     total_bytes = 0
-    stack = [(value, 0)]
-    containers = set()
+    stack = [(value, 0, False)]
+    active_containers = set()
     while stack:
-        item, depth = stack.pop()
+        item, depth, exiting = stack.pop()
+        if exiting:
+            active_containers.remove(id(item))
+            continue
         if depth > MAX_PAYLOAD_DEPTH:
             raise ChatProjectionInputError(
                 "payload_depth_exceeded", f"payload depth exceeds {MAX_PAYLOAD_DEPTH}",
@@ -847,41 +857,78 @@ def _measure_json(value: Any) -> int:
                 raise ChatProjectionInputError(
                     "string_too_long", f"string length exceeds {MAX_STRING_LENGTH}",
                 )
-            try:
-                total_bytes += len(item.encode("utf-8"))
-            except UnicodeError as exc:
-                raise ChatProjectionInputError("invalid_scalar", "string must be valid UTF-8") from exc
+            total_bytes += _json_string_bytes(item)
             continue
         if isinstance(item, Mapping):
             identity = id(item)
-            if identity in containers:
+            if identity in active_containers:
                 raise ChatProjectionInputError(
-                    "payload_not_tree", "payload contains a cyclic or aliased object",
+                    "payload_not_tree", "payload contains a cyclic object",
                 )
-            containers.add(identity)
+            active_containers.add(identity)
             if len(item) > MAX_LIST_ITEMS:
                 raise ChatProjectionInputError(
                     "list_too_large", f"object size exceeds {MAX_LIST_ITEMS}",
                 )
+            size = len(item)
+            total_bytes += 2 + max(0, size - 1) + size
+            stack.append((item, depth, True))
             for key, child in item.items():
-                stack.append((key, depth + 1))
-                stack.append((child, depth + 1))
+                if not isinstance(key, str):
+                    raise ChatProjectionInputError("invalid_payload", "JSON object keys must be strings")
+                stack.append((key, depth + 1, False))
+                stack.append((child, depth + 1, False))
             continue
         if isinstance(item, (list, tuple)):
             identity = id(item)
-            if identity in containers:
+            if identity in active_containers:
                 raise ChatProjectionInputError(
-                    "payload_not_tree", "payload contains a cyclic or aliased list",
+                    "payload_not_tree", "payload contains a cyclic list",
                 )
-            containers.add(identity)
+            active_containers.add(identity)
             if len(item) > MAX_LIST_ITEMS:
                 raise ChatProjectionInputError(
                     "list_too_large", f"list size exceeds {MAX_LIST_ITEMS}",
                 )
-            stack.extend((child, depth + 1) for child in item)
+            total_bytes += 2 + max(0, len(item) - 1)
+            stack.append((item, depth, True))
+            stack.extend((child, depth + 1, False) for child in item)
             continue
-        total_bytes += 8
+        if item is None:
+            total_bytes += 4
+            continue
+        if isinstance(item, bool):
+            total_bytes += 4 if item else 5
+            continue
+        if isinstance(item, int):
+            try:
+                encoded = str(item)
+            except ValueError as exc:
+                raise ChatProjectionInputError("invalid_payload", "integer is too large") from exc
+            if len(encoded) > MAX_STRING_LENGTH:
+                raise ChatProjectionInputError("string_too_long", "integer representation is too long")
+            total_bytes += len(encoded)
+            continue
+        raise ChatProjectionInputError(
+            "invalid_payload", f"unsupported JSON value: {type(item).__name__}",
+        )
     return total_bytes
+
+
+def _json_string_bytes(value: str) -> int:
+    size = 2
+    for character in value:
+        codepoint = ord(character)
+        if character in {'"', "\\"} or character in {"\b", "\f", "\n", "\r", "\t"}:
+            size += 2
+        elif codepoint < 0x20:
+            size += 6
+        else:
+            try:
+                size += len(character.encode("utf-8"))
+            except UnicodeError as exc:
+                raise ChatProjectionInputError("invalid_scalar", "string must be valid UTF-8") from exc
+    return size
 
 
 def _validate_version_update(current: CanonicalEvent, candidate: CanonicalEvent) -> None:
