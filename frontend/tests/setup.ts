@@ -40,6 +40,11 @@ installMemoryStorage();
 
 beforeEach(async () => {
   installMemoryStorage();
+  // happy-dom keeps one window per test FILE, so a navigation made by
+  // one test (App pushState on session select) leaks into the next
+  // test's boot route. Start every test at "/" — tests that exercise
+  // deep links pushState explicitly in their own body.
+  window.history.replaceState(null, "", "/");
   await clearOfflineActions();
 });
 

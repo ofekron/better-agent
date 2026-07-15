@@ -939,7 +939,7 @@ function AppMain({
     searchSessions,
     setSessionListFilters,
     wsTargetSessionId,
-  } = useSession(authStatus, route.kind === "session" ? route.sessionId : null);
+  } = useSession(authStatus);
   const [topbarPinnedSessions, setTopbarPinnedSessions] = useState<Record<string, Session>>({});
 
   const refreshTopbarPinnedSessions = useCallback(() => {
