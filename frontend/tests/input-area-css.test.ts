@@ -62,6 +62,17 @@ describe("InputArea prompt text metrics", () => {
     );
   });
 
+  it("keeps phone composer padding above the virtual keyboard", () => {
+    const phoneRules = mediaBody("@media (max-width: 700px)");
+
+    expect(phoneRules).not.toContain("padding: 10px 12px");
+    expect(phoneRules).toContain("padding-block-start: 10px");
+    expect(phoneRules).toContain("padding-inline: 12px");
+    expect(phoneRules).toContain(
+      "padding-bottom: calc(10px + env(safe-area-inset-bottom, 0px) + var(--vv-offset))",
+    );
+  });
+
   it("gives focused prompt writing stable desktop and mobile dimensions", () => {
     expect(ruleBody(".composer-focus-modal")).toContain(
       "width: min(960px, calc(100vw - 32px))",

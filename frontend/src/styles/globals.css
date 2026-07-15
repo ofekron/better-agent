@@ -17611,7 +17611,9 @@ button.progress-inflight {
     padding: 12px 8px;
   }
   .input-area {
-    padding: 10px 12px;
+    padding-block-start: 10px;
+    padding-inline: 12px;
+    padding-bottom: calc(10px + env(safe-area-inset-bottom, 0px) + var(--vv-offset));
   }
   .input-row {
     --input-prompt-max-height: 112px;
