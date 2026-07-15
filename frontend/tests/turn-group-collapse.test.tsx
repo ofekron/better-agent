@@ -517,7 +517,7 @@ describe("TurnGroup collapsed interrupted indicator", () => {
         initiatorMessage={makeUserMsg({ id: "u1", content: "do a thing" })}
         responseMessage={makeAssistantMsg({
           id: "a1",
-          content: "EXPLICIT_ONLY_ANSWER_TEXT",
+          content: "EXPLICIT_ONLY_ANSWER_TEXT\nSECOND_CANONICAL_LINE",
           isStreaming: false,
           events: [
             { type: "tool_call", data: { tool: "Bash", args: {}, tool_use_id: "t1" }, _ts: 1 },
@@ -531,6 +531,9 @@ describe("TurnGroup collapsed interrupted indicator", () => {
     // Auto-collapse keeps the answer expanded.
     expect(container.querySelector('[data-testid="assistant-answer-content"]')).not.toBeNull();
     expect(container.textContent).toContain("EXPLICIT_ONLY_ANSWER_TEXT");
+    const assistant = container.querySelector<HTMLElement>('[data-testid="assistant-message"]');
+    expect(assistant?.getAttribute("data-canonical-message-text")).toBe("EXPLICIT_ONLY_ANSWER_TEXT\nSECOND_CANONICAL_LINE");
+    expect(container.querySelectorAll("[data-canonical-message-text]")).toHaveLength(1);
 
     const answerBox = container.querySelector<HTMLElement>('[data-testid="assistant-answer-content"]');
     const answerToggle = answerBox?.querySelector<HTMLElement>(".message-box-toggle") ?? null;
@@ -540,6 +543,7 @@ describe("TurnGroup collapsed interrupted indicator", () => {
     // Explicit user collapse folds the full answer body to a one-line preview.
     expect(answerBox!.querySelector(".message-box-body")).toBeNull();
     expect(answerBox!.querySelector(".message-box-collapsed-body")).not.toBeNull();
+    expect(assistant?.getAttribute("data-canonical-message-text")).toBe("EXPLICIT_ONLY_ANSWER_TEXT\nSECOND_CANONICAL_LINE");
 
     fireEvent.click(answerToggle!);
     expect(answerBox!.querySelector(".message-box-body")).not.toBeNull();

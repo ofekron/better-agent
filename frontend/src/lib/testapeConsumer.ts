@@ -107,6 +107,10 @@ function readMessage(el: HTMLElement): ChatPanelMessage | null {
         : null;
   const id = el.getAttribute("data-message-id");
   if (!role || !id) return null;
+  const canonicalText = el.getAttribute("data-canonical-message-text");
+  if (canonicalText !== null && canonicalText !== undefined) {
+    return { id, role, text: tidyText(canonicalText) };
+  }
   const textEl =
     el.querySelector<HTMLElement>(".message-box-body, .message-box-collapsed-body")
     ?? el.querySelector<HTMLElement>(".message-content");

@@ -81,8 +81,11 @@ describe("Better Agent TestApe consumer", () => {
         <div class="message user-message" data-message-id="u2">
           <div class="message-content">Standalone</div>
         </div>
-        <div data-testid="assistant-message" data-message-id="a1">
+        <div data-testid="assistant-message" data-message-id="a1" data-canonical-message-text="Answer">
           <div class="message-content">
+            <div class="message-box open">
+              <div class="message-box-body">Earlier event details</div>
+            </div>
             <div class="message-box open">
               <button class="message-box-toggle">▼</button>
               <div class="message-box-body">Answer</div>
@@ -119,14 +122,14 @@ describe("Better Agent TestApe consumer", () => {
     }) as Session).mismatches).toEqual([]);
   });
 
-  it("extracts collapsed assistant answer text without presentation controls", () => {
+  it("extracts full collapsed assistant text instead of its one-line preview", () => {
     document.body.innerHTML = `
       <div data-testid="chat-messages">
-        <div data-testid="assistant-message" data-message-id="a1">
+        <div data-testid="assistant-message" data-message-id="a1" data-canonical-message-text="First line&#10;Second line">
           <div class="message-content">
             <div class="message-box">
               <button class="message-box-toggle">▶</button>
-              <button class="message-box-collapsed-body">Collapsed answer</button>
+              <button class="message-box-collapsed-body">First line…</button>
             </div>
           </div>
         </div>
@@ -134,7 +137,7 @@ describe("Better Agent TestApe consumer", () => {
     `;
 
     expect(extractVisibleChatPanelTree().regions[0]?.messages).toEqual([
-      { id: "a1", role: "assistant", text: "Collapsed answer" },
+      { id: "a1", role: "assistant", text: "First line Second line" },
     ]);
   });
 

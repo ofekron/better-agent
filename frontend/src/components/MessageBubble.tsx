@@ -2853,7 +2853,13 @@ const AssistantMessage = memo(function AssistantMessage({
     (stream.length === 0 || !visibleEventsRepresentAssistantContent(filteredManagerEvents, assistantContent));
 
   return (
-    <div className="message assistant-message" data-message-id={message.id} data-testid="assistant-message" ref={containerRef}>
+    <div
+      className="message assistant-message"
+      data-message-id={message.id}
+      data-testid="assistant-message"
+      data-canonical-message-text={assistantContent ? decodeEscapedUnicodeForDisplay(assistantContent) : undefined}
+      ref={containerRef}
+    >
       <div className="message-content" key={decorationRevision}>
         {hasManagerScope ? (
           <div className="manager-scope" aria-label={primaryEntityLabel(orchestrationMode) + " scope"}>
