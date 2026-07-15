@@ -25,6 +25,7 @@ from provisioning.dispatch import (
     client_delegation_id_for_request,
     dispatch,
     extract_fork_text,
+    request_delegation_cancel,
 )
 from provisioning.lifecycle import ensure_caller, ensure_session
 from provisioning.spec import ProvisionedSessionSpec
@@ -366,12 +367,28 @@ def run_sync(
     """Sync entry point — runs `run(...)` on a private loop in a worker
     thread, so callers without an event loop (or already inside one) both work."""
     results: SimpleQueue[tuple[str, Any]] = SimpleQueue()
+    control_ready = threading.Event()
+    control: dict[str, Any] = {}
+    run_ctx = dict(ctx or {})
+    delegation_id = _client_delegation_id(run_ctx) or client_delegation_id_for_request(
+        spec.key,
+        _debug_request_id(run_ctx),
+    )
+    run_ctx["client_delegation_id"] = delegation_id
 
     def _target() -> None:
+        loop = asyncio.new_event_loop()
+        task = loop.create_task(run(spec, query, run_ctx, model=model))
+        control.update(loop=loop, task=task)
+        control_ready.set()
         try:
-            results.put(("value", asyncio.run(run(spec, query, ctx, model=model))))
+            results.put(("value", loop.run_until_complete(task)))
         except BaseException as exc:  # noqa: BLE001 — re-raised on join
             results.put(("error", exc))
+        finally:
+            loop.run_until_complete(loop.shutdown_asyncgens())
+            loop.run_until_complete(loop.shutdown_default_executor())
+            loop.close()
 
     t = threading.Thread(target=_target, name=f"provisioning-{spec.key}")
     t.daemon = True
@@ -385,4 +402,20 @@ def run_sync(
                 raise value
             return value
         t.join(timeout=min(0.1, max(0.0, deadline - time.monotonic())))
+    cancel_started = time.monotonic()
+    signalled = request_delegation_cancel(delegation_id)
+    control_ready.wait()
+    loop = control["loop"]
+    task = control["task"]
+    loop.call_soon_threadsafe(task.cancel)
+    t.join()
+    logger.warning(
+        "provisioned_run_sync_timeout spec=%s delegation_id=%s budget_ms=%.3f "
+        "cancel_signalled=%s cancel_join_ms=%.3f",
+        spec.key,
+        delegation_id,
+        timeout * 1000,
+        signalled,
+        (time.monotonic() - cancel_started) * 1000,
+    )
     raise TimeoutError(f"{spec.key} provisioned run timed out after {timeout:g}s")

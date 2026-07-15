@@ -207,22 +207,37 @@ async def _dispatch_in_process(
     client_delegation_id: str = "",
 ) -> dict:
     from runtime_client import runtime as _runtime
-    return await _runtime.run_delegation(
-        app_session_id=caller_session_id,
-        instructions=instructions,
-        worker_session_id=base_session_id,
-        worker_description=cfg.worker_description,
-        model=cfg.model,
-        cwd=cfg.cwd,
-        client_delegation_id=client_delegation_id or client_delegation_id_for_request(spec.key, ""),
-        run_mode=cfg.run_mode,
-        worker_registry_cwd=cfg.cwd,
-        ephemeral=cfg.run_mode == "fork" and spec.ephemeral_forks,
-        machine_completion=spec.machine_completion,
-        provision_prompt=provision_prompt,
-        provisioned_tool_profile=spec.tool_profile,
-        include_events=True,
-    )
+    delegation_id = client_delegation_id or client_delegation_id_for_request(spec.key, "")
+    started = time.monotonic()
+    try:
+        async with asyncio.timeout(spec.effective_dispatch_timeout):
+            return await _runtime.run_delegation(
+                app_session_id=caller_session_id,
+                instructions=instructions,
+                worker_session_id=base_session_id,
+                worker_description=cfg.worker_description,
+                model=cfg.model,
+                cwd=cfg.cwd,
+                client_delegation_id=delegation_id,
+                run_mode=cfg.run_mode,
+                worker_registry_cwd=cfg.cwd,
+                ephemeral=cfg.run_mode == "fork" and spec.ephemeral_forks,
+                machine_completion=spec.machine_completion,
+                provision_prompt=provision_prompt,
+                provisioned_tool_profile=spec.tool_profile,
+                include_events=True,
+            )
+    except TimeoutError:
+        signalled = await asyncio.to_thread(request_delegation_cancel, delegation_id)
+        logger.warning(
+            "provisioned_in_process_dispatch_timeout spec=%s delegation_id=%s "
+            "elapsed_ms=%.3f cancel_signalled=%s",
+            spec.key,
+            delegation_id,
+            (time.monotonic() - started) * 1000,
+            signalled,
+        )
+        raise
 
 
 # ── shared helpers ────────────────────────────────────────────────────

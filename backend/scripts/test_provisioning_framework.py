@@ -760,16 +760,24 @@ def test_run_sync_times_out_stuck_dispatch() -> bool:
     original_ensure_caller = prov_manager.ensure_caller
     original_dispatch = prov_manager.dispatch
     original_ready_base = prov_manager._ensure_ready_base_locked
+    original_request_cancel = prov_manager.request_delegation_cancel
+    dispatch_cancelled = threading.Event()
+    requested_cancels: list[str] = []
 
     async def stuck_dispatch(*args, **kwargs):
-        await asyncio.sleep(1.0)
-        return {"success": True, "sdk_output": "late"}
+        try:
+            await asyncio.Event().wait()
+        finally:
+            dispatch_cancelled.set()
 
     try:
         prov_manager.ensure_session = lambda spec, cfg: "base"
         prov_manager.ensure_caller = lambda spec, cfg: "caller"
         prov_manager.dispatch = stuck_dispatch
         prov_manager._ensure_ready_base_locked = _ready_base_without_provider
+        prov_manager.request_delegation_cancel = lambda delegation_id: (
+            requested_cancels.append(delegation_id) or True
+        )
         started = time.monotonic()
         try:
             prov_manager.run_sync(_S(), "", {})
@@ -781,6 +789,15 @@ def test_run_sync_times_out_stuck_dispatch() -> bool:
             if elapsed > 1.0:
                 print(f"{FAIL} dispatch timeout: took too long ({elapsed:.3f}s)")
                 return False
+            if not dispatch_cancelled.is_set():
+                print(f"{FAIL} dispatch timeout: abandoned worker coroutine")
+                return False
+            if any(thread.name == "provisioning-dispatch_timeout_test" for thread in threading.enumerate()):
+                print(f"{FAIL} dispatch timeout: worker thread still alive")
+                return False
+            if len(requested_cancels) != 1 or not requested_cancels[0].startswith("dispatch_timeout_test_"):
+                print(f"{FAIL} dispatch timeout: provider cancellation not requested {requested_cancels!r}")
+                return False
             print(f"{PASS} dispatch timeout surfaces")
             return True
         print(f"{FAIL} dispatch timeout: run_sync did not raise")
@@ -790,6 +807,7 @@ def test_run_sync_times_out_stuck_dispatch() -> bool:
         prov_manager.ensure_caller = original_ensure_caller
         prov_manager.dispatch = original_dispatch
         prov_manager._ensure_ready_base_locked = original_ready_base
+        prov_manager.request_delegation_cancel = original_request_cancel
 
 
 def _budget_spec(provision_timeout: float, dispatch_timeout: float | None, retry_attempts: int = 1):
@@ -895,6 +913,57 @@ def test_in_process_dispatch_uses_explicit_delegation_id() -> bool:
         print(f"{FAIL} in-process dispatch id: {captured!r}")
         return False
     print(f"{PASS} in-process dispatch uses explicit delegation id")
+    return True
+
+
+def test_in_process_dispatch_timeout_cancels_provider_run() -> bool:
+    import provisioning.dispatch as prov_dispatch
+
+    spec = _budget_spec(1.0, 0.03)
+    cfg = ProvisionedConfig(
+        cwd="/repo", model="model", provider_id="provider", reasoning_effort="",
+        run_mode="fork", dispatch="in_process", on_no_fork="error", node_id="primary",
+        backend_url="http://localhost:8000", internal_token="token",
+        provisioned_session_id=None, caller_session_id=None,
+        worker_description="worker:budget-test",
+    )
+    coroutine_cancelled = asyncio.Event()
+    requested_cancels: list[str] = []
+
+    class Coordinator:
+        async def run_delegation(self, **kwargs):
+            try:
+                await asyncio.Event().wait()
+            finally:
+                coroutine_cancelled.set()
+
+    original_request_cancel = prov_dispatch.request_delegation_cancel
+    prov_dispatch.request_delegation_cancel = lambda delegation_id: (
+        requested_cancels.append(delegation_id) or True
+    )
+    try:
+        with _fake_runtime.bind_coordinator(Coordinator()):
+            try:
+                asyncio.run(prov_dispatch.dispatch(
+                    spec, cfg,
+                    base_session_id="base", caller_session_id="caller",
+                    instructions="i", provision_prompt="p",
+                    client_delegation_id="timed-in-process",
+                ))
+            except TimeoutError:
+                pass
+            else:
+                print(f"{FAIL} in-process dispatch timeout: did not time out")
+                return False
+    finally:
+        prov_dispatch.request_delegation_cancel = original_request_cancel
+    if not coroutine_cancelled.is_set():
+        print(f"{FAIL} in-process dispatch timeout: coroutine was not cancelled")
+        return False
+    if requested_cancels != ["timed-in-process"]:
+        print(f"{FAIL} in-process dispatch timeout: cancellation mismatch {requested_cancels!r}")
+        return False
+    print(f"{PASS} in-process dispatch timeout cancels coroutine and provider run")
     return True
 
 
@@ -1188,6 +1257,7 @@ def main_run() -> int:
         test_sync_timeout_composes_lifecycle_and_dispatch_budgets,
         test_dispatch_uses_dispatch_timeout_per_attempt,
         test_in_process_dispatch_uses_explicit_delegation_id,
+        test_in_process_dispatch_timeout_cancels_provider_run,
         test_run_honors_client_delegation_id_from_ctx,
         test_run_logs_phase_timings_for_debug_requests,
         test_delegation_tool_activity_detector_reads_canonical_message_content,

@@ -233,7 +233,14 @@ def _trigger_refresh(fingerprint: str, inventory: dict[str, Any]) -> None:
 def _refresh_cache(fingerprint: str, inventory: dict[str, Any]) -> None:
     try:
         payload = json.dumps(inventory, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-        result = provisioning.run_sync(AUDIT_SPEC, payload, {"fingerprint": fingerprint})
+        result = provisioning.run_sync(
+            AUDIT_SPEC,
+            payload,
+            {
+                "fingerprint": fingerprint,
+                "_debug_request_id": fingerprint[:12],
+            },
+        )
         _write_cache({"schema_version": _CACHE_SCHEMA_VERSION, "fingerprint": fingerprint, "result": result.value})
     except Exception:
         logger.exception("extension context audit refresh failed")
