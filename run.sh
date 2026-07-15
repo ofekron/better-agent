@@ -170,14 +170,14 @@ kill_port_listeners() {
   done
 
   if [ -n "$pids" ]; then
-    echo "Force killing remaining PIDs on :$port..."
+    echo "Force killing remaining PIDs on :$port..." >&2
     echo "$pids" | xargs kill -9 2>/dev/null || true
   fi
   sleep 0.5
   pids="$(lsof -tiTCP:"$port" -sTCP:LISTEN 2>/dev/null | sort -u || true)"
   if [ -n "$pids" ]; then
-    echo "Port :$port is still occupied by listener PID(s):"
-    lsof -nP -iTCP:"$port" -sTCP:LISTEN || true
+    echo "Port :$port is still occupied by listener PID(s):" >&2
+    lsof -nP -iTCP:"$port" -sTCP:LISTEN >&2 || true
     return 1
   fi
   return 0
@@ -251,7 +251,7 @@ bootout_launchctl_job() {
   local domain="gui/$(id -u)"
 
   if launchctl print "$domain/$label" >/dev/null 2>&1; then
-    echo "Stopping launchctl job $label..."
+    echo "Stopping launchctl job $label..." >&2
     launchctl bootout "$domain/$label" >/dev/null 2>&1 || true
   fi
 }
@@ -272,7 +272,7 @@ kill_matching_processes() {
     return 0
   fi
 
-  echo "Stopping previous $label process(es): $pids"
+  echo "Stopping previous $label process(es): $pids" >&2
   echo "$pids" | xargs kill -15 2>/dev/null || true
 
   while [ "$attempts" -lt 20 ]; do
@@ -289,7 +289,7 @@ kill_matching_processes() {
     sleep 0.25
   done
 
-  echo "Force killing previous $label process(es): $pids"
+  echo "Force killing previous $label process(es): $pids" >&2
   echo "$pids" | xargs kill -9 2>/dev/null || true
 }
 
