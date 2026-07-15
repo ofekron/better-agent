@@ -1044,7 +1044,7 @@ function todosKey(todos: unknown): string | null {
   }));
 }
 
-function groupEvents(
+export function groupEvents(
   events: WSEvent[],
   toolResultById?: Map<string, string>,
   /** While the owning turn is still streaming, extend the last output/
@@ -1058,7 +1058,6 @@ function groupEvents(
   | { kind: "event"; idx: number; event: WSEvent }
 > {
   const groups: ReturnType<typeof groupEvents> = [];
-  const seenTexts = new Set<string>();
   let i = 0;
 
   // When toolResultById has entries, events are in native Claude SDK
@@ -1166,7 +1165,12 @@ function groupEvents(
       }
       groups.push({ kind: "tool", idx: startIdx, event: ev, result });
     } else {
-      // Deduplicate output/thinking events with identical text
+      // Deduplicate an output/thinking/tool_result event against the
+      // IMMEDIATELY PRECEDING group only — some runners emit an
+      // adjacent thinking+output (or output+output) twin with
+      // identical text. Text that legitimately repeats later (after a
+      // tool call or different text intervenes) is not a twin and must
+      // render as its own row.
       if (ev.type === "output" || ev.type === "thinking" || ev.type === "tool_result") {
         const raw = (
           ev.type === "output"
@@ -1176,11 +1180,22 @@ function groupEvents(
               : ev.data.output
         ) as string;
         const normalized = normalizeForDedup(raw || "");
-        if (normalized && seenTexts.has(normalized)) {
+        const prevGroup = groups[groups.length - 1];
+        const prevRaw =
+          prevGroup?.kind === "event" &&
+          (prevGroup.event.type === "output" ||
+            prevGroup.event.type === "thinking" ||
+            prevGroup.event.type === "tool_result")
+            ? ((prevGroup.event.type === "output"
+                ? prevGroup.event.data.output
+                : prevGroup.event.type === "thinking"
+                  ? prevGroup.event.data.thought
+                  : prevGroup.event.data.output) as string)
+            : null;
+        if (normalized && prevRaw !== null && normalizeForDedup(prevRaw) === normalized) {
           i++;
-          continue; // skip duplicate
+          continue; // skip adjacent duplicate
         }
-        if (normalized) seenTexts.add(normalized);
       }
       // While the turn is running, some runners emit one uuid per text
       // chunk instead of cumulative updates to a stable uuid. Extend the
