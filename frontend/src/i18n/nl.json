@@ -85,6 +85,7 @@
   "common.yes": "ja",
   "common.no": "nee",
   "app.deleteSessionConfirm": "Weet je zeker dat je sessie \"{{name}}\" wilt verwijderen? Deze actie is onomkeerbaar.",
+  "app.deleteSessionsConfirm": "Weet je zeker dat je {{count}} sessies wilt verwijderen? Deze actie is onomkeerbaar.",
   "voice.enable": "Spraakactivering inschakelen",
   "voice.disable": "Spraakactivering uitschakelen",
   "voice.permissionDenied": "Microfoontoegang is geweigerd. Schakel het in je apparaatinstellingen in en probeer opnieuw.",

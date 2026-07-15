@@ -85,6 +85,7 @@
   "common.yes": "예",
   "common.no": "아니오",
   "app.deleteSessionConfirm": "세션 \"{{name}}\"을(를) 삭제하시겠습니까? 이 작업은 되돌릴 수 없습니다.",
+  "app.deleteSessionsConfirm": "{{count}}개의 세션을 삭제하시겠습니까? 이 작업은 되돌릴 수 없습니다.",
   "voice.enable": "음성 활성화 켜기",
   "voice.disable": "음성 활성화 끄기",
   "voice.permissionDenied": "마이크 접근이 거부되었습니다. 기기 설정에서 활성화한 후 다시 시도하세요.",

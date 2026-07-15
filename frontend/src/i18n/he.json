@@ -84,6 +84,7 @@
   "common.yes": "כן",
   "common.no": "לא",
   "app.deleteSessionConfirm": "האם אתה בטוח שברצונך למחוק את הסשן \"{{name}}\"? פעולה זו אינה הפיכה.",
+  "app.deleteSessionsConfirm": "האם אתה בטוח שברצונך למחוק {{count}} סשנים? פעולה זו אינה הפיכה.",
   "voice.enable": "הפעל הפעלה קולית",
   "voice.disable": "כבה הפעלה קולית",
   "voice.permissionDenied": "הגישה למיקרופון נדחתה. הפעל אותה בהגדרות המכשיר ונסה שוב.",

@@ -85,6 +85,7 @@
   "common.yes": "sì",
   "common.no": "no",
   "app.deleteSessionConfirm": "Eliminare la sessione \"{{name}}\"? Questa azione è irreversibile.",
+  "app.deleteSessionsConfirm": "Eliminare {{count}} sessioni? Questa azione è irreversibile.",
   "voice.enable": "Attiva comando vocale",
   "voice.disable": "Disattiva comando vocale",
   "voice.permissionDenied": "L'accesso al microfono è stato negato. Abilitalo nelle impostazioni del dispositivo e riprova.",

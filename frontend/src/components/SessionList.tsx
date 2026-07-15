@@ -348,6 +348,14 @@ function flattenFolderSessions(
   });
 }
 
+/** All session ids in a folder's subtree, including nested subfolders, regardless of collapse state. */
+function collectFolderSubtreeSessionIds(node: FolderRenderNode): string[] {
+  return [
+    ...node.sessions.map((s) => s.id),
+    ...node.children.flatMap(collectFolderSubtreeSessionIds),
+  ];
+}
+
 /** dataTransfer MIME carrying the dragged session id when reassigning
  * folders by drag. Custom type so it can't be confused with plain text. */
 export const SESSION_DRAG_MIME = "application/x-better-agent-session-id";
@@ -1488,6 +1496,7 @@ interface FolderSectionProps {
   bulkSelectMode: boolean;
   onToggleSelected: (id: string) => void;
   onStartBulkSelect: (id: string) => void;
+  onToggleGroupSelection: (ids: string[]) => void;
 }
 
 function FolderSection({
@@ -1531,9 +1540,23 @@ function FolderSection({
   bulkSelectMode,
   onToggleSelected,
   onStartBulkSelect,
+  onToggleGroupSelection,
 }: FolderSectionProps) {
+  const { t } = useTranslation();
   const collapsed = collapsedFolderIds.has(node.folder.id);
   const [dragOver, setDragOver] = useState(false);
+  const groupSessionIds = useMemo(() => collectFolderSubtreeSessionIds(node), [node]);
+  const groupSelectedCount = useMemo(
+    () => groupSessionIds.reduce((n, id) => n + (selectedSessionIds.has(id) ? 1 : 0), 0),
+    [groupSessionIds, selectedSessionIds],
+  );
+  const groupAllSelected = groupSessionIds.length > 0 && groupSelectedCount === groupSessionIds.length;
+  const groupCheckboxRef = useRef<HTMLInputElement | null>(null);
+  useEffect(() => {
+    if (groupCheckboxRef.current) {
+      groupCheckboxRef.current.indeterminate = groupSelectedCount > 0 && !groupAllSelected;
+    }
+  }, [groupSelectedCount, groupAllSelected]);
   return (
     <div className="session-folder-section" data-testid="session-folder-section">
       <button
@@ -1564,6 +1587,21 @@ function FolderSection({
         />
         <Icon name="folder" size={12} />
         <span>{node.folder.name}</span>
+        {bulkSelectMode && groupSessionIds.length > 0 && (
+          <label
+            className="session-group-select-all"
+            title={groupAllSelected ? t("session.deselectGroup") : t("session.selectGroup")}
+            aria-label={groupAllSelected ? t("session.deselectGroup") : t("session.selectGroup")}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <input
+              ref={groupCheckboxRef}
+              type="checkbox"
+              checked={groupAllSelected}
+              onChange={() => onToggleGroupSelection(groupSessionIds)}
+            />
+          </label>
+        )}
       </button>
       {!collapsed && node.sessions.map((s) => (
         <SessionNode
@@ -1652,6 +1690,7 @@ function FolderSection({
           bulkSelectMode={bulkSelectMode}
           onToggleSelected={onToggleSelected}
           onStartBulkSelect={onStartBulkSelect}
+          onToggleGroupSelection={onToggleGroupSelection}
         />
       ))}
     </div>
@@ -2742,6 +2781,23 @@ export function SessionList({
     setBulkFolderPopover(null);
     setBulkTagPopover(null);
   }, []);
+  /** Toggle selection for a whole group (folder subtree or status bucket):
+   * selects every id when any are unselected, deselects all when the whole
+   * group is already selected. */
+  const toggleGroupSelection = useCallback((ids: string[]) => {
+    if (ids.length === 0) return;
+    setBulkSelectMode(true);
+    setSelectedSessionIds((current) => {
+      const allSelected = ids.every((id) => current.has(id));
+      const next = new Set(current);
+      for (const id of ids) {
+        if (allSelected) next.delete(id);
+        else next.add(id);
+      }
+      if (next.size === 0) setBulkSelectMode(false);
+      return next;
+    });
+  }, []);
   const archiveSelectedSessions = useCallback(() => {
     if (selectedSessions.length === 0) return;
     // Snapshot the target state once so a mixed selection archives every
@@ -3574,6 +3630,7 @@ export function SessionList({
             bulkSelectMode={bulkSelectMode}
             onToggleSelected={toggleSelectedSession}
             onStartBulkSelect={startBulkSelect}
+            onToggleGroupSelection={toggleGroupSelection}
           />
         ))}
         {showFolders && unfiledSessions.length > 0 && folderRoots.length > 0 && (
@@ -3600,6 +3657,12 @@ export function SessionList({
         {statusGroupRuns
           ? statusGroupRuns.map((run) => {
               const collapsed = collapsedStatusGroupRanks.has(run.rank);
+              const groupIds = run.sessions.map((s) => s.id);
+              const groupSelectedCount = groupIds.reduce(
+                (n, id) => n + (selectedSessionIds.has(id) ? 1 : 0),
+                0,
+              );
+              const groupAllSelected = groupIds.length > 0 && groupSelectedCount === groupIds.length;
               return (
                 <div
                   key={`status-group-${run.rank}`}
@@ -3619,6 +3682,23 @@ export function SessionList({
                     />
                     <span>{t(STATUS_GROUP_I18N_KEY[run.rank] ?? "session.statusGroup.new")}</span>
                     <span className="session-status-group-count">{run.sessions.length}</span>
+                    {bulkSelectMode && groupIds.length > 0 && (
+                      <label
+                        className="session-group-select-all"
+                        title={groupAllSelected ? t("session.deselectGroup") : t("session.selectGroup")}
+                        aria-label={groupAllSelected ? t("session.deselectGroup") : t("session.selectGroup")}
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={groupAllSelected}
+                          ref={(el) => {
+                            if (el) el.indeterminate = groupSelectedCount > 0 && !groupAllSelected;
+                          }}
+                          onChange={() => toggleGroupSelection(groupIds)}
+                        />
+                      </label>
+                    )}
                   </button>
                   {!collapsed && run.sessions.map((s) => renderNode(s, 0, false))}
                 </div>

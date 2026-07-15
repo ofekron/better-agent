@@ -3680,34 +3680,42 @@ function AppMain({
   );
 
 
-  const [sessionToDelete, setSessionToDelete] = useState<string | null>(null);
+  const [sessionsToDelete, setSessionsToDelete] = useState<string[] | null>(null);
   const [detailsSessionId, setDetailsSessionId] = useState<string | null>(null);
 
   const handleDeleteSession = useCallback((id: string) => {
-    setSessionToDelete(id);
+    setSessionsToDelete([id]);
+  }, []);
+
+  const handleDeleteSessions = useCallback((ids: string[]) => {
+    if (ids.length === 0) return;
+    setSessionsToDelete(ids);
   }, []);
 
   const confirmDeleteSession = useCallback(async () => {
-    if (!sessionToDelete) return;
-    const id = sessionToDelete;
-    setSessionToDelete(null);
+    if (!sessionsToDelete || sessionsToDelete.length === 0) return;
+    const ids = sessionsToDelete;
+    setSessionsToDelete(null);
 
     // Drop the per-session debounce timer so a typing-PATCH for a
     // now-deleted session doesn't fire a wasted 404 request after
     // unmount.
     const timers = draftDebounceRef.current;
-    const existing = timers.get(id);
-    if (existing) {
-      clearTimeout(existing);
-      timers.delete(id);
+    for (const id of ids) {
+      const existing = timers.get(id);
+      if (existing) {
+        clearTimeout(existing);
+        timers.delete(id);
+      }
     }
-    await deleteSession(id);
-  }, [sessionToDelete, deleteSession]);
+    await Promise.all(ids.map((id) => deleteSession(id)));
+  }, [sessionsToDelete, deleteSession]);
 
   const sessionBeingDeleted = useMemo(() => {
-    if (!sessionToDelete) return null;
-    return sessions.find((s) => s.id === sessionToDelete) || getNode(sessionToDelete);
-  }, [sessionToDelete, sessions, getNode]);
+    if (!sessionsToDelete || sessionsToDelete.length !== 1) return null;
+    const id = sessionsToDelete[0];
+    return sessions.find((s) => s.id === id) || getNode(id);
+  }, [sessionsToDelete, sessions, getNode]);
 
   const handleDraftClearImmediate = useCallback(
     (sessionId: string) => {
@@ -7253,6 +7261,7 @@ function AppMain({
                 if (isMobile) setMobileSidebarOpen(false);
               }}
               onDelete={handleDeleteSession}
+              onDeleteMany={handleDeleteSessions}
               onRename={renameSession}
               onPin={togglePin}
               onUnpinOthers={unpinOtherSessions}
@@ -8640,13 +8649,17 @@ function AppMain({
         onCancel={dismissPreSendAdvisory}
         onSnoozeFiveHours={snoozePreSendAdvisoryAndSend}
       />
-      {sessionToDelete && (
+      {sessionsToDelete && (
         <ConfirmModal
-          open={!!sessionToDelete}
+          open={!!sessionsToDelete}
           title={t("session.deleteTitle")}
-          message={t("app.deleteSessionConfirm", { name: sessionBeingDeleted?.name || t("fork.fork") })}
+          message={
+            sessionsToDelete.length > 1
+              ? t("app.deleteSessionsConfirm", { count: sessionsToDelete.length })
+              : t("app.deleteSessionConfirm", { name: sessionBeingDeleted?.name || t("fork.fork") })
+          }
           onConfirm={confirmDeleteSession}
-          onCancel={() => setSessionToDelete(null)}
+          onCancel={() => setSessionsToDelete(null)}
         />
       )}
       {projectSuggestion && (

@@ -85,6 +85,7 @@
   "common.yes": "sí",
   "common.no": "no",
   "app.deleteSessionConfirm": "¿Seguro que quieres eliminar la sesión \"{{name}}\"? Esta acción es irreversible.",
+  "app.deleteSessionsConfirm": "¿Seguro que quieres eliminar {{count}} sesiones? Esta acción es irreversible.",
   "voice.enable": "Activar activación por voz",
   "voice.disable": "Desactivar activación por voz",
   "voice.permissionDenied": "Se denegó el acceso al micrófono. Actívalo en los ajustes del dispositivo e inténtalo de nuevo.",

@@ -85,6 +85,7 @@
   "common.yes": "ja",
   "common.no": "nein",
   "app.deleteSessionConfirm": "Möchten Sie die Sitzung „{{name}}\" wirklich löschen? Diese Aktion ist unwiderruflich.",
+  "app.deleteSessionsConfirm": "Möchten Sie {{count}} Sitzungen wirklich löschen? Diese Aktion ist unwiderruflich.",
   "voice.enable": "Sprachsteuerung aktivieren",
   "voice.disable": "Sprachsteuerung deaktivieren",
   "voice.permissionDenied": "Mikrofonzugriff wurde verweigert. Aktivieren Sie ihn in den Geräteeinstellungen und versuchen Sie es erneut.",

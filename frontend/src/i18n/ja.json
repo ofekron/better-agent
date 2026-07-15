@@ -85,6 +85,7 @@
   "common.yes": "はい",
   "common.no": "いいえ",
   "app.deleteSessionConfirm": "セッション「{{name}}」を削除してよろしいですか？この操作は元に戻せません。",
+  "app.deleteSessionsConfirm": "{{count}} 件のセッションを削除してよろしいですか？この操作は元に戻せません。",
   "voice.enable": "音声アクティベーションを有効化",
   "voice.disable": "音声アクティベーションを無効化",
   "voice.permissionDenied": "マイクへのアクセスが拒否されました。デバイスの設定で有効化してから再試行してください。",

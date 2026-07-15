@@ -85,6 +85,7 @@
   "common.yes": "نعم",
   "common.no": "لا",
   "app.deleteSessionConfirm": "هل أنت متأكد من حذف الجلسة \"{{name}}\"؟ لا يمكن التراجع عن هذا الإجراء.",
+  "app.deleteSessionsConfirm": "هل أنت متأكد من حذف {{count}} جلسات؟ لا يمكن التراجع عن هذا الإجراء.",
   "voice.enable": "تفعيل التنشيط الصوتي",
   "voice.disable": "تعطيل التنشيط الصوتي",
   "voice.permissionDenied": "تم رفض الوصول إلى الميكروفون. فعّله من إعدادات جهازك ثم حاول مرة أخرى.",

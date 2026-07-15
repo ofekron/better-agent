@@ -85,6 +85,7 @@
   "common.yes": "是",
   "common.no": "否",
   "app.deleteSessionConfirm": "确定要删除会话“{{name}}”吗？此操作不可撤销。",
+  "app.deleteSessionsConfirm": "确定要删除 {{count}} 个会话吗？此操作不可撤销。",
   "voice.enable": "启用语音激活",
   "voice.disable": "禁用语音激活",
   "voice.permissionDenied": "麦克风访问被拒绝。请在设备设置中启用后重试。",
