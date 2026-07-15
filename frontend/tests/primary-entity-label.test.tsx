@@ -83,5 +83,7 @@ describe("primary-entity toggle label by orchestration mode", () => {
     expect(text.indexOf("Review Subsession")).toBeLessThan(text.indexOf("primary after"));
     expect(container.querySelector(".role-label-manager")).toBeNull();
     expect(container.querySelector(".timeline-entity-header .role-chip:not(.role-chip-worker)")).toBeNull();
+    const alignedPanel = container.querySelector(".timeline-flattened-entity-block > .collapsible-timeline-block");
+    expect(alignedPanel?.querySelector(".timeline-toggle-label")?.textContent).toBe("Review Subsession");
   });
 });

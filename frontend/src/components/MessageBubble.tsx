@@ -2242,9 +2242,8 @@ function renderEntityBlock(
   // (its scope chip already wraps from the outer AssistantMessage).
   if (isWorker) {
     const anchorId = `timeline-entity-${block.entityId}`;
-    return (
+    const timelineBlock = (
       <CollapsibleTimelineBlock
-        key={key}
         anchorId={anchorId}
         label={block.entityLabel}
         labelColor={color}
@@ -2266,6 +2265,14 @@ function renderEntityBlock(
         isRunning={isRunning}
       />
     );
+    if (flattenManager) {
+      return (
+        <div className="timeline-flattened-entity-block" key={key}>
+          {timelineBlock}
+        </div>
+      );
+    }
+    return <React.Fragment key={key}>{timelineBlock}</React.Fragment>;
   }
 
   return (

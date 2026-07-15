@@ -9086,6 +9086,10 @@ button.run-badge-clickable:focus-visible {
   overflow: hidden;
 }
 
+.timeline-flattened-entity-block {
+  padding-inline: 14px;
+}
+
 .timeline-block-created {
   background: color-mix(in srgb, var(--bg-secondary) 72%, transparent);
   border-style: dashed;

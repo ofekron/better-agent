@@ -20,3 +20,10 @@ describe("UserInputCard batch layout", () => {
     expect(body).toContain("overscroll-behavior: contain");
   });
 });
+
+describe("Timeline entity alignment", () => {
+  it("insets flattened worker and sub-session panels to match primary events", () => {
+    const body = ruleBody(".timeline-flattened-entity-block");
+    expect(body).toContain("padding-inline: 14px");
+  });
+});
