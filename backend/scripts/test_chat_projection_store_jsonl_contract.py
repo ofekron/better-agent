@@ -20,7 +20,10 @@ os.environ["BETTER_AGENT_HOME"] = str(STATE_HOME)
 sys.path.insert(0, str(ROOT / "backend"))
 
 from chat_projection_store import ChatProjectionStoreError, ProjectionCommit, SourceWatermark, TurnManifest
-from chat_projection_store_jsonl import JsonlChatProjectionStore, MAX_JSONL_ROW_BYTES, _record_line
+from chat_projection_store_jsonl import (
+    INTEGRITY_MODULUS_A, INTEGRITY_MODULUS_B, JsonlChatProjectionStore, MAX_JSONL_ROW_BYTES,
+    _JsonlOwnerStore, _record_line,
+)
 from chat_projection_store_sqlite import SQLiteChatProjectionStore, canonical_json
 
 
@@ -45,6 +48,47 @@ def request(*, version: int = 1, sequence: int = 1) -> ProjectionCommit:
         visible_delta={"replace": fact["event_id"]},
         historical_revision={"event_id": fact["event_id"], "content_version": version},
         watermark=SourceWatermark("provider-neutral", 0, sequence),
+    )
+
+
+def growing_request(sequence: int, payload_size: int = 40 * 1024) -> ProjectionCommit:
+    fact = event()
+    fact["event_id"] = f"event-{sequence}"
+    fact["content_version"] = sequence
+    fact["data"]["text"] = f"{sequence}:" + "x" * payload_size
+    digest = hashlib.sha256(canonical_json(fact).encode()).hexdigest()
+    return ProjectionCommit(
+        root_id="root", root_generation=0, event_id=fact["event_id"], content_hash=digest,
+        canonical_fact=fact, render_node={"type": "Explanation", "text": fact["data"]["text"]},
+        turn_id=fact["turn_id"], message_id=fact["message_id"],
+        parent_event_id=fact["parent_event_id"], owner_scope="turn:turn-1",
+        manifest=TurnManifest(fact["turn_id"], sequence, sequence),
+        visible_delta={"append": fact["event_id"]},
+        historical_revision={"event_id": fact["event_id"], "content_version": sequence},
+        watermark=SourceWatermark("provider-neutral", 0, sequence),
+    )
+
+
+def register_integrity_functions(connection: sqlite3.Connection) -> None:
+    connection.create_function(
+        "jsonl_row_a", -1,
+        lambda table, *values: _JsonlOwnerStore._row_integrity(0, table, *values),
+        deterministic=True,
+    )
+    connection.create_function(
+        "jsonl_row_b", -1,
+        lambda table, *values: _JsonlOwnerStore._row_integrity(1, table, *values),
+        deterministic=True,
+    )
+    connection.create_function(
+        "jsonl_accumulate_a", 3,
+        lambda current, remove, add: (current - remove + add) % INTEGRITY_MODULUS_A,
+        deterministic=True,
+    )
+    connection.create_function(
+        "jsonl_accumulate_b", 3,
+        lambda current, remove, add: (current - remove + add) % INTEGRITY_MODULUS_B,
+        deterministic=True,
     )
 
 
@@ -154,6 +198,12 @@ def test_partial_tail_index_rebuild_corruption_and_concurrency() -> None:
     crash.select_generation("root", 0)
     crash.commit(request())
     crash.close()
+    crash_slot = next(crash_path.parent.glob(f"{crash_path.name}.index.*.sqlite3"))
+    crash_connection = sqlite3.connect(crash_slot)
+    checkpoint_sequence = crash_connection.execute(
+        "SELECT record_sequence FROM jsonl_checkpoint"
+    ).fetchone()[0]
+    crash_connection.close()
     last = json.loads(crash_path.read_bytes().splitlines()[-1])
     second_request = request(version=2, sequence=2)
     line, _ = _record_line(
@@ -164,11 +214,37 @@ def test_partial_tail_index_rebuild_corruption_and_concurrency() -> None:
         journal.write(line)
         journal.flush()
         os.fsync(journal.fileno())
+    crash_connection = sqlite3.connect(crash_slot)
+    assert crash_connection.execute(
+        "SELECT record_sequence FROM jsonl_checkpoint"
+    ).fetchone()[0] == checkpoint_sequence
+    crash_connection.close()
     for _ in range(2):
         recovered = JsonlChatProjectionStore(crash_path)
         assert recovered.projection_cursor("root", 0) == 2
         assert recovered.read_projection("root", 0, second_request.event_id).render_node["text"] == "answer-2"
         recovered.close()
+
+    injected_path = STATE_HOME / "chat" / "injected-crash-window.jsonl"
+    initialized = JsonlChatProjectionStore(injected_path)
+    initialized.select_generation("root", 0)
+    initialized.close()
+    injected_slot = next(injected_path.parent.glob(f"{injected_path.name}.index.*.sqlite3"))
+    connection = sqlite3.connect(injected_slot)
+    before_sequence = connection.execute("SELECT record_sequence FROM jsonl_checkpoint").fetchone()[0]
+    connection.close()
+    injected = JsonlChatProjectionStore(
+        injected_path, _test_owner_fault="post_append_failure",
+    )
+    assert_error("storage_write_failed", lambda: injected.commit(request()))
+    injected.close()
+    connection = sqlite3.connect(injected_slot)
+    assert connection.execute("SELECT record_sequence FROM jsonl_checkpoint").fetchone()[0] == before_sequence
+    connection.close()
+    recovered = JsonlChatProjectionStore(injected_path)
+    assert recovered.projection_cursor("root", 0) == 1
+    assert recovered.read_projection("root", 0, request().event_id).render_node["text"] == "answer-1"
+    recovered.close()
 
     concurrent_path = STATE_HOME / "chat" / "concurrent.jsonl"
     concurrent = JsonlChatProjectionStore(concurrent_path)
@@ -191,6 +267,32 @@ def test_partial_tail_index_rebuild_corruption_and_concurrency() -> None:
     assert_error("rebuild_required", fast.audit_prefix)
     fast.close()
 
+
+def test_growing_projection_has_bounded_checkpoint_work() -> None:
+    path = STATE_HOME / "chat" / "growing.jsonl"
+    store = JsonlChatProjectionStore(path)
+    store.select_generation("root", 0)
+    table_count = len(SQLiteChatProjectionStore._TABLES)
+    for sequence in range(1, 426):
+        before = store.checkpoint_rows_read()
+        result = store.commit(growing_request(sequence))
+        assert result.projection_cursor == sequence
+        assert store.checkpoint_rows_read() - before == table_count
+        if sequence % 100 == 0:
+            store.close()
+            store = JsonlChatProjectionStore(path)
+            assert store.startup_read_bytes() == 0
+            assert store.projection_cursor("root", 0) == sequence
+    assert path.stat().st_size > 16 * 1024 * 1024
+    store.close()
+    reopened = JsonlChatProjectionStore(path)
+    assert reopened.startup_read_bytes() == 0
+    assert reopened.projection_cursor("root", 0) == 425
+    reopened.close()
+    slot = next(path.parent.glob(f"{path.name}.index.*.sqlite3"))
+    connection = sqlite3.connect(slot)
+    assert connection.execute("SELECT COUNT(*) FROM canonical_facts").fetchone()[0] == 425
+    connection.close()
 
 def test_invalid_requests_do_not_append_and_writer_is_exclusive() -> None:
     path = STATE_HOME / "chat" / "validation.jsonl"
@@ -265,6 +367,7 @@ def test_epoch_reuse_tamper_fallback_and_automatic_quarantine() -> None:
     tamper.close()
     tampered_slot = next(tamper_path.parent.glob(f"{tamper_path.name}.index.*.sqlite3"))
     connection = sqlite3.connect(tampered_slot)
+    register_integrity_functions(connection)
     connection.execute("UPDATE render_nodes SET node_json='{}'")
     connection.commit()
     connection.close()
@@ -303,7 +406,7 @@ def test_epoch_reuse_tamper_fallback_and_automatic_quarantine() -> None:
     digest_store.close()
     digest_slot = next(digest_path.parent.glob(f"{digest_path.name}.index.*.sqlite3"))
     digest_connection = sqlite3.connect(digest_slot)
-    digest_connection.execute("UPDATE jsonl_checkpoint SET state_digest=?", ("f" * 64,))
+    digest_connection.execute("UPDATE jsonl_checkpoint SET integrity_json=?", ("forged",))
     digest_connection.commit()
     digest_connection.close()
     digest_recovered = JsonlChatProjectionStore(digest_path)
@@ -337,6 +440,8 @@ def main() -> None:
         print("PASS test_commit_duplicate_mutation_restart_and_delete")
         test_partial_tail_index_rebuild_corruption_and_concurrency()
         print("PASS test_partial_tail_index_rebuild_corruption_and_concurrency")
+        test_growing_projection_has_bounded_checkpoint_work()
+        print("PASS test_growing_projection_has_bounded_checkpoint_work")
         test_invalid_requests_do_not_append_and_writer_is_exclusive()
         print("PASS test_invalid_requests_do_not_append_and_writer_is_exclusive")
         test_hundred_thousand_record_checkpoint_is_tail_only()

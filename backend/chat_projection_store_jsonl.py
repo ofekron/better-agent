@@ -29,32 +29,62 @@ INDEX_SLOTS = 4
 CHECKPOINT_DDL = (
     "CREATE TABLE jsonl_checkpoint(slot_generation INTEGER NOT NULL,journal_dev INTEGER NOT NULL,"
     "journal_ino INTEGER NOT NULL,byte_offset INTEGER NOT NULL,record_sequence INTEGER NOT NULL,"
-    "chain_head TEXT NOT NULL,prefix_digest TEXT NOT NULL,heads_json TEXT NOT NULL,"
-    "state_digest TEXT NOT NULL,state_counts_json TEXT NOT NULL)"
+    "chain_head TEXT NOT NULL,prefix_digest TEXT NOT NULL,integrity_json TEXT NOT NULL)"
 )
 CHECKPOINT_SPEC = (
     ("slot_generation", "INTEGER", 1, 0, None), ("journal_dev", "INTEGER", 1, 0, None),
     ("journal_ino", "INTEGER", 1, 0, None), ("byte_offset", "INTEGER", 1, 0, None),
     ("record_sequence", "INTEGER", 1, 0, None), ("chain_head", "TEXT", 1, 0, None),
-    ("prefix_digest", "TEXT", 1, 0, None), ("heads_json", "TEXT", 1, 0, None),
-    ("state_digest", "TEXT", 1, 0, None), ("state_counts_json", "TEXT", 1, 0, None),
+    ("prefix_digest", "TEXT", 1, 0, None), ("integrity_json", "TEXT", 1, 0, None),
 )
+INTEGRITY_DDL = (
+    "CREATE TABLE jsonl_integrity(table_name TEXT PRIMARY KEY NOT NULL,row_count INTEGER NOT NULL,"
+    "sum_a INTEGER NOT NULL,sum_b INTEGER NOT NULL) WITHOUT ROWID"
+)
+INTEGRITY_SPEC = (
+    ("table_name", "TEXT", 1, 1, None), ("row_count", "INTEGER", 1, 0, None),
+    ("sum_a", "INTEGER", 1, 0, None), ("sum_b", "INTEGER", 1, 0, None),
+)
+INTEGRITY_MODULUS_A = 9_223_372_036_854_775_783
+INTEGRITY_MODULUS_B = 9_223_372_036_854_775_643
 
 
-def _guard_triggers() -> dict[str, tuple[str, str]]:
+def _integrity_triggers() -> dict[str, tuple[str, str]]:
     triggers = {}
     for table in SQLiteChatProjectionStore._TABLES:
-        for operation in ("INSERT", "UPDATE", "DELETE"):
-            name = f"jsonl_guard_{table}_{operation.lower()}"
-            triggers[name] = (
-                table,
-                f'CREATE TRIGGER "{name}" AFTER {operation} ON "{table}" '
-                "BEGIN DELETE FROM jsonl_checkpoint; END",
+        columns = [column[0] for column in SQLiteChatProjectionStore._TABLES[table]]
+        old_values = ",".join(f'OLD."{column}"' for column in columns)
+        new_values = ",".join(f'NEW."{column}"' for column in columns)
+        for operation, remove, add, count in (
+            ("INSERT", "0", f"jsonl_row_a('{table}',{new_values})", 1),
+            ("DELETE", f"jsonl_row_a('{table}',{old_values})", "0", -1),
+            (
+                "UPDATE", f"jsonl_row_a('{table}',{old_values})",
+                f"jsonl_row_a('{table}',{new_values})", 0,
+            ),
+        ):
+            name = f"jsonl_integrity_{table}_{operation.lower()}"
+            remove_b = remove.replace("jsonl_row_a", "jsonl_row_b")
+            add_b = add.replace("jsonl_row_a", "jsonl_row_b")
+            ddl = (
+                f'CREATE TRIGGER "{name}" AFTER {operation} ON "{table}" BEGIN '
+                "UPDATE jsonl_integrity SET "
+                f"row_count=row_count+({count}),sum_a=jsonl_accumulate_a(sum_a,{remove},{add}),"
+                f"sum_b=jsonl_accumulate_b(sum_b,{remove_b},{add_b}) WHERE table_name='{table}'; "
+                "DELETE FROM jsonl_checkpoint; END"
             )
+            triggers[name] = (table, ddl)
+    for operation in ("INSERT", "UPDATE", "DELETE"):
+        name = f"jsonl_guard_jsonl_integrity_{operation.lower()}"
+        triggers[name] = (
+            "jsonl_integrity",
+            f'CREATE TRIGGER "{name}" AFTER {operation} ON "jsonl_integrity" '
+            "BEGIN DELETE FROM jsonl_checkpoint; END",
+        )
     return triggers
 
 
-GUARD_TRIGGERS = _guard_triggers()
+INTEGRITY_TRIGGERS = _integrity_triggers()
 
 
 def _record_payload(sequence: int, previous_hash: str, operation: str, arguments: Mapping[str, Any]) -> dict[str, Any]:
@@ -72,9 +102,12 @@ def _record_line(sequence: int, previous_hash: str, operation: str, arguments: M
 
 
 class _JsonlOwnerStore:
-    def __init__(self, directory_fd: int, journal_fd: int, basename: str) -> None:
+    def __init__(
+        self, directory_fd: int, journal_fd: int, basename: str, test_owner_fault: str | None = None,
+    ) -> None:
         self._journal_fd = journal_fd
         self._basename = basename
+        self._test_owner_fault = test_owner_fault
         self._sequence = 0
         self._last_hash = "0" * 64
         try:
@@ -100,16 +133,24 @@ class _JsonlOwnerStore:
                 _before_transaction_commit=lambda connection: self._write_checkpoint(
                     connection, standalone=False,
                 ),
-                _extra_table_ddl={"jsonl_checkpoint": CHECKPOINT_DDL},
-                _extra_table_specs={"jsonl_checkpoint": CHECKPOINT_SPEC},
-                _extra_schema_objects=GUARD_TRIGGERS,
+                _extra_table_ddl={
+                    "jsonl_checkpoint": CHECKPOINT_DDL, "jsonl_integrity": INTEGRITY_DDL,
+                },
+                _extra_table_specs={
+                    "jsonl_checkpoint": CHECKPOINT_SPEC, "jsonl_integrity": INTEGRITY_SPEC,
+                },
+                _extra_schema_objects=INTEGRITY_TRIGGERS,
             )
         except BaseException:
             os.close(index_fd)
             os.close(index_directory_fd)
             raise
+        self._install_integrity_functions()
+        self._checkpoint_rows_read = 0
         if checkpoint is None:
             self._clear_index()
+        else:
+            self._initialize_integrity()
         self._sequence = start_sequence
         self._last_hash = start_hash
         self._prefix_digest = prefix_digest
@@ -138,24 +179,51 @@ class _JsonlOwnerStore:
             and stat.S_IMODE(metadata.st_mode) == 0o600 and metadata.st_nlink == 1
         )
 
-    def _heads_snapshot(self, connection: sqlite3.Connection) -> str:
-        heads = connection.execute(
-            "SELECT root_id,root_generation,fact_sequence,revision,projection_cursor FROM root_generation_heads ORDER BY 1,2"
-        ).fetchall()
-        watermarks = connection.execute(
-            "SELECT root_id,root_generation,stream_id,source_generation,source_sequence FROM source_watermarks ORDER BY 1,2,3"
-        ).fetchall()
-        return canonical_json({"heads": [list(row) for row in heads], "watermarks": [list(row) for row in watermarks]})
+    @staticmethod
+    def _row_integrity(component: int, table: str, *values: Any) -> int:
+        encoded = canonical_json([table, *values]).encode("utf-8")
+        digest = hashlib.sha256(encoded).digest()
+        start = component * 16
+        modulus = INTEGRITY_MODULUS_A if component == 0 else INTEGRITY_MODULUS_B
+        return int.from_bytes(digest[start:start + 16], "big") % modulus
 
-    def _state_integrity(self, connection: sqlite3.Connection) -> tuple[str, str]:
-        state = {}
-        counts = {}
-        for table in sorted(SQLiteChatProjectionStore._TABLES):
-            rows = connection.execute(f'SELECT * FROM "{table}" ORDER BY rowid').fetchall()
-            state[table] = [list(row) for row in rows]
-            counts[table] = len(rows)
-        encoded = canonical_json(state)
-        return hashlib.sha256(encoded.encode("utf-8")).hexdigest(), canonical_json(counts)
+    def _install_integrity_functions(self) -> None:
+        connection = self._index._connection
+        connection.create_function(
+            "jsonl_row_a", -1, lambda table, *values: self._row_integrity(0, table, *values),
+            deterministic=True,
+        )
+        connection.create_function(
+            "jsonl_row_b", -1, lambda table, *values: self._row_integrity(1, table, *values),
+            deterministic=True,
+        )
+        connection.create_function(
+            "jsonl_accumulate_a", 3,
+            lambda current, remove, add: (current - remove + add) % INTEGRITY_MODULUS_A,
+            deterministic=True,
+        )
+        connection.create_function(
+            "jsonl_accumulate_b", 3,
+            lambda current, remove, add: (current - remove + add) % INTEGRITY_MODULUS_B,
+            deterministic=True,
+        )
+
+    def _initialize_integrity(self) -> None:
+        with self._index._lock:
+            self._index._connection.executemany(
+                "INSERT OR IGNORE INTO jsonl_integrity VALUES(?,0,0,0)",
+                ((table,) for table in sorted(SQLiteChatProjectionStore._TABLES)),
+            )
+            self._index._connection.commit()
+
+    def _state_integrity(self, connection: sqlite3.Connection) -> str:
+        rows = connection.execute(
+            "SELECT table_name,row_count,sum_a,sum_b FROM jsonl_integrity ORDER BY table_name"
+        ).fetchall()
+        self._checkpoint_rows_read += len(rows)
+        if len(rows) != len(SQLiteChatProjectionStore._TABLES):
+            raise ChatProjectionStoreError("storage_corrupt", "projection integrity summary is incomplete")
+        return canonical_json([list(row) for row in rows])
 
     def _select_checkpoint(self):
         journal = os.fstat(self._journal_fd)
@@ -166,7 +234,7 @@ class _JsonlOwnerStore:
             try:
                 connection = sqlite3.connect(f"file:{name}?mode=rw", uri=True)
                 tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-                if tables != set(SQLiteChatProjectionStore._TABLES) | {"jsonl_checkpoint"}:
+                if tables != set(SQLiteChatProjectionStore._TABLES) | {"jsonl_checkpoint", "jsonl_integrity"}:
                     connection.close()
                     continue
                 triggers = {
@@ -177,7 +245,7 @@ class _JsonlOwnerStore:
                 }
                 expected_triggers = {
                     name: (table, "".join(ddl.lower().split()))
-                    for name, (table, ddl) in GUARD_TRIGGERS.items()
+                    for name, (table, ddl) in INTEGRITY_TRIGGERS.items()
                 }
                 if triggers != expected_triggers:
                     connection.close()
@@ -190,8 +258,17 @@ class _JsonlOwnerStore:
                     ("slot_generation", "INTEGER", 1), ("journal_dev", "INTEGER", 1),
                     ("journal_ino", "INTEGER", 1), ("byte_offset", "INTEGER", 1),
                     ("record_sequence", "INTEGER", 1), ("chain_head", "TEXT", 1),
-                    ("prefix_digest", "TEXT", 1), ("heads_json", "TEXT", 1),
-                    ("state_digest", "TEXT", 1), ("state_counts_json", "TEXT", 1),
+                    ("prefix_digest", "TEXT", 1), ("integrity_json", "TEXT", 1),
+                ):
+                    connection.close()
+                    continue
+                integrity_columns = tuple(
+                    (item[1], item[2].upper(), int(item[3]), int(item[5]))
+                    for item in connection.execute("PRAGMA table_info('jsonl_integrity')")
+                )
+                if integrity_columns != (
+                    ("table_name", "TEXT", 1, 1), ("row_count", "INTEGER", 1, 0),
+                    ("sum_a", "INTEGER", 1, 0), ("sum_b", "INTEGER", 1, 0),
                 ):
                     connection.close()
                     continue
@@ -199,15 +276,18 @@ class _JsonlOwnerStore:
                 if row is None or connection.execute("SELECT COUNT(*) FROM jsonl_checkpoint").fetchone()[0] != 1:
                     connection.close()
                     continue
-                generation, dev, ino, offset, sequence, chain, prefix, heads, state_digest, state_counts = row
-                actual_digest, actual_counts = self._state_integrity(connection)
+                generation, dev, ino, offset, sequence, chain, prefix, integrity = row
+                integrity_rows = connection.execute(
+                        "SELECT table_name,row_count,sum_a,sum_b FROM jsonl_integrity ORDER BY table_name"
+                    ).fetchall()
+                actual_integrity = canonical_json([list(item) for item in integrity_rows])
                 valid = (
                     type(generation) is int and type(offset) is int and type(sequence) is int
                     and (dev, ino) == (journal.st_dev, journal.st_ino) and 0 <= offset <= journal.st_size
                     and len(chain) == 64 and len(prefix) == 64
                     and all(character in "0123456789abcdef" for character in chain + prefix)
-                    and heads == self._heads_snapshot(connection)
-                    and state_digest == actual_digest and state_counts == actual_counts
+                    and len(integrity_rows) == len(SQLiteChatProjectionStore._TABLES)
+                    and integrity == actual_integrity
                     and self._checkpoint_boundary_valid(offset, sequence, chain)
                 )
                 connection.close()
@@ -293,8 +373,13 @@ class _JsonlOwnerStore:
     def _clear_index(self) -> None:
         with self._index._lock:
             self._index._connection.execute("BEGIN IMMEDIATE")
-            for table in self._index._TABLES:
+            for table in SQLiteChatProjectionStore._TABLES:
                 self._index._connection.execute(f'DELETE FROM "{table}"')
+            self._index._connection.execute("DELETE FROM jsonl_integrity")
+            self._index._connection.executemany(
+                "INSERT INTO jsonl_integrity VALUES(?,0,0,0)",
+                ((table,) for table in sorted(SQLiteChatProjectionStore._TABLES)),
+            )
             self._index._connection.commit()
 
     def _write_checkpoint(
@@ -307,10 +392,9 @@ class _JsonlOwnerStore:
         connection.execute(CHECKPOINT_DDL.replace("CREATE TABLE ", "CREATE TABLE IF NOT EXISTS ", 1))
         connection.execute("DELETE FROM jsonl_checkpoint")
         connection.execute(
-            "INSERT INTO jsonl_checkpoint VALUES(?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO jsonl_checkpoint VALUES(?,?,?,?,?,?,?,?)",
             (self._sequence, journal.st_dev, journal.st_ino, os.lseek(self._journal_fd, 0, os.SEEK_END),
-             self._sequence, self._last_hash, self._prefix_digest, self._heads_snapshot(connection),
-             *self._state_integrity(connection)),
+             self._sequence, self._last_hash, self._prefix_digest, self._state_integrity(connection)),
         )
         if standalone:
             connection.commit()
@@ -419,6 +503,11 @@ class _JsonlOwnerStore:
         self._sequence += 1
         self._last_hash = checksum
         self._prefix_digest = hashlib.sha256(bytes.fromhex(self._prefix_digest) + line).hexdigest()
+        if self._test_owner_fault == "post_append_failure":
+            self._test_owner_fault = None
+            raise ChatProjectionStoreError(
+                "storage_write_failed", "injected failure after journal durability",
+            )
 
     def _apply(self, operation: str, arguments: Mapping[str, Any]) -> Any:
         if operation == "commit":
@@ -562,6 +651,9 @@ class _JsonlOwnerStore:
         with self._audit_lock:
             return self._audit_status
 
+    def checkpoint_rows_read(self) -> int:
+        return self._checkpoint_rows_read
+
     def __getattr__(self, name: str):
         value = getattr(self._index, name)
         if not callable(value):
@@ -573,7 +665,12 @@ class _JsonlOwnerStore:
 
 
 class JsonlChatProjectionStore:
-    def __init__(self, path: Path | None = None, *, _ipc_timeout_seconds: float = 30) -> None:
+    def __init__(
+        self, path: Path | None = None, *, _ipc_timeout_seconds: float = 30,
+        _test_owner_fault: str | None = None,
+    ) -> None:
+        if _test_owner_fault not in {None, "post_append_failure"}:
+            raise ChatProjectionStoreError("invalid_input", "unknown owner test fault")
         root = Path(os.path.abspath(ba_home().expanduser()))
         selected = path or root / "chat" / "selected.jsonl"
         validator = SQLiteChatProjectionStore.__new__(SQLiteChatProjectionStore)
@@ -582,7 +679,7 @@ class JsonlChatProjectionStore:
                 if result is not None or arguments:
                     raise ChatProjectionStoreError("owner_protocol_error", "invalid audit result")
                 return None
-            if operation == "startup_read_bytes":
+            if operation in {"startup_read_bytes", "checkpoint_rows_read"}:
                 if type(result) is not int or result < 0 or arguments:
                     raise ChatProjectionStoreError("owner_protocol_error", "invalid startup metric")
                 return result
@@ -592,7 +689,8 @@ class JsonlChatProjectionStore:
                 return result
             return validator._validate_rpc_result(operation, result, arguments)
         self._owner = OwnerClient(
-            root_path=root, path=selected, owner_script=Path(__file__), owner_arguments=(),
+            root_path=root, path=selected, owner_script=Path(__file__),
+            owner_arguments=(_test_owner_fault or "none",),
             validate_result=validate_result,
             ipc_timeout_seconds=_ipc_timeout_seconds, max_error_text_bytes=MAX_TEXT_BYTES,
             require_sqlite_header=False,
@@ -645,8 +743,13 @@ class JsonlChatProjectionStore:
     def audit_status(self) -> str:
         return self._owner.rpc("audit_status")
 
+    def checkpoint_rows_read(self) -> int:
+        return self._owner.rpc("checkpoint_rows_read")
 
-def _run_owner(channel_fd: int, directory_fd: int, file_fd: int, basename: str) -> None:
+
+def _run_owner(
+    channel_fd: int, directory_fd: int, file_fd: int, basename: str, test_owner_fault: str,
+) -> None:
     def dispatch(store, operation: str, arguments: Mapping[str, Any], request_id: int):
         if operation == "audit_prefix":
             if arguments:
@@ -660,16 +763,21 @@ def _run_owner(channel_fd: int, directory_fd: int, file_fd: int, basename: str) 
             if arguments:
                 raise ChatProjectionStoreError("owner_protocol_error", "audit status arguments are invalid")
             return store.audit_status()
+        if operation == "checkpoint_rows_read":
+            if arguments:
+                raise ChatProjectionStoreError("owner_protocol_error", "metric arguments are invalid")
+            return store.checkpoint_rows_read()
         return _owner_dispatch(store, operation, arguments, request_id)
     serve_owner(
         channel_fd, directory_fd, file_fd, basename,
         lambda owner_directory_fd, owner_file_fd, owner_basename: _JsonlOwnerStore(
             owner_directory_fd, owner_file_fd, owner_basename,
+            None if test_owner_fault == "none" else test_owner_fault,
         ),
         dispatch, lambda store: store.close(),
         lambda _channel, _request_id, _operation, result: (result, False), MAX_RESPONSE_BYTES,
     )
 
 
-if __name__ == "__main__" and len(sys.argv) == 6 and sys.argv[1] == "--projection-owner":
-    _run_owner(int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4]), sys.argv[5])
+if __name__ == "__main__" and len(sys.argv) == 7 and sys.argv[1] == "--projection-owner":
+    _run_owner(int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4]), sys.argv[5], sys.argv[6])
