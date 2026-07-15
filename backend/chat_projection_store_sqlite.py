@@ -14,14 +14,37 @@ from chat_projection_store import (
 from paths import ba_home, is_test_mode
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 MAX_JSON_BYTES = 16 * 1024 * 1024
 MAX_READ_LIMIT = 10_000
 
 
+def _validate_json(value: Any) -> None:
+    if isinstance(value, Mapping):
+        if any(not isinstance(key, str) for key in value):
+            raise ChatProjectionStoreError("invalid_json", "JSON object keys must be strings")
+        for nested in value.values():
+            _validate_json(nested)
+        return
+    if isinstance(value, list):
+        for nested in value:
+            _validate_json(nested)
+        return
+    if value is None or isinstance(value, (str, bool)):
+        return
+    if type(value) is int:
+        return
+    if isinstance(value, float) and value == value and value not in (float("inf"), float("-inf")):
+        return
+    raise ChatProjectionStoreError("invalid_json", "payload contains a non-JSON value")
+
+
 def canonical_json(value: Mapping[str, Any]) -> str:
+    _validate_json(value)
     try:
-        encoded = json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+        encoded = json.dumps(
+            value, ensure_ascii=False, separators=(",", ":"), sort_keys=True, allow_nan=False,
+        )
     except (TypeError, ValueError) as exc:
         raise ChatProjectionStoreError("invalid_json", "payload must be canonical JSON") from exc
     if len(encoded.encode("utf-8")) > MAX_JSON_BYTES:
@@ -30,6 +53,50 @@ def canonical_json(value: Mapping[str, Any]) -> str:
 
 
 class SQLiteChatProjectionStore:
+    _TABLES = {
+        "selected_roots": (
+            ("root_id", "TEXT", 0, 1, None), ("root_generation", "INTEGER", 1, 0, None),
+        ),
+        "root_generation_heads": (
+            ("root_id", "TEXT", 1, 1, None), ("root_generation", "INTEGER", 1, 2, None),
+            ("fact_sequence", "INTEGER", 1, 0, None), ("revision", "INTEGER", 1, 0, None),
+            ("projection_cursor", "INTEGER", 1, 0, None),
+        ),
+        "canonical_facts": (
+            ("root_id", "TEXT", 1, 1, None), ("root_generation", "INTEGER", 1, 2, None),
+            ("fact_sequence", "INTEGER", 1, 3, None), ("event_id", "TEXT", 1, 0, None),
+            ("content_hash", "TEXT", 1, 0, None), ("fact_json", "TEXT", 1, 0, None),
+        ),
+        "render_nodes": (
+            ("root_id", "TEXT", 1, 1, None), ("root_generation", "INTEGER", 1, 2, None),
+            ("event_id", "TEXT", 1, 3, None), ("node_json", "TEXT", 1, 0, None),
+        ),
+        "ownership": (
+            ("root_id", "TEXT", 1, 1, None), ("root_generation", "INTEGER", 1, 2, None),
+            ("event_id", "TEXT", 1, 3, None), ("turn_id", "TEXT", 1, 0, None),
+            ("message_id", "TEXT", 0, 0, None), ("parent_event_id", "TEXT", 0, 0, None),
+            ("owner_scope", "TEXT", 1, 0, None),
+        ),
+        "turn_manifests": (
+            ("root_id", "TEXT", 1, 1, None), ("root_generation", "INTEGER", 1, 2, None),
+            ("turn_id", "TEXT", 1, 3, None), ("event_count", "INTEGER", 1, 0, None),
+            ("direct_child_count", "INTEGER", 1, 0, None),
+        ),
+        "revisions": (
+            ("root_id", "TEXT", 1, 1, None), ("root_generation", "INTEGER", 1, 2, None),
+            ("revision", "INTEGER", 1, 3, None), ("fact_sequence", "INTEGER", 1, 0, None),
+            ("visible_delta_json", "TEXT", 1, 0, None),
+            ("historical_json", "TEXT", 1, 0, None),
+        ),
+        "source_watermarks": (
+            ("root_id", "TEXT", 1, 1, None), ("root_generation", "INTEGER", 1, 2, None),
+            ("stream_id", "TEXT", 1, 3, None), ("source_generation", "INTEGER", 1, 0, None),
+            ("source_sequence", "INTEGER", 1, 0, None),
+        ),
+    }
+    _UNIQUE_INDEXES = {
+        "canonical_facts": {("root_id", "root_generation", "event_id", "content_hash")},
+    }
     def __init__(
         self,
         path: Path | None = None,
@@ -65,21 +132,27 @@ class SQLiteChatProjectionStore:
         return resolved
 
     def _install_schema(self) -> None:
-        existing = self._connection.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='root_heads'"
-        ).fetchone()
+        existing_tables = {
+            row[0] for row in self._connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+            )
+        }
         version = int(self._connection.execute("PRAGMA user_version").fetchone()[0])
-        if existing and version != SCHEMA_VERSION:
+        if existing_tables and (version != SCHEMA_VERSION or existing_tables != set(self._TABLES)):
             self.close()
             raise ChatProjectionStoreError("unsupported_schema", "wipe the selected chat store")
-        if not existing and version not in (0, SCHEMA_VERSION):
+        if not existing_tables and version not in (0, SCHEMA_VERSION):
             self.close()
             raise ChatProjectionStoreError("unsupported_schema", "wipe the selected chat store")
         self._connection.executescript("""
-            CREATE TABLE IF NOT EXISTS root_heads(
-              root_id TEXT PRIMARY KEY, root_generation INTEGER NOT NULL,
+            CREATE TABLE IF NOT EXISTS selected_roots(
+              root_id TEXT PRIMARY KEY, root_generation INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS root_generation_heads(
+              root_id TEXT NOT NULL, root_generation INTEGER NOT NULL,
               fact_sequence INTEGER NOT NULL, revision INTEGER NOT NULL,
-              projection_cursor INTEGER NOT NULL
+              projection_cursor INTEGER NOT NULL,
+              PRIMARY KEY(root_id,root_generation)
             );
             CREATE TABLE IF NOT EXISTS canonical_facts(
               root_id TEXT NOT NULL, root_generation INTEGER NOT NULL,
@@ -120,21 +193,53 @@ class SQLiteChatProjectionStore:
         """)
         self._connection.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
         self._connection.commit()
+        try:
+            self._validate_schema()
+        except ChatProjectionStoreError:
+            self.close()
+            raise
+
+    def _validate_schema(self) -> None:
+        for table, expected in self._TABLES.items():
+            rows = self._connection.execute(f'PRAGMA table_info("{table}")').fetchall()
+            actual = tuple((row[1], row[2].upper(), int(row[3]), int(row[5]), row[4]) for row in rows)
+            if actual != expected:
+                raise ChatProjectionStoreError("unsupported_schema", "wipe the selected chat store")
+            expected_pk = tuple(name for name, _, _, pk, _ in sorted(expected, key=lambda item: item[3]) if pk)
+            indexes = self._connection.execute(f'PRAGMA index_list("{table}")').fetchall()
+            unique_columns = set()
+            for index in indexes:
+                if int(index[2]) != 1:
+                    continue
+                columns = tuple(
+                    row[2] for row in self._connection.execute(
+                        f'PRAGMA index_info("{index[1]}")'
+                    ).fetchall()
+                )
+                if index[3] == "pk":
+                    if columns != expected_pk:
+                        raise ChatProjectionStoreError("unsupported_schema", "wipe the selected chat store")
+                else:
+                    unique_columns.add(columns)
+            if unique_columns != self._UNIQUE_INDEXES.get(table, set()):
+                raise ChatProjectionStoreError("unsupported_schema", "wipe the selected chat store")
 
     def select_generation(self, root_id: str, root_generation: int) -> None:
         self._identity(root_id, root_generation)
         with self._lock, self._connection:
             row = self._connection.execute(
-                "SELECT root_generation FROM root_heads WHERE root_id=?", (root_id,),
+                "SELECT root_generation FROM selected_roots WHERE root_id=?", (root_id,),
             ).fetchone()
             if row and root_generation <= int(row[0]):
                 if root_generation == int(row[0]):
                     return
                 raise ChatProjectionStoreError("stale_generation", "root generation is fenced")
             self._connection.execute(
-                "INSERT INTO root_heads VALUES(?,?,?,?,?) "
-                "ON CONFLICT(root_id) DO UPDATE SET root_generation=excluded.root_generation,"
-                "fact_sequence=0,revision=0,projection_cursor=0",
+                "INSERT INTO selected_roots VALUES(?,?) ON CONFLICT(root_id) DO UPDATE SET "
+                "root_generation=excluded.root_generation", (root_id, root_generation),
+            )
+            self._connection.execute(
+                "INSERT OR IGNORE INTO root_generation_heads VALUES(?,?,?,?,?)",
                 (root_id, root_generation, 0, 0, 0),
             )
 
@@ -165,8 +270,9 @@ class SQLiteChatProjectionStore:
         delta_json: str, historical_json: str,
     ) -> CommitResult:
         head = self._connection.execute(
-            "SELECT root_generation,fact_sequence,revision,projection_cursor "
-            "FROM root_heads WHERE root_id=?", (request.root_id,),
+            "SELECT h.root_generation,h.fact_sequence,h.revision,h.projection_cursor "
+            "FROM selected_roots s JOIN root_generation_heads h USING(root_id,root_generation) "
+            "WHERE s.root_id=?", (request.root_id,),
         ).fetchone()
         if head is None or int(head[0]) != request.root_generation:
             raise ChatProjectionStoreError("stale_generation", "root generation is not selected")
@@ -208,7 +314,7 @@ class SQLiteChatProjectionStore:
             (*values, revision, fact_sequence, delta_json, historical_json),
         )
         self._connection.execute(
-            "UPDATE root_heads SET fact_sequence=?,revision=?,projection_cursor=? "
+            "UPDATE root_generation_heads SET fact_sequence=?,revision=?,projection_cursor=? "
             "WHERE root_id=? AND root_generation=?",
             (fact_sequence, revision, cursor, *values),
         )
@@ -258,10 +364,71 @@ class SQLiteChatProjectionStore:
         self._identity(root_id, root_generation)
         with self._lock:
             row = self._connection.execute(
-                "SELECT projection_cursor FROM root_heads WHERE root_id=? AND root_generation=?",
+                "SELECT projection_cursor FROM root_generation_heads WHERE root_id=? AND root_generation=?",
                 (root_id, root_generation),
             ).fetchone()
         return int(row[0]) if row else 0
+
+    def delete_generation(self, root_id: str, root_generation: int) -> None:
+        self._identity(root_id, root_generation)
+        with self._lock:
+            try:
+                self._connection.execute("BEGIN IMMEDIATE")
+                selected = self._connection.execute(
+                    "SELECT root_generation FROM selected_roots WHERE root_id=?", (root_id,),
+                ).fetchone()
+                exists = self._connection.execute(
+                    "SELECT 1 FROM root_generation_heads WHERE root_id=? AND root_generation=?",
+                    (root_id, root_generation),
+                ).fetchone()
+                if exists is None:
+                    raise ChatProjectionStoreError("missing_generation", "root generation does not exist")
+                if selected and int(selected[0]) == root_generation:
+                    raise ChatProjectionStoreError("current_generation", "selected generation cannot be deleted")
+                self._delete_generation_rows(root_id, root_generation)
+                if self._before_commit:
+                    self._before_commit()
+                self._connection.commit()
+            except BaseException:
+                self._connection.rollback()
+                raise
+        if self._after_commit:
+            self._after_commit()
+
+    def delete_root(self, root_id: str) -> None:
+        self._identity(root_id, 0)
+        with self._lock:
+            try:
+                self._connection.execute("BEGIN IMMEDIATE")
+                exists = self._connection.execute(
+                    "SELECT 1 FROM selected_roots WHERE root_id=? UNION SELECT 1 FROM "
+                    "root_generation_heads WHERE root_id=? LIMIT 1", (root_id, root_id),
+                ).fetchone()
+                if exists is None:
+                    raise ChatProjectionStoreError("missing_root", "root does not exist")
+                for table in (
+                    "canonical_facts", "render_nodes", "ownership", "turn_manifests", "revisions",
+                    "source_watermarks", "root_generation_heads", "selected_roots",
+                ):
+                    self._connection.execute(f'DELETE FROM "{table}" WHERE root_id=?', (root_id,))
+                if self._before_commit:
+                    self._before_commit()
+                self._connection.commit()
+            except BaseException:
+                self._connection.rollback()
+                raise
+        if self._after_commit:
+            self._after_commit()
+
+    def _delete_generation_rows(self, root_id: str, root_generation: int) -> None:
+        for table in (
+            "canonical_facts", "render_nodes", "ownership", "turn_manifests", "revisions",
+            "source_watermarks", "root_generation_heads",
+        ):
+            self._connection.execute(
+                f'DELETE FROM "{table}" WHERE root_id=? AND root_generation=?',
+                (root_id, root_generation),
+            )
 
     def read_projection(
         self, root_id: str, root_generation: int, event_id: str,

@@ -137,14 +137,20 @@ def test_generation_fencing_schema_paths_and_bounded_reads() -> None:
     store.select_generation("root-1", 0)
     old = _request(_fixture_event(), generation=0)
     store.commit(old)
+    assert store.projection_cursor("root-1", 0) == 1
     store.select_generation("root-1", 1)
     _assert_error("stale_generation", lambda: store.commit(old))
     current = _request(_fixture_event(), generation=1)
     assert store.commit(current).fact_sequence == 1
     assert len(store.read_facts("root-1", 0)) == 1
+    assert store.projection_cursor("root-1", 0) == 1
     _assert_error("invalid_cursor", lambda: store.read_facts("root-1", 1, after=-1))
     _assert_error("invalid_limit", lambda: store.read_facts("root-1", 1, limit=MAX_READ_LIMIT + 1))
     store.close()
+    reopened = SQLiteChatProjectionStore(path)
+    assert reopened.projection_cursor("root-1", 0) == 1
+    assert reopened.projection_cursor("root-1", 1) == 1
+    reopened.close()
     _assert_error("invalid_path", lambda: SQLiteChatProjectionStore(Path("relative.sqlite3")))
     _assert_error("path_escape", lambda: SQLiteChatProjectionStore(STATE_HOME.parent / "escape.sqlite3"))
     if hasattr(os, "symlink"):
@@ -162,6 +168,91 @@ def test_generation_fencing_schema_paths_and_bounded_reads() -> None:
     connection.commit()
     connection.close()
     _assert_error("unsupported_schema", lambda: SQLiteChatProjectionStore(bad))
+
+
+def test_strict_json_and_same_version_schema_validation() -> None:
+    for invalid in (float("nan"), float("inf"), float("-inf")):
+        _assert_error("invalid_json", lambda invalid=invalid: canonical_json({"value": invalid}))
+    _assert_error("invalid_json", lambda: canonical_json({"nested": [{1: "not a JSON object"}]}))
+    _assert_error("invalid_json", lambda: canonical_json({"not_an_array": (1, 2)}))
+
+    malformed_column = _path("malformed-column")
+    valid = SQLiteChatProjectionStore(malformed_column)
+    valid.close()
+    connection = sqlite3.connect(malformed_column)
+    connection.execute("ALTER TABLE selected_roots ADD COLUMN unexpected TEXT")
+    connection.commit()
+    connection.close()
+    _assert_error("unsupported_schema", lambda: SQLiteChatProjectionStore(malformed_column))
+
+    malformed_index = _path("malformed-index")
+    valid = SQLiteChatProjectionStore(malformed_index)
+    valid.close()
+    connection = sqlite3.connect(malformed_index)
+    connection.execute("CREATE UNIQUE INDEX unexpected_fact_index ON canonical_facts(event_id)")
+    connection.commit()
+    connection.close()
+    _assert_error("unsupported_schema", lambda: SQLiteChatProjectionStore(malformed_index))
+
+
+def test_generation_and_root_deletion_are_atomic_and_durable() -> None:
+    path = _path("deletion")
+    store = SQLiteChatProjectionStore(path)
+    store.select_generation("root-1", 0)
+    store.commit(_request(_fixture_event(), generation=0))
+    store.select_generation("root-1", 1)
+    store.commit(_request(_fixture_event(), generation=1))
+    _assert_error("current_generation", lambda: store.delete_generation("root-1", 1))
+    _assert_error("missing_generation", lambda: store.delete_generation("root-1", 99))
+    store.delete_generation("root-1", 0)
+    assert store.read_facts("root-1", 0) == []
+    assert store.read_revisions("root-1", 0) == []
+    assert store.source_watermark("root-1", 0, "provider-neutral") is None
+    assert len(store.read_facts("root-1", 1)) == 1
+    store.close()
+    reopened = SQLiteChatProjectionStore(path)
+    assert reopened.read_facts("root-1", 0) == []
+    assert len(reopened.read_facts("root-1", 1)) == 1
+    reopened.close()
+
+    rollback_path = _path("deletion-rollback")
+    setup = SQLiteChatProjectionStore(rollback_path)
+    setup.select_generation("root-1", 0)
+    setup.commit(_request(_fixture_event(), generation=0))
+    setup.select_generation("root-1", 1)
+    setup.close()
+
+    def fail_before() -> None:
+        raise RuntimeError("simulated crash before delete commit")
+
+    rollback = SQLiteChatProjectionStore(rollback_path, before_commit=fail_before)
+    try:
+        rollback.delete_generation("root-1", 0)
+        raise AssertionError("delete rollback hook did not fire")
+    except RuntimeError:
+        pass
+    assert len(rollback.read_facts("root-1", 0)) == 1
+    try:
+        rollback.delete_root("root-1")
+        raise AssertionError("root delete rollback hook did not fire")
+    except RuntimeError:
+        pass
+    assert len(rollback.read_facts("root-1", 0)) == 1
+    rollback.close()
+
+    durable = SQLiteChatProjectionStore(rollback_path)
+    durable.delete_root("root-1")
+    _assert_error("missing_root", lambda: durable.delete_root("root-1"))
+    durable.close()
+    restarted = SQLiteChatProjectionStore(rollback_path)
+    for table in (
+        "canonical_facts", "render_nodes", "ownership", "turn_manifests", "revisions",
+        "source_watermarks", "root_generation_heads", "selected_roots",
+    ):
+        assert restarted._connection.execute(
+            f'SELECT COUNT(*) FROM "{table}" WHERE root_id=?', ("root-1",),
+        ).fetchone()[0] == 0
+    restarted.close()
 
 
 def main() -> None:
