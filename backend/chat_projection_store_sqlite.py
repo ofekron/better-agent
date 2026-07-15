@@ -2,21 +2,21 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
 import os
-import socket
 import sqlite3
-import stat
-import struct
-import subprocess
 import sys
 import threading
 from dataclasses import asdict
-from errno import EEXIST, ENOENT
 from functools import wraps
 from pathlib import Path
 from typing import Any, Callable, Mapping
 from urllib.parse import quote
+
+from chat_projection_store_owner import (
+    DEFAULT_FRAME_BYTES, DEFAULT_TIMEOUT_SECONDS, MAX_REQUEST_ID, MAX_TIMEOUT_SECONDS,
+    MIN_TIMEOUT_SECONDS, OwnerClient, encode_frame, send_frame, serve_owner,
+)
+from chat_projection_store_owner_path import verify_anchored_file
 
 from chat_projection_store import (
     ChatProjectionStoreError, CommitResult, ProjectionCommit, SourceWatermark, StoredFact,
@@ -34,13 +34,13 @@ MAX_JSON_LIST_ITEMS = 50_000
 MAX_JSON_OBJECT_ITEMS = 50_000
 MAX_TEXT_BYTES = 4_096
 MAX_COMMIT_BYTES = MAX_JSON_BYTES
-MAX_SQLITE_INTEGER = 2**63 - 1
-MAX_IPC_BYTES = 64 * 1024 * 1024
+MAX_SQLITE_INTEGER = MAX_REQUEST_ID
+MAX_IPC_BYTES = DEFAULT_FRAME_BYTES
 MAX_RESPONSE_BYTES = 16 * 1024 * 1024
-IPC_TIMEOUT_SECONDS = 30
-STARTUP_TIMEOUT_SECONDS = 30
-MIN_IPC_TIMEOUT_SECONDS = 0.05
-MAX_IPC_TIMEOUT_SECONDS = 300
+IPC_TIMEOUT_SECONDS = DEFAULT_TIMEOUT_SECONDS
+STARTUP_TIMEOUT_SECONDS = DEFAULT_TIMEOUT_SECONDS
+MIN_IPC_TIMEOUT_SECONDS = MIN_TIMEOUT_SECONDS
+MAX_IPC_TIMEOUT_SECONDS = MAX_TIMEOUT_SECONDS
 
 TABLE_DDL = {
     "selected_roots": "CREATE TABLE selected_roots(root_id TEXT PRIMARY KEY, root_generation INTEGER NOT NULL)",
@@ -133,60 +133,8 @@ def canonical_json(value: Mapping[str, Any]) -> str:
     return encoded
 
 
-def _encode_json_bounded(payload: Any, limit: int) -> bytearray:
-    encoder = json.JSONEncoder(ensure_ascii=False, separators=(",", ":"), allow_nan=False)
-    encoded = bytearray()
-    try:
-        for chunk in encoder.iterencode(payload):
-            chunk_bytes = chunk.encode("utf-8")
-            if len(encoded) + len(chunk_bytes) > limit:
-                raise ChatProjectionStoreError("ipc_too_large", "projection owner frame limit exceeded")
-            encoded.extend(chunk_bytes)
-    except (TypeError, ValueError, UnicodeError) as exc:
-        raise ChatProjectionStoreError("owner_protocol_error", "projection owner frame is invalid") from exc
-    return encoded
-
-
-def _send_frame(
-    channel: socket.socket, payload: Mapping[str, Any], *, limit: int = MAX_IPC_BYTES,
-) -> None:
-    encoded = _encode_json_bounded(payload, limit)
-    channel.sendall(struct.pack("!I", len(encoded)) + encoded)
-
-
-def _receive_exact(channel: socket.socket, length: int) -> bytes:
-    chunks = bytearray()
-    while len(chunks) < length:
-        chunk = channel.recv(length - len(chunks))
-        if not chunk:
-            raise ChatProjectionStoreError("owner_unavailable", "projection owner exited")
-        chunks.extend(chunk)
-    return bytes(chunks)
-
-
-def _receive_frame(channel: socket.socket) -> Mapping[str, Any]:
-    size = struct.unpack("!I", _receive_exact(channel, 4))[0]
-    if size > MAX_IPC_BYTES:
-        raise ChatProjectionStoreError("ipc_too_large", "projection owner frame limit exceeded")
-    try:
-        def strict_object(pairs):
-            result = {}
-            for key, value in pairs:
-                if key in result:
-                    raise ValueError("duplicate JSON key")
-                result[key] = value
-            return result
-        def reject_constant(value):
-            raise ValueError(f"non-finite number: {value}")
-        payload = json.loads(
-            _receive_exact(channel, size).decode("utf-8"), object_pairs_hook=strict_object,
-            parse_constant=reject_constant,
-        )
-    except (UnicodeError, json.JSONDecodeError, ValueError) as exc:
-        raise ChatProjectionStoreError("owner_protocol_error", "invalid projection owner frame") from exc
-    if not isinstance(payload, Mapping):
-        raise ChatProjectionStoreError("owner_protocol_error", "invalid projection owner frame")
-    return payload
+_encode_json_bounded = encode_frame
+_send_frame = send_frame
 
 
 class SQLiteChatProjectionStore:
@@ -253,15 +201,12 @@ class SQLiteChatProjectionStore:
         self._after_commit = after_commit
         self._lock = threading.RLock()
         self._closed = False
-        self._poisoned = False
-        self._next_request_id = 1
         self._ipc_timeout_seconds = _ipc_timeout_seconds
         self._startup_timeout_seconds = _startup_timeout_seconds
         self._test_owner_fault = _test_owner_fault
         if self._owner_client:
             self._start_owner(path)
             return
-        os.fchdir(_owner_directory_fd)
         self._path = Path(_owner_basename)
         self._connection = None
         self._parent_fd = None
@@ -279,180 +224,40 @@ class SQLiteChatProjectionStore:
         self._install_schema()
 
     def _start_owner(self, path: Path | None) -> None:
-        if (
-            not isinstance(self._startup_timeout_seconds, (int, float))
-            or isinstance(self._startup_timeout_seconds, bool)
-            or not math.isfinite(self._startup_timeout_seconds)
-            or not MIN_IPC_TIMEOUT_SECONDS <= self._startup_timeout_seconds <= MAX_IPC_TIMEOUT_SECONDS
-        ):
-            raise ChatProjectionStoreError("invalid_input", "owner startup timeout is invalid")
-        if (
-            not isinstance(self._ipc_timeout_seconds, (int, float))
-            or isinstance(self._ipc_timeout_seconds, bool)
-            or not math.isfinite(self._ipc_timeout_seconds)
-            or not MIN_IPC_TIMEOUT_SECONDS <= self._ipc_timeout_seconds <= MAX_IPC_TIMEOUT_SECONDS
-        ):
-            raise ChatProjectionStoreError(
-                "invalid_input",
-                f"IPC timeout must be {MIN_IPC_TIMEOUT_SECONDS}..{MAX_IPC_TIMEOUT_SECONDS} seconds",
-            )
         if self._test_owner_fault not in (
             None, "post_commit_stop", "malformed_response", "semantic_mismatch",
             "startup_stop", "malformed_commit_response", "revision_pair_mismatch",
         ):
             raise ChatProjectionStoreError("invalid_input", "unknown owner test fault")
         self._connection = None
-        self._process = None
-        self._channel = None
-        self._path, self._parent_fd, self._file_fd, created = self._secure_open(path)
-        parent_channel, child_channel = socket.socketpair()
-        parent_channel.settimeout(self._startup_timeout_seconds)
-        launcher = "import os,runpy,sys;sys.argv=sys.argv[1:];sys.path.insert(0,os.path.dirname(sys.argv[0]));runpy.run_path(sys.argv[0],run_name='__main__')"
-        command = [
-            sys.executable, "-I", "-c", launcher, str(Path(__file__).resolve()), "--projection-owner",
-            str(child_channel.fileno()), str(self._parent_fd), str(self._file_fd), self._path.name,
-            self._test_owner_fault or "none",
-        ]
-        environment = {"PATH": "/usr/bin:/bin", "PYTHONIOENCODING": "utf-8"}
-        startup_response_received = False
-        try:
-            self._process = subprocess.Popen(
-                command, pass_fds=(child_channel.fileno(), self._parent_fd, self._file_fd), env=environment,
-                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                close_fds=True,
-            )
-            child_channel.close()
-            self._channel = parent_channel
-            response = _receive_frame(self._channel)
-            startup_response_received = True
-            if set(response) == {"error"} and isinstance(response["error"], Mapping) and set(response["error"]) == {"code", "detail"}:
-                raise ChatProjectionStoreError(str(response["error"]["code"]), str(response["error"]["detail"]))
-            if response != {"ready": True}:
-                raise ChatProjectionStoreError("owner_protocol_error", "projection owner did not initialize")
-            parent_channel.settimeout(self._ipc_timeout_seconds)
-        except BaseException as exc:
-            parent_channel.close()
-            child_channel.close()
-            if self._process is not None:
-                self._process.kill()
-                self._process.wait()
-            if created:
-                try:
-                    os.unlink(self._path.name, dir_fd=self._parent_fd)
-                except OSError:
-                    pass
-            self._close_secure_handles()
-            if startup_response_received and isinstance(exc, ChatProjectionStoreError):
-                raise
-            raise ChatProjectionStoreError("owner_start_failed", "projection owner failed to start") from exc
+        root = Path(os.path.abspath(ba_home().expanduser()))
+        selected = path or root / "chat" / "selected.sqlite3"
+        self._owner = OwnerClient(
+            root_path=root, path=selected, owner_script=Path(__file__),
+            owner_arguments=(self._test_owner_fault or "none",),
+            validate_result=self._validate_rpc_result,
+            ipc_timeout_seconds=self._ipc_timeout_seconds,
+            startup_timeout_seconds=self._startup_timeout_seconds,
+            max_error_text_bytes=MAX_TEXT_BYTES,
+        )
+        self._path = self._owner.path
+        self._parent_fd = self._owner.parent_fd
+        self._file_fd = self._owner.file_fd
+        self._process = self._owner.process
+        self._channel = self._owner.channel
 
     @staticmethod
     def _verify_owner_file(file_fd: int, basename: str) -> None:
-        expected = os.fstat(file_fd)
-        visible = os.stat(basename, follow_symlinks=False)
-        SQLiteChatProjectionStore._validate_secure_file_stat(expected)
-        SQLiteChatProjectionStore._validate_secure_file_stat(visible)
-        if (expected.st_dev, expected.st_ino) != (visible.st_dev, visible.st_ino):
-            raise ChatProjectionStoreError("path_race", "chat store file changed during owner open")
-
-    @staticmethod
-    def _validate_secure_file_stat(metadata: os.stat_result) -> None:
-        if not stat.S_ISREG(metadata.st_mode):
-            raise ChatProjectionStoreError("insecure_store_file", "chat store must be a regular file")
-        if metadata.st_uid != os.getuid():
-            raise ChatProjectionStoreError("insecure_store_file", "chat store owner is invalid")
-        if stat.S_IMODE(metadata.st_mode) != 0o600:
-            raise ChatProjectionStoreError("insecure_store_file", "chat store mode must be 0600")
-        if metadata.st_nlink != 1:
-            raise ChatProjectionStoreError("insecure_store_file", "chat store cannot be hard-linked")
+        verify_anchored_file(file_fd, basename)
 
     def _file_checkpoint(self) -> None:
         self._verify_owner_file(self._owner_identity_fd, self._owner_basename)
 
     def _rpc(self, operation: str, **arguments: Any) -> Any:
-        if self._poisoned or self._closed:
-            raise ChatProjectionStoreError("owner_unavailable", "projection owner exited")
-        with self._lock:
-            if self._poisoned or self._closed or self._channel is None or self._process is None or self._process.poll() is not None:
-                self._poison_owner_locked()
-                raise ChatProjectionStoreError("owner_unavailable", "projection owner exited")
-            request_id = self._next_request_id
-            if request_id > MAX_SQLITE_INTEGER:
-                self._poison_owner_locked()
-                raise ChatProjectionStoreError("owner_protocol_error", "request id exhausted")
-            self._next_request_id += 1
-            dispatched = False
-            try:
-                _send_frame(self._channel, {
-                    "request_id": request_id, "operation": operation, "arguments": arguments,
-                })
-                dispatched = True
-                response = _receive_frame(self._channel)
-                return self._validate_rpc_response(response, request_id, operation, arguments)
-            except ChatProjectionStoreError as exc:
-                if exc.code not in ("owner_domain_error",):
-                    self._poison_owner_locked()
-                if exc.code == "owner_domain_error":
-                    cause = exc.__cause__
-                    if isinstance(cause, ChatProjectionStoreError):
-                        if cause.code in {
-                            "insecure_store_file", "path_race", "owner_protocol_error",
-                            "owner_internal_error",
-                        }:
-                            self._poison_owner_locked()
-                        raise cause
-                if operation == "commit" and dispatched:
-                    raise ChatProjectionStoreError(
-                        "commit_outcome_unknown", "owner response was lost after commit dispatch",
-                    ) from exc
-                raise
-            except (OSError, TimeoutError, UnicodeError) as exc:
-                self._poison_owner_locked()
-                code = "commit_outcome_unknown" if operation == "commit" and dispatched else "owner_unavailable"
-                raise ChatProjectionStoreError(code, "projection owner response unavailable") from exc
-
-    def _validate_rpc_response(
-        self, response: Mapping[str, Any], request_id: int, operation: str,
-        arguments: Mapping[str, Any],
-    ) -> Any:
-        base = {"request_id", "operation"}
-        if response.get("request_id") != request_id or response.get("operation") != operation:
-            raise ChatProjectionStoreError("owner_protocol_error", "owner response correlation mismatch")
-        if set(response) == base | {"error"}:
-            error = response["error"]
-            if not isinstance(error, Mapping) or set(error) != {"code", "detail"}:
-                raise ChatProjectionStoreError("owner_protocol_error", "invalid owner error envelope")
-            self._wire_text(error.get("code"))
-            self._wire_text(error.get("detail"))
-            domain = ChatProjectionStoreError(error["code"], error["detail"])
-            wrapped = ChatProjectionStoreError("owner_domain_error", "owner returned a domain error")
-            wrapped.__cause__ = domain
-            raise wrapped
-        if set(response) != base | {"result"}:
-            raise ChatProjectionStoreError("owner_protocol_error", "invalid owner result envelope")
-        return self._validate_rpc_result(operation, response["result"], arguments)
-
-    def _poison_owner_locked(self) -> None:
-        self._poisoned = True
-        channel, process = self._channel, self._process
-        self._channel = None
-        self._process = None
-        if process is not None and process.poll() is None:
-            try:
-                process.terminate()
-            except OSError:
-                pass
-            try:
-                process.wait(timeout=1)
-            except subprocess.TimeoutExpired:
-                try:
-                    process.kill()
-                except OSError:
-                    pass
-                process.wait()
-        if channel is not None:
-            channel.close()
-        self._close_secure_handles()
+        result = self._owner.rpc(operation, **arguments)
+        self._process = self._owner.process
+        self._channel = self._owner.channel
+        return result
 
     def _validate_rpc_result(
         self, operation: str, result: Any, arguments: Mapping[str, Any],
@@ -632,84 +437,6 @@ class SQLiteChatProjectionStore:
         except ChatProjectionStoreError as exc:
             raise ChatProjectionStoreError("owner_protocol_error", "owner JSON object is invalid") from exc
         return value
-
-    @classmethod
-    def _secure_open(cls, path: Path | None) -> tuple[Path, int, int, bool]:
-        declared_root = Path(os.path.abspath(ba_home().expanduser()))
-        declared_candidate = (path or declared_root / "chat" / "selected.sqlite3").expanduser()
-        if not declared_candidate.is_absolute():
-            raise ChatProjectionStoreError("invalid_path", "chat store path must be absolute")
-        declared_candidate = Path(os.path.abspath(declared_candidate))
-        try:
-            relative = declared_candidate.relative_to(declared_root)
-        except ValueError as exc:
-            raise ChatProjectionStoreError("path_escape", "store path escapes Better Agent home") from exc
-        root = Path(os.path.realpath(declared_root))
-        candidate = root / relative
-        if not relative.parts or candidate.name in ("", ".", ".."):
-            raise ChatProjectionStoreError("invalid_path", "chat store file name is required")
-        parent_fd = cls._open_directory_chain(root, relative.parts[:-1])
-        created = False
-        flags = os.O_RDWR | os.O_NOFOLLOW
-        try:
-            file_fd = os.open(candidate.name, flags | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=parent_fd)
-            created = True
-        except OSError as exc:
-            if exc.errno != EEXIST:
-                os.close(parent_fd)
-                raise ChatProjectionStoreError("path_open_failed", "cannot securely create chat store") from exc
-            try:
-                file_fd = os.open(candidate.name, flags, dir_fd=parent_fd)
-            except OSError as open_exc:
-                os.close(parent_fd)
-                code = "path_escape" if open_exc.errno != ENOENT else "path_race"
-                raise ChatProjectionStoreError(code, "cannot securely open chat store") from open_exc
-        try:
-            cls._validate_secure_file_stat(os.fstat(file_fd))
-            cls._validate_secure_file_stat(
-                os.stat(candidate.name, dir_fd=parent_fd, follow_symlinks=False),
-            )
-        except BaseException:
-            if created:
-                try:
-                    os.unlink(candidate.name, dir_fd=parent_fd)
-                except OSError:
-                    pass
-            os.close(file_fd)
-            os.close(parent_fd)
-            raise
-        return candidate, parent_fd, file_fd, created
-
-    @staticmethod
-    def _open_directory_chain(root: Path, relative_parts: tuple[str, ...]) -> int:
-        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
-        current = os.open("/", flags)
-        try:
-            for component in (*root.parts[1:], *relative_parts):
-                try:
-                    next_fd = os.open(component, flags, dir_fd=current)
-                except OSError as exc:
-                    if exc.errno != ENOENT:
-                        raise ChatProjectionStoreError("path_escape", "directory path is not secure") from exc
-                    try:
-                        os.mkdir(component, 0o700, dir_fd=current)
-                    except OSError as mkdir_exc:
-                        if mkdir_exc.errno != EEXIST:
-                            raise ChatProjectionStoreError("path_open_failed", "cannot create store directory") from mkdir_exc
-                    next_fd = os.open(component, flags, dir_fd=current)
-                os.close(current)
-                current = next_fd
-            return current
-        except BaseException:
-            os.close(current)
-            raise
-
-    def _close_secure_handles(self) -> None:
-        for name in ("_file_fd", "_parent_fd"):
-            descriptor = getattr(self, name, None)
-            if descriptor is not None:
-                os.close(descriptor)
-                setattr(self, name, None)
 
     def _install_schema(self) -> None:
         existing_tables = {
@@ -1381,42 +1108,17 @@ class SQLiteChatProjectionStore:
     @_translate_sqlite("storage_close_failed")
     def close(self) -> None:
         if self._owner_client:
-            with self._lock:
-                if self._closed:
-                    return
-                close_error = None
-                try:
-                    if not self._poisoned:
-                        self._rpc("close")
-                except ChatProjectionStoreError as exc:
-                    close_error = exc
-                    if not self._poisoned:
-                        self._poison_owner_locked()
-                process = self._process
-                if process is not None and process.poll() is None:
-                    try:
-                        process.wait(timeout=self._ipc_timeout_seconds)
-                    except subprocess.TimeoutExpired as exc:
-                        close_error = close_error or ChatProjectionStoreError(
-                            "owner_unavailable", "projection owner did not close",
-                        )
-                        close_error.__cause__ = exc
-                        self._poison_owner_locked()
-                channel = self._channel
-                self._channel = None
-                self._process = None
-                if channel is not None:
-                    channel.close()
-                self._close_secure_handles()
-                self._closed = True
-                if close_error is not None:
-                    raise close_error
+            self._owner.close()
+            self._process = None
+            self._channel = None
+            self._parent_fd = None
+            self._file_fd = None
+            self._closed = True
             return
         connection = getattr(self, "_connection", None)
         if connection is not None:
             connection.close()
             self._connection = None
-        self._close_secure_handles()
 
 
 def _owner_dispatch(
@@ -1520,96 +1222,51 @@ def _owner_dispatch(
 def _run_owner(
     channel_fd: int, directory_fd: int, file_fd: int, basename: str, test_fault: str,
 ) -> None:
-    os.environ.clear()
-    channel = socket.socket(fileno=channel_fd)
-    store = None
-    try:
+    def create_store(owner_directory_fd: int, owner_file_fd: int, owner_basename: str):
         store = SQLiteChatProjectionStore(
-            _owner_directory_fd=directory_fd, _owner_file_fd=file_fd, _owner_basename=basename,
+            _owner_directory_fd=owner_directory_fd, _owner_file_fd=owner_file_fd,
+            _owner_basename=owner_basename,
         )
         if test_fault == "startup_stop":
             os.kill(os.getpid(), signal.SIGSTOP)
-        _send_frame(channel, {"ready": True})
-        while True:
-            try:
-                request = _receive_frame(channel)
-            except ChatProjectionStoreError as exc:
-                if exc.code == "owner_unavailable":
-                    os._exit(1)
-                raise
-            if set(request) != {"request_id", "operation", "arguments"}:
-                raise ChatProjectionStoreError("owner_protocol_error", "request shape is invalid")
-            request_id = request["request_id"]
-            operation = request["operation"]
-            if type(request_id) is not int or not 0 <= request_id <= MAX_SQLITE_INTEGER:
-                raise ChatProjectionStoreError("owner_protocol_error", "request id is invalid")
-            if not isinstance(operation, str) or not isinstance(request["arguments"], Mapping):
-                raise ChatProjectionStoreError("owner_protocol_error", "request shape is invalid")
-            try:
-                result = _owner_dispatch(store, operation, request["arguments"], request_id)
-                if test_fault == "post_commit_stop" and operation == "commit":
-                    os.kill(os.getpid(), signal.SIGSTOP)
-                if test_fault == "malformed_response":
-                    _send_frame(channel, {
-                        "request_id": request_id + 1, "operation": operation,
-                        "result": result, "unexpected": True,
-                    })
-                    test_fault = "none"
-                    continue
-                if test_fault == "malformed_commit_response" and operation == "commit":
-                    _send_frame(channel, {
-                        "request_id": request_id, "operation": operation,
-                        "result": {"duplicate": "invalid"},
-                    })
-                    test_fault = "none"
-                    continue
-                if test_fault == "semantic_mismatch" and isinstance(result, Mapping):
-                    result = dict(result)
-                    result["root_id"] = "mismatched-root"
-                    test_fault = "none"
-                if (
-                    test_fault == "revision_pair_mismatch" and operation == "read_revisions"
-                    and isinstance(result, Mapping) and result.get("rows")
-                ):
-                    result = dict(result)
-                    result["rows"] = [dict(row) for row in result["rows"]]
-                    result["rows"][0]["fact_sequence"] += 1
-                    test_fault = "none"
-                try:
-                    _send_frame(channel, {
-                        "request_id": request_id, "operation": operation, "result": result,
-                    }, limit=MAX_RESPONSE_BYTES)
-                except ChatProjectionStoreError as exc:
-                    if exc.code != "ipc_too_large":
-                        raise
-                    raise ChatProjectionStoreError(
-                        "response_too_large", "owner result exceeds response budget",
-                    ) from exc
-                if operation == "close":
-                    break
-            except ChatProjectionStoreError as exc:
-                _send_frame(channel, {
-                    "request_id": request_id, "operation": operation,
-                    "error": {"code": exc.code, "detail": exc.detail},
-                })
-            except BaseException:
-                _send_frame(channel, {
-                    "request_id": request_id, "operation": operation,
-                    "error": {"code": "owner_internal_error", "detail": "owner operation failed"},
-                })
-    except ChatProjectionStoreError as exc:
-        _send_frame(channel, {"error": {"code": exc.code, "detail": exc.detail}})
-    except BaseException:
-        try:
-            _send_frame(channel, {"error": {"code": "owner_init_failed", "detail": "owner initialization failed"}})
-        except BaseException:
-            pass
-    finally:
-        if store is not None and store._connection is not None:
-            store._connection.close()
-        channel.close()
-        os.close(file_fd)
-        os.close(directory_fd)
+        return store
+
+    fault = [test_fault]
+    def mutate_result(channel, request_id: int, operation: str, result: Any) -> tuple[Any, bool]:
+        if fault[0] == "post_commit_stop" and operation == "commit":
+            os.kill(os.getpid(), signal.SIGSTOP)
+        if fault[0] == "malformed_response":
+            _send_frame(channel, {
+                "request_id": request_id + 1, "operation": operation,
+                "result": result, "unexpected": True,
+            })
+            fault[0] = "none"
+            return result, True
+        if fault[0] == "malformed_commit_response" and operation == "commit":
+            _send_frame(channel, {
+                "request_id": request_id, "operation": operation,
+                "result": {"duplicate": "invalid"},
+            })
+            fault[0] = "none"
+            return result, True
+        if fault[0] == "semantic_mismatch" and isinstance(result, Mapping):
+            result = dict(result)
+            result["root_id"] = "mismatched-root"
+            fault[0] = "none"
+        if (
+            fault[0] == "revision_pair_mismatch" and operation == "read_revisions"
+            and isinstance(result, Mapping) and result.get("rows")
+        ):
+            result = dict(result)
+            result["rows"] = [dict(row) for row in result["rows"]]
+            result["rows"][0]["fact_sequence"] += 1
+            fault[0] = "none"
+        return result, False
+
+    serve_owner(
+        channel_fd, directory_fd, file_fd, basename, create_store, _owner_dispatch,
+        mutate_result, MAX_RESPONSE_BYTES,
+    )
 
 
 if __name__ == "__main__" and len(sys.argv) == 7 and sys.argv[1] == "--projection-owner":

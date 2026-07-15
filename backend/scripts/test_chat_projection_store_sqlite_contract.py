@@ -5,7 +5,9 @@ import json
 import os
 import shutil
 import signal
+import socket
 import sqlite3
+import struct
 import sys
 import tempfile
 import threading
@@ -26,6 +28,7 @@ from chat_projection_store_sqlite import (
     MAX_SQLITE_INTEGER, MAX_TEXT_BYTES, MIN_IPC_TIMEOUT_SECONDS,
     SQLiteChatProjectionStore, _encode_json_bounded, canonical_json,
 )
+from chat_projection_store_owner import encode_frame, receive_frame
 
 
 FIXTURE = ROOT / "test-contracts" / "chat-panel" / "v1" / "canonical-session.json"
@@ -707,6 +710,16 @@ def test_response_page_budget_timeout_admission_and_close_failure() -> None:
 
 
 def test_exact_correlated_response_cap_and_commit_protocol_uncertainty() -> None:
+    assert bytes(encode_frame({"operation": "probe"})) == b'{"operation":"probe"}'
+    for malformed in (b'{"key":1,"key":2}', b'{"value":NaN}'):
+        sender, receiver = socket.socketpair()
+        try:
+            sender.sendall(struct.pack("!I", len(malformed)) + malformed)
+            _assert_error("owner_protocol_error", lambda: receive_frame(receiver))
+        finally:
+            sender.close()
+            receiver.close()
+
     def install_fact(path: Path, extra_bytes: int) -> None:
         setup = SQLiteChatProjectionStore(path)
         setup.select_generation("root-1", 0)
