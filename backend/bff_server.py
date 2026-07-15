@@ -34,6 +34,7 @@ from bff_app_routes import (
 from bff_event_hub import hub
 from bff_runtime_service import RuntimeServiceError, runtime_service
 from bff_runtime_upstream import RuntimeUpstreamUnavailable, runtime_upstream
+import bff_chat_feed
 import bff_projection
 import app_chat_draft_store
 from frontend_assets import (
@@ -63,10 +64,12 @@ async def _startup() -> None:
     await lease.release()
     runtime_service.bind(runtime_upstream)
     await initialize_app_projects()
+    await bff_chat_feed.feed_client.start()
 
 
 @app.on_event("shutdown")
 async def _shutdown() -> None:
+    await bff_chat_feed.feed_client.stop()
     runtime_service.unbind()
     await runtime_upstream.shutdown()
 

@@ -15,6 +15,30 @@ from canonical_event_authority import AuthorityError, RuntimeAuthorityCatalog
 from canonical_event_store import CanonicalEventStore
 from paths import ba_home
 
+# Advance observer: notified (root_id, journal_seq) whenever the canonical
+# journal gains coverage for a root, including writes to roots that have
+# not cut over yet (so consumers can trigger the on-demand cutover pull).
+# Set by the runtime app at startup; must never raise into the write path.
+_advance_observer = None
+_advance_observer_lock = threading.Lock()
+
+
+def set_advance_observer(observer) -> None:
+    global _advance_observer
+    with _advance_observer_lock:
+        _advance_observer = observer
+
+
+def _notify_advance(root_id: str, journal_seq: int) -> None:
+    with _advance_observer_lock:
+        observer = _advance_observer
+    if observer is None:
+        return
+    try:
+        observer(root_id, journal_seq)
+    except Exception:
+        pass
+
 
 class CanonicalRuntimeJournal:
     def __init__(self, catalog_path: Path | None = None) -> None:
@@ -66,6 +90,9 @@ class CanonicalRuntimeJournal:
     ) -> None:
         authority = self._catalog.current(root_id)
         if authority is None or authority.authority != "sqlite":
+            # Not cut over yet — still announce the write so a feed
+            # consumer can pull, which runs the on-demand cutover sync.
+            _notify_advance(root_id, seq)
             return
         if seq <= authority.journal_through_seq:
             return
@@ -95,6 +122,7 @@ class CanonicalRuntimeJournal:
             canonical_through_seq=head, journal_through_seq=seq,
             message_through_seq=authority.message_through_seq,
         )
+        _notify_advance(root_id, seq)
 
     def ensure_cutover(
         self,
@@ -158,6 +186,7 @@ class CanonicalRuntimeJournal:
                 journal_through_seq=journal_through_seq,
                 message_through_seq=message_through_seq,
             )
+        _notify_advance(root_id, journal_through_seq)
         return generation
 
     @staticmethod

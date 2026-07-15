@@ -1455,7 +1455,6 @@ from bff_runtime_contract import (
 )
 import auto_restart_on_idle
 import auto_restart_cooldown
-import ui_selection
 
 # Apply saved auth env vars at import time so any code path that still
 # reads `os.environ` directly (e.g. `runner.py` jsonl-path resolution)
@@ -9141,14 +9140,49 @@ async def bff_projection_source(
         page = canonical_runtime_journal().read_page(
             session_id, after_seq=after_seq, limit=limit,
         )
+        provider_kind = None
+        provider_id = session.get("provider_id")
+        if isinstance(provider_id, str) and provider_id:
+            provider = config_store.get_provider(provider_id)
+            kind = provider.get("kind") if isinstance(provider, dict) else None
+            if kind in {"claude", "codex", "gemini"}:
+                provider_kind = kind
         return {
             "found": True,
             "session": session,
+            "provider_kind": provider_kind,
             **page,
             "fact_schema_version": FACT_SCHEMA_VERSION,
         }
 
     return await asyncio.to_thread(_read)
+
+
+@app.websocket("/api/bff-runtime/feed")
+async def bff_runtime_feed(websocket: WebSocket):
+    """Server-to-server canonical feed: streams `canonical_advance`
+    facts (which roots gained journal coverage) to the BFF's chat feed
+    client, which pulls `projection-source` for each announced root."""
+    from runtime_feed_channel import runtime_feed_channel
+
+    if not bff_runtime_auth.is_authorized(
+        websocket.headers.get(BFF_SERVICE_TOKEN_HEADER)
+    ):
+        await websocket.close(code=4403)
+        return
+    await websocket.accept()
+    subscriber = runtime_feed_channel.attach()
+    try:
+        while True:
+            roots = await subscriber.wait_drain()
+            await websocket.send_json({
+                "type": "canonical_advance",
+                "roots": sorted(roots),
+            })
+    except (WebSocketDisconnect, ConnectionError, RuntimeError):
+        pass
+    finally:
+        runtime_feed_channel.detach(subscriber)
 
 
 @app.post("/api/internal/machine-nodes/local-node-id")
@@ -12626,7 +12660,13 @@ async def on_startup():
     acquire_backend_instance_lock()
     import runtime_ownership
     runtime_ownership.register_current_process_writer()
+    import canonical_runtime_journal as canonical_runtime_journal_module
     from canonical_runtime_journal import canonical_runtime_journal
+    from runtime_feed_channel import runtime_feed_channel
+    runtime_feed_channel.bind(loop)
+    canonical_runtime_journal_module.set_advance_observer(
+        runtime_feed_channel.publish_advance
+    )
     journal = canonical_runtime_journal()
     await asyncio.to_thread(journal.resolve_pending_deletions)
     import ambient_mcp_broker
@@ -13348,10 +13388,12 @@ async def on_shutdown():
     except Exception:
         logger.exception("session content projection shutdown failed")
     try:
-        from event_bus_subscribers import shutdown_chat_projection_ingestion
-        await asyncio.to_thread(shutdown_chat_projection_ingestion)
+        import canonical_runtime_journal as canonical_runtime_journal_module
+        from runtime_feed_channel import runtime_feed_channel
+        canonical_runtime_journal_module.set_advance_observer(None)
+        runtime_feed_channel.unbind()
     except Exception:
-        logger.exception("chat projection ingestion shutdown failed")
+        logger.exception("canonical feed channel shutdown failed")
     try:
         event_ingester.close_all()
     except Exception:

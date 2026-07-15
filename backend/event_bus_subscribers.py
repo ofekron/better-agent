@@ -603,74 +603,6 @@ def bind_session_content_projection() -> None:
     logger.info("event_bus: registered session content projection")
 
 
-_CHAT_PROJECTION_PRIORITY = 20  # after journal write (10), independent read-model
-
-
-async def _admit_chat_projection(event: BusEvent) -> None:
-    """EVENT_JOURNAL_WRITTEN -> canonical chat projection admission.
-
-    The only admission point for the canonical chat projection store —
-    producers (live streaming, crash-recovery replay) never call
-    `chat_projection_ingestion.admit_provider_event` directly; they
-    publish the journal fact and this subscriber projects it. Runs off
-    the event loop and never lets a projection failure propagate back
-    into the journal-write/render-tree path (bus subscriber exceptions
-    are isolated by `EventBus.publish`; this also logs for visibility).
-    """
-    payload = event.payload if isinstance(event.payload, dict) else {}
-    if payload.get("appended") is False or int(payload.get("seq") or 0) <= 0:
-        return
-    if payload.get("source") not in ("apply_event", "provider_stream"):
-        return
-    data = payload.get("data")
-    if not isinstance(data, dict):
-        return
-    root_id = str(event.root_id or "")
-    if not root_id:
-        return
-    session_id = str(event.sid or root_id)
-    run_id = event.run_id if isinstance(event.run_id, str) and event.run_id else None
-    message_id = event.msg_id if isinstance(event.msg_id, str) and event.msg_id else None
-    try:
-        import chat_projection_ingestion
-        await asyncio.to_thread(
-            chat_projection_ingestion.admit_provider_event,
-            root_id=root_id,
-            session_id=session_id,
-            event_type=str(payload.get("event_type") or "unknown"),
-            data=data,
-            source="provider_stream",
-            run_id=run_id,
-            message_id=message_id,
-            turn_id=run_id or message_id,
-            provider=None,
-        )
-    except Exception:
-        logger.exception(
-            "chat projection ingestion admission failed root=%s seq=%s",
-            root_id, payload.get("seq"),
-        )
-
-
-def bind_chat_projection_ingestion() -> None:
-    """Project provider-stream journal facts into the canonical chat
-    projection store from a single subscriber."""
-    bus.unsubscribe("chat_projection_ingestion")
-    bus.subscribe(
-        EVENT_JOURNAL_WRITTEN,
-        _admit_chat_projection,
-        priority=_CHAT_PROJECTION_PRIORITY,
-        name="chat_projection_ingestion",
-    )
-    logger.info("event_bus: registered chat projection ingestion subscriber")
-
-
-def shutdown_chat_projection_ingestion() -> None:
-    bus.unsubscribe("chat_projection_ingestion")
-    import chat_projection_ingestion
-    chat_projection_ingestion.close()
-
-
 def bind_requirement_tags_projection() -> None:
     bus.unsubscribe("requirement_tags_refresh")
     bus.unsubscribe("requirement_tags_projection")
@@ -695,7 +627,6 @@ def register_default_subscribers() -> None:
     are pruned first."""
     bind_event_journal_writer()
     bind_session_content_projection()
-    bind_chat_projection_ingestion()
     bind_requirement_tags_projection()
     bus.unsubscribe("ingester_to_events_jsonl")
     bus.unsubscribe("event_journal_persistence_adapter")

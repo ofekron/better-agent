@@ -1,7 +1,14 @@
+"""Admission of canonical feed facts into the chat projection store.
+
+Owned by the BFF process: its chat feed client pulls wire-shaped
+canonical facts (`canonical_event_adapter.fact_to_wire`) from the
+runtime's `projection-source` endpoint and admits each one here.
+Idempotent on (source_event_id, content_hash) via the source catalog,
+so re-delivery after reconnect or cursor replay is a no-op.
+"""
 from __future__ import annotations
 
 import hashlib
-import json
 import threading
 from pathlib import Path
 from typing import Any
@@ -17,6 +24,10 @@ _lock = threading.Lock()
 _service: CanonicalChatProjectionService | None = None
 _catalog: ChatProjectionSourceCatalog | None = None
 _home: Path | None = None
+
+_PROVIDER_KINDS = {"claude", "codex", "gemini"}
+_METADATA_TYPES = {"ai-title", "file-history-snapshot"}
+_CONTENT_HASH_ALPHABET = set("0123456789abcdef")
 
 
 def _instances() -> tuple[CanonicalChatProjectionService, ChatProjectionSourceCatalog]:
@@ -35,113 +46,84 @@ def _instances() -> tuple[CanonicalChatProjectionService, ChatProjectionSourceCa
         return _service, _catalog
 
 
-def _provider_event_id(data: dict[str, Any]) -> str | None:
-    for candidate in (data, data.get("data"), data.get("event")):
-        if not isinstance(candidate, dict):
-            continue
-        nested = candidate.get("data")
-        for owner in (candidate, nested if isinstance(nested, dict) else None):
-            if not isinstance(owner, dict):
-                continue
-            value = owner.get("uuid") or owner.get("id") or owner.get("event_id")
-            if isinstance(value, str) and value:
-                return value
-    return None
+def _required_text(fact: dict[str, Any], key: str) -> str:
+    value = fact.get(key)
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"canonical fact field {key!r} must be a non-empty string")
+    return value
 
 
-_PROVIDER_KINDS = {"claude", "codex", "gemini"}
-
-
-def _provider_kind(root_id: str, run_id: str | None) -> str:
-    if isinstance(run_id, str) and run_id and "/" not in run_id and "\\" not in run_id:
-        try:
-            from active_run_catalog import read_relative
-
-            raw = read_relative(ba_home() / "runs", run_id, "backend_state.json")
-            state = json.loads(raw.decode("utf-8"))
-            kind = state.get("provider_kind") if isinstance(state, dict) else None
-            if kind in _PROVIDER_KINDS:
-                return kind
-        except (OSError, ValueError, UnicodeError, json.JSONDecodeError):
-            pass
-    # Provider identity is a property of the root session, not of any one
-    # run — sources that admit events without a run correlation (e.g. the
-    # primary-agent backup tailer in jsonl_tailer.py, which ingests
-    # crash-window events with no live run in flight) never have a
-    # resolvable run_id. Fall back to the session's own provider_id,
-    # which is stable for the session's lifetime.
-    try:
-        from config_store import get_provider
-        from session_manager import manager as session_manager
-
-        sess = session_manager.get_lite(root_id)
-        provider_id = sess.get("provider_id") if isinstance(sess, dict) else None
-        if isinstance(provider_id, str) and provider_id:
-            provider = get_provider(provider_id)
-            kind = provider.get("kind") if isinstance(provider, dict) else None
-            if kind in _PROVIDER_KINDS:
-                return kind
-    except Exception:
-        pass
-    raise ValueError("canonical provider identity is unavailable")
-
-
-def admit_provider_event(
-    *, root_id: str, session_id: str, event_type: str, data: dict[str, Any],
-    source: str, run_id: str | None, message_id: str | None,
-    turn_id: str | None, provider: str | None = None,
-) -> None:
-    service, catalog = _instances()
-    provider = provider or _provider_kind(root_id, run_id)
-    if provider not in {"claude", "codex", "gemini"}:
+def admit_canonical_fact(fact: dict[str, Any], *, provider: str) -> None:
+    """Admit one wire-shaped canonical fact into the projection store."""
+    if provider not in _PROVIDER_KINDS:
         raise ValueError("canonical provider identity is invalid")
-    event_id = _provider_event_id(data)
-    if event_id is None:
-        event_id = "event-" + hashlib.sha256(canonical_json({
-            "type": event_type, "data": data, "source": source,
-            "run_id": run_id, "message_id": message_id,
-        }).encode("utf-8")).hexdigest()
-    stream_id = run_id or f"{provider}:{source}:{session_id}"
+    if not isinstance(fact, dict):
+        raise ValueError("canonical fact must be an object")
+    root_id = _required_text(fact, "root_id")
+    payload_type = _required_text(fact, "payload_type")
+    stream_id = _required_text(fact, "source_stream_id")
+    event_id = _required_text(fact, "source_event_id")
+    content_hash = _required_text(fact, "content_hash")
+    if len(content_hash) != 64 or not set(content_hash) <= _CONTENT_HASH_ALPHABET:
+        raise ValueError("canonical fact content_hash must be 64 lowercase hex chars")
+    payload = fact.get("payload")
+    if not isinstance(payload, dict):
+        raise ValueError("canonical fact payload must be an object")
+    raw_message_id = payload.get("message_id")
+    message_id = raw_message_id if isinstance(raw_message_id, str) and raw_message_id else None
+
+    # The store defines commit identity locally: the persisted fact must
+    # carry `event_id`, and the commit's content_hash is the hash of the
+    # persisted fact itself (not the upstream fact's own hash field).
+    stored_fact = {**fact, "provider": provider, "event_id": event_id}
+    commit_hash = hashlib.sha256(
+        canonical_json(stored_fact).encode("utf-8")
+    ).hexdigest()
+    service, catalog = _instances()
     root_generation = catalog.root_generation(root_id)
-    canonical_fact = {
-        "event_id": event_id,
-        "provider": provider,
-        "source": source,
-        "source_stream": stream_id,
-        "type": event_type,
-        "data": data,
-        "session_id": session_id,
-        "message_id": message_id,
-        "turn_id": turn_id,
-    }
-    content_hash = hashlib.sha256(canonical_json(canonical_fact).encode("utf-8")).hexdigest()
     identity = catalog.admit(
         root_id=root_id, provider=provider, stream_id=stream_id,
-        event_id=event_id, content_hash=content_hash,
+        event_id=event_id, content_hash=commit_hash,
     )
     authority = service.register(
         provider=provider, session_id=root_id, root_id=root_id,
         root_generation=root_generation, store_kind="jsonl",
     )
-    metadata_type = data.get("type") if isinstance(data, dict) else None
-    owner_scope = "metadata" if metadata_type in {"ai-title", "file-history-snapshot"} else (
+    # Replay tolerance: the catalog matched this exact (event, content)
+    # to an existing stream position; if the store already durably holds
+    # that position, the commit happened — skip. (A position admitted but
+    # never committed, e.g. crash between admit and append, falls through
+    # and commits now.)
+    durable = service.source_watermark(authority, identity.stream_id)
+    if durable is not None and (
+        (durable.generation, durable.sequence)
+        >= (identity.generation, identity.sequence)
+    ):
+        return
+    nested_type = payload.get("type")
+    is_metadata = payload_type in _METADATA_TYPES or (
+        isinstance(nested_type, str) and nested_type in _METADATA_TYPES
+    )
+    owner_scope = "metadata" if is_metadata else (
         f"message:{message_id}" if message_id else "root"
     )
+    raw_turn_id = fact.get("turn_id")
+    turn_id = raw_turn_id if isinstance(raw_turn_id, str) and raw_turn_id else None
     resolved_turn = turn_id or message_id or f"root:{root_id}"
     service.append_apply(authority, ProjectionCommit(
         root_id=root_id,
         root_generation=root_generation,
         event_id=event_id,
-        content_hash=content_hash,
-        canonical_fact=canonical_fact,
-        render_node={"type": event_type, "data": data},
+        content_hash=commit_hash,
+        canonical_fact=stored_fact,
+        render_node={"type": payload_type, "data": payload},
         turn_id=resolved_turn,
         message_id=message_id,
         parent_event_id=None,
         owner_scope=owner_scope,
         manifest=TurnManifest(resolved_turn, 1, 0 if owner_scope == "metadata" else 1),
-        visible_delta={"event_id": event_id, "type": event_type},
-        historical_revision={"event_id": event_id, "content_hash": content_hash},
+        visible_delta={"event_id": event_id, "type": payload_type},
+        historical_revision={"event_id": event_id, "content_hash": commit_hash},
         watermark=SourceWatermark(identity.stream_id, identity.generation, identity.sequence),
     ))
 

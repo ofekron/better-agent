@@ -23,9 +23,12 @@ import ui_selection
 router = APIRouter()
 _CHAT_DRAFT_PATH = re.compile(r"^/api/sessions/[A-Za-z0-9_-]+/draft$")
 _PROJECT_MAPPING_PATH = re.compile(r"^/api/project-mappings/[^/]+$")
+_CHAT_FEED_STATUS_PATH = re.compile(r"^/api/chat-feed/[A-Za-z0-9_-]+/status$")
 
 
 def owns_path(method: str, path: str) -> bool:
+    if _CHAT_FEED_STATUS_PATH.fullmatch(path):
+        return method == "GET"
     if path == "/api/file/draft":
         return method in {"GET", "POST", "DELETE"}
     if path == "/api/ui-selection":
@@ -45,6 +48,15 @@ def owns_path(method: str, path: str) -> bool:
     if path == "/api/sessions":
         return method == "POST"
     return method == "PATCH" and _CHAT_DRAFT_PATH.fullmatch(path) is not None
+
+
+@router.get("/api/chat-feed/{session_id}/status")
+async def chat_feed_status(session_id: str):
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", session_id):
+        raise HTTPException(status_code=400, detail="invalid session id")
+    import bff_chat_feed
+
+    return bff_chat_feed.feed_client.status(session_id)
 
 
 def chat_draft_session_id(method: str, path: str) -> str | None:

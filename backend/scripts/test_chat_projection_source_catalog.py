@@ -99,18 +99,24 @@ def test_concurrent_exact_allocation() -> None:
     assert values == [("claude", "shared-run", 1, 1)] * 4
 
 
+def wire_fact(provider: str, index: int) -> dict:
+    return {
+        "root_id": "provider-root",
+        "sid": "provider-root",
+        "source": "provider_stream",
+        "source_stream_id": f"run-{provider}",
+        "source_event_id": f"event-{index}",
+        "content_hash": digest(f"content-{index}"),
+        "payload_type": "assistant_output",
+        "payload": {"message_id": "message", "text": f"text-{index}"},
+        "turn_id": f"run-{provider}",
+    }
+
+
 def test_provider_switch_admits_one_neutral_root_and_missing_identity_fails_closed() -> None:
     for index, provider in enumerate(("claude", "codex", "gemini"), 1):
-        chat_projection_ingestion.admit_provider_event(
-            root_id="provider-root",
-            session_id="provider-root",
-            event_type="agent_message",
-            data={"uuid": f"event-{index}", "message": {"role": "assistant", "content": []}},
-            source="provider_stream",
-            run_id=f"run-{provider}",
-            message_id="message",
-            turn_id=f"run-{provider}",
-            provider=provider,
+        chat_projection_ingestion.admit_canonical_fact(
+            wire_fact(provider, index), provider=provider,
         )
     service, catalog = chat_projection_ingestion._instances()
     generation = catalog.root_generation("provider-root")
@@ -122,13 +128,10 @@ def test_provider_switch_admits_one_neutral_root_and_missing_identity_fails_clos
     assert [fact.canonical_fact["provider"] for fact in facts] == ["claude", "codex", "gemini"]
     assert authority.provider == "neutral"
     before = len(facts)
-    for provider in (None, "tampered"):
+    for provider in ("", "tampered"):
         try:
-            chat_projection_ingestion.admit_provider_event(
-                root_id="provider-root", session_id="provider-root",
-                event_type="agent_message", data={"uuid": "rejected"},
-                source="provider_stream", run_id=None,
-                message_id="message", turn_id="turn", provider=provider,
+            chat_projection_ingestion.admit_canonical_fact(
+                wire_fact("claude", 99), provider=provider,
             )
             raise AssertionError("missing or tampered provider was admitted")
         except ValueError:
