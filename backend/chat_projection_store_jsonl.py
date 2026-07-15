@@ -18,7 +18,8 @@ from chat_projection_store import (
 from chat_projection_store_owner import OwnerClient, serve_owner
 from chat_projection_store_owner_path import secure_open, verify_anchored_file
 from chat_projection_store_sqlite import (
-    MAX_RESPONSE_BYTES, MAX_TEXT_BYTES, SQLiteChatProjectionStore, _owner_dispatch, canonical_json,
+    AUTOINDEX_COUNTS, MAX_RESPONSE_BYTES, MAX_TEXT_BYTES, TABLE_DDL,
+    SQLiteChatProjectionStore, _owner_dispatch, canonical_json,
 )
 from paths import ba_home
 
@@ -85,6 +86,15 @@ def _integrity_triggers() -> dict[str, tuple[str, str]]:
 
 
 INTEGRITY_TRIGGERS = _integrity_triggers()
+JSONL_TABLE_DDL = {
+    **TABLE_DDL, "jsonl_checkpoint": CHECKPOINT_DDL, "jsonl_integrity": INTEGRITY_DDL,
+}
+JSONL_TABLE_SPECS = {
+    **SQLiteChatProjectionStore._TABLES,
+    "jsonl_checkpoint": CHECKPOINT_SPEC, "jsonl_integrity": INTEGRITY_SPEC,
+}
+JSONL_UNIQUE_INDEXES = SQLiteChatProjectionStore._UNIQUE_INDEXES
+JSONL_AUTOINDEX_COUNTS = AUTOINDEX_COUNTS
 
 
 def _record_payload(sequence: int, previous_hash: str, operation: str, arguments: Mapping[str, Any]) -> dict[str, Any]:
@@ -134,10 +144,11 @@ class _JsonlOwnerStore:
                     connection, standalone=False,
                 ),
                 _extra_table_ddl={
-                    "jsonl_checkpoint": CHECKPOINT_DDL, "jsonl_integrity": INTEGRITY_DDL,
+                    name: ddl for name, ddl in JSONL_TABLE_DDL.items() if name not in TABLE_DDL
                 },
                 _extra_table_specs={
-                    "jsonl_checkpoint": CHECKPOINT_SPEC, "jsonl_integrity": INTEGRITY_SPEC,
+                    name: spec for name, spec in JSONL_TABLE_SPECS.items()
+                    if name not in SQLiteChatProjectionStore._TABLES
                 },
                 _extra_schema_objects=INTEGRITY_TRIGGERS,
             )
@@ -233,45 +244,14 @@ class _JsonlOwnerStore:
                 continue
             try:
                 connection = sqlite3.connect(f"file:{name}?mode=rw", uri=True)
-                tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-                if tables != set(SQLiteChatProjectionStore._TABLES) | {"jsonl_checkpoint", "jsonl_integrity"}:
-                    connection.close()
-                    continue
-                triggers = {
-                    row[0]: (row[1], "".join((row[2] or "").lower().split()))
-                    for row in connection.execute(
-                        "SELECT name,tbl_name,sql FROM sqlite_master WHERE type='trigger'"
-                    )
-                }
-                expected_triggers = {
-                    name: (table, "".join(ddl.lower().split()))
-                    for name, (table, ddl) in INTEGRITY_TRIGGERS.items()
-                }
-                if triggers != expected_triggers:
-                    connection.close()
-                    continue
-                columns = tuple(
-                    (item[1], item[2].upper(), int(item[3]))
-                    for item in connection.execute("PRAGMA table_info('jsonl_checkpoint')")
+                SQLiteChatProjectionStore._validate_schema_connection(
+                    connection,
+                    table_ddl=JSONL_TABLE_DDL,
+                    table_specs=JSONL_TABLE_SPECS,
+                    extra_schema_objects=INTEGRITY_TRIGGERS,
+                    unique_indexes=JSONL_UNIQUE_INDEXES,
+                    autoindex_counts=JSONL_AUTOINDEX_COUNTS,
                 )
-                if columns != (
-                    ("slot_generation", "INTEGER", 1), ("journal_dev", "INTEGER", 1),
-                    ("journal_ino", "INTEGER", 1), ("byte_offset", "INTEGER", 1),
-                    ("record_sequence", "INTEGER", 1), ("chain_head", "TEXT", 1),
-                    ("prefix_digest", "TEXT", 1), ("integrity_json", "TEXT", 1),
-                ):
-                    connection.close()
-                    continue
-                integrity_columns = tuple(
-                    (item[1], item[2].upper(), int(item[3]), int(item[5]))
-                    for item in connection.execute("PRAGMA table_info('jsonl_integrity')")
-                )
-                if integrity_columns != (
-                    ("table_name", "TEXT", 1, 1), ("row_count", "INTEGER", 1, 0),
-                    ("sum_a", "INTEGER", 1, 0), ("sum_b", "INTEGER", 1, 0),
-                ):
-                    connection.close()
-                    continue
                 row = connection.execute("SELECT * FROM jsonl_checkpoint").fetchone()
                 if row is None or connection.execute("SELECT COUNT(*) FROM jsonl_checkpoint").fetchone()[0] != 1:
                     connection.close()
@@ -293,7 +273,7 @@ class _JsonlOwnerStore:
                 connection.close()
                 if valid:
                     candidates.append((offset, sequence, generation, name, chain, prefix))
-            except (sqlite3.Error, OSError, TypeError):
+            except (ChatProjectionStoreError, sqlite3.Error, OSError, TypeError):
                 continue
         if not candidates:
             return None

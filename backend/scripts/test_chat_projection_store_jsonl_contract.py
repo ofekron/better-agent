@@ -434,6 +434,89 @@ def test_epoch_reuse_tamper_fallback_and_automatic_quarantine() -> None:
     quarantined.close()
 
 
+def test_exact_schema_attestation_falls_back_before_selection() -> None:
+    def initialized_path(name: str) -> tuple[Path, Path]:
+        path = STATE_HOME / "chat" / f"schema-{name}.jsonl"
+        store = JsonlChatProjectionStore(path)
+        store.select_generation("root", 0)
+        store.commit(request())
+        store.close()
+        slot = next(path.parent.glob(f"{path.name}.index.*.sqlite3"))
+        return path, slot
+
+    valid_path, valid_slot = initialized_path("valid")
+    valid = JsonlChatProjectionStore(valid_path)
+    assert valid.startup_read_bytes() == 0
+    assert valid.projection_cursor("root", 0) == 1
+    valid.close()
+    assert len(list(valid_path.parent.glob(f"{valid_path.name}.index.*.sqlite3"))) == 1
+    assert valid_slot.exists()
+
+    view_path, view_slot = initialized_path("view")
+    connection = sqlite3.connect(view_slot)
+    connection.execute("CREATE VIEW unexpected_projection_view AS SELECT root_id FROM selected_roots")
+    connection.commit()
+    connection.close()
+    rebuilt = JsonlChatProjectionStore(view_path)
+    assert rebuilt.startup_read_bytes() == view_path.stat().st_size
+    assert rebuilt.projection_cursor("root", 0) == 1
+    rebuilt.close()
+    connection = sqlite3.connect(view_slot)
+    assert connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='view' AND name='unexpected_projection_view'"
+    ).fetchone()
+    connection.close()
+
+    index_path, index_slot = initialized_path("index")
+    connection = sqlite3.connect(index_slot)
+    connection.execute("CREATE INDEX unexpected_projection_index ON render_nodes(event_id)")
+    connection.commit()
+    connection.close()
+    rebuilt = JsonlChatProjectionStore(index_path)
+    assert rebuilt.startup_read_bytes() == index_path.stat().st_size
+    assert rebuilt.projection_cursor("root", 0) == 1
+    rebuilt.close()
+    connection = sqlite3.connect(index_slot)
+    assert connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='index' AND name='unexpected_projection_index'"
+    ).fetchone()
+    connection.close()
+
+    for name, original, replacement in (
+        (
+            "pk", "PRIMARY KEY(root_id,root_generation,fact_sequence)",
+            "PRIMARY KEY(root_id,fact_sequence,root_generation)",
+        ),
+        (
+            "unique", "UNIQUE(root_id,root_generation,event_id,content_hash)",
+            "UNIQUE(root_id,root_generation,event_id,fact_sequence)",
+        ),
+    ):
+        path, slot = initialized_path(name)
+        connection = sqlite3.connect(slot)
+        ddl = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='canonical_facts'"
+        ).fetchone()[0]
+        assert original in ddl
+        connection.execute("PRAGMA writable_schema=ON")
+        connection.execute(
+            "UPDATE sqlite_master SET sql=? WHERE type='table' AND name='canonical_facts'",
+            (ddl.replace(original, replacement),),
+        )
+        connection.execute("PRAGMA writable_schema=OFF")
+        connection.commit()
+        connection.close()
+        rebuilt = JsonlChatProjectionStore(path)
+        assert rebuilt.startup_read_bytes() == path.stat().st_size
+        assert rebuilt.projection_cursor("root", 0) == 1
+        rebuilt.close()
+        connection = sqlite3.connect(slot)
+        assert replacement in connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='canonical_facts'"
+        ).fetchone()[0]
+        connection.close()
+
+
 def main() -> None:
     try:
         test_commit_duplicate_mutation_restart_and_delete()
@@ -448,6 +531,8 @@ def main() -> None:
         print("PASS test_hundred_thousand_record_checkpoint_is_tail_only")
         test_epoch_reuse_tamper_fallback_and_automatic_quarantine()
         print("PASS test_epoch_reuse_tamper_fallback_and_automatic_quarantine")
+        test_exact_schema_attestation_falls_back_before_selection()
+        print("PASS test_exact_schema_attestation_falls_back_before_selection")
     finally:
         shutil.rmtree(STATE_HOME, ignore_errors=True)
 

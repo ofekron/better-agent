@@ -483,32 +483,50 @@ class SQLiteChatProjectionStore:
             raise
 
     def _validate_schema(self) -> None:
-        expected_objects = self._expected_schema_objects()
-        rows = self._connection.execute(
+        self._validate_schema_connection(
+            self._connection, table_ddl=self._table_ddl, table_specs=self._TABLES,
+            extra_schema_objects=self._extra_schema_objects,
+            unique_indexes=self._UNIQUE_INDEXES, autoindex_counts=AUTOINDEX_COUNTS,
+        )
+
+    @classmethod
+    def _validate_schema_connection(
+        cls, connection: sqlite3.Connection, *, table_ddl: Mapping[str, str],
+        table_specs: Mapping[str, tuple[tuple[str, str, int, int, str | None], ...]],
+        extra_schema_objects: Mapping[str, tuple[str, str]],
+        unique_indexes: Mapping[str, set[tuple[str, ...]]],
+        autoindex_counts: Mapping[str, int],
+    ) -> None:
+        expected_objects = cls._expected_schema_objects_for(
+            table_ddl, extra_schema_objects, autoindex_counts,
+        )
+        rows = connection.execute(
             "SELECT type,name,tbl_name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' "
             "OR name LIKE 'sqlite_autoindex_%'"
         ).fetchall()
         actual_objects = {
-            (row[0], row[1], row[2], self._normalize_sql(row[3])) for row in rows
+            (row[0], row[1], row[2], cls._normalize_sql(row[3])) for row in rows
             if row[0] in ("table", "index", "trigger", "view")
         }
         if actual_objects != expected_objects:
             raise ChatProjectionStoreError("unsupported_schema", "wipe the selected chat store")
-        if self._connection.execute("PRAGMA foreign_key_list('canonical_facts')").fetchall():
+        if int(connection.execute("PRAGMA user_version").fetchone()[0]) != SCHEMA_VERSION:
             raise ChatProjectionStoreError("unsupported_schema", "wipe the selected chat store")
-        for table, expected in self._TABLES.items():
-            rows = self._connection.execute(f'PRAGMA table_info("{table}")').fetchall()
+        for table, expected in table_specs.items():
+            if connection.execute(f'PRAGMA foreign_key_list("{table}")').fetchall():
+                raise ChatProjectionStoreError("unsupported_schema", "wipe the selected chat store")
+            rows = connection.execute(f'PRAGMA table_info("{table}")').fetchall()
             actual = tuple((row[1], row[2].upper(), int(row[3]), int(row[5]), row[4]) for row in rows)
             if actual != expected:
                 raise ChatProjectionStoreError("unsupported_schema", "wipe the selected chat store")
             expected_pk = tuple(name for name, _, _, pk, _ in sorted(expected, key=lambda item: item[3]) if pk)
-            indexes = self._connection.execute(f'PRAGMA index_list("{table}")').fetchall()
+            indexes = connection.execute(f'PRAGMA index_list("{table}")').fetchall()
             unique_columns = set()
             for index in indexes:
                 if int(index[2]) != 1:
                     continue
                 columns = tuple(
-                    row[2] for row in self._connection.execute(
+                    row[2] for row in connection.execute(
                         f'PRAGMA index_info("{index[1]}")'
                     ).fetchall()
                 )
@@ -517,7 +535,7 @@ class SQLiteChatProjectionStore:
                         raise ChatProjectionStoreError("unsupported_schema", "wipe the selected chat store")
                 else:
                     unique_columns.add(columns)
-            if unique_columns != self._UNIQUE_INDEXES.get(table, set()):
+            if unique_columns != unique_indexes.get(table, set()):
                 raise ChatProjectionStoreError("unsupported_schema", "wipe the selected chat store")
 
     @staticmethod
@@ -527,14 +545,23 @@ class SQLiteChatProjectionStore:
         return "".join(sql.lower().split())
 
     def _expected_schema_objects(self) -> set[tuple[str, str, str, str | None]]:
+        return self._expected_schema_objects_for(
+            self._table_ddl, self._extra_schema_objects, AUTOINDEX_COUNTS,
+        )
+
+    @classmethod
+    def _expected_schema_objects_for(
+        cls, table_ddl: Mapping[str, str], extra_schema_objects: Mapping[str, tuple[str, str]],
+        autoindex_counts: Mapping[str, int],
+    ) -> set[tuple[str, str, str, str | None]]:
         objects = {
-            ("table", name, name, self._normalize_sql(sql)) for name, sql in self._table_ddl.items()
+            ("table", name, name, cls._normalize_sql(sql)) for name, sql in table_ddl.items()
         }
-        for table, count in AUTOINDEX_COUNTS.items():
+        for table, count in autoindex_counts.items():
             for number in range(1, count + 1):
                 objects.add(("index", f"sqlite_autoindex_{table}_{number}", table, None))
-        for name, (table, ddl) in self._extra_schema_objects.items():
-            objects.add(("trigger", name, table, self._normalize_sql(ddl)))
+        for name, (table, ddl) in extra_schema_objects.items():
+            objects.add(("trigger", name, table, cls._normalize_sql(ddl)))
         return objects
 
     @_translate_sqlite("storage_write_failed")
