@@ -11,9 +11,13 @@ type Fixture = {
   expected: {
     chat_tree_completed: unknown
     formal_edge_cases: { visible_plans: Record<string, string[]> }
-    model_marker_targets: { visible_render_plans: Record<string, { scope?: string; visible_event_ids: string[]; marker_target_id: string }> }
+    model_marker_targets: Record<'live-at-seq-22' | 'completed-at-seq-33', MarkerTarget[]> & {
+      visible_render_plans: Record<string, { scope?: string; visible_event_ids: string[]; panel_last_id?: string; marker_target_id: string }>
+    }
   }
 }
+
+type MarkerTarget = { scope: string; provider: string; model: string; effort: string; target_event_id: string }
 
 const fixture = JSON.parse(readFileSync(resolve(import.meta.dirname, '../../test-contracts/chat-panel/v1/canonical-session.json'), 'utf8')) as Fixture
 const projection = parseProjection(fixture.expected.chat_tree_completed)
@@ -77,7 +81,7 @@ describe('canonical render plans', () => {
   it('matches completed collapsed and extended fixture plans', () => {
     expect(tokens('turn-1', 'collapsed')).toEqual(['prompt:u1', 'ellipsis:turn-1', 'result:e-final-card+e-final-text'])
     expect(tokens('turn-3', 'collapsed')).toEqual(['prompt:u3'])
-    expect(tokens('turn-2', 'extended')).toEqual(['prompt:u2', 'text:Resolved after ownership arrived.', 'compact:e-parent', 'text:Final replaced answer', 'steering:e-steer', 'native:e-ns1', 'worker:e-worker1'])
+    expect(tokens('turn-2', 'extended')).toEqual(['prompt:u2', 'summary:Resolved after ownership arrived.', 'summary:Final replaced answer', 'steering:e-steer', 'native:e-ns1', 'worker:e-worker1'])
   })
 
   it('renders off-path live explanations collapsed and the final-path explanation fully expanded', () => {
@@ -96,12 +100,18 @@ describe('canonical render plans', () => {
     ])
   })
 
-  it('keeps explanation and one-level expansion semantics independent', () => {
+  it('expands an explanation independently with its compact body items', () => {
     const explanation = turn('turn-1').body[0]
     expect(explanation.type).toBe('Explanation')
     if (explanation.type !== 'Explanation') return
     expect(explanationPlan(explanation, false)).toEqual([{ kind: 'explanation', text: 'I will inspect the inputs.', textEventIds: ['e-text-1a'], itemIds: ['e-tool-1'], itemCount: 1, expanded: false }])
-    expect(explanationPlan(explanation, true)).toEqual([{ kind: 'explanation', text: 'I will inspect the inputs.', textEventIds: ['e-text-1a'], itemIds: ['e-tool-1'], itemCount: 1, expanded: true }])
+    expect(explanationPlan(explanation, true)).toEqual([
+      { kind: 'explanation', text: 'I will inspect the inputs.', textEventIds: ['e-text-1a'], itemIds: ['e-tool-1'], itemCount: 1, expanded: true },
+      { kind: 'compact', id: 'e-tool-1' },
+    ])
+  })
+
+  it('keeps one-level scoped-turn expansion independent', () => {
     const worker = turn('turn-4').body[1] as ScopedTurn
     expect(oneLevelPlan(worker)).toEqual([{ kind: 'internal', id: 'e-live-worker' }, { kind: 'compact', id: 'e-live-native' }])
   })
@@ -120,16 +130,30 @@ describe('canonical render plans', () => {
 })
 
 describe('visibility-dependent model markers', () => {
+  it.each([
+    ['live-at-seq-22', 22],
+    ['completed-at-seq-33', 33],
+  ] as const)('matches the complete ordered %s marker stream across every scope and run', (snapshot, watermark) => {
+    const visible = canonicalEventsThrough(watermark)
+    const actual = decorateModelRuns(visible).map(({ id, scope, run }) => ({
+      scope,
+      provider: run.provider,
+      model: run.model,
+      effort: run.effort,
+      target_event_id: id,
+    }))
+    expect(actual).toEqual(fixture.expected.model_marker_targets[snapshot])
+  })
+
   it('matches exact fixture targets for every canonical visible render plan', () => {
-    const canonicalEvents = [...new Map(fixture.events.map((event) => [event.event_id, event])).values()]
-      .sort((left, right) => left.journal_seq - right.journal_seq)
     for (const plan of Object.values(fixture.expected.model_marker_targets.visible_render_plans)) {
       const wanted = new Set(plan.visible_event_ids)
-      const visible = canonicalEvents
-        .filter(({ event_id }) => wanted.has(event_id))
-        .map(({ event_id, context_id, provider }): VisibleEvent => ({ id: event_id, scope: plan.scope ?? context_id, run: { provider: provider.id, model: provider.model, effort: provider.effort } }))
+      const visible = canonicalEventsThrough(Number.POSITIVE_INFINITY)
+        .filter(({ id }) => wanted.has(id))
+        .map((event): VisibleEvent => ({ ...event, scope: plan.scope ?? event.scope }))
       expect(visible.map(({ id }) => id)).toEqual(plan.visible_event_ids)
       expect(decorateModelRuns(visible).map(({ id }) => id)).toEqual([plan.marker_target_id])
+      if (plan.panel_last_id) expect(visible.at(-1)?.id).toBe(plan.panel_last_id)
     }
   })
 
@@ -141,6 +165,12 @@ describe('visibility-dependent model markers', () => {
     expect(decorateModelRuns([visible[0], visible[2]]).map(({ id }) => id)).toEqual(['a', 'c'])
   })
 })
+
+function canonicalEventsThrough(watermark: number): VisibleEvent[] {
+  return [...new Map(fixture.events.filter(({ journal_seq }) => journal_seq <= watermark).map((event) => [event.event_id, event])).values()]
+    .sort((left, right) => left.journal_seq - right.journal_seq)
+    .map(({ event_id, context_id, provider }) => ({ id: event_id, scope: context_id, run: { provider: provider.id, model: provider.model, effort: provider.effort } }))
+}
 
 function expectCode(value: unknown, code: ProjectionParseError['code']): void {
   try { parseProjection(value) } catch (error) {
