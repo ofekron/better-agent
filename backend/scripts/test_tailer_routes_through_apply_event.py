@@ -39,15 +39,18 @@ import time
 # State-isolation rule: set BETTER_CLAUDE_HOME BEFORE importing any
 # backend module so every store, runs root, traces dir lands in a
 # throwaway tempdir.
-import _test_home
-_TMP_HOME = _test_home.isolate("bc-test-tailer-")
-
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _BACKEND = os.path.dirname(_HERE)
 if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
+import _test_home
+_TMP_HOME = _test_home.isolate("bc-test-tailer-")
+
 from pathlib import Path
+
+import runtime_ownership  # noqa: E402
+runtime_ownership.register_current_process_writer()
 
 from event_ingester import event_ingester  # noqa: E402
 from event_bus import BusEvent, bus  # noqa: E402
