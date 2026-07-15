@@ -819,6 +819,11 @@ export function InputArea({
       ? t("input.steerButton")
       : t("input.interruptSendButton")
     : t("input.sendButton");
+  const primarySendIcon = somethingRunning
+    ? selectedActiveAction === "steer"
+      ? "target"
+      : "swords"
+    : "arrow-up";
   const primarySendTitle = somethingRunning
     ? selectedActiveAction === "steer"
       ? t("input.steerTitle")
@@ -951,9 +956,12 @@ export function InputArea({
                     setSelectedQueuedIds(new Set());
                   }}
                 >
-                  {selectedQueuedIds.size > 0
-                    ? t("input.queuedInterruptSelected", { count: selectedQueuedIds.size })
-                    : t("input.queuedInterruptAll")}
+                  <Icon name="swords" size={14} />
+                  <span>
+                    {selectedQueuedIds.size > 0
+                      ? t("input.queuedInterruptSelected", { count: selectedQueuedIds.size })
+                      : t("input.queuedInterruptAll")}
+                  </span>
                 </button>
               )}
             </div>
@@ -1112,7 +1120,8 @@ export function InputArea({
             data-testid="send-btn"
             title={primarySendTitle}
           >
-            {primarySendLabel}
+            <Icon name={primarySendIcon} size={15} />
+            <span>{primarySendLabel}</span>
           </button>
         )}
         {somethingRunning && canSteer && overflowStage < (selectedActiveAction === "interrupt" ? 1 : 2) && (
@@ -1154,7 +1163,8 @@ export function InputArea({
             className="send-btn queue"
             data-testid="queue-btn"
           >
-            {t("input.queueSendButton")}
+            <Icon name="clock" size={15} />
+            <span>{t("input.queueSendButton")}</span>
           </button>
         )}
         {overflowStage < 4 && stopButton}
@@ -1205,7 +1215,8 @@ export function InputArea({
                   disabled={!canSend}
                   title={primarySendTitle}
                 >
-                  {primarySendLabel}
+                  <Icon name={primarySendIcon} size={14} />
+                  <span>{primarySendLabel}</span>
                 </button>
               )}
               {!somethingRunning && overflowStage >= 6 && (
@@ -1215,7 +1226,8 @@ export function InputArea({
                   onClick={() => { setMenuOpen(false); handleSend(); }}
                   disabled={!canSend}
                 >
-                  {t("input.sendButton")}
+                  <Icon name="arrow-up" size={14} />
+                  <span>{t("input.sendButton")}</span>
                 </button>
               )}
               {somethingRunning && canSteer && overflowStage >= 2 && (
@@ -1225,9 +1237,12 @@ export function InputArea({
                   onClick={() => void persistActiveAction(selectedActiveAction === "steer" ? "interrupt" : "steer")}
                   disabled={preferenceSaving}
                 >
-                  {selectedActiveAction === "steer"
-                    ? t("input.interruptSendButton")
-                    : t("input.steerButton")}
+                  <Icon name={selectedActiveAction === "steer" ? "swords" : "target"} size={14} />
+                  <span>
+                    {selectedActiveAction === "steer"
+                      ? t("input.interruptSendButton")
+                      : t("input.steerButton")}
+                  </span>
                 </button>
               )}
               {steerIsPrimary && overflowStage >= 6 && (
@@ -1237,7 +1252,8 @@ export function InputArea({
                   onClick={() => { setMenuOpen(false); handleSend(); }}
                   disabled={!canSend}
                 >
-                  {t("input.queueSendButton")}
+                  <Icon name="clock" size={14} />
+                  <span>{t("input.queueSendButton")}</span>
                 </button>
               )}
               {overflowStage >= 4 && stopButton && (
@@ -1453,7 +1469,8 @@ export function InputArea({
                 disabled={!canSend}
                 title={primarySendTitle}
               >
-                {primarySendLabel}
+                <Icon name={primarySendIcon} size={15} />
+                <span>{primarySendLabel}</span>
               </button>
             </div>
           </div>
@@ -1708,7 +1725,8 @@ function QueuedPromptBanner({
             <>
               {onCancel && (
                 <button className="queued-cancel-btn" onClick={onCancel}>
-                  {cancelLabel}
+                  <Icon name="x" size={13} />
+                  <span>{cancelLabel}</span>
                 </button>
               )}
               {onSaveToNote && (
@@ -1729,7 +1747,8 @@ function QueuedPromptBanner({
               onClick={onSteer}
               title={steerTitle}
             >
-              {steerLabel}
+              <Icon name="target" size={13} />
+              <span>{steerLabel}</span>
             </button>
           )}
           {onPromote && (
@@ -1739,7 +1758,8 @@ function QueuedPromptBanner({
               onClick={onPromote}
               title={interruptTitle}
             >
-              {interruptLabel}
+              <Icon name="swords" size={13} />
+              <span>{interruptLabel}</span>
             </button>
           )}
           {compactActions && (onCancel || onSaveToNote) && (
@@ -1877,7 +1897,8 @@ function QueuedPromptBanner({
                 className="queued-cancel-btn"
                 onClick={onCancel}
               >
-                {cancelLabel}
+                <Icon name="x" size={13} />
+                <span>{cancelLabel}</span>
               </button>
             )}
             {onSaveToNote && (
@@ -1898,7 +1919,8 @@ function QueuedPromptBanner({
             onClick={onSteer}
             title={steerTitle}
           >
-            {steerLabel}
+            <Icon name="target" size={13} />
+            <span>{steerLabel}</span>
           </button>
         )}
         {onPromote && (
@@ -1908,7 +1930,8 @@ function QueuedPromptBanner({
             onClick={onPromote}
             title={interruptTitle}
           >
-            {interruptLabel}
+            <Icon name="swords" size={13} />
+            <span>{interruptLabel}</span>
           </button>
         )}
         {compactActions && (onCancel || onSaveToNote) && (
