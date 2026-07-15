@@ -583,7 +583,14 @@ def project_session(session: dict[str, Any]) -> Optional[dict[str, Any]]:
         if prompt.get("client_id") in client_ids or prompt.get("lifecycle_msg_id") in lifecycle_ids:
             continue
         queued.append(copy.deepcopy(prompt))
-    return {"id": sid, "model": session.get("model"), "cwd": session.get("cwd"), "queued_prompts": queued, **users}
+    return {
+        "id": sid,
+        "model": session.get("model"),
+        "cwd": session.get("cwd"),
+        "queued_prompts": queued,
+        "queue_revision": int(session.get("queue_revision") or 0),
+        **users,
+    }
 
 
 def _walk_nodes(node: dict[str, Any]) -> Iterable[dict[str, Any]]:

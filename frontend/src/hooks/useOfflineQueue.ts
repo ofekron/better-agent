@@ -2,9 +2,20 @@ import { useState, useCallback, useRef, useEffect } from "react";
 import type { CapabilityContext, OrchestrationMode, SendMode, Session } from "../types";
 import type { ImagePayload, FilePayload } from "./useWebSocket";
 import { uuidv4 } from "../lib/uuid";
+import {
+  deleteOfflineAction,
+  importOfflineActions,
+  loadOfflineActions,
+  offlineActionKey,
+  offlineActionKeyFor,
+  putOfflineAction,
+  updateOfflineAction,
+} from "../lib/offlineQueueStore";
 
 export type { ImagePayload };
 export type { FilePayload };
+
+const LEGACY_STORAGE_KEY = "better_agent_offline_queue";
 
 export interface OfflinePromptEntry {
   type?: "send_message";
@@ -57,20 +68,11 @@ export interface OfflineQueueEditState {
   draftPrompt: string;
 }
 
-const STORAGE_KEY = "better_agent_offline_queue";
-
 const CANONICAL_UUID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 function entrySessionId(entry: OfflineQueueEntry): string {
   return entry.type === "create_session" ? entry.session.id : entry.sessionId;
-}
-
-function entryIdentity(entry: OfflineQueueEntry): string {
-  // Match the backend and ack-removal semantics: one logical action is the
-  // pair of target session + client-minted action id. This lets us merge
-  // tabs and re-enqueues without changing the replay/idempotency contract.
-  return `${entrySessionId(entry)}\u0000${entry.clientId}`;
 }
 
 export function offlineEntrySessionId(entry: OfflineQueueEntry): string {
@@ -117,205 +119,214 @@ function isUsableEntry(entry: unknown): entry is OfflineQueueEntry {
     && (p.prompt.length > 0 || hasPayloadArray(p.images) || hasPayloadArray(p.files));
 }
 
-function dedupeEntries(entries: OfflineQueueEntry[]): OfflineQueueEntry[] {
-  const latestById = new Map<string, OfflineQueueEntry>();
-  const order: string[] = [];
-  for (const entry of entries) {
-    const id = entryIdentity(entry);
-    if (!latestById.has(id)) order.push(id);
-    latestById.set(id, entry);
-  }
-  return order.map((id) => latestById.get(id)!);
-}
-
-function parseQueue(raw: string | null): OfflineQueueEntry[] {
+function readLegacyEntries(): OfflineQueueEntry[] | null {
+  const raw = localStorage.getItem(LEGACY_STORAGE_KEY);
   if (!raw) return [];
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
   } catch {
-    return [];
+    return null;
   }
-  if (!Array.isArray(parsed)) return [];
-  return dedupeEntries(normalizeQueueEntries(parsed.filter(isUsableEntry)));
-}
-
-function readQueue(): OfflineQueueEntry[] {
-  try {
-    return parseQueue(localStorage.getItem(STORAGE_KEY));
-  } catch {
-    return [];
-  }
-}
-
-function writeQueueRaw(queue: OfflineQueueEntry[]): boolean {
-  try {
-    if (queue.length === 0) {
-      localStorage.removeItem(STORAGE_KEY);
-    } else {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(queue));
-    }
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-export function loadOfflineQueue(): OfflineQueueEntry[] {
-  const parsed = readQueue();
-  // Repair-on-read after validation / normalization / dedupe. Best effort:
-  // if storage is unavailable, keep the parsed in-memory view but never throw.
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (raw && JSON.stringify(parsed) !== raw) writeQueueRaw(parsed);
-  } catch {
-    // ignored
-  }
-  return parsed;
+  if (!Array.isArray(parsed)) return null;
+  return normalizeQueueEntries(parsed.filter(isUsableEntry));
 }
 
 export function useOfflineQueue() {
-  const [queue, setQueue] = useState<OfflineQueueEntry[]>(loadOfflineQueue);
-  // Synchronous source for `getAll`. Kept in lockstep at mutation sites so
-  // we do not need to touch refs during render.
+  const [queue, setQueue] = useState<OfflineQueueEntry[]>([]);
   const queueRef = useRef(queue);
   const [persistFailed, setPersistFailed] = useState(false);
+  const [ready, setReady] = useState(false);
+  const channelRef = useRef<BroadcastChannel | null>(null);
+  const writeTailRef = useRef<Promise<void>>(Promise.resolve());
+  const instanceIdRef = useRef(uuidv4());
 
-  const commit = useCallback(
-    (update: (prev: OfflineQueueEntry[]) => OfflineQueueEntry[]) => {
-      // Read-modify-write against fresh disk so this tab never clobbers a
-      // concurrent tab's queued action or resurrects one another tab already
-      // removed after an explicit backend ack. Because failed writes return
-      // false without updating queueRef/state, there are no memory-only queued
-      // actions to merge back in.
-      const base = readQueue();
-      const next = dedupeEntries(update(base));
-      const ok = writeQueueRaw(next);
-      setPersistFailed(!ok);
-      if (!ok) {
-        // Fail closed. A pre-ack action that is not actually durable must not
-        // appear queued; callers use `false` to keep/restore the visible draft
-        // instead of silently losing intent on reload.
-        return false;
-      }
+  const refresh = useCallback(async () => {
+    try {
+      const next = (await loadOfflineActions()).filter(isUsableEntry);
       queueRef.current = next;
       setQueue(next);
+      setPersistFailed(false);
+    } catch {
+      setPersistFailed(true);
+    } finally {
+      setReady(true);
+    }
+  }, []);
+
+  const notifyChanged = useCallback(() => {
+    channelRef.current?.postMessage("changed");
+    window.dispatchEvent(new CustomEvent("better-agent-offline-queue-changed", {
+      detail: instanceIdRef.current,
+    }));
+  }, []);
+
+  const persist = useCallback((
+    operation: () => Promise<void>,
+    updateLocal: (items: OfflineQueueEntry[]) => OfflineQueueEntry[],
+  ) => {
+    const write = writeTailRef.current.then(operation, operation);
+    writeTailRef.current = write.catch(() => undefined);
+    return write.then(() => {
+      setPersistFailed(false);
+      const next = updateLocal(queueRef.current);
+      queueRef.current = next;
+      setQueue(next);
+      notifyChanged();
       return true;
-    },
-    [],
-  );
+    }, () => {
+      setPersistFailed(true);
+      return false;
+    });
+  }, [notifyChanged]);
 
   const enqueue = useCallback(
-    (entry: OfflineQueueEntry) => {
+    async (entry: OfflineQueueEntry) => {
       const [normalized] = normalizeQueueEntries([entry]);
       if (!normalized || !isUsableEntry(normalized)) return false;
-      return commit((prev) => {
-        const id = entryIdentity(normalized);
-        return [...prev.filter((e) => entryIdentity(e) !== id), normalized];
-      });
+      const key = offlineActionKey(normalized);
+      return persist(
+        () => putOfflineAction(normalized),
+        (items) => {
+          const index = items.findIndex((item) => offlineActionKey(item) === key);
+          if (index < 0) return [...items, normalized];
+          return items.map((item, itemIndex) => itemIndex === index ? normalized : item);
+        },
+      );
     },
-    [commit],
+    [persist],
   );
 
   const getAll = useCallback((): OfflineQueueEntry[] => {
     return queueRef.current;
   }, []);
 
-  const remove = useCallback(
-    (clientId: string) => {
-      return commit((prev) => prev.filter((e) => e.clientId !== clientId));
-    },
-    [commit],
-  );
-
   const removeEntry = useCallback(
     (entry: OfflineQueueEntry) => {
-      const id = entryIdentity(entry);
-      return commit((prev) => prev.filter((item) => entryIdentity(item) !== id));
+      const key = offlineActionKey(entry);
+      return persist(
+        () => deleteOfflineAction(key),
+        (items) => items.filter((item) => offlineActionKey(item) !== key),
+      );
     },
-    [commit],
+    [persist],
   );
 
   const beginEdit = useCallback(
     (entry: OfflineQueueEntry) => {
-      const id = entryIdentity(entry);
-      return commit((prev) => prev.map((item) => (
-        entryIdentity(item) === id
-          ? { ...item, editing: { draftPrompt: item.prompt } }
-          : item
-      )));
+      const key = offlineActionKey(entry);
+      const update = (item: OfflineQueueEntry) => ({ ...item, editing: { draftPrompt: item.prompt } });
+      return persist(
+        () => updateOfflineAction(key, update),
+        (items) => items.map((item) => offlineActionKey(item) === key ? update(item) : item),
+      );
     },
-    [commit],
+    [persist],
   );
 
   const updateEditDraft = useCallback(
     (entry: OfflineQueueEntry, draftPrompt: string) => {
-      const id = entryIdentity(entry);
-      return commit((prev) => prev.map((item) => (
-        entryIdentity(item) === id && item.editing
+      const key = offlineActionKey(entry);
+      const updateLocal = (items: OfflineQueueEntry[]) => items.map((item) => (
+        offlineActionKey(item) === key && item.editing
           ? { ...item, editing: { draftPrompt } }
           : item
-      )));
+      ));
+      queueRef.current = updateLocal(queueRef.current);
+      setQueue(updateLocal);
+      const update = (item: OfflineQueueEntry) => item.editing
+        ? { ...item, editing: { draftPrompt } }
+        : item;
+      return persist(
+        () => updateOfflineAction(key, update),
+        (items) => items.map((item) => offlineActionKey(item) === key ? update(item) : item),
+      );
     },
-    [commit],
+    [persist],
   );
 
   const finishEdit = useCallback(
     (entry: OfflineQueueEntry) => {
-      const id = entryIdentity(entry);
-      return commit((prev) => prev.map((item) => {
-        if (entryIdentity(item) !== id || !item.editing) return item;
+      const key = offlineActionKey(entry);
+      const update = (item: OfflineQueueEntry): OfflineQueueEntry => {
+        if (!item.editing) return item;
         const prompt = item.editing.draftPrompt;
         const { editing: _editing, ...rest } = item;
         void _editing;
         if (rest.type !== "create_session") return { ...rest, prompt };
         const name = prompt ? prompt.split("\n")[0].slice(0, 80) : rest.session.name;
         return { ...rest, prompt, session: { ...rest.session, name } };
-      }));
+      };
+      return persist(
+        () => updateOfflineAction(key, update),
+        (items) => items.map((item) => offlineActionKey(item) === key ? update(item) : item),
+      );
     },
-    [commit],
+    [persist],
   );
 
   const cancelEdit = useCallback(
     (entry: OfflineQueueEntry) => {
-      const id = entryIdentity(entry);
-      return commit((prev) => prev.map((item) => {
-        if (entryIdentity(item) !== id || !item.editing) return item;
+      const key = offlineActionKey(entry);
+      const update = (item: OfflineQueueEntry): OfflineQueueEntry => {
+        if (!item.editing) return item;
         const { editing: _editing, ...rest } = item;
         void _editing;
         return rest;
-      }));
+      };
+      return persist(
+        () => updateOfflineAction(key, update),
+        (items) => items.map((item) => offlineActionKey(item) === key ? update(item) : item),
+      );
     },
-    [commit],
+    [persist],
   );
 
   const removeBySessionAndClient = useCallback(
     (sessionId: string, clientId: string) => {
-      return commit((prev) => prev.filter((entry) => {
-        if (entry.clientId !== clientId) return true;
-        if (entry.type === "create_session") return entry.session.id !== sessionId;
-        return entry.sessionId !== sessionId;
-      }));
+      const key = offlineActionKeyFor(sessionId, clientId);
+      return persist(
+        () => deleteOfflineAction(key),
+        (items) => items.filter((item) => offlineActionKey(item) !== key),
+      );
     },
-    [commit],
+    [persist],
   );
 
   useEffect(() => {
-    const onStorage = (event: StorageEvent) => {
-      if (event.key !== null && event.key !== STORAGE_KEY) return;
-      const next = readQueue();
-      queueRef.current = next;
-      setQueue(next);
+    void (async () => {
+      const legacy = readLegacyEntries();
+      if (legacy !== null) {
+        try {
+          await importOfflineActions(legacy);
+          localStorage.removeItem(LEGACY_STORAGE_KEY);
+        } catch {
+          setPersistFailed(true);
+        }
+      }
+      await refresh();
+    })();
+    const onChanged = (event?: Event) => {
+      if (event instanceof CustomEvent && event.detail === instanceIdRef.current) return;
+      void refresh();
     };
-    window.addEventListener("storage", onStorage);
-    return () => window.removeEventListener("storage", onStorage);
-  }, []);
+    window.addEventListener("better-agent-offline-queue-changed", onChanged);
+    if (typeof BroadcastChannel !== "undefined") {
+      const channel = new BroadcastChannel("better-agent-offline-actions");
+      channel.onmessage = onChanged;
+      channelRef.current = channel;
+    }
+    return () => {
+      window.removeEventListener("better-agent-offline-queue-changed", onChanged);
+      channelRef.current?.close();
+      channelRef.current = null;
+    };
+  }, [refresh]);
 
   return {
     queue,
     enqueue,
     getAll,
-    remove,
     removeEntry,
     removeBySessionAndClient,
     beginEdit,
@@ -323,5 +334,6 @@ export function useOfflineQueue() {
     finishEdit,
     cancelEdit,
     persistFailed,
+    ready,
   };
 }

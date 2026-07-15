@@ -215,8 +215,8 @@ def test_append_user_msg_queue_projection_uses_locked_snapshot() -> bool:
     record = session_queue_projection.get(sid) or {}
     ok = (
         live_ref_seen["value"] is False
-        and [m.get("id") for m in record.get("user_messages") or []]
-        == ["user-projection"]
+        and (record.get("user_message_acks") or {}).get("client-projection", {}).get("id")
+        == "user-projection"
     )
     print(
         f"{PASS if ok else FAIL} append_user_msg queue projection uses locked snapshot",

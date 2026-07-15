@@ -3829,6 +3829,12 @@ class SessionManager:
         return session_queue_projection.project_session(session)
 
     @staticmethod
+    def _bump_queue_revision(session: dict) -> int:
+        revision = int(session.get("queue_revision") or 0) + 1
+        session["queue_revision"] = revision
+        return revision
+
+    @staticmethod
     def _upsert_queue_record(record: Optional[dict]) -> None:
         if record is None:
             return
@@ -3847,7 +3853,10 @@ class SessionManager:
         def _enrich(session: dict) -> dict:
             holder["record"] = self._project_queue_record(session)
             if include_queued_prompts:
-                return {"queued_prompts": list(session.get("queued_prompts") or [])}
+                return {
+                    "queued_prompts": list(session.get("queued_prompts") or []),
+                    "queue_revision": int(session.get("queue_revision") or 0),
+                }
             return {}
 
         return _enrich
@@ -5223,15 +5232,24 @@ class SessionManager:
                 q = sess.setdefault("queued_prompts", [])
                 q[:] = [p for p in q if p.get("id") != prompt.get("id")]
                 q.append(prompt)
+                queue_revision = self._bump_queue_revision(sess)
                 batch_ctx = self._batches.get(rid)
                 if batch_ctx is None:
                     self._persist_root(rid, bump=True)
-                change = {"kind": "queued_prompts_updated"}
+                change = {
+                    "kind": "queued_prompts_updated",
+                    "queued_prompts": list(q),
+                    "queue_revision": queue_revision,
+                }
                 if not (batch_ctx and batch_ctx.get("_phantom")):
                     self._fire(sid, change)
                 result["session"] = sess
                 result["admitted"] = True
+                result["queue_revision"] = queue_revision
                 projection_record = self._project_queue_record(sess)
+
+            if result["session"] is not None:
+                result["queue_revision"] = int(sess.get("queue_revision") or 0)
 
         queued_len = len((projection_record or {}).get("queued_prompts") or [])
         self._set_queued_prompt_count(sid, queued_len)
@@ -5257,6 +5275,7 @@ class SessionManager:
             for prompt in s.setdefault("queued_prompts", []):
                 if prompt.get("id") == queued_id:
                     prompt.update(updates)
+                    self._bump_queue_revision(s)
                     break
 
         result = self._run(
@@ -5285,13 +5304,16 @@ class SessionManager:
         projection: dict[str, Optional[dict]] = {}
 
         def _do(s: dict) -> None:
+            before = len(s.get("queued_prompts") or [])
             if queued_id is None:
                 s["queued_prompts"] = []
-                return
-            s["queued_prompts"] = [
-                p for p in s.get("queued_prompts", [])
-                if p.get("id") != queued_id
-            ]
+            else:
+                s["queued_prompts"] = [
+                    p for p in s.get("queued_prompts", [])
+                    if p.get("id") != queued_id
+                ]
+            if len(s["queued_prompts"]) != before:
+                self._bump_queue_revision(s)
 
         result = self._run(
             sid,
@@ -5318,10 +5340,13 @@ class SessionManager:
         projection: dict[str, Optional[dict]] = {}
 
         def _do(s: dict) -> None:
+            before = len(s.get("queued_prompts") or [])
             s["queued_prompts"] = [
                 p for p in s.get("queued_prompts", [])
                 if p.get("client_id") != client_id
             ]
+            if len(s["queued_prompts"]) != before:
+                self._bump_queue_revision(s)
 
         result = self._run(
             sid,

@@ -10,7 +10,6 @@ import {
 import {
   offlineEntryIsEditing,
   offlineEntrySessionId,
-  loadOfflineQueue,
   useOfflineQueue,
   type OfflineQueueEntry,
 } from "./hooks/useOfflineQueue";
@@ -1455,58 +1454,10 @@ function AppMain({
    * Cleared on next open. */
   const [promptEngStartError, setPromptEngStartError] = useState<string>("");
 
-  const initialOfflineState = useMemo(() => {
-    const pendingQueueDrafts: Record<string, PendingQueueDraft[]> = {};
-    const pendingBySession: Record<string, ChatMessage[]> = {};
-    try {
-      const queue = loadOfflineQueue();
-      if (queue.length > 0) {
-        for (const entry of queue) {
-          const sessionId = entry.type === "create_session" ? entry.session.id : entry.sessionId;
-          
-          if (entry.prompt) {
-            pendingBySession[sessionId] = [...(pendingBySession[sessionId] || []), {
-              id: entry.clientId,
-              role: "user",
-              content: entry.prompt,
-              events: [],
-              timestamp: entry.type === "create_session" ? (entry.session.created_at || new Date().toISOString()) : new Date().toISOString(),
-              isStreaming: false,
-              status: "offline"
-            }];
-            
-            if (entry.type !== "create_session" && entry.sendMode === "queue") {
-              pendingQueueDrafts[sessionId] = [...(pendingQueueDrafts[sessionId] ?? []), {
-                id: entry.clientId,
-                clientId: entry.clientId,
-                preview: entry.prompt,
-                ...(entry.images?.length ? {
-                  images: entry.images.map(img => ({
-                    mediaType: img.media_type,
-                    base64: img.data,
-                    dataUrl: `data:${img.media_type};base64,${img.data}`,
-                    file: new File([], "image"), // dummy file for typing
-                  })),
-                } : {}),
-                ...(entry.files?.length ? {
-                  files: entry.files.map(f => ({
-                    name: f.name,
-                    mediaType: f.media_type,
-                    base64: f.data,
-                    size: f.size,
-                    file: new File([], f.name), // dummy file
-                  })),
-                } : {}),
-              }];
-            }
-          }
-        }
-      }
-    } catch (err) {
-      void err;
-    }
-    return { pendingQueueDrafts, pendingBySession };
-  }, []);
+  const initialOfflineState = useMemo(() => ({
+    pendingQueueDrafts: {} as Record<string, PendingQueueDraft[]>,
+    pendingBySession: {} as Record<string, ChatMessage[]>,
+  }), []);
 
   // Optimistic user bubbles, keyed by app_session_id. Declared up here
   // (above useWebSocket) so `handleUserMessagePersisted` can clear the
@@ -1668,19 +1619,70 @@ function AppMain({
   }, []);
   const offlineQueue = useOfflineQueue();
   const promptQueue = usePromptQueueProjection();
+  useEffect(() => {
+    if (!offlineQueue.ready) return;
+    for (const entry of offlineQueue.queue) {
+      if (!entry.prompt) continue;
+      const sessionId = offlineEntrySessionId(entry);
+      setPendingForSession(sessionId, (previous) => {
+        if (previous.some((message) => message.id === entry.clientId)) return previous;
+        return [...previous, {
+          id: entry.clientId,
+          role: "user",
+          content: entry.prompt,
+          events: [],
+          timestamp: entry.type === "create_session"
+            ? entry.session.created_at || new Date().toISOString()
+            : new Date().toISOString(),
+          isStreaming: false,
+          status: "offline",
+        }];
+      });
+      if (entry.type !== "create_session" && entry.sendMode === "queue") {
+        const drafts = pendingQueueDraftsRef.current[sessionId] ?? [];
+        if (!drafts.some((draft) => draft.clientId === entry.clientId)) {
+          pendingQueueDraftsRef.current[sessionId] = [...drafts, {
+            id: entry.clientId,
+            clientId: entry.clientId,
+            preview: entry.prompt,
+            ...(entry.images?.length
+              ? { images: entry.images.map((image) => ({
+                  dataUrl: `data:${image.media_type};base64,${image.data}`,
+                  base64: image.data,
+                  mediaType: image.media_type,
+                })) }
+              : {}),
+            ...(entry.files?.length
+              ? { files: entry.files.map((file) => ({
+                  name: file.name,
+                  base64: file.data,
+                  mediaType: file.media_type,
+                  size: file.size,
+                })) }
+              : {}),
+          }];
+        }
+      }
+    }
+  }, [offlineQueue.queue, offlineQueue.ready, setPendingForSession]);
   const removeAckedOfflineAction = offlineQueue.removeBySessionAndClient;
   const offlineDispatchedRef = useRef<Set<string>>(new Set());
   const offlineRetryScheduleRef = useRef<Map<string, { attempt: number; dueAt: number }>>(new Map());
   const [offlineRetryTick, setOfflineRetryTick] = useState(0);
   const [offlineRetryScheduleVersion, setOfflineRetryScheduleVersion] = useState(0);
-  const scheduleOfflineRetry = useCallback((clientId: string) => {
-    const previous = offlineRetryScheduleRef.current.get(clientId);
+  const offlineDispatchKey = useCallback(
+    (sessionId: string, clientId: string) => `${sessionId}\u0000${clientId}`,
+    [],
+  );
+  const scheduleOfflineRetry = useCallback((sessionId: string, clientId: string) => {
+    const key = offlineDispatchKey(sessionId, clientId);
+    const previous = offlineRetryScheduleRef.current.get(key);
     offlineRetryScheduleRef.current.set(
-      clientId,
+      key,
       nextOfflineRetryDeadline(previous?.attempt ?? 0, Date.now(), Math.random()),
     );
     setOfflineRetryScheduleVersion((version) => version + 1);
-  }, []);
+  }, [offlineDispatchKey]);
   const hasHeldOfflineEdits = offlineQueue.queue.some(offlineEntryIsEditing);
   const sessionSnapshotHasClientId = useCallback((session: Session, clientId: string) => {
     const hasPersistedUserMessage = (session.messages || []).some(
@@ -1714,10 +1716,10 @@ function AppMain({
     [setPendingForSession],
   );
   const handleDeleteOfflineEntry = useCallback(
-    (entry: OfflineQueueEntry) => {
-      if (!offlineQueue.removeEntry(entry)) return;
+    async (entry: OfflineQueueEntry) => {
+      if (!await offlineQueue.removeEntry(entry)) return;
       const sessionId = offlineEntrySessionId(entry);
-      offlineDispatchedRef.current.delete(entry.clientId);
+      offlineDispatchedRef.current.delete(offlineDispatchKey(sessionId, entry.clientId));
       retryPayloadsRef.current.delete(entry.clientId);
       removePendingForSessionByClientId(sessionId, entry.clientId);
       if (entry.type !== "create_session" && entry.sendMode === "queue") {
@@ -1735,14 +1737,15 @@ function AppMain({
       dropSessionIfPresent,
       currentSession?.id,
       clearCurrentSession,
+      offlineDispatchKey,
     ],
   );
   const handleBeginOfflineEdit = useCallback(
-    (entry: OfflineQueueEntry) => {
-      offlineDispatchedRef.current.delete(entry.clientId);
-      offlineQueue.beginEdit(entry);
+    async (entry: OfflineQueueEntry) => {
+      offlineDispatchedRef.current.delete(offlineDispatchKey(offlineEntrySessionId(entry), entry.clientId));
+      await offlineQueue.beginEdit(entry);
     },
-    [offlineQueue],
+    [offlineDispatchKey, offlineQueue],
   );
   const handleOfflineEditDraft = useCallback(
     (entry: OfflineQueueEntry, draftPrompt: string) => {
@@ -1751,17 +1754,17 @@ function AppMain({
     [offlineQueue],
   );
   const handleFinishOfflineEdit = useCallback(
-    (entry: OfflineQueueEntry) => {
+    async (entry: OfflineQueueEntry) => {
       const prompt = entry.editing?.draftPrompt;
       if (typeof prompt !== "string") return;
-      if (!offlineQueue.finishEdit(entry)) return;
+      if (!await offlineQueue.finishEdit(entry)) return;
       updateOfflinePendingPrompt(entry, prompt);
     },
     [offlineQueue, updateOfflinePendingPrompt],
   );
   const handleCancelOfflineEdit = useCallback(
-    (entry: OfflineQueueEntry) => {
-      offlineQueue.cancelEdit(entry);
+    async (entry: OfflineQueueEntry) => {
+      await offlineQueue.cancelEdit(entry);
     },
     [offlineQueue],
   );
@@ -1812,7 +1815,7 @@ function AppMain({
       takePendingQueueDraft(sessionId, cid);
       if (cid) {
         ackedClientIdsRef.current.add(cid);
-        offlineDispatchedRef.current.delete(cid);
+        offlineDispatchedRef.current.delete(offlineDispatchKey(sessionId, cid));
         removeAckedOfflineAction(sessionId, cid);
       }
       if (cid) {
@@ -1835,7 +1838,7 @@ function AppMain({
       // Refresh sidebar so timestamps + sort order update immediately.
       refreshSessions();
     },
-    [addMessages, applySessionMetadata, refreshSessions, takePendingQueueDraft, removeAckedOfflineAction, removePendingForSessionByClientId]
+    [addMessages, applySessionMetadata, refreshSessions, takePendingQueueDraft, removeAckedOfflineAction, removePendingForSessionByClientId, offlineDispatchKey]
   );
   const handleSteerPromptPersisted = useCallback(
     (_sessionId: string, steerClientId?: string | null) => {
@@ -1844,11 +1847,11 @@ function AppMain({
         app_session_id: _sessionId,
         client_id: steerClientId,
       });
-      offlineDispatchedRef.current.delete(steerClientId);
+      offlineDispatchedRef.current.delete(offlineDispatchKey(_sessionId, steerClientId));
       removeAckedOfflineAction(_sessionId, steerClientId);
       removePendingByClientId(steerClientId);
     },
-    [removeAckedOfflineAction, removePendingByClientId]
+    [removeAckedOfflineAction, removePendingByClientId, offlineDispatchKey]
   );
   const handlePromptSendError = useCallback(
     (sessionId: string, promptClientId: string, errorText: string) => {
@@ -1858,7 +1861,7 @@ function AppMain({
         client_id: promptClientId,
         error: errorText,
       }, "error");
-      offlineDispatchedRef.current.delete(promptClientId);
+      offlineDispatchedRef.current.delete(offlineDispatchKey(sessionId, promptClientId));
       removeAckedOfflineAction(sessionId, promptClientId);
       setPendingForSession(sessionId, (prev) =>
         prev.map((m) =>
@@ -1868,7 +1871,7 @@ function AppMain({
         )
       );
     },
-    [removeAckedOfflineAction, setPendingForSession]
+    [removeAckedOfflineAction, setPendingForSession, offlineDispatchKey]
   );
 
   // Forward-declared shim so useWebSocket's `onProjectsChanged` option can
@@ -1998,7 +2001,7 @@ function AppMain({
       }
       if ("queued_prompts" in patch) {
         const queuedPrompts = (patch.queued_prompts ?? []) as QueuedPrompt[];
-        promptQueue.applySnapshot(sessionId, queuedPrompts);
+        promptQueue.applySnapshot(sessionId, queuedPrompts, Number(patch.queue_revision ?? 0));
       }
     },
     onSessionForked: appendFork,
@@ -2032,13 +2035,13 @@ function AppMain({
         preview: pendingDraft?.preview ?? data.prompt_preview,
         ...(pendingDraft?.images?.length ? { images: pendingDraft.images } : {}),
         ...(pendingDraft?.files?.length ? { files: pendingDraft.files } : {}),
-      });
+      }, data.queue_revision);
       // Remove the optimistic pending message bubble — the queued banner
       // on top of the input area is the single surface for queued state.
       // The real message will appear via user_message_persisted when the
       // queue drains and the backend processes the prompt.
       if (data.client_id) {
-        offlineDispatchedRef.current.delete(data.client_id);
+        offlineDispatchedRef.current.delete(offlineDispatchKey(data.app_session_id, data.client_id));
         removeAckedOfflineAction(data.app_session_id, data.client_id);
         removePendingByClientId(data.client_id);
       }
@@ -2059,7 +2062,7 @@ function AppMain({
       switch (event.type) {
         case "user_message_queued":
           if (d.client_id) {
-            offlineDispatchedRef.current.delete(d.client_id);
+            offlineDispatchedRef.current.delete(offlineDispatchKey(_appSessionId, d.client_id));
             removeAckedOfflineAction(_appSessionId, d.client_id);
             if (d.kind === "queued_behind") {
               removePendingByClientId(d.client_id);
@@ -2125,25 +2128,27 @@ function AppMain({
 
   useEffect(() => {
     if (!connected || offlineQueue.queue.length === 0) return;
-    const queuedIds = new Set(offlineQueue.queue.map((entry) => entry.clientId));
-    for (const clientId of offlineRetryScheduleRef.current.keys()) {
-      if (!queuedIds.has(clientId)) offlineRetryScheduleRef.current.delete(clientId);
+    const queuedIds = new Set(offlineQueue.queue.map((entry) =>
+      offlineDispatchKey(offlineEntrySessionId(entry), entry.clientId)
+    ));
+    for (const dispatchKey of offlineRetryScheduleRef.current.keys()) {
+      if (!queuedIds.has(dispatchKey)) offlineRetryScheduleRef.current.delete(dispatchKey);
     }
     const due = [...offlineRetryScheduleRef.current.entries()]
-      .filter(([clientId, state]) => queuedIds.has(clientId) && state.dueAt !== Number.MAX_SAFE_INTEGER)
+      .filter(([dispatchKey, state]) => queuedIds.has(dispatchKey) && state.dueAt !== Number.MAX_SAFE_INTEGER)
       .sort((left, right) => left[1].dueAt - right[1].dueAt)[0];
     if (!due) return;
     const timer = window.setTimeout(() => {
       const now = Date.now();
-      for (const [clientId, state] of offlineRetryScheduleRef.current) {
+      for (const [dispatchKey, state] of offlineRetryScheduleRef.current) {
         if (state.dueAt > now) continue;
-        offlineDispatchedRef.current.delete(clientId);
-        offlineRetryScheduleRef.current.set(clientId, { ...state, dueAt: Number.MAX_SAFE_INTEGER });
+        offlineDispatchedRef.current.delete(dispatchKey);
+        offlineRetryScheduleRef.current.set(dispatchKey, { ...state, dueAt: Number.MAX_SAFE_INTEGER });
       }
       setOfflineRetryTick((tick) => tick + 1);
     }, Math.max(0, due[1].dueAt - Date.now()));
     return () => window.clearTimeout(timer);
-  }, [connected, offlineQueue.queue, offlineRetryScheduleVersion]);
+  }, [connected, offlineDispatchKey, offlineQueue.queue, offlineRetryScheduleVersion]);
 
   // Active provider + model are read-only in the main UI — both come
   // from the provider record and only the settings dialog can change
@@ -2295,7 +2300,7 @@ function AppMain({
     offlineRetryScheduleRef.current.clear();
   }, [connected]);
   useEffect(() => {
-    if (!connected || offlineFlushRunningRef.current) return;
+    if (!connected || !offlineQueue.ready || offlineFlushRunningRef.current) return;
     offlineFlushRunningRef.current = true;
     void (async () => {
       // Sessions whose queued `create_session` PERMANENTLY failed this pass.
@@ -2306,7 +2311,9 @@ function AppMain({
       const heldCreateSessionIds = new Set<string>();
       try {
         for (const entry of offlineQueue.getAll()) {
-          if (offlineDispatchedRef.current.has(entry.clientId)) continue;
+          const entrySessionId = offlineEntrySessionId(entry);
+          const dispatchKey = offlineDispatchKey(entrySessionId, entry.clientId);
+          if (offlineDispatchedRef.current.has(dispatchKey)) continue;
           if (offlineEntryIsEditing(entry)) {
             if (entry.type === "create_session") heldCreateSessionIds.add(entry.session.id);
             logPromptSend("offline_flush_skip_editing", {
@@ -2341,7 +2348,7 @@ function AppMain({
               app_session_id: entry.sessionId,
               client_id: entry.clientId,
             });
-            offlineDispatchedRef.current.delete(entry.clientId);
+            offlineDispatchedRef.current.delete(dispatchKey);
             removeAckedOfflineAction(entry.sessionId, entry.clientId);
             removePendingForSessionByClientId(entry.sessionId, entry.clientId);
             if (entry.sendMode === "queue") {
@@ -2386,8 +2393,8 @@ function AppMain({
                 kind: outcome.stop ? "transient" : "permanent",
                 error: createErr instanceof Error ? createErr.message : String(createErr),
               }, outcome.stop ? "warn" : "error");
-              offlineDispatchedRef.current.add(entry.clientId);
-              scheduleOfflineRetry(entry.clientId);
+              offlineDispatchedRef.current.add(dispatchKey);
+              scheduleOfflineRetry(entrySessionId, entry.clientId);
               if (outcome.stop) {
                 // Transient (network/abort/5xx): pause the entire drain and
                 // retry the whole backlog on the next tick. Returning here
@@ -2420,7 +2427,7 @@ function AppMain({
             const images = entry.images?.length ? entry.images : undefined;
             const offlineFiles = entry.files?.length ? entry.files : undefined;
             if (entry.prompt) {
-              offlineDispatchedRef.current.add(entry.clientId);
+              offlineDispatchedRef.current.add(dispatchKey);
               const sent = sendMessage(
                 entry.prompt,
                 queued.model,
@@ -2441,7 +2448,7 @@ function AppMain({
                   app_session_id: queued.id,
                   client_id: entry.clientId,
                 }, "warn");
-                offlineDispatchedRef.current.delete(entry.clientId);
+                offlineDispatchedRef.current.delete(dispatchKey);
                 return;
               }
               logPromptSend("offline_flush_dispatched", {
@@ -2449,21 +2456,21 @@ function AppMain({
                 app_session_id: queued.id,
                 client_id: entry.clientId,
               });
-              scheduleOfflineRetry(entry.clientId);
+              scheduleOfflineRetry(entrySessionId, entry.clientId);
               setPendingForSession(queued.id, (prev) =>
                 prev.map((m) =>
                   m.id === entry.clientId ? { ...m, status: "sending" as const } : m
                 ),
               );
             } else {
-              offlineQueue.remove(entry.clientId);
+              void offlineQueue.removeEntry(entry);
             }
             continue;
           }
 
           const images = entry.images?.length ? entry.images : undefined;
           const offlineFiles = entry.files?.length ? entry.files : undefined;
-          offlineDispatchedRef.current.add(entry.clientId);
+          offlineDispatchedRef.current.add(dispatchKey);
           const sent = sendMessage(
             entry.prompt,
             entry.model,
@@ -2484,7 +2491,7 @@ function AppMain({
               app_session_id: entry.sessionId,
               client_id: entry.clientId,
             }, "warn");
-            offlineDispatchedRef.current.delete(entry.clientId);
+            offlineDispatchedRef.current.delete(dispatchKey);
             return;
           }
           logPromptSend("offline_flush_dispatched", {
@@ -2492,7 +2499,7 @@ function AppMain({
             app_session_id: entry.sessionId,
             client_id: entry.clientId,
           });
-          scheduleOfflineRetry(entry.clientId);
+          scheduleOfflineRetry(entrySessionId, entry.clientId);
           // Durable: a queue-mode entry re-dispatched on reconnect is the
           // restart regression's re-send path. Capture sid/client/mode so a
           // recurrence shows whether the prompt was re-sent after restart.
@@ -2630,14 +2637,18 @@ function AppMain({
   }, [currentSession?.queued_prompts]);
   useEffect(() => {
     if (!currentSession) return;
-    promptQueue.applySnapshot(currentSession.id, currentSession.queued_prompts ?? []);
-  }, [currentSession?.id, currentSession?.queued_prompts, promptQueue.applySnapshot]);
+    promptQueue.applySnapshot(
+      currentSession.id,
+      currentSession.queued_prompts ?? [],
+      Number(currentSession.queue_revision ?? 0),
+    );
+  }, [currentSession?.id, currentSession?.queued_prompts, currentSession?.queue_revision, promptQueue.applySnapshot]);
   useEffect(() => {
     if (!currentSession || persistedQueuedPrompts.length === 0) return;
     for (const queuedPrompt of persistedQueuedPrompts) {
       const clientId = queuedPrompt.clientId;
       if (!clientId) continue;
-      offlineDispatchedRef.current.delete(clientId);
+      offlineDispatchedRef.current.delete(offlineDispatchKey(currentSession.id, clientId));
       removeAckedOfflineAction(currentSession.id, clientId);
       removePendingForSessionByClientId(currentSession.id, clientId);
       takePendingQueueDraft(currentSession.id, clientId);
@@ -4583,7 +4594,7 @@ function AppMain({
     if (ackedClientIds.size === 0) return;
     for (const cid of ackedClientIds) {
       ackedClientIdsRef.current.add(cid);
-      offlineDispatchedRef.current.delete(cid);
+      offlineDispatchedRef.current.delete(offlineDispatchKey(sessionId, cid));
       removeAckedOfflineAction(sessionId, cid);
     }
     setPendingBySession((all) => {
@@ -4754,12 +4765,8 @@ function AppMain({
       const sendForm = { prompt: final.prompt };
       // client_id so the backend can echo it back when the queued message
       // is eventually processed (or immediately for non-queued sends).
-      const clientIdForMsg = `pending-${Date.now()}`;
-      const expectedQueued = sendMode === "queue"
-        && (
-          (isStreaming && streamingAppSessionId === currentSession.id)
-          || (runStateBySession[currentSession.id]?.length ?? 0) > 0
-        );
+      const clientIdForMsg = `pending-${uuidv4()}`;
+      const expectedQueued = sendMode === "queue";
       if (sendMode === "queue") {
         appendPendingQueueDraft(currentSession.id, {
           id: clientIdForMsg,
@@ -4849,11 +4856,11 @@ function AppMain({
         sendTarget: currentSession?.supervisor_enabled ? sendTarget : undefined,
         capabilityContexts,
       };
-      // Buffer to durable localStorage FIRST so a reconnect/reload can replay
+      // Commit to durable IndexedDB FIRST so a reconnect/reload can replay
       // the action even if this tab never gets to dispatch it. `offlineQueued`
-      // is false only when localStorage could not persist it (quota / private
+      // is false only when IndexedDB could not persist it (quota / private
       // mode); `persistFailed` then drives the degraded-buffering warning.
-      const offlineQueued = offlineQueue.enqueue(offlineEntry);
+      const offlinePersistence = offlineQueue.enqueue(offlineEntry);
 
       // The action is neither deliverable now nor durably buffered, so
       // accepting it would risk silent loss on reload. Fail closed: drop the
@@ -4878,8 +4885,8 @@ function AppMain({
 
       if (currentSession.offline_pending) {
         // No backend session exists yet, so the WS path is unavailable by
-        // construction: localStorage is the ONLY carrier across a reload.
-        if (!offlineQueued) {
+        // construction: IndexedDB is the ONLY carrier across a reload.
+        if (!await offlinePersistence) {
           abandonUndeliverableUndurable();
           return false;
         }
@@ -4921,14 +4928,14 @@ function AppMain({
         capabilityContexts,
       );
 
-      // Gap 1: WS not open — keep the durable localStorage action for
+      // Gap 1: WS not open — keep the durable IndexedDB action for
       // offline delivery. The optimistic bubble stays visible with
       // status "offline" and is promoted to "sending" on reconnect.
       if (!sent) {
         // WS not open. If the action is also not durably buffered it cannot
         // survive a reload — fail closed so the draft is preserved instead of
         // a phantom "offline" bubble that will never actually send.
-        if (!offlineQueued) {
+        if (!await offlinePersistence) {
           abandonUndeliverableUndurable();
           return false;
         }
@@ -4950,7 +4957,7 @@ function AppMain({
           client_id: clientIdForMsg,
           queue_size: offlineQueue.queue.length,
         });
-        offlineDispatchedRef.current.add(clientIdForMsg);
+        offlineDispatchedRef.current.add(offlineDispatchKey(sessionId, clientIdForMsg));
       }
 
       if (sessionTags.length > 0) {
@@ -5100,7 +5107,7 @@ function AppMain({
       const prompt = content.trim();
       if (!prompt) return false;
       const sessionId = currentSession.id;
-      const clientIdForMsg = `pending-${Date.now()}`;
+      const clientIdForMsg = `pending-${uuidv4()}`;
       const pendingMsg: ChatMessage = {
         id: clientIdForMsg,
         role: "user",
@@ -5204,7 +5211,7 @@ function AppMain({
       // Replace failed message with a fresh "sending" one
       const newPendingMsg: ChatMessage = {
         ...message,
-        id: `pending-${Date.now()}`,
+        id: `pending-${uuidv4()}`,
         status: "sending",
         errorText: undefined,
       };
@@ -5418,7 +5425,7 @@ function AppMain({
               .find((m) => m.role === "user")
           : undefined;
       const pendingMsg: ChatMessage = {
-        id: `pending-${Date.now()}`,
+        id: `pending-${uuidv4()}`,
         role: "user",
         content: priorUser?.content ?? "",
         events: [],
@@ -5500,7 +5507,7 @@ function AppMain({
   );
 
   const queueLocalFirstSession = useCallback(
-    (
+    async (
       config: SessionConfig,
       initialPrompt: string,
       images: ImagePayload[],
@@ -5547,7 +5554,7 @@ function AppMain({
           ? { draft_input: initialPrompt, draft_images: config.initialImages }
           : {}),
       };
-      const offlineQueued = offlineQueue.enqueue({
+      const offlineQueued = await offlineQueue.enqueue({
         type: "create_session",
         clientId,
         session: localSession,
@@ -5578,15 +5585,15 @@ function AppMain({
   );
 
   const queueInitialPromptForSession = useCallback(
-    (
+    async (
       sessionId: string,
       config: SessionConfig,
       initialPrompt: string,
       images: ImagePayload[],
       files: FilePayload[],
     ) => {
-      const clientId = `investigate-${Date.now()}`;
-      const offlineQueued = offlineQueue.enqueue({
+      const clientId = uuidv4();
+      const offlineQueued = await offlineQueue.enqueue({
         sessionId,
         clientId,
         prompt: initialPrompt,
@@ -5645,7 +5652,7 @@ function AppMain({
         return true;
       };
 
-      const finishCreatedSession = (session: Session) => {
+      const finishCreatedSession = async (session: Session) => {
         if (!send) return draftCreatedSession(session);
         if (!session?.id) return true;
         if (initialPrompt) {
@@ -5660,7 +5667,7 @@ function AppMain({
             capabilityContexts: config.capabilityContexts,
           };
           const promptAccepted = sendInitialPromptToSession(pending)
-            || queueInitialPromptForSession(session.id, config, initialPrompt, images, files);
+            || await queueInitialPromptForSession(session.id, config, initialPrompt, images, files);
           if (!promptAccepted) return false;
         }
         setNewSessionModalOpen(false);
@@ -5685,10 +5692,10 @@ function AppMain({
             capabilityContexts: config.capabilityContexts,
             folderId: config.folderId,
           });
-          finishCreatedSession(session);
+          await finishCreatedSession(session);
         } catch (e) {
           if (isRetryableOfflineError(e)) {
-            queueLocalFirstSession(
+            await queueLocalFirstSession(
               config,
               initialPrompt,
               images,
@@ -5705,7 +5712,7 @@ function AppMain({
       }
 
       if (!connected) {
-        queueLocalFirstSession(config, initialPrompt, images, files, "offline", send);
+        await queueLocalFirstSession(config, initialPrompt, images, files, "offline", send);
         return;
       }
 
@@ -5726,10 +5733,10 @@ function AppMain({
           capabilityContexts: config.capabilityContexts,
           folderId: config.folderId,
         });
-        finishCreatedSession(session);
+        await finishCreatedSession(session);
       } catch (e) {
         if (isRetryableOfflineError(e)) {
-          queueLocalFirstSession(config, initialPrompt, images, files, "offline", send);
+          await queueLocalFirstSession(config, initialPrompt, images, files, "offline", send);
           return;
         }
         const msg = e instanceof Error ? e.message : String(e);
@@ -6178,7 +6185,7 @@ function AppMain({
         media_type: img.mediaType,
       }));
       const parentId = currentSession.id;
-      const pendingId = `pending-${Date.now()}`;
+      const pendingId = `pending-${uuidv4()}`;
       try {
         const handle = progressTrackPromise(
           `session:forkAndSend:${parentId}`,

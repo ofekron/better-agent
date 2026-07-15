@@ -69,6 +69,8 @@ export type SessionMetadataPatch = {
   notes?: import("../types").Note[];
   current_todos?: import("../types").TodoItem[];
   current_tasks?: import("../types").TaskItem[];
+  queued_prompts?: import("../types").QueuedPrompt[];
+  queue_revision?: number;
   messages?: ChatMessage[];
   message_count?: number;
   updated_at?: string;

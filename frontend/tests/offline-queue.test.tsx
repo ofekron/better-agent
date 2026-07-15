@@ -1,4 +1,4 @@
-import { act, renderHook } from "@testing-library/react";
+import { act, renderHook, waitFor } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { useOfflineQueue, type OfflinePromptEntry } from "../src/hooks/useOfflineQueue";
 
@@ -11,49 +11,15 @@ const entry = (sessionId: string, clientId: string, prompt = clientId): OfflineP
 });
 
 describe("useOfflineQueue", () => {
-  it("persists every mutation synchronously", () => {
+  it("preserves insertion order and dedupes only the same composite identity", async () => {
     const { result } = renderHook(() => useOfflineQueue());
-
-    act(() => result.current.enqueue(entry("a", "a1")));
-    expect(JSON.parse(localStorage.getItem("better_agent_offline_queue") || "[]")).toEqual([
-      expect.objectContaining({ clientId: "a1" }),
-    ]);
-
-    act(() => result.current.remove("a1"));
-    expect(localStorage.getItem("better_agent_offline_queue")).toBeNull();
-  });
-
-  it("keeps repeated session actions in send order", () => {
-    const { result } = renderHook(() => useOfflineQueue());
-
-    act(() => {
-      result.current.enqueue(entry("a", "a1"));
-      result.current.enqueue(entry("b", "b1"));
-      result.current.enqueue(entry("a", "a2"));
-    });
-
-    expect(result.current.getAll().map((item) => item.clientId)).toEqual(["a1", "b1", "a2"]);
-    expect(
-      JSON.parse(localStorage.getItem("better_agent_offline_queue") || "[]").map(
-        (item: OfflinePromptEntry) => item.clientId,
-      ),
-    ).toEqual(["a1", "b1", "a2"]);
-  });
-
-  it("removes an acked action only when both session and client id match", () => {
-    const { result } = renderHook(() => useOfflineQueue());
-
-    act(() => {
-      result.current.enqueue(entry("a", "same"));
-      result.current.enqueue(entry("b", "same"));
-      result.current.removeBySessionAndClient("a", "same");
-    });
-
+    await waitFor(() => expect(result.current.ready).toBe(true));
+    await act(() => result.current.enqueue(entry("a", "same", "first")));
+    await act(() => result.current.enqueue(entry("b", "same", "second")));
+    await act(() => result.current.enqueue(entry("a", "same", "edited")));
     expect(result.current.getAll()).toEqual([
-      expect.objectContaining({ sessionId: "b", clientId: "same" }),
-    ]);
-    expect(JSON.parse(localStorage.getItem("better_agent_offline_queue") || "[]")).toEqual([
-      expect.objectContaining({ sessionId: "b", clientId: "same" }),
+      expect.objectContaining({ sessionId: "a", clientId: "same", prompt: "edited" }),
+      expect.objectContaining({ sessionId: "b", clientId: "same", prompt: "second" }),
     ]);
   });
 });

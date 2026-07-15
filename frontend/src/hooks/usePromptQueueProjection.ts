@@ -27,18 +27,19 @@ export function usePromptQueueProjection() {
     });
   }, []);
 
-  const applySnapshot = useCallback((sessionId: string, prompts: QueuedPrompt[]) => {
+  const applySnapshot = useCallback((sessionId: string, prompts: QueuedPrompt[], revision: number) => {
     const snapshot = visibleQueuedPromptBanners(prompts);
     setBySession((all) => ({
       ...all,
       [sessionId]: queueSnapshotReceived(
         all[sessionId] ?? EMPTY_PROMPT_QUEUE_PROJECTION,
         snapshot,
+        revision,
       ),
     }));
   }, []);
 
-  const acknowledge = useCallback((sessionId: string, item: QueuedBannerState) => {
+  const acknowledge = useCallback((sessionId: string, item: QueuedBannerState, revision: number) => {
     if (item.clientId) {
       setOptimisticBySession((all) => ({
         ...all,
@@ -52,6 +53,7 @@ export function usePromptQueueProjection() {
       [sessionId]: queueItemAcknowledged(
         all[sessionId] ?? EMPTY_PROMPT_QUEUE_PROJECTION,
         item,
+        revision,
       ),
     }));
   }, []);
