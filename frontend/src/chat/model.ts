@@ -53,7 +53,7 @@ export type RenderToken =
   | { kind: 'prompt'; id: string }
   | { kind: 'ellipsis'; id: string }
   | { kind: 'result'; ids: string[]; text: string }
-  | { kind: 'explanation'; text: string; itemCount: number; expanded: boolean }
+  | { kind: 'explanation'; text: string; textEventIds: string[]; itemIds: string[]; itemCount: number; expanded: boolean }
   | { kind: 'steering' | 'native' | 'worker' | 'compact' | 'expanded' | 'internal'; id: string }
 
 export type VisibleEvent = { id: string; scope: string; run: RunMeta }
