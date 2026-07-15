@@ -31,6 +31,7 @@ from chat_projection_store_sqlite import (
 )
 from chat_projection_store_owner import encode_frame, receive_frame, send_frame, serve_owner
 import chat_projection_store_owner as owner_transport
+import chat_projection_store_owner_path as owner_path_transport
 
 
 FIXTURE = ROOT / "test-contracts" / "chat-panel" / "v1" / "canonical-session.json"
@@ -370,7 +371,7 @@ def test_text_aggregate_and_sqlite_error_boundaries() -> None:
     corrupt = _path("corrupt")
     corrupt.parent.mkdir(parents=True, exist_ok=True)
     corrupt.write_bytes(b"not sqlite")
-    _assert_error("storage_init_failed", lambda: SQLiteChatProjectionStore(corrupt))
+    _assert_error("incomplete_store", lambda: SQLiteChatProjectionStore(corrupt))
 
 
 def test_generation_and_root_deletion_are_atomic_and_durable() -> None:
@@ -698,10 +699,13 @@ def test_response_page_budget_timeout_admission_and_close_failure() -> None:
         with (
             mock.patch.object(owner_transport.socket, "socketpair", side_effect=failing_socketpair),
             mock.patch.object(owner_transport.subprocess, "Popen") as launch,
+            mock.patch.object(owner_path_transport.os, "unlink") as unlink_path,
         ):
             _assert_error("owner_start_failed", lambda: SQLiteChatProjectionStore(failure_path))
             launch.assert_not_called()
-        assert not failure_path.exists()
+            unlink_path.assert_not_called()
+        assert failure_path.read_bytes() == b""
+        _assert_error("incomplete_store", lambda: SQLiteChatProjectionStore(failure_path))
         assert all(item.fileno() == -1 for item in sockets)
         assert len(os.listdir("/dev/fd")) == descriptors_before
 
@@ -714,7 +718,10 @@ def test_response_page_budget_timeout_admission_and_close_failure() -> None:
 
     missing_path = _path("init-missing-script")
     missing_path.parent.mkdir(parents=True, exist_ok=True)
-    missing_path.write_bytes(b"")
+    missing_connection = sqlite3.connect(missing_path)
+    missing_connection.execute("CREATE TABLE sentinel(value TEXT)")
+    missing_connection.commit()
+    missing_connection.close()
     missing_path.chmod(0o600)
     sentinels = [missing_path.with_name(f"{missing_path.name}{suffix}") for suffix in ("-wal", "-shm")]
     for sentinel in sentinels:
@@ -757,6 +764,9 @@ def test_response_page_budget_timeout_admission_and_close_failure() -> None:
                 return child.fileno()
             def close(self) -> None:
                 child.close()
+                post_popen_path.unlink(missing_ok=True)
+                post_popen_path.write_bytes(b"post-Popen partial main")
+                post_popen_path.chmod(0o600)
                 for suffix in ("-wal", "-shm"):
                     sidecar = post_popen_path.with_name(f"{post_popen_path.name}{suffix}")
                     sidecar.write_bytes(b"new owner sidecar")
@@ -773,17 +783,21 @@ def test_response_page_budget_timeout_admission_and_close_failure() -> None:
     ):
         _assert_error("owner_start_failed", lambda: SQLiteChatProjectionStore(post_popen_path))
     assert post_popen_processes and all(process.poll() is not None for process in post_popen_processes)
-    assert not post_popen_path.exists()
+    assert post_popen_path.read_bytes() == b"post-Popen partial main"
     post_sidecars = [
         post_popen_path.with_name(f"{post_popen_path.name}{suffix}") for suffix in ("-wal", "-shm")
     ]
     assert all(sidecar.read_bytes() == b"new owner sidecar" for sidecar in post_sidecars)
-    _assert_error("orphan_sidecars", lambda: SQLiteChatProjectionStore(post_popen_path))
+    _assert_error("incomplete_store", lambda: SQLiteChatProjectionStore(post_popen_path))
+    assert post_popen_path.read_bytes() == b"post-Popen partial main"
     assert all(sidecar.read_bytes() == b"new owner sidecar" for sidecar in post_sidecars)
 
     replacement_path = _path("init-sidecar-replacement")
     replacement_path.parent.mkdir(parents=True, exist_ok=True)
-    replacement_path.write_bytes(b"")
+    replacement_connection = sqlite3.connect(replacement_path)
+    replacement_connection.execute("CREATE TABLE sentinel(value TEXT)")
+    replacement_connection.commit()
+    replacement_connection.close()
     replacement_path.chmod(0o600)
     replacement_wal = replacement_path.with_name(f"{replacement_path.name}-wal")
     replacement_wal.write_bytes(b"original sentinel")
@@ -795,6 +809,9 @@ def test_response_page_budget_timeout_admission_and_close_failure() -> None:
                 return child.fileno()
             def close(self) -> None:
                 child.close()
+                replacement_path.unlink()
+                replacement_path.write_bytes(b"replacement partial main")
+                replacement_path.chmod(0o600)
                 replacement_wal.unlink()
                 replacement_wal.write_bytes(b"replacement sentinel")
                 replacement_wal.chmod(0o600)
@@ -809,7 +826,12 @@ def test_response_page_budget_timeout_admission_and_close_failure() -> None:
                 validate_result=lambda _operation, result, _arguments: result,
             ),
         )
-    assert replacement_path.exists()
+    assert replacement_path.read_bytes() == b"replacement partial main"
+    assert replacement_wal.read_bytes() == b"replacement sentinel"
+    with mock.patch.object(owner_path_transport.os, "unlink") as unlink_path:
+        _assert_error("incomplete_store", lambda: SQLiteChatProjectionStore(replacement_path))
+        unlink_path.assert_not_called()
+    assert replacement_path.read_bytes() == b"replacement partial main"
     assert replacement_wal.read_bytes() == b"replacement sentinel"
 
     timeout_path = _path("invalid-timeout")
@@ -834,12 +856,13 @@ def test_response_page_budget_timeout_admission_and_close_failure() -> None:
             startup_path, _startup_timeout_seconds=0.05, _test_owner_fault="startup_stop",
         ),
     )
-    assert not startup_path.exists()
+    assert startup_path.read_bytes() == b"startup partial main"
     startup_sidecars = [
         startup_path.with_name(f"{startup_path.name}{suffix}") for suffix in ("-wal", "-shm")
     ]
     assert all(sidecar.read_bytes() == b"startup sidecar sentinel" for sidecar in startup_sidecars)
-    _assert_error("orphan_sidecars", lambda: SQLiteChatProjectionStore(startup_path))
+    _assert_error("incomplete_store", lambda: SQLiteChatProjectionStore(startup_path))
+    assert startup_path.read_bytes() == b"startup partial main"
     for invalid in (float("nan"), float("inf"), 0.01, 301, True):
         _assert_error(
             "invalid_input",
@@ -847,7 +870,7 @@ def test_response_page_budget_timeout_admission_and_close_failure() -> None:
                 startup_path, _startup_timeout_seconds=invalid,
             ),
         )
-        assert not startup_path.exists()
+        assert startup_path.read_bytes() == b"startup partial main"
 
     page_path = _path("response-page-budget")
     store = SQLiteChatProjectionStore(page_path)

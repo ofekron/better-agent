@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from chat_projection_store import ChatProjectionStoreError
-from chat_projection_store_owner_path import cleanup_created_store, secure_open
+from chat_projection_store_owner_path import secure_open
 
 
 MIN_TIMEOUT_SECONDS = 0.05
@@ -92,7 +92,7 @@ class OwnerClient:
         self._max_error_text_bytes = max_error_text_bytes
         self.ipc_timeout_seconds = self._validate_timeout(ipc_timeout_seconds, "IPC")
         self.startup_timeout_seconds = self._validate_timeout(startup_timeout_seconds, "owner startup")
-        self.path, self.parent_fd, self.file_fd, created = secure_open(root_path, path)
+        self.path, self.parent_fd, self.file_fd, _ = secure_open(root_path, path)
         self.process: subprocess.Popen | None = None
         self.channel: socket.socket | None = None
         parent_channel = None
@@ -139,10 +139,6 @@ class OwnerClient:
                 self._terminate_process()
             except BaseException:
                 pass
-            if created and self.parent_fd is not None and self.file_fd is not None:
-                cleanup_created_store(
-                    self.parent_fd, self.file_fd, self.path.name,
-                )
             self._close_handles()
             if startup_response_received and isinstance(exc, ChatProjectionStoreError):
                 raise

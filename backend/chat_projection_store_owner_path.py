@@ -28,20 +28,6 @@ def verify_anchored_file(file_fd: int, basename: str) -> None:
         raise ChatProjectionStoreError("path_race", "chat store file changed during owner open")
 
 
-def cleanup_created_store(parent_fd: int, file_fd: int, basename: str) -> None:
-    try:
-        expected = os.fstat(file_fd)
-        visible = os.stat(basename, dir_fd=parent_fd, follow_symlinks=False)
-    except OSError:
-        return
-    if (expected.st_dev, expected.st_ino) != (visible.st_dev, visible.st_ino):
-        return
-    try:
-        os.unlink(basename, dir_fd=parent_fd)
-    except OSError:
-        pass
-
-
 def _reject_orphan_sidecars(parent_fd: int, basename: str) -> None:
     for suffix in ("-wal", "-shm"):
         try:
@@ -124,16 +110,16 @@ def secure_open(root_path: Path, path: Path) -> tuple[Path, int, int, bool]:
             code = "path_escape" if open_exc.errno != ENOENT else "path_race"
             raise ChatProjectionStoreError(code, "cannot securely open chat store") from open_exc
     try:
-        validate_secure_file_stat(os.fstat(file_fd))
+        file_metadata = os.fstat(file_fd)
+        validate_secure_file_stat(file_metadata)
         validate_secure_file_stat(os.stat(candidate.name, dir_fd=parent_fd, follow_symlinks=False))
         if created:
             _reject_orphan_sidecars(parent_fd, candidate.name)
+        elif file_metadata.st_size < 100 or os.pread(file_fd, 16, 0) != b"SQLite format 3\x00":
+            raise ChatProjectionStoreError(
+                "incomplete_store", "store initialization is incomplete",
+            )
     except BaseException:
-        if created:
-            try:
-                os.unlink(candidate.name, dir_fd=parent_fd)
-            except OSError:
-                pass
         os.close(file_fd)
         os.close(parent_fd)
         raise

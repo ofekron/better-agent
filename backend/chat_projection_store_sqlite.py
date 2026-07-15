@@ -1223,6 +1223,12 @@ def _run_owner(
         )
         if test_fault == "startup_stop":
             store.close()
+            os.unlink(owner_basename)
+            main_descriptor = os.open(owner_basename, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            try:
+                os.write(main_descriptor, b"startup partial main")
+            finally:
+                os.close(main_descriptor)
             for suffix in ("-wal", "-shm"):
                 descriptor = os.open(
                     f"{owner_basename}{suffix}", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600,
