@@ -704,6 +704,39 @@ def test_exact_json_bytes_match_oracle_for_events_escaping_and_unicode() -> None
     )
 
 
+def test_mapping_and_canonical_event_share_exact_wire_admission_bytes() -> None:
+    mapping = _event(
+        "wire", 7, "assistant_text", data={"text": "wire 😀"},
+        provider_final=True, metadata_only=False,
+    )
+    mapping["schema_version"] = 1
+    canonical = chat_projector._event_from_mapping(mapping, 1)
+    wire = chat_projector._canonical_event_wire(canonical)
+    assert set(wire) == set(mapping)
+    assert wire["journal_seq"] == mapping["journal_seq"]
+    assert wire["provider_final"] is mapping["provider_final"]
+    assert wire["metadata_only"] is mapping["metadata_only"]
+    assert wire["schema_version"] == mapping["schema_version"]
+    expected_bytes = len(json.dumps(
+        [mapping], ensure_ascii=False, separators=(",", ":"),
+    ).encode("utf-8"))
+    assert chat_projector._measure_json([mapping]) == expected_bytes
+    assert chat_projector._measure_json([wire]) == expected_bytes
+    for representation in (mapping, canonical):
+        _with_limit(
+            "MAX_CANONICAL_JSON_BYTES", expected_bytes,
+            lambda representation=representation: project_chat(
+                _messages(), [representation], schema_version=1,
+            ),
+        )
+        _with_limit(
+            "MAX_CANONICAL_JSON_BYTES", expected_bytes - 1,
+            lambda representation=representation: _assert_input_error(
+                "canonical_bytes_exceeded", _messages(), [representation],
+            ),
+        )
+
+
 def test_each_missing_message_field_has_stable_code_before_sorting() -> None:
     complete = _messages()[0]
     for field in ("id", "turn_id", "seq", "role", "content"):

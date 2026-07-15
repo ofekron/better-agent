@@ -31,7 +31,7 @@ _SCOPED_TYPES = {
 _EVENT_FIELDS = {
     "event_id", "timestamp", "journal_seq", "content_version", "context_id",
     "turn_id", "message_id", "parent_event_id", "type", "data", "provider",
-    "provider_final", "metadata_only", "source",
+    "provider_final", "metadata_only", "schema_version", "source",
 }
 _PROVIDER_FIELDS = {"id", "model", "effort"}
 _MESSAGE_FIELDS = {"id", "turn_id", "seq", "role", "content"}
@@ -412,6 +412,12 @@ def _event_from_mapping(raw: Mapping[str, Any], schema_version: int) -> Canonica
             raise ChatProjectionInputError("invalid_flag", f"{flag} must be a boolean")
     if "source" in raw:
         _required_str(raw["source"], "source")
+    if "schema_version" in raw:
+        wire_schema_version = _positive_int(raw["schema_version"], "schema_version")
+        if wire_schema_version != schema_version:
+            raise ChatProjectionInputError(
+                "event_schema_mismatch", "wire schema version does not match request",
+            )
     _validate_nested_data(_required_str(raw["type"], "type"), raw["data"])
     try:
         return CanonicalEvent(
@@ -804,17 +810,7 @@ def _admit_canonical_rows(
     for raw in events:
         value: Any
         if isinstance(raw, CanonicalEvent):
-            value = {
-                "event_id": raw.event_id, "timestamp": raw.timestamp,
-                "context_id": raw.context_id, "turn_id": raw.turn_id,
-                "message_id": raw.message_id, "parent_event_id": raw.parent_event_id,
-                "type": raw.type, "data": raw.data,
-                "provider": {
-                    "id": raw.provider.id if raw.provider else "",
-                    "model": raw.provider.model if raw.provider else "",
-                    "effort": raw.provider.effort if raw.provider else "",
-                },
-            }
+            value = _canonical_event_wire(raw)
         else:
             value = raw
         total_bytes += _measure_json(value)
@@ -823,6 +819,29 @@ def _admit_canonical_rows(
                 "canonical_bytes_exceeded",
                 f"canonical JSON bytes exceed {MAX_CANONICAL_JSON_BYTES}",
             )
+
+
+def _canonical_event_wire(event: CanonicalEvent) -> Mapping[str, Any]:
+    return {
+        "event_id": event.event_id,
+        "timestamp": event.timestamp,
+        "journal_seq": event.sequence,
+        "content_version": event.content_version,
+        "context_id": event.context_id,
+        "turn_id": event.turn_id,
+        "message_id": event.message_id,
+        "parent_event_id": event.parent_event_id,
+        "type": event.type,
+        "data": event.data,
+        "provider": {
+            "id": event.provider.id if event.provider else "",
+            "model": event.provider.model if event.provider else "",
+            "effort": event.provider.effort if event.provider else "",
+        },
+        "provider_final": event.provider_final,
+        "metadata_only": event.metadata_only,
+        "schema_version": event.schema_version,
+    }
 
 
 def _admit_messages(messages: Sequence[Mapping[str, Any]]) -> None:
