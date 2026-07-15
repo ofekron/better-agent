@@ -637,13 +637,13 @@ class Coordinator:
 
     @property
     def _run_state(self) -> dict:
-        return self._ensure_tm()._run_state
+        return self._ensure_tm().run_state_map_snapshot()
 
     @_run_state.setter
     def _run_state(self, value: dict) -> None:
         # Test fixtures (e.g. test_monitoring_state) assign to this
         # attribute directly. Replace the dict on the owner.
-        self._ensure_tm()._run_state = value
+        self._ensure_tm().replace_run_state(value)
 
     # Run-state registry delegates.
     def run_state_add(self, *a, **kw):
@@ -1425,9 +1425,12 @@ class Coordinator:
                     session_manager.remove_queued_prompt(app_session_id, item_id)
                 return existing_item_id
         q.put_nowait(params)
-        # Track queued IDs
+        # Track queued IDs. try_claim_queued_item (the re-enqueue path's
+        # atomic claim) may have already reserved item_id here — don't
+        # double-append.
         ids = self._queued_ids.setdefault(app_session_id, [])
-        ids.append(item_id)
+        if item_id not in ids:
+            ids.append(item_id)
         task = self._processor_tasks.get(app_session_id)
         if task is None or task.done():
             task = asyncio.create_task(
@@ -2964,6 +2967,32 @@ class Coordinator:
     def has_queued_prompts(self, app_session_id: str) -> bool:
         """Return True if there are queued (not yet dequeued) prompts for this session."""
         return bool(self._queued_ids.get(app_session_id))
+
+    def try_claim_queued_item(self, app_session_id: str, item_id: str) -> bool:
+        """Atomically check-and-reserve `item_id` against the same state
+        `is_prompt_item_in_flight` reads. No await between the check and
+        the reservation, so two concurrent re-enqueue passes (the
+        one-time startup recovery pass racing the periodic re-enqueue
+        watchdog when recovery outlasts the watchdog interval) can no
+        longer both observe "not in flight" before either registers —
+        only one caller ever wins the claim. Returns True if the caller
+        now owns the item; False if it was already in flight.
+
+        Callers that fail to actually queue the item after claiming it
+        (an exception, or a decision to skip) MUST call
+        `release_claimed_queued_item` to undo the reservation, or the
+        item would be stuck looking permanently in-flight."""
+        if self.is_prompt_item_in_flight(app_session_id, item_id):
+            return False
+        self._queued_ids.setdefault(app_session_id, []).append(item_id)
+        return True
+
+    def release_claimed_queued_item(self, app_session_id: str, item_id: str) -> None:
+        """Undo a `try_claim_queued_item` reservation that never reached
+        the real queue (submission failed or was skipped)."""
+        ids = self._queued_ids.get(app_session_id)
+        if ids and item_id in ids:
+            ids.remove(item_id)
 
     def is_prompt_item_in_flight(self, app_session_id: str, item_id: str) -> bool:
         """Return True if `item_id` is known to the in-memory coordinator —
@@ -4505,7 +4534,7 @@ class Coordinator:
         self.active_delegations.pop(app_session_id, None)
         self.turn_manager._turn_save_callbacks.pop(app_session_id, None)
         self.turn_manager.current_assistant_msgs.pop(app_session_id, None)
-        self.turn_manager._run_state.pop(app_session_id, None)
+        self.turn_manager.drop_run_state(app_session_id)
         # A10: clear the in-flight-prompt counter too. The matched
         # finally-block decrement in `_run_session_processor` already
         # handles the normal lifecycle, but a hard cancel mid-handle

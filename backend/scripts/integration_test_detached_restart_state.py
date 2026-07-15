@@ -83,6 +83,21 @@ def test_fresh_coordinator_restores_detached_parent_edge() -> None:
 
     restarted = _coordinator()
     _assert_waiting(restarted, parent)
+    with session_manager._monitoring_projection_lock:
+        session_manager._last_broadcast_monitoring.pop(parent, None)
+    restarted.turn_manager._refresh_cache()
+    assert restarted.turn_manager.is_running_cached(parent) is True
+    assert (
+        restarted.turn_manager.monitoring_state_cached(parent)
+        == "waiting_on_background"
+    )
+    assert session_manager.broadcast_state_snapshot().get(parent) == (
+        "waiting_on_background"
+    )
+    assert not any(
+        record.get("sid") == parent[:8]
+        for record in restarted.turn_manager.audit_running_discrepancies()
+    )
     links = restarted.turn_manager.get_run_state(parent)
     assert [entry.get("delegation_id") for entry in links] == ["lifecycle-a"]
 

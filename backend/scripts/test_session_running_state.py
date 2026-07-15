@@ -155,7 +155,10 @@ def test_active_pidless_turn_survives_prune() -> None:
     coord.active_run_ids[sid] = ["r-slow"]
     coord.cancel_events[sid] = threading.Event()
     coord.run_state_add(sid, run_id="r-slow", kind="native", target_message_id=None)
-    coord._run_state[sid][0]["started_at"] = "2000-01-01T00:00:00"
+    with coord.turn_manager._state_lock:
+        coord.turn_manager._run_state[sid][0]["started_at"] = (
+            "2000-01-01T00:00:00"
+        )
 
     pruned = coord._prune_dead_entries(sid)
     assert pruned is False, "active pidless turn must not be pruned"
@@ -289,6 +292,50 @@ def test_periodic_state_reconciles_detached_only_sessions() -> None:
     print(f"{PASS} periodic_state_reconciles_detached_only_sessions")
 
 
+def test_audit_discovers_detached_state_without_projections() -> None:
+    sid = _mk_session()
+    target = _mk_session()
+    coord = _bound_coord()
+    tm = coord.turn_manager
+    tm.register_detached_background(
+        parent_session_id=sid,
+        target_session_id=target,
+        lifecycle_msg_id="detached-audit",
+    )
+    with tm._cache_lock:
+        tm._cached_running.clear()
+        tm._cached_monitoring.clear()
+    with session_manager._monitoring_projection_lock:
+        session_manager._last_broadcast_monitoring.pop(sid, None)
+
+    records = tm.audit_running_discrepancies()
+    record = next(item for item in records if item.get("sid") == sid[:8])
+    assert record["live_monitoring"] == "waiting_on_background", record
+    assert len(record["runs"]) == 1, record
+    assert record["runs"][0]["run_id"] == "detached", record
+    assert record["runs"][0]["kind"] == "worker", record
+    tm.clear_detached_background(
+        lifecycle_msg_id="detached-audit",
+        target_session_id=target,
+    )
+    print(f"{PASS} audit_discovers_detached_state_without_projections")
+
+
+def test_run_state_add_returns_snapshot() -> None:
+    sid = _mk_session()
+    coord = _bound_coord()
+    returned = coord.run_state_add(
+        sid,
+        run_id="immutable-return",
+        kind="native",
+        target_message_id=None,
+    )
+    returned["pid"] = 999_999
+    assert coord.get_run_state(sid)[0].get("pid") is None
+    coord.run_state_remove(sid, "immutable-return")
+    print(f"{PASS} run_state_add_returns_snapshot")
+
+
 def test_active_precedence_masks_background_signal() -> None:
     sid = _mk_session()
     coord = _bound_coord()
@@ -302,14 +349,14 @@ def test_active_precedence_masks_background_signal() -> None:
     tm.active_run_ids[sid] = ["background-join"]
     tm.cancel_events[sid] = threading.Event()
     tm._run_state[sid][0]["foreground_status"] = "completed"
-    original = tm._has_background_work
-    tm._has_background_work = lambda candidate_sid: candidate_sid == sid
+    original = tm._snapshot_has_background_work
+    tm._snapshot_has_background_work = lambda _runs, _has_detached: True
     try:
         assert tm.monitoring_state(sid) == "waiting_on_background", (
             "a known background-only join must not be reported as active"
         )
     finally:
-        tm._has_background_work = original
+        tm._snapshot_has_background_work = original
         tm.cancel_events.pop(sid, None)
         tm.active_run_ids.pop(sid, None)
         tm.run_state_remove(sid, "background-join")
@@ -519,6 +566,8 @@ def main() -> int:
         test_duplicate_worker_run_id_updates_existing_entry()
         test_audit_running_discrepancy_records_state_layers()
         test_periodic_state_reconciles_detached_only_sessions()
+        test_audit_discovers_detached_state_without_projections()
+        test_run_state_add_returns_snapshot()
         test_active_precedence_masks_background_signal()
         test_activity_projection_is_monotonic()
         test_foreground_activity_outranks_older_background_work()

@@ -10536,7 +10536,7 @@ def _has_restart_blocking_agent_work() -> bool:
     active_sids = set(coordinator.turn_manager.active_run_ids.keys())
     active_sids.update(getattr(coordinator, "_in_flight_prompts", {}).keys())
     active_sids.update(getattr(coordinator, "_prompt_queues", {}).keys())
-    active_sids.update(coordinator.turn_manager._run_state.keys())
+    active_sids.update(coordinator.turn_manager.tracked_session_ids())
     return any(coordinator.turn_manager.has_active_runs(sid) for sid in active_sids)
 
 
@@ -11797,87 +11797,103 @@ async def _re_enqueue_queued_prompts(*, runtime: bool = False) -> None:
 
             for qp in list(queued):
                 qp_id = qp.get("id")
-                # Runtime safety: if the coordinator already has this item
-                # queued or being processed, it is not lost — skip it so the
-                # watchdog never double-runs a prompt. No-op at fresh startup
-                # where in-memory state is empty.
-                if qp_id and coordinator.is_prompt_item_in_flight(sid, qp_id):
+                # Runtime safety: atomically claim this item against the
+                # coordinator's in-flight tracking before any await. A
+                # read-only is_prompt_item_in_flight check here would be a
+                # check-then-act race — the startup recovery pass and the
+                # periodic re-enqueue watchdog can overlap when recovery
+                # takes longer than the watchdog interval, and both could
+                # observe "not in flight" before either registers,
+                # double-queuing the same prompt. try_claim_queued_item
+                # reserves the item synchronously as part of the check, so
+                # only one caller can ever win the claim. No-op at fresh
+                # startup where in-memory state is empty.
+                if qp_id and not coordinator.try_claim_queued_item(sid, qp_id):
                     continue
-                client_id = qp.get("client_id")
-                lifecycle_msg_id = qp.get("lifecycle_msg_id")
-                if not lifecycle_msg_id:
-                    lifecycle_msg_id = new_lifecycle_msg_id()
-                    await asyncio.to_thread(
-                        session_manager.update_queued_prompt,
-                        sid,
-                        qp_id,
-                        {"lifecycle_msg_id": lifecycle_msg_id},
-                    )
-
-                if (
-                    (client_id and client_id in existing_client_ids)
-                    or (lifecycle_msg_id and lifecycle_msg_id in existing_lifecycle_ids)
-                ):
-                    await asyncio.to_thread(session_manager.remove_queued_prompt, sid, qp_id)
-                    logger.info(
-                        "re-enqueue: skipping already-processed queued "
-                        "prompt %s for session %s",
-                        qp_id, sid,
-                    )
-                    continue
-
-                team_message = team_messaging.team_message_from_queue_payload(
-                    qp,
-                    target_session_id=sid,
-                )
-                params = {
-                    "prompt": qp.get("content", ""),
-                    "app_session_id": sid,
-                    "model": session.get("model"),
-                    "cwd": session.get("cwd"),
-                    "ws_callback": None,
-                    "images": qp.get("images"),
-                    "files": qp.get("files"),
-                    "orchestration_mode": qp.get("orchestration_mode"),
-                    "send_target": qp.get("send_target"),
-                    "client_id": client_id,
-                    "lifecycle_msg_id": lifecycle_msg_id,
-                    "cli_prompt": qp.get("cli_prompt"),
-                    "source": qp.get("source"),
-                    "team_message": team_message,
-                    "disallowed_tools": qp.get("disallowed_tools"),
-                    "disabled_builtin_extensions": qp.get("disabled_builtin_extensions"),
-                    "capability_contexts": qp.get("capability_contexts") or [],
-                    "_alter_rewind_latest": bool(qp.get("alter_rewind_latest")),
-                    "collapse_key": qp.get("collapse_key") or "",
-                    "collapse_policy": qp.get("collapse_policy") or "",
-                    "_queued_id": qp_id,
-                }
-                detached_sender_session_id = ""
-                if qp.get("source") == team_messaging.DELEGATE_TASK_SOURCE:
-                    detached_sender_session_id = str(
-                        qp.get("sender_session_id") or ""
-                    ).strip()
-                    if detached_sender_session_id:
-                        coordinator.register_detached_mssg_background(
-                            sender_session_id=detached_sender_session_id,
-                            lifecycle_msg_id=lifecycle_msg_id,
-                            target_session_id=sid,
-                        )
+                claimed = bool(qp_id)
                 try:
-                    item_id = await coordinator.submit_prompt_async(sid, params)
-                except Exception:
-                    if detached_sender_session_id:
-                        coordinator.unregister_detached_mssg_background(
-                            lifecycle_msg_id=lifecycle_msg_id,
-                            target_session_id=sid,
+                    client_id = qp.get("client_id")
+                    lifecycle_msg_id = qp.get("lifecycle_msg_id")
+                    if not lifecycle_msg_id:
+                        lifecycle_msg_id = new_lifecycle_msg_id()
+                        await asyncio.to_thread(
+                            session_manager.update_queued_prompt,
+                            sid,
+                            qp_id,
+                            {"lifecycle_msg_id": lifecycle_msg_id},
                         )
-                    raise
-                logger.info(
-                    "re-enqueue: re-submitted queued prompt %s -> %s "
-                    "for session %s",
-                    qp_id, item_id, sid,
-                )
+
+                    if (
+                        (client_id and client_id in existing_client_ids)
+                        or (lifecycle_msg_id and lifecycle_msg_id in existing_lifecycle_ids)
+                    ):
+                        await asyncio.to_thread(session_manager.remove_queued_prompt, sid, qp_id)
+                        logger.info(
+                            "re-enqueue: skipping already-processed queued "
+                            "prompt %s for session %s",
+                            qp_id, sid,
+                        )
+                        continue
+
+                    team_message = team_messaging.team_message_from_queue_payload(
+                        qp,
+                        target_session_id=sid,
+                    )
+                    params = {
+                        "prompt": qp.get("content", ""),
+                        "app_session_id": sid,
+                        "model": session.get("model"),
+                        "cwd": session.get("cwd"),
+                        "ws_callback": None,
+                        "images": qp.get("images"),
+                        "files": qp.get("files"),
+                        "orchestration_mode": qp.get("orchestration_mode"),
+                        "send_target": qp.get("send_target"),
+                        "client_id": client_id,
+                        "lifecycle_msg_id": lifecycle_msg_id,
+                        "cli_prompt": qp.get("cli_prompt"),
+                        "source": qp.get("source"),
+                        "team_message": team_message,
+                        "disallowed_tools": qp.get("disallowed_tools"),
+                        "disabled_builtin_extensions": qp.get("disabled_builtin_extensions"),
+                        "capability_contexts": qp.get("capability_contexts") or [],
+                        "_alter_rewind_latest": bool(qp.get("alter_rewind_latest")),
+                        "collapse_key": qp.get("collapse_key") or "",
+                        "collapse_policy": qp.get("collapse_policy") or "",
+                        "_queued_id": qp_id,
+                    }
+                    detached_sender_session_id = ""
+                    if qp.get("source") == team_messaging.DELEGATE_TASK_SOURCE:
+                        detached_sender_session_id = str(
+                            qp.get("sender_session_id") or ""
+                        ).strip()
+                        if detached_sender_session_id:
+                            coordinator.register_detached_mssg_background(
+                                sender_session_id=detached_sender_session_id,
+                                lifecycle_msg_id=lifecycle_msg_id,
+                                target_session_id=sid,
+                            )
+                    try:
+                        item_id = await coordinator.submit_prompt_async(sid, params)
+                    except Exception:
+                        if detached_sender_session_id:
+                            coordinator.unregister_detached_mssg_background(
+                                lifecycle_msg_id=lifecycle_msg_id,
+                                target_session_id=sid,
+                            )
+                        raise
+                    # submit_prompt_async succeeded: the item is now tracked
+                    # in _queued_ids by the real queuing path, so the claim
+                    # reservation must not be released.
+                    claimed = False
+                    logger.info(
+                        "re-enqueue: re-submitted queued prompt %s -> %s "
+                        "for session %s",
+                        qp_id, item_id, sid,
+                    )
+                finally:
+                    if claimed:
+                        coordinator.release_claimed_queued_item(sid, qp_id)
         except Exception:
             logger.exception(
                 "re-enqueue: failed for session %s, skipping", sid,
