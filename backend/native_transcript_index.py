@@ -660,6 +660,10 @@ def _ensure_fts_schema(conn: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS native_element_meta_path_element_index_idx "
         "ON native_element_meta(path, element_index, rowid)"
     )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS native_element_meta_sid_element_index_idx "
+        "ON native_element_meta(sid, element_index, rowid)"
+    )
     logger.info(
         "native transcript element-window index ensure elapsed_ms=%.3f",
         (time.monotonic() - element_window_index_started) * 1000.0,
@@ -2455,9 +2459,10 @@ _SQL_METADATA_COUNT_RE = re.compile(
 )
 _SQL_PATH_ELEMENT_WINDOW_RE = re.compile(
     r"^\s*select\s+(?P<select>.+?)\s+from\s+native_element_fts\s+where\s+"
-    r"(?:native_element_fts\.)?path\s*=\s*(?P<path>\?|'(?:''|[^'])*'|\"(?:\"\"|[^\"])*\")\s+and\s+"
-    r"(?:native_element_fts\.)?element_index\s+between\s+(?P<start>\?|\d+)\s+and\s+(?P<end>\?|\d+)\s+"
-    r"order\s+by\s+(?:native_element_fts\.)?element_index(?:\s+(?P<direction>asc|desc))?\s*$",
+    r"(?:native_element_fts\.)?(?P<scope>path|sid)\s*=\s*(?P<scope_value>\?|'(?:''|[^'])*'|\"(?:\"\"|[^\"])*\")\s+and\s+"
+    r"(?:native_element_fts\.)?element_index\s+between\s+(?P<start>\?|\d+)\s+and\s+(?P<end>\?|\d+)"
+    r"(?:\s+order\s+by\s+(?:native_element_fts\.)?element_index(?:\s+(?P<direction>asc|desc))?)?"
+    r"(?:\s+limit\s+(?P<limit>\?|\d+))?\s*$",
     re.IGNORECASE | re.DOTALL,
 )
 _SQL_METADATA_RECENCY_RE = re.compile(
@@ -2751,7 +2756,9 @@ def _rewrite_path_element_window_sql(sql: str, params: tuple = ()) -> str | None
     projections = _parse_sql_projections(match.group("select"))
     if projections is None:
         return None
-    values = (match.group("path"), match.group("start"), match.group("end"))
+    values = tuple(value for value in (
+        match.group("scope_value"), match.group("start"), match.group("end"), match.group("limit"),
+    ) if value is not None)
     expected_params = sum(value == "?" for value in values)
     if expected_params != len(params):
         return None
@@ -2763,8 +2770,8 @@ def _rewrite_path_element_window_sql(sql: str, params: tuple = ()) -> str | None
             param_index += 1
         else:
             resolved.append(value[1:-1] if value[:1] in {"'", '"'} else int(value))
-    path, start, end = resolved
-    if not isinstance(path, str) or len(path) > _SQL_SAFE_LITERAL_CHARS:
+    scope_value, start, end, *limit_values = resolved
+    if not isinstance(scope_value, str) or len(scope_value) > _SQL_SAFE_LITERAL_CHARS:
         return None
     if any(isinstance(value, bool) or not isinstance(value, int) for value in (start, end)):
         return None
@@ -2772,18 +2779,24 @@ def _rewrite_path_element_window_sql(sql: str, params: tuple = ()) -> str | None
         return None
     if end < start or end - start > _SQL_SAFE_LIMIT:
         return None
+    if limit_values:
+        limit = limit_values[0]
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 0 < limit <= _SQL_SAFE_LIMIT:
+            return None
     direction = (match.group("direction") or "asc").upper()
+    scope = match.group("scope").lower()
     text_join = (
         " CROSS JOIN native_element_text r ON r.rowid = e.rowid"
         if any(item.uses_raw_text for item in projections) else ""
     )
     return (
         f"SELECT {', '.join(item.sql for item in projections)} "
-        "FROM native_element_meta m INDEXED BY native_element_meta_path_element_index_idx "
+        f"FROM native_element_meta m INDEXED BY native_element_meta_{scope}_element_index_idx "
         "CROSS JOIN native_element_fts e ON e.rowid = m.rowid" + text_join + " "
-        "WHERE m.path = " + match.group("path") + " AND m.element_index BETWEEN "
+        f"WHERE m.{scope} = " + match.group("scope_value") + " AND m.element_index BETWEEN "
         + match.group("start") + " AND " + match.group("end")
-        + f" ORDER BY m.element_index {direction}"
+        + (f" ORDER BY m.element_index {direction}" if "order by" in sql.lower() else "")
+        + (f" LIMIT {match.group('limit')}" if match.group("limit") is not None else "")
     )
 
 

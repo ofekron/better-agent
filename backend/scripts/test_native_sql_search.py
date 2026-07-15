@@ -1045,6 +1045,54 @@ def test_path_window_endpoint_validation_covers_mixed_bindings_and_int64() -> bo
     return ok
 
 
+def test_sid_element_window_without_order_is_indexed() -> bool:
+    conn = idx._writer_connection()
+    start_rowid = conn.execute("SELECT COALESCE(MAX(rowid), 0) FROM native_element_fts").fetchone()[0]
+    rows = [
+        (f"sid window payload {i}", f"/sid-window/{i // 100}.jsonl", "shared-sid", "/proj", "codex",
+         "assistant_text", "", "2026-07-11T00:00:00Z", "assistant", f"sid-{i}", i)
+        for i in range(20_000)
+    ]
+    conn.executemany(
+        "INSERT INTO native_element_fts"
+        "(text,path,sid,cwd,tag,element_kind,tool_name,ts_utc,role,element_id,element_index) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?)", rows,
+    )
+    indexed = conn.execute(
+        "SELECT rowid,path,sid,cwd,tag,element_kind,tool_name,ts_utc,role,element_id,element_index "
+        "FROM native_element_fts WHERE rowid > ?", (start_rowid,),
+    ).fetchall()
+    conn.executemany(
+        "INSERT INTO native_element_meta"
+        "(rowid,path,sid,cwd,tag,element_kind,tool_name,ts_utc,role,element_id,element_index) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?)", indexed,
+    )
+    conn.commit()
+    sql = (
+        "SELECT sid, path, element_index, text FROM native_element_fts "
+        "WHERE sid = ? AND element_index BETWEEN ? AND ? LIMIT ?"
+    )
+    params = ("shared-sid", 9_995, 10_005, 5)
+    rewritten = idx._rewrite_path_element_window_sql(sql, params)
+    expected = [list(row) for row in conn.execute(sql, params).fetchall()]
+    started = time.perf_counter()
+    result = idx.run_readonly_sql(sql, params, timeout_s=5)
+    elapsed = time.perf_counter() - started
+    plan = " ".join(str(row[-1]) for row in conn.execute("EXPLAIN QUERY PLAN " + rewritten, params))
+    conn.execute("DELETE FROM native_element_meta WHERE rowid > ?", (start_rowid,))
+    conn.execute("DELETE FROM native_element_fts WHERE rowid > ?", (start_rowid,))
+    conn.commit()
+    ok = (
+        rewritten is not None and result.get("rows") == expected
+        and result.get("execution_route") == "path_element_window" and elapsed < 1.0
+        and "native_element_meta_sid_element_index_idx" in plan
+        and "USE TEMP B-TREE" not in plan and "ORDER BY" not in rewritten
+    )
+    print(f"{OK if ok else FAIL} sid+element window without order is indexed "
+          f"(elapsed={elapsed:.3f}s, plan={plan!r})")
+    return ok
+
+
 def test_path_element_near_miss_rejects_before_open() -> bool:
     sql = (
         "SELECT path, element_index, text FROM native_element_fts WHERE path = ? "
@@ -1904,6 +1952,7 @@ def main_run() -> int:
         test_observed_match_recency_templates_preserve_direct_results,
         test_match_recency_recognizer_falls_back_on_unsafe_shapes,
         test_production_path_element_window_rewrites_with_parity_and_bounded_work,
+        test_sid_element_window_without_order_is_indexed,
         test_path_window_endpoint_validation_covers_mixed_bindings_and_int64,
         test_path_element_near_miss_rejects_before_open,
         test_interrupt_watchdog_bounds_execute_wall_time,
