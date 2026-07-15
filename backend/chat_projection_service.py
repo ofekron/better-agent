@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import threading
+import time
 import uuid
+from concurrent.futures import Future
 from dataclasses import dataclass
 from typing import Callable, Mapping
 
@@ -36,6 +38,24 @@ class ProjectionChange:
 
 StoreFactory = Callable[[ProjectionAuthority], ChatProjectionStore]
 Subscriber = Callable[[ProjectionChange], None]
+MAX_PENDING_PER_STREAM = 1024
+MAX_STREAM_ADMISSIONS = 1024
+SEQUENCE_WAIT_SECONDS = 30.0
+
+
+@dataclass
+class _PendingCommit:
+    request: ProjectionCommit
+    future: Future
+
+
+@dataclass
+class _StreamAdmission:
+    condition: threading.Condition
+    next_sequence: int
+    pending: dict[int, _PendingCommit]
+    draining: bool = False
+    last_signature: tuple[str, str] | None = None
 
 
 class CanonicalChatProjectionService:
@@ -55,6 +75,7 @@ class CanonicalChatProjectionService:
         self._lock = threading.RLock()
         self._stores: dict[str, ChatProjectionStore] = {}
         self._subscribers: dict[str, dict[str, Subscriber]] = {}
+        self._admissions: dict[tuple[str, str, int], _StreamAdmission] = {}
         self._closed = False
 
     def register(
@@ -77,16 +98,143 @@ class CanonicalChatProjectionService:
         current = self._require(authority)
         if (request.root_id, request.root_generation) != (current.root_id, current.root_generation):
             raise ProjectionServiceError("authority_mismatch", "commit targets another root authority")
-        try:
-            result = self._store(current).commit(request)
-        except ChatProjectionStoreError as exc:
-            self._raise(exc)
+        result = self._append_sequenced(current, request)
         self._publish(current, ProjectionChange(
             current.authority_id, current.root_id, current.root_generation,
             result.revision, result.projection_cursor, request.event_id,
             "duplicate" if result.duplicate else "committed",
         ))
         return result
+
+    def _append_sequenced(
+        self, authority: ProjectionAuthority, request: ProjectionCommit,
+    ) -> CommitResult:
+        watermark = request.watermark
+        key = (authority.authority_id, watermark.stream_id, watermark.generation)
+        admission = self._admission(authority, key, watermark.stream_id, watermark.generation)
+        signature = (request.event_id, request.content_hash)
+        with admission.condition:
+            if watermark.sequence < admission.next_sequence:
+                return self._commit_regression_candidate(authority, admission, request)
+            existing = admission.pending.get(watermark.sequence)
+            if existing is not None:
+                if (existing.request.event_id, existing.request.content_hash) != signature:
+                    raise ProjectionServiceError(
+                        "sequence_conflict", "source sequence carries different content",
+                    )
+                future = existing.future
+            else:
+                if len(admission.pending) >= MAX_PENDING_PER_STREAM:
+                    raise ProjectionServiceError("sequence_buffer_full", "stream admission buffer is full")
+                future = Future()
+                admission.pending[watermark.sequence] = _PendingCommit(request, future)
+                admission.condition.notify_all()
+            self._drain_locked(authority, admission)
+            deadline = time.monotonic() + SEQUENCE_WAIT_SECONDS
+            while not future.done():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    pending = admission.pending.get(watermark.sequence)
+                    if pending is not None and pending.future is future:
+                        del admission.pending[watermark.sequence]
+                    raise ProjectionServiceError("sequence_gap", "source sequence gap did not close")
+                admission.condition.wait(remaining)
+            return future.result()
+
+    def _admission(
+        self, authority: ProjectionAuthority, key: tuple[str, str, int],
+        stream_id: str, generation: int,
+    ) -> _StreamAdmission:
+        with self._lock:
+            self._ensure_open()
+            existing = self._admissions.get(key)
+            if existing is not None:
+                return existing
+            if len(self._admissions) >= MAX_STREAM_ADMISSIONS:
+                idle = next((
+                    candidate for candidate, admission in self._admissions.items()
+                    if not admission.pending and not admission.draining
+                ), None)
+                if idle is None:
+                    raise ProjectionServiceError(
+                        "sequence_admission_full", "stream admission capacity is exhausted",
+                    )
+                del self._admissions[idle]
+            try:
+                watermark = self._store(authority).source_watermark(
+                    authority.root_id, authority.root_generation, stream_id,
+                )
+            except ChatProjectionStoreError as exc:
+                self._raise(exc)
+            next_sequence = 1
+            if watermark is not None:
+                if watermark.generation > generation:
+                    raise ProjectionServiceError(
+                        "watermark_regression", "source generation cannot regress",
+                    )
+                if watermark.generation == generation:
+                    next_sequence = watermark.sequence + 1
+            admission = _StreamAdmission(threading.Condition(), next_sequence, {})
+            self._admissions[key] = admission
+            return admission
+
+    def _commit_regression_candidate(
+        self, authority: ProjectionAuthority, admission: _StreamAdmission,
+        request: ProjectionCommit,
+    ) -> CommitResult:
+        if request.watermark.sequence != admission.next_sequence - 1:
+            raise ProjectionServiceError("watermark_regression", "source sequence cannot regress")
+        signature = (request.event_id, request.content_hash)
+        if admission.last_signature != signature:
+            raise ProjectionServiceError(
+                "sequence_conflict", "committed source sequence carries different content",
+            )
+        try:
+            result = self._store(authority).commit(request)
+        except ChatProjectionStoreError as exc:
+            self._raise(exc)
+        if not result.duplicate:
+            raise ProjectionServiceError(
+                "sequence_conflict", "committed source sequence was not an exact duplicate",
+            )
+        return result
+
+    def _drain_locked(
+        self, authority: ProjectionAuthority, admission: _StreamAdmission,
+    ) -> None:
+        if admission.draining:
+            return
+        admission.draining = True
+        try:
+            while admission.next_sequence in admission.pending:
+                pending = admission.pending.pop(admission.next_sequence)
+                admission.condition.release()
+                try:
+                    result = self._store(authority).commit(pending.request)
+                except ChatProjectionStoreError as exc:
+                    error = ProjectionServiceError(exc.code, exc.detail)
+                    pending.future.set_exception(error)
+                except BaseException as exc:
+                    pending.future.set_exception(exc)
+                else:
+                    admission.next_sequence += 1
+                    admission.last_signature = (
+                        pending.request.event_id, pending.request.content_hash,
+                    )
+                    pending.future.set_result(result)
+                finally:
+                    admission.condition.acquire()
+                admission.condition.notify_all()
+                if pending.future.exception() is not None:
+                    for blocked in admission.pending.values():
+                        blocked.future.set_exception(ProjectionServiceError(
+                            "sequence_blocked", "prior source sequence failed",
+                        ))
+                    admission.pending.clear()
+                    admission.condition.notify_all()
+                    break
+        finally:
+            admission.draining = False
 
     def read_facts(
         self, authority: ProjectionAuthority, *, after: int = 0, limit: int = 1000,
@@ -221,6 +369,16 @@ class CanonicalChatProjectionService:
             stores = tuple(self._stores.values())
             self._stores.clear()
             self._subscribers.clear()
+            admissions = tuple(self._admissions.values())
+            self._admissions.clear()
+        for admission in admissions:
+            with admission.condition:
+                for pending in admission.pending.values():
+                    pending.future.set_exception(
+                        ProjectionServiceError("service_closed", "projection service is closed"),
+                    )
+                admission.pending.clear()
+                admission.condition.notify_all()
         errors = []
         for store in stores:
             try:

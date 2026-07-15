@@ -2,11 +2,14 @@
 from __future__ import annotations
 
 import hashlib
+import multiprocessing
 import os
 import shutil
+import sqlite3
 import sys
 import tempfile
 import threading
+import time
 from dataclasses import replace
 from pathlib import Path
 
@@ -17,6 +20,7 @@ os.environ["BETTER_AGENT_HOME"] = str(HOME)
 sys.path.insert(0, str(ROOT / "backend"))
 
 from chat_projection_authority import ProjectionAuthority, ProjectionAuthorityRegistry
+from chat_projection_authority import ProjectionAuthorityError
 from chat_projection_service import CanonicalChatProjectionService, ProjectionServiceError
 from chat_projection_store import ProjectionCommit, SourceWatermark, TurnManifest
 from chat_projection_store_jsonl import JsonlChatProjectionStore
@@ -48,6 +52,21 @@ def assert_error(code: str, callback) -> None:
 
 def registry() -> ProjectionAuthorityRegistry:
     return ProjectionAuthorityRegistry()
+
+
+def register_worker(arguments: dict, ready, start, results) -> None:
+    selected = None
+    try:
+        selected = ProjectionAuthorityRegistry()
+        ready.put(True)
+        start.wait()
+        authority = selected.register(**arguments)
+        results.put(("ok", authority.authority_id))
+    except ProjectionAuthorityError as exc:
+        results.put(("error", exc.code))
+    finally:
+        if selected is not None:
+            selected.close()
 
 
 def test_authority_selection_provider_parity_and_fail_closed_mixes() -> None:
@@ -158,6 +177,8 @@ def test_concurrency_sqlite_selection_and_lifecycle_errors() -> None:
         provider="codex", session_id="concurrent", root_id="concurrent-root",
         root_generation=0, store_kind="jsonl",
     )
+    admission_key = (authority.authority_id, "provider", 0)
+    service._admission(authority, admission_key, "provider", 0)
     results = []
     failures = []
     def commit(sequence: int) -> None:
@@ -167,13 +188,43 @@ def test_concurrency_sqlite_selection_and_lifecycle_errors() -> None:
             ))
         except BaseException as exc:
             failures.append(exc)
-    threads = [threading.Thread(target=commit, args=(sequence,)) for sequence in range(1, 21)]
-    for thread in threads:
+    def wait_until_buffered(sequence: int) -> None:
+        deadline = time.monotonic() + 5
+        admission = service._admissions[admission_key]
+        with admission.condition:
+            while sequence not in admission.pending:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise AssertionError("sequence was not buffered")
+                admission.condition.wait(remaining)
+    threads = []
+    for sequence in range(20, 0, -1):
+        entered = threading.Event()
+        thread = threading.Thread(target=lambda value=sequence, gate=entered: (
+            gate.set(), commit(value),
+        ))
+        threads.append(thread)
         thread.start()
+        assert entered.wait(1)
+        if sequence > 1:
+            wait_until_buffered(sequence)
     for thread in threads:
         thread.join()
     assert not failures and len(results) == 20
     assert service.projection_cursor(authority) == 20
+    assert service.append_apply(
+        authority, request(20, root="concurrent-root"),
+    ).duplicate
+    assert_error("sequence_conflict", lambda: service.append_apply(
+        authority,
+        replace(
+            request(20, root="concurrent-root"), event_id="different-event",
+            content_hash="1" * 64,
+        ),
+    ))
+    assert_error("watermark_regression", lambda: service.append_apply(
+        authority, request(19, root="concurrent-root"),
+    ))
 
     sqlite_authority = service.register(
         provider="claude", session_id="sqlite", root_id="sqlite-root",
@@ -192,6 +243,115 @@ def test_concurrency_sqlite_selection_and_lifecycle_errors() -> None:
     service.close()
 
 
+def test_registry_version_multiprocess_and_symlink_security() -> None:
+    version_path = HOME / "version" / "authority.sqlite3"
+    version_path.parent.mkdir(parents=True)
+    connection = sqlite3.connect(version_path)
+    connection.execute("PRAGMA user_version=99")
+    connection.commit()
+    connection.close()
+    version_path.chmod(0o600)
+    try:
+        ProjectionAuthorityRegistry(version_path)
+        raise AssertionError("unsupported empty version must fail")
+    except ProjectionAuthorityError as exc:
+        assert exc.code == "unsupported_authority_schema"
+    connection = sqlite3.connect(version_path)
+    assert connection.execute("PRAGMA user_version").fetchone()[0] == 99
+    assert not connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table'"
+    ).fetchone()
+    connection.close()
+
+    context = multiprocessing.get_context("fork")
+    base = {
+        "provider": "claude", "session_id": "process-session", "root_id": "process-root",
+        "root_generation": 0, "store_kind": "jsonl",
+    }
+    ready, results, start = context.Queue(), context.Queue(), context.Event()
+    processes = [
+        context.Process(target=register_worker, args=(base, ready, start, results))
+        for _ in range(4)
+    ]
+    for process in processes:
+        process.start()
+    for _ in processes:
+        assert ready.get(timeout=10)
+    start.set()
+    outcomes = [results.get(timeout=20) for _ in processes]
+    for process in processes:
+        process.join(20)
+        assert process.exitcode == 0
+    assert {status for status, _ in outcomes} == {"ok"}
+    assert len({value for _, value in outcomes}) == 1
+
+    conflict_a = {**base, "session_id": "race-session", "root_id": "race-root-a"}
+    conflict_b = {**base, "session_id": "race-session", "root_id": "race-root-b"}
+    ready, results, start = context.Queue(), context.Queue(), context.Event()
+    processes = [
+        context.Process(target=register_worker, args=(arguments, ready, start, results))
+        for arguments in (conflict_a, conflict_b)
+    ]
+    for process in processes:
+        process.start()
+    for _ in processes:
+        assert ready.get(timeout=10)
+    start.set()
+    outcomes = [results.get(timeout=20) for _ in processes]
+    for process in processes:
+        process.join(20)
+        assert process.exitcode == 0
+    assert sorted(status for status, _ in outcomes) == ["error", "ok"]
+    assert {value for status, value in outcomes if status == "error"} == {"authority_conflict"}
+
+    catalog = ProjectionAuthorityRegistry()
+    catalog.register(
+        provider="claude", session_id="mixed-a", root_id="mixed-root-a",
+        root_generation=0, store_kind="jsonl",
+    )
+    catalog.register(
+        provider="claude", session_id="mixed-b", root_id="mixed-root-b",
+        root_generation=0, store_kind="jsonl",
+    )
+    try:
+        catalog.register(
+            provider="claude", session_id="mixed-a", root_id="mixed-root-b",
+            root_generation=0, store_kind="jsonl",
+        )
+        raise AssertionError("mixed authority must fail")
+    except ProjectionAuthorityError as exc:
+        assert exc.code == "mixed_authority"
+    catalog.close()
+
+    outside = Path(tempfile.mkdtemp(prefix="better-agent-authority-outside-"))
+    unsafe_parent = HOME / "unsafe-parent"
+    unsafe_parent.symlink_to(outside, target_is_directory=True)
+    try:
+        ProjectionAuthorityRegistry(unsafe_parent / "authority.sqlite3")
+        raise AssertionError("symlink parent must fail")
+    except ProjectionAuthorityError as exc:
+        assert exc.code == "path_escape"
+    assert not list(outside.iterdir())
+    unsafe_parent.unlink()
+
+    anchored = ProjectionAuthorityRegistry()
+    chat = HOME / "chat"
+    held = HOME / "chat-held"
+    outside_swap = Path(tempfile.mkdtemp(prefix="better-agent-authority-swap-"))
+    chat.rename(held)
+    chat.symlink_to(outside_swap, target_is_directory=True)
+    anchored.register(
+        provider="gemini", session_id="anchored", root_id="anchored-root",
+        root_generation=0, store_kind="jsonl",
+    )
+    anchored.close()
+    assert not list(outside_swap.iterdir())
+    chat.unlink()
+    held.rename(chat)
+    shutil.rmtree(outside, ignore_errors=True)
+    shutil.rmtree(outside_swap, ignore_errors=True)
+
+
 def main() -> None:
     try:
         test_authority_selection_provider_parity_and_fail_closed_mixes()
@@ -202,6 +362,8 @@ def main() -> None:
         print("PASS test_post_fsync_failure_recovers_through_same_apply_path")
         test_concurrency_sqlite_selection_and_lifecycle_errors()
         print("PASS test_concurrency_sqlite_selection_and_lifecycle_errors")
+        test_registry_version_multiprocess_and_symlink_security()
+        print("PASS test_registry_version_multiprocess_and_symlink_security")
     finally:
         shutil.rmtree(HOME, ignore_errors=True)
 
