@@ -251,6 +251,15 @@ export function flattenClaudeMessages(events: WSEvent[]): FlatEventsResult {
               },
               _ts,
             });
+          } else if (b.type !== "text" && b.type !== "image") {
+            // Unknown user-side block (text is the prompt itself, image
+            // renders as message attachments): surface as a diagnostic
+            // card rather than silently dropping it.
+            flat.push({
+              type: "diagnostic",
+              data: { kind: `user-block.${b.type || "(none)"}`, raw: block },
+              _ts: deriveTs(ev),
+            });
           }
         }
       }

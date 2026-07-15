@@ -53,8 +53,24 @@ def test_thinking_blocks_become_thinking_facts():
     assert thinking.source_event_id == "e4:think:0"
 
 
+def test_unknown_assistant_blocks_become_unsupported_block_facts():
+    facts = canonical_facts_from_journal_row({
+        "root_id": "r", "sid": "r", "seq": 5, "type": "agent_message", "source": "claude", "msg_id": "a1",
+        "data": {"uuid": "e5", "type": "assistant", "message": {"content": [
+            {"type": "text", "text": "known"},
+            {"type": "server_tool_search", "query": "docs"},
+        ]}},
+    })
+    assert [fact.payload_type for fact in facts] == ["assistant_output", "unsupported_block"]
+    unsupported = facts[1]
+    assert unsupported.payload["block_type"] == "server_tool_search"
+    assert unsupported.payload["block"] == {"type": "server_tool_search", "query": "docs"}
+    assert unsupported.source_event_id == "e5:block:1"
+
+
 if __name__ == "__main__":
     test_agent_message_projects_text_tools_and_results()
     test_legacy_manager_event_wrapper_unwraps_to_same_facts()
     test_thinking_blocks_become_thinking_facts()
+    test_unknown_assistant_blocks_become_unsupported_block_facts()
     print("canonical event adapter tests passed")

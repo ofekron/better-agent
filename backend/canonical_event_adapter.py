@@ -91,13 +91,29 @@ def canonical_facts_from_journal_row(row: dict[str, Any]) -> list[CanonicalFact]
                         update_semantics="snapshot",
                     ))
                 continue
-            if block.get("type") != "tool_use":
+            if block.get("type") == "tool_use":
+                facts.append(CanonicalFact.create(
+                    **common,
+                    source_event_id=f"{event_id}:tool:{index}",
+                    payload_type="tool_call",
+                    payload={"message_id": message_id, "tool_use_id": block.get("id"), "tool": block.get("name"), "args": block.get("input")},
+                    update_semantics="snapshot",
+                ))
                 continue
+            if block.get("type") == "text":
+                continue
+            # Unknown assistant content block: emit a typed fact rather
+            # than dropping it, so new provider block types stay visible
+            # all the way through the rendering pipeline until handled.
             facts.append(CanonicalFact.create(
                 **common,
-                source_event_id=f"{event_id}:tool:{index}",
-                payload_type="tool_call",
-                payload={"message_id": message_id, "tool_use_id": block.get("id"), "tool": block.get("name"), "args": block.get("input")},
+                source_event_id=f"{event_id}:block:{index}",
+                payload_type="unsupported_block",
+                payload={
+                    "message_id": message_id,
+                    "block_type": str(block.get("type") or "(none)"),
+                    "block": block,
+                },
                 update_semantics="snapshot",
             ))
     elif role == "user":

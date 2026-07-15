@@ -257,3 +257,34 @@ describe("fallback content block", () => {
     ]);
   });
 });
+
+describe("unknown user-side content blocks", () => {
+  it("surfaces unknown user blocks as diagnostics instead of dropping them", () => {
+    const ev: WSEvent = {
+      type: "agent_message",
+      data: {
+        type: "user",
+        message: {
+          role: "user",
+          content: [
+            { type: "text", text: "the prompt itself" },
+            { type: "image", source: { data: "..." } },
+            { type: "search_result_location", uri: "doc://x" },
+          ],
+        },
+        uuid: "user-1",
+      },
+    };
+    const { flat } = flattenClaudeMessages([ev]);
+    expect(flat).toEqual([
+      {
+        type: "diagnostic",
+        data: {
+          kind: "user-block.search_result_location",
+          raw: { type: "search_result_location", uri: "doc://x" },
+        },
+        _ts: undefined,
+      },
+    ]);
+  });
+});

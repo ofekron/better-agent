@@ -129,6 +129,22 @@ def test_full_pipeline() -> None:
           and wire[1]["result"]["part_ids"] == list(turn.result.part_ids))
 
 
+def test_unsupported_block_facts_stay_visible_as_typed_work() -> None:
+    adapted = adapt_chat_inputs(
+        [fact(1, "user_prompt", {"message_id": "u1", "text": "hi"}),
+         fact(2, "message_ownership_declared", {"message_id": "a1", "prompt_message_id": "u1"}),
+         fact(3, "unsupported_block", {"message_id": "a1", "block_type": "server_tool_search",
+                                       "block": {"type": "server_tool_search"}})],
+        SESSION,
+    )
+    work = [event for event in adapted.events if event["type"] == "other_typed_work"]
+    check("unsupported block maps to visible typed work",
+          len(work) == 1 and work[0]["data"] == {
+              "kind": "unsupported_block",
+              "label": "unsupported block: server_tool_search",
+          })
+
+
 def test_identity_fails_closed() -> None:
     bare_session = {"id": "root", "messages": []}
     adapted = adapt_chat_inputs(
@@ -143,6 +159,7 @@ def test_identity_fails_closed() -> None:
 
 if __name__ == "__main__":
     test_full_pipeline()
+    test_unsupported_block_facts_stay_visible_as_typed_work()
     test_identity_fails_closed()
     if _failures:
         print(f"{len(_failures)} test(s) FAILED")

@@ -262,9 +262,15 @@ def adapt_chat_inputs(
             emit(fact, _TURN_MARKERS[payload_type], {}, message_id=message_id, metadata_only=True)
             continue
 
+        block_type = payload.get("block_type")
+        label = (
+            f"unsupported block: {block_type}"
+            if payload_type == "unsupported_block" and isinstance(block_type, str)
+            else payload_type or "unknown"
+        )
         emit(
             fact, "other_typed_work",
-            {"kind": payload_type or "unknown", "label": payload_type or "unknown"},
+            {"kind": payload_type or "unknown", "label": label},
             message_id=message_id,
         )
 
