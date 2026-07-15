@@ -31,7 +31,7 @@ from urllib.parse import quote, urlparse
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
-from env_compat import dual_env_many, get_env
+from env_compat import better_agent_runtime_env, dual_env_many, get_env
 from json_store import read_json, write_json
 from paths import ba_home
 import password_manager
@@ -5417,22 +5417,28 @@ def _native_mcp_launcher_env(inputs: dict[str, Any]) -> dict[str, str]:
         if str(item or "").strip()
     ]
     provisioned_tool_profile = str(inputs.get("provisioned_tool_profile") or "").strip()
-    return dual_env_many({
-        "BETTER_CLAUDE_BACKEND_URL": backend_url,
-        "BETTER_CLAUDE_APP_SESSION_ID": str(inputs.get("app_session_id") or ""),
-        "BETTER_CLAUDE_CWD": str(inputs.get("cwd") or ""),
-        "BETTER_CLAUDE_MODEL": str(inputs.get("model") or ""),
-        "BETTER_CLAUDE_PROVIDER_ID": str(inputs.get("provider_id") or ""),
-        "BETTER_CLAUDE_MODE": str(inputs.get("mode") or ""),
-        "BETTER_CLAUDE_WORKING_MODE": str(inputs.get("working_mode") or ""),
-        "BETTER_CLAUDE_BARE_CONFIG": "1" if inputs.get("bare_config") else "0",
-        "BETTER_CLAUDE_USER_FACING": "1"
-        if bool(inputs.get("open_file_panel_enabled")) and not bool(inputs.get("bare_config"))
-        else "0",
-        "BETTER_CLAUDE_DISABLED_BUILTIN_EXTENSIONS": ",".join(disabled_extensions),
-        "BETTER_CLAUDE_ACTIVE_CAPABILITY_IDS": ",".join(active_capability_ids),
-        "BETTER_CLAUDE_PROVISIONED_TOOL_PROFILE": provisioned_tool_profile,
-    })
+    return {
+        **better_agent_runtime_env(),
+        **dual_env_many(
+            {
+                "BETTER_CLAUDE_BACKEND_URL": backend_url,
+                "BETTER_CLAUDE_APP_SESSION_ID": str(inputs.get("app_session_id") or ""),
+                "BETTER_CLAUDE_CWD": str(inputs.get("cwd") or ""),
+                "BETTER_CLAUDE_MODEL": str(inputs.get("model") or ""),
+                "BETTER_CLAUDE_PROVIDER_ID": str(inputs.get("provider_id") or ""),
+                "BETTER_CLAUDE_MODE": str(inputs.get("mode") or ""),
+                "BETTER_CLAUDE_WORKING_MODE": str(inputs.get("working_mode") or ""),
+                "BETTER_CLAUDE_BARE_CONFIG": "1" if inputs.get("bare_config") else "0",
+                "BETTER_CLAUDE_USER_FACING": "1"
+                if bool(inputs.get("open_file_panel_enabled"))
+                and not bool(inputs.get("bare_config"))
+                else "0",
+                "BETTER_CLAUDE_DISABLED_BUILTIN_EXTENSIONS": ",".join(disabled_extensions),
+                "BETTER_CLAUDE_ACTIVE_CAPABILITY_IDS": ",".join(active_capability_ids),
+                "BETTER_CLAUDE_PROVISIONED_TOOL_PROFILE": provisioned_tool_profile,
+            }
+        ),
+    }
 
 
 def resolve_native_mcp_server_config(
@@ -5474,13 +5480,18 @@ def _runtime_mcp_server_config_for_item(
         or "http://localhost:8000"
     ).strip()
     internal_token = ""
-    base_env = dual_env_many({
-        "BETTER_CLAUDE_BACKEND_URL": backend_url,
-        "BETTER_CLAUDE_APP_SESSION_ID": str(inputs.get("app_session_id") or ""),
-        "BETTER_CLAUDE_CWD": str(inputs.get("cwd") or ""),
-        "BETTER_CLAUDE_MODEL": str(inputs.get("model") or ""),
-        "BETTER_CLAUDE_PROVIDER_ID": str(inputs.get("provider_id") or ""),
-    })
+    base_env = {
+        **better_agent_runtime_env(),
+        **dual_env_many(
+            {
+                "BETTER_CLAUDE_BACKEND_URL": backend_url,
+                "BETTER_CLAUDE_APP_SESSION_ID": str(inputs.get("app_session_id") or ""),
+                "BETTER_CLAUDE_CWD": str(inputs.get("cwd") or ""),
+                "BETTER_CLAUDE_MODEL": str(inputs.get("model") or ""),
+                "BETTER_CLAUDE_PROVIDER_ID": str(inputs.get("provider_id") or ""),
+            }
+        ),
+    }
     if (
         manifest["id"] == extension_id_for_role('requirements')
         and str(inputs.get("provisioned_tool_profile") or "").strip() == "requirements_processor"

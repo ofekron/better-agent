@@ -14,8 +14,11 @@ Locks:
 from __future__ import annotations
 
 import json
+import os
 import socketserver
+import subprocess
 import sys
+import tempfile
 import threading
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
@@ -27,6 +30,7 @@ import _test_home
 _TEST_HOME = _test_home.isolate(prefix="ba-ipc-transport-")
 
 import internal_request_auth
+import env_compat
 import loopback_http
 import runtime_endpoints
 
@@ -162,6 +166,51 @@ def test_missing_descriptor_fails_closed():
         pass
     else:
         raise AssertionError("missing descriptor did not fail closed")
+
+
+def test_descriptor_validates_from_provider_isolated_home():
+    socket_path = runtime_endpoints.app_socket_path()
+    runtime_endpoints.write_app_endpoint({"kind": "uds", "path": str(socket_path)})
+    provider_home = tempfile.mkdtemp(prefix="ba-provider-home-")
+    try:
+        env = {
+            **env_compat.better_agent_runtime_env(),
+            "HOME": provider_home,
+            "PYTHONPATH": str(_BACKEND_DIR),
+        }
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import runtime_endpoints; print(runtime_endpoints.read_app_endpoint()['kind'])",
+            ],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        assert result.stdout.strip() == "uds"
+    finally:
+        runtime_endpoints.clear_app_endpoint()
+
+
+def test_runtime_env_canonicalizes_primary_home():
+    saved = {
+        "BETTER_AGENT_HOME": os.environ.get("BETTER_AGENT_HOME"),
+        "BETTER_CLAUDE_HOME": os.environ.get("BETTER_CLAUDE_HOME"),
+    }
+    try:
+        os.environ["BETTER_AGENT_HOME"] = "/tmp/ba-primary-home"
+        os.environ["BETTER_CLAUDE_HOME"] = "/tmp/ba-legacy-home"
+        env = env_compat.better_agent_runtime_env()
+        assert env["BETTER_AGENT_HOME"] == "/tmp/ba-primary-home"
+        assert env["BETTER_CLAUDE_HOME"] == "/tmp/ba-primary-home"
+    finally:
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
 
 def test_internal_producers_do_not_use_bff_transport():

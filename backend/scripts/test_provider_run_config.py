@@ -1602,6 +1602,8 @@ def t_requirements_mcp_stays_on_better_agent_runtime() -> None:
         check(env["BETTER_CLAUDE_EXTENSION_ID"] == extension_store.extension_id_for_role('requirements'), "runtime requirements MCP env selects requirements extension")
         check(env["BETTER_CLAUDE_APP_SESSION_ID"] == "bc-sid", "runtime requirements MCP env carries app session id")
         check(env["BETTER_CLAUDE_CWD"] == "/tmp/project", "runtime requirements MCP env carries cwd")
+        check(env["BETTER_AGENT_HOME"] == str(ba_home()), "runtime requirements MCP env pins primary Better Agent home")
+        check(env["BETTER_CLAUDE_HOME"] == str(ba_home()), "runtime requirements MCP env pins legacy Better Agent home")
         check(Path(req["args"][0]).name == "server.py", "runtime requirements MCP points at extension server")
     missing_token = dict(inputs)
     missing_token["internal_token"] = ""
@@ -1669,6 +1671,55 @@ def t_requirements_processor_profile_marks_requirements_mcp_env() -> None:
     check(
         runtime_env["BETTER_CLAUDE_PROVISIONED_TOOL_PROFILE"] == "requirements_processor",
         "processor profile native runtime env carries provisioned tool profile",
+    )
+    check(
+        runtime_env["BETTER_AGENT_HOME"] == str(ba_home()),
+        "native MCP runtime env pins primary Better Agent home",
+    )
+    check(
+        runtime_env["BETTER_CLAUDE_HOME"] == str(ba_home()),
+        "native MCP runtime env pins legacy Better Agent home",
+    )
+
+
+def t_capabilities_mcp_env_pins_better_agent_home() -> None:
+    inputs = {
+        "open_file_panel_enabled": False,
+        "app_session_id": "cap-sid",
+        "backend_url": "http://127.0.0.1:8000",
+        "internal_token": "secret",
+        "mode": "native",
+        "cwd": "/tmp/project",
+        "model": "m",
+        "provider_id": "prov-1",
+    }
+    config = builtin_mcp_config.with_builtin_mcp_servers(inputs, {})
+    cap_env = config["mcp_servers"]["capabilities"]["env"]
+    check(
+        cap_env["BETTER_AGENT_HOME"] == str(ba_home()),
+        "capabilities MCP env pins primary Better Agent home",
+    )
+    check(
+        cap_env["BETTER_CLAUDE_HOME"] == str(ba_home()),
+        "capabilities MCP env pins legacy Better Agent home",
+    )
+
+
+def t_extension_mcp_launcher_env_pins_better_agent_home() -> None:
+    env = extension_store._native_mcp_launcher_env(
+        {
+            "backend_url": "http://127.0.0.1:8000",
+            "app_session_id": "launcher-sid",
+            "cwd": "/tmp/project",
+        }
+    )
+    check(
+        env["BETTER_AGENT_HOME"] == str(ba_home()),
+        "extension MCP launcher env pins primary Better Agent home",
+    )
+    check(
+        env["BETTER_CLAUDE_HOME"] == str(ba_home()),
+        "extension MCP launcher env pins legacy Better Agent home",
     )
 
 
@@ -1895,6 +1946,8 @@ def main() -> int:
         ("better-agent runner uses extension mcp configs", t_better_agent_runner_uses_extension_mcp_configs),
         ("requirements mcp stays on Better Agent runtime", t_requirements_mcp_stays_on_better_agent_runtime),
         ("requirements processor profile marks requirements mcp env", t_requirements_processor_profile_marks_requirements_mcp_env),
+        ("capabilities mcp env pins Better Agent home", t_capabilities_mcp_env_pins_better_agent_home),
+        ("extension mcp launcher env pins Better Agent home", t_extension_mcp_launcher_env_pins_better_agent_home),
         ("bare TestApe mcp stays on Better Agent runtime", t_bare_testape_mcp_stays_on_better_agent_runtime),
         ("bare mcp availability matrix", t_bare_mcp_availability_matrix),
         ("open-file-panel mcp validates required fields", t_open_file_panel_mcp_validates_required_fields),

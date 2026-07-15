@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -14,6 +15,7 @@ import capabilities_mcp
 import open_config_panel_mcp
 import open_file_panel_mcp
 import ambient_mcp_broker
+import core_ambient_mcp_launcher
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
@@ -45,8 +47,30 @@ def main() -> None:
         "session-1",
         {"action": "load", "capability_id": "ext:cap", "app_session_id": "session-1"},
     )]
+    test_core_launcher_child_env_pins_home_across_provider_home()
     test_launcher_from_non_repo_cwd()
     print("PASS authenticated core ambient MCP schemas and calls")
+
+
+def test_core_launcher_child_env_pins_home_across_provider_home() -> None:
+    provider_home = tempfile.mkdtemp(prefix="ba-core-provider-home-")
+    env = {
+        **core_ambient_mcp_launcher._child_env("test-token"),
+        "HOME": provider_home,
+        "PYTHONPATH": str(Path(__file__).resolve().parents[1]),
+    }
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from paths import ba_home; print(ba_home())",
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert result.stdout.strip() == os.environ["BETTER_AGENT_HOME"]
 
 
 def test_launcher_from_non_repo_cwd() -> None:
@@ -61,8 +85,12 @@ async def _launcher_from_non_repo_cwd() -> None:
         env = {
             "PATH": os.environ.get("PATH", ""),
             "BETTER_AGENT_HOME": os.environ["BETTER_AGENT_HOME"],
+            "BETTER_CLAUDE_HOME": os.environ["BETTER_AGENT_HOME"],
             "BETTER_CLAUDE_INTERNAL_TOKEN": "test-token",
         }
+        for key in ("TMPDIR", "TEMP", "TMP"):
+            if os.environ.get(key) is not None:
+                env[key] = os.environ[key]
         params = StdioServerParameters(
             command=sys.executable,
             args=[str(launcher), "ui"],

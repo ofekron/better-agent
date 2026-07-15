@@ -30,6 +30,8 @@ def main() -> None:
         assert projected["user:notes"].ownership == "user"
         assert projected["core:capabilities"].available is True
         assert projected["core:capabilities"].launcher["args"][-1] == "capabilities"
+        assert projected["core:capabilities"].launcher["env"]["BETTER_AGENT_HOME"] == home
+        assert projected["core:capabilities"].launcher["env"]["BETTER_CLAUDE_HOME"] == home
         assert projected["core:capabilities"].policy["permissions"] == [
             "capabilities.read", "capabilities.write"
         ]

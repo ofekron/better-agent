@@ -37,3 +37,16 @@ def dual_env_many(values: dict[str, object]) -> dict[str, str]:
     for legacy_name, value in values.items():
         env.update(dual_env(legacy_name, value))
     return env
+
+
+def better_agent_home_env() -> dict[str, str]:
+    return dual_env("BETTER_CLAUDE_HOME", get_env("BETTER_CLAUDE_HOME"))
+
+
+def better_agent_runtime_env() -> dict[str, str]:
+    env = better_agent_home_env()
+    for key in ("TMPDIR", "TEMP", "TMP"):
+        value = os.environ.get(key)
+        if value is not None:
+            env[key] = value
+    return env

@@ -5,7 +5,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from env_compat import get_env
+from env_compat import better_agent_runtime_env, get_env
 
 
 _MODULE_FILES = {
@@ -13,6 +13,17 @@ _MODULE_FILES = {
     "open-config-panel": "open_config_panel_mcp.py",
     "capabilities": "capabilities_mcp.py",
 }
+
+
+def _child_env(credential: str) -> dict[str, str]:
+    return {
+        "PATH": os.environ.get("PATH", ""),
+        "PYTHONIOENCODING": "utf-8",
+        **better_agent_runtime_env(),
+        "BETTER_CLAUDE_BACKEND_URL": get_env("BETTER_CLAUDE_BACKEND_URL") or "http://localhost:8000",
+        "BETTER_CLAUDE_INTERNAL_TOKEN": credential,
+        "BETTER_AGENT_INTERNAL_TOKEN": credential,
+    }
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -36,13 +47,7 @@ def main(argv: list[str] | None = None) -> int:
         credential = str(grant.get("credential") or "")
         if not credential:
             raise PermissionError("broker returned no credential")
-        env = {
-            "PATH": os.environ.get("PATH", ""),
-            "PYTHONIOENCODING": "utf-8",
-            "BETTER_CLAUDE_BACKEND_URL": get_env("BETTER_CLAUDE_BACKEND_URL") or "http://localhost:8000",
-            "BETTER_CLAUDE_INTERNAL_TOKEN": credential,
-            "BETTER_AGENT_INTERNAL_TOKEN": credential,
-        }
+        env = _child_env(credential)
         module_path = Path(__file__).with_name(_MODULE_FILES[server_name]).resolve()
         process = subprocess.Popen([sys.executable, str(module_path)], env=env)
         return process.wait()

@@ -7,6 +7,7 @@ from typing import Any, Callable, Iterable, Literal
 
 import ambient_user_mcp_store
 import ambient_mcp_policy_store
+from env_compat import better_agent_runtime_env
 
 
 Ownership = Literal["better-agent-core", "extension", "user"]
@@ -85,7 +86,11 @@ def _core_capabilities() -> Iterable[AmbientMcpCapability]:
         yield AmbientMcpCapability(
             id=capability_id,
             name=name,
-            launcher={"command": sys.executable, "args": [str(launcher_script), name], "env": {}},
+            launcher={
+                "command": sys.executable,
+                "args": [str(launcher_script), name],
+                "env": better_agent_runtime_env(),
+            },
             policy={"native_exposure": True, "session_bound": True, "permissions": permissions},
             ownership="better-agent-core",
             available=True,
