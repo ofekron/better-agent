@@ -51,6 +51,33 @@ function openDatabase(): Promise<IDBDatabase> {
   });
 }
 
+async function withTransaction<T>(
+  storeNames: string | string[],
+  mode: IDBTransactionMode,
+  operation: (transaction: IDBTransaction) => Promise<T> | T,
+): Promise<T> {
+  const db = await openDatabase();
+  try {
+    const transaction = db.transaction(storeNames, mode);
+    const done = transactionDone(transaction);
+    try {
+      const result = await operation(transaction);
+      await done;
+      return result;
+    } catch (error) {
+      try {
+        transaction.abort();
+      } catch {
+        // The transaction already completed or aborted.
+      }
+      await done.catch(() => undefined);
+      throw error;
+    }
+  } finally {
+    db.close();
+  }
+}
+
 function splitEntry(entry: OfflineQueueEntry, key: string, order: number): {
   action: StoredAction;
   payload: StoredPayload | null;
@@ -74,51 +101,37 @@ function hydrate(action: StoredAction, payload?: StoredPayload): OfflineQueueEnt
 }
 
 export async function loadOfflineActions(): Promise<OfflineQueueEntry[]> {
-  const db = await openDatabase();
-  const tx = db.transaction([ACTIONS, PAYLOADS], "readonly");
-  const done = transactionDone(tx);
-  try {
+  return withTransaction([ACTIONS, PAYLOADS], "readonly", async (tx) => {
     const [actions, payloads] = await Promise.all([
       requestResult(tx.objectStore(ACTIONS).getAll()) as Promise<StoredAction[]>,
       requestResult(tx.objectStore(PAYLOADS).getAll()) as Promise<StoredPayload[]>,
     ]);
-    await done;
     const payloadByKey = new Map(payloads.map((payload) => [payload.key, payload]));
     return actions
       .sort((left, right) => left.order - right.order)
       .map((action) => hydrate(action, payloadByKey.get(action.key)));
-  } catch (error) {
-    await done.catch(() => undefined);
-    throw error;
-  } finally {
-    db.close();
-  }
+  });
 }
 
 export async function putOfflineAction(entry: OfflineQueueEntry): Promise<void> {
-  const db = await openDatabase();
-  const tx = db.transaction([ACTIONS, PAYLOADS, SEQUENCE], "readwrite");
-  const actions = tx.objectStore(ACTIONS);
-  const payloads = tx.objectStore(PAYLOADS);
-  const key = offlineActionKey(entry);
-  const existing = await requestResult(actions.get(key)) as StoredAction | undefined;
-  const order = existing?.order ?? Number(await requestResult(tx.objectStore(SEQUENCE).add({})));
-  const { action, payload } = splitEntry(entry, key, order);
-  actions.put(action);
-  if (payload) payloads.put(payload);
-  else payloads.delete(key);
-  await transactionDone(tx);
-  db.close();
+  await withTransaction([ACTIONS, PAYLOADS, SEQUENCE], "readwrite", async (tx) => {
+    const actions = tx.objectStore(ACTIONS);
+    const payloads = tx.objectStore(PAYLOADS);
+    const key = offlineActionKey(entry);
+    const existing = await requestResult(actions.get(key)) as StoredAction | undefined;
+    const order = existing?.order ?? Number(await requestResult(tx.objectStore(SEQUENCE).add({})));
+    const { action, payload } = splitEntry(entry, key, order);
+    actions.put(action);
+    if (payload) payloads.put(payload);
+    else payloads.delete(key);
+  });
 }
 
 export async function importOfflineActions(entries: OfflineQueueEntry[]): Promise<void> {
-  const db = await openDatabase();
-  const tx = db.transaction([ACTIONS, PAYLOADS, SEQUENCE], "readwrite");
-  const done = transactionDone(tx);
-  const actions = tx.objectStore(ACTIONS);
-  const payloads = tx.objectStore(PAYLOADS);
-  const sequence = tx.objectStore(SEQUENCE);
-  try {
+  await withTransaction([ACTIONS, PAYLOADS, SEQUENCE], "readwrite", async (tx) => {
+    const actions = tx.objectStore(ACTIONS);
+    const payloads = tx.objectStore(PAYLOADS);
+    const sequence = tx.objectStore(SEQUENCE);
     for (const entry of entries) {
       const key = offlineActionKey(entry);
       if (await requestResult(actions.getKey(key)) !== undefined) continue;
@@ -127,51 +140,34 @@ export async function importOfflineActions(entries: OfflineQueueEntry[]): Promis
       actions.put(action);
       if (payload) payloads.put(payload);
     }
-    await done;
-  } catch (error) {
-    try {
-      tx.abort();
-    } catch {
-      // The transaction already completed or aborted.
-    }
-    await done.catch(() => undefined);
-    throw error;
-  } finally {
-    db.close();
-  }
+  });
 }
 
 export async function updateOfflineAction(
   key: string,
   update: (entry: OfflineQueueEntry) => OfflineQueueEntry,
 ): Promise<void> {
-  const db = await openDatabase();
-  const tx = db.transaction(ACTIONS, "readwrite");
-  const actions = tx.objectStore(ACTIONS);
-  const action = await requestResult(actions.get(key)) as StoredAction | undefined;
-  if (action) {
-    const next = splitEntry(update(hydrate(action)), key, action.order);
-    actions.put(next.action);
-  }
-  await transactionDone(tx);
-  db.close();
+  await withTransaction(ACTIONS, "readwrite", async (tx) => {
+    const actions = tx.objectStore(ACTIONS);
+    const action = await requestResult(actions.get(key)) as StoredAction | undefined;
+    if (action) {
+      const next = splitEntry(update(hydrate(action)), key, action.order);
+      actions.put(next.action);
+    }
+  });
 }
 
 export async function deleteOfflineAction(key: string): Promise<void> {
-  const db = await openDatabase();
-  const tx = db.transaction([ACTIONS, PAYLOADS], "readwrite");
-  tx.objectStore(ACTIONS).delete(key);
-  tx.objectStore(PAYLOADS).delete(key);
-  await transactionDone(tx);
-  db.close();
+  await withTransaction([ACTIONS, PAYLOADS], "readwrite", (tx) => {
+    tx.objectStore(ACTIONS).delete(key);
+    tx.objectStore(PAYLOADS).delete(key);
+  });
 }
 
 export async function clearOfflineActions(): Promise<void> {
-  const db = await openDatabase();
-  const tx = db.transaction([ACTIONS, PAYLOADS, SEQUENCE], "readwrite");
-  tx.objectStore(ACTIONS).clear();
-  tx.objectStore(PAYLOADS).clear();
-  tx.objectStore(SEQUENCE).clear();
-  await transactionDone(tx);
-  db.close();
+  await withTransaction([ACTIONS, PAYLOADS, SEQUENCE], "readwrite", (tx) => {
+    tx.objectStore(ACTIONS).clear();
+    tx.objectStore(PAYLOADS).clear();
+    tx.objectStore(SEQUENCE).clear();
+  });
 }

@@ -7,6 +7,7 @@ import {
   type OfflinePromptEntry,
 } from "../src/hooks/useOfflineQueue";
 import {
+  clearOfflineActions,
   deleteOfflineAction,
   loadOfflineActions,
   offlineActionKey,
@@ -243,5 +244,73 @@ describe("useOfflineQueue — IndexedDB persistence integrity", () => {
     await act(() => Promise.all([enqueue, acknowledge]));
     expect(await loadOfflineActions()).toEqual([]);
     expect(result.current.getAll()).toEqual([]);
+  });
+
+  it("closes the database after a synchronous mutation failure", async () => {
+    const close = vi.spyOn(IDBDatabase.prototype, "close");
+    const put = vi.spyOn(IDBObjectStore.prototype, "put")
+      .mockImplementationOnce(() => { throw new DOMException("forced", "DataError"); });
+    try {
+      await expect(putOfflineAction(entry("a", "close-on-put"))).rejects.toThrow("forced");
+      expect(close).toHaveBeenCalled();
+    } finally {
+      put.mockRestore();
+      close.mockRestore();
+    }
+  });
+
+  it("closes the database when transaction creation fails", async () => {
+    const close = vi.spyOn(IDBDatabase.prototype, "close");
+    const transaction = vi.spyOn(IDBDatabase.prototype, "transaction")
+      .mockImplementationOnce(() => { throw new DOMException("forced transaction", "InvalidStateError"); });
+    try {
+      await expect(loadOfflineActions()).rejects.toThrow("forced transaction");
+      expect(close).toHaveBeenCalled();
+    } finally {
+      transaction.mockRestore();
+      close.mockRestore();
+    }
+  });
+
+  it("closes the database after an asynchronous request abort", async () => {
+    await putOfflineAction(entry("a", "close-on-abort"));
+    const close = vi.spyOn(IDBDatabase.prototype, "close");
+    const originalGet = IDBObjectStore.prototype.get;
+    IDBObjectStore.prototype.get = function (...args: Parameters<IDBObjectStore["get"]>) {
+      const request = originalGet.apply(this, args);
+      this.transaction.abort();
+      return request;
+    };
+    try {
+      await expect(updateOfflineAction(
+        offlineActionKey(entry("a", "close-on-abort")),
+        (current) => current,
+      )).rejects.toBeDefined();
+      expect(close).toHaveBeenCalled();
+    } finally {
+      IDBObjectStore.prototype.get = originalGet;
+      close.mockRestore();
+    }
+  });
+
+  it("closes the database after a transaction abort in a synchronous operation", async () => {
+    const close = vi.spyOn(IDBDatabase.prototype, "close");
+    const originalClear = IDBObjectStore.prototype.clear;
+    let aborted = false;
+    IDBObjectStore.prototype.clear = function (...args: Parameters<IDBObjectStore["clear"]>) {
+      const request = originalClear.apply(this, args);
+      if (!aborted) {
+        aborted = true;
+        this.transaction.abort();
+      }
+      return request;
+    };
+    try {
+      await expect(clearOfflineActions()).rejects.toBeDefined();
+      expect(close).toHaveBeenCalled();
+    } finally {
+      IDBObjectStore.prototype.clear = originalClear;
+      close.mockRestore();
+    }
   });
 });

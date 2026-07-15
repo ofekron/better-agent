@@ -47,6 +47,13 @@ describe("prompt queue projection", () => {
     expect(queueSnapshotReceived(acknowledged, [], 5).items).toEqual([]);
   });
 
+  it("does not resurrect a removed item from a delayed older acknowledgement", () => {
+    const acknowledged = queueItemAcknowledged(EMPTY_PROMPT_QUEUE_PROJECTION, item("a"), 1);
+    const removed = queueSnapshotReceived(acknowledged, [], 2);
+    expect(queueItemAcknowledged(removed, item("a"), 1)).toBe(removed);
+    expect(removed.items).toEqual([]);
+  });
+
   it("consumes selected items idempotently without disturbing order", () => {
     const state = {
       items: [item("a"), item("b"), item("c")],

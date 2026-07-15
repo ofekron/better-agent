@@ -17,6 +17,7 @@ export function queueItemAcknowledged(
   item: QueuedBannerState,
   revision: number,
 ): PromptQueueProjection {
+  if (revision < state.revision) return state;
   const items = state.items.some((current) => current.id === item.id)
     ? state.items.map((current) => current.id === item.id ? item : current)
     : [...state.items, item];
