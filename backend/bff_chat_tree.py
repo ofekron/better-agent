@@ -143,10 +143,13 @@ def _build_lookup(
             # ChatMessage needs beyond tree structure.
             "snapshot": snapshot_by_id.get(message["id"]),
         }
+    owning_messages: set[str] = set()
     for event in adapted_events:
         if event["event_id"] not in referenced:
             continue
         message_id = event.get("message_id")
+        if isinstance(message_id, str) and message_id:
+            owning_messages.add(message_id)
         lookup[event["event_id"]] = {
             "kind": "event",
             "type": event["type"],
@@ -156,6 +159,18 @@ def _build_lookup(
             "message_seq": snapshot_seq.get(message_id) if isinstance(message_id, str) else None,
             "run_meta": run_meta.get(message_id) if isinstance(message_id, str) else None,
         }
+    # Messages the window's events belong to (assistant rows): the tree
+    # references event ids, but the client's message shape needs the
+    # owning message's snapshot too.
+    for message in adapted_messages:
+        if message["id"] in owning_messages and message["id"] not in lookup:
+            lookup[message["id"]] = {
+                "kind": "message",
+                "role": message["role"],
+                "text": message["content"],
+                "seq": snapshot_seq.get(message["id"], message["seq"]),
+                "snapshot": snapshot_by_id.get(message["id"]),
+            }
     return lookup
 
 
