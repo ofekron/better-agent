@@ -2501,6 +2501,16 @@ SOURCE_GREP_CASES: tuple = (
      ),
      ('grep', 'main.py', (), ('_ensure_project_match_warm_task()',), ()),
     )),
+    ('startup_extension_package_resolution_stays_off_loop', (
+     ('grep', 'main.py', (('async def _on_startup_bg_orchestrator()', 'def _startup_orchestrator_done'),),
+      ('await asyncio.to_thread(\n                extension_package_loader.ensure_package_importable,',),
+      ('\n            extension_package_loader.ensure_package_importable(',),
+     ),
+     ('grep', 'requirement_prewarm.py', (('async def warm_processor()', 'return await ensure_warm_base'),),
+      ('spec, cfg = await asyncio.to_thread(resolve_processor)',),
+      ('\n            spec = requirement_context.get_requirements_processor_spec()',),
+     ),
+    )),
     ('requirement_unprocessed_fallback_reuses_freshness_projection', (
      ('grep', 'requirement_context.py', (('def _load_unprocessed_prompt_records(', 'def _prompt_fallback_record('),),
       ('freshness.get("_unhandled_prompt_records")',), ('for prompt in load_prompts()',),
@@ -3919,7 +3929,7 @@ def _grep_check_failures(check: tuple) -> list[str]:
 
 
 def test_source_grep_regressions() -> None:
-    assert len(SOURCE_GREP_CASES) == 186
+    assert len(SOURCE_GREP_CASES) == 187
     executed = 0
     failing: list[str] = []
     report: list[str] = []

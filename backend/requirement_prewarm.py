@@ -50,8 +50,11 @@ async def run_requirements_prewarm(reason: str = "manual") -> dict[str, Any]:
         from provisioning.manager import ensure_warm_base
 
         async def warm_processor() -> str:
-            spec = requirement_context.get_requirements_processor_spec()
-            cfg = resolve_config(spec)
+            def resolve_processor():
+                spec = requirement_context.get_requirements_processor_spec()
+                return spec, resolve_config(spec)
+
+            spec, cfg = await asyncio.to_thread(resolve_processor)
             return await ensure_warm_base(spec, cfg)
 
         _, base_session_id = await asyncio.gather(

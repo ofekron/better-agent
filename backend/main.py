@@ -13066,7 +13066,8 @@ async def on_startup():
         )
         import extension_package_loader
         try:
-            extension_package_loader.ensure_package_importable(
+            await asyncio.to_thread(
+                extension_package_loader.ensure_package_importable,
                 extension_store.extension_id_for_role("requirements"),
                 "requirement_analysis",
             )
