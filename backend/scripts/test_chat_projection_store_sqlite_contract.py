@@ -680,6 +680,13 @@ def test_owner_timeout_ambiguity_protocol_poison_and_idempotent_close() -> None:
 
 
 def test_response_page_budget_timeout_admission_and_close_failure() -> None:
+    for module_name in (
+        "chat_projection_store_sqlite.py", "chat_projection_store_owner.py",
+        "chat_projection_store_owner_path.py",
+    ):
+        source = (ROOT / "backend" / module_name).read_text(encoding="utf-8")
+        assert "unlink(" not in source
+
     for failure_name in ("socketpair", "settimeout"):
         failure_path = _path(f"init-{failure_name}-failure")
         descriptors_before = len(os.listdir("/dev/fd"))
@@ -850,10 +857,24 @@ def test_response_page_budget_timeout_admission_and_close_failure() -> None:
         boundary_store.close()
 
     startup_path = _path("startup-timeout")
+    startup_helper = STATE_HOME / "startup-stop-owner.py"
+    startup_helper.write_text(
+        "import os,signal,sys\n"
+        "directory_fd,file_fd,basename=int(sys.argv[3]),int(sys.argv[4]),sys.argv[5]\n"
+        "os.fchdir(directory_fd)\n"
+        "os.ftruncate(file_fd,0);os.write(file_fd,b'startup partial main')\n"
+        "for suffix in ('-wal','-shm'):\n"
+        " fd=os.open(basename+suffix,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)\n"
+        " os.write(fd,b'startup sidecar sentinel');os.close(fd)\n"
+        "os.kill(os.getpid(),signal.SIGSTOP)\n",
+        encoding="utf-8",
+    )
     _assert_error(
         "owner_start_failed",
-        lambda: SQLiteChatProjectionStore(
-            startup_path, _startup_timeout_seconds=0.05, _test_owner_fault="startup_stop",
+        lambda: owner_transport.OwnerClient(
+            root_path=STATE_HOME, path=startup_path, owner_script=startup_helper,
+            owner_arguments=(), validate_result=lambda _operation, result, _arguments: result,
+            startup_timeout_seconds=0.05,
         ),
     )
     assert startup_path.read_bytes() == b"startup partial main"
@@ -863,6 +884,12 @@ def test_response_page_budget_timeout_admission_and_close_failure() -> None:
     assert all(sidecar.read_bytes() == b"startup sidecar sentinel" for sidecar in startup_sidecars)
     _assert_error("incomplete_store", lambda: SQLiteChatProjectionStore(startup_path))
     assert startup_path.read_bytes() == b"startup partial main"
+    destructive_fault_path = _path("rejected-startup-stop")
+    _assert_error(
+        "invalid_input",
+        lambda: SQLiteChatProjectionStore(destructive_fault_path, _test_owner_fault="startup_stop"),
+    )
+    assert not destructive_fault_path.exists()
     for invalid in (float("nan"), float("inf"), 0.01, 301, True):
         _assert_error(
             "invalid_input",

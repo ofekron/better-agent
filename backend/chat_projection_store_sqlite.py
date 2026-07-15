@@ -224,7 +224,7 @@ class SQLiteChatProjectionStore:
     def _start_owner(self, path: Path | None) -> None:
         if self._test_owner_fault not in (
             None, "post_commit_stop", "malformed_response", "semantic_mismatch",
-            "startup_stop", "malformed_commit_response", "revision_pair_mismatch",
+            "malformed_commit_response", "revision_pair_mismatch",
         ):
             raise ChatProjectionStoreError("invalid_input", "unknown owner test fault")
         self._connection = None
@@ -1221,23 +1221,6 @@ def _run_owner(
             _owner_directory_fd=owner_directory_fd, _owner_file_fd=owner_file_fd,
             _owner_basename=owner_basename,
         )
-        if test_fault == "startup_stop":
-            store.close()
-            os.unlink(owner_basename)
-            main_descriptor = os.open(owner_basename, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-            try:
-                os.write(main_descriptor, b"startup partial main")
-            finally:
-                os.close(main_descriptor)
-            for suffix in ("-wal", "-shm"):
-                descriptor = os.open(
-                    f"{owner_basename}{suffix}", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600,
-                )
-                try:
-                    os.write(descriptor, b"startup sidecar sentinel")
-                finally:
-                    os.close(descriptor)
-            os.kill(os.getpid(), signal.SIGSTOP)
         return store
 
     fault = [test_fault]
