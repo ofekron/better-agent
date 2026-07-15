@@ -18,6 +18,7 @@ _PENDING_REQUESTS_BY_SESSION: dict[str, list[dict[str, Any]]] = {}
 _PENDING_COUNTS_VERSION = 0
 _PATH_CACHE_HOME: Path | None = None
 _PATH_CACHE_VALUE: Path | None = None
+_WAIT_EVENTS: dict[str, threading.Event] = {}
 
 
 def _path() -> Path:
@@ -302,11 +303,27 @@ def cancel_all_pending_requests() -> list[dict[str, Any]]:
             return []
         _write_locked(data)
         _rebuild_counts_locked(data)
+        for req in cancelled:
+            _signal_waiters_locked(req["request_id"])
         return cancelled
 
 
 def expire_request(request_id: str) -> dict[str, Any] | None:
     return _complete_request(request_id, "expired", {})
+
+
+def _signal_waiters_locked(request_id: str) -> None:
+    event = _WAIT_EVENTS.pop(request_id, None)
+    if event is not None:
+        event.set()
+
+
+def _event_for_locked(request_id: str) -> threading.Event:
+    event = _WAIT_EVENTS.get(request_id)
+    if event is None:
+        event = threading.Event()
+        _WAIT_EVENTS[request_id] = event
+    return event
 
 
 def _complete_request(
@@ -328,15 +345,27 @@ def _complete_request(
         _ensure_counts_locked()
         _adjust_pending_count_locked(req.get("app_session_id"), -1)
         _remove_pending_public_locked(req)
+        _signal_waiters_locked(request_id)
     return dict(req)
 
 
 async def wait_for_completion(request_id: str, timeout_seconds: float | None) -> dict[str, Any] | None:
+    """Event-driven wait: blocks a thread-pool thread on a `threading.Event`
+    instead of polling, so resolution wakes the waiter immediately (and
+    works regardless of which thread calls resolve/cancel/expire)."""
     deadline = _now() + timeout_seconds if timeout_seconds else None
     while True:
-        existing = get_request(request_id)
-        if existing is None or existing.get("status") != "pending":
-            return existing
-        if deadline is not None and _now() >= deadline:
+        with _LOCK:
+            existing = get_request(request_id)
+            if existing is None or existing.get("status") != "pending":
+                return existing
+            remaining = (deadline - _now()) if deadline is not None else None
+            if remaining is not None and remaining <= 0:
+                event = None
+            else:
+                event = _event_for_locked(request_id)
+        if event is None:
             return expire_request(request_id)
-        await asyncio.sleep(0.05)
+        signalled = await asyncio.to_thread(event.wait, remaining)
+        if not signalled and remaining is not None:
+            return expire_request(request_id)
