@@ -34,7 +34,6 @@ logger = logging.getLogger(__name__)
 _AUTHORIZED_TOOL_PROFILE_TTL_SECONDS = 900.0
 _AUTHORIZED_TOOL_PROFILE_DISPATCHES: dict[str, tuple[str, float]] = {}
 _AUTHORIZED_TOOL_PROFILE_LOCK = threading.Lock()
-_CANCEL_SETTLE_SECONDS = 0.25
 
 
 def authorize_tool_profile_dispatch(client_delegation_id: str, profile: str) -> None:
@@ -213,8 +212,7 @@ async def _dispatch_in_process(
 ) -> dict:
     from runtime_client import runtime as _runtime
     delegation_id = client_delegation_id or client_delegation_id_for_request(spec.key, "")
-    started = time.monotonic()
-    task = asyncio.create_task(_runtime.run_delegation(
+    return await _runtime.run_delegation(
         app_session_id=caller_session_id,
         instructions=instructions,
         worker_session_id=base_session_id,
@@ -229,34 +227,6 @@ async def _dispatch_in_process(
         provision_prompt=provision_prompt,
         provisioned_tool_profile=spec.tool_profile,
         include_events=True,
-    ))
-    done, _pending = await asyncio.wait(
-        {task},
-        timeout=spec.effective_dispatch_timeout,
-    )
-    if done:
-        return task.result()
-    signalled = request_delegation_cancel(
-        delegation_id,
-        interrupt_provider=False,
-    )
-    task.cancel()
-    done, _pending = await asyncio.wait({task}, timeout=_CANCEL_SETTLE_SECONDS)
-    if not done:
-        task.cancel()
-        await asyncio.wait({task}, timeout=_CANCEL_SETTLE_SECONDS)
-    logger.warning(
-        "provisioned_in_process_dispatch_timeout spec=%s delegation_id=%s "
-        "elapsed_ms=%.3f cancel_signalled=%s task_done=%s",
-        spec.key,
-        delegation_id,
-        (time.monotonic() - started) * 1000,
-        signalled,
-        task.done(),
-    )
-    raise TimeoutError(
-        f"{spec.key} in-process dispatch timed out after "
-        f"{spec.effective_dispatch_timeout:g}s"
     )
 
 

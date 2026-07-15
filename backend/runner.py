@@ -1190,6 +1190,74 @@ def _post_loopback_sync(
             backoff = min(backoff * 2, backoff_cap)
 
 
+def _post_loopback_job_sync(
+    payload: dict,
+    *,
+    operation: str,
+    internal_token: str,
+    url_path: str,
+    timeout: float,
+    non_json_t_key: str,
+    log_prefix: str,
+    backoff_cap: float,
+) -> dict:
+    """Fire-then-poll variant of `_post_loopback_sync`: fires `operation`
+    with a job id and wait=0, then polls `/api/internal/mcp-jobs/results`
+    for the same job id until it completes or `timeout` elapses. Unlike a
+    single long-lived POST, a dropped connection or backend restart
+    mid-flight re-attaches to the same job (via extension_jobs) instead of
+    losing or duplicating the work — same semantics as communicate_mcp.py's
+    `_post_mcp_job`, used by the other providers' MCP tools.
+    """
+    import time
+    import uuid
+    job_id = f"mcp_{uuid.uuid4().hex}"
+    fire_payload = {**payload, "_mcp_job_id": job_id, "_mcp_job_wait": 0}
+    deadline = time.monotonic() + max(0.0, timeout)
+    try:
+        response = _post_loopback_sync(
+            fire_payload,
+            internal_token=internal_token,
+            url_path=url_path,
+            timeout=min(30.0, max(1.0, timeout)),
+            non_json_t_key=non_json_t_key,
+            log_prefix=log_prefix,
+            backoff_cap=backoff_cap,
+        )
+    except Exception:
+        response = _post_loopback_sync(
+            {"operation": operation, "id": job_id, "_mcp_job_wait": 0},
+            internal_token=internal_token,
+            url_path="/api/internal/mcp-jobs/results",
+            timeout=30.0,
+            non_json_t_key=non_json_t_key,
+            log_prefix=log_prefix,
+            backoff_cap=backoff_cap,
+        )
+    while isinstance(response, dict) and response.get("ready") is False:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return response
+        time.sleep(min(1.0, max(0.05, remaining)))
+        response = _post_loopback_sync(
+            {
+                "operation": operation,
+                "id": job_id,
+                "_mcp_job_wait": min(5.0, max(0.0, remaining)),
+            },
+            internal_token=internal_token,
+            url_path="/api/internal/mcp-jobs/results",
+            timeout=min(30.0, max(1.0, remaining)),
+            non_json_t_key=non_json_t_key,
+            log_prefix=log_prefix,
+            backoff_cap=backoff_cap,
+        )
+    if isinstance(response, dict) and response.get("ready") is True and "result" in response:
+        result = response.get("result")
+        return result if isinstance(result, dict) else {"success": False, "error": "MCP job returned invalid result"}
+    return response
+
+
 def _byte_size_if_exists(path: Optional[str]) -> int:
     if not path:
         return 0
@@ -1273,8 +1341,9 @@ def _build_create_worker_tool(
     cwd: str,
 ):
     def _post_create_worker_sync(payload: dict) -> dict:
-        return _post_loopback_sync(
+        return _post_loopback_job_sync(
             payload,
+            operation="create-worker",
             internal_token=internal_token,
             url_path="/api/internal/create-worker",
             timeout=_DELEGATE_HTTP_TIMEOUT,

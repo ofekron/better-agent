@@ -1954,20 +1954,32 @@ class Coordinator:
             )
         created = False
         forked_from: Optional[str] = None
+        needs_create = False
+        needs_fork = False
+        gated = policy in ("manual", "always_new_approve")
 
-        # Resolve the target session.
+        def _create_target_session() -> str:
+            return self._delegate_task_create_session(
+                caller,
+                task,
+                create_config.get("model") or "",
+                cwd,
+                provider_id=delegate_provider_id,
+                reasoning_effort=delegate_reasoning_effort,
+                sub_session=sub_session,
+            )
+
+        # Resolve the target session. When approval is required, defer the
+        # actual create/fork until after the user approves — a denied
+        # request should never touch a session (previously this created
+        # eagerly and rolled back via session_manager.delete on deny).
         if not target:
             if policy in ("always_new", "always_new_approve"):
-                target = self._delegate_task_create_session(
-                    caller,
-                    task,
-                    create_config.get("model") or "",
-                    cwd,
-                    provider_id=delegate_provider_id,
-                    reasoning_effort=delegate_reasoning_effort,
-                    sub_session=sub_session,
-                )
-                created = True
+                if gated:
+                    needs_create = True
+                else:
+                    target = _create_target_session()
+                    created = True
             else:  # auto / manual → search_sessions, take the first usable suggestion
                 try:
                     suggestion = await session_search.run_search_sessions_session(
@@ -1992,18 +2004,14 @@ class Coordinator:
                     None,
                 )
                 if not target:
-                    target = self._delegate_task_create_session(
-                        caller,
-                        task,
-                        create_config.get("model") or "",
-                        cwd,
-                        provider_id=delegate_provider_id,
-                        reasoning_effort=delegate_reasoning_effort,
-                        sub_session=sub_session,
-                    )
-                    created = True
+                    if gated:
+                        needs_create = True
+                    else:
+                        target = _create_target_session()
+                        created = True
 
-        if run_mode == "fork":
+        async def _fork_target() -> None:
+            nonlocal target, forked_from, created
             try:
                 fork = await asyncio.to_thread(
                     session_manager.fork,
@@ -2013,13 +2021,19 @@ class Coordinator:
                 )
             except KeyError as exc:
                 raise ValueError("target_session_id does not exist") from exc
-            target = fork["id"]
             forked_from = target_session_id
+            target = fork["id"]
             created = True
+
+        if run_mode == "fork":
+            if gated:
+                needs_fork = True
+            else:
+                await _fork_target()
 
         # Approval gate (manual / always_new_approve) — reuses pending_approvals
         # + approval_waiters + the existing /api/pending_approvals/{id}/approve|deny.
-        if policy in ("manual", "always_new_approve"):
+        if gated:
             dt_id = f"dt_{uuid.uuid4().hex[:10]}"
             loop = asyncio.get_running_loop()
             fut: asyncio.Future = loop.create_future()
@@ -2031,7 +2045,7 @@ class Coordinator:
                     cwd=cwd,
                     justification=(
                         "Create a new target and delegate the task"
-                        if created else f"Delegate the task to session {target}"
+                        if (needs_create or needs_fork) else f"Delegate the task to session {target}"
                     ),
                     proposed_description=(task or "")[:200] or "delegate_task",
                     proposed_orchestration_mode="native",
@@ -2049,24 +2063,27 @@ class Coordinator:
                     "kind": "delegate_task",
                     "task": task,
                     "target_session_id": target,
-                    "created_session": created,
+                    "created_session": needs_create or needs_fork,
                 },
             })
             try:
                 await asyncio.wait_for(fut, timeout=_DELEGATE_TASK_APPROVAL_TIMEOUT)
             except asyncio.TimeoutError:
-                if created:
-                    await asyncio.to_thread(session_manager.delete, target)
                 return {"success": False, "error": "delegate_task approval timed out",
                         "target_session_id": target}
             finally:
                 self.approval_waiters.pop(dt_id, None)
             rec = pending_approvals.get(dt_id)
             if not rec or rec.get("status") != "approved":
-                if created:
-                    await asyncio.to_thread(session_manager.delete, target)
                 return {"success": False, "error": "delegate_task denied by user",
                         "target_session_id": target}
+
+            # Approved — perform whatever creation/fork was deferred.
+            if needs_create:
+                target = _create_target_session()
+                created = True
+            if needs_fork:
+                await _fork_target()
 
         if created and (folder_id or tag_ids):
             import session_organization_store

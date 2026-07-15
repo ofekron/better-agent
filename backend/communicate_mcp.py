@@ -351,7 +351,7 @@ def create_worker_response(
         return {"success": False, "error": "orchestration_mode must be 'team' or 'native'"}
     sender_session_id = _env_required("BETTER_CLAUDE_MSSG_SENDER_SESSION_ID")
     client_request_id = f"cw_{uuid.uuid4().hex[:10]}"
-    return _post_json("/api/internal/create-worker", {
+    return _post_mcp_job("/api/internal/create-worker", "create-worker", {
         "app_session_id": sender_session_id,
         "worker_description": worker_description,
         "justification": justification,

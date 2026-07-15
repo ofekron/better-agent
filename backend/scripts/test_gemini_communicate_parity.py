@@ -64,7 +64,9 @@ def test_ask_fork_routes_to_delegate_engine():
     assert payload["model"] == "gemini-x"
     assert payload["cwd"] == "/repo"
     assert payload["client_delegation_id"].startswith("del_")
-    assert timeout == communicate_mcp._LONG_TIMEOUT
+    # ask-fork fires via the durable job funnel (_post_mcp_job): each
+    # individual HTTP round-trip is capped at 30s, not the full poll budget.
+    assert timeout == min(30.0, communicate_mcp._LONG_TIMEOUT)
 
 
 def test_ask_fork_routes_ephemeral():
@@ -110,7 +112,10 @@ def test_create_worker_routes_to_create_worker_endpoint():
     assert payload["cwd"] == "/repo"
     assert payload["client_request_id"].startswith("cw_")
     assert payload["node_id"] == "primary"
-    assert timeout == communicate_mcp._LONG_TIMEOUT
+    # create_worker now fires via the durable job funnel (_post_mcp_job):
+    # each individual HTTP round-trip is capped at 30s, not the full poll
+    # budget.
+    assert timeout == min(30.0, communicate_mcp._LONG_TIMEOUT)
 
 
 def test_create_worker_rejects_missing_fields():
@@ -177,7 +182,9 @@ def test_delegate_task_routes_to_delegate_task_endpoint():
     assert payload["model"] == "model-1"
     assert payload["reasoning_effort"] == "high"
     assert payload["sub_session"] is False
-    assert timeout == communicate_mcp._LONG_TIMEOUT
+    # delegate_task fires via the durable job funnel (_post_mcp_job): each
+    # individual HTTP round-trip is capped at 30s, not the full poll budget.
+    assert timeout == min(30.0, communicate_mcp._LONG_TIMEOUT)
 
 
 def test_delegate_task_auto_routes_without_target():

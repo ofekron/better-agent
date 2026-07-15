@@ -391,6 +391,25 @@ def get_or_resume(owner: str, operation: str, job_id: str, runner: Runner) -> as
     return _register(owner, operation, job_id, payload, runner)
 
 
+def cancel(owner: str, operation: str, job_id: str) -> dict[str, Any] | None:
+    key = _key(owner, operation, job_id)
+    task = _JOBS.get(key)
+    if task is not None and not task.done():
+        task.cancel()
+        return {"success": True, "id": job_id, "status": "cancelling", "ready": False}
+    with _RECORD_LOCK:
+        record = read_record(owner, operation, job_id)
+        if record is None:
+            return None
+        if record.get("status") in ("complete", "failed"):
+            return response_from_record(record)
+        now = time.time()
+        _finish_progress(record, now)
+        record.update(status="failed", error="cancelled", completed_at=now)
+        _write_record(owner, operation, job_id, record)
+    return response_from_record(record)
+
+
 def get_active(owner: str, operation: str, job_id: str) -> asyncio.Task | None:
     return _JOBS.get(_key(owner, operation, job_id))
 

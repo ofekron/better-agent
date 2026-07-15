@@ -4660,6 +4660,8 @@ def _core_mcp_job_handler(operation: str):
         return _handle_internal_session_bridge_search
     if operation == "session-bridge-delegate":
         return _handle_internal_session_bridge_delegate
+    if operation == "create-worker":
+        return _handle_internal_create_worker
     raise HTTPException(status_code=404, detail="unknown MCP job operation")
 
 
@@ -14353,6 +14355,13 @@ async def internal_create_worker(
     _require_builtin_runtime_extension(extension_store.extension_id_for_role('team-orchestration'))
     if not _internal_authority_is_valid():
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
+    durable = await _maybe_run_core_mcp_job("create-worker", body)
+    if durable is not None:
+        return durable
+    return await _handle_internal_create_worker(body)
+
+
+async def _handle_internal_create_worker(body: dict) -> dict[str, Any]:
     app_session_id = str(body.get("app_session_id") or "")
     folder_id, tag_ids = await _initial_session_organization_from_body(body)
     requested_model = str(body.get("model") or "").strip()
