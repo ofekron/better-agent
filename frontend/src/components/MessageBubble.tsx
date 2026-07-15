@@ -1021,10 +1021,6 @@ function normalizeForDedup(text: string): string {
  */
 const TODO_TOOLS = new Set(["TodoWrite", "TaskCreate", "TaskUpdate"]);
 const STANDALONE_TOOL_CALLS = new Set(["WebSearch"]);
-// An action group this large is a burst — collapse it by default into a
-// single "N actions" header instead of rendering every tool card. Smaller
-// groups stay open so normal multi-step turns read as before.
-const AUTO_ACTION_OPEN_MAX = 3;
 
 function isTodoToolCall(ev: WSEvent): boolean {
   return ev.type === "tool_call" && TODO_TOOLS.has(ev.data?.tool as string);
@@ -1973,13 +1969,10 @@ function renderTreeLevel(
         actions={actions}
         childrenMap={childrenMap}
         toolResultById={toolResultById}
-        // Live-path invariant (chat-panel.md): while the turn runs, the
-        // final (live-leaf) group is forced fully expanded regardless of
-        // size; the AUTO_ACTION_OPEN_MAX cap applies only once live ends.
-        defaultOpen={
-          !hasLaterActionLead(groups, j)
-          && (isRunning === true || actions.length <= AUTO_ACTION_OPEN_MAX)
-        }
+        // chat-panel.md render model: only the live leaf is expanded
+        // (forced, any size). Completed groups render compact and expand
+        // on explicit user intent — no size-based auto-open heuristics.
+        defaultOpen={!hasLaterActionLead(groups, j) && isRunning === true}
         onFileClick={onFileClick}
         onViewDiff={onViewDiff}
         nested={nested}

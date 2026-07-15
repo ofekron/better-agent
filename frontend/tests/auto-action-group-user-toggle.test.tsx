@@ -60,16 +60,21 @@ function firstGroup(container: HTMLElement): HTMLElement {
   return group as HTMLElement;
 }
 
-describe("AutoActionGroup user toggle vs auto-collapse", () => {
+describe("AutoActionGroup user toggle vs compact default", () => {
+  it("completed groups render compact by default (no size-based auto-open)", () => {
+    const { container } = renderMessage(leadWithTools());
+    const header = firstGroup(container).querySelector(
+      ".auto-action-group-header",
+    ) as HTMLElement;
+    expect(header.getAttribute("aria-expanded")).toBe("false");
+  });
+
   it("keeps a user-opened group open when a later lead arrives", () => {
     const { container, rerender } = renderMessage(leadWithTools());
     const group = firstGroup(container);
     const header = group.querySelector(".auto-action-group-header") as HTMLElement;
-    expect(header.getAttribute("aria-expanded")).toBe("true");
 
-    // User toggles: close then reopen — an explicit "keep this open" choice.
-    fireEvent.click(header);
-    expect(header.getAttribute("aria-expanded")).toBe("false");
+    // User expands — an explicit "keep this open" choice.
     fireEvent.click(header);
     expect(header.getAttribute("aria-expanded")).toBe("true");
 
@@ -86,12 +91,12 @@ describe("AutoActionGroup user toggle vs auto-collapse", () => {
     expect(headerAfter.getAttribute("aria-expanded")).toBe("true");
   });
 
-  it("still auto-collapses an untouched group when a later lead arrives", () => {
+  it("keeps an untouched group compact when a later lead arrives", () => {
     const { container, rerender } = renderMessage(leadWithTools());
     const header = firstGroup(container).querySelector(
       ".auto-action-group-header",
     ) as HTMLElement;
-    expect(header.getAttribute("aria-expanded")).toBe("true");
+    expect(header.getAttribute("aria-expanded")).toBe("false");
 
     const msg = makeAssistantMsg({
       id: "m-toggle",

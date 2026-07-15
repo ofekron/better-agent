@@ -8,11 +8,11 @@ import type { WSEvent } from "../src/types";
 afterEach(cleanup);
 
 /**
- * Live-path invariant (chat-panel.md, "Render invariants"): while a turn is
- * live, every item on the path from the turn root to its final live leaf is
- * forced fully expanded — the AUTO_ACTION_OPEN_MAX size cap must not close
- * the live leaf group. Once live ends, ordinary collapse rules (including
- * the cap) apply again.
+ * chat-panel.md render model: while a turn is live, every item on the path
+ * from the turn root to its final live leaf is forced fully expanded — any
+ * size. When live ends, ordinary compact rules apply: completed groups
+ * render collapsed and expand only on explicit user intent (no size-based
+ * auto-open heuristics).
  */
 
 function agentMsg(data: Record<string, unknown>): WSEvent {
@@ -76,13 +76,13 @@ function groupHeader(container: HTMLElement): HTMLElement {
   return (group as HTMLElement).querySelector(".auto-action-group-header") as HTMLElement;
 }
 
-describe("live-leaf force expansion vs AUTO_ACTION_OPEN_MAX", () => {
-  it("keeps the live leaf group expanded even with more than 3 actions", () => {
+describe("live-leaf force expansion vs completed compact default", () => {
+  it("keeps the live leaf group expanded regardless of action count", () => {
     const { container } = renderTurn({ running: true });
     expect(groupHeader(container).getAttribute("aria-expanded")).toBe("true");
   });
 
-  it("applies the size cap once the turn is no longer live", () => {
+  it("renders the group compact once the turn is no longer live", () => {
     const { container } = renderTurn({ running: false });
     expect(groupHeader(container).getAttribute("aria-expanded")).toBe("false");
   });
