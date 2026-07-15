@@ -31,6 +31,7 @@ export BETTER_CLAUDE_HOME="${BETTER_CLAUDE_HOME:-$BA_HOME}"
 FLAG="$BA_HOME/restart_requested"
 RESULT="$BA_HOME/refresh_result.json"
 BACKEND_LOG="$BA_HOME/backend-run.log"
+BFF_LOG="$BA_HOME/bff-run.log"
 KC_SVC="better-agent"
 KC_LEGACY_SVC="better-claude"
 export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"
@@ -38,6 +39,13 @@ PY="$DIR/backend/.venv/bin/python"
 DEFAULT_BACKEND_PORT=18765
 BACKEND_PORT="${BETTER_AGENT_BACKEND_PORT:-${BETTER_CLAUDE_BACKEND_PORT:-$DEFAULT_BACKEND_PORT}}"
 FRONTEND_PORT="${BETTER_AGENT_FRONTEND_PORT:-${BETTER_CLAUDE_FRONTEND_PORT:-5173}}"
+# The BFF (backend/bff_server.py) is the browser-facing process (plan Phase
+# 3): it owns /api/projects, /api/user-prefs, /api/ui-selection, etc. and
+# proxies everything else + /ws through to the internal runtime (main:app,
+# still bound to $BACKEND_PORT). The browser must be pointed at this port,
+# not $BACKEND_PORT, or app-owned routes the runtime no longer serves 404.
+DEFAULT_BFF_PORT=8787
+BFF_PORT="${BETTER_AGENT_BFF_PORT:-${BETTER_CLAUDE_BFF_PORT:-$DEFAULT_BFF_PORT}}"
 GRACEFUL_RESTART_TIMEOUT_SECONDS="${BETTER_AGENT_GRACEFUL_RESTART_TIMEOUT_SECONDS:-8}"
 if ! [[ "$GRACEFUL_RESTART_TIMEOUT_SECONDS" =~ ^[0-9]+$ ]] || [ "$GRACEFUL_RESTART_TIMEOUT_SECONDS" -lt 1 ]; then
   GRACEFUL_RESTART_TIMEOUT_SECONDS=8
@@ -297,6 +305,8 @@ process_is_running() {
 
 FRONTEND_BUILD_PID=""
 BACKEND_PID=""
+BFF_PID=""
+BFF_ACTIVE_DIR=""
 ZAI_STARTUP_CHECK_PID=""
 DAEMON_HOST_PID=""
 
@@ -374,6 +384,7 @@ shutdown_children() {
   stop_child_process "startup checker" "$ZAI_STARTUP_CHECK_PID"
   stop_child_process "frontend build" "$FRONTEND_BUILD_PID"
   stop_child_process "daemon host" "$DAEMON_HOST_PID"
+  stop_child_process "bff" "$BFF_PID"
   stop_child_process "backend" "$BACKEND_PID"
   exit "$exit_code"
 }
@@ -482,6 +493,12 @@ kill_backend_lock_holder() {
 
 stop_known_better_agent_port_users() {
   local port="$1"
+  if [ "$port" = "$BFF_PORT" ]; then
+    kill_matching_processes \
+      "Better Agent BFF" \
+      "uvicorn bff_server:app.*--port $port"
+    return 0
+  fi
   if [ "$port" != "$BACKEND_PORT" ]; then
     return 0
   fi
@@ -736,7 +753,7 @@ start_frontend_build() {
 }
 
 app_url() {
-  echo "http://127.0.0.1:$BACKEND_PORT/"
+  echo "http://127.0.0.1:$BFF_PORT/"
 }
 
 open_first_run_browser() {
@@ -813,7 +830,6 @@ PY
 
 wait_for_backend() {
   local attempts=0
-  local url=""
   while [ "$attempts" -lt 240 ]; do
     if ! kill -0 "$BACKEND_PID" 2>/dev/null; then
       echo "Backend exited before becoming healthy."
@@ -823,9 +839,6 @@ wait_for_backend() {
     fi
     if curl -fsS "http://127.0.0.1:$BACKEND_PORT/healthz" >/dev/null 2>&1; then
       echo "Backend is healthy."
-      url="$(app_url)"
-      echo "Better Agent is ready: $url"
-      open_first_run_browser "$url"
       return 0
     fi
     attempts=$((attempts + 1))
@@ -835,6 +848,65 @@ wait_for_backend() {
   kill "$BACKEND_PID" 2>/dev/null || true
   wait "$BACKEND_PID" || true
   BACKEND_PID=""
+  return 1
+}
+
+# Publishes the runtime's app-endpoint descriptor the BFF reads to reach
+# main:app (backend/runtime_endpoints.py). Only `runtime_cli.py`
+# start-runtime/start-stack write this normally; run.sh launches main:app
+# directly (TCP, not the UDS path those commands use), so it must publish
+# the equivalent TCP descriptor itself once the backend is healthy. Cheap
+# to redo on every restart in case port conflict resolution changed it.
+write_runtime_endpoint() {
+  PYTHONPATH="$ACTIVE_DIR/backend" "$PY" -c "
+import runtime_endpoints
+runtime_endpoints.write_app_endpoint(
+    {'kind': 'tcp', 'host': '127.0.0.1', 'port': $BACKEND_PORT}
+)
+"
+}
+
+start_bff() {
+  echo "Starting BFF (browser-facing proxy) on 127.0.0.1:$BFF_PORT..."
+  stop_known_better_agent_port_users "$BFF_PORT"
+  BFF_PORT="$(resolve_port_conflict "$BFF_PORT" "bff")"
+  export BETTER_CLAUDE_BFF_PORT="$BFF_PORT"
+  export BETTER_AGENT_BFF_PORT="$BFF_PORT"
+  : > "$BFF_LOG"
+  echo "--- bff start $(date '+%Y-%m-%dT%H:%M:%S%z') port=$BFF_PORT ---" >> "$BFF_LOG"
+  (cd "$ACTIVE_DIR/backend" && source .venv/bin/activate && exec uvicorn bff_server:app --host 127.0.0.1 --port "$BFF_PORT" --ws-per-message-deflate false) > >(tee -a "$BFF_LOG") 2>&1 &
+  BFF_PID=$!
+  BFF_ACTIVE_DIR="$ACTIVE_DIR"
+}
+
+wait_for_bff() {
+  local attempts=0
+  local body=""
+  while [ "$attempts" -lt 240 ]; do
+    if ! kill -0 "$BFF_PID" 2>/dev/null; then
+      echo "BFF exited before becoming healthy."
+      wait "$BFF_PID" || true
+      BFF_PID=""
+      return 1
+    fi
+    body="$(curl -fsS "http://127.0.0.1:$BFF_PORT/bff/healthz" 2>/dev/null || true)"
+    if [ -n "$body" ] && "$PY" -c "
+import json, sys
+try:
+    sys.exit(0 if json.loads(sys.argv[1]).get('runtime') else 1)
+except (json.JSONDecodeError, AttributeError):
+    sys.exit(1)
+" "$body"; then
+      echo "BFF is healthy."
+      return 0
+    fi
+    attempts=$((attempts + 1))
+    sleep 0.25
+  done
+  echo "BFF did not become healthy within 60 seconds."
+  kill "$BFF_PID" 2>/dev/null || true
+  wait "$BFF_PID" || true
+  BFF_PID=""
   return 1
 }
 
@@ -1125,6 +1197,29 @@ else
       BACKEND_HEALTHY=1
     else
       BACKEND_HEALTHY=0
+    fi
+
+    if [ "$BACKEND_HEALTHY" -eq 1 ]; then
+      write_runtime_endpoint
+      # The BFF is long-lived across backend restarts (it reconnects to the
+      # runtime lazily via the descriptor above) — only (re)start it when it
+      # isn't running or the active checkout changed under it.
+      if [ -z "$BFF_PID" ] || ! tracked_child_is_running "$BFF_PID" || [ "$BFF_ACTIVE_DIR" != "$ACTIVE_DIR" ]; then
+        if [ -n "$BFF_PID" ]; then
+          stop_child_process "bff" "$BFF_PID"
+        fi
+        start_bff
+      fi
+      if wait_for_bff; then
+        BFF_URL="$(app_url)"
+        echo "Better Agent is ready: $BFF_URL"
+        open_first_run_browser "$BFF_URL"
+      else
+        # A backend that's healthy but unreachable through the BFF is not a
+        # usable app — fold this into the same failure path as a backend
+        # crash so it gets the same revert/startup-checker treatment below.
+        BACKEND_HEALTHY=0
+      fi
     fi
 
     if [ "$ZAI_STARTUP_CHECK_DONE" -eq 0 ]; then
