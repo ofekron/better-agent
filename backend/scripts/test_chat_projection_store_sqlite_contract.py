@@ -863,23 +863,45 @@ def test_response_page_budget_timeout_admission_and_close_failure() -> None:
     startup_helper = STATE_HOME / "startup-stop-owner.py"
     startup_helper.write_text(
         "import os,signal,sys\n"
-        "directory_fd,file_fd,basename=int(sys.argv[3]),int(sys.argv[4]),sys.argv[5]\n"
+        "directory_fd,file_fd,basename,ready_fd=int(sys.argv[3]),int(sys.argv[4]),sys.argv[5],int(sys.argv[6])\n"
         "os.fchdir(directory_fd)\n"
         "os.ftruncate(file_fd,0);os.write(file_fd,b'startup partial main')\n"
         "for suffix in ('-wal','-shm'):\n"
         " fd=os.open(basename+suffix,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)\n"
         " os.write(fd,b'startup sidecar sentinel');os.close(fd)\n"
+        "os.write(ready_fd,b'1');os.close(ready_fd)\n"
         "os.kill(os.getpid(),signal.SIGSTOP)\n",
         encoding="utf-8",
     )
-    _assert_error(
-        "owner_start_failed",
-        lambda: owner_transport.OwnerClient(
-            root_path=STATE_HOME, path=startup_path, owner_script=startup_helper,
-            owner_arguments=(), validate_result=lambda _operation, result, _arguments: result,
-            startup_timeout_seconds=0.05,
-        ),
-    )
+    # Startup timeout starts on the client's first recv after Popen returns; block in
+    # Popen until the helper signals its writes are done so the timeout never races them.
+    startup_ready_read, startup_ready_write = os.pipe()
+    startup_write_open = True
+    def popen_after_owner_writes(*args, **kwargs):
+        nonlocal startup_write_open
+        kwargs["pass_fds"] = (*kwargs["pass_fds"], startup_ready_write)
+        process = real_popen(*args, **kwargs)
+        os.close(startup_ready_write)
+        startup_write_open = False
+        assert os.read(startup_ready_read, 1) == b"1"
+        return process
+    try:
+        with mock.patch.object(
+            owner_transport.subprocess, "Popen", side_effect=popen_after_owner_writes,
+        ):
+            _assert_error(
+                "owner_start_failed",
+                lambda: owner_transport.OwnerClient(
+                    root_path=STATE_HOME, path=startup_path, owner_script=startup_helper,
+                    owner_arguments=(str(startup_ready_write),),
+                    validate_result=lambda _operation, result, _arguments: result,
+                    startup_timeout_seconds=0.05,
+                ),
+            )
+    finally:
+        if startup_write_open:
+            os.close(startup_ready_write)
+        os.close(startup_ready_read)
     assert startup_path.read_bytes() == b"startup partial main"
     startup_sidecars = [
         startup_path.with_name(f"{startup_path.name}{suffix}") for suffix in ("-wal", "-shm")
