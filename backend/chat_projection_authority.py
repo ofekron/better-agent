@@ -17,13 +17,14 @@ from paths import ba_home
 
 
 PROVIDERS = frozenset({"claude", "codex", "gemini"})
+ROOT_PROVIDER = "neutral"
 STORE_KINDS = frozenset({"jsonl", "sqlite"})
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 DDL = (
     "CREATE TABLE projection_authority("
     "authority_id TEXT PRIMARY KEY,provider TEXT NOT NULL,session_id TEXT NOT NULL UNIQUE,"
     "root_id TEXT NOT NULL UNIQUE,root_generation INTEGER NOT NULL,store_kind TEXT NOT NULL,"
-    "CHECK(provider IN ('claude','codex','gemini')),"
+    "CHECK(provider='neutral'),"
     "CHECK(store_kind IN ('jsonl','sqlite')),CHECK(root_generation>=0))"
 )
 ROW_KEYS = {
@@ -72,8 +73,8 @@ def _validate_selection(
         raise ProjectionAuthorityError("invalid_authority", "root_generation is invalid")
 
 
-def _authority_id(provider: str, session_id: str, root_id: str) -> str:
-    return hashlib.sha256(f"{provider}\0{session_id}\0{root_id}".encode("utf-8")).hexdigest()
+def _authority_id(session_id: str, root_id: str) -> str:
+    return hashlib.sha256(f"{session_id}\0{root_id}".encode("utf-8")).hexdigest()
 
 
 class _AuthorityOwner:
@@ -208,11 +209,25 @@ class _AuthorityOwner:
                 (arguments["session_id"], arguments["root_id"]),
             ).fetchall()
             if rows:
-                self._connection.rollback()
                 if len(rows) != 1:
+                    self._connection.rollback()
                     raise ChatProjectionStoreError(
                         "mixed_authority", "session and root resolve differently",
                     )
+                current = rows[0]
+                same_root = (
+                    current[0] == expected[0]
+                    and current[1:4] == expected[1:4]
+                    and current[5] == expected[5]
+                )
+                if same_root and expected[4] > current[4]:
+                    self._connection.execute(
+                        "UPDATE projection_authority SET root_generation=? WHERE authority_id=?",
+                        (expected[4], expected[0]),
+                    )
+                    self._connection.commit()
+                    return self._row(expected)
+                self._connection.rollback()
                 if rows[0] != expected:
                     raise ChatProjectionStoreError(
                         "authority_conflict", "authority is already assigned",
@@ -319,7 +334,7 @@ class ProjectionAuthorityRegistry:
     ) -> ProjectionAuthority:
         _validate_selection(provider, session_id, root_id, root_generation, store_kind)
         arguments = {
-            "authority_id": _authority_id(provider, session_id, root_id), "provider": provider,
+            "authority_id": _authority_id(session_id, root_id), "provider": ROOT_PROVIDER,
             "session_id": session_id, "root_id": root_id, "root_generation": root_generation,
             "store_kind": store_kind,
         }

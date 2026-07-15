@@ -89,7 +89,7 @@ def test_authority_selection_provider_parity_and_fail_closed_mixes() -> None:
             provider=provider, session_id=f"session-{provider}", root_id=f"root-{provider}",
             root_generation=0, store_kind="jsonl",
         ))
-    assert {item.provider for item in authorities} == {"claude", "codex", "gemini"}
+    assert {item.provider for item in authorities} == {"neutral"}
     assert len({item.store_path for item in authorities}) == 3
     assert all(item.store_path.resolve().is_relative_to(HOME.resolve()) for item in authorities)
     same = service.register(
@@ -97,10 +97,15 @@ def test_authority_selection_provider_parity_and_fail_closed_mixes() -> None:
         root_generation=0, store_kind="jsonl",
     )
     assert same == authorities[0]
-    assert_error("authority_conflict", lambda: service.register(
+    assert service.register(
         provider="codex", session_id="session-claude", root_id="root-claude",
         root_generation=0, store_kind="jsonl",
-    ))
+    ) == authorities[0]
+    advanced = service.register(
+        provider="gemini", session_id="session-claude", root_id="root-claude",
+        root_generation=1, store_kind="jsonl",
+    )
+    assert advanced.provider == "neutral" and advanced.root_generation == 1
     assert_error("authority_conflict", lambda: service.register(
         provider="claude", session_id="session-claude", root_id="another-root",
         root_generation=0, store_kind="jsonl",
@@ -109,9 +114,9 @@ def test_authority_selection_provider_parity_and_fail_closed_mixes() -> None:
         provider="unknown", session_id="bad", root_id="bad", root_generation=0,
         store_kind="jsonl",
     ))
-    forged = replace(authorities[0], root_generation=1)
+    forged = replace(authorities[0], root_generation=2)
     assert_error("authority_mismatch", lambda: service.projection_cursor(forged))
-    missing = ProjectionAuthority("f" * 64, "claude", "missing", "missing", 0, "jsonl", HOME / "x")
+    missing = ProjectionAuthority("f" * 64, "neutral", "missing", "missing", 0, "jsonl", HOME / "x")
     assert_error("authority_missing", lambda: service.projection_cursor(missing))
     service.close()
 

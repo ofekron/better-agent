@@ -86,7 +86,8 @@ class CanonicalChatProjectionService:
                 provider=provider, session_id=session_id, root_id=root_id,
                 root_generation=root_generation, store_kind=store_kind,
             )
-            self._store(authority)
+            store = self._store(authority)
+            store.select_generation(authority.root_id, authority.root_generation)
             return authority
         except (ProjectionAuthorityError, ChatProjectionStoreError) as exc:
             self._raise(exc)

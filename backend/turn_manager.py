@@ -1779,6 +1779,7 @@ class TurnManager:
         event_dict: dict,
         assistant_msg: dict,
         run_id: str,
+        provider_kind: str,
     ) -> None:
         from event_journal import publish_event
         from orchs import get_strategy
@@ -1789,6 +1790,18 @@ class TurnManager:
         etype, data = get_strategy("native").prepare_provider_event_for_journal(
             app_session_id=app_session_id,
             event=event_dict,
+        )
+        from chat_projection_ingestion import admit_provider_event
+        admit_provider_event(
+            root_id=root_id,
+            session_id=app_session_id,
+            event_type=etype,
+            data=data,
+            source="provider_stream",
+            run_id=run_id,
+            message_id=assistant_msg.get("id"),
+            turn_id=run_id,
+            provider=provider_kind,
         )
         await publish_event(
             session_id=root_id,
@@ -1943,6 +1956,7 @@ class TurnManager:
                         event_dict=event_dict,
                         assistant_msg=msg,
                         run_id=turn_run_id,
+                        provider_kind=frozen_provider_kind or "",
                     )
                     msg_id = msg.get("id")
                     loop = asyncio.get_running_loop()
