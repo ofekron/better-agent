@@ -23,6 +23,7 @@ from typing import Any
 
 import delegation_status_store
 import httpx
+import internal_request_auth
 from runs_dir import read_best_complete, runs_root
 
 from provisioning.config import ProvisionedConfig
@@ -181,14 +182,17 @@ async def _dispatch_http(
 async def _post_ask_fork(
     cfg: ProvisionedConfig, payload: dict, *, timeout: float
 ) -> dict:
+    url_path = "/api/internal/ask-fork"
+    body = json.dumps(payload).encode("utf-8")
+    headers = {
+        "Content-Type": "application/json",
+        **internal_request_auth.sign(cfg.internal_token, "POST", url_path, body),
+    }
     async with httpx.AsyncClient(timeout=timeout) as client:
         resp = await client.post(
-            cfg.backend_url.rstrip("/") + "/api/internal/ask-fork",
-            json=payload,
-            headers={
-                "Content-Type": "application/json",
-                "X-Internal-Token": cfg.internal_token,
-            },
+            cfg.backend_url.rstrip("/") + url_path,
+            content=body,
+            headers=headers,
         )
     resp.raise_for_status()
     data = resp.json()
