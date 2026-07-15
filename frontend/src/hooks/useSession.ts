@@ -741,9 +741,12 @@ function treeHasStreamingAssistant(node: Session): boolean {
   return (node.forks ?? []).some(treeHasStreamingAssistant);
 }
 
-export function useSession(authStatus?: string, initialSelectedSessionId: string | null = null) {
+export function useSession(authStatus?: string) {
   const { t } = useTranslation();
-  const [exchangePageSize] = useLocalStorage("bc_exchange_page_size", 3);
+  // chat-panel.md: "On session open, get JUST the last N turns and
+  // nothing more. N = 5." The localStorage override is a pure UI pref;
+  // the spec fixes the default.
+  const [exchangePageSize] = useLocalStorage("bc_exchange_page_size", 5);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [sessionListFilters, setSessionListFilters] =
     useState<SessionListFilters>({});
@@ -767,7 +770,12 @@ export function useSession(authStatus?: string, initialSelectedSessionId: string
     sessionId: string;
     message: string;
   } | null>(null);
-  const [selectedSessionId, setSelectedSessionId] = useState<string | null>(initialSelectedSessionId);
+  // Selection starts null even when the URL already points at a session:
+  // the route↔session sync effect in App.tsx sees the mismatch and drives
+  // the boot load through selectSession — the single load path. Seeding
+  // the routed id here would mark the session "already selected" while
+  // nothing fetches its tree or arms the WS subscription (dead deep link).
+  const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   // WS subscription target — set ONLY after REST resolves and seq cursors
   // are seeded. Prevents the WS subscribe from firing during the
   // optimistic swap (which has since_seq=0 and events_from_seq=0,
