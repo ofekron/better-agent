@@ -262,21 +262,25 @@
       "manifests": {
         "turn-1":{"historical_revision":32,"direct_child_count":2,"payload_pointer":"event-pointer:root-1:inc-1:hr-32:turn-1","payload_event_ids":["e-text-1a","e-tool-1","e-text-1b"]},
         "explanation-turn1-1":{"historical_revision":32,"direct_child_count":1,"payload_pointer":"event-pointer:root-1:inc-1:hr-32:explanation-turn1-1","payload_event_ids":["e-tool-1"]},
+        "e-tool-1":{"historical_revision":32,"direct_child_count":0,"payload_pointer":"event-pointer:root-1:inc-1:hr-32:e-tool-1","payload_event_ids":[]},
         "explanation-turn1-2":{"historical_revision":32,"direct_child_count":0,"payload_pointer":"event-pointer:root-1:inc-1:hr-32:explanation-turn1-2","payload_event_ids":[]},
         "turn-2":{"historical_revision":32,"direct_child_count":5,"payload_pointer":"event-pointer:root-1:inc-1:hr-32:turn-2","payload_event_ids":["e-orphan","e-parent","e-mutable","e-steer","e-ns1","e-worker1"]},
         "explanation-turn2-1":{"historical_revision":32,"direct_child_count":1,"payload_pointer":"event-pointer:root-1:inc-1:hr-32:explanation-turn2-1","payload_event_ids":["e-parent"]},
         "explanation-turn2-2":{"historical_revision":32,"direct_child_count":0,"payload_pointer":"event-pointer:root-1:inc-1:hr-32:explanation-turn2-2","payload_event_ids":[]},
+        "e-steer":{"historical_revision":32,"direct_child_count":0,"payload_pointer":"event-pointer:root-1:inc-1:hr-32:e-steer","payload_event_ids":[]},
         "e-ns1":{"historical_revision":32,"direct_child_count":0,"payload_pointer":"event-pointer:root-1:inc-1:hr-32:e-ns1","payload_event_ids":[]},
         "e-worker1":{"historical_revision":32,"direct_child_count":0,"payload_pointer":"event-pointer:root-1:inc-1:hr-32:e-worker1","payload_event_ids":[]},
         "turn-3":{"historical_revision":32,"direct_child_count":0,"payload_pointer":"event-pointer:root-1:inc-1:hr-32:turn-3","payload_event_ids":[]},
         "turn-4":{"historical_revision":32,"direct_child_count":2,"payload_pointer":"event-pointer:root-1:inc-1:hr-32:turn-4","payload_event_ids":["e-live-sibling","e-live-worker"]},
         "explanation-turn4-1":{"historical_revision":32,"direct_child_count":1,"payload_pointer":"event-pointer:root-1:inc-1:hr-32:explanation-turn4-1","payload_event_ids":["e-live-sibling"]},
+        "e-live-sibling":{"historical_revision":32,"direct_child_count":0,"payload_pointer":"event-pointer:root-1:inc-1:hr-32:e-live-sibling","payload_event_ids":[]},
         "e-live-worker":{"historical_revision":32,"direct_child_count":1,"payload_pointer":"event-pointer:root-1:inc-1:hr-32:e-live-worker","payload_event_ids":["e-live-native"]},
         "e-live-native":{"historical_revision":32,"direct_child_count":1,"payload_pointer":"event-pointer:root-1:inc-1:hr-32:e-live-native","payload_event_ids":["e-live-leaf"]},
         "e-live-leaf":{"historical_revision":32,"direct_child_count":0,"payload_pointer":"event-pointer:root-1:inc-1:hr-32:e-live-leaf","payload_event_ids":[]},
         "turn-5":{"historical_revision":32,"direct_child_count":0,"payload_pointer":"event-pointer:root-1:inc-1:hr-32:turn-5","payload_event_ids":[]},
         "turn-6":{"historical_revision":32,"direct_child_count":1,"payload_pointer":"event-pointer:root-1:inc-1:hr-32:turn-6","payload_event_ids":["e-rui"]},
         "explanation-turn6-1":{"historical_revision":32,"direct_child_count":1,"payload_pointer":"event-pointer:root-1:inc-1:hr-32:explanation-turn6-1","payload_event_ids":["e-rui"]},
+        "e-rui":{"historical_revision":32,"direct_child_count":0,"payload_pointer":"event-pointer:root-1:inc-1:hr-32:e-rui","payload_event_ids":[]},
         "turn-7":{"historical_revision":32,"direct_child_count":1,"payload_pointer":"event-pointer:root-1:inc-1:hr-32:turn-7","payload_event_ids":["e-propose","e-ask-picker","e-text-7a","e-text-7b"]},
         "explanation-turn7-1":{"historical_revision":32,"direct_child_count":1,"payload_pointer":"event-pointer:root-1:inc-1:hr-32:explanation-turn7-1","payload_event_ids":["e-propose"]},
         "e-propose":{"historical_revision":32,"direct_child_count":0,"payload_pointer":"event-pointer:root-1:inc-1:hr-32:e-propose","payload_event_ids":[]},
@@ -287,7 +291,7 @@
         "turn-2-page-2":{"cursor":"child:root-1:inc-1:cr-32:turn-2:2","authentication":"hmac-sha256","scope":["root-1","inc-1",32,"turn-2"],"item_ids":["e-steer","e-ns1"],"has_more":true,"next_cursor":"child:root-1:inc-1:cr-32:turn-2:4"},
         "turn-2-page-3":{"cursor":"child:root-1:inc-1:cr-32:turn-2:4","authentication":"hmac-sha256","scope":["root-1","inc-1",32,"turn-2"],"item_ids":["e-worker1"],"has_more":false,"next_cursor":null},
         "tampered":{"http_status":409,"typed_state":"historical_cursor_invalid","merge":false},
-        "stale":{"cursor_revision":32,"authoritative_revision":32,"http_status":409,"typed_state":"historical_revision_mismatch","merge":false,"refetch_current_count":1}
+        "stale":{"cursor_revision":31,"authoritative_revision":32,"http_status":409,"typed_state":"historical_revision_mismatch","merge":false,"refetch_current_count":1}
       },
       "hidden_parent_flattening":{"hidden_parent_id":"ownership-a2","visible_descendant_ids":["e-orphan","e-parent"],"fetch_depth":1},
       "cache":{"same_revision_reopen_request_count":0,"invalidate_from_revision":32,"invalidate_to_revision":33,"post_invalidation_request_count":1},
@@ -345,7 +349,7 @@
       },
       "persisted_visible_validator":{"priority":"low-background","schedule":"after-idle-or-5000ms","realtime_thread_block_ms":0,"root_lock_wait_ms":0,"visible_tree_source":"canonical_revision:32","persisted_source":"canonical_revision:32","match_signal":{"type":"chat_validation_ok","revision":32},"mismatch_signal":{"type":"chat_validation_mismatch","revision":32,"severity":"error","repair":"schedule_projection_rebuild","render_stale_success":false},"websocket_fanout_blocked":false,"compact_rest_blocked":false},
       "slow_dependencies": {
-        "persistence":{"delay_ms":5000,"initial_http_status":200,"typed_state":"ready","served_revision":33},
+        "persistence":{"delay_ms":5000,"initial_http_status":200,"typed_state":"ready","served_revision":32,"source_watermark":33},
         "projection_rebuild":{"delay_ms":5000,"http_status":503,"typed_state":"historical_projection_rebuilding"},
         "websocket_fanout":{"delay_ms":5000,"initial_http_status":200,"typed_state":"ready"},
         "worker_projection":{"delay_ms":5000,"initial_http_status":200,"typed_state":"ready"}
@@ -403,7 +407,7 @@
       "motion":{"streaming_layout_animation":false,"expand_collapse_animation":true,"reduced_motion_duration_ms":0,"rapid_update_debounce_ms":100},
       "keyboard_focus_order":["process-turn-1","answer-turn-1","explanation-explanation-turn1-1","worker-e-worker1","native-e-ns1","historical-turn-2","mcp-propose-stable-1","mcp-ask-stable-1","mcp-option-alpha","rui-option-beta","rui-other-input","rui-submit","rui-cancel","comment-e-text-1a","load-more","prompt-composer"],
       "keyboard_actions":{"Enter":"activate-focused-control","Space":"activate-focused-control","Escape":"close-current-popover-and-return-focus"},
-      "comment_jump":{"control_id":"comment-e-text-1a","target_event_id":"e-text-1a","target_alignment":"nearest","max_error_css_px":1,"cold_load":{"historical_revision_fence":33,"request_count":1,"scroll_after_commit":true},"hydrated":{"request_count":0,"scroll_after_commit":true},"stale_hydration":{"discard":true,"resnapshot_count":1,"scroll_stale_target":false}},
+      "comment_jump":{"control_id":"comment-e-text-1a","target_event_id":"e-text-1a","target_alignment":"nearest","max_error_css_px":1,"cold_load":{"historical_revision_fence":32,"request_count":1,"scroll_after_commit":true},"hydrated":{"request_count":0,"scroll_after_commit":true},"stale_hydration":{"discard":true,"resnapshot_count":1,"scroll_stale_target":false}},
       "composer_focus":{"control_id":"prompt-composer","retained_after":["messages_delta","reconnect","background_cache_update","historical_prepend"],"desktop":true,"narrow_mobile":true,"short_height":true},
       "timestamp_sides":{"ltr":"right","rtl":"left"},
       "load_more_intent":{"positive":["user-wheel-up-at-top","user-touch-drag-down-at-top","user-click-load-more","keyboard-page-up-at-top","keyboard-home-at-top","scrollbar-drag-to-top"],"negative":["programmatic-scroll","focus-change","layout-animation","expand","collapse","anchor-correction","raw-stream-event","keyboard-tab","scrollbar-programmatic-position"],"request_count_per_positive":1,"request_count_per_negative":0},
@@ -412,7 +416,8 @@
     },
     "i18n_contract": {
       "locales":["ar","de","en","es","fr","he","hi","it","ja","ko","nl","pt","ru","zh"],
-      "required_keys":["chat.process.show","chat.answer.toggle","chat.comment.open","chat.loadMore","chat.status.offline","chat.status.reconnecting","chat.status.pending","chat.status.queued","chat.status.running","chat.status.failed","chat.status.stopped","chat.status.finalized","chat.queue.edit","chat.queue.delete","chat.empty.ready","chat.empty.rebuilding","chat.empty.stale","chat.empty.failed"],
+      "required_keys":["chat.process.show","chat.process.hiddenCount","chat.answer.toggle","chat.explanation.toggle","chat.workerTurn.toggle","chat.nativeSubagent.toggle","chat.historicalProcess.load","chat.proposedSessions.open","chat.sessionPicker.open","chat.requestUserInput.optionBeta","chat.requestUserInput.submit","chat.requestUserInput.cancel","chat.requestUserInput.otherAnswer","chat.comment.open","chat.loadMore","chat.status.offline","chat.status.reconnecting","chat.status.pending","chat.status.queued","chat.status.running","chat.status.failed","chat.status.stopped","chat.status.finalized","chat.queue.edit","chat.queue.delete","chat.empty.ready","chat.empty.rebuilding","chat.empty.stale","chat.empty.failed"],
+      "locale_parity":{"expected_locale_count":14,"every_required_key_present_in_every_locale":true,"fallback_usage_count":0},
       "missing_key_behavior":"test_failure",
       "rtl_locales":["ar","he"],
       "interpolation_values":{"chat.process.hiddenCount":1}
