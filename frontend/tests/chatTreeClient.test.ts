@@ -14,7 +14,7 @@ describe("chatTreeToMessages", () => {
   const items = [
     {
       type: "Turn", id: "u1", prompt: "u1",
-      body: [{ type: "Explanation", text: "", text_event_ids: [], item_ids: ["e-tool"] }],
+      body: [{ type: "Explanation", text: "", text_event_ids: [], item_ids: ["e-tool", "e-result"] }],
       result: { type: "ProviderResult", part_ids: ["e-final"], text: "All done." },
     },
     { type: "ModelChange", id: "e-switch", before_turn: "u2" },
@@ -37,7 +37,10 @@ describe("chatTreeToMessages", () => {
     "e-final": { kind: "event", type: "assistant_text", data: { text: "All done." },
                  message_id: "a1", message_seq: 11 },
     "e-tool": { kind: "event", type: "tool_interaction",
-                data: { tool_name: "Bash", tool_use_id: "t1", status: "complete" },
+                data: { tool_name: "Bash", tool_use_id: "t1", status: "running" },
+                message_id: "a1", message_seq: 11 },
+    "e-result": { kind: "event", type: "tool_interaction",
+                data: { tool_name: "Bash", tool_use_id: "t1", status: "complete", output: "ok" },
                 message_id: "a1", message_seq: 11 },
     "e-t2": { kind: "event", type: "assistant_text", data: { text: "Second answer." },
               message_id: "a2", message_seq: 31 },
@@ -66,6 +69,11 @@ describe("chatTreeToMessages", () => {
         tool_use_id: "t1",
         tool: "Bash",
         args: null,
+      }],
+      ["tool_result", {
+        uuid: "e-result",
+        tool_use_id: "t1",
+        output: "ok",
       }],
       ["output", { uuid: "e-final", output: "All done." }],
       ["model_switched", {

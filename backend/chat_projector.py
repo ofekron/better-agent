@@ -706,7 +706,7 @@ def _validate_nested_data(event_type: str, data: Mapping[str, Any]) -> None:
             {"tool_name", "tool_use_id", "status"},
             {
                 "tool_name", "tool_use_id", "status", "assistant_text", "selected_session_id",
-                "session_ids", "sessions", "options", "question", "summary",
+                "session_ids", "sessions", "options", "question", "summary", "output",
             },
         ),
         "turn_completed": (set(), set()),
@@ -757,7 +757,7 @@ def _validate_nested_data(event_type: str, data: Mapping[str, Any]) -> None:
         _required_str(data[field], f"{event_type} data.{field}")
     string_fields = {
         "text", "source_timestamp", "snapshot_id", "prompt", "status", "result", "kind",
-        "label", "tool_name", "tool_use_id", "assistant_text", "selected_session_id",
+        "label", "tool_name", "tool_use_id", "assistant_text", "selected_session_id", "output",
         "question", "summary", "title",
     }
     for field in string_fields & data.keys():

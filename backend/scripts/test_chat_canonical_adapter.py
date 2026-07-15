@@ -82,7 +82,7 @@ FACTS = [
     }),
     fact(4, "thinking", {"message_id": "a1", "text": "planning"}),
     fact(5, "tool_call", {"message_id": "a1", "tool_use_id": "tu-1", "tool": "Bash", "args": {}}),
-    fact(6, "tool_result", {"message_id": "a1", "tool_use_id": "tu-1", "output": "ok"}),
+    fact(6, "tool_result", {"message_id": "a1", "tool_use_id": "tu-1", "output": {"stdout": "ok"}}),
     fact(7, "todos_snapshot", {"message_id": "a1", "todos": []}),
     fact(8, "assistant_output", {"message_id": "a1", "text": "All done.", "final": True}),
     # Incomplete model change: target lacks effort -> typed drop.
@@ -103,9 +103,22 @@ def test_full_pipeline() -> None:
           {"fact_id": "fact-9", "code": "model_change_identity_incomplete"} in adapted.dropped)
     check("timestamps normalize to Z",
           all(event["timestamp"].endswith("Z") for event in adapted.events))
-    check("tool call+result pair to one complete interaction",
-          [(e["type"], e["data"].get("status")) for e in adapted.events
-           if e["type"] == "tool_interaction"] == [("tool_interaction", "complete")])
+    tool_events = [event for event in adapted.events if event["type"] == "tool_interaction"]
+    check("tool call and result stay as separate pairable interactions",
+          [(e["event_id"], e["data"].get("status"), e["data"].get("tool_use_id")) for e in tool_events]
+          == [("event-5", "running", "tu-1"), ("event-6", "complete", "tu-1")])
+    check("tool result preserves result fact id and structured output",
+          tool_events[1]["data"].get("output") == '{"stdout": "ok"}')
+
+    unmatched = adapt_chat_inputs(
+        [fact(1, "user_prompt", {"message_id": "u1", "text": "hi"}),
+         fact(2, "message_ownership_declared", {"message_id": "a1", "prompt_message_id": "u1"}),
+         fact(3, "tool_result", {"message_id": "a1", "tool_use_id": "missing", "output": "late"})],
+        SESSION,
+    )
+    check("unmatched tool results are typed drops",
+          {"fact_id": "fact-3", "code": "unmatched_tool_result"} in unmatched.dropped
+          and [e for e in unmatched.events if e["type"] == "tool_interaction"] == [])
 
     chat = project_chat(adapted.messages, adapted.events, schema_version=CHAT_SCHEMA_VERSION)
     items = list(chat.items)
@@ -119,8 +132,8 @@ def test_full_pipeline() -> None:
     check("body is explanation-partitioned work",
           len(turn.body) == 1 and isinstance(turn.body[0], Explanation))
     explanation_items = turn.body[0].item_ids
-    check("thinking, tool interaction, and typed catch-all land as body items",
-          set(explanation_items) == {"event-4", "event-5", "event-7"})
+    check("thinking, tool pair, and typed catch-all land as body items",
+          set(explanation_items) == {"event-4", "event-5", "event-6", "event-7"})
 
     wire = chat_to_wire(chat)
     check("wire tree matches parseProjection contract shape",

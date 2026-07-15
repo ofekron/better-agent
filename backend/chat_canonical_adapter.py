@@ -14,6 +14,7 @@ as typed drops so callers can surface them.
 """
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
@@ -46,6 +47,16 @@ def _text_of(payload: Mapping[str, Any]) -> str:
         value = payload.get(key)
         if isinstance(value, str):
             return value
+    return ""
+
+
+def _tool_result_output(payload: Mapping[str, Any]) -> str:
+    for key in ("output", *_TEXT_KEYS):
+        value = payload.get(key)
+        if isinstance(value, str):
+            return value
+        if value is not None:
+            return json.dumps(value, ensure_ascii=False, default=str)
     return ""
 
 
@@ -195,20 +206,35 @@ def adapt_chat_inputs(
         if payload_type == "tool_call":
             tool_use_id = payload.get("tool_use_id")
             key = tool_use_id if isinstance(tool_use_id, str) and tool_use_id else fact_id
+            tool_name = str(payload.get("tool") or "tool")
             tool_calls[key] = {
-                "fact": fact,
                 "message_id": message_id,
-                "tool_name": str(payload.get("tool") or "tool"),
-                "tool_use_id": key,
-                "status": "running",
+                "tool_name": tool_name,
             }
+            emit(
+                fact, "tool_interaction",
+                {"tool_name": tool_name, "tool_use_id": key, "status": "running"},
+                message_id=message_id,
+            )
             continue
 
         if payload_type == "tool_result":
             tool_use_id = payload.get("tool_use_id")
             key = tool_use_id if isinstance(tool_use_id, str) and tool_use_id else None
             if key is not None and key in tool_calls:
-                tool_calls[key]["status"] = "complete"
+                call = tool_calls[key]
+                emit(
+                    fact, "tool_interaction",
+                    {
+                        "tool_name": call["tool_name"],
+                        "tool_use_id": key,
+                        "status": "complete",
+                        "output": _tool_result_output(payload),
+                    },
+                    message_id=message_id or call["message_id"],
+                )
+            else:
+                dropped.append({"fact_id": fact_id, "code": "unmatched_tool_result"})
             continue
 
         if payload_type == "steer_prompt":
@@ -272,14 +298,6 @@ def adapt_chat_inputs(
             fact, "other_typed_work",
             {"kind": payload_type or "unknown", "label": label},
             message_id=message_id,
-        )
-
-    for call in tool_calls.values():
-        emit(
-            call["fact"], "tool_interaction",
-            {"tool_name": call["tool_name"], "tool_use_id": call["tool_use_id"],
-             "status": call["status"]},
-            message_id=call["message_id"],
         )
 
     events.sort(key=lambda event: event["journal_seq"])
