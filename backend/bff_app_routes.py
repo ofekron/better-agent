@@ -6,6 +6,7 @@ import re
 from fastapi import APIRouter, HTTPException, Query, Request
 
 import app_user_prefs
+import git_repo_info
 import project_mapping_store
 import project_store
 import file_panel_drafts
@@ -268,30 +269,36 @@ async def _runtime_project_facts() -> dict:
         raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
 
 
+def _grouped_projects_with_counts(aggregate_rows: list | None) -> list[dict]:
+    """Grouped projects (one record per repo, with `worktrees`) carrying
+    badge counts. Runtime aggregates are keyed by repo identity (git
+    common dir), so resolving the grouped record's canonical path to the
+    same identity sums counts across all of that repo's worktrees."""
+    aggregates = {
+        (item.get("path") or "", item.get("node_id") or "primary"): item
+        for item in aggregate_rows or []
+        if isinstance(item, dict)
+    }
+    out: list[dict] = []
+    for project in project_store.list_projects_grouped():
+        path = project.get("path") or ""
+        ident = git_repo_info.repo_common_dir(path) or path
+        slot = aggregates.get((ident, project.get("node_id") or "primary"), {})
+        out.append({
+            **project,
+            "running_count": slot.get("running_count", 0),
+            "unread_session_count": slot.get("unread_session_count", 0),
+        })
+    return out
+
+
 @router.get("/api/projects")
 async def get_projects():
     facts = await _runtime_project_facts()
-    aggregates = {
-        (item.get("path") or "", item.get("node_id") or "primary"): item
-        for item in facts.get("aggregates") or []
-        if isinstance(item, dict)
-    }
-    projects = await asyncio.to_thread(project_store.list_projects)
     return {
-        "projects": [
-            {
-                **project,
-                "running_count": aggregates.get(
-                    (project.get("path") or "", project.get("node_id") or "primary"),
-                    {},
-                ).get("running_count", 0),
-                "unread_session_count": aggregates.get(
-                    (project.get("path") or "", project.get("node_id") or "primary"),
-                    {},
-                ).get("unread_session_count", 0),
-            }
-            for project in projects
-        ]
+        "projects": await asyncio.to_thread(
+            _grouped_projects_with_counts, facts.get("aggregates")
+        )
     }
 
 
@@ -301,7 +308,11 @@ async def get_project_status():
         status = await runtime_service.project_status()
     except RuntimeServiceError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
-    return {"projects": status.get("aggregates") or []}
+    return {
+        "projects": await asyncio.to_thread(
+            _grouped_projects_with_counts, status.get("aggregates")
+        )
+    }
 
 
 @router.post("/api/projects")
