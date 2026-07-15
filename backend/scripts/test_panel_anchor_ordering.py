@@ -46,12 +46,15 @@ def _text(label):
     }
 
 
-def _tool_result(label):
+def _tool_result(label, tool_use_id=None):
+    block = {"type": "tool_result", "content": label}
+    if tool_use_id:
+        block["tool_use_id"] = tool_use_id
     return {
         "type": "agent_message",
         "data": {
             "type": "user",
-            "message": {"content": [{"type": "tool_result", "content": label}]},
+            "message": {"content": [block]},
         },
     }
 
@@ -182,6 +185,31 @@ def test_create_worker_tool_use_is_ignored_does_not_desync_ask():
     print("ok: create_worker tool_use ignored; ask panel still anchors after ask")
 
 
+def test_failed_create_session_does_not_consume_success_panel():
+    msg = {
+        "events": [
+            _assistant_tool_use(("mcp__communicate__create_session", "c1")),
+            _tool_result("create_session failed: HTTP 400: provider_id does not exist", "c1"),
+            _assistant_tool_use(("mcp__communicate__create_session", "c2")),
+            _tool_result('{"success": true, "session_id": "s2", "name": "created"}', "c2"),
+        ],
+        "workers": [
+            {"delegation_id": "created_s2", "worker_session_id": "s2",
+             "panel_kind": "session_created", "run_mode": "created",
+             "insert_at": 0, "events": [_worker_event("CREATED_PANEL")]},
+        ],
+    }
+    labels = [_text_of(e) for e in render_stub.timeline_events(msg)]
+    assert labels == [
+        None,
+        "create_session failed: HTTP 400: provider_id does not exist",
+        None,
+        "CREATED_PANEL",
+        '{"success": true, "session_id": "s2", "name": "created"}',
+    ], labels
+    print("ok: failed create_session does not consume later success panel")
+
+
 def test_panel_anchor_cache_reused_until_invalidated():
     msg = {
         "events": [
@@ -221,5 +249,6 @@ if __name__ == "__main__":
     test_ask_async_mode_anchors_like_mssg()
     test_panel_without_tool_use_falls_back_to_stored_insert_at()
     test_create_worker_tool_use_is_ignored_does_not_desync_ask()
+    test_failed_create_session_does_not_consume_success_panel()
     test_panel_anchor_cache_reused_until_invalidated()
     print("ALL PASS")

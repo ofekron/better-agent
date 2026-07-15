@@ -143,10 +143,45 @@ def _tool_short_name(name: str) -> str:
     return name if idx == -1 else name[idx + 2:]
 
 
+def _tool_result_text(content) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(_tool_result_text(item) for item in content)
+    if isinstance(content, dict):
+        return "\n".join(
+            text for text in (_tool_result_text(value) for value in content.values())
+            if text
+        )
+    return ""
+
+
+def _tool_results_by_id(manager_events: list) -> dict:
+    results: dict = {}
+    for ev in manager_events:
+        if not isinstance(ev, dict) or ev.get("type") != "agent_message":
+            continue
+        data = ev.get("data")
+        if not isinstance(data, dict) or data.get("type") != "user":
+            continue
+        message = data.get("message")
+        content = message.get("content") if isinstance(message, dict) else None
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict) or block.get("type") != "tool_result":
+                continue
+            tool_use_id = block.get("tool_use_id")
+            if isinstance(tool_use_id, str):
+                results[tool_use_id] = _tool_result_text(block.get("content"))
+    return results
+
+
 def _delegation_tool_uses(manager_events: list) -> list:
     """Delegation tool_use blocks in firing order, each tagged with the
     index of the event entry that holds it (parallel asks in one entry
     share that index)."""
+    results = _tool_results_by_id(manager_events)
     out: list = []
     for entry_index, ev in enumerate(manager_events):
         if not isinstance(ev, dict) or ev.get("type") != "agent_message":
@@ -166,22 +201,46 @@ def _delegation_tool_uses(manager_events: list) -> list:
                 continue
             short = _tool_short_name(name)
             if short in _DELEGATION_TOOL_SHORT_NAMES:
-                out.append((entry_index, short))
+                tool_use_id = block.get("id")
+                out.append({
+                    "entry_index": entry_index,
+                    "short": short,
+                    "tool_use_id": tool_use_id if isinstance(tool_use_id, str) else None,
+                    "result_text": results.get(tool_use_id) if isinstance(tool_use_id, str) else None,
+                })
     return out
 
 
-def _panel_matches_tool(short: str, worker: dict) -> bool:
+def _creation_result_matches(tool_use: dict, worker: dict) -> bool:
+    session_id = worker.get("worker_session_id")
+    result_text = tool_use.get("result_text")
+    if not isinstance(session_id, str) or not session_id.strip():
+        return True
+    if result_text is None:
+        return True
+    return session_id.strip() in result_text
+
+
+def _panel_matches_tool(tool_use: dict, worker: dict) -> bool:
+    short = tool_use.get("short")
     kind = worker.get("panel_kind")
     run_mode = worker.get("run_mode")
     if short == "create_sub_session":
-        return kind == "sub_session_created"
+        return kind == "sub_session_created" and _creation_result_matches(tool_use, worker)
     if short == "create_session":
-        return kind == "session_created"
+        return kind == "session_created" and _creation_result_matches(tool_use, worker)
     if short == "ask":
         return run_mode in ("team_ask", "fork", "team_message")
     if short in ("mssg", "delegate_task"):
         return run_mode == "team_message"
     return False
+
+
+def _should_skip_unmatched_tool_use(tool_use: dict) -> bool:
+    return (
+        tool_use.get("short") in ("create_session", "create_sub_session")
+        and tool_use.get("result_text") is not None
+    )
 
 
 def _derive_panel_anchors(manager_events: list, workers: list) -> dict:
@@ -195,9 +254,16 @@ def _derive_panel_anchors(manager_events: list, workers: list) -> dict:
     anchors: dict = {}
     cursor = 0
     for worker, _index in workers:
-        if cursor < len(tool_uses) and _panel_matches_tool(tool_uses[cursor][1], worker):
-            anchors[worker.get("delegation_id")] = tool_uses[cursor][0] + 1
+        while cursor < len(tool_uses):
+            tool_use = tool_uses[cursor]
+            if not _panel_matches_tool(tool_use, worker):
+                if not _should_skip_unmatched_tool_use(tool_use):
+                    break
+                cursor += 1
+                continue
             cursor += 1
+            anchors[worker.get("delegation_id")] = tool_use["entry_index"] + 1
+            break
     return anchors
 
 

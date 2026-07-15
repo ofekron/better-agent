@@ -43,10 +43,46 @@ function toolShortName(name: string): string {
  * Each carries the index of the event ENTRY that contains it. Multiple
  * delegation tool_use blocks in one entry (parallel asks) yield multiple
  * records sharing that entry index. */
-function delegationToolUses(
-  managerEvents: WSEvent[],
-): { entryIndex: number; short: string }[] {
-  const out: { entryIndex: number; short: string }[] = [];
+type DelegationToolUse = {
+  entryIndex: number;
+  short: string;
+  toolUseId?: string;
+  resultText?: string;
+};
+
+function toolResultText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) return content.map(toolResultText).join("\n");
+  if (content && typeof content === "object") {
+    const record = content as Record<string, unknown>;
+    return Object.values(record).map(toolResultText).filter(Boolean).join("\n");
+  }
+  return "";
+}
+
+function toolResultsById(managerEvents: WSEvent[]): Map<string, string> {
+  const results = new Map<string, string>();
+  for (const ev of managerEvents) {
+    if (ev.type !== "agent_message") continue;
+    const data = ev.data as
+      | { type?: string; message?: { content?: unknown } }
+      | undefined;
+    if (!data || data.type !== "user") continue;
+    const content = data.message?.content;
+    if (!Array.isArray(content)) continue;
+    for (const raw of content) {
+      if (!raw || typeof raw !== "object") continue;
+      const block = raw as { type?: string; tool_use_id?: string; content?: unknown };
+      if (block.type !== "tool_result" || typeof block.tool_use_id !== "string") continue;
+      results.set(block.tool_use_id, toolResultText(block.content));
+    }
+  }
+  return results;
+}
+
+function delegationToolUses(managerEvents: WSEvent[]): DelegationToolUse[] {
+  const results = toolResultsById(managerEvents);
+  const out: DelegationToolUse[] = [];
   managerEvents.forEach((ev, entryIndex) => {
     if (ev.type !== "agent_message") return;
     const data = ev.data as
@@ -57,21 +93,34 @@ function delegationToolUses(
     if (!Array.isArray(content)) return;
     for (const raw of content) {
       if (!raw || typeof raw !== "object") continue;
-      const block = raw as { type?: string; name?: string };
+      const block = raw as { type?: string; name?: string; id?: string };
       if (block.type !== "tool_use" || typeof block.name !== "string") continue;
       const short = toolShortName(block.name);
-      if (DELEGATION_TOOL_SHORT_NAMES.has(short)) out.push({ entryIndex, short });
+      if (!DELEGATION_TOOL_SHORT_NAMES.has(short)) continue;
+      const toolUseId = typeof block.id === "string" ? block.id : undefined;
+      out.push({
+        entryIndex,
+        short,
+        toolUseId,
+        resultText: toolUseId ? results.get(toolUseId) : undefined,
+      });
     }
   });
   return out;
 }
 
-function panelMatchesTool(short: string, w: WorkerPanel): boolean {
-  switch (short) {
+function panelMatchesTool(toolUse: DelegationToolUse, w: WorkerPanel): boolean {
+  const creationResultMatches = () => {
+    const sessionId = w.worker_session_id?.trim();
+    if (!sessionId || toolUse.resultText === undefined) return true;
+    return toolUse.resultText.includes(sessionId);
+  };
+
+  switch (toolUse.short) {
     case "create_sub_session":
-      return w.panel_kind === "sub_session_created";
+      return w.panel_kind === "sub_session_created" && creationResultMatches();
     case "create_session":
-      return w.panel_kind === "session_created";
+      return w.panel_kind === "session_created" && creationResultMatches();
     case "ask":
       return w.run_mode === "team_ask" || w.run_mode === "fork";
     case "mssg":
@@ -80,6 +129,13 @@ function panelMatchesTool(short: string, w: WorkerPanel): boolean {
     default:
       return false;
   }
+}
+
+function shouldSkipUnmatchedToolUse(toolUse: DelegationToolUse): boolean {
+  return (
+    (toolUse.short === "create_session" || toolUse.short === "create_sub_session") &&
+    toolUse.resultText !== undefined
+  );
 }
 
 /**
@@ -102,9 +158,16 @@ export function derivePanelAnchors(
   const anchors = new Map<string, number>();
   let cursor = 0;
   for (const w of workers) {
-    if (cursor < toolUses.length && panelMatchesTool(toolUses[cursor].short, w)) {
-      anchors.set(w.delegation_id, toolUses[cursor].entryIndex + 1);
+    while (cursor < toolUses.length) {
+      const toolUse = toolUses[cursor];
+      if (!panelMatchesTool(toolUse, w)) {
+        if (!shouldSkipUnmatchedToolUse(toolUse)) break;
+        cursor += 1;
+        continue;
+      }
       cursor += 1;
+      anchors.set(w.delegation_id, toolUse.entryIndex + 1);
+      break;
     }
   }
   return anchors;

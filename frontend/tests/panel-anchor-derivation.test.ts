@@ -17,14 +17,30 @@ const text = (label: string): WSEvent => ({
   data: { type: "assistant", message: { content: [{ type: "text", text: label }] } },
 });
 
-const toolResult = (label: string): WSEvent => ({
+const toolResult = (label: string, toolUseId?: string): WSEvent => ({
   type: "agent_message",
-  data: { type: "user", message: { content: [{ type: "tool_result", content: label }] } },
+  data: {
+    type: "user",
+    message: {
+      content: [
+        {
+          type: "tool_result",
+          content: label,
+          ...(toolUseId ? { tool_use_id: toolUseId } : {}),
+        },
+      ],
+    },
+  },
 });
 
 const labelOf = (e: WSEvent): string => {
-  const c = (e.data as any)?.message?.content?.[0];
-  return c?.text ?? c?.content ?? "?";
+  const data = e.data as { message?: { content?: unknown[] } } | undefined;
+  const content = data?.message?.content?.[0];
+  if (!content || typeof content !== "object") return "?";
+  const block = content as { text?: unknown; content?: unknown };
+  if (typeof block.text === "string") return block.text;
+  if (typeof block.content === "string") return block.content;
+  return "?";
 };
 
 /** Flatten tagged stream to a comparable token list. */
@@ -94,6 +110,32 @@ describe("tagEvents render-time anchor derivation", () => {
     ];
     // anchors after the ask entry (index 1), not the create_worker entry (0)
     expect(tokens(managerEvents, workers)).toEqual(["?", "?", "W:SUBAGENT_WORK"]);
+  });
+
+  it("does not let a failed create_session consume a later success panel", () => {
+    const managerEvents = [
+      assistantToolUse(["mcp__communicate__create_session", "c1"]),
+      toolResult("create_session failed: HTTP 400: provider_id does not exist", "c1"),
+      assistantToolUse(["mcp__communicate__create_session", "c2"]),
+      toolResult('{"success": true, "session_id": "s2", "name": "created"}', "c2"),
+    ];
+    const workers = [
+      panel({
+        delegation_id: "created_s2",
+        worker_session_id: "s2",
+        panel_kind: "session_created",
+        run_mode: "created",
+        insert_at: 0,
+        events: [text("CREATED_PANEL")],
+      }),
+    ];
+    expect(tokens(managerEvents, workers)).toEqual([
+      "?",
+      "create_session failed: HTTP 400: provider_id does not exist",
+      "?",
+      "W:CREATED_PANEL",
+      '{"success": true, "session_id": "s2", "name": "created"}',
+    ]);
   });
 
   it("falls back to stored insert_at for a panel with no matching tool_use", () => {
