@@ -3712,8 +3712,9 @@ function AppMain({
         timers.delete(id);
       }
     }
+    await Promise.all(ids.map((id) => offlineQueue.removeAllForSession(id)));
     await Promise.all(ids.map((id) => deleteSession(id)));
-  }, [sessionsToDelete, deleteSession]);
+  }, [sessionsToDelete, deleteSession, offlineQueue]);
 
   const sessionBeingDeleted = useMemo(() => {
     if (!sessionsToDelete || sessionsToDelete.length !== 1) return null;

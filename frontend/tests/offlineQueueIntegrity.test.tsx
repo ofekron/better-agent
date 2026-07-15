@@ -283,4 +283,25 @@ describe("useOfflineQueue — IndexedDB persistence integrity", () => {
     expect(await loadOfflineActions()).toEqual([]);
     expect(result.current.getAll()).toEqual([]);
   });
+
+  it("purges every queued entry for a deleted session, leaving other sessions untouched", async () => {
+    const deletedSessionId = "11111111-1111-4111-8111-111111111111";
+    const { result } = renderHook(() => useOfflineQueue());
+    await waitFor(() => expect(result.current.ready).toBe(true));
+    await act(() => result.current.enqueue({
+      ...legacyCreateEntry("create-deleted"),
+      session: { ...legacyCreateEntry("create-deleted").session, id: deletedSessionId },
+    }));
+    await act(() => result.current.enqueue(entry(deletedSessionId, "prompt-deleted")));
+    await act(() => result.current.enqueue(entry("kept-session", "prompt-kept")));
+
+    await act(() => result.current.removeAllForSession(deletedSessionId));
+
+    expect(result.current.getAll()).toEqual([
+      expect.objectContaining({ sessionId: "kept-session", clientId: "prompt-kept" }),
+    ]);
+    expect(await loadOfflineActions()).toEqual([
+      expect.objectContaining({ sessionId: "kept-session", clientId: "prompt-kept" }),
+    ]);
+  });
 });

@@ -4,6 +4,7 @@ import type { ImagePayload, FilePayload } from "./useWebSocket";
 import { uuidv4 } from "../lib/uuid";
 import {
   deleteOfflineAction,
+  deleteOfflineActionsForSession,
   importOfflineActions,
   loadOfflineActions,
   offlineActionKey,
@@ -186,13 +187,13 @@ export function useOfflineQueue() {
     operation: () => Promise<void>,
     updateLocal: (items: OfflineQueueEntry[]) => OfflineQueueEntry[],
   ) => {
+    const next = updateLocal(queueRef.current);
+    queueRef.current = next;
+    setQueue(next);
     const write = writeTailRef.current.then(operation, operation);
     writeTailRef.current = write.catch(() => undefined);
     return write.then(() => {
       setPersistFailed(false);
-      const next = updateLocal(queueRef.current);
-      queueRef.current = next;
-      setQueue(next);
       notifyChanged();
       return true;
     }, () => {
@@ -222,28 +223,12 @@ export function useOfflineQueue() {
     return queueRef.current;
   }, []);
 
-  // Removals hit the in-memory projection synchronously: the offline
-  // flush loop decides redispatch from queueRef, so an acked/failed entry
-  // must never linger there while the durable delete is still in flight
-  // (it would be re-sent and its pending bubble re-stamped "sending").
-  // A durable delete that later fails leaves only a stale IndexedDB row,
-  // which the ack-based dedupe reconciles on the next load.
   const persistRemoval = useCallback((key: string) => {
-    const next = queueRef.current.filter((item) => offlineActionKey(item) !== key);
-    queueRef.current = next;
-    setQueue(next);
-    const operation = () => deleteOfflineAction(key);
-    const write = writeTailRef.current.then(operation, operation);
-    writeTailRef.current = write.catch(() => undefined);
-    return write.then(() => {
-      setPersistFailed(false);
-      notifyChanged();
-      return true;
-    }, () => {
-      setPersistFailed(true);
-      return false;
-    });
-  }, [notifyChanged]);
+    return persist(
+      () => deleteOfflineAction(key),
+      (items) => items.filter((item) => offlineActionKey(item) !== key),
+    );
+  }, [persist]);
 
   const removeEntry = useCallback(
     (entry: OfflineQueueEntry) => persistRemoval(offlineActionKey(entry)),
@@ -268,23 +253,11 @@ export function useOfflineQueue() {
       ...item,
       failure: { errorText },
     });
-    const next = queueRef.current.map((item) =>
-      offlineActionKey(item) === key ? update(item) : item
+    return persist(
+      () => updateOfflineAction(key, update),
+      (items) => items.map((item) => offlineActionKey(item) === key ? update(item) : item),
     );
-    queueRef.current = next;
-    setQueue(next);
-    const operation = () => updateOfflineAction(key, update);
-    const write = writeTailRef.current.then(operation, operation);
-    writeTailRef.current = write.catch(() => undefined);
-    return write.then(() => {
-      setPersistFailed(false);
-      notifyChanged();
-      return true;
-    }, () => {
-      setPersistFailed(true);
-      return false;
-    });
-  }, [notifyChanged]);
+  }, [persist]);
 
   const retryFailed = useCallback((entry: OfflineQueueEntry) => {
     const key = offlineActionKey(entry);
@@ -293,23 +266,11 @@ export function useOfflineQueue() {
       void _failure;
       return rest;
     };
-    const next = queueRef.current.map((item) =>
-      offlineActionKey(item) === key ? update(item) : item
+    return persist(
+      () => updateOfflineAction(key, update),
+      (items) => items.map((item) => offlineActionKey(item) === key ? update(item) : item),
     );
-    queueRef.current = next;
-    setQueue(next);
-    const operation = () => updateOfflineAction(key, update);
-    const write = writeTailRef.current.then(operation, operation);
-    writeTailRef.current = write.catch(() => undefined);
-    return write.then(() => {
-      setPersistFailed(false);
-      notifyChanged();
-      return true;
-    }, () => {
-      setPersistFailed(true);
-      return false;
-    });
-  }, [notifyChanged]);
+  }, [persist]);
 
   const updateEditDraft = useCallback(
     (entry: OfflineQueueEntry, draftPrompt: string) => {
@@ -319,8 +280,6 @@ export function useOfflineQueue() {
           ? { ...item, editing: { draftPrompt } }
           : item
       ));
-      queueRef.current = updateLocal(queueRef.current);
-      setQueue(updateLocal);
       const update = (item: OfflineQueueEntry) => item.editing
         ? { ...item, editing: { draftPrompt } }
         : item;
@@ -376,6 +335,16 @@ export function useOfflineQueue() {
     [persistRemoval],
   );
 
+  // A deleted session must never come back from a stale backlog replay: drop
+  // every queued entry (the create itself, and any prompts queued against
+  // it) targeting this id, regardless of which client queued them.
+  const removeAllForSession = useCallback((sessionId: string) => {
+    return persist(
+      () => deleteOfflineActionsForSession(sessionId),
+      (items) => items.filter((item) => entrySessionId(item) !== sessionId),
+    );
+  }, [persist]);
+
   useEffect(() => {
     void (async () => {
       let initializationFailed = false;
@@ -419,6 +388,7 @@ export function useOfflineQueue() {
     getAll,
     removeEntry,
     removeBySessionAndClient,
+    removeAllForSession,
     beginEdit,
     updateEditDraft,
     finishEdit,

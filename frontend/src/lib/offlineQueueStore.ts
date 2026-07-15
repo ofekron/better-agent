@@ -166,6 +166,22 @@ export async function deleteOfflineAction(key: string): Promise<void> {
   db.close();
 }
 
+export async function deleteOfflineActionsForSession(sessionId: string): Promise<void> {
+  const db = await openDatabase();
+  const tx = db.transaction([ACTIONS, PAYLOADS], "readwrite");
+  const actions = tx.objectStore(ACTIONS);
+  const payloads = tx.objectStore(PAYLOADS);
+  const all = await requestResult(actions.getAll()) as StoredAction[];
+  for (const action of all) {
+    const entrySessionId = action.type === "create_session" ? action.session.id : action.sessionId;
+    if (entrySessionId !== sessionId) continue;
+    actions.delete(action.key);
+    payloads.delete(action.key);
+  }
+  await transactionDone(tx);
+  db.close();
+}
+
 export async function clearOfflineActions(): Promise<void> {
   const db = await openDatabase();
   const tx = db.transaction([ACTIONS, PAYLOADS, SEQUENCE], "readwrite");

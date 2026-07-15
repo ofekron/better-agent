@@ -4654,6 +4654,14 @@ class SessionManager:
                     pass
             raise
 
+    def deletion_evidence_exists(self, sid: str) -> bool:
+        """True if `sid` was ever committed-deleted. Deletion evidence files
+        are never cleaned up, so this is a permanent retirement check — used
+        to refuse resurrecting a deleted id via a stale `client_session_id`
+        replay (e.g. an offline-queue backlog entry queued before the
+        delete)."""
+        return self._deletion_evidence_path(sid).exists()
+
     def owner_deletion_committed(self, token: SessionOwnerToken) -> bool:
         try:
             data = json.loads(
