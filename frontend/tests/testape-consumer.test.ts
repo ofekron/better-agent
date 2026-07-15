@@ -6,6 +6,7 @@ import {
   publishBetterAgentTestApeState,
   publishBetterAgentVisibleChatPanelTree,
 } from "src/lib/testapeConsumer";
+import { compareRenderedTreeToSession } from "src/lib/staleViewDetector";
 import type { Session } from "src/types";
 
 function session(overrides: Partial<Session> = {}): Session {
@@ -81,13 +82,19 @@ describe("Better Agent TestApe consumer", () => {
           <div class="message-content">Standalone</div>
         </div>
         <div data-testid="assistant-message" data-message-id="a1">
-          <div class="message-content">Answer</div>
+          <div class="message-content">
+            <div class="message-box open">
+              <button class="message-box-toggle">▼</button>
+              <div class="message-box-body">Answer</div>
+            </div>
+          </div>
         </div>
       </div>
     `;
     window.history.replaceState({}, "", "/s/s1");
 
-    expect(extractVisibleChatPanelTree()).toEqual({
+    const tree = extractVisibleChatPanelTree();
+    expect(tree).toEqual({
       visible: true,
       session_id: "s1",
       title: "Main",
@@ -103,6 +110,32 @@ describe("Better Agent TestApe consumer", () => {
         },
       ],
     });
+    expect(compareRenderedTreeToSession(tree, session({
+      messages: [
+        { id: "u1", role: "user", content: "Hello" },
+        { id: "u2", role: "user", content: "Standalone" },
+        { id: "a1", role: "assistant", content: "Answer" },
+      ],
+    }) as Session).mismatches).toEqual([]);
+  });
+
+  it("extracts collapsed assistant answer text without presentation controls", () => {
+    document.body.innerHTML = `
+      <div data-testid="chat-messages">
+        <div data-testid="assistant-message" data-message-id="a1">
+          <div class="message-content">
+            <div class="message-box">
+              <button class="message-box-toggle">▶</button>
+              <button class="message-box-collapsed-body">Collapsed answer</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+
+    expect(extractVisibleChatPanelTree().regions[0]?.messages).toEqual([
+      { id: "a1", role: "assistant", text: "Collapsed answer" },
+    ]);
   });
 
   it("publishes the visible chat panel tree through the TestApe SDK on demand", () => {
