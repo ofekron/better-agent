@@ -1,8 +1,9 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   offlineEntryIsEditing,
   useOfflineQueue,
+  type OfflineCreateSessionEntry,
   type OfflinePromptEntry,
 } from "../src/hooks/useOfflineQueue";
 import {
@@ -19,6 +20,22 @@ const entry = (sessionId: string, clientId: string, prompt = clientId): OfflineP
   prompt,
   model: "sonnet",
   cwd: "/tmp/project",
+});
+
+const legacyCreateEntry = (clientId: string): OfflineCreateSessionEntry => ({
+  type: "create_session",
+  clientId,
+  session: {
+    id: "invalid-legacy-session-id",
+    name: "legacy",
+    model: "sonnet",
+    cwd: "/tmp/project",
+    orchestration_mode: "native",
+    created_at: "2026-01-01T00:00:00Z",
+    updated_at: "2026-01-01T00:00:00Z",
+    messages: [],
+  },
+  prompt: "legacy create",
 });
 
 describe("useOfflineQueue — IndexedDB persistence integrity", () => {
@@ -130,30 +147,81 @@ describe("useOfflineQueue — IndexedDB persistence integrity", () => {
     expect(localStorage.getItem("better_agent_offline_queue")).toBeNull();
   });
 
-  it("retains legacy intent after a failed import and retries on remount", async () => {
-    const legacy = JSON.stringify([entry("a", "retry", "legacy")]);
-    localStorage.setItem("better_agent_offline_queue", legacy);
+  it("atomically retries a multi-entry legacy import under stable normalized identities", async () => {
+    localStorage.setItem("better_agent_offline_queue", JSON.stringify([
+      legacyCreateEntry("create-retry"),
+      entry("a", "send-retry", "legacy send"),
+    ]));
     const originalPut = IDBObjectStore.prototype.put;
-    let fail = true;
+    let putCount = 0;
     IDBObjectStore.prototype.put = function (...args: Parameters<IDBObjectStore["put"]>) {
-      if (fail) {
-        fail = false;
+      putCount += 1;
+      if (putCount === 2) {
         throw new DOMException("forced", "DataError");
       }
       return originalPut.apply(this, args);
     };
     const first = renderHook(() => useOfflineQueue());
     await waitFor(() => expect(first.result.current.ready).toBe(true));
-    expect(localStorage.getItem("better_agent_offline_queue")).toBe(legacy);
+    expect(await loadOfflineActions()).toEqual([]);
+    const normalizedRaw = localStorage.getItem("better_agent_offline_queue");
+    expect(normalizedRaw).not.toBeNull();
+    const normalized = JSON.parse(normalizedRaw!) as OfflineCreateSessionEntry[];
+    const normalizedSessionId = normalized[0].session.id;
+    expect(normalizedSessionId).not.toBe("invalid-legacy-session-id");
     first.unmount();
     IDBObjectStore.prototype.put = originalPut;
 
     const retry = renderHook(() => useOfflineQueue());
     await waitFor(() => expect(retry.result.current.ready).toBe(true));
+    expect(retry.result.current.getAll()).toHaveLength(2);
+    expect(retry.result.current.getAll()[0]).toEqual(expect.objectContaining({
+      clientId: "create-retry",
+      session: expect.objectContaining({ id: normalizedSessionId }),
+    }));
+    expect(retry.result.current.getAll()[1]).toEqual(expect.objectContaining({
+      sessionId: "a",
+      clientId: "send-retry",
+    }));
+    expect(localStorage.getItem("better_agent_offline_queue")).toBeNull();
+  });
+
+  it("retries removal failure without reminting or duplicating a legacy create", async () => {
+    localStorage.setItem("better_agent_offline_queue", JSON.stringify([legacyCreateEntry("remove-retry")]));
+    const removeItem = vi.spyOn(localStorage, "removeItem")
+      .mockImplementationOnce(() => { throw new Error("forced removal failure"); });
+    const first = renderHook(() => useOfflineQueue());
+    await waitFor(() => expect(first.result.current.ready).toBe(true));
+    const normalizedRaw = localStorage.getItem("better_agent_offline_queue");
+    expect(normalizedRaw).not.toBeNull();
+    const normalizedSessionId = (JSON.parse(normalizedRaw!)[0] as OfflineCreateSessionEntry).session.id;
+    expect(await loadOfflineActions()).toHaveLength(1);
+    first.unmount();
+    removeItem.mockRestore();
+
+    const retry = renderHook(() => useOfflineQueue());
+    await waitFor(() => expect(retry.result.current.ready).toBe(true));
     expect(retry.result.current.getAll()).toEqual([
-      expect.objectContaining({ sessionId: "a", clientId: "retry", prompt: "legacy" }),
+      expect.objectContaining({
+        clientId: "remove-retry",
+        session: expect.objectContaining({ id: normalizedSessionId }),
+      }),
     ]);
     expect(localStorage.getItem("better_agent_offline_queue")).toBeNull();
+  });
+
+  it("becomes ready with an empty failed state when durable storage cannot open", async () => {
+    const legacy = JSON.stringify([entry("a", "open-retry", "legacy")]);
+    localStorage.setItem("better_agent_offline_queue", legacy);
+    const open = vi.spyOn(IDBFactory.prototype, "open")
+      .mockImplementation(() => { throw new Error("forced open failure"); });
+    const failed = renderHook(() => useOfflineQueue());
+    await waitFor(() => expect(failed.result.current.ready).toBe(true));
+    expect(failed.result.current.persistFailed).toBe(true);
+    expect(failed.result.current.getAll()).toEqual([]);
+    expect(localStorage.getItem("better_agent_offline_queue")).toBe(legacy);
+    failed.unmount();
+    open.mockRestore();
   });
 
   it("deletes only the selected composite identity", async () => {

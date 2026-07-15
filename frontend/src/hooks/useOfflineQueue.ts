@@ -119,17 +119,24 @@ function isUsableEntry(entry: unknown): entry is OfflineQueueEntry {
     && (p.prompt.length > 0 || hasPayloadArray(p.images) || hasPayloadArray(p.files));
 }
 
-function readLegacyEntries(): OfflineQueueEntry[] | null {
+interface LegacyQueueSnapshot {
+  entries: OfflineQueueEntry[];
+  normalizedRaw: string;
+  raw: string;
+}
+
+function readLegacyEntries(): LegacyQueueSnapshot | null {
   const raw = localStorage.getItem(LEGACY_STORAGE_KEY);
-  if (!raw) return [];
+  if (raw === null) return null;
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
   } catch {
-    return null;
+    throw new Error("Invalid legacy offline queue");
   }
-  if (!Array.isArray(parsed)) return null;
-  return normalizeQueueEntries(parsed.filter(isUsableEntry));
+  if (!Array.isArray(parsed)) throw new Error("Invalid legacy offline queue");
+  const entries = normalizeQueueEntries(parsed.filter(isUsableEntry));
+  return { entries, normalizedRaw: JSON.stringify(entries), raw };
 }
 
 export function useOfflineQueue() {
@@ -147,8 +154,12 @@ export function useOfflineQueue() {
       queueRef.current = next;
       setQueue(next);
       setPersistFailed(false);
+      return true;
     } catch {
+      queueRef.current = [];
+      setQueue([]);
       setPersistFailed(true);
+      return false;
     } finally {
       setReady(true);
     }
@@ -295,16 +306,21 @@ export function useOfflineQueue() {
 
   useEffect(() => {
     void (async () => {
-      const legacy = readLegacyEntries();
-      if (legacy !== null) {
-        try {
-          await importOfflineActions(legacy);
+      let initializationFailed = false;
+      try {
+        const legacy = readLegacyEntries();
+        if (legacy) {
+          if (legacy.normalizedRaw !== legacy.raw) {
+            localStorage.setItem(LEGACY_STORAGE_KEY, legacy.normalizedRaw);
+          }
+          await importOfflineActions(legacy.entries);
           localStorage.removeItem(LEGACY_STORAGE_KEY);
-        } catch {
-          setPersistFailed(true);
         }
+      } catch {
+        initializationFailed = true;
       }
-      await refresh();
+      const loaded = await refresh();
+      if (initializationFailed || !loaded) setPersistFailed(true);
     })();
     const onChanged = (event?: Event) => {
       if (event instanceof CustomEvent && event.detail === instanceIdRef.current) return;

@@ -76,16 +76,23 @@ function hydrate(action: StoredAction, payload?: StoredPayload): OfflineQueueEnt
 export async function loadOfflineActions(): Promise<OfflineQueueEntry[]> {
   const db = await openDatabase();
   const tx = db.transaction([ACTIONS, PAYLOADS], "readonly");
-  const [actions, payloads] = await Promise.all([
-    requestResult(tx.objectStore(ACTIONS).getAll()) as Promise<StoredAction[]>,
-    requestResult(tx.objectStore(PAYLOADS).getAll()) as Promise<StoredPayload[]>,
-  ]);
-  await transactionDone(tx);
-  db.close();
-  const payloadByKey = new Map(payloads.map((payload) => [payload.key, payload]));
-  return actions
-    .sort((left, right) => left.order - right.order)
-    .map((action) => hydrate(action, payloadByKey.get(action.key)));
+  const done = transactionDone(tx);
+  try {
+    const [actions, payloads] = await Promise.all([
+      requestResult(tx.objectStore(ACTIONS).getAll()) as Promise<StoredAction[]>,
+      requestResult(tx.objectStore(PAYLOADS).getAll()) as Promise<StoredPayload[]>,
+    ]);
+    await done;
+    const payloadByKey = new Map(payloads.map((payload) => [payload.key, payload]));
+    return actions
+      .sort((left, right) => left.order - right.order)
+      .map((action) => hydrate(action, payloadByKey.get(action.key)));
+  } catch (error) {
+    await done.catch(() => undefined);
+    throw error;
+  } finally {
+    db.close();
+  }
 }
 
 export async function putOfflineAction(entry: OfflineQueueEntry): Promise<void> {
