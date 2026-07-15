@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import signal
 import sqlite3
 import sys
 import tempfile
@@ -547,6 +548,79 @@ def test_owner_anchors_database_wal_and_lifecycle_through_path_swaps() -> None:
         os.rename(moved_database, database)
     file_store.close()
     assert not any(item.name.endswith(("-wal", "-shm")) for item in outside.iterdir())
+
+
+def test_secure_file_metadata_and_hardlink_checkpoints() -> None:
+    parent = STATE_HOME / "chat-tests" / "metadata"
+    parent.mkdir(parents=True)
+
+    permissive = parent / "permissive.sqlite3"
+    permissive.touch(mode=0o644)
+    permissive.chmod(0o644)
+    _assert_error("insecure_store_file", lambda: SQLiteChatProjectionStore(permissive))
+
+    fifo = parent / "fifo.sqlite3"
+    os.mkfifo(fifo, 0o600)
+    _assert_error("insecure_store_file", lambda: SQLiteChatProjectionStore(fifo))
+
+    hardlinked = parent / "hardlinked.sqlite3"
+    hardlinked.touch(mode=0o600)
+    hardlink_peer = parent / "hardlinked-peer.sqlite3"
+    os.link(hardlinked, hardlink_peer)
+    _assert_error("insecure_store_file", lambda: SQLiteChatProjectionStore(hardlinked))
+
+    checkpoint_path = parent / "checkpoint.sqlite3"
+    store = SQLiteChatProjectionStore(checkpoint_path)
+    store.select_generation("root-1", 0)
+    checkpoint_peer = parent / "checkpoint-peer.sqlite3"
+    os.link(checkpoint_path, checkpoint_peer)
+    _assert_error("insecure_store_file", lambda: store.commit(_request(_fixture_event())))
+    checkpoint_peer.unlink()
+    connection = sqlite3.connect(checkpoint_path)
+    assert connection.execute("SELECT COUNT(*) FROM canonical_facts").fetchone()[0] == 0
+    connection.close()
+    _assert_error("owner_unavailable", lambda: store.commit(_request(_fixture_event())))
+    store.close()
+    restarted = SQLiteChatProjectionStore(checkpoint_path)
+    assert restarted.commit(_request(_fixture_event())).fact_sequence == 1
+    restarted.close()
+
+
+def test_owner_timeout_ambiguity_protocol_poison_and_idempotent_close() -> None:
+    stopped_path = _path("owner-stopped")
+    stopped = SQLiteChatProjectionStore(stopped_path, _ipc_timeout_seconds=0.1)
+    stopped_process = stopped._process
+    os.kill(stopped_process.pid, signal.SIGSTOP)
+    _assert_error("owner_unavailable", lambda: stopped.read_facts("root-1", 0))
+    assert stopped_process.poll() is not None
+    _assert_error("owner_unavailable", lambda: stopped.read_facts("root-1", 0))
+    stopped.close()
+    stopped.close()
+
+    ambiguous_path = _path("owner-ambiguous-commit")
+    ambiguous = SQLiteChatProjectionStore(
+        ambiguous_path, _ipc_timeout_seconds=0.1, _test_owner_fault="post_commit_stop",
+    )
+    ambiguous.select_generation("root-1", 0)
+    ambiguous_process = ambiguous._process
+    _assert_error("commit_outcome_unknown", lambda: ambiguous.commit(_request(_fixture_event())))
+    assert ambiguous_process.poll() is not None
+    _assert_error("owner_unavailable", lambda: ambiguous.read_facts("root-1", 0))
+    ambiguous.close()
+    ambiguous.close()
+    restarted = SQLiteChatProjectionStore(ambiguous_path)
+    assert len(restarted.read_facts("root-1", 0)) == 1
+    restarted.close()
+
+    malformed = SQLiteChatProjectionStore(
+        _path("owner-malformed"), _test_owner_fault="malformed_response",
+    )
+    malformed_process = malformed._process
+    _assert_error("owner_protocol_error", lambda: malformed.select_generation("root-1", 0))
+    assert malformed_process.poll() is not None
+    _assert_error("owner_unavailable", lambda: malformed.select_generation("root-1", 1))
+    malformed.close()
+    malformed.close()
 
 
 def main() -> None:
