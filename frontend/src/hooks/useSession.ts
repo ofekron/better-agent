@@ -667,6 +667,18 @@ export function mergeIncomingMessagesForNode(
   return merged;
 }
 
+export function preserveLocalMessagesInTree(
+  tree: Session,
+  sessionId: string,
+  source: ChatMessage[],
+): Session {
+  return updateNodeById(tree, sessionId, (node) => {
+    const existing = node.messages || [];
+    const merged = mergeIncomingMessagesForNode(source, existing);
+    return merged === existing ? node : { ...node, messages: merged };
+  });
+}
+
 /** Pure reducer for one live WS turn-event over a node's message list.
  *
  * Routes the event onto the in-flight assistant (via
@@ -1947,32 +1959,13 @@ export function useSession(authStatus?: string) {
     []
   );
 
-  /** Add messages from `source` into the tree node ONLY if their id
-   * doesn't already exist in the node. Used by selectSession and
-   * applySessionReconciled to preserve optimistic messages
-   * (user_message_persisted during fetch) without overwriting the
-   * canonical REST data with stale local versions. */
   const addMissingMessages = useCallback(
     (
       tree: Session,
       sessionId: string,
       source: ChatMessage[]
     ): Session => {
-      return updateNodeById(tree, sessionId, (node) => {
-        const existing = node.messages || [];
-        const existingIds = new Set(existing.map((m) => m.id));
-        const missing = source.filter((m) => !existingIds.has(m.id));
-        if (missing.length === 0) return node;
-        const merged = [...existing, ...missing];
-        merged.sort((a, b) => {
-          const sa =
-            typeof a.seq === "number" ? a.seq : Number.MAX_SAFE_INTEGER;
-          const sb =
-            typeof b.seq === "number" ? b.seq : Number.MAX_SAFE_INTEGER;
-          return sa - sb;
-        });
-        return { ...node, messages: merged };
-      });
+      return preserveLocalMessagesInTree(tree, sessionId, source);
     },
     []
   );

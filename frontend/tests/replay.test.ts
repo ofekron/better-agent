@@ -5,6 +5,7 @@ import {
   mergeProjectedMessageDelta,
   mergeIncomingMessagesForNode,
   mergeIncomingMessageSnapshot,
+  preserveLocalMessagesInTree,
 } from "../src/hooks/useSession";
 
 function textEvent(uuid: string, text: string) {
@@ -496,6 +497,46 @@ describe("messages_replay / messages_delta upsert + since_seq cursor", () => {
     });
 
     expect(mergeIncomingMessageSnapshot(current, incoming)).toBeNull();
+  });
+
+  it("REST preservation adopts a local live placeholder instead of duplicating the last assistant", () => {
+    const canonical = makeSession({
+      id: "s",
+      messages: [
+        makeUserMsg({ id: "u", content: "prompt", seq: 0 }),
+        makeAssistantMsg({
+          id: "a-real",
+          content: "final answer",
+          seq: 1,
+          isStreaming: false,
+          events: [textEvent("ev-final", "final answer")],
+        }),
+      ],
+    });
+    const localDuringFetch = [
+      makeUserMsg({ id: "u", content: "stale local prompt", seq: 0 }),
+      makeAssistantMsg({
+        id: "live-placeholder-1",
+        content: "final",
+        isStreaming: true,
+        events: [textEvent("ev-final", "final")],
+      }),
+      makeUserMsg({ id: "u-local-only", content: "queued locally" }),
+    ];
+
+    const merged = preserveLocalMessagesInTree(
+      canonical,
+      "s",
+      localDuringFetch,
+    );
+    const assistantMessages = merged.messages?.filter((message) => message.role === "assistant");
+
+    expect(merged.messages?.find((message) => message.id === "u")?.content).toBe("prompt");
+    expect(merged.messages?.some((message) => message.id === "u-local-only")).toBe(true);
+    expect(assistantMessages).toHaveLength(1);
+    expect(assistantMessages?.[0].id).toBe("a-real");
+    expect(assistantMessages?.[0].content).toBe("final answer");
+    expect(assistantMessages?.[0].events?.map((event) => event.data?.uuid)).toEqual(["ev-final"]);
   });
 
   it("cold REST select seeds the cursor from the highest seq in the payload", async () => {
