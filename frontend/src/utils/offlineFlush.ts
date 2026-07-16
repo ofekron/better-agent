@@ -1,4 +1,4 @@
-import { HttpStatusError } from "./offlineRequest";
+import { HttpStatusError, isRetryableOfflineError } from "./offlineRequest";
 import type { OfflineQueueEntry } from "../hooks/useOfflineQueue";
 
 // Policy helpers for draining the durable offline-action backlog on reconnect.
@@ -16,18 +16,18 @@ import type { OfflineQueueEntry } from "../hooks/useOfflineQueue";
 // it, and a merely-transient failure must pause the whole drain (so nothing is
 // dispatched out of order) rather than skip ahead.
 
-export type FlushErrorKind = "retryable" | "terminal";
+export type FlushErrorKind = "transient" | "actionable" | "terminal";
 
 /** Classify an error thrown while creating a session during the reconnect
  * drain.
  *
- * The backend's 410 tombstone is the only authoritative terminal response.
- * Every other failure remains retryable because network state, backend boot,
- * configuration, or authentication can self-heal without changing the queued
- * action. */
+ * The backend's 410 tombstone is terminal. Network-class failures retry in
+ * order; deterministic client/conflict responses become durable actionable
+ * holds so they cannot hot-loop but can be retried after user correction. */
 export function classifyFlushError(error: unknown): FlushErrorKind {
   if (error instanceof HttpStatusError && error.status === 410) return "terminal";
-  return "retryable";
+  if (isRetryableOfflineError(error)) return "transient";
+  return "actionable";
 }
 
 /** A queued prompt targets a session. If that session's queued `create_session`
@@ -50,9 +50,7 @@ export interface FlushOutcome {
    * network. */
   stop: boolean;
   scheduleRetry: boolean;
-  /** The backend authoritatively retired this id. Hold the durable action for
-   * explicit user retry/delete and skip its dependent prompts in this pass. */
-  terminalFailureSessionId?: string;
+  hold?: { sessionId: string; kind: "actionable" | "terminal" };
 }
 
 export interface OfflineRetryDeadline {
@@ -77,8 +75,9 @@ export function outcomeForCreateError(
   error: unknown,
   sessionId: string,
 ): FlushOutcome {
-  if (classifyFlushError(error) === "retryable") {
+  const kind = classifyFlushError(error);
+  if (kind === "transient") {
     return { stop: true, scheduleRetry: true };
   }
-  return { stop: false, scheduleRetry: false, terminalFailureSessionId: sessionId };
+  return { stop: false, scheduleRetry: false, hold: { sessionId, kind } };
 }

@@ -73,6 +73,7 @@ export interface OfflineQueueEditState {
 
 export interface OfflineQueueFailureState {
   errorText: string;
+  kind: "actionable" | "terminal";
 }
 
 const CANONICAL_UUID =
@@ -92,6 +93,10 @@ export function offlineEntryIsEditing(entry: OfflineQueueEntry): boolean {
 
 export function offlineEntryIsHeld(entry: OfflineQueueEntry): boolean {
   return offlineEntryIsEditing(entry) || typeof entry.failure?.errorText === "string";
+}
+
+export function offlineEntryCanRetry(entry: OfflineQueueEntry): boolean {
+  return entry.failure?.kind === "actionable";
 }
 
 /** A `create_session` entry persisted by older code (or minted in a context
@@ -186,6 +191,7 @@ export function useOfflineQueue() {
   const persist = useCallback((
     operation: () => Promise<void>,
     updateLocal: (items: OfflineQueueEntry[]) => OfflineQueueEntry[],
+    rollbackOnFailure?: (items: OfflineQueueEntry[]) => OfflineQueueEntry[],
   ) => {
     const next = updateLocal(queueRef.current);
     queueRef.current = next;
@@ -197,6 +203,11 @@ export function useOfflineQueue() {
       notifyChanged();
       return true;
     }, () => {
+      if (rollbackOnFailure) {
+        const rolledBack = rollbackOnFailure(queueRef.current);
+        queueRef.current = rolledBack;
+        setQueue(rolledBack);
+      }
       setPersistFailed(true);
       return false;
     });
@@ -247,15 +258,26 @@ export function useOfflineQueue() {
     [persist],
   );
 
-  const markFailed = useCallback((sessionId: string, clientId: string, errorText: string) => {
+  const markFailed = useCallback((
+    sessionId: string,
+    clientId: string,
+    errorText: string,
+    kind: OfflineQueueFailureState["kind"] = "actionable",
+  ) => {
     const key = offlineActionKeyFor(sessionId, clientId);
     const update = (item: OfflineQueueEntry): OfflineQueueEntry => ({
       ...item,
-      failure: { errorText },
+      failure: { errorText, kind },
     });
     return persist(
       () => updateOfflineAction(key, update),
       (items) => items.map((item) => offlineActionKey(item) === key ? update(item) : item),
+      (items) => items.map((item) => {
+        if (offlineActionKey(item) !== key) return item;
+        const { failure: _failure, ...rest } = item;
+        void _failure;
+        return rest;
+      }),
     );
   }, [persist]);
 

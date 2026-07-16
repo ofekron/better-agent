@@ -10,6 +10,7 @@ import {
 import {
   offlineEntryIsEditing,
   offlineEntryIsHeld,
+  offlineEntryCanRetry,
   offlineEntrySessionId,
   useOfflineQueue,
   type OfflineQueueEntry,
@@ -2393,7 +2394,7 @@ function AppMain({
                 type: entry.type,
                 app_session_id: queued.id,
                 client_id: entry.clientId,
-                kind: outcome.stop ? "retryable" : "terminal",
+                kind: outcome.hold?.kind ?? "transient",
                 error: createErr instanceof Error ? createErr.message : String(createErr),
               }, outcome.stop ? "warn" : "error");
               offlineDispatchedRef.current.add(dispatchKey);
@@ -2408,17 +2409,26 @@ function AppMain({
                 // the network.
                 return;
               }
-              // The backend's 410 tombstone is authoritative: hold this action
-              // until explicit retry/delete and skip its dependent prompts.
+              // Deterministic failures become durable holds and skip dependent
+              // prompts. Tombstones allow delete only; actionable holds retry
+              // only after explicit user correction.
               failedCreateSessionIds.add(queued.id);
               offlineRetryScheduleRef.current.delete(dispatchKey);
-              await offlineQueue.markFailed(
+              const held = await offlineQueue.markFailed(
                 queued.id,
                 entry.clientId,
                 createErr instanceof Error ? createErr.message : String(createErr),
+                outcome.hold?.kind ?? "actionable",
               );
+              if (!held) {
+                offlineDispatchedRef.current.delete(dispatchKey);
+                scheduleOfflineRetry(entrySessionId, entry.clientId);
+                return;
+              }
               setPendingForSession(queued.id, (prev) =>
-                prev.map((m) =>
+                outcome.hold?.kind === "terminal"
+                  ? prev.filter((m) => m.id !== entry.clientId)
+                  : prev.map((m) =>
                   m.id === entry.clientId
                     ? {
                         ...m,
@@ -2427,7 +2437,7 @@ function AppMain({
                           createErr instanceof Error ? createErr.message : String(createErr),
                       }
                     : m
-                ),
+                  ),
               );
               continue;
             }
@@ -6927,6 +6937,7 @@ function AppMain({
                         type="button"
                         className="offline-queue-preview"
                         onClick={() => handleBeginOfflineEdit(entry)}
+                        disabled={entry.failure?.kind === "terminal"}
                         aria-label={t("app.offlineQueuedEdit", "Edit queued prompt")}
                       >
                         {preview}
@@ -6937,7 +6948,7 @@ function AppMain({
                     ) : null}
                   </div>
                   <div className="offline-queue-actions">
-                    {entry.failure ? (
+                    {offlineEntryCanRetry(entry) ? (
                       <button
                         type="button"
                         className="offline-queue-action"

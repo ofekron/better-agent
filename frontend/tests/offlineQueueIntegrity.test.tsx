@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   offlineEntryIsEditing,
   offlineEntryIsHeld,
+  offlineEntryCanRetry,
   useOfflineQueue,
   type OfflineCreateSessionEntry,
   type OfflinePromptEntry,
@@ -162,8 +163,9 @@ describe("useOfflineQueue — IndexedDB persistence integrity", () => {
     const reloaded = renderHook(() => useOfflineQueue());
     await waitFor(() => expect(reloaded.result.current.ready).toBe(true));
     expect(reloaded.result.current.getAll()[0]).toEqual(expect.objectContaining({
-      failure: { errorText: "provider suspended" },
+      failure: { errorText: "provider suspended", kind: "actionable" },
     }));
+    expect(offlineEntryCanRetry(reloaded.result.current.getAll()[0])).toBe(true);
     await act(() => reloaded.result.current.retryFailed(reloaded.result.current.getAll()[0]));
     expect(offlineEntryIsHeld(reloaded.result.current.getAll()[0])).toBe(false);
     expect(reloaded.result.current.getAll()).toHaveLength(2);
@@ -175,6 +177,49 @@ describe("useOfflineQueue — IndexedDB persistence integrity", () => {
     expect(await loadOfflineActions()).toEqual([
       expect.objectContaining({ sessionId: "b", clientId: "failed" }),
     ]);
+  });
+
+  it("persists a terminal hold across reload without exposing a fake retry", async () => {
+    const { result, unmount } = renderHook(() => useOfflineQueue());
+    await waitFor(() => expect(result.current.ready).toBe(true));
+    await act(() => result.current.enqueue(entry("gone", "terminal", "keep visible")));
+    await act(() => result.current.markFailed("gone", "terminal", "permanently deleted", "terminal"));
+    unmount();
+
+    const reloaded = renderHook(() => useOfflineQueue());
+    await waitFor(() => expect(reloaded.result.current.ready).toBe(true));
+    expect(reloaded.result.current.getAll()[0]).toEqual(expect.objectContaining({
+      failure: { errorText: "permanently deleted", kind: "terminal" },
+    }));
+    expect(offlineEntryIsHeld(reloaded.result.current.getAll()[0])).toBe(true);
+    expect(offlineEntryCanRetry(reloaded.result.current.getAll()[0])).toBe(false);
+  });
+
+  it("rolls back an in-memory hold when durable failure persistence fails", async () => {
+    const { result } = renderHook(() => useOfflineQueue());
+    await waitFor(() => expect(result.current.ready).toBe(true));
+    await act(() => result.current.enqueue(entry("gone", "persist-fails")));
+    const originalPut = IDBObjectStore.prototype.put;
+    IDBObjectStore.prototype.put = function () {
+      throw new DOMException("forced failure-state write failure", "QuotaExceededError");
+    };
+    let held = true;
+    try {
+      await act(async () => {
+        held = await result.current.markFailed(
+          "gone",
+          "persist-fails",
+          "permanently deleted",
+          "terminal",
+        );
+      });
+    } finally {
+      IDBObjectStore.prototype.put = originalPut;
+    }
+    expect(held).toBe(false);
+    expect(result.current.persistFailed).toBe(true);
+    expect(offlineEntryIsHeld(result.current.getAll()[0])).toBe(false);
+    expect((await loadOfflineActions())[0]).not.toHaveProperty("failure");
   });
 
   it("projects failure, retry, and removal across mounted queue consumers", async () => {
@@ -189,7 +234,7 @@ describe("useOfflineQueue — IndexedDB persistence integrity", () => {
     await waitFor(() => expect(second.result.current.getAll()).toHaveLength(1));
     await act(() => first.result.current.markFailed("a", "shared", "provider suspended"));
     await waitFor(() => expect(second.result.current.getAll()[0]).toEqual(expect.objectContaining({
-      failure: { errorText: "provider suspended" },
+      failure: { errorText: "provider suspended", kind: "actionable" },
     })));
 
     await act(() => first.result.current.retryFailed(first.result.current.getAll()[0]));
