@@ -903,6 +903,129 @@ def test_bff_readiness_requires_reachable_runtime():
         runtime_cli.runtime_endpoints.http_get = saved
 
 
+def test_start_bff_uses_saved_public_bind_for_foreground_and_detached():
+    import runtime_cli
+
+    class _FakeProc:
+        pid = 4242
+
+    calls: list[tuple[str, object]] = []
+    saved_read = runtime_cli.runtime_endpoints.read_app_endpoint
+    saved_bind = runtime_cli.user_prefs.get_network_bind_address
+    saved_spawn = runtime_cli._spawn_detached
+    saved_alive = runtime_cli._bff_alive
+    saved_print = runtime_cli._print
+    saved_pid_path = runtime_cli._bff_pid_path
+    pid_dir = tempfile.mkdtemp(prefix="ba-bff-pid-")
+    try:
+        runtime_cli.runtime_endpoints.read_app_endpoint = lambda: {
+            "kind": "uds", "path": "/runtime.sock"
+        }
+        runtime_cli.user_prefs.get_network_bind_address = lambda: "0.0.0.0"
+        runtime_cli._bff_alive = lambda *a, **k: True
+        runtime_cli._print = lambda payload: calls.append(("print", payload))
+        runtime_cli._bff_pid_path = lambda: Path(pid_dir) / "bff.pid"
+
+        def fake_spawn(args, env, log_name):
+            calls.append(("spawn", args))
+            return _FakeProc()
+
+        runtime_cli._spawn_detached = fake_spawn
+
+        import uvicorn
+
+        saved_uvicorn_run = uvicorn.run
+        try:
+            uvicorn.run = lambda *args, **kwargs: calls.append(("uvicorn", kwargs))
+            assert runtime_cli.cmd_start_bff(port=59991, foreground=True) == 0
+        finally:
+            uvicorn.run = saved_uvicorn_run
+
+        assert ("uvicorn", {
+            "host": "0.0.0.0",
+            "port": 59991,
+            "ws_per_message_deflate": False,
+        }) in calls
+
+        assert runtime_cli.cmd_start_bff(port=59992, foreground=False) == 0
+        spawn = next(value for kind, value in calls if kind == "spawn")
+        assert "--host" in spawn
+        assert spawn[spawn.index("--host") + 1] == "0.0.0.0"
+        printed = [value for kind, value in calls if kind == "print"][-1]
+        assert printed["bind_host"] == "0.0.0.0"
+        assert printed["url"] == "http://127.0.0.1:59992"
+    finally:
+        runtime_cli.runtime_endpoints.read_app_endpoint = saved_read
+        runtime_cli.user_prefs.get_network_bind_address = saved_bind
+        runtime_cli._spawn_detached = saved_spawn
+        runtime_cli._bff_alive = saved_alive
+        runtime_cli._print = saved_print
+        runtime_cli._bff_pid_path = saved_pid_path
+        shutil.rmtree(pid_dir, ignore_errors=True)
+
+
+def test_start_stack_bff_path_routes_through_bind_aware_start_bff():
+    import runtime_cli
+
+    class _CapturedBffLaunch(Exception):
+        pass
+
+    class _FakeProc:
+        def __init__(self) -> None:
+            self.returncode = None
+            self.signals: list[int] = []
+
+        def poll(self):
+            return self.returncode
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+        def send_signal(self, signum):
+            self.signals.append(signum)
+            self.returncode = -signum
+
+        def terminate(self):
+            self.returncode = -signal.SIGTERM
+
+        def kill(self):
+            self.returncode = -signal.SIGKILL
+
+    spawned: list[list[str]] = []
+    saved_bind = runtime_cli.user_prefs.get_network_bind_address
+    saved_popen = runtime_cli.subprocess.Popen
+    saved_wait_for = runtime_cli._wait_for
+    try:
+        runtime_cli.user_prefs.get_network_bind_address = lambda: "0.0.0.0"
+        assert runtime_cli._bff_bind_host() == "0.0.0.0"
+        runtime_cli.user_prefs.get_network_bind_address = lambda: "127.0.0.1"
+        assert runtime_cli._bff_bind_host() == "127.0.0.1"
+
+        def fake_popen(args, **_kwargs):
+            spawned.append(list(args))
+            if "start-bff" in args:
+                raise _CapturedBffLaunch()
+            return _FakeProc()
+
+        runtime_cli.subprocess.Popen = fake_popen
+        runtime_cli._wait_for = lambda *a, **k: True
+        try:
+            runtime_cli.cmd_start_stack(59993)
+        except _CapturedBffLaunch:
+            pass
+        else:
+            raise AssertionError("cmd_start_stack did not attempt to launch BFF")
+        assert spawned[-1][-4:] == ["start-bff", "--foreground", "--port", "59993"]
+
+        assert runtime_cli._stack_child_args("bff", 59994, frozen=True)[-3:] == [
+            "--serve-bff", "--port", "59994"
+        ]
+    finally:
+        runtime_cli.user_prefs.get_network_bind_address = saved_bind
+        runtime_cli.subprocess.Popen = saved_popen
+        runtime_cli._wait_for = saved_wait_for
+
+
 def test_start_bff_reaps_child_when_runtime_unreachable():
     """A BFF that comes up but can't reach the runtime is a failed start;
     cmd_start_bff must terminate the spawned child — never leave an

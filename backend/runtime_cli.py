@@ -34,6 +34,7 @@ from pathlib import Path
 import runtime_endpoints
 import runtime_ipc
 import runtime_ownership
+import user_prefs
 from runtime_ipc import RuntimeIPCClient, RuntimeIPCError
 
 _START_DEADLINE_SECONDS = 30.0
@@ -277,22 +278,27 @@ def _terminate_child(process) -> None:
         process.wait(timeout=10)
 
 
+def _bff_bind_host() -> str:
+    return user_prefs.get_network_bind_address()
+
+
 def cmd_start_bff(port: int, foreground: bool) -> int:
     try:
         runtime_endpoints.read_app_endpoint()
     except runtime_endpoints.RuntimeEndpointError as exc:
         _print({"running": False, "error": str(exc)})
         return 1
+    bind_host = _bff_bind_host()
     if foreground:
         import uvicorn
 
-        uvicorn.run("bff_server:app", host="127.0.0.1", port=port,
+        uvicorn.run("bff_server:app", host=bind_host, port=port,
                     ws_per_message_deflate=False)
         return 0
     env = {**os.environ, "PYTHONPATH": str(_BACKEND_DIR)}
     process = _spawn_detached(
         [sys.executable, "-m", "uvicorn", "bff_server:app",
-         "--host", "127.0.0.1", "--port", str(port)],
+         "--host", bind_host, "--port", str(port)],
         env, BFF_LOG_NAME,
     )
     if not _wait_for(lambda: _bff_alive(port), _START_DEADLINE_SECONDS):
@@ -307,7 +313,7 @@ def cmd_start_bff(port: int, foreground: bool) -> int:
     _bff_pid_path().write_text(json.dumps({"pid": process.pid, "port": port}),
                                encoding="utf-8")
     _print({"running": True, "pid": process.pid, "port": port,
-            "url": f"http://127.0.0.1:{port}"})
+            "bind_host": bind_host, "url": f"http://127.0.0.1:{port}"})
     return 0
 
 
@@ -335,6 +341,32 @@ def cmd_stop_bff() -> int:
     return 0
 
 
+def _stack_child_args(role: str, port: int, *, frozen: bool) -> list[str]:
+    if role == "runtime":
+        if frozen:
+            return [sys.executable, "--serve-runtime"]
+        return [
+            sys.executable,
+            "-m",
+            "runtime_cli",
+            "start-runtime",
+            "--foreground",
+        ]
+    if role == "bff" and frozen:
+        return [sys.executable, "--serve-bff", "--port", str(port)]
+    if role == "bff":
+        return [
+            sys.executable,
+            "-m",
+            "runtime_cli",
+            "start-bff",
+            "--foreground",
+            "--port",
+            str(port),
+        ]
+    raise ValueError(f"unknown stack child role: {role}")
+
+
 def cmd_start_stack(port: int) -> int:
     stopped = threading.Event()
     stop_signal = {"value": signal.SIGTERM}
@@ -351,33 +383,10 @@ def cmd_start_stack(port: int) -> int:
     def spawn(role: str) -> subprocess.Popen | None:
         frozen = bool(getattr(sys, "frozen", False))
         if role == "runtime":
-            args = (
-                [sys.executable, "--serve-runtime"]
-                if frozen
-                else [
-                    sys.executable,
-                    "-m",
-                    "runtime_cli",
-                    "start-runtime",
-                    "--foreground",
-                ]
-            )
             ready = _runtime_app_alive
         else:
-            args = (
-                [sys.executable, "--serve-bff", "--port", str(port)]
-                if frozen
-                else [
-                    sys.executable,
-                    "-m",
-                    "runtime_cli",
-                    "start-bff",
-                    "--foreground",
-                    "--port",
-                    str(port),
-                ]
-            )
             ready = lambda: _bff_alive(port)
+        args = _stack_child_args(role, port, frozen=frozen)
         process = subprocess.Popen(
             args,
             cwd=str(_BACKEND_DIR),
