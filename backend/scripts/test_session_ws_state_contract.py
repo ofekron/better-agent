@@ -112,6 +112,14 @@ def test_live_and_recovery_completed_paths_share_delta_shape() -> None:
     assert live == recovery
 
 
+def test_fork_parent_line_count_set_is_internal_no_ws_warning() -> None:
+    assert "fork_parent_line_count_set" in _INTERNAL_KINDS
+    with mock.patch("session_ws_broadcaster.logger.warning") as warning:
+        frames = _broadcaster_frames({"kind": "fork_parent_line_count_set"})
+    assert frames == []
+    warning.assert_not_called()
+
+
 def test_emitted_session_kinds_are_exhaustively_classified() -> None:
     manager_source = inspect.getsource(sys.modules[session_manager.__class__.__module__])
     broadcaster_source = inspect.getsource(sys.modules[SessionWSBroadcaster.__module__])

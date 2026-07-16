@@ -102,6 +102,7 @@ _INTERNAL_KINDS = {
     "forked_from_set",
     "forked_from_supervisor_cleared",
     "forked_from_supervisor_set",
+    "fork_parent_line_count_set",
     "migrated_fields_applied",
     "moved_from_set",
     "moved_to_set",
