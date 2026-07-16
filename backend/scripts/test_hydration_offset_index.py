@@ -58,6 +58,55 @@ def main() -> int:
     build_lock = threading.Lock()
     original_build = hydrate._build_hydration_index
 
+    canonical = json.dumps({
+        "seq": 1, "ts": "2026-07-17T00:00:00+00:00",
+        "sid": 'sid-with-"quote', "msg_id": "m", "type": "agent_message",
+        "source": "test", "data": {"uuid": "u-1"},
+    }, separators=(",", ":")).encode() + b"\n"
+    fast_sid, used_fast_path = hydrate.hydration_index_store._sid_from_line(canonical)
+    assert (fast_sid, used_fast_path) == ('sid-with-"quote', True)
+    reordered = json.dumps(
+        {"data": {"payload": "x" * 8192}, **_row(2, "legacy", "m")},
+        separators=(",", ":"),
+    ).encode() + b"\n"
+    fallback_sid, used_fast_path = hydrate.hydration_index_store._sid_from_line(reordered)
+    assert (fallback_sid, used_fast_path) == ("legacy", False)
+
+    perf_journal = path.with_name("large-payload-events.jsonl")
+    payload = "x" * (256 * 1024)
+    _write(perf_journal, [{
+        "seq": seq, "ts": "2026-07-17T00:00:00+00:00",
+        "sid": "large-payload", "msg_id": "m", "type": "agent_message",
+        "source": "test", "data": {"uuid": f"u-{seq}", "payload": payload},
+    } for seq in range(1, 257)])
+    perf_db = path.with_name("large-payload-offsets.sqlite3")
+    perf_conn = hydrate.hydration_index_store._create(perf_db)
+    original_json_loads = hydrate.hydration_index_store.json.loads
+    largest_decoded_input = 0
+
+    def measured_json_loads(value, *args, **kwargs):
+        nonlocal largest_decoded_input
+        if isinstance(value, (bytes, bytearray, str)):
+            largest_decoded_input = max(largest_decoded_input, len(value))
+        return original_json_loads(value, *args, **kwargs)
+
+    hydrate.hydration_index_store.json.loads = measured_json_loads
+    started = time.perf_counter()
+    try:
+        committed, scanned, inserted, _digest = hydrate.hydration_index_store._scan(
+            perf_conn, perf_journal, 0, bytes(32).hex(),
+        )
+    finally:
+        hydrate.hydration_index_store.json.loads = original_json_loads
+        perf_conn.close()
+    elapsed = time.perf_counter() - started
+    assert committed == scanned == perf_journal.stat().st_size
+    assert inserted == 256
+    assert largest_decoded_input < 256, largest_decoded_input
+    assert elapsed < 2.0, elapsed
+    perf_journal.unlink()
+    perf_db.unlink()
+
     def counted_build(*args, **kwargs):
         nonlocal builds
         with build_lock:

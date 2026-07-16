@@ -2,6 +2,7 @@ import hashlib
 import json
 import multiprocessing
 import os
+import re
 import sqlite3
 import time
 import uuid
@@ -30,6 +31,28 @@ _append_receipts: dict[str, tuple[int, int, int, int, str, str]] = {}
 _journal_guard_locks: dict[str, threading.RLock] = {}
 _journal_guard_locks_guard = threading.Lock()
 _journal_guard_local = threading.local()
+_CANONICAL_SID = re.compile(
+    br'^\s*\{\s*"seq"\s*:\s*\d+\s*,\s*"ts"\s*:\s*'
+    br'"(?:\\.|[^"\\])*"\s*,\s*"sid"\s*:\s*'
+    br'("(?:\\.|[^"\\])*")'
+)
+
+
+def _sid_from_line(line: bytes) -> tuple[str | None, bool]:
+    match = _CANONICAL_SID.match(line, 0, min(len(line), BOUNDARY_BYTES))
+    if match is not None:
+        try:
+            sid = json.loads(match.group(1))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            sid = None
+        if isinstance(sid, str) and sid:
+            return sid, True
+    try:
+        row = json.loads(line)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None, False
+    sid = row.get("sid") if isinstance(row, dict) else None
+    return (sid if isinstance(sid, str) and sid else None), False
 
 
 def _db_path(root_id: str) -> Path:
@@ -124,6 +147,8 @@ def _scan(
     inserted = 0
     scanned = 0
     committed = start
+    fast_rows = 0
+    fallback_rows = 0
     with journal.open("rb") as file:
         file.seek(start)
         while True:
@@ -135,13 +160,15 @@ def _scan(
             if not line.endswith(b"\n"):
                 break
             committed = file.tell()
-            digest = hashlib.sha256(bytes.fromhex(digest) + line).hexdigest()
-            try:
-                row = json.loads(line)
-            except (json.JSONDecodeError, UnicodeDecodeError):
-                continue
-            sid = row.get("sid") if isinstance(row, dict) else None
-            if isinstance(sid, str) and sid:
+            chain_hash = hashlib.sha256(bytes.fromhex(digest))
+            chain_hash.update(line)
+            digest = chain_hash.hexdigest()
+            sid, used_fast_path = _sid_from_line(line)
+            if used_fast_path:
+                fast_rows += 1
+            else:
+                fallback_rows += 1
+            if sid is not None:
                 rows.append((sid, offset))
             if len(rows) >= 4096:
                 inserted += len(rows)
@@ -150,6 +177,8 @@ def _scan(
     if rows:
         inserted += len(rows)
         conn.executemany("INSERT INTO offsets VALUES (?, ?)", rows)
+    perf.record_count("hydrate.index_scan.fast_rows", fast_rows)
+    perf.record_count("hydrate.index_scan.fallback_rows", fallback_rows)
     return committed, scanned, inserted, digest
 
 
