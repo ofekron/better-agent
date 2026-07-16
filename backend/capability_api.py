@@ -4,6 +4,7 @@ import base64
 import contextvars
 import hashlib
 import inspect
+import logging
 import os
 import uuid
 from dataclasses import dataclass
@@ -14,6 +15,8 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 import extension_store
 import extension_token_registry
+
+logger = logging.getLogger(__name__)
 
 
 class _StrictPayload(BaseModel):
@@ -616,6 +619,12 @@ async def _invoke(request: InvokeCapabilityRequest, token: str) -> Any:
         if inspect.isawaitable(result):
             result = await result
         return result
+    except Exception:
+        logger.exception(
+            "capability handler failed: capability=%s action=%s caller=%s",
+            request.capability, request.action, caller_extension,
+        )
+        raise
     finally:
         _CAPABILITY_CALLER.reset(caller_token)
         if attribution_token is not None:

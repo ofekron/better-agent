@@ -904,22 +904,26 @@ async def run_search_sessions_session(
         reasoning_effort=reasoning_effort,
         node_id=node_id,
     )
-    special_filters, unsatisfiable = await asyncio.to_thread(
-        _resolve_special_filters, cwd=cwd, tags=tags, folder=folder,
-    )
-    # Fail closed: an unknown tag/folder name never silently widens results.
-    if unsatisfiable:
-        return {
-            "session_ids": [],
-            "reasoning": "",
-            "error": None,
-            "unsatisfiable_filters": unsatisfiable,
-        }
-    filters = {**scalar_filters, **special_filters}
-    with perf.timed("ask.search_candidates"):
-        candidates, candidate_stubs = await asyncio.to_thread(
-            _search_candidates_with_snapshot, query, filters=filters,
+    try:
+        special_filters, unsatisfiable = await asyncio.to_thread(
+            _resolve_special_filters, cwd=cwd, tags=tags, folder=folder,
         )
+        # Fail closed: an unknown tag/folder name never silently widens results.
+        if unsatisfiable:
+            return {
+                "session_ids": [],
+                "reasoning": "",
+                "error": None,
+                "unsatisfiable_filters": unsatisfiable,
+            }
+        filters = {**scalar_filters, **special_filters}
+        with perf.timed("ask.search_candidates"):
+            candidates, candidate_stubs = await asyncio.to_thread(
+                _search_candidates_with_snapshot, query, filters=filters,
+            )
+    except Exception:
+        logger.exception("run_search_sessions_session: candidate resolution failed")
+        return {"session_ids": [], "reasoning": "", "error": "internal_error"}
     if not candidates:
         return {"session_ids": [], "reasoning": "", "error": None}
 
@@ -942,30 +946,34 @@ async def run_search_sessions_session(
     if not isinstance(reported, dict) or reported.get("error"):
         return {"session_ids": [], "reasoning": "", "error": "parse_failed"}
 
-    session_ids = (await asyncio.to_thread(
-        validate_proposed,
-        reported.get("session_ids") or [],
-        filters=filters or None,
-        candidate_stubs=candidate_stubs,
-    ))[:max_results]
-    reasoning = reported.get("reasoning", "")
-    if not isinstance(reasoning, str):
-        reasoning = ""
+    try:
+        session_ids = (await asyncio.to_thread(
+            validate_proposed,
+            reported.get("session_ids") or [],
+            filters=filters or None,
+            candidate_stubs=candidate_stubs,
+        ))[:max_results]
+        reasoning = reported.get("reasoning", "")
+        if not isinstance(reasoning, str):
+            reasoning = ""
 
-    if propose and propose_target and propose_msg_id:
-        propose_sessions(
-            session_ids, reasoning,
-            target_sid=propose_target, msg_id=propose_msg_id,
-        )
+        if propose and propose_target and propose_msg_id:
+            propose_sessions(
+                session_ids, reasoning,
+                target_sid=propose_target, msg_id=propose_msg_id,
+            )
 
-    out = {
-        "session_ids": session_ids,
-        "reasoning": reasoning,
-        "error": None,
-    }
-    if include_worker_events:
-        out["_worker_events"] = result.dispatch_result.get("events") or []
-    return out
+        out = {
+            "session_ids": session_ids,
+            "reasoning": reasoning,
+            "error": None,
+        }
+        if include_worker_events:
+            out["_worker_events"] = result.dispatch_result.get("events") or []
+        return out
+    except Exception:
+        logger.exception("run_search_sessions_session: result validation failed")
+        return {"session_ids": [], "reasoning": "", "error": "internal_error"}
 
 
 

@@ -527,6 +527,46 @@ def test_run_search_sessions_worker_timeout() -> bool:
     return True
 
 
+def test_run_search_sessions_post_dispatch_exception_is_internal_error() -> bool:
+    """A successful worker dispatch followed by a crash while validating the
+    reported ids (e.g. a `session_manager`/index race) must return a clean
+    `error="internal_error"` dict, not propagate an uncaught exception up
+    through the capability layer as a bare, unlogged 500."""
+    _reset_home()
+    _write_session(sid="live-1", messages=[{"role": "user", "content": "anything"}])
+    from provisioning.manager import ProvisionedResult
+
+    async def _fake_run(spec, query, ctx=None, *, model=None):
+        return ProvisionedResult(
+            text='{"session_ids":["live-1"],"reasoning":"ok"}',
+            value={"session_ids": ["live-1"], "reasoning": "ok"},
+            config=None,
+            base_session_id="base",
+            caller_session_id="caller",
+            dispatch_result={"events": []},
+        )
+
+    def _boom(*_args, **_kwargs):
+        raise RuntimeError("boom")
+
+    original_run = session_search.provisioning.run
+    original_validate = session_search.validate_proposed
+    session_search.provisioning.run = _fake_run
+    session_search.validate_proposed = _boom
+    try:
+        out = asyncio.run(
+            session_search.run_search_sessions_session("anything")
+        )
+    finally:
+        session_search.provisioning.run = original_run
+        session_search.validate_proposed = original_validate
+    if out.get("error") != "internal_error":
+        print(f"{FAIL} post-dispatch exception: got {out!r}")
+        return False
+    print(f"{PASS} post-dispatch validate_proposed crash -> error=internal_error")
+    return True
+
+
 # ──────────────────────────────────────────────────────────────────────
 # Empty-query rejection at the public API
 # ──────────────────────────────────────────────────────────────────────
@@ -1002,6 +1042,7 @@ def main_run() -> int:
         test_run_search_sessions_worker_parse_failed,
         test_worker_parser_uses_last_valid_json_object,
         test_run_search_sessions_worker_timeout,
+        test_run_search_sessions_post_dispatch_exception_is_internal_error,
         test_run_search_sessions_short_circuits_empty_candidates,
         test_run_search_sessions_filter_bounds_candidates_and_postvalidates,
         test_empty_query_returns_empty_query_error,

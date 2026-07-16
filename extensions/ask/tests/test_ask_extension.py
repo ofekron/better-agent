@@ -55,3 +55,23 @@ def test_ask_backend_routes_proxy_to_internal_substrate() -> None:
         {},
         10.0,
     )
+
+
+def test_ask_backend_search_returns_structured_error_on_capability_failure() -> None:
+    """A capability-invoke failure (e.g. core's /sessions/search returning a
+    bare 500) must surface as a structured {results, error} response, not
+    propagate as the extension's own unhandled 500."""
+    module = _load_routes_module()
+
+    class FailingClient:
+        def invoke_capability(self, capability, action, payload=None, *, timeout=60.0):
+            raise module.BetterAgentError("core returned HTTP 500: internal error")
+
+    module.Client = FailingClient
+    app = FastAPI()
+    app.include_router(module.create_router(None))
+    client = TestClient(app)
+
+    response = client.post("/sessions/search", json={"query": "find billing"})
+    assert response.status_code == 200
+    assert response.json() == {"results": [], "reasoning": "", "error": "search_failed"}

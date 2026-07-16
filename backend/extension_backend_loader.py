@@ -379,13 +379,20 @@ def _spawn_persistent_proc(spec: dict[str, Any], base_url: str) -> Any:
     return proc
 
 
+_STDERR_ERROR_MARKERS = ("Traceback (most recent call last):", "Error:", "Exception:")
+
+
 def _drain_stderr(extension_id: str, stream: Any) -> None:
     if stream is None:
         return
     try:
         for raw in iter(stream.readline, b""):
             text = raw.decode("utf-8", "replace").rstrip()
-            if text:
+            if not text:
+                continue
+            if any(marker in text for marker in _STDERR_ERROR_MARKERS):
+                logger.error("extension backend stderr [%s]: %s", extension_id, text[:500])
+            else:
                 logger.debug("extension backend stderr [%s]: %s", extension_id, text[:500])
     except Exception:
         pass
@@ -836,6 +843,10 @@ async def _invoke_backend(
                 _resolve_slow_call_grace(spec, path),
             )
         if status >= 500:
+            logger.error(
+                "extension backend returned %s [%s %s]: %s",
+                status, extension_id, path, content[:2000].decode("utf-8", "replace"),
+            )
             headers = {"content-type": "text/plain"}
             content = b"Extension backend failed"
         return Response(content=content, status_code=status, headers=headers)

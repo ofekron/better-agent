@@ -25,7 +25,7 @@ class _Payload(BaseModel):
     value: str
 
 
-def _client(monkeypatch, grants: list[str]) -> TestClient:
+def _client(monkeypatch, grants: list[str], *, raise_server_exceptions: bool = True) -> TestClient:
     monkeypatch.setattr(capability_api.extension_token_registry, "resolve", lambda token: "ofek.test" if token == "valid" else None)
     monkeypatch.setattr(
         capability_api.extension_store,
@@ -38,7 +38,7 @@ def _client(monkeypatch, grants: list[str]) -> TestClient:
     monkeypatch.setattr(capability_api.extension_store, "is_extension_active", lambda extension_id: extension_id == "ofek.test")
     app = FastAPI()
     app.include_router(capability_api.router)
-    return TestClient(app)
+    return TestClient(app, raise_server_exceptions=raise_server_exceptions)
 
 
 def _invoke(client: TestClient, capability: str, action: str, payload: dict, **headers: str):
@@ -122,6 +122,31 @@ def test_public_sdk_has_no_raw_route_transport() -> None:
         pass
     else:
         raise AssertionError("invoke_capability accepted a raw path")
+
+
+def test_capability_handler_exception_is_logged_before_500(monkeypatch, caplog) -> None:
+    """A capability handler that raises must surface an ERROR-level traceback
+    in backend logs (not vanish silently), even though the caller still gets
+    a 500 — this is what let the ask-search 500 go undiagnosed in prod."""
+    def _boom(_payload):
+        raise RuntimeError("boom")
+
+    capability_api._ACTIONS[("test", "boom")] = capability_api._Action(
+        capability_api._StrictPayload, _boom,
+    )
+    try:
+        client = _client(monkeypatch, ["test.boom"], raise_server_exceptions=False)
+        with caplog.at_level("ERROR", logger="capability_api"):
+            response = _invoke(client, "test", "boom", {})
+        assert response.status_code == 500
+        assert any(
+            "capability handler failed" in record.message
+            and "capability=test" in record.message
+            and "action=boom" in record.message
+            for record in caplog.records
+        )
+    finally:
+        capability_api._ACTIONS.pop(("test", "boom"), None)
 
 
 def test_switch_capability_runtime_gets_identity_token(monkeypatch) -> None:
