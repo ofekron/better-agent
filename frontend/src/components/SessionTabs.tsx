@@ -2,7 +2,7 @@ import { useRef, useEffect, useState, type MouseEvent, type PointerEvent } from 
 import { useTranslation } from "react-i18next";
 import { useAnimatedTabMovement } from "src/hooks/useAnimatedTabMovement";
 import { scrollHorizontalItemToCenter } from "src/utils/tabScroll";
-import { sessionLinkMarker } from "src/utils/linkifyFilePaths";
+import { linkifyFilePaths, sessionLinkMarker } from "src/utils/linkifyFilePaths";
 import { copyToClipboard } from "src/utils/clipboard";
 import type { Provider, Session } from "../types";
 import { SessionStatusBadge } from "./SessionStatusBadge";
@@ -217,7 +217,9 @@ export function SessionTabs({
               <div className="session-tab-content">
                 <span className="session-tab-text">
                   <span className="session-tab-name">
-                    <span className="session-tab-name-text">{s.name || "Untitled"}</span>
+                    <span className="session-tab-name-text">
+                      {s.name ? linkifyFilePaths(s.name) : "Untitled"}
+                    </span>
                   </span>
                   <span className="session-tab-project">{projectName}</span>
                   {providerModel && (

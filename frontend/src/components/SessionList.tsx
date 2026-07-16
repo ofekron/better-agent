@@ -30,7 +30,7 @@ import { sessionMessageCount } from "src/lib/sessionMessageCount";
 import { SESSION_SORT_LABEL, sessionSortValue, timeAgo } from "../lib/sessionSort";
 import { buildFolderPathMap, sortFolders } from "../sessionFolders";
 import { todoProgress } from "./TodosPanel";
-import { sessionLinkMarker } from "../utils/linkifyFilePaths";
+import { linkifyFilePaths, sessionLinkMarker } from "../utils/linkifyFilePaths";
 import { copyToClipboard } from "../utils/clipboard";
 import { shouldStartAgentBoardSessionDrag, type SessionDragPoint } from "../utils/sessionDragThreshold";
 import { logTiming } from "../lib/frontendLogger";
@@ -1009,7 +1009,7 @@ function SessionNodeImpl({
               autoFocus
             />
           ) : (
-            session.name
+            linkifyFilePaths(session.name)
           )}
         </div>
         <div className="session-item-meta">

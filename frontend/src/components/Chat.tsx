@@ -1,6 +1,7 @@
 import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState, useCallback } from "react";
 import { LayoutGroup, motion, MotionConfig, useReducedMotion } from "framer-motion";
 import { mergeMessagesSorted, oldestNumericSeq } from "../utils/mergeMessages";
+import { linkifyFilePaths } from "../utils/linkifyFilePaths";
 import { useThrottledValue } from "../hooks/useThrottledValue";
 import { isGroupRunning } from "../utils/groupRunning";
 import { isUnanchoredRun } from "../utils/runTargets";
@@ -1468,7 +1469,7 @@ export function Chat({
               title={session.name}
               onDoubleClick={startEdit}
             >
-              {session.name}
+              {linkifyFilePaths(session.name)}
             </div>
           )}
           {onShowNotes && (session.notes?.length ?? 0) > 0 && (
