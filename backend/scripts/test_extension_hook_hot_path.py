@@ -366,6 +366,33 @@ def test_store_mutation_during_scan_retries_before_publish() -> None:
         extension_store._refresh_store_fingerprint_cache = original_store_fingerprint
 
 
+def test_integrity_refresh_records_parent_phase_attribution() -> None:
+    original_fingerprint = extension_store._refresh_store_fingerprint_cache
+    original_list = extension_store.list_extensions
+    original_build = extension_store._build_runtime_readiness_projection
+    original_record = extension_store.perf.record
+    labels: set[str] = set()
+    try:
+        extension_store._refresh_store_fingerprint_cache = lambda *_args: ("store", "digest")
+        extension_store.list_extensions = lambda: []
+        extension_store._build_runtime_readiness_projection = lambda _records: ({}, {})
+        extension_store.perf.record = lambda name, _value: labels.add(name)
+        assert extension_store.refresh_runtime_readiness_projection() == {}
+    finally:
+        extension_store._refresh_store_fingerprint_cache = original_fingerprint
+        extension_store.list_extensions = original_list
+        extension_store._build_runtime_readiness_projection = original_build
+        extension_store.perf.record = original_record
+    assert {
+        "extension.integrity.store_fingerprint_pre",
+        "extension.integrity.list",
+        "extension.integrity.build",
+        "extension.integrity.store_fingerprint_post",
+        "extension.integrity.publish",
+        "extension.integrity.refresh",
+    } <= labels
+
+
 def test_store_invalidation_wakes_readiness_audit() -> None:
     import threading
     import time
@@ -501,6 +528,7 @@ if __name__ == "__main__":
     test_first_integrity_failure_is_not_runtime_ready()
     test_persisted_install_digest_is_authoritative_on_first_refresh()
     test_store_mutation_during_scan_retries_before_publish()
+    test_integrity_refresh_records_parent_phase_attribution()
     test_store_invalidation_wakes_readiness_audit()
     test_integrity_timeout_kills_worker_and_recovers()
     test_root_and_nested_mutation_during_hash_fail_closed()

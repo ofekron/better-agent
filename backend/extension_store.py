@@ -3717,12 +3717,27 @@ def refresh_runtime_readiness_projection() -> dict[str, bool]:
                 return dict(_RUNTIME_READY_PROJECTION)
         started = time.perf_counter()
         for attempt in range(3):
+            phase_started = time.perf_counter()
             source_fingerprint = _refresh_store_fingerprint_cache()
+            perf.record(
+                "extension.integrity.store_fingerprint_pre",
+                (time.perf_counter() - phase_started) * 1000.0,
+            )
             with _RUNTIME_READY_PROJECTION_LOCK:
                 source_generation = _RUNTIME_STORE_GENERATION
+            phase_started = time.perf_counter()
             records = list_extensions()
+            perf.record("extension.integrity.list", (time.perf_counter() - phase_started) * 1000.0)
+            phase_started = time.perf_counter()
             result = _build_runtime_readiness_projection(records)
+            perf.record("extension.integrity.build", (time.perf_counter() - phase_started) * 1000.0)
+            phase_started = time.perf_counter()
             current_fingerprint = _refresh_store_fingerprint_cache()
+            perf.record(
+                "extension.integrity.store_fingerprint_post",
+                (time.perf_counter() - phase_started) * 1000.0,
+            )
+            phase_started = time.perf_counter()
             with _RUNTIME_READY_PROJECTION_LOCK:
                 if (
                     source_generation != _RUNTIME_STORE_GENERATION
@@ -3736,6 +3751,7 @@ def refresh_runtime_readiness_projection() -> dict[str, bool]:
                 for extension_id, fingerprint in fingerprints.items():
                     _RUNTIME_PACKAGE_FINGERPRINTS.setdefault(extension_id, fingerprint)
                 _RUNTIME_READINESS_REFRESH_GENERATION += 1
+                perf.record("extension.integrity.publish", (time.perf_counter() - phase_started) * 1000.0)
                 perf.record("extension.integrity.refresh", (time.perf_counter() - started) * 1000.0)
                 return dict(refreshed)
         perf.record_count("extension.integrity.cas_failed", 1)
@@ -3874,14 +3890,22 @@ class _RuntimeIntegrityWorker:
     def run(self, specs: list[dict[str, Any]], *, timeout: float) -> list[dict[str, Any]]:
         if not self._process.is_alive():
             raise RuntimeError("extension integrity worker is not alive")
+        roundtrip_started = time.perf_counter()
         self._request_id += 1
         request_id = self._request_id
         self._connection.send((request_id, specs))
         if not self._connection.poll(timeout):
             raise TimeoutError("extension integrity worker timed out")
-        response_id, result = self._connection.recv()
+        response_id, result, worker_ms = self._connection.recv()
         if response_id != request_id:
             raise RuntimeError("extension integrity worker response mismatch")
+        roundtrip_ms = (time.perf_counter() - roundtrip_started) * 1000.0
+        perf.record("extension.integrity.worker_roundtrip", roundtrip_ms)
+        perf.record("extension.integrity.worker_compute", float(worker_ms))
+        perf.record(
+            "extension.integrity.worker_outside_compute",
+            max(0.0, roundtrip_ms - float(worker_ms)),
+        )
         return result
 
     def close(self, *, force: bool = False) -> None:

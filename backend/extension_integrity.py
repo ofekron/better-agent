@@ -28,7 +28,9 @@ def worker_main(connection: Any) -> None:
             if request is None:
                 return
             request_id, specs = request
-            connection.send((request_id, fingerprint_packages(specs)))
+            started = time.perf_counter()
+            results = fingerprint_packages(specs)
+            connection.send((request_id, results, (time.perf_counter() - started) * 1000.0))
     except (EOFError, BrokenPipeError, OSError):
         return
     finally:

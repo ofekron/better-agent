@@ -82,6 +82,42 @@ def test_executor_shutdown_reopens_spawn_worker() -> None:
     extension_store.shutdown_runtime_integrity_executor()
 
 
+def test_worker_protocol_attributes_compute_and_roundtrip_residual() -> None:
+    class Process:
+        def is_alive(self) -> bool:
+            return True
+
+    class Connection:
+        request_id = 0
+
+        def send(self, message) -> None:
+            self.request_id = message[0]
+
+        def poll(self, _timeout: float) -> bool:
+            time.sleep(0.03)
+            return True
+
+        def recv(self):
+            return self.request_id, [{"digest": "ok"}], 5.0
+
+    worker = extension_store._RuntimeIntegrityWorker.__new__(
+        extension_store._RuntimeIntegrityWorker
+    )
+    worker._connection = Connection()
+    worker._process = Process()
+    worker._request_id = 0
+    original_record = extension_store.perf.record
+    timings: dict[str, float] = {}
+    try:
+        extension_store.perf.record = lambda name, value: timings.__setitem__(name, float(value))
+        assert worker.run([{}], timeout=1.0) == [{"digest": "ok"}]
+    finally:
+        extension_store.perf.record = original_record
+    assert timings["extension.integrity.worker_roundtrip"] >= 25.0
+    assert timings["extension.integrity.worker_compute"] == 5.0
+    assert timings["extension.integrity.worker_outside_compute"] >= 20.0
+
+
 def test_packaged_spawn_and_cross_platform_security_wiring() -> None:
     main_source = (_BACKEND / "main.py").read_text(encoding="utf-8")
     store_source = (_BACKEND / "extension_store.py").read_text(encoding="utf-8")
@@ -173,6 +209,7 @@ def test_package_outside_trusted_root_is_rejected() -> None:
 if __name__ == "__main__":
     asyncio.run(test_hashing_does_not_starve_event_loop())
     test_executor_shutdown_reopens_spawn_worker()
+    test_worker_protocol_attributes_compute_and_roundtrip_residual()
     test_packaged_spawn_and_cross_platform_security_wiring()
     test_crashed_worker_fails_closed_then_reopens()
     test_hanging_worker_is_dead_by_deadline_then_recovers()
