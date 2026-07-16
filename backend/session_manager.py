@@ -6735,6 +6735,69 @@ class SessionManager:
             },
         )
 
+    # ── Open browser panels ────────────────────────────────────────
+    #
+    # Mirrors "Open file panels" above: a backend-owned set of embedded
+    # browser tabs in the session's right-panel viewer. De-duplicated by
+    # `url` — re-opening an already-open URL moves it to the end instead
+    # of creating a duplicate tab. One change kind
+    # ("open_browser_panels_set") for add/remove/set.
+
+    def add_open_browser_panel(
+        self, sid: str, panel: dict, *, client_id: Optional[str] = None,
+    ) -> Optional[dict]:
+        def _do(s: dict) -> None:
+            panels = s.setdefault("open_browser_panels", [])
+            existing_index = next(
+                (
+                    idx
+                    for idx, p in enumerate(panels)
+                    if p.get("url") == panel.get("url")
+                ),
+                None,
+            )
+            if existing_index is not None:
+                existing = panels.pop(existing_index)
+                panels.append(existing)
+            else:
+                panels.append(panel)
+        return self._run(
+            sid, _do,
+            {"kind": "open_browser_panels_set", "client_id": client_id},
+            enrich=lambda s: {
+                "open_browser_panels": list(s.get("open_browser_panels") or []),
+            },
+        )
+
+    def remove_open_browser_panel(
+        self, sid: str, panel_id: str, *, client_id: Optional[str] = None,
+    ) -> Optional[dict]:
+        def _do(s: dict) -> None:
+            s["open_browser_panels"] = [
+                p for p in s.get("open_browser_panels", [])
+                if p.get("id") != panel_id
+            ]
+        return self._run(
+            sid, _do,
+            {"kind": "open_browser_panels_set", "client_id": client_id},
+            enrich=lambda s: {
+                "open_browser_panels": list(s.get("open_browser_panels") or []),
+            },
+        )
+
+    def set_open_browser_panels(
+        self, sid: str, panels: list, *, client_id: Optional[str] = None,
+    ) -> Optional[dict]:
+        def _do(s: dict) -> None:
+            s["open_browser_panels"] = list(panels)
+        return self._run(
+            sid, _do,
+            {"kind": "open_browser_panels_set", "client_id": client_id},
+            enrich=lambda s: {
+                "open_browser_panels": list(s.get("open_browser_panels") or []),
+            },
+        )
+
     def upsert_file_discussion(
         self,
         sid: str,

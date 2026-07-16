@@ -228,7 +228,7 @@ def _context_strategy_config_overrides(inputs: dict) -> list[str]:
 
 
 _KNOWN_MCP_SERVER_TOOL_NAMES: dict[str, frozenset[str]] = {
-    "ui": frozenset({"open_file_panel", "request_user_input"}),
+    "ui": frozenset({"open_file_panel", "open_browser_panel", "request_user_input"}),
     "open-config-panel": frozenset({"open_config_panel"}),
 }
 
@@ -391,6 +391,24 @@ _OPEN_FILE_PANEL_DESCRIPTION = (
     "Show the user a specific file location in the Better Agent UI. Use "
     "mode='panel' to open a persistent side panel, or mode='inline' to attach "
     "an inline viewer to the tool call."
+)
+
+_OPEN_BROWSER_PANEL_INPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "mode": {"type": "string", "enum": ["panel", "inline"]},
+        "url": {"type": "string"},
+        "title": {"type": "string"},
+    },
+    "required": ["mode", "url"],
+    "additionalProperties": False,
+}
+
+_OPEN_BROWSER_PANEL_DESCRIPTION = (
+    "Show the user a live web page in the Better Agent UI — typically a "
+    "local dev server the agent just started. Use mode='panel' to open a "
+    "persistent side panel, or mode='inline' to embed it in the tool "
+    "call. Only http(s) URLs are accepted."
 )
 
 _REQUEST_USER_INPUT_SCHEMA: dict[str, Any] = build_request_user_input_schema(additional_properties=False)
@@ -800,6 +818,14 @@ def _build_open_file_panel_dynamic_tool() -> dict:
         "name": "open_file_panel",
         "description": _OPEN_FILE_PANEL_DESCRIPTION,
         "inputSchema": _OPEN_FILE_PANEL_INPUT_SCHEMA,
+    }
+
+
+def _build_open_browser_panel_dynamic_tool() -> dict:
+    return {
+        "name": "open_browser_panel",
+        "description": _OPEN_BROWSER_PANEL_DESCRIPTION,
+        "inputSchema": _OPEN_BROWSER_PANEL_INPUT_SCHEMA,
     }
 
 
@@ -1387,6 +1413,47 @@ def _build_open_file_panel_tool_handler(
     return open_file_panel
 
 
+def _build_open_browser_panel_tool_handler(
+    *,
+    app_session_id: str,
+    internal_token: str,
+):
+    async def open_browser_panel(params: dict) -> dict:
+        args = params.get("arguments") or {}
+        if not isinstance(args, dict):
+            return _dynamic_tool_text_result(
+                "open_browser_panel arguments must be an object",
+                success=False,
+            )
+        mode = str(args.get("mode") or "").strip()
+        url = str(args.get("url") or "").strip()
+        if mode not in ("panel", "inline") or not url:
+            return _dynamic_tool_text_result(
+                "`mode` (panel|inline) and `url` are required",
+                success=False,
+            )
+        try:
+            result = await asyncio.to_thread(
+                _post_loopback_sync,
+                {
+                    "app_session_id": app_session_id,
+                    "mode": mode,
+                    "url": url,
+                    "title": args.get("title"),
+                },
+                internal_token=internal_token,
+                url_path="/api/internal/open-browser-panel",
+                timeout_s=10.0,
+            )
+        except Exception as e:
+            logger.exception("open_browser_panel dynamic tool handler failed")
+            return _dynamic_tool_text_result(f"open_browser_panel failed: {e}", success=False)
+        is_error = bool(result.get("error")) or result.get("success") is False
+        return _dynamic_tool_json_result(result, success=not is_error)
+
+    return open_browser_panel
+
+
 def _build_request_user_input_tool_handler(
     *,
     app_session_id: str,
@@ -1511,6 +1578,16 @@ def _build_dynamic_tool_set(
             tool_handlers,
             _build_open_file_panel_dynamic_tool(),
             _build_open_file_panel_tool_handler(
+                app_session_id=app_session_id,
+                internal_token=internal_token,
+            ),
+            existing_tool_names=existing_tool_names,
+        )
+        _add_dynamic_tool(
+            dynamic_tools,
+            tool_handlers,
+            _build_open_browser_panel_dynamic_tool(),
+            _build_open_browser_panel_tool_handler(
                 app_session_id=app_session_id,
                 internal_token=internal_token,
             ),

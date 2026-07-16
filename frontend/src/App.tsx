@@ -318,6 +318,9 @@ const FilePanels = lazyWithRetry(() =>
 const ConfigPanels = lazyWithRetry(() =>
   import("./components/ConfigPanels").then((m) => ({ default: m.ConfigPanels })),
 );
+const BrowserPanels = lazyWithRetry(() =>
+  import("./components/BrowserPanels").then((m) => ({ default: m.BrowserPanels })),
+);
 const FileEditor = lazyWithRetry(() =>
   import("./components/FileEditor").then((m) => ({ default: m.FileEditor })),
 );
@@ -1209,7 +1212,9 @@ function AppMain({
   const lastOpenFilePanelCountBySessionRef = useRef<Record<string, number>>({});
   useEffect(() => {
     if (!currentSession) return;
-    const count = currentSession.open_file_panels?.length ?? 0;
+    const count =
+      (currentSession.open_file_panels?.length ?? 0) +
+      (currentSession.open_browser_panels?.length ?? 0);
     const previous = lastOpenFilePanelCountBySessionRef.current[currentSession.id] ?? count;
     lastOpenFilePanelCountBySessionRef.current[currentSession.id] = count;
     if (count <= previous) return;
@@ -1224,6 +1229,7 @@ function AppMain({
   }, [
     currentSession?.id,
     currentSession?.open_file_panels,
+    currentSession?.open_browser_panels,
     isMobile,
     patchRightPanel,
   ]);
@@ -1240,7 +1246,10 @@ function AppMain({
         case "comments":
           return (currentSession.inline_tags?.length ?? 0) > 0;
         case "files":
-          return (currentSession.open_file_panels?.length ?? 0) > 0;
+          return (
+            (currentSession.open_file_panels?.length ?? 0) > 0 ||
+            (currentSession.open_browser_panels?.length ?? 0) > 0
+          );
         case "notes":
           return (currentSession.notes?.length ?? 0) > 0;
         case "canvas":
@@ -1275,6 +1284,7 @@ function AppMain({
     currentSession?.current_todos,
     currentSession?.inline_tags,
     currentSession?.open_file_panels,
+    currentSession?.open_browser_panels,
     currentSession?.notes,
     currentSession?.right_panel_open,
     currentSession?.right_panel_auto_opened_by,
@@ -3173,6 +3183,66 @@ function AppMain({
     [currentSession, applySessionMetadata, clientId, refreshSessions, t],
   );
 
+  const handleOpenBrowserPanel = useCallback(
+    (url: string, title?: string | null) => {
+      if (!currentSession) return;
+      if (isMobile) {
+        setMobileRightOpen(true);
+        setMobileSidebarOpen(false);
+      } else {
+        patchRightPanel(currentSession.id, { open: true, tab: "files", addAutoReason: "files" });
+      }
+      setRightPanelTab("files");
+      const panels = currentSession.open_browser_panels ?? [];
+      const existing = panels.find((p) => p.url === url);
+      const id =
+        existing?.id ??
+        `bp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const panel = { id, url, title: title ?? existing?.title ?? null };
+      const next = existing
+        ? [...panels.filter((p) => p.url !== url), panel]
+        : [...panels, panel];
+      applySessionMetadata(currentSession.id, { open_browser_panels: next });
+      void runThreeStateSync({
+        operationId: `browserPanel:add:${currentSession.id}:${id}`,
+        action: t("rightPanel.files"),
+        reconcile: refreshSessions,
+        mutate: () => progressTrackedFetch(
+          `browserPanel:add:${currentSession.id}:${id}`,
+          `${API}/api/sessions/${currentSession.id}/browser-panels`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ...panel, client_id: clientId }),
+          },
+        ),
+      }).catch(() => {});
+    },
+    [currentSession, applySessionMetadata, clientId, isMobile, patchRightPanel, refreshSessions, t],
+  );
+
+  const handleCloseBrowserPanel = useCallback(
+    (id: string) => {
+      if (!currentSession) return;
+      const next = (currentSession.open_browser_panels ?? []).filter(
+        (p) => p.id !== id,
+      );
+      applySessionMetadata(currentSession.id, { open_browser_panels: next });
+      void runThreeStateSync({
+        operationId: `browserPanel:remove:${currentSession.id}:${id}`,
+        action: t("rightPanel.files"),
+        reconcile: refreshSessions,
+        mutate: () => progressTrackedFetch(
+          `browserPanel:remove:${currentSession.id}:${id}`,
+          `${API}/api/sessions/${currentSession.id}/browser-panels/${id}` +
+            `?client_id=${encodeURIComponent(clientId)}`,
+          { method: "DELETE" },
+        ),
+      }).catch(() => {});
+    },
+    [currentSession, applySessionMetadata, clientId, refreshSessions, t],
+  );
+
   /** Rename an open file panel's underlying file on disk, keeping the SAME
    * panel id/tab open and pointing it at the new path. Physically renames
    * first (so a collision/permission error surfaces before we touch panel
@@ -4376,7 +4446,10 @@ function AppMain({
       setRightPanelTab(persisted);
       return;
     }
-    if ((currentSession.open_file_panels?.length ?? 0) > 0) {
+    if (
+      (currentSession.open_file_panels?.length ?? 0) > 0 ||
+      (currentSession.open_browser_panels?.length ?? 0) > 0
+    ) {
       setRightPanelTab("files");
     } else if (
       (currentSession.current_todos?.length ?? 0) > 0 ||
@@ -8413,9 +8486,14 @@ function AppMain({
                     patchRightPanel(currentSession.id, { tab: "files", clearAutoReasons: true });
                 }}
               >
-                {(currentSession?.open_file_panels?.length ?? 0) > 0
-                  ? `${t("rightPanel.files")} (${currentSession?.open_file_panels?.length})`
-                  : t("rightPanel.files")}
+                {(() => {
+                  const panelCount =
+                    (currentSession?.open_file_panels?.length ?? 0) +
+                    (currentSession?.open_browser_panels?.length ?? 0);
+                  return panelCount > 0
+                    ? `${t("rightPanel.files")} (${panelCount})`
+                    : t("rightPanel.files");
+                })()}
               </button>
               {currentSession?.name === "Assistant" && (
                 <button
@@ -8653,6 +8731,10 @@ function AppMain({
                       (tg) => tg.fileAnchor?.filePath === path,
                     ).length
                   }
+                />
+                <BrowserPanels
+                  panels={currentSession?.open_browser_panels ?? []}
+                  onClosePanel={handleCloseBrowserPanel}
                 />
               </Suspense>
             )}

@@ -11,7 +11,7 @@ import ambient_mcp_transport as transport
 
 
 _CORE_SERVER_PERMISSIONS = {
-    "ui": ("ui.open_file_panel", "ui.request_user_input"),
+    "ui": ("ui.open_file_panel", "ui.open_browser_panel", "ui.request_user_input"),
     "open-config-panel": ("config.open_panel",),
     "capabilities": ("capabilities.read", "capabilities.write"),
 }

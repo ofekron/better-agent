@@ -41,6 +41,7 @@ _METADATA_KINDS = {
     "tag_updated",
     "tags_cleared",
     "open_panels_set",
+    "open_browser_panels_set",
     "draft_changed",
     "fork_closed_set",
     "supervisor_enabled_set",
@@ -564,6 +565,11 @@ class SessionWSBroadcaster:
             # no reach-back into the singleton is needed.
             patch = {
                 "open_file_panels": list(change.get("open_file_panels") or [])
+            }
+        elif kind == "open_browser_panels_set":
+            # Mirrors open_panels_set for embedded browser tabs.
+            patch = {
+                "open_browser_panels": list(change.get("open_browser_panels") or [])
             }
         elif kind == "open_config_panels_set":
             # Mirrors open_panels_set for the provider-config-sync

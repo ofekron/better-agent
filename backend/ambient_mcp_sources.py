@@ -79,7 +79,7 @@ def _extension_capabilities() -> Iterable[AmbientMcpCapability]:
 def _core_capabilities() -> Iterable[AmbientMcpCapability]:
     launcher_script = Path(__file__).with_name("core_ambient_mcp_launcher.py")
     for capability_id, name, permissions in (
-        ("core:ui", "ui", ["ui.open_file_panel", "ui.request_user_input"]),
+        ("core:ui", "ui", ["ui.open_file_panel", "ui.open_browser_panel", "ui.request_user_input"]),
         ("core:open-config-panel", "open-config-panel", ["config.open_panel"]),
         ("core:capabilities", "capabilities", ["capabilities.read", "capabilities.write"]),
     ):

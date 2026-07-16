@@ -879,6 +879,24 @@ _OPEN_FILE_PANEL_DESCRIPTION = (
     "message or mode='panel' to open a persistent side panel."
 )
 
+_OPEN_BROWSER_PANEL_INPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "mode": {"type": "string", "enum": ["panel", "inline"]},
+        "url": {"type": "string"},
+        "title": {"type": "string"},
+    },
+    "required": ["mode", "url"],
+    "additionalProperties": False,
+}
+
+_OPEN_BROWSER_PANEL_DESCRIPTION = (
+    "Show the user a live web page — typically a local dev server the agent "
+    "just started. Use mode='panel' to open a persistent side panel, or "
+    "mode='inline' to embed it in this message. Only http(s) URLs are "
+    "accepted."
+)
+
 _REQUEST_USER_INPUT_SCHEMA: dict[str, Any] = build_request_user_input_schema(additional_properties=False)
 
 _REQUEST_USER_INPUT_DESCRIPTION = (
@@ -982,7 +1000,7 @@ _DISABLEABLE_BUILTIN_TOOLS = frozenset({
 _ORCHESTRATION_TOOL_NAMES = frozenset({
     "mssg", "ask", "delegate_task", "create_session",
     "create_sub_session", "create_worker", "ensure_named_worker",
-    "open_file_panel", "request_user_input", "start_file_discussion",
+    "open_file_panel", "open_browser_panel", "request_user_input", "start_file_discussion",
     "lock_ops", "barrier",
 })
 
@@ -1359,6 +1377,9 @@ def _tool_schemas_for_run(
         if open_file_panel_enabled:
             schemas.append(_function_tool_schema(
                 "open_file_panel", _OPEN_FILE_PANEL_DESCRIPTION, _OPEN_FILE_PANEL_INPUT_SCHEMA,
+            ))
+            schemas.append(_function_tool_schema(
+                "open_browser_panel", _OPEN_BROWSER_PANEL_DESCRIPTION, _OPEN_BROWSER_PANEL_INPUT_SCHEMA,
             ))
             schemas.append(_function_tool_schema(
                 "request_user_input", _REQUEST_USER_INPUT_DESCRIPTION, _REQUEST_USER_INPUT_SCHEMA,
@@ -2026,6 +2047,31 @@ def _build_loopback_tool_handlers(
         is_error = bool(result.get("error")) or result.get("success") is False
         return _dynamic_tool_json_result(result, success=not is_error)
 
+    async def open_browser_panel(params: dict) -> str:
+        args = _args(params)
+        mode = str(args.get("mode") or "").strip()
+        url = str(args.get("url") or "").strip()
+        if mode not in ("panel", "inline") or not url:
+            return _dynamic_tool_text_result("`mode` (panel|inline) and `url` are required", success=False)
+        try:
+            result = await asyncio.to_thread(
+                _post_loopback_sync,
+                {
+                    "app_session_id": app_session_id,
+                    "mode": mode,
+                    "url": url,
+                    "title": args.get("title"),
+                },
+                internal_token=internal_token,
+                url_path="/api/internal/open-browser-panel",
+                timeout_s=_OPEN_FILE_PANEL_HTTP_TIMEOUT_S,
+            )
+        except Exception as e:
+            logger.exception("open_browser_panel dynamic tool handler failed")
+            return _dynamic_tool_text_result(f"open_browser_panel failed: {e}", success=False)
+        is_error = bool(result.get("error")) or result.get("success") is False
+        return _dynamic_tool_json_result(result, success=not is_error)
+
     async def request_user_input(params: dict) -> str:
         args = _args(params)
         questions = args.get("questions")
@@ -2135,6 +2181,7 @@ def _build_loopback_tool_handlers(
         handlers["create_sub_session"] = create_sub_session
     if bool(inputs.get("open_file_panel_enabled")):
         handlers["open_file_panel"] = open_file_panel
+        handlers["open_browser_panel"] = open_browser_panel
         handlers["request_user_input"] = request_user_input
         if inputs.get("working_mode") == "file_editing":
             handlers["start_file_discussion"] = start_file_discussion

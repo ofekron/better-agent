@@ -994,6 +994,49 @@ _OPEN_FILE_PANEL_DESCRIPTION = (
 )
 
 
+# ============================================================================
+# Open-browser-panel tool schema & description (active session, any mode)
+# ============================================================================
+_OPEN_BROWSER_PANEL_INPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "mode": {
+            "type": "string",
+            "enum": ["panel", "inline"],
+            "description": (
+                "'inline' = embed a live view of the page directly inside "
+                "THIS message (best for a quick preview of something you "
+                "just started serving). 'panel' = open it as a tab in the "
+                "user's side panel area (best for a page the user should "
+                "keep around / interact with)."
+            ),
+        },
+        "url": {
+            "type": "string",
+            "description": (
+                "The http(s) URL to open — typically a local dev server "
+                "the agent just started (e.g. http://localhost:5173)."
+            ),
+        },
+        "title": {
+            "type": "string",
+            "description": "Optional short label for the panel tab.",
+        },
+    },
+    "required": ["mode", "url"],
+}
+
+_OPEN_BROWSER_PANEL_DESCRIPTION = (
+    "Show the user a live web page — this is a communication tool for "
+    "previewing a running app, not a general web browser. Use it after "
+    "starting a dev server or web app so the user can see it rendered, "
+    "without leaving the chat. Pick `mode`: 'inline' embeds the page "
+    "directly inside this message; 'panel' opens it as a tab in the side "
+    "panel (best for something the user should keep around). Only "
+    "http(s) URLs are accepted. Returns immediately; it does not block."
+)
+
+
 _REQUEST_USER_INPUT_SCHEMA: dict[str, Any] = build_request_user_input_schema()
 
 _REQUEST_USER_INPUT_DESCRIPTION = (
@@ -2079,6 +2122,58 @@ def _build_open_file_panel_tool(
         return _tool_success_result(result)
 
     return open_file_panel
+
+
+# ============================================================================
+# Open-browser-panel tool builder (active session, any orchestration mode)
+# ============================================================================
+def _build_open_browser_panel_tool(
+    *,
+    app_session_id: str,
+    internal_token: str,
+):
+    """Build an in-process SDK MCP tool that opens a live URL in the
+    user's UI. POSTs to /api/internal/open-browser-panel. Mirrors
+    _build_open_file_panel_tool."""
+
+    def _post_open_browser_panel_sync(payload: dict) -> dict:
+        return _post_loopback_sync(
+            payload,
+            internal_token=internal_token,
+            url_path="/api/internal/open-browser-panel",
+            timeout=_OPEN_FILE_PANEL_HTTP_TIMEOUT,
+            non_json_t_key="runner.open_browser_panel_non_json",
+            log_prefix="open-browser-panel POST",
+            backoff_cap=10.0,
+        )
+
+    @tool("open_browser_panel", _OPEN_BROWSER_PANEL_DESCRIPTION, _OPEN_BROWSER_PANEL_INPUT_SCHEMA)
+    async def open_browser_panel(args: dict[str, Any]) -> dict[str, Any]:
+        mode = args.get("mode") or ""
+        url = (args.get("url") or "").strip()
+        if mode not in ("panel", "inline") or not url:
+            return {
+                "content": [{
+                    "type": "text",
+                    "text": "`mode` (panel|inline) and `url` are required",
+                }],
+                "is_error": True,
+            }
+
+        payload = {
+            "app_session_id": app_session_id,
+            "mode": mode,
+            "url": url,
+            "title": args.get("title"),
+        }
+
+        try:
+            result = await asyncio.to_thread(_post_open_browser_panel_sync, payload)
+        except Exception as e:
+            return _tool_error_response("open-browser-panel", e)
+        return _tool_success_result(result)
+
+    return open_browser_panel
 
 
 def _build_request_user_input_tool(
@@ -3212,12 +3307,16 @@ async def _run(run_dir: Path, inputs: dict) -> int:
             app_session_id=app_session_id or "",
             internal_token=internal_token,
         )
+        obp_tool = _build_open_browser_panel_tool(
+            app_session_id=app_session_id or "",
+            internal_token=internal_token,
+        )
         request_user_input_tool = _build_request_user_input_tool(
             app_session_id=app_session_id or "",
             internal_token=internal_token,
             run_id=run_dir.name,
         )
-        tools = [ofp_tool, request_user_input_tool]
+        tools = [ofp_tool, obp_tool, request_user_input_tool]
         if file_editing_mode:
             tools.append(_build_start_file_discussion_tool(
                 app_session_id=app_session_id or "",

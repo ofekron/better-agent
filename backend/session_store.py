@@ -4291,6 +4291,7 @@ def _migrate_session(session: dict, ctx: Optional[dict] = None) -> dict:
     # agent-requested focus/selection is persisted; the user's live
     # scroll/selection within a panel stays frontend-transient.
     session.setdefault("open_file_panels", [])
+    session.setdefault("open_browser_panels", [])
     session.setdefault("open_config_panels", [])
     session.setdefault("notes", [])
     # Cross-provider TODO/task lists reconstructed by the public Todos
@@ -4579,6 +4580,7 @@ def create_session(
         "inline_tags": [],
         "adv_sync_overlays": [],
         "open_file_panels": [],
+        "open_browser_panels": [],
         "open_config_panels": [],
         "notes": [],
         "current_todos": [],
@@ -5472,6 +5474,7 @@ def fork_session(root: dict, parent_id: str, name: Optional[str] = None) -> dict
         "next_seq": fork_next_seq,
         "inline_tags": [],
         "open_file_panels": [],
+        "open_browser_panels": [],
         "open_config_panels": [],
         "notes": [],
         # Re-derive current_todos from the COPIED messages' events
@@ -5574,6 +5577,7 @@ def create_sub_session(
         "next_seq": 0,
         "inline_tags": [],
         "open_file_panels": [],
+        "open_browser_panels": [],
         "open_config_panels": [],
         "notes": [],
         "current_todos": [],
@@ -5697,6 +5701,7 @@ def create_delegate_fork(
         "inline_tags": [],
         "adv_sync_overlays": [],
         "open_file_panels": [],
+        "open_browser_panels": [],
         "open_config_panels": [],
         "notes": [],
         "current_todos": [],

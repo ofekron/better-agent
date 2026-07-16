@@ -29,6 +29,10 @@ def _post_open_file_panel(payload: dict[str, Any]) -> dict[str, Any]:
     return _post_internal("/api/internal/open-file-panel", payload, 10.0)
 
 
+def _post_open_browser_panel(payload: dict[str, Any]) -> dict[str, Any]:
+    return _post_internal("/api/internal/open-browser-panel", payload, 10.0)
+
+
 def _post_user_input(payload: dict[str, Any]) -> dict[str, Any]:
     return _post_internal("/api/internal/user-input/request", payload, 24 * 60 * 60)
 
@@ -62,6 +66,32 @@ def open_file_panel_response(
             "end_line": end_line,
             "selected_start": selected_start,
             "selected_end": selected_end,
+        })
+    except LoopbackHTTPStatusError as exc:
+        return {"success": False, "error": f"HTTP {exc.code}: {loopback_http_error_message(exc)}"}
+    except Exception as exc:
+        return {"success": False, "error": str(exc)}
+
+
+def open_browser_panel_response(
+    app_session_id: str,
+    mode: str,
+    url: str,
+    title: str | None = None,
+) -> dict[str, Any]:
+    app_session_id = str(app_session_id or "").strip()
+    mode = (mode or "").strip()
+    url = (url or "").strip()
+    if not app_session_id:
+        return {"success": False, "error": "`app_session_id` is required"}
+    if mode not in ("panel", "inline") or not url:
+        return {"success": False, "error": "`mode` (panel|inline) and `url` are required"}
+    try:
+        return _post_open_browser_panel({
+            "app_session_id": app_session_id,
+            "mode": mode,
+            "url": url,
+            "title": title,
         })
     except LoopbackHTTPStatusError as exc:
         return {"success": False, "error": f"HTTP {exc.code}: {loopback_http_error_message(exc)}"}
@@ -146,6 +176,15 @@ def build_server() -> FastMCP:
             selected_start,
             selected_end,
         )
+
+    @server.tool()
+    def open_browser_panel(
+        app_session_id: str,
+        mode: str,
+        url: str,
+        title: str | None = None,
+    ) -> dict[str, Any]:
+        return open_browser_panel_response(app_session_id, mode, url, title)
 
     @server.tool()
     def request_user_input(

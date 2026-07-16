@@ -1872,6 +1872,7 @@ async def auth_gate(request, call_next):
                 "/api/internal/capabilities/invoke": ("", ""),
                 "/api/internal/coordination/lock-ops": ("", "internal_loopback"),
                 "/api/internal/open-file-panel": ("ui", "ui.open_file_panel"),
+                "/api/internal/open-browser-panel": ("ui", "ui.open_browser_panel"),
                 "/api/internal/user-input/request": ("ui", "ui.request_user_input"),
                 "/api/internal/file-editor/start-discussion": ("ui", "ui.open_file_panel"),
                 "/api/internal/open-config-panel": ("open-config-panel", "config.open_panel"),
@@ -11358,6 +11359,78 @@ async def set_file_panels(session_id: str, body: dict):
     return {"panels": panels}
 
 
+_ALLOWED_BROWSER_PANEL_SCHEMES = ("http://", "https://")
+
+
+def _validate_browser_panel_url(url: str) -> str:
+    """Reject anything but http(s) — blocks javascript:/data:/file: etc.
+
+    This is rendered in a sandboxed iframe with an agent- or user-supplied
+    URL, so scheme allowlisting (not blocklisting) is the safety bar.
+    """
+    url = url.strip()
+    if not url.lower().startswith(_ALLOWED_BROWSER_PANEL_SCHEMES):
+        raise HTTPException(status_code=400, detail=t("error.browser_panel_url_invalid"))
+    return url
+
+
+def _sanitize_browser_panel(raw: dict) -> dict:
+    """Build a persisted open-browser-panel dict from request input.
+
+    Shape: {id, url, title?}. `url` is required and must be http(s)."""
+    url = str(raw.get("url") or "").strip()
+    if not url:
+        raise HTTPException(status_code=400, detail=t("error.browser_panel_url_required"))
+    url = _validate_browser_panel_url(url)
+
+    title = raw.get("title")
+    return {
+        "id": str(raw.get("id") or uuid.uuid4().hex[:12]),
+        "url": url,
+        "title": str(title).strip() if isinstance(title, str) and title.strip() else None,
+    }
+
+
+@app.post("/api/sessions/{session_id}/browser-panels")
+async def add_browser_panel(session_id: str, body: dict):
+    await _require_session_async(session_id)
+    panel = _sanitize_browser_panel(body)
+    await asyncio.to_thread(
+        session_manager.add_open_browser_panel,
+        session_id, panel, client_id=body.get("client_id"),
+    )
+    return panel
+
+
+@app.delete("/api/sessions/{session_id}/browser-panels/{panel_id}")
+async def remove_browser_panel(
+    session_id: str, panel_id: str, client_id: str = Query(None)
+):
+    await _require_session_async(session_id)
+    await asyncio.to_thread(
+        session_manager.remove_open_browser_panel,
+        session_id,
+        panel_id,
+        client_id=client_id,
+    )
+    return {"deleted": True}
+
+
+@app.put("/api/sessions/{session_id}/browser-panels")
+async def set_browser_panels(session_id: str, body: dict):
+    """Replace the full ordered panel list (covers reorder + clear)."""
+    await _require_session_async(session_id)
+    raw_panels = body.get("panels")
+    if not isinstance(raw_panels, list):
+        raise HTTPException(status_code=400, detail=t("error.browser_panels_list_required"))
+    panels = [_sanitize_browser_panel(p) for p in raw_panels]
+    await asyncio.to_thread(
+        session_manager.set_open_browser_panels,
+        session_id, panels, client_id=body.get("client_id"),
+    )
+    return {"panels": panels}
+
+
 def _sanitize_config_panel(raw: dict) -> dict:
     """Build a persisted open-config-panel dict from request input.
 
@@ -15557,6 +15630,61 @@ async def internal_open_file_panel(
     if mode == "panel":
         await asyncio.to_thread(
             session_manager.add_open_file_panel,
+            app_session_id,
+            panel,
+        )
+
+    return {"success": True, "mode": mode, "panel": panel}
+
+
+@app.post("/api/internal/open-browser-panel")
+async def internal_open_browser_panel(
+    request: Request,
+    body: dict,
+    x_internal_token: str = Depends(_internal_token_dependency),
+):
+    """Invoked by the active session's `open_browser_panel` tool.
+
+    mode="panel": mutate the session's backend-owned `open_browser_panels`
+    (fires `session_metadata_updated` → every connected tab opens the
+    tab). mode="inline": NO state mutation — the persisted tool-call
+    event on the assistant message is the source of truth; the frontend
+    renders an embedded viewer from it. Either way return success so
+    the agent gets a clean tool_result.
+    """
+    if not _internal_authority_is_valid():
+        raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
+
+    app_session_id = body.get("app_session_id") or ""
+    _require_ambient_core_target(
+        request, core_server="ui", permission="ui.open_browser_panel", app_session_id=app_session_id,
+    )
+    sess = await _session_lite(app_session_id)
+    if sess is None:
+        return {"success": False, "error": t("error.session_not_found_retry")}
+
+    mode = body.get("mode")
+    if mode not in ("panel", "inline"):
+        return {"success": False, "error": "mode must be 'panel' or 'inline'"}
+
+    raw_url = str(body.get("url") or "").strip()
+    if not raw_url:
+        return {"success": False, "error": t("error.browser_panel_url_required")}
+    try:
+        raw_url = _validate_browser_panel_url(raw_url)
+    except HTTPException as e:
+        return {"success": False, "error": e.detail}
+
+    title = body.get("title")
+    panel = {
+        "id": uuid.uuid4().hex[:12],
+        "url": raw_url,
+        "title": str(title).strip() if isinstance(title, str) and title.strip() else None,
+    }
+
+    if mode == "panel":
+        await asyncio.to_thread(
+            session_manager.add_open_browser_panel,
             app_session_id,
             panel,
         )

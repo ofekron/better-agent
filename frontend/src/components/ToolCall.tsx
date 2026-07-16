@@ -1217,6 +1217,68 @@ function InlineFilePanel({
   );
 }
 
+/** Detect an `open_browser_panel` MCP tool call with mode="inline".
+ *  Mirrors inlineOpenFilePanel. */
+function inlineOpenBrowserPanel(
+  tool: string,
+  argsStr: string,
+  result: string | undefined,
+): { url: string; title?: string } | null {
+  const mcp = parseMcpName(tool);
+  if (!mcp || mcp.toolName !== "open_browser_panel") return null;
+  const parsed = tryParseJsonValue(argsStr);
+  if (!parsed || typeof parsed !== "object") return null;
+  const a = parsed as Record<string, unknown>;
+  if (a.mode !== "inline") return null;
+
+  let url = "";
+  if (result) {
+    try {
+      const r = JSON.parse(result) as { panel?: { url?: string } };
+      if (r?.panel?.url) url = r.panel.url;
+    } catch {
+      /* result not (yet) JSON — fall back below */
+    }
+  }
+  if (!url && typeof a.url === "string") url = a.url;
+  if (!url || !/^https?:\/\//i.test(url)) return null;
+
+  return { url, title: typeof a.title === "string" ? a.title : undefined };
+}
+
+/** Sandboxed iframe embedded directly in the message. Mirrors
+ *  InlineFilePanel — no `allow-same-origin` alongside `allow-scripts`. */
+function InlineBrowserPanel({ url, title }: { url: string; title?: string }) {
+  const [collapsed, setCollapsed] = useState(false);
+  const label = title || url;
+  if (collapsed) {
+    return (
+      <div className="tool-call inline-browser-collapsed">
+        <span className="tool-icon">#</span>
+        <button className="btn-small" onClick={() => setCollapsed(false)}>
+          {label}
+        </button>
+      </div>
+    );
+  }
+  return (
+    <div className="inline-browser-panel">
+      <div className="inline-browser-panel-header">
+        <span className="tool-args" title={url}>{label}</span>
+        <button type="button" className="btn-small" onClick={() => setCollapsed(true)}>
+          Collapse
+        </button>
+      </div>
+      <iframe
+        title={label}
+        className="inline-browser-panel-frame"
+        sandbox="allow-scripts allow-forms allow-popups allow-modals"
+        src={url}
+      />
+    </div>
+  );
+}
+
 function inlineViewImage(
   tool: string,
   argsStr: string,
@@ -1528,6 +1590,13 @@ export function ToolCall({ tool, args, result, onFileClick, onViewDiff }: Props)
         select={inline.select}
       />
     );
+  }
+
+  // `open_browser_panel` MCP tool, inline mode → render the live URL
+  // embedded in the message. Mirrors open_file_panel above.
+  const inlineBrowser = inlineOpenBrowserPanel(tool, argsStr, result);
+  if (inlineBrowser) {
+    return <InlineBrowserPanel url={inlineBrowser.url} title={inlineBrowser.title} />;
   }
 
   // `open_config_panel` MCP tool → embed the configs-page capability

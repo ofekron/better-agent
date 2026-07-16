@@ -8617,6 +8617,158 @@ button.run-badge-clickable:focus-visible {
   border-inline-end: none;
 }
 
+/* Browser panels — mirrors .file-panels-* above */
+.browser-panels {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+}
+
+.browser-panels-tabs {
+  display: flex;
+  align-items: stretch;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border);
+  font-size: calc(12px * var(--app-font-scale));
+}
+
+.browser-panels-tablist {
+  display: flex;
+  flex: 1;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+.browser-panels-tablist::-webkit-scrollbar {
+  height: 4px;
+}
+.browser-panels-tablist::-webkit-scrollbar-thumb {
+  background: var(--text-secondary, #aaa);
+  border-radius: 2px;
+}
+.browser-panels-tablist::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.browser-panels-tab {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-inline-end: 1px solid var(--border);
+  color: var(--text-secondary);
+  cursor: pointer;
+  white-space: nowrap;
+  user-select: none;
+}
+
+.browser-panels-tab:hover {
+  color: var(--text-primary);
+}
+
+.browser-panels-tab.active {
+  color: var(--text-primary);
+  background: var(--bg-primary);
+  box-shadow: inset 0 -2px 0 #7b68ee;
+}
+
+.browser-panels-tab-name {
+  font-family: "SF Mono", "Fira Code", monospace;
+}
+
+.browser-panels-tab-close,
+.browser-panels-cycle,
+.browser-panels-split {
+  background: transparent;
+  border: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  padding: 0 8px;
+  font-size: calc(13px * var(--app-font-scale));
+  line-height: 1;
+}
+
+.browser-panels-tab-close:hover,
+.browser-panels-cycle:hover,
+.browser-panels-split:hover {
+  color: var(--text-primary);
+}
+
+.browser-panels-split.active {
+  color: #7b68ee;
+}
+
+.browser-panels-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+.browser-panels-body.split {
+  flex-direction: row;
+}
+
+.browser-panels-pane {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border-inline-end: 1px solid var(--border);
+}
+
+.browser-panels-body.split .browser-panels-pane:last-child {
+  border-inline-end: none;
+}
+
+.browser-panels-frame-shell {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: #fff;
+  animation: file-browser-preview-in 0.18s ease-out;
+}
+
+.browser-panels-note,
+.browser-panels-state {
+  padding: 8px 10px;
+  color: var(--text-muted, #888);
+  background: var(--bg-secondary, rgba(0, 0, 0, 0.2));
+  border-bottom: 1px solid var(--border);
+  font-size: calc(12px * var(--app-font-scale));
+}
+
+.browser-panels-address-bar {
+  padding: 6px 10px;
+  color: var(--text-secondary);
+  background: var(--bg-secondary, rgba(0, 0, 0, 0.15));
+  border-bottom: 1px solid var(--border);
+  font-family: "SF Mono", "Fira Code", monospace;
+  font-size: calc(11px * var(--app-font-scale));
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.browser-panels-state {
+  flex: 1;
+  display: grid;
+  place-items: center;
+  border-bottom: 0;
+}
+
+.browser-panels-iframe {
+  flex: 1;
+  min-height: 300px;
+  width: 100%;
+  border: 0;
+  background: #fff;
+}
+
 /* Agent-opened file embedded inside a chat message (inline mode) */
 .inline-file-panel {
   margin: 8px 0;
@@ -8627,6 +8779,43 @@ button.run-badge-clickable:focus-visible {
 }
 
 .inline-file-collapsed {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0;
+}
+
+/* Agent-opened browser panel embedded inside a chat message (inline mode) */
+.inline-browser-panel {
+  margin: 8px 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+  min-height: 300px;
+  display: flex;
+  flex-direction: column;
+}
+
+.inline-browser-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 10px;
+  background: var(--bg-secondary, rgba(0, 0, 0, 0.2));
+  border-bottom: 1px solid var(--border);
+  font-size: calc(12px * var(--app-font-scale));
+}
+
+.inline-browser-panel-frame {
+  flex: 1;
+  min-height: 260px;
+  width: 100%;
+  border: 0;
+  background: #fff;
+}
+
+.inline-browser-collapsed {
   display: flex;
   align-items: center;
   gap: 8px;

@@ -380,6 +380,15 @@ export interface OpenFilePanel {
   selection?: FileFocus | null;
 }
 
+/** A backend-owned embedded browser tab open in the session's tabbed
+ * right-panel viewer. Mirrors OpenFilePanel; de-duplicated by `url`
+ * server-side. */
+export interface OpenBrowserPanel {
+  id: string;
+  url: string;
+  title?: string | null;
+}
+
 export interface OpenConfigPanel {
   id: string;
   capability_id: string;
@@ -1031,6 +1040,10 @@ export interface Session {
    * right-panel viewer. Pulled via the session REST snapshot, pushed
    * via `session_metadata_updated` (same channel as inline_tags). */
   open_file_panels?: OpenFilePanel[];
+  /** Backend-owned set of embedded browser tabs open in the tabbed
+   * right-panel viewer. Mirrors open_file_panels (kind
+   * open_browser_panels_set). */
+  open_browser_panels?: OpenBrowserPanel[];
   /** Provider-config-sync capability panels popped into the right side
    *  panel from an inline `open_config_panel` tool widget. Backend-owned,
    *  broadcast via `session_metadata_updated` (kind open_config_panels_set). */
