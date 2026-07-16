@@ -1248,6 +1248,8 @@ export interface Project {
   last_used: string;
   running_count?: number;
   unread_session_count?: number;
+  waiting_for_user_count?: number;
+  errored_count?: number;
   /** Every checked-out worktree of this project's git repo. When a repo
    * has more than one worktree the UI shows a worktree selector below the
    * project tab. Omitted/empty for backends that pre-date worktree

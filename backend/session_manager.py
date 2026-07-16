@@ -6139,22 +6139,34 @@ class SessionManager:
     def _clear_view_markers(self, sid: str) -> None:
         """On a view-ack, clear any marker on `sid` owned by an extension
         whose tag rule declares `clear_on == "view"`. Best-effort."""
+        self._clear_markers_by_trigger(sid, "view")
+
+    def clear_new_turn_markers(self, sid: str) -> None:
+        """On turn start, clear any marker on `sid` owned by an extension
+        whose tag rule declares `clear_on == "new_turn"` (e.g. the
+        ALL_TASKS__DONE done-state marker: the new turn is now the last
+        turn, so the prior turn's done tag no longer applies). Same
+        lifecycle as `clear_unseen_error` — deliberately NOT tied to
+        view/seen state. Best-effort."""
+        self._clear_markers_by_trigger(sid, "new_turn")
+
+    def _clear_markers_by_trigger(self, sid: str, trigger: str) -> None:
         try:
             import extension_applied_config
 
             watch = extension_applied_config.tag_watch_rules()
         except Exception:
             return
-        view_ext_ids = {
+        ext_ids = {
             r["extension_id"]
             for r in watch.values()
-            if r.get("clear_on") == "view" and r.get("extension_id")
+            if r.get("clear_on") == trigger and r.get("extension_id")
         }
-        if not view_ext_ids:
+        if not ext_ids:
             return
         present = session_store._markers_for_session(sid)
         for ext_id in present:
-            if ext_id in view_ext_ids:
+            if ext_id in ext_ids:
                 self.clear_marker(sid, ext_id)
 
     def unread_counts_snapshot(self) -> dict[str, int]:

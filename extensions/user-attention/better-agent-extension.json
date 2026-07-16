@@ -2,8 +2,8 @@
   "kind": "better-agent-extension",
   "id": "ofek-dev.user-attention",
   "name": "User attention",
-  "version": "0.2.0",
-  "description": "Marks a session for the user's attention: an orange dot when the agent surfaces something needing a decision, and a blue dot when the agent reports all tasks are done. The marker clears when the user views the session.",
+  "version": "0.3.0",
+  "description": "Marks a session for the user's attention: an orange dot when the agent surfaces something needing a decision (clears when the user views the session), and a done state when the agent reports all tasks are done (persists until a new turn starts).",
   "surfaces": [
     "instructions"
   ],
@@ -43,7 +43,7 @@
             "tooltip": "All tasks done",
             "sound": false
           },
-          "clear_on": "view"
+          "clear_on": "new_turn"
         }
       ]
     }

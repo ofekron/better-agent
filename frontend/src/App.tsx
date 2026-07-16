@@ -3980,6 +3980,8 @@ function AppMain({
           ...project,
           running_count: status?.running_count || 0,
           unread_session_count: status?.unread_session_count || 0,
+          waiting_for_user_count: status?.waiting_for_user_count || 0,
+          errored_count: status?.errored_count || 0,
         };
       }));
     } catch {
@@ -4005,9 +4007,19 @@ function AppMain({
     };
     const offMonitoring = eventBus.subscribe("session_monitoring_changed", refreshCounts);
     const offUnread = eventBus.subscribe("session_unread_changed", refreshCounts);
+    // errored_count / waiting_for_user_count aggregate the same way
+    // running_count / unread_session_count do — refetch on the events that
+    // carry each dimension's state transition (error dot, NEEDS_USER_DECISION
+    // marker, pending user-input request).
+    const offError = eventBus.subscribe("session_error_changed", refreshCounts);
+    const offMarker = eventBus.subscribe("session_marker_changed", refreshCounts);
+    const offUserInput = eventBus.subscribe("session_user_input_changed", refreshCounts);
     return () => {
       offMonitoring();
       offUnread();
+      offError();
+      offMarker();
+      offUserInput();
       window.clearTimeout(timer);
     };
   }, [authStatus, refreshProjectCounts]);

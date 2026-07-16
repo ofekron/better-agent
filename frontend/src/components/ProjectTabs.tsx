@@ -169,6 +169,8 @@ export function ProjectTabs({
                   nodeId={projNode}
                   runningCount={p.running_count}
                   unreadSessionCount={p.unread_session_count}
+                  waitingForUserCount={p.waiting_for_user_count}
+                  erroredCount={p.errored_count}
                 />
                 {(() => {
                   const encoded = p.path.replace(/\//g, "-").replace(/_/g, "-") || "root";

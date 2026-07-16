@@ -1723,7 +1723,7 @@ _SETTING_KEY_RE = re.compile(r"^[a-z][a-z0-9_]{0,62}$")
 
 _TAG_RULE_TAG_RE = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
 _TAG_RULE_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
-_TAG_RULE_CLEAR_ON = {"view"}
+_TAG_RULE_CLEAR_ON = {"view", "new_turn"}
 
 
 def _validate_highlight(value: Any, *, prefix: str) -> dict[str, Any]:

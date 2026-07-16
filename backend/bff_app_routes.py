@@ -293,6 +293,8 @@ def _grouped_projects_with_counts(aggregate_rows: list | None) -> list[dict]:
             **project,
             "running_count": slot.get("running_count", 0),
             "unread_session_count": slot.get("unread_session_count", 0),
+            "waiting_for_user_count": slot.get("waiting_for_user_count", 0),
+            "errored_count": slot.get("errored_count", 0),
         })
     return out
 

@@ -131,6 +131,9 @@ _PROJECT_FACT_KINDS = {
     "seen_advanced",
     "unread_changed",
     "working_mode_marked",
+    "error_changed",
+    "marker_set",
+    "marker_cleared",
 }
 
 

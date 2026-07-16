@@ -65,7 +65,7 @@ def main() -> int:
             "tooltip": "All tasks done",
             "sound": False,
         }, done.get("marker")
-        assert done["clear_on"] == "view"
+        assert done["clear_on"] == "new_turn"
         # Blue dot is a pure signal — no inline text styling.
         assert "bold" not in done and "font_scale" not in done and "highlight" not in done, done
 

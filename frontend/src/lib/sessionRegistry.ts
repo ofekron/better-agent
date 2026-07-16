@@ -95,6 +95,11 @@ export interface SessionMeta {
   markers: Record<string, MarkerInfo>;
   testape_active?: boolean;
   has_error: boolean;
+  // Derived projection of the backend-owned ALL_TASKS__DONE attention
+  // marker (same detection `_session_status_rank` uses for rank 1):
+  // true while the last turn is tagged done; the backend clears the
+  // marker when a new turn starts.
+  is_done: boolean;
   current_todos: TodoItem[];
   current_tasks: TaskItem[];
 }
@@ -146,6 +151,17 @@ function isRunning(state: MonitoringState): boolean {
   return state !== "stopped";
 }
 
+/** Marker tag stamped by the user-attention extension when the assistant
+ * tags the last turn as all-done. Single detection source shared with the
+ * backend's `_session_status_rank`. */
+export const ALL_TASKS_DONE_TAG = "ALL_TASKS__DONE";
+
+/** The one place `is_done` is defined: the last turn carries the
+ * ALL_TASKS__DONE attention marker. */
+function isDoneFromMarkers(markers: Record<string, MarkerInfo>): boolean {
+  return Object.values(markers).some((m) => m?.tag === ALL_TASKS_DONE_TAG);
+}
+
 /** Frontend-only TestApe overlay for backend-owned project counts. */
 function entryRunning(entry: {
   monitoring_state: MonitoringState;
@@ -181,6 +197,7 @@ const EMPTY_SESSION: SessionMeta = {
   markers: EMPTY_MARKERS,
   testape_active: false,
   has_error: false,
+  is_done: false,
   current_todos: [],
   current_tasks: [],
 };
@@ -808,7 +825,7 @@ class SessionRegistry {
     const startedAt = performance.now();
     const key = this._aggregateKey(cwd, nodeId);
     let running = 0;
-    let unreadSessions = 0;
+    const unreadSessions = 0;
     for (const entry of this.sessions.values()) {
       if (!entry.cwd) continue;
       if (this._aggregateKey(entry.cwd, entry.node_id) !== key) continue;
@@ -933,6 +950,9 @@ class SessionRegistry {
       markers: e.markers,
       testape_active: testapeActive,
       has_error: e.has_error,
+      // Derived from `markers` — the cached-object comparison above
+      // compares `markers` by reference, so this stays coherent.
+      is_done: isDoneFromMarkers(e.markers),
       current_todos: e.current_todos,
       current_tasks: e.current_tasks,
     };

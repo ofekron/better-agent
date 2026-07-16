@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 
-import { useSessionMeta } from "../lib/sessionRegistry";
+import { ALL_TASKS_DONE_TAG, useSessionMeta } from "../lib/sessionRegistry";
 import Icon from "./Icon";
 
 /** Single source for "this session needs attention" / running / unread
@@ -32,9 +32,14 @@ export function SessionStatusBadge({
     testape_active,
     monitoring_state,
     has_error,
+    is_done,
   } = useSessionMeta(sid);
   const debouncedRunning = useDebouncedFlag(is_running, 100);
-  const markerEntries = Object.entries(markers);
+  // The ALL_TASKS__DONE marker renders as the dedicated done badge below,
+  // not as a generic extension marker dot.
+  const markerEntries = Object.entries(markers).filter(
+    ([, m]) => m?.tag !== ALL_TASKS_DONE_TAG,
+  );
   const awaitingApproval = monitoring_state === "blocked_on_user";
   const waitingOnBackground = monitoring_state === "waiting_on_background";
   const awaitingUserInput = pending_user_input_count > 0;
@@ -46,7 +51,8 @@ export function SessionStatusBadge({
     !debouncedRunning &&
     unread_count === 0 &&
     markerEntries.length === 0 &&
-    !testape_active
+    !testape_active &&
+    !is_done
   )
     return null;
 
@@ -85,6 +91,14 @@ export function SessionStatusBadge({
         >
           <Icon name="testape" size={12} />
         </span>
+      )}
+      {is_done && (
+        <span
+          className="session-status-done"
+          title={t("session.allTasksDone")}
+          data-testid="session-done-dot"
+          data-session-id={sid}
+        />
       )}
       {markerEntries.map(([extId, m]) => (
         <span

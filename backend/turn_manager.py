@@ -2211,6 +2211,17 @@ class TurnManager:
             except Exception:
                 logger.debug("clear_unseen_error at turn start failed", exc_info=True)
 
+            # Same lifecycle for the done-state marker: a new turn means the
+            # prior turn is no longer the "last" turn, so its ALL_TASKS__DONE
+            # tag (clear_on == "new_turn") no longer applies. Re-set by the
+            # marker ingest path if THIS turn ends tagged done.
+            try:
+                session_manager.clear_new_turn_markers(app_session_id)
+            except Exception:
+                logger.debug(
+                    "clear_new_turn_markers at turn start failed", exc_info=True
+                )
+
             current_sid = session.get(session_id_field)
             forked_from_field = (
                 "forked_from_supervisor_agent_sid"

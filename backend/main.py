@@ -3488,7 +3488,7 @@ def _local_sessions_for_sidebar() -> list[dict]:
 
 _project_aggregates_condition = threading.Condition()
 _project_aggregates_cache: tuple[
-    tuple[tuple[str, str], int, int], ...
+    tuple[tuple[str, str], int, int, int, int], ...
 ] = ()
 _project_aggregates_desired_gen = 0
 _project_aggregates_cached_gen = -1
@@ -3523,8 +3523,10 @@ def _project_aggregates() -> dict[tuple[str, str], dict[str, int]]:
             key: {
                 "running_count": running_count,
                 "unread_session_count": unread_count,
+                "waiting_for_user_count": waiting_count,
+                "errored_count": errored_count,
             }
-            for key, running_count, unread_count in rows
+            for key, running_count, unread_count, waiting_count, errored_count in rows
         }
 
     wait_started = time.perf_counter()
@@ -3562,6 +3564,7 @@ def _project_aggregates() -> dict[tuple[str, str], dict[str, int]]:
                 if state != "stopped"
             }
             unread_by_sid = session_manager.unread_counts_snapshot()
+            pending_input_by_sid = user_input_store.pending_counts_by_session()
             agg: dict[tuple[str, str], dict[str, int]] = {}
             expires_at = float("inf")
             dependency_valid = True
@@ -3593,12 +3596,39 @@ def _project_aggregates() -> dict[tuple[str, str], dict[str, int]]:
                     s.get("node_id") or "primary",
                 )
                 slot = agg.setdefault(
-                    key, {"running_count": 0, "unread_session_count": 0}
+                    key,
+                    {
+                        "running_count": 0,
+                        "unread_session_count": 0,
+                        "waiting_for_user_count": 0,
+                        "errored_count": 0,
+                    },
                 )
                 if sid in running_sids:
                     slot["running_count"] += 1
                 if unread_by_sid.get(sid, 0) > 0:
                     slot["unread_session_count"] += 1
+                # Same waiting-on-user derivation as _session_status_rank:
+                # blocked monitoring state, pending user-input requests, or
+                # a NEEDS_USER_DECISION attention marker on the session.
+                monitoring_state, _revision = monitoring_projection.get(
+                    sid, ("stopped", 0)
+                )
+                marker_tags = {
+                    (m or {}).get("tag")
+                    for m in (s.get("markers") or {}).values()
+                    if isinstance(m, dict)
+                }
+                if (
+                    monitoring_state == "blocked_on_user"
+                    or pending_input_by_sid.get(sid, 0) > 0
+                    or _MARKER_TAG_NEEDS_DECISION in marker_tags
+                ):
+                    slot["waiting_for_user_count"] += 1
+                # Same errored derivation as the sidebar decoration
+                # (`unseen_error` summary field = current_turn_error).
+                if s.get("unseen_error"):
+                    slot["errored_count"] += 1
             perf.record(
                 "projects.aggregates.repo_identity",
                 (time.perf_counter() - repo_started) * 1000.0,
@@ -3608,7 +3638,13 @@ def _project_aggregates() -> dict[tuple[str, str], dict[str, int]]:
                 "projects.aggregates.distinct_cwds", len(repo_identities)
             )
             rows = tuple(
-                (key, counts["running_count"], counts["unread_session_count"])
+                (
+                    key,
+                    counts["running_count"],
+                    counts["unread_session_count"],
+                    counts["waiting_for_user_count"],
+                    counts["errored_count"],
+                )
                 for key, counts in agg.items()
             )
             perf.record(
@@ -15776,6 +15812,16 @@ async def _broadcast_user_input_state(app_session_id: str) -> None:
         user_input_store.pending_count_for_session,
         sid,
     )
+    # `user_input_store` sits outside `session_manager`, so it can't fire a
+    # kind through `session_manager._fire` -> `SessionWSBroadcaster.on_change`
+    # -> `_PROJECT_FACT_KINDS` (the single project-aggregate invalidation
+    # funnel). This is the one choke point every pending-input mutation
+    # (create/resolve/cancel) already routes through to reach the frontend,
+    # so it's the correct place to bump the aggregate generation directly —
+    # otherwise `waiting_for_user_count` only reflects the
+    # `blocked_on_user`/marker branches and goes stale on pending-input-only
+    # transitions.
+    _invalidate_project_aggregates()
     await coordinator.broadcast_global("session_user_input_changed", {
         "session_id": sid,
         "app_session_id": sid,

@@ -14978,6 +14978,18 @@ pre .inline-tag-highlight {
   vertical-align: middle;
 }
 
+.session-status-done {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-inline-start: 0;
+  border-radius: 50%;
+  background: var(--done, #2563eb);
+  box-shadow: 0 0 6px
+    color-mix(in srgb, var(--done, #2563eb) 65%, transparent);
+  vertical-align: middle;
+}
+
 .session-status-marker {
   display: inline-block;
   width: 8px;
@@ -15056,6 +15068,36 @@ pre .inline-tag-highlight {
   font-weight: 700;
   border-radius: 9px;
   background: var(--accent, #7b68ee);
+  color: #fff;
+}
+
+.project-status-waiting {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 6px;
+  margin-inline-start: 0;
+  font-size: calc(11px * var(--app-font-scale));
+  font-weight: 700;
+  border-radius: 9px;
+  background: var(--warning, #d29922);
+  color: #fff;
+}
+
+.project-status-errored {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 6px;
+  margin-inline-start: 0;
+  font-size: calc(11px * var(--app-font-scale));
+  font-weight: 700;
+  border-radius: 9px;
+  background: var(--error, #f85149);
   color: #fff;
 }
 
