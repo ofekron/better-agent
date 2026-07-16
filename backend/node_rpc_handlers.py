@@ -833,6 +833,17 @@ def _rpc_create_directory(params: dict) -> dict:
     return create_directory(path_str)
 
 
+def _rpc_rename_path(params: dict) -> dict:
+    old_path = params.get("old_path") or ""
+    new_path = params.get("new_path") or ""
+    _validate_path(old_path)
+    _validate_path(new_path)
+    _assert_within_cwd_roots(old_path)
+    _assert_within_cwd_roots(new_path)
+    from file_browser import rename_path
+    return rename_path(old_path, new_path)
+
+
 def _rpc_reconstruct_before_edit(params: dict) -> dict:
     path_str = params.get("file_path") or ""
     _validate_path(path_str)
@@ -1212,6 +1223,7 @@ _HANDLERS = {
     "write_file_content": _rpc_write_file_content,
     "create_file": _rpc_create_file,
     "create_directory": _rpc_create_directory,
+    "rename_path": _rpc_rename_path,
     "reconstruct_before_edit": _rpc_reconstruct_before_edit,
     "get_git_status": _rpc_get_git_status,
     "get_file_diff": _rpc_get_file_diff,

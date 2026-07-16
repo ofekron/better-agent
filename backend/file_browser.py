@@ -208,6 +208,19 @@ def create_directory(path: str) -> dict:
     return {"path": _norm(target), "type": "directory"}
 
 
+def rename_path(old_path: str, new_path: str) -> dict:
+    source = Path(old_path).expanduser().resolve()
+    target = Path(new_path).expanduser().resolve()
+    if not source.exists():
+        raise FileNotFoundError(f"Path not found: {old_path}")
+    if target.exists():
+        raise FileExistsError(f"Path already exists: {new_path}")
+    if not target.parent.is_dir():
+        raise FileNotFoundError(f"Parent directory not found: {target.parent}")
+    source.rename(target)
+    return {"path": _norm(target), "type": "directory" if target.is_dir() else "file"}
+
+
 _VALID_METHODS = ("path", "name", "symbols")
 
 # Directories that are noisy in searches but don't start with '.' — paired

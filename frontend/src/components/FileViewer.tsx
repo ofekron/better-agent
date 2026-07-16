@@ -52,6 +52,12 @@ interface Props {
    * loads (real Monaco selection); does not re-fire on user scroll. */
   select?: FileFocus | null;
   onClose: () => void;
+  /** Rename the currently open file, given just its new base name (same
+   * directory). Undefined hides the rename action. Resolves once the
+   * physical rename + panel path update both succeed; the caller keeps
+   * this same panel open pointing at the new path. Rejects on failure
+   * so the inline rename UI can surface the error. */
+  onRename?: (newName: string) => Promise<void>;
   /** Multi-machine: which node's filesystem `filePath` lives on. The
    * GET/POST /api/file calls carry this as `node_id` so file reads
    * and writes hit the correct backend. Defaults to "primary" (the
@@ -240,6 +246,7 @@ export function FileViewer({
   focus,
   select,
   onClose,
+  onRename,
   nodeId = "primary",
   onAddFileTag,
   onStartDiscussion,
@@ -257,6 +264,10 @@ export function FileViewer({
   const [latestPreview, setLatestPreview] = useState<LoadedTextFile | null>(null);
   const [hasDraft, setHasDraft] = useState(false);
   const [copiedOriginal, setCopiedOriginal] = useState(false);
+  const [renaming, setRenaming] = useState(false);
+  const [renameValue, setRenameValue] = useState("");
+  const [renamePending, setRenamePending] = useState(false);
+  const [renameError, setRenameError] = useState<string | null>(null);
   const viewport = useViewport();
   const isTouchLayout = viewport.mode !== "desktop";
   // Live text of the Monaco selection — drives the mobile "Copy selection"
@@ -448,6 +459,31 @@ export function FileViewer({
       if (dirtyRef.current) void flushDraftAt(oldPath);
     };
   }, [filePath, nodeId, t, flushDraftAt, loadOpId]);
+
+  useEffect(() => {
+    setRenaming(false);
+    setRenameError(null);
+  }, [filePath]);
+
+  const submitRename = useCallback(async () => {
+    if (!onRename || !filePath) return;
+    const trimmed = renameValue.trim();
+    const currentName = filePath.split("/").pop() || filePath;
+    if (!trimmed || trimmed.includes("/") || trimmed === currentName) {
+      setRenaming(false);
+      return;
+    }
+    setRenamePending(true);
+    setRenameError(null);
+    try {
+      await onRename(trimmed);
+      setRenaming(false);
+    } catch (e) {
+      setRenameError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setRenamePending(false);
+    }
+  }, [onRename, renameValue, filePath]);
 
   const save = useCallback(async () => {
     if (!filePath || saving) return;
@@ -1063,11 +1099,62 @@ export function FileViewer({
               View
             </button>
           )}
+          {onRename && !isDiffMode && (
+            <button
+              type="button"
+              className="btn-small"
+              onClick={() => {
+                setRenameValue(fileName);
+                setRenameError(null);
+                setRenaming(true);
+              }}
+              title={t("fileViewer.renameTitle")}
+              data-testid="file-viewer-rename"
+            >
+              {t("fileViewer.rename")}
+            </button>
+          )}
           <button className="btn-small" onClick={onClose}>
             {t("fileViewer.close")}
           </button>
         </div>
       </div>
+
+      {renaming && (
+        <div className="file-viewer-rename-bar" data-testid="file-viewer-rename-bar">
+          <input
+            type="text"
+            className="file-viewer-rename-input"
+            value={renameValue}
+            autoFocus
+            disabled={renamePending}
+            onChange={(e) => setRenameValue(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") void submitRename();
+              if (e.key === "Escape") setRenaming(false);
+            }}
+          />
+          <button
+            type="button"
+            className="btn-small"
+            onClick={() => void submitRename()}
+            disabled={renamePending || !renameValue.trim()}
+          >
+            {t("fileViewer.renameConfirm")}
+          </button>
+          <button
+            type="button"
+            className="btn-small"
+            onClick={() => setRenaming(false)}
+            disabled={renamePending}
+          >
+            {t("fileViewer.renameCancel")}
+          </button>
+          {renameError && (
+            <span className="file-viewer-rename-error">{renameError}</span>
+          )}
+        </div>
+      )}
 
       {showLatestDiff && latestPreview ? (
         <div className="file-viewer-latest-diff" data-testid="file-viewer-latest-diff">

@@ -3169,6 +3169,57 @@ function AppMain({
     [currentSession, applySessionMetadata, clientId, refreshSessions, t],
   );
 
+  /** Rename an open file panel's underlying file on disk, keeping the SAME
+   * panel id/tab open and pointing it at the new path. Physically renames
+   * first (so a collision/permission error surfaces before we touch panel
+   * state), then persists the new path via the full-list PUT (dedup-by-path
+   * add_open_file_panel would leave a stale duplicate entry for this id).
+   * Propagates failures so the inline rename UI in FileViewer can show them
+   * (unlike close/open, which are fire-and-forget). */
+  const handleRenameFilePanel = useCallback(
+    async (id: string, newName: string) => {
+      if (!currentSession) return;
+      const panels = currentSession.open_file_panels ?? [];
+      const panel = panels.find((p) => p.id === id);
+      if (!panel) return;
+      const oldPath = panel.path;
+      const lastSlash = oldPath.lastIndexOf("/");
+      const dir = lastSlash === -1 ? "" : oldPath.slice(0, lastSlash);
+      const newPath = dir ? `${dir}/${newName}` : newName;
+      if (newPath === oldPath) return;
+      const opId = `filePanel:rename:${currentSession.id}:${id}`;
+      const next = panels.map((p) => (p.id === id ? { ...p, path: newPath } : p));
+      applySessionMetadata(currentSession.id, { open_file_panels: next });
+      await runThreeStateSync({
+        operationId: opId,
+        action: t("fileViewer.rename"),
+        info: newPath,
+        reconcile: refreshSessions,
+        mutate: async () => {
+          await progressTrackedFetch(opId, `${API}/api/files/rename`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              old_path: oldPath,
+              new_path: newPath,
+              node_id: currentSession.node_id ?? "primary",
+            }),
+          });
+          return progressTrackedFetch(
+            opId,
+            `${API}/api/sessions/${currentSession.id}/file-panels`,
+            {
+              method: "PUT",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ panels: next, client_id: clientId }),
+            },
+          );
+        },
+      });
+    },
+    [currentSession, applySessionMetadata, clientId, refreshSessions, t],
+  );
+
   /** Pop a provider-config-sync capability panel into the right side
    *  panel from an inline `open_config_panel` tool widget's button.
    *  Mirrors handleOpenFilePanel: optimistic applySessionMetadata +
@@ -8567,6 +8618,7 @@ function AppMain({
                   panels={currentSession?.open_file_panels ?? []}
                   nodeId={currentSession?.node_id ?? "primary"}
                   onClosePanel={handleCloseFilePanel}
+                  onRenamePanel={handleRenameFilePanel}
                   registerEditor={registerEditor}
                   onAddFileTag={handleAddFileAnchoredTag}
                   onStartDiscussion={

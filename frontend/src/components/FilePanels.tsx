@@ -15,6 +15,10 @@ interface Props {
   /** Ask the backend to close a panel (App does the optimistic
    * applySessionMetadata + DELETE round-trip, same as inline tags). */
   onClosePanel: (id: string) => void;
+  /** Rename a panel's file given its stable id + new base name. App does
+   * the physical rename + optimistic panel path update. Undefined hides
+   * the rename action on every panel. */
+  onRenamePanel?: (id: string, newName: string) => Promise<void>;
   /** Register/deregister a panel's live editor handle so prompt-send
    * can snapshot each open file's viewport + selection. Keyed by
    * path (the stable panel identity). */
@@ -108,6 +112,7 @@ export function FilePanels({
   panels,
   nodeId = "primary",
   onClosePanel,
+  onRenamePanel,
   registerEditor,
   onAddFileTag,
   onStartDiscussion,
@@ -276,6 +281,7 @@ export function FilePanels({
             focus={panel.focus ?? panel.selection ?? undefined}
             select={panel.selection ?? null}
             onClose={() => onClosePanel(panel.id)}
+            onRename={onRenamePanel ? (newName) => onRenamePanel(panel.id, newName) : undefined}
             onAddFileTag={onAddFileTag}
             onStartDiscussion={onStartDiscussion}
             pendingTagCount={pendingTagCountFor?.(panel.path) ?? 0}

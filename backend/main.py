@@ -3010,6 +3010,20 @@ async def create_file_entry(body: dict = Body(...)):
     return await _file_op(node_id, method, {"path": path})
 
 
+@app.post("/api/files/rename")
+async def rename_file_entry(body: dict = Body(...)):
+    old_path = body.get("old_path")
+    new_path = body.get("new_path")
+    node_id = body.get("node_id") or "primary"
+    if not isinstance(old_path, str) or not old_path.strip():
+        raise HTTPException(status_code=400, detail="old_path must be a non-empty string")
+    if not isinstance(new_path, str) or not new_path.strip():
+        raise HTTPException(status_code=400, detail="new_path must be a non-empty string")
+    if not isinstance(node_id, str) or not node_id.strip():
+        raise HTTPException(status_code=400, detail="node_id must be a non-empty string")
+    return await _file_op(node_id, "rename_path", {"old_path": old_path, "new_path": new_path})
+
+
 def _require_session(session_id: str) -> dict:
     """Fetch session by id or raise 404 with the standard
     `session_not_found_retry` detail. Replaces the 2-line guard

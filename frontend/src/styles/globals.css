@@ -8722,6 +8722,36 @@ button.run-badge-clickable:focus-visible {
   text-overflow: ellipsis;
 }
 
+.file-viewer-rename-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border);
+  font-size: calc(13px * var(--app-font-scale));
+}
+
+.file-viewer-rename-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  background: var(--bg-primary);
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  color: var(--text-primary);
+  font-family: "SF Mono", "Fira Code", monospace;
+  font-size: calc(13px * var(--app-font-scale));
+  padding: 3px 6px;
+  outline: none;
+}
+
+.file-viewer-rename-error {
+  color: var(--error);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* Rendered markdown view */
 .file-viewer-markdown {
   flex: 1;
