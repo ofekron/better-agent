@@ -2035,13 +2035,20 @@ def refresh_once(
                 repeat_stats: dict[str, Any] = {}
                 projection_dirty = bool(changed or deleted)
                 projection_status = _state_get(conn, "repeat_projection_status") or ""
+                projection_has_dirty = conn.execute(
+                    "SELECT EXISTS(SELECT 1 FROM native_repeat_dirty LIMIT 1)"
+                ).fetchone()[0] == 1
                 if partial_full:
-                    if projection_dirty:
+                    if projection_has_dirty and projection_status == "ready":
+                        _state_set(conn, "repeat_projection_status", "stale_incremental")
+                    elif projection_dirty and projection_status not in {"ready", "stale_incremental"}:
                         _reset_repeat_projection(conn)
                         _state_set(conn, "repeat_projection_status", "stale")
-                elif projection_dirty and projection_status == "ready":
+                elif projection_status in {"ready", "stale_incremental"} and projection_has_dirty:
                     repeat_stats = _drain_repeat_dirty_projection(conn)
-                elif projection_dirty or projection_status != "ready":
+                elif projection_status == "stale_incremental":
+                    _state_set(conn, "repeat_projection_status", "ready")
+                elif projection_status != "ready":
                     _state_set(conn, "repeat_projection_status", "building")
                     repeat_stats = _rebuild_repeat_projection(conn)
                 phase_timings["repeat_projection_s"] = time.monotonic() - repeat_start
@@ -2506,6 +2513,10 @@ _SQL_TEXT_LIKE_FILTER_RE = re.compile(
     r"^(?:native_element_fts\.)?text\s+like\s+(?P<value>\?|"
     r"'(?:''|[^'])*'|\"(?:\"\"|[^\"])*\")$",
     re.IGNORECASE | re.DOTALL,
+)
+_SQL_REPEAT_PROJECTION_TABLE_RE = re.compile(
+    r"\b(?:native_repeat_group|native_element_repeat|native_element_repeat_best)\b",
+    re.IGNORECASE,
 )
 
 
@@ -3490,6 +3501,18 @@ def run_readonly_sql(
         require_budget("freshness")
         conn = phase("open", lambda: _connect(path, readonly=True))
         require_budget("open")
+        if _SQL_REPEAT_PROJECTION_TABLE_RE.search(sql):
+            projection_status = _state_get(conn, "repeat_projection_status") or ""
+            if projection_status != "ready":
+                result = {
+                    "error": "repeat_projection_not_ready",
+                    "error_code": "repeat_projection_not_ready",
+                    "columns": [],
+                    "rows": [],
+                    "covered": bool(freshness_state and freshness_state.get("covered")),
+                    "usable": False,
+                }
+                return result
         timings["query_concurrency"] = query_concurrency
         record_reconcile_snapshot("start")
         conn.set_progress_handler(check_deadline, _SQL_PROGRESS_OPS)

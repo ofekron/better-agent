@@ -821,6 +821,125 @@ def test_partial_full_scan_defers_repeat_projection() -> bool:
     return ok
 
 
+def test_ready_partial_full_scan_drains_dirty_repeat_buckets_incrementally() -> bool:
+    claude, codex = _setup_roots()
+    shutil.rmtree(codex, ignore_errors=True)
+    repeated = "partial repeat projection body " + "x" * 1200
+    threshold_pair = repeated + " threshold-pair"
+    project = claude / encode_cwd("/repeat-partial")
+    paths = [project / f"repeat-{i:02d}.jsonl" for i in range(10)]
+    for index, path in enumerate(paths):
+        _write_claude(path, [threshold_pair if index >= 8 else repeated])
+    idx.refresh_once(full=True)
+
+    with paths[0].open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({
+            "type": "assistant", "uuid": "append", "timestamp": "2026-01-01T00:00:00Z",
+            "message": {"role": "assistant", "content": repeated},
+        }) + "\n")
+    _write_claude(paths[1], ["replacement unique body " + "y" * 1200])
+    _write_claude(paths[2], ["truncated replacement"])
+    for index, path in enumerate(paths[3:8], start=3):
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps({
+                "type": "assistant", "uuid": f"append-{index}",
+                "timestamp": "2026-01-01T00:00:00Z",
+                "message": {"role": "assistant", "content": repeated},
+            }) + "\n")
+
+    def snapshot():
+        conn = idx._readonly_connection()
+        groups = list(conn.execute(
+            "SELECT kind,bucket_field,hash_key,subgroup_key,count,common_norm_prefix_len "
+            "FROM native_repeat_group ORDER BY kind,bucket_field,hash_key,subgroup_key"
+        ))
+        best = list(conn.execute(
+            "SELECT m.path,m.element_index,g.kind,b.raw_tail_start,b.norm_tail_start "
+            "FROM native_element_repeat_best b JOIN native_element_meta m ON m.rowid=b.rowid "
+            "JOIN native_repeat_group g ON g.group_id=b.group_id ORDER BY m.path,m.element_index"
+        ))
+        return groups, best
+
+    original_batch = idx._FULL_REFRESH_FILE_BATCH
+    original_rebuild = idx._rebuild_repeat_projection
+    original_drain = idx._drain_repeat_dirty_projection
+    calls = {"rebuild": 0, "drain": 0, "dirty_buckets": 0}
+
+    def counted_rebuild(conn):
+        calls["rebuild"] += 1
+        return original_rebuild(conn)
+
+    def counted_drain(conn):
+        calls["drain"] += 1
+        result = original_drain(conn)
+        calls["dirty_buckets"] += int(result["dirty_buckets"])
+        return result
+
+    idx._FULL_REFRESH_FILE_BATCH = 2
+    idx._rebuild_repeat_projection = counted_rebuild
+    idx._drain_repeat_dirty_projection = counted_drain
+    passes = []
+    final_elapsed = 0.0
+    reopened = False
+    stale_read_error = ""
+    try:
+        while True:
+            started = time.perf_counter()
+            result = idx.refresh_once(full=True)
+            elapsed = time.perf_counter() - started
+            passes.append(result)
+            if len(passes) == 1:
+                with idx._lock:
+                    idx._writer_conn.close()
+                    idx._writer_conn = None
+                idx._close_readonly_connection()
+                reopened = True
+                stale_read_error = str(idx.run_readonly_sql(
+                    "SELECT COUNT(*) FROM native_repeat_group"
+                ).get("error") or "")
+            if result["partial"] == 0:
+                final_elapsed = elapsed
+                break
+        paths[8].unlink()
+        delete_result = idx.refresh_once(full=False)
+        incremental = snapshot()
+        threshold_exact_groups = idx._readonly_connection().execute(
+            "SELECT COUNT(*) FROM native_repeat_group "
+            "WHERE kind='exact_text' AND count=1"
+        ).fetchone()[0]
+        surviving_kind = idx._readonly_connection().execute(
+            "SELECT g.kind FROM native_element_repeat_best b "
+            "JOIN native_element_meta m ON m.rowid=b.rowid "
+            "JOIN native_repeat_group g ON g.group_id=b.group_id WHERE m.path=?",
+            (str(paths[9]),),
+        ).fetchone()
+        dirty_remaining = idx._readonly_connection().execute(
+            "SELECT COUNT(*) FROM native_repeat_dirty"
+        ).fetchone()[0]
+    finally:
+        idx._FULL_REFRESH_FILE_BATCH = original_batch
+        idx._rebuild_repeat_projection = original_rebuild
+        idx._drain_repeat_dirty_projection = original_drain
+
+    conn = idx._writer_connection()
+    original_rebuild(conn)
+    conn.commit()
+    rebuilt = snapshot()
+    ok = (
+        len(passes) == 5 and passes[-1]["touched"] == 0 and reopened
+        and stale_read_error == "repeat_projection_not_ready"
+        and delete_result["touched"] == 1
+        and calls["rebuild"] == 0 and calls["drain"] == 2
+        and calls["dirty_buckets"] == 6 and dirty_remaining == 0
+        and threshold_exact_groups == 0 and surviving_kind == ("shared_prefix",)
+        and incremental == rebuilt and final_elapsed < 1.0
+    )
+    print(f"{OK if ok else FAIL} ready partial full scan drains repeat buckets incrementally "
+          f"(passes={len(passes)}, stale_read={stale_read_error}, delete={delete_result}, calls={calls}, "
+          f"elapsed={final_elapsed:.3f}s, parity={incremental == rebuilt})")
+    return ok
+
+
 def test_full_scan_completes_despite_live_touched_directory() -> bool:
     """Directory metadata changes must not reset positional resume."""
     claude, codex = _setup_roots()
@@ -2244,6 +2363,7 @@ def main_run() -> int:
         test_default_cold_build_batch_is_bounded,
         test_queue_empty_incomplete_full_scan_resumes,
         test_partial_full_scan_defers_repeat_projection,
+        test_ready_partial_full_scan_drains_dirty_repeat_buckets_incrementally,
         test_full_scan_completes_despite_live_touched_directory,
         test_full_scan_indexes_file_inserted_before_resume_cursor,
         test_incremental_full_scan_preserves_sibling_directories,
