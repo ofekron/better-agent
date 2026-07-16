@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import os
 import re
+import tempfile
 from pathlib import Path
 from typing import Optional, Iterable
 from urllib.parse import quote
@@ -562,20 +563,33 @@ def _migrate_session_node(node: dict) -> bool:
 
 
 def _atomic_write_tmp(path: Path, text: str) -> None:
-    """Atomic write via `.bcfile.tmp` sibling + `os.replace`. The tmp
-    is unlinked in `finally` so a crash mid-write doesn't leave debris.
+    """Durably replace a file from a unique sibling temporary. The tmp
+    is unlinked in `finally` so a failed write doesn't leave debris.
     INVARIANT: same recipe used by both migration helpers in this
     module — they must not diverge in atomicity guarantees."""
-    tmp = path.with_suffix(path.suffix + ".bcfile.tmp")
+    fd, raw_tmp = tempfile.mkstemp(
+        prefix=f".{path.name}.bcfile.", suffix=".tmp", dir=path.parent,
+    )
+    tmp = Path(raw_tmp)
     try:
-        tmp.write_text(text, encoding="utf-8")
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
         os.replace(tmp, path)
-    finally:
-        if tmp.exists():
+        try:
+            dir_fd = os.open(
+                path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+            )
             try:
-                tmp.unlink()
-            except OSError:
-                pass
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+        except OSError:
+            if os.name != "nt":
+                raise
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def _migrate_session_file(path: Path) -> bool:
@@ -634,7 +648,19 @@ def _migrate_events_jsonl(
                 out_lines.append(line)
         if not changed:
             return False
-        _atomic_write_tmp(path, "".join(out_lines))
+        before = path.stat()
+        try:
+            _atomic_write_tmp(path, "".join(out_lines))
+        except BaseException:
+            try:
+                after = path.stat()
+            except OSError:
+                after = None
+            if after is not None and (
+                after.st_dev, after.st_ino,
+            ) != (before.st_dev, before.st_ino):
+                hydration_index_store.invalidate(root_id, path)
+            raise
         hydration_index_store.invalidate(root_id, path)
         return True
 

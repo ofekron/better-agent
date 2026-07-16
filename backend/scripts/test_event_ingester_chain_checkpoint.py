@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import multiprocessing
 import os
 import shutil
 import tempfile
@@ -49,6 +50,33 @@ def _commit(ingester: EventIngester, root: str, covered: int) -> tuple[dict, Pat
     )
     assert fence is not None
     return fence, checkpoint
+
+
+def _migrate_in_process(
+    root: str, path_raw: str, cwd: str,
+    replace_entered, release_replace, invalidate_entered, release_invalidate,
+) -> None:
+    import file_ref_resolver
+    import hydration_index_store
+
+    original_atomic_write = file_ref_resolver._atomic_write_tmp
+    original_invalidate = hydration_index_store.invalidate
+
+    def gated_atomic_write(target: Path, text: str) -> None:
+        replace_entered.set()
+        assert release_replace.wait(5)
+        original_atomic_write(target, text)
+
+    def gated_invalidate(root_id: str, journal: Path) -> None:
+        invalidate_entered.set()
+        assert release_invalidate.wait(5)
+        original_invalidate(root_id, journal)
+
+    file_ref_resolver._atomic_write_tmp = gated_atomic_write
+    hydration_index_store.invalidate = gated_invalidate
+    assert file_ref_resolver._migrate_events_jsonl(
+        root, Path(path_raw), cwd,
+    )
 
 
 def test_append_prefix_and_tail_only_restore() -> None:
@@ -164,55 +192,67 @@ def test_cached_handle_does_not_append_to_replaced_inode() -> None:
     ingester.close(root)
 
 
-def test_bcfile_migration_serializes_with_live_append() -> None:
+def test_bcfile_migration_serializes_cross_process_live_append() -> None:
     import file_ref_resolver
 
     root = "migration-live-append"
     ingester = EventIngester()
     referenced = ingester._root_dir(root) / "referenced.py"
     referenced.parent.mkdir(parents=True, exist_ok=True)
-    _append(ingester, root, "u1", str(referenced))
+    path = ingester._events_path(root)
+    path.write_text(json.dumps({
+        "seq": 1, "ts": "2026-01-01T00:00:00+00:00", "sid": root,
+        "type": "agent_message", "source": "test", "msg_id": "msg",
+        "data": {
+            "uuid": "u1",
+            "message": {"content": [{"type": "text", "text": str(referenced)}]},
+        },
+    }) + "\n", encoding="utf-8")
     referenced.touch()
     file_ref_resolver._cache.invalidate_path(str(referenced))
-    path = ingester._events_path(root)
-    replace_entered = threading.Event()
-    release_replace = threading.Event()
+    context = multiprocessing.get_context("fork")
+    replace_entered = context.Event()
+    release_replace = context.Event()
+    invalidate_entered = context.Event()
+    release_invalidate = context.Event()
     append_started = threading.Event()
     append_done = threading.Event()
-    original_atomic_write = file_ref_resolver._atomic_write_tmp
-
-    def gated_atomic_write(target: Path, text: str) -> None:
-        replace_entered.set()
-        assert release_replace.wait(5)
-        original_atomic_write(target, text)
-
-    def migrate() -> None:
-        assert file_ref_resolver._migrate_events_jsonl(root, path, str(path.parent))
 
     def append() -> None:
         append_started.set()
         assert _append(ingester, root, "u2", "after migration") == 2
         append_done.set()
 
-    file_ref_resolver._atomic_write_tmp = gated_atomic_write
-    migration_thread = threading.Thread(target=migrate)
+    migration_process = context.Process(
+        target=_migrate_in_process,
+        args=(
+            root, str(path), str(path.parent), replace_entered, release_replace,
+            invalidate_entered, release_invalidate,
+        ),
+    )
     append_thread = threading.Thread(target=append)
     try:
-        migration_thread.start()
+        migration_process.start()
         assert replace_entered.wait(5)
         append_thread.start()
         assert append_started.wait(5)
         time.sleep(0.02)
         assert not append_done.is_set()
         release_replace.set()
-        migration_thread.join(5)
+        assert invalidate_entered.wait(5)
+        assert not append_done.is_set()
+        release_invalidate.set()
+        migration_process.join(5)
         append_thread.join(5)
-        assert not migration_thread.is_alive()
+        assert migration_process.exitcode == 0
         assert not append_thread.is_alive()
     finally:
         release_replace.set()
-        file_ref_resolver._atomic_write_tmp = original_atomic_write
-        migration_thread.join(5)
+        release_invalidate.set()
+        migration_process.join(5)
+        if migration_process.is_alive():
+            migration_process.terminate()
+            migration_process.join(5)
         if append_thread.ident is not None:
             append_thread.join(5)
 
@@ -225,6 +265,130 @@ def test_bcfile_migration_serializes_with_live_append() -> None:
     assert meta["seq"] == 3
     assert meta["size"] == path.stat().st_size
     assert meta["digest"] == _manual_digest(path, 3)
+
+
+def test_bcfile_migration_durability_order_and_failure() -> None:
+    import file_ref_resolver
+    import hydration_index_store
+
+    root = "migration-durability-order"
+    ingester = EventIngester()
+    referenced = ingester._root_dir(root) / "referenced.py"
+    referenced.parent.mkdir(parents=True, exist_ok=True)
+    _append(ingester, root, "u1", str(referenced))
+    ingester.close_all()
+    referenced.touch()
+    file_ref_resolver._cache.invalidate_path(str(referenced))
+    path = ingester._events_path(root)
+    order: list[str] = []
+    original_fsync = os.fsync
+    original_replace = os.replace
+    original_invalidate = hydration_index_store.invalidate
+
+    def observed_fsync(fd: int) -> None:
+        order.append("fsync")
+        original_fsync(fd)
+
+    def observed_replace(source, target) -> None:
+        source_path = Path(source)
+        assert source_path != path
+        assert source_path.parent == path.parent
+        assert source_path.name.startswith(f".{path.name}.bcfile.")
+        assert source_path.stat().st_mode & 0o777 == 0o600
+        order.append("replace")
+        original_replace(source, target)
+
+    def observed_invalidate(root_id: str, journal: Path) -> None:
+        assert root_id == root and journal == path
+        order.append("invalidate")
+        original_invalidate(root_id, journal)
+
+    os.fsync = observed_fsync
+    os.replace = observed_replace
+    hydration_index_store.invalidate = observed_invalidate
+    try:
+        assert file_ref_resolver._migrate_events_jsonl(root, path, str(path.parent))
+    finally:
+        os.fsync = original_fsync
+        os.replace = original_replace
+        hydration_index_store.invalidate = original_invalidate
+    assert order == ["fsync", "replace", "fsync", "invalidate"], order
+
+    direct = path.parent / "direct-fault.txt"
+    direct.write_text("old", encoding="utf-8")
+    prefix = f".{direct.name}.bcfile."
+    fsync_calls = 0
+
+    def fail_file_fsync(fd: int) -> None:
+        nonlocal fsync_calls
+        fsync_calls += 1
+        raise OSError("injected file fsync failure")
+
+    os.fsync = fail_file_fsync
+    try:
+        try:
+            file_ref_resolver._atomic_write_tmp(direct, "new")
+        except OSError as exc:
+            assert "injected file fsync failure" in str(exc)
+        else:
+            raise AssertionError("file fsync failure was swallowed")
+    finally:
+        os.fsync = original_fsync
+    assert direct.read_text(encoding="utf-8") == "old"
+    assert not any(item.name.startswith(prefix) for item in direct.parent.iterdir())
+
+    def fail_replace(_source, _target) -> None:
+        raise OSError("injected replace failure")
+
+    os.replace = fail_replace
+    try:
+        try:
+            file_ref_resolver._atomic_write_tmp(direct, "new")
+        except OSError as exc:
+            assert "injected replace failure" in str(exc)
+        else:
+            raise AssertionError("replace failure was swallowed")
+    finally:
+        os.replace = original_replace
+    assert direct.read_text(encoding="utf-8") == "old"
+    assert not any(item.name.startswith(prefix) for item in direct.parent.iterdir())
+
+    second = ingester._root_dir(root) / "second.py"
+    _append(ingester, root, "u2", str(second))
+    ingester.close_all()
+    second.touch()
+    file_ref_resolver._cache.invalidate_path(str(second))
+    invalidated = False
+    fsync_count = 0
+
+    def fail_directory_fsync(fd: int) -> None:
+        nonlocal fsync_count
+        fsync_count += 1
+        if fsync_count == 2:
+            raise OSError("injected directory fsync failure")
+        original_fsync(fd)
+
+    def observed_failure_invalidate(root_id: str, journal: Path) -> None:
+        nonlocal invalidated
+        invalidated = True
+        original_invalidate(root_id, journal)
+
+    os.fsync = fail_directory_fsync
+    hydration_index_store.invalidate = observed_failure_invalidate
+    try:
+        try:
+            file_ref_resolver._migrate_events_jsonl(root, path, str(path.parent))
+        except OSError as exc:
+            assert "injected directory fsync failure" in str(exc)
+        else:
+            raise AssertionError("directory fsync failure was swallowed")
+    finally:
+        os.fsync = original_fsync
+        hydration_index_store.invalidate = original_invalidate
+    assert invalidated
+    assert not hydration_index_store._db_path(root).exists()
+    offsets, _ = hydration_index_store.load(root, path)
+    assert len(offsets[root]) == 2 and offsets[root][0] == 0
 
 
 def test_sparse_memory_bounded_tail_and_no_caller_fsync() -> None:
@@ -269,12 +433,26 @@ def test_append_during_background_fsync_keeps_new_epoch_dirty() -> None:
     ingester = EventIngester()
     entered = threading.Event()
     release = threading.Event()
+    second_entered = threading.Event()
+    second_release = threading.Event()
     original_fsync = os.fsync
+    journal_fsyncs = 0
 
     def gated_fsync(fd: int) -> None:
-        if threading.current_thread().name == "event-ingester-fsync" and not entered.is_set():
-            entered.set()
-            assert release.wait(5)
+        nonlocal journal_fsyncs
+        if threading.current_thread().name == "event-ingester-fsync":
+            try:
+                is_journal = os.fstat(fd).st_ino == ingester._events_path(root).stat().st_ino
+            except OSError:
+                is_journal = False
+            if is_journal:
+                journal_fsyncs += 1
+                if journal_fsyncs == 1:
+                    entered.set()
+                    assert release.wait(5)
+                elif journal_fsyncs == 2:
+                    second_entered.set()
+                    assert second_release.wait(5)
         original_fsync(fd)
 
     os.fsync = gated_fsync
@@ -294,10 +472,12 @@ def test_append_during_background_fsync_keeps_new_epoch_dirty() -> None:
         release.set()
         thread.join(5)
         assert append_done.is_set()
+        assert second_entered.wait(5)
         with ingester._fsync_cond:
             assert root in ingester._fsync_dirty
     finally:
         release.set()
+        second_release.set()
         os.fsync = original_fsync
     ingester.close_all()
     meta = json.loads(ingester._event_chain_path(root).read_text())
@@ -424,7 +604,8 @@ def main() -> None:
         test_cached_handle_does_not_append_to_replaced_inode()
         test_sparse_memory_bounded_tail_and_no_caller_fsync()
         test_append_during_background_fsync_keeps_new_epoch_dirty()
-        test_bcfile_migration_serializes_with_live_append()
+        test_bcfile_migration_serializes_cross_process_live_append()
+        test_bcfile_migration_durability_order_and_failure()
         test_cold_sparse_read_seeks_from_validated_ladder()
         test_corrupt_sparse_ladder_fails_closed_and_rebuilds()
         test_corrupt_cold_checkpoint_rebuild_has_bounded_projection_memory()
