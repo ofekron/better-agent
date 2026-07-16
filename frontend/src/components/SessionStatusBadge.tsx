@@ -41,7 +41,15 @@ export function SessionStatusBadge({
     ([, m]) => m?.tag !== ALL_TASKS_DONE_TAG,
   );
   const awaitingApproval = monitoring_state === "blocked_on_user";
-  const waitingOnBackground = monitoring_state === "waiting_on_background";
+  // Same calm treatment as the running pulse, mirrored: a transient
+  // active→waiting_on_background→active broadcast during a queued-prompt
+  // drain must not blink the pulse color/title, so the background style
+  // swaps IN after 100ms and swaps OUT instantly.
+  const waitingOnBackground = useDebouncedFlag(
+    monitoring_state === "waiting_on_background",
+    100,
+    false,
+  );
   const awaitingUserInput = pending_user_input_count > 0;
 
   if (
@@ -152,18 +160,24 @@ export function SessionStatusBadge({
   );
 }
 
-/** Two-cycle debounce: a flip from false→true settles on the next tick
- * (we WANT the pulse to appear as soon as a turn starts), but a flip
- * from true→false waits `delayMs` so a same-tick turn_start→turn_complete
- * burst doesn't visibly thrash. */
-function useDebouncedFlag(value: boolean, delayMs: number): boolean {
+/** Asymmetric debounce: a flip TO `instantValue` settles on the next tick,
+ * a flip away from it waits `delayMs`. With the default `instantValue=true`
+ * the pulse appears as soon as a turn starts but a same-tick
+ * turn_start→turn_complete burst doesn't visibly thrash; with
+ * `instantValue=false` a transient true blip (e.g. a mid-drain
+ * waiting_on_background broadcast) is suppressed while clearing is instant. */
+function useDebouncedFlag(
+  value: boolean,
+  delayMs: number,
+  instantValue = true,
+): boolean {
   const [debounced, setDebounced] = useState(value);
   useEffect(() => {
     const id = window.setTimeout(
       () => setDebounced(value),
-      value ? 0 : delayMs,
+      value === instantValue ? 0 : delayMs,
     );
     return () => window.clearTimeout(id);
-  }, [value, delayMs]);
+  }, [value, delayMs, instantValue]);
   return debounced;
 }
