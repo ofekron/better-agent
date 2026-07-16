@@ -7,6 +7,7 @@ const EXTENSION_PERFORMANCE_EVENT = "better-agent:extension-performance";
 const PERFORMANCE_INCIDENT_EVENT = "better-agent:performance-incident";
 const DEFAULT_SLOW_TIMING_MS = 250;
 const MAIN_THREAD_BLOCKED_MS = 80;
+const MAX_LONG_FRAME_SCRIPTS = 5;
 // Resolved at CALL time, not module load: capturing `fetch` once here
 // would permanently pin whatever implementation was installed at first
 // import, defeating any later `globalThis.fetch` reassignment (the
@@ -258,6 +259,76 @@ function installMainThreadBlockLogger(): void {
     observer.observe({ entryTypes: ["longtask"] });
   } catch {
     // Browser support varies; absence of longtask support should not affect boot.
+  }
+  installLongAnimationFrameLogger(PerformanceObserverCtor);
+}
+
+type LongFrameScript = {
+  duration?: number;
+  forcedStyleAndLayoutDuration?: number;
+  sourceURL?: string;
+  functionName?: string;
+  invokerType?: string;
+};
+
+type LongFrameEntry = PerformanceEntry & {
+  blockingDuration?: number;
+  renderStart?: number;
+  styleAndLayoutStart?: number;
+  scripts?: LongFrameScript[];
+};
+
+function safeScriptSource(source: string | undefined): string {
+  if (!source) return "unknown";
+  try {
+    const url = new URL(source, window.location.href);
+    if (url.origin === window.location.origin) return url.pathname.slice(0, 240);
+    return url.origin.slice(0, 160);
+  } catch {
+    return "unknown";
+  }
+}
+
+function safeLabel(value: string | undefined): string {
+  return String(value || "unknown").replace(/[^a-zA-Z0-9_$.:<> -]/g, "_").slice(0, 120);
+}
+
+function installLongAnimationFrameLogger(
+  PerformanceObserverCtor: typeof PerformanceObserver,
+): void {
+  try {
+    const observer = new PerformanceObserverCtor((list) => {
+      for (const rawEntry of list.getEntries()) {
+        const entry = rawEntry as LongFrameEntry;
+        const durationMs = Math.round(entry.duration * 10) / 10;
+        if (durationMs < MAIN_THREAD_BLOCKED_MS) continue;
+        const scripts = [...(entry.scripts || [])]
+          .sort((left, right) => (right.duration || 0) - (left.duration || 0))
+          .slice(0, MAX_LONG_FRAME_SCRIPTS)
+          .map((script) => ({
+            duration_ms: Math.round((script.duration || 0) * 10) / 10,
+            forced_style_layout_ms: Math.round((script.forcedStyleAndLayoutDuration || 0) * 10) / 10,
+            source: safeScriptSource(script.sourceURL),
+            function: safeLabel(script.functionName),
+            invoker: safeLabel(script.invokerType),
+          }));
+        logDurable("main-thread", "long-animation-frame", {
+          start_time: Math.round(entry.startTime * 10) / 10,
+          duration_ms: durationMs,
+          blocking_duration_ms: Math.round((entry.blockingDuration || 0) * 10) / 10,
+          render_delay_ms: entry.renderStart
+            ? Math.round((entry.renderStart - entry.startTime) * 10) / 10
+            : 0,
+          style_layout_delay_ms: entry.styleAndLayoutStart && entry.renderStart
+            ? Math.round((entry.styleAndLayoutStart - entry.renderStart) * 10) / 10
+            : 0,
+          scripts,
+        });
+      }
+    });
+    observer.observe({ entryTypes: ["long-animation-frame"] });
+  } catch {
+    // Chromium versions without LoAF attribution keep the long-task diagnostic.
   }
 }
 
