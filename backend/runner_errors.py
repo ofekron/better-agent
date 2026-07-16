@@ -95,6 +95,15 @@ _PROVIDER_RULES: dict[str, tuple[_Rule, ...]] = {
         ),
     ),
     "kimi": (),
+    "grok": (
+        _rule(
+            CATEGORY_AUTH,
+            r"not signed in",
+            "Grok CLI is not authenticated. Run `grok login --device-code` "
+            "or set XAI_API_KEY, then retry.",
+        ),
+        _rule(CATEGORY_SESSION_LOST, r"session does not exist"),
+    ),
     "amp": (
         _rule(
             CATEGORY_AUTH,

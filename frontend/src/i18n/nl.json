@@ -203,6 +203,8 @@
   "setup.templateAmpBlurb": "Sourcegraph's coding-agent-CLI. Headless (execute) modus vereist betaalde Amp-credits; log in met `amp login`.",
   "setup.templateOpencodeLabel": "OpenCode",
   "setup.templateOpencodeBlurb": "Open-source multi-provider coding-agent. Werkt direct met gratis modellen; koppel providers via `opencode auth login`.",
+  "setup.templateGrokLabel": "Grok Build",
+  "setup.templateGrokBlurb": "xAI's Grok Build CLI — log in met `grok login` of stel XAI_API_KEY in.",
   "setup.templateOllamaLabel": "Ollama",
   "setup.templateOllamaBlurb": "Lokale Anthropic-compatibele modellen via Claude Code.",
   "setup.templateZaiLabel": "Z.AI (Claude)",

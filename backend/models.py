@@ -426,6 +426,9 @@ def _resolve_refresh_fetch(rec: dict) -> Optional[Callable[[], list[str]]]:
     if kind == "opencode":
         from provider_opencode import fetch_opencode_models
         return fetch_opencode_models
+    if kind == "grok":
+        from provider_grok import fetch_grok_models
+        return fetch_grok_models
     return None
 
 
@@ -482,6 +485,9 @@ def _static_cold_start(provider: dict) -> list[str]:
     if kind == "opencode":
         from provider_opencode import OPENCODE_MODELS
         return list(OPENCODE_MODELS)
+    if kind == "grok":
+        from provider_grok import GROK_MODELS
+        return list(GROK_MODELS)
     if kind == "claude" and provider.get("mode", "subscription") == "subscription":
         return list(_SUBSCRIPTION_ALIASES)
     return []

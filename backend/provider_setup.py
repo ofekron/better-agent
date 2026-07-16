@@ -37,6 +37,10 @@ _AGY_INSTALL_SH = "https://antigravity.google/cli/install.sh"
 _AGY_INSTALL_PS1 = "https://antigravity.google/cli/install.ps1"
 _AGY_INSTALL_SH_SHA256 = "ee1ea43ce4e9e56356c4ab6dad907ef357ae4bdfcaadb682735909fb57c9c640"
 _AGY_INSTALL_PS1_SHA256 = "51c2cb4fada22ce0228da71b9506370383d6544bfebcec85fe7616a52b805344"
+_GROK_INSTALL_SH = "https://x.ai/cli/install.sh"
+_GROK_INSTALL_PS1 = "https://x.ai/cli/install.ps1"
+_GROK_INSTALL_SH_SHA256 = "5b74aa23e096d798a28a526c57daf5506eb2597de73ab7c37f742db20fcdbfb7"
+_GROK_INSTALL_PS1_SHA256 = "9e995d8d6adaa425fd52ad89b5281d6d4d9076c1835d6cc65a666ec89288d5b6"
 
 
 def _node_prerequisite_install_argv() -> tuple[str, ...]:
@@ -121,6 +125,37 @@ def _copilot_installer() -> ProviderInstaller:
     )
 
 
+def _grok_installer() -> ProviderInstaller:
+    if sys.platform == "win32":
+        return ProviderInstaller(
+            kind="grok",
+            label="Grok Build",
+            command="grok",
+            install_argv=(
+                "powershell",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                _INSTALLER_SCRIPT_ARG,
+            ),
+            verify_argv=("grok", "--version"),
+            prerequisite_argv=("powershell", "-NoProfile", "-Command", "$PSVersionTable.PSVersion"),
+            install_script_url=_GROK_INSTALL_PS1,
+            install_script_sha256=_GROK_INSTALL_PS1_SHA256,
+        )
+    return ProviderInstaller(
+        kind="grok",
+        label="Grok Build",
+        command="grok",
+        install_argv=("bash", _INSTALLER_SCRIPT_ARG),
+        verify_argv=("grok", "--version"),
+        prerequisite_argv=("bash", "--version"),
+        install_script_url=_GROK_INSTALL_SH,
+        install_script_sha256=_GROK_INSTALL_SH_SHA256,
+    )
+
+
 INSTALLERS: dict[str, ProviderInstaller] = {
     "claude": ProviderInstaller(
         kind="claude",
@@ -178,6 +213,7 @@ INSTALLERS: dict[str, ProviderInstaller] = {
         prerequisite_argv=("npm", "--version"),
         prerequisite_install_argv=_node_prerequisite_install_argv(),
     ),
+    "grok": _grok_installer(),
 }
 
 
@@ -579,7 +615,9 @@ async def _terminate_process(proc: asyncio.subprocess.Process) -> None:
 
 
 async def _run_installer_script(installer: ProviderInstaller, timeout: int) -> dict[str, Any]:
-    if installer.install_script_url not in {_AGY_INSTALL_SH, _AGY_INSTALL_PS1}:
+    if installer.install_script_url not in {
+        _AGY_INSTALL_SH, _AGY_INSTALL_PS1, _GROK_INSTALL_SH, _GROK_INSTALL_PS1,
+    }:
         return {
             "ok": False,
             "stdout": "",
@@ -621,7 +659,9 @@ async def _run_installer_script_streaming(
 ) -> dict[str, Any]:
     """Streaming counterpart of `_run_installer_script`: downloads the
     allowlisted, hash-pinned script, then streams its output."""
-    if installer.install_script_url not in {_AGY_INSTALL_SH, _AGY_INSTALL_PS1}:
+    if installer.install_script_url not in {
+        _AGY_INSTALL_SH, _AGY_INSTALL_PS1, _GROK_INSTALL_SH, _GROK_INSTALL_PS1,
+    }:
         return {"ok": False, "returncode": 126, "stderr": "installer URL is not allowlisted"}
     if not installer.install_script_sha256:
         return {"ok": False, "returncode": 126, "stderr": "installer hash is not pinned"}

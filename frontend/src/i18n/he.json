@@ -202,6 +202,8 @@
   "setup.templateAmpBlurb": "‏CLI של סוכן הקוד של Sourcegraph. מצב ללא ממשק (execute) דורש קרדיטים בתשלום; התחברות עם `amp login`.",
   "setup.templateOpencodeLabel": "OpenCode",
   "setup.templateOpencodeBlurb": "סוכן קוד רב-ספקים בקוד פתוח. עובד מיידית עם מודלים חינמיים; חיבור ספקים דרך `opencode auth login`.",
+  "setup.templateGrokLabel": "Grok Build",
+  "setup.templateGrokBlurb": "‏CLI של Grok Build מבית xAI — התחברות עם `grok login` או הגדרת XAI_API_KEY.",
   "setup.templateOllamaLabel": "Ollama",
   "setup.templateOllamaBlurb": "מודלים מקומיים תואמי Anthropic דרך Claude Code.",
   "setup.templateZaiLabel": "Z.AI (Claude)",

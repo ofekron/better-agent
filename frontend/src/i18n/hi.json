@@ -203,6 +203,8 @@
   "setup.templateAmpBlurb": "Sourcegraph का कोडिंग एजेंट CLI। हेडलेस (execute) मोड के लिए सशुल्क Amp क्रेडिट चाहिए; `amp login` से साइन इन करें।",
   "setup.templateOpencodeLabel": "OpenCode",
   "setup.templateOpencodeBlurb": "ओपन-सोर्स मल्टी-प्रोवाइडर कोडिंग एजेंट। मुफ़्त मॉडलों के साथ तुरंत काम करता है; `opencode auth login` से प्रोवाइडर जोड़ें।",
+  "setup.templateGrokLabel": "Grok Build",
+  "setup.templateGrokBlurb": "xAI का Grok Build CLI — `grok login` से साइन इन करें या XAI_API_KEY सेट करें।",
   "setup.templateOllamaLabel": "Ollama",
   "setup.templateOllamaBlurb": "Claude Code के माध्यम से स्थानीय Anthropic-संगत मॉडल।",
   "setup.templateZaiLabel": "Z.AI (Claude)",

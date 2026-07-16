@@ -203,6 +203,8 @@
   "setup.templateAmpBlurb": "‏CLI وكيل البرمجة من Sourcegraph. الوضع بدون واجهة (execute) يتطلب أرصدة مدفوعة؛ سجّل الدخول عبر `amp login`.",
   "setup.templateOpencodeLabel": "OpenCode",
   "setup.templateOpencodeBlurb": "وكيل برمجة مفتوح المصدر متعدد المزوّدين. يعمل فورًا مع نماذج مجانية؛ اربط المزوّدين عبر `opencode auth login`.",
+  "setup.templateGrokLabel": "Grok Build",
+  "setup.templateGrokBlurb": "‏CLI الخاص بـ Grok Build من xAI — سجّل الدخول عبر `grok login` أو عيّن XAI_API_KEY.",
   "setup.templateOllamaLabel": "Ollama",
   "setup.templateOllamaBlurb": "نماذج محلية متوافقة مع Anthropic عبر Claude Code.",
   "setup.templateZaiLabel": "Z.AI (Claude)",

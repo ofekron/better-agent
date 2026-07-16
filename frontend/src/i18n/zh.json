@@ -203,6 +203,8 @@
   "setup.templateAmpBlurb": "Sourcegraph 的编码代理 CLI。无界面（execute）模式需要付费 Amp 额度；使用 `amp login` 登录。",
   "setup.templateOpencodeLabel": "OpenCode",
   "setup.templateOpencodeBlurb": "开源多提供商编码代理。开箱即用免费模型；通过 `opencode auth login` 连接提供商。",
+  "setup.templateGrokLabel": "Grok Build",
+  "setup.templateGrokBlurb": "xAI 的 Grok Build CLI — 使用 `grok login` 登录或设置 XAI_API_KEY。",
   "setup.templateOllamaLabel": "Ollama",
   "setup.templateOllamaBlurb": "通过 Claude Code 使用本地 Anthropic 兼容模型。",
   "setup.templateZaiLabel": "Z.AI (Claude)",

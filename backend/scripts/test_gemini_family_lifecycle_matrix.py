@@ -23,6 +23,7 @@ from provider_amp import AmpProvider
 from provider_copilot import CopilotProvider
 from provider_cursor import CursorProvider
 from provider_gemini import GeminiProvider, RunState
+from provider_grok import GrokProvider
 from provider_kimi import KimiProvider
 from provider_lifecycle import RunLifecycleCoordinator
 from provider_opencode import OpencodeProvider
@@ -35,7 +36,7 @@ FAMILY = (
     ("gemini", GeminiProvider), ("agy", AgyProvider), ("amp", AmpProvider),
     ("copilot", CopilotProvider), ("cursor", CursorProvider),
     ("kimi", KimiProvider), ("opencode", OpencodeProvider),
-    ("pi", PiProvider), ("qwen", QwenProvider),
+    ("pi", PiProvider), ("qwen", QwenProvider), ("grok", GrokProvider),
 )
 
 

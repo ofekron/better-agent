@@ -1,7 +1,9 @@
 """Tests for runner_errors — the consolidated provider-runner error
 classification table — and the resume session-loss guard wired into the
 pi / qwen / cursor / amp / opencode runners (kimi's stream reports no
-session id, so it has no guard).
+session id, so it has no guard; grok's `-r`/`error` semantics fail the
+CLI process outright on a bad resume rather than silently reporting a
+different session id, so it has no guard either).
 
 Run:
     cd backend && .venv/bin/python scripts/test_runner_errors.py
@@ -80,6 +82,16 @@ def test_amp_rules() -> bool:
     return (
         auth is not None and auth.category == CATEGORY_AUTH
         and quota is not None and quota.category == CATEGORY_QUOTA_RATE_LIMIT
+    )
+
+
+def test_grok_rules() -> bool:
+    auth = classify("grok", "Not signed in. To authenticate without a browser, run:")
+    session_lost = classify("grok", "Error: Session does not exist")
+    return (
+        auth is not None and auth.category == CATEGORY_AUTH
+        and "XAI_API_KEY" in auth.message
+        and session_lost is not None and session_lost.category == CATEGORY_SESSION_LOST
     )
 
 
@@ -298,6 +310,7 @@ TESTS = [
     ("qwen_auth_rule", test_qwen_auth_rule),
     ("cursor_auth_rule", test_cursor_auth_rule),
     ("amp_rules", test_amp_rules),
+    ("grok_rules", test_grok_rules),
     ("common_rules_apply_to_kimi_and_opencode", test_common_rules_apply_to_kimi_and_opencode),
     ("first_match_wins_provider_before_common", test_first_match_wins_provider_before_common),
     ("matched_line_and_message_fallback", test_matched_line_and_message_fallback),

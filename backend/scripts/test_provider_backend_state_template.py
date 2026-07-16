@@ -12,6 +12,7 @@ from provider_copilot import CopilotProvider
 from provider_cursor import CursorProvider
 from provider_fugu import FuguProvider
 from provider_gemini import GeminiProvider
+from provider_grok import GrokProvider
 from provider_kimi import KimiProvider
 from provider_opencode import OpencodeProvider
 from provider_openai import OPENAI_INGESTION_VERSION, OpenAIProvider
@@ -135,6 +136,7 @@ def test_template_method_is_final() -> None:
         CopilotProvider,
         CursorProvider,
         FuguProvider,
+        GrokProvider,
         KimiProvider,
         OpencodeProvider,
         PiProvider,
@@ -253,6 +255,7 @@ def test_inherited_families_reuse_parent_hooks() -> None:
         AmpProvider,
         CopilotProvider,
         CursorProvider,
+        GrokProvider,
         KimiProvider,
         OpencodeProvider,
         PiProvider,

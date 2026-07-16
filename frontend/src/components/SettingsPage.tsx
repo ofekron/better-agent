@@ -92,8 +92,8 @@ type View =
   | { kind: "wizard-form"; templateId: TemplateId }
   | { kind: "mobile" };
 
-type TemplateId = "claude" | "codex" | "copilot" | "agy" | "fugu" | "pi" | "qwen" | "cursor" | "kimi" | "amp" | "opencode" | "sakana" | "meta-muse" | "ollama" | "zai" | "zai-openai" | "custom" | "custom-openai";
-type InstallableProviderKind = "claude" | "codex" | "gemini" | "agy" | "copilot" | "pi" | "qwen" | "amp" | "opencode";
+type TemplateId = "claude" | "codex" | "copilot" | "agy" | "fugu" | "pi" | "qwen" | "cursor" | "kimi" | "amp" | "opencode" | "grok" | "sakana" | "meta-muse" | "ollama" | "zai" | "zai-openai" | "custom" | "custom-openai";
+type InstallableProviderKind = "claude" | "codex" | "gemini" | "agy" | "copilot" | "pi" | "qwen" | "amp" | "opencode" | "grok";
 type SettingsSection =
   | "providers"
   | "account"
@@ -364,6 +364,20 @@ const TEMPLATES: Template[] = [
       base_url: "",
       config_dir: "",
       default_model: "opencode/big-pickle",
+      default_reasoning_effort: "",
+    },
+  },
+  {
+    id: "grok",
+    label: "Grok Build",
+    blurb: "xAI's Grok Build CLI — sign in with `grok login` or set XAI_API_KEY.",
+    defaults: {
+      name: "Grok Build",
+      kind: "grok",
+      mode: "subscription",
+      base_url: "",
+      config_dir: "",
+      default_model: "grok-build",
       default_reasoning_effort: "",
     },
   },
@@ -3006,6 +3020,7 @@ function WizardTemplates({
     kimi: { labelKey: "setup.templateKimiLabel", blurbKey: "setup.templateKimiBlurb" },
     amp: { labelKey: "setup.templateAmpLabel", blurbKey: "setup.templateAmpBlurb" },
     opencode: { labelKey: "setup.templateOpencodeLabel", blurbKey: "setup.templateOpencodeBlurb" },
+    grok: { labelKey: "setup.templateGrokLabel", blurbKey: "setup.templateGrokBlurb" },
     sakana: { labelKey: "setup.templateSakanaLabel", blurbKey: "setup.templateSakanaBlurb" },
     "meta-muse": { labelKey: "setup.templateMetaMuseLabel", blurbKey: "setup.templateMetaMuseBlurb" },
     ollama: { labelKey: "setup.templateOllamaLabel", blurbKey: "setup.templateOllamaBlurb" },

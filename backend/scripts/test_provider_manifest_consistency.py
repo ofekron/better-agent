@@ -59,7 +59,7 @@ def test_recovery_families():
     # currently uses the claude reader (pre-existing, flagged in the manifest).
     assert pm.gemini_family_kinds() == frozenset({
         "gemini", "agy", "copilot", "openai",
-        "pi", "qwen", "cursor", "kimi", "amp", "opencode",
+        "pi", "qwen", "cursor", "kimi", "amp", "opencode", "grok",
     })
     assert {k for k, s in pm.SPECS.items() if s.recovery_family == "codex"} == {"codex"}
     assert pm.spec_for("fugu").recovery_family == "claude"

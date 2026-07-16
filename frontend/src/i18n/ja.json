@@ -203,6 +203,8 @@
   "setup.templateAmpBlurb": "Sourcegraph のコーディングエージェント CLI。ヘッドレス（execute）モードには有料の Amp クレジットが必要。`amp login` でサインイン。",
   "setup.templateOpencodeLabel": "OpenCode",
   "setup.templateOpencodeBlurb": "オープンソースのマルチプロバイダー・コーディングエージェント。無料モデルですぐ使え、`opencode auth login` でプロバイダーを接続。",
+  "setup.templateGrokLabel": "Grok Build",
+  "setup.templateGrokBlurb": "xAI の Grok Build CLI。`grok login` でサインインするか XAI_API_KEY を設定。",
   "setup.templateOllamaLabel": "Ollama",
   "setup.templateOllamaBlurb": "Claude Code 経由の Anthropic 互換ローカルモデル。",
   "setup.templateZaiLabel": "Z.AI（Claude）",

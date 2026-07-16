@@ -149,6 +149,15 @@ SPECS: dict[str, ProviderSpec] = {
         installable=True, hosts_ui_mcp=True,
         context_continuation=False, uses_claude_env=False,
     ),
+    "grok": ProviderSpec(
+        kind="grok", module="provider_grok", cls="GrokProvider",
+        runner_module="runner_grok", recovery_family="gemini",
+        # curl|bash (macOS/Linux) and PowerShell irm|iex (Windows) installers,
+        # both with a verified path — unlike kimi/cursor (curl|bash only, no
+        # verified Windows path), grok is wizard-installable on both.
+        installable=True, hosts_ui_mcp=True,
+        context_continuation=False, uses_claude_env=False,
+    ),
     "claude-remote": ProviderSpec(
         kind="claude-remote", module="provider_remote", cls="RemoteProviderProxy",
         runner_module=None, recovery_family="claude",

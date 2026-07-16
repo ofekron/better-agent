@@ -203,6 +203,8 @@
   "setup.templateAmpBlurb": "CLI-агент для кода от Sourcegraph. Headless-режим (execute) требует платных кредитов Amp; вход через `amp login`.",
   "setup.templateOpencodeLabel": "OpenCode",
   "setup.templateOpencodeBlurb": "Open-source агент для кода с поддержкой многих провайдеров. Сразу работает с бесплатными моделями; подключайте провайдеров через `opencode auth login`.",
+  "setup.templateGrokLabel": "Grok Build",
+  "setup.templateGrokBlurb": "CLI Grok Build от xAI — войдите через `grok login` или укажите XAI_API_KEY.",
   "setup.templateOllamaLabel": "Ollama",
   "setup.templateOllamaBlurb": "Локальные Anthropic-совместимые модели через Claude Code.",
   "setup.templateZaiLabel": "Z.AI (Claude)",
