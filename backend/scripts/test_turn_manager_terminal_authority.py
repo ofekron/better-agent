@@ -138,6 +138,67 @@ async def scenario():
         "cross-thread startup preserves the real spawn failure",
     )
 
+    abandoned_provider = FakeProvider({"id": "fake-abandoned-cross-thread-failure"})
+    abandoned_provider._runs = {}
+    abandoned_gate = asyncio.Event()
+    abandoned_receipt = []
+    abandoned_error = LookupError("stale lifecycle rejection")
+    received_abandoned_error = None
+
+    async def abandoned_cross_thread_failure():
+        await abandoned_gate.wait()
+        raise abandoned_error
+
+    def schedule_abandoned_cross_thread_start():
+        receipt = schedule_loop_task(
+            owner_loop,
+            abandoned_cross_thread_failure(),
+            name="test-abandoned-cross-thread-provider-failure",
+        )
+        assert receipt is not None
+        abandoned_receipt.append(receipt)
+        abandoned_provider._track_run_start_receipt("abandoned-cross-thread", receipt)
+
+    abandoned_proxies = []
+    original_wrap_future = asyncio.wrap_future
+
+    def track_abandoned_proxy(future, *args, **kwargs):
+        proxy = original_wrap_future(future, *args, **kwargs)
+        if abandoned_receipt and future is abandoned_receipt[0]:
+            abandoned_proxies.append(proxy)
+        return proxy
+
+    asyncio.wrap_future = track_abandoned_proxy
+    try:
+        await asyncio.to_thread(schedule_abandoned_cross_thread_start)
+        abandoned_wait = asyncio.create_task(
+            abandoned_provider.await_run_started("abandoned-cross-thread", timeout=1.0)
+        )
+        await asyncio.sleep(0)
+        abandoned_wait.cancel()
+        await asyncio.gather(abandoned_wait, return_exceptions=True)
+        del abandoned_wait
+        abandoned_gate.set()
+        await asyncio.wrap_future(abandoned_receipt[0])
+    except LookupError as exc:
+        received_abandoned_error = exc
+    finally:
+        await asyncio.sleep(0)
+        asyncio.wrap_future = original_wrap_future
+    check(
+        len(abandoned_proxies) == 2
+        and abandoned_proxies[0].done()
+        and not abandoned_proxies[0]._log_traceback,
+        "cancelled startup wait consumes its abandoned receipt proxy failure",
+    )
+    check(
+        received_abandoned_error is abandoned_error,
+        "abandoned proxy observation preserves the authoritative receipt error",
+    )
+    for proxy in abandoned_proxies:
+        if proxy.done() and not proxy.cancelled():
+            proxy.exception()
+
     cancelled_admission_ran = threading.Event()
 
     async def cancelled_before_admission():

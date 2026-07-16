@@ -372,6 +372,11 @@ def _provider_task_done(task: asyncio.Task) -> None:
         logger.error("provider lifecycle task failed: %s", error, exc_info=error)
 
 
+def _consume_future_exception(future: asyncio.Future) -> None:
+    if not future.cancelled():
+        future.exception()
+
+
 def schedule_loop_task(
     loop: asyncio.AbstractEventLoop,
     coro,
@@ -881,6 +886,10 @@ class Provider(ABC):
         receipt = self._run_start_receipts.get(run_id)
         if receipt is None:
             raise RuntimeError(f"provider failed to schedule run {run_id}")
+        receipt_waitable = receipt
+        if not isinstance(receipt, asyncio.Future):
+            receipt_waitable = asyncio.wrap_future(receipt)
+            receipt_waitable.add_done_callback(_consume_future_exception)
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
         waiter = loop.create_future()
@@ -900,10 +909,7 @@ class Provider(ABC):
                 if remaining <= 0:
                     raise TimeoutError(f"provider start receipt timed out for run {run_id}")
                 waitables: list[asyncio.Future] = [waiter]
-                if isinstance(receipt, asyncio.Future):
-                    waitables.append(receipt)
-                else:
-                    waitables.append(asyncio.wrap_future(receipt))
+                waitables.append(receipt_waitable)
                 done, _ = await asyncio.wait(
                     waitables,
                     timeout=remaining,
