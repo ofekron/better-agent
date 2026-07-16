@@ -23,6 +23,7 @@ import auth  # noqa: E402
 import session_store  # noqa: E402
 import user_prefs  # noqa: E402
 import runtime_tokens  # noqa: E402
+import runtime_ownership  # noqa: E402
 from bff_runtime_contract import BFF_SERVICE_TOKEN_HEADER  # noqa: E402
 from paths import ba_home  # noqa: E402
 from session_manager import manager as session_manager  # noqa: E402
@@ -136,6 +137,23 @@ def test_prunes_only_expired_non_running_sessions(client: TestClient) -> bool:
     return True
 
 
+def test_deleted_client_id_is_authoritatively_gone(client: TestClient) -> bool:
+    _reset_home()
+    sid = _create(client, "deleted-offline-create")
+    if not session_manager.delete(sid):
+        print("  failed to delete fixture session")
+        return False
+    r = client.post(
+        "/api/bff-runtime/sessions",
+        json={"name": "stale replay", "cwd": "/tmp", "client_session_id": sid},
+        headers=_bff_headers(),
+    )
+    if r.status_code != 410:
+        print(f"  deleted id was not terminal: {r.status_code} {r.text}")
+        return False
+    return r.json().get("detail") == "client_session_id refers to a permanently deleted session"
+
+
 def main_test() -> int:
     client = TestClient(main.app, client=("127.0.0.1", 50000))
     client.headers.update({"Authorization": f"Bearer {auth.create_token('session-auto-delete-test')}"})
@@ -143,12 +161,14 @@ def main_test() -> int:
         ("default never + persistence", test_default_never_and_persistence),
         ("invalid values rejected", test_invalid_values_rejected),
         ("prunes only expired non-running sessions", test_prunes_only_expired_non_running_sessions),
+        ("deleted client id is authoritatively gone", test_deleted_client_id_is_authoritatively_gone),
     ]
     ok = True
-    for name, fn in tests:
-        passed = fn(client)
-        print(f"{PASS if passed else FAIL} {name}")
-        ok = ok and passed
+    with runtime_ownership.runtime_writer():
+        for name, fn in tests:
+            passed = fn(client)
+            print(f"{PASS if passed else FAIL} {name}")
+            ok = ok and passed
     shutil.rmtree(_TMP_HOME, ignore_errors=True)
     return 0 if ok else 1
 

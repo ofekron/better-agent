@@ -4064,6 +4064,17 @@ body {
   background: color-mix(in srgb, var(--accent, #7b68ee) 11%, var(--bg-primary));
 }
 
+.offline-queue-item--failed {
+  border-color: var(--danger);
+}
+
+.offline-queue-failure {
+  display: block;
+  margin-top: 4px;
+  color: var(--danger);
+  font-size: 12px;
+}
+
 .offline-queue-main {
   min-width: 0;
 }

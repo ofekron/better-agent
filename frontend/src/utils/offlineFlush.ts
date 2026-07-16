@@ -1,4 +1,4 @@
-import { isRetryableOfflineError } from "./offlineRequest";
+import { HttpStatusError } from "./offlineRequest";
 import type { OfflineQueueEntry } from "../hooks/useOfflineQueue";
 
 // Policy helpers for draining the durable offline-action backlog on reconnect.
@@ -16,29 +16,18 @@ import type { OfflineQueueEntry } from "../hooks/useOfflineQueue";
 // it, and a merely-transient failure must pause the whole drain (so nothing is
 // dispatched out of order) rather than skip ahead.
 
-export type FlushErrorKind = "transient" | "permanent";
+export type FlushErrorKind = "retryable" | "terminal";
 
 /** Classify an error thrown while creating a session during the reconnect
  * drain.
  *
- * - `transient` — network/abort/timeout/5xx/429/etc. The backend never saw a
- *   well-formed, rejected request; retrying the SAME idempotent action
- *   (client_session_id is the backend id) will eventually succeed. The drain
- *   must PAUSE on these and retry the entire backlog later, so we never
- *   dispatch a later action ahead of an earlier one that is merely waiting on
- *   the network.
- * - `permanent` — the backend received the request and rejected it on its
- *   merits (4xx other than the retryable ones — bad shape, unknown provider,
- *   a feature that is genuinely unavailable). Retrying the identical bytes
- *   cannot fix it, so the drain must NOT block the rest of the backlog on it.
- *
- * Self-healing states that surface as a non-retryable status right after
- * reconnect (e.g. a 404 "team orchestration not ready yet" while the backend
- * finishes booting) are intentionally left to retry on the next backoff deadline
- * — the caller keeps the entry in the durable backlog either way, so a state
- * that later flips to ready recovers without losing the user's action. */
+ * The backend's 410 tombstone is the only authoritative terminal response.
+ * Every other failure remains retryable because network state, backend boot,
+ * configuration, or authentication can self-heal without changing the queued
+ * action. */
 export function classifyFlushError(error: unknown): FlushErrorKind {
-  return isRetryableOfflineError(error) ? "transient" : "permanent";
+  if (error instanceof HttpStatusError && error.status === 410) return "terminal";
+  return "retryable";
 }
 
 /** A queued prompt targets a session. If that session's queued `create_session`
@@ -60,11 +49,10 @@ export interface FlushOutcome {
    * later action is dispatched ahead of an earlier one still waiting on the
    * network. */
   stop: boolean;
-  /** The create failed for good. Mark the optimistic message visibly failed
-   * (never silently drop it) and record the session id so dependent prompts in
-   * this pass are skipped — but keep the durable backlog entry so the user's
-   * intent is preserved and a later self-heal can still succeed. */
-  permanentFailureSessionId?: string;
+  scheduleRetry: boolean;
+  /** The backend authoritatively retired this id. Hold the durable action for
+   * explicit user retry/delete and skip its dependent prompts in this pass. */
+  terminalFailureSessionId?: string;
 }
 
 export interface OfflineRetryDeadline {
@@ -89,8 +77,8 @@ export function outcomeForCreateError(
   error: unknown,
   sessionId: string,
 ): FlushOutcome {
-  if (classifyFlushError(error) === "transient") {
-    return { stop: true };
+  if (classifyFlushError(error) === "retryable") {
+    return { stop: true, scheduleRetry: true };
   }
-  return { stop: false, permanentFailureSessionId: sessionId };
+  return { stop: false, scheduleRetry: false, terminalFailureSessionId: sessionId };
 }

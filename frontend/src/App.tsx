@@ -2383,11 +2383,13 @@ function AppMain({
                 type: entry.type,
                 app_session_id: queued.id,
                 client_id: entry.clientId,
-                kind: outcome.stop ? "transient" : "permanent",
+                kind: outcome.stop ? "retryable" : "terminal",
                 error: createErr instanceof Error ? createErr.message : String(createErr),
               }, outcome.stop ? "warn" : "error");
               offlineDispatchedRef.current.add(dispatchKey);
-              scheduleOfflineRetry(entrySessionId, entry.clientId);
+              if (outcome.scheduleRetry) {
+                scheduleOfflineRetry(entrySessionId, entry.clientId);
+              }
               if (outcome.stop) {
                 // Transient (network/abort/5xx): pause the entire drain and
                 // retry the whole backlog on the next tick. Returning here
@@ -2396,13 +2398,15 @@ function AppMain({
                 // the network.
                 return;
               }
-              // Permanent (4xx the backend rejected on its merits): surface it
-              // on the optimistic bubble instead of silently dropping it, and
-              // skip prompts that depend on this session for the rest of this
-              // pass. The entry stays in the durable backlog so a self-healing
-              // state (e.g. team-not-ready right after boot) recovers on a
-              // later tick.
+              // The backend's 410 tombstone is authoritative: hold this action
+              // until explicit retry/delete and skip its dependent prompts.
               failedCreateSessionIds.add(queued.id);
+              offlineRetryScheduleRef.current.delete(dispatchKey);
+              await offlineQueue.markFailed(
+                queued.id,
+                entry.clientId,
+                createErr instanceof Error ? createErr.message : String(createErr),
+              );
               setPendingForSession(queued.id, (prev) =>
                 prev.map((m) =>
                   m.id === entry.clientId
@@ -6834,7 +6838,7 @@ function AppMain({
               return (
                 <div
                   key={`${sessionId}:${entry.clientId}`}
-                  className={`offline-queue-item${editing ? " offline-queue-item--editing" : ""}`}
+                  className={`offline-queue-item${editing ? " offline-queue-item--editing" : ""}${entry.failure ? " offline-queue-item--failed" : ""}`}
                   data-testid="offline-queue-item"
                 >
                   <div className="offline-queue-main">
@@ -6855,8 +6859,26 @@ function AppMain({
                         {preview}
                       </button>
                     )}
+                    {entry.failure ? (
+                      <span className="offline-queue-failure" role="alert">{entry.failure.errorText}</span>
+                    ) : null}
                   </div>
                   <div className="offline-queue-actions">
+                    {entry.failure ? (
+                      <button
+                        type="button"
+                        className="offline-queue-action"
+                        onClick={() => {
+                          offlineDispatchedRef.current.delete(offlineDispatchKey(sessionId, entry.clientId));
+                          offlineRetryScheduleRef.current.delete(offlineDispatchKey(sessionId, entry.clientId));
+                          void offlineQueue.retryFailed(entry);
+                        }}
+                        aria-label={t("backendUnavailable.retry", "Retry")}
+                        title={t("backendUnavailable.retry", "Retry")}
+                      >
+                        <Icon name="refresh" size={14} />
+                      </button>
+                    ) : null}
                     {editing ? (
                       <>
                         <button

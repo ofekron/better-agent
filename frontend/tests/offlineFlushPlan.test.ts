@@ -53,18 +53,18 @@ const create = (sessionId: string, clientId: string): OfflineCreateSessionEntry 
 
 describe("classifyFlushError", () => {
   it("treats network/abort/timeout/5xx/429 as transient (retry whole backlog)", () => {
-    expect(classifyFlushError(new TypeError("Failed to fetch"))).toBe("transient");
-    expect(classifyFlushError(new DOMException("aborted", "AbortError"))).toBe("transient");
-    expect(classifyFlushError(new HttpStatusError(500, "boom"))).toBe("transient");
-    expect(classifyFlushError(new HttpStatusError(503, "down"))).toBe("transient");
-    expect(classifyFlushError(new HttpStatusError(429, "slow down"))).toBe("transient");
-    expect(classifyFlushError(new HttpStatusError(408, "timeout"))).toBe("transient");
+    expect(classifyFlushError(new TypeError("Failed to fetch"))).toBe("retryable");
+    expect(classifyFlushError(new DOMException("aborted", "AbortError"))).toBe("retryable");
+    expect(classifyFlushError(new HttpStatusError(500, "boom"))).toBe("retryable");
+    expect(classifyFlushError(new HttpStatusError(503, "down"))).toBe("retryable");
+    expect(classifyFlushError(new HttpStatusError(429, "slow down"))).toBe("retryable");
+    expect(classifyFlushError(new HttpStatusError(408, "timeout"))).toBe("retryable");
   });
 
-  it("treats merits-based 4xx as permanent (don't block the rest of the backlog)", () => {
-    expect(classifyFlushError(new HttpStatusError(400, "bad shape"))).toBe("permanent");
-    expect(classifyFlushError(new HttpStatusError(404, "team not ready"))).toBe("permanent");
-    expect(classifyFlushError(new HttpStatusError(403, "forbidden"))).toBe("permanent");
+  it("terminalizes only the backend's authoritative gone response", () => {
+    expect(classifyFlushError(new HttpStatusError(410, "permanently deleted"))).toBe("terminal");
+    expect(classifyFlushError(new HttpStatusError(400, "bad shape"))).toBe("retryable");
+    expect(classifyFlushError(new HttpStatusError(404, "team not ready"))).toBe("retryable");
   });
 });
 
@@ -72,13 +72,15 @@ describe("outcomeForCreateError", () => {
   it("stops the drain on a transient error so action order is preserved", () => {
     const outcome = outcomeForCreateError(new TypeError("offline"), "sess-1");
     expect(outcome.stop).toBe(true);
-    expect(outcome.permanentFailureSessionId).toBeUndefined();
+    expect(outcome.scheduleRetry).toBe(true);
+    expect(outcome.terminalFailureSessionId).toBeUndefined();
   });
 
   it("does NOT stop the drain on a permanent error, and records the dead session", () => {
-    const outcome = outcomeForCreateError(new HttpStatusError(400, "bad"), "sess-1");
+    const outcome = outcomeForCreateError(new HttpStatusError(410, "gone"), "sess-1");
     expect(outcome.stop).toBe(false);
-    expect(outcome.permanentFailureSessionId).toBe("sess-1");
+    expect(outcome.scheduleRetry).toBe(false);
+    expect(outcome.terminalFailureSessionId).toBe("sess-1");
   });
 });
 
@@ -145,14 +147,14 @@ describe("head-of-line blocking is broken (end-to-end policy walk)", () => {
       if (shouldSkipDependentSend(entry, failed)) continue;
       if (entry.type === "create_session") {
         // A is poison (permanent), B is healthy.
-        const err = entry.session.id === "A" ? new HttpStatusError(400, "bad") : null;
+        const err = entry.session.id === "A" ? new HttpStatusError(410, "gone") : null;
         if (err) {
           const outcome = outcomeForCreateError(err, entry.session.id);
           if (outcome.stop) {
             stopped = true;
             break;
           }
-          if (outcome.permanentFailureSessionId) failed.add(outcome.permanentFailureSessionId);
+          if (outcome.terminalFailureSessionId) failed.add(outcome.terminalFailureSessionId);
           continue;
         }
         dispatched.push(entry.clientId);

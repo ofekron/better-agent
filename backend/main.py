@@ -9281,7 +9281,7 @@ async def create_session(
             return existing
         if await asyncio.to_thread(session_manager.deletion_evidence_exists, client_session_id):
             raise HTTPException(
-                status_code=409,
+                status_code=410,
                 detail="client_session_id refers to a permanently deleted session",
             )
 
