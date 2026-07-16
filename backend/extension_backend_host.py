@@ -4,6 +4,7 @@ import base64
 import importlib.util
 import importlib
 import json
+import logging
 import sys
 import time
 from dataclasses import dataclass
@@ -11,6 +12,8 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, FastAPI
+
+logger = logging.getLogger("extension_backend_host")
 
 
 @dataclass(frozen=True)
@@ -247,6 +250,7 @@ async def _serve_persistent() -> int:
 
     async def _handle(line: bytes, accepted_ns: int) -> None:
         request_id = None
+        payload: dict[str, Any] | None = None
         dispatch_ns = time.monotonic_ns()
         decode_started_ns = dispatch_ns
         try:
@@ -274,6 +278,12 @@ async def _serve_persistent() -> int:
                 cohort_overlap_ns,
             ) = await _run_asgi(app, payload, concurrency)
         except Exception:
+            logger.exception(
+                "extension backend route failed: request_id=%s method=%s path=%s",
+                request_id,
+                (payload or {}).get("method"),
+                (payload or {}).get("path"),
+            )
             decoded_ns = time.monotonic_ns()
             build_ns = 0
             asgi_ns = 0
