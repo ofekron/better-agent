@@ -4,6 +4,7 @@ import {
   extractAssistantTextFromEvents,
   flattenClaudeMessages,
 } from "../src/utils/agentMessages";
+import { groupEvents } from "../src/components/MessageBubble";
 import type { WSEvent } from "../src/types";
 
 function assistantText(text: string, uuid: string): WSEvent {
@@ -255,6 +256,43 @@ describe("fallback content block", () => {
         _ts: undefined,
       },
     ]);
+  });
+});
+
+describe("pre-flattened BFF chat-tree tool events", () => {
+  const bffToolCall: WSEvent = {
+    type: "tool_call",
+    data: { uuid: "e1", tool_use_id: "t1", tool: "Read", args: { file_path: "/x" } },
+  };
+  const bffToolResult: WSEvent = {
+    type: "tool_result",
+    data: { uuid: "e2", tool_use_id: "t1", output: "file contents" },
+  };
+
+  it("pairs a flat tool_result with its flat tool_call by tool_use_id", () => {
+    const { flat, toolResultById } = flattenClaudeMessages([bffToolCall, bffToolResult]);
+    expect(toolResultById.get("t1")).toBe("file contents");
+    const result = flat.find((e) => e.type === "tool_result");
+    expect(result?.data.paired_tool_result).toBe(true);
+    expect(result?.data.orphan_tool_result).toBe(false);
+  });
+
+  it("marks a flat tool_result without a matching call as orphan", () => {
+    const { flat } = flattenClaudeMessages([bffToolResult]);
+    const result = flat.find((e) => e.type === "tool_result");
+    expect(result?.data.paired_tool_result).toBe(false);
+    expect(result?.data.orphan_tool_result).toBe(true);
+  });
+
+  it("groupEvents nests the BFF tool result under its tool call, never as a standalone row", () => {
+    const { flat, toolResultById } = flattenClaudeMessages([bffToolCall, bffToolResult]);
+    const groups = groupEvents(flat, toolResultById);
+    const toolGroups = groups.filter((g) => g.kind === "tool");
+    expect(toolGroups).toHaveLength(1);
+    expect(toolGroups[0].kind === "tool" && toolGroups[0].result).toBe("file contents");
+    expect(
+      groups.filter((g) => g.kind === "event" && g.event.type === "tool_result"),
+    ).toHaveLength(0);
   });
 });
 

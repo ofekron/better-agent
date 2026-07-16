@@ -144,6 +144,13 @@ export function flattenClaudeMessages(events: WSEvent[]): FlatEventsResult {
     if (text && !text.startsWith("Codex native event_msg.agent_message\n\n```json\n")) {
       renderedTexts.add(text);
     }
+    if (ev.type === "tool_call") {
+      // Pre-flattened event (BFF chat-tree grammar) — tool_use_id sits
+      // directly on data instead of inside an agent_message envelope.
+      const tuid = (ev.data as Record<string, unknown> | undefined)?.tool_use_id;
+      if (typeof tuid === "string") knownToolUseIds.add(tuid);
+      continue;
+    }
     if (ev.type !== "agent_message") continue;
     const msg = (ev.data ?? {}) as { type?: string; message?: { content?: unknown } };
     if (msg.type !== "assistant") continue;
@@ -164,6 +171,30 @@ export function flattenClaudeMessages(events: WSEvent[]): FlatEventsResult {
   for (const ev of events) {
     if (ev.type !== "agent_message") {
       const _ts = deriveTs(ev);
+      if (ev.type === "tool_result") {
+        // Pre-flattened event (BFF chat-tree grammar): pair it with its
+        // tool_call by tool_use_id so groupEvents nests it under the call
+        // instead of rendering it as standalone text.
+        const d = (ev.data ?? {}) as Record<string, unknown>;
+        if (typeof d.tool_use_id === "string") {
+          const resultText = typeof d.output === "string"
+            ? d.output
+            : toolResultContentToString(d.output ?? d.content);
+          toolResultById.set(d.tool_use_id, resultText);
+          const paired = knownToolUseIds.has(d.tool_use_id);
+          flat.push({
+            ...ev,
+            data: {
+              ...d,
+              output: resultText,
+              paired_tool_result: paired,
+              orphan_tool_result: !paired,
+            },
+            _ts,
+          });
+          continue;
+        }
+      }
       flat.push(_ts ? { ...ev, _ts } : ev);
       continue;
     }
