@@ -128,15 +128,34 @@ function modelSwitchEvent(id: string, entry: ChatTreeLookupEntry): WSEvent | nul
   } as WSEvent
 }
 
+/** Scoped-turn (NativeSubagentTurn/WorkerTurn) body items nest a whole
+ * sub-turn under one tool_use_id, recursively. Collects every candidate
+ * event id reachable from a body, including ones nested inside scoped
+ * turns, so callers that only need "any id with a resolvable message_id"
+ * (like `resolveAssistantMessageId`) don't miss a turn whose entire body
+ * is a single scoped turn. */
+function collectCandidateEventIds(items: readonly BodyItem[], out: string[] = []): string[] {
+  for (const item of items) {
+    if (item.type === 'Explanation') {
+      out.push(...item.textEventIds, ...item.itemIds)
+    } else if (item.type === 'SteeringMessage') {
+      out.push(item.id)
+    } else {
+      out.push(item.id)
+      if (item.result) out.push(...item.result.partIds)
+      collectCandidateEventIds(item.body, out)
+    }
+  }
+  return out
+}
+
 function resolveAssistantMessageId(
   turn: Turn,
   lookup: Record<string, ChatTreeLookupEntry>,
 ): string | null {
   const candidates: string[] = []
   if (turn.result) candidates.push(...turn.result.partIds)
-  for (const item of turn.body) {
-    if (item.type === 'Explanation') candidates.push(...item.textEventIds, ...item.itemIds)
-  }
+  collectCandidateEventIds(turn.body, candidates)
   for (const id of candidates) {
     const entry = lookup[id]
     if (entry?.kind === 'event' && typeof entry.message_id === 'string' && entry.message_id) {
@@ -146,67 +165,101 @@ function resolveAssistantMessageId(
   return null
 }
 
-function collectBodyEventIds(items: readonly BodyItem[]): string[] {
-  const ids: string[] = []
-  const stack = [...items]
-  while (stack.length > 0) {
-    const item = stack.shift()
-    if (!item) continue
-    if (item.type === 'Explanation') {
-      ids.push(...item.textEventIds, ...item.itemIds)
-    } else if (item.type === 'SteeringMessage') {
-      ids.push(item.id)
-    } else {
-      ids.push(item.id)
-      stack.unshift(...item.body)
-      if (item.result) ids.push(...item.result.partIds)
-      ids.push(...item.children)
+/** id -> the tool_use_id of the scoped turn (NativeSubagentTurn/WorkerTurn)
+ * it is nested directly under, or null at the turn's own top level.
+ * Reused (not forked) by `SubAgentBlock`'s existing `parent_tool_use_id`
+ * nesting convention (`MessageBubble.tsx` `partitionEventsByParent`) so a
+ * scoped turn from the BFF chat-tree grammar renders through the same
+ * collapsible sub-agent UI as the legacy sidechain path, recursively for
+ * nested scopes. */
+function collectBodyEventIds(
+  items: readonly BodyItem[],
+): { id: string; scopeId: string | null }[] {
+  const out: { id: string; scopeId: string | null }[] = []
+  const walk = (list: readonly BodyItem[], scopeId: string | null) => {
+    for (const item of list) {
+      if (item.type === 'Explanation') {
+        for (const id of item.textEventIds) out.push({ id, scopeId })
+        for (const id of item.itemIds) out.push({ id, scopeId })
+      } else if (item.type === 'SteeringMessage') {
+        out.push({ id: item.id, scopeId })
+      } else {
+        out.push({ id: item.id, scopeId })
+        walk(item.body, item.id)
+        if (item.result) {
+          for (const id of item.result.partIds) out.push({ id, scopeId: item.id })
+        }
+        for (const id of item.children) out.push({ id, scopeId: item.id })
+      }
     }
   }
-  return ids
+  walk(items, null)
+  return out
 }
 
-function eventForRender(id: string, entry: ChatTreeLookupEntry | undefined): WSEvent | null {
+function eventForRender(
+  id: string,
+  entry: ChatTreeLookupEntry | undefined,
+  parentToolUseId: string | null,
+): WSEvent | null {
   if (!entry || entry.kind !== 'event') return null
+  const withParent = (data: Record<string, unknown>): Record<string, unknown> =>
+    parentToolUseId ? { ...data, parent_tool_use_id: parentToolUseId } : data
   if (entry.type === 'assistant_text') {
-    return { type: 'output', data: { uuid: id, output: String(entry.data.text ?? '') }, _ts: entry.timestamp ?? undefined }
+    return { type: 'output', data: withParent({ uuid: id, output: String(entry.data.text ?? '') }), _ts: entry.timestamp ?? undefined }
   }
   if (entry.type === 'thinking') {
-    return { type: 'thinking', data: { uuid: id, thought: String(entry.data.text ?? '') }, _ts: entry.timestamp ?? undefined }
+    return { type: 'thinking', data: withParent({ uuid: id, thought: String(entry.data.text ?? '') }), _ts: entry.timestamp ?? undefined }
   }
   if (entry.type === 'tool_interaction') {
     const status = String(entry.data.status ?? '')
     if (status === 'complete' && entry.data.output !== undefined) {
       return {
         type: 'tool_result',
-        data: {
+        data: withParent({
           uuid: id,
           tool_use_id: String(entry.data.tool_use_id ?? id),
           output: String(entry.data.output ?? ''),
-        },
+        }),
         _ts: entry.timestamp ?? undefined,
       }
     }
     return {
       type: 'tool_call',
-      data: {
+      data: withParent({
         uuid: id,
         tool_use_id: String(entry.data.tool_use_id ?? id),
         tool: String(entry.data.tool_name ?? entry.data.tool ?? 'tool'),
         args: entry.data.args ?? null,
-      },
+      }),
+      _ts: entry.timestamp ?? undefined,
+    }
+  }
+  if (entry.type === 'native_subagent_turn' || entry.type === 'worker_turn') {
+    // Synthesize the scope as a tool_call whose tool_use_id is its own
+    // event id: SubAgentBlock (MessageBubble.tsx) renders any tool_call
+    // group that has children in `partitionEventsByParent`'s map, so this
+    // is the single existing nested-turn UI, reused rather than forked.
+    return {
+      type: 'tool_call',
+      data: withParent({
+        uuid: id,
+        tool_use_id: id,
+        tool: entry.type === 'native_subagent_turn' ? 'Agent' : 'Worker',
+        args: { prompt: String(entry.data.prompt ?? '') },
+      }),
       _ts: entry.timestamp ?? undefined,
     }
   }
   if (entry.type === 'steering_message') {
-    return { type: 'steer_prompt', data: { uuid: id, prompt: String(entry.data.text ?? '') }, _ts: entry.timestamp ?? undefined }
+    return { type: 'steer_prompt', data: withParent({ uuid: id, prompt: String(entry.data.text ?? '') }), _ts: entry.timestamp ?? undefined }
   }
   if (entry.type === 'model_change') {
     return modelSwitchEvent(id, entry)
   }
   return {
     type: 'diagnostic',
-    data: { uuid: id, kind: entry.type, raw: entry.data },
+    data: withParent({ uuid: id, kind: entry.type, raw: entry.data }),
     _ts: entry.timestamp ?? undefined,
   }
 }
@@ -215,16 +268,16 @@ function turnEventsForRender(
   turn: Turn,
   lookup: Record<string, ChatTreeLookupEntry>,
 ): WSEvent[] {
-  const ids = [
+  const entries = [
     ...collectBodyEventIds(turn.body),
-    ...(turn.result?.partIds ?? []),
+    ...(turn.result?.partIds ?? []).map((id) => ({ id, scopeId: null as string | null })),
   ]
   const seen = new Set<string>()
   const events: WSEvent[] = []
-  for (const id of ids) {
+  for (const { id, scopeId } of entries) {
     if (seen.has(id)) continue
     seen.add(id)
-    const event = eventForRender(id, lookup[id])
+    const event = eventForRender(id, lookup[id], scopeId)
     if (event) events.push(event)
   }
   return events

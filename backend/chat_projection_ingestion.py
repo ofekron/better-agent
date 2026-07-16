@@ -13,6 +13,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
+from canonical_event_adapter import subagent_scope_source_event_id
 from chat_projection_service import CanonicalChatProjectionService
 from chat_projection_source_catalog import ChatProjectionSourceCatalog
 from chat_projection_store import ProjectionCommit, SourceWatermark, TurnManifest
@@ -71,6 +72,16 @@ def admit_canonical_fact(fact: dict[str, Any], *, provider: str) -> None:
         raise ValueError("canonical fact payload must be an object")
     raw_message_id = payload.get("message_id")
     message_id = raw_message_id if isinstance(raw_message_id, str) and raw_message_id else None
+    raw_parent_tool_use_id = payload.get("parent_tool_use_id")
+    # Derived purely from this fact's own payload via the shared
+    # tool_use_id -> source_event_id naming convention (no cross-fact
+    # lookup): matches the parent_event_id chat_canonical_adapter resolves
+    # for the same sidechain event at render time.
+    parent_event_id = (
+        subagent_scope_source_event_id(raw_parent_tool_use_id)
+        if isinstance(raw_parent_tool_use_id, str) and raw_parent_tool_use_id
+        else None
+    )
 
     # The store defines commit identity locally: the persisted fact must
     # carry `event_id`, and the commit's content_hash is the hash of the
@@ -119,7 +130,7 @@ def admit_canonical_fact(fact: dict[str, Any], *, provider: str) -> None:
         render_node={"type": payload_type, "data": payload},
         turn_id=resolved_turn,
         message_id=message_id,
-        parent_event_id=None,
+        parent_event_id=parent_event_id,
         owner_scope=owner_scope,
         manifest=TurnManifest(resolved_turn, 1, 0 if owner_scope == "metadata" else 1),
         visible_delta={"event_id": event_id, "type": payload_type},

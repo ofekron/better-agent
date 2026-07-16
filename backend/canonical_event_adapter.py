@@ -23,6 +23,24 @@ def _text_blocks(content: Any) -> str:
     )
 
 
+def subagent_scope_source_event_id(tool_use_id: str) -> str:
+    """Deterministic source_event_id for a tool_use that may spawn a nested
+    subagent scope (Agent/Task/Workflow and provider-equivalent calls).
+
+    Shared, single-source naming convention: this module stamps it as the
+    `source_event_id` of the spawning tool_call fact; `chat_canonical_adapter`
+    and `chat_projection_ingestion` both derive the identical value from a
+    sidechain event's `payload["parent_tool_use_id"]` alone, with no
+    cross-fact lookup required.
+    """
+    return f"tool_use:{tool_use_id}"
+
+
+def _parent_tool_use_id(data: dict[str, Any]) -> str | None:
+    value = data.get("parent_tool_use_id")
+    return value if isinstance(value, str) and value else None
+
+
 def canonical_facts_from_journal_row(row: dict[str, Any]) -> list[CanonicalFact]:
     root_id = str(row.get("root_id") or row.get("sid") or "")
     sid = str(row.get("sid") or root_id)
@@ -66,6 +84,8 @@ def canonical_facts_from_journal_row(row: dict[str, Any]) -> list[CanonicalFact]
     message = message if isinstance(message, dict) else {}
     content = message.get("content")
     event_id = _uuid(data, f"journal:{seq}")
+    parent_tool_use_id = _parent_tool_use_id(data)
+    parent_payload = {"parent_tool_use_id": parent_tool_use_id} if parent_tool_use_id else {}
     facts: list[CanonicalFact] = []
     if role == "assistant":
         text = _text_blocks(content)
@@ -74,7 +94,7 @@ def canonical_facts_from_journal_row(row: dict[str, Any]) -> list[CanonicalFact]
                 **common,
                 source_event_id=event_id,
                 payload_type="assistant_output",
-                payload={"message_id": message_id, "text": text, "final": data.get("final_answer") is True},
+                payload={"message_id": message_id, "text": text, "final": data.get("final_answer") is True, **parent_payload},
                 update_semantics="final" if data.get("final_answer") is True else "snapshot",
             ))
         for index, block in enumerate(content if isinstance(content, list) else []):
@@ -87,16 +107,25 @@ def canonical_facts_from_journal_row(row: dict[str, Any]) -> list[CanonicalFact]
                         **common,
                         source_event_id=f"{event_id}:think:{index}",
                         payload_type="thinking",
-                        payload={"message_id": message_id, "text": thought},
+                        payload={"message_id": message_id, "text": thought, **parent_payload},
                         update_semantics="snapshot",
                     ))
                 continue
             if block.get("type") == "tool_use":
+                tool_use_id = block.get("id")
                 facts.append(CanonicalFact.create(
                     **common,
-                    source_event_id=f"{event_id}:tool:{index}",
+                    source_event_id=(
+                        subagent_scope_source_event_id(tool_use_id)
+                        if isinstance(tool_use_id, str) and tool_use_id
+                        else f"{event_id}:tool:{index}"
+                    ),
                     payload_type="tool_call",
-                    payload={"message_id": message_id, "tool_use_id": block.get("id"), "tool": block.get("name"), "args": block.get("input")},
+                    payload={
+                        "message_id": message_id, "tool_use_id": tool_use_id,
+                        "tool": block.get("name"), "args": block.get("input"),
+                        **parent_payload,
+                    },
                     update_semantics="snapshot",
                 ))
                 continue
@@ -113,6 +142,7 @@ def canonical_facts_from_journal_row(row: dict[str, Any]) -> list[CanonicalFact]
                     "message_id": message_id,
                     "block_type": str(block.get("type") or "(none)"),
                     "block": block,
+                    **parent_payload,
                 },
                 update_semantics="snapshot",
             ))
@@ -124,7 +154,10 @@ def canonical_facts_from_journal_row(row: dict[str, Any]) -> list[CanonicalFact]
                 **common,
                 source_event_id=f"{event_id}:result:{index}",
                 payload_type="tool_result",
-                payload={"message_id": message_id, "tool_use_id": block.get("tool_use_id"), "output": block.get("content")},
+                payload={
+                    "message_id": message_id, "tool_use_id": block.get("tool_use_id"),
+                    "output": block.get("content"), **parent_payload,
+                },
                 update_semantics="snapshot",
             ))
     return facts

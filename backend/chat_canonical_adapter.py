@@ -19,6 +19,8 @@ import math
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
+from canonical_event_adapter import subagent_scope_source_event_id
+
 
 class ChatAdapterError(ValueError):
     def __init__(self, code: str, detail: str) -> None:
@@ -111,6 +113,18 @@ def _text_of(payload: Mapping[str, Any]) -> str:
     return ""
 
 
+def _first_text(*values: Any) -> str:
+    for value in values:
+        if isinstance(value, str) and value:
+            return value
+    return ""
+
+
+def _parent_tool_use_id(payload: Mapping[str, Any]) -> str | None:
+    value = payload.get("parent_tool_use_id")
+    return value if isinstance(value, str) and value else None
+
+
 def _tool_result_output(payload: Mapping[str, Any]) -> str:
     for key in ("output", *_TEXT_KEYS):
         value = payload.get(key)
@@ -174,6 +188,17 @@ def adapt_chat_inputs(
         ))
     )
     projected_event_ids = _projected_event_ids(ordered)
+    # A tool_call renders as a NativeSubagentTurn instead of a plain
+    # ToolInteraction iff some other fact in this root's stream carries
+    # its tool_use_id as `parent_tool_use_id` — a purely structural,
+    # provider-uniform signal (no tool-name branching).
+    spawning_tool_use_ids = {
+        fact["payload"]["parent_tool_use_id"]
+        for fact in ordered
+        if isinstance(fact.get("payload"), Mapping)
+        and isinstance(fact["payload"].get("parent_tool_use_id"), str)
+        and fact["payload"]["parent_tool_use_id"]
+    }
 
     messages: list[dict[str, Any]] = []
     events: list[dict[str, Any]] = []
@@ -196,16 +221,16 @@ def adapt_chat_inputs(
         fact: Mapping[str, Any], event_type: str, data: dict[str, Any], *,
         message_id: str | None, provider_final: bool = False,
         metadata_only: bool = False, provider: dict[str, str] | None = None,
-        event_id: str | None = None,
-    ) -> None:
+        event_id: str | None = None, parent_event_id: str | None = None,
+    ) -> str | None:
         fact_id = str(fact.get("fact_id") or fact.get("source_event_id") or "")
         resolved = provider or identity_for(message_id, fact_id)
         if resolved is None:
-            return
+            return None
         seq = int(fact.get("canonical_seq") or 0)
         if seq < 1:
             dropped.append({"fact_id": fact_id, "code": "missing_canonical_seq"})
-            return
+            return None
         eid = event_id or projected_event_ids.get(id(fact), fact_id)
         versions[eid] = versions.get(eid, 0) + 1
         events.append({
@@ -219,13 +244,14 @@ def adapt_chat_inputs(
             "context_id": str(fact.get("sid") or root_id),
             "turn_id": None,
             "message_id": message_id,
-            "parent_event_id": None,
+            "parent_event_id": parent_event_id,
             "type": event_type,
             "data": data,
             "provider": resolved,
             "provider_final": provider_final,
             "metadata_only": metadata_only,
         })
+        return eid
 
     for fact in ordered:
         payload = fact.get("payload")
@@ -235,6 +261,10 @@ def adapt_chat_inputs(
         message_id = raw_message_id if isinstance(raw_message_id, str) and raw_message_id else None
         fact_id = str(fact.get("fact_id") or fact.get("source_event_id") or "")
         seq = int(fact.get("canonical_seq") or 0)
+        parent_tool_use_id = _parent_tool_use_id(payload)
+        scope_event_id = (
+            subagent_scope_source_event_id(parent_tool_use_id) if parent_tool_use_id else None
+        )
 
         if payload_type == "user_prompt":
             if not message_id or seq < 1:
@@ -264,6 +294,7 @@ def adapt_chat_inputs(
                 fact, "assistant_text", {"text": str(payload.get("text") or "")},
                 message_id=message_id,
                 provider_final=payload.get("final") is True,
+                parent_event_id=scope_event_id,
             )
             continue
 
@@ -271,17 +302,33 @@ def adapt_chat_inputs(
             tool_use_id = payload.get("tool_use_id")
             key = tool_use_id if isinstance(tool_use_id, str) and tool_use_id else fact_id
             tool_name = str(payload.get("tool") or "tool")
+            args = payload.get("args")
+            args = args if isinstance(args, Mapping) else {}
+            prompt_text = (
+                _first_text(args.get("prompt"), args.get("description"))
+                if key in spawning_tool_use_ids else ""
+            )
+            if prompt_text:
+                emit(
+                    fact, "native_subagent_turn", {"prompt": prompt_text},
+                    message_id=message_id,
+                    event_id=subagent_scope_source_event_id(key),
+                    parent_event_id=scope_event_id,
+                )
+                tool_calls[key] = {
+                    "message_id": message_id, "tool_name": tool_name, "is_subagent": True,
+                }
+                continue
             tool_calls[key] = {
-                "message_id": message_id,
-                "tool_name": tool_name,
+                "message_id": message_id, "tool_name": tool_name, "is_subagent": False,
             }
             call_data: dict[str, Any] = {
                 "tool_name": tool_name, "tool_use_id": key, "status": "running",
             }
-            args = payload.get("args")
-            if args is not None:
-                call_data["args"] = _json_safe(args)
-            emit(fact, "tool_interaction", call_data, message_id=message_id)
+            raw_args = payload.get("args")
+            if raw_args is not None:
+                call_data["args"] = _json_safe(raw_args)
+            emit(fact, "tool_interaction", call_data, message_id=message_id, parent_event_id=scope_event_id)
             continue
 
         if payload_type == "tool_result":
@@ -289,6 +336,11 @@ def adapt_chat_inputs(
             key = tool_use_id if isinstance(tool_use_id, str) and tool_use_id else None
             if key is not None and key in tool_calls:
                 call = tool_calls[key]
+                if call.get("is_subagent"):
+                    # The subagent's own nested sidechain events already carry
+                    # the scope's rendered content and result; the call's
+                    # outer tool_result closes it with no separate body item.
+                    continue
                 emit(
                     fact, "tool_interaction",
                     {
@@ -298,13 +350,14 @@ def adapt_chat_inputs(
                         "output": _tool_result_output(payload),
                     },
                     message_id=message_id or call["message_id"],
+                    parent_event_id=scope_event_id,
                 )
             else:
                 dropped.append({"fact_id": fact_id, "code": "unmatched_tool_result"})
             continue
 
         if payload_type == "steer_prompt":
-            emit(fact, "steering_message", {"text": _text_of(payload)}, message_id=message_id)
+            emit(fact, "steering_message", {"text": _text_of(payload)}, message_id=message_id, parent_event_id=scope_event_id)
             continue
 
         if payload_type == "thinking":
@@ -314,6 +367,7 @@ def adapt_chat_inputs(
                 {"text": _text_of(payload),
                  "status": status if isinstance(status, str) and status else "complete"},
                 message_id=message_id,
+                parent_event_id=scope_event_id,
             )
             continue
 
@@ -347,11 +401,17 @@ def adapt_chat_inputs(
             if not isinstance(value, str) or not value:
                 dropped.append({"fact_id": fact_id, "code": "invalid_metadata_payload"})
                 continue
-            emit(fact, canonical_type, {field: value}, message_id=message_id, metadata_only=True)
+            emit(
+                fact, canonical_type, {field: value}, message_id=message_id,
+                metadata_only=True, parent_event_id=scope_event_id,
+            )
             continue
 
         if payload_type in _TURN_MARKERS:
-            emit(fact, _TURN_MARKERS[payload_type], {}, message_id=message_id, metadata_only=True)
+            emit(
+                fact, _TURN_MARKERS[payload_type], {}, message_id=message_id,
+                metadata_only=True, parent_event_id=scope_event_id,
+            )
             continue
 
         block_type = payload.get("block_type")
@@ -368,6 +428,7 @@ def adapt_chat_inputs(
             fact, "other_typed_work",
             {"kind": payload_type or "unknown", "label": label, "payload": _json_safe(dict(payload))},
             message_id=message_id,
+            parent_event_id=scope_event_id,
         )
 
     events.sort(key=lambda event: event["journal_seq"])
