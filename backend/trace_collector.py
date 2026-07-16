@@ -199,9 +199,9 @@ class TraceStep:
         self._ended_at = time.monotonic()
 
     @property
-    def duration_ms(self) -> Optional[float]:
+    def duration_ms(self) -> Optional[int]:
         if self._started_at is not None and self._ended_at is not None:
-            return round((self._ended_at - self._started_at) * 1000, 1)
+            return round((self._ended_at - self._started_at) * 1000)
         return None
 
     def to_dict(self) -> dict:
@@ -290,9 +290,9 @@ class TraceCollector:
         self._ended_at = time.monotonic()
 
     @property
-    def total_duration_ms(self) -> Optional[float]:
+    def total_duration_ms(self) -> Optional[int]:
         if self._ended_at is not None:
-            return round((self._ended_at - self._started_at) * 1000, 1)
+            return round((self._ended_at - self._started_at) * 1000)
         return None
 
     @property

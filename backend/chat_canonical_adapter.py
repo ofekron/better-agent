@@ -15,6 +15,7 @@ as typed drops so callers can surface them.
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
@@ -85,6 +86,21 @@ def _projected_event_ids(
             continue
         projected[id(fact)] = str(fact.get("fact_id") or base)
     return projected
+
+
+def _json_safe(value: Any) -> Any:
+    """Recursively round floats to int (canonical facts allow no float —
+    `chat_projector._measure_json` rejects it), matching the codebase-wide
+    `duration_ms`-as-int convention. Raw upstream payloads (tool args,
+    worker/todo passthrough) are otherwise untyped, so this is the
+    boundary that keeps the strict projector contract safe."""
+    if isinstance(value, float):
+        return round(value) if math.isfinite(value) else value
+    if isinstance(value, Mapping):
+        return {key: _json_safe(child) for key, child in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(child) for child in value]
+    return value
 
 
 def _text_of(payload: Mapping[str, Any]) -> str:
@@ -264,7 +280,7 @@ def adapt_chat_inputs(
             }
             args = payload.get("args")
             if args is not None:
-                call_data["args"] = args
+                call_data["args"] = _json_safe(args)
             emit(fact, "tool_interaction", call_data, message_id=message_id)
             continue
 
@@ -350,7 +366,7 @@ def adapt_chat_inputs(
         # lookup sidecar can serve it, instead of reducing it to kind+label.
         emit(
             fact, "other_typed_work",
-            {"kind": payload_type or "unknown", "label": label, "payload": dict(payload)},
+            {"kind": payload_type or "unknown", "label": label, "payload": _json_safe(dict(payload))},
             message_id=message_id,
         )
 

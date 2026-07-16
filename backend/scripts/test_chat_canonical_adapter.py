@@ -30,7 +30,7 @@ _BACKEND = os.path.dirname(_HERE)
 if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
-from chat_canonical_adapter import adapt_chat_inputs
+from chat_canonical_adapter import adapt_chat_inputs, _json_safe
 from chat_models import CHAT_SCHEMA_VERSION, Explanation, ModelChange, Turn
 from chat_projector import project_chat
 from chat_tree_wire import chat_to_wire
@@ -235,12 +235,44 @@ def test_reused_source_event_id_across_messages_gets_scoped_projector_ids() -> N
     project_chat(adapted.messages, adapted.events, schema_version=CHAT_SCHEMA_VERSION)
 
 
+def test_float_payload_values_are_sanitized_before_projector() -> None:
+    # Regression: worker/trace passthrough facts (e.g. trace_step's
+    # duration_ms, always a float in the raw payload) must not reach
+    # chat_projector's strict no-float contract unsanitized, or every
+    # session containing one 422s `GET /api/chat-tree`.
+    adapted = adapt_chat_inputs(
+        [fact(1, "user_prompt", {"message_id": "u1", "text": "hi"}),
+         fact(2, "message_ownership_declared", {"message_id": "a1", "prompt_message_id": "u1"}),
+         fact(3, "trace_step", {"message_id": "a1", "duration_ms": 4803.7,
+                                 "nested": {"scores": [1.0, 2.25]}}),
+         fact(4, "tool_call", {"message_id": "a1", "tool_use_id": "tu-1", "tool": "Bash",
+                                "args": {"timeout_seconds": 2.5}})],
+        SESSION,
+    )
+    work = next(e for e in adapted.events if e["type"] == "other_typed_work")
+    assert work["data"]["payload"]["duration_ms"] == 4804
+    assert isinstance(work["data"]["payload"]["duration_ms"], int)
+    assert work["data"]["payload"]["nested"]["scores"] == [1, 2]
+    tool_call = next(e for e in adapted.events if e["type"] == "tool_interaction")
+    assert tool_call["data"]["args"]["timeout_seconds"] == 2
+    assert isinstance(tool_call["data"]["args"]["timeout_seconds"], int)
+    # Must not raise ChatProjectionInputError("invalid_payload", "... float").
+    project_chat(adapted.messages, adapted.events, schema_version=CHAT_SCHEMA_VERSION)
+
+
+def test_json_safe_leaves_non_finite_floats_for_the_projector_to_reject() -> None:
+    assert _json_safe({"nan": float("nan")})["nan"] != _json_safe({"nan": float("nan")})["nan"]
+    assert _json_safe(float("inf")) == float("inf")
+
+
 if __name__ == "__main__":
     test_full_pipeline()
     test_unsupported_block_facts_stay_visible_as_typed_work()
     test_identity_fails_closed()
     test_provider_stream_shadow_duplicate_is_ignored()
     test_reused_source_event_id_across_messages_gets_scoped_projector_ids()
+    test_float_payload_values_are_sanitized_before_projector()
+    test_json_safe_leaves_non_finite_floats_for_the_projector_to_reject()
     if _failures:
         print(f"{len(_failures)} test(s) FAILED")
         sys.exit(1)
