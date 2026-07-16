@@ -26,6 +26,7 @@ already in the msg's events list is a no-op. This makes replay safe.
 """
 
 from abc import ABC, abstractmethod
+import asyncio
 import json
 from dataclasses import dataclass, field
 from typing import Literal, Optional
@@ -427,7 +428,9 @@ class OrchestrationStrategy(ABC):
         final_cli = (
             cli_prompt
             if cli_prompt is not None
-            else self.wrap_cli_prompt(cwd=cwd, prompt=prompt, session=session)
+            else await asyncio.to_thread(
+                self.wrap_cli_prompt, cwd=cwd, prompt=prompt, session=session,
+            )
         )
         await coordinator.turn_manager.run_turn(
             session=session,

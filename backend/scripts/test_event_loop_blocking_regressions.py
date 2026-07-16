@@ -1669,6 +1669,12 @@ SOURCE_GREP_CASES: tuple = (
       ),
      ),
     )),
+    ('run_primary_wraps_cli_prompt_off_loop', (
+     ('grep', 'orchs/base.py', (('    async def run_primary(', '    def build_assistant_scaffold('),),
+      ('await asyncio.to_thread(\n                self.wrap_cli_prompt, cwd=cwd, prompt=prompt, session=session,',),
+      ('else self.wrap_cli_prompt(cwd=cwd, prompt=prompt, session=session)',),
+     ),
+    )),
     ('provider_event_rewrite_uses_file_ref_context_not_lite_copy', (
      ('grep', 'orchs/base.py', (('def prepare_provider_event_for_journal(', '    def _apply_worker_event('),),
       ('session_manager.get_file_ref_context(app_session_id)', 'assume_exists_for_node(node_id)'),
@@ -3834,7 +3840,7 @@ def _grep_check_failures(check: tuple) -> list[str]:
 
 
 def test_source_grep_regressions() -> None:
-    assert len(SOURCE_GREP_CASES) == 188
+    assert len(SOURCE_GREP_CASES) == 189
     executed = 0
     failing: list[str] = []
     report: list[str] = []
