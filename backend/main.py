@@ -12514,10 +12514,18 @@ def _report_lag_watchdog_issue(
             lag_incident_queue.enqueue(_serialize_lag_report(payload))
         except lag_incident_queue.LagIncidentSpoolFull:
             perf.record_count("lag_incident.spool_full")
-            lag_incident_queue.enqueue_backpressure(_serialize_lag_report(payload))
-            logger.warning(
-                "lag-watchdog: primary bug-report spool full; retained immutable indexed overflow"
-            )
+            try:
+                lag_incident_queue.enqueue_backpressure(_serialize_lag_report(payload))
+            except lag_incident_queue.LagIncidentSpoolFull:
+                perf.record_count("lag_incident.spool_full_overflow")
+                logger.warning(
+                    "lag-watchdog: primary bug-report spool AND overflow reserve full; "
+                    "report dropped (stack dump itself is unaffected)"
+                )
+            else:
+                logger.warning(
+                    "lag-watchdog: primary bug-report spool full; retained immutable indexed overflow"
+                )
 
 
 async def _dispatch_lag_watchdog_issue(body: bytes) -> lag_incident_queue.DispatchOutcome:

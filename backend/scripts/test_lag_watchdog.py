@@ -143,6 +143,32 @@ def test_lag_issue_report_spool_full_uses_immutable_indexed_reserve() -> None:
     assert [entry["name"] for entry in refs] == [overflow[0].name]
 
 
+def test_lag_issue_report_survives_reserve_also_exhausted() -> None:
+    shutil.rmtree(paths.ba_home() / "lag-incidents", ignore_errors=True)
+    queue = main.lag_incident_queue
+    original_entries = queue._MAX_TOTAL_ENTRIES
+    original_reserve = queue._BACKPRESSURE_RESERVE_ENTRIES
+    queue._MAX_TOTAL_ENTRIES = 0
+    queue._BACKPRESSURE_RESERVE_ENTRIES = 0
+    try:
+        # Before the fix, enqueue_backpressure's own LagIncidentSpoolFull was
+        # unhandled and propagated out of _report_lag_watchdog_issue, which the
+        # caller in `run()` only catches with a bare `except Exception` that
+        # logs an ERROR and skips the informational "dumped to" confirmation.
+        main._report_lag_watchdog_issue(
+            label="blocking stack candidate",
+            heartbeat_age=4.2,
+            dump_path=paths.ba_home() / "logs" / "backend-faulthandler.log",
+            evidence="event loop lag evidence heartbeat_age=4.2s",
+            stack_names=["sleep", "sleep", "sleep"],
+        )
+    finally:
+        queue._MAX_TOTAL_ENTRIES = original_entries
+        queue._BACKPRESSURE_RESERVE_ENTRIES = original_reserve
+    root = paths.ba_home() / "lag-incidents"
+    assert not list(root.glob("*.overflow"))
+
+
 def test_lag_report_serialization_boundaries_and_redaction() -> None:
     base = {"summary": "quoted \" evidence", "assistant_message": "\U0001f642", "evidence": "x"}
     exact = main._serialize_lag_report(base)
@@ -407,6 +433,7 @@ def test_real_loop_flood_and_block_have_distinct_evidence() -> None:
 if __name__ == "__main__":
     test_lag_issue_report_queues_assistant_bug_report()
     test_lag_issue_report_spool_full_uses_immutable_indexed_reserve()
+    test_lag_issue_report_survives_reserve_also_exhausted()
     test_lag_report_serialization_boundaries_and_redaction()
     test_lag_report_joint_budget_and_safe_downstream_errors()
     test_known_unavailable_destination_opens_generation_circuit()
