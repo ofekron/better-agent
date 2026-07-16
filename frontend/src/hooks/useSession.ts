@@ -2240,15 +2240,16 @@ export function useSession(authStatus?: string) {
     []
   );
 
-  // Self-healing reconciliation for stuck "Running…" badges: the
-  // backend can remove a run_state entry and drop the paired
-  // `run_state` WS notification (e.g. broadcast throws, or removal
-  // happens via the passive background prune, which never emits) —
-  // the frontend then mirrors a stale non-empty run list forever,
-  // since `run_state` is push-only with no periodic re-poll. Every
-  // 15s, any run older than the grace period gets a one-shot check
-  // against the backend's authoritative per-run snapshot; a 404
-  // means the backend already forgot it, so we drop it locally too.
+  // Self-healing reconciliation for stuck "Running…" badges. The
+  // backend emits run_state on the prune tick
+  // (turn_manager.tick_running_state) and pushes a snapshot on WS
+  // subscribe, but an emit whose journal publish fails is never
+  // retried, and a session absent from the tick's state sets never
+  // re-emits — the frontend would mirror a stale non-empty run list
+  // until reconnect. Every 15s, any run older than the grace period
+  // gets a one-shot check against the backend's authoritative
+  // per-run snapshot; a 404 means the backend already forgot it, so
+  // we drop it locally too.
   const runReconcileInFlightRef = useRef<Set<string>>(new Set());
   useEffect(() => {
     const RECONCILE_GRACE_MS = 30_000;
