@@ -3,7 +3,7 @@ import { render, cleanup, waitFor } from "@testing-library/react";
 import React from "react";
 import "../src/i18n";
 import { Chat } from "../src/components/Chat";
-import { makeSession, makeUserMsg } from "./fixtures";
+import { makeAssistantMsg, makeSession, makeUserMsg } from "./fixtures";
 import type { ChatMessage } from "../src/types";
 
 afterEach(cleanup);
@@ -81,6 +81,63 @@ describe("turn group identity across user_message_persisted ack", () => {
       });
       const nodeAfter = container.querySelector(".user-message-box") as HTMLElement;
       // Same DOM node: the TurnGroup was reconciled in place, not remounted.
+      expect(nodeAfter).toBe(nodeBefore);
+      expect(nodeBefore.isConnected).toBe(true);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+});
+
+describe("turn group identity when the assistant response resolves", () => {
+  it("does not remount the turn group when responseMessage first appears mid-turn", async () => {
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn(async () =>
+      new Response(JSON.stringify([]), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    ) as unknown as typeof fetch;
+
+    try {
+      const user = makeUserMsg({ id: "u-1", content: "the prompt", seq: 1 });
+      const { container, rerender } = renderChat([user], []);
+
+      await waitFor(() => {
+        expect(container.querySelector(".user-message-box")).not.toBeNull();
+      });
+      const nodeBefore = container.querySelector(".user-message-box") as HTMLElement;
+
+      // The assistant message resolves mid-turn (live chat_tree_delta):
+      // the turn group's key must not flip to the response id.
+      const assistant = makeAssistantMsg({
+        id: "a-1",
+        content: "working on it",
+        seq: 2,
+        events: [{ type: "output", data: { output: "working on it" } }],
+      });
+      rerender(
+        <Chat
+          messages={[user, assistant]}
+          pendingMessages={[]}
+          runs={[]}
+          streamingEvents={[]}
+          isStreaming={false}
+          isStopping={false}
+          streamingLoadPhase={null}
+          onSend={() => true}
+          disabled={false}
+          session={makeSession()}
+          draft=""
+          onDraftChange={() => {}}
+          onPromoteQueued={() => {}}
+        />,
+      );
+
+      await waitFor(() => {
+        expect(container.querySelector(".user-message-box")).not.toBeNull();
+      });
+      const nodeAfter = container.querySelector(".user-message-box") as HTMLElement;
       expect(nodeAfter).toBe(nodeBefore);
       expect(nodeBefore.isConnected).toBe(true);
     } finally {

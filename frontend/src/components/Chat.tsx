@@ -363,9 +363,12 @@ export interface TurnGroupData {
   trailingModelSwitchEvents: WSEvent[];
 }
 
+/** A turn's render identity is its initiator: `client_id` survives the
+ * pending→persisted id swap, and the id never changes when the assistant
+ * response later resolves or settles — keying on `responseMessage.id`
+ * would remount the whole turn group at those transitions. */
 function turnGroupRenderKey(group: TurnGroupData, sessionId = ""): string {
-  const turnId = group.responseMessage?.id
-    ?? group.initiatorMessage.client_id
+  const turnId = group.initiatorMessage.client_id
     ?? group.initiatorMessage.id;
   return `${sessionId}:${turnId}`;
 }

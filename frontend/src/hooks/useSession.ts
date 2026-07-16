@@ -1626,6 +1626,31 @@ export function useSession(authStatus?: string) {
     return applyOne(node);
   }, []);
 
+  /** Assemble a Session tree node from a chat-tree response — the one
+   * conversion for every chat-tree pull (cold load, reconcile refetch),
+   * so all pulls share the same message grammar and ids. Also advances
+   * the older-page cursor for loadOlderMessages. */
+  const sessionTreeFromChatTree = useCallback(
+    (
+      chatTree: Awaited<ReturnType<typeof fetchChatTree>>,
+      fallbackId: string,
+    ): Session => {
+      const rootMessages = chatTreeToMessages(chatTree.projection, chatTree.lookup);
+      chatTreeOlderCursorRef.current.set(
+        String(chatTree.session.id ?? fallbackId), chatTree.page.older_cursor);
+      return {
+        ...(chatTree.session as unknown as Session),
+        messages: rootMessages,
+        pagination: {
+          total_messages: undefined,
+          oldest_loaded_seq: rootMessages[0]?.seq ?? null,
+          has_older: chatTree.page.has_older,
+        },
+      } as Session;
+    },
+    [],
+  );
+
   const selectSession = useCallback(async (id: string) => {
     if (selectInFlightIdRef.current === id) return;
     selectInFlightIdRef.current = id;
@@ -1726,18 +1751,7 @@ export function useSession(authStatus?: string) {
       // (id may be a fork — the runtime resolves to its root). The
       // split-pane UI reads forks from `currentSession.forks`; only
       // the ROOT node's messages come from the formal tree.
-      const rootMessages = chatTreeToMessages(chatTree.projection, chatTree.lookup);
-      chatTreeOlderCursorRef.current.set(
-        String(chatTree.session.id ?? id), chatTree.page.older_cursor);
-      const tree = {
-        ...(chatTree.session as unknown as Session),
-        messages: rootMessages,
-        pagination: {
-          total_messages: undefined,
-          oldest_loaded_seq: rootMessages[0]?.seq ?? null,
-          has_older: chatTree.page.has_older,
-        },
-      } as Session;
+      const tree = sessionTreeFromChatTree(chatTree, id);
       if (myReqId !== selectRequestIdRef.current) return;
       const viewedSessionId = tree.id;
       const openedAt = markSessionOpened(viewedSessionId);
@@ -1876,7 +1890,7 @@ export function useSession(authStatus?: string) {
       setSessionLoading(false);
       completeOp(opId);
     }
-  }, [cachedSessionTreeFor, exchangePageSize, markSessionOpened]);
+  }, [cachedSessionTreeFor, exchangePageSize, markSessionOpened, sessionTreeFromChatTree]);
   // Stable handle for callbacks defined before selectSession (stale
   // turn-cursor recovery in loadOlderMessages refetches the snapshot).
   const selectSessionRef = useRef<typeof selectSession | null>(null);
@@ -3147,19 +3161,26 @@ export function useSession(authStatus?: string) {
         "[stale-dbg] applySessionReconciled %s: refetching (prev msgs=%d last_asst_evts=%d)",
         rootId.slice(0, 8), prevMsgCount, lastAsst?.events?.length ?? 0,
       );
-      return fetch(`${API}/api/sessions/${id}?exchange_count=${exchangePageSize}`, {
-        credentials: "include",
-      })
-        .then((res) => (res.ok ? res.json() : null))
+      // Same chat-tree source and assembly as selectSession — every pull
+      // shares one message grammar, so this silent replace is
+      // content-identical to what the live chat_tree_delta path already
+      // rendered instead of swapping in a differently-shaped copy.
+      return fetchChatTree(id, { turns: exchangePageSize })
+        .then((chatTree) => sessionTreeFromChatTree(chatTree, id))
+        .catch((error) => {
+          console.info(
+            "[stale-dbg] applySessionReconciled %s: chat-tree fetch failed: %s",
+            rootId.slice(0, 8), error instanceof Error ? error.message : String(error),
+          );
+          return null;
+        })
         .then((tree: Session | null) => {
           if (!tree) return;
           const treeMsgCount = tree.messages?.length ?? 0;
           const treeAsst = tree.messages?.filter((m: ChatMessage) => m.role === "assistant").at(-1) as ChatMessage | undefined;
           console.info(
-            "[stale-dbg] applySessionReconciled %s: REST tree msgs=%d last_asst_evts=%s last_asst_stub=%s",
-            rootId.slice(0, 8), treeMsgCount,
-            treeAsst?.events?.length ?? "none",
-            (treeAsst as unknown as Record<string, unknown>)?.stub ? JSON.stringify((treeAsst as unknown as Record<string, unknown>).stub) : "none",
+            "[stale-dbg] applySessionReconciled %s: chat tree msgs=%d last_asst_evts=%s",
+            rootId.slice(0, 8), treeMsgCount, treeAsst?.events?.length ?? "none",
           );
           setCurrentSession((prev) => {
             if (!prev || prev.id !== tree.id) return prev;
@@ -3172,7 +3193,7 @@ export function useSession(authStatus?: string) {
           return undefined;
         });
     },
-    [addMissingMessages, applyReconcilePreserves, carryDrafts, exchangePageSize]
+    [addMissingMessages, applyReconcilePreserves, carryDrafts, exchangePageSize, sessionTreeFromChatTree]
   );
 
   /** Update a user message's `status` field, located by `lifecycle_msg_id`.
