@@ -260,6 +260,42 @@ def test_cached_results_are_defensive_copies() -> None:
     print(f"{PASS} cached_results_are_defensive_copies")
 
 
+def test_repo_identity_lookup_scales_with_distinct_cwds() -> None:
+    _reset_aggregate_cache()
+    sessions = [
+        {
+            "id": f"sid-{index}",
+            "cwd": CWD if index < 1000 else f"{CWD}-other",
+            "node_id": "primary",
+        }
+        for index in range(1300)
+    ]
+    calls: list[str] = []
+
+    def repo_identity(cwd: str):
+        calls.append(cwd)
+        return (f"{cwd}-repo", float("inf"), 0)
+
+    with (
+        patch.object(session_manager, "list", return_value=sessions),
+        patch.object(session_manager, "monitoring_projection_snapshot", return_value={}),
+        patch.object(session_manager, "unread_counts_snapshot", return_value={}),
+        patch(
+            "git_repo_info.repo_common_dir_with_expiry",
+            side_effect=repo_identity,
+        ),
+        patch("git_repo_info.cache_generation_snapshot", return_value=0),
+    ):
+        aggregates = backend_main._project_aggregates()
+
+    assert calls == [CWD, f"{CWD}-other"], calls
+    assert set(aggregates) == {
+        (f"{CWD}-repo", "primary"),
+        (f"{CWD}-other-repo", "primary"),
+    }
+    print(f"{PASS} repo_identity_lookup_scales_with_distinct_cwds")
+
+
 def test_concurrent_cold_reads_have_one_producer() -> None:
     _reset_aggregate_cache()
     entered = threading.Event()
@@ -491,6 +527,7 @@ def main() -> int:
         test_session_list_enrichment()
         test_empty_results_are_cached()
         test_cached_results_are_defensive_copies()
+        test_repo_identity_lookup_scales_with_distinct_cwds()
         test_concurrent_cold_reads_have_one_producer()
         test_invalidation_retries_once_without_overlapping_producers()
         test_producer_exception_releases_waiters()

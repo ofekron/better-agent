@@ -3550,16 +3550,26 @@ def _project_aggregates() -> dict[tuple[str, str], dict[str, int]]:
             agg: dict[tuple[str, str], dict[str, int]] = {}
             expires_at = float("inf")
             dependency_valid = True
-            for s in session_manager.list():
+            sessions_started = time.perf_counter()
+            sessions = session_manager.list()
+            perf.record(
+                "projects.aggregates.sessions_snapshot",
+                (time.perf_counter() - sessions_started) * 1000.0,
+            )
+            repo_identities: dict[str, tuple[str | None, float, int]] = {}
+            repo_started = time.perf_counter()
+            for s in sessions:
                 if _wm.should_hide_from_sidebar(s):
                     continue
                 sid = s.get("id")
                 cwd = s.get("cwd") or ""
                 if not sid or not cwd:
                     continue
-                common_dir, dependency_expiry, dependency_gen = (
-                    _gri.repo_common_dir_with_expiry(cwd)
-                )
+                repo_identity = repo_identities.get(cwd)
+                if repo_identity is None:
+                    repo_identity = _gri.repo_common_dir_with_expiry(cwd)
+                    repo_identities[cwd] = repo_identity
+                common_dir, dependency_expiry, dependency_gen = repo_identity
                 expires_at = min(expires_at, dependency_expiry)
                 if dependency_gen != scan_git_gen:
                     dependency_valid = False
@@ -3574,6 +3584,14 @@ def _project_aggregates() -> dict[tuple[str, str], dict[str, int]]:
                     slot["running_count"] += 1
                 if unread_by_sid.get(sid, 0) > 0:
                     slot["unread_session_count"] += 1
+            perf.record(
+                "projects.aggregates.repo_identity",
+                (time.perf_counter() - repo_started) * 1000.0,
+            )
+            perf.record_count("projects.aggregates.sessions_scanned", len(sessions))
+            perf.record_count(
+                "projects.aggregates.distinct_cwds", len(repo_identities)
+            )
             rows = tuple(
                 (key, counts["running_count"], counts["unread_session_count"])
                 for key, counts in agg.items()
