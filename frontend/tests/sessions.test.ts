@@ -945,6 +945,18 @@ describe("sessions CRUD + subscribe lifecycle", () => {
     h.unmount();
   });
 
+  it("does not show a failure toast when the session was already deleted (404 on delete)", async () => {
+    const session = makeSession({ id: "already-gone" });
+    const h = await renderApp({ seed: { sessions: [session] } });
+    h.backend.failNextWithStatus(404, `/api/sessions/${session.id}`);
+
+    await h.deleteSession(session.id);
+
+    expect(h.toJSON().sidebar.sessions.map((s) => s.id)).toEqual([]);
+    expect(h.$(".sync-failure-toast")).toBeNull();
+    h.unmount();
+  });
+
   it("keeps offline intent when the backend rejects session deletion", async () => {
     const session = makeSession({ id: "delete-fails" });
     await putOfflineAction({

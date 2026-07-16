@@ -1946,7 +1946,12 @@ export function useSession(authStatus?: string) {
               method: "DELETE",
               credentials: "include",
             });
-            if (!response.ok) throw await responseError(response);
+            // 404 means the desired end state (session gone) is already
+            // achieved — a duplicate/late delete (double-tap, multi-tab,
+            // remote WS delete) is idempotent success, not a failure.
+            if (!response.ok && response.status !== 404) {
+              throw await responseError(response);
+            }
             return response;
           },
       });
