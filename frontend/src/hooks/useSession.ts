@@ -14,7 +14,13 @@ import { applyLiveTurnEvent } from "../utils/applyLiveTurnEvent";
 import { belongsToProjectPath } from "../utils/projectMembership";
 import { startOp, completeOp, runThreeStateSync } from "../progress/store";
 import { fetchWithTimeout, responseError } from "src/utils/offlineRequest";
-import { ChatTreeError, chatTreeToMessages, fetchChatTree } from "../chat/chatTreeClient";
+import {
+  ChatTreeError,
+  chatTreeToMessages,
+  fetchChatTree,
+  type ChatTreeLookupEntry,
+} from "../chat/chatTreeClient";
+import { parseProjection, ProjectionParseError } from "../chat/parseProjection";
 
 import { API } from "../api";
 import { useLocalStorage } from "./useLocalStorage";
@@ -347,6 +353,47 @@ export function mergeIncomingMessageSnapshot(
     }
   }
   return mergeProjectedMessageDelta(current, incoming);
+}
+
+export type ChatTreeDeltaPhase = "streaming" | "settled" | "stopped" | "detached";
+
+/** Merge one message from a live `chat_tree_delta` into the tree.
+ *
+ * Unlike `mergeIncomingMessageSnapshot` (REST replay vs. live
+ * reconciliation), this is a pure CONTENT patch: `chatTreeToMessages`
+ * always renders `isStreaming: false` (its REST-history default), so
+ * this function is the one place that decides per-message streaming
+ * state for the live path — and it deliberately does NOT own
+ * `isStreaming`/`stopped_at`/`isDetached`/`isStale` beyond seeding
+ * `isStreaming` on a message's first appearance. Turn lifecycle frames
+ * (`turn_start`/`turn_complete`/`turn_stopped`/`turn_detached`) are NOT
+ * intercepted by the BFF proxy (see `bff_server.py`'s
+ * `_INTERCEPTED_LIVE_RENDER_TYPES`) specifically so `markTurnTerminal`/
+ * `markTurnDetached` keep owning those stamps exactly as before —
+ * whichever of the two independent deliveries (this delta vs. the raw
+ * lifecycle frame) arrives first, preserving the CURRENT message's
+ * streaming-state fields here means neither can clobber the other. */
+export function mergeChatTreeDeltaMessage(
+  current: ChatMessage | undefined,
+  incoming: ChatMessage,
+  phase: ChatTreeDeltaPhase,
+): ChatMessage {
+  if (!current) {
+    // Only assistant messages carry a meaningful streaming state; a
+    // user prompt message is always settled the moment it exists.
+    return {
+      ...incoming,
+      isStreaming: incoming.role === "assistant" && phase === "streaming",
+    };
+  }
+  return {
+    ...incoming,
+    isStreaming: current.isStreaming,
+    isStale: current.isStale,
+    isDetached: current.isDetached,
+    stopped_at: current.stopped_at,
+    interrupted_by_msg_id: current.interrupted_by_msg_id,
+  };
 }
 
 /** Walk the tree rooted at `tree` and apply `mutate` to the node whose
@@ -2083,6 +2130,60 @@ export function useSession(authStatus?: string) {
     [activeRunTargetMessageId]
   );
 
+  /** Apply a live `chat_tree_delta` (BFF-rendered Turn/ModelChange items
+   * + lookup sidecar for the in-flight turn) onto the backend-owned
+   * message list — the live-rendering counterpart to
+   * `applyMessagesReplay`, sharing the exact same `chatTreeToMessages`
+   * conversion the REST history path uses so live and history render
+   * through one function. Malformed frames are dropped rather than
+   * crashing the chat (fail-closed, matches `fetchChatTree`'s handling
+   * of the same wire shape). */
+  const applyChatTreeDelta = useCallback(
+    (
+      sessionId: string,
+      phase: ChatTreeDeltaPhase,
+      items: unknown[],
+      lookup: Record<string, unknown>,
+    ) => {
+      markOpenTimingEvent(sessionId);
+      let deltaMessages: ChatMessage[];
+      try {
+        deltaMessages = chatTreeToMessages(
+          parseProjection(items),
+          lookup as Record<string, ChatTreeLookupEntry>,
+        );
+      } catch (error) {
+        if (error instanceof ProjectionParseError) return;
+        throw error;
+      }
+      if (deltaMessages.length === 0) return;
+      setCurrentSession((prev) => {
+        if (!prev) return prev;
+        return updateNodeById(prev, sessionId, (node) => {
+          const existing = node.messages || [];
+          const byId = new Map(existing.map((m, i) => [m.id, i] as const));
+          let next = existing;
+          for (const incoming of deltaMessages) {
+            const idx = byId.get(incoming.id);
+            const merged = mergeChatTreeDeltaMessage(
+              idx !== undefined ? next[idx] : undefined, incoming, phase,
+            );
+            if (next === existing) next = [...existing];
+            if (idx !== undefined) {
+              next[idx] = merged;
+            } else {
+              byId.set(incoming.id, next.length);
+              next.push(merged);
+            }
+          }
+          if (next === existing) return node;
+          return { ...node, messages: next };
+        });
+      });
+    },
+    [],
+  );
+
   /** Replace the run-state list for a session with the backend's
    * authoritative snapshot. Empty array → no runs active. */
   const applyRunState = useCallback(
@@ -3155,6 +3256,7 @@ export function useSession(authStatus?: string) {
     runStateBySession,
     applyRunState,
     applyLiveEvent,
+    applyChatTreeDelta,
     markTurnTerminal,
     markTurnDetached,
     markTurnStale,

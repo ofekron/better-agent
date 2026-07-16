@@ -164,6 +164,124 @@ def test_turn_start_resets_accumulation() -> None:
     asyncio.run(scenario())
 
 
+def test_worker_frame_refetches_the_session_snapshot() -> None:
+    """A worker_start/worker_event/worker_complete frame must refetch the
+    session scaffold even though one is already cached — the runtime
+    mutates `message.workers` out of band from this cache's row
+    accumulation, so a stale cached scaffold would render the panel
+    without its worker_description (or omit it entirely) for the rest of
+    the turn. Non-worker frames (agent_message) must NOT trigger a
+    refetch — the cache-once optimization stays intact for pure text.
+
+    Regression test for a gap found driving a real worker delegation
+    through the live BFF: the assistant snapshot's `workers` array never
+    appeared in the published deltas because the session was fetched
+    once at the first content frame and never refreshed."""
+    async def scenario() -> None:
+        root_id = "worker-refresh-root"
+        # The reader simulates the runtime's session mutating between
+        # calls: no `workers` on the first read (before worker_start),
+        # populated on the second (after).
+        state = {"n": 0}
+        published: list[tuple[str, object]] = []
+
+        def session_with_workers(has_workers: bool) -> dict:
+            session = _session(root_id)
+            if has_workers:
+                session["messages"][1]["workers"] = [
+                    {"delegation_id": "d1", "worker_description": "Researcher", "events": []},
+                ]
+            return session
+
+        async def reader(rid: str):
+            state["n"] += 1
+            return session_with_workers(has_workers=state["n"] >= 2)
+
+        async def publisher(rid: str, turn_id: str, phase: str, delta) -> None:
+            published.append((phase, delta))
+
+        feed = CurrentTurnFeed(session_reader=reader, delta_publisher=publisher)
+        feed.start()
+        try:
+            feed.submit(_raw_frame(root_id, "agent_message", 1, text="hi"))
+            ok = await _wait_until(lambda: len(published) == 1)
+            check("first content frame renders and publishes", ok)
+            check("first frame fetched the session once", state["n"] == 1)
+
+            feed.submit(_raw_frame(root_id, "agent_message", 2, text="hi there"))
+            await _wait_until(lambda: len(published) == 2)
+            check("a second non-worker frame does NOT refetch (cache-once holds)",
+                  state["n"] == 1)
+
+            feed.submit({
+                "type": "raw_event", "root_id": root_id, "event_type": "worker_start",
+                "seq": 3, "sid": root_id, "source": "claude", "msg_id": "a1",
+                "data": {"delegation_id": "d1"},
+            })
+            ok = await _wait_until(lambda: len(published) == 3)
+            check("worker_start triggers a render + publish", ok)
+            check("worker_start triggers a session refetch", state["n"] == 2)
+
+            _phase, delta = published[-1]
+            snapshot = delta.lookup.get("a1", {}).get("snapshot") or {}
+            check("post-refetch delta's lookup carries the worker panel",
+                  bool(snapshot.get("workers")))
+            current_turn_cache.settle(root_id, "u1")
+        finally:
+            await feed.stop()
+
+    asyncio.run(scenario())
+
+
+def test_delta_publisher_receives_streaming_then_settled_phase() -> None:
+    """Locks the live WS delta contract `bff_server.py` will push to the
+    browser: every content frame publishes phase="streaming" with the
+    turn's rendered items+lookup, and the settling frame publishes the
+    final snapshot under its mapped terminal phase before the cache
+    entry is dropped."""
+    async def scenario() -> None:
+        root_id = "publish-root"
+        session = _session(root_id)
+        published: list[tuple[str, str, str, object]] = []
+
+        async def reader(rid: str):
+            return session
+
+        async def publisher(rid: str, turn_id: str, phase: str, delta) -> None:
+            published.append((rid, turn_id, phase, delta))
+
+        feed = CurrentTurnFeed(session_reader=reader, delta_publisher=publisher)
+        feed.start()
+        try:
+            feed.submit(_raw_frame(root_id, "agent_message", 1, text="hi", final=True))
+            ok = await _wait_until(lambda: len(published) == 1)
+            check("first content frame publishes one delta", ok)
+            if ok:
+                rid, turn_id, phase, delta = published[0]
+                check("published delta targets the frame's root", rid == root_id)
+                check("published delta targets the resolved turn", turn_id == "u1")
+                check("in-flight delta phase is streaming", phase == "streaming")
+                check("in-flight delta carries the rendered turn text",
+                      _turn_result_text(delta.items) == "hi")
+                check("in-flight delta carries a lookup sidecar",
+                      isinstance(delta.lookup, dict) and len(delta.lookup) > 0)
+
+            feed.submit(_raw_frame(root_id, "turn_stopped", 2))
+            ok = await _wait_until(lambda: len(published) == 2)
+            check("settle publishes one final delta", ok)
+            if ok:
+                _rid, _turn_id, phase, delta = published[1]
+                check("settle delta phase maps turn_stopped -> stopped", phase == "stopped")
+                check("settle delta still carries the last rendered content",
+                      _turn_result_text(delta.items) == "hi")
+            check("cache entry is dropped after settle publish",
+                  current_turn_cache.get(root_id, "u1") is None)
+        finally:
+            await feed.stop()
+
+    asyncio.run(scenario())
+
+
 def test_no_prompt_is_noop() -> None:
     async def scenario() -> None:
         root_id = "no-prompt-root"
@@ -188,6 +306,8 @@ if __name__ == "__main__":
     try:
         test_content_accumulates_and_settles()
         test_turn_start_resets_accumulation()
+        test_worker_frame_refetches_the_session_snapshot()
+        test_delta_publisher_receives_streaming_then_settled_phase()
         test_no_prompt_is_noop()
     finally:
         shutil.rmtree(_TMP_HOME, ignore_errors=True)

@@ -16,9 +16,11 @@ the same incremental gap-catch-up pattern as
 from __future__ import annotations
 
 import threading
+from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
-from bff_chat_render import render_chat
+import bff_chat_lookup
+from bff_chat_render import RenderedChat, render_chat
 from canonical_event_adapter import (
     canonical_facts_from_rows,
     canonical_message_facts,
@@ -26,6 +28,15 @@ from canonical_event_adapter import (
 )
 from canonical_runtime_journal import canonical_runtime_journal
 from event_ingester import event_ingester
+
+
+@dataclass(frozen=True)
+class TurnDelta:
+    """One turn's rendered items plus their lookup sidecar — the shape
+    the live WS delta and the REST `/api/chat-tree` response both need
+    to hand the frontend's `chatTreeToMessages` a self-contained unit."""
+    items: list[dict[str, Any]]
+    lookup: dict[str, dict[str, Any]]
 
 _READ_PAGE = 2_000
 
@@ -78,15 +89,24 @@ class CurrentTurnCache:
         self._lock = threading.Lock()
         self._entries: dict[tuple[str, str], list[dict[str, Any]]] = {}
 
-    def _render_turn(
+    def _render_turn_full(
         self,
         root_id: str,
         turn_id: str,
         rows: Sequence[Mapping[str, Any]],
         session: Mapping[str, Any],
-    ) -> list[dict[str, Any]] | None:
+    ) -> tuple[list[dict[str, Any]] | None, RenderedChat]:
         rendered = render_chat(_wire_facts(root_id, rows, session), session)
-        return _turn_items(rendered.items, turn_id)
+        return _turn_items(rendered.items, turn_id), rendered
+
+    def _store(
+        self, root_id: str, turn_id: str, items: list[dict[str, Any]] | None,
+    ) -> None:
+        with self._lock:
+            if items is None:
+                self._entries.pop((root_id, turn_id), None)
+            else:
+                self._entries[(root_id, turn_id)] = items
 
     def update(
         self,
@@ -95,13 +115,30 @@ class CurrentTurnCache:
         rows: Sequence[Mapping[str, Any]],
         session: Mapping[str, Any],
     ) -> list[dict[str, Any]] | None:
-        items = self._render_turn(root_id, turn_id, rows, session)
-        with self._lock:
-            if items is None:
-                self._entries.pop((root_id, turn_id), None)
-            else:
-                self._entries[(root_id, turn_id)] = items
+        items, _rendered = self._render_turn_full(root_id, turn_id, rows, session)
+        self._store(root_id, turn_id, items)
         return items
+
+    def render_with_lookup(
+        self,
+        root_id: str,
+        turn_id: str,
+        rows: Sequence[Mapping[str, Any]],
+        session: Mapping[str, Any],
+    ) -> TurnDelta | None:
+        """Render + store this turn's items (same write path as `update`)
+        and additionally build the lookup sidecar for those items —
+        the self-contained unit the live WS delta pushes to the browser,
+        using the same `bff_chat_lookup.build_lookup` the durable REST
+        read path uses."""
+        items, rendered = self._render_turn_full(root_id, turn_id, rows, session)
+        self._store(root_id, turn_id, items)
+        if items is None:
+            return None
+        lookup = bff_chat_lookup.build_lookup(
+            items, rendered.adapted.messages, rendered.adapted.events, session,
+        )
+        return TurnDelta(items=items, lookup=lookup)
 
     def get(self, root_id: str, turn_id: str) -> list[dict[str, Any]] | None:
         with self._lock:

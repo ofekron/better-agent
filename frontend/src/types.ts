@@ -54,6 +54,12 @@ export type WSEventType =
   // `since_seq=N`. Carries every persisted message with `seq >= N` so
   // the frontend can converge on the canonical state on (re)connect.
   | "messages_replay"
+  // BFF-rendered live chat-tree delta for the in-flight turn (Turn/
+  // ModelChange nodes + lookup sidecar, same wire shape as
+  // GET /api/chat-tree). Replaces agent_message/manager_event/
+  // worker_event/worker_start/worker_complete/worker_prep_*/
+  // todos_snapshot as the live-rendering source for the open session.
+  | "chat_tree_delta"
   | "subscription_ready"
   | "subscription_failed"
   | "render_delta"

@@ -54,6 +54,41 @@ _HOP_BY_HOP = {
     "te", "trailers", "transfer-encoding", "upgrade", "host", "content-length",
 }
 _PROXY_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"]
+# Pure per-message render content types: BFF's `chat_tree_delta` (pushed by
+# `bff_current_turn_feed.py`) is now their single source of truth for the
+# browser, so the runtime's raw frame is dropped here instead of proxied.
+# Deliberately narrower than `runtime_feed_channel._RAW_FORWARD_TYPES`:
+#   - turn_start/turn_complete/turn_stopped/turn_detached: drive non-content
+#     composer/global streaming UI state (stop button, load phase, run_state
+#     touch, stale watchdog) that has no chat-tree equivalent.
+#   - supervisor_event: a transient notification never journaled into a
+#     turn (chat-panel.md "Rendering correctness" — permanently out of the
+#     chat grammar).
+#   - agent_message: carries two non-content side channels frontend still
+#     needs raw — the `pr-link` toast (a metadata agent_message with no
+#     canonical-fact representation, dropped silently by
+#     `canonical_facts_from_journal_row` since its `data.type` matches
+#     neither "assistant" nor "user") and the streamingLoadPhase
+#     "session_discovered"/"assistant" heuristic in `useWebSocket.ts`.
+#   - worker_start/worker_complete: drive the composer's global
+#     `streamingPhase` ("manager" vs "worker") toggle in
+#     `useWebSocket.ts`, a UI concern with no chat-tree equivalent.
+#   `frontend/src/hooks/useWebSocket.ts` still routes CONTENT application
+#   for all three through `chat_tree_delta`, not the raw frame — only the
+#   side channels above still read the passthrough frame.
+# All of the above keep passing through unchanged. messages_replay/
+# messages_delta also stay unchanged — they're the reconnect/backfill
+# mechanism (`onMessagesReplay`), a distinct concern from live in-flight-
+# turn rendering.
+_INTERCEPTED_LIVE_RENDER_TYPES = frozenset({
+    "manager_event",
+    "worker_event",
+    "worker_prep_start",
+    "worker_prep_event",
+    "worker_prep_complete",
+    "worker_prep_cancelled",
+    "todos_snapshot",
+})
 _BROWSER_WS_CLOSE_CODES = frozenset({
     1000,
     1001,
@@ -383,6 +418,20 @@ async def proxy_ws(websocket: WebSocket, _path: str) -> None:
 
     async def upstream_to_browser() -> None:
         async for frame in upstream:
+            if isinstance(frame, str):
+                with contextlib.suppress(json.JSONDecodeError):
+                    parsed = json.loads(frame)
+                    if isinstance(parsed, dict) and parsed.get("type") in _INTERCEPTED_LIVE_RENDER_TYPES:
+                        # BFF now owns rendering for these types: the
+                        # current-turn feed pushes its own `chat_tree_delta`
+                        # frame (via bff_current_turn_feed.py ->
+                        # bff_event_hub.hub.publish_session) instead of the
+                        # runtime's raw frame reaching the browser. Everything
+                        # NOT in this set (turn lifecycle, messages_replay/
+                        # messages_delta reconnect backfill, supervisor_event,
+                        # approvals, sidebar/session metadata, provider infra)
+                        # keeps passing through unchanged.
+                        continue
             await connection.send_frame(frame)
 
     pumps = {

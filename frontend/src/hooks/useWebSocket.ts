@@ -140,6 +140,24 @@ interface UseWebSocketOptions {
    * bubble grows in real time without needing a synthetic
    * "streamingMessage" twin. */
   onLiveTurnEvent?: (appSessionId: string, event: WSEvent) => void;
+  /** BFF-rendered live chat-tree delta (`chat_tree_delta` frames): the
+   * in-flight turn's Turn/ModelChange items + lookup sidecar, same wire
+   * shape `fetchChatTree` returns. Replaces `onLiveTurnEvent` as the
+   * rendering source for agent_message/manager_event/worker_event/
+   * worker_start/worker_complete/worker_prep events/todos_snapshot —
+   * those raw types no longer reach the browser for the intercepted set
+   * (see `bff_server.py`'s `_INTERCEPTED_LIVE_RENDER_TYPES`). `phase`
+   * drives per-message `isStreaming`: "streaming" while still in
+   * flight, "settled"/"stopped"/"detached" on turn end (content only —
+   * the lifecycle-owned isStreaming/stopped_at/isDetached stamps still
+   * come from the unintercepted turn_* frames via
+   * onTurnTerminal/onTurnDetached). */
+  onChatTreeDelta?: (
+    appSessionId: string,
+    phase: "streaming" | "settled" | "stopped" | "detached",
+    items: unknown[],
+    lookup: Record<string, unknown>,
+  ) => void;
   /** Turn ended (complete, stopped, or error). Gives the session layer
    * a chance to flip `isStreaming` on the in-flight assistant message
    * and stamp `stopped_at` so the "Running…" indicator vanishes
@@ -307,6 +325,7 @@ export function useWebSocket(
   const onPromptSendErrorRef = useRef(options.onPromptSendError);
   const onRunStateRef = useRef(options.onRunState);
   const onLiveTurnEventRef = useRef(options.onLiveTurnEvent);
+  const onChatTreeDeltaRef = useRef(options.onChatTreeDelta);
   const onTurnTerminalRef = useRef(options.onTurnTerminal);
   const onTurnDetachedRef = useRef(options.onTurnDetached);
   const onTurnStaleRef = useRef(options.onTurnStale);
@@ -330,6 +349,7 @@ export function useWebSocket(
     onPromptSendErrorRef.current = options.onPromptSendError;
     onRunStateRef.current = options.onRunState;
     onLiveTurnEventRef.current = options.onLiveTurnEvent;
+    onChatTreeDeltaRef.current = options.onChatTreeDelta;
     onTurnTerminalRef.current = options.onTurnTerminal;
     onTurnDetachedRef.current = options.onTurnDetached;
     onTurnStaleRef.current = options.onTurnStale;
@@ -353,6 +373,7 @@ export function useWebSocket(
     options.onPromptSendError,
     options.onRunState,
     options.onLiveTurnEvent,
+    options.onChatTreeDelta,
     options.onTurnTerminal,
     options.onTurnDetached,
     options.onTurnStale,
@@ -551,6 +572,30 @@ export function useWebSocket(
           return;
         }
 
+        // Live chat-tree delta (BFF-rendered): the in-flight turn's
+        // Turn/ModelChange items + lookup, same shape as GET
+        // /api/chat-tree. Dispatched imperatively (not through the
+        // generic `events` buffer) since it drives per-message content
+        // directly via `onChatTreeDelta`, mirroring messages_replay.
+        if (event.type === "chat_tree_delta") {
+          const d = event.data as {
+            app_session_id?: string;
+            phase?: "streaming" | "settled" | "stopped" | "detached";
+            items?: unknown[];
+            lookup?: Record<string, unknown>;
+          };
+          if (d.app_session_id && d.phase && Array.isArray(d.items)) {
+            logTiming("websocket", "chat_tree_delta", frameStartedAt, {
+              bytes: byteSize,
+              items: d.items.length,
+            }, 50);
+            onChatTreeDeltaRef.current?.(
+              d.app_session_id, d.phase, d.items, d.lookup ?? {},
+            );
+          }
+          return;
+        }
+
         // A backend reconcile appended late events to a collapsed
         // historical turn — replace its stale stub so the expanded
         // turn re-fetches fresh full events.
@@ -690,20 +735,24 @@ export function useWebSocket(
             prRepository: d.prRepository,
           });
         } else if (
-          event.type === "agent_message" ||
-          event.type === "manager_event" ||
+          // agent_message/manager_event/worker_event/worker_start/
+          // worker_complete/worker_prep_*/todos_snapshot are no longer
+          // routed here: their content now arrives via `chat_tree_delta`
+          // (see the handler above). manager_event/worker_event/
+          // worker_start/worker_complete/worker_prep_*/todos_snapshot no
+          // longer reach the browser at all for the currently-viewed
+          // session (`bff_server.py`'s `_INTERCEPTED_LIVE_RENDER_TYPES`);
+          // agent_message still arrives raw for the pr-link/load-phase
+          // side channels below, but its content must not double-apply
+          // through Strategy.applyLiveEvent anymore. model_switched/
+          // steer_prompt/turn_start/turn_complete are unintercepted and
+          // still need this path (model-boundary markers, steering
+          // messages, and turn_start/turn_complete's agent_session_id
+          // stamping have no chat-tree equivalent).
           event.type === "model_switched" ||
           event.type === "steer_prompt" ||
-          event.type === "worker_event" ||
           event.type === "turn_start" ||
-          event.type === "turn_complete" ||
-          event.type === "worker_start" ||
-          event.type === "worker_complete" ||
-          event.type === "worker_prep_start" ||
-          event.type === "worker_prep_event" ||
-          event.type === "worker_prep_complete" ||
-          event.type === "worker_prep_cancelled" ||
-          event.type === "todos_snapshot"
+          event.type === "turn_complete"
         ) {
           const eventSid = resolveLiveFrameSessionId(
             event,
