@@ -2599,6 +2599,7 @@ def _sql_authorizer(action: int, arg1, arg2, db_name, trigger) -> int:
 class _SqlProjection:
     sql: str
     uses_raw_text: bool = False
+    minimum_text_chars_sql: str | None = None
 
 
 @dataclass(frozen=True)
@@ -2703,7 +2704,9 @@ def _parse_sql_projections(select_expr: str) -> tuple[_SqlProjection, ...] | Non
             alias = bare_match.group("alias")
             alias_sql = f" AS {alias}" if alias else ""
             if column == "text":
-                projections.append(_SqlProjection(f"e.text{alias_sql}"))
+                projections.append(_SqlProjection(
+                    f"e.text{alias_sql}", minimum_text_chars_sql="m.text_len",
+                ))
             elif column in metadata_columns:
                 projections.append(_SqlProjection(f"m.{column}{alias_sql}"))
             else:
@@ -2717,7 +2720,10 @@ def _parse_sql_projections(select_expr: str) -> tuple[_SqlProjection, ...] | Non
         if start > 1_000_000 or length > 1_000_000:
             return None
         alias = substr_match.group("alias")
-        projections.append(_SqlProjection(f"substr(r.text,{start},{length}) AS {alias}", True))
+        minimum_chars_sql = f"MAX(MIN(m.text_len - {start - 1}, {length}), 0)"
+        projections.append(_SqlProjection(
+            f"substr(r.text,{start},{length}) AS {alias}", True, minimum_chars_sql,
+        ))
     return tuple(projections)
 
 
@@ -3302,7 +3308,9 @@ def _choose_match_recency_sql(
     conn: sqlite3.Connection,
     sql: str,
     params: tuple,
-) -> tuple[str, str, dict[str, int]] | None:
+    *,
+    max_result_bytes: int = SQL_RESULT_MAX_BYTES,
+) -> tuple[str | None, str, dict[str, int]] | None:
     """Choose the smaller bounded access path for validated MATCH recency SQL."""
     parsed = _validated_match_recency_query(sql, params)
     if parsed is None:
@@ -3332,6 +3340,33 @@ def _choose_match_recency_sql(
     match_rows = int(conn.execute(match_probe_sql, match_params).fetchone()[0])
     metadata_rows = int(conn.execute(metadata_probe_sql, metadata_params).fetchone()[0])
     probe = {"match_rows": match_rows, "metadata_rows": metadata_rows}
+    minimum_text_expressions = [
+        item.minimum_text_chars_sql for item in parsed.projections
+        if item.minimum_text_chars_sql is not None
+    ]
+    if parsed.limit is None and minimum_text_expressions:
+        both_probes_overflow = (
+            match_rows > _SQL_PLAN_PROBE_LIMIT and metadata_rows > _SQL_PLAN_PROBE_LIMIT
+        )
+        preflight_drive = (
+            "fts" if both_probes_overflow or match_rows < metadata_rows else "metadata"
+        )
+        preflight_sql = parsed.render(drive=preflight_drive)
+        select_end = preflight_sql.index(" FROM ")
+        order_start = preflight_sql.rindex(" ORDER BY ")
+        preflight_sql = (
+            "SELECT " + " + ".join(minimum_text_expressions)
+            + preflight_sql[select_end:order_start]
+        )
+        minimum_text_chars = 0
+        for row in conn.execute(preflight_sql, params):
+            minimum_text_chars += int(row[0] or 0)
+            if minimum_text_chars > max_result_bytes:
+                break
+        if minimum_text_chars:
+            probe["minimum_result_bytes"] = minimum_text_chars
+        if minimum_text_chars > max_result_bytes:
+            return None, "rejected_result_too_large", probe
     if match_rows > _SQL_PLAN_PROBE_LIMIT and metadata_rows > _SQL_PLAN_PROBE_LIMIT:
         return parsed.render(drive="fts"), "match_fts", probe
     if match_rows >= metadata_rows:
@@ -3529,9 +3564,24 @@ def run_readonly_sql(
         deadline_timer.name = "native-transcript-sql-deadline"
         deadline_timer.daemon = True
         deadline_timer.start()
-        match_plan = phase("plan_probe", lambda: _choose_match_recency_sql(conn, sql, params))
+        match_plan = phase(
+            "plan_probe",
+            lambda: _choose_match_recency_sql(
+                conn, sql, params, max_result_bytes=result_byte_budget,
+            ),
+        )
         if match_plan is not None:
             executed_sql, execution_route, plan_probe = match_plan
+            if executed_sql is None:
+                result = {
+                    "error": "result_too_large",
+                    "error_code": "result_too_large",
+                    "max_result_bytes": result_byte_budget,
+                    "remediation": {"add_limit": True},
+                    "columns": [],
+                    "rows": [],
+                }
+                return result
         elif _sql_shape(sql)["has_match"] and _sql_shape(sql)["orders_by_ts_utc"]:
             rejection = _match_recency_rejection(sql)
         require_budget("plan_probe")

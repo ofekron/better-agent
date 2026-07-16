@@ -855,6 +855,65 @@ def test_match_recency_plan_selects_lower_cardinality_path() -> bool:
     return ok
 
 
+def test_unbounded_raw_match_rejects_proven_byte_overflow_before_sort() -> bool:
+    conn = idx._writer_connection()
+    start_rowid = conn.execute("SELECT COALESCE(MAX(rowid), 0) FROM native_element_fts").fetchone()[0]
+    payload = "broadguard " + ("x" * 1_700)
+    rows = [
+        (payload, f"/broad-guard/{i}.jsonl", f"broad-{i}", "/broad-guard", "claude",
+         "assistant_text", "", f"2025-04-01T00:{i % 60:02d}:00Z", "assistant", len(payload))
+        for i in range(idx._SQL_PLAN_PROBE_LIMIT + 1)
+    ]
+    conn.executemany(
+        "INSERT INTO native_element_fts"
+        "(text,path,sid,cwd,tag,element_kind,tool_name,ts_utc,role,text_len) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?)", rows,
+    )
+    indexed = conn.execute(
+        "SELECT rowid,path,sid,cwd,tag,element_kind,tool_name,ts_utc,role,text_len "
+        "FROM native_element_fts WHERE rowid > ?", (start_rowid,),
+    ).fetchall()
+    conn.executemany(
+        "INSERT INTO native_element_meta"
+        "(rowid,path,sid,cwd,tag,element_kind,tool_name,ts_utc,role,text_len) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?)", indexed,
+    )
+    conn.commit()
+    unbounded_sql = (
+        "SELECT path, text, ts_utc FROM native_element_fts "
+        "WHERE native_element_fts MATCH ? AND cwd = ? ORDER BY ts_utc DESC"
+    )
+    started = time.perf_counter()
+    rejected = idx._choose_match_recency_sql(
+        conn, unbounded_sql, ("broadguard", "/broad-guard"),
+    )
+    elapsed = time.perf_counter() - started
+    bounded_sql = unbounded_sql + " LIMIT 5"
+    bounded = idx._choose_match_recency_sql(
+        conn, bounded_sql, ("broadguard", "/broad-guard"),
+    )
+    snippet_sql = unbounded_sql.replace("text", "substr(text,1,20) AS snippet", 1)
+    snippet = idx._choose_match_recency_sql(
+        conn, snippet_sql, ("broadguard", "/broad-guard"),
+    )
+    expected = conn.execute(bounded_sql, ("broadguard", "/broad-guard")).fetchall()
+    actual = conn.execute(bounded[0], ("broadguard", "/broad-guard")).fetchall() if bounded and bounded[0] else []
+    conn.execute("DELETE FROM native_element_meta WHERE rowid > ?", (start_rowid,))
+    conn.execute("DELETE FROM native_element_fts WHERE rowid > ?", (start_rowid,))
+    conn.commit()
+    ok = (
+        rejected is not None and rejected[0] is None
+        and rejected[1] == "rejected_result_too_large"
+        and rejected[2].get("minimum_result_bytes", 0) > idx.SQL_RESULT_MAX_BYTES
+        and elapsed < 1.0
+        and bounded is not None and bounded[0] is not None and actual == expected
+        and snippet is not None and snippet[0] is not None
+    )
+    print(f"{OK if ok else FAIL} unbounded raw MATCH rejects proven byte overflow before sort "
+          f"(elapsed={elapsed:.3f}s, probe={rejected[2] if rejected else None})")
+    return ok
+
+
 def test_observed_match_recency_templates_preserve_direct_results() -> bool:
     conn = idx._writer_connection()
     start_rowid = conn.execute("SELECT COALESCE(MAX(rowid), 0) FROM native_element_fts").fetchone()[0]
@@ -1886,9 +1945,9 @@ def test_total_timer_attributes_probe_delay_and_enforces_budget() -> bool:
     handler = logging.StreamHandler(stream)
     old_level = idx.logger.level
     idx.time.monotonic = lambda: clock[0]
-    def delayed_probe(conn, sql, params):
+    def delayed_probe(conn, sql, params, **kwargs):
         clock[0] += 9.303
-        return old_choose(conn, sql, params)
+        return old_choose(conn, sql, params, **kwargs)
     idx._choose_match_recency_sql = delayed_probe
     idx.logger.addHandler(handler)
     idx.logger.setLevel(logging.WARNING)
@@ -1949,6 +2008,7 @@ def main_run() -> int:
         test_match_recency_rewrite_reduces_vm_work,
         test_unbounded_match_rewrite_reduces_median_vm_work,
         test_match_recency_plan_selects_lower_cardinality_path,
+        test_unbounded_raw_match_rejects_proven_byte_overflow_before_sort,
         test_observed_match_recency_templates_preserve_direct_results,
         test_match_recency_recognizer_falls_back_on_unsafe_shapes,
         test_production_path_element_window_rewrites_with_parity_and_bounded_work,
