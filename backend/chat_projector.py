@@ -378,7 +378,15 @@ def _canonical_events(
         current = latest.get(event.event_id)
         if current is not None:
             _validate_version_update(current, event)
-        if current is None or (event.content_version, event.sequence) > (current.content_version, current.sequence):
+        if current is None or bool(event.message_id) != bool(current.message_id):
+            # Ownership is a stronger signal than (content_version, sequence)
+            # ordering: an owned version always wins over an unowned one
+            # (e.g. an orphan re-ingestion of an already-owned event),
+            # regardless of arrival order, and an unowned candidate never
+            # unlinks an already-owned event from its message.
+            if current is None or event.message_id:
+                latest[event.event_id] = event
+        elif (event.content_version, event.sequence) > (current.content_version, current.sequence):
             latest[event.event_id] = event
     return tuple(_ordered(
         CanonicalEvent(
@@ -954,9 +962,15 @@ def _json_string_bytes(value: str) -> int:
 
 def _validate_version_update(current: CanonicalEvent, candidate: CanonicalEvent) -> None:
     identity = (
-        "context_id", "turn_id", "message_id", "parent_event_id", "type", "provider",
+        "context_id", "turn_id", "parent_event_id", "type", "provider",
     )
     if any(getattr(current, field) != getattr(candidate, field) for field in identity):
+        raise ChatProjectionInputError("version_identity_changed", "event identity changed")
+    # An empty message_id on either side means that version has no known
+    # owner (e.g. an orphan re-ingestion of an already-owned event) rather
+    # than a genuine, conflicting claim of ownership — only two disagreeing
+    # non-empty owners are a real identity change.
+    if current.message_id and candidate.message_id and current.message_id != candidate.message_id:
         raise ChatProjectionInputError("version_identity_changed", "event identity changed")
     render_changed = (
         current.data != candidate.data

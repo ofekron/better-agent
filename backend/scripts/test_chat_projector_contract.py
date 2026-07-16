@@ -387,6 +387,27 @@ def test_same_id_versions_require_stable_identity_and_versioned_render_updates()
     assert turn.result.text == "two"
 
 
+def test_orphan_duplicate_without_owner_does_not_break_identity() -> None:
+    owned = _event("versioned", 1, "assistant_text", data={"text": "one"})
+    orphan = dict(owned)
+    orphan.update({"message_id": None, "journal_seq": 2})
+    # Must not raise: an unowned duplicate is weaker evidence, not a
+    # conflicting identity claim.
+    turn = next(
+        item for item in project_chat(_messages(), [owned, orphan], schema_version=1).items
+        if isinstance(item, Turn)
+    )
+    canonical = chat_projector._canonical_events([owned, orphan], 1)
+    event_by_id = {event.event_id: event for event in canonical}
+    # The orphan duplicate must never unlink the event from its real owner.
+    assert event_by_id["versioned"].message_id == "assistant"
+    assert turn.result.text == "one"
+    # Order independence: the orphan arriving first must not stick either.
+    canonical_reordered = chat_projector._canonical_events([orphan, owned], 1)
+    event_by_id_reordered = {event.event_id: event for event in canonical_reordered}
+    assert event_by_id_reordered["versioned"].message_id == "assistant"
+
+
 def test_closed_envelopes_and_nested_identities_reject_unknown_fields() -> None:
     base = _event("valid", 1, "assistant_text", data={"text": "ok"})
     extra_event = dict(base, surprise=True)
