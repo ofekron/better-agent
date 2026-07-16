@@ -595,42 +595,48 @@ def _migrate_session_file(path: Path) -> bool:
     return True
 
 
-def _migrate_events_jsonl(path: Path, cwd: Optional[str]) -> bool:
+def _migrate_events_jsonl(
+    root_id: str, path: Path, cwd: Optional[str],
+) -> bool:
     """Atomically rewrite a per-root events.jsonl. Returns True iff any
     line changed."""
     import json
-    if not path.exists():
-        return False
-    out_lines: list[str] = []
-    changed = False
-    with path.open("r", encoding="utf-8") as f:
-        for line in f:
-            stripped = line.rstrip("\n")
-            if not stripped.strip():
-                out_lines.append(line)
-                continue
-            try:
-                entry = json.loads(stripped)
-            except json.JSONDecodeError:
-                out_lines.append(line)
-                continue
-            etype = entry.get("type") or ""
-            edata = entry.get("data")
-            if isinstance(edata, dict):
-                before = repr(edata)
-                rewrite_event_data(etype, edata, cwd)
-                if repr(edata) != before:
-                    changed = True
-                    entry["data"] = edata
-                    out_lines.append(
-                        json.dumps(entry, ensure_ascii=False) + "\n"
-                    )
+    import hydration_index_store
+
+    with hydration_index_store.journal_guard(root_id, path):
+        if not path.exists():
+            return False
+        out_lines: list[str] = []
+        changed = False
+        with path.open("r", encoding="utf-8") as f:
+            for line in f:
+                stripped = line.rstrip("\n")
+                if not stripped.strip():
+                    out_lines.append(line)
                     continue
-            out_lines.append(line)
-    if not changed:
-        return False
-    _atomic_write_tmp(path, "".join(out_lines))
-    return True
+                try:
+                    entry = json.loads(stripped)
+                except json.JSONDecodeError:
+                    out_lines.append(line)
+                    continue
+                etype = entry.get("type") or ""
+                edata = entry.get("data")
+                if isinstance(edata, dict):
+                    before = repr(edata)
+                    rewrite_event_data(etype, edata, cwd)
+                    if repr(edata) != before:
+                        changed = True
+                        entry["data"] = edata
+                        out_lines.append(
+                            json.dumps(entry, ensure_ascii=False) + "\n"
+                        )
+                        continue
+                out_lines.append(line)
+        if not changed:
+            return False
+        _atomic_write_tmp(path, "".join(out_lines))
+        hydration_index_store.invalidate(root_id, path)
+        return True
 
 
 def migrate_all(ba_home_dir: Path) -> dict:
@@ -688,7 +694,7 @@ def migrate_all(ba_home_dir: Path) -> dict:
             continue
         cwd = cwd_by_root.get(sub.name)
         try:
-            if _migrate_events_jsonl(events_path, cwd):
+            if _migrate_events_jsonl(sub.name, events_path, cwd):
                 events_changed += 1
         except Exception:
             continue

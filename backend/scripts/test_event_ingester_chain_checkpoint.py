@@ -164,6 +164,69 @@ def test_cached_handle_does_not_append_to_replaced_inode() -> None:
     ingester.close(root)
 
 
+def test_bcfile_migration_serializes_with_live_append() -> None:
+    import file_ref_resolver
+
+    root = "migration-live-append"
+    ingester = EventIngester()
+    referenced = ingester._root_dir(root) / "referenced.py"
+    referenced.parent.mkdir(parents=True, exist_ok=True)
+    _append(ingester, root, "u1", str(referenced))
+    referenced.touch()
+    file_ref_resolver._cache.invalidate_path(str(referenced))
+    path = ingester._events_path(root)
+    replace_entered = threading.Event()
+    release_replace = threading.Event()
+    append_started = threading.Event()
+    append_done = threading.Event()
+    original_atomic_write = file_ref_resolver._atomic_write_tmp
+
+    def gated_atomic_write(target: Path, text: str) -> None:
+        replace_entered.set()
+        assert release_replace.wait(5)
+        original_atomic_write(target, text)
+
+    def migrate() -> None:
+        assert file_ref_resolver._migrate_events_jsonl(root, path, str(path.parent))
+
+    def append() -> None:
+        append_started.set()
+        assert _append(ingester, root, "u2", "after migration") == 2
+        append_done.set()
+
+    file_ref_resolver._atomic_write_tmp = gated_atomic_write
+    migration_thread = threading.Thread(target=migrate)
+    append_thread = threading.Thread(target=append)
+    try:
+        migration_thread.start()
+        assert replace_entered.wait(5)
+        append_thread.start()
+        assert append_started.wait(5)
+        time.sleep(0.02)
+        assert not append_done.is_set()
+        release_replace.set()
+        migration_thread.join(5)
+        append_thread.join(5)
+        assert not migration_thread.is_alive()
+        assert not append_thread.is_alive()
+    finally:
+        release_replace.set()
+        file_ref_resolver._atomic_write_tmp = original_atomic_write
+        migration_thread.join(5)
+        if append_thread.ident is not None:
+            append_thread.join(5)
+
+    assert _append(ingester, root, "u3", "identity refreshed") == 3
+    ingester.close_all()
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    assert [row["seq"] for row in rows] == [1, 2, 3]
+    assert "bcfile:" in rows[0]["data"]["message"]["content"][0]["text"]
+    meta = json.loads(ingester._event_chain_path(root).read_text())
+    assert meta["seq"] == 3
+    assert meta["size"] == path.stat().st_size
+    assert meta["digest"] == _manual_digest(path, 3)
+
+
 def test_sparse_memory_bounded_tail_and_no_caller_fsync() -> None:
     root = "sparse-large"
     ingester = EventIngester()
@@ -361,6 +424,7 @@ def main() -> None:
         test_cached_handle_does_not_append_to_replaced_inode()
         test_sparse_memory_bounded_tail_and_no_caller_fsync()
         test_append_during_background_fsync_keeps_new_epoch_dirty()
+        test_bcfile_migration_serializes_with_live_append()
         test_cold_sparse_read_seeks_from_validated_ladder()
         test_corrupt_sparse_ladder_fails_closed_and_rebuilds()
         test_corrupt_cold_checkpoint_rebuild_has_bounded_projection_memory()
