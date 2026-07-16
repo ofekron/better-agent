@@ -97,11 +97,15 @@ export interface InvestigationContext {
 interface Props {
   open: boolean;
   onClose: () => void;
-  /** `send=true` (Create & Send) auto-sends the initial prompt right after
-   * creation — the prior "Create" behavior. `send=false` (Create) only
+  /** `send=true` (Create & Send / Create & Send & Open) auto-sends the
+   * initial prompt right after creation. `send=false` (Create) only
    * creates the session and prefills the initial prompt as its draft,
-   * leaving it in the composer unsent. */
-  onCreate: (config: SessionConfig, investigation: InvestigationContext | undefined, send: boolean) => void;
+   * leaving it in the composer unsent.
+   * `open=true` (Create & Send & Open) navigates to the newly created
+   * session afterwards. `open=false` (Create / Create & Send) creates
+   * (and optionally sends) without navigating — the current session stays
+   * in view, unchanged. */
+  onCreate: (config: SessionConfig, investigation: InvestigationContext | undefined, send: boolean, open: boolean) => void;
   defaultCwd: string;
   /** Existing projects (paths + names). Drives the project picker so
    * users don't have to type a path. Required so the modal can render
@@ -763,7 +767,7 @@ export function NewSessionModal({
   const missingProviderConfig =
     !main.providerId || (effectiveOrchestrationMode === "team" && !worker.providerId);
 
-  const handleCreate = (send: boolean) => {
+  const handleCreate = (send: boolean, open: boolean) => {
     const effectiveCwd = cwd || defaultCwd;
     const baseConfig: SessionConfig = {
       orchestrationMode: effectiveOrchestrationMode,
@@ -790,14 +794,14 @@ export function NewSessionModal({
     const ctx = investigation
       ? { ...investigation, prompt: editedPrompt, images: initialImages, files: initialFiles }
       : undefined;
-    onCreate(config, ctx, send);
+    onCreate(config, ctx, send, open);
   };
 
   const handlePromptKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key !== "Enter" || e.shiftKey) return;
     e.preventDefault();
     if (!(cwd || defaultCwd) || creating) return;
-    handleCreate(true);
+    handleCreate(true, false);
   };
 
   const handlePromptPaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
@@ -1090,20 +1094,29 @@ export function NewSessionModal({
           <ProgressButton
             className="btn-secondary"
             opId="session:create"
-            onClick={() => handleCreate(false)}
+            onClick={() => handleCreate(false, false)}
             extraDisabled={!(cwd || defaultCwd) || (!allowOfflineCreate && missingProviderConfig)}
             loadingChildren={t("newSession.creating")}
           >
             {t("newSession.create")}
           </ProgressButton>
           <ProgressButton
-            className="btn-primary"
+            className="btn-secondary"
             opId="session:create"
-            onClick={() => handleCreate(true)}
+            onClick={() => handleCreate(true, false)}
             extraDisabled={!(cwd || defaultCwd) || (!allowOfflineCreate && missingProviderConfig)}
             loadingChildren={t("newSession.creating")}
           >
             {t("newSession.createAndSend")}
+          </ProgressButton>
+          <ProgressButton
+            className="btn-primary"
+            opId="session:create"
+            onClick={() => handleCreate(true, true)}
+            extraDisabled={!(cwd || defaultCwd) || (!allowOfflineCreate && missingProviderConfig)}
+            loadingChildren={t("newSession.creating")}
+          >
+            {t("newSession.createAndSendAndOpen")}
           </ProgressButton>
         </div>
       </div>

@@ -726,6 +726,7 @@
   "newSession.cancel": "Cancel",
   "newSession.create": "Create",
   "newSession.createAndSend": "Create & Send",
+  "newSession.createAndSendAndOpen": "Create & Send & Open",
   "newSession.creating": "Creating…",
   "newSession.fileEdit": "File Edit Mode",
   "newSession.machine": "Machine",

@@ -5750,6 +5750,7 @@ function AppMain({
       files: FilePayload[],
       pendingStatus: ChatMessage["status"] = "offline",
       send: boolean = true,
+      openAfter: boolean = true,
     ) => {
       if (config.fileEditEnabled) {
         window.alert(t("app.fileEditOfflineQueue", "File-editing sessions cannot be queued offline."));
@@ -5814,7 +5815,7 @@ function AppMain({
       }
       setNewSessionModalOpen(false);
       setInvestigationCtx(undefined);
-      navigate(sessionPath(id));
+      if (openAfter) navigate(sessionPath(id));
       return true;
     },
     [addOfflineSession, offlineQueue, navigate, setPendingForSession, t],
@@ -5860,7 +5861,7 @@ function AppMain({
   );
 
   const handleCreateSessionFromModal = useCallback(
-    async (config: SessionConfig, investigation: InvestigationContext | undefined, send: boolean) => {
+    async (config: SessionConfig, investigation: InvestigationContext | undefined, send: boolean, open: boolean) => {
       const initialPrompt = (investigation?.prompt ?? config.initialPrompt).trim();
       const initialPromptImages = investigation?.images ?? config.initialImages;
       const images: ImagePayload[] = initialPromptImages.map((img) => ({
@@ -5884,7 +5885,7 @@ function AppMain({
         }
         setNewSessionModalOpen(false);
         setInvestigationCtx(undefined);
-        navigateToCreatedSession(session);
+        if (open) navigateToCreatedSession(session);
         return true;
       };
 
@@ -5908,7 +5909,7 @@ function AppMain({
         }
         setNewSessionModalOpen(false);
         setInvestigationCtx(undefined);
-        navigateToCreatedSession(session);
+        if (open) navigateToCreatedSession(session);
         return true;
       };
 
@@ -5938,6 +5939,7 @@ function AppMain({
               files,
               connected ? "sending" : "offline",
               send,
+              open,
             );
             return;
           }
@@ -5948,7 +5950,7 @@ function AppMain({
       }
 
       if (!connected) {
-        await queueLocalFirstSession(config, initialPrompt, images, files, "offline", send);
+        await queueLocalFirstSession(config, initialPrompt, images, files, "offline", send, open);
         return;
       }
 
@@ -5972,7 +5974,7 @@ function AppMain({
         await finishCreatedSession(session);
       } catch (e) {
         if (isRetryableOfflineError(e)) {
-          await queueLocalFirstSession(config, initialPrompt, images, files, "offline", send);
+          await queueLocalFirstSession(config, initialPrompt, images, files, "offline", send, open);
           return;
         }
         const msg = e instanceof Error ? e.message : String(e);
