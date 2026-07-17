@@ -1305,6 +1305,17 @@ def test_ba_home_memoizes_resolution_off_loop() -> None:
 # occurrence of start (file head if None) up to the first following end
 # (file tail if None).
 SOURCE_GREP_CASES: tuple = (
+    ('get_historical_children_reads_root_off_loop', (
+     ('grep', 'main.py',
+      (('async def get_historical_children(', '\ndef _resolve_session_node_id('),),
+      ('node = await asyncio.to_thread(session_manager.get_ref, session_id)',
+       'rebuild_root = await asyncio.to_thread(session_manager.get_ref, root_id)',
+      ),
+      ('node = session_manager.get_ref(session_id)',
+       'historical_children_projection.schedule_rebuild(\n            root_id, session_manager.get_ref(root_id), priority=True,',
+      ),
+     ),
+    )),
     ('hook_runner_loads_config_off_loop', (
      ('grep', 'hook_runner.py', (), ('hooks = await asyncio.to_thread(hook_store.list_hooks)',),
       ('hooks = hook_store.list_hooks()',),
@@ -3840,7 +3851,7 @@ def _grep_check_failures(check: tuple) -> list[str]:
 
 
 def test_source_grep_regressions() -> None:
-    assert len(SOURCE_GREP_CASES) == 189
+    assert len(SOURCE_GREP_CASES) == 190
     executed = 0
     failing: list[str] = []
     report: list[str] = []

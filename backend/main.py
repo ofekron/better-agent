@@ -8948,7 +8948,7 @@ async def get_historical_children(
     root_id = session_manager._root_id_for(session_id)
     if root_id is None:
         raise HTTPException(status_code=404, detail=t("error.session_not_found"))
-    node = session_manager.get_ref(session_id)
+    node = await asyncio.to_thread(session_manager.get_ref, session_id)
     live_message = next(
         (
             message for message in (node.get("messages") or [])
@@ -8984,8 +8984,9 @@ async def get_historical_children(
             limit=limit, cursor=cursor if isinstance(cursor, str) else None,
         )
     except historical_children_projection.ProjectionUnavailable as exc:
+        rebuild_root = await asyncio.to_thread(session_manager.get_ref, root_id)
         historical_children_projection.schedule_rebuild(
-            root_id, session_manager.get_ref(root_id), priority=True,
+            root_id, rebuild_root, priority=True,
         )
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except historical_children_projection.ProjectionConflict as exc:
