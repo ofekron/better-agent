@@ -120,8 +120,8 @@ class CanonicalRuntimeJournal:
         event_type: str,
         data: dict[str, Any],
         source: str,
+        run_id: str | None,
         msg_id: str | None,
-        event_id: str | None,
         turn_id: str | None,
     ) -> None:
         with self._advance_lock(root_id):
@@ -145,17 +145,22 @@ class CanonicalRuntimeJournal:
                 # than eagerly (and fatally) here.
                 _notify_advance(root_id, seq)
                 return
-            payload = dict(data)
-            if event_id and not payload.get("uuid"):
-                payload["uuid"] = event_id
+            # This row MUST mirror the persisted events.jsonl entry
+            # field-for-field (data bytes, run_id, msg_id, turn_id; no
+            # injected uuid): gap-fill re-derivation feeds the disk row
+            # into the same canonical_facts_from_rows, and any skew
+            # here forks the fact's identity (source_stream_id /
+            # source_event_id) or its content_hash — duplicates or a
+            # SourceConflictError on the next full re-derivation.
             rows = [{
                 "root_id": root_id,
                 "root_generation": authority.root_generation,
                 "sid": sid,
                 "seq": seq,
                 "type": event_type,
-                "data": payload,
+                "data": data,
                 "source": source,
+                "run_id": run_id,
                 "msg_id": msg_id,
                 "turn_id": turn_id,
             }]
@@ -206,7 +211,7 @@ class CanonicalRuntimeJournal:
             ]
             store = self._store()
             if facts:
-                store.submit_many(facts)
+                store.submit_many(facts, upsert=True)
             barrier = store.barrier(root_id, generation)
             journal_through_seq = max(
                 (int(row.get("seq") or 0) for row in rows), default=authority.journal_through_seq,

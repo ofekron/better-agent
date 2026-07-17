@@ -85,7 +85,6 @@ class EventIngester:
         # `close_all()` only drains handles so the singleton remains reusable.
         self._fsync_dirty: set[str] = set()
         self._fsync_dirty_epoch: dict[str, int] = {}
-        self._projection_failed_epoch: dict[str, int] = {}
         self._fsync_cond = threading.Condition()
         self._fsync_thread: Optional[threading.Thread] = None
         self._fsync_stop = threading.Event()
@@ -496,17 +495,31 @@ class EventIngester:
         self._prune_append_handles(exclude_root_id=root_id)
         return fh
 
-    def _close_handle_locked(self, root_id: str) -> None:
+    @staticmethod
+    def _flush_hydration_projection(root_id: str, path: Path) -> None:
+        import hydration_index_store
+        try:
+            hydration_index_store.flush_writer_projection(root_id, path)
+        except hydration_index_store.WriterProjectionError as exc:
+            if str(exc) != "projection prefix is not authoritative":
+                raise
+            hydration_index_store.invalidate(root_id, path)
+            hydration_index_store._publish_cold(
+                path, hydration_index_store._db_path(root_id),
+            )
+
+    def _close_handle_locked(self, root_id: str) -> bool:
         with self._guard:
             pair = self._handles.pop(root_id, None)
         if not pair:
-            return
+            return True
         path, fh = pair
         import hydration_index_store
         journal_guard = hydration_index_store.journal_guard(root_id, path)
         journal_guard.__enter__()
         # Drain durability for this handle synchronously — once closed
         # the background flusher can no longer reach it.
+        close_handle = True
         try:
             fh.flush()
             if not self._chain_handle_current_locked(root_id, path, fh):
@@ -521,15 +534,25 @@ class EventIngester:
                 self._persist_chain_head_locked(
                     root_id, path, fh, journal_durable=True,
                 )
-                hydration_index_store.flush_writer_projection(root_id, path)
+                self._flush_hydration_projection(root_id, path)
             with self._fsync_cond:
                 self._fsync_dirty.discard(root_id)
                 self._fsync_dirty_epoch.pop(root_id, None)
+        except hydration_index_store.WriterProjectionError:
+            logger.error(
+                "close hydration projection failed for %s; handle retained",
+                root_id, exc_info=True,
+            )
+            with self._guard:
+                self._handles[root_id] = (path, fh)
+            close_handle = False
         except (OSError, RuntimeError):
             logger.debug("close fsync failed for %s", root_id, exc_info=True)
         finally:
-            fh.close()
+            if close_handle:
+                fh.close()
             journal_guard.__exit__(None, None, None)
+        return close_handle
 
     def _prune_append_handles(self, *, exclude_root_id: str) -> None:
         # Skip victims whose per-root lock is currently held (a concurrent
@@ -591,20 +614,12 @@ class EventIngester:
     def _fsync_loop(self) -> None:
         while not self._fsync_stop.is_set():
             with self._fsync_cond:
-                dirty = sorted(
-                    root_id for root_id in self._fsync_dirty
-                    if self._projection_failed_epoch.get(root_id)
-                    != self._fsync_dirty_epoch.get(root_id, 0)
-                )
+                dirty = sorted(self._fsync_dirty)
                 if not dirty:
                     self._fsync_cond.wait()
                 if self._fsync_stop.is_set():
                     return
-                dirty = sorted(
-                    root_id for root_id in self._fsync_dirty
-                    if self._projection_failed_epoch.get(root_id)
-                    != self._fsync_dirty_epoch.get(root_id, 0)
-                )
+                dirty = sorted(self._fsync_dirty)
             # Fsync outside `_fsync_cond` so a slow disk can't block
             # dirty-marking. Re-fetch the CURRENT handle under `_guard`
             # per root: an evicted/closed root's data was fsync'd in the
@@ -619,8 +634,6 @@ class EventIngester:
                         if root_id not in self._fsync_dirty:
                             continue
                         epoch = self._fsync_dirty_epoch.get(root_id, 0)
-                        if self._projection_failed_epoch.get(root_id) == epoch:
-                            continue
                     with self._guard:
                         current = self._handles.get(root_id)
                     if current is None:
@@ -645,14 +658,12 @@ class EventIngester:
                         self._persist_chain_head_locked(
                             root_id, path, fh, journal_durable=True,
                         )
-                        hydration_index_store.flush_writer_projection(root_id, path)
+                        self._flush_hydration_projection(root_id, path)
                     except hydration_index_store.WriterProjectionError:
                         logger.error(
                             "background hydration projection failed for %s; retrying",
                             root_id, exc_info=True,
                         )
-                        with self._fsync_cond:
-                            self._projection_failed_epoch[root_id] = epoch
                         journal_guard.__exit__(None, None, None)
                         continue
                     except RuntimeError:
@@ -672,7 +683,6 @@ class EventIngester:
                     with self._fsync_cond:
                         if self._fsync_dirty_epoch.get(root_id) == epoch:
                             self._fsync_dirty.discard(root_id)
-                            self._projection_failed_epoch.pop(root_id, None)
 
     def _fsync_dirty_now(self) -> None:
         """Synchronous fsync of every currently-dirty root. Used by
@@ -706,7 +716,14 @@ class EventIngester:
                     self._persist_chain_head_locked(
                         root_id, path, fh, journal_durable=True,
                     )
-                    hydration_index_store.flush_writer_projection(root_id, path)
+                    try:
+                        self._flush_hydration_projection(root_id, path)
+                    except hydration_index_store.WriterProjectionError:
+                        logger.error(
+                            "shutdown hydration projection failed for %s; retrying",
+                            root_id, exc_info=True,
+                        )
+                        self._flush_hydration_projection(root_id, path)
                     with self._fsync_cond:
                         self._fsync_dirty.discard(root_id)
                 except (OSError, RuntimeError):
@@ -1117,7 +1134,8 @@ class EventIngester:
             pair = self._handles.get(root_id)
         if meta is None:
             if pair is not None:
-                self._close_handle_locked(root_id)
+                if not self._close_handle_locked(root_id):
+                    return
                 pair = None
             self._rebuild_chain_only_locked(root_id, path)
         if pair is None:
@@ -1300,6 +1318,7 @@ class EventIngester:
         source: str,
         run_id: Optional[str],
         msg_id: Optional[str],
+        turn_id: Optional[str] = None,
     ) -> dict:
         """Build the entry from canonical event data and write one JSONL line.
 
@@ -1324,6 +1343,8 @@ class EventIngester:
             entry["run_id"] = run_id
         if msg_id is not None:
             entry["msg_id"] = msg_id
+        if turn_id is not None:
+            entry["turn_id"] = turn_id
         line = json.dumps(entry, ensure_ascii=False) + "\n"
         line_bytes = line.encode("utf-8")
         # INVARIANT: ingest/ingest_batch hold `_locks[root_id]` across
@@ -1399,13 +1420,51 @@ class EventIngester:
         source: str,
         run_id: Optional[str] = None,
         msg_id: Optional[str] = None,
+        turn_id: Optional[str] = None,
         cwd_override: Optional[str] = None,
         dedupe_by_uid_only: bool = False,
     ) -> int:
         with perf.timed("ingest.live"):
+            seq, _canonical_data = self._ingest_impl(
+                root_id, sid, event_type, data,
+                source=source, run_id=run_id, msg_id=msg_id,
+                turn_id=turn_id,
+                cwd_override=cwd_override,
+                dedupe_by_uid_only=dedupe_by_uid_only,
+            )
+        return seq
+
+    def ingest_with_canonical_data(
+        self,
+        root_id: str,
+        sid: str,
+        event_type: str,
+        data: dict,
+        *,
+        source: str,
+        run_id: Optional[str] = None,
+        msg_id: Optional[str] = None,
+        turn_id: Optional[str] = None,
+        cwd_override: Optional[str] = None,
+        dedupe_by_uid_only: bool = False,
+    ) -> tuple[int, Optional[dict]]:
+        """Same as `ingest`, but also returns the exact rewritten payload
+        persisted to disk (file-ref rewrite applied). Callers that need to
+        canonicalize this event elsewhere too (e.g.
+        `EventJournalWriter._append_resolved` mirroring into
+        `canonical_runtime_journal`) MUST reuse this value rather than
+        re-deriving from their own input `data`, or a later gap-fill
+        re-derivation reading the same rewritten bytes back off disk will
+        disagree with it and the canonical store's identity-uniqueness
+        check will reject one as a conflicting duplicate. `ingest` itself
+        keeps returning a bare `int` — this is a separate opt-in method
+        rather than a signature change, since `ingest`'s plain-int
+        contract has many existing callers."""
+        with perf.timed("ingest.live"):
             return self._ingest_impl(
                 root_id, sid, event_type, data,
                 source=source, run_id=run_id, msg_id=msg_id,
+                turn_id=turn_id,
                 cwd_override=cwd_override,
                 dedupe_by_uid_only=dedupe_by_uid_only,
             )
@@ -1420,9 +1479,10 @@ class EventIngester:
         source: str,
         run_id: Optional[str] = None,
         msg_id: Optional[str] = None,
+        turn_id: Optional[str] = None,
         cwd_override: Optional[str] = None,
         dedupe_by_uid_only: bool = False,
-    ) -> int:
+    ) -> tuple[int, Optional[dict]]:
         # Resolve cwd BEFORE taking the per-root ingester Lock so that
         # `session_manager.get` (which acquires the session_manager
         # per-root RLock inside `_ref_ctx_for_root`) never runs under the
@@ -1484,7 +1544,7 @@ class EventIngester:
             # rows (measured: 4346 dup rows on session 4ddbd4d7
             # before this gate).
             if dedupe_by_uid_only and uid and uid in uids_only:
-                return -1
+                return -1, None
             dedup_data = self._dedup_data_for_hash(canonical_data)
             try:
                 payload = json.dumps(dedup_data, sort_keys=True).encode()
@@ -1494,7 +1554,7 @@ class EventIngester:
             data_hash = f"{uid}:{raw_hash}" if uid else f":{raw_hash}"
 
             if self._is_duplicate_event_owner(root_id, data_hash, msg_id):
-                return -1
+                return -1, None
             seen.add(data_hash)
             if uid:
                 uids_only.add(uid)
@@ -1503,7 +1563,7 @@ class EventIngester:
             self._seq[root_id] = seq
             search_entry = self._emit(
                 fh, root_id, seq, sid, event_type, canonical_data, source,
-                run_id, msg_id,
+                run_id, msg_id, turn_id,
             )
             # Kernel fence: `flush()` makes the line visible in the
             # kernel page cache so cross-process tailers / in-process
@@ -1577,7 +1637,7 @@ class EventIngester:
                     "orphan-event dirty-mark failed for sid=%s",
                     sid, exc_info=True,
                 )
-        return seq
+        return seq, canonical_data
 
     def ingest_batch(
         self,
@@ -3204,7 +3264,8 @@ class EventIngester:
         lock = self._locks.get(root_id)
         if lock:
             with lock:
-                self._close_handle_locked(root_id)
+                if not self._close_handle_locked(root_id):
+                    return
                 self._seq.pop(root_id, None)
                 self._locks.pop(root_id, None)
                 self._seen_uuids.pop(root_id, None)

@@ -81,7 +81,11 @@ def _receipt_path(journal: Path) -> Path:
 def _validate_journal(root_id: str, journal: Path) -> Path:
     root = _safe_root_dir(root_id)
     candidate = Path(journal)
-    if candidate.name != "events.jsonl" or candidate.parent.resolve(strict=False) != root:
+    if (
+        candidate.name != "events.jsonl"
+        or candidate.parent.resolve(strict=False) != root
+        or candidate.is_symlink()
+    ):
         raise ValueError("hydration journal is outside its root")
     return candidate
 

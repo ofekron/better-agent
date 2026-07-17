@@ -573,6 +573,53 @@ class EventJournalWriter:
             future.cancel()
             raise TimeoutError("timed out reconciling event journal ownership")
 
+    def correct_event_ownership_sync(
+        self,
+        root_id: str,
+        event_seq: int,
+        row: dict,
+        msg_id: str,
+        *,
+        reason: str,
+        timeout: float = 30.0,
+    ) -> None:
+        """Append a corrective `event_ownership_resolved` fact for a row
+        that ALREADY carries a (wrong) owner.
+
+        `_pending_events`-driven resolution (`_resolve_pending_events`/
+        `_resolve_matching_pending_duplicate`) only ever fires for rows
+        that were unowned at write time -- an already-owned row is never
+        enqueued there, so this is a separate, explicit entry point for
+        offline repair (see `backend/scripts/repair_event_journal_ownership.py`
+        for the caller-side lock discipline this must run under: hold
+        `backend_instance_lock` for the duration, same as any other
+        offline journal mutation). `row` is the raw journal row at
+        `event_seq` (as returned by `EventJournalReader.read_events`),
+        used only to recover `sid`/`cwd_override` for the correction
+        fact's own provenance -- it is never rewritten in place; this
+        appends, it does not edit.
+        """
+        event = Event(
+            root_id=root_id,
+            sid=str(row.get("sid") or root_id),
+            event_type=str(row.get("type") or "unknown"),
+            data=row.get("data") or {},
+            source=str(row.get("source") or "journal"),
+            run_id=row.get("run_id"),
+        )
+        future = self._executor.submit(
+            root_id,
+            self._append_ownership_resolution,
+            event, event_seq, msg_id,
+            reason=reason,
+            lane="write",
+        )
+        try:
+            future.result(timeout=timeout)
+        except concurrent.futures.TimeoutError:
+            future.cancel()
+            raise TimeoutError("timed out correcting event journal ownership")
+
     async def prepare_read(self, root_id: str) -> int:
         """Single-thread-hop consolidation of barrier + reconcile_through.
 
@@ -952,7 +999,7 @@ class EventJournalWriter:
         reason: str,
     ) -> None:
         event_id = self._provider_event_id(event.data)
-        seq = self._append_metadata_event(
+        seq, _ = self._append_metadata_event(
             event.root_id,
             sid=event.sid,
             event_type="event_ownership_resolved",
@@ -1220,7 +1267,7 @@ class EventJournalWriter:
         """Append an internally-resolved event to events.jsonl."""
         ownership = event.ownership
         if isinstance(ownership, MessageOwnership):
-            seq = self._append_message_event(
+            seq, canonical_data = self._append_message_event(
                 event.root_id,
                 sid=event.sid,
                 event_type=event.event_type,
@@ -1228,24 +1275,26 @@ class EventJournalWriter:
                 source=event.source,
                 msg_id=ownership.msg_id,
                 run_id=event.run_id,
+                turn_id=event.turn_id,
                 cwd_override=event.cwd_override,
                 dedupe_by_uid_only=event.dedupe_by_uid_only,
             )
             msg_id: Optional[str] = ownership.msg_id
         elif isinstance(ownership, RootOwnership):
-            seq = self._append_root_event(
+            seq, canonical_data = self._append_root_event(
                 event.root_id,
                 sid=event.sid,
                 event_type=event.event_type,
                 data=event.data,
                 source=event.source,
                 run_id=event.run_id,
+                turn_id=event.turn_id,
                 cwd_override=event.cwd_override,
                 dedupe_by_uid_only=event.dedupe_by_uid_only,
             )
             msg_id = None
         elif isinstance(ownership, MetadataOwnership):
-            seq = self._append_metadata_event(
+            seq, canonical_data = self._append_metadata_event(
                 event.root_id,
                 sid=event.sid,
                 event_type=event.event_type,
@@ -1253,6 +1302,7 @@ class EventJournalWriter:
                 source=event.source,
                 run_id=event.run_id,
                 msg_id=ownership.msg_id,
+                turn_id=event.turn_id,
                 cwd_override=event.cwd_override,
                 dedupe_by_uid_only=event.dedupe_by_uid_only,
             )
@@ -1272,15 +1322,30 @@ class EventJournalWriter:
         if seq >= 0:
             from canonical_runtime_journal import canonical_runtime_journal
 
+            # Mirror EXACTLY the row _ingest_impl just persisted to
+            # events.jsonl — the rewritten bytes (canonical_data), the
+            # run_id, and the turn_id — never the caller's raw
+            # event.data or any field the disk row doesn't carry. A
+            # later gap-fill re-derivation
+            # (_ensure_canonical_authority) reads that row back off
+            # disk and derives fact identity (source_stream_id from
+            # run_id, source_event_id from the payload) plus
+            # content_hash from it, so mirroring anything else here
+            # makes the two derivations of the same event disagree —
+            # either a permanent cutover deadlock (SourceConflictError:
+            # journal_through_seq never advances on failure, every
+            # retry re-derives the same mismatch) or, worse, silent
+            # duplicate facts under two identities after an authority
+            # reset.
             canonical_runtime_journal().mirror_event(
                 root_id=event.root_id,
                 sid=event.sid,
                 seq=seq,
                 event_type=event.event_type,
-                data=event.data,
+                data=canonical_data if canonical_data is not None else event.data,
                 source=event.source,
+                run_id=event.run_id,
                 msg_id=msg_id,
-                event_id=event.event_id,
                 turn_id=event.turn_id,
             )
         elif seq == -1:
@@ -1315,6 +1380,23 @@ class EventJournalWriter:
         rows: list[dict] = []
         after_seq = authority.journal_through_seq if authority is not None else -1
         while True:
+            # Gap-fill re-derivation MUST read back the exact bytes
+            # `_ingest_impl` persisted and mirrored at write time
+            # (canonical_runtime_journal.mirror_event). msg_id is part of
+            # the derived fact's payload and therefore its content_hash,
+            # so reading through any ownership-resolution overlay that
+            # rewrites msg_id here breaks write-time / gap-fill parity:
+            # the re-derived fact collides on identity (source_stream_id,
+            # source_event_id, source_order) with the mirrored fact but
+            # disagrees on content_hash, raising SourceConflictError.
+            # journal_through_seq never advances on failure, so every
+            # projection read would re-derive the same mismatch and 502
+            # forever (see the parity note at the mirror_event call site
+            # in _ingest_impl). event_ownership_resolved corrections are
+            # appended as their own new rows and ingested unchanged here;
+            # effective ownership is an overlay for the display/projection
+            # path (event_journal_reader.read_events), not canonical
+            # ingestion.
             page, _, has_more = event_ingester.read_events(
                 root_id, after_seq=after_seq, limit=2_000,
             )
@@ -1341,18 +1423,24 @@ class EventJournalWriter:
         source: str,
         msg_id: str,
         run_id: Optional[str] = None,
+        turn_id: Optional[str] = None,
         cwd_override: Optional[str] = None,
         dedupe_by_uid_only: bool = False,
-    ) -> int:
+    ) -> tuple[int, Optional[dict]]:
         """Append an event owned by a chat message.
 
         Render events should use this path.  A missing message id is a
         programming error; callers that really mean "root/unattached" must use
         append_root_event explicitly.
+
+        Returns (seq, canonical_data) — see `EventIngester.ingest`'s
+        docstring for why callers that also canonicalize this event
+        elsewhere (e.g. into `canonical_runtime_journal`) must reuse the
+        returned `canonical_data` rather than their own input `data`.
         """
         if not isinstance(msg_id, str) or not msg_id:
             raise ValueError("_append_message_event requires a non-empty msg_id")
-        return event_ingester.ingest(
+        return event_ingester.ingest_with_canonical_data(
             root_id,
             sid=sid,
             event_type=event_type,
@@ -1360,6 +1448,7 @@ class EventJournalWriter:
             source=source,
             run_id=run_id,
             msg_id=msg_id,
+            turn_id=turn_id,
             cwd_override=cwd_override,
             dedupe_by_uid_only=dedupe_by_uid_only,
         )
@@ -1373,11 +1462,13 @@ class EventJournalWriter:
         data: dict,
         source: str,
         run_id: Optional[str] = None,
+        turn_id: Optional[str] = None,
         cwd_override: Optional[str] = None,
         dedupe_by_uid_only: bool = False,
-    ) -> int:
-        """Append an explicitly unattached/root event."""
-        return event_ingester.ingest(
+    ) -> tuple[int, Optional[dict]]:
+        """Append an explicitly unattached/root event. Returns (seq,
+        canonical_data) — see `_append_message_event`."""
+        return event_ingester.ingest_with_canonical_data(
             root_id,
             sid=sid,
             event_type=event_type,
@@ -1385,6 +1476,7 @@ class EventJournalWriter:
             source=source,
             run_id=run_id,
             msg_id=None,
+            turn_id=turn_id,
             cwd_override=cwd_override,
             dedupe_by_uid_only=dedupe_by_uid_only,
         )
@@ -1399,15 +1491,17 @@ class EventJournalWriter:
         source: str,
         run_id: Optional[str] = None,
         msg_id: Optional[str] = None,
+        turn_id: Optional[str] = None,
         cwd_override: Optional[str] = None,
         dedupe_by_uid_only: bool = False,
-    ) -> int:
+    ) -> tuple[int, Optional[dict]]:
         """Append a non-render/control event.
 
         Metadata may be message-correlated or session/root-scoped, so msg_id is
-        optional here by design.
+        optional here by design. Returns (seq, canonical_data) — see
+        `_append_message_event`.
         """
-        return event_ingester.ingest(
+        return event_ingester.ingest_with_canonical_data(
             root_id,
             sid=sid,
             event_type=event_type,
@@ -1415,6 +1509,7 @@ class EventJournalWriter:
             source=source,
             run_id=run_id,
             msg_id=msg_id,
+            turn_id=turn_id,
             cwd_override=cwd_override,
             dedupe_by_uid_only=dedupe_by_uid_only,
         )

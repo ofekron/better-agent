@@ -36,7 +36,7 @@ def test_import_cutover_mirror_and_page_read():
     journal.mirror_event(
         root_id=root_id, sid=root_id, seq=2, event_type="turn_complete",
         data={"message_id": "a1"}, source="claude", msg_id="a1",
-        event_id="e2", turn_id="u1",
+        run_id=None, turn_id="u1",
     )
     second = journal.read_page(
         root_id, after_seq=first["canonical_through_seq"], limit=100,
@@ -166,7 +166,7 @@ def test_gap_skips_write_and_waits_for_read_path_resync():
     # must not raise, it must simply decline to advance coverage.
     journal.mirror_event(
         root_id=root_id, sid=root_id, seq=3, event_type="turn_complete",
-        data={}, source="claude", msg_id=None, event_id="g3", turn_id=None,
+        data={}, source="claude", msg_id=None, run_id=None, turn_id=None,
     )
     assert journal.current_authority(root_id).journal_through_seq == 1
     page = journal.read_page(root_id, after_seq=0, limit=100)
@@ -231,7 +231,7 @@ def test_mirror_gap_leaves_coverage_for_read_path_to_fill():
     # coverage on its own.
     journal.mirror_event(
         root_id=root_id, sid=root_id, seq=seq4, event_type="turn_complete",
-        data={"uuid": "h4"}, source="test", msg_id=None, event_id="h4",
+        data={"uuid": "h4"}, source="test", msg_id=None, run_id=None,
         turn_id=None,
     )
     assert journal.current_authority(root_id).journal_through_seq == 1
@@ -326,12 +326,12 @@ def test_zero_fact_live_row_advances_contiguous_coverage():
     journal.mirror_event(
         root_id=root_id, sid=root_id, seq=2, event_type="agent_message",
         data={"uuid": "z2", "type": "assistant", "message": {"content": []}},
-        source="claude", msg_id="a1", event_id="z2", turn_id="u1",
+        source="claude", msg_id="a1", run_id=None, turn_id="u1",
     )
     assert journal.current_authority(root_id).journal_through_seq == 2
     journal.mirror_event(
         root_id=root_id, sid=root_id, seq=3, event_type="turn_complete",
-        data={}, source="claude", msg_id="a1", event_id="z3", turn_id="u1",
+        data={}, source="claude", msg_id="a1", run_id=None, turn_id="u1",
     )
     assert journal.current_authority(root_id).journal_through_seq == 3
     journal.close()
@@ -420,7 +420,7 @@ def test_live_provider_stream_render_row_advances_without_fact():
         data={"uuid": "stream-only", "type": "assistant", "message": {
             "content": [{"type": "text", "text": "skip"}],
         }},
-        source="provider_stream", msg_id="a1", event_id="stream-only", turn_id="u1",
+        source="provider_stream", msg_id="a1", run_id=None, turn_id="u1",
     )
     assert journal.current_authority(root_id).journal_through_seq == 0
     assert journal.read_page(root_id, after_seq=0, limit=100)["facts"] == []
@@ -429,7 +429,7 @@ def test_live_provider_stream_render_row_advances_without_fact():
         data={"uuid": "apply", "type": "assistant", "message": {
             "content": [{"type": "text", "text": "keep"}],
         }},
-        source="apply_event", msg_id="a1", event_id="apply", turn_id="u1",
+        source="apply_event", msg_id="a1", run_id=None, turn_id="u1",
     )
     page = journal.read_page(root_id, after_seq=0, limit=100)
     assert [fact["source_event_id"] for fact in page["facts"]] == ["apply"]
@@ -513,7 +513,7 @@ def test_concurrent_mirror_and_cutover_do_not_race_authority_advance():
                 journal.mirror_event(
                     root_id=root_id, sid=root_id, seq=seq, event_type="progress",
                     data={"uuid": f"c{seq}"}, source="claude", msg_id=None,
-                    event_id=f"c{seq}", turn_id=None,
+                    run_id=None, turn_id=None,
                 )
         except BaseException as exc:  # noqa: BLE001 - surface to main thread
             errors.append(exc)

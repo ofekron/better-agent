@@ -18,7 +18,7 @@ os.environ["BETTER_AGENT_HOME"] = HOME
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import hydration_index_store as store
-from event_ingester import event_ingester
+from event_ingester import EventIngester, event_ingester
 
 
 def _row(sid: str, value: int, newline: bool = True) -> bytes:
@@ -46,6 +46,16 @@ def main() -> int:
     try:
         store._db_path("symlink-root")
         raise AssertionError("symlink root accepted")
+    except ValueError:
+        pass
+    symlink_journal = Path(HOME) / "sessions" / "journal-link" / "events.jsonl"
+    symlink_journal.parent.mkdir(parents=True)
+    symlink_target = outside / "events.jsonl"
+    symlink_target.write_bytes(b"")
+    symlink_journal.symlink_to(symlink_target)
+    try:
+        store.load("journal-link", symlink_journal)
+        raise AssertionError("symlink journal accepted")
     except ValueError:
         pass
 
@@ -224,7 +234,7 @@ def main() -> int:
         source="hydration-index-test", msg_id="message",
     )
     _, rewrite_rebuilt = store.load(rewrite_root, rewrite_path)
-    assert rewrite_rebuilt["cold"] == 1, rewrite_rebuilt
+    assert rewrite_rebuilt["scanned_bytes"] == 0, rewrite_rebuilt
     event_ingester.close(rewrite_root)
 
     restart_root = "restart-root"
@@ -294,6 +304,45 @@ with store.journal_guard(root, path):
     assert len(shared_offsets["writer-b"]) == 2
     assert json.loads(store._ack_path(shared_path).read_text())["offset"] == shared_path.stat().st_size
 
+    real_root = "concurrent-real-ingesters"
+    real_ready = Path(HOME) / "real-ready"
+    real_start = Path(HOME) / "real-start"
+    real_writer = r'''
+import sys, time
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from event_ingester import EventIngester
+root, writer = sys.argv[2], sys.argv[3]
+ready, start = Path(sys.argv[4]), Path(sys.argv[5])
+ingester = EventIngester()
+ready.mkdir(parents=True, exist_ok=True)
+(ready / writer).touch()
+while not start.exists():
+    time.sleep(0.001)
+for value in range(25):
+    ingester.ingest(root, root, "agent_message", {"uuid": f"{writer}-{value}"}, source=writer, msg_id="message")
+ingester.shutdown()
+'''
+    writers = [subprocess.Popen([
+        sys.executable, "-c", real_writer,
+        str(Path(__file__).resolve().parents[1]), real_root, writer,
+        str(real_ready), str(real_start),
+    ], env={**os.environ, "BETTER_AGENT_HOME": HOME}) for writer in ("a", "b")]
+    deadline = time.monotonic() + 3
+    while len(list(real_ready.glob("*"))) < 2 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert len(list(real_ready.glob("*"))) == 2
+    real_start.touch()
+    assert all(process.wait(timeout=15) == 0 for process in writers)
+    real_path = Path(HOME) / "sessions" / real_root / "events.jsonl"
+    rows = [json.loads(line) for line in real_path.read_text().splitlines()]
+    assert len(rows) == 50
+    assert len({row["data"]["uuid"] for row in rows}) == 50
+    assert [row["seq"] for row in rows] == list(range(1, 51))
+    real_offsets, real_metrics = store.load(real_root, real_path)
+    assert real_metrics["scanned_bytes"] == 0, real_metrics
+    assert sum(map(len, real_offsets.values())) == 50
+
     failure_root = "projection-failure-root"
     failure_path = Path(HOME) / "sessions" / failure_root / "events.jsonl"
     failure_path.parent.mkdir(parents=True)
@@ -326,6 +375,40 @@ with store.journal_guard(root, path):
     store.flush_writer_projection(failure_root, failure_path)
     _, failure_retried = store.load(failure_root, failure_path)
     assert failure_retried["scanned_bytes"] == 0, failure_retried
+
+    retry_ingester = EventIngester()
+    retry_root = "background-projection-retry"
+    original_flush = store.flush_writer_projection
+    retry_succeeded = threading.Event()
+    retry_calls = 0
+    def transient_flush(*args, **kwargs):
+        nonlocal retry_calls
+        retry_calls += 1
+        if retry_calls == 1:
+            raise store.WriterProjectionError("transient")
+        result = original_flush(*args, **kwargs)
+        retry_succeeded.set()
+        return result
+    store.flush_writer_projection = transient_flush
+    try:
+        retry_ingester.ingest(retry_root, retry_root, "agent_message", {"uuid": "retry"}, source="retry", msg_id="message")
+        assert retry_succeeded.wait(3), "background projection did not retry"
+    finally:
+        store.flush_writer_projection = original_flush
+        retry_ingester.shutdown()
+
+    close_ingester = EventIngester()
+    close_ingester._mark_fsync_dirty = lambda _root_id: None
+    close_root = "close-projection-retention"
+    close_ingester.ingest(close_root, close_root, "agent_message", {"uuid": "close"}, source="close", msg_id="message")
+    store.flush_writer_projection = lambda *_args, **_kwargs: (_ for _ in ()).throw(store.WriterProjectionError("transient"))
+    try:
+        close_ingester.close(close_root)
+        assert close_root in close_ingester._handles
+    finally:
+        store.flush_writer_projection = original_flush
+    close_ingester.close(close_root)
+    assert close_root not in close_ingester._handles
 
     kill_writer = r'''
 import os, signal, sys

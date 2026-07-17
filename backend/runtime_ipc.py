@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import secrets
 import stat
@@ -42,6 +43,8 @@ from typing import Any, Callable
 
 from paths import ba_home
 import runtime_ownership
+
+logger = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 3  # v3: bounded request frames + chunked responses
 _TOKEN_NAME = "ipc.token"
@@ -564,6 +567,11 @@ class RuntimeIPCServer:
         try:
             return {"ok": True, "result": handler(args)}
         except Exception as exc:  # noqa: BLE001 — boundary: map, never crash the server
+            # _error_response deliberately strips the traceback from what
+            # goes back to the IPC client (can carry secrets/env) — but
+            # that means failures here were previously invisible even to
+            # the operator. Log server-side only, full detail.
+            logger.exception("runtime_ipc: op %r failed", op)
             return _error_response(exc)
 
 

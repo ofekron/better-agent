@@ -42,6 +42,7 @@ class _Request:
     ticket: int
     payload: Any
     future: Future
+    upsert: bool = False
 
 
 class CanonicalEventStore:
@@ -71,6 +72,7 @@ class CanonicalEventStore:
         *,
         timeout: float | None = 30.0,
         max_batch_size: int = 256,
+        upsert: bool = False,
     ) -> list[CommitAck]:
         if not facts:
             return []
@@ -82,7 +84,7 @@ class CanonicalEventStore:
         results: list[CommitAck] = []
         for start in range(0, len(facts), max_batch_size):
             batch = facts[start:start + max_batch_size]
-            request = self._accept("write_batch", batch[0].root_id, batch, timeout)
+            request = self._accept("write_batch", batch[0].root_id, batch, timeout, upsert=upsert)
             results.extend(request.future.result(timeout=timeout))
         return results
 
@@ -114,7 +116,7 @@ class CanonicalEventStore:
             connection.close()
         return [self._decode(root_id, row) for row in rows]
 
-    def _accept(self, kind: str, root_id: str, payload: Any, timeout: float | None) -> _Request:
+    def _accept(self, kind: str, root_id: str, payload: Any, timeout: float | None, *, upsert: bool = False) -> _Request:
         deadline = None if timeout is None else time.monotonic() + timeout
         with self._condition:
             while self._pending >= self._capacity and self._accepting:
@@ -126,7 +128,7 @@ class CanonicalEventStore:
                 raise CanonicalStoreError("canonical event store is closed")
             ticket = self._tickets.get(root_id, 0) + 1
             self._tickets[root_id] = ticket
-            request = _Request(kind, root_id, ticket, payload, Future())
+            request = _Request(kind, root_id, ticket, payload, Future(), upsert=upsert)
             root_queue = self._queues.setdefault(root_id, queue.deque())
             root_queue.append(request)
             self._pending += 1
@@ -212,7 +214,7 @@ class CanonicalEventStore:
         if request.kind == "write":
             return self._write(connection, request.ticket, request.payload)
         if request.kind == "write_batch":
-            return self._write_batch(connection, request.ticket, request.payload)
+            return self._write_batch(connection, request.ticket, request.payload, upsert=request.upsert)
         if request.kind == "barrier":
             row = connection.execute(
                 "SELECT canonical_seq, committed_ticket FROM root_heads WHERE root_id=? AND root_generation=?",
@@ -233,15 +235,19 @@ class CanonicalEventStore:
         connection: sqlite3.Connection,
         ticket: int,
         facts: list[CanonicalFact],
+        *,
+        upsert: bool = False,
     ) -> list[CommitAck]:
         with connection:
-            return [self._write_in_transaction(connection, ticket, fact) for fact in facts]
+            return [self._write_in_transaction(connection, ticket, fact, upsert=upsert) for fact in facts]
 
     def _write_in_transaction(
         self,
         connection: sqlite3.Connection,
         ticket: int,
         fact: CanonicalFact,
+        *,
+        upsert: bool = False,
     ) -> CommitAck:
         existing = connection.execute(
             "SELECT canonical_seq, acceptance_ticket, content_hash FROM canonical_facts WHERE root_id=? AND root_generation=? AND source_stream_id=? AND source_event_id=? AND source_generation=? AND source_sequence=?",
@@ -249,7 +255,33 @@ class CanonicalEventStore:
         ).fetchone()
         if existing:
             if existing[2] != fact.content_hash:
-                raise SourceConflictError("same source order carried different content")
+                if not upsert:
+                    raise SourceConflictError("same source order carried different content")
+                # Gap-fill reconciliation path (ensure_cutover, opted in via
+                # submit_many(upsert=True)). The on-disk event was rewritten
+                # AFTER write-time mirroring -- e.g. the reality-resolution
+                # layer or resumable replay linkified/transformed a field --
+                # so the re-derived fact's content_hash (msg_id/output/etc.
+                # are in the payload) legitimately differs from the bytes
+                # mirrored at ingest. The re-derived fact carries the
+                # current truth, so refresh the stored content in place.
+                # canonical_seq and the root head are stable (readers
+                # sequence by canonical_seq); only content-derived columns
+                # and the acceptance ticket move. The strict write-time
+                # mirror path (submit / submit_many default) still raises
+                # here -- a divergence at MIRROR time is a real bug, this
+                # leniency is exclusively for the read-side gap-fill.
+                connection.execute(
+                    "UPDATE canonical_facts SET acceptance_ticket=?, schema_version=?, fact_id=?, sid=?, source=?, payload_type=?, payload_json=?, update_semantics=?, content_hash=?, observed_at=?, source_timestamp=?, turn_id=?, correction_of=? WHERE root_id=? AND root_generation=? AND source_stream_id=? AND source_event_id=? AND source_generation=? AND source_sequence=?",
+                    (
+                        ticket, fact.schema_version, fact.fact_id, fact.sid, fact.source,
+                        fact.payload_type, canonical_json(fact.payload), fact.update_semantics, fact.content_hash,
+                        fact.observed_at, fact.source_timestamp, fact.turn_id, fact.correction_of,
+                        fact.root_id, fact.root_generation, fact.source_stream_id, fact.source_event_id,
+                        fact.source_order.generation, fact.source_order.sequence,
+                    ),
+                )
+                return CommitAck(True, False, int(existing[0]), ticket)
             return CommitAck(True, True, int(existing[0]), ticket)
         head = connection.execute(
             "SELECT canonical_seq FROM root_heads WHERE root_id=? AND root_generation=?", (fact.root_id, fact.root_generation),

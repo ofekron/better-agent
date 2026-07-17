@@ -9233,10 +9233,23 @@ async def bff_projection_source(
         session = session_store.get_session(session_id)
         if session is None:
             return _json_bytes_response({"found": False})
-        event_journal_writer.ensure_canonical_authority_sync(session_id)
-        page = canonical_runtime_journal().read_page(
-            session_id, after_seq=after_seq, limit=limit,
-        )
+        try:
+            event_journal_writer.ensure_canonical_authority_sync(session_id)
+            page = canonical_runtime_journal().read_page(
+                session_id, after_seq=after_seq, limit=limit,
+            )
+        except Exception as exc:
+            # Unlike most BFF-runtime routes, nothing here previously
+            # caught/logged failures — an uncaught exception propagates
+            # through asyncio.to_thread as a plain 500 with no JSON body,
+            # and uvicorn's default logging config decouples ASGI
+            # tracebacks from this process's own log file, so the
+            # underlying cause was invisible. Log explicitly and return a
+            # typed error so a stuck-cutover-style failure is diagnosable.
+            logger.exception(
+                "bff_projection_source: canonical read failed for %s", session_id,
+            )
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
         provider_kind = None
         provider_id = session.get("provider_id")
         if isinstance(provider_id, str) and provider_id:
