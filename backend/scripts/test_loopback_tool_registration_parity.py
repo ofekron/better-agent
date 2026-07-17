@@ -140,13 +140,13 @@ def test_claude_bare_native_bridges_extension_mcp_tools() -> None:
             "outstanding_tasks": set(),
         }
 
-    def fake_runtime_configs(_inputs, *, user_facing: bool, bare: bool):
-        assert user_facing is False
+    def fake_runtime_configs(_inputs, *, interacts_with_user: bool, bare: bool):
+        assert interacts_with_user is False
         assert bare is True
         return {"runtime-owned": {"type": "runtime"}}
 
-    def fake_native_configs(_inputs, *, user_facing: bool, bare: bool):
-        assert user_facing is False
+    def fake_native_configs(_inputs, *, interacts_with_user: bool, bare: bool):
+        assert interacts_with_user is False
         assert bare is True
         return {
             "testape": {
@@ -161,7 +161,7 @@ def test_claude_bare_native_bridges_extension_mcp_tools() -> None:
             },
         }
 
-    def fake_launcher_configs(_inputs, *, user_facing: bool, bare: bool):
+    def fake_launcher_configs(_inputs, *, interacts_with_user: bool, bare: bool):
         raise AssertionError("bare Claude bridge must not use launcher configs for tools/list")
 
     async def fake_mcp_list_tools(server_name: str, config: dict):

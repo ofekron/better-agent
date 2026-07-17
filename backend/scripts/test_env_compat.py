@@ -45,7 +45,7 @@ def main() -> int:
         model="model",
         provider_id="provider",
         bare_config=False,
-        user_facing=True,
+        interacts_with_user=True,
         disabled_builtin_extensions=["b", "a"],
     )
     for suffix in (

@@ -448,12 +448,12 @@ async def _mcp_call_tool(
 async def _bridge_native_extension_mcp_servers(
     inputs: dict[str, Any],
     *,
-    user_facing: bool,
+    interacts_with_user: bool,
     bare: bool,
 ) -> dict[str, dict[str, Any]]:
     configs = extension_store.native_mcp_server_configs(
         inputs,
-        user_facing=user_facing,
+        interacts_with_user=interacts_with_user,
         bare=bare,
     )
     bridged: dict[str, dict[str, Any]] = {}
@@ -3336,7 +3336,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
 
     for _extension_mcp_name, _extension_mcp_config in extension_store.runtime_mcp_server_configs(
         inputs,
-        user_facing=bool(_user_facing_extras and app_session_id),
+        interacts_with_user=bool(_user_facing_extras and app_session_id),
         bare=_bare,
     ).items():
         mcp_servers.setdefault(_extension_mcp_name, _extension_mcp_config)
@@ -3344,7 +3344,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
         for _extension_mcp_name, _extension_mcp_config in (
             await _bridge_native_extension_mcp_servers(
                 inputs,
-                user_facing=bool(_user_facing_extras and app_session_id),
+                interacts_with_user=bool(_user_facing_extras and app_session_id),
                 bare=_bare,
             )
         ).items():
@@ -3352,7 +3352,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
     if not _bare:
         for _extension_mcp_name, _extension_mcp_config in extension_store.native_mcp_server_configs(
             inputs,
-            user_facing=bool(_user_facing_extras and app_session_id),
+            interacts_with_user=bool(_user_facing_extras and app_session_id),
             bare=_bare,
         ).items():
             if extension_store.is_reserved_mcp_server_name(_extension_mcp_name):

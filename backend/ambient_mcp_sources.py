@@ -58,7 +58,7 @@ def _extension_capabilities() -> Iterable[AmbientMcpCapability]:
     import extension_store
 
     configs = extension_store.eligible_native_mcp_launcher_server_configs(
-        {}, user_facing=True, bare=False
+        {}, interacts_with_user=True, bare=False
     )
     for name, launcher in configs.items():
         env = dict(launcher.get("env") or {})

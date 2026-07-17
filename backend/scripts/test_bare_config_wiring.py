@@ -62,7 +62,7 @@ def main() -> int:
     check(
         "session-bridge gated behind _user_facing_extras",
         "active_builtin_mcp_extensions(" in runner
-        and 'user_facing=bool(_user_facing_extras and app_session_id)' in runner
+        and 'interacts_with_user=bool(_user_facing_extras and app_session_id)' in runner
     )
     check(
         "provider-config-sync comes from private extension runtime configs",

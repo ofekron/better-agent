@@ -1129,7 +1129,7 @@ def _mcp_chat_tool_name(server_name: str, tool_name: str, used_names: set[str]) 
 def _extension_mcp_server_configs_for_run(
     inputs: dict,
     *,
-    user_facing: bool,
+    interacts_with_user: bool,
     bare: bool,
 ) -> dict[str, dict[str, Any]]:
     try:
@@ -1138,11 +1138,11 @@ def _extension_mcp_server_configs_for_run(
         return {}
     configs: dict[str, dict[str, Any]] = {}
     for name, config in extension_store.runtime_mcp_server_configs(
-        inputs, user_facing=user_facing, bare=bare,
+        inputs, interacts_with_user=interacts_with_user, bare=bare,
     ).items():
         configs.setdefault(name, config)
     for name, config in extension_store.native_mcp_server_configs(
-        inputs, user_facing=user_facing, bare=bare,
+        inputs, interacts_with_user=interacts_with_user, bare=bare,
     ).items():
         if extension_store.is_reserved_mcp_server_name(name):
             configs[name] = config
@@ -1283,14 +1283,14 @@ async def _mcp_call_tool(spec: dict[str, Any], args: dict[str, Any]) -> str:
 async def _extension_mcp_tools_for_run(
     inputs: dict,
     *,
-    user_facing: bool,
+    interacts_with_user: bool,
     bare: bool,
     used_names: set[str],
 ) -> tuple[list[dict], dict[str, dict[str, Any]]]:
     schemas: list[dict] = []
     handlers: dict[str, dict[str, Any]] = {}
     configs = list(_extension_mcp_server_configs_for_run(
-        inputs, user_facing=user_facing, bare=bare,
+        inputs, interacts_with_user=interacts_with_user, bare=bare,
     ).items())
     tool_lists = await asyncio.gather(*(
         _mcp_list_tools(server_name, config)
@@ -2325,7 +2325,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
     )
     extension_mcp_schemas, extension_mcp_handlers = await _extension_mcp_tools_for_run(
         inputs,
-        user_facing=bool(open_file_panel_enabled and app_session_id),
+        interacts_with_user=bool(open_file_panel_enabled and app_session_id),
         bare=bool(inputs.get("bare_config")),
         used_names=_schema_tool_names(tool_schemas),
     )

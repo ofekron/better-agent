@@ -116,7 +116,7 @@ def _make_run_env_args(**over):
         model="some-model",
         provider_id="pid",
         bare_config=False,
-        user_facing=True,
+        interacts_with_user=True,
         disabled_builtin_extensions=["demo"],
     )
     base.update(over)
@@ -145,7 +145,7 @@ def test_run_env_is_kind_agnostic_and_deterministic():
         "BETTER_CLAUDE_MODEL",
         "BETTER_CLAUDE_CWD",
         "BETTER_CLAUDE_BARE_CONFIG",
-        "BETTER_CLAUDE_USER_FACING",
+        "BETTER_CLAUDE_INTERACTS_WITH_USER",
         "BETTER_CLAUDE_DISABLED_BUILTIN_EXTENSIONS",
     ):
         assert key in a, f"run env missing required key {key}"

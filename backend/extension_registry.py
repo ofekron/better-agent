@@ -11,7 +11,7 @@ class BuiltinMcpExtension:
     extension_id: str
     name: str
     mcp_server: str
-    user_facing: bool
+    interacts_with_user: bool
     bare_allowed: bool
     requires_backend_auth: bool
     predicate: Callable[[dict], bool]
@@ -32,7 +32,7 @@ def _disabled_extension_ids(inputs: dict) -> set[str]:
     }
 
 
-def active_builtin_mcp_extensions(inputs: dict, *, user_facing: bool, bare: bool) -> list[BuiltinMcpExtension]:
+def active_builtin_mcp_extensions(inputs: dict, *, interacts_with_user: bool, bare: bool) -> list[BuiltinMcpExtension]:
     disabled = _disabled_extension_ids(inputs)
     active: list[BuiltinMcpExtension] = []
     for extension in BUILTIN_MCP_EXTENSIONS:
@@ -42,9 +42,9 @@ def active_builtin_mcp_extensions(inputs: dict, *, user_facing: bool, bare: bool
             continue
         if bare and not extension.bare_allowed:
             continue
-        if extension.user_facing and not user_facing:
+        if extension.interacts_with_user and not interacts_with_user:
             continue
-        if not extension.user_facing and bare and not extension.bare_allowed:
+        if not extension.interacts_with_user and bare and not extension.bare_allowed:
             continue
         if extension.predicate(inputs):
             active.append(extension)

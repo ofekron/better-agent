@@ -238,7 +238,7 @@ class AmpProvider(GeminiProvider):
                 model=model,
                 provider_id=self.id,
                 bare_config=bool(session_record.get("bare_config")),
-                user_facing=bool(open_file_panel_enabled) and not bool(session_record.get("bare_config")),
+                interacts_with_user=bool(open_file_panel_enabled) and not bool(session_record.get("bare_config")),
                 disabled_builtin_extensions=input_payload["disabled_builtin_extensions"],
             ))
             popen = provider_runtime.popen_runner(

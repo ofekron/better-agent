@@ -246,7 +246,7 @@ class McpServer:
     python: str
     args: tuple[str, ...] = ()
     env: dict[str, str] | None = None
-    user_facing: bool = True
+    interacts_with_user: bool = True
     bare_allowed: bool = False
     requires_backend_auth: bool = True
     replaces_builtin: str | None = None
@@ -256,7 +256,7 @@ class McpServer:
         data: dict[str, Any] = {
             "name": self.name,
             "python": self.python,
-            "user_facing": self.user_facing,
+            "interacts_with_user": self.interacts_with_user,
             "bare_allowed": self.bare_allowed,
             "requires_backend_auth": self.requires_backend_auth,
         }

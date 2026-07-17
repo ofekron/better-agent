@@ -50,7 +50,7 @@ def _record_testape_internal_runtime_mcp() -> Path:
                 {
                     "name": "testape",
                     "python": "mcp/server.py",
-                    "user_facing": False,
+                    "interacts_with_user": False,
                     "bare_allowed": True,
                     "requires_backend_auth": False,
                     "native_exposure": {"allowed": True, "permissions": []},
@@ -349,7 +349,7 @@ def _make_runtime_repo(root: Path) -> tuple[Path, str]:
                     "name": "ofek-scheduler",
                     "python": "mcp/server.py",
                     "env": {"OF_EXTENSION_TEST": "1"},
-                    "user_facing": True,
+                    "interacts_with_user": True,
                     "bare_allowed": False,
                     "requires_backend_auth": True,
                 }
@@ -396,7 +396,7 @@ def test_extension_package_installs_preserving_requirements_and_exposes_runtime_
                 {
                     "name": "synthetic",
                     "python": "mcp/server.py",
-                    "user_facing": True,
+                    "interacts_with_user": True,
                     "bare_allowed": False,
                     "requires_backend_auth": True,
                 }
@@ -443,7 +443,7 @@ def test_extension_package_installs_preserving_requirements_and_exposes_runtime_
             "cwd": "/tmp/project",
             "model": "model",
         },
-        user_facing=True,
+        interacts_with_user=True,
         bare=False,
     )
     server = config.get("synthetic")
@@ -474,7 +474,7 @@ def test_internal_runtime_mcp_requires_loopback_auth_but_not_user_facing() -> No
                 {
                     "name": "internal-runtime",
                     "python": "mcp/server.py",
-                    "user_facing": False,
+                    "interacts_with_user": False,
                     "bare_allowed": False,
                     "requires_backend_auth": True,
                 }
@@ -504,13 +504,13 @@ def test_internal_runtime_mcp_requires_loopback_auth_but_not_user_facing() -> No
         "internal_token": "token",
         "app_session_id": "session-1",
     }
-    configs = extension_store.runtime_mcp_server_configs(inputs, user_facing=False, bare=False)
+    configs = extension_store.runtime_mcp_server_configs(inputs, interacts_with_user=False, bare=False)
     if "internal-runtime" not in configs:
         raise AssertionError("internal runtime MCP unavailable to non-user-facing runner")
 
     missing_token = dict(inputs)
     missing_token["internal_token"] = ""
-    configs = extension_store.runtime_mcp_server_configs(missing_token, user_facing=False, bare=False)
+    configs = extension_store.runtime_mcp_server_configs(missing_token, interacts_with_user=False, bare=False)
     if "internal-runtime" in configs:
         raise AssertionError("internal runtime MCP available without internal token")
 
@@ -530,7 +530,7 @@ def test_dynamic_runtime_mcp_can_be_disabled_per_run() -> None:
                 {
                     "name": "testape",
                     "python": "mcp/server.py",
-                    "user_facing": False,
+                    "interacts_with_user": False,
                     "bare_allowed": True,
                     "requires_backend_auth": False,
                 }
@@ -562,14 +562,14 @@ def test_dynamic_runtime_mcp_can_be_disabled_per_run() -> None:
     }
     enabled = extension_store.runtime_mcp_server_configs(
         inputs,
-        user_facing=False,
+        interacts_with_user=False,
         bare=True,
     )
     if "testape" not in enabled:
         raise AssertionError(enabled)
     disabled = extension_store.runtime_mcp_server_configs(
         {**inputs, "disabled_builtin_extensions": ["ofek.testape-internal"]},
-        user_facing=False,
+        interacts_with_user=False,
         bare=True,
     )
     if "testape" in disabled:
@@ -588,14 +588,14 @@ def test_recorded_runtime_mcp_outside_builtin_maps_can_be_disabled_per_run() -> 
     }
     enabled = extension_store.runtime_mcp_server_configs(
         inputs,
-        user_facing=False,
+        interacts_with_user=False,
         bare=True,
     )
     if "testape" not in enabled:
         raise AssertionError(enabled)
     disabled = extension_store.runtime_mcp_server_configs(
         {**inputs, "disabled_builtin_extensions": ["ofek.testape-internal"]},
-        user_facing=False,
+        interacts_with_user=False,
         bare=True,
     )
     if "testape" in disabled:
@@ -663,7 +663,7 @@ def test_extension_store_save_preserves_concurrent_marketplace_mcp_records() -> 
                 {
                     "name": "headroom",
                     "python": "mcp/server.py",
-                    "user_facing": True,
+                    "interacts_with_user": True,
                     "bare_allowed": False,
                     "requires_backend_auth": True,
                 }
@@ -834,7 +834,7 @@ def test_extension_store_rehydrates_installed_artifact_snapshot() -> None:
                     "python": "mcp/server.py",
                     "args": [],
                     "env": {},
-                    "user_facing": True,
+                    "interacts_with_user": True,
                     "bare_allowed": False,
                     "requires_backend_auth": True,
                 }
@@ -3840,7 +3840,7 @@ def test_module_based_mcp_server_config() -> None:
                 "cwd": str(package),
                 "model": "m",
             },
-            user_facing=True,
+            interacts_with_user=True,
             bare=False,
         )
         config = configs.get("module-mcp")
@@ -3877,7 +3877,7 @@ def test_installed_extension_exports_runtime_mcp_server_config() -> None:
                 "cwd": str(work),
                 "model": "m",
             },
-            user_facing=True,
+            interacts_with_user=True,
             bare=False,
         )
         config = configs.get("ofek-scheduler")
@@ -3921,7 +3921,7 @@ def test_runtime_mcp_without_internal_loopback_does_not_receive_token() -> None:
                     {
                         "name": "no-loopback",
                         "python": "mcp/server.py",
-                        "user_facing": True,
+                        "interacts_with_user": True,
                         "bare_allowed": False,
                         "requires_backend_auth": False,
                     }
@@ -3958,7 +3958,7 @@ def test_runtime_mcp_without_internal_loopback_does_not_receive_token() -> None:
                 "cwd": str(package),
                 "model": "m",
             },
-            user_facing=True,
+            interacts_with_user=True,
             bare=False,
         )
         config = configs.get("no-loopback")
@@ -4027,7 +4027,7 @@ def test_legacy_string_mcp_entrypoints_do_not_crash_runtime_config() -> None:
                 "cwd": str(install_root),
                 "model": "m",
             },
-            user_facing=True,
+            interacts_with_user=True,
             bare=False,
         )
         if "communicate" in configs:
@@ -4270,7 +4270,7 @@ def test_builtin_mcp_registry_respects_feature_extension_state() -> None:
 
     active = extension_registry.active_builtin_mcp_extensions(
         {"mode": "native", "app_session_id": "s1"},
-        user_facing=True,
+        interacts_with_user=True,
         bare=False,
     )
     if "get-requirements" in {item.mcp_server for item in active}:
@@ -4279,7 +4279,7 @@ def test_builtin_mcp_registry_respects_feature_extension_state() -> None:
     _configure_internal_llm_defaults("project_structure_edit")
     active = extension_registry.active_builtin_mcp_extensions(
         {"mode": "native", "app_session_id": "s1"},
-        user_facing=True,
+        interacts_with_user=True,
         bare=False,
     )
     if "project-updates" in {item.mcp_server for item in active}:
@@ -4313,7 +4313,7 @@ def test_private_requirements_mcp_requires_internal_llm_defaults() -> None:
                         "python": "mcp/server.py",
                         "args": [],
                         "env": {},
-                        "user_facing": True,
+                        "interacts_with_user": True,
                         "bare_allowed": False,
                         "requires_backend_auth": True,
                     }
@@ -4365,7 +4365,7 @@ def test_private_requirements_mcp_requires_internal_llm_defaults() -> None:
             "backend_url": "http://127.0.0.1:8000",
             "internal_token": "secret",
         },
-        user_facing=True,
+        interacts_with_user=True,
         bare=False,
     )
     if "better-agent-requirements" in configs:
@@ -4379,7 +4379,7 @@ def test_private_requirements_mcp_requires_internal_llm_defaults() -> None:
             "backend_url": "http://127.0.0.1:8000",
             "internal_token": "secret",
         },
-        user_facing=True,
+        interacts_with_user=True,
         bare=False,
     )
     if "better-agent-requirements" in configs:
@@ -4394,7 +4394,7 @@ def test_private_requirements_mcp_requires_internal_llm_defaults() -> None:
             "backend_url": "http://127.0.0.1:8000",
             "internal_token": "secret",
         },
-        user_facing=True,
+        interacts_with_user=True,
         bare=False,
     )
     if "better-agent-requirements" not in configs:
@@ -4916,7 +4916,7 @@ def test_obsolete_marketplace_id_is_purged_from_store_and_frontend_modules() -> 
                         "python": "mcp/server.py",
                         "args": [],
                         "env": {},
-                        "user_facing": True,
+                        "interacts_with_user": True,
                         "bare_allowed": False,
                         "requires_backend_auth": True,
                     }

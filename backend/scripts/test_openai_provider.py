@@ -579,8 +579,8 @@ def test_openai_runner_exposes_and_dispatches_extension_mcp_tools():
     original_call = runner._mcp_call_tool
     calls = []
 
-    def fake_configs(inputs, *, user_facing, bare):
-        assert user_facing is True
+    def fake_configs(inputs, *, interacts_with_user, bare):
+        assert interacts_with_user is True
         assert bare is False
         return {
             "better-agent-requirements": {
@@ -612,7 +612,7 @@ def test_openai_runner_exposes_and_dispatches_extension_mcp_tools():
         runner._mcp_call_tool = fake_call
         schemas, handlers = asyncio.run(runner._extension_mcp_tools_for_run(
             {"cwd": "/repo"},
-            user_facing=True,
+            interacts_with_user=True,
             bare=False,
             used_names=set(),
         ))
@@ -659,7 +659,7 @@ def test_openai_runner_lists_extension_mcp_tools_concurrently_in_order():
     original_configs = runner._extension_mcp_server_configs_for_run
     original_list = runner._mcp_list_tools
 
-    def fake_configs(inputs, *, user_facing, bare):
+    def fake_configs(inputs, *, interacts_with_user, bare):
         return {
             "alpha": {"command": sys.executable},
             "beta": {"command": sys.executable},
@@ -680,7 +680,7 @@ def test_openai_runner_lists_extension_mcp_tools_concurrently_in_order():
         started = time.monotonic()
         schemas, handlers = asyncio.run(runner._extension_mcp_tools_for_run(
             {"cwd": "/repo"},
-            user_facing=True,
+            interacts_with_user=True,
             bare=False,
             used_names=set(),
         ))

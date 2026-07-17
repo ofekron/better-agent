@@ -588,7 +588,7 @@ def build_better_agent_run_env(
     model: str | None,
     provider_id: str,
     bare_config: bool,
-    user_facing: bool,
+    interacts_with_user: bool,
     disabled_builtin_extensions: list[str] | None,
 ) -> dict[str, str]:
     state_home = str(ba_home())
@@ -604,7 +604,7 @@ def build_better_agent_run_env(
         "BETTER_CLAUDE_MODEL": str(model or ""),
         "BETTER_CLAUDE_PROVIDER_ID": str(provider_id or ""),
         "BETTER_CLAUDE_BARE_CONFIG": "1" if bare_config else "0",
-        "BETTER_CLAUDE_USER_FACING": "1" if user_facing else "0",
+        "BETTER_CLAUDE_INTERACTS_WITH_USER": "1" if interacts_with_user else "0",
         "BETTER_CLAUDE_DISABLED_BUILTIN_EXTENSIONS": ",".join(
             sorted(set(disabled_builtin_extensions or []))
         ),

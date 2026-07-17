@@ -54,7 +54,7 @@ def with_builtin_mcp_servers(inputs: dict, provider_run_config: dict) -> dict:
     provider_id = str(inputs.get("provider_id") or "").strip()
     provider_kind = str(inputs.get("provider_kind") or "").strip().lower()
     bare = bool(inputs.get("bare_config"))
-    user_facing = bool(inputs.get("open_file_panel_enabled")) and not bare
+    interacts_with_user = bool(inputs.get("open_file_panel_enabled")) and not bare
 
     base_env = {
         **better_agent_runtime_env(),
@@ -72,7 +72,7 @@ def with_builtin_mcp_servers(inputs: dict, provider_run_config: dict) -> dict:
             }
         ),
     }
-    if user_facing and app_session_id and backend_url and internal_token:
+    if interacts_with_user and app_session_id and backend_url and internal_token:
         import provider_manifest
         _spec = provider_manifest.spec_for(provider_kind)
         if _spec is None or _spec.hosts_ui_mcp:
@@ -81,7 +81,7 @@ def with_builtin_mcp_servers(inputs: dict, provider_run_config: dict) -> dict:
 
     # Capability management — let the model scope its own session (load/release/
     # list scoped capabilities). Internal, non-bare sessions only; bare sessions
-    # are deliberately capability-stripped. Independent of user_facing so
+    # are deliberately capability-stripped. Independent of interacts_with_user so
     # headless/worker turns can self-scope too (matches runner.py's Claude path).
     if app_session_id and backend_url and internal_token and not bare:
         cap_env = {
@@ -99,7 +99,7 @@ def with_builtin_mcp_servers(inputs: dict, provider_run_config: dict) -> dict:
 
     for name, server_config in extension_store.runtime_mcp_server_configs(
         inputs,
-        user_facing=bool(user_facing and app_session_id),
+        interacts_with_user=bool(interacts_with_user and app_session_id),
         bare=bare,
     ).items():
         if extension_store.is_reserved_mcp_server_name(name):
@@ -109,7 +109,7 @@ def with_builtin_mcp_servers(inputs: dict, provider_run_config: dict) -> dict:
 
     for name, server_config in extension_store.native_mcp_launcher_server_configs(
         inputs,
-        user_facing=bool(user_facing and app_session_id),
+        interacts_with_user=bool(interacts_with_user and app_session_id),
         bare=bare,
     ).items():
         if extension_store.is_reserved_mcp_server_name(name):
@@ -133,7 +133,7 @@ def native_mcp_runtime_env(inputs: dict) -> dict[str, str]:
     provider_id = str(inputs.get("provider_id") or "").strip()
     provisioned_tool_profile = str(inputs.get("provisioned_tool_profile") or "").strip()
     bare = bool(inputs.get("bare_config"))
-    user_facing = bool(inputs.get("open_file_panel_enabled")) and not bare
+    interacts_with_user = bool(inputs.get("open_file_panel_enabled")) and not bare
     disabled_extensions = [
         str(item).strip()
         for item in inputs.get("disabled_builtin_extensions") or []
@@ -151,7 +151,7 @@ def native_mcp_runtime_env(inputs: dict) -> dict[str, str]:
                 "BETTER_CLAUDE_PROVIDER_ID": provider_id,
                 "BETTER_CLAUDE_PROVISIONED_TOOL_PROFILE": provisioned_tool_profile,
                 "BETTER_CLAUDE_BARE_CONFIG": "1" if bare else "0",
-                "BETTER_CLAUDE_USER_FACING": "1" if user_facing else "0",
+                "BETTER_CLAUDE_INTERACTS_WITH_USER": "1" if interacts_with_user else "0",
                 "BETTER_CLAUDE_FILE_EDITING": "1"
                 if inputs.get("working_mode") == "file_editing"
                 else "0",

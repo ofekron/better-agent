@@ -86,10 +86,10 @@ def test_session_control_extension_validates_and_injects() -> None:
         "open_file_panel_enabled": True, "backend_url": "http://localhost:8000",
         "internal_token": "tok",
     }
-    nv = extension_store.native_mcp_launcher_server_configs(inputs, user_facing=True, bare=False)
+    nv = extension_store.native_mcp_launcher_server_configs(inputs, interacts_with_user=True, bare=False)
     check("better-agent-session-control" in nv, "injected for native session")
     excluded = extension_store.native_mcp_launcher_server_configs(
-        {**inputs, "working_mode": "search_worker"}, user_facing=True, bare=False,
+        {**inputs, "working_mode": "search_worker"}, interacts_with_user=True, bare=False,
     )
     check("better-agent-session-control" not in excluded, "excluded for search_worker")
 

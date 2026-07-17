@@ -120,7 +120,7 @@ def _install_requirements_extension_record(
         "python": "mcp/server.py",
         "args": [],
         "env": {},
-        "user_facing": False,
+        "interacts_with_user": False,
         "bare_allowed": True,
         "requires_backend_auth": True,
         "native_exposure": {
@@ -253,7 +253,7 @@ def _install_scheduler_extension_record() -> None:
                         "python": "mcp/server.py",
                         "args": [],
                         "env": {},
-                        "user_facing": True,
+                        "interacts_with_user": True,
                         "bare_allowed": False,
                         "requires_backend_auth": True,
                     }
@@ -319,7 +319,7 @@ def _install_provider_config_sync_extension_record() -> None:
                         "python": "mcp/server.py",
                         "args": [],
                         "env": {},
-                        "user_facing": True,
+                        "interacts_with_user": True,
                         "bare_allowed": False,
                         "requires_backend_auth": True,
                     }
@@ -370,7 +370,7 @@ def _install_browser_harness_extension_record() -> None:
                         "python": "mcp/server.py",
                         "args": [],
                         "env": {},
-                        "user_facing": True,
+                        "interacts_with_user": True,
                         "bare_allowed": False,
                         "requires_backend_auth": True,
                         "predicate": {"equals": {"browser_harness_enabled": True}},
@@ -423,7 +423,7 @@ def _install_credential_broker_extension_record() -> None:
                         "python": "mcp/server.py",
                         "args": [],
                         "env": {},
-                        "user_facing": True,
+                        "interacts_with_user": True,
                         "bare_allowed": True,
                         "requires_backend_auth": True,
                     }
@@ -474,7 +474,7 @@ def _install_session_bridge_extension_record() -> None:
                         "python": "mcp/server.py",
                         "args": [],
                         "env": {},
-                        "user_facing": True,
+                        "interacts_with_user": True,
                         "bare_allowed": False,
                         "requires_backend_auth": True,
                         "predicate": {
@@ -533,7 +533,7 @@ def _install_coordination_extension_record() -> None:
                         "python": "mcp/server.py",
                         "args": [],
                         "env": {},
-                        "user_facing": True,
+                        "interacts_with_user": True,
                         "bare_allowed": False,
                         "requires_backend_auth": True,
                     }
@@ -584,7 +584,7 @@ def _install_canvas_extension_record() -> None:
                         "python": "mcp/server.py",
                         "args": [],
                         "env": {},
-                        "user_facing": False,
+                        "interacts_with_user": False,
                         "bare_allowed": True,
                         "requires_backend_auth": False,
                     }
@@ -635,7 +635,7 @@ def _install_testape_extension_record() -> None:
                         "python": "mcp/server.py",
                         "args": [],
                         "env": {},
-                        "user_facing": True,
+                        "interacts_with_user": True,
                         "bare_allowed": True,
                         "requires_backend_auth": False,
                     }
@@ -687,7 +687,7 @@ def _install_bare_matrix_extension_record() -> None:
                         "python": "mcp/server.py",
                         "args": [],
                         "env": {},
-                        "user_facing": False,
+                        "interacts_with_user": False,
                         "bare_allowed": True,
                         "requires_backend_auth": False,
                         "native_exposure": {"allowed": True, "permissions": []},
@@ -697,7 +697,7 @@ def _install_bare_matrix_extension_record() -> None:
                         "python": "mcp/server.py",
                         "args": [],
                         "env": {},
-                        "user_facing": True,
+                        "interacts_with_user": True,
                         "bare_allowed": True,
                         "requires_backend_auth": False,
                     },
@@ -706,7 +706,7 @@ def _install_bare_matrix_extension_record() -> None:
                         "python": "mcp/server.py",
                         "args": [],
                         "env": {},
-                        "user_facing": True,
+                        "interacts_with_user": True,
                         "bare_allowed": False,
                         "requires_backend_auth": False,
                     },
@@ -1261,7 +1261,7 @@ def t_installed_extension_can_replace_reserved_builtin_mcp_name() -> None:
                         "python": "mcp/server.py",
                         "args": [],
                         "env": {},
-                        "user_facing": False,
+                        "interacts_with_user": False,
                         "bare_allowed": False,
                         "requires_backend_auth": True,
                     }
@@ -1326,7 +1326,7 @@ def t_installed_extension_mcp_servers_are_injected() -> None:
                         "python": "mcp/server.py",
                         "args": [],
                         "env": {"OF_RUNTIME": "1"},
-                        "user_facing": True,
+                        "interacts_with_user": True,
                         "bare_allowed": False,
                         "requires_backend_auth": True,
                     }
@@ -1428,7 +1428,7 @@ def t_requirements_mcp_is_available_to_ambient_native_tools() -> None:
         "provider_id": "prov-native-restart",
     }
     configs = extension_store.eligible_native_mcp_launcher_server_configs(
-        inputs, user_facing=True, bare=False
+        inputs, interacts_with_user=True, bare=False
     )
     check(
         "get-requirements" in configs,
@@ -1549,7 +1549,7 @@ def t_better_agent_runner_uses_extension_mcp_configs() -> None:
         "provider_id": "prov-ba",
     }
     configs = runner_better_agent._extension_mcp_server_configs_for_run(
-        inputs, user_facing=True, bare=False,
+        inputs, interacts_with_user=True, bare=False,
     )
     check(
         "better-agent-requirements" in configs,
@@ -1559,7 +1559,7 @@ def t_better_agent_runner_uses_extension_mcp_configs() -> None:
     headless["open_file_panel_enabled"] = False
     check(
         "better-agent-requirements" in runner_better_agent._extension_mcp_server_configs_for_run(
-            headless, user_facing=False, bare=False,
+            headless, interacts_with_user=False, bare=False,
         ),
         "Better Agent runner keeps requirements MCP for authenticated headless sessions",
     )
@@ -1568,13 +1568,13 @@ def t_better_agent_runner_uses_extension_mcp_configs() -> None:
     missing_token["internal_token"] = ""
     check(
         "better-agent-requirements" not in runner_better_agent._extension_mcp_server_configs_for_run(
-            missing_token, user_facing=True, bare=False,
+            missing_token, interacts_with_user=True, bare=False,
         ),
         "Better Agent runner omits requirements MCP without backend auth",
     )
     check(
         "better-agent-requirements" in runner_better_agent._extension_mcp_server_configs_for_run(
-            inputs, user_facing=True, bare=True,
+            inputs, interacts_with_user=True, bare=True,
         ),
         "Better Agent runner keeps requirements MCP for bare runs",
     )
@@ -1649,7 +1649,7 @@ def t_requirements_processor_profile_marks_requirements_mcp_env() -> None:
     }
     direct = extension_store.runtime_mcp_server_configs(
         inputs,
-        user_facing=False,
+        interacts_with_user=False,
         bare=False,
     ).get("get-requirements")
     check(direct is not None, "processor profile runtime requirements MCP resolves")
@@ -1744,7 +1744,7 @@ def t_bare_testape_mcp_stays_on_better_agent_runtime() -> None:
     check(Path(server["args"][0]).name == "server.py", "bare TestApe MCP uses runtime server")
     check(server["env"]["BETTER_CLAUDE_EXTENSION_ID"] == extension_store.extension_id_for_role('testape'), "bare TestApe runtime env carries extension id")
     check(server["env"]["BETTER_CLAUDE_APP_SESSION_ID"] == "testape-bare-sid", "bare TestApe runtime env carries session id")
-    raw = extension_store.native_mcp_server_configs(inputs, user_facing=False, bare=True).get("testape")
+    raw = extension_store.native_mcp_server_configs(inputs, interacts_with_user=False, bare=True).get("testape")
     check(raw is None, "session-aware TestApe MCP is excluded from ambient native tools")
 
 
@@ -1763,7 +1763,7 @@ def t_bare_mcp_availability_matrix() -> None:
     }
     servers = extension_store.native_mcp_launcher_server_configs(
         inputs,
-        user_facing=False,
+        interacts_with_user=False,
         bare=True,
     )
     check("headless-bare" in servers, "bare non-user-facing MCP is available when bare_allowed")
@@ -1907,7 +1907,7 @@ def t_provider_runner_env_pins_better_agent_home() -> None:
         model="model",
         provider_id="provider-1",
         bare_config=True,
-        user_facing=False,
+        interacts_with_user=False,
         disabled_builtin_extensions=["ofek.testape-internal"],
     )
     home = str(ba_home())

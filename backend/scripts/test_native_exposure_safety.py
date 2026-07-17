@@ -26,7 +26,7 @@ def _record(extension_id: str, *, skill: str = "", mcp: str = "") -> dict:
             "command": mcp,
             "args": [],
             "env": {},
-            "user_facing": False,
+            "interacts_with_user": False,
             "requires_backend_auth": False,
             "native_exposure": {"allowed": True, "permissions": []},
             "predicate": {},

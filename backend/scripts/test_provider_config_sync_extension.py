@@ -65,7 +65,7 @@ def main() -> int:
             "cwd": str(Path.cwd()),
             "model": "model",
         },
-        user_facing=True,
+        interacts_with_user=True,
         bare=False,
     )
     server = configs.get("provider-config-sync")

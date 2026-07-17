@@ -2006,7 +2006,7 @@ def _validate_mcp_entrypoints(value: Any, *, extension_id: str) -> list[dict[str
                 "entrypoints.mcp.native_exposure.permissions must be a string list"
             )
         native_permissions = list(dict.fromkeys(permission.strip() for permission in native_permissions))
-        user_facing = item.get("user_facing") is not False
+        interacts_with_user = item.get("interacts_with_user") is not False
         requires_backend_auth = item.get("requires_backend_auth") is not False
         predicate = _validate_mcp_predicate(item.get("predicate"))
         if native_allowed and requires_backend_auth and not native_permissions:
@@ -2025,7 +2025,7 @@ def _validate_mcp_entrypoints(value: Any, *, extension_id: str) -> list[dict[str
                 "command": command,
                 "args": args,
                 "env": env,
-                "user_facing": user_facing,
+                "interacts_with_user": interacts_with_user,
                 "bare_allowed": item.get("bare_allowed") is True,
                 "requires_backend_auth": requires_backend_auth,
                 "native_exposure": {
@@ -5273,13 +5273,13 @@ def _disabled_runtime_extension_ids(inputs: dict[str, Any]) -> set[str]:
 def runtime_mcp_server_configs(
     inputs: dict[str, Any],
     *,
-    user_facing: bool,
+    interacts_with_user: bool,
     bare: bool,
 ) -> dict[str, dict[str, Any]]:
     return _mcp_server_configs_for_delivery(
         _HARNESS_DELIVERY_RUNTIME,
         inputs,
-        user_facing=user_facing,
+        interacts_with_user=interacts_with_user,
         bare=bare,
     )
 
@@ -5287,13 +5287,13 @@ def runtime_mcp_server_configs(
 def native_mcp_server_configs(
     inputs: dict[str, Any],
     *,
-    user_facing: bool,
+    interacts_with_user: bool,
     bare: bool,
 ) -> dict[str, dict[str, Any]]:
     return _mcp_server_configs_for_delivery(
         _HARNESS_DELIVERY_NATIVE,
         inputs,
-        user_facing=user_facing,
+        interacts_with_user=interacts_with_user,
         bare=bare,
     )
 
@@ -5301,13 +5301,13 @@ def native_mcp_server_configs(
 def native_mcp_launcher_server_configs(
     inputs: dict[str, Any],
     *,
-    user_facing: bool,
+    interacts_with_user: bool,
     bare: bool,
 ) -> dict[str, dict[str, Any]]:
     return _mcp_server_configs_for_delivery(
         _HARNESS_DELIVERY_NATIVE,
         inputs,
-        user_facing=user_facing,
+        interacts_with_user=interacts_with_user,
         bare=bare,
         launcher=True,
     )
@@ -5316,13 +5316,13 @@ def native_mcp_launcher_server_configs(
 def eligible_native_mcp_launcher_server_configs(
     inputs: dict[str, Any],
     *,
-    user_facing: bool,
+    interacts_with_user: bool,
     bare: bool,
 ) -> dict[str, dict[str, Any]]:
     return _mcp_server_configs_for_delivery(
         _HARNESS_DELIVERY_NATIVE,
         inputs,
-        user_facing=user_facing,
+        interacts_with_user=interacts_with_user,
         bare=bare,
         launcher=True,
         eligible_only=True,
@@ -5333,14 +5333,14 @@ def _mcp_server_configs_for_delivery(
     delivery: str,
     inputs: dict[str, Any],
     *,
-    user_facing: bool,
+    interacts_with_user: bool,
     bare: bool,
     launcher: bool = False,
     eligible_only: bool = False,
 ) -> dict[str, dict[str, Any]]:
     resolved_inputs = {
         **inputs,
-        "open_file_panel_enabled": bool(user_facing),
+        "open_file_panel_enabled": bool(interacts_with_user),
         "bare_config": bool(bare),
     }
     disabled_extension_ids = _disabled_runtime_extension_ids(inputs)
@@ -5418,7 +5418,7 @@ def _native_mcp_launcher_env(inputs: dict[str, Any]) -> dict[str, str]:
                 "BETTER_CLAUDE_MODE": str(inputs.get("mode") or ""),
                 "BETTER_CLAUDE_WORKING_MODE": str(inputs.get("working_mode") or ""),
                 "BETTER_CLAUDE_BARE_CONFIG": "1" if inputs.get("bare_config") else "0",
-                "BETTER_CLAUDE_USER_FACING": "1"
+                "BETTER_CLAUDE_INTERACTS_WITH_USER": "1"
                 if bool(inputs.get("open_file_panel_enabled"))
                 and not bool(inputs.get("bare_config"))
                 else "0",
@@ -5599,11 +5599,11 @@ def _mcp_item_available_for_inputs(
     if not is_mcp_server_enabled(manifest["id"], item["name"]):
         return False
     bare = bool(inputs.get("bare_config"))
-    user_facing = bool(inputs.get("open_file_panel_enabled")) and not bare
+    interacts_with_user = bool(inputs.get("open_file_panel_enabled")) and not bare
     # See the matching comment in `_runtime_mcp_server_config_for_item`: only
     # the genuine ambient launcher subprocess sets
     # `extension_mcp_launcher_context`. Without that check, any runtime spawn
-    # missing `app_session_id` would falsely bypass `user_facing`,
+    # missing `app_session_id` would falsely bypass `interacts_with_user`,
     # `requires_backend_auth`, and predicate gating below.
     ambient_native = (
         bool((item.get("native_exposure") or {}).get("allowed"))
@@ -5611,8 +5611,8 @@ def _mcp_item_available_for_inputs(
         and not str(inputs.get("app_session_id") or "").strip()
     )
     if (
-        item.get("user_facing")
-        and not user_facing
+        item.get("interacts_with_user")
+        and not interacts_with_user
         and not ambient_native
         and not (bare and item.get("bare_allowed"))
     ):
@@ -6851,7 +6851,7 @@ def extension_mcp_servers(extension_id: str) -> list[dict[str, Any]]:
             {
                 "name": item["name"],
                 "label": item["name"],
-                "user_facing": item.get("user_facing", True),
+                "interacts_with_user": item.get("interacts_with_user", True),
                 "enabled": is_mcp_server_enabled(extension_id, item["name"]),
             }
         )

@@ -26,7 +26,7 @@
         "python": "mcp/server.py",
         "args": [],
         "env": {},
-        "user_facing": true,
+        "interacts_with_user": true,
         "bare_allowed": false,
         "requires_backend_auth": true,
         "native_exposure": {

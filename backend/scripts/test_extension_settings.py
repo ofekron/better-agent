@@ -125,7 +125,7 @@ def test_native_exposure_manifest_supports_scoped_backend_auth() -> None:
     manifest["entrypoints"] = {"mcp": [{
         "name": "search-index",
         "command": "search-index",
-        "user_facing": False,
+        "interacts_with_user": False,
         "requires_backend_auth": True,
         "native_exposure": {"allowed": True, "permissions": ["internal_loopback"]},
     }]}
@@ -135,23 +135,23 @@ def test_native_exposure_manifest_supports_scoped_backend_auth() -> None:
         "permissions": ["internal_loopback"],
     }
 
-    user_facing = _base_manifest()
-    user_facing["surfaces"] = ["runtime_mcp"]
-    user_facing["permissions"] = {"internal_loopback": True}
-    user_facing["entrypoints"] = {"mcp": [{
+    interacts_with_user = _base_manifest()
+    interacts_with_user["surfaces"] = ["runtime_mcp"]
+    interacts_with_user["permissions"] = {"internal_loopback": True}
+    interacts_with_user["entrypoints"] = {"mcp": [{
         "name": "ui-tools",
         "command": "ui-tools",
-        "user_facing": True,
+        "interacts_with_user": True,
         "requires_backend_auth": True,
         "native_exposure": {"allowed": True, "permissions": ["internal_loopback"]},
     }]}
-    assert extension_store.validate_manifest(user_facing)["entrypoints"]["mcp"][0][
+    assert extension_store.validate_manifest(interacts_with_user)["entrypoints"]["mcp"][0][
         "native_exposure"
     ]["allowed"] is True
 
     for unsafe, permissions in (
-        ({"user_facing": False, "requires_backend_auth": True}, {}),
-        ({"user_facing": False, "requires_backend_auth": True, "native_exposure": {"allowed": True, "permissions": ["undeclared.action"]}}, {}),
+        ({"interacts_with_user": False, "requires_backend_auth": True}, {}),
+        ({"interacts_with_user": False, "requires_backend_auth": True, "native_exposure": {"allowed": True, "permissions": ["undeclared.action"]}}, {}),
     ):
         rejected = _base_manifest()
         rejected["surfaces"] = ["runtime_mcp"]
@@ -386,7 +386,7 @@ def test_mcp_toggle_filters_builtin_injection() -> None:
                 {
                     "name": "scheduler",
                     "python": "mcp/server.py",
-                    "user_facing": True,
+                    "interacts_with_user": True,
                     "bare_allowed": False,
                     "requires_backend_auth": True,
                 }
@@ -551,7 +551,7 @@ def test_native_harness_exposure_is_per_item_and_unsafe_mcp_fails_closed() -> No
                         "command": "local-search",
                         "args": [],
                         "env": {},
-                        "user_facing": False,
+                        "interacts_with_user": False,
                         "requires_backend_auth": False,
                         "native_exposure": {"allowed": True, "permissions": []},
                         "predicate": {},
@@ -561,7 +561,7 @@ def test_native_harness_exposure_is_per_item_and_unsafe_mcp_fails_closed() -> No
                         "command": "session-control",
                         "args": [],
                         "env": {},
-                        "user_facing": False,
+                        "interacts_with_user": False,
                         "requires_backend_auth": True,
                         "native_exposure": {"allowed": False, "permissions": []},
                         "predicate": {},

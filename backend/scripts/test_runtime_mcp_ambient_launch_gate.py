@@ -54,7 +54,7 @@ def _install_extension(extension_id: str, server_name: str) -> None:
                 "python": "mcp/server.py",
                 "args": [],
                 "env": {},
-                "user_facing": False,
+                "interacts_with_user": False,
                 "bare_allowed": False,
                 "requires_backend_auth": True,
                 "native_exposure": {"allowed": True, "permissions": ["internal_loopback"]},
@@ -119,7 +119,7 @@ def test_runtime_spawn_without_app_session_id_still_gets_token() -> None:
         "provider_id": "provider-ambient-launch-gate",
     }
     config = extension_store.runtime_mcp_server_configs(
-        inputs, user_facing=False, bare=False,
+        inputs, interacts_with_user=False, bare=False,
     ).get(server_name)
     check(config is not None, "runtime MCP config resolves without app_session_id")
     env = (config or {}).get("env") or {}
@@ -131,7 +131,7 @@ def test_runtime_spawn_without_app_session_id_still_gets_token() -> None:
     # instead.
     launcher_inputs = {**inputs, "extension_mcp_launcher_context": True}
     launcher_config = extension_store.runtime_mcp_server_configs(
-        launcher_inputs, user_facing=False, bare=False,
+        launcher_inputs, interacts_with_user=False, bare=False,
     ).get(server_name)
     check(launcher_config is not None, "runtime MCP config resolves for launcher context")
     launcher_env = (launcher_config or {}).get("env") or {}

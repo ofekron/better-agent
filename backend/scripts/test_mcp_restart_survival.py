@@ -332,7 +332,7 @@ if __name__ == "__main__":
                 "python": "mcp/server.py",
                 "args": [],
                 "env": {},
-                "user_facing": False,
+                "interacts_with_user": False,
                 "bare_allowed": False,
                 "requires_backend_auth": True,
             }]
@@ -441,7 +441,7 @@ async def test_runtime_extension_mcp_process_survives_backend_restart() -> None:
         _install_extension(extension_id, server_name)
         config = extension_store.runtime_mcp_server_configs(
             _run_inputs(backend),
-            user_facing=False,
+            interacts_with_user=False,
             bare=False,
         )[server_name]
         await _assert_process_survives_restart(
@@ -466,7 +466,7 @@ async def test_session_bound_extension_mcp_is_not_ambient_native() -> None:
         inputs = _run_inputs(backend)
         native_configs = extension_store.native_mcp_launcher_server_configs(
             inputs,
-            user_facing=False,
+            interacts_with_user=False,
             bare=False,
         )
         check(server_name not in native_configs, "session-bound MCP remains unavailable ambiently")
