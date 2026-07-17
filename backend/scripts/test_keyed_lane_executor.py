@@ -423,7 +423,6 @@ def test_idle_teardown_only_affects_idle_key_not_busy_key() -> None:
             "busy-key", lambda: (started.set(), release.wait())[1], lane="a",
         )
         assert started.wait(1)
-        idle_entry = executor._lanes_by_key.setdefault
         executor.submit("idle-key", lambda: "idle-done", lane="a").result(timeout=1)
         idle_lane = executor._lanes_by_key[("idle-key", "a")]
         deadline = time.monotonic() + 1
