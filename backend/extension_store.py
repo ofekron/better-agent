@@ -5515,9 +5515,21 @@ def _runtime_mcp_server_config_for_item(
         and str(inputs.get("provisioned_tool_profile") or "").strip() == "requirements_processor"
     ):
         base_env.update(dual_env_many({"BETTER_CLAUDE_REQUIREMENTS_PROCESSOR": "1"}))
-    ambient_launch = bool((item.get("native_exposure") or {}).get("allowed")) and not str(
-        inputs.get("app_session_id") or ""
-    ).strip()
+    # Only the genuine ambient launcher subprocess (`extension_mcp_launcher.py`,
+    # which sets `extension_mcp_launcher_context` and instead authenticates via
+    # `ambient_mcp_broker`'s per-call credential) may skip token minting here.
+    # Gating on `native_exposure.allowed` + missing `app_session_id` alone is
+    # not enough: ordinary runtime/subagent MCP spawns for a
+    # native-exposure-enabled extension can also have an empty
+    # `app_session_id` (e.g. not threaded through by the caller), which would
+    # falsely skip minting and leave the subprocess with no internal token —
+    # every `/api/internal/*` call it makes then 403s with "invalid internal
+    # token".
+    ambient_launch = (
+        bool((item.get("native_exposure") or {}).get("allowed"))
+        and bool(inputs.get("extension_mcp_launcher_context"))
+        and not str(inputs.get("app_session_id") or "").strip()
+    )
     if needs_identity_token(record) and not ambient_launch:
         # Per-extension token: identity is derived from this secret, never
         # from a self-asserted X-Extension-Id header. The global token from
@@ -5617,9 +5629,16 @@ def _mcp_item_available_for_inputs(
         return False
     bare = bool(inputs.get("bare_config"))
     user_facing = bool(inputs.get("open_file_panel_enabled")) and not bare
-    ambient_native = bool((item.get("native_exposure") or {}).get("allowed")) and not str(
-        inputs.get("app_session_id") or ""
-    ).strip()
+    # See the matching comment in `_runtime_mcp_server_config_for_item`: only
+    # the genuine ambient launcher subprocess sets
+    # `extension_mcp_launcher_context`. Without that check, any runtime spawn
+    # missing `app_session_id` would falsely bypass `user_facing`,
+    # `requires_backend_auth`, and predicate gating below.
+    ambient_native = (
+        bool((item.get("native_exposure") or {}).get("allowed"))
+        and bool(inputs.get("extension_mcp_launcher_context"))
+        and not str(inputs.get("app_session_id") or "").strip()
+    )
     if (
         item.get("user_facing")
         and not user_facing
