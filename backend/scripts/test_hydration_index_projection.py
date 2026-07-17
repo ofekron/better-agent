@@ -407,6 +407,73 @@ ingester.shutdown()
     _, failure_retried = store.load(failure_root, failure_path)
     assert failure_retried["scanned_bytes"] == 0, failure_retried
 
+    receipt_target = store._receipt_path(failure_path)
+    receipt_before = receipt_target.read_bytes()
+    original_replace = store.os.replace
+    store.os.replace = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        OSError("injected receipt rename failure")
+    )
+    try:
+        try:
+            store.prepare_durable_append_receipt(
+                failure_root, failure_path, failure_path.stat().st_size,
+                failure_digest,
+            )
+            raise AssertionError("receipt rename failure was swallowed")
+        except OSError:
+            pass
+    finally:
+        store.os.replace = original_replace
+    assert receipt_target.read_bytes() == receipt_before
+    assert not list(failure_path.parent.glob(".hydration_append_receipt.json.*.tmp"))
+
+    original_fsync = store.os.fsync
+    receipt_fsync_calls = 0
+    def fail_receipt_fsync(fd):
+        nonlocal receipt_fsync_calls
+        receipt_fsync_calls += 1
+        if receipt_fsync_calls == 1:
+            raise OSError("injected receipt temp fsync failure")
+        return original_fsync(fd)
+    store.os.fsync = fail_receipt_fsync
+    try:
+        try:
+            store.prepare_durable_append_receipt(
+                failure_root, failure_path, failure_path.stat().st_size,
+                failure_digest,
+            )
+            raise AssertionError("receipt temp fsync failure was swallowed")
+        except OSError:
+            pass
+    finally:
+        store.os.fsync = original_fsync
+    assert receipt_target.read_bytes() == receipt_before
+    assert not list(failure_path.parent.glob(".hydration_append_receipt.json.*.tmp"))
+
+    receipt_fsync_calls = 0
+    def fail_receipt_dir_fsync(fd):
+        nonlocal receipt_fsync_calls
+        receipt_fsync_calls += 1
+        if receipt_fsync_calls == 2:
+            raise OSError("injected receipt directory fsync failure")
+        return original_fsync(fd)
+    store.os.fsync = fail_receipt_dir_fsync
+    try:
+        try:
+            store.prepare_durable_append_receipt(
+                failure_root, failure_path, failure_path.stat().st_size,
+                failure_digest,
+            )
+            raise AssertionError("receipt directory fsync failure was swallowed")
+        except OSError:
+            pass
+    finally:
+        store.os.fsync = original_fsync
+    assert not list(failure_path.parent.glob(".hydration_append_receipt.json.*.tmp"))
+    store.prepare_durable_append_receipt(
+        failure_root, failure_path, failure_path.stat().st_size, failure_digest,
+    )
+
     retry_ingester = EventIngester()
     retry_root = "background-projection-retry"
     original_flush = store.flush_writer_projection
@@ -451,6 +518,12 @@ root, phase = sys.argv[2], sys.argv[3]
 ingester = EventIngester()
 if phase == "before-chain":
     ingester._persist_chain_head_locked = lambda *_a, **_k: os.kill(os.getpid(), signal.SIGKILL)
+elif phase == "receipt-before-journal-fsync":
+    original_prepare = store.prepare_durable_append_receipt
+    def kill_after_receipt(*args, **kwargs):
+        original_prepare(*args, **kwargs)
+        os.kill(os.getpid(), signal.SIGKILL)
+    store.prepare_durable_append_receipt = kill_after_receipt
 else:
     store.flush_writer_projection = lambda *_a, **_k: os.kill(os.getpid(), signal.SIGKILL)
 ingester.ingest(
@@ -460,7 +533,7 @@ ingester.ingest(
 ingester.close(root)
 raise AssertionError("failpoint did not terminate process")
 '''
-    for phase in ("before-chain", "before-projection"):
+    for phase in ("before-chain", "before-projection", "receipt-before-journal-fsync"):
         kill_root = f"sigkill-{phase}"
         kill_path = Path(HOME) / "sessions" / kill_root / "events.jsonl"
         kill_path.parent.mkdir(parents=True)
@@ -472,12 +545,29 @@ raise AssertionError("failpoint did not terminate process")
             str(Path(__file__).resolve().parents[1]), kill_root, phase,
         ], env={**os.environ, "BETTER_AGENT_HOME": HOME})
         assert killed.returncode == -signal.SIGKILL, (phase, killed.returncode)
+        if phase == "receipt-before-journal-fsync":
+            with kill_path.open("r+b") as handle:
+                handle.truncate(baseline_size)
+            durable_stat = kill_path.stat()
+            with sqlite3.connect(store._db_path(kill_root)) as conn:
+                conn.executemany(
+                    "UPDATE meta SET value=? WHERE key=?",
+                    (
+                        (str(durable_stat.st_mtime_ns), "mtime_ns"),
+                        (str(durable_stat.st_ctime_ns), "ctime_ns"),
+                    ),
+                )
+                conn.commit()
         with store._receipts_lock:
             store._append_receipts.clear()
         recovered_offsets, recovered_metrics = store.load(kill_root, kill_path)
         assert recovered_metrics["cold"] == 0, (phase, recovered_metrics)
-        assert recovered_metrics["scanned_bytes"] == kill_path.stat().st_size - baseline_size
-        assert recovered_offsets[kill_root][-1] == baseline_size
+        expected_tail = kill_path.stat().st_size - baseline_size
+        assert recovered_metrics["scanned_bytes"] == expected_tail
+        if expected_tail:
+            assert recovered_offsets[kill_root][-1] == baseline_size
+        else:
+            assert recovered_offsets[kill_root] == (0,)
 
     guard_root = "guard-root"
     event_ingester.ingest(
@@ -761,14 +851,12 @@ store.invalidate(sys.argv[2])
     large_size = 1_947_000_000
     with large_journal.open("wb") as handle:
         handle.truncate(large_size)
+        handle.seek(large_size - 1)
+        handle.write(b"\n")
     large_target = store._db_path(large_root)
     large_conn = store._create(large_target)
     large_stat = large_journal.stat()
     large_rows = 250_937
-    large_conn.executemany(
-        "INSERT INTO offsets VALUES (?, ?)",
-        (("large-sid", index * 7000) for index in range(large_rows)),
-    )
     large_conn.executemany("INSERT INTO meta VALUES (?, ?)", {
         "schema": str(store.SCHEMA), "dev": str(large_stat.st_dev),
         "ino": str(large_stat.st_ino), "offset": str(large_size),
@@ -780,12 +868,25 @@ store.invalidate(sys.argv[2])
     }.items())
     large_conn.commit()
     large_conn.close()
+    large_digest = bytes(32).hex()
+    store._write_ack(large_journal, large_size, large_digest)
+    large_tail = _row("large-tail", large_rows + 1)
+    with large_journal.open("ab") as handle:
+        handle.write(large_tail)
+        handle.flush()
+        store.prepare_durable_append_receipt(
+            large_root, large_journal, handle.tell(),
+            _next_digest(large_digest, large_tail),
+        )
+        os.fsync(handle.fileno())
+    cached_offsets = {"large-sid": tuple(range(0, large_rows * 7000, 7000))}
     rss_before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     large_result: list[object] = []
-    large_cpu_started = time.process_time()
     large_started = time.perf_counter()
     large_loader = threading.Thread(
-        target=lambda: large_result.append(store.load(large_root, large_journal)),
+        target=lambda: large_result.append(store.load(
+            large_root, large_journal, cached_offsets, large_size,
+        )),
     )
     large_loader.start()
     heartbeats = 0
@@ -799,17 +900,12 @@ store.invalidate(sys.argv[2])
         prior_heartbeat = heartbeat
     large_loader.join()
     large_elapsed = time.perf_counter() - large_started
-    # Bound the WORK, not the wall clock: scanned_bytes == 0 below
-    # already proves the journal was not rescanned, and process CPU
-    # time bounds the hot offset load itself. A wall-clock bound here
-    # flaked repeatedly (41-58s observed) purely from concurrent
-    # machine load.
-    large_cpu_elapsed = time.process_time() - large_cpu_started
     rss_after = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     large_offsets, large_metrics = large_result[0]
     assert len(large_offsets["large-sid"]) == large_rows
-    assert large_metrics["scanned_bytes"] == 0, large_metrics
-    assert large_cpu_elapsed < 15, (large_cpu_elapsed, large_elapsed)
+    assert large_offsets["large-tail"] == (large_size,)
+    assert large_metrics["scanned_bytes"] == len(large_tail), large_metrics
+    assert large_elapsed < 5, large_elapsed
     assert heartbeats > 0, heartbeats
     assert max_heartbeat_gap < 0.2, max_heartbeat_gap
     rss_scale = 1024 if sys.platform != "darwin" else 1
