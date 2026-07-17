@@ -1905,21 +1905,6 @@ def _ensure_on_demand_background_extraction() -> dict[str, Any]:
         return {"running": False, "error": str(exc)}
 
 
-def ensure_manual_requirements_mining() -> dict[str, Any]:
-    """Best-effort nudge for the manual-requirements git-history miner.
-    Called from backend startup (a periodic catch-all, since doc commits
-    don't otherwise correlate with a live request) — the immediate trigger
-    per commit is the ``post-commit`` git hook in better-agent-private's
-    ``.githooks/``, which launches the same ``--extract-manual --background``
-    CLI path directly."""
-    try:
-        return _launch_requirements_background(["--extract-manual", "--background"])
-    except RuntimeError as exc:
-        return {"running": True, "detail": str(exc)}
-    except Exception as exc:
-        return {"running": False, "error": str(exc)}
-
-
 def _ensure_background_extraction() -> dict[str, Any]:
     """Ensure the detached requirement-extraction runner is alive. Spawns the
     CLI ``--extract --background`` process, which owns unit extraction + the
