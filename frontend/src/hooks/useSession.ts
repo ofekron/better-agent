@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useRef } from "react";
+import { useState, useCallback, useEffect, useMemo, useRef } from "react";
 import { useTranslation } from "react-i18next";
 import type {
   OpenFilePanel,
@@ -395,6 +395,35 @@ export function mergeChatTreeDeltaMessage(
     stopped_at: current.stopped_at,
     interrupted_by_msg_id: current.interrupted_by_msg_id,
   };
+}
+
+/** Upsert one chat_tree_delta's messages into a session node. Pure:
+ * returns the same node when nothing changed. Shared by the focused
+ * currentSession path and the warm LRU-cache patch path so both apply
+ * identical merge semantics. */
+function mergeDeltaMessagesIntoNode(
+  node: Session,
+  deltaMessages: ChatMessage[],
+  phase: ChatTreeDeltaPhase,
+): Session {
+  const existing = node.messages || [];
+  const byId = new Map(existing.map((m, i) => [m.id, i] as const));
+  let next = existing;
+  for (const incoming of deltaMessages) {
+    const idx = byId.get(incoming.id);
+    const merged = mergeChatTreeDeltaMessage(
+      idx !== undefined ? next[idx] : undefined, incoming, phase,
+    );
+    if (next === existing) next = [...existing];
+    if (idx !== undefined) {
+      next[idx] = merged;
+    } else {
+      byId.set(incoming.id, next.length);
+      next.push(merged);
+    }
+  }
+  if (next === existing) return node;
+  return { ...node, messages: next };
 }
 
 /** Walk the tree rooted at `tree` and apply `mutate` to the node whose
@@ -889,6 +918,16 @@ export function useSession(authStatus?: string) {
   const liveSessionNamesRef = useRef<Map<string, string>>(new Map());
   const sessionTreeCacheRef = useRef<Map<string, Session>>(new Map());
   const sessionTreeRootByNodeRef = useRef<Map<string, string>>(new Map());
+  // Reactive mirror of LRU cache MEMBERSHIP (every cached node id):
+  // the warm WS subscription set derives from it. A plain string state
+  // so identical recomputes bail out of re-rendering; updated after
+  // every cache mutation.
+  const [sessionCacheMembership, setSessionCacheMembership] = useState("");
+  const syncSessionCacheMembership = useCallback(() => {
+    setSessionCacheMembership(
+      Array.from(sessionTreeRootByNodeRef.current.keys()).sort().join("|"),
+    );
+  }, []);
 
   const collectTreeNodeIds = useCallback((tree: Session): string[] => {
     const ids: string[] = [];
@@ -909,7 +948,8 @@ export function useSession(authStatus?: string) {
       }
     }
     sessionTreeCacheRef.current.delete(rootId);
-  }, [collectTreeNodeIds]);
+    syncSessionCacheMembership();
+  }, [collectTreeNodeIds, syncSessionCacheMembership]);
 
   const rememberSessionTree = useCallback((tree: Session) => {
     forgetSessionTree(tree.id);
@@ -923,7 +963,8 @@ export function useSession(authStatus?: string) {
       if (!oldestRootId) break;
       forgetSessionTree(oldestRootId);
     }
-  }, [collectTreeNodeIds, forgetSessionTree]);
+    syncSessionCacheMembership();
+  }, [collectTreeNodeIds, forgetSessionTree, syncSessionCacheMembership]);
 
   const cachedSessionTreeFor = useCallback((sessionId: string): Session | null => {
     const rootId = sessionTreeRootByNodeRef.current.get(sessionId);
@@ -1640,7 +1681,7 @@ export function useSession(authStatus?: string) {
     ): Session => {
       const rootMessages = chatTreeToMessages(chatTree.projection, chatTree.lookup);
       chatTreeOlderCursorRef.current.set(
-        String(chatTree.session.id ?? fallbackId), chatTree.page.older_cursor);
+        String(chatTree.session.id ?? fallbackId), chatTree.page.page_cursor);
       return {
         ...(chatTree.session as unknown as Session),
         messages: rootMessages,
@@ -2181,27 +2222,24 @@ export function useSession(authStatus?: string) {
       if (deltaMessages.length === 0) return;
       setCurrentSession((prev) => {
         if (!prev) return prev;
-        return updateNodeById(prev, sessionId, (node) => {
-          const existing = node.messages || [];
-          const byId = new Map(existing.map((m, i) => [m.id, i] as const));
-          let next = existing;
-          for (const incoming of deltaMessages) {
-            const idx = byId.get(incoming.id);
-            const merged = mergeChatTreeDeltaMessage(
-              idx !== undefined ? next[idx] : undefined, incoming, phase,
-            );
-            if (next === existing) next = [...existing];
-            if (idx !== undefined) {
-              next[idx] = merged;
-            } else {
-              byId.set(incoming.id, next.length);
-              next.push(merged);
-            }
-          }
-          if (next === existing) return node;
-          return { ...node, messages: next };
-        });
+        return updateNodeById(prev, sessionId, (node) =>
+          mergeDeltaMessagesIntoNode(node, deltaMessages, phase));
       });
+      // Warm-subscribed sessions ride the same frames: patch the LRU
+      // cached tree too so a cached reopen shows current content, not
+      // the snapshot from when the tree was last focused. `set` on an
+      // existing key preserves LRU (insertion) order.
+      const cachedRootId = sessionTreeRootByNodeRef.current.get(sessionId);
+      const cachedTree = cachedRootId
+        ? sessionTreeCacheRef.current.get(cachedRootId)
+        : undefined;
+      if (cachedRootId && cachedTree) {
+        const updated = updateNodeById(cachedTree, sessionId, (node) =>
+          mergeDeltaMessagesIntoNode(node, deltaMessages, phase));
+        if (updated !== cachedTree) {
+          sessionTreeCacheRef.current.set(cachedRootId, updated);
+        }
+      }
     },
     [],
   );
@@ -2984,6 +3022,15 @@ export function useSession(authStatus?: string) {
     return ids;
   }, [currentSession]);
 
+  /** Every node id of every LRU-cached session tree — the WS "warm"
+   * subscription set. Ids that are also open subscribe as "opened"
+   * (useWebSocket's desired-map precedence); eviction from the cache
+   * drops the id here, which unsubscribes it. */
+  const warmSubscriptionIds = useMemo(
+    () => (sessionCacheMembership ? sessionCacheMembership.split("|") : []),
+    [sessionCacheMembership],
+  );
+
   /** Look up a node within the current tree (read-only). */
   const getNode = useCallback(
     (sessionId: string): Session | null => {
@@ -3001,8 +3048,9 @@ export function useSession(authStatus?: string) {
       if (cursor === undefined) {
         // First chat-tree page for a fork pane (initial fork messages ride
         // embedded in the root tree, so no cursor was seeded): a
-        // cursor-less pane window returns the authoritative older_cursor —
-        // never derived client-side, so it cannot go stale by guessing.
+        // cursor-less pane window returns the authoritative signed
+        // page_cursor — never derived client-side, so it cannot go stale
+        // by guessing.
         let seed: Awaited<ReturnType<typeof fetchChatTree>>;
         try {
           seed = await fetchChatTree(sessionId, {
@@ -3013,7 +3061,7 @@ export function useSession(authStatus?: string) {
           return;
         }
         const paneWindow = chatTreeToMessages(seed.projection, seed.lookup);
-        chatTreeOlderCursorRef.current.set(sessionId, seed.page.older_cursor);
+        chatTreeOlderCursorRef.current.set(sessionId, seed.page.page_cursor);
         setCurrentSession((prev) => {
           if (!prev) return prev;
           return updateNodeById(prev, sessionId, (node) => {
@@ -3032,14 +3080,14 @@ export function useSession(authStatus?: string) {
             };
           });
         });
-        cursor = seed.page.older_cursor;
+        cursor = seed.page.page_cursor;
         if (cursor === null) return;
       }
       let chatTree: Awaited<ReturnType<typeof fetchChatTree>>;
       try {
         chatTree = await fetchChatTree(sessionId, {
           turns: exchangePageSize,
-          beforeTurn: cursor,
+          cursor,
           pane: sessionId,
         });
       } catch (error) {
@@ -3052,7 +3100,7 @@ export function useSession(authStatus?: string) {
         return;
       }
       const older = chatTreeToMessages(chatTree.projection, chatTree.lookup);
-      chatTreeOlderCursorRef.current.set(sessionId, chatTree.page.older_cursor);
+      chatTreeOlderCursorRef.current.set(sessionId, chatTree.page.page_cursor);
       setCurrentSession((prev) => {
         if (!prev) return prev;
         return updateNodeById(prev, sessionId, (node) => {
@@ -3314,6 +3362,7 @@ export function useSession(authStatus?: string) {
     patchMessageStatus,
     appendFork,
     allOpenSessionIds,
+    warmSubscriptionIds,
     getNode,
     loadOlderMessages,
     searchSessions,

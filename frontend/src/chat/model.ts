@@ -47,6 +47,28 @@ export type Turn = {
 export type ChatItem = ModelChange | Turn
 export type ChatProjection = readonly ChatItem[]
 
+/** Canonical boundary metadata stamped on an adapted tree-sourced
+ * message: body item order, Explanation partitions (text + source
+ * event ids + item event ids), and the result boundary (part ids +
+ * concatenated-text source ids). Consumed by renderers for completed
+ * turns instead of re-deriving grouping from flattened events. */
+export type CanonicalBodyMeta =
+  | { kind: 'explanation'; text: string; textEventIds: string[]; itemIds: string[] }
+  | { kind: 'steering'; id: string }
+  | { kind: 'scoped'; scope: 'native' | 'worker'; id: string }
+
+export type CanonicalResultMeta = {
+  type: 'ProviderResult' | 'DerivedResult'
+  partIds: string[]
+  textSourceIds: string[]
+  text: string
+}
+
+export type CanonicalTurnMeta = {
+  body: CanonicalBodyMeta[]
+  result: CanonicalResultMeta | null
+}
+
 export type RenderMode = 'collapsed' | 'extended' | 'live'
 
 export type RenderToken =

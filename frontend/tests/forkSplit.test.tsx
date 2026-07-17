@@ -568,7 +568,7 @@ describe("fork-and-send through App harness", () => {
 // ─────────────────────────── multi-WS subscribe ──────────────────────
 
 describe("multi-pane WebSocket subscription", () => {
-  it("subscribes to a new fork id when session_forked arrives, unsubscribes when the tree changes", async () => {
+  it("subscribes to a new fork id when session_forked arrives, demotes the tree to warm on switch", async () => {
     const root = makeSession({
       id: "root",
       manager_claude_session_id: "claude-A",
@@ -585,14 +585,17 @@ describe("multi-pane WebSocket subscription", () => {
           (f as { type?: string; app_session_id?: string }).app_session_id ===
             sid,
       );
-    const unsubFor = (sid: string) =>
-      h.outbound.find(
+    const lastLifecycleFrameFor = (sid: string) => {
+      const frames = h.outbound.filter(
         (f) =>
-          (f as { type?: string; app_session_id?: string }).type ===
-            "unsubscribe" &&
-          (f as { type?: string; app_session_id?: string }).app_session_id ===
-            sid,
+          ((f as { type?: string }).type === "subscribe" ||
+            (f as { type?: string }).type === "unsubscribe") &&
+          (f as { app_session_id?: string }).app_session_id === sid,
       );
+      return frames[frames.length - 1] as
+        | { type?: string; priority?: string }
+        | undefined;
+    };
 
     // Root is subscribed on select.
     expect(subFor(root.id)).toBeDefined();
@@ -614,10 +617,18 @@ describe("multi-pane WebSocket subscription", () => {
     await h.flush();
     expect(subFor(child.id)).toBeDefined();
 
-    // Now switch sessions away — must unsubscribe BOTH ids.
+    // Now switch sessions away — the cached tree stays subscribed, but
+    // demoted to warm priority (unsubscribe happens only on LRU
+    // eviction, not on focus change).
     await h.selectSession(other.id);
-    expect(unsubFor(root.id)).toBeDefined();
-    expect(unsubFor(child.id)).toBeDefined();
+    expect(lastLifecycleFrameFor(root.id)).toMatchObject({
+      type: "subscribe",
+      priority: "warm",
+    });
+    expect(lastLifecycleFrameFor(child.id)).toMatchObject({
+      type: "subscribe",
+      priority: "warm",
+    });
     h.unmount();
   });
 });

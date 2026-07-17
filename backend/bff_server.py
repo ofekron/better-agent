@@ -48,6 +48,7 @@ from frontend_assets import (
     NoCacheIndexStaticFiles,
     frontend_dist_dir,
 )
+from ws_subscription_contract import resolve_subscribe_priority
 
 app = FastAPI(title="better-agent-bff")
 app.include_router(app_router)
@@ -419,7 +420,14 @@ async def proxy_ws(websocket: WebSocket, _path: str) -> None:
                         message_type = message.get("type")
                         session_id = message.get("app_session_id")
                         if message_type == "subscribe" and isinstance(session_id, str):
-                            hub.subscribe(connection, session_id)
+                            priority = resolve_subscribe_priority(message)
+                            if priority is not None:
+                                hub.subscribe(connection, session_id, priority=priority)
+                            # Invalid priority: fail closed — no local
+                            # registration. The frame is still forwarded so
+                            # the runtime's frame validation (the single
+                            # rejection authority) replies with the error
+                            # frame, which proxies back to the browser.
                         elif message_type == "unsubscribe" and isinstance(session_id, str):
                             hub.unsubscribe(connection, session_id)
                 await upstream.send(data)

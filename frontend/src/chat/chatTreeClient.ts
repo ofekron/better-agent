@@ -1,7 +1,8 @@
 import { API } from '../api'
 import { parseProjection } from './parseProjection'
-import type { BodyItem, ChatProjection, Turn } from './model'
+import type { BodyItem, CanonicalTurnMeta, ChatProjection, Turn } from './model'
 import type { ChatMessage, WSEvent } from '../types'
+import type { RawHistoricalManifest } from '../lib/historicalChildrenClient'
 
 export type ChatTreeLookupEntry =
   | {
@@ -10,6 +11,11 @@ export type ChatTreeLookupEntry =
       text: string
       seq?: number | null
       snapshot?: Record<string, unknown> | null
+      /** Per-message historical-hydration manifest carried on the
+       * chat-tree wire (GET responses and chat_tree_delta lookups).
+       * Shape is the frontend's RawHistoricalManifest — the existing
+       * consumer contract (Chat.tsx gate, HistoricalTurnDetails). */
+      historical_hydration_root?: RawHistoricalManifest | null
     }
   | {
       kind: 'event'
@@ -23,9 +29,11 @@ export type ChatTreeLookupEntry =
 
 export type ChatTreePage = {
   turns: number
-  before_turn: string | null
   pane?: string | null
-  older_cursor: string | null
+  /** Opaque signed cursor for the next OLDER page; null when nothing
+   * older exists. The client never inspects it — it echoes it back as
+   * the `cursor` query param on load-more. */
+  page_cursor: string | null
   has_older: boolean
 }
 
@@ -50,11 +58,11 @@ export class ChatTreeError extends Error {
 
 export async function fetchChatTree(
   sessionId: string,
-  options: { turns?: number; beforeTurn?: string; pane?: string; signal?: AbortSignal } = {},
+  options: { turns?: number; cursor?: string; pane?: string; signal?: AbortSignal } = {},
 ): Promise<ChatTree> {
   const params = new URLSearchParams()
   if (options.turns !== undefined) params.set('turns', String(options.turns))
-  if (options.beforeTurn !== undefined) params.set('before_turn', options.beforeTurn)
+  if (options.cursor !== undefined) params.set('cursor', options.cursor)
   if (options.pane !== undefined) params.set('pane', options.pane)
   const query = params.toString()
   const response = await fetch(
@@ -89,6 +97,41 @@ export async function fetchChatTree(
 
 function numberOrUndefined(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined
+}
+
+/** Validate the wire manifest fail-closed: a malformed object yields
+ * undefined (expansion gate stays off) instead of a crash or a lying
+ * gate. `null` is an explicit "no historical work" and is preserved. */
+function historicalHydrationRoot(
+  entry: ChatTreeLookupEntry | undefined,
+): RawHistoricalManifest | null | undefined {
+  if (!entry || entry.kind !== 'message') return undefined
+  const raw = entry.historical_hydration_root
+  if (raw === undefined) return undefined
+  if (raw === null) return null
+  if (typeof raw !== 'object' || Array.isArray(raw)) return undefined
+  const m = raw as Record<string, unknown>
+  if (
+    typeof m.id !== 'string' || typeof m.type !== 'string' ||
+    typeof m.revision !== 'string' || typeof m.display_summary !== 'string' ||
+    typeof m.direct_child_count !== 'number' || !Number.isFinite(m.direct_child_count)
+  ) return undefined
+  return {
+    id: m.id,
+    type: m.type,
+    revision: m.revision,
+    direct_child_count: m.direct_child_count,
+    display_summary: m.display_summary,
+  }
+}
+
+/** Explicit wire manifest wins over any snapshot passthrough copy; when
+ * the wire omits it entirely, nothing is stamped (spread of {}). */
+function hydrationRootExtras(
+  entry: ChatTreeLookupEntry | undefined,
+): Partial<ChatMessage> {
+  const root = historicalHydrationRoot(entry)
+  return root === undefined ? {} : { historical_hydration_root: root }
 }
 
 function snapshotExtras(entry: ChatTreeLookupEntry | undefined): Partial<ChatMessage> {
@@ -285,6 +328,47 @@ function turnEventsForRender(
   return events
 }
 
+/** Canonical boundary metadata for a tree-sourced turn: the projector's
+ * Explanation partitions, body item order, and result boundary carried
+ * verbatim onto the adapted message so renderers consume them instead
+ * of re-deriving grouping from the flattened event list. */
+function canonicalTurnMeta(
+  turn: Turn,
+  lookup: Record<string, ChatTreeLookupEntry>,
+): CanonicalTurnMeta {
+  return {
+    body: turn.body.map((item) => {
+      if (item.type === 'Explanation') {
+        return {
+          kind: 'explanation' as const,
+          text: item.text,
+          textEventIds: [...item.textEventIds],
+          itemIds: [...item.itemIds],
+        }
+      }
+      if (item.type === 'SteeringMessage') {
+        return { kind: 'steering' as const, id: item.id }
+      }
+      return {
+        kind: 'scoped' as const,
+        scope: item.type === 'NativeSubagentTurn' ? ('native' as const) : ('worker' as const),
+        id: item.id,
+      }
+    }),
+    result: turn.result
+      ? {
+          type: turn.result.type,
+          partIds: [...turn.result.partIds],
+          textSourceIds: turn.result.partIds.filter((id) => {
+            const entry = lookup[id]
+            return entry?.kind === 'event' && entry.type === 'assistant_text'
+          }),
+          text: turn.result.text,
+        }
+      : null,
+  }
+}
+
 /** Adapt the formal chat tree into the ChatMessage list the existing
  * Chat component renders. Structure and result resolution come from the
  * tree (the backend projector — no client-side rederivation); content
@@ -314,6 +398,7 @@ export function chatTreeToMessages(
         events: [],
         isStreaming: false,
         ...snapshotExtras(promptEntry),
+        ...hydrationRootExtras(promptEntry),
       })
     }
     const assistantId = resolveAssistantMessageId(item, lookup)
@@ -329,6 +414,8 @@ export function chatTreeToMessages(
       events: [],
       isStreaming: false,
       ...(assistantEntry?.kind === 'message' ? snapshotExtras(assistantEntry) : {}),
+      ...(assistantEntry?.kind === 'message' ? hydrationRootExtras(assistantEntry) : {}),
+      canonical_turn: canonicalTurnMeta(item, lookup),
     })
     messages[messages.length - 1].events = [
       ...(messages[messages.length - 1].events ?? []),

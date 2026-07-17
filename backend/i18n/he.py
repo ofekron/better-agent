@@ -48,6 +48,7 @@ TRANSLATIONS: dict[str, str] = {
 
     # --- WebSocket errors ---
     "error.ws_invalid_json": "JSON לא תקין",
+    "error.ws_invalid_subscribe_priority": "עדיפות מנוי לא חוקית",
     "error.ws_empty_prompt": "פרומפט ריק",
     "error.ws_no_session_selected": "לא נבחר סשן",
     "error.ws_session_not_found": "סשן לא נמצא",

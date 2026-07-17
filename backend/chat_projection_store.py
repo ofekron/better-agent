@@ -72,6 +72,19 @@ class StoredFact:
 
 
 @dataclass(frozen=True)
+class TurnWindowPage:
+    """One page of the bounded turn-window read.
+
+    `facts` covers only the facts owned by the window's turns (last-N
+    pane prompts plus one extra older turn for has-older detection, plus
+    the cursor turn itself on load-more). `cursor_found` is False when
+    `before_turn` does not resolve to a pane prompt."""
+    facts: tuple[StoredFact, ...]
+    cursor_found: bool
+    projection_cursor: int
+
+
+@dataclass(frozen=True)
 class StoredRevision:
     revision: int
     fact_sequence: int
@@ -96,6 +109,7 @@ class ChatProjectionStore(Protocol):
     def delete_generation(self, root_id: str, root_generation: int) -> None: ...
     def delete_root(self, root_id: str) -> None: ...
     def read_facts(self, root_id: str, root_generation: int, *, after: int = 0, limit: int = 1000) -> Sequence[StoredFact]: ...
+    def read_turn_window(self, root_id: str, root_generation: int, *, pane_id: str, turns: int, before_turn: str | None = None, after: int = 0, limit: int = 1000) -> TurnWindowPage: ...
     def read_revisions(self, root_id: str, root_generation: int, *, after: int = 0, limit: int = 1000) -> Sequence[StoredRevision]: ...
     def projection_cursor(self, root_id: str, root_generation: int) -> int: ...
     def read_projection(self, root_id: str, root_generation: int, event_id: str) -> StoredProjection | None: ...

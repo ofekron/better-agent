@@ -1063,7 +1063,7 @@ describe("sessions CRUD + subscribe lifecycle", () => {
     h.unmount();
   });
 
-  it("switching sessions sends unsubscribe(prev) + subscribe(next)", async () => {
+  it("switching sessions subscribes next as opened and demotes prev to warm", async () => {
     const a = makeSession({ id: "a", name: "A" });
     const b = makeSession({ id: "b", name: "B" });
     const h = await renderApp({ seed: { sessions: [a, b] } });
@@ -1071,12 +1071,21 @@ describe("sessions CRUD + subscribe lifecycle", () => {
     await h.selectSession("a");
     await h.selectSession("b");
 
-    const types = h.outbound.map((f) => `${f.type}:${f.app_session_id ?? ""}`);
-    // unsubscribe for "a" must precede subscribe for "b"
-    const idxUnsubA = types.indexOf("unsubscribe:a");
-    const idxSubB = types.indexOf("subscribe:b");
-    expect(idxUnsubA).toBeGreaterThanOrEqual(0);
-    expect(idxSubB).toBeGreaterThan(idxUnsubA);
+    const subB = h.outbound.filter(
+      (f) => f.type === "subscribe" && f.app_session_id === "b",
+    );
+    expect(subB[subB.length - 1]).toMatchObject({ priority: "opened" });
+    // "a" stays subscribed (LRU cache keeps it fresh) but is demoted to
+    // warm priority; unsubscribe fires only on cache eviction.
+    const lifecycleA = h.outbound.filter(
+      (f) =>
+        (f.type === "subscribe" || f.type === "unsubscribe") &&
+        f.app_session_id === "a",
+    );
+    expect(lifecycleA[lifecycleA.length - 1]).toMatchObject({
+      type: "subscribe",
+      priority: "warm",
+    });
     h.unmount();
   });
 

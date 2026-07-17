@@ -7,7 +7,7 @@ import type { WSEvent, WorkerPanel } from 'src/types'
 import { HistoricalNodeTree, type HistoricalNodeRendererProps } from './HistoricalNodeTree'
 import { CanonicalHistoricalEventRow, CanonicalHistoricalWorkerRow } from './MessageBubble'
 
-type Props = { sessionId: string; messageId: string; manifest: RawHistoricalManifest; active: boolean; onTerminal: () => void }
+type Props = { sessionId: string; messageId: string; manifest: RawHistoricalManifest; active: boolean; onTerminal?: () => void }
 
 function isWorkerPanel(value: unknown): value is WorkerPanel {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false
@@ -54,7 +54,7 @@ export function HistoricalTurnDetails({ sessionId, messageId, manifest, active, 
   }, [active, collapse, expand])
   useLayoutEffect(() => {
     if (!active || hydration.status === 'idle' || hydration.status === 'loading') return
-    onTerminal()
+    onTerminal?.()
   }, [active, hydration.status, onTerminal])
   if (!active) return null
   if (hydration.status === 'loading' || hydration.status === 'idle') return <div className="chat-loading-pulse historical-loading" aria-busy="true" />
@@ -64,7 +64,11 @@ export function HistoricalTurnDetails({ sessionId, messageId, manifest, active, 
       <button type="button" className="chat-load-error-retry" onClick={() => void hydration.expand()}>{t('chat.sessionLoadRetry')}</button>
     </div>
   )
-  if (hydration.children.length === 0) return null
+  if (hydration.children.length === 0) return (
+    // Terminal empty snapshot: surface the node's own summary as the
+    // status row instead of vanishing — the toggle stays truthful.
+    <div className="historical-turn-details historical-empty" role="status">{root.summary}</div>
+  )
   const renderNode = (props: HistoricalNodeRendererProps) => (
     <HistoricalPayload node={props.manifest} sessionId={sessionId} expanded={props.expanded} expandable={props.expandable} toggleExpanded={props.toggleExpanded} loading={props.status === 'loading'} />
   )

@@ -632,7 +632,7 @@ export class MockBackend {
           return chatTreeResponse(
             root,
             Number(query.turns ?? 5),
-            query.before_turn,
+            query.cursor,
           );
         }
       }
@@ -1178,10 +1178,17 @@ function notFound(): { __notFound: true } {
  * carries content + stripped snapshots. Initial snapshots are
  * spec-compact (no body items) — event enrichment arrives via the
  * tests' own WS replay frames, as in production. */
+/** Opaque signed page cursor stand-in: binds root id + window-start
+ * turn id like the production HMAC cursor. Tests may hand-craft a
+ * mismatched one to exercise the typed 409 path. */
+export function mockPageCursor(rootId: string, windowStartTurnId: string): string {
+  return `mock-page-cursor:${rootId}:${windowStartTurnId}`;
+}
+
 export function chatTreeResponse(
   root: Session,
   turns: number,
-  beforeTurn: string | undefined,
+  cursor: string | undefined,
 ): Record<string, unknown> | { __notFound: true; __status?: number } {
   type Pair = { user: ChatMessage; assistant?: ChatMessage; anchors: ChatMessage[] };
   const pairs: Pair[] = [];
@@ -1201,8 +1208,15 @@ export function chatTreeResponse(
     }
   }
   let end = pairs.length;
-  if (beforeTurn !== undefined) {
-    const at = pairs.findIndex((pair) => pair.user.id === beforeTurn);
+  if (cursor !== undefined) {
+    // Validate the opaque cursor exactly like the production signed
+    // cursor: root binding and window-start turn must both resolve, or
+    // the request gets the typed 409 (client discards + refetches).
+    const match = cursor.match(/^mock-page-cursor:([^:]+):(.+)$/);
+    if (!match || match[1] !== root.id) {
+      return { __notFound: true, __status: 409 };
+    }
+    const at = pairs.findIndex((pair) => pair.user.id === match[2]);
     if (at < 0) {
       return { __notFound: true, __status: 409 };
     }
@@ -1213,15 +1227,23 @@ export function chatTreeResponse(
   const items: Record<string, unknown>[] = [];
   const lookup: Record<string, unknown> = {};
   const strip = (message: ChatMessage): Record<string, unknown> => {
-    const { events: _e, workers: _w, manager: _m, ...rest } = message as ChatMessage & {
-      manager?: unknown;
-    };
+    // `historical_hydration_root` travels top-level on the lookup entry
+    // (the wire contract), never via the snapshot passthrough.
+    const {
+      events: _e, workers: _w, manager: _m, historical_hydration_root: _h,
+      ...rest
+    } = message as ChatMessage & { manager?: unknown };
     return rest as Record<string, unknown>;
   };
+  const hydrationRoot = (message: ChatMessage): Record<string, unknown> =>
+    message.historical_hydration_root !== undefined
+      ? { historical_hydration_root: message.historical_hydration_root }
+      : {};
   window.forEach((pair, index) => {
     lookup[pair.user.id] = {
       kind: "message", role: "user", text: pair.user.content,
       seq: pair.user.seq ?? null, snapshot: strip(pair.user),
+      ...hydrationRoot(pair.user),
     };
     const assistant = pair.assistant;
     let result: Record<string, unknown> | null = null;
@@ -1236,6 +1258,7 @@ export function chatTreeResponse(
       lookup[assistant.id] = {
         kind: "message", role: "assistant", text: assistant.content ?? "",
         seq: assistant.seq ?? null, snapshot: strip(assistant),
+        ...hydrationRoot(assistant),
       };
       result = { type: "ProviderResult", part_ids: [partId], text: assistant.content ?? "" };
     }
@@ -1280,8 +1303,11 @@ export function chatTreeResponse(
     lookup,
     page: {
       turns,
-      before_turn: beforeTurn ?? null,
-      older_cursor: start > 0 ? window[0]?.user.id ?? null : null,
+      pane: root.id,
+      page_cursor:
+        start > 0 && window[0]
+          ? mockPageCursor(root.id, window[0].user.id)
+          : null,
       has_older: start > 0,
     },
     dropped: [],

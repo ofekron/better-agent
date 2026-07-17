@@ -33,6 +33,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 import bff_chat_feed  # noqa: E402
 import bff_chat_tree  # noqa: E402
+import chat_page_cursor  # noqa: E402
 import chat_projection_ingestion  # noqa: E402
 from bff_runtime_service import runtime_service  # noqa: E402
 
@@ -230,14 +231,17 @@ def main() -> None:
         turn_ids = [item["id"] for item in body["items"] if item["type"] == "Turn"]
         check("default window is the last 5 turns",
               response.status_code == 200 and turn_ids == ["u3", "u4", "u5", "u6", "u7"])
-        check("older cursor points at the window's first turn",
-              body["page"] == {"turns": 5, "before_turn": None,
-                               "pane": "windowroot",
-                               "older_cursor": "u3", "has_older": True})
+        window_page_cursor = body["page"].get("page_cursor")
+        check("page carries only the signed cursor as its paging handle",
+              body["page"] == {"turns": 5, "pane": "windowroot",
+                               "has_older": True,
+                               "page_cursor": window_page_cursor}
+              and isinstance(window_page_cursor, str) and window_page_cursor)
         check("lookup carries prompt text and snapshot seq",
               body["lookup"]["u7"] == {"kind": "message", "role": "user",
                                        "text": "prompt 7", "seq": 70,
-                                       "snapshot": {"id": "u7", "role": "user", "seq": 70}})
+                                       "snapshot": {"id": "u7", "role": "user", "seq": 70},
+                                       "historical_hydration_root": None})
         check("response carries session metadata without messages",
               body["session"]["id"] == "windowroot" and "messages" not in body["session"])
         result_part = next(item for item in body["items"]
@@ -247,18 +251,27 @@ def main() -> None:
               and body["lookup"][result_part]["message_id"] == "a7"
               and body["lookup"][result_part]["message_seq"] == 71)
 
-        response = client.get("/api/chat-tree/windowroot?before_turn=u3")
+        response = client.get(f"/api/chat-tree/windowroot?cursor={window_page_cursor}")
         body = response.json()
         turn_ids = [item["id"] for item in body["items"] if item["type"] == "Turn"]
         check("older page returns the exact preceding turns with no overlap",
               turn_ids == ["u1", "u2"] and body["page"]["has_older"] is False
-              and body["page"]["older_cursor"] is None)
+              and body["page"]["page_cursor"] is None)
 
-        response = client.get("/api/chat-tree/windowroot?before_turn=nope")
+        response = client.get("/api/chat-tree/windowroot?cursor=nope")
         detail = response.json().get("detail")
         check("stale turn cursor is a typed 409",
               response.status_code == 409
               and isinstance(detail, dict) and detail.get("code") == "stale_turn_cursor")
+
+        # The legacy unbound before_turn param is gone: it is ignored, so
+        # the latest window is served — no unbound load-more path remains.
+        response = client.get("/api/chat-tree/windowroot?before_turn=u3")
+        body = response.json()
+        turn_ids = [item["id"] for item in body["items"] if item["type"] == "Turn"]
+        check("bare before_turn no longer pages (unbound path removed)",
+              response.status_code == 200
+              and turn_ids == ["u3", "u4", "u5", "u6", "u7"])
 
         # Worker delegation + todos content survives from raw canonical
         # facts (worker_start, tool_call with TodoWrite args) all the way
@@ -391,25 +404,34 @@ def main() -> None:
         response = client.get("/api/chat-tree/forkedroot?pane=fork1&turns=2")
         body = response.json()
         turn_ids = [item["id"] for item in body["items"] if item["type"] == "Turn"]
+        fork_page_cursor = body["page"].get("page_cursor")
         check("fork pane serves only its own turns, windowed",
               response.status_code == 200 and turn_ids == ["ku2", "ku3"])
         check("fork pane page carries its pane and cursor",
               body["page"]["pane"] == "fork1"
-              and body["page"]["older_cursor"] == "ku2"
-              and body["page"]["has_older"] is True)
+              and body["page"]["has_older"] is True
+              and isinstance(fork_page_cursor, str) and fork_page_cursor)
 
-        response = client.get("/api/chat-tree/forkedroot?pane=fork1&turns=2&before_turn=ku2")
+        response = client.get(
+            f"/api/chat-tree/forkedroot?pane=fork1&turns=2&cursor={fork_page_cursor}",
+        )
         body = response.json()
         turn_ids = [item["id"] for item in body["items"] if item["type"] == "Turn"]
         check("fork pane older page has no overlap and terminates",
               response.status_code == 200 and turn_ids == ["ku1"]
               and body["page"]["has_older"] is False
-              and body["page"]["older_cursor"] is None)
+              and body["page"]["page_cursor"] is None)
         check("fork pane lookup resolves the fork's own prompt",
               body["lookup"]["ku1"]["kind"] == "message"
               and body["lookup"]["ku1"]["text"] == "prompt ku1")
 
-        response = client.get("/api/chat-tree/forkedroot?pane=fork1&before_turn=fu2")
+        root_scoped_cursor = chat_page_cursor.encode_page_cursor(
+            root_id="forkedroot", pane_id="forkedroot", generation=1, revision=1,
+            turn_id="fu2", turn_seq=1, turn_hash="0" * 64,
+        )
+        response = client.get(
+            f"/api/chat-tree/forkedroot?pane=fork1&cursor={root_scoped_cursor}",
+        )
         detail = response.json().get("detail")
         check("root-owned cursor inside a fork pane is a typed 409",
               response.status_code == 409

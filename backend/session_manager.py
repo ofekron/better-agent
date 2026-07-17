@@ -3566,6 +3566,11 @@ class SessionManager:
                         historical_root = historical_children_projection.root_manifest(
                             rid, node_sid, msg_id, str(m.get("content") or ""),
                         )
+                        # Frontend-shaped manifest ({id, type, revision,
+                        # direct_child_count, display_summary}) — the gate
+                        # Chat.tsx/MessageBubble read; carried to the BFF
+                        # chat-tree lookup via the session snapshot.
+                        m["historical_hydration_root"] = historical_root
                         m["stub"] = render_stub.build_stub_projection(
                             event_count=summary.get("event_count", 0),
                             direct_child_count=historical_root["direct_child_count"],

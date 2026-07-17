@@ -23,6 +23,7 @@ export interface Harness {
   readonly restCalls: {
     method: string;
     path: string;
+    query: Record<string, string>;
     credentials?: RequestCredentials;
     body?: unknown;
   }[];
@@ -107,6 +108,7 @@ export async function renderApp(options: RenderAppOptions = {}): Promise<Harness
       return backend.calls.map((c) => ({
         method: c.method,
         path: c.path,
+        query: c.query,
         credentials: c.credentials,
         body: c.body,
       }));

@@ -12,7 +12,7 @@ from chat_projection_authority import (
 )
 from chat_projection_store import (
     ChatProjectionStore, ChatProjectionStoreError, CommitResult, ProjectionCommit,
-    SourceWatermark, StoredFact, StoredProjection, StoredRevision,
+    SourceWatermark, StoredFact, StoredProjection, StoredRevision, TurnWindowPage,
 )
 from chat_projection_store_jsonl import JsonlChatProjectionStore
 from chat_projection_store_sqlite import SQLiteChatProjectionStore
@@ -182,10 +182,34 @@ class CanonicalChatProjectionService:
         self, authority: ProjectionAuthority, admission: _StreamAdmission,
         request: ProjectionCommit,
     ) -> CommitResult:
+        """A commit whose position is behind the in-memory stream head.
+
+        The in-memory head only proves the catalog assigned positions up
+        to it, not that the store committed them. When the DURABLE
+        watermark is behind this position (projection reset via
+        delete_root, or an admitted-but-never-committed crash window),
+        the position was never stored — commit it fresh. Positions the
+        store HAS seen keep the strict contract: only the head-1
+        re-delivery is tolerated (as a duplicate), anything older is a
+        regression.
+        """
+        store = self._store(authority)
+        try:
+            current = store.source_watermark(
+                authority.root_id, authority.root_generation, request.watermark.stream_id,
+            )
+        except ChatProjectionStoreError as exc:
+            self._raise(exc)
+        candidate = (request.watermark.generation, request.watermark.sequence)
+        if current is None or candidate > (current.generation, current.sequence):
+            try:
+                return store.commit(request)
+            except ChatProjectionStoreError as exc:
+                self._raise(exc)
         if request.watermark.sequence != admission.next_sequence - 1:
             raise ProjectionServiceError("watermark_regression", "source sequence cannot regress")
         try:
-            durable = self._store(authority).source_admission(
+            durable = store.source_admission(
                 authority.root_id, authority.root_generation, request.watermark.stream_id,
                 request.watermark.generation, request.watermark.sequence,
             )
@@ -242,6 +266,16 @@ class CanonicalChatProjectionService:
     ) -> list[StoredFact]:
         current = self._require(authority)
         return list(self._call(current, "read_facts", after=after, limit=limit))
+
+    def read_turn_window(
+        self, authority: ProjectionAuthority, *, pane_id: str, turns: int,
+        before_turn: str | None = None, after: int = 0, limit: int = 1000,
+    ) -> TurnWindowPage:
+        current = self._require(authority)
+        return self._call(
+            current, "read_turn_window", pane_id=pane_id, turns=turns,
+            before_turn=before_turn, after=after, limit=limit,
+        )
 
     def read_revisions(
         self, authority: ProjectionAuthority, *, after: int = 0, limit: int = 1000,

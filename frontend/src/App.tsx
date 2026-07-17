@@ -944,6 +944,7 @@ function AppMain({
     patchMessageStatus,
     appendFork,
     allOpenSessionIds,
+    warmSubscriptionIds,
     getNode,
     loadOlderMessages,
     searchSessions,
@@ -2020,10 +2021,19 @@ function AppMain({
     // covers the primary transport target; this list carries the rest.
     // useWebSocket de-duplicates and diffs against the previous set so
     // subscribe/unsubscribe frames only fire on actual changes.
-    additionalAppSessionIds: additionalSessionSubscriptionIds(
-      allOpenSessionIds(),
-      wsTargetSessionId,
-    ),
+    // Gated on a live WS target: selectSession drops the target to null
+    // until the REST snapshot resolves AND seq cursors are seeded.
+    // Subscribing the open tree's panes during that window would send
+    // since_seq/events_from_seq=0 (a full replay flood) and never
+    // re-send once the cursors exist — no pane subscribes before the
+    // target does.
+    additionalAppSessionIds: wsTargetSessionId
+      ? additionalSessionSubscriptionIds(allOpenSessionIds(), wsTargetSessionId)
+      : [],
+    // LRU-cached trees stay subscribed at "warm" priority so their
+    // cached projections keep receiving chat_tree_delta frames; opened
+    // ids take precedence inside useWebSocket's desired map.
+    warmAppSessionIds: warmSubscriptionIds,
     onRewindComplete: replaceMessages,
     onMessagesReplay: applyMessagesReplay,
     onStubInvalidated: applyStubInvalidated,

@@ -48,6 +48,7 @@ TRANSLATIONS: dict[str, str] = {
 
     # --- WebSocket errors ---
     "error.ws_invalid_json": "Invalid JSON",
+    "error.ws_invalid_subscribe_priority": "Invalid subscribe priority",
     "error.ws_empty_prompt": "Empty prompt",
     "error.ws_no_session_selected": "No session selected",
     "error.ws_session_not_found": "Session not found",

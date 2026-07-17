@@ -14,10 +14,34 @@ from typing import Any
 from canonical_event_adapter import walk_session_nodes
 
 _HEAVY_MESSAGE_FIELDS = frozenset({"events", "manager"})
+_HYDRATION_ROOT_FIELDS = {
+    "id": str, "type": str, "revision": str,
+    "direct_child_count": int, "display_summary": str,
+}
 
 
 def strip_heavy_message_fields(message: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in message.items() if k not in _HEAVY_MESSAGE_FIELDS}
+
+
+def historical_hydration_root_of(snapshot: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Frontend-shaped expansion manifest from a runtime message snapshot.
+
+    Fail closed: anything that is not exactly the
+    {id, type, revision, direct_child_count, display_summary} object the
+    frontend gate consumes maps to None rather than a partial shape."""
+    if not isinstance(snapshot, dict):
+        return None
+    manifest = snapshot.get("historical_hydration_root")
+    if not isinstance(manifest, dict):
+        return None
+    for field, kind in _HYDRATION_ROOT_FIELDS.items():
+        value = manifest.get(field)
+        if not isinstance(value, kind) or isinstance(value, bool):
+            return None
+        if kind is int and value < 0:
+            return None
+    return {field: manifest[field] for field in _HYDRATION_ROOT_FIELDS}
 
 
 def referenced_ids(items: list[dict[str, Any]]) -> set[str]:
@@ -82,6 +106,7 @@ def build_lookup(
     for message in adapted_messages:
         if message["id"] not in referenced:
             continue
+        snapshot = snapshot_by_id.get(message["id"])
         lookup[message["id"]] = {
             "kind": "message",
             "role": message["role"],
@@ -90,7 +115,10 @@ def build_lookup(
             # Runtime snapshot passthrough (minus heavy payloads): liveness,
             # hydration pointers, run_meta — everything the client's
             # ChatMessage needs beyond tree structure.
-            "snapshot": snapshot_by_id.get(message["id"]),
+            "snapshot": snapshot,
+            # Canonical carrier for the three-dot expansion gate; the
+            # frontend maps this onto ChatMessage.historical_hydration_root.
+            "historical_hydration_root": historical_hydration_root_of(snapshot),
         }
     owning_messages: set[str] = set()
     for event in adapted_events:
@@ -113,11 +141,13 @@ def build_lookup(
     # owning message's snapshot too.
     for message in adapted_messages:
         if message["id"] in owning_messages and message["id"] not in lookup:
+            snapshot = snapshot_by_id.get(message["id"])
             lookup[message["id"]] = {
                 "kind": "message",
                 "role": message["role"],
                 "text": message["content"],
                 "seq": snapshot_seq.get(message["id"], message["seq"]),
-                "snapshot": snapshot_by_id.get(message["id"]),
+                "snapshot": snapshot,
+                "historical_hydration_root": historical_hydration_root_of(snapshot),
             }
     return lookup

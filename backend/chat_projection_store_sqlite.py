@@ -20,7 +20,7 @@ from chat_projection_store_owner_path import verify_anchored_file
 
 from chat_projection_store import (
     ChatProjectionStoreError, CommitResult, ProjectionCommit, SourceAdmission, SourceWatermark, StoredFact,
-    StoredProjection, StoredRevision, TurnManifest,
+    StoredProjection, StoredRevision, TurnManifest, TurnWindowPage,
 )
 from paths import ba_home
 
@@ -333,7 +333,31 @@ class SQLiteChatProjectionStore:
             elif result["fact_sequence"] != result["projection_cursor"]:
                 raise ChatProjectionStoreError("owner_protocol_error", "inserted fact sequence mismatch")
             return {key: result[key] for key in ("duplicate", "fact_sequence", "revision", "projection_cursor")}
-        if operation in {"read_facts", "read_revisions"}:
+        if operation in {"read_facts", "read_turn_window"}:
+            if operation == "read_facts":
+                self._wire_mapping(result, {
+                    "root_id", "root_generation", "after", "projection_cursor", "rows",
+                })
+                self._wire_correlation(result, arguments, ("root_id", "root_generation", "after"))
+            else:
+                self._wire_mapping(result, {
+                    "root_id", "root_generation", "pane_id", "turns", "before_turn",
+                    "after", "projection_cursor", "cursor_found", "rows",
+                })
+                self._wire_correlation(result, arguments, (
+                    "root_id", "root_generation", "pane_id", "turns", "before_turn", "after",
+                ))
+                if type(result["cursor_found"]) is not bool:
+                    raise ChatProjectionStoreError("owner_protocol_error", "invalid cursor_found flag")
+            cursor = self._wire_integer(result["projection_cursor"])
+            rows = self._wire_fact_rows(result["rows"], arguments, cursor)
+            if operation == "read_facts":
+                return rows
+            return {
+                "rows": rows, "cursor_found": result["cursor_found"],
+                "projection_cursor": cursor,
+            }
+        if operation == "read_revisions":
             self._wire_mapping(result, {
                 "root_id", "root_generation", "after", "projection_cursor", "rows",
             })
@@ -342,48 +366,36 @@ class SQLiteChatProjectionStore:
             cursor = self._wire_integer(result["projection_cursor"])
             if not isinstance(rows, list) or len(rows) > arguments["limit"]:
                 raise ChatProjectionStoreError("owner_protocol_error", "invalid bounded read result")
-            expected = (
-                {"root_id", "root_generation", "fact_sequence", "event_id", "content_hash", "canonical_fact"}
-                if operation == "read_facts" else
-                {"root_id", "root_generation", "revision", "fact_sequence", "event_id", "content_hash", "visible_delta", "historical_revision"}
-            )
+            expected = {"root_id", "root_generation", "revision", "fact_sequence", "event_id", "content_hash", "visible_delta", "historical_revision"}
             previous = arguments["after"]
             for row in rows:
                 self._wire_mapping(row, expected)
                 self._wire_correlation(row, arguments, ("root_id", "root_generation"))
-                for key in expected & {"fact_sequence", "revision"}:
+                for key in ("fact_sequence", "revision"):
                     self._wire_integer(row[key])
-                for key in expected & {"event_id", "content_hash"}:
+                for key in ("event_id", "content_hash"):
                     self._wire_text(row[key])
-                if "content_hash" in row and (
+                if (
                     len(row["content_hash"]) != 64
                     or any(character not in "0123456789abcdef" for character in row["content_hash"])
                 ):
                     raise ChatProjectionStoreError("owner_protocol_error", "owner hash is invalid")
-                for key in expected & {"canonical_fact", "visible_delta", "historical_revision"}:
+                for key in ("visible_delta", "historical_revision"):
                     self._wire_json(row[key])
-                sequence_key = "fact_sequence" if operation == "read_facts" else "revision"
-                if row[sequence_key] <= previous:
+                if row["revision"] <= previous:
                     raise ChatProjectionStoreError("owner_protocol_error", "owner rows are not strictly ordered")
-                previous = row[sequence_key]
-                if operation == "read_facts":
-                    expected_hash = content_only_hash(row["canonical_fact"])
-                    if row["content_hash"] != expected_hash or row["canonical_fact"].get("event_id") != row["event_id"]:
-                        raise ChatProjectionStoreError("owner_protocol_error", "owner fact hash mismatch")
-                else:
-                    if row["revision"] != row["fact_sequence"]:
-                        raise ChatProjectionStoreError(
-                            "owner_protocol_error", "owner revision fact pairing mismatch",
-                        )
-                    self._validate_delta_identity(
-                        row["visible_delta"], row["historical_revision"], row["event_id"],
-                        row["content_hash"], "owner_protocol_error",
+                previous = row["revision"]
+                if row["revision"] != row["fact_sequence"]:
+                    raise ChatProjectionStoreError(
+                        "owner_protocol_error", "owner revision fact pairing mismatch",
                     )
+                self._validate_delta_identity(
+                    row["visible_delta"], row["historical_revision"], row["event_id"],
+                    row["content_hash"], "owner_protocol_error",
+                )
             if rows and previous > cursor:
                 raise ChatProjectionStoreError("owner_protocol_error", "owner cursor precedes page")
-            transport_only = {"root_id", "root_generation"}
-            if operation == "read_revisions":
-                transport_only |= {"event_id", "content_hash"}
+            transport_only = {"root_id", "root_generation", "event_id", "content_hash"}
             return [
                 {key: value for key, value in row.items() if key not in transport_only}
                 for row in rows
@@ -449,6 +461,41 @@ class SQLiteChatProjectionStore:
                 self._wire_integer(admission[key])
             return admission
         raise ChatProjectionStoreError("owner_protocol_error", "unknown owner result operation")
+
+    def _wire_fact_rows(
+        self, rows: Any, arguments: Mapping[str, Any], cursor: int,
+    ) -> list[dict[str, Any]]:
+        """Validate owner-returned canonical fact rows (shared by the
+        read_facts and read_turn_window results) and strip transport keys."""
+        if not isinstance(rows, list) or len(rows) > arguments["limit"]:
+            raise ChatProjectionStoreError("owner_protocol_error", "invalid bounded read result")
+        expected = {"root_id", "root_generation", "fact_sequence", "event_id", "content_hash", "canonical_fact"}
+        previous = arguments["after"]
+        for row in rows:
+            self._wire_mapping(row, expected)
+            self._wire_correlation(row, arguments, ("root_id", "root_generation"))
+            self._wire_integer(row["fact_sequence"])
+            for key in ("event_id", "content_hash"):
+                self._wire_text(row[key])
+            if (
+                len(row["content_hash"]) != 64
+                or any(character not in "0123456789abcdef" for character in row["content_hash"])
+            ):
+                raise ChatProjectionStoreError("owner_protocol_error", "owner hash is invalid")
+            self._wire_json(row["canonical_fact"])
+            if row["fact_sequence"] <= previous:
+                raise ChatProjectionStoreError("owner_protocol_error", "owner rows are not strictly ordered")
+            previous = row["fact_sequence"]
+            expected_hash = content_only_hash(row["canonical_fact"])
+            if row["content_hash"] != expected_hash or row["canonical_fact"].get("event_id") != row["event_id"]:
+                raise ChatProjectionStoreError("owner_protocol_error", "owner fact hash mismatch")
+        if rows and previous > cursor:
+            raise ChatProjectionStoreError("owner_protocol_error", "owner cursor precedes page")
+        transport_only = {"root_id", "root_generation"}
+        return [
+            {key: value for key, value in row.items() if key not in transport_only}
+            for row in rows
+        ]
 
     @staticmethod
     def _wire_correlation(
@@ -820,32 +867,144 @@ class SQLiteChatProjectionStore:
                 "WHERE root_id=? AND root_generation=? AND fact_sequence>? "
                 "ORDER BY fact_sequence LIMIT ?", (root_id, root_generation, after, limit),
             )
-            results = []
-            page_bytes = _page_base_bytes
-            previous = after
-            try:
-                for row in cursor:
-                    item = StoredFact(
-                        self._stored_int(row[0]), self._stored_text(row[1]),
-                        self._stored_text(row[2]), self._stored_json(row[3]),
-                    )
-                    expected_hash = content_only_hash(item.canonical_fact)
-                    if item.content_hash != expected_hash or item.canonical_fact.get("event_id") != item.event_id:
-                        raise ChatProjectionStoreError("storage_corrupt", "persisted fact identity is invalid")
-                    if item.fact_sequence <= previous:
-                        raise ChatProjectionStoreError("storage_corrupt", "persisted facts are unordered")
-                    previous = item.fact_sequence
-                    wire_item = {
-                        **asdict(item), "root_id": root_id, "root_generation": root_generation,
-                    }
-                    row_bytes = len(_encode_json_bounded(wire_item, MAX_RESPONSE_BYTES))
-                    added_bytes = row_bytes + (1 if results else 0)
-                    if page_bytes + added_bytes > MAX_RESPONSE_BYTES:
-                        raise ChatProjectionStoreError("response_too_large", "fact page exceeds response budget")
-                    results.append(item)
-                    page_bytes += added_bytes
-            finally:
-                cursor.close()
+            results = self._collect_fact_page(cursor, after, _page_base_bytes, root_id, root_generation)
+        return results
+
+    @_translate_sqlite("storage_read_failed")
+    def read_turn_window(
+        self, root_id: str, root_generation: int, *, pane_id: str, turns: int,
+        before_turn: str | None = None, after: int = 0, limit: int = 1000,
+        _page_base_bytes: int = 0,
+    ) -> TurnWindowPage:
+        """Bounded window read: only the facts owned by the last-`turns`
+        pane prompts (plus one extra older turn for has-older detection,
+        plus the cursor turn itself on load-more). Row semantics match
+        read_facts; page with (after, limit) like read_facts."""
+        self._read_args(root_id, root_generation, after, limit)
+        self._text("pane_id", pane_id)
+        if type(turns) is not int or not 1 <= turns <= MAX_READ_LIMIT:
+            raise ChatProjectionStoreError("invalid_limit", f"turns must be 1..{MAX_READ_LIMIT}")
+        if before_turn is not None:
+            self._text("before_turn", before_turn)
+        if self._owner_client:
+            result = self._rpc(
+                "read_turn_window", root_id=root_id, root_generation=root_generation,
+                pane_id=pane_id, turns=turns, before_turn=before_turn,
+                after=after, limit=limit,
+            )
+            return TurnWindowPage(
+                tuple(StoredFact(**row) for row in result["rows"]),
+                result["cursor_found"], result["projection_cursor"],
+            )
+        with self._lock:
+            head = self.projection_cursor(root_id, root_generation)
+            message_ids = self._turn_window_message_ids(
+                root_id, root_generation, pane_id, turns, before_turn,
+            )
+            if message_ids is None:
+                return TurnWindowPage((), False, head)
+            if not message_ids:
+                return TurnWindowPage((), True, head)
+            ordered_ids = sorted(message_ids)
+            placeholders = ",".join("?" for _ in ordered_ids)
+            cursor = self._connection.execute(
+                "SELECT fact_sequence,event_id,content_hash,fact_json FROM canonical_facts "
+                "WHERE root_id=? AND root_generation=? AND fact_sequence>? "
+                f"AND json_extract(fact_json,'$.payload.message_id') IN ({placeholders}) "
+                "ORDER BY fact_sequence LIMIT ?",
+                (root_id, root_generation, after, *ordered_ids, limit),
+            )
+            results = self._collect_fact_page(cursor, after, _page_base_bytes, root_id, root_generation)
+        return TurnWindowPage(tuple(results), True, head)
+
+    def _turn_window_message_ids(
+        self, root_id: str, root_generation: int, pane_id: str, turns: int,
+        before_turn: str | None,
+    ) -> set[str] | None:
+        """Message ids owning the requested window's facts: the window's
+        pane prompt ids plus the assistant ids their ownership facts
+        declare. None when before_turn is not a pane prompt."""
+        prompts: list[tuple[int, int, str]] = []
+        rows = self._connection.execute(
+            "SELECT fact_sequence,fact_json FROM canonical_facts "
+            "WHERE root_id=? AND root_generation=? "
+            "AND json_extract(fact_json,'$.payload_type')='user_prompt'",
+            (root_id, root_generation),
+        )
+        for row in rows:
+            fact = self._stored_json(row[1])
+            if str(fact.get("sid") or root_id) != pane_id:
+                continue
+            payload = fact.get("payload")
+            payload = payload if isinstance(payload, Mapping) else {}
+            message_id = payload.get("message_id")
+            if not isinstance(message_id, str) or not message_id:
+                continue
+            canonical_seq = fact.get("canonical_seq")
+            canonical_seq = canonical_seq if type(canonical_seq) is int else 0
+            prompts.append((canonical_seq, self._stored_int(row[0]), message_id))
+        prompts.sort()
+        order = [message_id for _, _, message_id in prompts]
+        end = len(order)
+        include_cursor: list[str] = []
+        if before_turn is not None:
+            if before_turn not in order:
+                return None
+            end = order.index(before_turn)
+            include_cursor = [before_turn]
+        start = max(0, end - (turns + 1))
+        selected = order[start:end] + include_cursor
+        if not selected:
+            return set()
+        placeholders = ",".join("?" for _ in selected)
+        assistant_rows = self._connection.execute(
+            "SELECT fact_json FROM canonical_facts WHERE root_id=? AND root_generation=? "
+            "AND json_extract(fact_json,'$.payload_type')='message_ownership_declared' "
+            f"AND json_extract(fact_json,'$.payload.prompt_message_id') IN ({placeholders})",
+            (root_id, root_generation, *selected),
+        )
+        message_ids = set(selected)
+        for row in assistant_rows:
+            fact = self._stored_json(row[0])
+            payload = fact.get("payload")
+            payload = payload if isinstance(payload, Mapping) else {}
+            message_id = payload.get("message_id")
+            if isinstance(message_id, str) and message_id:
+                message_ids.add(message_id)
+        return message_ids
+
+    def _collect_fact_page(
+        self, cursor: Any, after: int, page_base_bytes: int, root_id: str,
+        root_generation: int,
+    ) -> list[StoredFact]:
+        """Validate + byte-budget a canonical_facts cursor into StoredFacts
+        (shared by read_facts and read_turn_window)."""
+        results: list[StoredFact] = []
+        page_bytes = page_base_bytes
+        previous = after
+        try:
+            for row in cursor:
+                item = StoredFact(
+                    self._stored_int(row[0]), self._stored_text(row[1]),
+                    self._stored_text(row[2]), self._stored_json(row[3]),
+                )
+                expected_hash = content_only_hash(item.canonical_fact)
+                if item.content_hash != expected_hash or item.canonical_fact.get("event_id") != item.event_id:
+                    raise ChatProjectionStoreError("storage_corrupt", "persisted fact identity is invalid")
+                if item.fact_sequence <= previous:
+                    raise ChatProjectionStoreError("storage_corrupt", "persisted facts are unordered")
+                previous = item.fact_sequence
+                wire_item = {
+                    **asdict(item), "root_id": root_id, "root_generation": root_generation,
+                }
+                row_bytes = len(_encode_json_bounded(wire_item, MAX_RESPONSE_BYTES))
+                added_bytes = row_bytes + (1 if results else 0)
+                if page_bytes + added_bytes > MAX_RESPONSE_BYTES:
+                    raise ChatProjectionStoreError("response_too_large", "fact page exceeds response budget")
+                results.append(item)
+                page_bytes += added_bytes
+        finally:
+            cursor.close()
         return results
 
     @_translate_sqlite("storage_read_failed")
@@ -1289,6 +1448,9 @@ def _owner_dispatch(
         "select_generation": {"root_id", "root_generation"},
         "commit": {"request"},
         "read_facts": {"root_id", "root_generation", "after", "limit"},
+        "read_turn_window": {
+            "root_id", "root_generation", "pane_id", "turns", "before_turn", "after", "limit",
+        },
         "read_revisions": {"root_id", "root_generation", "after", "limit"},
         "projection_cursor": {"root_id", "root_generation"},
         "delete_generation": {"root_id", "root_generation"},
@@ -1327,6 +1489,27 @@ def _owner_dispatch(
         result["rows"] = [
             {**asdict(item), "root_id": arguments["root_id"],
              "root_generation": arguments["root_generation"]} for item in rows
+        ]
+        return result
+    if operation == "read_turn_window":
+        cursor = store.projection_cursor(arguments["root_id"], arguments["root_generation"])
+        result = {
+            "root_id": arguments["root_id"], "root_generation": arguments["root_generation"],
+            "pane_id": arguments["pane_id"], "turns": arguments["turns"],
+            "before_turn": arguments["before_turn"], "after": arguments["after"],
+            "projection_cursor": cursor, "cursor_found": True, "rows": [],
+        }
+        base_bytes = len(_encode_json_bounded({
+            "request_id": request_id, "operation": operation, "result": result,
+        }, MAX_RESPONSE_BYTES))
+        page = store.read_turn_window(**arguments, _page_base_bytes=base_bytes)
+        if page.facts and page.facts[-1].fact_sequence > cursor:
+            raise ChatProjectionStoreError("storage_corrupt", "fact page exceeds projection head")
+        result["cursor_found"] = page.cursor_found
+        result["projection_cursor"] = page.projection_cursor
+        result["rows"] = [
+            {**asdict(item), "root_id": arguments["root_id"],
+             "root_generation": arguments["root_generation"]} for item in page.facts
         ]
         return result
     if operation == "read_revisions":

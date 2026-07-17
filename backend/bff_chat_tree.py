@@ -14,7 +14,8 @@ Failures are typed — no stale success, no silent fallbacks.
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Mapping
 
 from fastapi import APIRouter, HTTPException
 
@@ -22,12 +23,14 @@ import re
 
 import bff_chat_feed
 import bff_chat_lookup
+import chat_page_cursor
 import chat_projection_ingestion
 from bff_chat_render import render_chat
 from bff_runtime_service import RuntimeServiceError, runtime_service
 from bff_runtime_upstream import RuntimeUpstreamUnavailable
 from chat_canonical_adapter import ChatAdapterError
 from chat_models import CHAT_SCHEMA_VERSION
+from chat_projection_store import StoredFact
 from chat_projector import ChatProjectionInputError
 from chat_projection_service import ProjectionServiceError
 
@@ -36,6 +39,14 @@ router = APIRouter()
 _SESSION_ID = re.compile(r"^[A-Za-z0-9_-]+$")
 _READ_PAGE = 1000
 _PROVIDER_KINDS = {"claude", "codex", "gemini"}
+
+
+def _raise_stale_cursor() -> None:
+    raise HTTPException(
+        status_code=409,
+        detail={"code": "stale_turn_cursor",
+                "message": "cursor turn is no longer in the tree"},
+    )
 
 
 def _window_items(
@@ -76,21 +87,52 @@ def _window_items(
     return items[first:stop], older_cursor
 
 
-def _read_stored_facts(root_id: str, provider: str) -> list[dict[str, Any]]:
+@dataclass(frozen=True)
+class _WindowRead:
+    facts: tuple[StoredFact, ...]
+    cursor_found: bool
+    generation: int
+    projection_cursor: int
+
+
+def _read_window_facts(
+    root_id: str, provider: str, pane_id: str, turns: int, before_turn: str | None,
+) -> _WindowRead:
+    """Bounded read: only the facts the requested turn window needs (the
+    last-N pane turns plus one extra older turn for has-older detection,
+    plus the cursor turn on load-more), resolved server-side by the
+    projection store — never the full fact log."""
     service, catalog = chat_projection_ingestion._instances()
     generation = catalog.root_generation(root_id)
     authority = service.register(
         provider=provider, session_id=root_id, root_id=root_id,
         root_generation=generation, store_kind="jsonl",
     )
-    facts: list[dict[str, Any]] = []
+    facts: list[StoredFact] = []
     after = 0
     while True:
-        page = service.read_facts(authority, after=after, limit=_READ_PAGE)
-        facts.extend(dict(stored.canonical_fact) for stored in page)
-        if len(page) < _READ_PAGE:
-            return facts
-        after = page[-1].fact_sequence
+        page = service.read_turn_window(
+            authority, pane_id=pane_id, turns=turns, before_turn=before_turn,
+            after=after, limit=_READ_PAGE,
+        )
+        if not page.cursor_found:
+            return _WindowRead((), False, generation, page.projection_cursor)
+        facts.extend(page.facts)
+        if len(page.facts) < _READ_PAGE:
+            return _WindowRead(tuple(facts), True, generation, page.projection_cursor)
+        after = page.facts[-1].fact_sequence
+
+
+def _prompt_fact(facts: tuple[StoredFact, ...], turn_id: str) -> StoredFact | None:
+    for fact in facts:
+        canonical = fact.canonical_fact
+        if str(canonical.get("payload_type") or "") != "user_prompt":
+            continue
+        payload = canonical.get("payload")
+        payload = payload if isinstance(payload, Mapping) else {}
+        if payload.get("message_id") == turn_id:
+            return fact
+    return None
 
 
 def _raise_chat_tree_rebuilding(root_id: str) -> None:
@@ -116,15 +158,13 @@ def _pane_exists(session: dict[str, Any], pane_id: str) -> bool:
 async def get_chat_tree(
     session_id: str,
     turns: int = 5,
-    before_turn: str | None = None,
+    cursor: str | None = None,
     pane: str | None = None,
 ):
     if not _SESSION_ID.fullmatch(session_id):
         raise HTTPException(status_code=400, detail="invalid session id")
     if not 1 <= turns <= 100:
         raise HTTPException(status_code=400, detail="invalid turns window")
-    if before_turn is not None and not _SESSION_ID.fullmatch(before_turn):
-        raise HTTPException(status_code=400, detail="invalid turn cursor")
     if pane is not None and not _SESSION_ID.fullmatch(pane):
         raise HTTPException(status_code=400, detail="invalid pane id")
     try:
@@ -155,27 +195,61 @@ async def get_chat_tree(
             detail={"code": "pane_not_found",
                     "message": "pane is not part of this session tree"},
         )
+    pane_id = pane or root_id
+    decoded_cursor: dict[str, Any] | None = None
+    before_turn: str | None = None
+    if cursor is not None:
+        try:
+            decoded_cursor = chat_page_cursor.decode_page_cursor(cursor)
+        except chat_page_cursor.PageCursorError:
+            _raise_stale_cursor()
+        if decoded_cursor["root"] != root_id or decoded_cursor["pane"] != pane_id:
+            _raise_stale_cursor()
+        before_turn = decoded_cursor["turn"]
     try:
-        facts = await asyncio.to_thread(_read_stored_facts, root_id, provider)
+        read = await asyncio.to_thread(
+            _read_window_facts, root_id, provider, pane_id, turns, before_turn,
+        )
     except ProjectionServiceError as exc:
         raise HTTPException(
             status_code=503, detail={"code": exc.code, "message": exc.detail},
         ) from exc
-    if not facts:
+    if decoded_cursor is not None:
+        # Signed-cursor binding: catalog generation, non-regressed
+        # projection head, and the window-start turn's prompt-fact anchor
+        # must all still hold — anything else means the projection was
+        # rebuilt under this cursor.
+        if (
+            not read.cursor_found
+            or decoded_cursor["gen"] != read.generation
+            or decoded_cursor["rev"] > read.projection_cursor
+        ):
+            _raise_stale_cursor()
+        anchor = _prompt_fact(read.facts, before_turn)
+        if (
+            anchor is None
+            or anchor.fact_sequence != decoded_cursor["turn_seq"]
+            or anchor.content_hash != decoded_cursor["turn_hash"]
+        ):
+            _raise_stale_cursor()
+    if not read.facts and read.projection_cursor == 0:
         try:
             await bff_chat_feed.feed_client.pull_now(root_id)
         except (RuntimeServiceError, RuntimeUpstreamUnavailable) as exc:
             _raise_chat_tree_rebuilding(root_id)
         try:
-            facts = await asyncio.to_thread(_read_stored_facts, root_id, provider)
+            read = await asyncio.to_thread(
+                _read_window_facts, root_id, provider, pane_id, turns, before_turn,
+            )
         except ProjectionServiceError as exc:
             raise HTTPException(
                 status_code=503, detail={"code": exc.code, "message": exc.detail},
             ) from exc
-    if not facts:
-        # Cache miss with no source facts yet: keep this typed so the
-        # client can show a warming state instead of an empty success.
-        _raise_chat_tree_rebuilding(root_id)
+        if not read.facts and read.projection_cursor == 0:
+            # Cache miss with no source facts yet: keep this typed so the
+            # client can show a warming state instead of an empty success.
+            _raise_chat_tree_rebuilding(root_id)
+    facts = [dict(fact.canonical_fact) for fact in read.facts]
     try:
         rendered = await asyncio.to_thread(
             lambda: render_chat(facts, session, pane_id=pane),
@@ -185,6 +259,16 @@ async def get_chat_tree(
             status_code=422, detail={"code": exc.code, "message": str(exc)},
         ) from exc
     window, older_cursor = _window_items(rendered.items, turns, before_turn)
+    page_cursor: str | None = None
+    if older_cursor is not None:
+        older_anchor = _prompt_fact(read.facts, older_cursor)
+        if older_anchor is not None:
+            page_cursor = chat_page_cursor.encode_page_cursor(
+                root_id=root_id, pane_id=pane_id, generation=read.generation,
+                revision=read.projection_cursor, turn_id=older_cursor,
+                turn_seq=older_anchor.fact_sequence,
+                turn_hash=older_anchor.content_hash,
+            )
     return {
         "session_id": session_id,
         "schema_version": CHAT_SCHEMA_VERSION,
@@ -195,12 +279,13 @@ async def get_chat_tree(
         "lookup": bff_chat_lookup.build_lookup(
             window, rendered.adapted.messages, rendered.adapted.events, session,
         ),
+        # The signed page_cursor is the ONLY paging handle — no bare turn
+        # ids ride along that could seed a second, unbound cursor source.
         "page": {
             "turns": turns,
-            "before_turn": before_turn,
-            "pane": pane or root_id,
-            "older_cursor": older_cursor,
-            "has_older": older_cursor is not None,
+            "pane": pane_id,
+            "has_older": page_cursor is not None,
+            "page_cursor": page_cursor,
         },
         "dropped": list(rendered.adapted.dropped),
     }

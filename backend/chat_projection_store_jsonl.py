@@ -13,7 +13,7 @@ from typing import Any, Mapping
 
 from chat_projection_store import (
     ChatProjectionStoreError, CommitResult, ProjectionCommit, SourceAdmission, SourceWatermark, StoredFact,
-    StoredProjection, StoredRevision, TurnManifest,
+    StoredProjection, StoredRevision, TurnManifest, TurnWindowPage,
 )
 from chat_projection_store_owner import OwnerClient, serve_owner
 from chat_projection_store_owner_path import secure_open, verify_anchored_file
@@ -762,6 +762,19 @@ class JsonlChatProjectionStore:
     def read_facts(self, root_id: str, root_generation: int, *, after: int = 0, limit: int = 1000):
         rows = self._owner.rpc("read_facts", root_id=root_id, root_generation=root_generation, after=after, limit=limit)
         return [StoredFact(**row) for row in rows]
+
+    def read_turn_window(
+        self, root_id: str, root_generation: int, *, pane_id: str, turns: int,
+        before_turn: str | None = None, after: int = 0, limit: int = 1000,
+    ) -> TurnWindowPage:
+        result = self._owner.rpc(
+            "read_turn_window", root_id=root_id, root_generation=root_generation,
+            pane_id=pane_id, turns=turns, before_turn=before_turn, after=after, limit=limit,
+        )
+        return TurnWindowPage(
+            tuple(StoredFact(**row) for row in result["rows"]),
+            result["cursor_found"], result["projection_cursor"],
+        )
 
     def read_revisions(self, root_id: str, root_generation: int, *, after: int = 0, limit: int = 1000):
         rows = self._owner.rpc("read_revisions", root_id=root_id, root_generation=root_generation, after=after, limit=limit)

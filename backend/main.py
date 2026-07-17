@@ -18967,18 +18967,38 @@ async def websocket_chat(websocket: WebSocket):
             # worker fan-out from `/api/internal/ask-fork` also reaches
             # this socket via the same callback registry.
             if msg_type == "subscribe":
+                from ws_subscription_contract import (
+                    PRIORITY_OPENED,
+                    resolve_subscribe_priority,
+                )
+                # Optional `priority` field: "opened" (default when absent)
+                # or "warm" (LRU cache-warming). Invalid values are rejected
+                # before ANY registration side effect — fail closed, no
+                # coercion.
+                sub_priority = resolve_subscribe_priority(msg)
+                if sub_priority is None:
+                    await ws_callback({
+                        "type": "error",
+                        "data": {"error": t("error.ws_invalid_subscribe_priority")},
+                    })
+                    continue
                 sub_sid = msg.get("app_session_id")
                 if sub_sid:
-                    try:
-                        import startup_recovery_gate
-                        sub_sid_text = str(sub_sid)
-                        startup_recovery_gate.request_session_priority(sub_sid_text)
-                        asyncio.create_task(
-                            _promote_recovered_session(sub_sid_text),
-                            name=f"recover-selected-{sub_sid_text[:8]}",
-                        )
-                    except Exception:
-                        logger.debug("startup recovery priority request failed", exc_info=True)
+                    # Startup-recovery prioritization follows REAL use: only
+                    # an "opened" subscribe (a session actually in view)
+                    # promotes the session's recovery; warm cache-warming
+                    # subscribes must not steal recovery priority.
+                    if sub_priority == PRIORITY_OPENED:
+                        try:
+                            import startup_recovery_gate
+                            sub_sid_text = str(sub_sid)
+                            startup_recovery_gate.request_session_priority(sub_sid_text)
+                            asyncio.create_task(
+                                _promote_recovered_session(sub_sid_text),
+                                name=f"recover-selected-{sub_sid_text[:8]}",
+                            )
+                        except Exception:
+                            logger.debug("startup recovery priority request failed", exc_info=True)
                     # `events_from_seq` is the watermark from the REST
                     # snapshot's `max_seq_by_sid`. The wire tailer drains
                     # `events_from_seq+1..cursor` to this WS before live

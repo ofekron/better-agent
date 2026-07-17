@@ -8,6 +8,8 @@ import uuid
 
 from fastapi import WebSocket
 
+from ws_subscription_contract import PRIORITY_OPENED, SUBSCRIBE_PRIORITIES
+
 
 class BffConnection:
     def __init__(self, websocket: WebSocket) -> None:
@@ -30,7 +32,8 @@ class BffEventHub:
     def __init__(self) -> None:
         self._lock = threading.RLock()
         self._connections: dict[str, BffConnection] = {}
-        self._subscriptions: dict[str, set[str]] = {}
+        # session_id -> {connection_id: priority ("opened" | "warm")}
+        self._subscriptions: dict[str, dict[str, str]] = {}
 
     def attach(self, websocket: WebSocket) -> BffConnection:
         connection = BffConnection(websocket)
@@ -38,26 +41,38 @@ class BffEventHub:
             self._connections[connection.id] = connection
         return connection
 
-    def subscribe(self, connection: BffConnection, session_id: str) -> None:
+    def subscribe(
+        self,
+        connection: BffConnection,
+        session_id: str,
+        priority: str = PRIORITY_OPENED,
+    ) -> None:
         if not session_id:
             return
+        if priority not in SUBSCRIBE_PRIORITIES:
+            raise ValueError(f"invalid subscriber priority: {priority!r}")
         with self._lock:
-            self._subscriptions.setdefault(session_id, set()).add(connection.id)
+            self._subscriptions.setdefault(session_id, {})[connection.id] = priority
 
     def unsubscribe(self, connection: BffConnection, session_id: str) -> None:
         with self._lock:
             ids = self._subscriptions.get(session_id)
             if ids is None:
                 return
-            ids.discard(connection.id)
+            ids.pop(connection.id, None)
             if not ids:
                 self._subscriptions.pop(session_id, None)
+
+    def subscriber_priorities(self, session_id: str) -> dict[str, str]:
+        """Registry view: connection_id -> "opened" | "warm" for a session."""
+        with self._lock:
+            return dict(self._subscriptions.get(session_id, {}))
 
     def detach(self, connection: BffConnection) -> None:
         with self._lock:
             self._connections.pop(connection.id, None)
             for session_id, ids in list(self._subscriptions.items()):
-                ids.discard(connection.id)
+                ids.pop(connection.id, None)
                 if not ids:
                     self._subscriptions.pop(session_id, None)
 
@@ -80,10 +95,15 @@ class BffEventHub:
         await self._publish(targets, event)
 
     async def publish_session(self, session_id: str, event: dict[str, Any]) -> None:
+        # Opened subscribers first, warm after — warm is deprioritized in
+        # send order but receives every frame (never dropped).
         with self._lock:
             targets = [
                 self._connections[connection_id]
-                for connection_id in self._subscriptions.get(session_id, set())
+                for connection_id, priority in sorted(
+                    self._subscriptions.get(session_id, {}).items(),
+                    key=lambda entry: entry[1] != PRIORITY_OPENED,
+                )
                 if connection_id in self._connections
             ]
         await self._publish(targets, event)

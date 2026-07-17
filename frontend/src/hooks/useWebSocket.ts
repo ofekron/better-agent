@@ -76,6 +76,26 @@ export function resolveLiveFrameSessionId(
   return null;
 }
 
+export type SubscribePriority = "opened" | "warm";
+
+/** Desired subscription map: warm ids first, then focused/additional
+ * pane ids overwrite to "opened" — an id in both sets is opened. */
+export function desiredSubscriptions(
+  targetAppSessionId: string | null,
+  additionalIds: string[] | undefined,
+  warmIds: string[] | undefined,
+): Map<string, SubscribePriority> {
+  const desired = new Map<string, SubscribePriority>();
+  for (const id of warmIds ?? []) {
+    if (id) desired.set(id, "warm");
+  }
+  if (targetAppSessionId) desired.set(targetAppSessionId, "opened");
+  for (const id of additionalIds ?? []) {
+    if (id) desired.set(id, "opened");
+  }
+  return desired;
+}
+
 interface UseWebSocketOptions {
   /** The app_session_id currently being viewed in the UI. When this
    * changes, the hook sends `unsubscribe` for the previous id and
@@ -90,6 +110,13 @@ interface UseWebSocketOptions {
    * frames flow in. Live `manager_event`/`worker_event` frames route
    * only when the backend provides their owning `app_session_id`. */
   additionalAppSessionIds?: string[];
+  /** Session ids to keep subscribed at `priority: "warm"` — the LRU
+   * session-tree cache. Warm subscribers receive the same change-only
+   * chat_tree_delta/state frames so cached projections stay fresh for
+   * an instant reopen. An id that is also focused/additional subscribes
+   * as "opened" (opened wins). Dropping an id (cache eviction) sends
+   * `unsubscribe`. */
+  warmAppSessionIds?: string[];
   onRewindComplete?: (appSessionId: string, messages: ChatMessage[]) => void;
   /** Backend's response to a subscribe with `since_seq=N`. Carries
    * every persisted message with `seq >= N` plus the live in-flight
@@ -1188,40 +1215,37 @@ export function useWebSocket(
   // continues to work; this just covers the "viewing-without-
   // prompting" case (zombie runners, crash-recovered sessions, CLI
   // sessions writing in parallel).
-  // Track the full set of subscribed session ids (the focused pane plus
-  // any additional pane ids from the split-fork view). Diff-driven: on
-  // every change of the desired set, send subscribe frames for new ids
-  // and unsubscribe for dropped ids.
-  const subscribedIdsRef = useRef<Set<string>>(new Set());
+  // Track the full map of subscribed session ids → priority (the
+  // focused pane and split-fork panes at "opened", LRU-cached trees at
+  // "warm"). Diff-driven: on every change of the desired map, send
+  // subscribe frames for new ids, priority-upsert subscribes for ids
+  // whose priority flipped, and unsubscribe for dropped ids.
+  const subscribedIdsRef = useRef<Map<string, SubscribePriority>>(new Map());
   const targetAppSessionId = options.currentAppSessionId ?? null;
   const additionalIds = options.additionalAppSessionIds;
-  // Memoize the joined key so this effect only re-runs when the set
+  const warmIds = options.warmAppSessionIds;
+  // Memoize the joined key so this effect only re-runs when the map
   // actually changes (not on every parent render).
   const desiredSetKey = (() => {
-    const ids = new Set<string>();
-    if (targetAppSessionId) ids.add(targetAppSessionId);
-    for (const id of additionalIds ?? []) {
-      if (id) ids.add(id);
-    }
-    return Array.from(ids).sort().join("|");
+    const desired = desiredSubscriptions(targetAppSessionId, additionalIds, warmIds);
+    return Array.from(desired, ([id, priority]) => `${priority}:${id}`)
+      .sort()
+      .join("|");
   })();
   useEffect(() => {
     if (!connected) {
       // WS went down — drop our local record of subscriptions so that
       // the reconnect re-subscribes the full desired set fresh.
-      subscribedIdsRef.current = new Set();
+      subscribedIdsRef.current = new Map();
       return;
     }
     const ws = wsRef.current;
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    const desired = new Set<string>();
-    if (targetAppSessionId) desired.add(targetAppSessionId);
-    for (const id of additionalIds ?? []) {
-      if (id) desired.add(id);
-    }
+    const desired = desiredSubscriptions(targetAppSessionId, additionalIds, warmIds);
     const prev = subscribedIdsRef.current;
-    // Unsubscribe ids that fell out of the desired set.
-    for (const id of prev) {
+    // Unsubscribe ids that fell out of the desired map (focus moved
+    // away with no cache slot, or LRU cache eviction).
+    for (const id of prev.keys()) {
       if (!desired.has(id)) {
         try {
           ws.send(
@@ -1232,25 +1256,28 @@ export function useWebSocket(
         }
       }
     }
-    // Subscribe ids that are newly desired.
-    for (const id of desired) {
-      if (!prev.has(id)) {
-        try {
-          const sinceSeq = getSinceSeqRef.current?.(id) ?? 0;
-          const eventsFromSeq = getEventsFromSeqRef.current?.(id) ?? 0;
-          const eventsCursorKnown = getEventsCursorKnownRef.current?.(id) ?? false;
-          ws.send(
-            JSON.stringify({
-              type: "subscribe",
-              app_session_id: id,
-              since_seq: sinceSeq,
-              events_from_seq: eventsFromSeq,
-              events_cursor_known: eventsCursorKnown,
-            })
-          );
-        } catch {
-          // ignore
-        }
+    // Subscribe newly desired ids; re-send subscribe as a priority
+    // upsert when an already-subscribed id flips opened↔warm (the
+    // backend updates the recorded priority in place — no duplicate
+    // subscription, replay bounded by the current cursors).
+    for (const [id, priority] of desired) {
+      if (prev.get(id) === priority) continue;
+      try {
+        const sinceSeq = getSinceSeqRef.current?.(id) ?? 0;
+        const eventsFromSeq = getEventsFromSeqRef.current?.(id) ?? 0;
+        const eventsCursorKnown = getEventsCursorKnownRef.current?.(id) ?? false;
+        ws.send(
+          JSON.stringify({
+            type: "subscribe",
+            app_session_id: id,
+            since_seq: sinceSeq,
+            events_from_seq: eventsFromSeq,
+            events_cursor_known: eventsCursorKnown,
+            priority,
+          })
+        );
+      } catch {
+        // ignore
       }
     }
     subscribedIdsRef.current = desired;

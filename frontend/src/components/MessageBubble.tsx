@@ -35,6 +35,7 @@ import { dedupeWorkerPanels, isCreationPanelKind, panelKindLabel } from "../util
 import { isSaveShortcutEvent } from "../hooks/useSaveShortcut";
 import { useBackButtonDismiss } from "../hooks/useBackButtonDismiss";
 import { flattenClaudeMessages } from "../utils/agentMessages";
+import type { CanonicalTurnMeta } from "../chat/model";
 import { formatWholeJsonMessage } from "../utils/formatWholeJsonMessage";
 import { buildMessageImageUrl } from "../utils/messageImages";
 import { unwrapTypedAgentMessageEnvelope, unwrapWorkerEventEnvelope } from "../utils/workerEventEnvelope";
@@ -1913,36 +1914,27 @@ function renderTreeEntries(
   ));
 }
 
-function renderTreeLevel(
-  events: WSEvent[],
+/** One renderable unit of a timeline level: either a standalone row or
+ * a lead + collapsed-actions group. Derived either heuristically (live
+ * streaming / legacy event lists) or from canonical turn metadata
+ * (completed tree-sourced turns) — rendering is shared. */
+type RenderSegment =
+  | { kind: "row"; group: EventRenderGroup }
+  | { kind: "group"; lead: EventRenderGroup; actions: EventRenderGroups; defaultOpen: boolean };
+
+/** Heuristic segmentation for streams with no canonical metadata: an
+ * output/thinking lead absorbs the run of tool actions that follows it. */
+function deriveHeuristicSegments(
+  groups: EventRenderGroups,
   childrenMap: ChildrenMap,
-  onFileClick?: (p: string, focus?: FileFocus) => void,
-  onViewDiff?: (path: string, oldStr: string, newStr: string) => void,
-  nested: boolean = false,
-  toolResultById?: Map<string, string>,
-  parentMessageId?: string,
-  parentTargetId?: string,
-  sessionId?: string,
   isRunning?: boolean,
-) {
-  const groups = groupEvents(events, toolResultById, isRunning);
-  const rows: ReactNode[] = [];
+): RenderSegment[] {
+  const segments: RenderSegment[] = [];
   let i = 0;
   while (i < groups.length) {
     const lead = groups[i];
     if (!isActionLeadGroup(lead)) {
-      rows.push(renderTreeEntry(
-        lead,
-        childrenMap,
-        onFileClick,
-        onViewDiff,
-        nested,
-        toolResultById,
-        parentMessageId,
-        parentTargetId,
-        sessionId,
-        isRunning,
-      ));
+      segments.push({ kind: "row", group: lead });
       i++;
       continue;
     }
@@ -1969,8 +1961,133 @@ function renderTreeLevel(
       break;
     }
     if (actions.length === 0) {
-      rows.push(renderTreeEntry(
-        lead,
+      segments.push({ kind: "row", group: lead });
+      i++;
+      continue;
+    }
+
+    segments.push({
+      kind: "group",
+      lead,
+      actions,
+      // chat-panel.md render model: only the live leaf is expanded
+      // (forced, any size). Completed groups render compact and expand
+      // on explicit user intent — no size-based auto-open heuristics.
+      defaultOpen: !hasLaterActionLead(groups, j) && isRunning === true,
+    });
+    i = j;
+  }
+  return segments;
+}
+
+/** Canonical segmentation for completed tree-sourced turns: the
+ * projector's Explanation partitions decide which text leads which
+ * actions — nothing is re-derived from event adjacency. Result part
+ * events never render as body rows (the message content owns the
+ * result); groups the metadata does not claim (model boundaries,
+ * diagnostics) keep rendering in original order after the body. */
+function deriveCanonicalSegments(
+  canonical: CanonicalTurnMeta,
+  groups: EventRenderGroups,
+): RenderSegment[] {
+  const groupIndexByUuid = new Map<string, number>();
+  groups.forEach((group, index) => {
+    const uuid = eventUuid(group.event);
+    if (uuid !== undefined && !groupIndexByUuid.has(uuid)) {
+      groupIndexByUuid.set(uuid, index);
+    }
+  });
+  const claimed = new Set<number>();
+  const claim = (id: string): number | undefined => {
+    const index = groupIndexByUuid.get(id);
+    if (index === undefined || claimed.has(index)) return undefined;
+    claimed.add(index);
+    return index;
+  };
+  const claimAll = (ids: readonly string[]): number[] => {
+    const indexes: number[] = [];
+    for (const id of ids) {
+      const index = claim(id);
+      if (index !== undefined) indexes.push(index);
+    }
+    return indexes;
+  };
+
+  const segments: RenderSegment[] = [];
+  let syntheticIdx = groups.length;
+  canonical.body.forEach((item, itemIndex) => {
+    if (item.kind === "steering" || item.kind === "scoped") {
+      const index = claim(item.id);
+      if (index !== undefined) segments.push({ kind: "row", group: groups[index] });
+      return;
+    }
+    const textIndexes = claimAll(item.textEventIds);
+    const actions = claimAll(item.itemIds).map((index) => groups[index]);
+    let lead: EventRenderGroup | null = null;
+    if (item.text) {
+      const source = textIndexes.length > 0 ? groups[textIndexes[0]] : null;
+      if (source && source.kind === "event" && leadText(source) === item.text) {
+        // Single source whose text IS the partition text: keep the
+        // original group (identity, timestamp) instead of synthesizing.
+        lead = source;
+      } else {
+        // Partition text spans several source events (or the source is
+        // missing from this window): render the canonical concatenated
+        // text as one lead, sourced from the partition itself.
+        lead = {
+          kind: "event",
+          idx: source?.idx ?? syntheticIdx++,
+          event: {
+            type: "output",
+            data: {
+              uuid: item.textEventIds[0] ?? `canonical-explanation-${itemIndex}`,
+              output: item.text,
+            },
+            _ts: source?.event._ts,
+          } as WSEvent,
+        };
+      }
+    }
+    if (lead && actions.length > 0) {
+      segments.push({ kind: "group", lead, actions, defaultOpen: false });
+    } else if (lead) {
+      segments.push({ kind: "row", group: lead });
+    } else {
+      for (const action of actions) segments.push({ kind: "row", group: action });
+    }
+  });
+  // The result boundary is consumed, not re-derived: the concatenated
+  // result text is owned by the assistant content box, so its source
+  // events never duplicate as body rows. Non-text result parts (cards)
+  // stay unclaimed and render after the body like any other tail group.
+  for (const id of canonical.result?.textSourceIds ?? []) claim(id);
+  groups.forEach((group, index) => {
+    if (!claimed.has(index)) segments.push({ kind: "row", group });
+  });
+  return segments;
+}
+
+function renderTreeLevel(
+  events: WSEvent[],
+  childrenMap: ChildrenMap,
+  onFileClick?: (p: string, focus?: FileFocus) => void,
+  onViewDiff?: (path: string, oldStr: string, newStr: string) => void,
+  nested: boolean = false,
+  toolResultById?: Map<string, string>,
+  parentMessageId?: string,
+  parentTargetId?: string,
+  sessionId?: string,
+  isRunning?: boolean,
+  canonical?: CanonicalTurnMeta,
+) {
+  const groups = groupEvents(events, toolResultById, isRunning);
+  const segments = canonical
+    ? deriveCanonicalSegments(canonical, groups)
+    : deriveHeuristicSegments(groups, childrenMap, isRunning);
+  return segments.map((segment) => {
+    if (segment.kind === "row") {
+      return renderTreeEntry(
+        segment.group,
         childrenMap,
         onFileClick,
         onViewDiff,
@@ -1980,22 +2097,16 @@ function renderTreeLevel(
         parentTargetId,
         sessionId,
         isRunning,
-      ));
-      i++;
-      continue;
+      );
     }
-
-    rows.push(
+    return (
       <AutoActionGroup
-        key={`auto-action-${lead.idx}`}
-        lead={lead}
-        actions={actions}
+        key={`auto-action-${segment.lead.idx}`}
+        lead={segment.lead}
+        actions={segment.actions}
         childrenMap={childrenMap}
         toolResultById={toolResultById}
-        // chat-panel.md render model: only the live leaf is expanded
-        // (forced, any size). Completed groups render compact and expand
-        // on explicit user intent — no size-based auto-open heuristics.
-        defaultOpen={!hasLaterActionLead(groups, j) && isRunning === true}
+        defaultOpen={segment.defaultOpen}
         onFileClick={onFileClick}
         onViewDiff={onViewDiff}
         nested={nested}
@@ -2003,11 +2114,9 @@ function renderTreeLevel(
         parentTargetId={parentTargetId}
         sessionId={sessionId}
         isRunning={isRunning}
-      />,
+      />
     );
-    i = j;
-  }
-  return rows;
+  });
 }
 
 function renderGroupedEvents(
@@ -2018,11 +2127,12 @@ function renderGroupedEvents(
   parentTargetId?: string,
   sessionId?: string,
   isRunning?: boolean,
+  canonical?: CanonicalTurnMeta,
 ) {
   const { flat, toolResultById } = flattenClaudeMessages(events);
   const { topLevel, children } = partitionEventsByParent(flat);
   return renderTreeLevel(
-    topLevel, children, onFileClick, onViewDiff, false, toolResultById, parentMessageId, parentTargetId, sessionId, isRunning,
+    topLevel, children, onFileClick, onViewDiff, false, toolResultById, parentMessageId, parentTargetId, sessionId, isRunning, canonical,
   );
 }
 
@@ -2235,6 +2345,7 @@ function renderEntityBlock(
   sessionId?: string,
   workerDefaultOpenById?: ReadonlyMap<string, boolean>,
   isRunning?: boolean,
+  canonical?: CanonicalTurnMeta,
 ): ReactNode {
   const color = colorMap?.get(block.entityId);
   const filteredEvents: WSEvent[] = [];
@@ -2242,11 +2353,14 @@ function renderEntityBlock(
     if (["complete", "session_discovered", "worker_start"].includes(e.type)) return;
     filteredEvents.push({ ...e, _ts: block.timestamps[i] });
   });
+  // Canonical metadata describes the TURN's own body — it applies to the
+  // primary (manager) block only; worker side-streams keep deriving.
+  const managerCanonical = block.entityType === "manager" ? canonical : undefined;
 
   if (flattenManager && block.entityType === "manager") {
     return (
       <div className="timeline-block-body" key={key}>
-        {renderGroupedEvents(filteredEvents, onFileClick, onViewDiff, initiatorMessageId, undefined, sessionId, isRunning)}
+        {renderGroupedEvents(filteredEvents, onFileClick, onViewDiff, initiatorMessageId, undefined, sessionId, isRunning, managerCanonical)}
       </div>
     );
   }
@@ -2306,7 +2420,7 @@ function renderEntityBlock(
         <span style={{ color }}>{block.entityLabel}</span>
       </div>
       <div className="timeline-block-body">
-        {renderGroupedEvents(filteredEvents, onFileClick, onViewDiff, initiatorMessageId, undefined, sessionId, isRunning)}
+        {renderGroupedEvents(filteredEvents, onFileClick, onViewDiff, initiatorMessageId, undefined, sessionId, isRunning, managerCanonical)}
       </div>
     </div>
   );
@@ -2325,6 +2439,7 @@ function renderTimeline(
   initiatorMessageId?: string,
   sessionId?: string,
   isRunning?: boolean,
+  canonical?: CanonicalTurnMeta,
 ): ReactNode[] {
   const workerDefaultOpenById = new Map(
     workers.map((worker) => [
@@ -2400,13 +2515,13 @@ function renderTimeline(
     return [
       ...prepBlocks,
       ...entityBlocks.map((b, i) =>
-        renderEntityBlock(b, colorMap, onFileClick, onViewDiff, `block-${b.entityId}-${i}`, flattenManager, orchestrationMode, initiatorMessageId, sessionId, workerDefaultOpenById, isRunning)
+        renderEntityBlock(b, colorMap, onFileClick, onViewDiff, `block-${b.entityId}-${i}`, flattenManager, orchestrationMode, initiatorMessageId, sessionId, workerDefaultOpenById, isRunning, canonical)
       ),
     ];
   }
   return [
     ...prepBlocks,
-    ...renderManagerStreamLegacy(cleanManagerEvents, workers, colorMap, onFileClick, onViewDiff, workerDefaultOpenById, initiatorMessageId, sessionId, isRunning),
+    ...renderManagerStreamLegacy(cleanManagerEvents, workers, colorMap, onFileClick, onViewDiff, workerDefaultOpenById, initiatorMessageId, sessionId, isRunning, canonical),
   ];
 }
 
@@ -2451,6 +2566,7 @@ function renderManagerStreamLegacy(
   initiatorMessageId?: string,
   sessionId?: string,
   isRunning?: boolean,
+  canonical?: CanonicalTurnMeta,
 ): ReactNode[] {
   const { flat, toolResultById } = flattenClaudeMessages(managerEvents);
   const { topLevel, children } = partitionEventsByParent(flat);
@@ -2466,6 +2582,7 @@ function renderManagerStreamLegacy(
       undefined,
       sessionId,
       isRunning,
+      canonical,
     );
   }
   const groups = groupEvents(topLevel, toolResultById, isRunning);
@@ -2821,6 +2938,15 @@ const AssistantMessage = memo(function AssistantMessage({
   const hasManagerScope = renderWork && strategy.hasScopeWrapper(effectiveMessage);
   const flattenPrimaryEntity = hasManagerScope || orchestrationMode !== "team";
 
+  // Canonical boundary metadata is consumed only once the turn is
+  // complete: a completed tree-sourced turn renders its Explanation/
+  // Result structure from the projector's metadata; a live streaming
+  // turn keeps deriving until its tree projection exists.
+  const canonicalTurn =
+    !activelyStreaming && !routedMessage.isStreaming
+      ? routedMessage.canonical_turn ?? undefined
+      : undefined;
+
   const stream = renderWork ? renderTimeline(
     entityBlocks,
     filteredManagerEvents,
@@ -2837,6 +2963,7 @@ const AssistantMessage = memo(function AssistantMessage({
     initiatorMessageId,
     sessionId,
     activelyStreaming && !message.stopped_at,
+    canonicalTurn,
   ) : [];
 
   const managerSessionShort =
@@ -2854,7 +2981,12 @@ const AssistantMessage = memo(function AssistantMessage({
     !!assistantContent &&
     !message.error &&
     !activelyStreaming &&
-    (stream.length === 0 || !visibleEventsRepresentAssistantContent(filteredManagerEvents, assistantContent));
+    // Canonical turns consume the projector's result boundary: their
+    // result part events are excluded from body rows, so the content
+    // box always owns the result — no duplicate-tail sniffing.
+    (canonicalTurn != null ||
+      stream.length === 0 ||
+      !visibleEventsRepresentAssistantContent(filteredManagerEvents, assistantContent));
 
   return (
     <div

@@ -1,4 +1,5 @@
 import type { InlineTag } from "./types/inlineTag";
+import type { CanonicalTurnMeta } from "./chat/model";
 
 /** An image attachment (pasted or file-selected) stored as base64. */
 export interface PastedImage {
@@ -720,6 +721,11 @@ export interface ChatMessage {
     direct_child_count: number;
     display_summary: string;
   } | null;
+  /** Canonical Explanation/Result boundary metadata for tree-sourced
+   * messages (produced by chatTreeToMessages from the projector output).
+   * Completed turns render their grouping from this instead of
+   * re-deriving it from the flattened event list. */
+  canonical_turn?: CanonicalTurnMeta | null;
   status?: "sending" | "received" | "running" | "error" | "offline";
   errorText?: string;
   error?: boolean;
