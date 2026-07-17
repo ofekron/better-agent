@@ -4,6 +4,7 @@ import json
 import os
 import re
 import subprocess
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -12,7 +13,22 @@ from typing import Any, Callable
 
 
 _TAILSCALE_DNS_RE = re.compile(r"^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?\.ts\.net$")
-_SERVE_ATTEMPTED_TARGETS: set[tuple[str, str]] = set()
+# Failed serve applies retry after this backoff instead of being poisoned
+# for the process lifetime — serve config lost mid-run must self-heal.
+_SERVE_RETRY_BACKOFF_SECONDS = 120.0
+_SERVE_LAST_ATTEMPT: dict[tuple[str, str], float] = {}
+_SERVE_NOT_ENABLED_MARKER = "Serve is not enabled"
+_last_serve_failure_reason = ""
+
+
+def last_serve_failure_reason() -> str:
+    return _last_serve_failure_reason
+
+
+def _mentions_serve_not_enabled(output: object) -> bool:
+    if isinstance(output, bytes):
+        output = output.decode("utf-8", errors="replace")
+    return isinstance(output, str) and _SERVE_NOT_ENABLED_MARKER in output
 
 
 @dataclass(frozen=True)
@@ -212,7 +228,9 @@ def ensure_tailscale_serve_https(
     local_url: str,
     *,
     run: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+    now: Callable[[], float] = time.monotonic,
 ) -> bool:
+    global _last_serve_failure_reason
     target = local_serve_target(local_url)
     if target is None:
         return False
@@ -222,25 +240,60 @@ def ensure_tailscale_serve_https(
     if status is not None:
         state = serve_https_state(status, tailscale_url, target)
         if state == "configured":
+            _last_serve_failure_reason = ""
             return True
         if state == "conflict":
+            _last_serve_failure_reason = "serve_conflict"
             return False
 
-    if key in _SERVE_ATTEMPTED_TARGETS:
+    last_attempt = _SERVE_LAST_ATTEMPT.get(key)
+    if last_attempt is not None and now() - last_attempt < _SERVE_RETRY_BACKOFF_SECONDS:
         return False
-    _SERVE_ATTEMPTED_TARGETS.add(key)
+    _SERVE_LAST_ATTEMPT[key] = now()
 
+    # --bg persists the config in tailscaled; without it the CLI serves in
+    # the foreground and the config dies when the process does. When the
+    # tailnet has Serve/HTTPS disabled, the CLI blocks waiting for browser
+    # approval — the timeout kills it and the output carries the reason.
     try:
         proc = run(
-            ["tailscale", "serve", "--https=443", target],
+            ["tailscale", "serve", "--bg", "--https=443", target],
             capture_output=True,
             text=True,
             timeout=5,
             check=False,
         )
-    except (FileNotFoundError, subprocess.SubprocessError, OSError):
+    except subprocess.TimeoutExpired as exc:
+        _last_serve_failure_reason = (
+            "serve_not_enabled"
+            if _mentions_serve_not_enabled(exc.stdout) or _mentions_serve_not_enabled(exc.stderr)
+            else "serve_apply_failed"
+        )
         return False
-    return proc.returncode == 0
+    except (FileNotFoundError, subprocess.SubprocessError, OSError):
+        _last_serve_failure_reason = "serve_apply_failed"
+        return False
+
+    if _mentions_serve_not_enabled(proc.stdout) or _mentions_serve_not_enabled(proc.stderr):
+        _last_serve_failure_reason = "serve_not_enabled"
+        return False
+    if proc.returncode != 0:
+        _last_serve_failure_reason = "serve_apply_failed"
+        return False
+    _last_serve_failure_reason = ""
+    _SERVE_LAST_ATTEMPT.pop(key, None)
+    return True
+
+
+def serve_reconcile_tick(local_url: str) -> bool:
+    """Re-assert the persisted serve config so a *.ts.net URL saved on a
+    mobile client heals without any client reaching the backend."""
+    tailscale_url = current_tailscale_https_url()
+    if not tailscale_url:
+        return False
+    if better_agent_is_reachable(tailscale_url):
+        return True
+    return ensure_tailscale_serve_https(tailscale_url, local_url)
 
 
 def preferred_external_url_details(local_url: str, *, allow_loopback_https: bool = False) -> ExternalUrlPreference:
@@ -256,6 +309,8 @@ def preferred_external_url_details(local_url: str, *, allow_loopback_https: bool
         return ExternalUrlPreference(local_https_url, "local_https", True, "")
 
     reason = "tailscale_unreachable" if tailscale_url else "no_tailscale"
+    if tailscale_url and _last_serve_failure_reason:
+        reason = _last_serve_failure_reason
     return ExternalUrlPreference(local_url, "http_fallback", False, reason)
 
 
