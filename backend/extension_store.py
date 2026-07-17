@@ -2765,6 +2765,7 @@ def _install_from_package_dir(
             for recovered_id in recovered:
                 _evict_extension_backend(recovered_id)
             raise
+        _drop_update_cache_row(manifest["id"])
     return record
 
 
@@ -4382,6 +4383,132 @@ def update_installed_extensions() -> dict[str, Any]:
     }
 
 
+_UPDATABLE_SOURCE_TYPES = frozenset({"git", "marketplace", "better_agent_signed"})
+
+_updates_cache_lock = threading.Lock()
+_updates_cache: dict[str, Any] | None = None
+
+
+def _drop_update_cache_row(extension_id: str) -> None:
+    global _updates_cache
+    with _updates_cache_lock:
+        if _updates_cache is None:
+            return
+        rows = [
+            row for row in _updates_cache.get("results", [])
+            if row.get("extension_id") != extension_id
+        ]
+        _updates_cache = {
+            **_updates_cache,
+            "results": rows,
+            "available": [r["extension_id"] for r in rows if r.get("update_available")],
+        }
+
+
+def cached_extension_updates() -> dict[str, Any] | None:
+    with _updates_cache_lock:
+        return copy.deepcopy(_updates_cache)
+
+
+def _check_git_update(record: dict[str, Any]) -> dict[str, Any]:
+    source = record.get("source") or {}
+    repo_url = _validate_repo_url(str(source.get("repo_url") or ""))
+    ref = str(source.get("ref") or "").strip()
+    remote_commit = _git_remote_commit(repo_url, ref)
+    installed_commit = str(source.get("commit_sha") or "").strip()
+    return {
+        "update_available": bool(remote_commit and installed_commit != remote_commit),
+        "available_version": "",
+        "available_sha": remote_commit,
+    }
+
+
+def _check_marketplace_update(extension_id: str, record: dict[str, Any]) -> dict[str, Any]:
+    source = record.get("source") or {}
+    metadata = _fetch_json(_marketplace_metadata_url_for_record(extension_id, record))
+    published_sha = str(metadata.get("artifact_sha256") or "").strip().lower()
+    installed_sha = str(source.get("artifact_sha256") or source.get("commit_sha") or "").strip().lower()
+    return {
+        "update_available": bool(published_sha and installed_sha != published_sha),
+        "available_version": str(metadata.get("version") or ""),
+        "available_sha": published_sha,
+    }
+
+
+def check_extension_updates(*, refresh: bool = False) -> dict[str, Any]:
+    """Check-only update scan for remote-sourced extensions.
+
+    The result is a disposable cached projection; installed records stay the
+    source of truth. Per-extension check failures land in the row's "error"
+    field instead of failing the whole scan, so one unreachable source cannot
+    hide the others.
+    """
+    global _updates_cache
+    if not refresh:
+        cached = cached_extension_updates()
+        if cached is not None:
+            return cached
+    data = _load()
+    results: list[dict[str, Any]] = []
+    for extension_id, record in sorted(data["extensions"].items()):
+        source_type = str((record.get("source") or {}).get("type") or "")
+        if source_type not in _UPDATABLE_SOURCE_TYPES:
+            continue
+        row: dict[str, Any] = {
+            "extension_id": extension_id,
+            "source_type": source_type,
+            "installed_version": str((record.get("manifest") or {}).get("version") or ""),
+        }
+        try:
+            if source_type == "git":
+                row.update(_check_git_update(record))
+            else:
+                row.update(_check_marketplace_update(extension_id, record))
+        except ExtensionError as exc:
+            row.update({"update_available": False, "error": str(exc)})
+        results.append(row)
+    snapshot = {
+        "checked_at": datetime.now(timezone.utc).isoformat(),
+        "results": results,
+        "available": [row["extension_id"] for row in results if row["update_available"]],
+    }
+    with _updates_cache_lock:
+        _updates_cache = copy.deepcopy(snapshot)
+    return snapshot
+
+
+def apply_extension_update(extension_id: str) -> dict[str, Any]:
+    clean_id = str(extension_id or "").strip()
+    if not _ID_RE.fullmatch(clean_id):
+        raise ExtensionError("extension_id is invalid")
+    data = _load()
+    record = data["extensions"].get(clean_id)
+    if not record:
+        raise ExtensionError("Extension not installed")
+    source_type = str((record.get("source") or {}).get("type") or "")
+    if source_type not in _UPDATABLE_SOURCE_TYPES:
+        raise ExtensionError("Extension source does not support remote updates")
+    if source_type == "git":
+        updated = _update_git_extension(clean_id, record)
+    else:
+        updated = _update_marketplace_extension(clean_id, record)
+    if updated is None:
+        # The source is already current; clear any stale "available" row.
+        _drop_update_cache_row(clean_id)
+        return {
+            "extension_id": clean_id,
+            "source_type": source_type,
+            "updated": False,
+            "skipped": "up_to_date",
+        }
+    return {
+        "extension_id": clean_id,
+        "source_type": source_type,
+        "updated": True,
+        "version": updated["manifest"].get("version", ""),
+    }
+
+
 def set_enabled(extension_id: str, enabled: bool) -> dict[str, Any]:
     data = _load()
     record = data["extensions"].get(extension_id)
@@ -4799,6 +4926,7 @@ def uninstall(extension_id: str) -> None:
                 raise ExtensionError("Extension install path escapes install root")
             shutil.rmtree(extension_root)
     _save(data, deleted_extension_ids={extension_id})
+    _drop_update_cache_row(extension_id)
     import extension_token_registry
     extension_token_registry.revoke(extension_id)
     reconcile_runtime_skills()

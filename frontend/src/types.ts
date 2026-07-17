@@ -129,6 +129,9 @@ export type WSEventType =
   | "provider_install_finished"
   | "provider_config_sync_changed"
   | "extensions_changed"
+  // The set of remote extensions with an available update changed —
+  // frontend refetches `/api/extensions/updates`.
+  | "extension_updates_changed"
   // Per-provider model catalog delta — fired by the daily refresher
   // (and manual refresh endpoints) when the cached model list changes.
   // Frontend refetches `/api/models`. Payload carries four disjoint

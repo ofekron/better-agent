@@ -12311,6 +12311,41 @@ def _start_tailscale_serve_reconciler() -> None:
     )
 
 
+_EXTENSION_UPDATE_CHECK_INTERVAL_SECONDS = 6 * 3600.0
+_extension_update_checker_task: asyncio.Task | None = None
+
+
+def _start_extension_update_checker() -> None:
+    """Periodically refresh the remote-extension update projection so the
+    frontend badge reflects marketplace/git state without polling. Pushes
+    `extension_updates_changed` only when the available set changes."""
+    global _extension_update_checker_task
+    if os.environ.get("BETTER_AGENT_TEST_MODE"):
+        return
+
+    async def _loop() -> None:
+        while True:
+            try:
+                previous = extension_store.cached_extension_updates()
+                snapshot = await asyncio.to_thread(
+                    extension_store.check_extension_updates, refresh=True,
+                )
+                previous_available = set((previous or {}).get("available") or [])
+                available = set(snapshot.get("available") or [])
+                if available != previous_available:
+                    await coordinator.broadcast_global(
+                        "extension_updates_changed",
+                        {"available": sorted(available)},
+                    )
+            except Exception:
+                logger.exception("extension update check failed")
+            await asyncio.sleep(_EXTENSION_UPDATE_CHECK_INTERVAL_SECONDS)
+
+    _extension_update_checker_task = asyncio.create_task(
+        _loop(), name="extension-update-checker"
+    )
+
+
 @app.on_event("startup")
 async def on_startup():
     """Boot uvicorn fast: every long-running step (migrations,
@@ -12398,6 +12433,7 @@ async def on_startup():
     schedule_ticker.start()
 
     _start_tailscale_serve_reconciler()
+    _start_extension_update_checker()
 
     # Daily model-catalog refresher. Assumes uvicorn --workers 1
     # (see auth.py:8, run.sh:132) — a second worker would fire a

@@ -14,6 +14,7 @@ import { NativeImportSetting } from "./NativeImportSetting";
 import { DelegateTaskPolicySetting } from "./DelegateTaskPolicySetting";
 import { InternalLLMSetting } from "./InternalLLMSetting";
 import { SearchInput } from "./SearchInput";
+import { eventBus } from "../lib/eventBus";
 import { LanguageSelector } from "./LanguageSelector";
 import {
   availableModesForForm,
@@ -1119,6 +1120,8 @@ export function ExtensionUiSettingsSection() {
   const [error, setError] = useState("");
   const [creatingPersonalHarness, setCreatingPersonalHarness] = useState(false);
   const [deletingIds, setDeletingIds] = useState<Set<string>>(() => new Set());
+  const [availableUpdates, setAvailableUpdates] = useState<Record<string, { availableVersion: string }>>({});
+  const [updatingIds, setUpdatingIds] = useState<Set<string>>(() => new Set());
   const [savingNativeExposure, setSavingNativeExposure] = useState<Set<string>>(() => new Set());
   const [nativeExposureErrors, setNativeExposureErrors] = useState<Record<string, string>>({});
   const [openConfigModule, setOpenConfigModule] = useState<{
@@ -1212,9 +1215,39 @@ export function ExtensionUiSettingsSection() {
     }
   }, []);
 
+  const refreshUpdates = useCallback(async () => {
+    try {
+      const res = await fetch(`${API}/api/extensions/updates`, { credentials: "include" });
+      if (!res.ok) return;
+      const data = await res.json();
+      const next: Record<string, { availableVersion: string }> = {};
+      for (const row of Array.isArray(data.results) ? data.results : []) {
+        if (row?.update_available === true && typeof row.extension_id === "string") {
+          next[row.extension_id] = {
+            availableVersion: typeof row.available_version === "string" ? row.available_version : "",
+          };
+        }
+      }
+      setAvailableUpdates(next);
+    } catch {
+      // offline: keep the last known projection
+    }
+  }, []);
+
   useEffect(() => {
     void refresh();
-  }, [refresh]);
+    void refreshUpdates();
+    const unsubscribeUpdates = eventBus.subscribe("extension_updates_changed", () => {
+      void refreshUpdates();
+    });
+    const unsubscribeExtensions = eventBus.subscribe("extensions_changed", () => {
+      void refreshUpdates();
+    });
+    return () => {
+      unsubscribeUpdates();
+      unsubscribeExtensions();
+    };
+  }, [refresh, refreshUpdates]);
 
   const patch = useCallback(
     async (path: string, body: unknown, onError?: () => void) => {
@@ -1496,6 +1529,39 @@ export function ExtensionUiSettingsSection() {
     [refresh, t],
   );
 
+  const updateExtension = useCallback(
+    async (id: string) => {
+      setUpdatingIds((prev) => new Set(prev).add(id));
+      setError("");
+      try {
+        const res = await fetch(`${API}/api/extensions/${encodeURIComponent(id)}/update`, {
+          method: "POST",
+          credentials: "include",
+        });
+        if (!res.ok) {
+          let detail = "";
+          try {
+            const payload = await res.json();
+            detail = typeof payload.detail === "string" ? payload.detail : "";
+          } catch {
+            detail = await res.text();
+          }
+          throw new Error(detail || t("settings.extensionsUpdateFailed"));
+        }
+        await Promise.all([refresh(), refreshUpdates()]);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : t("settings.extensionsUpdateFailed"));
+      } finally {
+        setUpdatingIds((prev) => {
+          const next = new Set(prev);
+          next.delete(id);
+          return next;
+        });
+      }
+    },
+    [refresh, refreshUpdates, t],
+  );
+
   const createPersonalHarness = useCallback(async () => {
     setCreatingPersonalHarness(true);
     setError("");
@@ -1579,6 +1645,28 @@ export function ExtensionUiSettingsSection() {
               )}
             </div>
             <div className="extension-ui-settings-header-actions">
+              {availableUpdates[row.id] && (
+                <>
+                  <span className="extension-ui-settings-update-badge">
+                    {availableUpdates[row.id].availableVersion
+                      ? t("settings.extensionsUpdateAvailableVersion", {
+                          version: availableUpdates[row.id].availableVersion,
+                        })
+                      : t("settings.extensionsUpdateAvailable")}
+                  </span>
+                  <button
+                    type="button"
+                    className="btn-secondary extension-ui-settings-update"
+                    disabled={updatingIds.has(row.id)}
+                    onClick={() => void updateExtension(row.id)}
+                  >
+                    <Icon name="refresh" size={13} />
+                    {updatingIds.has(row.id)
+                      ? t("settings.extensionsUpdating")
+                      : t("settings.extensionsUpdate")}
+                  </button>
+                </>
+              )}
               <label className="extension-ui-settings-toggle extension-ui-settings-main-toggle">
                 <input
                   type="checkbox"
