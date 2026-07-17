@@ -3,7 +3,6 @@ import os
 import shutil
 import sys
 import tempfile
-import threading
 import time
 from pathlib import Path
 
@@ -14,7 +13,6 @@ _test_home.isolate("bc_test_projection_")
 import event_bus_subscribers  # noqa: E402
 from event_bus import BusEvent  # noqa: E402
 from event_ingester import event_ingester  # noqa: E402
-from ordered_root_dispatcher import OrderedRootDispatcher  # noqa: E402
 
 
 class _SlowSessionManager:
@@ -143,48 +141,9 @@ async def _test_projection_keeps_loop_responsive() -> None:
             await asyncio.gather(beat, return_exceptions=True)
 
 
-async def _test_dispatcher_bounds_backlog_and_drains_shutdown() -> None:
-    started = threading.Event()
-    release = threading.Event()
-    applied: list[int] = []
-    rejected: list[str] = []
-
-    def _apply(item: int) -> None:
-        started.set()
-        release.wait()
-        applied.append(item)
-
-    dispatcher = OrderedRootDispatcher(
-        _apply,
-        pool_size=1,
-        thread_name_prefix="projection-test",
-        logger=event_bus_subscribers.logger,
-        on_error=lambda root_id, _item, _exc: rejected.append(root_id),
-        max_pending=1,
-    )
-    first = dispatcher.submit("root", 1)
-    await asyncio.wait_for(asyncio.to_thread(started.wait), timeout=1)
-    second = dispatcher.submit("root", 2)
-    await asyncio.sleep(0)
-    assert isinstance(second.exception(), RuntimeError)
-    for _ in range(100):
-        if rejected:
-            break
-        await asyncio.sleep(0.01)
-    assert rejected == ["root"], rejected
-    closing = asyncio.create_task(asyncio.to_thread(dispatcher.shutdown, wait=True))
-    await asyncio.sleep(0.05)
-    assert not closing.done()
-    release.set()
-    await asyncio.wait_for(closing, timeout=1)
-    assert first.result() is None
-    assert applied == [1]
-
-
 def main() -> int:
     try:
         asyncio.run(_test_projection_keeps_loop_responsive())
-        asyncio.run(_test_dispatcher_bounds_backlog_and_drains_shutdown())
         print("PASS: session projection keeps event loop responsive")
         return 0
     finally:

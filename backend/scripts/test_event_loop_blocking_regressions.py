@@ -77,7 +77,6 @@ def test_session_projection_uses_bounded_off_loop_drainer() -> None:
         apply_row,
         read_rows,
         lambda root_id, _exc: dirty_roots.append(root_id),
-        shards=1,
         max_active_roots=1,
         chunk_size=1,
     )

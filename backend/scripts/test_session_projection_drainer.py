@@ -38,7 +38,6 @@ class Harness:
             self.apply,
             self.read,
             lambda root, exc: self.dirty.append((root, exc)),
-            shards=2,
             max_active_roots=16,
             chunk_size=chunk_size,
         )
@@ -299,14 +298,11 @@ def test_shutdown_is_bounded_and_marks_blocked_root_dirty() -> None:
     harness.drainer.barrier(root)
 
 
-def test_same_shard_root_progress_and_shutdown_barrier() -> None:
-    first = "root-0"
-    second = next(
-        f"root-{index}"
-        for index in range(1, 100)
-        if hash(f"root-{index}") % 2 == hash(first) % 2
-    )
-    roots = [first, second]
+def test_unrelated_roots_progress_independently_and_shutdown_barrier() -> None:
+    """Each root gets its own dedicated drain thread (KeyedLaneExecutor),
+    so a blocked root must never delay an unrelated root's progress --
+    not just "eventually before", but concurrently, while still blocked."""
+    roots = ["root-0", "root-1"]
     rows = {
         root: [{"seq": seq, "sid": root, "msg_id": "m", "type": "agent_message", "source": "event_bus", "data": {}} for seq in range(1, 5)]
         for root in roots
@@ -329,6 +325,13 @@ def test_same_shard_root_progress_and_shutdown_barrier() -> None:
         harness.drainer.submit(_command(roots[0], row))
     for row in rows[roots[1]]:
         harness.drainer.submit(_command(roots[1], row))
+    # root-1 must fully finish while root-0's first chunk is still
+    # blocked -- proving they never share a thread.
+    deadline = time.monotonic() + 2
+    while (roots[1], 4) not in harness.applied and time.monotonic() < deadline:
+        time.sleep(0.005)
+    assert (roots[1], 4) in harness.applied, harness.applied
+    assert (roots[0], 4) not in harness.applied, harness.applied
     release.set()
     for root in roots:
         harness.drainer.barrier(root)
@@ -348,7 +351,7 @@ def main() -> int:
         test_conflicting_duplicate_expectation_is_dirty,
         test_missing_journal_gap_dirties_without_advancing_past_gap,
         test_shutdown_is_bounded_and_marks_blocked_root_dirty,
-        test_same_shard_root_progress_and_shutdown_barrier,
+        test_unrelated_roots_progress_independently_and_shutdown_barrier,
     ]
     for test in tests:
         test()

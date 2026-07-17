@@ -19,11 +19,11 @@ they never run before persistence.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import json
 import logging
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Callable
 
@@ -35,6 +35,7 @@ from event_journal import (
     event_journal_writer,
 )
 from event_shape import journal_row_projects_to_render_tree
+from keyed_lane_executor import KeyedLaneExecutor
 from session_manager import manager as session_manager
 import perf
 
@@ -43,7 +44,6 @@ logger = logging.getLogger(__name__)
 
 _JOURNAL_SUBSCRIBER_PRIORITY = 10  # MUST run before WS-facing subscribers
 _SESSION_PROJECTION_PRIORITY = 20  # after journal write, before WS
-_SESSION_PROJECTION_SHARDS = 8
 _SESSION_PROJECTION_MAX_PENDING = 256
 _SESSION_PROJECTION_DRAIN_CHUNK = 128
 
@@ -83,7 +83,6 @@ class SessionProjectionDrainer:
         read_rows: Callable[[str, int, int], list[dict]],
         mark_dirty: Callable[[str, BaseException], None],
         *,
-        shards: int,
         max_active_roots: int,
         chunk_size: int,
     ) -> None:
@@ -96,12 +95,9 @@ class SessionProjectionDrainer:
         self._states: dict[str, _ProjectionRootState] = {}
         self._active_roots = 0
         self._accepting = True
-        self._executors = tuple(
-            ThreadPoolExecutor(
-                max_workers=1,
-                thread_name_prefix=f"session-projection-{i}",
-            )
-            for i in range(shards)
+        self._executor_pool = KeyedLaneExecutor(
+            lanes=("drain",),
+            thread_name_prefix="session-projection",
         )
         perf.register_queue("session_projection.active_roots", self.active_root_count)
         perf.register_queue("session_projection.pending_rows", self.pending_row_count)
@@ -175,11 +171,8 @@ class SessionProjectionDrainer:
             self._executor(command.root_id).submit(self._drain_chunk, command.root_id)
             return True
 
-    def _executor(self, root_id: str) -> ThreadPoolExecutor:
-        return self._executors[self._shard(root_id)]
-
-    def _shard(self, root_id: str) -> int:
-        return hash(root_id) % len(self._executors)
+    def _executor(self, root_id: str) -> concurrent.futures.Executor:
+        return self._executor_pool.executor(root_id, lane="drain")
 
     def _drain_chunk(self, root_id: str) -> None:
         with self._lock:
@@ -191,7 +184,6 @@ class SessionProjectionDrainer:
             "session_projection.age",
             (time.perf_counter() - queued_at) * 1000.0,
         )
-        perf.record_lag(f"session_projection.shard{self._shard(root_id)}", queued_at)
         try:
             rows = self._read_rows(root_id, after_seq, self._chunk_size)
             if not rows and after_seq < target:
@@ -293,8 +285,11 @@ class SessionProjectionDrainer:
                 root_id,
                 RuntimeError("session projection shutdown timed out"),
             )
-        for executor in self._executors:
-            executor.shutdown(wait=wait and drained, cancel_futures=not drained)
+        # A root's dedicated thread never holds another root's queued
+        # chunk (unlike the old hash-sharded pool), so there is nothing
+        # cross-root left to abandon on a timed-out drain -- just stop
+        # waiting for stragglers rather than forcing a cancel.
+        self._executor_pool.shutdown(wait=wait and drained)
         perf.unregister_queue("session_projection.active_roots")
         perf.unregister_queue("session_projection.pending_rows")
 
@@ -427,7 +422,6 @@ def _new_session_projection_dispatcher() -> SessionProjectionDrainer:
         _apply_session_projection_row,
         _read_session_projection_rows,
         _mark_session_projection_dirty,
-        shards=_SESSION_PROJECTION_SHARDS,
         max_active_roots=_SESSION_PROJECTION_MAX_PENDING,
         chunk_size=_SESSION_PROJECTION_DRAIN_CHUNK,
     )
