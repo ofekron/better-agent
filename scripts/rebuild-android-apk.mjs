@@ -15,6 +15,7 @@ import { execFileSync, execSync } from "node:child_process";
 import { copyFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { androidRebuildDecision } from "./android-rebuild-policy.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, "..");
@@ -29,26 +30,6 @@ const ANDROID_HOME = process.env.ANDROID_HOME || `${process.env.HOME}/Library/An
 
 const log = (m) => console.log(`[apk] ${m}`);
 const warn = (m) => console.warn(`[apk] ${m}`);
-
-// Staged paths whose change means the bundled APK is stale.
-const RELEVANT = [
-  /^frontend\/src\//,
-  /^frontend\/public\//,
-  /^frontend\/index\.html$/,
-  /^frontend\/vite\.config\./,
-  /^frontend\/tsconfig.*\.json$/,
-  /^frontend\/package(-lock)?\.json$/,
-  /^frontend\/capacitor\.config\./,
-  /^frontend\/android\/app\/src\//,
-  /^frontend\/android\/(app\/)?build\.gradle(\.kts)?$/,
-  /^frontend\/android\/variables\.gradle$/,
-  /^frontend\/android\/capacitor\.(build|settings)\.gradle$/,
-];
-// Build outputs / generated files — never a trigger (and gitignored anyway).
-const IRRELEVANT = [
-  /^frontend\/android\/(app\/)?build\//,
-  /^frontend\/android\/\.gradle\//,
-];
 
 function sh(cmd) {
   return execSync(cmd, { encoding: "utf8", cwd: ROOT }).toString().trim();
@@ -81,18 +62,14 @@ function stagedFiles() {
   return out ? out.split("\n") : [];
 }
 
-function isRelevant(file) {
-  if (IRRELEVANT.some((re) => re.test(file))) return false;
-  return RELEVANT.some((re) => re.test(file));
-}
-
 if (process.env.BA_SKIP_APK === "1") {
   log("BA_SKIP_APK=1 — skipping.");
   process.exit(0);
 }
 
 const files = stagedFiles();
-if (process.env.BA_FORCE_APK_REBUILD !== "1" && !files.some(isRelevant)) {
+const decision = androidRebuildDecision(files);
+if (process.env.BA_FORCE_APK_REBUILD !== "1" && !decision.rebuild) {
   log("no APK-relevant staged changes — skipping rebuild.");
   process.exit(0);
 }

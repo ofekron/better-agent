@@ -4,6 +4,7 @@ import { mkdirSync, openSync, closeSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isThrottled, recordRun } from "./artifact-throttle.mjs";
+import { androidRebuildDecision } from "./android-rebuild-policy.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, "..");
@@ -45,10 +46,16 @@ if (files.length === 0) {
   process.exit(0);
 }
 
+const androidDecision = androidRebuildDecision(files);
+
 // Throttle: at most one rebuild scheduled per window. BA_FORCE_ARTIFACT_REBUILD=1 bypasses.
 const stampPath = join(LOG_DIR, "last-scheduled");
 const now = Date.now();
-if (process.env.BA_FORCE_ARTIFACT_REBUILD !== "1" && isThrottled(stampPath, now)) {
+if (
+  process.env.BA_FORCE_ARTIFACT_REBUILD !== "1"
+  && !androidDecision.rebuild
+  && isThrottled(stampPath, now)
+) {
   console.log("[artifacts] throttled — a rebuild was scheduled within the last 10 min; skipping.");
   process.exit(0);
 }
@@ -77,4 +84,7 @@ const child = spawn(
 child.unref();
 closeSync(fd);
 
-console.log(`[artifacts] rebuild scheduled in background; log: ${logPath}`);
+const reason = androidDecision.rebuild
+  ? `Android inputs changed: ${androidDecision.relevantPaths.join(", ")}`
+  : "non-Android artifact check";
+console.log(`[artifacts] rebuild scheduled in background (${reason}); log: ${logPath}`);

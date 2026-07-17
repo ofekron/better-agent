@@ -48,6 +48,11 @@ try {
     fail("expected pre-commit hook to expose the current artifact skip env var");
   }
 
+  const schedulerSource = readFileSync(new URL("./rebuild-artifacts-background.mjs", import.meta.url), "utf8");
+  if (!schedulerSource.includes("!androidDecision.rebuild\n  && isThrottled")) {
+    fail("expected Android-relevant commits to bypass the shared artifact throttle");
+  }
+
   const workerSource = readFileSync(new URL("./rebuild-artifacts-worker.mjs", import.meta.url), "utf8");
   const waitIndex = workerSource.indexOf("waitForSourceCommit();");
   const apkRunIndex = workerSource.indexOf('run("rebuild-android-apk.mjs")');
