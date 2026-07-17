@@ -12471,6 +12471,21 @@ async def on_startup():
         except Exception:
             logger.exception("requirements processor prewarm failed")
 
+    # Catch-all trigger for the manual-requirements git-history miner: doc
+    # commits made while the backend was offline (or before the post-commit
+    # hook was installed) would otherwise sit unmined until someone runs the
+    # CLI by hand. The per-commit trigger is the .githooks/post-commit hook;
+    # this just ensures a restart also picks up anything it missed.
+    async def _prewarm_manual_requirements_mining() -> None:
+        try:
+            import requirement_context
+
+            await asyncio.to_thread(requirement_context.ensure_manual_requirements_mining)
+        except Exception:
+            logger.exception("manual requirements mining startup trigger failed")
+
+    asyncio.create_task(_prewarm_manual_requirements_mining(), name="manual-requirements-mining-startup")
+
     async def _models_catalog_refresher() -> None:
         POLL = 300
         while True:
