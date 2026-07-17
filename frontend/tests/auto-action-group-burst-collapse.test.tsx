@@ -54,12 +54,12 @@ function renderGroup(n: number) {
 }
 
 describe("action group burst collapse", () => {
-  it("a small group (<=3 actions) stays open by default", () => {
+  it("a small completed group stays compact by default", () => {
     const group = renderGroup(2);
     expect(group).not.toBeNull();
     expect(group!.querySelector(".auto-action-group-count")?.textContent).toBe("2 actions");
-    expect(group!.classList.contains("open")).toBe(true);
-    expect(group!.querySelector(".auto-action-group-header")?.getAttribute("aria-expanded")).toBe("true");
+    expect(group!.classList.contains("open")).toBe(false);
+    expect(group!.querySelector(".auto-action-group-header")?.getAttribute("aria-expanded")).toBe("false");
   });
 
   it("a burst (>3 actions) auto-collapses into a single header", () => {

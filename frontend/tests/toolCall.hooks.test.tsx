@@ -313,7 +313,12 @@ describe("ToolCall — Bash result rendering", () => {
       />,
     );
 
-    const rendered = h.container.querySelector(".bash-result-content")?.textContent;
+    const toggle = h.container.querySelector(".tool-result-toggle") as HTMLButtonElement;
+    expect(toggle).not.toBeNull();
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    await act(async () => toggle.click());
+
+    const rendered = h.container.querySelector(".tool-result-content")?.textContent;
     expect(rendered).toBe([
       "matched",
       "next line",

@@ -4667,45 +4667,6 @@ button.run-badge-clickable:focus-visible {
   line-height: 1.4;
 }
 
-.bash-result {
-  border-top: 1px solid var(--border);
-}
-
-.bash-result-content {
-  margin: 0;
-  padding: 6px 12px;
-  font-size: calc(12px * var(--app-font-scale));
-  line-height: 1.5;
-  background: var(--bg-primary);
-  white-space: pre-wrap;
-  word-break: break-all;
-  color: var(--text-secondary);
-  font-family: "SF Mono", "Fira Code", monospace;
-}
-
-.bash-result-collapsed {
-  overflow: hidden;
-}
-
-.bash-result-expand {
-  display: block;
-  width: 100%;
-  padding: 4px 12px;
-  background: transparent;
-  border: none;
-  border-top: 1px solid var(--border);
-  color: var(--text-muted);
-  font-size: calc(11px * var(--app-font-scale));
-  font-family: "SF Mono", "Fira Code", monospace;
-  cursor: pointer;
-  text-align: start;
-}
-
-.bash-result-expand:hover {
-  color: var(--text-primary);
-  background: var(--bg-tertiary);
-}
-
 .agent-prompt-section {
   padding: 0 12px 6px;
 }
@@ -5116,19 +5077,38 @@ button.run-badge-clickable:focus-visible {
 /* Tool Result (inside tool call card)     */
 /* ======================================= */
 
-.tool-result-inline {
-  padding: 3px 12px 6px;
-  font-size: calc(12px * var(--app-font-scale));
-  color: var(--text-muted);
-  font-family: "SF Mono", "Fira Code", monospace;
-  border-top: 1px solid var(--border);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .tool-result-block {
   border-top: 1px solid var(--border);
+}
+
+.tool-result-body-shell {
+  display: grid;
+  grid-template-rows: 0fr;
+  opacity: 0;
+  overflow: hidden;
+  transition: grid-template-rows 180ms ease, opacity 180ms ease;
+}
+
+.tool-result-body-shell.open {
+  grid-template-rows: 1fr;
+  opacity: 1;
+}
+
+.tool-result-body-shell > * {
+  min-height: 0;
+}
+
+@starting-style {
+  .tool-result-body-shell.open {
+    grid-template-rows: 0fr;
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tool-result-body-shell {
+    transition: none;
+  }
 }
 
 .tool-result-toggle {

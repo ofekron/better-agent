@@ -1,4 +1,4 @@
-import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import Editor from "@monaco-editor/react";
 import { ProviderConfigSyncPage } from "@better-agent/provider-config-sync-ui";
@@ -844,9 +844,44 @@ function WebReaderCard({
   );
 }
 
+function CollapsibleToolResult({ preview, body }: { preview: ReactNode; body: ReactNode }) {
+  const [state, setState] = useState({ open: false, bodyMounted: false });
+  const { open, bodyMounted } = state;
+
+  return (
+    <div className="tool-result-block">
+      <button
+        type="button"
+        className="tool-result-toggle"
+        aria-expanded={open}
+        onClick={(event) => {
+          event.stopPropagation();
+          setState((current) => current.open
+            ? { ...current, open: false }
+            : { open: true, bodyMounted: true });
+        }}
+      >
+        <span className="diff-arrow">{open ? <Icon name="chevron-down" size={14} style={{ verticalAlign: "-2px" }} /> : <Icon name="chevron-right" size={14} style={{ verticalAlign: "-2px" }} />}</span>
+        {preview}
+      </button>
+      {bodyMounted ? (
+        <div
+          className={`tool-result-body-shell${open ? " open" : ""}`}
+          aria-hidden={!open}
+          onTransitionEnd={(event) => {
+            if (event.target !== event.currentTarget || open) return;
+            setState({ open: false, bodyMounted: false });
+          }}
+        >
+          {body}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function ToolResult({ result, tool, filePath, onFileClick }: { result: string; tool: string; filePath?: string; onFileClick?: (path: string, focus?: FileFocus) => void }) {
   const { t } = useTranslation();
-  const [showResult, setShowResult] = useState(false);
   const clean = result.replace(/^[\p{Emoji_Presentation}\p{Emoji}\uFE0F\u200D]+\s*/u, "").trim();
   if (!clean) return null;
 
@@ -858,26 +893,17 @@ function ToolResult({ result, tool, filePath, onFileClick }: { result: string; t
     const entries = parseWebReaderResult(stripped);
     if (entries && entries.length > 0) {
       return (
-        <div className="tool-result-block">
-          <button
-            className="tool-result-toggle"
-            onClick={(e) => { e.stopPropagation(); setShowResult(!showResult); }}
-          >
-            <span className="diff-arrow">{showResult ? <Icon name="chevron-down" size={14} style={{ verticalAlign: "-2px" }} /> : <Icon name="chevron-right" size={14} style={{ verticalAlign: "-2px" }} />}</span>
+        <CollapsibleToolResult
+          preview={<>
             <span className="webreader-tag">Web</span>
             <span className="tool-result-preview">{entries.length} result{entries.length !== 1 ? "s" : ""}</span>
-          </button>
-          {showResult && (
-            <div className="tool-result-content webreader-result-wrap">
-              <WebReaderResult entries={entries} />
-            </div>
-          )}
-        </div>
+          </>}
+          body={<div className="tool-result-content webreader-result-wrap"><WebReaderResult entries={entries} /></div>}
+        />
       );
     }
   }
 
-  const isShort = stripped.length < 120 && !stripped.includes("\n");
   const isFile = isFileContent(stripped) || ["Read", "read_file"].includes(tool);
   // If the result is a JSON object/array, render it with a tree viewer
   // instead of raw text. Skip file-content to preserve the line-numbered
@@ -892,36 +918,18 @@ function ToolResult({ result, tool, filePath, onFileClick }: { result: string; t
       ? `stale${freshness.unhandled_prompts ? ` by ${freshness.unhandled_prompts}` : ""}`
       : freshness ? "fresh" : "";
     return (
-      <div className="tool-result-block">
-        <button
-          className="tool-result-toggle"
-          onClick={(e) => { e.stopPropagation(); setShowResult(!showResult); }}
-        >
-          <span className="diff-arrow">{showResult ? "\u25BC" : "\u25B6"}</span>
+      <CollapsibleToolResult
+        preview={<>
           <span className="requirements-tag">Req</span>
           <span className="tool-result-preview">
             {requirementsResult.count ?? matches.length} matches{freshnessLabel ? ` · ${freshnessLabel}` : ""}
           </span>
-        </button>
-        {showResult && (
-          <div className="tool-result-content requirements-result-wrap">
-            <RequirementsResultView result={requirementsResult} onFileClick={onFileClick} />
-          </div>
-        )}
-      </div>
+        </>}
+        body={<div className="tool-result-content requirements-result-wrap"><RequirementsResultView result={requirementsResult} onFileClick={onFileClick} /></div>}
+      />
     );
   }
 
-  // Short results: show inline (but if they're JSON, still use the tree)
-  if (isShort && !parsedJson) {
-    return (
-      <div className="tool-result-inline">
-        <span className="tool-result-text">{linkifyFilePaths(stripped, onFileClick)}</span>
-      </div>
-    );
-  }
-
-  // Longer results: collapsible
   const preview = parsedJson
     ? summarizeArgs(parsedJson) || stripped.split("\n")[0].slice(0, 60)
     : stripped.split("\n")[0].slice(0, 60);
@@ -930,27 +938,19 @@ function ToolResult({ result, tool, filePath, onFileClick }: { result: string; t
     : "";
 
   return (
-    <div className="tool-result-block">
-      <button
-        className="tool-result-toggle"
-        onClick={(e) => { e.stopPropagation(); setShowResult(!showResult); }}
-      >
-        <span className="diff-arrow">{showResult ? "\u25BC" : "\u25B6"}</span>
+    <CollapsibleToolResult
+      preview={<>
         {parsedJson != null && <span className="json-embedded-tag">{t('toolCall.jsonTag')}</span>}
         <span className="tool-result-preview">{linkifyFilePaths(preview, onFileClick)}{charCount}</span>
-      </button>
-      {showResult && (
-        parsedJson ? (
-          <div className="tool-result-content tool-result-json">
-            <JsonNode value={parsedJson} defaultOpen />
-          </div>
-        ) : isFile ? (
-          <FileContentMonaco text={stripped} filePath={filePath} />
-        ) : (
-          <pre className="tool-result-content">{linkifyFilePaths(stripped, onFileClick)}</pre>
-        )
+      </>}
+      body={parsedJson ? (
+        <div className="tool-result-content tool-result-json"><JsonNode value={parsedJson} defaultOpen /></div>
+      ) : isFile ? (
+        <FileContentMonaco text={stripped} filePath={filePath} />
+      ) : (
+        <pre className="tool-result-content">{linkifyFilePaths(stripped, onFileClick)}</pre>
       )}
-    </div>
+    />
   );
 }
 
@@ -1060,8 +1060,6 @@ function parseSkillArgs(args: string): { skill?: string; prompt?: string; args?:
   return { skill: skill?.[1], args: prompt?.[1] };
 }
 
-const BASH_RESULT_COLLAPSED_LINES = 6;
-const BASH_RESULT_COLLAPSED_HEIGHT = 130;
 const CODEX_BASH_RESULT_HEADER =
   /^(Chunk ID: [^\n]*\nWall time: [^\n]*\nProcess exited with code [^\n]*\nOriginal token count: [^\n]*\n)Output:\n?/;
 
@@ -1085,14 +1083,10 @@ function BashToolCall({ tool, args, result, onFileClick }: {
   result?: string;
   onFileClick?: (path: string, focus?: FileFocus) => void;
 }) {
-  const [showFull, setShowFull] = useState(false);
   const bashArgs = parseBashArgs(args);
   const command = bashArgs?.command || args;
   const description = bashArgs?.description;
   const cleanResult = formatBashResult(result);
-
-  const resultLines = cleanResult ? cleanResult.split("\n").length : 0;
-  const needsCollapse = resultLines > BASH_RESULT_COLLAPSED_LINES;
 
   return (
     <div className="tool-call bash-tool-call">
@@ -1104,24 +1098,7 @@ function BashToolCall({ tool, args, result, onFileClick }: {
       <div className="bash-command-line">
         <span className="bash-command">{command}</span>
       </div>
-      {cleanResult && (
-        <div className="bash-result">
-          <pre
-            className={`bash-result-content ${!showFull && needsCollapse ? "bash-result-collapsed" : ""}`}
-            style={!showFull && needsCollapse ? { maxHeight: BASH_RESULT_COLLAPSED_HEIGHT } : undefined}
-          >
-            {linkifyFilePaths(cleanResult, onFileClick)}
-          </pre>
-          {needsCollapse && !showFull && (
-            <button
-              className="bash-result-expand"
-              onClick={(e) => { e.stopPropagation(); setShowFull(true); }}
-            >
-              <Icon name="chevron-down" size={12} style={{ verticalAlign: "-2px" }} /> {resultLines} lines — show all
-            </button>
-          )}
-        </div>
-      )}
+      {cleanResult && <ToolResult result={cleanResult} tool={tool} onFileClick={onFileClick} />}
     </div>
   );
 }

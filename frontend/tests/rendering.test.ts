@@ -710,7 +710,8 @@ describe("message rendering", () => {
     const tool = container.querySelector(".tool-call");
     expect(tool).not.toBeNull();
     expect(tool!.textContent ?? "").toContain("echo visible");
-    expect(tool!.querySelector(".bash-result-content")).not.toBeNull();
+    expect(tool!.querySelector(".tool-result-toggle")?.getAttribute("aria-expanded")).toBe("false");
+    expect(tool!.querySelector(".tool-result-content")).toBeNull();
     expect(tool!.textContent ?? "").toContain(marker);
     const boxes = Array.from(container.querySelectorAll(".message-box"));
     expect(boxes.some((box) => (box.textContent ?? "").includes(marker))).toBe(false);

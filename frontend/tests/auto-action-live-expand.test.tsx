@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from "vitest";
-import { render, cleanup } from "@testing-library/react";
+import { render, cleanup, fireEvent } from "@testing-library/react";
 import React from "react";
 import { TurnGroup } from "../src/components/MessageBubble";
 import { makeAssistantMsg, makeUserMsg } from "./fixtures";
@@ -49,6 +49,35 @@ function leadWithManyTools(count: number): WSEvent[] {
   return events;
 }
 
+function completedBashThenPendingBash(): WSEvent[] {
+  return [
+    agentMsg({
+      type: "assistant",
+      uuid: "lead",
+      message: { content: [{ type: "text", text: "Running checks." }] },
+    }),
+    agentMsg({
+      type: "assistant",
+      uuid: "tool-complete",
+      message: {
+        content: [{ type: "tool_use", id: "toolu_complete", name: "Bash", input: { command: "first" } }],
+      },
+    }),
+    agentMsg({
+      type: "user",
+      uuid: "result-complete",
+      message: { content: [{ type: "tool_result", tool_use_id: "toolu_complete", content: "FIRST_RESULT" }] },
+    }),
+    agentMsg({
+      type: "assistant",
+      uuid: "tool-pending",
+      message: {
+        content: [{ type: "tool_use", id: "toolu_pending", name: "Bash", input: { command: "second" } }],
+      },
+    }),
+  ];
+}
+
 function renderTurn({ running }: { running: boolean }) {
   const initiator = makeUserMsg({ id: "u-live", content: "go" });
   const response = makeAssistantMsg({
@@ -85,5 +114,36 @@ describe("live-leaf force expansion vs completed compact default", () => {
   it("renders the group compact once the turn is no longer live", () => {
     const { container } = renderTurn({ running: false });
     expect(groupHeader(container).getAttribute("aria-expanded")).toBe("false");
+  });
+
+  it("collapses a completed tool result when a later tool becomes the live leaf", () => {
+    const initiator = makeUserMsg({ id: "u-tool-result", content: "go" });
+    const response = makeAssistantMsg({
+      id: "a-tool-result",
+      content: "",
+      events: completedBashThenPendingBash(),
+      isStreaming: true,
+    });
+    const { container } = render(
+      <TurnGroup
+        initiatorMessage={initiator}
+        responseMessage={response}
+        sessionId="s1"
+        orchestrationMode="native"
+        sessionRunning
+        activelyStreaming
+        defaultCollapsed={false}
+      />,
+    );
+
+    expect(groupHeader(container).getAttribute("aria-expanded")).toBe("true");
+    expect(container.querySelector(".tool-result-content")).toBeNull();
+
+    const toggle = container.querySelector(".tool-result-toggle") as HTMLElement;
+    expect(toggle).not.toBeNull();
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    fireEvent.click(toggle);
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    expect(container.querySelector(".tool-result-content")?.textContent).toContain("FIRST_RESULT");
   });
 });
