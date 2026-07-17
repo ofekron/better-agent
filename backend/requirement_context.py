@@ -868,6 +868,17 @@ def _connect_fts(path: Path) -> sqlite3.Connection:
     return conn
 
 
+# Serializes FTS index builds/schema-repairs across threads, mirroring
+# _VECTOR_INDEX_LOCK below: _ensure_fts_index runs via run_in_executor from
+# concurrent requests, and its schema-drift repair (DROP TABLE + rebuild) is
+# not atomic across the DROP/CREATE/INSERT sequence, so two racing rebuilds
+# (or a rebuild racing a _run_fts_query reader on its own connection) could
+# otherwise observe a transient "no such table" instead of a clean result.
+# Shared across unit and thread indexes for the same reason the vector lock
+# is shared.
+_FTS_INDEX_LOCK = threading.Lock()
+
+
 def _ensure_fts_index(
     *,
     db_path: Path,
@@ -888,59 +899,75 @@ def _ensure_fts_index(
     if not source_path.exists():
         return {"ready": False, "reason": "source_missing", "path": str(db_path)}
     source_state = _index_source_state(source_path)
-    conn = _connect_fts(db_path)
-    try:
-        conn.executescript(f"""
-            CREATE TABLE IF NOT EXISTS {table_name}_state(
-                key TEXT PRIMARY KEY,
-                value TEXT NOT NULL
-            );
-            CREATE VIRTUAL TABLE IF NOT EXISTS {table_name} USING fts5(
-                search_text,
-                record_json UNINDEXED,
-                cwds_json UNINDEXED,
-                sort_key UNINDEXED,
-                tokenize='unicode61'
-            );
-        """)
-        stored = {
-            str(row[0]): str(row[1])
-            for row in conn.execute(f"SELECT key, value FROM {table_name}_state")
-        }
-        expected = {
-            "source_mtime_ns": source_state["mtime_ns"],
-            "source_size": source_state["size"],
-            "record_count": str(len(records)),
-        }
-        if stored != expected:
-            with conn:
-                conn.execute(f"DELETE FROM {table_name}")
-                conn.execute(f"DELETE FROM {table_name}_state")
-                conn.executemany(
-                    f"INSERT INTO {table_name}(search_text, record_json, cwds_json, sort_key) VALUES (?, ?, ?, ?)",
-                    [
-                        (
-                            search_text_fn(record),
-                            json.dumps(record, ensure_ascii=False, sort_keys=True),
-                            json.dumps(cwds_fn(record), ensure_ascii=False),
-                            str(sort_key_fn(record)),
-                        )
-                        for record in records
-                    ],
-                )
-                conn.executemany(
-                    f"INSERT INTO {table_name}_state(key, value) VALUES (?, ?)",
-                    list(expected.items()),
-                )
-        return {
-            "ready": True,
-            "path": str(db_path),
-            "source_path": str(source_path),
-            "record_count": len(records),
-            "rebuilt": stored != expected,
-        }
-    finally:
-        conn.close()
+    with _FTS_INDEX_LOCK:
+        conn = _connect_fts(db_path)
+        try:
+            existing_columns = {
+                str(row[1])
+                for row in conn.execute(f"PRAGMA table_info({table_name})")
+            }
+            if existing_columns and "cwds_json" not in existing_columns:
+                # Pre-existing on-disk index from before cwds_json was added to
+                # the schema: CREATE ... IF NOT EXISTS below is a no-op against
+                # it, so drop and let the block below rebuild from scratch
+                # (rebuildable cache, not a source of truth -- see
+                # json_store.py version-bump convention for the same "no live
+                # migrations" rule).
+                conn.executescript(f"""
+                    DROP TABLE IF EXISTS {table_name};
+                    DROP TABLE IF EXISTS {table_name}_state;
+                """)
+            conn.executescript(f"""
+                CREATE TABLE IF NOT EXISTS {table_name}_state(
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                );
+                CREATE VIRTUAL TABLE IF NOT EXISTS {table_name} USING fts5(
+                    search_text,
+                    record_json UNINDEXED,
+                    cwds_json UNINDEXED,
+                    sort_key UNINDEXED,
+                    tokenize='unicode61'
+                );
+            """)
+            stored = {
+                str(row[0]): str(row[1])
+                for row in conn.execute(f"SELECT key, value FROM {table_name}_state")
+            }
+            expected = {
+                "source_mtime_ns": source_state["mtime_ns"],
+                "source_size": source_state["size"],
+                "record_count": str(len(records)),
+            }
+            if stored != expected:
+                with conn:
+                    conn.execute(f"DELETE FROM {table_name}")
+                    conn.execute(f"DELETE FROM {table_name}_state")
+                    conn.executemany(
+                        f"INSERT INTO {table_name}(search_text, record_json, cwds_json, sort_key) VALUES (?, ?, ?, ?)",
+                        [
+                            (
+                                search_text_fn(record),
+                                json.dumps(record, ensure_ascii=False, sort_keys=True),
+                                json.dumps(cwds_fn(record), ensure_ascii=False),
+                                str(sort_key_fn(record)),
+                            )
+                            for record in records
+                        ],
+                    )
+                    conn.executemany(
+                        f"INSERT INTO {table_name}_state(key, value) VALUES (?, ?)",
+                        list(expected.items()),
+                    )
+            return {
+                "ready": True,
+                "path": str(db_path),
+                "source_path": str(source_path),
+                "record_count": len(records),
+                "rebuilt": stored != expected,
+            }
+        finally:
+            conn.close()
 
 
 def _run_fts_query(
