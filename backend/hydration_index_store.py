@@ -53,11 +53,26 @@ def _safe_root_dir(root_id: str) -> Path:
         or "\x00" in root_id
     ):
         raise ValueError("invalid hydration root id")
-    sessions = (ba_home() / "sessions").resolve()
-    root = sessions / root_id
-    if root.resolve(strict=False).parent != sessions:
-        raise ValueError("hydration root escapes sessions directory")
-    return root
+    # The canonical per-root state dir comes from session_store (single
+    # source): the flat sessions dir for regular roots, a
+    # routine-sessions/<routine> dir for routine roots. Hardcoding
+    # ba_home()/sessions here rejected every routine root's journal.
+    import session_store
+    root = session_store.root_state_dir(root_id)
+    resolved = root.resolve(strict=False)
+    home = ba_home().resolve()
+    # Fail closed: the dir must be named after the root and its parent
+    # must be one of the two legitimate session layouts — the flat
+    # sessions dir, or exactly one routine dir under routine-sessions.
+    # Any other location (symlink escape, nesting trick, a future
+    # layout nobody vetted here) is rejected.
+    parent = resolved.parent
+    if resolved.name != root_id or not (
+        parent == (home / "sessions").resolve()
+        or parent.parent == (home / "routine-sessions").resolve()
+    ):
+        raise ValueError("hydration root escapes the state home")
+    return resolved
 
 
 def _db_path(root_id: str) -> Path:
@@ -83,7 +98,7 @@ def _validate_journal(root_id: str, journal: Path) -> Path:
     candidate = Path(journal)
     if (
         candidate.name != "events.jsonl"
-        or candidate.parent.resolve(strict=False) != root
+        or candidate.parent.resolve(strict=False) != root.resolve(strict=False)
         or candidate.is_symlink()
     ):
         raise ValueError("hydration journal is outside its root")

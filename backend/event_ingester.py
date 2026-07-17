@@ -151,7 +151,7 @@ class EventIngester:
         self._durable_chain_head: dict[str, tuple[int, str, int]] = {}
 
     def _root_dir(self, root_id: str) -> Path:
-        return Path(session_store.session_file_path(root_id)).parent / root_id
+        return session_store.root_state_dir(root_id)
 
     def _events_path(self, root_id: str) -> Path:
         return self._root_dir(root_id) / "events.jsonl"

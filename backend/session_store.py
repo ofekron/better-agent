@@ -3316,6 +3316,16 @@ def session_file_path(sid: str) -> str:
     return str(_session_path(sid))
 
 
+def root_state_dir(root_id: str) -> Path:
+    """Canonical per-root state directory (events.jsonl, event_meta.json,
+    hydration cache, ...): a sibling directory of the root's session json,
+    named after the root. Lives next to wherever the json actually is —
+    the flat sessions dir or a routine-sessions/<routine> dir — so every
+    consumer (event_ingester, hydration_index_store) derives the same
+    location instead of assuming the flat layout."""
+    return _root_file_path(root_id).parent / root_id
+
+
 def root_session_file_path(root_id: str) -> Path:
     """Return a known root's storage path without fork resolution."""
     return _root_file_path(root_id)

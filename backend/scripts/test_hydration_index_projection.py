@@ -65,6 +65,37 @@ def main() -> int:
     offsets, first = store.load("root", journal)
     assert first["cold"] == 1 and offsets["a"] == (0,), (offsets, first)
 
+    # Routine-session layout: the root's session json (and therefore its
+    # state dir, per session_store.root_state_dir) lives under
+    # routine-sessions/<routine>/, not the flat sessions dir. The
+    # hydration guard must accept the canonical journal there and keep
+    # rejecting the same root's journal at any other location.
+    import session_store
+    routine_root = "routine-layout-root"
+    routine_dir = Path(HOME) / "routine-sessions" / "routine-abc"
+    routine_dir.mkdir(parents=True)
+    (routine_dir / f"{routine_root}.json").write_text(
+        json.dumps({"id": routine_root, "messages": []}),
+    )
+    routine_journal = routine_dir / routine_root / "events.jsonl"
+    routine_journal.parent.mkdir(parents=True)
+    routine_journal.write_bytes(_row("r", 1))
+    assert session_store.root_state_dir(routine_root) == routine_journal.parent
+    routine_offsets, routine_stats = store.load(routine_root, routine_journal)
+    assert routine_stats["cold"] == 1 and routine_offsets["r"] == (0,), (
+        routine_offsets, routine_stats,
+    )
+    assert store._db_path(routine_root).parent == routine_journal.parent.resolve()
+    wrong_location = Path(HOME) / "sessions" / routine_root / "events.jsonl"
+    wrong_location.parent.mkdir(parents=True)
+    wrong_location.write_bytes(_row("r", 1))
+    try:
+        store.load(routine_root, wrong_location)
+        raise AssertionError("non-canonical journal location accepted")
+    except ValueError:
+        pass
+    shutil.rmtree(wrong_location.parent)
+
     original_size = journal.stat().st_size
     digest = _next_digest(bytes(32).hex(), _row("a", 1))
     appended_row = _row("b", 2)
