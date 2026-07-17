@@ -117,6 +117,11 @@ export type WSEventType =
   | "turn_started"
   | "turn_stopped"
   | "turn_detached"
+  // Catch-all for canonical-event kinds with no dedicated render shape
+  // (session_discovered, worker lifecycle, todos_snapshot, unsupported
+  // blocks, ...). Data carries {kind, label, payload} — not rendered,
+  // available for internal use only.
+  | "other_typed_work"
   | "session_renamed"
   | "rewind_complete"
   // Interactive tool/command approval (Claude can_use_tool / Codex app-server).

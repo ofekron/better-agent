@@ -710,7 +710,7 @@ function CollapsibleTimelineBlock({
  *  (flatten → partition → dedup) so the preview matches
  *  what the user sees at the bottom of the expanded timeline. */
 const COLLAPSED_PREVIEW_NON_USER_FACING = new Set([
-  "complete", "session_discovered",
+  "complete", "session_discovered", "other_typed_work",
   "run_state", "command_received", "messages_delta",
   "turn_start", "turn_complete",
   "turn_started", "turn_stopped", "turn_detached",
@@ -1354,6 +1354,10 @@ function renderSingleEvent(
         />
       );
     case "session_discovered":
+      return null;
+    // Catch-all canonical-event kind — data stays available on the
+    // event for internal use, just not rendered.
+    case "other_typed_work":
       return null;
     // Internal lifecycle events — not rendered.
     case "turn_start":
