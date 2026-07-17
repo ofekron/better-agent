@@ -28,6 +28,7 @@ Runtime profile is the formal name for a provider/model/reasoning-effort selecti
 - Root instruction files: `AGENTS.md`, `CLAUDE.md`, and `GEMINI.md` hold provider-facing repo instructions.
 - Tests: backend integration scripts live under `backend/scripts/`; frontend tests live under `frontend/tests/`.
 - Persistent Better Agent state must route through `backend/paths.py::bc_home()` and honor `BETTER_AGENT_HOME`.
+- `backend/native_transcript_index.py`: FTS index over all provider transcripts. Its worker subprocess owns BOTH indexing writes AND `run_readonly_sql` query execution (served over a local authenticated endpoint with global admission and a 120s budget ceiling); the backend is a thin client and never runs heavy index SQL in-process. Test mode executes locally. FTS5 content is the single text store; the worker VACUUMs when free pages exceed threshold.
 
 ## Keeping This Skill Current
 

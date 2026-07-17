@@ -32,6 +32,8 @@ import logging
 import math
 import os
 import re
+import secrets
+import shutil
 import subprocess
 import sys
 import sqlite3
@@ -40,9 +42,11 @@ import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from multiprocessing import AuthenticationError
 from pathlib import Path
 from typing import Any, Iterator
 
+import paths
 from paths import ba_home, encode_cwd
 import portable_lock
 import native_internal_prompt
@@ -71,7 +75,7 @@ def set_roots_resolver(resolver) -> None:
     global _roots_resolver_override
     _roots_resolver_override = resolver
 
-_SCHEMA_VERSION = 19
+_SCHEMA_VERSION = 20
 _FTS_COLUMNS = (
     "text", "path", "sid", "cwd", "tag", "element_kind", "tool_name",
     "ts_utc", "role", "element_id", "element_index",
@@ -401,6 +405,53 @@ def _checkpoint_if_large(conn: sqlite3.Connection) -> None:
         logger.debug("native transcript WAL checkpoint failed", exc_info=True)
 
 
+# Reclaim free pages once they exceed a quarter of the file and a real size;
+# deletes and schema rebuilds otherwise leave the file at its high-water mark
+# forever (observed: 20GB file after the duplicate text table was dropped).
+_VACUUM_FREELIST_RATIO = 0.25
+_VACUUM_FREELIST_MIN_BYTES = 1 * 1024 * 1024 * 1024
+
+
+def _maybe_vacuum(conn: sqlite3.Connection) -> bool:
+    """Run VACUUM on the writer connection when enough of the file is free
+    pages. Worker-process only (refresh path); requires no open transaction.
+    Skips (fail-closed, logged) when free disk cannot hold the rewrite."""
+    try:
+        page_size = int(conn.execute("PRAGMA page_size").fetchone()[0])
+        page_count = int(conn.execute("PRAGMA page_count").fetchone()[0])
+        freelist_count = int(conn.execute("PRAGMA freelist_count").fetchone()[0])
+    except sqlite3.Error:
+        logger.debug("native transcript vacuum probe failed", exc_info=True)
+        return False
+    if page_count <= 0:
+        return False
+    freelist_bytes = freelist_count * page_size
+    if (
+        freelist_count / page_count < _VACUUM_FREELIST_RATIO
+        or freelist_bytes < _VACUUM_FREELIST_MIN_BYTES
+    ):
+        return False
+    db_bytes = page_count * page_size
+    free_disk = shutil.disk_usage(_db_path().parent).free
+    if free_disk < db_bytes:
+        logger.warning(
+            "native transcript vacuum skipped: need %d bytes free disk, have %d",
+            db_bytes, free_disk,
+        )
+        return False
+    started = time.monotonic()
+    try:
+        conn.execute("VACUUM")
+    except sqlite3.Error:
+        logger.exception("native transcript vacuum failed")
+        return False
+    logger.info(
+        "native transcript vacuum reclaimed=%d bytes elapsed_s=%.1f",
+        freelist_bytes, time.monotonic() - started,
+    )
+    return True
+
+
 def _readonly_connection() -> sqlite3.Connection:
     path = _db_path()
     conn = getattr(_readonly_local, "conn", None)
@@ -492,9 +543,6 @@ def _ensure_fts_schema(conn: sqlite3.Connection) -> None:
         meta_index_exists = conn.execute(
             "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'native_element_meta'"
         ).fetchone()
-        text_projection_exists = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'native_element_text'"
-        ).fetchone()
         repeat_group_exists = conn.execute(
             "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'native_repeat_group'"
         ).fetchone()
@@ -507,7 +555,6 @@ def _ensure_fts_schema(conn: sqlite3.Connection) -> None:
             or version_row[0] != str(_SCHEMA_VERSION)
             or not path_index_exists
             or not meta_index_exists
-            or not text_projection_exists
             or not repeat_group_exists
             or not repeat_best_exists
         ):
@@ -569,10 +616,6 @@ def _ensure_fts_schema(conn: sqlite3.Connection) -> None:
             prefix_8192_sha256 TEXT,
             text_len INTEGER,
             norm_text_len INTEGER
-        );
-        CREATE TABLE IF NOT EXISTS native_element_text (
-            rowid INTEGER PRIMARY KEY,
-            text TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS native_repeat_group (
             group_id INTEGER PRIMARY KEY,
@@ -1650,7 +1693,6 @@ def _insert_index_rows(
         return
     path_rows = []
     meta_rows = []
-    text_rows = []
     for row in rows:
         cursor = conn.execute(
             f"INSERT INTO native_element_fts({', '.join(_FTS_COLUMNS)}) "
@@ -1660,14 +1702,12 @@ def _insert_index_rows(
         rowid = cursor.lastrowid
         path_rows.append((rowid, path))
         meta_rows.append((rowid, *row[1:]))
-        text_rows.append((rowid, row[0]))
     conn.executemany("INSERT INTO native_element_path(rowid, path) VALUES (?, ?)", path_rows)
     conn.executemany(
         f"INSERT INTO native_element_meta(rowid, {', '.join(_META_COLUMNS)}) "
         f"VALUES ({', '.join('?' for _ in range(len(_META_COLUMNS) + 1))})",
         meta_rows,
     )
-    conn.executemany("INSERT INTO native_element_text(rowid, text) VALUES (?, ?)", text_rows)
     dirty_keys: list[tuple[str, str]] = []
     for meta_row in meta_rows:
         dirty_keys.extend(_repeat_dirty_keys_from_meta_values(
@@ -1799,10 +1839,6 @@ def _delete_path(conn: sqlite3.Connection, path: str, *, file_state: bool = True
         )
         conn.executemany(
             "DELETE FROM native_element_fts WHERE rowid = ?",
-            [(rowid,) for rowid in rowids],
-        )
-        conn.executemany(
-            "DELETE FROM native_element_text WHERE rowid = ?",
             [(rowid,) for rowid in rowids],
         )
         conn.execute("DELETE FROM native_element_path WHERE path = ?", (path,))
@@ -2112,6 +2148,8 @@ def refresh_once(
                     json.dumps(rounded_phase_timings, separators=(",", ":")),
                 )
                 conn.commit()
+                if not partial_full:
+                    _maybe_vacuum(conn)
                 with _refresh_cond:
                     _last_refresh_at = time.time()
                     _refresh_cond.notify_all()
@@ -2627,8 +2665,6 @@ class _MatchRecencyQuery:
             from_sql = f"native_element_meta m{index_hint} CROSS JOIN native_element_fts e ON e.rowid = m.rowid"
         else:
             from_sql = "native_element_fts e CROSS JOIN native_element_meta m ON m.rowid = e.rowid"
-        if self.uses_raw_text:
-            from_sql += " CROSS JOIN native_element_text r ON r.rowid = e.rowid"
         limit_sql = f" LIMIT {self.limit}" if self.limit is not None else ""
         return (
             f"SELECT {', '.join(item.sql for item in self.projections)} FROM {from_sql} "
@@ -2722,7 +2758,7 @@ def _parse_sql_projections(select_expr: str) -> tuple[_SqlProjection, ...] | Non
         alias = substr_match.group("alias")
         minimum_chars_sql = f"MAX(MIN(m.text_len - {start - 1}, {length}), 0)"
         projections.append(_SqlProjection(
-            f"substr(r.text,{start},{length}) AS {alias}", True, minimum_chars_sql,
+            f"substr(e.text,{start},{length}) AS {alias}", True, minimum_chars_sql,
         ))
     return tuple(projections)
 
@@ -2802,14 +2838,10 @@ def _rewrite_path_element_window_sql(sql: str, params: tuple = ()) -> str | None
             return None
     direction = (match.group("direction") or "asc").upper()
     scope = match.group("scope").lower()
-    text_join = (
-        " CROSS JOIN native_element_text r ON r.rowid = e.rowid"
-        if any(item.uses_raw_text for item in projections) else ""
-    )
     return (
         f"SELECT {', '.join(item.sql for item in projections)} "
         f"FROM native_element_meta m INDEXED BY native_element_meta_{scope}_element_index_idx "
-        "CROSS JOIN native_element_fts e ON e.rowid = m.rowid" + text_join + " "
+        "CROSS JOIN native_element_fts e ON e.rowid = m.rowid "
         f"WHERE m.{scope} = " + match.group("scope_value") + " AND m.element_index BETWEEN "
         + match.group("start") + " AND " + match.group("end")
         + (f" ORDER BY m.element_index {direction}" if "order by" in sql.lower() else "")
@@ -2847,17 +2879,13 @@ def _rewrite_metadata_recency_sql(sql: str, params: tuple = ()) -> str | None:
         if order_column == "ts_utc"
         else f"native_element_meta_{filter_column}_rowid_idx"
     )
-    rendered: list[str] = []
-    needs_text = False
-    for projection in projections:
-        if projection.sql.startswith("e.text"):
-            rendered.append("r.text" + projection.sql[len("e.text"):])
-            needs_text = True
-        else:
-            rendered.append(projection.sql)
-    text_join = " CROSS JOIN native_element_text r ON r.rowid = m.rowid" if needs_text else ""
+    needs_text = any(
+        projection.sql.startswith(("e.text", "substr(e.text")) for projection in projections
+    )
+    text_join = " CROSS JOIN native_element_fts e ON e.rowid = m.rowid" if needs_text else ""
     return (
-        f"SELECT {', '.join(rendered)} FROM native_element_meta m INDEXED BY {index_name}"
+        f"SELECT {', '.join(item.sql for item in projections)} "
+        f"FROM native_element_meta m INDEXED BY {index_name}"
         f"{text_join} WHERE m.{filter_column} = {match.group('value')} "
         f"ORDER BY m.{order_column} {direction} LIMIT {match.group('limit')}"
     )
@@ -3432,9 +3460,33 @@ def run_readonly_sql(
     """Run one read-only SELECT against the native-transcript FTS index.
 
     Returns ``{columns, rows, covered, usable}`` or ``{error, ...}``.
-    Hardened per the section header: authorizer denies anything but read/select,
-    fresh mode=ro connection, timeout, single statement only."""
+
+    Execution routes to the process that owns the index: the worker
+    subprocess serves queries over the local authenticated endpoint, with
+    global admission and a hard budget ceiling, so heavy FTS scans never
+    burn CPU/GIL inside the backend process. The worker itself and
+    test-mode (embedded, no worker) execute locally. No fallback: with no
+    live worker the query fails closed as ``worker_unavailable``."""
     _require_off_loop("run_readonly_sql")
+    if _this_process_is_worker or paths.is_test_mode():
+        return _run_readonly_sql_local(
+            sql, params, timeout_s=timeout_s, max_result_bytes=max_result_bytes,
+        )
+    return _query_via_worker(
+        sql, params, timeout_s=timeout_s, max_result_bytes=max_result_bytes,
+    )
+
+
+def _run_readonly_sql_local(
+    sql: str,
+    params: tuple = (),
+    *,
+    timeout_s: float = _SQL_TIMEOUT_SECONDS,
+    max_result_bytes: int = SQL_RESULT_MAX_BYTES,
+) -> dict[str, Any]:
+    """The actual query executor (see run_readonly_sql). Hardened per the
+    section header: authorizer denies anything but read/select, fresh mode=ro
+    connection, timeout, single statement only."""
     sql = (sql or "").strip().rstrip(";").strip()
     if not sql:
         return {"error": "empty_sql", "columns": [], "rows": []}
@@ -3712,6 +3764,279 @@ def run_readonly_sql(
     return result
 
 
+# ─── worker query service ───────────────────────────────────────────────────
+# Heavy FTS queries execute in the index worker process, never in the backend:
+# the backend is a thin authenticated client over a local endpoint. The worker
+# enforces global admission and a hard budget ceiling regardless of caller.
+
+_QUERY_MAX_CONCURRENT = 3
+_QUERY_ADMISSION_TIMEOUT_SECONDS = 10.0
+_QUERY_BUDGET_CEILING_SECONDS = 120.0
+_QUERY_MAX_REQUEST_BYTES = 256 * 1024
+_QUERY_MAX_RESPONSE_BYTES = 64 * 1024 * 1024
+_QUERY_AUTH_DEADLINE_SECONDS = 2.0
+_QUERY_CLIENT_SLACK_SECONDS = 10.0
+_this_process_is_worker = False
+_query_listener: Any = None
+_query_admission = threading.BoundedSemaphore(_QUERY_MAX_CONCURRENT)
+
+
+def _query_endpoint_address() -> str:
+    import runtime_ipc
+
+    if os.name == "nt":
+        return rf"\\.\pipe\better-agent-nti-{runtime_ipc.home_digest()}"
+    return str(runtime_ipc.socket_dir() / f"{runtime_ipc.home_digest()}-nti.sock")
+
+
+def _query_endpoint_family() -> str:
+    return "AF_PIPE" if os.name == "nt" else "AF_UNIX"
+
+
+def _query_token_path() -> Path:
+    return _db_path().with_suffix(_db_path().suffix + ".query.token")
+
+
+def _mint_query_token() -> bytes:
+    token = secrets.token_hex(32)
+    _atomic_private_json(_query_token_path(), {"token": token})
+    return token.encode("utf-8")
+
+
+def _read_query_token() -> bytes | None:
+    try:
+        data = json.loads(_query_token_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None
+    token = data.get("token") if isinstance(data, dict) else None
+    if not isinstance(token, str) or len(token) != 64:
+        return None
+    return token.encode("utf-8")
+
+
+def _worker_unavailable_result(detail: str) -> dict[str, Any]:
+    return {
+        "error": f"index worker unavailable: {detail}",
+        "error_code": "worker_unavailable",
+        "columns": [],
+        "rows": [],
+        "covered": False,
+        "usable": False,
+    }
+
+
+def _ensure_worker_alive() -> None:
+    """Reset the started latch when the lease is dead so ensure_started can
+    respawn a crashed worker; safe to call from any backend thread."""
+    global _worker_started
+    lease = _read_worker_lease()
+    if lease is None or not _lease_identity_valid(lease):
+        with _worker_lock:
+            _worker_started = False
+    ensure_started()
+
+
+def _query_via_worker(
+    sql: str,
+    params: tuple,
+    *,
+    timeout_s: float,
+    max_result_bytes: int,
+) -> dict[str, Any]:
+    from multiprocessing.connection import Client
+
+    try:
+        requested_budget = float(timeout_s)
+    except (TypeError, ValueError, OverflowError):
+        return {"error": "invalid_timeout", "error_code": "invalid_timeout", "columns": [], "rows": []}
+    if not math.isfinite(requested_budget) or requested_budget <= 0:
+        return {"error": "invalid_timeout", "error_code": "invalid_timeout", "columns": [], "rows": []}
+    budget = max(0.1, min(requested_budget, _QUERY_BUDGET_CEILING_SECONDS))
+    token = _read_query_token()
+    if token is None:
+        _ensure_worker_alive()
+        return _worker_unavailable_result("query endpoint not published")
+    try:
+        request = json.dumps({
+            "op": "sql",
+            "sql": sql,
+            "params": list(params),
+            "timeout_s": budget,
+            "max_result_bytes": int(max_result_bytes),
+        }).encode("utf-8")
+    except (TypeError, ValueError):
+        return {"error": "invalid_request", "error_code": "invalid_request", "columns": [], "rows": []}
+    if len(request) > _QUERY_MAX_REQUEST_BYTES:
+        return {"error": "query request too large", "error_code": "request_too_large", "columns": [], "rows": []}
+    deadline = (
+        time.monotonic() + budget
+        + _QUERY_ADMISSION_TIMEOUT_SECONDS + _QUERY_CLIENT_SLACK_SECONDS
+    )
+    try:
+        conn = Client(
+            _query_endpoint_address(), family=_query_endpoint_family(), authkey=token,
+        )
+    except (OSError, EOFError, AuthenticationError, ValueError) as exc:
+        _ensure_worker_alive()
+        return _worker_unavailable_result(type(exc).__name__)
+    try:
+        conn.send_bytes(request)
+        if not conn.poll(max(0.0, deadline - time.monotonic())):
+            return _worker_unavailable_result("query response timeout")
+        raw = conn.recv_bytes(_QUERY_MAX_RESPONSE_BYTES + 1)
+        result = json.loads(raw.decode("utf-8"))
+        if not isinstance(result, dict):
+            return _worker_unavailable_result("malformed response")
+        return result
+    except (OSError, EOFError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        _ensure_worker_alive()
+        return _worker_unavailable_result(type(exc).__name__)
+    finally:
+        conn.close()
+
+
+def _execute_query_request(request: Any) -> dict[str, Any]:
+    """Worker-side request validation + admission + local execution."""
+    if not isinstance(request, dict) or request.get("op") != "sql":
+        return {"error": "invalid_request", "error_code": "invalid_request", "columns": [], "rows": []}
+    sql = request.get("sql")
+    params = request.get("params")
+    if params is None:
+        params = []
+    if (
+        not isinstance(sql, str)
+        or not isinstance(params, list)
+        or any(
+            item is not None and not isinstance(item, (str, int, float))
+            for item in params
+        )
+    ):
+        return {"error": "invalid_request", "error_code": "invalid_request", "columns": [], "rows": []}
+    try:
+        timeout_s = float(request.get("timeout_s", _SQL_TIMEOUT_SECONDS))
+        max_result_bytes = int(request.get("max_result_bytes", SQL_RESULT_MAX_BYTES))
+    except (TypeError, ValueError, OverflowError):
+        return {"error": "invalid_request", "error_code": "invalid_request", "columns": [], "rows": []}
+    if not math.isfinite(timeout_s) or timeout_s <= 0:
+        return {"error": "invalid_timeout", "error_code": "invalid_timeout", "columns": [], "rows": []}
+    timeout_s = min(timeout_s, _QUERY_BUDGET_CEILING_SECONDS)
+    max_result_bytes = max(1, min(max_result_bytes, SQL_RESULT_MAX_BYTES))
+    if not _query_admission.acquire(timeout=_QUERY_ADMISSION_TIMEOUT_SECONDS):
+        logger.warning("native index query admission timed out (concurrency=%d)", _QUERY_MAX_CONCURRENT)
+        return {
+            "error": "index query admission timed out",
+            "error_code": "admission_timeout",
+            "columns": [],
+            "rows": [],
+        }
+    try:
+        return _run_readonly_sql_local(
+            sql, tuple(params), timeout_s=timeout_s, max_result_bytes=max_result_bytes,
+        )
+    finally:
+        _query_admission.release()
+
+
+def _serve_query_connection(conn: Any, token: bytes) -> None:
+    from multiprocessing.connection import answer_challenge, deliver_challenge
+
+    try:
+        # Break a stalled handshake by closing the connection at the deadline.
+        auth_timer = threading.Timer(_QUERY_AUTH_DEADLINE_SECONDS, conn.close)
+        auth_timer.daemon = True
+        auth_timer.start()
+        try:
+            deliver_challenge(conn, token)
+            answer_challenge(conn, token)
+        finally:
+            auth_timer.cancel()
+        raw = conn.recv_bytes(_QUERY_MAX_REQUEST_BYTES + 1)
+        if len(raw) > _QUERY_MAX_REQUEST_BYTES:
+            return
+        try:
+            request = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return
+        response = _execute_query_request(request)
+        encoded = json.dumps(response).encode("utf-8")
+        if len(encoded) > _QUERY_MAX_RESPONSE_BYTES:
+            encoded = json.dumps({
+                "error": "query response exceeds maximum size",
+                "error_code": "response_too_large",
+                "columns": [],
+                "rows": [],
+            }).encode("utf-8")
+        conn.send_bytes(encoded)
+    except (OSError, EOFError, AuthenticationError):
+        logger.debug("native index query connection failed", exc_info=True)
+    finally:
+        try:
+            conn.close()
+        except OSError:
+            pass
+
+
+def _query_accept_loop(listener: Any, token: bytes) -> None:
+    while not _stop.is_set():
+        try:
+            conn = listener.accept()
+        except (OSError, EOFError):
+            if _stop.is_set():
+                return
+            time.sleep(0.05)
+            continue
+        threading.Thread(
+            target=_serve_query_connection,
+            args=(conn, token),
+            name="native-index-query",
+            daemon=True,
+        ).start()
+
+
+def _start_query_server() -> None:
+    from multiprocessing.connection import Listener
+
+    global _query_listener
+    address = _query_endpoint_address()
+    if os.name != "nt":
+        import runtime_ipc
+
+        runtime_ipc.ensure_socket_dir()
+        try:
+            os.unlink(address)
+        except FileNotFoundError:
+            pass
+    token = _mint_query_token()
+    listener = Listener(address, family=_query_endpoint_family())
+    if os.name != "nt":
+        os.chmod(address, 0o600)
+    _query_listener = listener
+    threading.Thread(
+        target=_query_accept_loop,
+        args=(listener, token),
+        name="native-index-query-server",
+        daemon=True,
+    ).start()
+    logger.info("native transcript index query endpoint serving at %s", address)
+
+
+def _stop_query_server() -> None:
+    global _query_listener
+    listener = _query_listener
+    _query_listener = None
+    if listener is not None:
+        try:
+            listener.close()
+        except OSError:
+            pass
+    if os.name != "nt":
+        try:
+            os.unlink(_query_endpoint_address())
+        except OSError:
+            pass
+    _query_token_path().unlink(missing_ok=True)
+
+
 # ─── background worker ─────────────────────────────────────────────────────
 
 def ensure_started() -> None:
@@ -3806,6 +4131,7 @@ def _worker_main(nonce: str, parent_pid: int | None = None) -> None:
 
 
 def _run_worker_process() -> int:
+    global _this_process_is_worker
     parent_pid = os.getppid()
     logging.basicConfig(
         level=logging.INFO,
@@ -3816,12 +4142,15 @@ def _run_worker_process() -> int:
     if lease is None:
         return 0
     nonce = str(lease["nonce"])
+    _this_process_is_worker = True
     _write_worker_pid(pid)
     try:
         logger.info("native transcript index worker process running pid=%s parent=%s", pid, parent_pid)
+        _start_query_server()
         _worker_main(nonce, parent_pid=parent_pid)
         return 0
     finally:
+        _stop_query_server()
         _clear_owned_lease(nonce)
         _clear_worker_pid(pid)
         shutdown()

@@ -308,13 +308,15 @@ def test_old_schema_cache_rebuilds() -> bool:
     conn = idx._writer_connection()
     columns = tuple(row[1] for row in conn.execute("PRAGMA table_info(native_element_fts)"))
     meta_columns = tuple(row[1] for row in conn.execute("PRAGMA table_info(native_element_meta)"))
-    text_columns = tuple(row[1] for row in conn.execute("PRAGMA table_info(native_element_text)"))
+    dropped_text_table = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'native_element_text'"
+    ).fetchone()
     file_state_columns = tuple(row[1] for row in conn.execute("PRAGMA table_info(native_file_state)"))
     stale_rows = conn.execute("SELECT count(*) FROM native_file_state").fetchone()[0]
     ok = (
         columns == idx._FTS_COLUMNS
         and meta_columns == ("rowid", *idx._META_COLUMNS)
-        and text_columns == ("rowid", "text")
+        and dropped_text_table is None
         and "first_user_prompt_ts" in file_state_columns
         and "message_count" in file_state_columns
         and stale_rows == 0
@@ -1993,7 +1995,11 @@ def test_metadata_recency_queries_use_bounded_covering_indexes() -> bool:
     conn.executemany(
         "INSERT INTO native_element_meta VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", rows
     )
-    conn.executemany("INSERT INTO native_element_text(rowid,text) VALUES (?,?)", texts)
+    conn.executemany(
+        f"INSERT INTO native_element_fts(rowid, {', '.join(idx._FTS_COLUMNS)}) "
+        f"VALUES ({', '.join('?' for _ in range(len(idx._FTS_COLUMNS) + 1))})",
+        [(row[0], text, *row[1:]) for row, (_, text) in zip(rows, texts)],
+    )
     conn.commit()
 
     cases = (
@@ -2104,9 +2110,9 @@ def test_append_refresh_parses_only_new_complete_records() -> bool:
         nm.NativeCandidate.parse_elements = original_full_parse
     conn = idx._readonly_connection()
     rows = conn.execute(
-        "SELECT text, element_index FROM native_element_meta m "
-        "JOIN native_element_text t ON t.rowid=m.rowid WHERE m.path=? "
-        "ORDER BY element_index DESC LIMIT 1", (str(path),),
+        "SELECT t.text, m.element_index FROM native_element_meta m "
+        "JOIN native_element_fts t ON t.rowid=m.rowid WHERE m.path=? "
+        "ORDER BY m.element_index DESC LIMIT 1", (str(path),),
     ).fetchone()
     timing = json.loads(idx._state_get(conn, "last_refresh_slowest_files_json"))[0]
     ok = result["touched"] == 1 and rows == ("appendtailneedle", 2000) and timing["mode"] == "append"
@@ -2128,13 +2134,13 @@ def test_append_refresh_holds_partial_line_until_complete() -> bool:
         handle.write(line[:split])
     first = idx.refresh_once(full=False)
     before = idx._readonly_connection().execute(
-        "SELECT COUNT(*) FROM native_element_text WHERE text='partialtailneedle'"
+        "SELECT COUNT(*) FROM native_element_fts WHERE text='partialtailneedle'"
     ).fetchone()[0]
     with path.open("a", encoding="utf-8") as handle:
         handle.write(line[split:] + "\n")
     second = idx.refresh_once(full=False)
     after = idx._readonly_connection().execute(
-        "SELECT COUNT(*) FROM native_element_text WHERE text='partialtailneedle'"
+        "SELECT COUNT(*) FROM native_element_fts WHERE text='partialtailneedle'"
     ).fetchone()[0]
     ok = first["touched"] == 1 and second["touched"] == 1 and before == 0 and after == 1
     print(f"{OK if ok else FAIL} partial append waits for newline (before={before}, after={after})")
@@ -2150,7 +2156,7 @@ def test_append_refresh_rebuilds_after_truncate_or_boundary_rewrite() -> bool:
     idx.refresh_once(full=False)
     conn = idx._readonly_connection()
     truncated = conn.execute(
-        "SELECT GROUP_CONCAT(text, '|') FROM native_element_text"
+        "SELECT GROUP_CONCAT(text, '|') FROM native_element_fts"
     ).fetchone()[0]
     with path.open("r+b") as handle:
         payload = handle.read().replace(b"replacementneedle", b"boundaryrewriteneedle")
@@ -2163,7 +2169,7 @@ def test_append_refresh_rebuilds_after_truncate_or_boundary_rewrite() -> bool:
             "message": {"role": "user", "content": "afterrewrite"},
         }) + "\n")
     idx.refresh_once(full=False)
-    texts = {row[0] for row in conn.execute("SELECT text FROM native_element_text")}
+    texts = {row[0] for row in conn.execute("SELECT text FROM native_element_fts")}
     timing = json.loads(idx._state_get(conn, "last_refresh_slowest_files_json"))[0]
     ok = truncated == "replacementneedle" and texts == {"boundaryrewriteneedle", "afterrewrite"} and timing["mode"] == "rebuild"
     print(f"{OK if ok else FAIL} truncate/boundary rewrite rebuilds (texts={texts}, mode={timing['mode']})")
@@ -2198,9 +2204,9 @@ def test_append_refresh_defers_unstable_source_generation() -> bool:
         first = idx.refresh_once(full=False)
     finally:
         nm.NativeCandidate.parse_elements_from = original
-    before = {row[0] for row in idx._readonly_connection().execute("SELECT text FROM native_element_text")}
+    before = {row[0] for row in idx._readonly_connection().execute("SELECT text FROM native_element_fts")}
     second = idx.refresh_once(full=False)
-    after = {row[0] for row in idx._readonly_connection().execute("SELECT text FROM native_element_text")}
+    after = {row[0] for row in idx._readonly_connection().execute("SELECT text FROM native_element_fts")}
     ok = first["touched"] == 0 and before == {"stablebase"} and second["touched"] == 1 and after == {"stablebase", "racingone", "racingtwo"}
     print(f"{OK if ok else FAIL} unstable source generation defers atomically (before={before}, after={after})")
     return ok
@@ -2226,11 +2232,11 @@ def test_append_refresh_retries_transient_parse_failure() -> bool:
     finally:
         nm.NativeCandidate.parse_elements_from = original
     before = idx._readonly_connection().execute(
-        "SELECT COUNT(*) FROM native_element_text WHERE text='retrytailneedle'"
+        "SELECT COUNT(*) FROM native_element_fts WHERE text='retrytailneedle'"
     ).fetchone()[0]
     result = idx.refresh_once(full=False)
     after = idx._readonly_connection().execute(
-        "SELECT COUNT(*) FROM native_element_text WHERE text='retrytailneedle'"
+        "SELECT COUNT(*) FROM native_element_fts WHERE text='retrytailneedle'"
     ).fetchone()[0]
     ok = failed and before == 0 and result["touched"] == 1 and after == 1
     print(f"{OK if ok else FAIL} transient parse failure retries (before={before}, after={after})")
@@ -2306,11 +2312,11 @@ def test_append_transaction_rolls_back_rows_before_state_update() -> bool:
         idx._insert_index_rows = original
     conn = idx._readonly_connection()
     before = conn.execute(
-        "SELECT COUNT(*) FROM native_element_text WHERE text='rollbacktailneedle'"
+        "SELECT COUNT(*) FROM native_element_fts WHERE text='rollbacktailneedle'"
     ).fetchone()[0]
     idx.refresh_once(full=False)
     after = conn.execute(
-        "SELECT COUNT(*) FROM native_element_text WHERE text='rollbacktailneedle'"
+        "SELECT COUNT(*) FROM native_element_fts WHERE text='rollbacktailneedle'"
     ).fetchone()[0]
     ok = before == 0 and after == 1
     print(f"{OK if ok else FAIL} append row/state transaction rolls back atomically")
