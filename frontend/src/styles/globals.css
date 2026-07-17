@@ -5612,6 +5612,39 @@ button.run-badge-clickable:focus-visible {
   gap: 5px;
   max-width: 100%;
 }
+.extension-ui-settings-update-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: calc(11px * var(--app-font-scale));
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+  animation: extension-update-badge-in 240ms ease-out;
+  white-space: nowrap;
+}
+@keyframes extension-update-badge-in {
+  from {
+    opacity: 0;
+    transform: scale(0.92);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+.extension-ui-settings-update {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
+}
+@media (prefers-reduced-motion: reduce) {
+  .extension-ui-settings-update-badge {
+    animation: none;
+  }
+}
 .extension-ui-settings-groups {
   min-width: 0;
   display: flex;

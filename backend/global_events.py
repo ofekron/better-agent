@@ -21,7 +21,9 @@ _EVENT_OWNERS: Mapping[str, tuple[str, ...]] = {
         "projects_changed", "project_mappings_changed", "workers_changed",
         "tasks_changed", "project_updates_changed",
     ),
-    "extension": ("extensions_changed", "extension_event"),
+    "extension": (
+        "extensions_changed", "extension_updates_changed", "extension_event",
+    ),
     "schedule_store": ("schedules_changed",),
     "user_prefs": ("user_prefs_changed", "ui_selection_changed"),
     "session_manager": (
@@ -41,6 +43,7 @@ _EVENT_OWNERS: Mapping[str, tuple[str, ...]] = {
         "session_marker_changed",
     ),
     "startup_tasks": ("startup_task_changed",),
+    "switch_control": ("switch_control_state_changed",),
     "machine_nodes": (
         "node_state_changed", "node_registration_requested",
         "node_registration_resolved",

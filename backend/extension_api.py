@@ -914,11 +914,50 @@ async def create_personal_harness_extension():
 @router.post("/update")
 async def update_extensions():
     try:
-        result = extension_store.update_installed_extensions()
+        result = await asyncio.to_thread(extension_store.update_installed_extensions)
     except extension_store.ExtensionError as exc:
         raise _extension_error(exc) from exc
     if result.get("updated"):
         await _broadcast_extensions_changed()
+        await _broadcast_extension_updates_changed()
+    return result
+
+
+async def _broadcast_extension_updates_changed() -> None:
+    from orchestrator import get_active_coordinator
+
+    coordinator = get_active_coordinator()
+    if coordinator is None:
+        return
+    cached = extension_store.cached_extension_updates()
+    available = sorted(cached.get("available") or []) if cached else []
+    await coordinator.broadcast_global(
+        "extension_updates_changed", {"available": available},
+    )
+
+
+@router.get("/updates")
+async def list_extension_updates(refresh: bool = False):
+    try:
+        result = await asyncio.to_thread(
+            extension_store.check_extension_updates, refresh=refresh,
+        )
+    except extension_store.ExtensionError as exc:
+        raise _extension_error(exc) from exc
+    return result
+
+
+@router.post("/{extension_id}/update")
+async def update_extension(extension_id: str):
+    try:
+        result = await asyncio.to_thread(
+            extension_store.apply_extension_update, extension_id,
+        )
+    except extension_store.ExtensionError as exc:
+        raise _extension_error(exc) from exc
+    if result.get("updated"):
+        await _broadcast_extensions_changed()
+    await _broadcast_extension_updates_changed()
     return result
 
 
