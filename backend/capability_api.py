@@ -908,6 +908,8 @@ def _register_requirements() -> None:
         "unit-rg": (_RequirementsRgPayload, "internal_search_requirements"),
         "unit-fts": (_RequirementsUnitPayload, "internal_requirements_unit_fts"),
         "unit-vector": (_RequirementsUnitPayload, "internal_requirements_unit_vector"),
+        "thread-fts": (_RequirementsUnitPayload, "internal_requirements_thread_fts"),
+        "thread-vector": (_RequirementsUnitPayload, "internal_requirements_thread_vector"),
         "index-sql": (_RequirementsSqlPayload, "internal_requirements_index_sql"),
     }
     register("requirements", "fire", _RequirementsFirePayload, fire)

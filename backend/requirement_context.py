@@ -46,6 +46,21 @@ MATCH_FIELD_ORDER = (
     "user_seq",
     "native_hit_index",
 )
+DEFAULT_THREAD_MATCH_FIELDS = ("id", "status", "current", "project_cwds", "session_ids", "edited_files")
+THREAD_MATCH_FIELD_ORDER = (
+    "id",
+    "status",
+    "current",
+    "parent_ids",
+    "merged_from",
+    "merged_into",
+    "project_cwds",
+    "session_ids",
+    "edited_files",
+    "git_commits",
+    "event_keys",
+    "events",
+)
 PROMPT_FALLBACK_KIND = "unprocessed_prompt"
 NATIVE_TRANSCRIPT_BUNDLE_KIND = "native_transcript_bundle"
 GET_REQUIREMENTS_PROCESSOR_KEY = "get_requirements_processor"
@@ -68,7 +83,12 @@ NATIVE_BUNDLE_PREFIX_COLLAPSE_FIELDS = (
 UNIT_FTS_DB_NAME = "requirement_units_fts.sqlite3"
 UNIT_VECTOR_DB_NAME = "requirement_units_vectors.npz"
 UNIT_VECTOR_STATE_NAME = "requirement_units_vectors.state.json"
-UNIT_FTS_TOKEN_RE = re.compile(r"[\w-]{2,}", re.UNICODE)
+UNIT_FTS_TABLE = "requirement_units_fts"
+THREAD_FTS_DB_NAME = "requirement_threads_fts.sqlite3"
+THREAD_VECTOR_DB_NAME = "requirement_threads_vectors.npz"
+THREAD_VECTOR_STATE_NAME = "requirement_threads_vectors.state.json"
+THREAD_FTS_TABLE = "requirement_threads_fts"
+FTS_TOKEN_RE = re.compile(r"[\w-]{2,}", re.UNICODE)
 RG_QUERY_MAX_CHARS = 4000
 RG_QUERY_MAX_PATTERNS = 128
 RG_FORBIDDEN_OPTIONS = {
@@ -774,13 +794,7 @@ def _search_requirements_prepared(
 
 
 
-def _unit_fts_db_path() -> Path:
-    from requirement_analysis.prephase import units_path
-
-    return units_path().parent / UNIT_FTS_DB_NAME
-
-
-def _unit_fts_state(path: Path) -> dict[str, str]:
+def _index_source_state(path: Path) -> dict[str, str]:
     try:
         st = path.stat()
     except OSError:
@@ -788,20 +802,20 @@ def _unit_fts_state(path: Path) -> dict[str, str]:
     return {"exists": "1", "mtime_ns": str(st.st_mtime_ns), "size": str(st.st_size)}
 
 
-def _unit_fts_quote(token: str) -> str:
+def _fts_quote(token: str) -> str:
     return '"' + token.replace('"', '""') + '"'
 
 
-def _unit_fts_match_expr(query: str) -> str:
-    tokens = [tok.lower() for tok in UNIT_FTS_TOKEN_RE.findall(query or "")]
+def _fts_match_expr(query: str) -> str:
+    tokens = [tok.lower() for tok in FTS_TOKEN_RE.findall(query or "")]
     deduped: list[str] = []
     for token in tokens:
         if token not in deduped:
             deduped.append(token)
-    return " OR ".join(_unit_fts_quote(token) for token in deduped)
+    return " OR ".join(_fts_quote(token) for token in deduped)
 
 
-def _connect_unit_fts(path: Path) -> sqlite3.Connection:
+def _connect_fts(path: Path) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(path))
     conn.execute("PRAGMA journal_mode=WAL")
@@ -809,34 +823,44 @@ def _connect_unit_fts(path: Path) -> sqlite3.Connection:
     return conn
 
 
-def _ensure_unit_fts_index(records: list[dict[str, Any]] | None = None) -> dict[str, Any]:
-    from requirement_analysis.prephase import units_path
-
-    source_path = units_path()
+def _ensure_fts_index(
+    *,
+    db_path: Path,
+    table_name: str,
+    source_path: Path,
+    records: list[dict[str, Any]],
+    search_text_fn,
+    cwds_fn,
+    sort_key_fn,
+) -> dict[str, Any]:
+    """Build/refresh a FTS5 index over an arbitrary record list, keyed to
+    ``source_path``'s (mtime, size) + record count so any write to the
+    source triggers a full reindex on next access. Shared by the unit and
+    thread search indexes below — ``table_name`` is always one of the two
+    internal constants, never derived from a request, so f-string
+    interpolation into DDL/table references here is safe (sqlite3 can't
+    parametrize identifiers via placeholders)."""
     if not source_path.exists():
-        return {"ready": False, "reason": "requirement_units_missing", "path": str(_unit_fts_db_path())}
-    source_state = _unit_fts_state(source_path)
-    db_path = _unit_fts_db_path()
-    if records is None:
-        records = _load_unit_records()
-    conn = _connect_unit_fts(db_path)
+        return {"ready": False, "reason": "source_missing", "path": str(db_path)}
+    source_state = _index_source_state(source_path)
+    conn = _connect_fts(db_path)
     try:
-        conn.executescript("""
-            CREATE TABLE IF NOT EXISTS requirement_units_fts_state(
+        conn.executescript(f"""
+            CREATE TABLE IF NOT EXISTS {table_name}_state(
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
             );
-            CREATE VIRTUAL TABLE IF NOT EXISTS requirement_units_fts USING fts5(
+            CREATE VIRTUAL TABLE IF NOT EXISTS {table_name} USING fts5(
                 search_text,
                 record_json UNINDEXED,
-                cwd UNINDEXED,
-                ts UNINDEXED,
+                cwds_json UNINDEXED,
+                sort_key UNINDEXED,
                 tokenize='unicode61'
             );
         """)
         stored = {
             str(row[0]): str(row[1])
-            for row in conn.execute("SELECT key, value FROM requirement_units_fts_state")
+            for row in conn.execute(f"SELECT key, value FROM {table_name}_state")
         }
         expected = {
             "source_mtime_ns": source_state["mtime_ns"],
@@ -845,22 +869,22 @@ def _ensure_unit_fts_index(records: list[dict[str, Any]] | None = None) -> dict[
         }
         if stored != expected:
             with conn:
-                conn.execute("DELETE FROM requirement_units_fts")
-                conn.execute("DELETE FROM requirement_units_fts_state")
+                conn.execute(f"DELETE FROM {table_name}")
+                conn.execute(f"DELETE FROM {table_name}_state")
                 conn.executemany(
-                    "INSERT INTO requirement_units_fts(search_text, record_json, cwd, ts) VALUES (?, ?, ?, ?)",
+                    f"INSERT INTO {table_name}(search_text, record_json, cwds_json, sort_key) VALUES (?, ?, ?, ?)",
                     [
                         (
-                            _unit_search_line(record),
+                            search_text_fn(record),
                             json.dumps(record, ensure_ascii=False, sort_keys=True),
-                            str(record.get("cwd") or ""),
-                            str(record.get("ts") or ""),
+                            json.dumps(cwds_fn(record), ensure_ascii=False),
+                            str(sort_key_fn(record)),
                         )
                         for record in records
                     ],
                 )
                 conn.executemany(
-                    "INSERT INTO requirement_units_fts_state(key, value) VALUES (?, ?)",
+                    f"INSERT INTO {table_name}_state(key, value) VALUES (?, ?)",
                     list(expected.items()),
                 )
         return {
@@ -872,6 +896,69 @@ def _ensure_unit_fts_index(records: list[dict[str, Any]] | None = None) -> dict[
         }
     finally:
         conn.close()
+
+
+def _run_fts_query(
+    *,
+    db_path: Path,
+    table_name: str,
+    match_expr: str,
+    allowed_cwds: set[str],
+    id_field: str,
+) -> tuple[list[dict[str, Any]], str | None]:
+    sql = (
+        f"SELECT record_json, cwds_json FROM {table_name} "
+        f"WHERE {table_name} MATCH ? "
+        f"ORDER BY bm25({table_name}), sort_key"
+    )
+    conn = sqlite3.connect(str(db_path))
+    try:
+        rows = conn.execute(sql, (match_expr,)).fetchall()
+    except sqlite3.Error as exc:
+        return [], f"{type(exc).__name__}: {exc}"
+    finally:
+        conn.close()
+    raw_matches: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for record_json, cwds_json in rows:
+        try:
+            record = json.loads(record_json)
+        except (TypeError, json.JSONDecodeError):
+            continue
+        try:
+            cwds = set(json.loads(cwds_json)) if cwds_json else set()
+        except (TypeError, json.JSONDecodeError):
+            cwds = set()
+        if allowed_cwds and not allowed_cwds & cwds:
+            continue
+        key = str(record.get(id_field) or json.dumps(record, sort_keys=True))
+        if key in seen:
+            continue
+        seen.add(key)
+        raw_matches.append(record)
+    return raw_matches, None
+
+
+def _unit_fts_db_path() -> Path:
+    from requirement_analysis.prephase import units_path
+
+    return units_path().parent / UNIT_FTS_DB_NAME
+
+
+def _ensure_unit_fts_index(records: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    from requirement_analysis.prephase import units_path
+
+    if records is None:
+        records = _load_unit_records()
+    return _ensure_fts_index(
+        db_path=_unit_fts_db_path(),
+        table_name=UNIT_FTS_TABLE,
+        source_path=units_path(),
+        records=records,
+        search_text_fn=_unit_search_line,
+        cwds_fn=lambda r: [r["cwd"]] if r.get("cwd") else [],
+        sort_key_fn=lambda r: r.get("ts") or "",
+    )
 
 
 def search_requirement_units_fts(
@@ -908,7 +995,7 @@ def search_requirement_units_fts(
             "cwd_filters": list(normalized_cwds),
             "all_projects": all_projects,
         }
-    match_expr = _unit_fts_match_expr(normalized_query)
+    match_expr = _fts_match_expr(normalized_query)
     if not match_expr:
         return {
             "success": True,
@@ -919,47 +1006,23 @@ def search_requirement_units_fts(
             "query": normalized_query,
             "index": index,
         }
-    where = "requirement_units_fts MATCH ?"
-    params: list[Any] = [match_expr]
-    if normalized_cwds:
-        placeholders = ",".join("?" for _ in normalized_cwds)
-        where += f" AND cwd IN ({placeholders})"
-        params.extend(normalized_cwds)
-    sql = (
-        "SELECT record_json FROM requirement_units_fts "
-        f"WHERE {where} "
-        "ORDER BY bm25(requirement_units_fts), ts"
+    raw_matches, error = _run_fts_query(
+        db_path=_unit_fts_db_path(),
+        table_name=UNIT_FTS_TABLE,
+        match_expr=match_expr,
+        allowed_cwds=set(normalized_cwds),
+        id_field="source_key",
     )
-    conn = sqlite3.connect(str(_unit_fts_db_path()))
-    try:
-        rows = conn.execute(sql, tuple(params)).fetchall()
-    except sqlite3.Error as exc:
+    if error is not None:
         return {
             "success": False,
             "searched": False,
-            "error": f"{type(exc).__name__}: {exc}",
+            "error": error,
             "matches": [],
             "count": 0,
             "query": normalized_query,
             "index": index,
         }
-    finally:
-        conn.close()
-    raw_matches: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    allowed_cwds = set(normalized_cwds)
-    for (record_json,) in rows:
-        try:
-            record = json.loads(record_json)
-        except (TypeError, json.JSONDecodeError):
-            continue
-        if allowed_cwds and record.get("cwd") not in allowed_cwds:
-            continue
-        key = str(record.get("source_key") or json.dumps(record, sort_keys=True))
-        if key in seen:
-            continue
-        seen.add(key)
-        raw_matches.append(record)
     matches = _project_records(raw_matches, normalized_fields)
     return {
         "success": True,
@@ -977,10 +1040,361 @@ def search_requirement_units_fts(
     }
 
 
-def _default_unit_vector_embed(texts: list[str]):
+def _thread_fts_db_path() -> Path:
+    from requirement_analysis.threads import requirement_threads_path
+
+    return requirement_threads_path().parent / THREAD_FTS_DB_NAME
+
+
+def _ensure_thread_fts_index(records: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    from requirement_analysis.threads import requirement_threads_path
+
+    if records is None:
+        records = _load_thread_records()
+    return _ensure_fts_index(
+        db_path=_thread_fts_db_path(),
+        table_name=THREAD_FTS_TABLE,
+        source_path=requirement_threads_path(),
+        records=records,
+        search_text_fn=_thread_search_line,
+        cwds_fn=lambda r: r["project_cwds"] if isinstance(r.get("project_cwds"), list) else [],
+        sort_key_fn=_thread_latest_ts,
+    )
+
+
+def search_requirement_threads_fts(
+    *,
+    query: str,
+    cwd: str = "",
+    cwds: list[str] | None = None,
+    all_projects: bool = False,
+    fields: list[str] | None = None,
+    include_all_fields: bool = False,
+) -> dict[str, Any]:
+    """Search the SQLite FTS projection over requirement_threads.json.
+    Mirrors search_requirement_units_fts, but a thread's searchable text is
+    its compiled `current` state plus every event's text, so a query can
+    match wording that only appears in the thread's history."""
+    _ensure_requirements_importable()
+    normalized_query = (query or "").strip()
+    if not normalized_query:
+        return {"success": False, "error": "query is required", "matches": [], "count": 0}
+    normalized_cwds, cwds_error = _normalize_cwd_filters(cwd, cwds, all_projects=all_projects)
+    if cwds_error:
+        return {"success": False, "error": cwds_error, "matches": [], "count": 0}
+    normalized_fields, fields_error = _normalize_match_fields(
+        fields, include_all_fields=include_all_fields, available=THREAD_MATCH_FIELD_ORDER
+    )
+    if fields_error:
+        return {"success": False, "error": fields_error, "matches": [], "count": 0}
+    records = _load_thread_records()
+    index = _ensure_thread_fts_index(records)
+    if not index.get("ready"):
+        return {
+            "success": True,
+            "searched": False,
+            "reason": index.get("reason") or "index_not_ready",
+            "matches": [],
+            "count": 0,
+            "query": normalized_query,
+            "index": index,
+            "cwd_filter": normalized_cwds[0] if len(normalized_cwds) == 1 else "",
+            "cwd_filters": list(normalized_cwds),
+            "all_projects": all_projects,
+        }
+    match_expr = _fts_match_expr(normalized_query)
+    if not match_expr:
+        return {
+            "success": True,
+            "searched": False,
+            "reason": "no_query_terms",
+            "matches": [],
+            "count": 0,
+            "query": normalized_query,
+            "index": index,
+        }
+    raw_matches, error = _run_fts_query(
+        db_path=_thread_fts_db_path(),
+        table_name=THREAD_FTS_TABLE,
+        match_expr=match_expr,
+        allowed_cwds=set(normalized_cwds),
+        id_field="id",
+    )
+    if error is not None:
+        return {
+            "success": False,
+            "searched": False,
+            "error": error,
+            "matches": [],
+            "count": 0,
+            "query": normalized_query,
+            "index": index,
+        }
+    matches = _project_records(raw_matches, normalized_fields)
+    return {
+        "success": True,
+        "searched": True,
+        "query": normalized_query,
+        "match_expr": match_expr,
+        "matches": matches,
+        "count": len(matches),
+        "index": index,
+        "cwd_filter": normalized_cwds[0] if len(normalized_cwds) == 1 else "",
+        "cwd_filters": list(normalized_cwds),
+        "all_projects": all_projects,
+        "match_fields": list(normalized_fields) if normalized_fields is not None else "all",
+        "max_matches": None,
+    }
+
+
+def _default_requirement_embed(texts: list[str]):
     from requirement_analysis import unit_vector_embedder
 
     return unit_vector_embedder.embed(texts)
+
+
+# Serializes vector-index builds across threads. Concurrent processor forks
+# (admission allows 2) each call _ensure_*_vector_index; two simultaneous
+# full-corpus ONNX re-embeds thrash CPU and race on the npz write. The lock
+# collapses them into one build + cheap reuse. Shared across unit and thread
+# indexes since both use the same embedder/model and would otherwise thrash
+# each other just as badly.
+_VECTOR_INDEX_LOCK = threading.Lock()
+
+
+def _load_vector_arrays(db_path: Path):
+    """Return (vectors, ids, cwds_json, text_shas) for an existing index, or
+    None when the index is missing, ill-formed, internally inconsistent, or
+    predates the cwds_json/id schema used here (forces a clean full rebuild —
+    self-healing across the unit->generic index format change)."""
+    import numpy as np
+
+    if not db_path.exists():
+        return None
+    try:
+        with np.load(db_path, allow_pickle=False) as data:
+            vectors = np.asarray(data["vectors"], dtype=np.float32)
+            if "ids" not in data or "cwds_json" not in data or "text_shas" not in data:
+                return None
+            ids = [str(key) for key in data["ids"]]
+            cwds_json = [str(value) for value in data["cwds_json"]]
+            text_shas = [str(sha) for sha in data["text_shas"]]
+    except (OSError, ValueError, KeyError):
+        return None
+    if vectors.ndim != 2:
+        return None
+    if not (vectors.shape[0] == len(ids) == len(cwds_json) == len(text_shas)):
+        return None
+    return vectors, ids, cwds_json, text_shas
+
+
+def _vector_text_sha(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _build_vector_index(
+    records: list[dict[str, Any]],
+    *,
+    id_field: str,
+    text_fn,
+    cwds_fn,
+    embedder,
+    db_path: Path,
+):
+    """Return (vectors, ids, cwds_json, text_shas) covering ``records``.
+
+    MiniLM embeddings are deterministic per text, so an existing index's
+    vectors are reusable for any record whose embedded text is unchanged.
+    Incremental embedding reuses the cached prefix and embeds only the
+    appended tail — guarded by BOTH id AND a per-record sha256 of the
+    embedded text, because an id can be re-emitted with different text (a
+    re-extracted unit under the same source_key; a thread's `current` state
+    changing in place as new events attach/refine it) — key-only matching
+    would silently serve stale vectors. Fall back to a full re-embed on cold
+    start, any prefix mismatch, or embedding-dim change. Re-embedding the
+    whole corpus on every search wastes real CPU (and under concurrent
+    forks, tens of minutes) — for threads, whose `current`/events mutate in
+    place far more often than units ever do, this means a full re-embed is
+    the common case rather than the exception; acceptable at this corpus
+    scale (dozens-hundreds of threads), revisit if that stops being true."""
+    import numpy as np
+
+    new_ids = [str(r.get(id_field) or "") for r in records]
+    new_texts = [text_fn(r) for r in records]
+    new_cwds_json = [json.dumps(cwds_fn(r), ensure_ascii=False) for r in records]
+    new_shas = [_vector_text_sha(t) for t in new_texts]
+    ids_arr = np.asarray(new_ids)
+    cwds_arr = np.asarray(new_cwds_json)
+    shas_arr = np.asarray(new_shas)
+
+    existing = _load_vector_arrays(db_path)
+    if existing is not None:
+        ex_vectors, ex_ids, _ex_cwds_json, ex_shas = existing
+        prefix_len = ex_vectors.shape[0]
+        prefix_intact = (
+            0 < prefix_len <= len(records)
+            and ex_ids == new_ids[:prefix_len]
+            and ex_shas == new_shas[:prefix_len]
+        )
+        if prefix_intact:
+            tail_texts = new_texts[prefix_len:]
+            if not tail_texts:
+                return ex_vectors, ids_arr, cwds_arr, shas_arr
+            tail_vectors = np.asarray(embedder(tail_texts), dtype=np.float32)
+            if tail_vectors.ndim == 2 and tail_vectors.shape[1] == ex_vectors.shape[1]:
+                vectors = np.vstack([ex_vectors, tail_vectors]).astype(np.float32, copy=False)
+                return vectors, ids_arr, cwds_arr, shas_arr
+
+    # Cold start, prefix/id/text mismatch, or embedding-dim change: full re-embed.
+    vectors = embedder(new_texts) if new_texts else np.zeros((0, 1), dtype=np.float32)
+    vectors = np.asarray(vectors, dtype=np.float32)
+    if vectors.ndim != 2:
+        vectors = vectors.reshape(0, 1)
+    return vectors, ids_arr, cwds_arr, shas_arr
+
+
+def _write_vector_index_atomic(db_path: Path, vectors, ids, cwds_json, text_shas) -> None:
+    """Write the index via a staged temp file + os.replace, so a concurrent
+    np.load reader (another processor fork mid-search) never observes a
+    half-written file. tempfile suffix must be .npz or numpy appends one and
+    os.replace misses the target."""
+    import numpy as np
+
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=".req_vectors.", suffix=".npz", dir=str(db_path.parent)
+    )
+    os.close(fd)
+    tmp_path = Path(tmp_name)
+    try:
+        np.savez(
+            tmp_path,
+            vectors=vectors,
+            ids=np.asarray([str(v) for v in ids]),
+            cwds_json=np.asarray([str(v) for v in cwds_json]),
+            text_shas=np.asarray([str(v) for v in text_shas]),
+        )
+        os.replace(tmp_path, db_path)
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink(missing_ok=True)
+
+
+def _vector_index_ok(
+    db_path: Path, source_path: Path, record_count: int, *, rebuilt: bool
+) -> dict[str, Any]:
+    return {
+        "ready": True,
+        "path": str(db_path),
+        "source_path": str(source_path),
+        "record_count": record_count,
+        "rebuilt": rebuilt,
+    }
+
+
+def _ensure_vector_index(
+    *,
+    db_path: Path,
+    state_path: Path,
+    source_path: Path,
+    records: list[dict[str, Any]],
+    id_field: str,
+    text_fn,
+    cwds_fn,
+    embedder,
+) -> dict[str, Any]:
+    import json as _json
+
+    if not source_path.exists():
+        return {"ready": False, "reason": "source_missing", "path": str(db_path)}
+
+    source_state = _index_source_state(source_path)
+    expected = {
+        "source_mtime_ns": source_state["mtime_ns"],
+        "source_size": source_state["size"],
+        "record_count": str(len(records)),
+    }
+
+    def _read_state() -> dict[str, str]:
+        try:
+            with open(state_path, "r", encoding="utf-8") as fh:
+                return {str(k): str(v) for k, v in _json.load(fh).items()}
+        except (OSError, ValueError):
+            return {}
+
+    if _read_state() == expected and db_path.exists():
+        return _vector_index_ok(db_path, source_path, len(records), rebuilt=False)
+
+    # Serialize builds: a second processor fork may have produced the exact
+    # index while we waited, and two concurrent full-corpus re-embeds must not
+    # run together. Re-check state inside the lock.
+    with _VECTOR_INDEX_LOCK:
+        stored = _read_state()
+        if stored == expected and db_path.exists():
+            return _vector_index_ok(db_path, source_path, len(records), rebuilt=False)
+        vectors, ids, cwds_json, text_shas = _build_vector_index(
+            records, id_field=id_field, text_fn=text_fn, cwds_fn=cwds_fn, embedder=embedder, db_path=db_path,
+        )
+        _write_vector_index_atomic(db_path, vectors, ids, cwds_json, text_shas)
+        with open(state_path, "w", encoding="utf-8") as fh:
+            _json.dump(expected, fh)
+    return _vector_index_ok(db_path, source_path, len(records), rebuilt=True)
+
+
+def _run_vector_query(
+    *,
+    db_path: Path,
+    records: list[dict[str, Any]],
+    id_field: str,
+    query_vec,
+    allowed_cwds: set[str],
+) -> tuple[list[dict[str, Any]], str | None]:
+    import numpy as np
+
+    with np.load(db_path, allow_pickle=False) as data:
+        vectors = np.asarray(data["vectors"], dtype=np.float32)
+        ids = [str(key) for key in data["ids"]]
+        cwds_json = [str(value) for value in data["cwds_json"]]
+    if vectors.shape[0] == 0:
+        return [], None
+    dim = vectors.shape[1]
+    if query_vec.shape[0] != dim:
+        return [], f"embedding_dim_mismatch: query={query_vec.shape[0]} index={dim}"
+    scores = vectors @ query_vec
+
+    scored: list[tuple[float, int]] = []
+    for position, score in enumerate(scores):
+        try:
+            record_cwds = set(json.loads(cwds_json[position])) if position < len(cwds_json) else set()
+        except (TypeError, json.JSONDecodeError):
+            record_cwds = set()
+        if allowed_cwds and not allowed_cwds & record_cwds:
+            continue
+        scored.append((float(score), position))
+    scored.sort(key=lambda item: item[0], reverse=True)
+
+    records_by_id: dict[str, dict[str, Any]] = {}
+    for record in records:
+        key = str(record.get(id_field) or json.dumps(record, sort_keys=True))
+        records_by_id.setdefault(key, record)
+
+    raw_matches: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for score, position in scored:
+        if score <= 0.0:
+            break
+        key = ids[position] if position < len(ids) else ""
+        record = records_by_id.get(key)
+        if record is None:
+            continue
+        dedupe = key or json.dumps(record, sort_keys=True)
+        if dedupe in seen:
+            continue
+        seen.add(dedupe)
+        scored_record = dict(record)
+        scored_record["vector_score"] = score
+        raw_matches.append(scored_record)
+    return raw_matches, None
 
 
 def _unit_vector_path() -> Path:
@@ -993,13 +1407,6 @@ def _unit_vector_state_path() -> Path:
     from requirement_analysis.prephase import units_path
 
     return units_path().parent / UNIT_VECTOR_STATE_NAME
-
-
-# Serializes vector-index builds across threads. Concurrent processor forks
-# (admission allows 2) each call _ensure_unit_vector_index; two simultaneous
-# full-corpus ONNX re-embeds thrash CPU and race on the npz write. The lock
-# collapses them into one build + cheap reuse.
-_UNIT_VECTOR_INDEX_LOCK = threading.Lock()
 
 
 def _unit_vector_text(record: dict[str, Any]) -> str:
@@ -1016,182 +1423,20 @@ def _ensure_unit_vector_index(
     records: list[dict[str, Any]] | None = None,
     embedder=None,
 ) -> dict[str, Any]:
-    import json as _json
-
     from requirement_analysis.prephase import units_path
 
-    source_path = units_path()
-    if not source_path.exists():
-        return {"ready": False, "reason": "requirement_units_missing", "path": str(_unit_vector_path())}
-    if embedder is None:
-        embedder = _default_unit_vector_embed
     if records is None:
         records = _load_unit_records()
-
-    source_state = _unit_fts_state(source_path)
-    db_path = _unit_vector_path()
-    state_path = _unit_vector_state_path()
-    expected = {
-        "source_mtime_ns": source_state["mtime_ns"],
-        "source_size": source_state["size"],
-        "record_count": str(len(records)),
-    }
-
-    def _read_state() -> dict[str, str]:
-        try:
-            with open(state_path, "r", encoding="utf-8") as fh:
-                return {str(k): str(v) for k, v in _json.load(fh).items()}
-        except (OSError, ValueError):
-            return {}
-
-    if _read_state() == expected and db_path.exists():
-        return _unit_vector_index_ok(db_path, source_path, len(records), rebuilt=False)
-
-    # Serialize builds: a second processor fork may have produced the exact
-    # index while we waited, and two concurrent full-corpus re-embeds must not
-    # run together. Re-check state inside the lock.
-    with _UNIT_VECTOR_INDEX_LOCK:
-        stored = _read_state()
-        if stored == expected and db_path.exists():
-            return _unit_vector_index_ok(db_path, source_path, len(records), rebuilt=False)
-        vectors, source_keys, cwds, text_shas = _build_unit_vector_index(
-            records, embedder=embedder, db_path=db_path
-        )
-        _write_unit_vector_index_atomic(db_path, vectors, source_keys, cwds, text_shas)
-        with open(state_path, "w", encoding="utf-8") as fh:
-            _json.dump(expected, fh)
-    return _unit_vector_index_ok(db_path, source_path, len(records), rebuilt=True)
-
-
-def _unit_vector_index_ok(
-    db_path: Path, source_path: Path, record_count: int, *, rebuilt: bool
-) -> dict[str, Any]:
-    return {
-        "ready": True,
-        "path": str(db_path),
-        "source_path": str(source_path),
-        "record_count": record_count,
-        "rebuilt": rebuilt,
-    }
-
-
-def _load_unit_vector_arrays(db_path: Path):
-    """Return (vectors, source_keys, cwds, text_shas) for an existing index, or
-    None when the index is missing, ill-formed, internally inconsistent, or
-    predates the per-record content-hash guard (forces a clean full rebuild)."""
-    import numpy as np
-
-    if not db_path.exists():
-        return None
-    try:
-        with np.load(db_path, allow_pickle=False) as data:
-            vectors = np.asarray(data["vectors"], dtype=np.float32)
-            source_keys = [str(key) for key in data["source_keys"]]
-            cwds = [str(value) for value in data["cwds"]]
-            if "text_shas" not in data:
-                return None
-            text_shas = [str(sha) for sha in data["text_shas"]]
-    except (OSError, ValueError, KeyError):
-        return None
-    if vectors.ndim != 2:
-        return None
-    if not (vectors.shape[0] == len(source_keys) == len(cwds) == len(text_shas)):
-        return None
-    return vectors, source_keys, cwds, text_shas
-
-
-def _unit_vector_text_sha(record: dict[str, Any]) -> str:
-    return hashlib.sha256(_unit_vector_text(record).encode("utf-8")).hexdigest()
-
-
-def _build_unit_vector_index(
-    records: list[dict[str, Any]],
-    *,
-    embedder,
-    db_path: Path,
-):
-    """Return (vectors, source_keys, cwds, text_shas) covering ``records``.
-
-    MiniLM embeddings are deterministic per text, so an existing index's
-    vectors are reusable for any record whose embedded text is unchanged.
-    Incremental embedding reuses the cached prefix and embeds only the
-    appended tail — guarded by BOTH source_key AND a per-record sha256 of the
-    embedded text. The text guard is required because source_key is structural
-    (``f"{source_prompt_key}:unit:{unit_index}"``, prephase.py), not
-    content-derived: ``_replace_units_for_prompt_keys`` can re-append a
-    re-extracted unit under the same source_key with different text, which
-    key-only matching would silently serve as stale vectors. Fall back to a
-    full re-embed on cold start, any prefix mismatch, or embedding-dim change.
-    Re-embedding the whole corpus on every search wastes ~57s of CPU per call
-    (and under concurrent forks, tens of minutes), which is what pushed
-    processor runs past their dispatch budget into ReadTimeout.
-    """
-    import numpy as np
-
-    new_keys = [str(r.get("source_key") or "") for r in records]
-    new_cwds = [str(r.get("cwd") or "") for r in records]
-    new_shas = [_unit_vector_text_sha(r) for r in records]
-    keys_arr = np.asarray(new_keys)
-    cwds_arr = np.asarray(new_cwds)
-    shas_arr = np.asarray(new_shas)
-
-    existing = _load_unit_vector_arrays(db_path)
-    if existing is not None:
-        ex_vectors, ex_keys, _ex_cwds, ex_shas = existing
-        prefix_len = ex_vectors.shape[0]
-        prefix_intact = (
-            0 < prefix_len <= len(records)
-            and ex_keys == new_keys[:prefix_len]
-            and ex_shas == new_shas[:prefix_len]
-        )
-        if prefix_intact:
-            tail = records[prefix_len:]
-            if not tail:
-                return ex_vectors, keys_arr, cwds_arr, shas_arr
-            tail_vectors = np.asarray(
-                embedder([_unit_vector_text(r) for r in tail]),
-                dtype=np.float32,
-            )
-            if tail_vectors.ndim == 2 and tail_vectors.shape[1] == ex_vectors.shape[1]:
-                vectors = np.vstack([ex_vectors, tail_vectors]).astype(np.float32, copy=False)
-                return vectors, keys_arr, cwds_arr, shas_arr
-
-    # Cold start, prefix/key/text mismatch, or embedding-dim change: full re-embed.
-    text_lines = [_unit_vector_text(record) for record in records]
-    vectors = embedder(text_lines) if text_lines else np.zeros((0, 1), dtype=np.float32)
-    vectors = np.asarray(vectors, dtype=np.float32)
-    if vectors.ndim != 2:
-        vectors = vectors.reshape(0, 1)
-    return vectors, keys_arr, cwds_arr, shas_arr
-
-
-def _write_unit_vector_index_atomic(
-    db_path: Path, vectors, source_keys, cwds, text_shas
-) -> None:
-    """Write the index via a staged temp file + os.replace, so a concurrent
-    np.load reader (another processor fork mid-search) never observes a
-    half-written file. tempfile suffix must be .npz or numpy appends one and
-    os.replace misses the target."""
-    import numpy as np
-
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(
-        prefix=".unit_vectors.", suffix=".npz", dir=str(db_path.parent)
+    return _ensure_vector_index(
+        db_path=_unit_vector_path(),
+        state_path=_unit_vector_state_path(),
+        source_path=units_path(),
+        records=records,
+        id_field="source_key",
+        text_fn=_unit_vector_text,
+        cwds_fn=lambda r: [r["cwd"]] if r.get("cwd") else [],
+        embedder=embedder or _default_requirement_embed,
     )
-    os.close(fd)
-    tmp_path = Path(tmp_name)
-    try:
-        np.savez(
-            tmp_path,
-            vectors=vectors,
-            source_keys=np.asarray([str(k) for k in source_keys]),
-            cwds=np.asarray([str(c) for c in cwds]),
-            text_shas=np.asarray([str(s) for s in text_shas]),
-        )
-        os.replace(tmp_path, db_path)
-    finally:
-        if tmp_path.exists():
-            tmp_path.unlink(missing_ok=True)
 
 
 def search_requirement_units_vector(
@@ -1222,6 +1467,7 @@ def search_requirement_units_vector(
     if fields_error:
         return {"success": False, "error": fields_error, "matches": [], "count": 0}
     records = _load_unit_records()
+    embedder = embedder or _default_requirement_embed
     index = _ensure_unit_vector_index(records, embedder=embedder)
     if not index.get("ready"):
         return {
@@ -1236,74 +1482,137 @@ def search_requirement_units_vector(
             "cwd_filters": list(normalized_cwds),
             "all_projects": all_projects,
         }
-    if embedder is None:
-        embedder = _default_unit_vector_embed
-
-    db_path = _unit_vector_path()
-    with np.load(db_path, allow_pickle=False) as data:
-        vectors = np.asarray(data["vectors"], dtype=np.float32)
-        source_keys = [str(key) for key in data["source_keys"]]
-        index_cwds = [str(value) for value in data["cwds"]]
-    if vectors.shape[0] == 0:
+    query_vec = np.asarray(embedder([normalized_query]), dtype=np.float32).reshape(-1)
+    raw_matches, error = _run_vector_query(
+        db_path=_unit_vector_path(),
+        records=records,
+        id_field="source_key",
+        query_vec=query_vec,
+        allowed_cwds=set(normalized_cwds),
+    )
+    if error is not None:
         return {
-            "success": True,
-            "searched": True,
-            "query": normalized_query,
+            "success": False,
+            "searched": False,
+            "error": error,
             "matches": [],
             "count": 0,
+            "query": normalized_query,
+            "index": index,
+        }
+    matches = _project_records(raw_matches, normalized_fields)
+    return {
+        "success": True,
+        "searched": True,
+        "query": normalized_query,
+        "matches": matches,
+        "count": len(matches),
+        "index": index,
+        "cwd_filter": normalized_cwds[0] if len(normalized_cwds) == 1 else "",
+        "cwd_filters": list(normalized_cwds),
+        "all_projects": all_projects,
+        "match_fields": list(normalized_fields) if normalized_fields is not None else "all",
+        "max_matches": None,
+    }
+
+
+def _thread_vector_path() -> Path:
+    from requirement_analysis.threads import requirement_threads_path
+
+    return requirement_threads_path().parent / THREAD_VECTOR_DB_NAME
+
+
+def _thread_vector_state_path() -> Path:
+    from requirement_analysis.threads import requirement_threads_path
+
+    return requirement_threads_path().parent / THREAD_VECTOR_STATE_NAME
+
+
+def _thread_vector_text(record: dict[str, Any]) -> str:
+    return (record.get("current") or "").strip()
+
+
+def _ensure_thread_vector_index(
+    records: list[dict[str, Any]] | None = None,
+    embedder=None,
+) -> dict[str, Any]:
+    from requirement_analysis.threads import requirement_threads_path
+
+    if records is None:
+        records = _load_thread_records()
+    return _ensure_vector_index(
+        db_path=_thread_vector_path(),
+        state_path=_thread_vector_state_path(),
+        source_path=requirement_threads_path(),
+        records=records,
+        id_field="id",
+        text_fn=_thread_vector_text,
+        cwds_fn=lambda r: r["project_cwds"] if isinstance(r.get("project_cwds"), list) else [],
+        embedder=embedder or _default_requirement_embed,
+    )
+
+
+def search_requirement_threads_vector(
+    *,
+    query: str,
+    cwd: str = "",
+    cwds: list[str] | None = None,
+    all_projects: bool = False,
+    fields: list[str] | None = None,
+    include_all_fields: bool = False,
+    embedder=None,
+) -> dict[str, Any]:
+    """Semantic (vector) search over requirement_threads.json via ONNX MiniLM
+    cosine similarity on each thread's compiled `current` state. Mirrors
+    search_requirement_units_vector."""
+    import numpy as np
+
+    _ensure_requirements_importable()
+    normalized_query = (query or "").strip()
+    if not normalized_query:
+        return {"success": False, "error": "query is required", "matches": [], "count": 0}
+    normalized_cwds, cwds_error = _normalize_cwd_filters(cwd, cwds, all_projects=all_projects)
+    if cwds_error:
+        return {"success": False, "error": cwds_error, "matches": [], "count": 0}
+    normalized_fields, fields_error = _normalize_match_fields(
+        fields, include_all_fields=include_all_fields, available=THREAD_MATCH_FIELD_ORDER
+    )
+    if fields_error:
+        return {"success": False, "error": fields_error, "matches": [], "count": 0}
+    records = _load_thread_records()
+    embedder = embedder or _default_requirement_embed
+    index = _ensure_thread_vector_index(records, embedder=embedder)
+    if not index.get("ready"):
+        return {
+            "success": True,
+            "searched": False,
+            "reason": index.get("reason") or "index_not_ready",
+            "matches": [],
+            "count": 0,
+            "query": normalized_query,
             "index": index,
             "cwd_filter": normalized_cwds[0] if len(normalized_cwds) == 1 else "",
             "cwd_filters": list(normalized_cwds),
             "all_projects": all_projects,
-            "match_fields": list(normalized_fields) if normalized_fields is not None else "all",
-            "max_matches": None,
         }
-
     query_vec = np.asarray(embedder([normalized_query]), dtype=np.float32).reshape(-1)
-    dim = vectors.shape[1]
-    if query_vec.shape[0] != dim:
+    raw_matches, error = _run_vector_query(
+        db_path=_thread_vector_path(),
+        records=records,
+        id_field="id",
+        query_vec=query_vec,
+        allowed_cwds=set(normalized_cwds),
+    )
+    if error is not None:
         return {
             "success": False,
             "searched": False,
-            "error": f"embedding_dim_mismatch: query={query_vec.shape[0]} index={dim}",
+            "error": error,
             "matches": [],
             "count": 0,
             "query": normalized_query,
             "index": index,
         }
-    scores = vectors @ query_vec
-
-    allowed_cwds = set(normalized_cwds)
-    scored: list[tuple[float, int]] = []
-    for position, score in enumerate(scores):
-        if allowed_cwds and index_cwds[position] not in allowed_cwds:
-            continue
-        scored.append((float(score), position))
-    scored.sort(key=lambda item: item[0], reverse=True)
-
-    # records may carry duplicates by source_key; keep the first occurrence
-    records_by_key: dict[str, dict[str, Any]] = {}
-    for record in records:
-        key = str(record.get("source_key") or json.dumps(record, sort_keys=True))
-        records_by_key.setdefault(key, record)
-
-    raw_matches: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for score, position in scored:
-        if score <= 0.0:
-            break
-        key = source_keys[position] if position < len(source_keys) else ""
-        record = records_by_key.get(key)
-        if record is None:
-            continue
-        dedupe = key or json.dumps(record, sort_keys=True)
-        if dedupe in seen:
-            continue
-        seen.add(dedupe)
-        scored_record = dict(record)
-        scored_record["vector_score"] = score
-        raw_matches.append(scored_record)
-
     matches = _project_records(raw_matches, normalized_fields)
     return {
         "success": True,
@@ -1619,6 +1928,44 @@ def _load_unit_records() -> list[dict[str, Any]]:
         for unit in load_units()
         if isinstance(unit.get("text"), str) and unit.get("text", "").strip()
     ]
+
+
+def _load_thread_records() -> list[dict[str, Any]]:
+    from requirement_analysis.threads import load_requirement_threads
+
+    db = load_requirement_threads()
+    threads = db.get("threads")
+    if not isinstance(threads, list):
+        return []
+    return [
+        thread
+        for thread in threads
+        if isinstance(thread, dict) and isinstance(thread.get("current"), str) and thread.get("current").strip()
+    ]
+
+
+def _thread_event_texts(record: dict[str, Any]) -> list[str]:
+    events = record.get("events")
+    if not isinstance(events, list):
+        return []
+    return [str(event.get("text") or "") for event in events if isinstance(event, dict) and event.get("text")]
+
+
+def _thread_search_line(record: dict[str, Any]) -> str:
+    searchable = {
+        "current": record.get("current") or "",
+        "status": record.get("status") or "",
+        "events_text": " ".join(_thread_event_texts(record)),
+    }
+    return json.dumps(searchable, ensure_ascii=False, sort_keys=True).replace("\r", "\\r").replace("\n", "\\n")
+
+
+def _thread_latest_ts(record: dict[str, Any]) -> str:
+    events = record.get("events")
+    if not isinstance(events, list):
+        return ""
+    timestamps = sorted(str(event.get("ts") or "") for event in events if isinstance(event, dict) and event.get("ts"))
+    return timestamps[-1] if timestamps else ""
 
 
 def _search_unprocessed_prompts(
@@ -2223,24 +2570,27 @@ def _normalize_match_fields(
     fields: list[str] | None,
     *,
     include_all_fields: bool,
+    available: tuple[str, ...] = MATCH_FIELD_ORDER,
+    default: tuple[str, ...] | None = None,
 ) -> tuple[tuple[str, ...] | None, str | None]:
+    default_fields = default or (DEFAULT_MATCH_FIELDS if available is MATCH_FIELD_ORDER else DEFAULT_THREAD_MATCH_FIELDS)
     if include_all_fields:
         return None, None
     if fields is None:
-        return DEFAULT_MATCH_FIELDS, None
+        return default_fields, None
     normalized: list[str] = []
-    available = set(MATCH_FIELD_ORDER)
+    allowed = set(available)
     for field in fields:
         if not isinstance(field, str):
-            return DEFAULT_MATCH_FIELDS, "fields must be a list of strings"
+            return default_fields, "fields must be a list of strings"
         name = field.strip()
         if not name:
             continue
-        if name not in available:
-            return DEFAULT_MATCH_FIELDS, f"unsupported field: {name}"
+        if name not in allowed:
+            return default_fields, f"unsupported field: {name}"
         if name not in normalized:
             normalized.append(name)
-    return tuple(normalized or DEFAULT_MATCH_FIELDS), None
+    return tuple(normalized or default_fields), None
 
 
 def _project_records(records: list[dict[str, Any]], fields: tuple[str, ...] | None) -> list[dict[str, Any]]:
@@ -2460,7 +2810,7 @@ def _rg_query_pattern_count(query: str) -> int:
     if re.search(r"\w", normalized_query, re.UNICODE):
         seen.add(normalized_query.lower())
         count += 1
-    for token in [tok.lower() for tok in UNIT_FTS_TOKEN_RE.findall(normalized_query)]:
+    for token in [tok.lower() for tok in FTS_TOKEN_RE.findall(normalized_query)]:
         if token in seen:
             continue
         seen.add(token)
@@ -2472,7 +2822,7 @@ def _rg_args_from_query(query: str) -> list[str]:
     patterns: list[str] = []
     seen: set[str] = set()
     normalized_query = " ".join(query.split())
-    tokens = [tok.lower() for tok in UNIT_FTS_TOKEN_RE.findall(normalized_query)]
+    tokens = [tok.lower() for tok in FTS_TOKEN_RE.findall(normalized_query)]
     if re.search(r"\w", normalized_query, re.UNICODE):
         seen.add(normalized_query.lower())
         patterns.append(normalized_query)
