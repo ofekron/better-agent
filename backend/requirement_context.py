@@ -20,6 +20,7 @@ import extension_jobs
 import provisioning
 import extension_package_loader
 import extension_store
+import git_repo_info
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +78,9 @@ NATIVE_BUNDLE_COLD_RETRY_TIMEOUT_SECONDS = 20.0
 NATIVE_INDEX_SQL_TIMEOUT_SECONDS = 120.0
 NATIVE_BUNDLE_WINDOW_AFTER = 8
 NATIVE_BUNDLE_EXACT_COLLAPSE_MIN_CHARS = 256
+REQUIREMENTS_CWD_INPUT_LIMIT = 8
+REQUIREMENTS_CWD_LENGTH_LIMIT = 4096
+REQUIREMENTS_CWD_RESOLVED_LIMIT = 256
 NATIVE_BUNDLE_PREFIX_COLLAPSE_FIELDS = (
     ("prefix_8192_sha256", 8192),
     ("prefix_4096_sha256", 4096),
@@ -441,11 +445,13 @@ def _run_requirements_processor(
     debug_request_id: str = "",
     delegation_id: str = "",
 ) -> dict[str, Any]:
-    ctx = {
-        "cwd": cwd,
-        "cwds": cwds or [],
-        "all_projects": all_projects,
-    }
+    ctx, scope_error = _requirements_processor_scope(
+        cwd,
+        cwds,
+        all_projects=all_projects,
+    )
+    if scope_error:
+        return {"text": "", "error": scope_error}
     if debug_request_id:
         ctx["_debug_request_id"] = debug_request_id
     if delegation_id:
@@ -469,9 +475,9 @@ def _run_requirements_processor(
                 request_id=debug_request_id,
                 payload={
                     "query": query,
-                    "cwd": cwd,
-                    "cwds": cwds or [],
-                    "all_projects": all_projects,
+                    "cwd": ctx["cwd"],
+                    "cwds": ctx["cwds"],
+                    "all_projects": ctx["all_projects"],
                     "delegation_id": ctx.get("client_delegation_id"),
                 },
             )
@@ -789,7 +795,15 @@ def _search_requirements_prepared(
             "freshness": _public_freshness(freshness),
         }
 
-    records = _filter_records_by_cwds(_load_unit_records(), normalized_cwds)
+    records, scope_error = _filter_records_by_cwds(_load_unit_records(), normalized_cwds)
+    if scope_error:
+        return {
+            "success": False,
+            "error": scope_error,
+            "matches": [],
+            "count": 0,
+            "rg_args": normalized_args,
+        }
     unit_projection_path, line_records = _write_unit_projection(records)
     try:
         rg_result = _run_rg(unit_projection_path, normalized_args)
@@ -1064,6 +1078,13 @@ def search_requirement_units_fts(
     if fields_error:
         return {"success": False, "error": fields_error, "matches": [], "count": 0}
     records = _load_unit_records()
+    normalized_cwds, scope_error = _expand_cwds_from_records(
+        normalized_cwds,
+        records,
+        lambda record: [record.get("cwd") or ""],
+    )
+    if scope_error:
+        return {"success": False, "error": scope_error, "matches": [], "count": 0}
     index = _ensure_unit_fts_index(records)
     if not index.get("ready"):
         return {
@@ -1177,6 +1198,15 @@ def search_requirement_threads_fts(
     if fields_error:
         return {"success": False, "error": fields_error, "matches": [], "count": 0}
     records = _load_thread_records()
+    normalized_cwds, scope_error = _expand_cwds_from_records(
+        normalized_cwds,
+        records,
+        lambda record: record.get("project_cwds")
+        if isinstance(record.get("project_cwds"), list)
+        else [],
+    )
+    if scope_error:
+        return {"success": False, "error": scope_error, "matches": [], "count": 0}
     index = _ensure_thread_fts_index(records)
     if not index.get("ready"):
         return {
@@ -1558,6 +1588,13 @@ def search_requirement_units_vector(
     if fields_error:
         return {"success": False, "error": fields_error, "matches": [], "count": 0}
     records = _load_unit_records()
+    normalized_cwds, scope_error = _expand_cwds_from_records(
+        normalized_cwds,
+        records,
+        lambda record: [record.get("cwd") or ""],
+    )
+    if scope_error:
+        return {"success": False, "error": scope_error, "matches": [], "count": 0}
     embedder = embedder or _default_requirement_embed
     index = _ensure_unit_vector_index(records, embedder=embedder)
     if not index.get("ready"):
@@ -1673,6 +1710,15 @@ def search_requirement_threads_vector(
     if fields_error:
         return {"success": False, "error": fields_error, "matches": [], "count": 0}
     records = _load_thread_records()
+    normalized_cwds, scope_error = _expand_cwds_from_records(
+        normalized_cwds,
+        records,
+        lambda record: record.get("project_cwds")
+        if isinstance(record.get("project_cwds"), list)
+        else [],
+    )
+    if scope_error:
+        return {"success": False, "error": scope_error, "matches": [], "count": 0}
     embedder = embedder or _default_requirement_embed
     index = _ensure_thread_vector_index(records, embedder=embedder)
     if not index.get("ready"):
@@ -2070,7 +2116,18 @@ def _search_unprocessed_prompts(
         return {"enabled": False, "searched": False, "matches": [], "count": 0}
     if remaining is not None and remaining <= 0:
         return {"enabled": True, "searched": False, "matches": [], "count": 0, "reason": "unit_match_limit_reached"}
-    records = _filter_records_by_cwds(_load_unprocessed_prompt_records(freshness), cwds)
+    records, scope_error = _filter_records_by_cwds(
+        _load_unprocessed_prompt_records(freshness),
+        cwds,
+    )
+    if scope_error:
+        return {
+            "enabled": True,
+            "searched": False,
+            "matches": [],
+            "count": 0,
+            "error": scope_error,
+        }
     if not records:
         return {"enabled": True, "searched": False, "matches": [], "count": 0, "reason": "no_unprocessed_prompts"}
     projection_path, line_records = _write_prompt_fallback_projection(records)
@@ -2252,13 +2309,16 @@ def _native_transcript_sql_window_rows(
     cwds: tuple[str, ...],
     limit: int,
 ) -> list[dict[str, Any]]:
+    scoped_cwds, scope_error = _native_index_project_cwds(native_transcript_index, cwds)
+    if scope_error:
+        raise RuntimeError(scope_error)
     match_expr = native_transcript_index._match_expr(tokens)
     cwd_clause = ""
     params: list[Any] = [match_expr]
-    if cwds:
-        placeholders = ",".join("?" for _ in cwds)
+    if scoped_cwds:
+        placeholders = ",".join("?" for _ in scoped_cwds)
         cwd_clause = f" AND cwd IN ({placeholders})"
-        params.extend(cwds)
+        params.extend(scoped_cwds)
     params.extend([
         limit,
         NATIVE_BUNDLE_WINDOW_BEFORE,
@@ -2626,11 +2686,91 @@ def _format_native_bundle_text(
     return "\n".join(lines)
 
 
-def _filter_records_by_cwds(records: list[dict[str, Any]], cwds: tuple[str, ...]) -> list[dict[str, Any]]:
+def _filter_records_by_cwds(
+    records: list[dict[str, Any]],
+    cwds: tuple[str, ...],
+) -> tuple[list[dict[str, Any]], str | None]:
     if not cwds:
-        return records
-    allowed = set(cwds)
-    return [record for record in records if record.get("cwd") in allowed]
+        return records, None
+    expanded, error = _expand_cwds_from_records(
+        cwds,
+        records,
+        lambda record: [record.get("cwd") or ""],
+    )
+    if error:
+        return [], error
+    allowed = set(expanded)
+    return [record for record in records if record.get("cwd") in allowed], None
+
+
+def _expand_cwds_from_records(
+    cwds: tuple[str, ...],
+    records: list[dict[str, Any]],
+    record_cwds,
+) -> tuple[tuple[str, ...], str | None]:
+    candidates = [
+        candidate
+        for record in records
+        for candidate in record_cwds(record)
+        if isinstance(candidate, str) and candidate
+    ]
+    return _expand_cwds_from_candidates(cwds, candidates)
+
+
+def _expand_cwds_from_candidates(
+    cwds: tuple[str, ...],
+    candidates: list[str],
+) -> tuple[tuple[str, ...], str | None]:
+    if not cwds:
+        return (), None
+    expanded = list(cwds)
+    allowed_common_dirs = {
+        common
+        for value in cwds
+        if (common := git_repo_info.repo_common_dir(value))
+    }
+    if not allowed_common_dirs:
+        return cwds, None
+    try:
+        resolved_roots = tuple(Path(value).expanduser().resolve() for value in cwds)
+    except (OSError, RuntimeError, ValueError):
+        return (), "requirements cwd scope could not be resolved"
+    for candidate in candidates:
+        if candidate in expanded:
+            continue
+        try:
+            resolved_candidate = Path(candidate).expanduser().resolve()
+        except (OSError, RuntimeError, ValueError):
+            continue
+        if not any(
+            resolved_candidate == root or resolved_candidate.is_relative_to(root)
+            for root in resolved_roots
+        ):
+            continue
+        if git_repo_info.repo_common_dir(candidate) in allowed_common_dirs:
+            expanded.append(candidate)
+            if len(expanded) > REQUIREMENTS_CWD_RESOLVED_LIMIT:
+                return (), "resolved requirements cwd scope is too large"
+    return tuple(expanded), None
+
+
+def _native_index_project_cwds(
+    native_transcript_index: Any,
+    cwds: tuple[str, ...],
+) -> tuple[tuple[str, ...], str | None]:
+    if not cwds:
+        return (), None
+    result = native_transcript_index.run_readonly_sql(
+        "SELECT DISTINCT cwd FROM native_element_meta WHERE cwd <> ''"
+    )
+    if result.get("error"):
+        return (), f"native transcript cwd scope failed: {result['error']}"
+    candidates = [
+        row[0]
+        for row in result.get("rows") or []
+        if isinstance(row, (list, tuple)) and row and isinstance(row[0], str)
+    ]
+    return _expand_cwds_from_candidates(cwds, candidates)
 
 
 def _normalize_cwd_filters(
@@ -2647,12 +2787,49 @@ def _normalize_cwd_filters(
         not isinstance(cwds, list) or any(not isinstance(item, str) for item in cwds)
     ):
         return (), "cwds must be a list of strings"
+    inputs = [cwd, *(cwds or [])]
+    if len(inputs) > REQUIREMENTS_CWD_INPUT_LIMIT:
+        return (), f"at most {REQUIREMENTS_CWD_INPUT_LIMIT} cwd values are allowed"
+    if any(len(item) > REQUIREMENTS_CWD_LENGTH_LIMIT for item in inputs):
+        return (), f"cwd values must be at most {REQUIREMENTS_CWD_LENGTH_LIMIT} characters"
+    if any(any(ord(char) < 32 or ord(char) == 127 for char in item) for item in inputs):
+        return (), "cwd values contain unsupported control characters"
     normalized: list[str] = []
-    for item in [cwd, *(cwds or [])]:
+    for item in inputs:
         value = item.strip()
-        if value and value not in normalized:
+        if not value:
+            continue
+        if value not in normalized:
             normalized.append(value)
+        for worktree in git_repo_info.worktree_roots(value) or []:
+            if worktree and worktree not in normalized:
+                normalized.append(worktree)
+                if len(normalized) > REQUIREMENTS_CWD_RESOLVED_LIMIT:
+                    return (), "resolved requirements cwd scope is too large"
     return tuple(normalized), None
+
+
+def _requirements_processor_scope(
+    cwd: str,
+    cwds: list[str] | None,
+    *,
+    all_projects: bool,
+) -> tuple[dict[str, Any], str | None]:
+    normalized, error = _normalize_cwd_filters(
+        cwd,
+        cwds,
+        all_projects=all_projects,
+    )
+    if error:
+        return {}, error
+    if all_projects:
+        return {"cwd": "", "cwds": [], "all_projects": True}, None
+    primary = cwd.strip()
+    return {
+        "cwd": primary,
+        "cwds": [value for value in normalized if value != primary],
+        "all_projects": False,
+    }, None
 
 
 def _normalize_match_fields(
