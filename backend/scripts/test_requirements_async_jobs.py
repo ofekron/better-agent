@@ -354,6 +354,56 @@ def test_results_timeout_returns_persisted_running_progress() -> None:
     asyncio.run(scenario())
 
 
+def test_running_results_include_native_session_file_paths() -> None:
+    async def scenario():
+        import main
+
+        original_auth = main._internal_authority_is_valid
+        original_gate = main._require_builtin_runtime_extension
+        original_role = main.extension_store.extension_id_for_role
+        original_read_status = delegation_status_store.read_status
+        started = asyncio.Event()
+
+        async def _holds(payload, *, request_id=""):
+            started.set()
+            await asyncio.sleep(3600)
+            return {}
+
+        try:
+            main._internal_authority_is_valid = lambda: True
+            main._require_builtin_runtime_extension = lambda _extension_id: None
+            main.extension_store.extension_id_for_role = lambda _role: "requirements"
+            delegation_status_store.read_status = lambda _delegation_id: {
+                "jsonl_path": "/native/processor-session.jsonl",
+            }
+            _fire(
+                "job-results-native-path",
+                {"query": "q"},
+                _holds,
+                metadata={"delegation_id": _delegation_id("job-results-native-path")},
+            )
+            await started.wait()
+
+            response = await main.internal_get_requirements_results(
+                {"id": "job-results-native-path", "wait": 0},
+                x_internal_token="test",
+            )
+
+            assert response["ready"] is False
+            assert response["native_session_file_paths"] == [
+                "/native/processor-session.jsonl",
+            ]
+        finally:
+            main._internal_authority_is_valid = original_auth
+            main._require_builtin_runtime_extension = original_gate
+            main.extension_store.extension_id_for_role = original_role
+            delegation_status_store.read_status = original_read_status
+            for task in jobs._JOBS.values():
+                task.cancel()
+
+    asyncio.run(scenario())
+
+
 def test_phase_persist_failure_does_not_fail_requirements_job() -> None:
     async def scenario():
         import main
@@ -501,6 +551,50 @@ def test_processor_hands_fork_text_through_without_revalidation() -> None:
     assert processed.get("error") is None
     assert processed["text"] == fork_text
     assert dispatches["count"] == 1, "unparseable text must not trigger a re-dispatch"
+
+
+def test_backend_requirements_processor_uses_in_process_dispatch() -> None:
+    original_get_spec = requirement_context.get_requirements_processor_spec
+    original_run_sync = requirement_context.provisioning.run_sync
+
+    class ProcessorSpec:
+        key = requirement_context.GET_REQUIREMENTS_PROCESSOR_KEY
+        dispatch = "http"
+
+    class OtherSpec:
+        key = "other_processor"
+        dispatch = "http"
+
+    processor_spec = ProcessorSpec()
+    seen: list[object] = []
+
+    def _run_sync(spec, _query, _ctx):
+        seen.append(spec)
+        return SimpleNamespace(
+            text="ok",
+            value={"text": "ok"},
+            base_session_id="base",
+            caller_session_id="caller",
+            dispatch_result={},
+        )
+
+    try:
+        requirement_context.get_requirements_processor_spec = lambda: processor_spec
+        requirement_context.provisioning.run_sync = _run_sync
+        processed = requirement_context._run_requirements_processor(
+            query="q",
+            cwd="/repo",
+            debug_request_id="job-in-process-dispatch",
+        )
+    finally:
+        requirement_context.get_requirements_processor_spec = original_get_spec
+        requirement_context.provisioning.run_sync = original_run_sync
+
+    assert processed.get("error") is None
+    assert seen and seen[0] is not processor_spec
+    assert getattr(seen[0], "dispatch") == "in_process"
+    assert processor_spec.dispatch == "http"
+    assert requirement_context._backend_processor_spec(OtherSpec()).dispatch == "http"
 
 
 def test_disk_sweep_removes_expired_records() -> None:
@@ -763,10 +857,12 @@ def main() -> int:
         test_failed_job_closes_active_phase_timing,
         test_running_progress_does_not_overwrite_terminal_records,
         test_results_timeout_returns_persisted_running_progress,
+        test_running_results_include_native_session_file_paths,
         test_phase_persist_failure_does_not_fail_requirements_job,
         test_phase_progress_includes_processor_queue_state,
         test_processor_on_queued_observes_registered_waiter,
         test_processor_hands_fork_text_through_without_revalidation,
+        test_backend_requirements_processor_uses_in_process_dispatch,
         test_disk_sweep_removes_expired_records,
         test_completed_delegation_recovers_running_async_job,
         test_completed_run_dir_recovers_running_async_job,

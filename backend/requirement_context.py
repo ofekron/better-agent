@@ -12,6 +12,7 @@ import sqlite3
 import subprocess
 import tempfile
 import threading
+from copy import copy
 from pathlib import Path
 from typing import Any
 
@@ -170,6 +171,16 @@ def get_requirements_processor_spec():
         GET_REQUIREMENTS_PROCESSOR_KEY,
         "requirement_analysis.processor_spec",
     )
+
+
+def _backend_processor_spec(spec: Any) -> Any:
+    if getattr(spec, "key", "") != GET_REQUIREMENTS_PROCESSOR_KEY:
+        return spec
+    if getattr(spec, "dispatch", "") == "in_process":
+        return spec
+    backend_spec = copy(spec)
+    backend_spec.dispatch = "in_process"
+    return backend_spec
 
 
 def processor_delegation_id(request_id: str) -> str:
@@ -440,7 +451,7 @@ def _run_requirements_processor(
     if delegation_id:
         ctx["client_delegation_id"] = delegation_id
     try:
-        spec = get_requirements_processor_spec()
+        spec = _backend_processor_spec(get_requirements_processor_spec())
     except Exception as exc:
         if debug_request_id:
             logger.warning(

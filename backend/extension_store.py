@@ -5134,13 +5134,22 @@ def _mcp_item_available_for_inputs(
         return False
     if bare and not item.get("bare_allowed"):
         return False
+    explicit_backend_url = str(inputs.get("backend_url") or "").strip()
     backend_url = str(
-        inputs.get("backend_url")
+        explicit_backend_url
         or get_env("BETTER_CLAUDE_BACKEND_URL")
         or "http://localhost:8000"
     ).strip()
     internal_token = str(inputs.get("internal_token") or "").strip()
-    if item.get("requires_backend_auth") and not (backend_url and internal_token):
+    launcher_can_mint_token = (
+        bool(inputs.get("extension_mcp_launcher_context"))
+        and bool(str(inputs.get("app_session_id") or "").strip())
+        and bool(explicit_backend_url)
+    )
+    if (
+        item.get("requires_backend_auth")
+        and not ((backend_url and internal_token) or launcher_can_mint_token)
+    ):
         return False
     predicate = item.get("predicate")
     if predicate and not _mcp_predicate_matches(predicate, inputs):
