@@ -49,6 +49,24 @@ def install_extension_fixture(
     return extension_id
 
 
+def fabricate_shared_venv(install_path: Path | str, requirements: Sequence[str]) -> Path:
+    """Create a ready-marked (empty) shared venv referenced by install_path.
+
+    Returns the venv's bin dir, resolved the way runtime consumers see it.
+    """
+    import extension_venvs
+    req_hash = extension_venvs.requirements_venv_hash(list(requirements))
+    venv_dir = extension_venvs.venvs_root() / req_hash
+    venv_bin = extension_venvs.venv_bin_dir(venv_dir)
+    venv_bin.mkdir(parents=True, exist_ok=True)
+    extension_venvs.venv_python(venv_dir).touch()
+    (venv_dir / extension_venvs._COMPLETE_MARKER).touch()
+    (Path(install_path) / extension_venvs.VENV_REF_FILENAME).write_text(
+        req_hash + "\n", encoding="utf-8"
+    )
+    return venv_bin
+
+
 def install_machine_nodes_extension(home: str) -> str:
     return install_extension_fixture(
         home,

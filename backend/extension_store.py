@@ -40,12 +40,16 @@ import extension_applied_config
 from provider_config_sync_backend.api import KNOWN_PROVIDER_KINDS
 import extension_instructions
 import extension_mcp
+import extension_venvs
 import perf
 import extension_integrity
 
 logger = logging.getLogger(__name__)
 
-STORE_SCHEMA_VERSION = 2
+# v3: version snapshots reference shared venvs (extensions/venvs/<req-hash>/)
+# via a .venv-ref marker instead of bundling a per-version .venv. No migration:
+# wipe extensions/extensions.json to start fresh (extensions reinstall on load).
+STORE_SCHEMA_VERSION = 3
 MANIFEST_KIND = "better-agent-extension"
 EXTENSION_SLOW_CALL_SECONDS = 2.0
 _EXTENSION_SLOW_CALL_LIMIT = 3
@@ -459,29 +463,8 @@ def _store_lock():
             lock_file.close()
 
 
-_SOURCE_TYPE_V1_TO_V2 = {
-    "public_builtin": "better_agent_bundled",
-    "private_local": "better_agent_local",
-    "required_artifact": "better_agent_signed",
-}
-
-
-def _migrate_store_v1_to_v2(data: dict[str, Any]) -> None:
-    for record in (data.get("extensions") or {}).values():
-        source = record.get("source") if isinstance(record, dict) else None
-        if not isinstance(source, dict):
-            continue
-        new_type = _SOURCE_TYPE_V1_TO_V2.get(source.get("type"))
-        if new_type:
-            source["type"] = new_type
-    data["schema_version"] = 2
-
-
 def _read_store_unlocked() -> dict[str, Any]:
     data = read_json(_store_path(), _blank_store())
-    if data.get("schema_version") == 1:
-        _migrate_store_v1_to_v2(data)
-        _write_store_unlocked(data)
     if data.get("schema_version") != STORE_SCHEMA_VERSION:
         raise ExtensionError("Unsupported extension store schema; wipe extensions/extensions.json to start fresh")
     extensions = data.get("extensions")
@@ -871,7 +854,22 @@ def _prune_extension_versions(data: dict[str, Any]) -> int:
             shutil.rmtree(stale, ignore_errors=True)
             if not stale.exists():
                 removed += 1
+    removed_venvs = extension_venvs.prune_unreferenced(
+        _referenced_venv_hashes_on_disk, referenced
+    )
+    if removed_venvs:
+        perf.record_count("extension_venv_gc.removed", removed_venvs)
     return removed
+
+
+def _referenced_venv_hashes_on_disk() -> set[str]:
+    """Requirement hashes referenced by any version snapshot still on disk."""
+    hashes: set[str] = set()
+    for marker in _install_root().glob(f"*/versions/*/{extension_venvs.VENV_REF_FILENAME}"):
+        ref = extension_venvs.read_venv_ref(marker.parent)
+        if ref:
+            hashes.add(ref)
+    return hashes
 
 
 def prune_extension_versions() -> int:
@@ -3099,59 +3097,16 @@ def _recover_quarantined_cohort_for_generation(
     return ordered
 
 
-def _venv_python(venv_dir: Path) -> Path:
-    if sys.platform == "win32":
-        return venv_dir / "Scripts" / "python.exe"
-    return venv_dir / "bin" / "python"
-
-
-def _venv_bin_dir(venv_dir: Path) -> Path:
-    if sys.platform == "win32":
-        return venv_dir / "Scripts"
-    return venv_dir / "bin"
-
-
-def _venv_site_packages_dir(venv_dir: Path) -> Path | None:
-    if sys.platform == "win32":
-        candidate = venv_dir / "Lib" / "site-packages"
-        return candidate if candidate.is_dir() else None
-    lib_dir = venv_dir / "lib"
-    if not lib_dir.is_dir():
-        return None
-    for candidate in sorted(lib_dir.glob("python*/site-packages")):
-        if candidate.is_dir():
-            return candidate
-    return None
-
-
 def _install_python_requirements(target: Path, manifest: dict[str, Any]) -> None:
     requirements = list(manifest.get("entrypoints", {}).get("python_requirements") or [])
     if not requirements:
         return
     if os.environ.get("BETTER_AGENT_SKIP_EXTENSION_DEPENDENCY_INSTALL") == "1":
         return
-    venv_dir = target / ".venv"
-    result = subprocess.run(
-        [sys.executable, "-m", "venv", str(venv_dir)],
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=120,
-    )
-    if result.returncode != 0:
-        detail = _scrub((result.stderr or result.stdout or "venv creation failed").strip())
-        raise ExtensionError(f"extension dependency environment creation failed: {detail}")
-    python = _venv_python(venv_dir)
-    result = subprocess.run(
-        [str(python), "-m", "pip", "install", *requirements],
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=10 * 60,
-    )
-    if result.returncode != 0:
-        detail = _scrub((result.stderr or result.stdout or "pip install failed").strip())
-        raise ExtensionError(f"extension dependency install failed: {detail}")
+    try:
+        extension_venvs.provision(target, requirements)
+    except extension_venvs.VenvBuildError as exc:
+        raise ExtensionError(_scrub(str(exc)))
 
 
 def _placeholder_record(extension_id: str, *, source_type: str, error: str = "") -> dict[str, Any]:
@@ -3308,7 +3263,7 @@ def _hash_public_package(package_dir: Path) -> str:
     for path in sorted(package_dir.rglob("*")):
         if (
             not path.is_file()
-            or any(part in {"__pycache__", ".pytest_cache", ".venv"} for part in path.parts)
+            or any(part in {"__pycache__", ".pytest_cache", ".venv", extension_venvs.VENV_REF_FILENAME} for part in path.parts)
             or path.suffix == ".pyc"
         ):
             continue
@@ -4072,9 +4027,9 @@ def _require_smoke_path(package_dir: Path, rel_path: str) -> None:
 
 
 def _smoke_python(package_dir: Path) -> Path:
-    venv_python = _venv_python(package_dir / ".venv")
-    if venv_python.is_file():
-        return venv_python
+    venv_dir = extension_venvs.resolve_venv_dir(package_dir)
+    if venv_dir is not None:
+        return extension_venvs.venv_python(venv_dir)
     return Path(sys.executable)
 
 
@@ -5556,13 +5511,17 @@ def _runtime_mcp_server_config_for_item(
             "env": env,
             **timeout_config,
         }
-    venv_bin = _venv_bin_dir(install_root / ".venv")
-    if venv_bin.is_dir():
-        existing_path = env.get("PATH") or os.environ.get("PATH") or ""
-        env["PATH"] = str(venv_bin) + (os.pathsep + existing_path if existing_path else "")
+    venv_dir = extension_venvs.resolve_venv_dir(install_root)
+    if venv_dir is not None:
+        venv_bin = extension_venvs.venv_bin_dir(venv_dir)
+        if venv_bin.is_dir():
+            existing_path = env.get("PATH") or os.environ.get("PATH") or ""
+            env["PATH"] = str(venv_bin) + (os.pathsep + existing_path if existing_path else "")
     sdk_path = _sdk_pythonpath()
     pythonpath_parts = [str(install_root)]
-    site_packages = _venv_site_packages_dir(install_root / ".venv")
+    site_packages = (
+        extension_venvs.venv_site_packages_dir(venv_dir) if venv_dir is not None else None
+    )
     if site_packages is not None:
         pythonpath_parts.append(str(site_packages))
     if sdk_path:

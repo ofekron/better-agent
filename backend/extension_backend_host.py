@@ -13,6 +13,8 @@ from typing import Any
 
 from fastapi import APIRouter, FastAPI
 
+import extension_venvs
+
 logger = logging.getLogger("extension_backend_host")
 
 
@@ -68,25 +70,15 @@ def _prepare_import_path(install_path: Path) -> None:
         if Path(item or ".").resolve() != backend_dir
     ]
     paths = [str(install_path)]
-    site_packages = _venv_site_packages(install_path / ".venv")
+    venv_dir = extension_venvs.resolve_venv_dir(install_path)
+    site_packages = (
+        extension_venvs.venv_site_packages_dir(venv_dir) if venv_dir is not None else None
+    )
     if site_packages is not None:
         paths.append(str(site_packages))
     for path in reversed(paths):
         if path not in sys.path:
             sys.path.insert(0, path)
-
-
-def _venv_site_packages(venv_dir: Path) -> Path | None:
-    if sys.platform == "win32":
-        candidate = venv_dir / "Lib" / "site-packages"
-        return candidate if candidate.is_dir() else None
-    lib_dir = venv_dir / "lib"
-    if not lib_dir.is_dir():
-        return None
-    for candidate in sorted(lib_dir.glob("python*/site-packages")):
-        if candidate.is_dir():
-            return candidate
-    return None
 
 
 async def _run_asgi(

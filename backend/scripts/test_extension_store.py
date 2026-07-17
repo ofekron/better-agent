@@ -31,6 +31,7 @@ if _BACKEND not in sys.path:
 
 import extension_store  # noqa: E402
 import extension_backend_loader  # noqa: E402
+from _extension_test_helpers import fabricate_shared_venv  # noqa: E402
 import personal_harness_extension  # noqa: E402
 from json_store import read_json, write_json  # noqa: E402
 
@@ -429,10 +430,11 @@ def test_extension_package_installs_preserving_requirements_and_exposes_runtime_
         raise AssertionError("python_requirements declaration was not preserved")
     # Resolve to the canonical path: the runtime-MCP builder resolves
     # install_root (Path(...).resolve()), so on macOS (/var -> /private/var)
-    # the PATH entry is the resolved form. Match it or the entry-level check
-    # compares unresolved vs resolved strings and fails.
-    venv_bin = extension_store._venv_bin_dir(Path(record["source"]["install_path"]).resolve() / ".venv")
-    venv_bin.mkdir(parents=True)
+    # the marker is read from the resolved form. Match it or the entry-level
+    # check compares unresolved vs resolved strings and fails.
+    venv_bin = fabricate_shared_venv(
+        Path(record["source"]["install_path"]).resolve(), ["some-runtime-dep[mcp]"]
+    )
     _configure_internal_llm_defaults("default_session")
 
     config = extension_store.runtime_mcp_server_configs(
@@ -496,8 +498,9 @@ def test_internal_runtime_mcp_requires_loopback_auth_but_not_user_facing() -> No
         },
         persist=True,
     )
-    venv_bin = extension_store._venv_bin_dir(Path(record["source"]["install_path"]).resolve() / ".venv")
-    venv_bin.mkdir(parents=True)
+    fabricate_shared_venv(
+        Path(record["source"]["install_path"]).resolve(), ["fixture-dep"]
+    )
 
     inputs = {
         "backend_url": "http://127.0.0.1:8000",
@@ -5417,53 +5420,8 @@ def test_manifest_accepts_session_event_hook_and_todos_fields() -> None:
         raise AssertionError(manifest["permissions"])
 
 
-def test_v1_store_migrates_source_types_to_v2_without_wipe() -> None:
-    temp_home = tempfile.mkdtemp(prefix="bc-test-v1-migrate-")
-    try:
-        store_path = Path(temp_home) / "extensions" / "extensions.json"
-        store_path.parent.mkdir(parents=True, exist_ok=True)
-        def record(extension_id: str, source_type: str) -> dict:
-            return {
-                "manifest": {"id": extension_id},
-                "source": {"type": source_type},
-            }
-        v1_store = {
-            "schema_version": 1,
-            "extensions": {
-                "vendor.bundled": record("vendor.bundled", "public_builtin"),
-                "vendor.local": record("vendor.local", "private_local"),
-                "vendor.signed": record("vendor.signed", "required_artifact"),
-                "vendor.market": record("vendor.market", "artifact"),
-            },
-            "deleted_extensions": {},
-        }
-        store_path.write_text(json.dumps(v1_store), encoding="utf-8")
-
-        with extension_store._override_store_path(store_path):
-            data = extension_store._read_store_unlocked()  # type: ignore[attr-defined]
-        if data["schema_version"] != 2:
-            raise AssertionError(data["schema_version"])
-        types = {k: v["source"]["type"] for k, v in data["extensions"].items()}
-        if types != {
-            "vendor.bundled": "better_agent_bundled",
-            "vendor.local": "better_agent_local",
-            "vendor.signed": "better_agent_signed",
-            "vendor.market": "artifact",
-        }:
-            raise AssertionError(types)
-
-        persisted = json.loads(store_path.read_text(encoding="utf-8"))
-        if persisted["schema_version"] != 2:
-            raise AssertionError("migration was not persisted to disk")
-        if persisted["extensions"]["vendor.local"]["source"]["type"] != "better_agent_local":
-            raise AssertionError(persisted["extensions"]["vendor.local"])
-    finally:
-        shutil.rmtree(temp_home, ignore_errors=True)
-
-
 if __name__ == "__main__":
     try:
-        test_v1_store_migrates_source_types_to_v2_without_wipe()
         test_manifest_validation_rejects_unknown_permissions()
         test_manifest_validates_mcp_predicate()
         test_manifest_accepts_session_event_hook_and_todos_fields()
