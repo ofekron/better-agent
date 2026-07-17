@@ -21,7 +21,7 @@ from pathlib import Path
 
 import httpx
 import websockets
-from fastapi import FastAPI, Request, WebSocket
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from starlette.background import BackgroundTask
 
@@ -383,11 +383,13 @@ async def proxy_ws(websocket: WebSocket, _path: str) -> None:
                 descriptor["path"],
                 uri=f"ws://better-agent-runtime{target}",
                 additional_headers=headers,
+                max_size=None,  # chat/event frames can exceed the 1 MiB default (see node_client.py)
             )
         else:
             upstream = await websockets.connect(
                 f"ws://{descriptor['host']}:{descriptor['port']}{target}",
                 additional_headers=headers,
+                max_size=None,  # chat/event frames can exceed the 1 MiB default (see node_client.py)
             )
     except (OSError, websockets.exceptions.WebSocketException):
         await websocket.close(code=1013)  # runtime unreachable: try later
@@ -432,7 +434,17 @@ async def proxy_ws(websocket: WebSocket, _path: str) -> None:
                         # approvals, sidebar/session metadata, provider infra)
                         # keeps passing through unchanged.
                         continue
-            await connection.send_frame(frame)
+            try:
+                await connection.send_frame(frame)
+            except (RuntimeError, WebSocketDisconnect):
+                # Browser socket is already closed/disconnected (tab
+                # navigated, reconnect, etc.) — Starlette raises
+                # RuntimeError on `websocket.send` after close. There's
+                # nowhere left to deliver, so stop this pump; the outer
+                # teardown closes upstream + the websocket. Without this
+                # guard the send-after-close RuntimeError escapes the task
+                # and is logged as an ASGI ERROR traceback.
+                return
 
     pumps = {
         asyncio.create_task(browser_to_upstream()),
