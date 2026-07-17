@@ -14,6 +14,9 @@ HOME = tempfile.mkdtemp(prefix="historical-projection-")
 os.environ["BETTER_AGENT_HOME"] = HOME
 
 import historical_children_projection as projection
+import runtime_ownership
+
+runtime_ownership.register_current_process_writer()
 
 
 ROOT, SID, MSG = "root", "session", "message"
@@ -425,11 +428,50 @@ def test_schedule_all_loads_durable_unloaded_worker_tree():
     }]}], "forks": []}
     owner = type("ProjectionOwner", (), {
         "list": lambda _self: [{"id": root_id}],
-        "get_ref": lambda _self, requested: snapshot if requested == root_id else None,
+        "get": lambda _self, requested: snapshot if requested == root_id else None,
     })()
     with patch.object(projection, "schedule_rebuild") as rebuild:
         projection.schedule_all(owner)
     rebuild.assert_called_once_with(root_id, snapshot, priority=False)
+
+
+def test_schedule_all_snapshot_is_immune_to_concurrent_live_mutation():
+    """Regression: `schedule_all` must hand `schedule_rebuild` a deep-copied
+    snapshot (`session_manager.get`), not the live mutable node
+    (`session_manager.get_ref`). `schedule_rebuild` closes over the snapshot
+    and runs it on a background executor thread well after this call
+    returns; if the snapshot were the live node, concurrent appends to the
+    session's live tree would be visible inside the background rebuild and
+    could tear a mid-append `messages` list."""
+    from session_manager import manager as sm
+
+    sess = sm.create(
+        name="snapshot-immunity", cwd="/tmp",
+        orchestration_mode="native", model="model", source="test",
+    )
+    root_id = sess["id"]
+    sm.append_user_msg(root_id, {"id": "msg-1", "role": "user", "content": "first"})
+
+    captured = {}
+    owner = type("ProjectionOwner", (), {
+        "list": lambda _self: [{"id": root_id}],
+        "get": lambda _self, requested: captured.setdefault(
+            "snapshot", sm.get(requested),
+        ),
+    })()
+    with patch.object(projection, "_is_current", return_value=False), \
+         patch.object(projection, "schedule_rebuild") as rebuild:
+        projection.schedule_all(owner)
+
+    snapshot = captured["snapshot"]
+    assert [m["id"] for m in snapshot["messages"]] == ["msg-1"]
+
+    sm.append_user_msg(root_id, {"id": "msg-2", "role": "user", "content": "second"})
+
+    assert [m["id"] for m in snapshot["messages"]] == ["msg-1"]
+    passed_snapshot = rebuild.call_args.args[1]
+    assert passed_snapshot is snapshot
+    assert [m["id"] for m in passed_snapshot["messages"]] == ["msg-1"]
 
 
 def test_missing_journal_worker_projection_is_current_and_readable():
@@ -718,7 +760,7 @@ def test_mixed_startup_sweep_completes_present_and_missing_journals():
     }
     owner = type("ProjectionOwner", (), {
         "list": lambda _self: [{"id": present}, {"id": missing}],
-        "get_ref": lambda _self, root_id: snapshots[root_id],
+        "get": lambda _self, root_id: snapshots[root_id],
     })()
     projection.schedule_all(owner)
     assert projection._is_current(present)
@@ -743,7 +785,7 @@ def test_connections_close_and_fd_count_stays_constant():
 def test_valid_startup_skips_snapshot_and_rebuild():
     owner = type("ProjectionOwner", (), {
         "list": lambda _self: [{"id": ROOT}],
-        "get_ref": lambda *_args: (_ for _ in ()).throw(AssertionError("loaded current root")),
+        "get": lambda *_args: (_ for _ in ()).throw(AssertionError("loaded current root")),
     })()
     with patch.object(
         projection, "_is_current", return_value=True,

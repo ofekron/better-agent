@@ -1392,7 +1392,7 @@ SOURCE_GREP_CASES: tuple = (
      ('grep', 'main.py',
       (('async def get_historical_children(', '\ndef _resolve_session_node_id('),),
       ('node = await asyncio.to_thread(session_manager.get_ref, session_id)',
-       'rebuild_root = await asyncio.to_thread(session_manager.get_ref, root_id)',
+       'rebuild_root = await asyncio.to_thread(session_manager.get, root_id)',
       ),
       ('node = session_manager.get_ref(session_id)',
        'historical_children_projection.schedule_rebuild(\n            root_id, session_manager.get_ref(root_id), priority=True,',

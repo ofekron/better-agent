@@ -8984,7 +8984,7 @@ async def get_historical_children(
             limit=limit, cursor=cursor if isinstance(cursor, str) else None,
         )
     except historical_children_projection.ProjectionUnavailable as exc:
-        rebuild_root = await asyncio.to_thread(session_manager.get_ref, root_id)
+        rebuild_root = await asyncio.to_thread(session_manager.get, root_id)
         historical_children_projection.schedule_rebuild(
             root_id, rebuild_root, priority=True,
         )

@@ -1047,7 +1047,7 @@ def schedule_all(session_manager: Any) -> None:
         if _is_current(root_id):
             continue
         future = schedule_rebuild(
-            root_id, session_manager.get_ref(root_id), priority=False,
+            root_id, session_manager.get(root_id), priority=False,
         )
         if future is None:
             continue
