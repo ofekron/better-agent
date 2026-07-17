@@ -229,6 +229,16 @@ _CORE_ROLE_INTERNAL_LLM_TASKS: dict[str, tuple[str, ...]] = {
 }
 _BUILTIN_RUNTIME_REQUIRED_PATHS: dict[str, tuple[str, ...]] = {
 }
+# Top-level packages a core-role owner's install root must contain before
+# it's runtime-ready, keyed by role rather than a hardcoded extension id so
+# it applies to whichever extension currently owns the role (see
+# `extension_id_for_role`). The requirements MCP dynamically imports the
+# `requirement_analysis` package from its install root at request time; if
+# that package hasn't shipped yet, activating the MCP would crash the first
+# call instead of failing closed here.
+_CORE_ROLE_RUNTIME_REQUIRED_PATHS: dict[str, tuple[str, ...]] = {
+    "requirements": ("requirement_analysis",),
+}
 
 _PUBLIC_FRONTEND_BUILTIN_KEYS = {
     "ask": BUILTIN_ASK_EXTENSION_ID,
@@ -3949,7 +3959,11 @@ def _record_backend_surface_ready(record: dict[str, Any]) -> bool:
 def _record_has_required_runtime_paths(record: dict[str, Any]) -> bool:
     manifest = record.get("manifest") or {}
     extension_id = str(manifest.get("id") or "")
-    required = _BUILTIN_RUNTIME_REQUIRED_PATHS.get(extension_id, ())
+    required: list[str] = list(_BUILTIN_RUNTIME_REQUIRED_PATHS.get(extension_id, ()))
+    for role in manifest.get("core_roles") or []:
+        for rel in _CORE_ROLE_RUNTIME_REQUIRED_PATHS.get(str(role), ()):
+            if rel not in required:
+                required.append(rel)
     if not required:
         return True
     install_root = Path(str((record.get("source") or {}).get("install_path") or "")).expanduser()

@@ -4321,6 +4321,7 @@ def test_private_requirements_mcp_requires_internal_llm_defaults() -> None:
                 "instructions": [],
             },
             "permissions": {"session_state": True, "spawn_runs": True, "internal_loopback": True},
+            "core_roles": ["requirements"],
             "marketplace": {
                 "product_id": "requirements.pro",
                 "subscription_required": True,
