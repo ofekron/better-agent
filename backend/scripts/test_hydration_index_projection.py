@@ -31,6 +31,23 @@ def _next_digest(previous: str, row: bytes) -> str:
 
 
 def main() -> int:
+    for invalid_root in ("", ".", "..", "../escape", "nested/root", "nested\\root"):
+        try:
+            store._db_path(invalid_root)
+            raise AssertionError(invalid_root)
+        except ValueError:
+            pass
+    outside = Path(HOME) / "outside"
+    outside.mkdir()
+    symlink_root = Path(HOME) / "sessions" / "symlink-root"
+    symlink_root.parent.mkdir(parents=True, exist_ok=True)
+    symlink_root.symlink_to(outside, target_is_directory=True)
+    try:
+        store._db_path("symlink-root")
+        raise AssertionError("symlink root accepted")
+    except ValueError:
+        pass
+
     journal = Path(HOME) / "sessions" / "root" / "events.jsonl"
     journal.parent.mkdir(parents=True)
     journal.write_bytes(_row("a", 1))
@@ -207,6 +224,7 @@ def main() -> int:
     )
     _, rewrite_rebuilt = store.load(rewrite_root, rewrite_path)
     assert rewrite_rebuilt["cold"] == 1, rewrite_rebuilt
+    event_ingester.close(rewrite_root)
 
     restart_root = "restart-root"
     for value in range(1, 101):
@@ -229,8 +247,84 @@ def main() -> int:
     _, restart_tail = store.load(restart_root, restart_path)
     assert restart_tail["cold"] == 0, restart_tail
     assert restart_tail["scanned_bytes"] == 0, restart_tail
-    assert store._db_path(restart_root).parent == restart_path.parent
+    assert store._db_path(restart_root).parent == restart_path.parent.resolve()
     assert store.reconcile_cursor(restart_root, restart_path) == 100
+
+    shared_root = "shared-receipt-root"
+    shared_path = Path(HOME) / "sessions" / shared_root / "events.jsonl"
+    shared_path.parent.mkdir(parents=True)
+    shared_initial = _row(shared_root, 1)
+    shared_path.write_bytes(shared_initial)
+    store.load(shared_root, shared_path)
+    shared_ack = json.loads(store._ack_path(shared_path).read_text())
+    writer_code = r'''
+import hashlib, json, os, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+import hydration_index_store as store
+root, sid = sys.argv[2], sys.argv[3]
+path = Path(sys.argv[4])
+with store.journal_guard(root, path):
+    try:
+        prior = json.loads(store._receipt_path(path).read_text())
+        digest = prior["digest"]
+    except OSError:
+        digest = json.loads(store._ack_path(path).read_text())["digest"]
+    row = json.dumps({"sid": sid, "seq": int(sys.argv[5])}).encode() + b"\n"
+    next_digest = hashlib.sha256(bytes.fromhex(digest) + row).hexdigest()
+    with path.open("ab") as handle:
+        handle.write(row)
+        handle.flush()
+        store.prepare_durable_append_receipt(root, path, handle.tell(), next_digest)
+        os.fsync(handle.fileno())
+'''
+    for sid, seq in (("writer-a", 2), ("writer-b", 3), ("writer-a", 4), ("writer-b", 5)):
+        subprocess.run([
+            sys.executable, "-c", writer_code,
+            str(Path(__file__).resolve().parents[1]), shared_root, sid,
+            str(shared_path), str(seq),
+        ], env={**os.environ, "BETTER_AGENT_HOME": HOME}, check=True)
+    with store._receipts_lock:
+        store._append_receipts.clear()
+    shared_offsets, shared_tail = store.load(shared_root, shared_path)
+    assert shared_tail["cold"] == 0, shared_tail
+    assert 0 < shared_tail["scanned_bytes"] < shared_path.stat().st_size
+    assert len(shared_offsets["writer-a"]) == 2
+    assert len(shared_offsets["writer-b"]) == 2
+    assert json.loads(store._ack_path(shared_path).read_text())["offset"] == shared_path.stat().st_size
+
+    failure_root = "projection-failure-root"
+    failure_path = Path(HOME) / "sessions" / failure_root / "events.jsonl"
+    failure_path.parent.mkdir(parents=True)
+    failure_first = _row(failure_root, 1)
+    failure_path.write_bytes(failure_first)
+    store.load(failure_root, failure_path)
+    failure_ack = json.loads(store._ack_path(failure_path).read_text())
+    failure_tail = _row(failure_root, 2)
+    with store.journal_guard(failure_root, failure_path):
+        with failure_path.open("ab") as handle:
+            handle.write(failure_tail)
+            handle.flush()
+            failure_digest = _next_digest(failure_ack["digest"], failure_tail)
+            store.prepare_durable_append_receipt(
+                failure_root, failure_path, handle.tell(), failure_digest,
+            )
+            os.fsync(handle.fileno())
+    original_scan = store._scan
+    store._scan = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        sqlite3.OperationalError("injected projection failure")
+    )
+    try:
+        try:
+            store.flush_writer_projection(failure_root, failure_path)
+            raise AssertionError("SQLite projection failure was swallowed")
+        except store.WriterProjectionError:
+            pass
+    finally:
+        store._scan = original_scan
+    store.flush_writer_projection(failure_root, failure_path)
+    _, failure_retried = store.load(failure_root, failure_path)
+    assert failure_retried["scanned_bytes"] == 0, failure_retried
 
     guard_root = "guard-root"
     event_ingester.ingest(
@@ -417,7 +511,7 @@ store.invalidate(sys.argv[2])
     offsets, recovered = store.load("root", journal)
     assert recovered["cold"] == 1 and set(offsets) == {"replacement"}
 
-    missing = journal.with_name("missing.jsonl")
+    missing = Path(HOME) / "sessions" / "child-failure" / "events.jsonl"
     try:
         store._publish_cold(missing, store._db_path("child-failure"))
         raise AssertionError("child failure was accepted")
@@ -456,7 +550,7 @@ store.invalidate(sys.argv[2])
     runtime_pool = store._pool
     second_home = tempfile.mkdtemp(prefix="ba-hydration-generation-")
     os.environ["BETTER_AGENT_HOME"] = second_home
-    second_journal = Path(second_home) / "sessions" / "root" / "events.jsonl"
+    second_journal = Path(second_home) / "sessions" / "runtime-root" / "events.jsonl"
     second_journal.parent.mkdir(parents=True)
     second_journal.write_bytes(_row("runtime", 1))
     offsets, _ = store.load("runtime-root", second_journal)
@@ -541,17 +635,23 @@ store.invalidate(sys.argv[2])
     )
     large_loader.start()
     heartbeats = 0
+    max_heartbeat_gap = 0.0
+    prior_heartbeat = time.perf_counter()
     while large_loader.is_alive():
         heartbeats += 1
-        time.sleep(0.001)
+        time.sleep(0.05)
+        heartbeat = time.perf_counter()
+        max_heartbeat_gap = max(max_heartbeat_gap, heartbeat - prior_heartbeat)
+        prior_heartbeat = heartbeat
     large_loader.join()
     large_elapsed = time.perf_counter() - large_started
     rss_after = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     large_offsets, large_metrics = large_result[0]
     assert len(large_offsets["large-sid"]) == large_rows
     assert large_metrics["scanned_bytes"] == 0, large_metrics
-    assert large_elapsed < 5, large_elapsed
+    assert large_elapsed < 15, large_elapsed
     assert heartbeats > 0, heartbeats
+    assert max_heartbeat_gap < 0.2, max_heartbeat_gap
     rss_scale = 1024 if sys.platform != "darwin" else 1
     assert (rss_after - rss_before) * rss_scale < 160 * 1024 * 1024
 

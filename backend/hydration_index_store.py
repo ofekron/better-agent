@@ -1,5 +1,6 @@
 import hashlib
 import json
+import logging
 import multiprocessing
 import os
 import sqlite3
@@ -16,6 +17,9 @@ import portable_lock
 from paths import ba_home
 
 
+logger = logging.getLogger(__name__)
+
+
 SCHEMA = 2
 BOUNDARY_BYTES = 4096
 BUILD_TIMEOUT_SECONDS = 300
@@ -29,7 +33,6 @@ _builds: dict[
 _shutdown = threading.Event()
 _receipts_lock = threading.Lock()
 _append_receipts: dict[str, tuple[int, int, int, int, str, str]] = {}
-_pending_offsets: dict[str, list[tuple[str, int, int, str]]] = {}
 _journal_guard_locks: dict[str, threading.RLock] = {}
 _journal_guard_locks_guard = threading.Lock()
 _journal_guard_local = threading.local()
@@ -39,17 +42,48 @@ class _StaleProjection(Exception):
     pass
 
 
+class WriterProjectionError(RuntimeError):
+    pass
+
+
+def _safe_root_dir(root_id: str) -> Path:
+    if (
+        not isinstance(root_id, str) or not root_id
+        or root_id in {".", ".."} or "/" in root_id or "\\" in root_id
+        or "\x00" in root_id
+    ):
+        raise ValueError("invalid hydration root id")
+    sessions = (ba_home() / "sessions").resolve()
+    root = sessions / root_id
+    if root.resolve(strict=False).parent != sessions:
+        raise ValueError("hydration root escapes sessions directory")
+    return root
+
+
 def _db_path(root_id: str) -> Path:
-    return ba_home() / "sessions" / root_id / "render_hydration.sqlite3"
+    return _safe_root_dir(root_id) / "render_hydration.sqlite3"
 
 
 def _legacy_db_path(root_id: str) -> Path:
+    _safe_root_dir(root_id)
     name = hashlib.sha256(root_id.encode("utf-8")).hexdigest() + ".sqlite3"
     return ba_home() / "cache" / "render-hydration" / name
 
 
 def _ack_path(journal: Path) -> Path:
     return journal.parent / "hydration_index_ack.json"
+
+
+def _receipt_path(journal: Path) -> Path:
+    return journal.parent / "hydration_append_receipt.json"
+
+
+def _validate_journal(root_id: str, journal: Path) -> Path:
+    root = _safe_root_dir(root_id)
+    candidate = Path(journal)
+    if candidate.name != "events.jsonl" or candidate.parent.resolve(strict=False) != root:
+        raise ValueError("hydration journal is outside its root")
+    return candidate
 
 
 def _write_ack(journal: Path, offset: int, digest: str) -> None:
@@ -82,6 +116,9 @@ def _write_ack(journal: Path, offset: int, digest: str) -> None:
 
 @contextmanager
 def journal_guard(root_id: str, journal: Path | None = None):
+    authority = _validate_journal(
+        root_id, journal or (_safe_root_dir(root_id) / "events.jsonl"),
+    )
     with _journal_guard_locks_guard:
         local_lock = _journal_guard_locks.setdefault(root_id, threading.RLock())
     with local_lock:
@@ -94,9 +131,6 @@ def journal_guard(root_id: str, journal: Path | None = None):
             finally:
                 held[root_id] = (existing[0], existing[1])
             return
-        authority = journal or (
-            ba_home() / "sessions" / root_id / "events.jsonl"
-        )
         lock_path = authority.parent / ".render_hydration.lock"
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         lock_file = lock_path.open("a+b")
@@ -242,10 +276,42 @@ def note_authoritative_append(
         _append_receipts[root_id] = (
             stat.st_dev, stat.st_ino, origin, end, origin_digest, after_digest,
         )
-        if sid:
-            _pending_offsets.setdefault(root_id, []).append(
-                (sid, start, end, after_digest),
-            )
+
+
+def prepare_durable_append_receipt(
+    root_id: str, journal: Path, end: int, digest: str,
+) -> None:
+    journal = _validate_journal(root_id, journal)
+    predecessor_size = 0
+    predecessor_digest = bytes(32).hex()
+    try:
+        ack = json.loads(_ack_path(journal).read_text(encoding="utf-8"))
+        predecessor_size = int(ack["offset"])
+        predecessor_digest = str(ack["digest"])
+    except (OSError, KeyError, ValueError, TypeError, json.JSONDecodeError):
+        pass
+    stat = journal.stat()
+    payload = {
+        "version": 1, "dev": int(stat.st_dev), "ino": int(stat.st_ino),
+        "predecessor_size": predecessor_size,
+        "predecessor_digest": predecessor_digest,
+        "size": int(end), "digest": digest,
+    }
+    target = _receipt_path(journal)
+    temp = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        with temp.open("w", encoding="utf-8") as handle:
+            json.dump(payload, handle, separators=(",", ":"))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp, target)
+        dir_fd = os.open(target.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+    finally:
+        temp.unlink(missing_ok=True)
 
 
 def _install_legacy_projection(root_id: str, journal: Path) -> None:
@@ -270,16 +336,10 @@ def _install_legacy_projection(root_id: str, journal: Path) -> None:
 def flush_writer_projection(root_id: str, journal: Path) -> None:
     with journal_guard(root_id, journal):
         _install_legacy_projection(root_id, journal)
-        with _receipts_lock:
-            pending = tuple(_pending_offsets.get(root_id, ()))
-        if not pending:
-            return
         target = _db_path(root_id)
         conn: sqlite3.Connection | None = None
         try:
             if not target.exists():
-                if pending[0][1] != 0:
-                    return
                 target.parent.mkdir(parents=True, exist_ok=True)
                 conn = _create(target)
                 stat = journal.stat()
@@ -299,51 +359,70 @@ def flush_writer_projection(root_id: str, journal: Path) -> None:
             meta = _meta(conn)
             if not _valid_append(root_id, meta, journal):
                 conn.rollback()
-                return
+                raise WriterProjectionError("projection prefix is not authoritative")
             start = int(meta["offset"])
-            applicable = [row for row in pending if row[1] >= start]
-            if not applicable or applicable[0][1] != start:
-                conn.rollback()
-                return
-            expected = start
-            rows: list[tuple[str, int]] = []
-            for sid, offset, end, _digest in applicable:
-                if offset != expected:
-                    conn.rollback()
-                    return
-                rows.append((sid, offset))
-                expected = end
             stat = journal.stat()
-            if stat.st_size < expected:
+            if stat.st_size == start:
                 conn.rollback()
                 return
-            digest = applicable[-1][3]
-            conn.executemany("INSERT INTO offsets VALUES (?, ?)", rows)
+            expected, scanned, rows, digest = _scan(
+                conn, journal, start, meta["digest"], stat.st_size,
+            )
+            if expected != stat.st_size:
+                raise WriterProjectionError("journal tail is incomplete")
+            receipt_digest = _receipt_growth_digest(root_id, meta, stat, start)
+            if receipt_digest is not None and digest != receipt_digest:
+                raise WriterProjectionError("journal tail digest mismatches receipt")
             updates = {
                 "offset": str(expected), "boundary": _boundary(journal, expected),
                 "mtime_ns": str(stat.st_mtime_ns), "ctime_ns": str(stat.st_ctime_ns),
                 "digest": digest,
-                "rows": str(int(meta.get("rows", 0)) + len(rows)),
+                "rows": str(int(meta.get("rows", 0)) + rows),
+                "scanned": str(scanned),
             }
             conn.executemany(
                 "UPDATE meta SET value=? WHERE key=?",
                 ((value, key) for key, value in updates.items()),
             )
             conn.commit()
-            with _receipts_lock:
-                current = _pending_offsets.get(root_id, [])
-                _pending_offsets[root_id] = [row for row in current if row[2] > expected]
-                if not _pending_offsets[root_id]:
-                    _pending_offsets.pop(root_id, None)
             _write_ack(journal, expected, digest)
-            perf.record_count("hydrate.writer_projection.rows", len(rows))
-        except (OSError, sqlite3.Error, KeyError, ValueError):
+            perf.record_count("hydrate.writer_projection.rows", rows)
+        except WriterProjectionError:
+            if conn is not None:
+                conn.rollback()
+            raise
+        except (OSError, sqlite3.Error, KeyError, ValueError) as exc:
             if conn is not None:
                 conn.rollback()
             perf.record_count("hydrate.writer_projection.failed", 1)
+            logger.error("writer hydration projection failed for %s", root_id, exc_info=True)
+            raise WriterProjectionError("writer hydration projection failed") from exc
         finally:
             if conn is not None:
                 conn.close()
+
+
+def _receipt_growth_digest(
+    root_id: str, meta: dict[str, str], stat: os.stat_result, offset: int,
+) -> str | None:
+    try:
+        receipt = json.loads(
+            (_safe_root_dir(root_id) / "hydration_append_receipt.json").read_text(
+                encoding="utf-8",
+            )
+        )
+        if (
+            int(receipt.get("dev", -1)) == stat.st_dev
+            and int(receipt.get("ino", -1)) == stat.st_ino
+            and int(receipt.get("predecessor_size", -1)) == offset
+            and receipt.get("predecessor_digest") == meta["digest"]
+            and int(receipt.get("size", -1)) == stat.st_size
+            and isinstance(receipt.get("digest"), str)
+        ):
+            return str(receipt["digest"])
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        pass
+    return None
 
 
 def _growth_is_authoritative(root_id: str, meta: dict[str, str], stat: os.stat_result, offset: int) -> bool:
@@ -357,6 +436,9 @@ def _growth_is_authoritative(root_id: str, meta: dict[str, str], stat: os.stat_r
             and receipt[4] == meta["digest"]
         )
     if in_memory:
+        return True
+    if _receipt_growth_digest(root_id, meta, stat, offset) is not None:
+        perf.record_count("hydrate.append_authority.receipt", 1)
         return True
     try:
         payload = json.loads((ba_home() / "sessions" / root_id / "event_chain.json").read_text(
@@ -553,7 +635,6 @@ def invalidate(root_id: str, journal: Path | None = None) -> None:
     with journal_guard(root_id, journal):
         with _receipts_lock:
             _append_receipts.pop(root_id, None)
-            _pending_offsets.pop(root_id, None)
         _db_path(root_id).unlink(missing_ok=True)
         _legacy_db_path(root_id).unlink(missing_ok=True)
 
@@ -598,6 +679,9 @@ def _load(
                 conn, journal, start, meta["digest"],
             )
             stat = journal.stat()
+            receipt_digest = _receipt_growth_digest(root_id, meta, stat, start)
+            if receipt_digest is not None and digest != receipt_digest:
+                raise _StaleProjection
             conn.execute("UPDATE meta SET value=? WHERE key='offset'", (str(committed),))
             conn.execute("UPDATE meta SET value=? WHERE key='boundary'", (_boundary(journal, committed),))
             conn.execute("UPDATE meta SET value=? WHERE key='scanned'", (str(scanned),))

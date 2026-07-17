@@ -80,15 +80,12 @@ class EventIngester:
         self._guard = threading.Lock()
         # Background stable-storage flusher. Root ids that have flushed
         # (kernel-visible) but not yet fsync'd land in `_fsync_dirty`; a
-        # daemon thread fsyncs each still-open handle every `_FSYNC_INTERVAL`.
-        # `_fsync_thread` is started lazily on first dirty mark so tests
-        # that never ingest don't spawn it. The thread runs for the
-        # process lifetime; `_fsync_dirty_now` drains synchronously
-        # (e.g. on shutdown) without killing it — the module-level
-        # singleton is reused after `close_all`, so a permanent stop
-        # flag would silently disable durability for the rest of life.
+        # daemon thread fsyncs each still-open handle after a dirty event.
+        # `_fsync_thread` is started lazily and `shutdown()` joins it;
+        # `close_all()` only drains handles so the singleton remains reusable.
         self._fsync_dirty: set[str] = set()
         self._fsync_dirty_epoch: dict[str, int] = {}
+        self._projection_failed_epoch: dict[str, int] = {}
         self._fsync_cond = threading.Condition()
         self._fsync_thread: Optional[threading.Thread] = None
         self._fsync_stop = threading.Event()
@@ -512,6 +509,13 @@ class EventIngester:
         # the background flusher can no longer reach it.
         try:
             fh.flush()
+            if not self._chain_handle_current_locked(root_id, path, fh):
+                hydration_index_store.invalidate(root_id, path)
+                raise RuntimeError("event journal changed before close durability fence")
+            hydration_index_store.prepare_durable_append_receipt(
+                root_id, path, int(self._next_offset.get(root_id, 0)),
+                self._chain_head_digest.get(root_id, _CHAIN_ZERO.hex()),
+            )
             os.fsync(fh.fileno())
             if self._chain_handle_current_locked(root_id, path, fh):
                 self._persist_chain_head_locked(
@@ -587,11 +591,20 @@ class EventIngester:
     def _fsync_loop(self) -> None:
         while not self._fsync_stop.is_set():
             with self._fsync_cond:
-                if not self._fsync_dirty:
-                    self._fsync_cond.wait(timeout=_FSYNC_INTERVAL)
+                dirty = sorted(
+                    root_id for root_id in self._fsync_dirty
+                    if self._projection_failed_epoch.get(root_id)
+                    != self._fsync_dirty_epoch.get(root_id, 0)
+                )
+                if not dirty:
+                    self._fsync_cond.wait()
                 if self._fsync_stop.is_set():
                     return
-                dirty = sorted(self._fsync_dirty)
+                dirty = sorted(
+                    root_id for root_id in self._fsync_dirty
+                    if self._projection_failed_epoch.get(root_id)
+                    != self._fsync_dirty_epoch.get(root_id, 0)
+                )
             # Fsync outside `_fsync_cond` so a slow disk can't block
             # dirty-marking. Re-fetch the CURRENT handle under `_guard`
             # per root: an evicted/closed root's data was fsync'd in the
@@ -606,6 +619,8 @@ class EventIngester:
                         if root_id not in self._fsync_dirty:
                             continue
                         epoch = self._fsync_dirty_epoch.get(root_id, 0)
+                        if self._projection_failed_epoch.get(root_id) == epoch:
+                            continue
                     with self._guard:
                         current = self._handles.get(root_id)
                     if current is None:
@@ -622,11 +637,24 @@ class EventIngester:
                             journal_guard.__exit__(None, None, None)
                             continue
                         fh.flush()
+                        hydration_index_store.prepare_durable_append_receipt(
+                            root_id, path, int(self._next_offset.get(root_id, 0)),
+                            self._chain_head_digest.get(root_id, _CHAIN_ZERO.hex()),
+                        )
                         os.fsync(fh.fileno())
                         self._persist_chain_head_locked(
                             root_id, path, fh, journal_durable=True,
                         )
                         hydration_index_store.flush_writer_projection(root_id, path)
+                    except hydration_index_store.WriterProjectionError:
+                        logger.error(
+                            "background hydration projection failed for %s; retrying",
+                            root_id, exc_info=True,
+                        )
+                        with self._fsync_cond:
+                            self._projection_failed_epoch[root_id] = epoch
+                        journal_guard.__exit__(None, None, None)
+                        continue
                     except RuntimeError:
                         import hydration_index_store
                         hydration_index_store.invalidate(root_id, path)
@@ -644,6 +672,7 @@ class EventIngester:
                     with self._fsync_cond:
                         if self._fsync_dirty_epoch.get(root_id) == epoch:
                             self._fsync_dirty.discard(root_id)
+                            self._projection_failed_epoch.pop(root_id, None)
 
     def _fsync_dirty_now(self) -> None:
         """Synchronous fsync of every currently-dirty root. Used by
@@ -663,11 +692,20 @@ class EventIngester:
                 path, fh = pair
                 try:
                     fh.flush()
+                    import hydration_index_store
+                    if not self._chain_handle_current_locked(root_id, path, fh):
+                        hydration_index_store.invalidate(root_id, path)
+                        raise RuntimeError(
+                            "event journal changed before shutdown durability fence"
+                        )
+                    hydration_index_store.prepare_durable_append_receipt(
+                        root_id, path, int(self._next_offset.get(root_id, 0)),
+                        self._chain_head_digest.get(root_id, _CHAIN_ZERO.hex()),
+                    )
                     os.fsync(fh.fileno())
                     self._persist_chain_head_locked(
                         root_id, path, fh, journal_durable=True,
                     )
-                    import hydration_index_store
                     hydration_index_store.flush_writer_projection(root_id, path)
                     with self._fsync_cond:
                         self._fsync_dirty.discard(root_id)
