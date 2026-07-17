@@ -13616,7 +13616,7 @@ async def on_shutdown():
     except Exception:
         logger.exception("canonical feed channel shutdown failed")
     try:
-        event_ingester.close_all()
+        event_ingester.shutdown()
     except Exception:
         logger.exception("EventIngester close_all failed")
     release_backend_instance_lock()

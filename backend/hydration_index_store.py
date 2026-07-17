@@ -29,6 +29,7 @@ _builds: dict[
 _shutdown = threading.Event()
 _receipts_lock = threading.Lock()
 _append_receipts: dict[str, tuple[int, int, int, int, str, str]] = {}
+_pending_offsets: dict[str, list[tuple[str, int, int, str]]] = {}
 _journal_guard_locks: dict[str, threading.RLock] = {}
 _journal_guard_locks_guard = threading.Lock()
 _journal_guard_local = threading.local()
@@ -39,6 +40,10 @@ class _StaleProjection(Exception):
 
 
 def _db_path(root_id: str) -> Path:
+    return ba_home() / "sessions" / root_id / "render_hydration.sqlite3"
+
+
+def _legacy_db_path(root_id: str) -> Path:
     name = hashlib.sha256(root_id.encode("utf-8")).hexdigest() + ".sqlite3"
     return ba_home() / "cache" / "render-hydration" / name
 
@@ -221,7 +226,7 @@ def _meta(conn: sqlite3.Connection) -> dict[str, str]:
 
 def note_authoritative_append(
     root_id: str, journal: Path, start: int, end: int,
-    before_digest: str, after_digest: str,
+    before_digest: str, after_digest: str, sid: str | None = None,
 ) -> None:
     stat = journal.stat()
     with _receipts_lock:
@@ -237,6 +242,108 @@ def note_authoritative_append(
         _append_receipts[root_id] = (
             stat.st_dev, stat.st_ino, origin, end, origin_digest, after_digest,
         )
+        if sid:
+            _pending_offsets.setdefault(root_id, []).append(
+                (sid, start, end, after_digest),
+            )
+
+
+def _install_legacy_projection(root_id: str, journal: Path) -> None:
+    target = _db_path(root_id)
+    if target.exists():
+        return
+    legacy = _legacy_db_path(root_id)
+    if not legacy.exists():
+        return
+    try:
+        with sqlite3.connect(legacy) as conn:
+            meta = _meta(conn)
+            if not _valid_append(root_id, meta, journal):
+                return
+        target.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(legacy, target)
+        perf.record_count("hydrate.writer_projection.migrated", 1)
+    except (OSError, sqlite3.Error, KeyError, ValueError):
+        return
+
+
+def flush_writer_projection(root_id: str, journal: Path) -> None:
+    with journal_guard(root_id, journal):
+        _install_legacy_projection(root_id, journal)
+        with _receipts_lock:
+            pending = tuple(_pending_offsets.get(root_id, ()))
+        if not pending:
+            return
+        target = _db_path(root_id)
+        conn: sqlite3.Connection | None = None
+        try:
+            if not target.exists():
+                if pending[0][1] != 0:
+                    return
+                target.parent.mkdir(parents=True, exist_ok=True)
+                conn = _create(target)
+                stat = journal.stat()
+                zero = bytes(32).hex()
+                conn.executemany("INSERT INTO meta VALUES (?, ?)", {
+                    "schema": str(SCHEMA), "dev": str(stat.st_dev),
+                    "ino": str(stat.st_ino), "offset": "0",
+                    "boundary": _boundary(journal, 0),
+                    "mtime_ns": str(stat.st_mtime_ns),
+                    "ctime_ns": str(stat.st_ctime_ns), "scanned": "0",
+                    "rows": "0", "digest": zero, "reconciled_seq": "0",
+                }.items())
+                conn.commit()
+            else:
+                conn = sqlite3.connect(target)
+            conn.execute("BEGIN IMMEDIATE")
+            meta = _meta(conn)
+            if not _valid_append(root_id, meta, journal):
+                conn.rollback()
+                return
+            start = int(meta["offset"])
+            applicable = [row for row in pending if row[1] >= start]
+            if not applicable or applicable[0][1] != start:
+                conn.rollback()
+                return
+            expected = start
+            rows: list[tuple[str, int]] = []
+            for sid, offset, end, _digest in applicable:
+                if offset != expected:
+                    conn.rollback()
+                    return
+                rows.append((sid, offset))
+                expected = end
+            stat = journal.stat()
+            if stat.st_size < expected:
+                conn.rollback()
+                return
+            digest = applicable[-1][3]
+            conn.executemany("INSERT INTO offsets VALUES (?, ?)", rows)
+            updates = {
+                "offset": str(expected), "boundary": _boundary(journal, expected),
+                "mtime_ns": str(stat.st_mtime_ns), "ctime_ns": str(stat.st_ctime_ns),
+                "digest": digest,
+                "rows": str(int(meta.get("rows", 0)) + len(rows)),
+            }
+            conn.executemany(
+                "UPDATE meta SET value=? WHERE key=?",
+                ((value, key) for key, value in updates.items()),
+            )
+            conn.commit()
+            with _receipts_lock:
+                current = _pending_offsets.get(root_id, [])
+                _pending_offsets[root_id] = [row for row in current if row[2] > expected]
+                if not _pending_offsets[root_id]:
+                    _pending_offsets.pop(root_id, None)
+            _write_ack(journal, expected, digest)
+            perf.record_count("hydrate.writer_projection.rows", len(rows))
+        except (OSError, sqlite3.Error, KeyError, ValueError):
+            if conn is not None:
+                conn.rollback()
+            perf.record_count("hydrate.writer_projection.failed", 1)
+        finally:
+            if conn is not None:
+                conn.close()
 
 
 def _growth_is_authoritative(root_id: str, meta: dict[str, str], stat: os.stat_result, offset: int) -> bool:
@@ -446,7 +553,9 @@ def invalidate(root_id: str, journal: Path | None = None) -> None:
     with journal_guard(root_id, journal):
         with _receipts_lock:
             _append_receipts.pop(root_id, None)
+            _pending_offsets.pop(root_id, None)
         _db_path(root_id).unlink(missing_ok=True)
+        _legacy_db_path(root_id).unlink(missing_ok=True)
 
 
 def _load(
@@ -532,6 +641,8 @@ def load(
     started = time.perf_counter()
     cold = False
     while True:
+        with journal_guard(root_id, journal):
+            _install_legacy_projection(root_id, journal)
         try:
             with journal_guard(root_id, journal):
                 return _load(

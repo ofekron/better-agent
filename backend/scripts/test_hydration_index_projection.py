@@ -1,5 +1,6 @@
 import json
 import os
+import resource
 import shutil
 import subprocess
 import sqlite3
@@ -186,7 +187,7 @@ def main() -> int:
         )
     rewrite_path = event_ingester._events_path(rewrite_root)
     _, rewrite_initial = store.load(rewrite_root, rewrite_path)
-    assert rewrite_initial["cold"] == 1
+    assert rewrite_initial["cold"] == 0
     payload = bytearray(rewrite_path.read_bytes())
     mutation_offset = payload.index(b"x" * 16)
     assert mutation_offset < len(payload) - store.BOUNDARY_BYTES
@@ -227,7 +228,8 @@ def main() -> int:
         store._append_receipts.clear()
     _, restart_tail = store.load(restart_root, restart_path)
     assert restart_tail["cold"] == 0, restart_tail
-    assert 0 < restart_tail["scanned_bytes"] < restart_path.stat().st_size
+    assert restart_tail["scanned_bytes"] == 0, restart_tail
+    assert store._db_path(restart_root).parent == restart_path.parent
     assert store.reconcile_cursor(restart_root, restart_path) == 100
 
     guard_root = "guard-root"
@@ -236,10 +238,17 @@ def main() -> int:
         source="hydration-index-test", msg_id="message",
     )
     guard_path = event_ingester._events_path(guard_root)
+    event_ingester.close(guard_root)
     store.load(guard_root, guard_path)
-    event_ingester.ingest(
-        guard_root, guard_root, "agent_message", {"uuid": "guard-2"},
-        source="hydration-index-test", msg_id="message",
+    with sqlite3.connect(store._db_path(guard_root)) as conn:
+        guard_digest = dict(conn.execute("SELECT key, value FROM meta"))["digest"]
+    guard_tail = _row(guard_root, 2)
+    guard_start = guard_path.stat().st_size
+    with guard_path.open("ab") as handle:
+        handle.write(guard_tail)
+    store.note_authoritative_append(
+        guard_root, guard_path, guard_start, guard_path.stat().st_size,
+        guard_digest, _next_digest(guard_digest, guard_tail),
     )
     scan_entered = threading.Event()
     scan_release = threading.Event()
@@ -303,6 +312,7 @@ def main() -> int:
     mutator.join(2)
     event_ingester._emit = original_emit
     assert mutation_done.is_set()
+    event_ingester.close(guard_root)
 
     store.load(guard_root, guard_path)
     ready = Path(HOME) / "guard-ready"
@@ -497,6 +507,56 @@ store.invalidate(sys.argv[2])
     except RuntimeError:
         pass
     store._shutdown.clear()
+
+    large_root = "large-durable-root"
+    large_journal = Path(HOME) / "sessions" / large_root / "events.jsonl"
+    large_journal.parent.mkdir(parents=True)
+    large_size = 1_947_000_000
+    with large_journal.open("wb") as handle:
+        handle.truncate(large_size)
+    large_target = store._db_path(large_root)
+    large_conn = store._create(large_target)
+    large_stat = large_journal.stat()
+    large_rows = 250_937
+    large_conn.executemany(
+        "INSERT INTO offsets VALUES (?, ?)",
+        (("large-sid", index * 7000) for index in range(large_rows)),
+    )
+    large_conn.executemany("INSERT INTO meta VALUES (?, ?)", {
+        "schema": str(store.SCHEMA), "dev": str(large_stat.st_dev),
+        "ino": str(large_stat.st_ino), "offset": str(large_size),
+        "boundary": store._boundary(large_journal, large_size),
+        "mtime_ns": str(large_stat.st_mtime_ns),
+        "ctime_ns": str(large_stat.st_ctime_ns), "scanned": "0",
+        "rows": str(large_rows), "digest": bytes(32).hex(),
+        "reconciled_seq": "0",
+    }.items())
+    large_conn.commit()
+    large_conn.close()
+    rss_before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    large_result: list[object] = []
+    large_started = time.perf_counter()
+    large_loader = threading.Thread(
+        target=lambda: large_result.append(store.load(large_root, large_journal)),
+    )
+    large_loader.start()
+    heartbeats = 0
+    while large_loader.is_alive():
+        heartbeats += 1
+        time.sleep(0.001)
+    large_loader.join()
+    large_elapsed = time.perf_counter() - large_started
+    rss_after = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    large_offsets, large_metrics = large_result[0]
+    assert len(large_offsets["large-sid"]) == large_rows
+    assert large_metrics["scanned_bytes"] == 0, large_metrics
+    assert large_elapsed < 5, large_elapsed
+    assert heartbeats > 0, heartbeats
+    rss_scale = 1024 if sys.platform != "darwin" else 1
+    assert (rss_after - rss_before) * rss_scale < 160 * 1024 * 1024
+
+    event_ingester.shutdown()
+    assert event_ingester._fsync_thread is None
     print("PASS: hydration index projection is incremental and recoverable")
     return 0
 

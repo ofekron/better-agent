@@ -91,6 +91,7 @@ class EventIngester:
         self._fsync_dirty_epoch: dict[str, int] = {}
         self._fsync_cond = threading.Condition()
         self._fsync_thread: Optional[threading.Thread] = None
+        self._fsync_stop = threading.Event()
         # Per-root UUID sets for dedup. Bounded: cleared on close().
         self._seen_uuids: dict[str, set[str]] = {}
         self._seen_event_owners: dict[str, dict[str, set[Optional[str]]]] = {}
@@ -516,6 +517,7 @@ class EventIngester:
                 self._persist_chain_head_locked(
                     root_id, path, fh, journal_durable=True,
                 )
+                hydration_index_store.flush_writer_projection(root_id, path)
             with self._fsync_cond:
                 self._fsync_dirty.discard(root_id)
                 self._fsync_dirty_epoch.pop(root_id, None)
@@ -574,6 +576,7 @@ class EventIngester:
 
     def _start_fsync_thread_locked(self) -> None:
         if self._fsync_thread is None:
+            self._fsync_stop.clear()
             t = threading.Thread(
                 target=self._fsync_loop, name="event-ingester-fsync",
                 daemon=True,
@@ -582,10 +585,12 @@ class EventIngester:
             t.start()
 
     def _fsync_loop(self) -> None:
-        while True:
+        while not self._fsync_stop.is_set():
             with self._fsync_cond:
                 if not self._fsync_dirty:
                     self._fsync_cond.wait(timeout=_FSYNC_INTERVAL)
+                if self._fsync_stop.is_set():
+                    return
                 dirty = sorted(self._fsync_dirty)
             # Fsync outside `_fsync_cond` so a slow disk can't block
             # dirty-marking. Re-fetch the CURRENT handle under `_guard`
@@ -621,6 +626,7 @@ class EventIngester:
                         self._persist_chain_head_locked(
                             root_id, path, fh, journal_durable=True,
                         )
+                        hydration_index_store.flush_writer_projection(root_id, path)
                     except RuntimeError:
                         import hydration_index_store
                         hydration_index_store.invalidate(root_id, path)
@@ -661,9 +667,20 @@ class EventIngester:
                     self._persist_chain_head_locked(
                         root_id, path, fh, journal_durable=True,
                     )
+                    import hydration_index_store
+                    hydration_index_store.flush_writer_projection(root_id, path)
                     with self._fsync_cond:
                         self._fsync_dirty.discard(root_id)
-                except OSError:
+                except (OSError, RuntimeError):
+                    try:
+                        import hydration_index_store
+                        hydration_index_store.invalidate(root_id, path)
+                    except Exception:
+                        logger.exception(
+                            "shutdown projection invalidation failed for %s", root_id,
+                        )
+                    with self._fsync_cond:
+                        self._fsync_dirty.discard(root_id)
                     logger.error("shutdown fsync failed for %s; durability at risk",
                                  root_id, exc_info=True)
 
@@ -1242,7 +1259,7 @@ class EventIngester:
             import hydration_index_store
             hydration_index_store.note_authoritative_append(
                 root_id, Path(fh.name), offset_for_this_line, self._next_offset[root_id],
-                previous.hex(), head_digest,
+                previous.hex(), head_digest, sid,
             )
         except Exception:
             logger.debug("hydration append receipt update failed", exc_info=True)
@@ -3126,6 +3143,19 @@ class EventIngester:
         root_ids = set(self._handles) | set(self._seq)
         for root_id in list(root_ids):
             self.close(root_id)
+
+    def shutdown(self) -> None:
+        self.close_all()
+        with self._fsync_cond:
+            thread = self._fsync_thread
+            self._fsync_stop.set()
+            self._fsync_cond.notify_all()
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=5)
+            if thread.is_alive():
+                raise RuntimeError("event ingester fsync thread did not stop")
+        with self._fsync_cond:
+            self._fsync_thread = None
 
 
 event_ingester = EventIngester()
