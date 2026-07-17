@@ -232,6 +232,7 @@ def main() -> None:
               response.status_code == 200 and turn_ids == ["u3", "u4", "u5", "u6", "u7"])
         check("older cursor points at the window's first turn",
               body["page"] == {"turns": 5, "before_turn": None,
+                               "pane": "windowroot",
                                "older_cursor": "u3", "has_older": True})
         check("lookup carries prompt text and snapshot seq",
               body["lookup"]["u7"] == {"kind": "message", "role": "user",
@@ -327,6 +328,98 @@ def main() -> None:
               todo_lookup_entry is not None
               and todo_lookup_entry["data"]["args"]["todos"]
               == [{"content": "do X", "status": "pending"}])
+
+        # Fork-pane windowing: fork panes page through the same chat-tree
+        # cursor contract as the root (chat-panel.md runtime parity /
+        # load-more requirements) instead of the legacy seq paging.
+        # Message seqs are per-node counters: the fork's tail reuses seq
+        # numbers the root also uses — pane scoping must keep them apart.
+        fork_session = {
+            **SESSION, "id": "forkedroot",
+            "messages": [
+                {"id": "fu1", "role": "user", "seq": 1},
+                {"id": "fa1", "role": "assistant", "seq": 2,
+                 "run_meta": {"provider_id": "claude", "model": "sonnet-4-6",
+                              "reasoning_effort": "high"}},
+                {"id": "fu2", "role": "user", "seq": 3},
+                {"id": "fa2", "role": "assistant", "seq": 4,
+                 "run_meta": {"provider_id": "claude", "model": "sonnet-4-6",
+                              "reasoning_effort": "high"}},
+            ],
+            "forks": [{
+                "id": "fork1", "kind": "user", "fork_point_seq": 2,
+                "messages": [
+                    {"id": "fu1", "role": "user", "seq": 1},
+                    {"id": "fa1", "role": "assistant", "seq": 2},
+                    *(entry for turn in range(1, 4) for entry in (
+                        {"id": f"ku{turn}", "role": "user", "seq": 2 + turn * 2 - 1},
+                        {"id": f"ka{turn}", "role": "assistant", "seq": 2 + turn * 2,
+                         "run_meta": {"provider_id": "claude", "model": "sonnet-4-6",
+                                      "reasoning_effort": "high"}},
+                    )),
+                ],
+                "forks": [],
+            }],
+        }
+        SESSIONS_BY_ID["forkedroot"] = fork_session
+        seq = 0
+        turn_facts = [
+            ("forkedroot", "fu1", "fa1"), ("forkedroot", "fu2", "fa2"),
+            ("fork1", "ku1", "ka1"), ("fork1", "ku2", "ka2"), ("fork1", "ku3", "ka3"),
+        ]
+        for sid, prompt_id, answer_id in turn_facts:
+            for payload_type, payload in (
+                ("user_prompt", {"message_id": prompt_id, "text": f"prompt {prompt_id}"}),
+                ("message_ownership_declared",
+                 {"message_id": answer_id, "prompt_message_id": prompt_id}),
+                ("assistant_output",
+                 {"message_id": answer_id, "text": f"answer {answer_id}", "final": True}),
+            ):
+                seq += 1
+                fact = wire_fact(seq, payload_type, payload)
+                fact["root_id"] = "forkedroot"
+                fact["sid"] = sid
+                fact["turn_id"] = prompt_id
+                chat_projection_ingestion.admit_canonical_fact(fact, provider="claude")
+
+        response = client.get("/api/chat-tree/forkedroot")
+        body = response.json()
+        turn_ids = [item["id"] for item in body["items"] if item["type"] == "Turn"]
+        check("root pane excludes fork turns",
+              response.status_code == 200 and turn_ids == ["fu1", "fu2"])
+
+        response = client.get("/api/chat-tree/forkedroot?pane=fork1&turns=2")
+        body = response.json()
+        turn_ids = [item["id"] for item in body["items"] if item["type"] == "Turn"]
+        check("fork pane serves only its own turns, windowed",
+              response.status_code == 200 and turn_ids == ["ku2", "ku3"])
+        check("fork pane page carries its pane and cursor",
+              body["page"]["pane"] == "fork1"
+              and body["page"]["older_cursor"] == "ku2"
+              and body["page"]["has_older"] is True)
+
+        response = client.get("/api/chat-tree/forkedroot?pane=fork1&turns=2&before_turn=ku2")
+        body = response.json()
+        turn_ids = [item["id"] for item in body["items"] if item["type"] == "Turn"]
+        check("fork pane older page has no overlap and terminates",
+              response.status_code == 200 and turn_ids == ["ku1"]
+              and body["page"]["has_older"] is False
+              and body["page"]["older_cursor"] is None)
+        check("fork pane lookup resolves the fork's own prompt",
+              body["lookup"]["ku1"]["kind"] == "message"
+              and body["lookup"]["ku1"]["text"] == "prompt ku1")
+
+        response = client.get("/api/chat-tree/forkedroot?pane=fork1&before_turn=fu2")
+        detail = response.json().get("detail")
+        check("root-owned cursor inside a fork pane is a typed 409",
+              response.status_code == 409
+              and isinstance(detail, dict) and detail.get("code") == "stale_turn_cursor")
+
+        response = client.get("/api/chat-tree/forkedroot?pane=ghost")
+        detail = response.json().get("detail")
+        check("unknown pane is a typed 404",
+              response.status_code == 404
+              and isinstance(detail, dict) and detail.get("code") == "pane_not_found")
     finally:
         runtime_service.session_tree = original
         bff_chat_feed.feed_client = original_feed_client

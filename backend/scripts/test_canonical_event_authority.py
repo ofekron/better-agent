@@ -18,7 +18,7 @@ def test_cutover_is_atomic_and_missing_authority_fails_closed():
         catalog.commit_sqlite_cutover(
             "root", root.root_generation, database_path=database, canonical_through_seq=4,
             journal_through_seq=7,
-            message_through_seq=2,
+            message_heads={"root": 2},
         )
         raise AssertionError("missing database must fail")
     except AuthorityError:
@@ -28,14 +28,23 @@ def test_cutover_is_atomic_and_missing_authority_fails_closed():
     cutover = catalog.commit_sqlite_cutover(
         "root", root.root_generation, database_path=database, canonical_through_seq=4,
         journal_through_seq=7,
-        message_through_seq=2,
+        message_heads={"root": 2},
     )
     assert cutover.authority == "sqlite"
     advanced = catalog.advance_coverage(
         "root", root.root_generation, canonical_through_seq=5,
-        journal_through_seq=8, message_through_seq=3,
+        journal_through_seq=8, message_heads={"root": 3, "fork": 4},
     )
     assert advanced.journal_through_seq == 8
+    assert catalog.current("root").message_heads == {"root": 3, "fork": 4}
+    try:
+        catalog.advance_coverage(
+            "root", root.root_generation, canonical_through_seq=5,
+            journal_through_seq=8, message_heads={"root": 3},
+        )
+        raise AssertionError("dropping a covered node head must fail closed")
+    except AuthorityError:
+        pass
     database.unlink()
     try:
         catalog.require_database("root")

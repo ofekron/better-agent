@@ -1,13 +1,32 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 import threading
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Mapping
 
 
 class AuthorityError(RuntimeError):
     pass
+
+
+def _decode_heads(raw: str) -> dict[str, int]:
+    try:
+        value = json.loads(raw)
+    except ValueError as exc:
+        raise AuthorityError("canonical message heads are malformed") from exc
+    if not isinstance(value, dict) or not all(
+        isinstance(k, str) and isinstance(v, int) and not isinstance(v, bool)
+        for k, v in value.items()
+    ):
+        raise AuthorityError("canonical message heads are malformed")
+    return value
+
+
+def _encode_heads(heads: Mapping[str, int]) -> str:
+    return json.dumps(dict(heads), sort_keys=True, separators=(",", ":"))
 
 
 @dataclass(frozen=True)
@@ -17,12 +36,14 @@ class RootAuthority:
     authority: str
     canonical_through_seq: int
     journal_through_seq: int
-    message_through_seq: int
+    # Highest covered message seq per session-tree node id (message seqs
+    # are per-node counters, so one scalar watermark cannot gate forks).
+    message_heads: Mapping[str, int]
     database_path: str | None
 
 
 class RuntimeAuthorityCatalog:
-    SCHEMA_VERSION = 2
+    SCHEMA_VERSION = 3
 
     def __init__(self, path: Path) -> None:
         self._path = Path(path)
@@ -45,7 +66,7 @@ class RuntimeAuthorityCatalog:
             authority TEXT NOT NULL CHECK(authority IN ('jsonl', 'sqlite', 'deleting', 'deleted')),
             canonical_through_seq INTEGER NOT NULL,
             journal_through_seq INTEGER NOT NULL,
-            message_through_seq INTEGER NOT NULL,
+            message_heads_json TEXT NOT NULL,
             database_path TEXT,
             PRIMARY KEY (root_id, root_generation)
         )""")
@@ -56,11 +77,17 @@ class RuntimeAuthorityCatalog:
     def current(self, root_id: str) -> RootAuthority | None:
         with self._lock:
             row = self._connection.execute(
-                "SELECT root_generation,authority,canonical_through_seq,journal_through_seq,message_through_seq,database_path "
+                "SELECT root_generation,authority,canonical_through_seq,journal_through_seq,message_heads_json,database_path "
                 "FROM root_authority WHERE root_id=? AND authority!='deleted'",
                 (root_id,),
             ).fetchone()
-        return RootAuthority(root_id, *row) if row else None
+        if row is None:
+            return None
+        generation, authority, canonical_seq, journal_seq, heads_json, database_path = row
+        return RootAuthority(
+            root_id, generation, authority, canonical_seq, journal_seq,
+            _decode_heads(heads_json), database_path,
+        )
 
     def create(self, root_id: str) -> RootAuthority:
         with self._lock, self._connection:
@@ -73,9 +100,9 @@ class RuntimeAuthorityCatalog:
             generation = int(row[0]) + 1 if row and row[0] is not None else 0
             self._connection.execute(
                 "INSERT INTO root_authority VALUES(?,?,?,?,?,?,NULL)",
-                (root_id, generation, "jsonl", 0, -1, -1),
+                (root_id, generation, "jsonl", 0, -1, "{}"),
             )
-        return RootAuthority(root_id, generation, "jsonl", 0, -1, -1, None)
+        return RootAuthority(root_id, generation, "jsonl", 0, -1, {}, None)
 
     def commit_sqlite_cutover(
         self,
@@ -85,7 +112,7 @@ class RuntimeAuthorityCatalog:
         database_path: Path,
         canonical_through_seq: int,
         journal_through_seq: int,
-        message_through_seq: int,
+        message_heads: Mapping[str, int],
     ) -> RootAuthority:
         if not database_path.is_file():
             raise AuthorityError("canonical database must exist before authority cutover")
@@ -96,11 +123,11 @@ class RuntimeAuthorityCatalog:
             if current.authority != "jsonl":
                 raise AuthorityError("root is not JSONL-authoritative")
             self._connection.execute(
-                "UPDATE root_authority SET authority='sqlite',canonical_through_seq=?,journal_through_seq=?,message_through_seq=?,database_path=? "
+                "UPDATE root_authority SET authority='sqlite',canonical_through_seq=?,journal_through_seq=?,message_heads_json=?,database_path=? "
                 "WHERE root_id=? AND root_generation=? AND authority='jsonl'",
-                (canonical_through_seq, journal_through_seq, message_through_seq, str(database_path), root_id, root_generation),
+                (canonical_through_seq, journal_through_seq, _encode_heads(message_heads), str(database_path), root_id, root_generation),
             )
-        return RootAuthority(root_id, root_generation, "sqlite", canonical_through_seq, journal_through_seq, message_through_seq, str(database_path))
+        return RootAuthority(root_id, root_generation, "sqlite", canonical_through_seq, journal_through_seq, dict(message_heads), str(database_path))
 
     def advance_coverage(
         self,
@@ -109,7 +136,7 @@ class RuntimeAuthorityCatalog:
         *,
         canonical_through_seq: int,
         journal_through_seq: int,
-        message_through_seq: int,
+        message_heads: Mapping[str, int],
     ) -> RootAuthority:
         with self._lock, self._connection:
             current = self.current(root_id)
@@ -117,15 +144,18 @@ class RuntimeAuthorityCatalog:
                 raise AuthorityError("canonical authority is not current")
             if (canonical_through_seq < current.canonical_through_seq
                     or journal_through_seq < current.journal_through_seq
-                    or message_through_seq < current.message_through_seq):
+                    or any(
+                        message_heads.get(sid, -1) < head
+                        for sid, head in current.message_heads.items()
+                    )):
                 raise AuthorityError("canonical coverage cannot regress")
             self._connection.execute(
-                "UPDATE root_authority SET canonical_through_seq=?,journal_through_seq=?,message_through_seq=? WHERE root_id=? AND root_generation=?",
-                (canonical_through_seq, journal_through_seq, message_through_seq, root_id, root_generation),
+                "UPDATE root_authority SET canonical_through_seq=?,journal_through_seq=?,message_heads_json=? WHERE root_id=? AND root_generation=?",
+                (canonical_through_seq, journal_through_seq, _encode_heads(message_heads), root_id, root_generation),
             )
         return RootAuthority(
             root_id, root_generation, "sqlite", canonical_through_seq,
-            journal_through_seq, message_through_seq, current.database_path,
+            journal_through_seq, dict(message_heads), current.database_path,
         )
 
     def require_database(self, root_id: str) -> Path | None:
@@ -171,10 +201,16 @@ class RuntimeAuthorityCatalog:
     def deleting(self) -> list[RootAuthority]:
         with self._lock:
             rows = self._connection.execute(
-                "SELECT root_id,root_generation,authority,canonical_through_seq,journal_through_seq,message_through_seq,database_path "
+                "SELECT root_id,root_generation,authority,canonical_through_seq,journal_through_seq,message_heads_json,database_path "
                 "FROM root_authority WHERE authority='deleting'"
             ).fetchall()
-        return [RootAuthority(*row) for row in rows]
+        return [
+            RootAuthority(
+                root_id, generation, authority, canonical_seq, journal_seq,
+                _decode_heads(heads_json), database_path,
+            )
+            for root_id, generation, authority, canonical_seq, journal_seq, heads_json, database_path in rows
+        ]
 
     def close(self) -> None:
         with self._lock:

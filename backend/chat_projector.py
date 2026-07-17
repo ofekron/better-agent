@@ -34,7 +34,7 @@ _EVENT_FIELDS = {
     "provider_final", "metadata_only", "schema_version", "source",
 }
 _PROVIDER_FIELDS = {"id", "model", "effort"}
-_MESSAGE_FIELDS = {"id", "turn_id", "seq", "role", "content"}
+_MESSAGE_FIELDS = {"id", "turn_id", "seq", "role", "content", "context_id"}
 _MODEL_IDENTITY_FIELDS = {"provider", "model", "effort"}
 MAX_CANONICAL_ROWS = 200_000
 MAX_CANONICAL_JSON_BYTES = 128 * 1024 * 1024
@@ -484,6 +484,8 @@ def _validated_messages(
             raise ChatProjectionInputError("invalid_message_role", f"unsupported role: {role}")
         if not isinstance(message["content"], str):
             raise ChatProjectionInputError("invalid_message_content", "content must be a string")
+        if "context_id" in message.keys():
+            _required_str(message["context_id"], "message.context_id")
         if message_id in message_ids:
             raise ChatProjectionInputError("duplicate_message_id", f"duplicate id: {message_id}")
         message_ids.add(message_id)

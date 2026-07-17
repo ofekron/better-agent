@@ -8099,7 +8099,7 @@ function AppMain({
               }
               onLoadOlderMessages={
                 loadOlderMessages
-                  ? (sessionId, beforeSeq) => loadOlderMessages(sessionId, beforeSeq)
+                  ? (sessionId) => loadOlderMessages(sessionId)
                   : undefined
               }
               hasOlderMessages={currentSession?.pagination?.has_older}

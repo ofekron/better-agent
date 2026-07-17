@@ -3,12 +3,13 @@ from __future__ import annotations
 import os
 import threading
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from canonical_event_adapter import (
     canonical_facts_from_rows,
     canonical_message_facts,
     fact_to_wire,
+    session_message_heads,
 )
 from canonical_event_authority import AuthorityError, RuntimeAuthorityCatalog
 from canonical_event_store import CanonicalEventStore
@@ -42,8 +43,13 @@ def _notify_advance(root_id: str, journal_seq: int) -> None:
 
 class CanonicalRuntimeJournal:
     def __init__(self, catalog_path: Path | None = None) -> None:
+        if catalog_path is None:
+            # The v2 catalog (scalar message watermark) is superseded; the
+            # v3 catalog rebuilds lazily per root on demand.
+            for stale in ba_home().glob("runtime/canonical-authority-v2.sqlite*"):
+                stale.unlink(missing_ok=True)
         self._catalog = RuntimeAuthorityCatalog(
-            catalog_path or ba_home() / "runtime" / "canonical-authority-v2.sqlite"
+            catalog_path or ba_home() / "runtime" / "canonical-authority-v3.sqlite"
         )
         self._store_instance: CanonicalEventStore | None = None
         self._lock = threading.RLock()
@@ -59,14 +65,13 @@ class CanonicalRuntimeJournal:
             return self._store_instance
 
     @staticmethod
-    def _message_head(session: dict[str, Any], default: int) -> int:
-        for message in reversed(session.get("messages") or []):
-            if not isinstance(message, dict):
-                continue
-            seq = message.get("seq")
-            if isinstance(seq, int) and not isinstance(seq, bool):
-                return max(default, seq)
-        return default
+    def _merged_message_heads(
+        session: dict[str, Any], covered: Mapping[str, int],
+    ) -> dict[str, int]:
+        heads = dict(covered)
+        for sid, head in session_message_heads(session).items():
+            heads[sid] = max(heads.get(sid, -1), head)
+        return heads
 
     def is_authoritative(self, root_id: str) -> bool:
         authority = self._catalog.current(root_id)
@@ -132,7 +137,7 @@ class CanonicalRuntimeJournal:
         self._catalog.advance_coverage(
             root_id, authority.root_generation,
             canonical_through_seq=head, journal_through_seq=seq,
-            message_through_seq=authority.message_through_seq,
+            message_heads=authority.message_heads,
         )
         _notify_advance(root_id, seq)
 
@@ -153,14 +158,14 @@ class CanonicalRuntimeJournal:
             for row in gap_rows
             if not provider_stream_render_row_is_shadow(row)
         ]
-        message_through_seq = self._message_head(session, authority.message_through_seq)
+        message_heads = self._merged_message_heads(session, authority.message_heads)
         if (authority.authority == "sqlite" and not normalized_rows
-                and message_through_seq <= authority.message_through_seq):
+                and message_heads == dict(authority.message_heads)):
             return generation
         message_facts = canonical_message_facts(
             root_id,
             {**session, "generation": generation},
-            after_seq=authority.message_through_seq,
+            heads=dict(authority.message_heads),
         )
         facts = [
             *message_facts,
@@ -190,14 +195,14 @@ class CanonicalRuntimeJournal:
                 root_id, generation, database_path=database_path,
                 canonical_through_seq=barrier.canonical_through_seq,
                 journal_through_seq=journal_through_seq,
-                message_through_seq=message_through_seq,
+                message_heads=message_heads,
             )
         else:
             self._catalog.advance_coverage(
                 root_id, generation,
                 canonical_through_seq=barrier.canonical_through_seq,
                 journal_through_seq=journal_through_seq,
-                message_through_seq=message_through_seq,
+                message_heads=message_heads,
             )
         _notify_advance(root_id, journal_through_seq)
         return generation

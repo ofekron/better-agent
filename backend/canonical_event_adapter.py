@@ -167,16 +167,48 @@ def canonical_facts_from_rows(rows: Iterable[dict[str, Any]]) -> list[CanonicalF
     return [fact for row in rows for fact in canonical_facts_from_journal_row(row)]
 
 
-def canonical_message_facts(
+def walk_session_nodes(session: dict[str, Any]) -> list[dict[str, Any]]:
+    """Root-first walk over the session tree: root, then every nested fork.
+
+    Root-first order is load-bearing for fact dedup: a fork's copied
+    message prefix produces facts with the same fact_id as the root's
+    originals (sid is not part of fact identity), and first-write-wins
+    dedup must keep the root-scoped fact.
+    """
+    nodes = [session]
+    for fork in session.get("forks") or []:
+        if isinstance(fork, dict):
+            nodes.extend(walk_session_nodes(fork))
+    return nodes
+
+
+def session_message_heads(session: dict[str, Any]) -> dict[str, int]:
+    """Highest message seq per session-tree node id (message seqs are
+    per-node counters; forks continue their own after the fork point)."""
+    heads: dict[str, int] = {}
+    for node in walk_session_nodes(session):
+        node_id = str(node.get("id") or "")
+        if not node_id:
+            continue
+        for message in reversed(node.get("messages") or []):
+            if not isinstance(message, dict):
+                continue
+            seq = message.get("seq")
+            if isinstance(seq, int) and not isinstance(seq, bool):
+                heads[node_id] = max(heads.get(node_id, -1), seq)
+                break
+    return heads
+
+
+def _node_message_facts(
     root_id: str,
-    session: dict[str, Any],
-    *,
-    after_seq: int = -1,
+    root_generation: int,
+    node: dict[str, Any],
+    after_seq: int,
 ) -> list[CanonicalFact]:
     facts: list[CanonicalFact] = []
-    root_generation = int(session.get("generation", 0))
     current_prompt = ""
-    messages = session.get("messages") or []
+    messages = node.get("messages") or []
     start = len(messages)
     for index in range(len(messages) - 1, -1, -1):
         message = messages[index]
@@ -199,7 +231,7 @@ def canonical_message_facts(
         if role == "user":
             current_prompt = message_id
             facts.append(CanonicalFact.create(
-                root_id=root_id, root_generation=root_generation, sid=str(session.get("id") or root_id), source="session",
+                root_id=root_id, root_generation=root_generation, sid=str(node.get("id") or root_id), source="session",
                 source_stream_id=f"session:{root_id}", source_event_id=message_id,
                 source_order=SourceOrder(sequence=message_seq), payload_type="user_prompt",
                 payload={"message_id": message_id, "text": str(message.get("content") or "")},
@@ -207,12 +239,34 @@ def canonical_message_facts(
             ))
         elif role == "assistant" and current_prompt:
             facts.append(CanonicalFact.create(
-                root_id=root_id, root_generation=root_generation, sid=str(session.get("id") or root_id), source="session",
+                root_id=root_id, root_generation=root_generation, sid=str(node.get("id") or root_id), source="session",
                 source_stream_id=f"session:{root_id}", source_event_id=f"owner:{message_id}",
                 source_order=SourceOrder(sequence=message_seq), payload_type="message_ownership_declared",
                 payload={"message_id": message_id, "prompt_message_id": current_prompt},
                 update_semantics="snapshot", turn_id=current_prompt,
             ))
+    return facts
+
+
+def canonical_message_facts(
+    root_id: str,
+    session: dict[str, Any],
+    *,
+    heads: dict[str, int] | None = None,
+) -> list[CanonicalFact]:
+    """Message-scaffold facts for every session-tree node (root + forks).
+
+    `heads` gates emission per node id (a node's messages with
+    seq <= heads[node_id] are already covered); None emits everything.
+    """
+    root_generation = int(session.get("generation", 0))
+    facts: list[CanonicalFact] = []
+    for node in walk_session_nodes(session):
+        node_id = str(node.get("id") or root_id)
+        after_seq = (heads or {}).get(node_id, -1)
+        facts.extend(
+            _node_message_facts(root_id, root_generation, node, after_seq)
+        )
     return facts
 
 

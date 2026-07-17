@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from canonical_event_adapter import walk_session_nodes
+
 _HEAVY_MESSAGE_FIELDS = frozenset({"events", "manager"})
 
 
@@ -60,18 +62,22 @@ def build_lookup(
     referenced = referenced_ids(items)
     snapshot_seq: dict[str, Any] = {}
     run_meta: dict[str, Any] = {}
-    for message in session.get("messages") or []:
-        if not isinstance(message, dict):
-            continue
-        message_id = message.get("id")
-        if isinstance(message_id, str) and message_id:
+    snapshot_by_id: dict[str, dict[str, Any]] = {}
+    # Root-first walk: fork panes carry their own tail messages; copied
+    # prefix ids resolve to the root's snapshot (first write wins).
+    for node in walk_session_nodes(dict(session)):
+        for message in node.get("messages") or []:
+            if not isinstance(message, dict):
+                continue
+            message_id = message.get("id")
+            if not isinstance(message_id, str) or not message_id:
+                continue
+            if message_id in snapshot_by_id:
+                continue
             snapshot_seq[message_id] = message.get("seq")
             if isinstance(message.get("run_meta"), dict):
                 run_meta[message_id] = message["run_meta"]
-    snapshot_by_id: dict[str, dict[str, Any]] = {}
-    for message in session.get("messages") or []:
-        if isinstance(message, dict) and isinstance(message.get("id"), str):
-            snapshot_by_id[message["id"]] = strip_heavy_message_fields(message)
+            snapshot_by_id[message_id] = strip_heavy_message_fields(message)
     lookup: dict[str, dict[str, Any]] = {}
     for message in adapted_messages:
         if message["id"] not in referenced:

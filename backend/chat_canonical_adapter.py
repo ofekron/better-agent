@@ -274,6 +274,7 @@ def adapt_chat_inputs(
             messages.append({
                 "id": message_id, "turn_id": message_id, "seq": seq,
                 "role": "user", "content": str(payload.get("text") or ""),
+                "context_id": str(fact.get("sid") or root_id),
             })
             continue
 
@@ -286,6 +287,7 @@ def adapt_chat_inputs(
             messages.append({
                 "id": message_id, "turn_id": turn_id, "seq": seq,
                 "role": "assistant", "content": "",
+                "context_id": str(fact.get("sid") or root_id),
             })
             continue
 
