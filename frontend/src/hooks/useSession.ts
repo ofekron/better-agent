@@ -2994,68 +2994,78 @@ export function useSession(authStatus?: string) {
   );
 
   const loadOlderMessages = useCallback(
-    async (sessionId: string, beforeSeq: number) => {
-      // ROOT sessions page by formal-tree turn cursor; fork panes keep
-      // seq paging until they migrate onto the chat tree.
-      const treeCursor = chatTreeOlderCursorRef.current.get(sessionId);
-      if (treeCursor !== undefined) {
-        if (treeCursor === null) return;
-        let chatTree: Awaited<ReturnType<typeof fetchChatTree>>;
+    async (sessionId: string) => {
+      // Every pane (root and forks) pages by formal-tree turn cursor.
+      let cursor = chatTreeOlderCursorRef.current.get(sessionId);
+      if (cursor === null) return;
+      if (cursor === undefined) {
+        // First chat-tree page for a fork pane (initial fork messages ride
+        // embedded in the root tree, so no cursor was seeded): a
+        // cursor-less pane window returns the authoritative older_cursor —
+        // never derived client-side, so it cannot go stale by guessing.
+        let seed: Awaited<ReturnType<typeof fetchChatTree>>;
         try {
-          chatTree = await fetchChatTree(sessionId, {
+          seed = await fetchChatTree(sessionId, {
             turns: exchangePageSize,
-            beforeTurn: treeCursor,
+            pane: sessionId,
           });
-        } catch (error) {
-          if (error instanceof ChatTreeError && error.code === "stale_turn_cursor") {
-            // Typed stale cursor: discard paging state and refetch one
-            // current snapshot — never merge mixed revisions.
-            chatTreeOlderCursorRef.current.delete(sessionId);
-            await selectSessionRef.current?.(sessionId);
-          }
+        } catch {
           return;
         }
-        const older = chatTreeToMessages(chatTree.projection, chatTree.lookup);
-        chatTreeOlderCursorRef.current.set(sessionId, chatTree.page.older_cursor);
-        if (older.length === 0) return;
+        const paneWindow = chatTreeToMessages(seed.projection, seed.lookup);
+        chatTreeOlderCursorRef.current.set(sessionId, seed.page.older_cursor);
         setCurrentSession((prev) => {
           if (!prev) return prev;
           return updateNodeById(prev, sessionId, (node) => {
             const existing = node.messages || [];
             const known = new Set(existing.map((message) => message.id));
-            const fresh = older.filter((message) => !known.has(message.id));
+            const fresh = paneWindow.filter((message) => !known.has(message.id));
             return {
               ...node,
               messages: [...fresh, ...existing],
               pagination: {
                 total_messages: undefined,
-                oldest_loaded_seq: fresh[0]?.seq ?? node.pagination?.oldest_loaded_seq ?? null,
-                has_older: chatTree.page.has_older,
+                oldest_loaded_seq:
+                  fresh[0]?.seq ?? node.pagination?.oldest_loaded_seq ?? null,
+                has_older: seed.page.has_older,
               },
             };
           });
         });
+        cursor = seed.page.older_cursor;
+        if (cursor === null) return;
+      }
+      let chatTree: Awaited<ReturnType<typeof fetchChatTree>>;
+      try {
+        chatTree = await fetchChatTree(sessionId, {
+          turns: exchangePageSize,
+          beforeTurn: cursor,
+          pane: sessionId,
+        });
+      } catch (error) {
+        if (error instanceof ChatTreeError && error.code === "stale_turn_cursor") {
+          // Typed stale cursor: discard paging state and refetch one
+          // current snapshot — never merge mixed revisions.
+          chatTreeOlderCursorRef.current.delete(sessionId);
+          await selectSessionRef.current?.(sessionId);
+        }
         return;
       }
-      const res = await fetch(
-        `${API}/api/sessions/${sessionId}/messages?before_seq=${beforeSeq}&exchange_count=${exchangePageSize}`
-      );
-      if (!res.ok) return;
-      const data = await res.json();
-      const older: ChatMessage[] = data.messages || [];
-      if (older.length === 0) return;
+      const older = chatTreeToMessages(chatTree.projection, chatTree.lookup);
+      chatTreeOlderCursorRef.current.set(sessionId, chatTree.page.older_cursor);
       setCurrentSession((prev) => {
         if (!prev) return prev;
         return updateNodeById(prev, sessionId, (node) => {
           const existing = node.messages || [];
-          const oldest = older[0]?.seq ?? null;
+          const known = new Set(existing.map((message) => message.id));
+          const fresh = older.filter((message) => !known.has(message.id));
           return {
             ...node,
-            messages: [...older, ...existing],
+            messages: [...fresh, ...existing],
             pagination: {
-              total_messages: data.total_messages,
-              oldest_loaded_seq: oldest,
-              has_older: data.has_older,
+              total_messages: undefined,
+              oldest_loaded_seq: fresh[0]?.seq ?? node.pagination?.oldest_loaded_seq ?? null,
+              has_older: chatTree.page.has_older,
             },
           };
         });

@@ -446,6 +446,8 @@
   "settings.extensionsPermission.unknown.risk": "This permission is not recognized by this UI. Treat it as high risk until the extension explains it.",
   "settings.extensionsSettings": "Settings",
   "settings.extensionsSettingsHelp": "Configuration values read by this extension.",
+  "settings.extensionsSearchPlaceholder": "Search extensions…",
+  "settings.extensionsSearchNoResults": "No extensions match your search.",
   "settings.extensionsUserInstructions": "Your instructions",
   "settings.extensionsUserInstructionsHelp": "Personal notes on how the agent should use this extension. Added to agent runs while it is enabled.",
   "settings.extensionsUserInstructionsPlaceholder": "e.g. Always ask before deleting; prefer the staging environment.",

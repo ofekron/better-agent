@@ -428,6 +428,8 @@
   "settings.extensionsPermission.unknown.risk": "Diese Berechtigung wird von dieser UI nicht erkannt. Behandeln Sie sie bis zur Erklärung durch die Erweiterung als hohes Risiko.",
   "settings.extensionsSettings": "Einstellungen",
   "settings.extensionsSettingsHelp": "Konfigurationswerte, die diese Erweiterung ausliest.",
+  "settings.extensionsSearchPlaceholder": "Erweiterungen suchen…",
+  "settings.extensionsSearchNoResults": "Keine Erweiterungen entsprechen deiner Suche.",
   "settings.extensionsUserInstructions": "Deine Anweisungen",
   "settings.extensionsUserInstructionsHelp": "Persönliche Hinweise, wie der Agent diese Erweiterung verwenden soll. Werden Agent-Läufen hinzugefügt, solange sie aktiviert ist.",
   "settings.extensionsUserInstructionsPlaceholder": "z. B. Vor dem Löschen immer nachfragen; die Staging-Umgebung bevorzugen.",

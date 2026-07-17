@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState, useCallback } from "react";
 import { LayoutGroup, motion, MotionConfig, useReducedMotion } from "framer-motion";
-import { mergeMessagesSorted, oldestNumericSeq } from "../utils/mergeMessages";
+import { mergeMessagesSorted } from "../utils/mergeMessages";
 import { linkifyFilePaths } from "../utils/linkifyFilePaths";
 import { useThrottledValue } from "../hooks/useThrottledValue";
 import { isGroupRunning } from "../utils/groupRunning";
@@ -499,7 +499,7 @@ interface Props {
   sendTarget?: "worker" | "supervisor";
   onSendTargetChange?: (target: "worker" | "supervisor") => void;
   /** Load older messages on scroll-up. Takes session id + beforeSeq. */
-  onLoadOlderMessages?: (sessionId: string, beforeSeq: number) => Promise<void>;
+  onLoadOlderMessages?: (sessionId: string) => Promise<void>;
   /** Whether the focused session has older messages to load. */
   hasOlderMessages?: boolean;
   /** True while REST fetch for the session is in flight. */
@@ -731,11 +731,8 @@ export function Chat({
 
   const loadOlderFn = useCallback(async () => {
     if (!onLoadOlderMessages || !session?.id) return;
-    const oldest = oldestNumericSeq(messages);
-    if (oldest !== null && oldest > 0) {
-      await onLoadOlderMessages(session.id, oldest);
-    }
-  }, [onLoadOlderMessages, session?.id, messages]);
+    await onLoadOlderMessages(session.id);
+  }, [onLoadOlderMessages, session?.id]);
 
   const {
     scrollRef,

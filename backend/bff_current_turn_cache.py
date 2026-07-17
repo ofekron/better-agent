@@ -25,6 +25,7 @@ from canonical_event_adapter import (
     canonical_facts_from_rows,
     canonical_message_facts,
     fact_to_wire,
+    walk_session_nodes,
 )
 from canonical_runtime_journal import canonical_runtime_journal
 from event_ingester import event_ingester
@@ -68,6 +69,20 @@ def _wire_facts(
     return wire
 
 
+def _pane_id_for_turn(session: Mapping[str, Any], turn_id: str) -> str | None:
+    """Session-tree node owning this turn's prompt message. The root-first
+    walk makes the first match the owner: a fork's copied prefix repeats
+    root message ids, but the root is visited before any fork, and a
+    fork's own tail messages exist only in that fork."""
+    for node in walk_session_nodes(dict(session)):
+        if any(
+            isinstance(message, dict) and message.get("id") == turn_id
+            for message in node.get("messages") or []
+        ):
+            return str(node.get("id") or "") or None
+    return None
+
+
 def _turn_items(
     items: Sequence[dict[str, Any]], turn_id: str,
 ) -> list[dict[str, Any]] | None:
@@ -96,7 +111,10 @@ class CurrentTurnCache:
         rows: Sequence[Mapping[str, Any]],
         session: Mapping[str, Any],
     ) -> tuple[list[dict[str, Any]] | None, RenderedChat]:
-        rendered = render_chat(_wire_facts(root_id, rows, session), session)
+        rendered = render_chat(
+            _wire_facts(root_id, rows, session), session,
+            pane_id=_pane_id_for_turn(session, turn_id),
+        )
         return _turn_items(rendered.items, turn_id), rendered
 
     def _store(

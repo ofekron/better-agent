@@ -432,6 +432,8 @@
   "settings.extensionsPermission.unknown.risk": "Questo permesso non è riconosciuto da questa UI. Consideralo ad alto rischio finché l'estensione non lo spiega.",
   "settings.extensionsSettings": "Impostazioni",
   "settings.extensionsSettingsHelp": "Valori di configurazione letti da questa estensione.",
+  "settings.extensionsSearchPlaceholder": "Cerca estensioni…",
+  "settings.extensionsSearchNoResults": "Nessuna estensione corrisponde alla tua ricerca.",
   "settings.extensionsUserInstructions": "Le tue istruzioni",
   "settings.extensionsUserInstructionsHelp": "Note personali su come l'agente dovrebbe usare questa estensione. Aggiunte alle esecuzioni dell'agente finché è abilitata.",
   "settings.extensionsUserInstructionsPlaceholder": "es. Chiedi sempre prima di eliminare; preferisci l'ambiente di staging.",

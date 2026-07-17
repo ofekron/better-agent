@@ -432,6 +432,8 @@
   "settings.extensionsPermission.unknown.risk": "هذا الإذن غير معروف لهذه الواجهة. تعامل معه كعالي المخاطر حتى يشرحه الامتداد.",
   "settings.extensionsSettings": "الإعدادات",
   "settings.extensionsSettingsHelp": "قيم الإعداد التي يقرأها هذا الامتداد.",
+  "settings.extensionsSearchPlaceholder": "البحث في الامتدادات…",
+  "settings.extensionsSearchNoResults": "لا توجد امتدادات تطابق بحثك.",
   "settings.extensionsUserInstructions": "تعليماتك",
   "settings.extensionsUserInstructionsHelp": "ملاحظات شخصية حول كيفية استخدام الوكيل لهذا الامتداد. تُضاف إلى عمليات تشغيل الوكيل أثناء تفعيله.",
   "settings.extensionsUserInstructionsPlaceholder": "مثال: اسأل دائمًا قبل الحذف؛ فضّل بيئة الاختبار المرحلية.",

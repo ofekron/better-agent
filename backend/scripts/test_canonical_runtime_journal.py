@@ -85,6 +85,57 @@ def test_reconcile_gap_and_new_messages_after_cutover():
     journal.close()
 
 
+def test_fork_messages_emit_scoped_facts_with_per_node_heads():
+    root_id = "forked-root"
+    session = {
+        "id": root_id,
+        "messages": [
+            {"id": "u1", "seq": 1, "role": "user", "content": "root work"},
+            {"id": "a1", "seq": 2, "role": "assistant", "content": "root done"},
+        ],
+        "forks": [{
+            "id": "fork-1",
+            "messages": [
+                # Copied pre-fork prefix (same ids/seqs as the root) plus the
+                # fork's own tail; tail seqs collide with root seq numbers.
+                {"id": "u1", "seq": 1, "role": "user", "content": "root work"},
+                {"id": "a1", "seq": 2, "role": "assistant", "content": "root done"},
+                {"id": "fu1", "seq": 3, "role": "user", "content": "fork work"},
+                {"id": "fa1", "seq": 4, "role": "assistant", "content": "fork done"},
+            ],
+            "forks": [],
+        }],
+    }
+    journal = CanonicalRuntimeJournal(HOME / "forked-catalog.sqlite")
+    journal.ensure_cutover(root_id, rows=[], session=session)
+    page = journal.read_page(root_id, after_seq=0, limit=100)
+    prompts = {
+        fact["payload"]["message_id"]: fact["sid"]
+        for fact in page["facts"] if fact["payload_type"] == "user_prompt"
+    }
+    # The copied prefix dedups onto the root's fact (root-first walk); the
+    # fork's own tail is scoped to the fork node.
+    assert prompts == {"u1": root_id, "fu1": "fork-1"}
+    heads = journal.current_authority(root_id).message_heads
+    assert heads == {root_id: 2, "fork-1": 4}
+
+    # A fork-only advance re-triggers emission for the fork node alone.
+    session["forks"][0]["messages"].extend([
+        {"id": "fu2", "seq": 5, "role": "user", "content": "fork again"},
+        {"id": "fa2", "seq": 6, "role": "assistant", "content": "fork again done"},
+    ])
+    journal.ensure_cutover(root_id, rows=[], session=session)
+    page = journal.read_page(root_id, after_seq=0, limit=100)
+    fork_prompts = [
+        fact["payload"]["message_id"]
+        for fact in page["facts"]
+        if fact["payload_type"] == "user_prompt" and fact["sid"] == "fork-1"
+    ]
+    assert fork_prompts == ["fu1", "fu2"]
+    assert journal.current_authority(root_id).message_heads == {root_id: 2, "fork-1": 6}
+    journal.close()
+
+
 def test_delete_tombstones_generation_and_reuse_mints_next_generation():
     root_id = "reused-root"
     session = {"id": root_id, "messages": []}
@@ -432,6 +483,7 @@ def test_first_singleton_access_does_not_wait_on_root_lifecycle_gate():
 if __name__ == "__main__":
     test_import_cutover_mirror_and_page_read()
     test_reconcile_gap_and_new_messages_after_cutover()
+    test_fork_messages_emit_scoped_facts_with_per_node_heads()
     test_delete_tombstones_generation_and_reuse_mints_next_generation()
     test_gap_skips_write_and_waits_for_read_path_resync()
     test_mirror_gap_leaves_coverage_for_read_path_to_fill()

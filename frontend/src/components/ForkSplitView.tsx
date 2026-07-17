@@ -12,7 +12,7 @@ import { TurnGroup } from "./MessageBubble";
 import { buildThreadColorMap } from "../threadColors";
 import { useOpProgress } from "../progress/store";
 import { useViewport } from "../hooks/useViewport";
-import { mergeMessagesSorted, oldestNumericSeq } from "../utils/mergeMessages";
+import { mergeMessagesSorted } from "../utils/mergeMessages";
 import { useScrollLoadOlder } from "../hooks/useScrollLoadOlder";
 import { isUnanchoredRun } from "../utils/runTargets";
 import { providerNameForId } from "../utils/providerCache";
@@ -51,7 +51,7 @@ interface Props {
   onRetryStopped?: (assistantMessage: ChatMessage) => void;
   userDisplayName?: string | null;
   /** Load older messages for a pane. Keyed by session id. */
-  onLoadOlderMessages?: (sessionId: string, beforeSeq: number) => Promise<void>;
+  onLoadOlderMessages?: (sessionId: string) => Promise<void>;
   /** Click handler for adversarial-sync agreed-text spans. The
    * overlay carries the two fork ids; App navigates the focused
    * pane to the supportive fork. */
@@ -144,11 +144,8 @@ export function ForkSplitView({
   const sharedHasOlder = !!(tree.pagination?.has_older);
   const sharedLoadOlderFn = useCallback(async () => {
     if (!onLoadOlderMessages) return;
-    const oldest = oldestNumericSeq(sharedMessages);
-    if (oldest !== null && oldest > 0) {
-      await onLoadOlderMessages(tree.id, oldest);
-    }
-  }, [onLoadOlderMessages, tree.id, sharedMessages]);
+    await onLoadOlderMessages(tree.id);
+  }, [onLoadOlderMessages, tree.id]);
 
   const sharedOlderOpId = `messages:loadOlder:shared:${tree.id}`;
   const { inflight: sharedLoadingOlder } = useOpProgress(sharedOlderOpId);
@@ -423,10 +420,7 @@ export function ForkSplitView({
               onLoadOlderMessages={
                 onLoadOlderMessages
                   ? async () => {
-                      const oldest = oldestNumericSeq(msgs);
-                      if (oldest !== null && oldest > 0) {
-                        await onLoadOlderMessages(pane.id, oldest);
-                      }
+                      await onLoadOlderMessages(pane.id);
                     }
                   : undefined
               }

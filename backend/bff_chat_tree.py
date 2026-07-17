@@ -103,11 +103,21 @@ def _raise_chat_tree_rebuilding(root_id: str) -> None:
     )
 
 
+def _pane_exists(session: dict[str, Any], pane_id: str) -> bool:
+    if str(session.get("id") or "") == pane_id:
+        return True
+    return any(
+        isinstance(fork, dict) and _pane_exists(fork, pane_id)
+        for fork in session.get("forks") or []
+    )
+
+
 @router.get("/api/chat-tree/{session_id}")
 async def get_chat_tree(
     session_id: str,
     turns: int = 5,
     before_turn: str | None = None,
+    pane: str | None = None,
 ):
     if not _SESSION_ID.fullmatch(session_id):
         raise HTTPException(status_code=400, detail="invalid session id")
@@ -115,6 +125,8 @@ async def get_chat_tree(
         raise HTTPException(status_code=400, detail="invalid turns window")
     if before_turn is not None and not _SESSION_ID.fullmatch(before_turn):
         raise HTTPException(status_code=400, detail="invalid turn cursor")
+    if pane is not None and not _SESSION_ID.fullmatch(pane):
+        raise HTTPException(status_code=400, detail="invalid pane id")
     try:
         source = await runtime_service.session_tree(
             session_id, exchange_count=turns,
@@ -134,8 +146,15 @@ async def get_chat_tree(
                     "message": "session provider identity is unavailable"},
         )
     # The requested id may be a fork; the tree resolves to its root, and
-    # the rendering cache keys facts by root.
+    # the rendering cache keys facts by root. `pane` selects which
+    # session-tree node's turns the window covers (default: the root).
     root_id = str(session.get("id") or session_id)
+    if pane is not None and not _pane_exists(session, pane):
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "pane_not_found",
+                    "message": "pane is not part of this session tree"},
+        )
     try:
         facts = await asyncio.to_thread(_read_stored_facts, root_id, provider)
     except ProjectionServiceError as exc:
@@ -158,7 +177,9 @@ async def get_chat_tree(
         # client can show a warming state instead of an empty success.
         _raise_chat_tree_rebuilding(root_id)
     try:
-        rendered = await asyncio.to_thread(render_chat, facts, session)
+        rendered = await asyncio.to_thread(
+            lambda: render_chat(facts, session, pane_id=pane),
+        )
     except (ChatAdapterError, ChatProjectionInputError) as exc:
         raise HTTPException(
             status_code=422, detail={"code": exc.code, "message": str(exc)},
@@ -177,6 +198,7 @@ async def get_chat_tree(
         "page": {
             "turns": turns,
             "before_turn": before_turn,
+            "pane": pane or root_id,
             "older_cursor": older_cursor,
             "has_older": older_cursor is not None,
         },

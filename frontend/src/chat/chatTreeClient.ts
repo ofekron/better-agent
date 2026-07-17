@@ -24,6 +24,7 @@ export type ChatTreeLookupEntry =
 export type ChatTreePage = {
   turns: number
   before_turn: string | null
+  pane?: string | null
   older_cursor: string | null
   has_older: boolean
 }
@@ -49,11 +50,12 @@ export class ChatTreeError extends Error {
 
 export async function fetchChatTree(
   sessionId: string,
-  options: { turns?: number; beforeTurn?: string; signal?: AbortSignal } = {},
+  options: { turns?: number; beforeTurn?: string; pane?: string; signal?: AbortSignal } = {},
 ): Promise<ChatTree> {
   const params = new URLSearchParams()
   if (options.turns !== undefined) params.set('turns', String(options.turns))
   if (options.beforeTurn !== undefined) params.set('before_turn', options.beforeTurn)
+  if (options.pane !== undefined) params.set('pane', options.pane)
   const query = params.toString()
   const response = await fetch(
     `${API}/api/chat-tree/${encodeURIComponent(sessionId)}${query ? `?${query}` : ''}`,

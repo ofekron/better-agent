@@ -432,6 +432,8 @@
   "settings.extensionsPermission.unknown.risk": "Cette permission n'est pas reconnue par cette UI. Traitez-la comme à haut risque jusqu'à ce que l'extension l'explique.",
   "settings.extensionsSettings": "Paramètres",
   "settings.extensionsSettingsHelp": "Valeurs de configuration lues par cette extension.",
+  "settings.extensionsSearchPlaceholder": "Rechercher des extensions…",
+  "settings.extensionsSearchNoResults": "Aucune extension ne correspond à votre recherche.",
   "settings.extensionsUserInstructions": "Vos instructions",
   "settings.extensionsUserInstructionsHelp": "Notes personnelles sur la façon dont l'agent doit utiliser cette extension. Ajoutées aux exécutions de l'agent tant qu'elle est activée.",
   "settings.extensionsUserInstructionsPlaceholder": "ex. : Toujours demander avant de supprimer ; préférer l'environnement de préproduction.",
