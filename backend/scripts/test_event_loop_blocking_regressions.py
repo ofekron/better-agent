@@ -4489,6 +4489,22 @@ def test_ba_home_memoizes_resolution_off_loop() -> None:
             pass
 
 
+def test_startup_extension_package_resolution_stays_off_loop() -> None:
+    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    start = source.index("import extension_package_loader")
+    end = source.index("extension_store.extension_id_for_role(\"requirements\")", start)
+    region = source[start:end]
+    assert "await asyncio.to_thread(\n                extension_package_loader.ensure_package_importable," in region
+    assert "\n            extension_package_loader.ensure_package_importable(" not in region
+
+    prewarm = (ROOT / "requirement_prewarm.py").read_text(encoding="utf-8")
+    fn_start = prewarm.index("async def warm_processor()")
+    fn_end = prewarm.index("return await ensure_warm_base", fn_start)
+    fn_source = prewarm[fn_start:fn_end]
+    assert "spec, cfg = await asyncio.to_thread(resolve_processor)" in fn_source
+    assert "\n            spec = requirement_context.get_requirements_processor_spec()" not in fn_source
+
+
 if __name__ == "__main__":
     test_hook_runner_loads_config_off_loop()
     test_hot_path_warning_logs_are_off_loop()
@@ -4628,4 +4644,5 @@ if __name__ == "__main__":
     test_internal_communication_worker_lookup_is_off_loop()
     test_ba_home_memoizes_resolution_off_loop()
     test_provider_start_run_is_off_loop_everywhere()
+    test_startup_extension_package_resolution_stays_off_loop()
     print("PASS event loop blocking regressions")
