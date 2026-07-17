@@ -58,19 +58,48 @@ def main() -> int:
     build_lock = threading.Lock()
     original_build = hydrate._build_hydration_index
 
-    canonical = json.dumps({
-        "seq": 1, "ts": "2026-07-17T00:00:00+00:00",
-        "sid": 'sid-with-"quote', "msg_id": "m", "type": "agent_message",
-        "source": "test", "data": {"uuid": "u-1"},
-    }, separators=(",", ":")).encode() + b"\n"
-    fast_sid, used_fast_path = hydrate.hydration_index_store._sid_from_line(canonical)
-    assert (fast_sid, used_fast_path) == ('sid-with-"quote', True)
-    reordered = json.dumps(
-        {"data": {"payload": "x" * 8192}, **_row(2, "legacy", "m")},
-        separators=(",", ":"),
-    ).encode() + b"\n"
-    fallback_sid, used_fast_path = hydrate.hydration_index_store._sid_from_line(reordered)
-    assert (fallback_sid, used_fast_path) == ("legacy", False)
+    corpus = [
+        b'{"seq":1,"ts":"t","sid":"first","sid":"last","data":{}}\n',
+        b' { "data" : [1,true,null,{"sid":"nested"}], "sid" : "reordered" } \n',
+        b'{"sid":"quoted\\\"-\\u263a","data":"x"}\n',
+        b'{"seq":1,"ts":"' + (b"t" * 5000) + b'","sid":"boundary","data":{}}\n',
+        b'{"sid":"discarded","sid":null,"data":{}}\n',
+        b'{"sid":"malformed","data":{}} trailing\n',
+        b'{"sid":"bad-utf8","data":"\xff"}\n',
+        b'{"sid":"truncated","data":{"x":1}\n',
+    ]
+    expected_offsets: dict[str, list[int]] = {}
+    corpus_path = path.with_name("differential-events.jsonl")
+    offset = 0
+    with corpus_path.open("wb") as handle:
+        for raw in corpus:
+            handle.write(raw)
+            try:
+                parsed = json.loads(raw)
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                pass
+            else:
+                expected = parsed.get("sid") if isinstance(parsed, dict) else None
+                expected = expected if isinstance(expected, str) and expected else None
+                if expected is not None:
+                    expected_offsets.setdefault(expected, []).append(offset)
+            offset += len(raw)
+    corpus_db = path.with_name("differential-offsets.sqlite3")
+    corpus_conn = hydrate.hydration_index_store._create(corpus_db)
+    try:
+        hydrate.hydration_index_store._scan(
+            corpus_conn, corpus_path, 0, bytes(32).hex(),
+        )
+        actual_offsets: dict[str, list[int]] = {}
+        for sid, row_offset in corpus_conn.execute(
+            "SELECT sid, offset FROM offsets ORDER BY offset"
+        ):
+            actual_offsets.setdefault(sid, []).append(row_offset)
+    finally:
+        corpus_conn.close()
+    assert actual_offsets == expected_offsets, (actual_offsets, expected_offsets)
+    corpus_path.unlink()
+    corpus_db.unlink()
 
     perf_journal = path.with_name("large-payload-events.jsonl")
     payload = "x" * (256 * 1024)
@@ -81,28 +110,16 @@ def main() -> int:
     } for seq in range(1, 257)])
     perf_db = path.with_name("large-payload-offsets.sqlite3")
     perf_conn = hydrate.hydration_index_store._create(perf_db)
-    original_json_loads = hydrate.hydration_index_store.json.loads
-    largest_decoded_input = 0
-
-    def measured_json_loads(value, *args, **kwargs):
-        nonlocal largest_decoded_input
-        if isinstance(value, (bytes, bytearray, str)):
-            largest_decoded_input = max(largest_decoded_input, len(value))
-        return original_json_loads(value, *args, **kwargs)
-
-    hydrate.hydration_index_store.json.loads = measured_json_loads
     started = time.perf_counter()
     try:
         committed, scanned, inserted, _digest = hydrate.hydration_index_store._scan(
             perf_conn, perf_journal, 0, bytes(32).hex(),
         )
     finally:
-        hydrate.hydration_index_store.json.loads = original_json_loads
         perf_conn.close()
     elapsed = time.perf_counter() - started
     assert committed == scanned == perf_journal.stat().st_size
     assert inserted == 256
-    assert largest_decoded_input < 256, largest_decoded_input
     assert elapsed < 2.0, elapsed
     perf_journal.unlink()
     perf_db.unlink()

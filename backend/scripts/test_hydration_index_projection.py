@@ -7,6 +7,7 @@ import sys
 import tempfile
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
 from pathlib import Path
 
@@ -340,6 +341,62 @@ store.invalidate(sys.argv[2])
     assert holder.wait(timeout=3) == 0
     assert cross_process_invalidator.wait(timeout=3) == 0
     assert not store._db_path(guard_root).exists()
+
+    cold_root = "cold-append-root"
+    cold_journal = Path(HOME) / "sessions" / cold_root / "events.jsonl"
+    cold_journal.parent.mkdir(parents=True)
+    cold_prefix = b"".join(_row(cold_root, value) for value in range(1, 101))
+    cold_journal.write_bytes(cold_prefix)
+    cold_digest = bytes(32).hex()
+    for value in range(1, 101):
+        cold_digest = _next_digest(cold_digest, _row(cold_root, value))
+    cold_scan_entered = threading.Event()
+    cold_scan_release = threading.Event()
+    cold_append_done = threading.Event()
+    original_scan = store._scan
+
+    def paused_cold_scan(*args, **kwargs):
+        if kwargs.get("stop") is not None or len(args) >= 5:
+            cold_scan_entered.set()
+            assert cold_scan_release.wait(2)
+        return original_scan(*args, **kwargs)
+
+    store._discard_pool()
+    store.apply_runtime_generation()
+    store._pool = ThreadPoolExecutor(max_workers=1)
+    store._scan = paused_cold_scan
+    cold_result: list[object] = []
+    cold_loader = threading.Thread(
+        target=lambda: cold_result.append(store.load(cold_root, cold_journal)),
+    )
+    cold_loader.start()
+    assert cold_scan_entered.wait(2)
+    appended = _row("appended-during-cold", 101)
+
+    def append_during_cold() -> None:
+        with store.journal_guard(cold_root, cold_journal):
+            start = cold_journal.stat().st_size
+            with cold_journal.open("ab") as handle:
+                handle.write(appended)
+            store.note_authoritative_append(
+                cold_root, cold_journal, start, cold_journal.stat().st_size,
+                cold_digest, _next_digest(cold_digest, appended),
+            )
+        cold_append_done.set()
+
+    cold_writer = threading.Thread(target=append_during_cold)
+    cold_writer.start()
+    assert cold_append_done.wait(0.5), "cold scan held the journal writer fence"
+    cold_scan_release.set()
+    cold_loader.join(3)
+    cold_writer.join(3)
+    store._scan = original_scan
+    store._discard_pool()
+    assert cold_result
+    cold_offsets, cold_metrics = cold_result[0]
+    assert cold_metrics["cold"] == 1, cold_metrics
+    assert len(cold_offsets[cold_root]) == 100, cold_offsets
+    assert cold_offsets["appended-during-cold"] == (len(cold_prefix),), cold_offsets
 
     journal.write_bytes(_row("replacement", 5))
     offsets, rebuilt = store.load("root", journal)

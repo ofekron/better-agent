@@ -2,7 +2,6 @@ import hashlib
 import json
 import multiprocessing
 import os
-import re
 import sqlite3
 import time
 import uuid
@@ -24,35 +23,19 @@ _WORKER_COUNT = 2
 _pool_lock = threading.Lock()
 _pool: ProcessPoolExecutor | None = None
 _pool_generation: object = None
-_builds: dict[Path, tuple[Future, Path]] = {}
+_builds: dict[
+    Path, tuple[Future, Path, tuple[tuple[int, int, int, int, int], str]]
+] = {}
 _shutdown = threading.Event()
 _receipts_lock = threading.Lock()
 _append_receipts: dict[str, tuple[int, int, int, int, str, str]] = {}
 _journal_guard_locks: dict[str, threading.RLock] = {}
 _journal_guard_locks_guard = threading.Lock()
 _journal_guard_local = threading.local()
-_CANONICAL_SID = re.compile(
-    br'^\s*\{\s*"seq"\s*:\s*\d+\s*,\s*"ts"\s*:\s*'
-    br'"(?:\\.|[^"\\])*"\s*,\s*"sid"\s*:\s*'
-    br'("(?:\\.|[^"\\])*")'
-)
 
 
-def _sid_from_line(line: bytes) -> tuple[str | None, bool]:
-    match = _CANONICAL_SID.match(line, 0, min(len(line), BOUNDARY_BYTES))
-    if match is not None:
-        try:
-            sid = json.loads(match.group(1))
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            sid = None
-        if isinstance(sid, str) and sid:
-            return sid, True
-    try:
-        row = json.loads(line)
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        return None, False
-    sid = row.get("sid") if isinstance(row, dict) else None
-    return (sid if isinstance(sid, str) and sid else None), False
+class _StaleProjection(Exception):
+    pass
 
 
 def _db_path(root_id: str) -> Path:
@@ -130,6 +113,14 @@ def _boundary(path: Path, offset: int) -> str:
         return hashlib.sha256(file.read(offset - start)).hexdigest()
 
 
+def _journal_identity(path: Path) -> tuple[int, int, int, int, int]:
+    stat = path.stat()
+    return (
+        int(stat.st_dev), int(stat.st_ino), int(stat.st_size),
+        int(stat.st_mtime_ns), int(stat.st_ctime_ns),
+    )
+
+
 def _create(path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(path)
     conn.executescript(
@@ -142,18 +133,22 @@ def _create(path: Path) -> sqlite3.Connection:
 
 def _scan(
     conn: sqlite3.Connection, journal: Path, start: int, digest: str,
+    stop: int | None = None,
 ) -> tuple[int, int, int, str]:
     rows: list[tuple[str, int]] = []
     inserted = 0
     scanned = 0
     committed = start
-    fast_rows = 0
-    fallback_rows = 0
+    valid_rows = 0
+    invalid_rows = 0
     with journal.open("rb") as file:
         file.seek(start)
         while True:
             offset = file.tell()
-            line = file.readline()
+            remaining = None if stop is None else stop - offset
+            if remaining is not None and remaining <= 0:
+                break
+            line = file.readline(remaining)
             if not line:
                 break
             scanned += len(line)
@@ -163,11 +158,16 @@ def _scan(
             chain_hash = hashlib.sha256(bytes.fromhex(digest))
             chain_hash.update(line)
             digest = chain_hash.hexdigest()
-            sid, used_fast_path = _sid_from_line(line)
-            if used_fast_path:
-                fast_rows += 1
+            try:
+                row = json.loads(line)
+                valid_rows += 1
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                sid = None
+                invalid_rows += 1
             else:
-                fallback_rows += 1
+                sid = row.get("sid") if isinstance(row, dict) else None
+                if not isinstance(sid, str) or not sid:
+                    sid = None
             if sid is not None:
                 rows.append((sid, offset))
             if len(rows) >= 4096:
@@ -177,33 +177,35 @@ def _scan(
     if rows:
         inserted += len(rows)
         conn.executemany("INSERT INTO offsets VALUES (?, ?)", rows)
-    perf.record_count("hydrate.index_scan.fast_rows", fast_rows)
-    perf.record_count("hydrate.index_scan.fallback_rows", fallback_rows)
+    perf.record_count("hydrate.index_scan.valid_rows", valid_rows)
+    perf.record_count("hydrate.index_scan.invalid_rows", invalid_rows)
     return committed, scanned, inserted, digest
 
 
-def _cold_build(journal_raw: str, output_raw: str) -> None:
+def _cold_build(
+    journal_raw: str, output_raw: str,
+    snapshot: tuple[tuple[int, int, int, int, int], str],
+) -> None:
     journal = Path(journal_raw)
     output = Path(output_raw)
-    stat = journal.stat()
+    captured, captured_boundary = snapshot
     conn = _create(output)
     try:
         committed, scanned, rows, digest = _scan(
-            conn, journal, 0, bytes(32).hex(),
+            conn, journal, 0, bytes(32).hex(), captured[2],
         )
         end = journal.stat()
         if (
-            stat.st_dev, stat.st_ino, stat.st_size,
-            stat.st_mtime_ns, stat.st_ctime_ns,
-        ) != (
-            end.st_dev, end.st_ino, end.st_size,
-            end.st_mtime_ns, end.st_ctime_ns,
+            (int(end.st_dev), int(end.st_ino)) != captured[:2]
+            or int(end.st_size) < captured[2]
+            or committed != captured[2]
+            or _boundary(journal, captured[2]) != captured_boundary
         ):
             raise RuntimeError("journal changed during hydration index build")
         values = {
-            "schema": str(SCHEMA), "dev": str(end.st_dev), "ino": str(end.st_ino),
+            "schema": str(SCHEMA), "dev": str(captured[0]), "ino": str(captured[1]),
             "offset": str(committed), "boundary": _boundary(journal, committed),
-            "mtime_ns": str(end.st_mtime_ns), "ctime_ns": str(end.st_ctime_ns),
+            "mtime_ns": str(captured[3]), "ctime_ns": str(captured[4]),
             "scanned": str(scanned), "rows": str(rows), "digest": digest,
             "reconciled_seq": "0",
         }
@@ -312,19 +314,29 @@ def _publish_cold(journal: Path, target: Path) -> None:
         raise RuntimeError("hydration index store is shutting down")
     target.parent.mkdir(parents=True, exist_ok=True)
     for attempt in range(2):
+        root_id = journal.parent.name
+        try:
+            with journal_guard(root_id, journal):
+                captured = _journal_identity(journal)
+                snapshot = (captured, _boundary(journal, captured[2]))
+        except OSError as exc:
+            raise RuntimeError("hydration journal unavailable") from exc
         with _pool_lock:
             if _shutdown.is_set():
                 raise RuntimeError("hydration index store is shutting down")
             build = _builds.get(target)
             if build is None:
                 temp = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
-                future = _ensure_pool_locked().submit(_cold_build, str(journal), str(temp))
-                build = (future, temp)
+                future = _ensure_pool_locked().submit(
+                    _cold_build, str(journal), str(temp), snapshot,
+                )
+                build = (future, temp, snapshot)
                 _builds[target] = build
                 perf.record_count("hydrate.worker.submitted", 1)
             else:
                 perf.record_count("hydrate.worker.coalesced", 1)
-        future, temp = build
+        future, temp, snapshot = build
+        captured, captured_boundary = snapshot
         try:
             future.result(timeout=BUILD_TIMEOUT_SECONDS)
         except TimeoutError as exc:
@@ -345,14 +357,36 @@ def _publish_cold(journal: Path, target: Path) -> None:
                 perf.record_count("hydrate.worker.snapshot_retry", 1)
                 continue
             raise RuntimeError("hydration index worker build failed") from exc
-        with _pool_lock:
-            if _shutdown.is_set():
-                temp.unlink(missing_ok=True)
-                raise RuntimeError("hydration index build cancelled by shutdown")
-            if _builds.get(target) == build:
-                os.replace(temp, target)
-                _builds.pop(target, None)
-        return
+        with journal_guard(root_id, journal):
+            current = _journal_identity(journal)
+            prefix_valid = current == captured
+            if (
+                not prefix_valid
+                and current[:2] == captured[:2]
+                and current[2] > captured[2]
+                and _boundary(journal, captured[2]) == captured_boundary
+            ):
+                try:
+                    with sqlite3.connect(temp) as temp_conn:
+                        built_meta = _meta(temp_conn)
+                    prefix_valid = _growth_is_authoritative(
+                        root_id, built_meta, journal.stat(), captured[2],
+                    )
+                except (OSError, sqlite3.Error, KeyError, ValueError):
+                    prefix_valid = False
+            with _pool_lock:
+                if _shutdown.is_set():
+                    temp.unlink(missing_ok=True)
+                    raise RuntimeError("hydration index build cancelled by shutdown")
+                if _builds.get(target) == build:
+                    _builds.pop(target, None)
+                    if prefix_valid:
+                        os.replace(temp, target)
+                    else:
+                        temp.unlink(missing_ok=True)
+            if prefix_valid:
+                return
+        perf.record_count("hydrate.worker.snapshot_retry", 1)
 
 
 def _ensure_pool_locked() -> ProcessPoolExecutor:
@@ -379,7 +413,7 @@ def _discard_pool() -> None:
         _builds.clear()
     if pool is not None:
         pool.shutdown(wait=True, cancel_futures=True)
-    for _, temp in stale_builds:
+    for _, temp, _ in stale_builds:
         temp.unlink(missing_ok=True)
 
 
@@ -403,7 +437,7 @@ def shutdown() -> None:
     with _pool_lock:
         builds = tuple(_builds.values())
         _builds.clear()
-    for _, temp in builds:
+    for _, temp, _ in builds:
         temp.unlink(missing_ok=True)
 
 
@@ -420,11 +454,13 @@ def _load(
     journal: Path,
     base_offsets: dict[str, tuple[int, ...]] | None = None,
     base_checkpoint: int = 0,
+    *,
+    cold: bool = False,
+    started: float | None = None,
 ) -> tuple[dict[str, tuple[int, ...]], dict[str, int]]:
     apply_runtime_generation()
     target = _db_path(root_id)
-    started = time.perf_counter()
-    cold = False
+    started = time.perf_counter() if started is None else started
     conn: sqlite3.Connection | None = None
     try:
         conn = sqlite3.connect(target)
@@ -436,10 +472,7 @@ def _load(
     except (OSError, sqlite3.Error, KeyError, ValueError):
         if conn is not None:
             conn.close()
-        cold = True
-        _publish_cold(journal, target)
-        conn = sqlite3.connect(target)
-        meta = _meta(conn)
+        raise _StaleProjection
     try:
         conn.execute("BEGIN IMMEDIATE")
         meta = _meta(conn)
@@ -447,11 +480,7 @@ def _load(
             conn.rollback()
             conn.close()
             conn = None
-            cold = True
-            _publish_cold(journal, target)
-            conn = sqlite3.connect(target)
-            conn.execute("BEGIN IMMEDIATE")
-            meta = _meta(conn)
+            raise _StaleProjection
         start = int(meta["offset"])
         current_checkpoint = start
         scanned = int(meta.get("scanned", 0)) if cold else 0
@@ -500,15 +529,25 @@ def load(
     base_offsets: dict[str, tuple[int, ...]] | None = None,
     base_checkpoint: int = 0,
 ) -> tuple[dict[str, tuple[int, ...]], dict[str, int]]:
-    with journal_guard(root_id, journal):
-        return _load(root_id, journal, base_offsets, base_checkpoint)
+    started = time.perf_counter()
+    cold = False
+    while True:
+        try:
+            with journal_guard(root_id, journal):
+                return _load(
+                    root_id, journal, base_offsets, base_checkpoint,
+                    cold=cold, started=started,
+                )
+        except _StaleProjection:
+            cold = True
+        _publish_cold(journal, _db_path(root_id))
 
 
 def reconcile_cursor(root_id: str, journal: Path) -> int:
     """Return the durable render-reconcile high-water after validating the index."""
     started = time.perf_counter()
+    load(root_id, journal)
     with journal_guard(root_id, journal):
-        _load(root_id, journal)
         with sqlite3.connect(_db_path(root_id)) as conn:
             cursor = int(_meta(conn).get("reconciled_seq", 0))
     perf.record("hydrate.reconcile_cursor.read", (time.perf_counter() - started) * 1000)
@@ -518,8 +557,8 @@ def reconcile_cursor(root_id: str, journal: Path) -> int:
 def mark_reconciled(root_id: str, journal: Path, seq: int) -> None:
     """Durably advance the reconcile high-water on the validated append projection."""
     started = time.perf_counter()
+    load(root_id, journal)
     with journal_guard(root_id, journal):
-        _load(root_id, journal)
         with sqlite3.connect(_db_path(root_id)) as conn:
             conn.execute("BEGIN IMMEDIATE")
             current = int(_meta(conn).get("reconciled_seq", 0))
