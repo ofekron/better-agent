@@ -55,6 +55,7 @@ export type SessionMetadataPatch = {
   adv_sync_overlays?: Session["adv_sync_overlays"];
   open_file_panels?: OpenFilePanel[];
   open_config_panels?: import("../types").OpenConfigPanel[];
+  open_browser_panels?: Session["open_browser_panels"];
   draft_input?: string;
   draft_images?: import("../types").PastedImage[];
   draft_input_seq?: number;
@@ -1086,6 +1087,8 @@ export function useSession(authStatus?: string) {
         next.open_file_panels = patch.open_file_panels;
       if (patch.open_config_panels !== undefined)
         next.open_config_panels = patch.open_config_panels;
+      if (patch.open_browser_panels !== undefined)
+        next.open_browser_panels = patch.open_browser_panels;
       if (patch.draft_input !== undefined) next.draft_input = patch.draft_input;
       if (patch.draft_images !== undefined) next.draft_images = patch.draft_images;
       if (patch.draft_input_seq !== undefined) next.draft_input_seq = patch.draft_input_seq;

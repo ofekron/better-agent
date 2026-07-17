@@ -3193,44 +3193,6 @@ function AppMain({
     [currentSession, applySessionMetadata, clientId, refreshSessions, t],
   );
 
-  const handleOpenBrowserPanel = useCallback(
-    (url: string, title?: string | null) => {
-      if (!currentSession) return;
-      if (isMobile) {
-        setMobileRightOpen(true);
-        setMobileSidebarOpen(false);
-      } else {
-        patchRightPanel(currentSession.id, { open: true, tab: "files", addAutoReason: "files" });
-      }
-      setRightPanelTab("files");
-      const panels = currentSession.open_browser_panels ?? [];
-      const existing = panels.find((p) => p.url === url);
-      const id =
-        existing?.id ??
-        `bp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-      const panel = { id, url, title: title ?? existing?.title ?? null };
-      const next = existing
-        ? [...panels.filter((p) => p.url !== url), panel]
-        : [...panels, panel];
-      applySessionMetadata(currentSession.id, { open_browser_panels: next });
-      void runThreeStateSync({
-        operationId: `browserPanel:add:${currentSession.id}:${id}`,
-        action: t("rightPanel.files"),
-        reconcile: refreshSessions,
-        mutate: () => progressTrackedFetch(
-          `browserPanel:add:${currentSession.id}:${id}`,
-          `${API}/api/sessions/${currentSession.id}/browser-panels`,
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ ...panel, client_id: clientId }),
-          },
-        ),
-      }).catch(() => {});
-    },
-    [currentSession, applySessionMetadata, clientId, isMobile, patchRightPanel, refreshSessions, t],
-  );
-
   const handleCloseBrowserPanel = useCallback(
     (id: string) => {
       if (!currentSession) return;

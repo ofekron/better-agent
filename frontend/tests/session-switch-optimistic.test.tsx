@@ -620,6 +620,67 @@ describe("useSession.selectSession — optimistic swap", () => {
     expect(gate.urls.filter((u) => SESSION_FETCH.test(u))).toHaveLength(fetchCountBeforeReopen);
   });
 
+  it("projects browser panel closes through current, sidebar, and cached session state", async () => {
+    const firstPanel = { id: "browser-1", url: "https://example.com", title: "Example" };
+    const secondPanel = { id: "browser-2", url: "https://openai.com", title: "OpenAI" };
+    const a = makeSession({
+      id: "a",
+      name: "Alpha",
+      open_browser_panels: [firstPanel, secondPanel],
+    });
+    const b = makeSession({ id: "b", name: "Beta" });
+
+    gate = installFetchGate({
+      hold: SESSION_FETCH,
+      defaultBody: { sessions: [a, b] },
+    });
+
+    const { result } = renderHook(() => useSession());
+    await waitFor(() => {
+      expect(result.current.sessions).toHaveLength(2);
+    });
+
+    await act(async () => {
+      void result.current.selectSession("a");
+      await Promise.resolve();
+    });
+    await act(async () => {
+      gate!.resolve(SESSION_FETCH, chatTreeResponse(a, 5, undefined));
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      result.current.applySessionMetadata("a", (session) => ({
+        open_browser_panels: (session.open_browser_panels ?? []).filter(
+          (panel) => panel.id !== firstPanel.id,
+        ),
+      }));
+    });
+
+    expect(result.current.currentSession?.open_browser_panels).toEqual([secondPanel]);
+    expect(
+      result.current.sessions.find((session) => session.id === "a")?.open_browser_panels,
+    ).toEqual([secondPanel]);
+
+    await act(async () => {
+      void result.current.selectSession("b");
+      await Promise.resolve();
+    });
+    await act(async () => {
+      gate!.resolve(SESSION_FETCH, chatTreeResponse(b, 5, undefined));
+      await Promise.resolve();
+    });
+
+    const fetchCountBeforeReopen = gate.urls.filter((url) => SESSION_FETCH.test(url)).length;
+    await act(async () => {
+      void result.current.selectSession("a");
+      await Promise.resolve();
+    });
+
+    expect(result.current.currentSession?.open_browser_panels).toEqual([secondPanel]);
+    expect(gate.urls.filter((url) => SESSION_FETCH.test(url))).toHaveLength(fetchCountBeforeReopen);
+  });
+
   it("REFETCH-OF-SAME-ID: finalized REST snapshot replaces stale local streaming message", async () => {
     const a = makeSession({ id: "a", name: "Alpha" });
 
