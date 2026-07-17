@@ -4808,7 +4808,7 @@ def test_obsolete_marketplace_id_is_purged_from_store_and_frontend_modules() -> 
     os.environ["BETTER_CLAUDE_HOME"] = temp_home
     os.environ["BETTER_AGENT_MARKETPLACE_BASE_URL"] = (Path(temp_home) / "missing" / "marketplace").as_uri()
     store_path = Path(temp_home) / "extensions" / "extensions.json"
-    extension_store._STORE_PATH = store_path
+    extension_store._STORE_PATH = None  # recompute from the temp home env
     store_path.parent.mkdir(parents=True, exist_ok=True)
     obsolete_root = Path(temp_home) / "obsolete-marketplace"
     obsolete_frontend = obsolete_root / "ui"
@@ -5387,7 +5387,7 @@ def test_v1_store_migrates_source_types_to_v2_without_wipe() -> None:
     temp_home = tempfile.mkdtemp(prefix="bc-test-v1-migrate-")
     try:
         store_path = Path(temp_home) / "extensions" / "extensions.json"
-        extension_store._STORE_PATH = store_path
+        extension_store._STORE_PATH = (str(extension_store.ba_home()), store_path)
         store_path.parent.mkdir(parents=True, exist_ok=True)
         v1_store = {
             "schema_version": 1,

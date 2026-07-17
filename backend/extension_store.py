@@ -1858,9 +1858,13 @@ def _validate_mcp_entrypoints(value: Any, *, extension_id: str) -> list[dict[str
                 "entrypoints.mcp.ambient_native requires user_facing=false, "
                 "requires_backend_auth=false, and no predicate"
             )
+        label = str(item.get("label") or "").strip()
+        if label and len(label) > 80:
+            raise ExtensionError("entrypoints.mcp.label must be at most 80 characters")
         items.append(
             {
                 "name": name,
+                "label": label,
                 "python": python_path,
                 "module": module,
                 "command": command,
@@ -6567,7 +6571,7 @@ def extension_mcp_servers(extension_id: str) -> list[dict[str, Any]]:
         servers.append(
             {
                 "name": item["name"],
-                "label": item["name"],
+                "label": item.get("label") or item["name"],
                 "user_facing": item.get("user_facing", True),
                 "enabled": is_mcp_server_enabled(extension_id, item["name"]),
             }
