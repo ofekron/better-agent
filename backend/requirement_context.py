@@ -332,6 +332,7 @@ def get_processed_requirements(
         cwds=cwds,
         all_projects=all_projects,
     )
+    persist_processor_findings(processed.get("text") if isinstance(processed, dict) else "")
     return build_processed_requirements_response(
         query=normalized_query,
         cwd=cwd,
@@ -339,6 +340,59 @@ def get_processed_requirements(
         all_projects=all_projects,
         processed=processed,
     )
+
+
+def parse_processor_requirements(text: str) -> list[dict[str, Any]]:
+    """Extract the {"requirements": [...]} list from processor output text."""
+    stripped = (text or "").strip()
+    if not stripped:
+        return []
+    candidates: list[Any] = []
+    try:
+        candidates.append(json.loads(stripped))
+    except json.JSONDecodeError:
+        decoder = json.JSONDecoder()
+        idx = stripped.find("{")
+        while idx != -1:
+            try:
+                obj, _ = decoder.raw_decode(stripped, idx)
+            except json.JSONDecodeError:
+                idx = stripped.find("{", idx + 1)
+                continue
+            candidates.append(obj)
+            break
+    for candidate in candidates:
+        if isinstance(candidate, dict) and isinstance(candidate.get("requirements"), list):
+            return [row for row in candidate["requirements"] if isinstance(row, dict)]
+    return []
+
+
+def persist_processor_findings(text: str) -> dict[str, Any]:
+    """Queue transcript-evidence findings for canonical unit extraction.
+
+    Findings whose decisive evidence is an existing unit (unit_source_key) are
+    already durable; only transcript-row evidence is enqueued, through the
+    on-demand window queue, so the single prephase writer mines and dedups it.
+    Best-effort: the query path never blocks or fails on persistence."""
+    try:
+        requirements = parse_processor_requirements(text)
+        transcript_rows: list[dict[str, Any]] = []
+        for row in requirements:
+            evidence = row.get("evidence")
+            if not isinstance(evidence, dict) or evidence.get("unit_source_key"):
+                continue
+            transcript_rows.append({**evidence, "cwd": row.get("cwd") or ""})
+        if not transcript_rows:
+            return {"recorded": 0, "reason": "no_transcript_evidence"}
+        _ensure_requirements_importable()
+        from requirement_analysis import on_demand
+
+        result = on_demand.record_targeted_windows(transcript_rows)
+        if int(result.get("recorded") or 0) > 0:
+            result["on_demand_extraction"] = _ensure_on_demand_background_extraction()
+        return result
+    except Exception as exc:
+        return {"recorded": 0, "error": str(exc)}
 
 
 def build_processed_requirements_response(
