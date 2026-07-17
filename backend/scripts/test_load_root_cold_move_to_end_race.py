@@ -51,6 +51,7 @@ def _reset() -> None:
     mgr._batches = {}
     mgr._in_flight_reconcile = {}
     mgr._reconcile_dirty = {}
+    mgr._reconcile_pin_dirty = set()
     mgr._draft_dirty = set()
     mgr._draft_gen = {}
     mgr._last_broadcast_monitoring = {}
