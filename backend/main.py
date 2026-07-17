@@ -12272,6 +12272,45 @@ def _start_lag_watchdog(threshold: float = 1.5, cooldown: float = 5.0) -> None:
     threading.Thread(target=run, daemon=True, name="lag-watchdog").start()
 
 
+_TAILSCALE_SERVE_RECONCILE_INTERVAL_SECONDS = 300.0
+_tailscale_serve_reconciler_task: asyncio.Task | None = None
+
+
+def _tailscale_serve_reconciler_local_url() -> str | None:
+    port = os.environ.get("BETTER_AGENT_BACKEND_PORT") or os.environ.get("BETTER_CLAUDE_BACKEND_PORT")
+    if not port or not port.isdigit():
+        return None
+    return f"http://127.0.0.1:{int(port)}"
+
+
+def _start_tailscale_serve_reconciler() -> None:
+    """A phone's saved *.ts.net HTTPS URL dies whenever tailscaled loses its
+    serve config (upgrade, reset, tailnet policy change), and no client can
+    reach the backend to trigger the lazy settings-endpoint heal. Re-assert
+    the config at startup and on a fixed interval."""
+    global _tailscale_serve_reconciler_task
+    if os.environ.get("BETTER_AGENT_TEST_MODE"):
+        return
+    local_url = _tailscale_serve_reconciler_local_url()
+    if local_url is None:
+        logger.info("tailscale serve reconciler disabled: backend port env not set")
+        return
+
+    import tailscale_https
+
+    async def _loop() -> None:
+        while True:
+            try:
+                await asyncio.to_thread(tailscale_https.serve_reconcile_tick, local_url)
+            except Exception:
+                logger.exception("tailscale serve reconcile failed")
+            await asyncio.sleep(_TAILSCALE_SERVE_RECONCILE_INTERVAL_SECONDS)
+
+    _tailscale_serve_reconciler_task = asyncio.create_task(
+        _loop(), name="tailscale-serve-reconciler"
+    )
+
+
 @app.on_event("startup")
 async def on_startup():
     """Boot uvicorn fast: every long-running step (migrations,
@@ -12357,6 +12396,8 @@ async def on_startup():
     # Backend-owned schedule ticker — fires due schedules as normal
     # prompts through coordinator.submit_prompt.
     schedule_ticker.start()
+
+    _start_tailscale_serve_reconciler()
 
     # Daily model-catalog refresher. Assumes uvicorn --workers 1
     # (see auth.py:8, run.sh:132) — a second worker would fire a
