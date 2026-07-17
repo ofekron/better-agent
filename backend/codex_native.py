@@ -918,9 +918,15 @@ def normalize_rollout_file(
     start_byte: int,
     namespace: str,
     end_byte: Optional[int] = None,
+    emit_replay_bytes: bool = False,
 ) -> tuple[list[dict], Optional[int]]:
     """Replay a rollout file off-line (recovery / re-digest). Returns the
-    wrapped event list and the last seen model context window."""
+    wrapped event list and the last seen model context window.
+
+    `emit_replay_bytes` stamps each wrapped event with an internal
+    `_replay_byte` key — the cumulative byte position after the source
+    line — for crash-recovery replay to advance a durable per-event
+    cursor. Off by default; existing callers are unaffected."""
     normalizer = CodexRolloutNormalizer(namespace=namespace)
     wrapped: list[dict] = []
     try:
@@ -932,9 +938,13 @@ def normalize_rollout_file(
                     break
                 if end_byte is not None and f.tell() > end_byte:
                     break
+                line_end = f.tell()
                 line = raw.decode("utf-8", errors="replace")
                 for event in normalizer.normalize_line(line):
-                    wrapped.append({"type": "agent_message", "data": event})
+                    wrapped_event = {"type": "agent_message", "data": event}
+                    if emit_replay_bytes:
+                        wrapped_event["_replay_byte"] = line_end
+                    wrapped.append(wrapped_event)
     except OSError:
         logger.exception("failed reading codex rollout %s", path)
     return wrapped, normalizer.context_window

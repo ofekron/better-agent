@@ -135,6 +135,24 @@ def canonical_json(value: Mapping[str, Any]) -> str:
     return encoded
 
 
+# Attribution/routing fields carried on a canonical fact: identical semantic
+# content re-delivered under different attribution (e.g. a misattributed
+# turn/event replay) must still hash identically, so these are excluded from
+# content_only_hash. `source_event_id` is excluded alongside `event_id`
+# because ingestion copies the former's value into the latter key.
+CONTENT_HASH_EXCLUDED_FIELDS = frozenset({
+    "provider", "event_id", "turn_id", "source_event_id",
+})
+
+
+def content_only_hash(canonical_fact: Mapping[str, Any]) -> str:
+    content = {
+        key: value for key, value in canonical_fact.items()
+        if key not in CONTENT_HASH_EXCLUDED_FIELDS
+    }
+    return hashlib.sha256(canonical_json(content).encode("utf-8")).hexdigest()
+
+
 _encode_json_bounded = encode_frame
 _send_frame = send_frame
 
@@ -349,7 +367,7 @@ class SQLiteChatProjectionStore:
                     raise ChatProjectionStoreError("owner_protocol_error", "owner rows are not strictly ordered")
                 previous = row[sequence_key]
                 if operation == "read_facts":
-                    expected_hash = hashlib.sha256(canonical_json(row["canonical_fact"]).encode("utf-8")).hexdigest()
+                    expected_hash = content_only_hash(row["canonical_fact"])
                     if row["content_hash"] != expected_hash or row["canonical_fact"].get("event_id") != row["event_id"]:
                         raise ChatProjectionStoreError("owner_protocol_error", "owner fact hash mismatch")
                 else:
@@ -811,9 +829,7 @@ class SQLiteChatProjectionStore:
                         self._stored_int(row[0]), self._stored_text(row[1]),
                         self._stored_text(row[2]), self._stored_json(row[3]),
                     )
-                    expected_hash = hashlib.sha256(
-                        canonical_json(item.canonical_fact).encode("utf-8"),
-                    ).hexdigest()
+                    expected_hash = content_only_hash(item.canonical_fact)
                     if item.content_hash != expected_hash or item.canonical_fact.get("event_id") != item.event_id:
                         raise ChatProjectionStoreError("storage_corrupt", "persisted fact identity is invalid")
                     if item.fact_sequence <= previous:
@@ -873,9 +889,7 @@ class SQLiteChatProjectionStore:
                     event_id = self._stored_text(row[5])
                     content_hash = self._stored_text(row[6])
                     canonical_fact = self._stored_json(row[7])
-                    expected_hash = hashlib.sha256(
-                        canonical_json(canonical_fact).encode("utf-8"),
-                    ).hexdigest()
+                    expected_hash = content_only_hash(canonical_fact)
                     if content_hash != expected_hash or canonical_fact.get("event_id") != event_id:
                         raise ChatProjectionStoreError(
                             "storage_corrupt", "revision canonical fact identity is invalid",
@@ -1129,7 +1143,7 @@ class SQLiteChatProjectionStore:
                 raise ChatProjectionStoreError("invalid_input", f"{name} must be an object")
         if request.canonical_fact.get("event_id") != request.event_id:
             raise ChatProjectionStoreError("invalid_input", "canonical fact event_id does not match")
-        expected = hashlib.sha256(canonical_json(request.canonical_fact).encode("utf-8")).hexdigest()
+        expected = content_only_hash(request.canonical_fact)
         if len(request.content_hash) != 64 or any(character not in "0123456789abcdef" for character in request.content_hash):
             raise ChatProjectionStoreError("invalid_input", "content_hash must be lowercase SHA-256")
         if request.content_hash != expected:

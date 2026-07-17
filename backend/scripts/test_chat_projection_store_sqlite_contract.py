@@ -27,7 +27,7 @@ from chat_projection_store_sqlite import (
     MAX_COMMIT_BYTES, MAX_IPC_BYTES, MAX_IPC_TIMEOUT_SECONDS, MAX_JSON_DEPTH, MAX_JSON_LIST_ITEMS,
     MAX_JSON_NODES, MAX_JSON_OBJECT_ITEMS, MAX_READ_LIMIT, MAX_RESPONSE_BYTES,
     MAX_SQLITE_INTEGER, MAX_TEXT_BYTES, MIN_IPC_TIMEOUT_SECONDS,
-    SQLiteChatProjectionStore, _encode_json_bounded, canonical_json,
+    SQLiteChatProjectionStore, _encode_json_bounded, canonical_json, content_only_hash,
 )
 from chat_projection_store_owner import encode_frame, receive_frame, send_frame, serve_owner
 import chat_projection_store_owner as owner_transport
@@ -43,7 +43,7 @@ def _fixture_event(index: int = 1) -> dict:
 
 def _request(event: dict, *, generation: int = 0, watermark: int | None = None) -> ProjectionCommit:
     fact = json.loads(json.dumps(event))
-    digest = __import__("hashlib").sha256(canonical_json(fact).encode("utf-8")).hexdigest()
+    digest = content_only_hash(fact)
     return ProjectionCommit(
         root_id="root-1", root_generation=generation, event_id=event["event_id"],
         content_hash=digest, canonical_fact=fact,
@@ -60,7 +60,7 @@ def _request(event: dict, *, generation: int = 0, watermark: int | None = None) 
 def _with_event_id(request: ProjectionCommit, event_id: str) -> ProjectionCommit:
     fact = dict(request.canonical_fact)
     fact["event_id"] = event_id
-    digest = __import__("hashlib").sha256(canonical_json(fact).encode("utf-8")).hexdigest()
+    digest = content_only_hash(fact)
     return replace(request, event_id=event_id, canonical_fact=fact, content_hash=digest)
 
 
@@ -98,7 +98,7 @@ def test_atomic_commit_duplicate_mutation_and_projection_surfaces() -> None:
     mutated_fact = json.loads(json.dumps(request.canonical_fact))
     mutated_fact["content_version"] = 2
     mutated_fact["data"]["text"] = "Mutated answer"
-    digest = __import__("hashlib").sha256(canonical_json(mutated_fact).encode()).hexdigest()
+    digest = content_only_hash(mutated_fact)
     mutated = replace(
         request, canonical_fact=mutated_fact, content_hash=digest,
         render_node={"type": "Explanation", "text": "Mutated answer"},
@@ -506,7 +506,7 @@ def test_sqlite_integer_boundaries_unicode_and_persisted_corruption() -> None:
     connection.close()
     changed_fact = dict(original.canonical_fact)
     changed_fact["content_version"] = 99
-    digest = __import__("hashlib").sha256(canonical_json(changed_fact).encode()).hexdigest()
+    digest = content_only_hash(changed_fact)
     changed = replace(original, canonical_fact=changed_fact, content_hash=digest,
                       watermark=replace(original.watermark, sequence=original.watermark.sequence + 1))
     _assert_error("storage_corrupt", lambda: rollback.commit(changed))
@@ -534,7 +534,7 @@ def test_owner_anchors_database_wal_and_lifecycle_through_path_swaps() -> None:
         for version in range(2, 22):
             fact = json.loads(json.dumps(base.canonical_fact))
             fact["content_version"] = version
-            digest = __import__("hashlib").sha256(canonical_json(fact).encode()).hexdigest()
+            digest = content_only_hash(fact)
             store.commit(replace(
                 base, canonical_fact=fact, content_hash=digest,
                 historical_revision={"content_version": version},
@@ -933,7 +933,7 @@ def test_response_page_budget_timeout_admission_and_close_failure() -> None:
         fact = json.loads(json.dumps(base.canonical_fact))
         fact["content_version"] = version
         fact["data"]["text"] = blob
-        digest = __import__("hashlib").sha256(canonical_json(fact).encode()).hexdigest()
+        digest = content_only_hash(fact)
         store.commit(replace(
             base, canonical_fact=fact, content_hash=digest,
             historical_revision={"blob": blob, "version": version},
@@ -1026,7 +1026,7 @@ def test_exact_correlated_response_cap_and_commit_protocol_uncertainty() -> None
         setup.select_generation("root-1", 0)
         setup.close()
         fact = {"event_id": "event-exact", "data": {"nested": {"text": ""}}}
-        digest = __import__("hashlib").sha256(canonical_json(fact).encode()).hexdigest()
+        digest = content_only_hash(fact)
         wire_row = {
             "fact_sequence": 1, "event_id": "event-exact", "content_hash": digest,
             "canonical_fact": fact, "root_id": "root-1", "root_generation": 0,
@@ -1039,7 +1039,7 @@ def test_exact_correlated_response_cap_and_commit_protocol_uncertainty() -> None
         }
         base_size = len(_encode_json_bounded(envelope, MAX_IPC_BYTES))
         fact["data"]["nested"]["text"] = "x" * (MAX_RESPONSE_BYTES - base_size + extra_bytes)
-        digest = __import__("hashlib").sha256(canonical_json(fact).encode()).hexdigest()
+        digest = content_only_hash(fact)
         connection = sqlite3.connect(path)
         connection.execute(
             "INSERT INTO canonical_facts VALUES(?,?,?,?,?,?)",
@@ -1086,7 +1086,7 @@ def test_revision_fact_pairing_and_delta_identity_are_atomic() -> None:
         fact = json.loads(json.dumps(base.canonical_fact))
         fact["content_version"] = 2
         fact["data"]["text"] = "second revision"
-        digest = __import__("hashlib").sha256(canonical_json(fact).encode()).hexdigest()
+        digest = content_only_hash(fact)
         store.commit(replace(
             base, canonical_fact=fact, content_hash=digest,
             historical_revision={"event_id": base.event_id, "content_version": 2},

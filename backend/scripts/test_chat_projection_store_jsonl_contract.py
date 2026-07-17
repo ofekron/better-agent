@@ -24,7 +24,7 @@ from chat_projection_store_jsonl import (
     INTEGRITY_MODULUS_A, INTEGRITY_MODULUS_B, JsonlChatProjectionStore, MAX_JSONL_ROW_BYTES,
     _JsonlOwnerStore, _record_line,
 )
-from chat_projection_store_sqlite import SQLiteChatProjectionStore, canonical_json
+from chat_projection_store_sqlite import SQLiteChatProjectionStore, content_only_hash
 
 
 FIXTURE = ROOT / "test-contracts" / "chat-panel" / "v1" / "canonical-session.json"
@@ -38,7 +38,7 @@ def request(*, version: int = 1, sequence: int = 1) -> ProjectionCommit:
     fact = event()
     fact["content_version"] = version
     fact["data"]["text"] = f"answer-{version}"
-    digest = hashlib.sha256(canonical_json(fact).encode()).hexdigest()
+    digest = content_only_hash(fact)
     return ProjectionCommit(
         root_id="root", root_generation=0, event_id=fact["event_id"], content_hash=digest,
         canonical_fact=fact, render_node={"type": "Explanation", "text": f"answer-{version}"},
@@ -56,7 +56,7 @@ def growing_request(sequence: int, payload_size: int = 40 * 1024) -> ProjectionC
     fact["event_id"] = f"event-{sequence}"
     fact["content_version"] = sequence
     fact["data"]["text"] = f"{sequence}:" + "x" * payload_size
-    digest = hashlib.sha256(canonical_json(fact).encode()).hexdigest()
+    digest = content_only_hash(fact)
     return ProjectionCommit(
         root_id="root", root_generation=0, event_id=fact["event_id"], content_hash=digest,
         canonical_fact=fact, render_node={"type": "Explanation", "text": fact["data"]["text"]},

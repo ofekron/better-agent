@@ -8,7 +8,6 @@ so re-delivery after reconnect or cursor replay is a no-op.
 """
 from __future__ import annotations
 
-import hashlib
 import threading
 from pathlib import Path
 from typing import Any
@@ -17,7 +16,7 @@ from canonical_event_adapter import subagent_scope_source_event_id
 from chat_projection_service import CanonicalChatProjectionService
 from chat_projection_source_catalog import ChatProjectionSourceCatalog
 from chat_projection_store import ProjectionCommit, SourceWatermark, TurnManifest
-from chat_projection_store_sqlite import canonical_json
+from chat_projection_store_sqlite import content_only_hash
 from paths import ba_home
 
 
@@ -84,12 +83,12 @@ def admit_canonical_fact(fact: dict[str, Any], *, provider: str) -> None:
     )
 
     # The store defines commit identity locally: the persisted fact must
-    # carry `event_id`, and the commit's content_hash is the hash of the
-    # persisted fact itself (not the upstream fact's own hash field).
+    # carry `event_id`, and the commit's content_hash is a content-only hash
+    # of the persisted fact (excluding attribution/routing fields such as
+    # `provider`, `event_id`, `turn_id`, `source_event_id`), so a re-delivery
+    # of the same semantic content under different attribution still dedupes.
     stored_fact = {**fact, "provider": provider, "event_id": event_id}
-    commit_hash = hashlib.sha256(
-        canonical_json(stored_fact).encode("utf-8")
-    ).hexdigest()
+    commit_hash = content_only_hash(stored_fact)
     service, catalog = _instances()
     root_generation = catalog.root_generation(root_id)
     identity = catalog.admit(

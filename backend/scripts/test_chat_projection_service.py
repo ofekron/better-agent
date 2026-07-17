@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-import hashlib
 import multiprocessing
 import os
 import shutil
@@ -24,13 +23,13 @@ from chat_projection_authority import ProjectionAuthorityError
 from chat_projection_service import CanonicalChatProjectionService, ProjectionServiceError
 from chat_projection_store import ProjectionCommit, SourceWatermark, TurnManifest
 from chat_projection_store_jsonl import JsonlChatProjectionStore
-from chat_projection_store_sqlite import SQLiteChatProjectionStore, canonical_json
+from chat_projection_store_sqlite import SQLiteChatProjectionStore, content_only_hash
 
 
 def request(sequence: int, *, root: str = "root", generation: int = 0) -> ProjectionCommit:
     event_id = f"event-{sequence}"
     fact = {"event_id": event_id, "type": "assistant", "text": f"answer-{sequence}"}
-    digest = hashlib.sha256(canonical_json(fact).encode("utf-8")).hexdigest()
+    digest = content_only_hash(fact)
     return ProjectionCommit(
         root_id=root, root_generation=generation, event_id=event_id, content_hash=digest,
         canonical_fact=fact, render_node={"type": "Explanation", "text": fact["text"]},
@@ -46,7 +45,7 @@ def conflicting_request(
 ) -> ProjectionCommit:
     original = request(sequence, root=root)
     fact = {**original.canonical_fact, "text": marker}
-    digest = hashlib.sha256(canonical_json(fact).encode("utf-8")).hexdigest()
+    digest = content_only_hash(fact)
     return replace(
         original, canonical_fact=fact, content_hash=digest,
         render_node={"type": "Explanation", "text": marker},

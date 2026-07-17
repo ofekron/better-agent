@@ -852,6 +852,17 @@ async def _run(run_dir: Path, inputs: dict) -> int:
                                 discovered_sid = sid
                                 state["session_id"] = sid
                                 state["jsonl_path"] = str(events_path)
+                                # Identity signal for crash-recovery replay
+                                # (`_replay_from_gemini_jsonl`): `session_events.jsonl`
+                                # is unlinked and recreated at the start of
+                                # every retry attempt within this same run
+                                # dir, so a stale recovery pass must be able
+                                # to detect it's looking at a superseded
+                                # generation of the file.
+                                try:
+                                    state["jsonl_inode"] = events_path.stat().st_ino
+                                except OSError:
+                                    state["jsonl_inode"] = None
                                 atomic_write_json(state_path, state)
                             init_model = raw_event.get("model")
                             if init_model:
