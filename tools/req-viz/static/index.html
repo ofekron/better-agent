@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Requirement Hierarchy</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+  <h1>Requirement Hierarchy</h1>
+  <input id="search" type="search" placeholder="Filter nodes…" autocomplete="off">
+  <span id="stats"></span>
+</header>
+
+<section id="query-bar">
+  <input id="query-input" type="text" placeholder="Ask get-requirements… (fire and wait)" autocomplete="off">
+  <input id="query-cwd" type="text" placeholder="cwd (optional)" autocomplete="off">
+  <label><input id="query-all" type="checkbox"> all projects</label>
+  <button id="query-fire">Query</button>
+  <span id="query-status" class="idle"></span>
+</section>
+
+<main>
+  <div id="columns"></div>
+  <aside id="detail" class="hidden"></aside>
+</main>
+
+<section id="query-results" class="hidden">
+  <h2>Query results <button id="query-close">×</button></h2>
+  <div id="query-list"></div>
+</section>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
