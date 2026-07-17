@@ -52,6 +52,11 @@ _MAX_PENDING = 256
 _MAX_PAYLOAD_BYTES = 18_000
 _MAX_TOTAL_ENTRIES = 2_048
 _MAX_TOTAL_BYTES = 16 * 1024 * 1024
+# Parked entries wait for a destination that may never come back; cap them so
+# a permanently blocked destination cannot grow the spool without bound.
+# Pruning drops oldest-first down to the target, amortizing the scan.
+_MAX_PARKED = 256
+_PARKED_PRUNE_TARGET = 192
 _BACKPRESSURE_RESERVE_ENTRIES = 64
 _BACKPRESSURE_RESERVE_BYTES = 1024 * 1024
 _RETRY_BASE_SECONDS = 1.0
@@ -72,7 +77,8 @@ _dispatch_generation = 0
 _depth_cache = 0
 _DEPTH_META_NAME = ".depth.meta"
 _DEPTH_LOCK_NAME = ".depth.lock"
-_DEPTH_VERSION = 1
+_DEPTH_VERSION = 2
+_INVENTORY_FIELDS = ("depth", "pending_count", "parked_count", "active_bytes")
 _RETRY_META_NAME = ".retry.meta"
 _RETRY_META_VERSION = 2
 _DESTINATION_META_NAME = ".destination.meta"
@@ -130,14 +136,13 @@ def _depth_process_lock(root: Path):
         os.close(fd)
 
 
-def _write_depth_metadata_locked(root: Path, depth_value: int, generation: int) -> None:
+def _write_inventory_locked(root: Path, inventory: dict[str, int], generation: int) -> None:
     target = root / _DEPTH_META_NAME
     temporary = root / f".{_DEPTH_META_NAME}.{uuid.uuid4().hex}.tmp"
-    body = json.dumps({
-        "version": _DEPTH_VERSION,
-        "generation": max(0, int(generation)),
-        "depth": max(0, int(depth_value)),
-    }, separators=(",", ":")).encode("utf-8")
+    record: dict[str, int] = {"version": _DEPTH_VERSION, "generation": max(0, int(generation))}
+    for field in _INVENTORY_FIELDS:
+        record[field] = max(0, int(inventory[field]))
+    body = json.dumps(record, separators=(",", ":")).encode("utf-8")
     try:
         fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         try:
@@ -204,7 +209,7 @@ def _save_retry_state(failures: int, next_attempt_epoch: float) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def _read_depth_metadata_locked(root: Path) -> tuple[int, int] | None:
+def _read_inventory_locked(root: Path) -> tuple[dict[str, int], int] | None:
     try:
         info = (root / _DEPTH_META_NAME).lstat()
         if not stat.S_ISREG(info.st_mode):
@@ -212,7 +217,13 @@ def _read_depth_metadata_locked(root: Path) -> tuple[int, int] | None:
         data = json.loads((root / _DEPTH_META_NAME).read_text(encoding="utf-8"))
         if data.get("version") != _DEPTH_VERSION:
             return None
-        return max(0, int(data["depth"])), max(0, int(data["generation"]))
+        inventory: dict[str, int] = {}
+        for field in _INVENTORY_FIELDS:
+            value = data[field]
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                return None
+            inventory[field] = value
+        return inventory, max(0, int(data["generation"]))
     except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
         return None
 
@@ -260,40 +271,102 @@ def _write_destination_meta_locked(
         temporary.unlink(missing_ok=True)
 
 
+def _rebuild_inventory_locked(root: Path) -> dict[str, int]:
+    """Authoritative inventory from one spool scan; caller holds the process lock."""
+    pending, active, active_bytes = _active_inventory(root)
+    overflow = len(_reconcile_overflow_refs_locked(root))
+    return {
+        "depth": active + overflow,
+        "pending_count": pending,
+        "parked_count": active - pending,
+        "active_bytes": active_bytes,
+    }
+
+
+def _inventory_for_update_locked(root: Path) -> tuple[dict[str, int], int]:
+    """Load the O(1) inventory projection, rebuilding and persisting it when
+    missing or invalid; caller holds the process lock."""
+    metadata = _read_inventory_locked(root)
+    if metadata is not None:
+        return metadata
+    with perf.timed("lag_incident.depth_reconcile"):
+        inventory = _rebuild_inventory_locked(root)
+    _write_inventory_locked(root, inventory, 1)
+    return inventory, 1
+
+
 def _reconcile_depth_projection() -> int:
     root = _secure_spool_dir()
     with _depth_process_lock(root):
-        actual = (
-            len(_pending_files(strict=True))
-            + len(_reconcile_overflow_refs_locked(root))
-            + len(_parked_files(strict=True))
-        )
-        metadata = _read_depth_metadata_locked(root)
+        inventory = _rebuild_inventory_locked(root)
+        metadata = _read_inventory_locked(root)
         generation = (metadata[1] if metadata else 0) + 1
-        _write_depth_metadata_locked(root, actual, generation)
-    _set_depth(actual)
-    return actual
+        _write_inventory_locked(root, inventory, generation)
+    _set_depth(inventory["depth"])
+    return inventory["depth"]
 
 
-def _update_depth_projection(delta: int) -> int:
+def _apply_inventory_delta(
+    *, depth: int = 0, pending: int = 0, parked: int = 0, active_bytes: int = 0,
+) -> int:
+    """Adjust the persisted inventory after a spool mutation. When the
+    projection is missing it is rebuilt from the spool — which already
+    reflects the mutation — so the deltas are discarded in that case."""
     root = _secure_spool_dir()
     with _depth_process_lock(root):
-        metadata = _read_depth_metadata_locked(root)
+        metadata = _read_inventory_locked(root)
         if metadata is None:
             with perf.timed("lag_incident.depth_reconcile"):
-                value = (
-                    len(_pending_files(strict=True))
-                    + len(_reconcile_overflow_refs_locked(root))
-                    + len(_parked_files(strict=True))
-                )
+                inventory = _rebuild_inventory_locked(root)
             generation = 0
         else:
-            value, generation = metadata
-            value = max(0, value + int(delta))
+            inventory, generation = metadata
+            inventory["depth"] = max(0, inventory["depth"] + int(depth))
+            inventory["pending_count"] = max(0, inventory["pending_count"] + int(pending))
+            inventory["parked_count"] = max(0, inventory["parked_count"] + int(parked))
+            inventory["active_bytes"] = max(0, inventory["active_bytes"] + int(active_bytes))
         with perf.timed("lag_incident.depth_commit"):
-            _write_depth_metadata_locked(root, value, generation + 1)
-    _set_depth(value)
-    return value
+            _write_inventory_locked(root, inventory, generation + 1)
+    _set_depth(inventory["depth"])
+    return inventory["depth"]
+
+
+def _prune_parked_locked(root: Path, inventory: dict[str, int]) -> None:
+    """Drop oldest parked incidents beyond _MAX_PARKED down to the prune
+    target, adjusting the inventory in place; caller holds the process lock."""
+    if inventory["parked_count"] <= _MAX_PARKED:
+        return
+    parked = _spool_files(_PARKED_SUFFIX, strict=True)
+    excess = len(parked) - _PARKED_PRUNE_TARGET
+    dropped = 0
+    for source in parked[:excess]:
+        try:
+            size = source.lstat().st_size
+            source.unlink()
+        except OSError:
+            continue
+        dropped += 1
+        inventory["depth"] = max(0, inventory["depth"] - 1)
+        inventory["parked_count"] = max(0, inventory["parked_count"] - 1)
+        inventory["active_bytes"] = max(0, inventory["active_bytes"] - size)
+    if dropped:
+        _fsync_parent_portable(root)
+        perf.record_count("lag_incident.parked_pruned", dropped)
+
+
+def _record_parked_shift_locked(root: Path) -> None:
+    """Account a pending→parked move (depth unchanged) and enforce the parked
+    cap; caller holds the process lock. A missing projection stays missing —
+    the next loader rebuilds it from the spool."""
+    metadata = _read_inventory_locked(root)
+    if metadata is None:
+        return
+    inventory, generation = metadata
+    inventory["pending_count"] = max(0, inventory["pending_count"] - 1)
+    inventory["parked_count"] += 1
+    _prune_parked_locked(root, inventory)
+    _write_inventory_locked(root, inventory, generation + 1)
+    _set_depth(inventory["depth"])
 
 
 def _active_inventory(root: Path) -> tuple[int, int, int]:
@@ -395,10 +468,6 @@ def _unlink_if_identity(dir_fd: int, name: str, identity: EntryIdentity) -> None
 
 def _pending_files(*, strict: bool = False) -> list[Path]:
     return _spool_files(_FILE_SUFFIX, strict=strict)
-
-
-def _parked_files(*, strict: bool = False) -> list[Path]:
-    return _spool_files(_PARKED_SUFFIX, strict=strict)
 
 
 def _count_spool(suffix: str) -> int:
@@ -524,15 +593,29 @@ def _overflow_depth() -> int:
         return len(_load_overflow_ledger_locked(root))
 
 
-def _overflow_contains(digest: str) -> bool:
-    root = _secure_spool_dir()
-    with _depth_process_lock(root):
-        return any(entry["digest"] == digest for entry in _load_overflow_ledger_locked(root))
+def _overflow_quota_error(
+    inventory: dict[str, int],
+    entries: list[dict[str, object]],
+    payload: bytes,
+    projected: bytes,
+    *,
+    use_reserve: bool,
+) -> str | None:
+    entry_limit = _MAX_TOTAL_ENTRIES + (_BACKPRESSURE_RESERVE_ENTRIES if use_reserve else 0)
+    byte_limit = _MAX_TOTAL_BYTES + (_BACKPRESSURE_RESERVE_BYTES if use_reserve else 0)
+    active_count = inventory["pending_count"] + inventory["parked_count"]
+    if active_count + len(entries) >= entry_limit:
+        return "lag incident spool count quota exhausted"
+    overflow_bytes = sum(int(item["size"]) for item in entries)
+    if inventory["active_bytes"] + overflow_bytes + len(payload) + len(projected) > byte_limit:
+        return "lag incident spool byte quota exhausted"
+    return None
 
 
 def _append_overflow(payload: bytes, digest: str, *, use_reserve: bool = False) -> bool:
     root = _secure_spool_dir()
     with _depth_process_lock(root):
+        inventory, generation = _inventory_for_update_locked(root)
         entries = _reconcile_overflow_refs_locked(root)
         if (
             any(entry["digest"] == digest for entry in entries)
@@ -540,12 +623,6 @@ def _append_overflow(payload: bytes, digest: str, *, use_reserve: bool = False) 
             or (root / f"{digest}{_PARKED_SUFFIX}").exists()
         ):
             return False
-        active = _pending_files(strict=True) + _parked_files(strict=True)
-        active_bytes = sum(path.stat(follow_symlinks=False).st_size for path in active)
-        entry_limit = _MAX_TOTAL_ENTRIES + (_BACKPRESSURE_RESERVE_ENTRIES if use_reserve else 0)
-        byte_limit = _MAX_TOTAL_BYTES + (_BACKPRESSURE_RESERVE_BYTES if use_reserve else 0)
-        if len(active) + len(entries) >= entry_limit:
-            raise LagIncidentSpoolFull("lag incident spool count quota exhausted")
         name = f"{digest}{_OVERFLOW_SUFFIX}"
         destination = root / name
         temporary = root / f".{digest}.{uuid.uuid4().hex}.tmp"
@@ -559,9 +636,14 @@ def _append_overflow(payload: bytes, digest: str, *, use_reserve: bool = False) 
             {"version": _OVERFLOW_LEDGER_VERSION, "entries": candidate},
             separators=(",", ":"),
         ).encode("utf-8")
-        overflow_bytes = sum(int(item["size"]) for item in entries)
-        if active_bytes + overflow_bytes + len(payload) + len(projected) > byte_limit:
-            raise LagIncidentSpoolFull("lag incident spool byte quota exhausted")
+        error = _overflow_quota_error(inventory, entries, payload, projected, use_reserve=use_reserve)
+        if error is not None:
+            inventory = _rebuild_inventory_locked(root)
+            generation += 1
+            _write_inventory_locked(root, inventory, generation)
+            error = _overflow_quota_error(inventory, entries, payload, projected, use_reserve=use_reserve)
+            if error is not None:
+                raise LagIncidentSpoolFull(error)
         try:
             with open(temporary, "xb") as stream:
                 os.chmod(temporary, 0o600)
@@ -576,6 +658,9 @@ def _append_overflow(payload: bytes, digest: str, *, use_reserve: bool = False) 
             raise
         finally:
             temporary.unlink(missing_ok=True)
+        inventory["depth"] += 1
+        _write_inventory_locked(root, inventory, generation + 1)
+        _set_depth(inventory["depth"])
     return True
 
 
@@ -587,24 +672,8 @@ def enqueue_backpressure(payload_bytes: bytes) -> bool:
     created = _append_overflow(canonical, digest, use_reserve=True)
     if created:
         perf.record_count("lag_incident.backpressure_reserved")
-        _update_depth_projection(1)
     _notify_dispatcher()
     return created
-
-
-def _assert_spool_capacity(payload_bytes: int) -> None:
-    root = _secure_spool_dir()
-    with _depth_process_lock(root):
-        entries = _load_overflow_ledger_locked(root)
-        active = _pending_files(strict=True) + _parked_files(strict=True)
-        if len(active) + len(entries) >= _MAX_TOTAL_ENTRIES:
-            raise LagIncidentSpoolFull("lag incident spool count quota exhausted")
-        active_bytes = sum(path.stat(follow_symlinks=False).st_size for path in active)
-        ledger = root / _OVERFLOW_LEDGER_NAME
-        ledger_bytes = ledger.stat(follow_symlinks=False).st_size if ledger.exists() else 0
-        overflow_bytes = sum(int(item["size"]) for item in entries)
-        if active_bytes + overflow_bytes + ledger_bytes + payload_bytes > _MAX_TOTAL_BYTES:
-            raise LagIncidentSpoolFull("lag incident spool byte quota exhausted")
 
 
 def _spool_files(suffix: str, *, strict: bool = False) -> list[Path]:
@@ -645,12 +714,6 @@ def _set_depth(value: int) -> None:
     global _depth_cache
     with _lock:
         _depth_cache = max(0, int(value))
-
-
-def _adjust_depth(delta: int) -> None:
-    global _depth_cache
-    with _lock:
-        _depth_cache = max(0, _depth_cache + int(delta))
 
 
 def _normalize_payload(payload: object) -> dict[str, object]:
@@ -718,6 +781,23 @@ def _publish_payload(root: Path, name: str, payload: bytes) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def _enqueue_quota_error(
+    root: Path,
+    inventory: dict[str, int],
+    entries: list[dict[str, object]],
+    payload_bytes: int,
+) -> str | None:
+    active_count = inventory["pending_count"] + inventory["parked_count"]
+    if active_count + len(entries) >= _MAX_TOTAL_ENTRIES:
+        return "lag incident spool count quota exhausted"
+    overflow_bytes = sum(int(item["size"]) for item in entries)
+    ledger = root / _OVERFLOW_LEDGER_NAME
+    ledger_bytes = ledger.stat(follow_symlinks=False).st_size if ledger.exists() else 0
+    if inventory["active_bytes"] + overflow_bytes + ledger_bytes + payload_bytes > _MAX_TOTAL_BYTES:
+        return "lag incident spool byte quota exhausted"
+    return None
+
+
 def enqueue(payload_bytes: bytes) -> bool:
     payload = _validated_payload(payload_bytes, require_redacted=False)
     payload_bytes = _encode(payload)
@@ -734,6 +814,9 @@ def enqueue(payload_bytes: bytes) -> bool:
             lock_started = time.perf_counter()
             with _depth_process_lock(root):
                 perf.record("lag_incident.spool_lock_wait", (time.perf_counter() - lock_started) * 1000.0)
+                # Inventory first: a rebuild reconciles the overflow ledger,
+                # so the ledger must be read after it to stay authoritative.
+                inventory, generation = _inventory_for_update_locked(root)
                 entries = _load_overflow_ledger_locked(root)
                 names = {destination_name, parked_name, f"{digest}{_OVERFLOW_SUFFIX}"}
                 if any((root / name).exists() for name in names) or any(
@@ -741,24 +824,34 @@ def enqueue(payload_bytes: bytes) -> bool:
                 ):
                     _notify_dispatcher()
                     return False
-                pending_count, active_count, active_bytes = _active_inventory(root)
-                overflow_bytes = sum(int(item["size"]) for item in entries)
-                ledger = root / _OVERFLOW_LEDGER_NAME
-                ledger_bytes = ledger.stat(follow_symlinks=False).st_size if ledger.exists() else 0
-                if active_count + len(entries) >= _MAX_TOTAL_ENTRIES:
-                    raise LagIncidentSpoolFull("lag incident spool count quota exhausted")
-                if active_bytes + overflow_bytes + ledger_bytes + len(payload_bytes) > _MAX_TOTAL_BYTES:
-                    raise LagIncidentSpoolFull("lag incident spool byte quota exhausted")
-                generation, blocked, _identity = _load_destination_meta_locked(root)
-                if blocked == generation:
+                error = _enqueue_quota_error(root, inventory, entries, len(payload_bytes))
+                if error is not None:
+                    # Verify against a fresh scan before rejecting so
+                    # projection drift can never refuse capacity that exists.
+                    inventory = _rebuild_inventory_locked(root)
+                    generation += 1
+                    _write_inventory_locked(root, inventory, generation)
+                    entries = _load_overflow_ledger_locked(root)
+                    error = _enqueue_quota_error(root, inventory, entries, len(payload_bytes))
+                    if error is not None:
+                        raise LagIncidentSpoolFull(error)
+                dest_generation, blocked, _identity = _load_destination_meta_locked(root)
+                if blocked == dest_generation:
                     _publish_payload(root, parked_name, payload_bytes)
+                    inventory["depth"] += 1
+                    inventory["parked_count"] += 1
+                    inventory["active_bytes"] += len(payload_bytes)
+                    _prune_parked_locked(root, inventory)
+                    _write_inventory_locked(root, inventory, generation + 1)
+                    _set_depth(inventory["depth"])
                     perf.record_count("lag_incident.parked_same_generation")
-                    _adjust_depth(1)
                     _notify_dispatcher()
                     return True
-                if pending_count < _MAX_PENDING:
+                if inventory["pending_count"] < _MAX_PENDING:
                     with perf.timed("lag_incident.payload_publish"):
                         _publish_payload(root, destination_name, payload_bytes)
+                    inventory["pending_count"] += 1
+                    inventory["active_bytes"] += len(payload_bytes)
                 else:
                     name = f"{digest}{_OVERFLOW_SUFFIX}"
                     with perf.timed("lag_incident.payload_publish"):
@@ -771,8 +864,10 @@ def enqueue(payload_bytes: bytes) -> bool:
                     })
                     _write_overflow_ledger_locked(root, entries)
                     perf.record_count("lag_incident.overflow_enqueued")
+                inventory["depth"] += 1
+                _write_inventory_locked(root, inventory, generation + 1)
+                _set_depth(inventory["depth"])
     perf.record_count("lag_incident.enqueued")
-    _update_depth_projection(1)
     _notify_dispatcher()
     return True
 
@@ -789,6 +884,7 @@ def _promote_overflow() -> bool:
             entry = entries[0]
             digest = str(entry["digest"])
             destination = root / f"{digest}{_FILE_SUFFIX}"
+            promoted_size: int | None = None
             if not destination.exists():
                 source = root / str(entry["name"])
                 info = source.lstat()
@@ -810,30 +906,66 @@ def _promote_overflow() -> bool:
                     _fsync_parent_portable(root)
                 finally:
                     temporary.unlink(missing_ok=True)
+                promoted_size = len(payload)
             (root / str(entry["name"])).unlink(missing_ok=True)
             _write_overflow_ledger_locked(root, entries[1:])
+            metadata = _read_inventory_locked(root)
+            if metadata is not None:
+                inventory, generation = metadata
+                if promoted_size is None:
+                    # Duplicate overflow reference removed; one fewer entry.
+                    inventory["depth"] = max(0, inventory["depth"] - 1)
+                else:
+                    inventory["pending_count"] += 1
+                    inventory["active_bytes"] += promoted_size
+                _write_inventory_locked(root, inventory, generation + 1)
+                _set_depth(inventory["depth"])
     perf.record_count("lag_incident.overflow_promoted")
     return True
 
 
 def _reactivate_parked() -> int:
+    """Single pass: one parked listing, one pending count, one ledger load and
+    at most one ledger write — never one scan per parked entry."""
     root = _secure_spool_dir()
     moved = 0
     with _lock:
-        for source in _parked_files(strict=True):
-            stem = source.name[:-len(_PARKED_SUFFIX)]
-            active = root / f"{stem}{_FILE_SUFFIX}"
-            if active.exists() or _overflow_contains(stem):
-                source.unlink()
-            elif len(_pending_files(strict=True)) < _MAX_PENDING:
-                os.replace(source, active)
-            else:
-                payload = source.read_bytes()
-                _append_overflow(payload, stem)
-                source.unlink()
-            moved += 1
-        if moved:
-            _fsync_parent_portable(root)
+        with _depth_process_lock(root):
+            parked = _spool_files(_PARKED_SUFFIX, strict=True)
+            if parked:
+                entries = _reconcile_overflow_refs_locked(root)
+                ledger_digests = {str(entry["digest"]) for entry in entries}
+                pending_count = len(_pending_files(strict=True))
+                ledger_changed = False
+                for source in parked:
+                    stem = source.name[:-len(_PARKED_SUFFIX)]
+                    active = root / f"{stem}{_FILE_SUFFIX}"
+                    if active.exists() or stem in ledger_digests:
+                        source.unlink()
+                    elif pending_count < _MAX_PENDING:
+                        os.replace(source, active)
+                        pending_count += 1
+                    else:
+                        with open(source, "rb") as stream:
+                            payload = stream.read(_MAX_PAYLOAD_BYTES + 1)
+                        if len(payload) > _MAX_PAYLOAD_BYTES:
+                            # Oversized entries never came from enqueue; leave
+                            # them for the cap pruner rather than propagate.
+                            continue
+                        _publish_payload(root, f"{stem}{_OVERFLOW_SUFFIX}", payload)
+                        entries.append({
+                            "digest": stem,
+                            "enqueued_ns": time.time_ns(),
+                            "name": f"{stem}{_OVERFLOW_SUFFIX}",
+                            "size": len(payload),
+                        })
+                        ledger_digests.add(stem)
+                        ledger_changed = True
+                        source.unlink()
+                    moved += 1
+                if ledger_changed:
+                    _write_overflow_ledger_locked(root, entries)
+                _fsync_parent_portable(root)
         while _promote_overflow():
             pass
         _reconcile_depth_projection()
@@ -1003,6 +1135,7 @@ def _park(
                 raise ValueError("spool entry content changed before parking")
             os.replace(path, root / destination_name)
             _fsync_parent_portable(root)
+            _record_parked_shift_locked(root)
             return True
         dir_fd = _open_spool_dir_fd(root)
         try:
@@ -1018,6 +1151,7 @@ def _park(
             _fsync_dir(dir_fd)
         finally:
             os.close(dir_fd)
+        _record_parked_shift_locked(root)
     return True
 
 
@@ -1052,7 +1186,7 @@ async def _drain_outcome(
             await _to_thread(_park_blocked_generation_entries)
             pending = await _to_thread(_pending_files, strict=True)
         overflow_depth = await _to_thread(_overflow_depth)
-        parked = len(await _to_thread(_parked_files, strict=True))
+        parked = await _to_thread(_count_spool, _PARKED_SUFFIX)
         _set_depth(len(pending) + overflow_depth + parked)
         perf.record("lag_incident.overflow_depth", float(overflow_depth))
     except (OSError, RuntimeError):
@@ -1104,7 +1238,14 @@ async def _drain_outcome(
         try:
             await _to_thread(_acknowledge, path, identity)
             promoted = await _to_thread(_promote_overflow)
-            await _to_thread(_update_depth_projection, -1)
+            await _to_thread(
+                functools.partial(
+                    _apply_inventory_delta,
+                    depth=-1,
+                    pending=-1,
+                    active_bytes=-identity[3],
+                )
+            )
             perf.record_count("lag_incident.acknowledged")
             if promoted and _wake is not None:
                 _wake.set()

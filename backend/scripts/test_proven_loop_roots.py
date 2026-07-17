@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 import shutil
 import tempfile
@@ -66,7 +67,7 @@ def main() -> None:
     source = (Path(__file__).resolve().parents[1] / "session_search.py").read_text(encoding="utf-8")
     validation = source[source.index("def validate_proposed("):source.index("def _resolve_proposed_project(")]
     assert "candidate_stubs" in validation
-    assert "await asyncio.to_thread(\n        validate_proposed" in source
+    assert re.search(r"await asyncio\.to_thread\(\s*validate_proposed\b", source)
     print("PASS proven loop roots avoid synchronous scans and locks")
 
 

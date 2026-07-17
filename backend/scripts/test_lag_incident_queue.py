@@ -808,7 +808,12 @@ def test_active_quota_is_atomic_across_processes() -> None:
         queue._MAX_PENDING = original_pending
 
 
-def test_enqueue_uses_one_bounded_inventory_and_delta_depth_update() -> None:
+def test_enqueue_never_rescans_spool_with_seeded_projection() -> None:
+    # The lag watchdog enqueues an incident on every lag event. An enqueue
+    # that stats the spool corpus makes each lag event more expensive as
+    # incidents accumulate — a self-amplifying spiral (observed at 1,912
+    # parked files: 58.7s per enqueue). With the inventory projection seeded,
+    # enqueue must be O(1): zero directory scans.
     _reset_spool()
     root = paths.ba_home() / "lag-incidents"
     root.mkdir(parents=True)
@@ -835,12 +840,79 @@ def test_enqueue_uses_one_bounded_inventory_and_delta_depth_update() -> None:
     queue._pending_files = tracked_pending
     try:
         assert queue.enqueue(_payload("f" * 16))
-        assert inventory_calls == 1
-        assert pending_calls == 0, "depth delta must not rescan the spool corpus"
+        assert inventory_calls == 0, "enqueue must trust the inventory projection"
+        assert pending_calls == 0, "enqueue must not rescan the spool corpus"
         assert queue.depth() == 801
     finally:
         queue._active_inventory = original_inventory
         queue._pending_files = original_pending
+    assert queue._reconcile_depth_projection() == 801
+
+
+def test_parked_backlog_is_bounded_under_blocked_destination() -> None:
+    # A permanently unavailable destination (e.g. the Assistant extension
+    # disabled) parks every incident. Without a cap the backlog grows without
+    # bound and every startup reactivation pays for it.
+    _reset_spool()
+    root = paths.ba_home() / "lag-incidents"
+    root.mkdir(parents=True)
+    with queue._depth_process_lock(root):
+        queue._write_destination_meta_locked(root, 7, 7)
+    original_cap = queue._MAX_PARKED
+    original_target = queue._PARKED_PRUNE_TARGET
+    queue._MAX_PARKED = 8
+    queue._PARKED_PRUNE_TARGET = 6
+    try:
+        refs = [f"{index:016x}" for index in range(40, 60)]
+        for ref in refs:
+            assert queue.enqueue(_payload(ref))
+            time.sleep(0.002)
+        parked = {path.name[: -len(".parked")] for path in root.glob("*.parked")}
+        assert len(parked) <= queue._MAX_PARKED, f"parked backlog unbounded: {len(parked)}"
+        assert refs[-1] in parked, "newest incident must survive pruning"
+        assert refs[0] not in parked, "oldest incident must be pruned first"
+        assert queue._reconcile_depth_projection() == len(parked)
+    finally:
+        queue._MAX_PARKED = original_cap
+        queue._PARKED_PRUNE_TARGET = original_target
+
+
+def test_reactivate_parked_is_single_pass() -> None:
+    # Reactivation used to rescan pending and reload the overflow ledger once
+    # per parked entry — O(n^2) at every backend startup and destination
+    # change. It must do a constant number of spool scans regardless of N.
+    _reset_spool()
+    root = paths.ba_home() / "lag-incidents"
+    root.mkdir(parents=True)
+    n = 40
+    for index in range(n):
+        ref = f"{index + 0x100:016x}"
+        (root / f"{ref}.parked").write_bytes(_payload(ref))
+        time.sleep(0.001)
+    original_max = queue._MAX_PENDING
+    queue._MAX_PENDING = 4
+    pending_calls = 0
+    original_pending = queue._pending_files
+
+    def tracked_pending(*args, **kwargs):
+        nonlocal pending_calls
+        pending_calls += 1
+        return original_pending(*args, **kwargs)
+
+    queue._pending_files = tracked_pending
+    try:
+        moved = queue._reactivate_parked()
+        assert moved == n
+        assert pending_calls <= 3, (
+            f"reactivation must not rescan per parked entry: {pending_calls} scans for {n} files"
+        )
+        assert len(list(root.glob("*.json"))) == queue._MAX_PENDING
+        assert len(list(root.glob("*.parked"))) == 0
+        assert len(list(root.glob("*.overflow"))) == n - queue._MAX_PENDING
+        assert queue.depth() == n
+    finally:
+        queue._pending_files = original_pending
+        queue._MAX_PENDING = original_max
 
 
 async def _blocked_generation_survives_restart_without_probe() -> None:
@@ -1013,7 +1085,9 @@ def main_test() -> None:
     test_retry_metadata_survives_wall_clock_jumps()
     test_synchronize_destination_repairs_stale_metadata_version()
     test_active_quota_is_atomic_across_processes()
-    test_enqueue_uses_one_bounded_inventory_and_delta_depth_update()
+    test_enqueue_never_rescans_spool_with_seeded_projection()
+    test_parked_backlog_is_bounded_under_blocked_destination()
+    test_reactivate_parked_is_single_pass()
     asyncio.run(_blocked_generation_survives_restart_without_probe())
     asyncio.run(_blocked_generation_parks_overflow_without_probe())
     test_corrupt_reference_ledger_is_quarantined_and_rebuilt()
