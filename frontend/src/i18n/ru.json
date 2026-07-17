@@ -432,6 +432,8 @@
   "settings.extensionsPermission.unknown.risk": "Это разрешение не распознано данным UI. Считайте его высокорисковым, пока расширение его не пояснит.",
   "settings.extensionsSettings": "Настройки",
   "settings.extensionsSettingsHelp": "Конфигурационные значения, читаемые этим расширением.",
+  "settings.extensionsSearchPlaceholder": "Поиск расширений…",
+  "settings.extensionsSearchNoResults": "Нет расширений, соответствующих вашему поиску.",
   "settings.extensionsUserInstructions": "Ваши инструкции",
   "settings.extensionsUserInstructionsHelp": "Личные заметки о том, как агент должен использовать это расширение. Добавляются в запуски агента, пока оно включено.",
   "settings.extensionsUserInstructionsPlaceholder": "напр.: Всегда спрашивай перед удалением; предпочитай среду staging.",

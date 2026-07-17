@@ -428,6 +428,8 @@
   "settings.extensionsPermission.unknown.risk": "Deze machtiging wordt niet herkend door deze UI. Beschouw het als hoog risico totdat de extensie het uitlegt.",
   "settings.extensionsSettings": "Instellingen",
   "settings.extensionsSettingsHelp": "Configuratiewaarden die door deze extensie worden gelezen.",
+  "settings.extensionsSearchPlaceholder": "Extensies zoeken…",
+  "settings.extensionsSearchNoResults": "Geen extensies gevonden voor je zoekopdracht.",
   "settings.extensionsUserInstructions": "Jouw instructies",
   "settings.extensionsUserInstructionsHelp": "Persoonlijke notities over hoe de agent deze extensie moet gebruiken. Worden aan agentruns toegevoegd zolang ze is ingeschakeld.",
   "settings.extensionsUserInstructionsPlaceholder": "bijv. Vraag altijd voordat je verwijdert; geef de voorkeur aan de staging-omgeving.",

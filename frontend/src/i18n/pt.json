@@ -432,6 +432,8 @@
   "settings.extensionsPermission.unknown.risk": "Esta permissão não é reconhecida por esta interface. Trate-a como de alto risco até que a extensão a explique.",
   "settings.extensionsSettings": "Configurações",
   "settings.extensionsSettingsHelp": "Valores de configuração lidos por esta extensão.",
+  "settings.extensionsSearchPlaceholder": "Pesquisar extensões…",
+  "settings.extensionsSearchNoResults": "Nenhuma extensão corresponde à sua pesquisa.",
   "settings.extensionsUserInstructions": "Suas instruções",
   "settings.extensionsUserInstructionsHelp": "Notas pessoais sobre como o agente deve usar esta extensão. Adicionadas às execuções do agente enquanto estiver ativada.",
   "settings.extensionsUserInstructionsPlaceholder": "ex.: Sempre pergunte antes de excluir; prefira o ambiente de staging.",

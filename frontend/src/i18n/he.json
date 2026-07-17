@@ -433,6 +433,8 @@
   "settings.extensionsPermission.unknown.risk": "הממשק לא מכיר את ההרשאה הזו. התייחס אליה כסיכון גבוה עד שהתוסף מסביר אותה.",
   "settings.extensionsSettings": "הגדרות",
   "settings.extensionsSettingsHelp": "ערכי תצורה שהתוסף קורא.",
+  "settings.extensionsSearchPlaceholder": "חיפוש הרחבות…",
+  "settings.extensionsSearchNoResults": "אין הרחבות שתואמות לחיפוש שלך.",
   "settings.extensionsUserInstructions": "ההוראות שלך",
   "settings.extensionsUserInstructionsHelp": "הערות אישיות כיצד הסוכן צריך להשתמש בתוסף הזה. נוספות להרצות הסוכן כל עוד הוא מופעל.",
   "settings.extensionsUserInstructionsPlaceholder": "לדוגמה: תמיד לשאול לפני מחיקה; להעדיף את סביבת ה-staging.",
