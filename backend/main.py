@@ -4906,6 +4906,70 @@ async def internal_requirements_unit_vector(
     )
 
 
+@app.post("/api/internal/get-requirements/thread-fts")
+async def internal_requirements_thread_fts(
+    body: dict,
+    x_internal_token: str = Depends(_internal_token_dependency),
+):
+    _require_builtin_runtime_extension(extension_store.extension_id_for_role('requirements'))
+    if not _internal_authority_is_valid():
+        raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
+    payload = _validate_processed_requirements_body(body)
+    fields = body.get("fields")
+    if fields is not None and (
+        not isinstance(fields, list) or any(not isinstance(field, str) for field in fields)
+    ):
+        raise HTTPException(status_code=400, detail="fields must be a list of strings")
+    include_all_fields = body.get("include_all_fields", False)
+    if not isinstance(include_all_fields, bool):
+        raise HTTPException(status_code=400, detail="include_all_fields must be a boolean")
+
+    import requirement_context
+    return await run_requirements_query(
+        "requirements.thread_fts",
+        requirement_context.search_requirement_threads_fts,
+        executor=REQUIREMENTS_SEARCH_EXECUTOR,
+        query=payload["query"],
+        cwd=payload["cwd"],
+        cwds=payload["cwds"],
+        all_projects=payload["all_projects"],
+        fields=fields,
+        include_all_fields=include_all_fields,
+    )
+
+
+@app.post("/api/internal/get-requirements/thread-vector")
+async def internal_requirements_thread_vector(
+    body: dict,
+    x_internal_token: str = Depends(_internal_token_dependency),
+):
+    _require_builtin_runtime_extension(extension_store.extension_id_for_role('requirements'))
+    if not _internal_authority_is_valid():
+        raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
+    payload = _validate_processed_requirements_body(body)
+    fields = body.get("fields")
+    if fields is not None and (
+        not isinstance(fields, list) or any(not isinstance(field, str) for field in fields)
+    ):
+        raise HTTPException(status_code=400, detail="fields must be a list of strings")
+    include_all_fields = body.get("include_all_fields", False)
+    if not isinstance(include_all_fields, bool):
+        raise HTTPException(status_code=400, detail="include_all_fields must be a boolean")
+
+    import requirement_context
+    return await run_requirements_query(
+        "requirements.thread_vector",
+        requirement_context.search_requirement_threads_vector,
+        executor=REQUIREMENTS_SEARCH_EXECUTOR,
+        query=payload["query"],
+        cwd=payload["cwd"],
+        cwds=payload["cwds"],
+        all_projects=payload["all_projects"],
+        fields=fields,
+        include_all_fields=include_all_fields,
+    )
+
+
 @app.post("/api/internal/get-requirements/index-sql")
 async def internal_requirements_index_sql(
     body: dict,
