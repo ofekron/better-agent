@@ -1294,6 +1294,90 @@ def test_ba_home_memoizes_resolution_off_loop() -> None:
 
 
 
+def test_get_historical_children_get_ref_runs_off_loop() -> None:
+    """Regression: `get_historical_children` (main.py) must not call
+    `session_manager.get_ref` inline on the event loop thread. `get_ref`
+    takes the root's `_lock_for_root`, which a cold render-tree hydration
+    (or any other holder) can pin for many seconds — an inline call would
+    freeze every other request/websocket on the process for that long.
+    Proves the async BEHAVIOR (event loop stays responsive while the lock
+    is held elsewhere), not just that the source text changed."""
+    import main
+    from fastapi import HTTPException
+    from session_manager import manager as session_manager
+
+    sess = session_manager.create(
+        name="target", cwd="/tmp", orchestration_mode="native",
+        model="model", source="test",
+    )
+    root_id = sess["id"]
+
+    lock_acquired = threading.Event()
+    release_lock = threading.Event()
+    ticks = 0
+    outcome: dict[str, object] = {}
+
+    def hold_root_lock() -> None:
+        with session_manager._lock_for_root(root_id):
+            lock_acquired.set()
+            release_lock.wait(timeout=10)
+
+    async def run() -> None:
+        nonlocal ticks
+
+        async def heartbeat() -> None:
+            nonlocal ticks
+            for _ in range(5):
+                await asyncio.sleep(0.02)
+                ticks += 1
+
+        call_task = asyncio.create_task(main.get_historical_children(
+            session_id=root_id,
+            message_id="does-not-exist",
+            parent_id="root",
+            revision="r1",
+            limit=50,
+            cursor=None,
+        ))
+        await heartbeat()
+        release_lock.set()
+        try:
+            await call_task
+        except HTTPException as exc:
+            outcome["status_code"] = exc.status_code
+            outcome["detail"] = exc.detail
+
+    def run_loop() -> None:
+        asyncio.run(run())
+
+    holder = threading.Thread(target=hold_root_lock)
+    holder.start()
+    assert lock_acquired.wait(timeout=2)
+
+    # If get_historical_children blocks the loop thread synchronously on
+    # the held lock, NOTHING in that loop can run — including asyncio's
+    # own timeout machinery, since it needs the same thread to fire. Only
+    # an outside OS-thread wall-clock join can catch that kind of freeze.
+    loop_thread = threading.Thread(target=run_loop)
+    loop_thread.start()
+    loop_thread.join(timeout=3)
+    if loop_thread.is_alive():
+        release_lock.set()
+        loop_thread.join(timeout=5)
+        raise AssertionError(
+            "event loop froze while get_historical_children awaited "
+            "get_ref — it is blocking inline instead of via asyncio.to_thread"
+        )
+    holder.join(timeout=2)
+
+    assert ticks == 5, (
+        f"heartbeat only ticked {ticks}/5 times before get_ref's lock was "
+        "released — get_historical_children is not running get_ref "
+        "concurrently with other event-loop work"
+    )
+    assert outcome.get("status_code") == 404, outcome
+
+
 # Static source-grep regression cases collapsed into one data-driven test.
 # Entry: (label, checks). Check kinds:
 #   ("grep", file, steps, must, must_not) — containment within the region

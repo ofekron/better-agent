@@ -53,11 +53,13 @@ def _run(cwd: Path, args: list[str], *, timeout: float = 60.0) -> dict[str, Any]
 
 
 def _repo(payload: dict[str, Any]) -> Path:
-    session = session_manager.get_ref(payload["actor_session_id"])
-    if not session:
+    actor_session_id = payload["actor_session_id"]
+    if not session_manager.exists(actor_session_id):
         raise HTTPException(status_code=404, detail="unknown actor session")
     requested = Path(payload["cwd"]).expanduser().resolve()
-    session_cwd = Path(str(session.get("cwd") or "")).expanduser().resolve()
+    session_cwd = Path(
+        str(session_manager.get_field(actor_session_id, "cwd") or ""),
+    ).expanduser().resolve()
     if requested != session_cwd:
         raise HTTPException(status_code=403, detail="cwd does not match actor session")
     if not requested.is_dir():

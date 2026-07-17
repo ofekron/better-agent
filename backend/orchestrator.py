@@ -5324,7 +5324,7 @@ class Coordinator:
             # Delegate mode-specific finalization (pin session ids,
             # promote recovered placeholders, etc.)
             from orchs import get_strategy
-            orch_mode = (session_manager.get_ref(app_session_id) or {}).get("orchestration_mode") or "team"
+            orch_mode = session_manager.get_field(app_session_id, "orchestration_mode") or "team"
             get_strategy(orch_mode).finalize_turn(
                 app_session_id=app_session_id,
                 assistant_msg=assistant_msg,
