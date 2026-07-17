@@ -46,11 +46,13 @@ MATCH_FIELD_ORDER = (
     "user_seq",
     "native_hit_index",
 )
-DEFAULT_THREAD_MATCH_FIELDS = ("id", "status", "current", "project_cwds", "session_ids", "edited_files")
+DEFAULT_THREAD_MATCH_FIELDS = ("id", "status", "reality", "project_cwds", "session_ids", "edited_files")
 THREAD_MATCH_FIELD_ORDER = (
     "id",
     "status",
-    "current",
+    "reality",
+    "reality_is_active",
+    "reality_polarity",
     "parent_ids",
     "merged_from",
     "merged_into",
@@ -1041,20 +1043,24 @@ def search_requirement_units_fts(
 
 
 def _thread_fts_db_path() -> Path:
-    from requirement_analysis.threads import requirement_threads_path
+    from requirement_analysis.reality import requirement_reality_path
 
-    return requirement_threads_path().parent / THREAD_FTS_DB_NAME
+    return requirement_reality_path().parent / THREAD_FTS_DB_NAME
 
 
 def _ensure_thread_fts_index(records: list[dict[str, Any]] | None = None) -> dict[str, Any]:
-    from requirement_analysis.threads import requirement_threads_path
+    from requirement_analysis.reality import requirement_reality_path
 
     if records is None:
         records = _load_thread_records()
     return _ensure_fts_index(
         db_path=_thread_fts_db_path(),
         table_name=THREAD_FTS_TABLE,
-        source_path=requirement_threads_path(),
+        # Tracked against requirement_reality.json, not requirement_threads.json:
+        # the searchable text (`reality`) comes from reality's full-history
+        # resolution, which can change (a rerun with an improved model, a
+        # correction) without the underlying thread/event list changing.
+        source_path=requirement_reality_path(),
         records=records,
         search_text_fn=_thread_search_line,
         cwds_fn=lambda r: r["project_cwds"] if isinstance(r.get("project_cwds"), list) else [],
@@ -1071,10 +1077,12 @@ def search_requirement_threads_fts(
     fields: list[str] | None = None,
     include_all_fields: bool = False,
 ) -> dict[str, Any]:
-    """Search the SQLite FTS projection over requirement_threads.json.
-    Mirrors search_requirement_units_fts, but a thread's searchable text is
-    its compiled `current` state plus every event's text, so a query can
-    match wording that only appears in the thread's history."""
+    """Search the SQLite FTS projection over requirement_threads.json joined
+    with requirement_reality.json. Mirrors search_requirement_units_fts, but
+    a thread's searchable text is its resolved `reality` (the full-history
+    chronological resolution, see requirement_analysis.reality) plus every
+    event's text, so a query can match wording that only appears in the
+    thread's history."""
     _ensure_requirements_importable()
     normalized_query = (query or "").strip()
     if not normalized_query:
@@ -1208,15 +1216,17 @@ def _build_vector_index(
     Incremental embedding reuses the cached prefix and embeds only the
     appended tail — guarded by BOTH id AND a per-record sha256 of the
     embedded text, because an id can be re-emitted with different text (a
-    re-extracted unit under the same source_key; a thread's `current` state
-    changing in place as new events attach/refine it) — key-only matching
-    would silently serve stale vectors. Fall back to a full re-embed on cold
-    start, any prefix mismatch, or embedding-dim change. Re-embedding the
-    whole corpus on every search wastes real CPU (and under concurrent
-    forks, tens of minutes) — for threads, whose `current`/events mutate in
-    place far more often than units ever do, this means a full re-embed is
-    the common case rather than the exception; acceptable at this corpus
-    scale (dozens-hundreds of threads), revisit if that stops being true."""
+    re-extracted unit under the same source_key; a thread's `reality` text
+    changing whenever it gets recomputed with more/changed history) —
+    key-only matching would silently serve stale vectors. Fall back to a
+    full re-embed on cold start, any prefix mismatch, or embedding-dim
+    change. Re-embedding the whole corpus on every search wastes real CPU
+    (and under concurrent forks, tens of minutes) — for threads, whose
+    `reality` is fully recomputed on every reality rebuild (see
+    requirement_analysis.reality.rebuild_requirement_reality), this means a
+    full re-embed is the common case rather than the exception; acceptable
+    at this corpus scale (dozens-hundreds of threads), revisit if that
+    stops being true."""
     import numpy as np
 
     new_ids = [str(r.get(id_field) or "") for r in records]
@@ -1517,33 +1527,34 @@ def search_requirement_units_vector(
 
 
 def _thread_vector_path() -> Path:
-    from requirement_analysis.threads import requirement_threads_path
+    from requirement_analysis.reality import requirement_reality_path
 
-    return requirement_threads_path().parent / THREAD_VECTOR_DB_NAME
+    return requirement_reality_path().parent / THREAD_VECTOR_DB_NAME
 
 
 def _thread_vector_state_path() -> Path:
-    from requirement_analysis.threads import requirement_threads_path
+    from requirement_analysis.reality import requirement_reality_path
 
-    return requirement_threads_path().parent / THREAD_VECTOR_STATE_NAME
+    return requirement_reality_path().parent / THREAD_VECTOR_STATE_NAME
 
 
 def _thread_vector_text(record: dict[str, Any]) -> str:
-    return (record.get("current") or "").strip()
+    return (record.get("reality") or "").strip()
 
 
 def _ensure_thread_vector_index(
     records: list[dict[str, Any]] | None = None,
     embedder=None,
 ) -> dict[str, Any]:
-    from requirement_analysis.threads import requirement_threads_path
+    from requirement_analysis.reality import requirement_reality_path
 
     if records is None:
         records = _load_thread_records()
     return _ensure_vector_index(
         db_path=_thread_vector_path(),
         state_path=_thread_vector_state_path(),
-        source_path=requirement_threads_path(),
+        # Tracked against requirement_reality.json — see _ensure_thread_fts_index.
+        source_path=requirement_reality_path(),
         records=records,
         id_field="id",
         text_fn=_thread_vector_text,
@@ -1563,8 +1574,9 @@ def search_requirement_threads_vector(
     embedder=None,
 ) -> dict[str, Any]:
     """Semantic (vector) search over requirement_threads.json via ONNX MiniLM
-    cosine similarity on each thread's compiled `current` state. Mirrors
-    search_requirement_units_vector."""
+    cosine similarity on each thread's resolved `reality` text (the
+    full-history chronological resolution, see requirement_analysis.reality).
+    Mirrors search_requirement_units_vector."""
     import numpy as np
 
     _ensure_requirements_importable()
@@ -1931,16 +1943,12 @@ def _load_unit_records() -> list[dict[str, Any]]:
 
 
 def _load_thread_records() -> list[dict[str, Any]]:
-    from requirement_analysis.threads import load_requirement_threads
+    from requirement_analysis.reality import realized_threads
 
-    db = load_requirement_threads()
-    threads = db.get("threads")
-    if not isinstance(threads, list):
-        return []
     return [
         thread
-        for thread in threads
-        if isinstance(thread, dict) and isinstance(thread.get("current"), str) and thread.get("current").strip()
+        for thread in realized_threads()
+        if isinstance(thread, dict) and isinstance(thread.get("reality"), str) and thread.get("reality").strip()
     ]
 
 
@@ -1953,7 +1961,7 @@ def _thread_event_texts(record: dict[str, Any]) -> list[str]:
 
 def _thread_search_line(record: dict[str, Any]) -> str:
     searchable = {
-        "current": record.get("current") or "",
+        "reality": record.get("reality") or "",
         "status": record.get("status") or "",
         "events_text": " ".join(_thread_event_texts(record)),
     }
