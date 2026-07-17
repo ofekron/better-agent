@@ -25,6 +25,10 @@ from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from starlette.background import BackgroundTask
 
+from backend_instance_lock import (
+    acquire_bff_instance_lock,
+    release_bff_instance_lock,
+)
 from bff_app_routes import (
     chat_draft_session_id,
     initialize_app_projects,
@@ -122,6 +126,7 @@ def _browser_ws_close_code(upstream_code: object) -> int:
 
 @app.on_event("startup")
 async def _startup() -> None:
+    acquire_bff_instance_lock()
     lease = await runtime_upstream.acquire()
     await lease.release()
     runtime_service.bind(runtime_upstream)
@@ -134,6 +139,7 @@ async def _shutdown() -> None:
     await bff_chat_feed.feed_client.stop()
     runtime_service.unbind()
     await runtime_upstream.shutdown()
+    release_bff_instance_lock()
 
 
 def _browser_identity_headers(request: Request) -> list[tuple[bytes, bytes]]:
