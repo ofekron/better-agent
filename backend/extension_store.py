@@ -1211,12 +1211,12 @@ def _validate_instructions(value: Any) -> list[dict[str, Any]]:
     return items
 
 
-def _validate_skills(value: Any) -> list[dict[str, str]]:
+def _validate_skills(value: Any) -> list[dict[str, Any]]:
     if value is None:
         return []
     if not isinstance(value, list):
         raise ExtensionError("entrypoints.skills must be a list")
-    items: list[dict[str, str]] = []
+    items: list[dict[str, Any]] = []
     seen: set[str] = set()
     for item in value:
         if not isinstance(item, dict):
@@ -1228,7 +1228,12 @@ def _validate_skills(value: Any) -> list[dict[str, str]]:
             raise ExtensionError(f"entrypoints.skills contains duplicate name: {name}")
         seen.add(name)
         path = _clean_rel_path(str(item.get("path") or ""), field="entrypoints.skills.path")
-        items.append({"name": name, "path": path})
+        cleaned: dict[str, Any] = {"name": name, "path": path}
+        if "default_enabled" in item:
+            if not isinstance(item["default_enabled"], bool):
+                raise ExtensionError("entrypoints.skills.default_enabled must be a boolean")
+            cleaned["default_enabled"] = item["default_enabled"]
+        items.append(cleaned)
     return items
 
 
@@ -4623,6 +4628,10 @@ def reconcile_runtime_skills() -> int:
     for record in _active_records_from_data(data):
         manifest = record["manifest"]
         for item in manifest.get("entrypoints", {}).get("skills") or []:
+            if not is_runtime_skill_enabled(
+                manifest["id"], item["name"], settings=settings, record=record
+            ):
+                continue
             if not native_harness_exposed(
                 manifest["id"], "skill", item["name"], settings=settings, record=record
             ):
@@ -4645,6 +4654,10 @@ def reconcile_runtime_skills() -> int:
         manifest = record["manifest"]
         extension_id = manifest["id"]
         for item in manifest.get("entrypoints", {}).get("skills") or []:
+            if not is_runtime_skill_enabled(
+                extension_id, item["name"], settings=settings, record=record
+            ):
+                continue
             if not native_harness_exposed(
                 extension_id, "skill", item["name"], settings=settings, record=record
             ):
@@ -4665,12 +4678,17 @@ def reconcile_runtime_skills() -> int:
 def runtime_skill_entries() -> list[dict[str, str]]:
     skills: list[dict[str, str]] = []
     data = _load()
+    settings = _load_ext_settings()
     for record in _active_records_from_data(data):
         manifest = record["manifest"]
         install_root = runtime_package_root_for_record(record)
         if install_root is None or not install_root.exists():
             continue
         for item in manifest.get("entrypoints", {}).get("skills") or []:
+            if not is_runtime_skill_enabled(
+                manifest["id"], item["name"], settings=settings, record=record
+            ):
+                continue
             source = (install_root / item["path"]).resolve()
             if not source.is_relative_to(install_root):
                 continue
@@ -5943,6 +5961,51 @@ def is_mcp_server_enabled(extension_id: str, server_name: str) -> bool:
     return server_name not in set(disabled)
 
 
+def is_runtime_skill_enabled(
+    extension_id: str,
+    skill_name: str,
+    *,
+    settings: dict[str, Any] | None = None,
+    record: dict[str, Any] | None = None,
+) -> bool:
+    """Whether a declared skill is exposed to sessions. Explicit user choice
+    wins; otherwise the manifest item's default_enabled (default True)."""
+    current_record = record if record is not None else get_extension(extension_id)
+    if current_record is None:
+        return False
+    item = _harness_addition(current_record, "skill", skill_name)
+    if item is None:
+        return False
+    data = settings if settings is not None else _load_ext_settings()
+    entry = data["extensions"].get(extension_id, {})
+    overrides = entry.get("skills_enabled") if isinstance(entry, dict) else None
+    if isinstance(overrides, dict) and skill_name in overrides:
+        return bool(overrides[skill_name])
+    return bool(item.get("default_enabled", True))
+
+
+def set_runtime_skill_enabled(extension_id: str, skill_name: str, enabled: bool) -> bool:
+    if not isinstance(enabled, bool):
+        raise ExtensionError("skill enabled must be a boolean")
+    record = get_extension(extension_id)
+    if record is None:
+        raise ExtensionError("Extension not installed")
+    if not _ID_RE.fullmatch(skill_name):
+        raise ExtensionError("Invalid skill name")
+    if _harness_addition(record, "skill", skill_name) is None:
+        raise ExtensionError("Unknown skill")
+    data = _load_ext_settings()
+    entry = _ext_settings_entry(data, extension_id)
+    overrides = entry.get("skills_enabled")
+    if not isinstance(overrides, dict):
+        overrides = {}
+    overrides[skill_name] = enabled
+    entry["skills_enabled"] = overrides
+    _save_ext_settings(data)
+    reconcile_runtime_skills()
+    return enabled
+
+
 def _native_harness_key(kind: str, name: str) -> str:
     clean_kind = str(kind or "").strip()
     clean_name = str(name or "").strip()
@@ -6236,6 +6299,7 @@ def extension_config(extension_id: str) -> dict[str, Any]:
         "ui": get_ui_settings(extension_id),
         "frontend_modules": extension_frontend_modules(extension_id),
         "mcp": extension_mcp_servers(extension_id),
+        "skills": extension_runtime_skills(extension_id),
         "remote_services": list(entrypoints.get("remote_services") or []),
         "settings": get_extension_settings(extension_id),
         "permissions": {
@@ -6327,7 +6391,7 @@ def extension_harness_additions(record: dict[str, Any]) -> list[dict[str, Any]]:
             additions.append({
                 "kind": "skill",
                 "name": name,
-                "detail": "",
+                "detail": "enabled" if is_runtime_skill_enabled(extension_id, name, record=record) else "disabled",
                 "native_eligible": True,
                 "native_exposed": native_harness_exposed(extension_id, "skill", name, record=record),
             })
@@ -6343,6 +6407,23 @@ def extension_harness_additions(record: dict[str, Any]) -> list[dict[str, Any]]:
             "native_exposed": native_harness_exposed(extension_id, "mcp", name, record=record),
         })
     return additions
+
+
+def extension_runtime_skills(extension_id: str) -> list[dict[str, Any]]:
+    """Skills an extension provides, with current session-exposure state — for
+    the Settings UI."""
+    record = get_extension(extension_id)
+    if record is None:
+        raise ExtensionError("Extension not installed")
+    entrypoints = record["manifest"].get("entrypoints", {})
+    return [
+        {
+            "name": item["name"],
+            "enabled": is_runtime_skill_enabled(extension_id, item["name"], record=record),
+        }
+        for item in entrypoints.get("skills") or []
+        if isinstance(item, dict) and item.get("name")
+    ]
 
 
 def extension_mcp_servers(extension_id: str) -> list[dict[str, Any]]:

@@ -386,6 +386,8 @@
   "settings.extensionsUiSurfacesHelp": "Botões ou páginas que esta extensão adiciona ao Better Agent.",
   "settings.extensionsMcpServers": "Ferramentas do agente",
   "settings.extensionsMcpServersHelp": "Servidores MCP expostos como ferramentas às execuções do Claude, Codex ou Gemini.",
+  "settings.extensionsSkills": "Habilidades do agente",
+  "settings.extensionsSkillsHelp": "Habilidades expostas às sessões como habilidades de execução. Habilidades desmarcadas ficam ocultas em todas as execuções.",
   "settings.extensionsRemoteServices": "Serviços remotos",
   "settings.extensionsRemoteServicesHelp": "Serviços externos que esta extensão declara para lógica proprietária ou hospedada.",
   "settings.extensionsInstructions": "Instruções de prompt",

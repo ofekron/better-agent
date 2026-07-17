@@ -954,6 +954,7 @@ interface ExtensionConfigRow {
   internalLlmTasks: string[];
   userInstructions: string;
   mcp: Array<{ name: string; label: string; enabled: boolean }>;
+  skills: Array<{ name: string; enabled: boolean }>;
   remoteServices: ExtensionRemoteService[];
   settingsSchema: SettingSpec[];
   settingsValues: Record<string, unknown>;
@@ -1186,6 +1187,7 @@ export function ExtensionUiSettingsSection() {
               : [],
             userInstructions: typeof cfg.user_instructions === "string" ? cfg.user_instructions : "",
             mcp: Array.isArray(cfg.mcp) ? cfg.mcp : [],
+            skills: Array.isArray(cfg.skills) ? cfg.skills : [],
             remoteServices: Array.isArray(cfg.remote_services) ? cfg.remote_services : [],
             settingsSchema: Array.isArray(cfg.settings?.schema) ? cfg.settings.schema : [],
             settingsValues: cfg.settings?.values || {},
@@ -1271,6 +1273,31 @@ export function ExtensionUiSettingsSection() {
       void patch(`/api/extensions/${encodeURIComponent(id)}/mcp/${encodeURIComponent(server)}/enabled`, {
         enabled: next,
       });
+    },
+    [patch],
+  );
+
+  const toggleSkill = useCallback(
+    (id: string, skill: string, next: boolean) => {
+      setRows((prev) =>
+        prev.map((r) =>
+          r.id === id
+            ? { ...r, skills: r.skills.map((s) => (s.name === skill ? { ...s, enabled: next } : s)) }
+            : r,
+        ),
+      );
+      void patch(
+        `/api/extensions/${encodeURIComponent(id)}/skills/${encodeURIComponent(skill)}/enabled`,
+        { enabled: next },
+        () =>
+          setRows((prev) =>
+            prev.map((r) =>
+              r.id === id
+                ? { ...r, skills: r.skills.map((s) => (s.name === skill ? { ...s, enabled: !next } : s)) }
+                : r,
+            ),
+          ),
+      );
     },
     [patch],
   );
@@ -1504,6 +1531,7 @@ export function ExtensionUiSettingsSection() {
         row.id,
         row.description,
         ...row.mcp.flatMap((server) => [server.name, server.label]),
+        ...row.skills.map((skill) => skill.name),
         ...row.frontendModules.flatMap((module) => [module.slot, module.id, module.label]),
         ...row.harnessAdditions.flatMap((item) => [item.name, item.detail ?? ""]),
         ...row.remoteServices.flatMap((service) => [service.name, service.base_url, service.purpose]),
@@ -1710,6 +1738,23 @@ export function ExtensionUiSettingsSection() {
                       onChange={(e) => toggleMcp(row.id, server.name, e.target.checked)}
                     />
                     {server.label}
+                  </label>
+                ))}
+              </ExtensionConfigGroup>
+            )}
+            {row.skills.length > 0 && (
+              <ExtensionConfigGroup
+                title={t("settings.extensionsSkills")}
+                description={t("settings.extensionsSkillsHelp")}
+              >
+                {row.skills.map((skill) => (
+                  <label key={skill.name} className="extension-ui-settings-toggle">
+                    <input
+                      type="checkbox"
+                      checked={skill.enabled}
+                      onChange={(e) => toggleSkill(row.id, skill.name, e.target.checked)}
+                    />
+                    {skill.name}
                   </label>
                 ))}
               </ExtensionConfigGroup>

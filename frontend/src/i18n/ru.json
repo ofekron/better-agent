@@ -386,6 +386,8 @@
   "settings.extensionsUiSurfacesHelp": "Кнопки или страницы, которые это расширение добавляет в Better Agent.",
   "settings.extensionsMcpServers": "Инструменты агента",
   "settings.extensionsMcpServersHelp": "MCP-серверы, предоставляемые как инструменты запускам Claude, Codex или Gemini.",
+  "settings.extensionsSkills": "Навыки агента",
+  "settings.extensionsSkillsHelp": "Навыки, доступные сессиям как навыки времени выполнения. Неотмеченные навыки скрыты во всех запусках.",
   "settings.extensionsRemoteServices": "Удалённые сервисы",
   "settings.extensionsRemoteServicesHelp": "Внешние сервисы, объявляемые этим расширением для проприетарной или хостинговой логики.",
   "settings.extensionsInstructions": "Инструкции для промпта",

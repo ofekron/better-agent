@@ -386,6 +386,8 @@
   "settings.extensionsUiSurfacesHelp": "此扩展添加到 Better Agent 的按钮或页面。",
   "settings.extensionsMcpServers": "Agent 工具",
   "settings.extensionsMcpServersHelp": "作为工具暴露给 Claude、Codex 或 Gemini 运行的 MCP 服务器。",
+  "settings.extensionsSkills": "代理技能",
+  "settings.extensionsSkillsHelp": "作为运行时技能暴露给会话的技能。未勾选的技能在所有运行中均被隐藏。",
   "settings.extensionsRemoteServices": "远程服务",
   "settings.extensionsRemoteServicesHelp": "此扩展为专有或托管逻辑声明的外部服务。",
   "settings.extensionsInstructions": "Prompt 指令",
