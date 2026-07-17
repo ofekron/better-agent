@@ -1,6 +1,7 @@
 import json
 import os
 import resource
+import signal
 import shutil
 import subprocess
 import sqlite3
@@ -325,6 +326,44 @@ with store.journal_guard(root, path):
     store.flush_writer_projection(failure_root, failure_path)
     _, failure_retried = store.load(failure_root, failure_path)
     assert failure_retried["scanned_bytes"] == 0, failure_retried
+
+    kill_writer = r'''
+import os, signal, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from event_ingester import EventIngester
+import hydration_index_store as store
+root, phase = sys.argv[2], sys.argv[3]
+ingester = EventIngester()
+if phase == "before-chain":
+    ingester._persist_chain_head_locked = lambda *_a, **_k: os.kill(os.getpid(), signal.SIGKILL)
+else:
+    store.flush_writer_projection = lambda *_a, **_k: os.kill(os.getpid(), signal.SIGKILL)
+ingester.ingest(
+    root, root, "agent_message", {"uuid": phase},
+    source="sigkill-test", msg_id="message",
+)
+ingester.close(root)
+raise AssertionError("failpoint did not terminate process")
+'''
+    for phase in ("before-chain", "before-projection"):
+        kill_root = f"sigkill-{phase}"
+        kill_path = Path(HOME) / "sessions" / kill_root / "events.jsonl"
+        kill_path.parent.mkdir(parents=True)
+        kill_path.write_bytes(_row(kill_root, 1))
+        store.load(kill_root, kill_path)
+        baseline_size = kill_path.stat().st_size
+        killed = subprocess.run([
+            sys.executable, "-c", kill_writer,
+            str(Path(__file__).resolve().parents[1]), kill_root, phase,
+        ], env={**os.environ, "BETTER_AGENT_HOME": HOME})
+        assert killed.returncode == -signal.SIGKILL, (phase, killed.returncode)
+        with store._receipts_lock:
+            store._append_receipts.clear()
+        recovered_offsets, recovered_metrics = store.load(kill_root, kill_path)
+        assert recovered_metrics["cold"] == 0, (phase, recovered_metrics)
+        assert recovered_metrics["scanned_bytes"] == kill_path.stat().st_size - baseline_size
+        assert recovered_offsets[kill_root][-1] == baseline_size
 
     guard_root = "guard-root"
     event_ingester.ingest(
