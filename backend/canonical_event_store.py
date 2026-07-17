@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import queue
 import sqlite3
 import threading
@@ -11,6 +12,8 @@ from pathlib import Path
 from typing import Any
 
 from canonical_event import CanonicalFact, CommittedFact, SourceOrder, canonical_json
+
+logger = logging.getLogger(__name__)
 
 
 class CanonicalStoreError(RuntimeError):
@@ -27,6 +30,10 @@ class CommitAck:
     duplicate: bool
     canonical_seq: int
     acceptance_ticket: int
+    # True iff an upsert rewrote an existing fact's content in place
+    # (same canonical_seq, new content-derived columns). Callers use it
+    # to invalidate downstream projections that already consumed the seq.
+    rewritten: bool = False
 
 
 @dataclass(frozen=True)
@@ -281,7 +288,11 @@ class CanonicalEventStore:
                         fact.source_order.generation, fact.source_order.sequence,
                     ),
                 )
-                return CommitAck(True, False, int(existing[0]), ticket)
+                logger.warning(
+                    "canonical upsert rewrote fact in place: root_id=%s canonical_seq=%d payload_type=%s content_hash %s -> %s",
+                    fact.root_id, int(existing[0]), fact.payload_type, existing[2], fact.content_hash,
+                )
+                return CommitAck(True, False, int(existing[0]), ticket, rewritten=True)
             return CommitAck(True, True, int(existing[0]), ticket)
         head = connection.execute(
             "SELECT canonical_seq FROM root_heads WHERE root_id=? AND root_generation=?", (fact.root_id, fact.root_generation),

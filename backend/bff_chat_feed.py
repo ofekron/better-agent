@@ -53,6 +53,10 @@ def _cursors_path() -> Path:
     return _state_dir() / "cursors.json"
 
 
+def _resets_path() -> Path:
+    return _state_dir() / "pending-resets.json"
+
+
 class ChatFeedClient:
     def __init__(
         self,
@@ -63,6 +67,11 @@ class ChatFeedClient:
         self._source_reader = source_reader or runtime_service.projection_source
         self._current_turn_feed = current_turn_feed or CurrentTurnFeed()
         self._cursors: dict[str, int] = {}
+        # Roots whose projection must be dropped before the next admit:
+        # upstream rewrote canonical fact content at/behind our consumed
+        # cursor. Durable so a crash between the rewrite frame and the
+        # re-pull can't strand a stale projection.
+        self._pending_resets: set[str] = set()
         self._dirty: set[str] = set()
         self._wake = asyncio.Event()
         self._connected = False
@@ -75,6 +84,7 @@ class ChatFeedClient:
     async def start(self) -> None:
         self._stopping = False
         self._cursors = await asyncio.to_thread(self._load_cursors)
+        self._pending_resets = await asyncio.to_thread(self._load_resets)
         self._current_turn_feed.start()
         self._runner = asyncio.create_task(self._run(), name="bff-chat-feed")
 
@@ -109,9 +119,11 @@ class ChatFeedClient:
                     backoff = 1.0
                     # Catch up every known root on (re)connect: advances
                     # broadcast while disconnected were never queued.
-                    self.mark_dirty(*self._cursors.keys())
+                    # Pending resets ride along — their cursor entry was
+                    # already dropped, so they aren't in _cursors.
+                    self.mark_dirty(*self._cursors.keys(), *self._pending_resets)
                     async for raw in upstream:
-                        self._handle_frame(raw)
+                        await self._handle_frame(raw)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -140,7 +152,7 @@ class ChatFeedClient:
             additional_headers=headers,
         )
 
-    def _handle_frame(self, raw: str | bytes) -> None:
+    async def _handle_frame(self, raw: str | bytes) -> None:
         try:
             frame = json.loads(raw)
         except (ValueError, UnicodeDecodeError):
@@ -152,12 +164,46 @@ class ChatFeedClient:
         if frame_type == "raw_event":
             self._current_turn_feed.submit(frame)
             return
+        if frame_type == "canonical_rewrite":
+            await self._handle_rewrite_frame(frame)
+            return
         if frame_type != "canonical_advance":
             return
         roots = frame.get("roots")
         if not isinstance(roots, list):
             return
         self.mark_dirty(*(r for r in roots if isinstance(r, str) and r))
+
+    async def _handle_rewrite_frame(self, frame: dict[str, Any]) -> None:
+        """Upstream rewrote committed canonical fact content in place.
+        If the rewrite landed at/behind our consumed cursor, everything
+        we admitted for that root is suspect: drop the cursor and flag
+        the root for a projection reset on the next pull."""
+        rewrites = frame.get("rewrites")
+        if not isinstance(rewrites, dict):
+            return
+        stale: list[str] = []
+        for root_id, seq in rewrites.items():
+            if not isinstance(root_id, str) or not root_id:
+                continue
+            if not isinstance(seq, int) or isinstance(seq, bool) or seq < 1:
+                continue
+            if self._cursors.get(root_id, 0) < seq and root_id not in self._pending_resets:
+                # Rewrite is ahead of what we consumed — the normal
+                # pull will pick up the current content; nothing stale.
+                continue
+            stale.append(root_id)
+        if not stale:
+            return
+        for root_id in stale:
+            self._pending_resets.add(root_id)
+            self._cursors.pop(root_id, None)
+        # Persist reset intent BEFORE the cursor drop: reversed, a crash
+        # in between leaves a rewound cursor whose re-pull is skipped by
+        # the projection's durable watermarks — silent staleness.
+        await asyncio.to_thread(self._persist_resets)
+        await asyncio.to_thread(self._persist_cursors)
+        self.mark_dirty(*stale)
 
     def mark_dirty(self, *roots: str) -> None:
         if not roots:
@@ -186,18 +232,26 @@ class ChatFeedClient:
                     logger.exception("chat feed pull failed for %s", root_id)
 
     async def pull_now(self, root_id: str) -> None:
-        task = self._pull_tasks.get(root_id)
-        if task is None:
-            task = asyncio.create_task(
-                self._pull_root(root_id),
-                name=f"bff-chat-feed-pull-{root_id[:8]}",
-            )
-            self._pull_tasks[root_id] = task
-        try:
-            await task
-        finally:
-            if self._pull_tasks.get(root_id) is task:
-                self._pull_tasks.pop(root_id, None)
+        while True:
+            task = self._pull_tasks.get(root_id)
+            joined = task is not None
+            if task is None:
+                task = asyncio.create_task(
+                    self._pull_root(root_id),
+                    name=f"bff-chat-feed-pull-{root_id[:8]}",
+                )
+                self._pull_tasks[root_id] = task
+            try:
+                await task
+            finally:
+                if self._pull_tasks.get(root_id) is task:
+                    self._pull_tasks.pop(root_id, None)
+            # A joined in-flight pull predates a rewrite reset and never
+            # applied it — run a fresh pull so the reset lands now. A
+            # pull we started ourselves leaves the reset pending only on
+            # failure; the next advance retries, don't spin here.
+            if not joined or root_id not in self._pending_resets:
+                return
 
     async def _pull_root(self, root_id: str) -> None:
         cursor = self._cursors.get(root_id, 0)
@@ -208,6 +262,10 @@ class ChatFeedClient:
             if not isinstance(page, dict) or page.get("found") is not True:
                 self._cursors.pop(root_id, None)
                 await asyncio.to_thread(self._persist_cursors)
+                if root_id in self._pending_resets:
+                    # Root is gone upstream — nothing left to reset.
+                    self._pending_resets.discard(root_id)
+                    await asyncio.to_thread(self._persist_resets)
                 return
             provider = page.get("provider_kind")
             if provider not in _PROVIDER_KINDS:
@@ -216,6 +274,26 @@ class ChatFeedClient:
                     root_id,
                 )
                 return
+            if root_id in self._pending_resets:
+                logger.warning(
+                    "chat feed: canonical rewrite behind consumed cursor for %s; "
+                    "dropping projection and rebuilding from seq 0",
+                    root_id,
+                )
+                await asyncio.to_thread(
+                    chat_projection_ingestion.reset_root_projection,
+                    root_id, provider=provider,
+                )
+                self._pending_resets.discard(root_id)
+                await asyncio.to_thread(self._persist_resets)
+                # A pull that was already in flight when the rewrite
+                # frame landed may have re-advanced the cursor; the
+                # rebuild must re-admit from the very beginning.
+                if cursor != 0:
+                    cursor = 0
+                    self._cursors.pop(root_id, None)
+                    await asyncio.to_thread(self._persist_cursors)
+                    continue
             facts = page.get("facts")
             for fact in facts if isinstance(facts, list) else []:
                 try:
@@ -239,6 +317,27 @@ class ChatFeedClient:
                 return
 
     # ── cursor persistence ────────────────────────────────────────
+
+    def _load_resets(self) -> set[str]:
+        try:
+            raw = json.loads(_resets_path().read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return set()
+        except (OSError, ValueError):
+            logger.warning("chat feed: pending-resets file unreadable; ignoring")
+            return set()
+        if not isinstance(raw, list):
+            logger.warning("chat feed: pending-resets file malformed; ignoring")
+            return set()
+        return {root for root in raw if isinstance(root, str) and root}
+
+    def _persist_resets(self) -> None:
+        directory = _state_dir()
+        directory.mkdir(parents=True, exist_ok=True)
+        path = _resets_path()
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(sorted(self._pending_resets)), encoding="utf-8")
+        os.replace(tmp, path)
 
     def _load_cursors(self) -> dict[str, int]:
         try:

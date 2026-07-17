@@ -9304,11 +9304,19 @@ async def bff_runtime_feed(websocket: WebSocket):
                 return_when=asyncio.FIRST_COMPLETED,
             )
             if advance_task in done:
-                roots = advance_task.result()
-                await websocket.send_json({
-                    "type": "canonical_advance",
-                    "roots": sorted(roots),
-                })
+                roots, rewrites = advance_task.result()
+                # Rewrite frame FIRST: the BFF must drop its stale
+                # cursor/projection before the advance triggers a pull.
+                if rewrites:
+                    await websocket.send_json({
+                        "type": "canonical_rewrite",
+                        "rewrites": rewrites,
+                    })
+                if roots:
+                    await websocket.send_json({
+                        "type": "canonical_advance",
+                        "roots": sorted(roots),
+                    })
                 advance_task = asyncio.ensure_future(subscriber.wait_drain())
             if raw_task in done:
                 frame = raw_task.result()
@@ -12964,6 +12972,9 @@ async def on_startup():
     canonical_runtime_journal_module.set_advance_observer(
         runtime_feed_channel.publish_advance
     )
+    canonical_runtime_journal_module.set_rewrite_observer(
+        runtime_feed_channel.publish_rewrite
+    )
     journal = canonical_runtime_journal()
     await asyncio.to_thread(journal.resolve_pending_deletions)
     import ambient_mcp_broker
@@ -13705,6 +13716,7 @@ async def on_shutdown():
         import canonical_runtime_journal as canonical_runtime_journal_module
         from runtime_feed_channel import runtime_feed_channel
         canonical_runtime_journal_module.set_advance_observer(None)
+        canonical_runtime_journal_module.set_rewrite_observer(None)
         runtime_feed_channel.unbind()
     except Exception:
         logger.exception("canonical feed channel shutdown failed")

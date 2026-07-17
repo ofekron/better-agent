@@ -265,6 +265,13 @@ class CanonicalChatProjectionService:
         current = self._require(authority)
         return self._call(current, "projection_cursor")
 
+    def delete_root(self, authority: ProjectionAuthority) -> None:
+        current = self._require(authority)
+        try:
+            self._store(current).delete_root(current.root_id)
+        except ChatProjectionStoreError as exc:
+            self._raise(exc)
+
     def rebuild(self, authority: ProjectionAuthority) -> int:
         current = self._require(authority)
         if current.store_kind != "jsonl":

@@ -138,6 +138,26 @@ def admit_canonical_fact(fact: dict[str, Any], *, provider: str) -> None:
     ))
 
 
+def reset_root_projection(root_id: str, *, provider: str) -> None:
+    """Drop a root's entire chat projection so it rebuilds from seq 0.
+
+    Used when upstream canonical fact content was rewritten in place at
+    a seq the projection already consumed: stale commits carry durable
+    watermarks that would make re-admission of the rewritten facts a
+    skip, so the whole root must be cleared before re-pulling."""
+    if provider not in _PROVIDER_KINDS:
+        raise ValueError("canonical provider identity is invalid")
+    if not isinstance(root_id, str) or not root_id:
+        raise ValueError("root_id must be a non-empty string")
+    service, catalog = _instances()
+    root_generation = catalog.root_generation(root_id)
+    authority = service.register(
+        provider=provider, session_id=root_id, root_id=root_id,
+        root_generation=root_generation, store_kind="jsonl",
+    )
+    service.delete_root(authority)
+
+
 def close() -> None:
     global _service, _catalog, _home
     with _lock:

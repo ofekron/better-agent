@@ -62,15 +62,32 @@ def test_channel_fanout_and_coalescing() -> None:
         thread = threading.Thread(target=burst)
         thread.start()
         thread.join()
-        roots_first = await asyncio.wait_for(first.wait_drain(), timeout=5)
-        roots_second = await asyncio.wait_for(second.wait_drain(), timeout=5)
+        roots_first, rewrites_first = await asyncio.wait_for(first.wait_drain(), timeout=5)
+        roots_second, rewrites_second = await asyncio.wait_for(second.wait_drain(), timeout=5)
         check("burst coalesces to one dirty-set per subscriber",
               roots_first == {"root-a", "root-b"} and roots_second == {"root-a", "root-b"})
+        check("advance-only burst carries no rewrites",
+              rewrites_first == {} and rewrites_second == {})
+
+        def rewrite_burst() -> None:
+            channel.publish_rewrite("root-a", 7)
+            channel.publish_rewrite("root-a", 3)
+            channel.publish_rewrite("root-a", 9)
+            channel.publish_rewrite("root-b", 2)
+            channel.publish_rewrite("", 1)
+            channel.publish_rewrite("root-c", 0)
+
+        thread = threading.Thread(target=rewrite_burst)
+        thread.start()
+        thread.join()
+        _, rewrites_first = await asyncio.wait_for(first.wait_drain(), timeout=5)
+        check("rewrites coalesce to the lowest seq per root, invalid dropped",
+              rewrites_first == {"root-a": 3, "root-b": 2})
 
         channel.detach(second)
         channel.publish_advance("root-c", 4)
         await asyncio.sleep(0)
-        roots_first = await asyncio.wait_for(first.wait_drain(), timeout=5)
+        (roots_first, _) = await asyncio.wait_for(first.wait_drain(), timeout=5)
         check("detached subscriber receives nothing; attached receives root-c",
               roots_first == {"root-c"} and not second.dirty)
 
@@ -162,7 +179,7 @@ def test_journal_fires_advance_observer() -> None:
             data={"uuid": "u2", "type": "assistant",
                   "message": {"role": "assistant",
                               "content": [{"type": "text", "text": "again"}]}},
-            source="provider_stream", msg_id="m1", event_id="u2", turn_id="m1",
+            source="provider_stream", run_id=None, msg_id="m1", turn_id="m1",
         )
         check("authoritative mirror_event fires advance observer",
               calls[-1:] == [("feed-root", 2)])
@@ -170,7 +187,7 @@ def test_journal_fires_advance_observer() -> None:
         journal.mirror_event(
             root_id="never-cutover", sid="never-cutover", seq=1,
             event_type="agent_message", data={"uuid": "u3"},
-            source="provider_stream", msg_id=None, event_id="u3", turn_id=None,
+            source="provider_stream", run_id=None, msg_id=None, turn_id=None,
         )
         check("pre-cutover mirror_event still announces the root",
               calls[-1:] == [("never-cutover", 1)])
@@ -178,11 +195,46 @@ def test_journal_fires_advance_observer() -> None:
         crj.set_advance_observer(None)
 
 
+def test_journal_fires_rewrite_observer_on_gap_fill_rewrite() -> None:
+    rewrites: list[tuple[str, int]] = []
+    crj.set_rewrite_observer(lambda root, seq: rewrites.append((root, seq)))
+    try:
+        def session(text: str) -> dict:
+            return {
+                "id": "rw-root",
+                "messages": [
+                    {"id": "m1", "seq": 0, "role": "user", "content": text},
+                ],
+            }
+
+        first = crj.CanonicalRuntimeJournal(
+            catalog_path=_TMP_HOME_PATH / "rw-authority.sqlite",
+        )
+        first.ensure_cutover("rw-root", rows=[], session=session("original"))
+        check("plain cutover fires no rewrite observer", rewrites == [])
+        first.close()
+
+        # Authority reset: a fresh catalog re-derives everything from
+        # scratch and collides with the fact already committed under the
+        # same source identity but different content — the gap-fill
+        # upsert rewrites in place and must announce it.
+        second = crj.CanonicalRuntimeJournal(
+            catalog_path=_TMP_HOME_PATH / "rw-authority-reset.sqlite",
+        )
+        second.ensure_cutover("rw-root", rows=[], session=session("rewritten"))
+        second.close()
+        check("gap-fill rewrite fires rewrite observer with lowest seq",
+              rewrites == [("rw-root", 1)])
+    finally:
+        crj.set_rewrite_observer(None)
+
+
 if __name__ == "__main__":
     try:
         test_channel_fanout_and_coalescing()
         test_raw_event_ordered_delivery_and_filter()
         test_journal_fires_advance_observer()
+        test_journal_fires_rewrite_observer_on_gap_fill_rewrite()
     finally:
         shutil.rmtree(_TMP_HOME, ignore_errors=True)
     if _failures:

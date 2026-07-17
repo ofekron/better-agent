@@ -145,9 +145,7 @@ def _pop_bff_cursor(session_id: str) -> bool:
 
 def _run_bump_generation(args: argparse.Namespace) -> int:
     from canonical_runtime_journal import canonical_runtime_journal
-    from chat_projection_service import CanonicalChatProjectionService
-    from chat_projection_source_catalog import ChatProjectionSourceCatalog
-    from chat_projection_store_jsonl import JsonlChatProjectionStore
+    import chat_projection_ingestion
     import session_store
 
     session_id = args.session_id
@@ -173,16 +171,7 @@ def _run_bump_generation(args: argparse.Namespace) -> int:
         if kind in {"claude", "codex", "gemini"}:
             provider = kind
 
-    catalog = ChatProjectionSourceCatalog()
-    service = CanonicalChatProjectionService()
-    bff_generation = catalog.root_generation(session_id)
-    bff_authority = service.register(
-        provider=provider, session_id=session_id, root_id=session_id,
-        root_generation=bff_generation, store_kind="jsonl",
-    )
-    bff_store_path = bff_authority.store_path
     cursor_path = _cursors_json_path()
-    print(f"  BFF projection store: {bff_store_path}")
     print(f"  BFF feed cursor file: {cursor_path}")
 
     if not args.apply:
@@ -204,12 +193,11 @@ def _run_bump_generation(args: argparse.Namespace) -> int:
         f"authority={after.authority if after else '?'!r}",
     )
 
-    bff_store = JsonlChatProjectionStore(bff_store_path)
     try:
-        bff_store.delete_root(session_id)
+        chat_projection_ingestion.reset_root_projection(session_id, provider=provider)
         print(f"  invalidated BFF projection store for {session_id}")
     finally:
-        bff_store.close()
+        chat_projection_ingestion.close()
 
     if _pop_bff_cursor(session_id):
         print(f"  reset BFF feed cursor for {session_id}")

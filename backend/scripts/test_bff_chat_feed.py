@@ -49,16 +49,17 @@ def digest(value: str) -> str:
     return hashlib.sha256(value.encode()).hexdigest()
 
 
-def wire_fact(root_id: str, index: int) -> dict:
+def wire_fact(root_id: str, index: int, text: str | None = None) -> dict:
+    text = text if text is not None else f"text-{index}"
     return {
         "root_id": root_id,
         "sid": root_id,
         "source": "provider_stream",
         "source_stream_id": f"run-{root_id}",
         "source_event_id": f"event-{index}",
-        "content_hash": digest(f"content-{index}"),
+        "content_hash": digest(text),
         "payload_type": "assistant_output",
-        "payload": {"message_id": "m1", "text": f"text-{index}"},
+        "payload": {"message_id": "m1", "text": text},
         "turn_id": "m1",
     }
 
@@ -97,14 +98,25 @@ class FailingSource:
         raise RuntimeServiceError(503, "runtime unavailable")
 
 
-def admitted_count(root_id: str) -> int:
+def admitted_facts(root_id: str) -> list:
     service, catalog = chat_projection_ingestion._instances()
     generation = catalog.root_generation(root_id)
     authority = service.register(
         provider="claude", session_id=root_id, root_id=root_id,
         root_generation=generation, store_kind="jsonl",
     )
-    return len(service.read_facts(authority))
+    return service.read_facts(authority)
+
+
+def admitted_count(root_id: str) -> int:
+    return len(admitted_facts(root_id))
+
+
+def admitted_texts(root_id: str) -> list[str]:
+    return [
+        fact.canonical_fact.get("payload", {}).get("text")
+        for fact in admitted_facts(root_id)
+    ]
 
 
 def test_pull_admits_pages_and_persists_cursor() -> None:
@@ -198,17 +210,70 @@ def test_deleted_root_drops_cursor() -> None:
 
 
 def test_frames_mark_dirty_and_malformed_frames_drop() -> None:
-    client = bff_chat_feed.ChatFeedClient(source_reader=FakeSource({}))
-    client._handle_frame(json.dumps({"type": "canonical_advance", "roots": ["r1", "", 3, "r2"]}))
-    check("advance frame marks valid roots dirty", client._dirty == {"r1", "r2"})
-    client._handle_frame("{not json")
-    client._handle_frame(json.dumps({"type": "other", "roots": ["r3"]}))
-    client._handle_frame(json.dumps({"type": "canonical_advance", "roots": "r4"}))
-    check("malformed and foreign frames are ignored", client._dirty == {"r1", "r2"})
-    status = client.status("r1")
-    check("status reports pending pull and cursor",
-          status["pending_pull"] is True and status["cursor"] == 0
-          and status["connected"] is False)
+    async def run() -> None:
+        client = bff_chat_feed.ChatFeedClient(source_reader=FakeSource({}))
+        await client._handle_frame(json.dumps({"type": "canonical_advance", "roots": ["r1", "", 3, "r2"]}))
+        check("advance frame marks valid roots dirty", client._dirty == {"r1", "r2"})
+        await client._handle_frame("{not json")
+        await client._handle_frame(json.dumps({"type": "other", "roots": ["r3"]}))
+        await client._handle_frame(json.dumps({"type": "canonical_advance", "roots": "r4"}))
+        check("malformed and foreign frames are ignored", client._dirty == {"r1", "r2"})
+        status = client.status("r1")
+        check("status reports pending pull and cursor",
+              status["pending_pull"] is True and status["cursor"] == 0
+              and status["connected"] is False)
+
+    asyncio.run(run())
+
+
+def test_rewrite_behind_cursor_resets_projection_and_rebuilds() -> None:
+    async def run() -> None:
+        root = "rewriteroot"
+        stale = FakeSource({
+            0: {
+                "found": True, "provider_kind": "claude",
+                "facts": [wire_fact(root, 1, text="stale")],
+                "next_seq": 1, "has_more": False,
+            },
+        })
+        client = bff_chat_feed.ChatFeedClient(source_reader=stale)
+        await client._pull_root(root)
+        check("stale content admitted before rewrite", admitted_texts(root) == ["stale"])
+
+        await client._handle_frame(json.dumps(
+            {"type": "canonical_rewrite", "rewrites": {root: 5}}
+        ))
+        check("rewrite ahead of cursor is not a reset",
+              root not in client._pending_resets and client._cursors.get(root) == 1)
+
+        await client._handle_frame(json.dumps(
+            {"type": "canonical_rewrite", "rewrites": {root: 1}}
+        ))
+        check("rewrite at/behind cursor drops cursor and flags reset",
+              root in client._pending_resets and root not in client._cursors
+              and root in client._dirty)
+        persisted = json.loads(bff_chat_feed._resets_path().read_text(encoding="utf-8"))
+        check("pending reset is durable", persisted == [root])
+
+        # The runtime now serves the rewritten content for the same
+        # source identity; without the projection reset, the durable
+        # watermark would skip it and the stale text would survive.
+        client._source_reader = FakeSource({
+            0: {
+                "found": True, "provider_kind": "claude",
+                "facts": [wire_fact(root, 1, text="rewritten")],
+                "next_seq": 1, "has_more": False,
+            },
+        })
+        await client.pull_now(root)
+        check("projection rebuilt with rewritten content only",
+              admitted_texts(root) == ["rewritten"])
+        check("reset consumed and cursor re-persisted",
+              root not in client._pending_resets and client._cursors.get(root) == 1)
+        persisted = json.loads(bff_chat_feed._resets_path().read_text(encoding="utf-8"))
+        check("durable reset cleared after rebuild", persisted == [])
+
+    asyncio.run(run())
 
 
 if __name__ == "__main__":
@@ -219,6 +284,7 @@ if __name__ == "__main__":
         test_missing_provider_kind_fails_closed()
         test_deleted_root_drops_cursor()
         test_frames_mark_dirty_and_malformed_frames_drop()
+        test_rewrite_behind_cursor_resets_projection_and_rebuilds()
         chat_projection_ingestion.close()
     finally:
         shutil.rmtree(_TMP_HOME, ignore_errors=True)

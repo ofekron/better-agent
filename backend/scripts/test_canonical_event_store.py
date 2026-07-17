@@ -86,10 +86,49 @@ def test_bulk_commit_is_atomic_and_generation_scoped():
     store.close()
 
 
+def test_upsert_rewrite_flags_ack_and_logs():
+    import logging
+
+    class _Capture(logging.Handler):
+        def __init__(self):
+            super().__init__()
+            self.records = []
+
+        def emit(self, record):
+            self.records.append(record)
+
+    handler = _Capture()
+    store_logger = logging.getLogger("canonical_event_store")
+    store_logger.addHandler(handler)
+    store = CanonicalEventStore(Path(HOME) / "upsert.sqlite")
+    try:
+        first = store.submit(fact(text="one"))
+        assert first.rewritten is False
+        same = store.submit_many([fact(text="one")], upsert=True)[0]
+        assert same.duplicate and same.rewritten is False
+        rewritten = store.submit_many([fact(text="two")], upsert=True)[0]
+        assert rewritten.committed and rewritten.rewritten is True
+        assert rewritten.canonical_seq == first.canonical_seq
+        rows = store.read("root", 0)
+        assert len(rows) == 1 and rows[0].fact.payload == {"text": "two"}
+        rewrite_logs = [
+            record for record in handler.records
+            if "rewrote fact in place" in record.getMessage()
+        ]
+        assert len(rewrite_logs) == 1
+        message = rewrite_logs[0].getMessage()
+        assert "root_id=root" in message and "canonical_seq=1" in message
+        assert "payload_type=assistant_output" in message
+    finally:
+        store_logger.removeHandler(handler)
+        store.close()
+
+
 if __name__ == "__main__":
     test_commit_ack_and_idempotency()
     test_same_source_order_different_content_fails_closed()
     test_barrier_linearizes_prior_acceptance()
     test_root_generation_scopes_identity_and_sequence()
     test_bulk_commit_is_atomic_and_generation_scoped()
+    test_upsert_rewrite_flags_ack_and_logs()
     print("canonical event store tests passed")

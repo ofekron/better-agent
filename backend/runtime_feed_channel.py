@@ -50,18 +50,24 @@ _RAW_FORWARD_TYPES = frozenset({
 class FeedSubscriber:
     def __init__(self) -> None:
         self.dirty: set[str] = set()
+        # root_id -> lowest rewritten canonical_seq since last drain.
+        # Coalesced by min: the subscriber only needs the earliest seq
+        # whose content changed to decide whether its cursor is stale.
+        self.rewrites: dict[str, int] = {}
         self.wake = asyncio.Event()
         self.raw: asyncio.Queue[dict] = asyncio.Queue()
         self.closed = False
 
-    async def wait_drain(self) -> set[str]:
+    async def wait_drain(self) -> tuple[set[str], dict[str, int]]:
         await self.wake.wait()
         self.wake.clear()
         if self.closed:
             raise ConnectionError("feed channel closed")
         roots = self.dirty
+        rewrites = self.rewrites
         self.dirty = set()
-        return roots
+        self.rewrites = {}
+        return roots, rewrites
 
 
 class RuntimeFeedChannel:
@@ -116,6 +122,32 @@ class RuntimeFeedChannel:
         def _fanout() -> None:
             for subscriber in subscribers:
                 subscriber.dirty.add(root_id)
+                subscriber.wake.set()
+
+        try:
+            loop.call_soon_threadsafe(_fanout)
+        except RuntimeError:
+            pass
+
+    def publish_rewrite(self, root_id: str, canonical_seq: int) -> None:
+        """Thread-safe: called from the journal writer's worker threads
+        when a gap-fill upsert rewrote committed fact content in place
+        at canonical_seq."""
+        if not isinstance(root_id, str) or not root_id:
+            return
+        if not isinstance(canonical_seq, int) or isinstance(canonical_seq, bool) or canonical_seq < 1:
+            return
+        with self._lock:
+            loop = self._loop
+            subscribers = list(self._subscribers)
+        if loop is None or not subscribers:
+            return
+
+        def _fanout() -> None:
+            for subscriber in subscribers:
+                current = subscriber.rewrites.get(root_id)
+                if current is None or canonical_seq < current:
+                    subscriber.rewrites[root_id] = canonical_seq
                 subscriber.wake.set()
 
         try:

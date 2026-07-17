@@ -41,6 +41,33 @@ def _notify_advance(root_id: str, journal_seq: int) -> None:
         pass
 
 
+# Rewrite observer: notified (root_id, canonical_seq) when a gap-fill
+# upsert rewrote an already-committed fact's content in place at
+# canonical_seq (the lowest rewritten seq per batch). Downstream
+# projections that consumed past that seq hold stale content and must
+# invalidate. Set by the runtime app at startup; must never raise into
+# the write path.
+_rewrite_observer = None
+_rewrite_observer_lock = threading.Lock()
+
+
+def set_rewrite_observer(observer) -> None:
+    global _rewrite_observer
+    with _rewrite_observer_lock:
+        _rewrite_observer = observer
+
+
+def _notify_rewrite(root_id: str, canonical_seq: int) -> None:
+    with _rewrite_observer_lock:
+        observer = _rewrite_observer
+    if observer is None:
+        return
+    try:
+        observer(root_id, canonical_seq)
+    except Exception:
+        pass
+
+
 class CanonicalRuntimeJournal:
     def __init__(self, catalog_path: Path | None = None) -> None:
         if catalog_path is None:
@@ -210,8 +237,10 @@ class CanonicalRuntimeJournal:
                 *canonical_facts_from_rows(normalized_rows),
             ]
             store = self._store()
+            rewritten_seqs: list[int] = []
             if facts:
-                store.submit_many(facts, upsert=True)
+                acks = store.submit_many(facts, upsert=True)
+                rewritten_seqs = [ack.canonical_seq for ack in acks if ack.rewritten]
             barrier = store.barrier(root_id, generation)
             journal_through_seq = max(
                 (int(row.get("seq") or 0) for row in rows), default=authority.journal_through_seq,
@@ -242,6 +271,8 @@ class CanonicalRuntimeJournal:
                     journal_through_seq=journal_through_seq,
                     message_heads=message_heads,
                 )
+        if rewritten_seqs:
+            _notify_rewrite(root_id, min(rewritten_seqs))
         _notify_advance(root_id, journal_through_seq)
         return generation
 
