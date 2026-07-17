@@ -18,7 +18,7 @@ import threading
 import time
 import uuid
 from bisect import bisect_right
-from collections import OrderedDict, deque
+from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -28,6 +28,7 @@ import perf
 from event_bus import BusEvent, EventBus, bus
 from event_shape import RENDER_EVENT_TYPES, frontend_events_from_journal_rows
 from event_ingester import event_ingester
+from keyed_lane_executor import KeyedLaneExecutor
 
 EVENT_JOURNAL_EVENT = "event_journal.event"
 EVENT_JOURNAL_TURN_MESSAGE_SET = "event_journal.turn_message_set"
@@ -266,113 +267,14 @@ def publish_event_sync(
     return event_journal_writer.submit_event_sync(event, timeout=timeout)
 
 
-class _RootExecutor(concurrent.futures.Executor):
-    def __init__(self, owner: "_KeyedSerialExecutor", root_id: str) -> None:
-        self._owner = owner
-        self._root_id = root_id
-
-    def submit(self, fn, /, *args, **kwargs):
-        return self._owner.submit(self._root_id, fn, *args, **kwargs)
-
-
-class _KeyedSerialExecutor:
-    """One dedicated worker thread per root, FIFO within that root.
-
-    Roots never share a thread, so a slow/backlogged root can never
-    starve another root's queued work behind a shared pool's capacity
-    (see the ensure_canonical_authority_sync starvation this replaced).
-    A root's thread is spun up lazily on first submission and torn
-    down once its queue drains, so idle sessions don't hold a thread
-    forever.
-    """
-
-    def __init__(self, thread_name_prefix: str = "ejw") -> None:
-        self._thread_name_prefix = thread_name_prefix
-        self._lock = threading.Lock()
-        self._drained = threading.Condition(self._lock)
-        self._queues: dict[str, deque[tuple[concurrent.futures.Future, object, tuple, dict]]] = {}
-        self._threads: dict[str, threading.Thread] = {}
-        self._adapters: dict[str, _RootExecutor] = {}
-        self._pending = 0
-        self._closed = False
-        perf.register_queue(f"{thread_name_prefix}.active_roots", self.active_roots_count)
-        perf.register_queue(f"{thread_name_prefix}.pending", self.pending_count)
-
-    def active_roots_count(self) -> int:
-        with self._lock:
-            return len(self._threads)
-
-    def pending_count(self) -> int:
-        with self._lock:
-            return self._pending
-
-    def executor(self, root_id: str) -> concurrent.futures.Executor:
-        with self._lock:
-            adapter = self._adapters.get(root_id)
-            if adapter is None:
-                adapter = _RootExecutor(self, root_id)
-                self._adapters[root_id] = adapter
-            return adapter
-
-    def submit(self, root_id: str, fn, /, *args, **kwargs):
-        future: concurrent.futures.Future = concurrent.futures.Future()
-        with self._lock:
-            if self._closed:
-                raise RuntimeError("cannot schedule new futures after shutdown")
-            queue = self._queues.setdefault(root_id, deque())
-            queue.append((future, fn, args, kwargs))
-            self._pending += 1
-            if root_id not in self._threads:
-                thread = threading.Thread(
-                    target=self._run_root,
-                    args=(root_id,),
-                    daemon=True,
-                    name=f"{self._thread_name_prefix}-{root_id}",
-                )
-                self._threads[root_id] = thread
-                thread.start()
-        return future
-
-    def _run_root(self, root_id: str) -> None:
-        while True:
-            with self._lock:
-                queue = self._queues.get(root_id)
-                if not queue:
-                    self._threads.pop(root_id, None)
-                    self._queues.pop(root_id, None)
-                    self._adapters.pop(root_id, None)
-                    self._drained.notify_all()
-                    return
-                future, fn, args, kwargs = queue.popleft()
-            if future.set_running_or_notify_cancel():
-                try:
-                    result = fn(*args, **kwargs)
-                except BaseException as exc:
-                    future.set_exception(exc)
-                else:
-                    future.set_result(result)
-            with self._lock:
-                self._pending -= 1
-                self._drained.notify_all()
-
-    def shutdown(self, wait: bool = True) -> None:
-        del wait
-        with self._lock:
-            self._closed = True
-            threads = list(self._threads.values())
-            while self._pending:
-                self._drained.wait()
-        for thread in threads:
-            thread.join()
-
-
 class EventJournalWriter:
     """Ownership-aware write facade for events.jsonl."""
 
     def __init__(self) -> None:
         self._bus = None
         self._closed = False
-        self._executor = _KeyedSerialExecutor(
+        self._executor = KeyedLaneExecutor(
+            lanes=("write", "read"),
             thread_name_prefix="ejw",
         )
         self._turn_messages: dict[tuple[str, str], str] = {}
@@ -508,7 +410,7 @@ class EventJournalWriter:
     async def _on_turn_message_set(self, bus_event: BusEvent) -> None:
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(
-            self._executor.executor(bus_event.root_id),
+            self._executor.executor(bus_event.root_id, lane="write"),
             self._set_turn_message,
             bus_event,
         )
@@ -534,7 +436,7 @@ class EventJournalWriter:
         """
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(
-            self._executor.executor(bus_event.root_id),
+            self._executor.executor(bus_event.root_id, lane="write"),
             self._finish_turn,
             bus_event,
         )
@@ -552,7 +454,7 @@ class EventJournalWriter:
         try:
             loop = asyncio.get_running_loop()
             written = await loop.run_in_executor(
-                self._executor.executor(bus_event.root_id),
+                self._executor.executor(bus_event.root_id, lane="write"),
                 self._write_bus_event,
                 bus_event,
             )
@@ -575,7 +477,7 @@ class EventJournalWriter:
         """
         if self._closed:
             raise EventJournalWriteError("event journal writer is closed")
-        future = self._executor.submit(event.root_id, self._append_event, event)
+        future = self._executor.submit(event.root_id, self._append_event, event, lane="write")
         if timeout == 0:
             # Fire-and-forget: schedule written/failed callbacks on
             # completion so downstream bookkeeping still fires.
@@ -602,7 +504,7 @@ class EventJournalWriter:
         """Queue a fact without requiring event-bus startup wiring."""
         if self._closed:
             raise EventJournalWriteError("event journal writer is closed")
-        future = self._executor.submit(event.root_id, self._append_event, event)
+        future = self._executor.submit(event.root_id, self._append_event, event, lane="write")
         try:
             written = await asyncio.wrap_future(future)
         except Exception as exc:
@@ -622,7 +524,7 @@ class EventJournalWriter:
                 (time.perf_counter() - enqueued) * 1000,
             )
             return event_ingester.cursor(root_id)
-        future = self._executor.submit(root_id, _cursor)
+        future = self._executor.submit(root_id, _cursor, lane="write")
         try:
             return int(future.result(timeout=timeout))
         except concurrent.futures.TimeoutError:
@@ -639,14 +541,14 @@ class EventJournalWriter:
                 (time.perf_counter() - enqueued) * 1000,
             )
             return event_ingester.cursor(root_id)
-        future = self._executor.submit(root_id, _cursor)
+        future = self._executor.submit(root_id, _cursor, lane="write")
         return int(await asyncio.wrap_future(future))
 
     def reconcile_ownership_sync(
         self, root_id: str, *, timeout: float = 30.0,
     ) -> int:
         """Resolve durable unattached rows using all currently known facts."""
-        future = self._executor.submit(root_id, self._reconcile_ownership, root_id)
+        future = self._executor.submit(root_id, self._reconcile_ownership, root_id, lane="write")
         try:
             return int(future.result(timeout=timeout))
         except concurrent.futures.TimeoutError:
@@ -671,7 +573,7 @@ class EventJournalWriter:
             session_manager.reconcile_through(root_id, barrier_seq)
             return barrier_seq
 
-        future = self._executor.submit(root_id, _run)
+        future = self._executor.submit(root_id, _run, lane="write")
         return int(await asyncio.wrap_future(future))
 
     def _reconcile_ownership(self, root_id: str) -> int:
@@ -742,7 +644,8 @@ class EventJournalWriter:
         """Recreate writer threads for a new lifespan in this process."""
         if not self._closed:
             return
-        self._executor = _KeyedSerialExecutor(
+        self._executor = KeyedLaneExecutor(
+            lanes=("write", "read"),
             thread_name_prefix="ejw",
         )
         self._closed = False
@@ -1350,7 +1253,7 @@ class EventJournalWriter:
         self, root_id: str, *, timeout: float = 120.0,
     ) -> int:
         future = self._executor.submit(
-            root_id, self._ensure_canonical_authority, root_id,
+            root_id, self._ensure_canonical_authority, root_id, lane="read",
         )
         return int(future.result(timeout=timeout))
 

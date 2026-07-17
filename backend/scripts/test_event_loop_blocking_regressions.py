@@ -1682,7 +1682,7 @@ SOURCE_GREP_CASES: tuple = (
      ),
     )),
     ('publish_event_sync_resolves_cwd_without_full_session_copy', (
-     ('grep', 'event_journal.py', (('def publish_event_sync(', 'class _RootExecutor('),),
+     ('grep', 'event_journal.py', (('def publish_event_sync(', 'class EventJournalWriter:'),),
       ('session_manager.get_file_ref_context(context_id or session_id)',),
       ('session_manager.get_lite(', 'session_manager.get('),
      ),
