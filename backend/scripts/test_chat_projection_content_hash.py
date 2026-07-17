@@ -31,9 +31,11 @@ Run with:
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
 import sys
+from pathlib import Path
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _BACKEND = os.path.dirname(_HERE)
@@ -44,7 +46,12 @@ import _test_home
 _TMP_HOME = _test_home.isolate("bc-test-chat-projection-content-hash-")
 
 import chat_projection_ingestion  # noqa: E402
-from chat_projection_store_sqlite import content_only_hash  # noqa: E402
+import bff_chat_feed  # noqa: E402
+from chat_projection_store import ProjectionCommit, SourceWatermark, TurnManifest  # noqa: E402
+from chat_projection_store_jsonl import _record_line  # noqa: E402
+from chat_projection_store_sqlite import (  # noqa: E402
+    SQLiteChatProjectionStore, canonical_json, content_only_hash,
+)
 
 PASS = "\x1b[32mPASS\x1b[0m"
 FAIL = "\x1b[31mFAIL\x1b[0m"
@@ -137,11 +144,64 @@ def test_admit_canonical_fact_content_hash_survives_misattributed_replay() -> No
     )
 
 
+def test_hash_contract_uses_one_versioned_cache_namespace() -> None:
+    root_id = "legacy-hash-contract-root"
+    legacy_fact = {
+        "event_id": "legacy-event", "provider": "claude", "turn_id": "legacy-turn",
+        "source_event_id": "legacy-event", "payload": {"text": "legacy"},
+    }
+    legacy_hash = hashlib.sha256(canonical_json(legacy_fact).encode("utf-8")).hexdigest()
+    legacy_request = ProjectionCommit(
+        root_id=root_id, root_generation=1, event_id="legacy-event",
+        content_hash=legacy_hash, canonical_fact=legacy_fact,
+        render_node={"type": "assistant_output"}, turn_id="legacy-turn",
+        message_id=None, parent_event_id=None, owner_scope="root",
+        manifest=TurnManifest("legacy-turn", 1, 1),
+        visible_delta={"event_id": "legacy-event"},
+        historical_revision={"event_id": "legacy-event", "content_hash": legacy_hash},
+        watermark=SourceWatermark("legacy-stream", 1, 1),
+    )
+    authority_id = hashlib.sha256(f"{root_id}\0{root_id}".encode("utf-8")).hexdigest()
+    legacy_path = Path(_TMP_HOME) / "chat" / "canonical-projections" / f"{authority_id}.jsonl"
+    legacy_path.parent.mkdir(parents=True, exist_ok=True)
+    select_line, select_hash = _record_line(
+        1, "0" * 64, "select_generation", {"root_id": root_id, "root_generation": 1},
+    )
+    commit_line, _ = _record_line(
+        2, select_hash, "commit",
+        {"request": SQLiteChatProjectionStore._commit_to_dict(legacy_request)},
+    )
+    legacy_path.write_bytes(select_line + commit_line)
+
+    root = Path(_TMP_HOME) / "app-state" / "chat-projection-cache-v2"
+    service, catalog = chat_projection_ingestion._instances()
+    generation = catalog.root_generation(root_id)
+    authority = service.register(
+        provider="claude", session_id=root_id, root_id=root_id,
+        root_generation=generation, store_kind="jsonl",
+    )
+    check("legacy full-hash journal is ignored", service.read_facts(authority) == [])
+    check(
+        "projection journals use the versioned cache root",
+        authority.store_path.parent == root / "canonical-projections",
+    )
+    check(
+        "projection authority uses the versioned cache root",
+        (root / "projection-authority.sqlite3").exists(),
+    )
+    check(
+        "source catalog uses the versioned cache root",
+        (root / "canonical-source-catalog.sqlite3").exists(),
+    )
+    check("feed cursors use the versioned cache root", bff_chat_feed._state_dir() == root / "feed")
+
+
 if __name__ == "__main__":
     try:
         test_content_only_hash_ignores_attribution_fields()
         test_content_only_hash_distinguishes_different_payload()
         test_admit_canonical_fact_content_hash_survives_misattributed_replay()
+        test_hash_contract_uses_one_versioned_cache_namespace()
     finally:
         chat_projection_ingestion.close()
         shutil.rmtree(_TMP_HOME, ignore_errors=True)

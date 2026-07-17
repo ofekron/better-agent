@@ -25,11 +25,11 @@ import websockets
 
 import chat_projection_ingestion
 from bff_current_turn_feed import CurrentTurnFeed
+from chat_projection_cache import projection_cache_root
 from chat_projection_store import ChatProjectionStoreError
 from bff_runtime_contract import BFF_SERVICE_TOKEN_HEADER
 from bff_runtime_service import RuntimeServiceError, runtime_service
 from bff_runtime_upstream import RuntimeUpstreamUnavailable, runtime_upstream
-from paths import ba_home
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +46,7 @@ SourceReader = Callable[..., Awaitable[dict[str, Any]]]
 
 
 def _state_dir() -> Path:
-    return ba_home() / "app-state" / "chat-feed-cache"
+    return projection_cache_root() / "feed"
 
 
 def _cursors_path() -> Path:

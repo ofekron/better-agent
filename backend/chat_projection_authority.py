@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Mapping
 from urllib.parse import quote
 
+from chat_projection_cache import projection_cache_root
 from chat_projection_store import ChatProjectionStoreError
 from chat_projection_store_owner import OwnerClient, serve_owner
 from chat_projection_store_owner_path import verify_anchored_file
@@ -276,8 +277,9 @@ class ProjectionAuthorityRegistry:
         self, path: Path | None = None, *, _test_connect_swap_basename: str | None = None,
     ) -> None:
         root = Path(os.path.abspath(ba_home().expanduser()))
-        self._projection_root = root / "chat" / "canonical-projections"
-        selected = path or root / "chat" / "projection-authority.sqlite3"
+        cache_root = projection_cache_root()
+        self._projection_root = cache_root / "canonical-projections"
+        selected = path or cache_root / "projection-authority.sqlite3"
         selected = Path(os.path.abspath(selected.expanduser()))
         if _test_connect_swap_basename is not None and (
             not _test_connect_swap_basename

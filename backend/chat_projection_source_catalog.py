@@ -6,6 +6,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from chat_projection_cache import projection_cache_root
 from paths import ba_home
 from chat_projection_store import ChatProjectionStoreError
 from chat_projection_store_owner import OwnerClient, serve_owner
@@ -168,7 +169,7 @@ class _SourceCatalogOwner:
 class ChatProjectionSourceCatalog:
     def __init__(self, path: Path | None = None) -> None:
         root = Path(os.path.abspath(ba_home().expanduser()))
-        selected = path or root / "chat" / "canonical-source-catalog.sqlite3"
+        selected = path or projection_cache_root() / "canonical-source-catalog.sqlite3"
         try:
             self._owner = OwnerClient(
                 root_path=root,

@@ -20,6 +20,7 @@ sys.path.insert(0, str(ROOT / "backend"))
 
 from chat_projection_authority import ProjectionAuthority, ProjectionAuthorityRegistry
 from chat_projection_authority import ProjectionAuthorityError
+from chat_projection_cache import projection_cache_root
 from chat_projection_service import CanonicalChatProjectionService, ProjectionServiceError
 from chat_projection_store import ProjectionCommit, SourceWatermark, TurnManifest
 from chat_projection_store_jsonl import JsonlChatProjectionStore
@@ -421,8 +422,8 @@ def test_registry_version_multiprocess_and_symlink_security() -> None:
     unsafe_parent.unlink()
 
     anchored = ProjectionAuthorityRegistry()
-    chat = HOME / "chat"
-    held = HOME / "chat-held"
+    chat = projection_cache_root()
+    held = HOME / "chat-projection-cache-held"
     outside_swap = Path(tempfile.mkdtemp(prefix="better-agent-authority-swap-"))
     chat.rename(held)
     chat.symlink_to(outside_swap, target_is_directory=True)
