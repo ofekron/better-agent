@@ -398,16 +398,19 @@ def test_idle_thread_is_torn_down_and_respawned() -> None:
         entry = executor._lanes_by_key[("key", "a")]
         first_thread = entry.thread
         deadline = time.monotonic() + 1
-        while entry.worker_alive and time.monotonic() < deadline:
+        while ("key", "a") in executor._lanes_by_key and time.monotonic() < deadline:
             time.sleep(0.01)
-        assert not entry.worker_alive
+        # Idle teardown removes the directory entry entirely (no unbounded
+        # growth for keys that go idle), not just the thread.
+        assert ("key", "a") not in executor._lanes_by_key
         first_thread.join(timeout=1)
         assert not first_thread.is_alive()
 
         second = executor.submit("key", lambda: "second", lane="a")
         assert second.result(timeout=1) == "second"
-        assert executor._lanes_by_key[("key", "a")] is entry
-        assert entry.thread is not first_thread
+        new_entry = executor._lanes_by_key[("key", "a")]
+        assert new_entry is not entry
+        assert new_entry.thread is not first_thread
     finally:
         executor.shutdown()
 
@@ -518,6 +521,44 @@ def test_stress_multi_producer_multi_key_multi_lane() -> None:
 # ---------------------------------------------------------------------------
 # Shutdown semantics
 # ---------------------------------------------------------------------------
+
+def test_concurrent_submit_and_shutdown_admission_is_atomic() -> None:
+    """submit() and shutdown() must fully serialize on the closed check --
+    every concurrent submit either raises RuntimeError before being
+    admitted, or is admitted and guaranteed to finish before
+    shutdown(wait=True) returns. No job may be silently dropped, hang, or
+    run after shutdown() has returned."""
+    for _ in range(30):
+        executor = KeyedLaneExecutor(lanes=("a",), thread_name_prefix="test-kle-race")
+        outcomes: list[tuple[str, object]] = []
+        lock = threading.Lock()
+
+        def worker(i: int) -> None:
+            try:
+                future = executor.submit("key", lambda: i, lane="a")
+            except RuntimeError:
+                with lock:
+                    outcomes.append(("rejected", i))
+                return
+            try:
+                result = future.result(timeout=2)
+                with lock:
+                    outcomes.append(("ran", result))
+            except Exception as exc:  # noqa: BLE001
+                with lock:
+                    outcomes.append(("error", exc))
+
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(16)]
+        for thread in threads:
+            thread.start()
+        executor.shutdown(wait=True)
+        for thread in threads:
+            thread.join(timeout=2)
+            assert not thread.is_alive(), "worker thread hung past shutdown"
+        assert len(outcomes) == 16, outcomes
+        for kind, value in outcomes:
+            assert kind in ("rejected", "ran"), (kind, value)
+
 
 def test_shutdown_drains_rejects_and_leaves_no_scheduler_state() -> None:
     executor = KeyedLaneExecutor(lanes=("a",), thread_name_prefix="test-kle-shutdown")
@@ -750,6 +791,7 @@ if __name__ == "__main__":
     test_idle_teardown_only_affects_idle_key_not_busy_key()
     test_stress_idle_respawn_race_no_lost_or_duplicated_work()
     test_stress_multi_producer_multi_key_multi_lane()
+    test_concurrent_submit_and_shutdown_admission_is_atomic()
     test_shutdown_drains_rejects_and_leaves_no_scheduler_state()
     test_shutdown_rejects_every_lane_not_just_the_one_with_work()
     test_shutdown_with_no_lanes_ever_created_is_a_no_op()

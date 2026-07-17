@@ -7,15 +7,23 @@ next submit. Only visited keys ever get a thread; nothing is
 pre-allocated per possible key.
 
 Different keys, and different lanes of the same key, never share a
-thread or block on each other: there is no lock that spans more than
-one (key, lane) pair. Each pair owns its own `threading.Condition`
-guarding only its own queue — submitting/dispatching work for one
-session can never be delayed by another session's (or another lane's)
-backlog. The directory of lanes is a plain dict published through
-`dict.setdefault`, which CPython guarantees is atomic, so discovering
-or publishing a new (key, lane) entry needs no lock of its own; once
-published, a `_Lane` object's identity never changes, only the state
-behind its own condition/queue does.
+thread and never block on each other's *work*: the actual submitted
+callable always runs with no lock held. Bookkeeping (enqueue, dequeue,
+spawn/teardown decisions, the closed flag) shares one small mutex
+across every (key, lane) pair, the same way `queue.Queue` protects its
+deque — cheap O(1) operations, never held across a blocking call or a
+submitted callable. Every `_Lane`'s `Condition` wraps that same mutex,
+so a lane blocked in `cv.wait()` releases it for every other lane and
+for `shutdown()`/`submit()` to proceed; only actual work execution is
+lock-free and fully isolated per (key, lane).
+
+Sharing one mutex for bookkeeping (rather than per-lane locks with an
+ad hoc "closed" admission race) makes shutdown and idle-teardown exact
+instead of best-effort: `shutdown()` and `submit()` can never
+interleave around the closed check, and a lane whose queue just
+emptied can safely remove itself from the directory in the same
+critical section that decided to die, so the directory never grows
+unbounded for keys that go idle.
 
 Callers pick the lane per submit (e.g. "write" vs "read") so that
 unrelated workloads for the same key never queue behind each other,
@@ -33,8 +41,8 @@ from typing import Callable
 class _Lane:
     __slots__ = ("cv", "queue", "worker_alive", "thread", "stopping")
 
-    def __init__(self) -> None:
-        self.cv = threading.Condition()
+    def __init__(self, directory_lock: threading.Lock) -> None:
+        self.cv = threading.Condition(directory_lock)
         self.queue: deque[tuple[concurrent.futures.Future, Callable, tuple, dict]] = deque()
         self.worker_alive = False
         self.thread: threading.Thread | None = None
@@ -64,20 +72,22 @@ class KeyedLaneExecutor:
         self._lane_names = frozenset(lanes)
         self._idle_timeout = idle_timeout
         self._thread_name_prefix = thread_name_prefix
+        self._directory_lock = threading.Lock()
         self._lanes_by_key: dict[tuple[str, str], _Lane] = {}
         self._adapters: dict[tuple[str, str], _LaneExecutorAdapter] = {}
-        self._close_lock = threading.Lock()
         self._closed = False
 
     def submit(self, key: str, fn, /, *args, lane: str = "default", **kwargs):
         if lane not in self._lane_names:
             raise ValueError(f"unknown lane {lane!r}")
-        with self._close_lock:
+        future: concurrent.futures.Future = concurrent.futures.Future()
+        with self._directory_lock:
             if self._closed:
                 raise RuntimeError("cannot schedule new futures after shutdown")
-        entry = self._lanes_by_key.setdefault((key, lane), _Lane())
-        future: concurrent.futures.Future = concurrent.futures.Future()
-        with entry.cv:
+            entry = self._lanes_by_key.get((key, lane))
+            if entry is None:
+                entry = _Lane(self._directory_lock)
+                self._lanes_by_key[(key, lane)] = entry
             entry.queue.append((future, fn, args, kwargs))
             if not entry.worker_alive:
                 entry.worker_alive = True
@@ -93,8 +103,25 @@ class KeyedLaneExecutor:
         return future
 
     def executor(self, key: str, *, lane: str = "default") -> concurrent.futures.Executor:
-        adapter = self._adapters.setdefault((key, lane), _LaneExecutorAdapter(self, key, lane))
-        return adapter
+        with self._directory_lock:
+            adapter = self._adapters.get((key, lane))
+            if adapter is None:
+                adapter = _LaneExecutorAdapter(self, key, lane)
+                self._adapters[(key, lane)] = adapter
+            return adapter
+
+    def pending_count(self) -> int:
+        """Queued-plus-running items across every (key, lane) pair."""
+        with self._directory_lock:
+            return sum(
+                len(entry.queue) + (1 if entry.worker_alive else 0)
+                for entry in self._lanes_by_key.values()
+            )
+
+    def active_lanes_count(self) -> int:
+        """Number of (key, lane) pairs with a live worker thread right now."""
+        with self._directory_lock:
+            return sum(1 for entry in self._lanes_by_key.values() if entry.worker_alive)
 
     def _run_lane(self, key: str, lane: str, entry: _Lane) -> None:
         while True:
@@ -103,10 +130,14 @@ class KeyedLaneExecutor:
                     if not entry.cv.wait(timeout=self._idle_timeout):
                         if not entry.queue:
                             entry.worker_alive = False
+                            self._lanes_by_key.pop((key, lane), None)
+                            self._adapters.pop((key, lane), None)
                             return
                         continue
                 if not entry.queue:
                     entry.worker_alive = False
+                    self._lanes_by_key.pop((key, lane), None)
+                    self._adapters.pop((key, lane), None)
                     return
                 work = entry.queue.popleft()
             future, fn, args, kwargs = work
@@ -119,18 +150,10 @@ class KeyedLaneExecutor:
                     future.set_result(result)
 
     def shutdown(self, wait: bool = True) -> None:
-        # Best-effort: a submit() that is between its closed-check and its
-        # entry.cv admission right as shutdown runs can still enqueue and
-        # spawn a straggler worker after this method's thread snapshot is
-        # taken. That worker still drains its item (its own `stopping`
-        # read races the same way, but the queue check after it always
-        # wins), it just may finish after `shutdown(wait=True)` returns.
-        # Acceptable for a rare, process-lifecycle call on daemon threads.
-        with self._close_lock:
+        with self._directory_lock:
             self._closed = True
-        threads: list[threading.Thread] = []
-        for entry in list(self._lanes_by_key.values()):
-            with entry.cv:
+            threads: list[threading.Thread] = []
+            for entry in self._lanes_by_key.values():
                 entry.stopping = True
                 entry.cv.notify_all()
                 if entry.worker_alive and entry.thread is not None:

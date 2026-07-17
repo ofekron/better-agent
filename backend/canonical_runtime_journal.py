@@ -53,6 +53,29 @@ class CanonicalRuntimeJournal:
         )
         self._store_instance: CanonicalEventStore | None = None
         self._lock = threading.RLock()
+        # `mirror_event` (write lane) and `ensure_cutover` (read lane) each
+        # do a read-modify-write against a root's authority row --
+        # `current()` then, after unlocked store I/O, `advance_coverage()`/
+        # `commit_sqlite_cutover()` -- with real work in between. Since the
+        # read/write lane split made those two paths run truly concurrently
+        # for the same root, that gap is a genuine race: whichever call
+        # loses computes coverage against a stale snapshot and
+        # `advance_coverage` raises "canonical coverage cannot regress",
+        # turning a legitimate concurrent write or read into a spurious
+        # failure. One lock per root serializes only the advance
+        # candidates for that root -- unrelated roots are untouched, so
+        # this doesn't reintroduce the shared-pool starvation the lane
+        # split fixed.
+        #
+        # This dict is never pruned -- every root a process ever touches
+        # leaves one bare `Lock` behind for the process lifetime. Accepted
+        # deliberately: a `Lock` has no thread/fd attached (unlike
+        # KeyedLaneExecutor's per-(key,lane) entries, which do and are
+        # reclaimed on idle), so this is a small memory-only cost bounded
+        # by distinct roots ever seen in one process's lifetime, not by
+        # concurrent load. Revisit only if that bound stops holding.
+        self._root_advance_locks: dict[str, threading.Lock] = {}
+        self._root_advance_locks_guard = threading.Lock()
 
     @staticmethod
     def _database_path() -> Path:
@@ -63,6 +86,14 @@ class CanonicalRuntimeJournal:
             if self._store_instance is None:
                 self._store_instance = CanonicalEventStore(self._database_path())
             return self._store_instance
+
+    def _advance_lock(self, root_id: str) -> threading.Lock:
+        with self._root_advance_locks_guard:
+            lock = self._root_advance_locks.get(root_id)
+            if lock is None:
+                lock = threading.Lock()
+                self._root_advance_locks[root_id] = lock
+            return lock
 
     @staticmethod
     def _merged_message_heads(
@@ -93,52 +124,53 @@ class CanonicalRuntimeJournal:
         event_id: str | None,
         turn_id: str | None,
     ) -> None:
-        authority = self._catalog.current(root_id)
-        if authority is None or authority.authority != "sqlite":
-            # Not cut over yet — still announce the write so a feed
-            # consumer can pull, which runs the on-demand cutover sync.
-            _notify_advance(root_id, seq)
-            return
-        if seq <= authority.journal_through_seq:
-            return
-        if seq != authority.journal_through_seq + 1:
-            # The mirror fell behind the durable jsonl (e.g. a prior
-            # mirror attempt raised/was dropped by a fire-and-forget
-            # caller). jsonl is the source of truth and the canonical
-            # journal is a rebuildable, on-demand projection of it —
-            # don't try to repair the gap on this hot write path.
-            # `ensure_canonical_authority_sync`/`ensure_cutover` fully
-            # catches the projection up from jsonl before every BFF
-            # read, so the gap is filled lazily on next demand rather
-            # than eagerly (and fatally) here.
-            _notify_advance(root_id, seq)
-            return
-        payload = dict(data)
-        if event_id and not payload.get("uuid"):
-            payload["uuid"] = event_id
-        rows = [{
-            "root_id": root_id,
-            "root_generation": authority.root_generation,
-            "sid": sid,
-            "seq": seq,
-            "type": event_type,
-            "data": payload,
-            "source": source,
-            "msg_id": msg_id,
-            "turn_id": turn_id,
-        }]
-        facts = canonical_facts_from_rows(
-            [row for row in rows if not provider_stream_render_row_is_shadow(row)]
-        )
-        store = self._store()
-        if facts:
-            store.submit_many(facts)
-        head = store.barrier(root_id, authority.root_generation).canonical_through_seq
-        self._catalog.advance_coverage(
-            root_id, authority.root_generation,
-            canonical_through_seq=head, journal_through_seq=seq,
-            message_heads=authority.message_heads,
-        )
+        with self._advance_lock(root_id):
+            authority = self._catalog.current(root_id)
+            if authority is None or authority.authority != "sqlite":
+                # Not cut over yet — still announce the write so a feed
+                # consumer can pull, which runs the on-demand cutover sync.
+                _notify_advance(root_id, seq)
+                return
+            if seq <= authority.journal_through_seq:
+                return
+            if seq != authority.journal_through_seq + 1:
+                # The mirror fell behind the durable jsonl (e.g. a prior
+                # mirror attempt raised/was dropped by a fire-and-forget
+                # caller). jsonl is the source of truth and the canonical
+                # journal is a rebuildable, on-demand projection of it —
+                # don't try to repair the gap on this hot write path.
+                # `ensure_canonical_authority_sync`/`ensure_cutover` fully
+                # catches the projection up from jsonl before every BFF
+                # read, so the gap is filled lazily on next demand rather
+                # than eagerly (and fatally) here.
+                _notify_advance(root_id, seq)
+                return
+            payload = dict(data)
+            if event_id and not payload.get("uuid"):
+                payload["uuid"] = event_id
+            rows = [{
+                "root_id": root_id,
+                "root_generation": authority.root_generation,
+                "sid": sid,
+                "seq": seq,
+                "type": event_type,
+                "data": payload,
+                "source": source,
+                "msg_id": msg_id,
+                "turn_id": turn_id,
+            }]
+            facts = canonical_facts_from_rows(
+                [row for row in rows if not provider_stream_render_row_is_shadow(row)]
+            )
+            store = self._store()
+            if facts:
+                store.submit_many(facts)
+            head = store.barrier(root_id, authority.root_generation).canonical_through_seq
+            self._catalog.advance_coverage(
+                root_id, authority.root_generation,
+                canonical_through_seq=head, journal_through_seq=seq,
+                message_heads=authority.message_heads,
+            )
         _notify_advance(root_id, seq)
 
     def ensure_cutover(
@@ -148,62 +180,63 @@ class CanonicalRuntimeJournal:
         rows: list[dict[str, Any]],
         session: dict[str, Any],
     ) -> int:
-        authority = self._catalog.create(root_id)
-        if authority.authority == "deleting":
-            raise AuthorityError("root deletion is pending")
-        generation = authority.root_generation
-        gap_rows = self._validated_gap_rows(rows, authority.journal_through_seq)
-        normalized_rows = [
-            {**row, "root_id": root_id, "root_generation": generation}
-            for row in gap_rows
-            if not provider_stream_render_row_is_shadow(row)
-        ]
-        message_heads = self._merged_message_heads(session, authority.message_heads)
-        if (authority.authority == "sqlite" and not normalized_rows
-                and message_heads == dict(authority.message_heads)):
-            return generation
-        message_facts = canonical_message_facts(
-            root_id,
-            {**session, "generation": generation},
-            heads=dict(authority.message_heads),
-        )
-        facts = [
-            *message_facts,
-            *canonical_facts_from_rows(normalized_rows),
-        ]
-        store = self._store()
-        if facts:
-            store.submit_many(facts)
-        barrier = store.barrier(root_id, generation)
-        journal_through_seq = max(
-            (int(row.get("seq") or 0) for row in rows), default=authority.journal_through_seq,
-        )
-        database_path = self._database_path()
-        if authority.authority == "jsonl":
-            persisted_ids: set[str] = set()
-            after_seq = 0
-            while True:
-                page = store.read(root_id, generation, after_seq=after_seq, limit=5_000)
-                persisted_ids.update(row.fact.fact_id for row in page)
-                if len(page) < 5_000:
-                    break
-                after_seq = page[-1].canonical_seq
-            if not {fact.fact_id for fact in facts}.issubset(persisted_ids):
-                raise AuthorityError("canonical import parity check failed")
-            self._fsync_database(database_path)
-            self._catalog.commit_sqlite_cutover(
-                root_id, generation, database_path=database_path,
-                canonical_through_seq=barrier.canonical_through_seq,
-                journal_through_seq=journal_through_seq,
-                message_heads=message_heads,
+        with self._advance_lock(root_id):
+            authority = self._catalog.create(root_id)
+            if authority.authority == "deleting":
+                raise AuthorityError("root deletion is pending")
+            generation = authority.root_generation
+            gap_rows = self._validated_gap_rows(rows, authority.journal_through_seq)
+            normalized_rows = [
+                {**row, "root_id": root_id, "root_generation": generation}
+                for row in gap_rows
+                if not provider_stream_render_row_is_shadow(row)
+            ]
+            message_heads = self._merged_message_heads(session, authority.message_heads)
+            if (authority.authority == "sqlite" and not normalized_rows
+                    and message_heads == dict(authority.message_heads)):
+                return generation
+            message_facts = canonical_message_facts(
+                root_id,
+                {**session, "generation": generation},
+                heads=dict(authority.message_heads),
             )
-        else:
-            self._catalog.advance_coverage(
-                root_id, generation,
-                canonical_through_seq=barrier.canonical_through_seq,
-                journal_through_seq=journal_through_seq,
-                message_heads=message_heads,
+            facts = [
+                *message_facts,
+                *canonical_facts_from_rows(normalized_rows),
+            ]
+            store = self._store()
+            if facts:
+                store.submit_many(facts)
+            barrier = store.barrier(root_id, generation)
+            journal_through_seq = max(
+                (int(row.get("seq") or 0) for row in rows), default=authority.journal_through_seq,
             )
+            database_path = self._database_path()
+            if authority.authority == "jsonl":
+                persisted_ids: set[str] = set()
+                after_seq = 0
+                while True:
+                    page = store.read(root_id, generation, after_seq=after_seq, limit=5_000)
+                    persisted_ids.update(row.fact.fact_id for row in page)
+                    if len(page) < 5_000:
+                        break
+                    after_seq = page[-1].canonical_seq
+                if not {fact.fact_id for fact in facts}.issubset(persisted_ids):
+                    raise AuthorityError("canonical import parity check failed")
+                self._fsync_database(database_path)
+                self._catalog.commit_sqlite_cutover(
+                    root_id, generation, database_path=database_path,
+                    canonical_through_seq=barrier.canonical_through_seq,
+                    journal_through_seq=journal_through_seq,
+                    message_heads=message_heads,
+                )
+            else:
+                self._catalog.advance_coverage(
+                    root_id, generation,
+                    canonical_through_seq=barrier.canonical_through_seq,
+                    journal_through_seq=journal_through_seq,
+                    message_heads=message_heads,
+                )
         _notify_advance(root_id, journal_through_seq)
         return generation
 

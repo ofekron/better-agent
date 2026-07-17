@@ -480,6 +480,66 @@ def test_first_singleton_access_does_not_wait_on_root_lifecycle_gate():
     runtime_module.close_canonical_runtime_journal()
 
 
+def test_concurrent_mirror_and_cutover_do_not_race_authority_advance():
+    """The read lane's `ensure_cutover` and the write lane's
+    `mirror_event` run on genuinely different threads for the same root
+    under KeyedLaneExecutor's read/write split. Both do
+    read-current -> unlocked store I/O -> advance-coverage against the
+    SAME root's authority record; without per-root serialization,
+    `advance_coverage`'s monotonic guard raises AuthorityError when the
+    loser of the race computed its target against a now-stale snapshot,
+    turning a legitimate concurrent write or read into a spurious
+    failure."""
+    import threading
+
+    root_id = "concurrent-root"
+    session = {"id": root_id, "messages": []}
+    journal = CanonicalRuntimeJournal(HOME / "concurrent-catalog.sqlite")
+    total = 200
+    all_rows = [
+        {"root_id": root_id, "sid": root_id, "seq": seq, "type": "progress", "data": {"uuid": f"c{seq}"}}
+        for seq in range(total)
+    ]
+    # Establish sqlite authority first so mirror_event takes the
+    # advance_coverage path (not the pre-cutover notify-only path).
+    journal.ensure_cutover(root_id, rows=[all_rows[0]], session=session)
+
+    errors: list[BaseException] = []
+    stop = threading.Event()
+
+    def writer() -> None:
+        try:
+            for seq in range(1, total):
+                journal.mirror_event(
+                    root_id=root_id, sid=root_id, seq=seq, event_type="progress",
+                    data={"uuid": f"c{seq}"}, source="claude", msg_id=None,
+                    event_id=f"c{seq}", turn_id=None,
+                )
+        except BaseException as exc:  # noqa: BLE001 - surface to main thread
+            errors.append(exc)
+        finally:
+            stop.set()
+
+    def reader() -> None:
+        try:
+            while not stop.is_set():
+                journal.ensure_cutover(root_id, rows=all_rows, session=session)
+        except BaseException as exc:  # noqa: BLE001 - surface to main thread
+            errors.append(exc)
+
+    writer_thread = threading.Thread(target=writer)
+    reader_thread = threading.Thread(target=reader)
+    writer_thread.start()
+    reader_thread.start()
+    writer_thread.join(timeout=30)
+    reader_thread.join(timeout=30)
+    assert not writer_thread.is_alive(), "writer thread hung"
+    assert not reader_thread.is_alive(), "reader thread hung"
+    assert not errors, errors
+    assert journal.current_authority(root_id).journal_through_seq == total - 1
+    journal.close()
+
+
 if __name__ == "__main__":
     test_import_cutover_mirror_and_page_read()
     test_reconcile_gap_and_new_messages_after_cutover()
@@ -496,4 +556,5 @@ if __name__ == "__main__":
     test_live_provider_stream_render_row_advances_without_fact()
     test_event_writer_reads_jsonl_only_after_catalog_cursor()
     test_first_singleton_access_does_not_wait_on_root_lifecycle_gate()
+    test_concurrent_mirror_and_cutover_do_not_race_authority_advance()
     print("canonical runtime journal tests passed")

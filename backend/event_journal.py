@@ -277,6 +277,19 @@ class EventJournalWriter:
             lanes=("write", "read"),
             thread_name_prefix="ejw",
         )
+        perf.register_queue("ejw.active_lanes", self._executor.active_lanes_count)
+        perf.register_queue("ejw.pending", self._executor.pending_count)
+        # Shared across every root's write-lane thread (one dict, not
+        # partitioned per root), so all reads/writes/iterations of these
+        # six maps go through `_ownership_state_lock` -- cheap dict
+        # bookkeeping only, never held across journal/file I/O, and never
+        # held across a call to another locked method (the lock is plain,
+        # non-reentrant). `_pending_events` is nested (root_id ->
+        # sub_key -> Event); only its outer-dict point operations
+        # (get/setdefault/pop by root_id) take the lock -- the inner
+        # per-root dict is single-writer (only that root's write-lane
+        # thread ever touches it) so its own mutations don't need it.
+        self._ownership_state_lock = threading.Lock()
         self._turn_messages: dict[tuple[str, str], str] = {}
         self._turn_boundaries: dict[tuple[str, str], list[TurnBoundary]] = {}
         self._event_messages: dict[tuple[str, str], str] = {}
@@ -318,21 +331,22 @@ class EventJournalWriter:
             delegate_messages = state.get("delegate_messages") or []
             if sum(map(len, (turn_messages, turn_boundaries, event_messages, tool_messages, delegate_messages))) > 1_000_000:
                 return None
-            for turn_id, msg_id in turn_messages:
-                self._turn_messages[(root_id, str(turn_id))] = str(msg_id)
-            for sid, timestamp, turn_id, msg_id in turn_boundaries:
-                source_ts = self._source_ts({"timestamp": timestamp})
-                if source_ts is None:
-                    raise ValueError("invalid ownership checkpoint timestamp")
-                self._turn_boundaries.setdefault((root_id, str(sid)), []).append(
-                    TurnBoundary(source_ts, str(turn_id), str(msg_id))
-                )
-            for event_id, msg_id in event_messages:
-                self._event_messages[(root_id, str(event_id))] = str(msg_id)
-            for tool_id, msg_id in tool_messages:
-                self._tool_messages[(root_id, str(tool_id))] = str(msg_id)
-            for delegate_id, msg_id in delegate_messages:
-                self._delegate_messages[(root_id, str(delegate_id))] = str(msg_id)
+            with self._ownership_state_lock:
+                for turn_id, msg_id in turn_messages:
+                    self._turn_messages[(root_id, str(turn_id))] = str(msg_id)
+                for sid, timestamp, turn_id, msg_id in turn_boundaries:
+                    source_ts = self._source_ts({"timestamp": timestamp})
+                    if source_ts is None:
+                        raise ValueError("invalid ownership checkpoint timestamp")
+                    self._turn_boundaries.setdefault((root_id, str(sid)), []).append(
+                        TurnBoundary(source_ts, str(turn_id), str(msg_id))
+                    )
+                for event_id, msg_id in event_messages:
+                    self._event_messages[(root_id, str(event_id))] = str(msg_id)
+                for tool_id, msg_id in tool_messages:
+                    self._tool_messages[(root_id, str(tool_id))] = str(msg_id)
+                for delegate_id, msg_id in delegate_messages:
+                    self._delegate_messages[(root_id, str(delegate_id))] = str(msg_id)
             perf.record_count("ejw.ownership_checkpoint.hit", 1)
             return covered_seq
         except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
@@ -341,34 +355,37 @@ class EventJournalWriter:
             return None
 
     def _clear_ownership_state(self, root_id: str) -> None:
-        for mapping in (
-            self._turn_messages, self._turn_boundaries, self._event_messages,
-            self._tool_messages, self._delegate_messages,
-        ):
-            for key in [key for key in mapping if key[0] == root_id]:
-                mapping.pop(key, None)
+        with self._ownership_state_lock:
+            for mapping in (
+                self._turn_messages, self._turn_boundaries, self._event_messages,
+                self._tool_messages, self._delegate_messages,
+            ):
+                for key in [key for key in mapping if key[0] == root_id]:
+                    mapping.pop(key, None)
 
     def _write_ownership_checkpoint(self, root_id: str, covered_seq: int) -> None:
         token = event_ingester.ownership_checkpoint_token(root_id)
         if token is None:
             return
-        pending = self._pending_events.get(root_id) or {}
+        with self._ownership_state_lock:
+            pending = dict(self._pending_events.get(root_id) or {})
         if pending:
             covered_seq = min(covered_seq, min(pending) - 1)
         covered_seq = min(covered_seq, int(token["seq"]))
         path = self._ownership_checkpoint_path(root_id)
         path.parent.mkdir(parents=True, exist_ok=True)
-        state = {
-            "turn_messages": [[key[1], value] for key, value in self._turn_messages.items() if key[0] == root_id],
-            "turn_boundaries": [
-                [key[1], boundary.source_ts.isoformat(), boundary.turn_id, boundary.msg_id]
-                for key, values in self._turn_boundaries.items() if key[0] == root_id
-                for boundary in values
-            ],
-            "event_messages": [[key[1], value] for key, value in self._event_messages.items() if key[0] == root_id],
-            "tool_messages": [[key[1], value] for key, value in self._tool_messages.items() if key[0] == root_id],
-            "delegate_messages": [[key[1], value] for key, value in self._delegate_messages.items() if key[0] == root_id],
-        }
+        with self._ownership_state_lock:
+            state = {
+                "turn_messages": [[key[1], value] for key, value in self._turn_messages.items() if key[0] == root_id],
+                "turn_boundaries": [
+                    [key[1], boundary.source_ts.isoformat(), boundary.turn_id, boundary.msg_id]
+                    for key, values in self._turn_boundaries.items() if key[0] == root_id
+                    for boundary in values
+                ],
+                "event_messages": [[key[1], value] for key, value in self._event_messages.items() if key[0] == root_id],
+                "tool_messages": [[key[1], value] for key, value in self._tool_messages.items() if key[0] == root_id],
+                "delegate_messages": [[key[1], value] for key, value in self._delegate_messages.items() if key[0] == root_id],
+            }
         payload = {
             "version": _OWNERSHIP_CHECKPOINT_VERSION,
             "root_id": root_id,
@@ -426,7 +443,8 @@ class EventJournalWriter:
             and isinstance(message_id, str) and message_id
         ):
             return
-        self._turn_messages[(bus_event.root_id, turn_id)] = message_id
+        with self._ownership_state_lock:
+            self._turn_messages[(bus_event.root_id, turn_id)] = message_id
 
     async def _on_turn_finished(self, bus_event: BusEvent) -> None:
         """Serialize the lifecycle fact without closing ownership.
@@ -633,9 +651,20 @@ class EventJournalWriter:
         ))
 
     def close(self) -> None:
-        """Drain queued writes and stop all writer threads."""
+        """Drain queued writes and stop all writer threads.
+
+        `KeyedLaneExecutor.shutdown(wait=True)` fully serializes on its
+        directory lock: once it returns, no straggler write can still be
+        running or about to start. That guarantee is load-bearing here --
+        it's what makes it safe to close the canonical runtime journal
+        immediately after, with no window where a write could resurrect
+        it post-close. Swapping in a differently-behaved executor here
+        would reopen that race.
+        """
         self._closed = True
         self._executor.shutdown(wait=True)
+        perf.unregister_queue("ejw.active_lanes")
+        perf.unregister_queue("ejw.pending")
         from canonical_runtime_journal import close_canonical_runtime_journal
 
         close_canonical_runtime_journal()
@@ -648,6 +677,8 @@ class EventJournalWriter:
             lanes=("write", "read"),
             thread_name_prefix="ejw",
         )
+        perf.register_queue("ejw.active_lanes", self._executor.active_lanes_count)
+        perf.register_queue("ejw.pending", self._executor.pending_count)
         self._closed = False
 
     async def _publish_written(
@@ -829,7 +860,8 @@ class EventJournalWriter:
         if event.event_type == "event_ownership_resolved":
             event_seq = event.data.get("event_seq")
             if isinstance(event_seq, int) and event_seq > 0 and msg_id:
-                pending = self._pending_events.get(event.root_id, {}).pop(event_seq, None)
+                with self._ownership_state_lock:
+                    pending = self._pending_events.get(event.root_id, {}).pop(event_seq, None)
                 if pending is not None:
                     changed = self._record_resolved_event(pending, msg_id) or changed
             return changed
@@ -840,29 +872,32 @@ class EventJournalWriter:
             and isinstance(journal_seq, int)
             and journal_seq > 0
         ):
-            self._pending_events.setdefault(event.root_id, {})[journal_seq] = event
+            with self._ownership_state_lock:
+                self._pending_events.setdefault(event.root_id, {})[journal_seq] = event
         if not msg_id:
             return changed
-        if provider_event_id:
-            key = (event.root_id, provider_event_id)
-            if self._event_messages.get(key) != msg_id:
-                self._event_messages[key] = msg_id
-                changed = True
-        for tool_use_id in self._tool_use_ids(event.data):
-            key = (event.root_id, tool_use_id)
-            if self._tool_messages.get(key) != msg_id:
-                self._tool_messages[key] = msg_id
-                changed = True
-        delegate_id = self._delegate_id(event.data)
-        if delegate_id:
-            key = (event.root_id, delegate_id)
-            if self._delegate_messages.get(key) != msg_id:
-                self._delegate_messages[key] = msg_id
-                changed = True
+        with self._ownership_state_lock:
+            if provider_event_id:
+                key = (event.root_id, provider_event_id)
+                if self._event_messages.get(key) != msg_id:
+                    self._event_messages[key] = msg_id
+                    changed = True
+            for tool_use_id in self._tool_use_ids(event.data):
+                key = (event.root_id, tool_use_id)
+                if self._tool_messages.get(key) != msg_id:
+                    self._tool_messages[key] = msg_id
+                    changed = True
+            delegate_id = self._delegate_id(event.data)
+            if delegate_id:
+                key = (event.root_id, delegate_id)
+                if self._delegate_messages.get(key) != msg_id:
+                    self._delegate_messages[key] = msg_id
+                    changed = True
         return changed
 
     def _resolve_pending_events(self, root_id: str) -> int:
-        pending = self._pending_events.get(root_id)
+        with self._ownership_state_lock:
+            pending = self._pending_events.get(root_id)
         if not pending:
             return 0
         resolved_count = 0
@@ -889,7 +924,8 @@ class EventJournalWriter:
     def _resolve_matching_pending_duplicate(
         self, event: Event, msg_id: str,
     ) -> bool:
-        pending = self._pending_events.get(event.root_id, {})
+        with self._ownership_state_lock:
+            pending = self._pending_events.get(event.root_id, {})
         changed = False
         for event_seq, pending_event in list(pending.items()):
             if (
@@ -951,15 +987,16 @@ class EventJournalWriter:
             return False
         changed = False
         turn_key = (event.root_id, turn_id)
-        if self._turn_messages.get(turn_key) != msg_id:
-            self._turn_messages[turn_key] = msg_id
-            changed = True
-        key = (event.root_id, event.sid)
-        boundaries = self._turn_boundaries.setdefault(key, [])
         boundary = TurnBoundary(source_ts, turn_id, msg_id)
-        if boundary not in boundaries:
-            boundaries.insert(bisect_right(boundaries, boundary), boundary)
-            changed = True
+        with self._ownership_state_lock:
+            if self._turn_messages.get(turn_key) != msg_id:
+                self._turn_messages[turn_key] = msg_id
+                changed = True
+            key = (event.root_id, event.sid)
+            boundaries = self._turn_boundaries.setdefault(key, [])
+            if boundary not in boundaries:
+                boundaries.insert(bisect_right(boundaries, boundary), boundary)
+                changed = True
         return changed
 
     def _ensure_ownership_hydrated(self, root_id: str) -> None:
@@ -1018,43 +1055,45 @@ class EventJournalWriter:
             return False
         changed = False
         nodes = [root, *session_store._walk_forks(root)]
-        for node in nodes:
-            sid = node.get("id")
-            if not isinstance(sid, str) or not sid:
-                continue
-            boundaries = self._turn_boundaries.setdefault((root_id, sid), [])
-            for msg in node.get("messages") or []:
-                msg_id = msg.get("id") if isinstance(msg, dict) else None
-                if (
-                    not isinstance(msg, dict)
-                    or msg.get("role") != "assistant"
-                    or not isinstance(msg_id, str)
-                    or not msg_id
-                ):
+        with self._ownership_state_lock:
+            for node in nodes:
+                sid = node.get("id")
+                if not isinstance(sid, str) or not sid:
                     continue
-                source_ts = self._source_ts({"timestamp": msg.get("timestamp")})
-                if source_ts is None:
-                    continue
-                boundary = TurnBoundary(
-                    source_ts,
-                    f"snapshot:{msg_id}",
-                    msg_id,
-                )
-                if boundary not in boundaries:
-                    boundaries.insert(bisect_right(boundaries, boundary), boundary)
-                    changed = True
+                boundaries = self._turn_boundaries.setdefault((root_id, sid), [])
+                for msg in node.get("messages") or []:
+                    msg_id = msg.get("id") if isinstance(msg, dict) else None
+                    if (
+                        not isinstance(msg, dict)
+                        or msg.get("role") != "assistant"
+                        or not isinstance(msg_id, str)
+                        or not msg_id
+                    ):
+                        continue
+                    source_ts = self._source_ts({"timestamp": msg.get("timestamp")})
+                    if source_ts is None:
+                        continue
+                    boundary = TurnBoundary(
+                        source_ts,
+                        f"snapshot:{msg_id}",
+                        msg_id,
+                    )
+                    if boundary not in boundaries:
+                        boundaries.insert(bisect_right(boundaries, boundary), boundary)
+                        changed = True
         return changed
 
     def _owner_for_causal_key(
         self, root_id: str, key: tuple[str, str],
     ) -> Optional[str]:
         kind, value = key
-        if kind == "event":
-            return self._event_messages.get((root_id, value))
-        if kind == "tool":
-            return self._tool_messages.get((root_id, value))
-        if kind == "delegate":
-            return self._delegate_messages.get((root_id, value))
+        with self._ownership_state_lock:
+            if kind == "event":
+                return self._event_messages.get((root_id, value))
+            if kind == "tool":
+                return self._tool_messages.get((root_id, value))
+            if kind == "delegate":
+                return self._delegate_messages.get((root_id, value))
         return None
 
     @classmethod
@@ -1162,7 +1201,8 @@ class EventJournalWriter:
     def _message_id_for_source_ts(
         self, root_id: str, sid: str, source_ts: datetime,
     ) -> Optional[str]:
-        boundaries = self._turn_boundaries.get((root_id, sid), [])
+        with self._ownership_state_lock:
+            boundaries = list(self._turn_boundaries.get((root_id, sid), []))
         if not boundaries:
             return None
         probe = TurnBoundary(source_ts, "\uffff", "\uffff")
@@ -1173,7 +1213,8 @@ class EventJournalWriter:
         turn_id = event.turn_id or event.run_id
         if not isinstance(turn_id, str) or not turn_id:
             return None
-        return self._turn_messages.get((event.root_id, turn_id))
+        with self._ownership_state_lock:
+            return self._turn_messages.get((event.root_id, turn_id))
 
     def _append_resolved(self, event: ResolvedEvent) -> EventWritten:
         """Append an internally-resolved event to events.jsonl."""
@@ -1255,7 +1296,11 @@ class EventJournalWriter:
         future = self._executor.submit(
             root_id, self._ensure_canonical_authority, root_id, lane="read",
         )
-        return int(future.result(timeout=timeout))
+        try:
+            return int(future.result(timeout=timeout))
+        except concurrent.futures.TimeoutError:
+            future.cancel()
+            raise TimeoutError("timed out ensuring canonical journal authority")
 
     @staticmethod
     def _ensure_canonical_authority(root_id: str) -> int:
