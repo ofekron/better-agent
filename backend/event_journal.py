@@ -19,7 +19,6 @@ import time
 import uuid
 from bisect import bisect_right
 from collections import OrderedDict, deque
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -277,29 +276,31 @@ class _RootExecutor(concurrent.futures.Executor):
 
 
 class _KeyedSerialExecutor:
-    """Bounded worker pool with FIFO serialization per root."""
+    """One dedicated worker thread per root, FIFO within that root.
 
-    def __init__(self, pool_size: int = 8, thread_name_prefix: str = "ejw") -> None:
-        self._pool_size = pool_size
-        self._pool = ThreadPoolExecutor(
-            max_workers=pool_size,
-            thread_name_prefix=f"{thread_name_prefix}-",
-        )
+    Roots never share a thread, so a slow/backlogged root can never
+    starve another root's queued work behind a shared pool's capacity
+    (see the ensure_canonical_authority_sync starvation this replaced).
+    A root's thread is spun up lazily on first submission and torn
+    down once its queue drains, so idle sessions don't hold a thread
+    forever.
+    """
+
+    def __init__(self, thread_name_prefix: str = "ejw") -> None:
+        self._thread_name_prefix = thread_name_prefix
         self._lock = threading.Lock()
         self._drained = threading.Condition(self._lock)
         self._queues: dict[str, deque[tuple[concurrent.futures.Future, object, tuple, dict]]] = {}
-        self._ready: deque[str] = deque()
-        self._ready_set: set[str] = set()
-        self._active: set[str] = set()
+        self._threads: dict[str, threading.Thread] = {}
         self._adapters: dict[str, _RootExecutor] = {}
         self._pending = 0
         self._closed = False
-        perf.register_queue(f"{thread_name_prefix}.ready_roots", self.ready_count)
+        perf.register_queue(f"{thread_name_prefix}.active_roots", self.active_roots_count)
         perf.register_queue(f"{thread_name_prefix}.pending", self.pending_count)
 
-    def ready_count(self) -> int:
+    def active_roots_count(self) -> int:
         with self._lock:
-            return len(self._ready)
+            return len(self._threads)
 
     def pending_count(self) -> int:
         with self._lock:
@@ -321,36 +322,28 @@ class _KeyedSerialExecutor:
             queue = self._queues.setdefault(root_id, deque())
             queue.append((future, fn, args, kwargs))
             self._pending += 1
-            if root_id not in self._active and root_id not in self._ready_set:
-                self._ready.append(root_id)
-                self._ready_set.add(root_id)
-            self._dispatch_locked()
+            if root_id not in self._threads:
+                thread = threading.Thread(
+                    target=self._run_root,
+                    args=(root_id,),
+                    daemon=True,
+                    name=f"{self._thread_name_prefix}-{root_id}",
+                )
+                self._threads[root_id] = thread
+                thread.start()
         return future
 
-    def _dispatch_locked(self) -> None:
-        while self._ready and len(self._active) < self._pool_size:
-            root_id = self._ready.popleft()
-            self._ready_set.remove(root_id)
-            queue = self._queues[root_id]
-            work = queue.popleft()
-            self._active.add(root_id)
-            try:
-                self._pool.submit(self._run_one, root_id, work)
-            except BaseException as exc:
-                self._active.remove(root_id)
-                self._pending -= 1
-                work[0].set_exception(exc)
-                if queue:
-                    self._ready.append(root_id)
-                    self._ready_set.add(root_id)
-                else:
+    def _run_root(self, root_id: str) -> None:
+        while True:
+            with self._lock:
+                queue = self._queues.get(root_id)
+                if not queue:
+                    self._threads.pop(root_id, None)
                     self._queues.pop(root_id, None)
-                self._drained.notify_all()
-                raise
-
-    def _run_one(self, root_id: str, work: tuple) -> None:
-        future, fn, args, kwargs = work
-        try:
+                    self._adapters.pop(root_id, None)
+                    self._drained.notify_all()
+                    return
+                future, fn, args, kwargs = queue.popleft()
             if future.set_running_or_notify_cancel():
                 try:
                     result = fn(*args, **kwargs)
@@ -358,27 +351,19 @@ class _KeyedSerialExecutor:
                     future.set_exception(exc)
                 else:
                     future.set_result(result)
-        finally:
             with self._lock:
-                self._active.remove(root_id)
                 self._pending -= 1
-                queue = self._queues.get(root_id)
-                if queue:
-                    self._ready.append(root_id)
-                    self._ready_set.add(root_id)
-                else:
-                    self._queues.pop(root_id, None)
-                    self._adapters.pop(root_id, None)
-                self._dispatch_locked()
                 self._drained.notify_all()
 
     def shutdown(self, wait: bool = True) -> None:
         del wait
         with self._lock:
             self._closed = True
+            threads = list(self._threads.values())
             while self._pending:
                 self._drained.wait()
-        self._pool.shutdown(wait=True, cancel_futures=False)
+        for thread in threads:
+            thread.join()
 
 
 class EventJournalWriter:
@@ -388,7 +373,6 @@ class EventJournalWriter:
         self._bus = None
         self._closed = False
         self._executor = _KeyedSerialExecutor(
-            pool_size=8,
             thread_name_prefix="ejw",
         )
         self._turn_messages: dict[tuple[str, str], str] = {}
@@ -759,7 +743,6 @@ class EventJournalWriter:
         if not self._closed:
             return
         self._executor = _KeyedSerialExecutor(
-            pool_size=8,
             thread_name_prefix="ejw",
         )
         self._closed = False
