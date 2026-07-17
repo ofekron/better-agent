@@ -10,12 +10,13 @@ import re
 import sqlite3
 import threading
 import time
-from concurrent.futures import Future, InvalidStateError, ThreadPoolExecutor
+from concurrent.futures import Future, InvalidStateError
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from keyed_lane_executor import KeyedLaneExecutor
 from paths import ba_home
 import perf
 import portable_lock
@@ -34,24 +35,26 @@ _current_waiters: dict[str, set[Future]] = {}
 _rebuild_local = threading.local()
 _query_observer = None
 _change_observer = None
-_startup_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="historical-startup")
-_ondemand_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="historical-ondemand")
+# One dedicated thread per (root_id, lane): "startup" for background sweep
+# rebuilds, "ondemand" for priority rebuilds. Each root's rebuild work is
+# fully isolated from every other root's -- no root can queue behind an
+# unrelated root's rebuild in either lane.
+_executor_pool = KeyedLaneExecutor(
+    lanes=("startup", "ondemand"),
+    thread_name_prefix="historical",
+)
 _shutdown = False
 logger = logging.getLogger(__name__)
 
 
 def reopen() -> None:
-    global _shutdown, _startup_executor, _ondemand_executor
+    global _shutdown, _executor_pool
     with _locks_guard:
         if not _shutdown:
             return
-        _startup_executor = ThreadPoolExecutor(
-            max_workers=1,
-            thread_name_prefix="historical-startup",
-        )
-        _ondemand_executor = ThreadPoolExecutor(
-            max_workers=1,
-            thread_name_prefix="historical-ondemand",
+        _executor_pool = KeyedLaneExecutor(
+            lanes=("startup", "ondemand"),
+            thread_name_prefix="historical",
         )
         _rebuilding.clear()
         _rebuild_dirty.clear()
@@ -1021,9 +1024,9 @@ def schedule_rebuild(root_id: str, root_snapshot: dict[str, Any] | None, *, prio
             if pending is not None and not _shutdown:
                 schedule_rebuild(root_id, pending[0], priority=pending[1])
 
-    executor = _ondemand_executor if priority else _startup_executor
+    lane = "ondemand" if priority else "startup"
     try:
-        return executor.submit(run)
+        return _executor_pool.submit(root_id, run, lane=lane)
     except RuntimeError as exc:
         with _locks_guard:
             _rebuilding.discard(root_id)
@@ -1066,5 +1069,7 @@ def shutdown(*, wait: bool = True) -> None:
             root_id,
             ProjectionUnavailable("historical projection is shutting down"),
         )
-    _ondemand_executor.shutdown(wait=wait, cancel_futures=True)
-    _startup_executor.shutdown(wait=wait, cancel_futures=True)
+    # schedule_rebuild's `_rebuilding` set already guarantees at most one
+    # in-flight/queued run() per root, so -- like SessionProjectionDrainer
+    # -- there is never cross-root queued work in either lane to cancel.
+    _executor_pool.shutdown(wait=wait)

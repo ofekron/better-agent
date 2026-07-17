@@ -473,9 +473,14 @@ def test_event_payload_fails_closed_after_journal_disappears():
 
 def test_active_rebuild_is_not_queued_behind_background_migration():
     occupied, release = threading.Event(), threading.Event()
-    blocker = projection._startup_executor.submit(lambda: (occupied.set(), release.wait(5)))
-    assert occupied.wait(2)
     root_id = "priority-rebuild-root"
+    # Occupy this SAME root's "startup" lane -- proving the "ondemand"
+    # lane below is isolated even for the same root, not just because
+    # it's a different root.
+    blocker = projection._executor_pool.submit(
+        root_id, lambda: (occupied.set(), release.wait(5)), lane="startup",
+    )
+    assert occupied.wait(2)
     try:
         future = projection.schedule_rebuild(
             root_id, {"id": root_id, "messages": [], "forks": []}, priority=True,
@@ -654,10 +659,11 @@ def test_append_after_publish_schedules_followup_before_rebuild_clear():
     release_second = threading.Event()
     submitted = []
     publish_count = 0
-    original_submit = projection._ondemand_executor.submit
+    original_submit = projection._executor_pool.submit
 
-    def observed_submit(fn):
-        future = original_submit(fn)
+    def observed_submit(key, fn, *, lane="default"):
+        assert lane == "ondemand"
+        future = original_submit(key, fn, lane=lane)
         submitted.append(future)
         return future
 
@@ -672,7 +678,7 @@ def test_append_after_publish_schedules_followup_before_rebuild_clear():
         assert release_second.wait(5)
 
     with (
-        patch.object(projection._ondemand_executor, "submit", side_effect=observed_submit),
+        patch.object(projection._executor_pool, "submit", side_effect=observed_submit),
         patch.object(projection.logger, "info", side_effect=gate_publish),
     ):
         waiter = projection.ensure_current(root_id, None)
@@ -781,16 +787,16 @@ def test_append_lag_is_unavailable_then_incrementally_ready():
     assert any(row["type"] == "agent_message" for row in children(refreshed["id"], refreshed["revision"], msg=lag_msg)["children"])
 
 
-def test_rebuild_requests_coalesce_and_executors_are_bounded():
+def test_rebuild_requests_coalesce_onto_a_single_ondemand_submit():
     pending_root = "coalesced-root"
-    with patch.object(projection._ondemand_executor, "submit") as submit:
+    with patch.object(projection._executor_pool, "submit") as submit:
         projection.schedule_rebuild(pending_root, None)
         projection.schedule_rebuild(pending_root, None)
     assert submit.call_count == 1
+    _, call_kwargs = submit.call_args
+    assert call_kwargs.get("lane") == "ondemand"
     with projection._locks_guard:
         projection._rebuilding.discard(pending_root)
-    assert projection._ondemand_executor._max_workers == 1
-    assert projection._startup_executor._max_workers == 1
 
 
 def test_ready_zero_at_indexed_eof_resumes_without_rescan_and_replays_pending_bootstrap():
@@ -1098,7 +1104,7 @@ if __name__ == "__main__":
         test_valid_startup_skips_snapshot_and_rebuild,
         test_same_size_journal_replacement_invalidates_sidecar,
         test_append_lag_is_unavailable_then_incrementally_ready,
-        test_rebuild_requests_coalesce_and_executors_are_bounded,
+        test_rebuild_requests_coalesce_onto_a_single_ondemand_submit,
         test_ready_zero_at_indexed_eof_resumes_without_rescan_and_replays_pending_bootstrap,
         test_current_waiters_cover_zero_manifest_coalescing_and_cancellation,
         test_emfile_open_failure_does_not_corrupt_valid_sidecar,
