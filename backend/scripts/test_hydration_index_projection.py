@@ -808,6 +808,36 @@ store.invalidate(sys.argv[2])
     rss_scale = 1024 if sys.platform != "darwin" else 1
     assert (rss_after - rss_before) * rss_scale < 160 * 1024 * 1024
 
+    # _ensure_chain_head_locked must surface the retained-handle close
+    # failure as the typed projection error — never return None into its
+    # tuple-unpacking callers.
+    retained_ing = EventIngester()
+    retained_root = "retained-close-root"
+    retained_seq = retained_ing.ingest(
+        retained_root, sid="rc", event_type="progress", data={"uuid": "rc1"},
+        source="test", cwd_override="",
+    )
+    assert retained_seq == 1, retained_seq
+    retained_path = retained_ing._events_path(retained_root)
+    retained_ing._event_chain_path(retained_root).unlink()
+    original_flush = store.flush_writer_projection
+    store.flush_writer_projection = (
+        lambda *_a, **_k: (_ for _ in ()).throw(
+            store.WriterProjectionError("transient"),
+        )
+    )
+    try:
+        try:
+            retained_ing._ensure_chain_head_locked(retained_root, retained_path)
+            raise AssertionError(
+                "retained-handle close failure did not raise WriterProjectionError",
+            )
+        except store.WriterProjectionError:
+            pass
+    finally:
+        store.flush_writer_projection = original_flush
+        retained_ing.close_all()
+
     event_ingester.shutdown()
     assert event_ingester._fsync_thread is None
     print("PASS: hydration index projection is incremental and recoverable")

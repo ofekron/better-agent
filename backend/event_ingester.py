@@ -500,13 +500,8 @@ class EventIngester:
         import hydration_index_store
         try:
             hydration_index_store.flush_writer_projection(root_id, path)
-        except hydration_index_store.WriterProjectionError as exc:
-            if str(exc) != "projection prefix is not authoritative":
-                raise
-            hydration_index_store.invalidate(root_id, path)
-            hydration_index_store._publish_cold(
-                path, hydration_index_store._db_path(root_id),
-            )
+        except hydration_index_store.ProjectionPrefixNotAuthoritative:
+            hydration_index_store.recover_writer_projection(root_id, path)
 
     def _close_handle_locked(self, root_id: str) -> bool:
         with self._guard:
@@ -723,7 +718,21 @@ class EventIngester:
                             "shutdown hydration projection failed for %s; retrying",
                             root_id, exc_info=True,
                         )
-                        self._flush_hydration_projection(root_id, path)
+                        try:
+                            self._flush_hydration_projection(root_id, path)
+                        except hydration_index_store.WriterProjectionError:
+                            # Journal durability itself succeeded (fsync +
+                            # chain head above); only the projection is
+                            # stale. Invalidate it so the next open
+                            # rebuilds cold, and say so explicitly rather
+                            # than letting this surface as a generic
+                            # "shutdown fsync failed".
+                            hydration_index_store.invalidate(root_id, path)
+                            logger.error(
+                                "shutdown hydration projection failed twice for %s; "
+                                "projection invalidated, rebuilds cold on next open",
+                                root_id, exc_info=True,
+                            )
                     with self._fsync_cond:
                         self._fsync_dirty.discard(root_id)
                 except (OSError, RuntimeError):
@@ -1135,7 +1144,15 @@ class EventIngester:
         if meta is None:
             if pair is not None:
                 if not self._close_handle_locked(root_id):
-                    return
+                    # The close-time projection flush failed and the
+                    # handle was retained for retry — callers unpack the
+                    # returned tuple, so fail with the typed error, not
+                    # a None that turns into an unpacking TypeError.
+                    import hydration_index_store
+                    raise hydration_index_store.WriterProjectionError(
+                        f"chain head unavailable for {root_id}: "
+                        "close-time hydration projection flush failed",
+                    )
                 pair = None
             self._rebuild_chain_only_locked(root_id, path)
         if pair is None:

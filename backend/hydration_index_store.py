@@ -46,6 +46,11 @@ class WriterProjectionError(RuntimeError):
     pass
 
 
+class ProjectionPrefixNotAuthoritative(WriterProjectionError):
+    """The projection's persisted prefix no longer matches the journal;
+    recoverable via `recover_writer_projection` (cold republish)."""
+
+
 def _safe_root_dir(root_id: str) -> Path:
     if (
         not isinstance(root_id, str) or not root_id
@@ -378,7 +383,9 @@ def flush_writer_projection(root_id: str, journal: Path) -> None:
             meta = _meta(conn)
             if not _valid_append(root_id, meta, journal):
                 conn.rollback()
-                raise WriterProjectionError("projection prefix is not authoritative")
+                raise ProjectionPrefixNotAuthoritative(
+                    "projection prefix is not authoritative",
+                )
             start = int(meta["offset"])
             stat = journal.stat()
             if stat.st_size == start:
@@ -419,6 +426,15 @@ def flush_writer_projection(root_id: str, journal: Path) -> None:
         finally:
             if conn is not None:
                 conn.close()
+
+
+def recover_writer_projection(root_id: str, journal: Path) -> None:
+    """Recover from `ProjectionPrefixNotAuthoritative`: drop the stale
+    writer projection and republish it cold from the journal. The
+    store-owned recovery path for writers (event_ingester) — callers
+    never touch the projection internals directly."""
+    invalidate(root_id, journal)
+    _publish_cold(Path(journal), _db_path(root_id))
 
 
 def _receipt_growth_digest(
