@@ -176,12 +176,59 @@ def test_predicate_round_trips_through_launcher_env() -> None:
             os.environ["BETTER_AGENT_ACTIVE_CAPABILITY_IDS"] = saved
 
 
+def test_launcher_context_allows_scoped_token_mint_without_global_token() -> None:
+    record = {"manifest": {"id": "ofek.test.auth"}}
+    item = {
+        "name": "secure-mcp",
+        "python": "mcp/server.py",
+        "requires_backend_auth": True,
+        "native_exposure": {"allowed": True},
+    }
+    non_ambient_item = {**item, "native_exposure": {"allowed": False}}
+    base_inputs = {
+        "backend_url": "http://127.0.0.1:8000",
+        "app_session_id": "sid-1",
+        "internal_token": "",
+        "bare_config": False,
+        "open_file_panel_enabled": True,
+    }
+    check(
+        not extension_store._mcp_item_available_for_inputs(record, item, base_inputs),
+        "non-launcher MCP resolution still rejects missing backend auth token",
+    )
+    check(
+        extension_store._mcp_item_available_for_inputs(
+            record,
+            item,
+            {**base_inputs, "extension_mcp_launcher_context": True},
+        ),
+        "launcher MCP resolution accepts later scoped-token mint",
+    )
+    check(
+        not extension_store._mcp_item_available_for_inputs(
+            record,
+            item,
+            {**base_inputs, "backend_url": "", "extension_mcp_launcher_context": True},
+        ),
+        "launcher MCP resolution rejects missing backend url",
+    )
+    check(
+        not extension_store._mcp_item_available_for_inputs(
+            record,
+            non_ambient_item,
+            {**base_inputs, "app_session_id": "", "extension_mcp_launcher_context": True},
+        ),
+        "launcher MCP resolution rejects missing app session",
+    )
+
+
 def main() -> int:
     test_launcher_env_carries_active_capability_ids()
     test_launcher_env_empty_when_no_active_capabilities()
     test_launcher_env_carries_provisioned_tool_profile()
     test_launcher_runtime_inputs_parse_active_capability_ids()
     test_predicate_round_trips_through_launcher_env()
+    test_launcher_context_allows_scoped_token_mint_without_global_token()
     print("\nPASS launcher capability predicate round-trip")
     return 0
 

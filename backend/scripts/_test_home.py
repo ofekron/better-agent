@@ -25,6 +25,7 @@ from __future__ import annotations
 import atexit
 import os
 import shutil
+import sys
 import tempfile
 from pathlib import Path
 
@@ -160,6 +161,11 @@ def unlock_prod_home() -> None:
 # Entry points
 # --------------------------------------------------------------------------- #
 def engage(home: str, lock: bool = False) -> str:
+    # Callers invoke this before any backend import; make backend/ importable
+    # regardless of the caller's own sys.path setup.
+    backend_dir = str(Path(__file__).resolve().parent.parent)
+    if backend_dir not in sys.path:
+        sys.path.insert(0, backend_dir)
     import paths
     resolved = paths.engage_test_home(home)
     install_deletion_guard()

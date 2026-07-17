@@ -4822,15 +4822,17 @@ async def get_processed_requirements_results_for_caller(
     if found is None:
         return {"success": False, "error": "unknown id"}
     if isinstance(found, dict):
-        return found
+        return _with_running_requirements_native_session_files(found, request_id)
     task = found
     try:
         result = await asyncio.wait_for(asyncio.shield(task), timeout=float(wait))
     except asyncio.TimeoutError:
         record = extension_jobs.read_record("requirements", "processed", request_id)
         if isinstance(record, dict):
-            return extension_jobs.response_from_record(record)
-        return {"success": True, "id": request_id, "status": "running", "ready": False}
+            response = extension_jobs.response_from_record(record)
+            return _with_running_requirements_native_session_files(response, request_id)
+        response = {"success": True, "id": request_id, "status": "running", "ready": False}
+        return _with_running_requirements_native_session_files(response, request_id)
     except Exception as exc:
         return {"success": False, "id": request_id, "status": "failed", "ready": True, "error": str(exc)}
     return await asyncio.to_thread(
@@ -4840,6 +4842,30 @@ async def get_processed_requirements_results_for_caller(
         request_id,
         result,
     )
+
+
+def _with_running_requirements_native_session_files(
+    response: dict[str, Any],
+    request_id: str,
+) -> dict[str, Any]:
+    if response.get("ready") is not False:
+        return response
+
+    import delegation_status_store
+    import requirement_context
+
+    delegation_id = str(response.get("delegation_id") or "").strip()
+    if not delegation_id:
+        delegation_id = extension_jobs.delegation_id(
+            "requirements",
+            "processed",
+            request_id,
+            requirement_context.GET_REQUIREMENTS_PROCESSOR_KEY,
+        )
+    status = delegation_status_store.read_status(delegation_id)
+    path = status.get("jsonl_path") if isinstance(status, dict) else None
+    paths = [path] if isinstance(path, str) and path else []
+    return {**response, "native_session_file_paths": paths}
 
 
 @app.post("/api/internal/get-requirements/unit-fts")
@@ -4909,7 +4935,7 @@ async def internal_requirements_unit_vector(
 @app.post("/api/internal/get-requirements/thread-fts")
 async def internal_requirements_thread_fts(
     body: dict,
-    x_internal_token: str = Depends(_internal_token_dependency),
+    x_internal_token: str = Header(..., alias="X-Internal-Token"),
 ):
     _require_builtin_runtime_extension(extension_store.extension_id_for_role('requirements'))
     if not _internal_authority_is_valid():
@@ -4941,7 +4967,7 @@ async def internal_requirements_thread_fts(
 @app.post("/api/internal/get-requirements/thread-vector")
 async def internal_requirements_thread_vector(
     body: dict,
-    x_internal_token: str = Depends(_internal_token_dependency),
+    x_internal_token: str = Header(..., alias="X-Internal-Token"),
 ):
     _require_builtin_runtime_extension(extension_store.extension_id_for_role('requirements'))
     if not _internal_authority_is_valid():
