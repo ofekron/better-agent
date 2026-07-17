@@ -930,6 +930,7 @@ class EventIngester:
         clean_end: int,
         *,
         repaired: bool,
+        verified_predecessor: tuple[int, str, int] | None = None,
     ) -> None:
         self._chain_digests[root_id] = ladder
         self._chain_head_digest[root_id] = digest
@@ -960,19 +961,72 @@ class EventIngester:
         self._chain_generation[root_id] = prior_generation
         self._chain_meta_identity[root_id] = self._chain_identity(path.stat())
         self._chain_checkpoint.pop(root_id, None)
-        self._durable_chain_head.pop(root_id, None)
+        if verified_predecessor is not None:
+            # The full rebuild scan independently recomputed the SHA256
+            # append chain from byte 0 and, partway through, reproduced
+            # the exact (size, digest) the last durable event_chain.json
+            # checkpoint claims -- cryptographic proof that checkpoint is
+            # a genuine, untampered prefix of the current file, not stale
+            # metadata. That's strictly stronger evidence than an
+            # in-process receipt, so it's safe to seed the next write's
+            # `append_authority` predecessor from it directly, restoring
+            # durable-authority continuity across process restarts
+            # without weakening what counts as "authoritative".
+            self._durable_chain_head[root_id] = verified_predecessor
+            perf.record_count("ingest.chain.restore.verified_prefix")
+        else:
+            self._durable_chain_head.pop(root_id, None)
         perf.record_count("ingest.chain.rebuilt")
         if repaired:
             perf.record_count("ingest.chain.torn_tail_repaired")
 
-    def _rebuild_chain_only_locked(self, root_id: str, path: Path) -> None:
-        """Rebuild only the sparse integrity projection in bounded memory."""
+    def _scan_chain_from_scratch_locked(
+        self, root_id: str, path: Path, *, collect_entries: bool,
+    ) -> dict:
+        """Full linear rescan of the events journal from byte 0.
+
+        Recomputes the SHA256 append-chain digest and sparse ladder, and
+        truncates a torn trailing line left by a crash between fsync and
+        the trailing newline. Also looks for a byte offset where this
+        from-scratch scan reproduces the (size, digest) of the last
+        durable event_chain.json checkpoint, even when that checkpoint no
+        longer validates as a full match against the current file (e.g.
+        more was appended after the checkpoint was written, durably on
+        disk, before this process started). Finding that offset is
+        cryptographic proof the checkpoint is a genuine, untampered
+        prefix -- not merely stale metadata -- so it can seed a valid
+        `append_authority` predecessor for the next write instead of
+        losing durable-authority continuity across the gap.
+
+        When `collect_entries` is True, also parses and returns each
+        entry plus its line-start byte offset, for `_ensure_open`'s
+        read-cache seed.
+        """
+        old_size: Optional[int] = None
+        old_digest: Optional[str] = None
+        old_generation: Optional[int] = None
+        try:
+            raw_prior = json.loads(self._event_chain_path(root_id).read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            raw_prior = None
+        if (
+            isinstance(raw_prior, dict)
+            and isinstance(raw_prior.get("size"), int)
+            and isinstance(raw_prior.get("digest"), str)
+            and isinstance(raw_prior.get("generation"), int)
+        ):
+            old_size = raw_prior["size"]
+            old_digest = raw_prior["digest"]
+            old_generation = raw_prior["generation"]
+
         digest = _CHAIN_ZERO
         ladder: list[dict] = []
-        pending_hash = hashlib.sha256()
-        pending_hash.update(digest)
+        chain_pending = bytearray()
         seq = 0
         torn_offset: Optional[int] = None
+        verified_predecessor: tuple[int, str, int] | None = None
+        entries: Optional[list[dict]] = [] if collect_entries else None
+        seq_offsets: Optional[list[int]] = [] if collect_entries else None
         with open(path, "rb") as source:
             scan_before = self._chain_identity(os.fstat(source.fileno()))
             while True:
@@ -980,32 +1034,45 @@ class EventIngester:
                 raw = source.readline()
                 if not raw:
                     break
-                pending_hash.update(raw)
+                chain_pending.extend(raw)
                 text = raw.decode("utf-8", errors="replace").rstrip("\n")
                 if not text.strip():
                     torn_offset = None
                     continue
                 try:
-                    json.loads(text)
+                    entry = json.loads(text)
                 except json.JSONDecodeError:
                     if torn_offset is None:
                         torn_offset = line_start
                     continue
                 torn_offset = None
+                if collect_entries:
+                    entries.append(entry)
+                    seq_offsets.append(line_start)
                 seq += 1
-                digest = pending_hash.digest()
+                digest = self._chain_next(digest, bytes(chain_pending))
+                chain_pending.clear()
+                current_end = source.tell()
+                if (
+                    old_size is not None
+                    and current_end == old_size
+                    and digest.hex() == old_digest
+                ):
+                    verified_predecessor = (old_size, old_digest, old_generation)
                 if seq % _CHAIN_INTERVAL == 0:
                     ladder.append({
                         "seq": seq,
-                        "size": source.tell(),
+                        "size": current_end,
                         "digest": digest.hex(),
                     })
-                pending_hash = hashlib.sha256()
-                pending_hash.update(digest)
             scan_after = self._chain_identity(os.fstat(source.fileno()))
         if scan_before != scan_after or self._chain_identity(path.stat()) != scan_after:
             raise OSError("events journal changed during chain rebuild")
         if torn_offset is not None:
+            logger.warning(
+                "event_ingester: truncating torn trailing line at "
+                "offset %d in %s", torn_offset, path,
+            )
             with open(path, "r+b") as target:
                 target.truncate(torn_offset)
                 target.flush()
@@ -1016,14 +1083,33 @@ class EventIngester:
             finally:
                 os.close(dir_fd)
         clean_end = path.stat().st_size
-        self._seq[root_id] = seq
-        self._next_offset[root_id] = clean_end
+        return {
+            "seq": seq,
+            "digest": digest.hex(),
+            "ladder": ladder,
+            "clean_end": clean_end,
+            "torn": torn_offset is not None,
+            "verified_predecessor": verified_predecessor,
+            "entries": entries,
+            "seq_offsets": seq_offsets,
+        }
+
+    def _rebuild_chain_only_locked(self, root_id: str, path: Path) -> None:
+        """Rebuild only the sparse integrity projection in bounded memory.
+
+        See `_scan_chain_from_scratch_locked` for the scan/verified-
+        predecessor details.
+        """
+        scan = self._scan_chain_from_scratch_locked(root_id, path, collect_entries=False)
+        self._seq[root_id] = scan["seq"]
+        self._next_offset[root_id] = scan["clean_end"]
         self._seed_chain_locked(
-            root_id, seq, digest.hex(), ladder, path, clean_end,
-            repaired=torn_offset is not None,
+            root_id, scan["seq"], scan["digest"], scan["ladder"], path, scan["clean_end"],
+            repaired=scan["torn"],
+            verified_predecessor=scan["verified_predecessor"],
         )
-        perf.record_count("ingest.chain.streaming_rebuild_rows", seq)
-        perf.record("ingest.chain.streaming_rebuild_bytes", clean_end)
+        perf.record_count("ingest.chain.streaming_rebuild_rows", scan["seq"])
+        perf.record("ingest.chain.streaming_rebuild_bytes", scan["clean_end"])
 
     def _ensure_chain_head_locked(self, root_id: str, path: Path) -> tuple[Path, Any, dict]:
         meta = self._load_chain_meta_locked(root_id, path) if path.exists() else None
@@ -1039,6 +1125,18 @@ class EventIngester:
         else:
             fh = pair[1]
         meta = self._load_chain_meta_locked(root_id, path)
+        if meta is not None and root_id not in self._durable_chain_head:
+            # The on-disk chain meta already matches the file exactly (no
+            # rebuild was needed) -- it's a valid predecessor for the next
+            # write's `append_authority`. Without this, the first write in
+            # a fresh process to touch an already-valid root would find
+            # `_durable_chain_head` empty and silently omit
+            # `append_authority` from its own chain-meta write, breaking
+            # hydration_index_store's durable-authority chain even though
+            # nothing was ever actually stale.
+            self._durable_chain_head[root_id] = (
+                int(meta["size"]), str(meta["digest"]), int(meta["generation"]),
+            )
         if meta is None:
             with self._fsync_cond:
                 self._fsync_dirty.discard(root_id)
@@ -1083,74 +1181,29 @@ class EventIngester:
         ):
             perf.record_count("ingest.bootstrap.reused_read_scan", 1)
             return path, self._open_append_handle(root_id, path)
-        entries: list[dict] = []
-        chain_digest = _CHAIN_ZERO
-        chain_ladder: list[dict] = []
-        chain_seq = 0
-        chain_pending = bytearray()
         # Same scan also seeds the seq → byte-offset index so read_events
-        # can fast-path-skip the after_seq prefix.
-        seq_offsets: list[int] = []
-        # Torn-tail recovery: if a crash interrupted ingest between
-        # fsync and the trailing newline, the last line is partial JSON.
-        # Truncate it so the file stays parseable and the next append
-        # doesn't bury garbage in the middle. Only the trailing run of
-        # un-parseable lines is truncated; mid-file decode errors stay
-        # (truncating them would lose subsequent good data).
-        torn_offset: Optional[int] = None
+        # can fast-path-skip the after_seq prefix. See
+        # `_scan_chain_from_scratch_locked` for torn-tail recovery and
+        # verified-predecessor details.
         if path.exists():
-            with open(path, "rb") as f:
-                scan_before = self._chain_identity(os.fstat(f.fileno()))
-                while True:
-                    line_start = f.tell()
-                    raw = f.readline()
-                    if not raw:
-                        break
-                    chain_pending.extend(raw)
-                    text = raw.decode("utf-8", errors="replace").rstrip("\n")
-                    if not text.strip():
-                        torn_offset = None
-                        continue
-                    try:
-                        entry = json.loads(text)
-                    except json.JSONDecodeError:
-                        if torn_offset is None:
-                            torn_offset = line_start
-                        continue
-                    torn_offset = None
-                    entries.append(entry)
-                    seq_offsets.append(line_start)
-                    chain_seq += 1
-                    chain_digest = self._chain_next(chain_digest, bytes(chain_pending))
-                    if chain_seq % _CHAIN_INTERVAL == 0:
-                        chain_ladder.append({
-                            "seq": chain_seq,
-                            "size": f.tell(),
-                            "digest": chain_digest.hex(),
-                        })
-                    chain_pending.clear()
-                scan_after = self._chain_identity(os.fstat(f.fileno()))
-            try:
-                scan_path = self._chain_identity(path.stat())
-            except OSError:
-                scan_path = None
-            if scan_before != scan_after or scan_path != scan_after:
-                raise OSError("events journal changed during chain rebuild")
-            if torn_offset is not None:
-                logger.warning(
-                    "event_ingester: truncating torn trailing line at "
-                    "offset %d in %s", torn_offset, path,
-                )
-                with open(path, "r+b") as f:
-                    f.truncate(torn_offset)
-                    f.flush()
-                    os.fsync(f.fileno())
-                dir_fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-                try:
-                    os.fsync(dir_fd)
-                finally:
-                    os.close(dir_fd)
-        clean_end = path.stat().st_size if path.exists() else 0
+            scan = self._scan_chain_from_scratch_locked(root_id, path, collect_entries=True)
+            entries = scan["entries"]
+            seq_offsets = scan["seq_offsets"]
+            clean_end = scan["clean_end"]
+            chain_seq = scan["seq"]
+            chain_digest_hex = scan["digest"]
+            chain_ladder = scan["ladder"]
+            torn = scan["torn"]
+            verified_predecessor = scan["verified_predecessor"]
+        else:
+            entries = []
+            seq_offsets = []
+            clean_end = 0
+            chain_seq = 0
+            chain_digest_hex = _CHAIN_ZERO.hex()
+            chain_ladder = []
+            torn = False
+            verified_predecessor = None
         identity = self._event_file_identity(path)
         if identity is None:
             identity = (0, 0, 0, clean_end)
@@ -1158,8 +1211,9 @@ class EventIngester:
             root_id, entries, seq_offsets, clean_end, identity,
         )
         self._seed_chain_locked(
-            root_id, chain_seq, chain_digest.hex(), chain_ladder,
-            path, clean_end, repaired=torn_offset is not None,
+            root_id, chain_seq, chain_digest_hex, chain_ladder,
+            path, clean_end, repaired=torn,
+            verified_predecessor=verified_predecessor,
         )
         self._locks.setdefault(root_id, threading.Lock())
         fh = self._open_append_handle(root_id, path)
