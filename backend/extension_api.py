@@ -204,6 +204,10 @@ class SetMcpEnabledRequest(BaseModel):
     enabled: bool
 
 
+class SetSkillEnabledRequest(BaseModel):
+    enabled: bool
+
+
 class SetFrontendModuleEnabledRequest(BaseModel):
     enabled: bool
 
@@ -1097,6 +1101,16 @@ async def set_extension_mcp_enabled(extension_id: str, server_name: str, req: Se
         raise _extension_error(exc) from exc
     await _broadcast_extensions_changed()
     return {"server": server_name, "enabled": enabled}
+
+
+@router.patch("/{extension_id}/skills/{skill_name}/enabled")
+async def set_extension_skill_enabled(extension_id: str, skill_name: str, req: SetSkillEnabledRequest):
+    try:
+        enabled = extension_store.set_runtime_skill_enabled(extension_id, skill_name, req.enabled)
+    except extension_store.ExtensionError as exc:
+        raise _extension_error(exc) from exc
+    await _broadcast_extensions_changed()
+    return {"skill": skill_name, "enabled": enabled}
 
 
 @router.patch("/{extension_id}/frontend-modules/{slot}/{module_id}/enabled")

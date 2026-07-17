@@ -387,6 +387,8 @@
   "settings.extensionsUiSurfacesHelp": "כפתורים או עמודים שהתוסף מוסיף ל-Better Agent.",
   "settings.extensionsMcpServers": "כלי סוכן",
   "settings.extensionsMcpServersHelp": "שרתי MCP שנחשפים ככלים להרצות Claude, Codex או Gemini.",
+  "settings.extensionsSkills": "כישורי סוכן",
+  "settings.extensionsSkillsHelp": "כישורים שנחשפים לסשנים ככישורי ריצה. כישור לא מסומן מוסתר מכל ההרצות.",
   "settings.extensionsRemoteServices": "שירותים מרוחקים",
   "settings.extensionsRemoteServicesHelp": "שירותים חיצוניים שהתוסף מצהיר עליהם ללוגיקה קניינית או מתארחת.",
   "settings.extensionsInstructions": "הוראות פרומפט",

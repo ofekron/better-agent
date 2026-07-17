@@ -382,6 +382,8 @@
   "settings.extensionsUiSurfacesHelp": "Knoppen of pagina's die deze extensie aan Better Agent toevoegt.",
   "settings.extensionsMcpServers": "Agent-tools",
   "settings.extensionsMcpServersHelp": "MCP-servers die als tools worden aangeboden aan Claude-, Codex- of Gemini-runs.",
+  "settings.extensionsSkills": "Agentvaardigheden",
+  "settings.extensionsSkillsHelp": "Vaardigheden die aan sessies worden blootgesteld als runtimevaardigheden. Niet-aangevinkte vaardigheden zijn verborgen in alle runs.",
   "settings.extensionsRemoteServices": "Externe services",
   "settings.extensionsRemoteServicesHelp": "Externe services die deze extensie declareert voor eigen of gehoste logica.",
   "settings.extensionsInstructions": "Prompt-instructies",

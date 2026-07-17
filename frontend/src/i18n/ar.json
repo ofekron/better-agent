@@ -386,6 +386,8 @@
   "settings.extensionsUiSurfacesHelp": "أزرار أو صفحات يضيفها هذا الامتداد إلى Better Agent.",
   "settings.extensionsMcpServers": "أدوات الوكيل",
   "settings.extensionsMcpServersHelp": "خوادم MCP مكشوفة كأدوات لتشغيلات Claude أو Codex أو Gemini.",
+  "settings.extensionsSkills": "مهارات الوكيل",
+  "settings.extensionsSkillsHelp": "المهارات المتاحة للجلسات كمهارات وقت التشغيل. المهارات غير المحددة مخفية في جميع عمليات التشغيل.",
   "settings.extensionsRemoteServices": "خدمات بعيدة",
   "settings.extensionsRemoteServicesHelp": "خدمات خارجية يصرّح بها هذا الامتداد لمنطق خاص أو مستضاف.",
   "settings.extensionsInstructions": "تعليمات الطلب",

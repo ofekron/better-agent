@@ -382,6 +382,8 @@
   "settings.extensionsUiSurfacesHelp": "Schaltflächen oder Seiten, die diese Erweiterung zu Better Agent hinzufügt.",
   "settings.extensionsMcpServers": "Agent-Tools",
   "settings.extensionsMcpServersHelp": "MCP-Server, die Claude-, Codex- oder Gemini-Läufen als Werkzeuge zur Verfügung stehen.",
+  "settings.extensionsSkills": "Agenten-Skills",
+  "settings.extensionsSkillsHelp": "Skills, die Sitzungen als Laufzeit-Skills bereitgestellt werden. Nicht angehakte Skills sind in allen Läufen ausgeblendet.",
   "settings.extensionsRemoteServices": "Remote-Dienste",
   "settings.extensionsRemoteServicesHelp": "Externe Dienste, die diese Erweiterung für proprietäre oder gehostete Logik deklariert.",
   "settings.extensionsInstructions": "Prompt-Anweisungen",

@@ -386,6 +386,8 @@
   "settings.extensionsUiSurfacesHelp": "이 확장이 Better Agent에 추가하는 버튼이나 페이지입니다.",
   "settings.extensionsMcpServers": "에이전트 도구",
   "settings.extensionsMcpServersHelp": "Claude, Codex, Gemini 실행에 도구로 노출되는 MCP 서버입니다.",
+  "settings.extensionsSkills": "에이전트 스킬",
+  "settings.extensionsSkillsHelp": "세션에 런타임 스킬로 노출되는 스킬입니다. 선택 해제된 스킬은 모든 실행에서 숨겨집니다.",
   "settings.extensionsRemoteServices": "원격 서비스",
   "settings.extensionsRemoteServicesHelp": "이 확장이 자체 또는 호스팅 로직을 위해 선언하는 외부 서비스입니다.",
   "settings.extensionsInstructions": "프롬프트 지시",
