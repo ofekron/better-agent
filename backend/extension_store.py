@@ -34,6 +34,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from env_compat import better_agent_runtime_env, dual_env_many, get_env
 from json_store import read_json, write_json
 from paths import ba_home
+from ssrf_guard import is_disallowed_remote_host
 import password_manager
 import extension_applied_config
 from provider_config_sync_backend.api import KNOWN_PROVIDER_KINDS
@@ -1257,36 +1258,6 @@ def _validate_protocol_coverage(manifest: dict[str, Any]) -> None:
         )
 
 
-_DISALLOWED_REMOTE_HOSTNAMES = frozenset({
-    "localhost",
-    "metadata.google.internal",
-    "metadata",
-})
-
-
-def _is_disallowed_remote_host(hostname: str) -> bool:
-    host = (hostname or "").strip().strip(".").lower()
-    if not host:
-        return True
-    if host in _DISALLOWED_REMOTE_HOSTNAMES:
-        return True
-    if host.endswith(".localhost") or host.endswith(".local") or host.endswith(".internal"):
-        return True
-    import ipaddress
-    try:
-        ip = ipaddress.ip_address(host)
-    except ValueError:
-        return False
-    return (
-        ip.is_loopback
-        or ip.is_private
-        or ip.is_link_local
-        or ip.is_reserved
-        or ip.is_multicast
-        or ip.is_unspecified
-    )
-
-
 def _validate_remote_services(value: Any) -> list[dict[str, str]]:
     if value is None:
         return []
@@ -1321,7 +1292,7 @@ def _validate_remote_services(value: Any) -> list[dict[str, str]]:
         # as a trusted subprocess (trusted-by-install model) and can reach any
         # host it wants; this only stops a published manifest from *declaring*
         # loopback/private/metadata endpoints as legitimate services.
-        if _is_disallowed_remote_host(parsed.hostname or ""):
+        if is_disallowed_remote_host(parsed.hostname or ""):
             raise ExtensionError(
                 "entrypoints.remote_services.base_url must not target a private, "
                 "loopback, link-local, or cloud-metadata host"

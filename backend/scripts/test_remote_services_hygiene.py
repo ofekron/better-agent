@@ -16,6 +16,7 @@ _test_home.isolate("ba-rs-")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import extension_store as es  # noqa: E402
+import ssrf_guard  # noqa: E402
 
 
 def _rejects(url: str) -> bool:
@@ -47,9 +48,9 @@ def main() -> int:
         assert not _rejects(url), f"should allow public host: {url}"
 
     # And the helper directly:
-    assert es._is_disallowed_remote_host("169.254.169.254") is True
-    assert es._is_disallowed_remote_host("") is True
-    assert es._is_disallowed_remote_host("api.stripe.com") is False
+    assert ssrf_guard.is_disallowed_remote_host("169.254.169.254") is True
+    assert ssrf_guard.is_disallowed_remote_host("") is True
+    assert ssrf_guard.is_disallowed_remote_host("api.stripe.com") is False
 
     print("OK: remote_services rejects internal/private/metadata hosts; allows public")
     return 0
