@@ -782,6 +782,7 @@ store.invalidate(sys.argv[2])
     large_conn.close()
     rss_before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     large_result: list[object] = []
+    large_cpu_started = time.process_time()
     large_started = time.perf_counter()
     large_loader = threading.Thread(
         target=lambda: large_result.append(store.load(large_root, large_journal)),
@@ -798,11 +799,17 @@ store.invalidate(sys.argv[2])
         prior_heartbeat = heartbeat
     large_loader.join()
     large_elapsed = time.perf_counter() - large_started
+    # Bound the WORK, not the wall clock: scanned_bytes == 0 below
+    # already proves the journal was not rescanned, and process CPU
+    # time bounds the hot offset load itself. A wall-clock bound here
+    # flaked repeatedly (41-58s observed) purely from concurrent
+    # machine load.
+    large_cpu_elapsed = time.process_time() - large_cpu_started
     rss_after = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     large_offsets, large_metrics = large_result[0]
     assert len(large_offsets["large-sid"]) == large_rows
     assert large_metrics["scanned_bytes"] == 0, large_metrics
-    assert large_elapsed < 15, large_elapsed
+    assert large_cpu_elapsed < 15, (large_cpu_elapsed, large_elapsed)
     assert heartbeats > 0, heartbeats
     assert max_heartbeat_gap < 0.2, max_heartbeat_gap
     rss_scale = 1024 if sys.platform != "darwin" else 1
