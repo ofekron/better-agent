@@ -325,18 +325,16 @@ def test_local_keychain_executor_cross_platform():
     assert res.ok is True and res.body == "stored"
     assert kr_calls == [("testape", "login.password", SECRET)]
 
-    # darwin → /usr/bin/security so the keychain ACL stays with the security binary
-    sec_calls = []
-    real_run = oskeychain.subprocess.run
+    # darwin writes through Keyring so plaintext never appears in process argv.
+    darwin_calls = []
     sys.platform = "darwin"
-    oskeychain.subprocess.run = lambda args, **kw: sec_calls.append(args)
+    keyring.set_password = lambda *args: darwin_calls.append(args)
     try:
         res = ex.execute(desc, SECRET)
     finally:
-        sys.platform, oskeychain.subprocess.run = real_platform, real_run
+        sys.platform, keyring.set_password = real_platform, real_set
     assert res.ok is True
-    assert sec_calls[0][:2] == ["/usr/bin/security", "add-generic-password"]
-    assert SECRET in sec_calls[0]
+    assert darwin_calls == [("testape", "login.password", SECRET)]
 
     # store failure → ok=False, secret-free error
     real_store = oskeychain.store
@@ -350,6 +348,35 @@ def test_local_keychain_executor_cross_platform():
     assert res.ok is False
     assert SECRET not in res.error
     print("ok  local-keychain executor routes per platform")
+
+
+def test_macos_keychain_read_distinguishes_missing_from_denied():
+    import oskeychain
+
+    real_platform = sys.platform
+    real_run = oskeychain.subprocess.run
+
+    class _Result:
+        stdout = "sensitive-output"
+
+        def __init__(self, returncode):
+            self.returncode = returncode
+
+    sys.platform = "darwin"
+    try:
+        oskeychain.subprocess.run = lambda *args, **kwargs: _Result(44)
+        assert oskeychain.get("service", "missing") is None
+
+        oskeychain.subprocess.run = lambda *args, **kwargs: _Result(1)
+        try:
+            oskeychain.get("service", "denied")
+        except RuntimeError as exc:
+            assert "sensitive" not in str(exc)
+        else:
+            raise AssertionError("denied keychain read must fail")
+    finally:
+        sys.platform = real_platform
+        oskeychain.subprocess.run = real_run
 
 
 def test_exec_secret_via_stdin_and_env_scrubbed():
@@ -875,6 +902,7 @@ def _run_all():
         test_named_multi_secret_http_injection,
         test_local_keychain_sink_stores_without_egress,
         test_local_keychain_executor_cross_platform,
+        test_macos_keychain_read_distinguishes_missing_from_denied,
         test_exec_secret_via_stdin_and_env_scrubbed,
         test_named_multi_secret_exec_injection_and_storage,
         test_stored_password_manager_sources_approve_without_user_secret_values,
