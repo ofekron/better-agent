@@ -118,9 +118,8 @@ def _keyring_services() -> tuple[str, ...]:
     return service_names(KEYRING_SERVICE, LEGACY_KEYRING_SERVICE)
 
 
-# Provider-key writes use the native Keyring API. macOS reads use the stable
-# Apple `security` binary identity so one Keychain authorization survives
-# Python interpreter and virtual-environment changes.
+# Provider-key reads and writes use the stable Apple `security` binary identity
+# so one Keychain authorization survives interpreter and environment changes.
 #
 # `keyring`'s macOS backend never sets `kSecUseOperationPrompt`, so the OS
 # "allow access" prompt shows only the generic calling-binary identity
@@ -149,31 +148,6 @@ def _keychain_reason(provider_id: str, verb: str) -> str:
     return f"Better Agent needs {verb} the API key for AI provider {provider_id!r}"
 
 
-def _macos_set_password_with_reason(
-    service: str, username: str, password: str, reason: str,
-) -> None:
-    """Like `keyring.set_password`, but the OS prompt (if shown, e.g. when
-    overwriting an item this binary doesn't already own the ACL for)
-    states `reason` instead of just the calling binary's generic identity."""
-    import ctypes
-    from contextlib import suppress
-
-    api = _macos_security_api()
-    if api is None:
-        raise RuntimeError("macOS Security API unavailable")
-    with suppress(api.NotFound):
-        api.delete_generic_password(None, service, username)
-    query = api.create_query(
-        kSecClass=api.k_("kSecClassGenericPassword"),
-        kSecAttrService=service,
-        kSecAttrAccount=username,
-        kSecValueData=password,
-        kSecUseOperationPrompt=reason,
-    )
-    status = api.SecItemAdd(query, None)
-    api.Error.raise_for_status(status)
-
-
 def _get_password_with_reason(service: str, username: str, reason: str) -> str | None:
     """Read through macOS's stable ``security`` identity when possible."""
     if (
@@ -198,7 +172,7 @@ def _set_password_with_reason(
         keyring.set_password is _ORIGINAL_KEYRING_SET_PASSWORD
         and _macos_security_api() is not None
     ):
-        _macos_set_password_with_reason(service, username, password, reason)
+        oskeychain.store(service, username, password)
     else:
         keyring.set_password(service, username, password)
 
@@ -257,6 +231,18 @@ def _keyring_call(
             if failure_flag is not None:
                 failure_flag.append(True)
             return default
+    if (
+        fn is _set_password_with_reason
+        and keyring.set_password is _ORIGINAL_KEYRING_SET_PASSWORD
+        and _macos_security_api() is not None
+    ):
+        try:
+            return fn(*args)
+        except Exception:
+            logger.warning("stable macOS keychain write failed for %s/%s", entry[0], entry[1])
+            if failure_flag is not None:
+                failure_flag.append(True)
+            raise RuntimeError("stable macOS keychain write failed") from None
     result: list[Any] = [default]
     done = threading.Event()
 

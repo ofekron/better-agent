@@ -1,9 +1,4 @@
-"""Read and write one secret through the OS credential store.
-
-macOS reads use the stable Apple ``security`` binary identity. Writes use the
-native Keyring API because the ``security`` CLI accepts plaintext only in argv.
-Other platforms use Keyring for both operations.
-"""
+"""Read and write one secret through the OS credential store."""
 
 from __future__ import annotations
 
@@ -14,11 +9,48 @@ from typing import Optional
 _TIMEOUT = 5  # seconds — fail loud rather than hang on a locked keychain
 
 
+def _interactive_arg(value: str) -> str:
+    if any(character in value for character in "\0\r\n"):
+        raise ValueError("OS credential identifiers cannot contain control characters")
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _store_input(service: str, account: str, value: str) -> bytes:
+    args = (
+        "add-generic-password",
+        "-U",
+        "-s",
+        service,
+        "-a",
+        account,
+        "-X",
+        value.encode("utf-8").hex(),
+    )
+    return (" ".join(_interactive_arg(arg) for arg in args) + "\n").encode("utf-8")
+
+
 def store(service: str, account: str, value: str) -> None:
     """Write (replacing) one credential entry. Raises on failure."""
-    import keyring
+    if sys.platform != "darwin":
+        import keyring
 
-    keyring.set_password(service, account, value)
+        keyring.set_password(service, account, value)
+        return
+    timed_out = False
+    try:
+        proc = subprocess.run(
+            ["/usr/bin/security", "-q", "-i"],
+            input=_store_input(service, account, value),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        timed_out = True
+    if timed_out:
+        raise RuntimeError("OS credential write timed out") from None
+    if proc.returncode != 0:
+        raise RuntimeError("OS credential write was denied or unavailable") from None
 
 
 def get(service: str, account: str, *, timeout: float = _TIMEOUT) -> Optional[str]:
