@@ -14408,6 +14408,43 @@ async def internal_mssg(
     return await _handle_internal_mssg(body)
 
 
+@app.post("/api/internal/stop-turn")
+async def internal_stop_turn(
+    body: dict,
+    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+):
+    if not _internal_authority_is_valid():
+        raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
+    caller_session_id = str(body.get("caller_session_id") or "").strip()
+    target_session_id = str(body.get("target_session_id") or "").strip()
+    if not caller_session_id or not target_session_id:
+        raise HTTPException(
+            status_code=400,
+            detail="caller_session_id and target_session_id are required",
+        )
+    if not await _session_exists(caller_session_id):
+        raise HTTPException(status_code=404, detail="caller session not found")
+    if not await _session_exists(target_session_id):
+        raise HTTPException(status_code=404, detail="target session not found")
+    try:
+        stopped = await coordinator.turn_manager.cancel_turn_created_by(
+            target_session_id,
+            caller_session_id,
+        )
+    except PermissionError as exc:
+        raise HTTPException(
+            status_code=403,
+            detail=str(exc),
+        ) from exc
+    if not stopped:
+        raise HTTPException(status_code=409, detail="target session has no running turn")
+    return {
+        "success": True,
+        "stopped": True,
+        "target_session_id": target_session_id,
+    }
+
+
 async def _handle_internal_mssg(body: dict) -> dict[str, Any]:
     sender_session_id = str(body.get("sender_session_id") or "").strip()
     message = str(body.get("message") or "").strip()

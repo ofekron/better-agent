@@ -265,6 +265,7 @@ class TurnManager:
         self.active_run_ids: dict[str, list[str]] = {}
         self.current_assistant_msgs: dict[str, dict] = {}
         self.current_turn_workers: dict[str, list[dict]] = {}
+        self._turn_creators: dict[str, str] = {}
         self._turn_save_callbacks: dict[str, Callable[[dict], Awaitable[None]]] = {}
         # `in_flight_lifecycle_msg_id` moved to UserPromptManager.
         # `_interrupted_by_msg_id` stays here — it's a turn-side
@@ -397,6 +398,52 @@ class TurnManager:
 
     def force_context_overflow_once(self, app_session_id: str) -> None:
         self._forced_context_overflow_once.add(app_session_id)
+
+    @staticmethod
+    def _team_message_creator(team_message: object) -> Optional[str]:
+        if not isinstance(team_message, dict):
+            return None
+        metadata = team_message.get("metadata")
+        if not isinstance(metadata, dict):
+            return None
+        creator = metadata.get("sender_session_id")
+        if not isinstance(creator, str):
+            return None
+        return creator.strip() or None
+
+    def current_turn_creator(self, app_session_id: str) -> Optional[str]:
+        return self._turn_creators.get(app_session_id)
+
+    async def cancel_turn_created_by(
+        self,
+        app_session_id: str,
+        caller_session_id: str,
+    ) -> bool:
+        if self.current_turn_creator(app_session_id) != caller_session_id:
+            raise PermissionError("caller did not create the running turn")
+        return await self.cancel_turn(app_session_id)
+
+    def register_recovered_turn_creator(
+        self,
+        app_session_id: str,
+        session: dict,
+        target_message_id: Optional[str],
+    ) -> None:
+        messages = session.get("messages") if isinstance(session, dict) else None
+        if not isinstance(messages, list) or not target_message_id:
+            return
+        for index, message in enumerate(messages):
+            if not isinstance(message, dict) or message.get("id") != target_message_id:
+                continue
+            if index == 0:
+                return
+            user_message = messages[index - 1]
+            if not isinstance(user_message, dict) or user_message.get("role") != "user":
+                return
+            creator = self._team_message_creator(user_message.get("team_message"))
+            if creator:
+                self._turn_creators[app_session_id] = creator
+            return
 
     def _pop_forced_context_overflow_once(self, app_session_id: str) -> bool:
         if app_session_id not in self._forced_context_overflow_once:
@@ -676,6 +723,7 @@ class TurnManager:
         ]
         if not self._run_state[app_session_id]:
             self._run_state.pop(app_session_id, None)
+            self._turn_creators.pop(app_session_id, None)
         for r in removed:
             self._maybe_flip_streaming(
                 app_session_id,
@@ -1415,6 +1463,11 @@ class TurnManager:
         workers_list = self.current_turn_workers[app_session_id]
 
         self._evict_stale_runs(app_session_id, mode)
+        creator = self._team_message_creator(team_message)
+        if creator:
+            self._turn_creators[app_session_id] = creator
+        else:
+            self._turn_creators.pop(app_session_id, None)
 
         turn_run_id = str(uuid.uuid4())
         self.active_run_ids.setdefault(app_session_id, []).append(turn_run_id)
@@ -1959,6 +2012,7 @@ class TurnManager:
                 self.active_run_ids.pop(app_session_id, None)
             self.current_turn_workers.pop(app_session_id, None)
             self.current_assistant_msgs.pop(app_session_id, None)
+            self._turn_creators.pop(app_session_id, None)
             # Pre-existing latent bug in the original Coordinator._run_turn
             # (orchestrator.py:3057+): the cancel branch pops
             # `_interrupted_by_msg_id` but the success / error / detached

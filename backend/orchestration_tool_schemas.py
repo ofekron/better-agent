@@ -16,6 +16,19 @@ SESSION_ORGANIZATION_INPUT_PROPERTIES: dict[str, Any] = {
 }
 
 
+STOP_TURN_INPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "target_session_id": {
+            "type": "string",
+            "description": "Better Agent session id whose current turn should be stopped.",
+        },
+    },
+    "required": ["target_session_id"],
+    "additionalProperties": False,
+}
+
+
 DELEGATE_TASK_INPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
