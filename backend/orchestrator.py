@@ -74,7 +74,7 @@ _TOKEN_AUTH_EXECUTOR = BoundedAsyncExecutor(
     capacity=16,
     timeout_seconds=0.1,
 )
-_BOUND_PRINCIPAL: ContextVar["_RequestAuthorityBinding" | None] = ContextVar(
+_BOUND_PRINCIPAL: ContextVar[Optional["_RequestAuthorityBinding"]] = ContextVar(
     "bound_internal_principal",
     default=None,
 )
