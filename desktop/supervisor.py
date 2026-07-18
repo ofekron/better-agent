@@ -219,7 +219,17 @@ def kill_backend_lock_holder(*, timeout: float = 5.0) -> bool:
     return not _process_exists(pid)
 
 
-def backend_argv(role: BackendRole = "primary") -> list[str]:
+def _checkout_python(checkout: Path) -> Path:
+    for path in (
+        checkout / "backend" / ".venv" / "bin" / "python",
+        checkout / "backend" / ".venv" / "Scripts" / "python.exe",
+    ):
+        if path.is_file():
+            return path
+    raise RuntimeError(f"Line checkout has no backend interpreter: {checkout}")
+
+
+def backend_argv(role: BackendRole = "primary", checkout: Path | None = None) -> list[str]:
     """argv to start the backend server.
 
     Frozen: re-exec the single app binary with `--serve` — `app_main.py`
@@ -228,9 +238,13 @@ def backend_argv(role: BackendRole = "primary") -> list[str]:
     """
     if getattr(sys, "frozen", False):
         return [sys.executable, "--serve-node" if role == "node" else "--serve"]
+    checkout = (checkout or _REPO_ROOT).resolve()
+    app_entry = checkout / "backend" / "app_entry.py"
+    if not app_entry.is_file():
+        raise RuntimeError(f"Line checkout has no backend entrypoint: {checkout}")
     return [
-        sys.executable,
-        str(_BACKEND_DIR / "app_entry.py"),
+        str(_checkout_python(checkout)),
+        str(app_entry),
         "--serve-node" if role == "node" else "--serve",
     ]
 
@@ -349,6 +363,7 @@ class BackendSupervisor:
         self._backend_logger: Optional[logging.Logger] = None
         self._daemon_host = None
         self._daemon_host_thread: Optional[threading.Thread] = None
+        self._active_checkout = _REPO_ROOT.resolve()
         # The backend — and every runner it spawns — inherits this PATH so
         # `claude`/`gemini`/`node` resolve under launchd's stripped PATH.
         self._env = {
@@ -420,6 +435,7 @@ class BackendSupervisor:
             try:
                 with urllib.request.urlopen(self.health_url, timeout=2) as r:
                     if r.status == 200:
+                        self._confirm_active_checkout()
                         return True
             except (urllib.error.URLError, OSError):
                 pass
@@ -430,7 +446,12 @@ class BackendSupervisor:
         """Block until the backend process exits; return its exit code."""
         if self._proc is None:
             return 0
-        return self._proc.wait()
+        flag = _ba_home() / "restart_requested"
+        while self._proc.poll() is None:
+            if flag.exists():
+                _signal_stop_backend(self._proc.pid)
+            time.sleep(0.1)
+        return int(self._proc.returncode or 0)
 
     def local_url(self) -> str:
         return f"http://127.0.0.1:{self.port}/"
@@ -462,6 +483,16 @@ class BackendSupervisor:
                 )
                 return False
             time.sleep(0.1)
+        try:
+            self._proc = self._spawn_backend()
+        except RuntimeError as exc:
+            if not self._recover_failed_switch(str(exc)):
+                return False
+            self._proc = self._spawn_backend()
+        if self.wait_healthy():
+            return True
+        if not self._recover_failed_switch("backend failed to become healthy"):
+            return False
         self._proc = self._spawn_backend()
         return self.wait_healthy()
 
@@ -493,8 +524,14 @@ class BackendSupervisor:
         Finder-launched .app vanishes into a closed fd; without
         rotation the file would grow unbounded."""
         self._ensure_backend_logger()
+        checkout = self._resolved_checkout()
+        self._active_checkout = checkout
+        self._env.update(dual_env_many({
+            "BETTER_CLAUDE_ACTIVE_CHECKOUT": str(checkout),
+            "BETTER_CLAUDE_RUN_SH_SUPERVISOR": "1",
+        }))
         proc = subprocess.Popen(
-            backend_argv(self.role), env=self._env,
+            backend_argv(self.role, checkout), env=self._env, cwd=checkout / "backend",
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True, bufsize=1,  # line-buffered text stream
         )
@@ -503,6 +540,52 @@ class BackendSupervisor:
             daemon=True, name="backend-log-forwarder",
         ).start()
         return proc
+
+    def _resolved_checkout(self) -> Path:
+        if self.role != "primary" or getattr(sys, "frozen", False):
+            return _REPO_ROOT.resolve()
+        from daemonhost import pointer
+
+        checkout = Path(pointer.resolve(str(_REPO_ROOT))).resolve()
+        if not (checkout / "frontend" / "dist" / "index.html").is_file():
+            raise RuntimeError(f"Line checkout has no built frontend: {checkout}")
+        _checkout_python(checkout)
+        return checkout
+
+    def _confirm_active_checkout(self) -> None:
+        if self.role != "primary" or getattr(sys, "frozen", False):
+            return
+        from daemonhost import pointer, switch_control
+        from daemonhost.jsonio import write_json
+        from daemonhost.paths import refresh_result_path
+
+        request_id = str(pointer.read().get("request_id") or "")
+        pointer.confirm_healthy(str(self._active_checkout), request_id)
+        if request_id:
+            write_json(refresh_result_path(), {
+                "request_id": request_id,
+                "status": "succeeded",
+                "error": None,
+            })
+            switch_control.service_tick(str(self._active_checkout))
+
+    def _recover_failed_switch(self, error: str) -> bool:
+        from daemonhost import pointer, switch_control
+        from daemonhost.jsonio import write_json
+        from daemonhost.paths import refresh_result_path
+
+        pointer_data = pointer.read()
+        if pointer_data.get("status") != "switching":
+            return False
+        request_id = str(pointer_data.get("request_id") or "")
+        pointer.revert(error, request_id)
+        write_json(refresh_result_path(), {
+            "request_id": request_id,
+            "status": "failed",
+            "error": error,
+        })
+        switch_control.service_tick(str(self._active_checkout))
+        return True
 
     def _ensure_backend_logger(self) -> None:
         """Configure the rotating `backend.log` handler once. Idempotent

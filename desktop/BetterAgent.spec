@@ -81,6 +81,15 @@ hiddenimports += [
     "daemonhost.paths",
     "daemonhost.pointer",
     "daemonhost.switch_control",
+    "switch_control_daemon",
+    "switch_control_daemon.line_switch_runtime",
+    "switch_control_daemon.line_switch_runtime.control",
+    "switch_control_daemon.line_switch_runtime.jsonio",
+    "switch_control_daemon.line_switch_runtime.paths",
+    "switch_control_daemon.line_switch_runtime.pointer",
+    "switch_control_daemon.line_switch_runtime.requests",
+    "switch_control_daemon.line_switch_runtime.service",
+    "switch_control_daemon.line_switch_runtime.transaction",
 ]
 
 a = Analysis(                                            # noqa: F821

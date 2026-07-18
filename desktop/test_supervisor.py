@@ -17,6 +17,7 @@ import time
 from pathlib import Path
 
 _TMP_HOME = tempfile.mkdtemp(prefix="bc-test-supervisor-")
+os.environ["BETTER_AGENT_HOME"] = _TMP_HOME
 os.environ["BETTER_CLAUDE_HOME"] = _TMP_HOME
 
 _HERE = Path(__file__).resolve().parent
@@ -338,6 +339,51 @@ def test_restart_aborts_when_port_held() -> bool:
     return True
 
 
+def test_backend_argv_uses_target_checkout_interpreter() -> bool:
+    root = Path(_TMP_HOME) / "target-checkout"
+    posix_python = root / "backend" / ".venv" / "bin" / "python"
+    app_entry = root / "backend" / "app_entry.py"
+    posix_python.parent.mkdir(parents=True)
+    posix_python.write_text("", encoding="utf-8")
+    app_entry.write_text("", encoding="utf-8")
+    argv = backend_argv(checkout=root)
+    if argv[:2] != [str(posix_python.resolve()), str(app_entry.resolve())]:
+        print(f"  target POSIX argv mismatch: {argv}")
+        return False
+    posix_python.unlink()
+    windows_python = root / "backend" / ".venv" / "Scripts" / "python.exe"
+    windows_python.parent.mkdir(parents=True)
+    windows_python.write_text("", encoding="utf-8")
+    argv = backend_argv(checkout=root)
+    if argv[:2] != [str(windows_python.resolve()), str(app_entry.resolve())]:
+        print(f"  target Windows argv mismatch: {argv}")
+        return False
+    return True
+
+
+def test_source_switch_rejects_missing_frontend() -> bool:
+    from daemonhost import pointer
+
+    root = Path(_TMP_HOME) / "missing-dist-checkout"
+    python = root / "backend" / ".venv" / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.write_text("", encoding="utf-8")
+    (root / "backend" / "main.py").write_text("", encoding="utf-8")
+    pointer.set_active(str(root), "missing-dist")
+    sup = BackendSupervisor()
+    try:
+        sup._resolved_checkout()
+    except RuntimeError as exc:
+        if "no built frontend" not in str(exc):
+            print(f"  unexpected rejection: {exc}")
+            return False
+    else:
+        print("  checkout without frontend dist was accepted")
+        return False
+    pointer.revert("expected test rejection", "missing-dist")
+    return True
+
+
 TESTS = [
     ("backend_argv dev form runs app_entry.py --serve", test_backend_argv_dev),
     ("backend_argv dev node form runs app_entry.py --serve-node", test_backend_argv_dev_node),
@@ -357,6 +403,10 @@ TESTS = [
      test_shutdown_signal_choice),
     ("restart aborts when port is held instead of spawning a dead backend",
      test_restart_aborts_when_port_held),
+    ("target checkout argv uses POSIX and Windows interpreters",
+     test_backend_argv_uses_target_checkout_interpreter),
+    ("source switch rejects a target without a built frontend",
+     test_source_switch_rejects_missing_frontend),
 ]
 
 
