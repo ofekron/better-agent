@@ -13238,6 +13238,21 @@ pre .inline-tag-highlight {
   opacity: 0.55;
   cursor: not-allowed;
 }
+.user-approval-card {
+  border-inline-start: 3px solid var(--accent, #7b68ee);
+}
+.user-approval-card__error {
+  color: var(--danger, #e5484d);
+  font-size: calc(11px * var(--app-font-scale));
+}
+@media (max-width: 520px) {
+  .user-input-card {
+    margin-inline: 8px;
+  }
+  .user-input-card__actions button {
+    flex: 1 1 100%;
+  }
+}
 
 /* ─── Tool-approval card: per-argument detail rows ───────────── */
 .tool-approval-card__provider {

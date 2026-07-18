@@ -12,7 +12,9 @@ import type {
   FileFocus,
   PendingApproval,
   CredentialConsent,
+  UserApprovalRequest,
   UserInputRequest,
+  UserInteractionRequest,
   ToolApproval,
   Provider,
   RunInfo,
@@ -37,6 +39,7 @@ import { VoiceActivation } from "./VoiceActivation";
 import { SessionBackgroundStrip } from "./SessionBackgroundStrip";
 import { ShortcutResponses } from "./ShortcutResponses";
 import { useSessionMeta } from "../lib/sessionRegistry";
+import { notifyUserRequest } from "../utils/userInputNotifications";
 import { registerMobileHandlers, clearMobileHandlers } from "../contexts/MobileHandlersContext";
 import {
   extractAssistantOutputTextFromEvents,
@@ -90,6 +93,7 @@ function UserInputCard({
   request: UserInputRequest;
   onDone: (requestId: string) => void;
 }) {
+  const { t } = useTranslation();
   const [answers, setAnswers] = useState<Record<string, string>>(() => {
     const initial: Record<string, string> = {};
     for (const q of request.questions) {
@@ -140,8 +144,8 @@ function UserInputCard({
   };
 
   return (
-    <div className="user-input-card">
-      <div className="user-input-card__title">Input needed</div>
+    <div className="user-input-card" data-testid="user-input-card">
+      <div className="user-input-card__title">{t("userInput.title")}</div>
       {request.questions.map((q) => (
         <div className="user-input-card__question" key={q.id}>
           <div className="user-input-card__header">{q.header}</div>
@@ -170,7 +174,7 @@ function UserInputCard({
                 onChange={(e) => setAnswers((prev) => ({ ...prev, [q.id]: e.target.value }))}
                 onFocus={(e) => e.target.select()}
                 disabled={submitting}
-                placeholder="Other answer"
+                placeholder={t("userInput.otherAnswer")}
               />
             </div>
           ) : (
@@ -185,9 +189,86 @@ function UserInputCard({
         </div>
       ))}
       <div className="user-input-card__actions">
-        <button type="button" onClick={cancel} disabled={submitting}>Cancel</button>
+        <button type="button" onClick={cancel} disabled={submitting}>{t("userInput.cancel")}</button>
         <button type="button" className="primary" onClick={submit} disabled={!canSubmit || submitting}>
-          Send
+          {submitting ? t("userInput.submitting") : t("userInput.send")}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function UserApprovalCard({
+  request,
+  onDone,
+}: {
+  request: UserApprovalRequest;
+  onDone: (requestId: string) => void;
+}) {
+  const { t } = useTranslation();
+  const [alternative, setAlternative] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [failed, setFailed] = useState(false);
+
+  const resolve = async (approved: boolean) => {
+    const text = alternative.trim();
+    if (submitting || (!approved && !text)) return;
+    setSubmitting(true);
+    setFailed(false);
+    try {
+      const res = await fetch(`${API}/api/user-input/${encodeURIComponent(request.request_id)}/resolve`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({
+          app_session_id: request.app_session_id,
+          approved,
+          ...(approved ? {} : { alternative: text }),
+        }),
+      });
+      if (res.ok) {
+        onDone(request.request_id);
+        return;
+      }
+      setFailed(true);
+    } catch {
+      setFailed(true);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="user-input-card user-approval-card" data-testid="user-approval-card">
+      <div className="user-input-card__title">{t("userApproval.title")}</div>
+      <div className="user-input-card__body">{request.prompt}</div>
+      <textarea
+        className="user-input-card__textarea"
+        data-action="alternative"
+        value={alternative}
+        onChange={(event) => setAlternative(event.target.value)}
+        placeholder={t("userApproval.alternativePlaceholder")}
+        disabled={submitting}
+        rows={3}
+      />
+      {failed ? <div className="user-approval-card__error" role="alert">{t("userApproval.failed")}</div> : null}
+      <div className="user-input-card__actions">
+        <button
+          type="button"
+          data-action="submit-alternative"
+          onClick={() => resolve(false)}
+          disabled={submitting || !alternative.trim()}
+        >
+          {submitting ? t("userApproval.submitting") : t("userApproval.useAlternative")}
+        </button>
+        <button
+          type="button"
+          className="primary"
+          data-action="approve"
+          onClick={() => resolve(true)}
+          disabled={submitting}
+        >
+          {submitting ? t("userApproval.submitting") : t("userApproval.approve")}
         </button>
       </div>
     </div>
@@ -767,7 +848,7 @@ export function Chat({
     if (last.type !== "credential_consent_changed") return;
     refetchCredentials();
   }, [streamingEvents, refetchCredentials]);
-  const [pendingUserInputs, setPendingUserInputs] = useState<UserInputRequest[]>([]);
+  const [pendingUserInputs, setPendingUserInputs] = useState<UserInteractionRequest[]>([]);
   const pendingUserInputsSessionRef = useRef<string | null>(null);
   const pendingUserInputsFetchSeqRef = useRef(0);
   pendingUserInputsSessionRef.current = session?.id ?? null;
@@ -795,7 +876,7 @@ export function Chat({
       if (!res.ok) return;
       const data = await res.json();
       if (fetchSeq !== pendingUserInputsFetchSeqRef.current || pendingUserInputsSessionRef.current !== sid) return;
-      const fetched = Array.isArray(data.requests) ? (data.requests as UserInputRequest[]) : [];
+      const fetched = Array.isArray(data.requests) ? (data.requests as UserInteractionRequest[]) : [];
       setPendingUserInputs(fetched.filter((req) => req.app_session_id === sid));
     } catch {
       // ignore
@@ -806,7 +887,9 @@ export function Chat({
   }, [refetchUserInputs]);
   useEffect(() => {
     const onRequested = (e: Event) => {
-      const detail = (e as CustomEvent<UserInputRequest>).detail;
+      const detail = (e as CustomEvent<UserInteractionRequest>).detail;
+      if (!detail) return;
+      void notifyUserRequest(detail, t("userApproval.title"), t("userInput.title"));
       const sid = pendingUserInputsSessionRef.current;
       if (!sid || detail?.app_session_id !== sid) return;
       setPendingUserInputs((prev) => {
@@ -826,7 +909,7 @@ export function Chat({
       window.removeEventListener("user_input_requested", onRequested);
       window.removeEventListener("user_input_resolved", onResolved);
     };
-  }, [removePendingUserInput]);
+  }, [removePendingUserInput, t]);
   const visiblePendingUserInputs = useMemo(() => {
     const sid = session?.id;
     return sid ? pendingUserInputs.filter((req) => req.app_session_id === sid) : [];
@@ -1439,11 +1522,20 @@ export function Chat({
             />
           ))}
         {visiblePendingUserInputs.map((request) => (
-          <UserInputCard
+          <motion.div
             key={request.request_id}
-            request={request}
-            onDone={removePendingUserInput}
-          />
+            layout
+            initial={{ opacity: 0, y: 12 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -8 }}
+            transition={{ duration: 0.24, ease: "easeOut" }}
+          >
+            {request.kind === "approval" ? (
+              <UserApprovalCard request={request} onDone={removePendingUserInput} />
+            ) : (
+              <UserInputCard request={request} onDone={removePendingUserInput} />
+            )}
+          </motion.div>
         ))}
         {pendingToolApprovals.map((approval) => (
           <ToolApprovalCard

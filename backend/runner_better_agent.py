@@ -68,6 +68,10 @@ from orchestration_tool_schemas import (
     DELEGATE_TASK_INPUT_SCHEMA as _DELEGATE_TASK_INPUT_SCHEMA,
 )
 from capability_contexts import prepend_capability_context, render_capability_context
+from user_interaction_tool_contracts import (
+    REQUEST_USER_APPROVAL_DESCRIPTION as _REQUEST_USER_APPROVAL_DESCRIPTION,
+    REQUEST_USER_APPROVAL_SCHEMA as _REQUEST_USER_APPROVAL_SCHEMA,
+)
 from json_store import write_json as _write_json
 from loopback_http import raise_loopback_http_error
 from stream_limits import SUBPROCESS_LINE_LIMIT_BYTES
@@ -1021,7 +1025,7 @@ _DISABLEABLE_BUILTIN_TOOLS = frozenset({
 _ORCHESTRATION_TOOL_NAMES = frozenset({
     "mssg", "ask", "delegate_task", "create_session",
     "create_sub_session", "create_worker", "ensure_named_worker",
-    "open_file_panel", "request_user_input", "start_file_discussion",
+    "open_file_panel", "request_user_input", "request_user_approval", "start_file_discussion",
     "lock_ops", "barrier",
 })
 
@@ -1401,6 +1405,9 @@ def _tool_schemas_for_run(
             ))
             schemas.append(_function_tool_schema(
                 "request_user_input", _REQUEST_USER_INPUT_DESCRIPTION, _REQUEST_USER_INPUT_SCHEMA,
+            ))
+            schemas.append(_function_tool_schema(
+                "request_user_approval", _REQUEST_USER_APPROVAL_DESCRIPTION, _REQUEST_USER_APPROVAL_SCHEMA,
             ))
             if file_editing_mode:
                 schemas.append(_function_tool_schema(
@@ -2028,6 +2035,7 @@ def _build_loopback_tool_handlers(
                 _post_loopback_sync,
                 {
                     "app_session_id": app_session_id,
+                    "kind": "input",
                     "questions": questions,
                     "timeout_seconds": args.get("timeout_seconds"),
                 },
@@ -2039,6 +2047,31 @@ def _build_loopback_tool_handlers(
         except Exception as e:
             logger.exception("request_user_input dynamic tool handler failed")
             return _dynamic_tool_text_result(f"request_user_input failed: {e}", success=False)
+        is_error = bool(result.get("error")) or result.get("success") is False
+        return _dynamic_tool_json_result(result, success=not is_error)
+
+    async def request_user_approval(params: dict) -> str:
+        args = _args(params)
+        prompt = str(args.get("prompt") or "").strip()
+        if not prompt:
+            return _dynamic_tool_text_result("`prompt` is required", success=False)
+        try:
+            result = await asyncio.to_thread(
+                _post_loopback_sync,
+                {
+                    "app_session_id": app_session_id,
+                    "kind": "approval",
+                    "prompt": prompt,
+                    "timeout_seconds": args.get("timeout_seconds"),
+                },
+                backend_url=backend_url,
+                internal_token=internal_token,
+                url_path="/api/internal/user-input/request",
+                timeout_s=DELEGATE_HTTP_TIMEOUT_S,
+            )
+        except Exception as e:
+            logger.exception("request_user_approval dynamic tool handler failed")
+            return _dynamic_tool_text_result(f"request_user_approval failed: {e}", success=False)
         is_error = bool(result.get("error")) or result.get("success") is False
         return _dynamic_tool_json_result(result, success=not is_error)
 
@@ -2130,6 +2163,7 @@ def _build_loopback_tool_handlers(
     if bool(inputs.get("open_file_panel_enabled")):
         handlers["open_file_panel"] = open_file_panel
         handlers["request_user_input"] = request_user_input
+        handlers["request_user_approval"] = request_user_approval
         if inputs.get("working_mode") == "file_editing":
             handlers["start_file_discussion"] = start_file_discussion
     try:

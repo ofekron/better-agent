@@ -6,6 +6,7 @@ import type {
   Provider,
   Session,
   Trace,
+  UserInteractionRequest,
   WorkerInfo,
 } from "../../src/types";
 import type { ProjectSuggestion } from "../../src/components/ProjectSuggestionModal";
@@ -16,6 +17,7 @@ export interface BackendState {
   workers: WorkerInfo[];
   approvals: PendingApproval[];
   credentials: CredentialConsent[];
+  userInputs: UserInteractionRequest[];
   traces: Record<string, Trace>;
   models: { id: string; name: string }[];
   providers: Provider[];
@@ -98,6 +100,7 @@ function emptyState(): BackendState {
     workers: [],
     approvals: [],
     credentials: [],
+    userInputs: [],
     traces: {},
     models: [
       { id: "claude-sonnet-4-6", name: "Sonnet 4.6" },
@@ -338,8 +341,34 @@ export class MockBackend {
         }],
       };
     }
+    if (method === "GET" && path === "/api/extensions/builtin-ids") {
+      return { ids: {} };
+    }
     if (method === "GET" && path === "/api/ui-selection") {
       return this.state.uiSelection;
+    }
+    if (method === "GET" && path === "/api/user-input/pending") {
+      return {
+        requests: this.state.userInputs.filter(
+          (request) => request.app_session_id === query.app_session_id && request.status === "pending",
+        ),
+      };
+    }
+    const userInputResolveMatch = path.match(/^\/api\/user-input\/([^/]+)\/resolve$/);
+    if (method === "POST" && userInputResolveMatch) {
+      const requestId = decodeURIComponent(userInputResolveMatch[1]);
+      this.state.userInputs = this.state.userInputs.filter(
+        (request) => request.request_id !== requestId,
+      );
+      return { success: true, status: "resolved" };
+    }
+    const userInputCancelMatch = path.match(/^\/api\/user-input\/([^/]+)\/cancel$/);
+    if (method === "POST" && userInputCancelMatch) {
+      const requestId = decodeURIComponent(userInputCancelMatch[1]);
+      this.state.userInputs = this.state.userInputs.filter(
+        (request) => request.request_id !== requestId,
+      );
+      return { success: true, status: "cancelled" };
     }
     if (method === "PATCH" && path === "/api/ui-selection") {
       const b = body as Partial<BackendState["uiSelection"]> & {

@@ -66,6 +66,10 @@ import chat_store
 import extension_store
 from runs_dir import atomic_write_json
 from env_compat import get_env
+from user_interaction_tool_contracts import (
+    REQUEST_USER_APPROVAL_DESCRIPTION as _REQUEST_USER_APPROVAL_DESCRIPTION,
+    REQUEST_USER_APPROVAL_SCHEMA as _REQUEST_USER_APPROVAL_SCHEMA,
+)
 from orchestration_tool_descriptions import (
     ASK_DESCRIPTION as _ASK_DESCRIPTION,
     CHAT_DESCRIPTION as _CHAT_DESCRIPTION,
@@ -222,7 +226,7 @@ def _context_strategy_config_overrides(inputs: dict) -> list[str]:
 
 
 _KNOWN_MCP_SERVER_TOOL_NAMES: dict[str, frozenset[str]] = {
-    "ui": frozenset({"open_file_panel", "request_user_input"}),
+    "ui": frozenset({"open_file_panel", "request_user_input", "request_user_approval"}),
     "open-config-panel": frozenset({"open_config_panel"}),
 }
 
@@ -798,6 +802,14 @@ def _build_request_user_input_dynamic_tool() -> dict:
         "name": "request_user_input",
         "description": _REQUEST_USER_INPUT_DESCRIPTION,
         "inputSchema": _REQUEST_USER_INPUT_SCHEMA,
+    }
+
+
+def _build_request_user_approval_dynamic_tool() -> dict:
+    return {
+        "name": "request_user_approval",
+        "description": _REQUEST_USER_APPROVAL_DESCRIPTION,
+        "inputSchema": _REQUEST_USER_APPROVAL_SCHEMA,
     }
 
 
@@ -1410,6 +1422,7 @@ def _build_request_user_input_tool_handler(
                 _post_loopback_sync,
                 {
                     "app_session_id": app_session_id,
+                    "kind": "input",
                     "questions": questions,
                     "timeout_seconds": args.get("timeout_seconds"),
                 },
@@ -1425,6 +1438,45 @@ def _build_request_user_input_tool_handler(
         return _dynamic_tool_json_result(result, success=not is_error)
 
     return request_user_input
+
+
+def _build_request_user_approval_tool_handler(
+    *,
+    app_session_id: str,
+    backend_url: str,
+    internal_token: str,
+):
+    async def request_user_approval(params: dict) -> dict:
+        args = params.get("arguments") or {}
+        if not isinstance(args, dict):
+            return _dynamic_tool_text_result(
+                "request_user_approval arguments must be an object",
+                success=False,
+            )
+        prompt = str(args.get("prompt") or "").strip()
+        if not prompt:
+            return _dynamic_tool_text_result("`prompt` is required", success=False)
+        try:
+            result = await asyncio.to_thread(
+                _post_loopback_sync,
+                {
+                    "app_session_id": app_session_id,
+                    "kind": "approval",
+                    "prompt": prompt,
+                    "timeout_seconds": args.get("timeout_seconds"),
+                },
+                backend_url=backend_url,
+                internal_token=internal_token,
+                url_path="/api/internal/user-input/request",
+                timeout_s=DELEGATE_HTTP_TIMEOUT_S,
+            )
+        except Exception as e:
+            logger.exception("request_user_approval dynamic tool handler failed")
+            return _dynamic_tool_text_result(f"request_user_approval failed: {e}", success=False)
+        is_error = bool(result.get("error")) or result.get("success") is False
+        return _dynamic_tool_json_result(result, success=not is_error)
+
+    return request_user_approval
 
 
 def _build_start_file_discussion_tool_handler(
@@ -1525,6 +1577,17 @@ def _build_dynamic_tool_set(
             tool_handlers,
             _build_request_user_input_dynamic_tool(),
             _build_request_user_input_tool_handler(
+                app_session_id=app_session_id,
+                backend_url=backend_url,
+                internal_token=internal_token,
+            ),
+            existing_tool_names=existing_tool_names,
+        )
+        _add_dynamic_tool(
+            dynamic_tools,
+            tool_handlers,
+            _build_request_user_approval_dynamic_tool(),
+            _build_request_user_approval_tool_handler(
                 app_session_id=app_session_id,
                 backend_url=backend_url,
                 internal_token=internal_token,

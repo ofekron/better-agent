@@ -2684,7 +2684,7 @@ def test_user_input_file_store_calls_are_off_loop() -> None:
     assert "user_input_store.cancel_request(request_id)" not in cancel_source
 
     internal_start = source.index("async def internal_request_user_input(")
-    internal_end = source.index("@app.post(\"/api/internal/goal/set\")", internal_start)
+    internal_end = source.index("@app.post(\"/api/internal/open-config-panel\")", internal_start)
     internal_source = source[internal_start:internal_end]
     assert "public_req, created = await asyncio.to_thread(" in internal_source
     assert "user_input_store.create_or_get_pending_request" in internal_source
