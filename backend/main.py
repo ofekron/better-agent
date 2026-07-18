@@ -8298,7 +8298,13 @@ def _emit_session_processing(root_id: str, kind: str) -> None:
     `session_processing_finished` to every connected WS so the
     frontend can render a "reconciling…" badge for slow reconciles
     (>0.3s)."""
-    payload = {"root_id": root_id}
+    epoch, revision, roots = session_manager.reconcile_processing_state()
+    payload = {
+        "root_id": root_id,
+        "epoch": epoch,
+        "revision": revision,
+        "root_ids": list(roots),
+    }
     coro = coordinator.broadcast_global(f"session_processing_{kind}", payload)
     _fire_and_forget(coro)
 
@@ -8360,13 +8366,28 @@ def _emit_stub_invalidated(changes: list[dict]) -> None:
     )
 
 
-def _reconcile_catchup_state(sub_sid: str) -> tuple[str | None, bool]:
-    sub_root_id = session_manager._root_id_for(sub_sid)
-    if not isinstance(sub_root_id, str):
-        return None, False
-    session_manager.schedule_reconcile_if_needed(sub_root_id)
-    with session_manager._lock_for_root(sub_root_id):
-        return sub_root_id, session_manager.is_reconcile_in_flight(sub_root_id)
+async def _send_reconcile_processing_snapshot(send) -> None:
+    state = session_manager.reconcile_processing_state()
+    while True:
+        epoch, revision, roots = state
+        await send({
+            "type": "session_processing_state",
+            "data": {
+                "epoch": epoch,
+                "revision": revision,
+                "root_ids": list(roots),
+            },
+        })
+        current = session_manager.reconcile_processing_state()
+        if current == state:
+            return
+        state = current
+
+
+async def _schedule_reconcile_for_subscriber(sub_sid: str) -> None:
+    root_id = await asyncio.to_thread(session_manager._root_id_for, sub_sid)
+    if isinstance(root_id, str):
+        session_manager.schedule_reconcile_if_needed(root_id)
 
 
 def _session_reconcile_snapshot_and_schedule(root_id: str) -> tuple[bool, bool, int]:
@@ -18081,26 +18102,12 @@ async def websocket_chat(websocket: WebSocket):
                                 )
                     except Exception:
                         logger.exception("messages_replay on subscribe failed")
-                    # Async-reconcile catch-up: schedule if needed (cold
-                    # cache or orphan-event dirty), and emit a catch-up
-                    # `session_processing_started` to this subscriber if
-                    # a reconcile is already in flight. The catch-up
-                    # emit + the timer-driven `started/finished` emits
-                    # in `_async_reconcile_with_progress` share the
-                    # per-root RLock, so this subscriber either sees
-                    # in-flight=True and the catch-up arrives BEFORE
-                    # any matching `finished`, or sees in-flight=False
-                    # (and `finished` has already been broadcast).
+                    # Reconcile catch-up is an authoritative snapshot, not
+                    # a synthetic started delta. Fast reconciles are never
+                    # visible, and reconnects replace any stale roots.
                     try:
-                        sub_root_id, in_flight = await asyncio.to_thread(
-                            _reconcile_catchup_state,
-                            sub_sid,
-                        )
-                        if sub_root_id and in_flight:
-                            await ws_callback({
-                                "type": "session_processing_started",
-                                "data": {"root_id": sub_root_id},
-                            })
+                        await _schedule_reconcile_for_subscriber(sub_sid)
+                        await _send_reconcile_processing_snapshot(ws_callback)
                     except Exception:
                         logger.exception("processing catch-up on subscribe failed")
                     # Push current run_state snapshot so the freshly
