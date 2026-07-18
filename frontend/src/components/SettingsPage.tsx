@@ -954,7 +954,7 @@ interface ExtensionConfigRow {
   harnessAdditions: ExtensionHarnessAddition[];
   internalLlmTasks: string[];
   userInstructions: string;
-  mcp: Array<{ name: string; label: string; enabled: boolean }>;
+  mcp: Array<{ name: string; label: string; enabled: boolean; forced_by_skills?: string[] }>;
   skills: Array<{ name: string; enabled: boolean }>;
   remoteServices: ExtensionRemoteService[];
   settingsSchema: SettingSpec[];
@@ -1818,16 +1818,26 @@ export function ExtensionUiSettingsSection() {
                 title={t("settings.extensionsMcpServers")}
                 description={t("settings.extensionsMcpServersHelp")}
               >
-                {row.mcp.map((server) => (
-                  <label key={server.name} className="extension-ui-settings-toggle">
-                    <input
-                      type="checkbox"
-                      checked={server.enabled}
-                      onChange={(e) => toggleMcp(row.id, server.name, e.target.checked)}
-                    />
-                    {server.label}
-                  </label>
-                ))}
+                {row.mcp.map((server) => {
+                  const forcedBy = server.forced_by_skills ?? [];
+                  const forced = forcedBy.length > 0;
+                  return (
+                    <label key={server.name} className="extension-ui-settings-toggle">
+                      <input
+                        type="checkbox"
+                        checked={forced || server.enabled}
+                        disabled={forced}
+                        onChange={(e) => toggleMcp(row.id, server.name, e.target.checked)}
+                      />
+                      {server.label}
+                      {forced && (
+                        <span className="extension-ui-settings-mcp-forced">
+                          {t("settings.extensionsMcpForcedBySkill", { skills: forcedBy.join(", ") })}
+                        </span>
+                      )}
+                    </label>
+                  );
+                })}
               </ExtensionConfigGroup>
             )}
             {row.skills.length > 0 && (

@@ -402,6 +402,7 @@
   "settings.extensionsMcpServersHelp": "MCP servers exposed as tools to Claude, Codex, or Gemini runs.",
   "settings.extensionsSkills": "Agent skills",
   "settings.extensionsSkillsHelp": "Skills exposed to sessions as runtime skills. Unchecked skills are hidden from all runs.",
+  "settings.extensionsMcpForcedBySkill": "kept on by skill: {{skills}}",
   "settings.extensionsRemoteServices": "Remote services",
   "settings.extensionsRemoteServicesHelp": "External services this extension declares for proprietary or hosted logic.",
   "settings.extensionsInstructions": "Prompt instructions",

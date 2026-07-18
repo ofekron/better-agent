@@ -1233,6 +1233,10 @@ def _validate_skills(value: Any) -> list[dict[str, Any]]:
             if not isinstance(item["default_enabled"], bool):
                 raise ExtensionError("entrypoints.skills.default_enabled must be a boolean")
             cleaned["default_enabled"] = item["default_enabled"]
+        if "requires_mcp" in item:
+            if not isinstance(item["requires_mcp"], bool):
+                raise ExtensionError("entrypoints.skills.requires_mcp must be a boolean")
+            cleaned["requires_mcp"] = item["requires_mcp"]
         items.append(cleaned)
     return items
 
@@ -5276,7 +5280,7 @@ def _mcp_item_available_for_inputs(
     manifest = record["manifest"]
     if not item.get("python") and not item.get("module") and not item.get("command"):
         return False
-    if not is_mcp_server_enabled(manifest["id"], item["name"]):
+    if not is_mcp_server_enabled(manifest["id"], item["name"], record=record):
         return False
     bare = bool(inputs.get("bare_config"))
     user_facing = bool(inputs.get("open_file_panel_enabled")) and not bare
@@ -6085,12 +6089,41 @@ def resolve_all_settings(extension_id: str) -> dict[str, Any]:
     return resolved
 
 
-def is_mcp_server_enabled(extension_id: str, server_name: str) -> bool:
-    entry = _load_ext_settings()["extensions"].get(extension_id, {})
+def mcp_forcing_skills(
+    extension_id: str,
+    *,
+    settings: dict[str, Any] | None = None,
+    record: dict[str, Any] | None = None,
+) -> list[str]:
+    """Names of enabled skills declaring requires_mcp — these force all of the
+    extension's MCP servers on so the skill's instructions stay executable."""
+    current_record = record if record is not None else get_extension(extension_id)
+    if current_record is None:
+        return []
+    entrypoints = (current_record.get("manifest") or {}).get("entrypoints") or {}
+    data = settings if settings is not None else _load_ext_settings()
+    return [
+        item["name"]
+        for item in entrypoints.get("skills") or []
+        if isinstance(item, dict)
+        and item.get("requires_mcp") is True
+        and is_runtime_skill_enabled(extension_id, item["name"], settings=data, record=current_record)
+    ]
+
+
+def is_mcp_server_enabled(
+    extension_id: str,
+    server_name: str,
+    *,
+    settings: dict[str, Any] | None = None,
+    record: dict[str, Any] | None = None,
+) -> bool:
+    data = settings if settings is not None else _load_ext_settings()
+    entry = data["extensions"].get(extension_id, {})
     disabled = entry.get("mcp_disabled") if isinstance(entry, dict) else None
-    if not isinstance(disabled, list):
+    if not isinstance(disabled, list) or server_name not in set(disabled):
         return True
-    return server_name not in set(disabled)
+    return bool(mcp_forcing_skills(extension_id, settings=data, record=record))
 
 
 def is_runtime_skill_enabled(
@@ -6395,10 +6428,18 @@ def user_instruction_contexts(*, bare_config: bool = False) -> list[dict[str, An
 
 
 def set_mcp_server_enabled(extension_id: str, server_name: str, enabled: bool) -> bool:
-    if get_extension(extension_id) is None:
+    record = get_extension(extension_id)
+    if record is None:
         raise ExtensionError("Extension not installed")
     if not _ID_RE.fullmatch(server_name):
         raise ExtensionError("Invalid MCP server name")
+    if not enabled:
+        forcing = mcp_forcing_skills(extension_id, record=record)
+        if forcing:
+            raise ExtensionError(
+                f"MCP server {server_name!r} is required by enabled skill(s): "
+                f"{', '.join(forcing)}. Disable the skill first."
+            )
     data = _load_ext_settings()
     entry = _ext_settings_entry(data, extension_id)
     disabled = set(entry.get("mcp_disabled") or [])
@@ -6534,7 +6575,7 @@ def extension_harness_additions(record: dict[str, Any]) -> list[dict[str, Any]]:
         additions.append({
             "kind": "mcp",
             "name": name,
-            "detail": "enabled" if is_mcp_server_enabled(str(manifest.get("id") or ""), name) else "disabled",
+            "detail": "enabled" if is_mcp_server_enabled(str(manifest.get("id") or ""), name, record=record) else "disabled",
             "native_eligible": _native_harness_eligible(record, "mcp", name),
             "native_exposed": native_harness_exposed(extension_id, "mcp", name, record=record),
         })
@@ -6564,6 +6605,7 @@ def extension_mcp_servers(extension_id: str) -> list[dict[str, Any]]:
     if get_extension(extension_id) is None:
         raise ExtensionError("Extension not installed")
     record = get_extension(extension_id)
+    forcing = mcp_forcing_skills(extension_id, record=record)
     servers: list[dict[str, Any]] = []
     for item in _stored_mcp_entrypoints(record):
         if item["name"] in _RESERVED_MCP_SERVER_NAMES:
@@ -6573,7 +6615,8 @@ def extension_mcp_servers(extension_id: str) -> list[dict[str, Any]]:
                 "name": item["name"],
                 "label": item.get("label") or item["name"],
                 "user_facing": item.get("user_facing", True),
-                "enabled": is_mcp_server_enabled(extension_id, item["name"]),
+                "enabled": is_mcp_server_enabled(extension_id, item["name"], record=record),
+                "forced_by_skills": forcing,
             }
         )
     return servers
