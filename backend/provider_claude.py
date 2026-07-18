@@ -58,7 +58,7 @@ from provider import (
     runner_argv,
 )
 import config_store
-from extension_run_policy import disabled_builtin_extensions_for_run
+from extension_run_policy import disabled_builtin_extensions_for_run, extra_mcp_servers_for_run
 from provider_env import is_ollama_base_url
 from reasoning_effort import CLAUDE_REASONING_EFFORTS, DEFAULT_REASONING_EFFORT
 import git_policy
@@ -620,6 +620,10 @@ class ClaudeProvider(Provider):
                     session_record=_sess_rec,
                     worker_record=_worker_sess_rec,
                 )
+            ),
+            "extra_mcp_servers": extra_mcp_servers_for_run(
+                session_record=_sess_rec,
+                worker_record=_worker_sess_rec,
             ),
         }
         return input_payload, _bare, mode, resolved_backend_url

@@ -4514,6 +4514,7 @@ def create_session(
     user_initiated: bool = False,
     disallowed_tools: Optional[list[str]] = None,
     disabled_builtin_extensions: Optional[list[str]] = None,
+    extra_mcp_servers: Optional[list[str]] = None,
     storage_scope: Optional[dict] = None,
     id: Optional[str] = None,
     created_at: Optional[str] = None,
@@ -4661,6 +4662,12 @@ def create_session(
         session["disabled_builtin_extensions"] = list(dict.fromkeys(
             str(item).strip()
             for item in disabled_builtin_extensions
+            if str(item or "").strip()
+        ))
+    if extra_mcp_servers:
+        session["extra_mcp_servers"] = list(dict.fromkeys(
+            str(item).strip()
+            for item in extra_mcp_servers
             if str(item or "").strip()
         ))
     # Route through `write_session_full` so the single write funnel
@@ -5458,6 +5465,7 @@ def create_sub_session(
     node_id: Optional[str] = None,
     disallowed_tools: Optional[list[str]] = None,
     disabled_builtin_extensions: Optional[list[str]] = None,
+    extra_mcp_servers: Optional[list[str]] = None,
 ) -> dict:
     parent = _find_in_tree(root, parent_session_id)
     if parent is None:
@@ -5561,6 +5569,9 @@ def create_sub_session(
                 if str(item).strip()
             )
         ),
+        **({"extra_mcp_servers": list(dict.fromkeys(
+            str(item).strip() for item in extra_mcp_servers if str(item or "").strip()
+        ))} if extra_mcp_servers else {}),
     }
     parent.setdefault("forks", []).append(child)
     _index_set(child["id"], root["id"])

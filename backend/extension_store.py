@@ -4999,6 +4999,16 @@ def is_reserved_mcp_server_name(name: str) -> bool:
     return name in _RESERVED_MCP_SERVER_NAMES
 
 
+def _extra_mcp_server_names(inputs: dict[str, Any]) -> set[str]:
+    """Session-scoped opt-in server names from the run inputs — lets a session
+    created for a specific job (e.g. a TestApe operator) receive extension MCP
+    servers that are default-off for every other session."""
+    raw = inputs.get("extra_mcp_servers")
+    if not isinstance(raw, list):
+        return set()
+    return {name for name in (str(item or "").strip() for item in raw) if name}
+
+
 def _disabled_runtime_extension_ids(inputs: dict[str, Any]) -> set[str]:
     raw = inputs.get("disabled_builtin_extensions")
     if not isinstance(raw, list):
@@ -5292,7 +5302,8 @@ def _mcp_item_available_for_inputs(
     manifest = record["manifest"]
     if not item.get("python") and not item.get("module") and not item.get("command"):
         return False
-    if not is_mcp_server_enabled(manifest["id"], item["name"], record=record):
+    session_opted_in = item["name"] in _extra_mcp_server_names(inputs)
+    if not session_opted_in and not is_mcp_server_enabled(manifest["id"], item["name"], record=record):
         return False
     bare = bool(inputs.get("bare_config"))
     user_facing = bool(inputs.get("open_file_panel_enabled")) and not bare
@@ -6615,6 +6626,16 @@ def extension_harness_additions(record: dict[str, Any]) -> list[dict[str, Any]]:
             "native_exposed": native_harness_exposed(extension_id, "mcp", name, record=record),
         })
     return additions
+
+
+def all_extension_mcp_server_names() -> set[str]:
+    """Server names declared by installed, enabled extensions — the valid
+    targets for per-session MCP opt-in."""
+    names: set[str] = set()
+    for record in _active_records():
+        for item in _stored_mcp_entrypoints(record):
+            names.add(item["name"])
+    return names
 
 
 def extension_runtime_skills(extension_id: str) -> list[dict[str, Any]]:

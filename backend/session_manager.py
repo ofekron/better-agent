@@ -4183,6 +4183,7 @@ class SessionManager:
         capability_contexts: Optional[list[dict]] = None,
         disallowed_tools: Optional[list[str]] = None,
         disabled_builtin_extensions: Optional[list[str]] = None,
+        extra_mcp_servers: Optional[list[str]] = None,
         storage_scope: Optional[dict] = None,
         id: Optional[str] = None,
         created_at: Optional[str] = None,
@@ -4212,6 +4213,7 @@ class SessionManager:
             user_initiated=user_initiated,
             disallowed_tools=disallowed_tools,
             disabled_builtin_extensions=disabled_builtin_extensions,
+            extra_mcp_servers=extra_mcp_servers,
             storage_scope=storage_scope,
             id=id,
             created_at=created_at,
@@ -4309,6 +4311,7 @@ class SessionManager:
         node_id: Optional[str] = None,
         disallowed_tools: Optional[list[str]] = None,
         disabled_builtin_extensions: Optional[list[str]] = None,
+        extra_mcp_servers: Optional[list[str]] = None,
     ) -> dict:
         rid = self._root_id_for(parent_session_id)
         if rid is None:
@@ -4332,6 +4335,7 @@ class SessionManager:
                 node_id=node_id,
                 disallowed_tools=disallowed_tools,
                 disabled_builtin_extensions=disabled_builtin_extensions,
+                extra_mcp_servers=extra_mcp_servers,
             )
             self._index_root(cached_root)
             session_store.write_session_full(cached_root, bump_updated_at=False)

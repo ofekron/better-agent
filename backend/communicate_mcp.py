@@ -428,6 +428,7 @@ def create_session_response(
     cwd: str = "",
     folder_id: str = "",
     tag_ids: list[str] | None = None,
+    mcp_servers: list[str] | None = None,
 ) -> dict[str, Any]:
     name = (name or "").strip()
     if not name:
@@ -448,6 +449,7 @@ def create_session_response(
         "node_id": node_id.strip() or None,
         "folder_id": (folder_id or "").strip() or None,
         "tag_ids": tag_ids or [],
+        "mcp_servers": mcp_servers or [],
     }, timeout=30.0)
 
 
@@ -460,6 +462,7 @@ def create_sub_session_response(
     cwd: str = "",
     folder_id: str = "",
     tag_ids: list[str] | None = None,
+    mcp_servers: list[str] | None = None,
 ) -> dict[str, Any]:
     return _post_json("/api/internal/create-sub-session", {
         "sender_session_id": _env_required("BETTER_CLAUDE_MSSG_SENDER_SESSION_ID"),
@@ -471,6 +474,7 @@ def create_sub_session_response(
         "node_id": node_id.strip() or None,
         "folder_id": (folder_id or "").strip() or None,
         "tag_ids": tag_ids or [],
+        "mcp_servers": mcp_servers or [],
     }, timeout=30.0)
 
 
@@ -644,6 +648,7 @@ def build_server() -> FastMCP:
             cwd: str = "",
             folder_id: str = "",
             tag_ids: list[str] | None = None,
+            mcp_servers: list[str] | None = None,
         ) -> dict[str, Any]:
             return _safe_result(create_session_response)(
                 name,
@@ -655,6 +660,7 @@ def build_server() -> FastMCP:
                 cwd,
                 folder_id,
                 tag_ids,
+                mcp_servers,
             )
 
     if "create_sub_session" not in disabled_tools:
@@ -668,6 +674,7 @@ def build_server() -> FastMCP:
             cwd: str = "",
             folder_id: str = "",
             tag_ids: list[str] | None = None,
+            mcp_servers: list[str] | None = None,
         ) -> dict[str, Any]:
             return _safe_result(create_sub_session_response)(
                 description,
@@ -678,6 +685,7 @@ def build_server() -> FastMCP:
                 cwd,
                 folder_id,
                 tag_ids,
+                mcp_servers,
             )
 
     if "ask" not in disabled_tools:

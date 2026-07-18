@@ -13,6 +13,24 @@ def normalize_disabled_builtin_extensions(value: object) -> list[str] | None:
     return list(dict.fromkeys(str(item).strip() for item in value if str(item or "").strip()))
 
 
+def normalize_extra_mcp_servers(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return list(dict.fromkeys(str(item).strip() for item in value if str(item or "").strip()))
+
+
+def extra_mcp_servers_for_run(
+    *,
+    session_record: dict | None,
+    worker_record: dict | None = None,
+) -> list[str]:
+    """Session-scoped opt-in of globally default-off extension MCP servers."""
+    for record in (worker_record, session_record):
+        if isinstance(record, dict) and record.get("extra_mcp_servers"):
+            return normalize_extra_mcp_servers(record.get("extra_mcp_servers"))
+    return []
+
+
 def disabled_builtin_extensions_for_run(
     explicit: Optional[list[str]],
     *,
