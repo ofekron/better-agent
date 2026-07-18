@@ -14,6 +14,7 @@ import { eventBus } from "../lib/eventBus";
 import { getWsUrl } from "../api";
 import { logPromptSend } from "../lib/promptSendLog";
 import { SnapshotTransport } from "../lib/snapshotTransport";
+import { SNAPSHOT_BINARY_SUBPROTOCOL } from "../lib/snapshotBinary";
 import { logFailure, logTiming } from "../lib/frontendLogger";
 import {
   sendWebSocketFrame,
@@ -651,7 +652,8 @@ export function useWebSocket(
     // load (right after login on native) ends up on the handshake URL.
     // Browser path is the same URL, just without a ?token= suffix.
     void url;
-    const ws = new WebSocket(getWsUrl());
+    const ws = new WebSocket(getWsUrl(), SNAPSHOT_BINARY_SUBPROTOCOL);
+    ws.binaryType = "arraybuffer";
     let routingVerifiedSnapshot = false;
     let verifiedRouteResult: void | Promise<void>;
 
@@ -700,6 +702,18 @@ export function useWebSocket(
       let frameFailed = false;
       const byteSize = webSocketDataBytes(e.data);
       try {
+        if (e.data instanceof ArrayBuffer) {
+          eventType = "snapshot_chunk";
+          if (!routingVerifiedSnapshot && snapshotTransportRef.current.handleBinary(
+            e.data,
+            (frame) => sendWebSocketFrame(ws, frame),
+            routeVerifiedSnapshot,
+          )) return;
+          throw new TypeError("unexpected binary WebSocket frame");
+        }
+        if (typeof e.data !== "string") {
+          throw new TypeError("unexpected WebSocket frame type");
+        }
         const event: WSEvent = JSON.parse(e.data);
         eventType = event.type;
         if (!routingVerifiedSnapshot && snapshotTransportRef.current.handle(

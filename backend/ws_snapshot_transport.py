@@ -11,11 +11,15 @@ from dataclasses import dataclass
 from typing import Awaitable, Callable
 
 import perf
+from ws_snapshot_binary import (
+    SNAPSHOT_BINARY_ENCODING,
+    SNAPSHOT_CHUNK_BYTES,
+    encode_snapshot_chunk,
+)
 from ws_serialization import SerializedWebSocketFrame, dumps_ws_json
 
 
 MAX_WS_FRAME_BYTES = 256 * 1024
-SNAPSHOT_CHUNK_BYTES = 180 * 1024
 SNAPSHOT_THRESHOLD_BYTES = 240 * 1024
 SNAPSHOT_CACHE_TTL_SECONDS = 120.0
 SNAPSHOT_CACHE_MAX_BYTES = 64 * 1024 * 1024
@@ -37,7 +41,7 @@ class Snapshot:
     revision: str
     digest: str
     payload_bytes: int
-    chunks: tuple[str, ...]
+    chunks: tuple[bytes, ...]
     scope: tuple[tuple[str, str | None], ...]
     refresh_id: str
     created_at: float
@@ -198,6 +202,7 @@ class _Transfer:
 
 
 PreparedSender = Callable[[dict, SerializedWebSocketFrame | None], Awaitable[bool]]
+BinarySender = Callable[[bytes], Awaitable[bool]]
 RefreshSender = Callable[[tuple[tuple[str, str | None], ...], str], Awaitable[bool]]
 
 
@@ -207,11 +212,17 @@ class SnapshotTransport:
         *,
         principal: str,
         send: PreparedSender,
+        send_binary: BinarySender | None = None,
+        binary: bool = False,
         refresh: RefreshSender | None = None,
         cache: SnapshotCache | None = None,
     ) -> None:
+        if binary and send_binary is None:
+            raise ValueError("binary snapshot transport requires a binary sender")
         self._principal = hashlib.sha256(principal.encode("utf-8")).hexdigest()
         self._send = send
+        self._send_binary = send_binary
+        self._binary = binary
         self._refresh = refresh
         self._cache = cache or _SNAPSHOT_CACHE
         self._active_by_key: dict[str, _Transfer] = {}
@@ -266,7 +277,7 @@ class SnapshotTransport:
             digest=digest,
         )
         if snapshot is None:
-            reserved_bytes = _encoded_chunks_size(len(payload))
+            reserved_bytes = len(payload)
             if not self._cache.reserve(reserved_bytes):
                 perf.record_count("ws.snapshot.rejected_capacity")
                 revision = _snapshot_revision(event, digest)
@@ -291,15 +302,12 @@ class SnapshotTransport:
                     }, None)
             chunk_started = time.perf_counter()
             try:
-                chunks = await asyncio.to_thread(
-                    _encode_chunks,
-                    payload,
-                )
+                chunks = await asyncio.to_thread(_split_chunks, payload)
             except BaseException:
                 self._cache.cancel_reservation(reserved_bytes)
                 raise
             perf.record(
-                "ws.snapshot.chunk_encode",
+                "ws.snapshot.chunk_prepare",
                 (time.perf_counter() - chunk_started) * 1000.0,
             )
             candidate = Snapshot(
@@ -361,7 +369,10 @@ class SnapshotTransport:
                     return False
             self._active_by_key[key] = transfer
             self._active_by_id[snapshot.snapshot_id] = transfer
-            sent = await self._send(_begin_frame(snapshot, resume_from=0), None)
+            sent = await self._send(
+                _begin_frame(snapshot, resume_from=0, binary=self._binary),
+                None,
+            )
             if not sent:
                 self._active_by_key.pop(key, None)
                 self._active_by_id.pop(snapshot.snapshot_id, None)
@@ -416,7 +427,10 @@ class SnapshotTransport:
                 self._release_transfer(prior)
             self._active_by_key[snapshot.key] = transfer
             self._active_by_id[snapshot_id] = transfer
-            if not await self._send(_begin_frame(snapshot, resume_from=next_chunk), None):
+            if not await self._send(
+                _begin_frame(snapshot, resume_from=next_chunk, binary=self._binary),
+                None,
+            ):
                 self._active_by_key.pop(snapshot.key, None)
                 self._active_by_id.pop(snapshot_id, None)
                 self._release_transfer(transfer)
@@ -431,13 +445,30 @@ class SnapshotTransport:
         )
         while transfer.sent_until < target:
             index = transfer.sent_until
+            chunk = snapshot.chunks[index]
+            if self._binary:
+                if self._send_binary is None:
+                    raise RuntimeError("binary snapshot sender is unavailable")
+                frame = encode_snapshot_chunk(snapshot.snapshot_id, index, chunk)
+                if len(frame) > MAX_WS_FRAME_BYTES:
+                    raise RuntimeError("snapshot chunk exceeds WebSocket frame bound")
+                if not await self._send_binary(frame):
+                    return False
+                transfer.sent_until += 1
+                continue
+            encode_started = time.perf_counter()
+            payload = await asyncio.to_thread(_encode_legacy_chunk, chunk)
+            perf.record(
+                "ws.snapshot.legacy_base64_encode",
+                (time.perf_counter() - encode_started) * 1000.0,
+            )
             frame = {
                 "type": "snapshot_chunk",
                 "data": {
                     "snapshot_id": snapshot.snapshot_id,
                     "revision": snapshot.revision,
                     "index": index,
-                    "payload": snapshot.chunks[index],
+                    "payload": payload,
                 },
             }
             if _encoded_size(frame) > MAX_WS_FRAME_BYTES:
@@ -638,8 +669,8 @@ def _snapshot_revision(event: dict, digest: str) -> str:
     return f"sha256:{digest}"
 
 
-def _begin_frame(snapshot: Snapshot, *, resume_from: int) -> dict:
-    return {
+def _begin_frame(snapshot: Snapshot, *, resume_from: int, binary: bool = False) -> dict:
+    frame = {
         "type": "snapshot_begin",
         "data": {
             "snapshot_id": snapshot.snapshot_id,
@@ -654,6 +685,9 @@ def _begin_frame(snapshot: Snapshot, *, resume_from: int) -> dict:
             "refresh_id": snapshot.refresh_id,
         },
     }
+    if binary:
+        frame["data"]["encoding"] = SNAPSHOT_BINARY_ENCODING
+    return frame
 
 
 def _end_frame(snapshot: Snapshot) -> dict:
@@ -683,16 +717,12 @@ def _encode_and_digest(serialized: str) -> tuple[bytes, str]:
     return payload, hashlib.sha256(payload).hexdigest()
 
 
-def _encode_chunks(payload: bytes) -> tuple[str, ...]:
+def _split_chunks(payload: bytes) -> tuple[bytes, ...]:
     return tuple(
-        base64.b64encode(payload[offset:offset + SNAPSHOT_CHUNK_BYTES]).decode("ascii")
+        payload[offset:offset + SNAPSHOT_CHUNK_BYTES]
         for offset in range(0, len(payload), SNAPSHOT_CHUNK_BYTES)
     )
 
 
-def _encoded_chunks_size(payload_bytes: int) -> int:
-    total = 0
-    for offset in range(0, payload_bytes, SNAPSHOT_CHUNK_BYTES):
-        chunk_bytes = min(SNAPSHOT_CHUNK_BYTES, payload_bytes - offset)
-        total += 4 * ((chunk_bytes + 2) // 3)
-    return total
+def _encode_legacy_chunk(payload: bytes) -> str:
+    return base64.b64encode(payload).decode("ascii")
