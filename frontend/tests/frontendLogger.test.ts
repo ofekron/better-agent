@@ -175,6 +175,16 @@ describe("frontend logger", () => {
     expect(payload.message).toContain('"items":4');
   });
 
+  it("starts final durable transport immediately with keepalive", async () => {
+    const { logDurableImmediate } = await import("../src/lib/frontendLogger");
+
+    logDurableImmediate("websocket-traffic", "summary", { reason: "unmounted" });
+
+    expect(fetch).toHaveBeenCalledTimes(1);
+    const init = vi.mocked(fetch).mock.calls[0][1];
+    expect(init?.keepalive).toBe(true);
+  });
+
   it("logs async failures with redaction and duration", async () => {
     const { timeAsync } = await import("../src/lib/frontendLogger");
     const nowSpy = vi.spyOn(performance, "now");

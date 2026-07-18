@@ -18,8 +18,8 @@ export class MockWebSocketController {
     this.originalCtor = globalThis.WebSocket;
     const getController = () => this;
     class Bound extends MockWebSocket {
-      constructor(url: string) {
-        super(url, getController());
+      constructor(url: string, protocols?: string | string[]) {
+        super(url, getController(), protocols);
       }
     }
     // Re-expose the static readyState constants so consumers can do
@@ -104,10 +104,17 @@ export class MockWebSocket {
   onmessage: ((ev: MessageEvent) => void) | null = null;
   onerror: ((ev: Event) => void) | null = null;
   url: string;
+  protocols: string[];
+  binaryType: BinaryType = "blob";
   outbound: OutboundFrame[] = [];
 
-  constructor(url: string, controller: MockWebSocketController) {
+  constructor(
+    url: string,
+    controller: MockWebSocketController,
+    protocols?: string | string[],
+  ) {
     this.url = url;
+    this.protocols = typeof protocols === "string" ? [protocols] : protocols ?? [];
     controller.setCurrent(this);
     // Open asynchronously so the consumer attaches handlers first.
     queueMicrotask(() => {
@@ -142,5 +149,10 @@ export class MockWebSocket {
   deliver(event: WSEvent): void {
     if (this.readyState !== MockWebSocket.OPEN) return;
     this.onmessage?.(new MessageEvent("message", { data: JSON.stringify(event) }));
+  }
+
+  deliverBinary(data: ArrayBuffer): void {
+    if (this.readyState !== MockWebSocket.OPEN) return;
+    this.onmessage?.(new MessageEvent("message", { data }));
   }
 }
