@@ -203,6 +203,27 @@ def t_default_disabled_mcp_hidden_until_forced_or_checked() -> None:
     )
 
 
+def t_session_opt_in_exposes_default_off_mcp() -> None:
+    ext = "test.mcp-session-opt-in"
+    install_skill_extension(
+        ext,
+        skills=[{"name": "opt-skill", "path": "skills/opt-skill"}],
+        mcp=[
+            {"name": "always-server", "python": "mcp/server.py", "requires_backend_auth": False},
+            {"name": "opt-in-server", "python": "mcp/internal_server.py", "default_enabled": False, "requires_backend_auth": False},
+        ],
+    )
+    plain = extension_store.runtime_mcp_server_configs({}, user_facing=True, bare=False)
+    check("always-server" in plain, "default-on server composes for plain sessions")
+    check("opt-in-server" not in plain, "default-off server is absent from plain sessions")
+    opted = extension_store.runtime_mcp_server_configs(
+        {"extra_mcp_servers": ["opt-in-server"]}, user_facing=True, bare=False
+    )
+    check("opt-in-server" in opted, "extra_mcp_servers opts the session into the default-off server")
+    check("always-server" in opted, "opt-in does not drop default-on servers")
+    check("opt-in-server" in extension_store.all_extension_mcp_server_names(), "opt-in name is in the valid-target catalog")
+
+
 def t_unknown_skill_rejected() -> None:
     try:
         extension_store.set_runtime_skill_enabled("test.skill-toggle", "missing-skill", True)
@@ -218,6 +239,7 @@ def main() -> None:
     t_unchecking_hides_skill_and_purges_native()
     t_enabled_skill_forces_extension_mcp_on()
     t_default_disabled_mcp_hidden_until_forced_or_checked()
+    t_session_opt_in_exposes_default_off_mcp()
     t_unknown_skill_rejected()
     print("OK")
 

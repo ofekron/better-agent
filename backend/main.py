@@ -13791,6 +13791,7 @@ async def internal_create_session(
         _api_reasoning_effort(reasoning_effort),
     )
     node_id = str(body.get("node_id") or "").strip() or "primary"
+    extra_mcp_servers = _api_extra_mcp_servers(body.get("mcp_servers"))
     if not model:
         model = await asyncio.to_thread(config_store.default_session_model)
     sess = await asyncio.to_thread(
@@ -13805,6 +13806,7 @@ async def internal_create_session(
             source="cli",
             bare_config=bare_config,
             capability_contexts=capability_contexts,
+            extra_mcp_servers=extra_mcp_servers,
         )
     )
     await _apply_initial_session_organization(sess["id"], folder_id, tag_ids)
@@ -13883,6 +13885,7 @@ async def internal_create_sub_session(
     node_id = str(body.get("node_id") or "").strip() or str(parent.get("node_id") or "primary")
     disallowed_tools = _api_disallowed_tools(body.get("disallowed_tools"))
     disabled_builtin_extensions = _api_disabled_builtin_extensions(body.get("disabled_builtin_extensions"))
+    extra_mcp_servers = _api_extra_mcp_servers(body.get("mcp_servers"))
     name = description or "sub-session"
 
     try:
@@ -13897,6 +13900,7 @@ async def internal_create_sub_session(
                 node_id=node_id,
                 disallowed_tools=disallowed_tools,
                 disabled_builtin_extensions=disabled_builtin_extensions,
+                extra_mcp_servers=extra_mcp_servers,
             )
         )
         await _apply_initial_session_organization(sub["id"], folder_id, tag_ids)
@@ -13922,6 +13926,7 @@ async def internal_create_sub_session(
         "reasoning_effort": sub.get("reasoning_effort"),
         "disallowed_tools": sub.get("disallowed_tools") or [],
         "disabled_builtin_extensions": sub.get("disabled_builtin_extensions") or [],
+        "extra_mcp_servers": sub.get("extra_mcp_servers") or [],
     }
 
 
@@ -16227,6 +16232,28 @@ def _api_optional_pool_affinity_key(value: object) -> str:
     if len(key) > 200:
         raise HTTPException(status_code=400, detail="pool_affinity_key must be at most 200 characters")
     return key
+
+
+def _api_extra_mcp_servers(value: object) -> list[str]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise HTTPException(status_code=400, detail="mcp_servers must be a list")
+    names = []
+    for item in value:
+        name = str(item).strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="mcp_servers entries must be non-empty strings")
+        names.append(name)
+    names = list(dict.fromkeys(names))
+    known = extension_store.all_extension_mcp_server_names()
+    unknown = [name for name in names if name not in known]
+    if unknown:
+        raise HTTPException(
+            status_code=400,
+            detail=f"unknown extension MCP servers: {', '.join(unknown)}",
+        )
+    return names
 
 
 def _api_disallowed_tools(value: object) -> list[str]:
