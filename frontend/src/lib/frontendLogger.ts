@@ -33,7 +33,13 @@ function redactSecrets(value: string): string {
   );
 }
 
-function postFrontendLog(level: FrontendLogLevel, source: string, message: string, stack = ""): void {
+function postFrontendLog(
+  level: FrontendLogLevel,
+  source: string,
+  message: string,
+  stack = "",
+  immediate = false,
+): void {
   if ((level === "debug" || level === "info") && message.startsWith("TESTAPE_SDK custom_state ")) {
     return;
   }
@@ -58,6 +64,10 @@ function postFrontendLog(level: FrontendLogLevel, source: string, message: strin
       // Logging must never affect the UI path being observed.
     }
   };
+  if (immediate) {
+    send();
+    return;
+  }
   window.setTimeout(send, 0);
 }
 
@@ -74,6 +84,20 @@ export function logDurable(source: string, stage: string, data: Record<string, u
     message = `${stage} <unserializable>`;
   }
   postFrontendLog("warn", source, message);
+}
+
+export function logDurableImmediate(
+  source: string,
+  stage: string,
+  data: Record<string, unknown>,
+): void {
+  let message: string;
+  try {
+    message = `${stage} ${JSON.stringify(data)}`;
+  } catch {
+    message = `${stage} <unserializable>`;
+  }
+  postFrontendLog("warn", source, message, "", true);
 }
 
 export function logTiming(
