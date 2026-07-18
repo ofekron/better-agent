@@ -1078,4 +1078,35 @@ describe("TurnGroup collapsed interrupted indicator", () => {
       globalThis.fetch = realFetch;
     }
   });
+
+  it("renders the running indication after the provider chips", () => {
+    const { container } = render(
+      <TurnGroup
+        initiatorMessage={makeUserMsg({ id: "u1", content: "live prompt" })}
+        responseMessage={makeAssistantMsg({
+          id: "a1",
+          content: "streaming reply",
+          isStreaming: true,
+          run_meta: {
+            provider_id: "claude",
+            model: "claude-sonnet-4-6",
+            reasoning_effort: "high",
+          },
+        })}
+        defaultCollapsed={false}
+        sessionId="s1"
+        orchestrationMode="native"
+        runs={[{ run_id: "run-1", kind: "manager", target_message_id: "a1", pid: null }]}
+      />,
+    );
+
+    const providerChips = container.querySelector<HTMLElement>(".assistant-run-meta-footer");
+    const runningIndicator = container.querySelector<HTMLElement>(".streaming-footer");
+
+    expect(providerChips).not.toBeNull();
+    expect(runningIndicator).not.toBeNull();
+    expect(
+      providerChips!.compareDocumentPosition(runningIndicator!) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
 });
