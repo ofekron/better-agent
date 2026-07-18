@@ -136,6 +136,20 @@ def test_mssg_still_routes_to_mssg_endpoint():
     assert captured[0][2] == 30.0
 
 
+def test_stop_turn_routes_caller_identity_to_stop_endpoint():
+    captured = _instrument()
+    result = communicate_mcp.stop_turn_response("worker-1")
+    assert result["success"] is True
+    assert captured == [(
+        "/api/internal/stop-turn",
+        {
+            "caller_session_id": "mgr-session",
+            "target_session_id": "worker-1",
+        },
+        30.0,
+    )]
+
+
 def test_ask_async_mode_routes_to_ask_endpoint():
     captured = _instrument()
     communicate_mcp.ask_response(

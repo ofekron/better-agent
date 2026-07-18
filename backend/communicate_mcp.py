@@ -30,6 +30,7 @@ from orchestration_tool_descriptions import (
     LIST_AVAILABLE_PROVIDER_MODELS_DESCRIPTION,
     MSSG_DESCRIPTION,
     SET_CHAT_SENDER_POLICY_DESCRIPTION,
+    STOP_TURN_DESCRIPTION,
 )
 
 
@@ -68,6 +69,7 @@ _DISABLEABLE_BUILTIN_TOOLS = frozenset({
     "mssg",
     "read_chat_history",
     "set_chat_sender_policy",
+    "stop_turn",
 })
 
 
@@ -205,6 +207,20 @@ def mssg_response(
     if payload.get("success") is False:
         return payload
     return _post_mcp_job("/api/internal/mssg", "mssg", payload, timeout=30.0)
+
+
+def stop_turn_response(target_session_id: str) -> dict[str, Any]:
+    target_session_id = (target_session_id or "").strip()
+    if not target_session_id:
+        return {"success": False, "error": "target_session_id is required"}
+    return _post_json(
+        "/api/internal/stop-turn",
+        {
+            "caller_session_id": _env_required("BETTER_CLAUDE_MSSG_SENDER_SESSION_ID"),
+            "target_session_id": target_session_id,
+        },
+        timeout=30.0,
+    )
 
 
 def _resolve_cwd(cwd: str) -> str:
@@ -497,6 +513,7 @@ def build_server() -> FastMCP:
             "session; orchestration_mode='team' is for complex tasks that need "
             "their own coordinator), create_sub_session (hidden native "
             "sub-session; send work to it later with mssg or ask), and "
+            "stop_turn (stops only a running turn created by this caller), "
             "create_worker (team worker, may require approval), and chat/create_chat/"
             "delete_chat (a shared team chat room: every session reads the same chat; "
             "chat returns only messages newer than your last-read position). Leave provider/"
@@ -531,6 +548,11 @@ def build_server() -> FastMCP:
                 collapse_key,
                 collapse_policy,
             )
+
+    if "stop_turn" not in disabled_tools:
+        @server.tool(description=STOP_TURN_DESCRIPTION)
+        def stop_turn(target_session_id: str) -> dict[str, Any]:
+            return _safe_result(stop_turn_response)(target_session_id)
 
     if "list_available_provider_models" not in disabled_tools:
         @server.tool(description=LIST_AVAILABLE_PROVIDER_MODELS_DESCRIPTION)
