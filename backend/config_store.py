@@ -234,7 +234,7 @@ _KEYRING_TIMEOUT = 2.0
 # call in this process short-circuits to its `default`. Without this,
 # code that hits keyring in a loop (e.g. `recover_all_in_flight` per
 # run-dir) accumulates 2s per call and minutes of startup latency.
-_keyring_blocked = False
+_keyring_blocked_entries: set = set()
 
 
 def _keyring_call(
@@ -242,10 +242,11 @@ def _keyring_call(
     failure_flag: list[bool] | None = None,
 ) -> Any:
     """Run a keyring operation with a `_KEYRING_TIMEOUT` deadline. After
-    the first timeout the keychain is treated as inaccessible for the
-    rest of the process lifetime — the worker thread is still blocked
-    in `SecItemCopyMatching` and cannot be cancelled, so we don't waste
-    additional 2s windows on every caller.
+    a timeout the specific (service, account) entry is treated as
+    inaccessible for the rest of the process lifetime — the worker
+    thread is still blocked in `SecItemCopyMatching` and cannot be
+    cancelled, so we don't waste additional 2s windows re-probing it.
+    Other entries keep working.
 
     If `failure_flag` is given, an item is appended to it whenever the
     call did not complete successfully (raised — e.g. the user denied a
@@ -254,8 +255,12 @@ def _keyring_call(
     denied/failed read as if it were a confirmed value: a single
     accidental "Deny" click must not permanently disable the provider
     for the rest of the process's life."""
-    global _keyring_blocked
-    if _keyring_blocked:
+    # A timed-out worker thread stays blocked in SecItemCopyMatching, so a
+    # retry of the SAME entry would burn another timeout window every call —
+    # but one ACL-locked item must not disable the keychain for every other
+    # entry (that skipped readable provider keys process-wide).
+    entry = (str(args[0]), str(args[1])) if len(args) >= 2 else ("", fn.__name__)
+    if entry in _keyring_blocked_entries:
         if failure_flag is not None:
             failure_flag.append(True)
         return default
@@ -276,13 +281,13 @@ def _keyring_call(
         target=worker, daemon=True, name=f"keyring-{fn.__name__}",
     ).start()
     if not done.wait(timeout=_KEYRING_TIMEOUT):
-        _keyring_blocked = True
+        _keyring_blocked_entries.add(entry)
         logger.warning(
-            "keyring %s timed out after %.1fs — disabling keyring for "
-            "this process. (The frozen .app's signature likely lacks "
-            "the keychain ACL of items written by the dev Python; "
-            "re-enter API keys via the app UI.)",
-            fn.__name__, _KEYRING_TIMEOUT,
+            "keyring %s timed out after %.1fs for %s/%s — disabling this "
+            "entry for the rest of the process. (This binary likely lacks "
+            "the keychain ACL of an item written by another Python; "
+            "re-enter that credential via the app UI.)",
+            fn.__name__, _KEYRING_TIMEOUT, entry[0], entry[1],
         )
         if failure_flag is not None:
             failure_flag.append(True)
@@ -310,7 +315,7 @@ def _keyring_call(
 # matches what `keyring.get_password` would return for the rest of this
 # process. Manual `/usr/bin/security` edits from outside the backend are
 # NOT reflected; restart the backend to pick them up. (Same constraint
-# already applied implicitly via the post-timeout `_keyring_blocked`
+# already applied implicitly via the post-timeout `_keyring_blocked_entries`
 # short-circuit — once that fires, the cache value is whatever was read
 # successfully; this is strictly an improvement.)
 _LEGACY_CACHE_KEY = "__legacy__"
