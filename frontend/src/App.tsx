@@ -132,7 +132,7 @@ import type { FileEditingState } from "./types/fileEditing";
 import { buildFinalPrompt } from "./utils/finalPrompt";
 import type { OpenFileSnapshot } from "./utils/openFilesPreamble";
 import { isValidEmptyFileEditSession, patchFileDiscussionMeta, upsertFileDiscussionMeta } from "./utils/fileDiscussions";
-import { appendPendingUnlessAcked } from "./utils/pendingMessages";
+import { upsertPendingUnlessAcked } from "./utils/pendingMessages";
 import { resolveAskPrompt } from "./utils/askPrompt";
 import {
   applyBackendSnapshot,
@@ -1670,7 +1670,7 @@ function AppMain({
         content_length: pendingMsg.content.length,
       });
       setPendingForSession(sessionId, (prev) => {
-        return appendPendingUnlessAcked(prev, sessionId, pendingMsg, {
+        return upsertPendingUnlessAcked(prev, sessionId, pendingMsg, {
           ackedClientIds: ackedClientIdsRef.current,
           skipNextAppendBySession: skipNextPendingAppendBySessionRef.current,
         });
@@ -5210,7 +5210,7 @@ function AppMain({
       const sessionId = currentSession.id;
       const images = retryPayloadsRef.current.get(message.id) ?? [];
 
-      // Replace failed message with a fresh "sending" one
+      // Create a fresh optimistic entry for the retry.
       const newPendingMsg: ChatMessage = {
         ...message,
         id: `pending-${Date.now()}`,
@@ -5224,7 +5224,16 @@ function AppMain({
       }
 
       setPendingForSession(sessionId, (prev) =>
-        prev.map((m) => (m.id === message.id ? newPendingMsg : m))
+        upsertPendingUnlessAcked(
+          prev,
+          sessionId,
+          newPendingMsg,
+          {
+            ackedClientIds: ackedClientIdsRef.current,
+            skipNextAppendBySession: skipNextPendingAppendBySessionRef.current,
+          },
+          message.id,
+        )
       );
 
       const sent = sendMessage(
