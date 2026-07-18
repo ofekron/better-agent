@@ -5,6 +5,7 @@ import inspect
 import json
 import sys
 import threading
+import time
 from pathlib import Path
 from unittest import mock
 
@@ -36,10 +37,17 @@ class _BlockingWebSocket:
 class _RecordingWebSocket:
     def __init__(self) -> None:
         self.sent: list[str] = []
+        self.binary_sent: list[bytes] = []
+        self.wire: list[tuple[str, str | bytes]] = []
         self.closed = False
 
     async def send_text(self, text: str) -> None:
         self.sent.append(text)
+        self.wire.append(("text", text))
+
+    async def send_bytes(self, payload: bytes) -> None:
+        self.binary_sent.append(payload)
+        self.wire.append(("binary", payload))
 
     async def close(self) -> None:
         self.closed = True
@@ -49,6 +57,13 @@ class _StallingWebSocket(_RecordingWebSocket):
     async def send_text(self, text: str) -> None:
         await asyncio.sleep(0.03)
         await super().send_text(text)
+
+
+class _StallingBinaryWebSocket(_RecordingWebSocket):
+    async def send_bytes(self, payload: bytes) -> None:
+        main._LAG_LOOP_EVIDENCE["sentinel_at"] = time.perf_counter()
+        await asyncio.sleep(0.01)
+        await super().send_bytes(payload)
 
 
 class _LongStallingWebSocket(_RecordingWebSocket):
@@ -138,6 +153,64 @@ def test_ws_outbox_sends_queued_frames_fifo() -> None:
         assert closed.is_set() is False
         await outbox.close()
         await outbox.wait_closed()
+
+    asyncio.run(run())
+
+
+def test_ws_outbox_text_and_binary_frames_share_one_fifo() -> None:
+    async def run() -> None:
+        websocket = _RecordingWebSocket()
+        outbox = main._WebSocketOutbox(
+            websocket,
+            on_close=lambda: asyncio.sleep(0),
+        )
+        assert await outbox.send({"type": "snapshot_begin", "data": {}})
+        assert await outbox.send_binary(b"binary-chunk", event_type="snapshot_chunk")
+        assert await outbox.send({"type": "agent_message", "data": {}})
+        await _wait_for(lambda: len(websocket.wire) == 3)
+        assert [kind for kind, _ in websocket.wire] == ["text", "binary", "text"]
+        assert json.loads(websocket.wire[0][1])["type"] == "snapshot_begin"
+        assert websocket.wire[1][1] == b"binary-chunk"
+        assert json.loads(websocket.wire[2][1])["type"] == "agent_message"
+        await outbox.close()
+        await outbox.wait_closed()
+
+    asyncio.run(run())
+
+
+def test_ws_outbox_binary_records_timeline_and_lag_overlap() -> None:
+    async def run() -> None:
+        websocket = _StallingBinaryWebSocket()
+        records: list[tuple[str, float]] = []
+        counts: list[tuple[str, int]] = []
+        with (
+            mock.patch.object(
+                main.perf,
+                "record",
+                side_effect=lambda name, value: records.append((name, value)),
+            ),
+            mock.patch.object(
+                main.perf,
+                "record_count",
+                side_effect=lambda name, value=1: counts.append((name, value)),
+            ),
+            mock.patch.object(
+                main,
+                "_LAG_LOOP_EVIDENCE",
+                {},
+            ),
+        ):
+            outbox = main._WebSocketOutbox(websocket, on_close=lambda: asyncio.sleep(0))
+            assert await outbox.send_binary(b"x" * 1024, event_type="snapshot_chunk")
+            await _wait_for(lambda: len(websocket.binary_sent) == 1)
+            await outbox.close()
+            await outbox.wait_closed()
+        phases = {name: value for name, value in records if name.startswith("ws.phase.")}
+        assert "ws.phase.writer_dequeue_wire_start" in phases
+        assert "ws.phase.wire_start_resume" in phases
+        assert abs(phases["ws.phase.timeline_total"] - phases["ws.phase.timeline_elapsed"]) < 0.1
+        assert any(name == "ws.phase.payload_bytes" and value == 1024 for name, value in counts)
+        assert any(name == "ws.phase.lag_overlap" for name, _ in counts)
 
     asyncio.run(run())
 
@@ -398,7 +471,15 @@ def test_snapshot_transport_preserves_outbox_fifo_with_live_interleave() -> None
         async def send(frame, serialized=None) -> bool:
             return await outbox.send(frame, serialized)
 
-        transport = SnapshotTransport(principal="user", send=send)
+        async def send_binary(frame: bytes) -> bool:
+            return await outbox.send_binary(frame, event_type="snapshot_chunk")
+
+        transport = SnapshotTransport(
+            principal="user",
+            send=send,
+            send_binary=send_binary,
+            binary=True,
+        )
         assert await transport.send_event({
             "type": "messages_replay",
             "data": {
@@ -419,10 +500,12 @@ def test_snapshot_transport_preserves_outbox_fifo_with_live_interleave() -> None
                 "next_chunk": 0,
             },
         })
-        await _wait_for(lambda: len(websocket.sent) >= 4)
-        types = [json.loads(text)["type"] for text in websocket.sent[:4]]
-        assert types == [
-            "snapshot_begin", "agent_message", "snapshot_chunk", "snapshot_chunk",
+        await _wait_for(lambda: len(websocket.wire) >= 4)
+        assert [kind for kind, _ in websocket.wire[:4]] == [
+            "text", "text", "binary", "binary",
+        ]
+        assert [json.loads(value)["type"] for kind, value in websocket.wire[:2]] == [
+            "snapshot_begin", "agent_message",
         ]
         await outbox.close()
         await outbox.wait_closed()

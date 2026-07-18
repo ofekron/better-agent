@@ -7,6 +7,8 @@ import { MockWebSocketController } from "./harness/mockWebSocket";
 
 const encoder = new TextEncoder();
 const REFRESH_ID = "f".repeat(32);
+const SNAPSHOT_ID = "0123456789abcdef0123456789abcdef";
+const BINARY_PROTOCOL = "better-agent.snapshot.binary-v1";
 
 async function digest(bytes: Uint8Array): Promise<string> {
   const value = await crypto.subtle.digest("SHA-256", bytes);
@@ -44,12 +46,164 @@ async function frames(event: WSEvent, chunkBytes = 9) {
   };
 }
 
+function binaryChunk(snapshotId: string, index: number, payload: Uint8Array): ArrayBuffer {
+  const frame = new ArrayBuffer(32 + payload.byteLength);
+  const bytes = new Uint8Array(frame);
+  bytes.set([66, 65, 83, 78, 1, 1, 0, 0]);
+  for (let offset = 0; offset < 16; offset += 1) {
+    bytes[8 + offset] = Number.parseInt(snapshotId.slice(offset * 2, offset * 2 + 2), 16);
+  }
+  const view = new DataView(frame);
+  view.setUint32(24, index, false);
+  view.setUint32(28, payload.byteLength, false);
+  bytes.set(payload, 32);
+  return frame;
+}
+
+async function binaryFrames(event: WSEvent, chunkBytes = 9) {
+  const payload = await frames(event, chunkBytes);
+  const bytes = encoder.encode(JSON.stringify(event));
+  payload.begin.data.snapshot_id = SNAPSHOT_ID;
+  payload.begin.data.encoding = "binary-v1";
+  payload.end.data.snapshot_id = SNAPSHOT_ID;
+  return {
+    ...payload,
+    chunks: Array.from({ length: payload.begin.data.total_chunks }, (_, index) =>
+      binaryChunk(SNAPSHOT_ID, index, bytes.slice(index * chunkBytes, (index + 1) * chunkBytes))),
+  };
+}
+
 async function settle() {
   await new Promise((resolve) => setTimeout(resolve, 5));
   await new Promise((resolve) => setTimeout(resolve, 5));
 }
 
 describe("SnapshotTransport", () => {
+  it("accepts binary chunks and applies the verified snapshot atomically", async () => {
+    const transport = new SnapshotTransport();
+    const send = vi.fn();
+    const apply = vi.fn();
+    const payload = await binaryFrames({
+      type: "messages_replay", data: { app_session_id: "s1", messages: [] },
+    });
+    transport.handle(payload.begin, send, apply);
+    for (const chunk of [...payload.chunks].reverse()) {
+      expect(transport.handleBinary(chunk, send, apply)).toBe(true);
+    }
+    transport.handle(payload.end, send, apply);
+    expect(apply).not.toHaveBeenCalled();
+    await settle();
+    expect(apply).toHaveBeenCalledOnce();
+    expect(send.mock.calls.at(-1)?.[0]).toMatchObject({
+      type: "snapshot_ack", data: { next_chunk: payload.chunks.length },
+    });
+  });
+
+  it.each([
+    ["magic", 0, 0],
+    ["version", 4, 2],
+    ["kind", 5, 2],
+    ["flags", 7, 1],
+  ] as const)("rejects malformed binary %s", async (_name, offset, value) => {
+    const transport = new SnapshotTransport();
+    const send = vi.fn();
+    const apply = vi.fn();
+    const payload = await binaryFrames({
+      type: "messages_replay", data: { app_session_id: "s1", messages: [] },
+    });
+    transport.handle(payload.begin, send, apply);
+    send.mockClear();
+    const corrupted = payload.chunks[0].slice(0);
+    new Uint8Array(corrupted)[offset] = value;
+    expect(transport.handleBinary(corrupted, send, apply)).toBe(true);
+    expect(send.mock.calls.at(-1)?.[0]).toMatchObject({
+      type: "snapshot_refresh", data: { reason: "corrupt" },
+    });
+    expect(apply).not.toHaveBeenCalled();
+  });
+
+  it("refreshes when a structurally valid binary frame has an unknown transfer id", async () => {
+    const transport = new SnapshotTransport();
+    const send = vi.fn();
+    const apply = vi.fn();
+    const payload = await binaryFrames({
+      type: "messages_replay", data: { app_session_id: "s1", messages: [] },
+    });
+    transport.handle(payload.begin, send, apply);
+    send.mockClear();
+    const unknown = payload.chunks[0].slice(0);
+    new Uint8Array(unknown)[8] ^= 1;
+    expect(transport.handleBinary(unknown, send, apply)).toBe(true);
+    expect(send.mock.calls.at(-1)?.[0]).toMatchObject({
+      type: "snapshot_refresh", data: { reason: "corrupt" },
+    });
+    expect(apply).not.toHaveBeenCalled();
+  });
+
+  it("rejects binary payload length mismatches before staging", async () => {
+    const transport = new SnapshotTransport();
+    const send = vi.fn();
+    const apply = vi.fn();
+    const payload = await binaryFrames({
+      type: "messages_replay", data: { app_session_id: "s1", messages: [] },
+    });
+    transport.handle(payload.begin, send, apply);
+    send.mockClear();
+    const malformed = payload.chunks[0].slice(0);
+    const view = new DataView(malformed);
+    view.setUint32(28, view.getUint32(28, false) + 1, false);
+    expect(transport.handleBinary(malformed, send, apply)).toBe(true);
+    expect(send.mock.calls.at(-1)?.[0]).toMatchObject({
+      type: "snapshot_refresh", data: { reason: "corrupt" },
+    });
+    expect(apply).not.toHaveBeenCalled();
+  });
+
+  it("never applies a digest-corrupt binary snapshot", async () => {
+    const transport = new SnapshotTransport();
+    const send = vi.fn();
+    const apply = vi.fn();
+    const payload = await binaryFrames({
+      type: "messages_replay", data: { app_session_id: "s1", messages: [] },
+    });
+    transport.handle(payload.begin, send, apply);
+    const corrupt = payload.chunks[0].slice(0);
+    new Uint8Array(corrupt)[32] ^= 1;
+    transport.handleBinary(corrupt, send, apply);
+    payload.chunks.slice(1).forEach((chunk) => transport.handleBinary(chunk, send, apply));
+    transport.handle(payload.end, send, apply);
+    await settle();
+    expect(apply).not.toHaveBeenCalled();
+    expect(send.mock.calls.at(-1)?.[0]).toMatchObject({
+      type: "snapshot_refresh", data: { reason: "corrupt" },
+    });
+  });
+
+  it("resumes staged binary chunks from the exact cumulative offset", async () => {
+    const transport = new SnapshotTransport();
+    const send = vi.fn();
+    const apply = vi.fn();
+    const payload = await binaryFrames({
+      type: "messages_replay", data: {
+        app_session_id: "s1", messages: [{ id: "large", text: "x".repeat(50) }],
+      },
+    }, 9);
+    transport.handle(payload.begin, send, apply);
+    transport.handleBinary(payload.chunks[0], send, apply);
+    await settle();
+    transport.resume(send);
+    expect(send.mock.calls.at(-1)?.[0]).toMatchObject({
+      type: "snapshot_resume", data: { snapshot_id: SNAPSHOT_ID, next_chunk: 1 },
+    });
+    const resumedBegin = structuredClone(payload.begin);
+    resumedBegin.data.resume_from = 1;
+    transport.handle(resumedBegin, send, apply);
+    payload.chunks.slice(1).forEach((chunk) => transport.handleBinary(chunk, send, apply));
+    transport.handle(payload.end, send, apply);
+    await settle();
+    expect(apply).toHaveBeenCalledOnce();
+  });
+
   it("accepts reordered and identical duplicate chunks, then applies atomically", async () => {
     const transport = new SnapshotTransport();
     const send = vi.fn();
@@ -574,6 +728,50 @@ describe("SnapshotTransport", () => {
 });
 
 describe("useWebSocket snapshot routing", () => {
+  it("offers binary-v1 and requests ArrayBuffer delivery before open", async () => {
+    const ctrl = new MockWebSocketController();
+    ctrl.install();
+    const rendered = renderHook(() => useWebSocket("ws://test", {}));
+    const socket = ctrl.getCurrent();
+    expect(socket.protocols).toEqual([BINARY_PROTOCOL]);
+    expect(socket.binaryType).toBe("arraybuffer");
+    rendered.unmount();
+    ctrl.uninstall();
+  });
+
+  it("routes binary snapshots before interleaved live events", async () => {
+    const ctrl = new MockWebSocketController();
+    ctrl.install();
+    const onMessagesReplay = vi.fn();
+    const onMessagesDelta = vi.fn();
+    const rendered = renderHook(() => useWebSocket("ws://test", {
+      onMessagesReplay,
+      onMessagesDelta,
+    }));
+    await act(async () => { await Promise.resolve(); });
+    const payload = await binaryFrames({
+      type: "messages_replay", data: { app_session_id: "s1", messages: [] },
+    });
+    act(() => {
+      ctrl.getCurrent().deliver(payload.begin as WSEvent);
+      ctrl.getCurrent().deliver({
+        type: "messages_delta", data: { app_session_id: "s1", messages: [{ id: "live" }] },
+      });
+      payload.chunks.forEach((chunk) => ctrl.getCurrent().deliverBinary(chunk));
+      ctrl.getCurrent().deliver(payload.end as WSEvent);
+    });
+    expect(onMessagesReplay).not.toHaveBeenCalled();
+    expect(onMessagesDelta).not.toHaveBeenCalled();
+    await act(async () => { await settle(); });
+    expect(onMessagesReplay).toHaveBeenCalledOnce();
+    expect(onMessagesDelta).toHaveBeenCalledOnce();
+    expect(onMessagesReplay.mock.invocationCallOrder[0]).toBeLessThan(
+      onMessagesDelta.mock.invocationCallOrder[0],
+    );
+    rendered.unmount();
+    ctrl.uninstall();
+  });
+
   it("keeps live reducers gated until correlated authoritative REST reconciliation resolves", async () => {
     const ctrl = new MockWebSocketController();
     ctrl.install();

@@ -89,6 +89,7 @@ from ws_serialization import (
     reopen_ws_json_executor,
     shutdown_ws_json_executor,
 )
+from ws_snapshot_binary import SNAPSHOT_BINARY_SUBPROTOCOL
 
 _WS_OUTBOX_MAX_ITEMS = 256
 _WS_OUTBOX_ENQUEUE_TIMEOUT_SECONDS = 2.0
@@ -123,7 +124,15 @@ class _WebSocketOutbox:
         self._websocket = websocket
         self._on_close = on_close
         self._queue: asyncio.Queue[
-            tuple[int, float, dict, int, SerializedWebSocketFrame | None] | None
+            tuple[
+                int,
+                float,
+                str,
+                dict | None,
+                int,
+                SerializedWebSocketFrame | None,
+                bytes | None,
+            ] | None
         ] = perf.LaggedQueue(
             maxsize=max_items,
             _perf_name="ws.outbox",
@@ -143,12 +152,44 @@ class _WebSocketOutbox:
         event_dict: dict,
         serialized: SerializedWebSocketFrame | None = None,
     ) -> bool:
+        event_type = event_dict.get("type") if isinstance(event_dict, dict) else None
+        return await self._enqueue(
+            event_type=event_type if isinstance(event_type, str) else "unknown",
+            event_dict=event_dict,
+            serialized=serialized,
+            binary=None,
+        )
+
+    async def send_binary(self, payload: bytes, *, event_type: str) -> bool:
+        if not isinstance(payload, bytes) or not payload:
+            raise ValueError("binary WebSocket payload must be non-empty bytes")
+        return await self._enqueue(
+            event_type=event_type,
+            event_dict=None,
+            serialized=None,
+            binary=payload,
+        )
+
+    async def _enqueue(
+        self,
+        *,
+        event_type: str,
+        event_dict: dict | None,
+        serialized: SerializedWebSocketFrame | None,
+        binary: bytes | None,
+    ) -> bool:
         if self._closed:
             perf.record_count("ws.outbox.rejected_closed")
             return False
         perf.record_count("ws.outbox.enqueue_depth", self._queue.qsize())
         queued_item = (
-            next(_WS_FRAME_IDS), time.perf_counter(), event_dict, self._queue.qsize(), serialized,
+            next(_WS_FRAME_IDS),
+            time.perf_counter(),
+            event_type,
+            event_dict,
+            self._queue.qsize(),
+            serialized,
+            binary,
         )
         try:
             self._queue.put_nowait(queued_item)
@@ -174,7 +215,6 @@ class _WebSocketOutbox:
                 return False
             if put_task in done:
                 return True
-            event_type = event_dict.get("type") if isinstance(event_dict, dict) else None
             perf.record_count("ws.outbox.rejected_timeout")
             _warning_off_loop(
                 "closing slow WebSocket: outbox enqueue timeout type=%s depth=%d",
@@ -224,14 +264,36 @@ class _WebSocketOutbox:
             queued_item = await self._queue.get()
             if queued_item is None:
                 return
-            frame_id, queued_at, event_dict, enqueue_depth, serialized = queued_item
+            (
+                frame_id,
+                queued_at,
+                event_type,
+                event_dict,
+                enqueue_depth,
+                serialized,
+                binary,
+            ) = queued_item
             writer_start_ms = (time.perf_counter() - queued_at) * 1000.0
             perf.record("ws.outbox.writer_start", writer_start_ms)
-            metric_type = metric_event_type(event_dict)
+            metric_type = metric_event_type({"type": event_type})
             perf.record(
                 f"ws.outbox.writer_start.type.{metric_type}",
                 writer_start_ms,
             )
+            if binary is not None:
+                await self._write_binary(
+                    binary,
+                    event_type=event_type,
+                    frame_id=frame_id,
+                    queued_at=queued_at,
+                    writer_dequeued_at=time.perf_counter(),
+                    enqueue_depth=enqueue_depth,
+                )
+                if self._closed:
+                    return
+                continue
+            if event_dict is None:
+                raise RuntimeError("text WebSocket queue item is missing its event")
             await self._write_one(
                 event_dict,
                 frame_id=frame_id,
@@ -242,6 +304,69 @@ class _WebSocketOutbox:
             )
             if self._closed:
                 return
+
+    async def _write_binary(
+        self,
+        payload: bytes,
+        *,
+        event_type: str,
+        frame_id: int,
+        queued_at: float,
+        writer_dequeued_at: float,
+        enqueue_depth: int,
+    ) -> None:
+        send_t = time.perf_counter()
+        try:
+            perf.record_count("ws.phase.payload_bytes", len(payload))
+            wire_t = time.perf_counter()
+            perf.record("ws.phase.writer_dequeue_wire_start", (
+                wire_t - writer_dequeued_at
+            ) * 1000.0)
+            await self._websocket.send_bytes(payload)
+            wire_ms = (time.perf_counter() - wire_t) * 1000.0
+            wire_end_at = time.perf_counter()
+            self._record_lag_overlap(queued_at, wire_end_at)
+            perf.record("ws.phase.wire_start_resume", wire_ms)
+            perf.record("ws.send_binary.wire", wire_ms)
+            timeline_total = (
+                writer_dequeued_at - queued_at
+                + wire_t - writer_dequeued_at
+                + wire_end_at - wire_t
+            )
+            perf.record("ws.phase.timeline_total", timeline_total * 1000.0)
+            perf.record("ws.phase.timeline_elapsed", (
+                wire_end_at - queued_at
+            ) * 1000.0)
+            if wire_ms > 250.0:
+                _warning_off_loop(
+                    "slow binary WebSocket wire type=%s elapsed_ms=%.1f bytes=%d "
+                    "conn=%s frame=%d enqueue_depth=%d current_depth=%d",
+                    event_type,
+                    wire_ms,
+                    len(payload),
+                    self._connection_id,
+                    frame_id,
+                    enqueue_depth,
+                    self._queue.qsize(),
+                )
+        except Exception as exc:
+            logger.debug(
+                "Binary WebSocket send failed type=%s error=%s",
+                event_type,
+                exc,
+            )
+            await self._close(cancel_writer=False)
+            return
+        perf.record("ws.send_binary", (time.perf_counter() - send_t) * 1000.0)
+
+    @staticmethod
+    def _record_lag_overlap(queued_at: float, finished_at: float) -> None:
+        evidence = globals().get("_LAG_LOOP_EVIDENCE")
+        if not isinstance(evidence, dict):
+            return
+        sentinel_at = evidence.get("sentinel_at")
+        if isinstance(sentinel_at, (int, float)) and queued_at <= sentinel_at <= finished_at:
+            perf.record_count("ws.phase.lag_overlap")
 
     async def _write_one(
         self,
@@ -258,13 +383,6 @@ class _WebSocketOutbox:
         payload_bytes = 0
         wire_t: float | None = None
 
-        def record_lag_overlap(finished_at: float) -> None:
-            evidence = globals().get("_LAG_LOOP_EVIDENCE")
-            if not isinstance(evidence, dict):
-                return
-            sentinel_at = evidence.get("sentinel_at")
-            if isinstance(sentinel_at, (int, float)) and queued_at <= sentinel_at <= finished_at:
-                perf.record_count("ws.phase.lag_overlap")
         try:
             serialize_t = time.perf_counter()
             serialized_task = getattr(event_dict, "_bc_serialized_json_task", None)
@@ -324,7 +442,7 @@ class _WebSocketOutbox:
             await self._websocket.send_text(text)
             wire_ms = (time.perf_counter() - wire_t) * 1000.0
             wire_end_at = time.perf_counter()
-            record_lag_overlap(wire_end_at)
+            self._record_lag_overlap(queued_at, wire_end_at)
             perf.record("ws.phase.wire_start_resume", wire_ms)
             perf.record("ws.send_json.wire", wire_ms)
             if serializer_done_at <= writer_dequeued_at:
@@ -17761,6 +17879,11 @@ async def websocket_chat(websocket: WebSocket):
             return False
         return await outbox.send(event_dict, serialized)
 
+    async def _send_binary(payload: bytes):
+        if outbox is None:
+            return False
+        return await outbox.send_binary(payload, event_type="snapshot_chunk")
+
     async def _refresh_snapshot_roots(scope, refresh_id):
         return await _send_snapshot_refresh_roots(
             scope,
@@ -17791,6 +17914,8 @@ async def websocket_chat(websocket: WebSocket):
     snapshot_transport = SnapshotTransport(
         principal=json.dumps(user, sort_keys=True, default=str),
         send=_send_prepared,
+        send_binary=_send_binary,
+        binary=_snapshot_binary_enabled(websocket),
         refresh=_refresh_snapshot_roots,
     )
     coordinator.register_global_ws(ws_callback)
@@ -18837,11 +18962,28 @@ async def websocket_chat(websocket: WebSocket):
             await outbox.wait_closed()
 
 
+def _snapshot_binary_offered(websocket: WebSocket) -> bool:
+    raw = websocket.headers.get("sec-websocket-protocol", "")
+    if not isinstance(raw, str) or len(raw) > 1024:
+        return False
+    return SNAPSHOT_BINARY_SUBPROTOCOL in {
+        value.strip() for value in raw.split(",") if value.strip()
+    }
+
+
+def _snapshot_binary_enabled(websocket: WebSocket) -> bool:
+    return websocket.scope.get("better_agent_snapshot_binary_v1") is True
+
+
 async def _accept_ws_if_needed(websocket: WebSocket) -> None:
     if websocket.application_state == WebSocketState.CONNECTED:
         logger.warning("WebSocket entered /ws/chat already accepted")
         return
-    await websocket.accept()
+    binary = _snapshot_binary_offered(websocket)
+    await websocket.accept(
+        subprotocol=SNAPSHOT_BINARY_SUBPROTOCOL if binary else None,
+    )
+    websocket.scope["better_agent_snapshot_binary_v1"] = binary
 
 
 @app.websocket("/{_unknown_ws_path:path}")
