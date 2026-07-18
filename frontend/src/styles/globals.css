@@ -5612,6 +5612,39 @@ button.run-badge-clickable:focus-visible {
   gap: 5px;
   max-width: 100%;
 }
+.extension-ui-settings-update-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: calc(11px * var(--app-font-scale));
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+  animation: extension-update-badge-in 240ms ease-out;
+  white-space: nowrap;
+}
+@keyframes extension-update-badge-in {
+  from {
+    opacity: 0;
+    transform: scale(0.92);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+.extension-ui-settings-update {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
+}
+@media (prefers-reduced-motion: reduce) {
+  .extension-ui-settings-update-badge {
+    animation: none;
+  }
+}
 .extension-ui-settings-groups {
   min-width: 0;
   display: flex;
@@ -5664,6 +5697,12 @@ button.run-badge-clickable:focus-visible {
 }
 .extension-ui-settings-toggle input {
   flex: 0 0 auto;
+}
+.extension-ui-settings-mcp-forced {
+  font-size: calc(11px * var(--app-font-scale));
+  color: var(--text-muted);
+  opacity: 0.75;
+  font-style: italic;
 }
 .extension-ui-settings-select {
   display: inline-flex;
@@ -13198,6 +13237,21 @@ pre .inline-tag-highlight {
 .user-input-card__actions button:disabled {
   opacity: 0.55;
   cursor: not-allowed;
+}
+.user-approval-card {
+  border-inline-start: 3px solid var(--accent, #7b68ee);
+}
+.user-approval-card__error {
+  color: var(--danger, #e5484d);
+  font-size: calc(11px * var(--app-font-scale));
+}
+@media (max-width: 520px) {
+  .user-input-card {
+    margin-inline: 8px;
+  }
+  .user-input-card__actions button {
+    flex: 1 1 100%;
+  }
 }
 
 /* ─── Tool-approval card: per-argument detail rows ───────────── */

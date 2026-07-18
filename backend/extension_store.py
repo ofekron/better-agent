@@ -1211,12 +1211,12 @@ def _validate_instructions(value: Any) -> list[dict[str, Any]]:
     return items
 
 
-def _validate_skills(value: Any) -> list[dict[str, str]]:
+def _validate_skills(value: Any) -> list[dict[str, Any]]:
     if value is None:
         return []
     if not isinstance(value, list):
         raise ExtensionError("entrypoints.skills must be a list")
-    items: list[dict[str, str]] = []
+    items: list[dict[str, Any]] = []
     seen: set[str] = set()
     for item in value:
         if not isinstance(item, dict):
@@ -1228,7 +1228,16 @@ def _validate_skills(value: Any) -> list[dict[str, str]]:
             raise ExtensionError(f"entrypoints.skills contains duplicate name: {name}")
         seen.add(name)
         path = _clean_rel_path(str(item.get("path") or ""), field="entrypoints.skills.path")
-        items.append({"name": name, "path": path})
+        cleaned: dict[str, Any] = {"name": name, "path": path}
+        if "default_enabled" in item:
+            if not isinstance(item["default_enabled"], bool):
+                raise ExtensionError("entrypoints.skills.default_enabled must be a boolean")
+            cleaned["default_enabled"] = item["default_enabled"]
+        if "requires_mcp" in item:
+            if not isinstance(item["requires_mcp"], bool):
+                raise ExtensionError("entrypoints.skills.requires_mcp must be a boolean")
+            cleaned["requires_mcp"] = item["requires_mcp"]
+        items.append(cleaned)
     return items
 
 
@@ -1853,9 +1862,13 @@ def _validate_mcp_entrypoints(value: Any, *, extension_id: str) -> list[dict[str
                 "entrypoints.mcp.ambient_native requires user_facing=false, "
                 "requires_backend_auth=false, and no predicate"
             )
+        label = str(item.get("label") or "").strip()
+        if label and len(label) > 80:
+            raise ExtensionError("entrypoints.mcp.label must be at most 80 characters")
         items.append(
             {
                 "name": name,
+                "label": label,
                 "python": python_path,
                 "module": module,
                 "command": command,
@@ -2760,6 +2773,7 @@ def _install_from_package_dir(
             for recovered_id in recovered:
                 _evict_extension_backend(recovered_id)
             raise
+        _drop_update_cache_row(manifest["id"])
     return record
 
 
@@ -4377,6 +4391,132 @@ def update_installed_extensions() -> dict[str, Any]:
     }
 
 
+_UPDATABLE_SOURCE_TYPES = frozenset({"git", "marketplace", "better_agent_signed"})
+
+_updates_cache_lock = threading.Lock()
+_updates_cache: dict[str, Any] | None = None
+
+
+def _drop_update_cache_row(extension_id: str) -> None:
+    global _updates_cache
+    with _updates_cache_lock:
+        if _updates_cache is None:
+            return
+        rows = [
+            row for row in _updates_cache.get("results", [])
+            if row.get("extension_id") != extension_id
+        ]
+        _updates_cache = {
+            **_updates_cache,
+            "results": rows,
+            "available": [r["extension_id"] for r in rows if r.get("update_available")],
+        }
+
+
+def cached_extension_updates() -> dict[str, Any] | None:
+    with _updates_cache_lock:
+        return copy.deepcopy(_updates_cache)
+
+
+def _check_git_update(record: dict[str, Any]) -> dict[str, Any]:
+    source = record.get("source") or {}
+    repo_url = _validate_repo_url(str(source.get("repo_url") or ""))
+    ref = str(source.get("ref") or "").strip()
+    remote_commit = _git_remote_commit(repo_url, ref)
+    installed_commit = str(source.get("commit_sha") or "").strip()
+    return {
+        "update_available": bool(remote_commit and installed_commit != remote_commit),
+        "available_version": "",
+        "available_sha": remote_commit,
+    }
+
+
+def _check_marketplace_update(extension_id: str, record: dict[str, Any]) -> dict[str, Any]:
+    source = record.get("source") or {}
+    metadata = _fetch_json(_marketplace_metadata_url_for_record(extension_id, record))
+    published_sha = str(metadata.get("artifact_sha256") or "").strip().lower()
+    installed_sha = str(source.get("artifact_sha256") or source.get("commit_sha") or "").strip().lower()
+    return {
+        "update_available": bool(published_sha and installed_sha != published_sha),
+        "available_version": str(metadata.get("version") or ""),
+        "available_sha": published_sha,
+    }
+
+
+def check_extension_updates(*, refresh: bool = False) -> dict[str, Any]:
+    """Check-only update scan for remote-sourced extensions.
+
+    The result is a disposable cached projection; installed records stay the
+    source of truth. Per-extension check failures land in the row's "error"
+    field instead of failing the whole scan, so one unreachable source cannot
+    hide the others.
+    """
+    global _updates_cache
+    if not refresh:
+        cached = cached_extension_updates()
+        if cached is not None:
+            return cached
+    data = _load()
+    results: list[dict[str, Any]] = []
+    for extension_id, record in sorted(data["extensions"].items()):
+        source_type = str((record.get("source") or {}).get("type") or "")
+        if source_type not in _UPDATABLE_SOURCE_TYPES:
+            continue
+        row: dict[str, Any] = {
+            "extension_id": extension_id,
+            "source_type": source_type,
+            "installed_version": str((record.get("manifest") or {}).get("version") or ""),
+        }
+        try:
+            if source_type == "git":
+                row.update(_check_git_update(record))
+            else:
+                row.update(_check_marketplace_update(extension_id, record))
+        except ExtensionError as exc:
+            row.update({"update_available": False, "error": str(exc)})
+        results.append(row)
+    snapshot = {
+        "checked_at": datetime.now(timezone.utc).isoformat(),
+        "results": results,
+        "available": [row["extension_id"] for row in results if row["update_available"]],
+    }
+    with _updates_cache_lock:
+        _updates_cache = copy.deepcopy(snapshot)
+    return snapshot
+
+
+def apply_extension_update(extension_id: str) -> dict[str, Any]:
+    clean_id = str(extension_id or "").strip()
+    if not _ID_RE.fullmatch(clean_id):
+        raise ExtensionError("extension_id is invalid")
+    data = _load()
+    record = data["extensions"].get(clean_id)
+    if not record:
+        raise ExtensionError("Extension not installed")
+    source_type = str((record.get("source") or {}).get("type") or "")
+    if source_type not in _UPDATABLE_SOURCE_TYPES:
+        raise ExtensionError("Extension source does not support remote updates")
+    if source_type == "git":
+        updated = _update_git_extension(clean_id, record)
+    else:
+        updated = _update_marketplace_extension(clean_id, record)
+    if updated is None:
+        # The source is already current; clear any stale "available" row.
+        _drop_update_cache_row(clean_id)
+        return {
+            "extension_id": clean_id,
+            "source_type": source_type,
+            "updated": False,
+            "skipped": "up_to_date",
+        }
+    return {
+        "extension_id": clean_id,
+        "source_type": source_type,
+        "updated": True,
+        "version": updated["manifest"].get("version", ""),
+    }
+
+
 def set_enabled(extension_id: str, enabled: bool) -> dict[str, Any]:
     data = _load()
     record = data["extensions"].get(extension_id)
@@ -4623,6 +4763,10 @@ def reconcile_runtime_skills() -> int:
     for record in _active_records_from_data(data):
         manifest = record["manifest"]
         for item in manifest.get("entrypoints", {}).get("skills") or []:
+            if not is_runtime_skill_enabled(
+                manifest["id"], item["name"], settings=settings, record=record
+            ):
+                continue
             if not native_harness_exposed(
                 manifest["id"], "skill", item["name"], settings=settings, record=record
             ):
@@ -4645,6 +4789,10 @@ def reconcile_runtime_skills() -> int:
         manifest = record["manifest"]
         extension_id = manifest["id"]
         for item in manifest.get("entrypoints", {}).get("skills") or []:
+            if not is_runtime_skill_enabled(
+                extension_id, item["name"], settings=settings, record=record
+            ):
+                continue
             if not native_harness_exposed(
                 extension_id, "skill", item["name"], settings=settings, record=record
             ):
@@ -4665,12 +4813,17 @@ def reconcile_runtime_skills() -> int:
 def runtime_skill_entries() -> list[dict[str, str]]:
     skills: list[dict[str, str]] = []
     data = _load()
+    settings = _load_ext_settings()
     for record in _active_records_from_data(data):
         manifest = record["manifest"]
         install_root = runtime_package_root_for_record(record)
         if install_root is None or not install_root.exists():
             continue
         for item in manifest.get("entrypoints", {}).get("skills") or []:
+            if not is_runtime_skill_enabled(
+                manifest["id"], item["name"], settings=settings, record=record
+            ):
+                continue
             source = (install_root / item["path"]).resolve()
             if not source.is_relative_to(install_root):
                 continue
@@ -4781,6 +4934,7 @@ def uninstall(extension_id: str) -> None:
                 raise ExtensionError("Extension install path escapes install root")
             shutil.rmtree(extension_root)
     _save(data, deleted_extension_ids={extension_id})
+    _drop_update_cache_row(extension_id)
     import extension_token_registry
     extension_token_registry.revoke(extension_id)
     reconcile_runtime_skills()
@@ -5126,7 +5280,7 @@ def _mcp_item_available_for_inputs(
     manifest = record["manifest"]
     if not item.get("python") and not item.get("module") and not item.get("command"):
         return False
-    if not is_mcp_server_enabled(manifest["id"], item["name"]):
+    if not is_mcp_server_enabled(manifest["id"], item["name"], record=record):
         return False
     bare = bool(inputs.get("bare_config"))
     user_facing = bool(inputs.get("open_file_panel_enabled")) and not bare
@@ -5935,12 +6089,86 @@ def resolve_all_settings(extension_id: str) -> dict[str, Any]:
     return resolved
 
 
-def is_mcp_server_enabled(extension_id: str, server_name: str) -> bool:
-    entry = _load_ext_settings()["extensions"].get(extension_id, {})
+def mcp_forcing_skills(
+    extension_id: str,
+    *,
+    settings: dict[str, Any] | None = None,
+    record: dict[str, Any] | None = None,
+) -> list[str]:
+    """Names of enabled skills declaring requires_mcp — these force all of the
+    extension's MCP servers on so the skill's instructions stay executable."""
+    current_record = record if record is not None else get_extension(extension_id)
+    if current_record is None:
+        return []
+    entrypoints = (current_record.get("manifest") or {}).get("entrypoints") or {}
+    data = settings if settings is not None else _load_ext_settings()
+    return [
+        item["name"]
+        for item in entrypoints.get("skills") or []
+        if isinstance(item, dict)
+        and item.get("requires_mcp") is True
+        and is_runtime_skill_enabled(extension_id, item["name"], settings=data, record=current_record)
+    ]
+
+
+def is_mcp_server_enabled(
+    extension_id: str,
+    server_name: str,
+    *,
+    settings: dict[str, Any] | None = None,
+    record: dict[str, Any] | None = None,
+) -> bool:
+    data = settings if settings is not None else _load_ext_settings()
+    entry = data["extensions"].get(extension_id, {})
     disabled = entry.get("mcp_disabled") if isinstance(entry, dict) else None
-    if not isinstance(disabled, list):
+    if not isinstance(disabled, list) or server_name not in set(disabled):
         return True
-    return server_name not in set(disabled)
+    return bool(mcp_forcing_skills(extension_id, settings=data, record=record))
+
+
+def is_runtime_skill_enabled(
+    extension_id: str,
+    skill_name: str,
+    *,
+    settings: dict[str, Any] | None = None,
+    record: dict[str, Any] | None = None,
+) -> bool:
+    """Whether a declared skill is exposed to sessions. Explicit user choice
+    wins; otherwise the manifest item's default_enabled (default True)."""
+    current_record = record if record is not None else get_extension(extension_id)
+    if current_record is None:
+        return False
+    item = _harness_addition(current_record, "skill", skill_name)
+    if item is None:
+        return False
+    data = settings if settings is not None else _load_ext_settings()
+    entry = data["extensions"].get(extension_id, {})
+    overrides = entry.get("skills_enabled") if isinstance(entry, dict) else None
+    if isinstance(overrides, dict) and skill_name in overrides:
+        return bool(overrides[skill_name])
+    return bool(item.get("default_enabled", True))
+
+
+def set_runtime_skill_enabled(extension_id: str, skill_name: str, enabled: bool) -> bool:
+    if not isinstance(enabled, bool):
+        raise ExtensionError("skill enabled must be a boolean")
+    record = get_extension(extension_id)
+    if record is None:
+        raise ExtensionError("Extension not installed")
+    if not _ID_RE.fullmatch(skill_name):
+        raise ExtensionError("Invalid skill name")
+    if _harness_addition(record, "skill", skill_name) is None:
+        raise ExtensionError("Unknown skill")
+    data = _load_ext_settings()
+    entry = _ext_settings_entry(data, extension_id)
+    overrides = entry.get("skills_enabled")
+    if not isinstance(overrides, dict):
+        overrides = {}
+    overrides[skill_name] = enabled
+    entry["skills_enabled"] = overrides
+    _save_ext_settings(data)
+    reconcile_runtime_skills()
+    return enabled
 
 
 def _native_harness_key(kind: str, name: str) -> str:
@@ -6200,10 +6428,18 @@ def user_instruction_contexts(*, bare_config: bool = False) -> list[dict[str, An
 
 
 def set_mcp_server_enabled(extension_id: str, server_name: str, enabled: bool) -> bool:
-    if get_extension(extension_id) is None:
+    record = get_extension(extension_id)
+    if record is None:
         raise ExtensionError("Extension not installed")
     if not _ID_RE.fullmatch(server_name):
         raise ExtensionError("Invalid MCP server name")
+    if not enabled:
+        forcing = mcp_forcing_skills(extension_id, record=record)
+        if forcing:
+            raise ExtensionError(
+                f"MCP server {server_name!r} is required by enabled skill(s): "
+                f"{', '.join(forcing)}. Disable the skill first."
+            )
     data = _load_ext_settings()
     entry = _ext_settings_entry(data, extension_id)
     disabled = set(entry.get("mcp_disabled") or [])
@@ -6236,6 +6472,7 @@ def extension_config(extension_id: str) -> dict[str, Any]:
         "ui": get_ui_settings(extension_id),
         "frontend_modules": extension_frontend_modules(extension_id),
         "mcp": extension_mcp_servers(extension_id),
+        "skills": extension_runtime_skills(extension_id),
         "remote_services": list(entrypoints.get("remote_services") or []),
         "settings": get_extension_settings(extension_id),
         "permissions": {
@@ -6327,7 +6564,7 @@ def extension_harness_additions(record: dict[str, Any]) -> list[dict[str, Any]]:
             additions.append({
                 "kind": "skill",
                 "name": name,
-                "detail": "",
+                "detail": "enabled" if is_runtime_skill_enabled(extension_id, name, record=record) else "disabled",
                 "native_eligible": True,
                 "native_exposed": native_harness_exposed(extension_id, "skill", name, record=record),
             })
@@ -6338,11 +6575,28 @@ def extension_harness_additions(record: dict[str, Any]) -> list[dict[str, Any]]:
         additions.append({
             "kind": "mcp",
             "name": name,
-            "detail": "enabled" if is_mcp_server_enabled(str(manifest.get("id") or ""), name) else "disabled",
+            "detail": "enabled" if is_mcp_server_enabled(str(manifest.get("id") or ""), name, record=record) else "disabled",
             "native_eligible": _native_harness_eligible(record, "mcp", name),
             "native_exposed": native_harness_exposed(extension_id, "mcp", name, record=record),
         })
     return additions
+
+
+def extension_runtime_skills(extension_id: str) -> list[dict[str, Any]]:
+    """Skills an extension provides, with current session-exposure state — for
+    the Settings UI."""
+    record = get_extension(extension_id)
+    if record is None:
+        raise ExtensionError("Extension not installed")
+    entrypoints = record["manifest"].get("entrypoints", {})
+    return [
+        {
+            "name": item["name"],
+            "enabled": is_runtime_skill_enabled(extension_id, item["name"], record=record),
+        }
+        for item in entrypoints.get("skills") or []
+        if isinstance(item, dict) and item.get("name")
+    ]
 
 
 def extension_mcp_servers(extension_id: str) -> list[dict[str, Any]]:
@@ -6351,6 +6605,7 @@ def extension_mcp_servers(extension_id: str) -> list[dict[str, Any]]:
     if get_extension(extension_id) is None:
         raise ExtensionError("Extension not installed")
     record = get_extension(extension_id)
+    forcing = mcp_forcing_skills(extension_id, record=record)
     servers: list[dict[str, Any]] = []
     for item in _stored_mcp_entrypoints(record):
         if item["name"] in _RESERVED_MCP_SERVER_NAMES:
@@ -6358,9 +6613,10 @@ def extension_mcp_servers(extension_id: str) -> list[dict[str, Any]]:
         servers.append(
             {
                 "name": item["name"],
-                "label": item["name"],
+                "label": item.get("label") or item["name"],
                 "user_facing": item.get("user_facing", True),
-                "enabled": is_mcp_server_enabled(extension_id, item["name"]),
+                "enabled": is_mcp_server_enabled(extension_id, item["name"], record=record),
+                "forced_by_skills": forcing,
             }
         )
     return servers
