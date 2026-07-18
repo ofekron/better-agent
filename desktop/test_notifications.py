@@ -28,3 +28,4 @@ def test_windows_command_keeps_untrusted_text_out_of_script() -> None:
     assert title not in command[4]
     assert body not in command[4]
     assert command[-2:] == [title, body]
+
