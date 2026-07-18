@@ -281,6 +281,70 @@ describe("steer prompt events", () => {
     h.unmount();
   });
 
+  it("clears a steered queue item for a non-initiating subscriber", async () => {
+    const tag: InlineTag = {
+      id: "tag-after-remote-steer",
+      messageId: "u1",
+      selectedText: "selected code",
+      comment: "apply to the next prompt",
+      timestamp: "2026-07-18T12:00:00.000Z",
+    };
+    const session = makeSession({
+      provider_id: "codex",
+      messages: [
+        makeUserMsg({ id: "u1", content: "start work" }),
+        makeAssistantMsg({ id: "a1", isStreaming: true }),
+      ],
+      inline_tags: [tag],
+      queued_prompts: [],
+    });
+    const h = await renderApp({ seed: { sessions: [session] } });
+    await h.selectSession(session.id);
+    h.emit({
+      type: "run_state",
+      data: { app_session_id: session.id, runs: [makeRun({ target_message_id: "a1" })] },
+    });
+    h.emit({
+      type: "prompt_queued",
+      data: {
+        app_session_id: session.id,
+        queued_id: "q1",
+        prompt_preview: "steered in another tab",
+        send_mode: "queue",
+        queue_position: 1,
+        client_id: "client-q1",
+      },
+    });
+    await h.flush();
+
+    h.emit({
+      type: "session_metadata_updated",
+      data: {
+        session_id: session.id,
+        patch: { queued_prompts: [] },
+      },
+    });
+    await h.flush();
+    expect(h.$('[data-testid="queued-prompt-banner"]')?.textContent)
+      .toContain("steered in another tab");
+
+    h.emit({
+      type: "queue_consumed",
+      data: { app_session_id: session.id, queued_id: "q1" },
+    });
+    await h.flush();
+    expect(h.$('[data-testid="queued-prompt-banner"]')).toBeNull();
+
+    await typeAndQueue(h, "next queued work");
+    const sent = h.outbound.filter((frame) => frame.type === "send_message").at(-1);
+    expect(sent).toMatchObject({
+      prompt: expect.stringContaining("next queued work"),
+      send_mode: "queue",
+    });
+    expect(String(sent?.prompt ?? "")).not.toContain("steered in another tab");
+    h.unmount();
+  });
+
   it("keeps later persisted prompts when the first queue item is consumed", async () => {
     const session = makeSession({
       queued_prompts: [
