@@ -1710,9 +1710,12 @@ function AppMain({
       }
       if (cid) {
         removePendingForSessionByClientId(sessionId, cid);
-        setQueuedForSession(sessionId, (prev) => {
+        setQueuedForSession(sessionId, (prev, hasLocalProjection) => {
+          const base = hasLocalProjection
+            ? prev
+            : visibleQueuedPromptBanners(getNode(sessionId)?.queued_prompts);
           const metadataUnseenIds = metadataUnseenQueuedIdsRef.current[sessionId];
-          return prev.filter((item) => {
+          return base.filter((item) => {
             const keep = item.id !== cid && item.clientId !== cid;
             if (!keep) metadataUnseenIds?.delete(item.id);
             return keep;
@@ -1735,7 +1738,7 @@ function AppMain({
       // Refresh sidebar so timestamps + sort order update immediately.
       refreshSessions();
     },
-    [addMessages, applySessionMetadata, refreshSessions, takePendingQueueDraft, removeAckedOfflineAction, removePendingForSessionByClientId]
+    [addMessages, applySessionMetadata, refreshSessions, takePendingQueueDraft, removeAckedOfflineAction, removePendingForSessionByClientId, getNode]
   );
   const handleSteerPromptPersisted = useCallback(
     (_sessionId: string, steerClientId?: string | null) => {
@@ -1989,9 +1992,12 @@ function AppMain({
     },
     onTurnStarted: () => {},
     onQueueConsumed: (data) => {
-      setQueuedForSession(data.app_session_id, (prev) => {
+      setQueuedForSession(data.app_session_id, (prev, hasLocalProjection) => {
         if (!data.queued_id) return [];
-        return prev.filter((item) => item.id !== data.queued_id);
+        const base = hasLocalProjection
+          ? prev
+          : visibleQueuedPromptBanners(getNode(data.app_session_id)?.queued_prompts);
+        return base.filter((item) => item.id !== data.queued_id);
       }, "queue_consumed");
     },
     onAnyEvent: progressHandleWSEvent,
@@ -2529,12 +2535,18 @@ function AppMain({
       value:
         | QueuedBannerState[]
         | null
-        | ((prev: QueuedBannerState[]) => QueuedBannerState[] | null),
+        | ((
+            prev: QueuedBannerState[],
+            hasLocalProjection: boolean,
+          ) => QueuedBannerState[] | null),
       reason: string,
     ) => {
       setQueuedBySession((all): Record<string, QueuedBannerState[] | null> => {
-        const current = all[sessionId] ?? [];
-        const resolved = typeof value === "function" ? value(current) : value;
+        const hasLocalProjection = sessionId in all;
+        const current = hasLocalProjection ? all[sessionId] ?? [] : [];
+        const resolved = typeof value === "function"
+          ? value(current, hasLocalProjection)
+          : value;
         logDurable("queue-diag", "set_queued_banner", {
           sid: sessionId,
           reason,
@@ -2577,8 +2589,8 @@ function AppMain({
   const appendQueuedForSession = useCallback(
     (sessionId: string, item: QueuedBannerState, reason: string) => {
       const persistedBase = visibleQueuedPromptBanners(getNode(sessionId)?.queued_prompts);
-      setQueuedForSession(sessionId, (prev) => {
-        const base = prev.length > 0 ? prev : persistedBase;
+      setQueuedForSession(sessionId, (prev, hasLocalProjection) => {
+        const base = hasLocalProjection ? prev : persistedBase;
         const existingIndex = base.findIndex((queued) => queued.id === item.id);
         if (existingIndex >= 0) {
           return base.map((queued, index) => index === existingIndex ? item : queued);
@@ -4764,8 +4776,8 @@ function AppMain({
       let filePayloads: FilePayload[] = effFiles.map(toFilePayload);
 
       const sessionTags = currentSession.inline_tags ?? [];
-      const queuedBase = queuedBySession[currentSession.id]?.length
-        ? queuedBySession[currentSession.id]!
+      const queuedBase = currentSession.id in queuedBySession
+        ? queuedBySession[currentSession.id] ?? []
         : persistedQueuedPrompts;
       const latestQueued = queuedBase[queuedBase.length - 1] ?? null;
       const final = buildFinalPrompt({
@@ -5373,8 +5385,8 @@ function AppMain({
     if (!currentSession) return;
     const sent = sendPromoteQueued(currentSession.id, action, queuedId, queuedIds);
     if (!sent) return;
-    setQueuedForSession(currentSession.id, (prev) => {
-      const base = prev.length > 0 ? prev : persistedQueuedPrompts;
+    setQueuedForSession(currentSession.id, (prev, hasLocalProjection) => {
+      const base = hasLocalProjection ? prev : persistedQueuedPrompts;
       if (queuedIds && queuedIds.length > 0) {
         const idSet = new Set(queuedIds);
         const metadataUnseenIds = metadataUnseenQueuedIdsRef.current[currentSession.id];
@@ -5397,8 +5409,8 @@ function AppMain({
     if (!sent) return;
     if (queuedId) {
       metadataUnseenQueuedIdsRef.current[currentSession.id]?.delete(queuedId);
-      setQueuedForSession(currentSession.id, (prev) => {
-        const base = prev.length > 0 ? prev : persistedQueuedPrompts;
+      setQueuedForSession(currentSession.id, (prev, hasLocalProjection) => {
+        const base = hasLocalProjection ? prev : persistedQueuedPrompts;
         return base.filter((item) => item.id !== queuedId);
       }, "cancel_item");
     } else {
@@ -5411,8 +5423,8 @@ function AppMain({
   const handleQueuedTextEdit = useCallback(
     (text: string, queuedId?: string) => {
       if (!currentSession) return;
-      const base = queuedBySession[currentSession.id]?.length
-        ? queuedBySession[currentSession.id]!
+      const base = currentSession.id in queuedBySession
+        ? queuedBySession[currentSession.id] ?? []
         : persistedQueuedPrompts;
       const existing = queuedId
         ? base.find((item) => item.id === queuedId) ?? null
@@ -5420,8 +5432,8 @@ function AppMain({
       if (!existing) return;
       const sent = sendUpdateQueued(currentSession.id, existing.id, text);
       if (!sent) return;
-      setQueuedForSession(currentSession.id, (prev) => {
-        const current = prev.length > 0 ? prev : base;
+      setQueuedForSession(currentSession.id, (prev, hasLocalProjection) => {
+        const current = hasLocalProjection ? prev : base;
         return current.map((item) => item.id === existing.id ? { ...item, preview: text } : item);
       }, "text_edit");
     },
