@@ -14891,6 +14891,15 @@ def _validate_user_input_questions(raw_questions: Any) -> list[dict[str, Any]]:
     return questions
 
 
+def _validate_user_approval_prompt(raw_prompt: Any) -> str:
+    if not isinstance(raw_prompt, str):
+        raise HTTPException(status_code=400, detail="prompt must be a string")
+    prompt = raw_prompt.strip()
+    if not prompt:
+        raise HTTPException(status_code=400, detail="prompt is required")
+    return prompt[:2000]
+
+
 async def _broadcast_user_input(event_type: str, payload: dict[str, Any]) -> None:
     app_session_id = str(payload.get("app_session_id") or "").strip()
     if not app_session_id:
@@ -14937,19 +14946,33 @@ async def resolve_user_input(request_id: str, body: dict):
         raise HTTPException(status_code=403, detail="session mismatch")
     if req.get("status") != "pending":
         return {"success": False, "status": req.get("status")}
-    if not isinstance(body, dict) or not isinstance(body.get("answers"), dict):
-        raise HTTPException(status_code=400, detail="answers object is required")
-    expected = {q["id"] for q in req.get("questions") or []}
-    answers: dict[str, str] = {}
-    for qid in expected:
-        value = str(body["answers"].get(qid) or "").strip()
-        if not value:
-            raise HTTPException(status_code=400, detail=f"answer is required for {qid}")
-        answers[qid] = value[:2000]
+    kind = req.get("kind")
+    if kind == "approval":
+        approved = body.get("approved")
+        if not isinstance(approved, bool):
+            raise HTTPException(status_code=400, detail="approved must be a boolean")
+        alternative = str(body.get("alternative") or "").strip()
+        if approved and alternative:
+            raise HTTPException(status_code=400, detail="approved response cannot include alternative text")
+        if not approved and not alternative:
+            raise HTTPException(status_code=400, detail="alternative is required when approval is not granted")
+        response: dict[str, Any] = {"approved": approved}
+        if alternative:
+            response["alternative"] = alternative[:4000]
+    else:
+        if not isinstance(body.get("answers"), dict):
+            raise HTTPException(status_code=400, detail="answers object is required")
+        expected = {q["id"] for q in req.get("questions") or []}
+        response = {}
+        for qid in expected:
+            value = str(body["answers"].get(qid) or "").strip()
+            if not value:
+                raise HTTPException(status_code=400, detail=f"answer is required for {qid}")
+            response[qid] = value[:2000]
     resolved = await asyncio.to_thread(
         user_input_store.resolve_request,
         request_id,
-        answers,
+        response,
     )
     if resolved is None:
         raise HTTPException(status_code=404, detail="request not found")
@@ -14994,7 +15017,15 @@ async def internal_request_user_input(
     if await _session_lite(app_session_id) is None:
         return {"success": False, "error": t("error.session_not_found_retry")}
     try:
-        questions = _validate_user_input_questions(body.get("questions"))
+        kind = str(body.get("kind") or "input").strip()
+        if kind == "approval":
+            prompt = _validate_user_approval_prompt(body.get("prompt"))
+            questions: list[dict[str, Any]] = []
+        elif kind == "input":
+            questions = _validate_user_input_questions(body.get("questions"))
+            prompt = ""
+        else:
+            raise HTTPException(status_code=400, detail="kind must be input or approval")
     except HTTPException as exc:
         return {"success": False, "error": str(exc.detail)}
     raw_timeout = body.get("timeout_seconds")
@@ -15009,7 +15040,9 @@ async def internal_request_user_input(
     public_req, created = await asyncio.to_thread(
         user_input_store.create_or_get_pending_request,
         app_session_id=app_session_id,
+        kind=kind,
         questions=questions,
+        prompt=prompt,
         timeout_seconds=timeout_seconds,
     )
     if created:
@@ -15027,22 +15060,29 @@ async def internal_request_user_input(
         return {"success": False, "error": "request not found"}
     if completed.get("status") == "resolved":
         await _broadcast_user_input_state(str(completed.get("app_session_id") or ""))
-        return {
+        result = {
             "success": True,
             "request_id": completed["request_id"],
-            "answers": completed.get("answers") or {},
         }
+        if completed.get("kind") == "approval":
+            result.update(completed.get("response") or {})
+        else:
+            result["answers"] = completed.get("response") or {}
+        return result
     await _broadcast_user_input("user_input_resolved", {
         "request_id": completed.get("request_id"),
         "app_session_id": completed.get("app_session_id"),
         "status": completed.get("status"),
     })
     await _broadcast_user_input_state(str(completed.get("app_session_id") or ""))
-    return {
+    result = {
         "success": False,
         "request_id": completed.get("request_id"),
         "status": completed.get("status"),
     }
+    if completed.get("kind") == "approval":
+        result["approved"] = False
+    return result
 
 
 @app.post("/api/internal/open-config-panel")

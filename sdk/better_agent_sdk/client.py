@@ -1175,7 +1175,25 @@ class Client:
             "/api/internal/user-input/request",
             {
                 "app_session_id": self.app_session_id,
+                "kind": "input",
                 "questions": questions,
+                "timeout_seconds": timeout_seconds,
+            },
+            timeout=timeout_seconds or 24 * 60 * 60,
+        )
+
+    def request_user_approval(
+        self,
+        prompt: str,
+        *,
+        timeout_seconds: float | None = None,
+    ) -> dict[str, Any]:
+        return self._post(
+            "/api/internal/user-input/request",
+            {
+                "app_session_id": self.app_session_id,
+                "kind": "approval",
+                "prompt": prompt,
                 "timeout_seconds": timeout_seconds,
             },
             timeout=timeout_seconds or 24 * 60 * 60,
