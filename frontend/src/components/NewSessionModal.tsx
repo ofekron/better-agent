@@ -799,7 +799,7 @@ export function NewSessionModal({
     if (e.key !== "Enter" || e.shiftKey) return;
     e.preventDefault();
     if (!(cwd || defaultCwd) || creating) return;
-    handleCreate("send");
+    handleCreate("send-and-open");
   };
 
   const handlePromptPaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
