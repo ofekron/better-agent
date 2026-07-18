@@ -2776,37 +2776,6 @@ const AssistantMessage = memo(function AssistantMessage({
             <span>{loadPhase === "starting" ? "Starting session…" : "Loading context…"}</span>
           </div>
         )}
-        {/* `runs` (this message's backend run_state entries) can legitimately
-         * stay non-empty after the message itself is finalized: the CLI
-         * process is deliberately kept registered during its wind-down so
-         * cancel/kill still resolves it (see backend provider_claude.py
-         * `_watch_complete` — "Turn done, process still alive ... the run
-         * stays registered"), which for some providers takes a long time.
-         * That's internal process bookkeeping, not user-visible generation
-         * — the badge must track the message's own completion signal
-         * (`isStreaming`), not raw run-entry presence, or it lies about
-         * still-generating long after the content is done. */}
-        {message.isStreaming &&
-          (runs.length > 0 || (!message.stopped_at && !message.isStale)) && (
-          <div className="streaming-footer">
-            {runs.length > 0 ? (
-              <RunBadgeStack
-                runs={runs}
-                sessionId={sessionId}
-                workerLabelByDelegation={
-                  workers.length > 0
-                    ? new Map(
-                        workers.map((w) => [
-                          w.delegation_id,
-                          w.worker_description,
-                        ])
-                      )
-                    : undefined
-                }
-              />
-            ) : null}
-          </div>
-        )}
         {message.error && !message.retrying_until && (
           <>
             <MessageStatus
@@ -2916,6 +2885,37 @@ const AssistantMessage = memo(function AssistantMessage({
           </div>
         )}
         <AssistantRunMeta message={message} fallbackMeta={fallbackRunMeta} />
+        {/* `runs` (this message's backend run_state entries) can legitimately
+         * stay non-empty after the message itself is finalized: the CLI
+         * process is deliberately kept registered during its wind-down so
+         * cancel/kill still resolves it (see backend provider_claude.py
+         * `_watch_complete` — "Turn done, process still alive ... the run
+         * stays registered"), which for some providers takes a long time.
+         * That's internal process bookkeeping, not user-visible generation
+         * — the badge must track the message's own completion signal
+         * (`isStreaming`), not raw run-entry presence, or it lies about
+         * still-generating long after the content is done. */}
+        {message.isStreaming &&
+          (runs.length > 0 || (!message.stopped_at && !message.isStale)) && (
+          <div className="streaming-footer">
+            {runs.length > 0 ? (
+              <RunBadgeStack
+                runs={runs}
+                sessionId={sessionId}
+                workerLabelByDelegation={
+                  workers.length > 0
+                    ? new Map(
+                        workers.map((w) => [
+                          w.delegation_id,
+                          w.worker_description,
+                        ])
+                      )
+                    : undefined
+                }
+              />
+            ) : null}
+          </div>
+        )}
       </div>
     </div>
   );
