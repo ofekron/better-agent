@@ -5888,6 +5888,8 @@ function AppMain({
       model,
       providerId: currentSession?.provider_id ?? "",
       reasoningEffort: currentSession?.reasoning_effort ?? "",
+      t,
+      language: i18n.language,
       events,
       activeExtensionPanel:
         route.kind === "extensionPanel"
@@ -5919,6 +5921,8 @@ function AppMain({
       model,
       currentSession?.provider_id,
       currentSession?.reasoning_effort,
+      t,
+      i18n.language,
       events,
       route,
       navigate,
@@ -5932,6 +5936,8 @@ function AppMain({
       panelResourceId: route.kind === "extensionPanel" ? route.resourceId : "",
       cwd: selectedProjectPath || cwd || currentSession?.cwd || "",
       nodeId: selectedProjectNodeId,
+      t,
+      language: i18n.language,
       events,
       onOpenSession: (sessionId: string) => {
         if (!sessionId) return;
@@ -5945,6 +5951,8 @@ function AppMain({
       cwd,
       currentSession?.cwd,
       selectedProjectNodeId,
+      t,
+      i18n.language,
       events,
       navigate,
     ],
