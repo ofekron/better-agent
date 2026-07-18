@@ -42,6 +42,8 @@ export interface OfflineCreateSessionEntry {
     | "messages"
     | "capability_contexts"
     | "folder_id"
+    | "draft_input"
+    | "draft_images"
   >;
   prompt: string;
   images?: ImagePayload[];

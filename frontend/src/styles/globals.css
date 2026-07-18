@@ -9432,6 +9432,26 @@ button.run-badge-clickable:focus-visible {
   border-top: 1px solid var(--border);
 }
 
+.ns-create-actions {
+  flex-wrap: wrap;
+}
+
+@media (max-width: 640px) {
+  .ns-create-actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .ns-create-actions > button {
+    min-height: 40px;
+    white-space: normal;
+  }
+
+  .ns-create-actions > .btn-primary {
+    grid-column: 1 / -1;
+  }
+}
+
 .project-suggestion-modal .modal-footer button {
   max-width: min(220px, 42vw);
   overflow: hidden;
