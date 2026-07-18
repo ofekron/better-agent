@@ -388,6 +388,7 @@
   "settings.extensionsMcpServersHelp": "MCP सर्वर जो Claude, Codex, या Gemini रनों को टूल के रूप में उजागर किए जाते हैं।",
   "settings.extensionsSkills": "एजेंट कौशल",
   "settings.extensionsSkillsHelp": "सत्रों को रनटाइम कौशल के रूप में उपलब्ध कौशल। बिना चुने कौशल सभी रन में छिपे रहते हैं।",
+  "settings.extensionsMcpForcedBySkill": "कौशल द्वारा चालू रखा गया: {{skills}}",
   "settings.extensionsRemoteServices": "रिमोट सेवाएँ",
   "settings.extensionsRemoteServicesHelp": "बाहरी सेवाएँ जो यह एक्सटेंशन स्वामित्व या होस्ट किए गए लॉजिक के लिए घोषित करता है।",
   "settings.extensionsInstructions": "प्रॉम्प्ट निर्देश",

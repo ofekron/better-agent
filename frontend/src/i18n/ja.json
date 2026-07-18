@@ -384,6 +384,7 @@
   "settings.extensionsMcpServersHelp": "Claude、Codex、Gemini の実行にツールとして公開される MCP サーバー。",
   "settings.extensionsSkills": "エージェントスキル",
   "settings.extensionsSkillsHelp": "セッションにランタイムスキルとして公開されるスキル。チェックを外したスキルはすべての実行で非表示になります。",
+  "settings.extensionsMcpForcedBySkill": "スキルにより有効のまま: {{skills}}",
   "settings.extensionsRemoteServices": "リモートサービス",
   "settings.extensionsRemoteServicesHelp": "この拡張機能が独自またはホスト型ロジック用に宣言する外部サービス。",
   "settings.extensionsInstructions": "プロンプト指示",

@@ -5698,6 +5698,12 @@ button.run-badge-clickable:focus-visible {
 .extension-ui-settings-toggle input {
   flex: 0 0 auto;
 }
+.extension-ui-settings-mcp-forced {
+  font-size: calc(11px * var(--app-font-scale));
+  color: var(--text-muted);
+  opacity: 0.75;
+  font-style: italic;
+}
 .extension-ui-settings-select {
   display: inline-flex;
   min-width: min(220px, 100%);

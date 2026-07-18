@@ -389,6 +389,7 @@
   "settings.extensionsMcpServersHelp": "שרתי MCP שנחשפים ככלים להרצות Claude, Codex או Gemini.",
   "settings.extensionsSkills": "כישורי סוכן",
   "settings.extensionsSkillsHelp": "כישורים שנחשפים לסשנים ככישורי ריצה. כישור לא מסומן מוסתר מכל ההרצות.",
+  "settings.extensionsMcpForcedBySkill": "נשאר פעיל בגלל כישור: {{skills}}",
   "settings.extensionsRemoteServices": "שירותים מרוחקים",
   "settings.extensionsRemoteServicesHelp": "שירותים חיצוניים שהתוסף מצהיר עליהם ללוגיקה קניינית או מתארחת.",
   "settings.extensionsInstructions": "הוראות פרומפט",
