@@ -174,10 +174,20 @@ def _journal(root_id: str) -> Path:
         raise ProjectionConflict("invalid historical root")
     if root_id in (".", "..") or "/" in root_id or "\\" in root_id or Path(root_id).is_absolute():
         raise ProjectionConflict("invalid historical root")
-    sessions = (ba_home() / "sessions").resolve()
-    candidate = sessions / root_id / "events.jsonl"
-    resolved_parent = candidate.parent.resolve(strict=False)
-    if resolved_parent != sessions / root_id or sessions not in resolved_parent.parents:
+    # The canonical per-root state dir comes from session_store (single
+    # source of truth): the flat sessions dir for regular roots, a
+    # routine-sessions/<routine> dir for routine roots. Hardcoding
+    # ba_home()/sessions here — as this function did before — returned a
+    # journal path that hydration_index_store._validate_journal (which
+    # uses session_store.root_state_dir) rejected for every routine root
+    # with "hydration journal is outside its root", breaking the startup
+    # rebuild for routine-session roots. Resolve the parent so the
+    # returned path is comparable to other resolved consumers (and so
+    # symlinked temp dirs don't trip fence checks downstream).
+    import session_store
+    root_resolved = session_store.root_state_dir(root_id).resolve(strict=False)
+    candidate = root_resolved / "events.jsonl"
+    if candidate.parent.resolve(strict=False) != root_resolved:
         raise ProjectionConflict("invalid historical root path")
     return candidate
 
