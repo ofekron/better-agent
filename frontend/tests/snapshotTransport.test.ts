@@ -79,12 +79,120 @@ describe("SnapshotTransport", () => {
     transport.handle(payload.begin, send, vi.fn());
     send.mockClear();
     transport.handle(payload.chunks[0], send, vi.fn());
+    await settle();
     expect(send).toHaveBeenCalledTimes(1);
     expect(send).toHaveBeenCalledWith({
       type: "snapshot_ack",
       data: {
         snapshot_id: "snap-1", revision: payload.revision, next_chunk: 1,
       },
+    });
+  });
+
+  it("decodes a near-limit chunk cooperatively before acknowledging it", async () => {
+    vi.useFakeTimers();
+    try {
+      const transport = new SnapshotTransport();
+      const send = vi.fn();
+      const payload = await frames({ type: "messages_replay", data: {
+        app_session_id: "s1", messages: [{ id: "large", text: "x".repeat(170 * 1024) }],
+      } } as WSEvent, 180 * 1024);
+      transport.handle(payload.begin, send, vi.fn());
+      send.mockClear();
+
+      transport.handle(payload.chunks[0], send, vi.fn());
+
+      expect(send).not.toHaveBeenCalled();
+      await Promise.resolve();
+      await vi.advanceTimersToNextTimerAsync();
+      expect(send).not.toHaveBeenCalled();
+      await vi.runAllTimersAsync();
+      expect(send).toHaveBeenCalledOnce();
+      expect(send).toHaveBeenCalledWith({
+        type: "snapshot_ack",
+        data: {
+          snapshot_id: "snap-1", revision: payload.revision, next_chunk: 1,
+        },
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not acknowledge or mutate a transfer cancelled during cooperative decoding", async () => {
+    vi.useFakeTimers();
+    try {
+      const transport = new SnapshotTransport();
+      const send = vi.fn();
+      const apply = vi.fn();
+      const payload = await frames({ type: "messages_replay", data: {
+        app_session_id: "s1", messages: [{ id: "large", text: "x".repeat(170 * 1024) }],
+      } } as WSEvent, 180 * 1024);
+      transport.handle(payload.begin, send, apply);
+      send.mockClear();
+      transport.handle(payload.chunks[0], send, apply);
+      await Promise.resolve();
+      transport.handle({ type: "snapshot_cancelled", data: {
+        snapshot_id: "snap-1", revision: payload.revision, reason: "superseded",
+      } }, send, apply);
+
+      await vi.runAllTimersAsync();
+      expect(send).not.toHaveBeenCalled();
+      expect(apply).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("recovers from malformed base64 without acknowledging the corrupt chunk", async () => {
+    const transport = new SnapshotTransport();
+    const send = vi.fn();
+    const apply = vi.fn();
+    const payload = await frames({ type: "messages_replay", data: {
+      app_session_id: "s1", messages: [],
+    } });
+    transport.handle(payload.begin, send, apply);
+    send.mockClear();
+    const malformed = structuredClone(payload.chunks[0]);
+    malformed.data.payload = "%%%=";
+    transport.handle(malformed, send, apply);
+    await settle();
+
+    expect(send).not.toHaveBeenCalledWith(expect.objectContaining({ type: "snapshot_ack" }));
+    expect(send.mock.calls.at(-1)?.[0]).toMatchObject({
+      type: "snapshot_refresh", data: { reason: "corrupt" },
+    });
+    expect(apply).not.toHaveBeenCalled();
+  });
+
+  it("bounds queued chunk work and reclaims capacity after overflow recovery", async () => {
+    const transport = new SnapshotTransport();
+    const send = vi.fn();
+    const apply = vi.fn();
+    const payload = await frames({ type: "messages_replay", data: {
+      app_session_id: "s1", messages: [],
+    } }, 180 * 1024);
+    transport.handle(payload.begin, send, apply);
+    send.mockClear();
+    for (let index = 0; index <= 128; index += 1) {
+      transport.handle(payload.chunks[0], send, apply);
+    }
+    expect(send.mock.calls.at(-1)?.[0]).toMatchObject({
+      type: "snapshot_refresh", data: { reason: "overflow" },
+    });
+    await settle();
+
+    const next = await frames({ type: "messages_replay", data: {
+      app_session_id: "s1", messages: [{ id: "next" }],
+    } }, 180 * 1024);
+    send.mockClear();
+    transport.handle(next.begin, send, apply);
+    send.mockClear();
+    transport.handle(next.chunks[0], send, apply);
+    await settle();
+    expect(send).toHaveBeenCalledWith({
+      type: "snapshot_ack",
+      data: { snapshot_id: "snap-1", revision: next.revision, next_chunk: 1 },
     });
   });
 
@@ -178,6 +286,7 @@ describe("SnapshotTransport", () => {
     const payload = await frames({ type: "messages_replay", data: { app_session_id: "s1", messages: [] } });
     transport.handle(payload.begin, send, apply);
     transport.handle(payload.chunks[0], send, apply);
+    await settle();
     transport.resume(send);
     expect(send.mock.calls.at(-1)?.[0]).toMatchObject({
       type: "snapshot_resume", data: { snapshot_id: "snap-1", next_chunk: 1 },
@@ -265,6 +374,8 @@ describe("SnapshotTransport", () => {
           } }, send, apply, 1);
         }
       }
+
+      await settle();
 
       expect(applied).toEqual([]);
       expect(send.mock.calls.some(([frame]) => frame.type === "snapshot_refresh")).toBe(true);
