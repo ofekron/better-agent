@@ -68,6 +68,8 @@ def publish_registry() -> dict[str, Any]:
             entries.pop(key, None)
             continue
         source_root = extension_store.runtime_package_root(extension_id)
+        if extension_id == extension_store.BUILTIN_SWITCH_CONTROL_EXTENSION_ID:
+            source_root = _REPO_ROOT / "switch_control_daemon"
         if source_root is None:
             # Package unavailable on this line: keep whatever the host has.
             continue

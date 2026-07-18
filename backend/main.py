@@ -10157,9 +10157,21 @@ async def admin_restart_status(request_id: str):
         raise HTTPException(status_code=400, detail="Invalid restart request id.")
     accepted = await asyncio.to_thread(_read_refresh_acceptance_for, request_id)
     result = await asyncio.to_thread(_read_refresh_result_for, request_id)
+    from daemonhost import switch_control
+
+    switch_result = await asyncio.to_thread(switch_control.request_status, request_id)
+    has_switch = switch_result.get("found") is True
+    status = switch_result.get("status") if has_switch else (
+        result.get("status") if result else "pending"
+    )
+    error = switch_result.get("error") if has_switch else (
+        str(result.get("error") or "") if result else ""
+    )
     return {
         "request_id": request_id,
-        "accepted": accepted is not None or result is not None,
+        "accepted": has_switch or accepted is not None or result is not None,
+        "status": status,
+        "error": error,
         "refresh_result": result,
     }
 
