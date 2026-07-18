@@ -4,6 +4,7 @@ import type {
   OrchestrationMode,
   RunInfo,
   Session,
+  SessionProcessingUpdate,
   ChatMessage,
   CapabilityContext,
   WSEvent,
@@ -20,6 +21,24 @@ import { sessionRegistry, statusRankForRow } from "../lib/sessionRegistry";
 import { subscribeMany } from "../lib/eventBus";
 
 export { sortSessionsForList };
+
+export type SessionProcessingState = {
+  epoch: string | null;
+  revision: number;
+  roots: Record<string, boolean>;
+};
+
+export function reduceSessionProcessing(
+  previous: SessionProcessingState,
+  update: SessionProcessingUpdate,
+): SessionProcessingState {
+  if (previous.epoch === update.epoch && update.revision < previous.revision) return previous;
+  return {
+    epoch: update.epoch,
+    revision: update.revision,
+    roots: Object.fromEntries(update.rootIds.map((rootId) => [rootId, true])),
+  };
+}
 
 export interface CreateSessionOptions {
   name: string;
@@ -906,9 +925,12 @@ export function useSession(authStatus?: string) {
   // touch this state (no UI flash). State (not ref) so badges
   // re-render. Keyed by root_id, NOT app_session_id, because
   // reconcile is per-root-tree.
-  const [processingByRoot, setProcessingByRoot] = useState<
-    Record<string, boolean>
-  >({});
+  const [processingState, setProcessingState] = useState<SessionProcessingState>({
+    epoch: null,
+    revision: 0,
+    roots: {},
+  });
+  const processingByRoot = processingState.roots;
 
   // Ref mirrors so callbacks with [] deps can read fresh state without
   // re-creating themselves (selectSession in particular needs to peek
@@ -2793,15 +2815,8 @@ export function useSession(authStatus?: string) {
    * cross the 0.3s threshold; fast reconciles never reach this
    * handler, so the badge doesn't flash for sub-perceptible work. */
   const applySessionProcessing = useCallback(
-    (rootId: string, kind: "started" | "finished") => {
-      setProcessingByRoot((prev) => {
-        const active = kind === "started";
-        if (!!prev[rootId] === active) return prev;
-        const next = { ...prev };
-        if (active) next[rootId] = true;
-        else delete next[rootId];
-        return next;
-      });
+    (update: SessionProcessingUpdate) => {
+      setProcessingState((previous) => reduceSessionProcessing(previous, update));
     },
     []
   );

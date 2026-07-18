@@ -436,6 +436,9 @@ class SessionManager:
         # Per-root single-flight task tracker. Mutated ONLY on the event
         # loop thread (add via schedule_*, remove via done_callback).
         self._in_flight_reconcile: dict[str, asyncio.Task] = {}
+        self._visible_reconcile_roots: set[str] = set()
+        self._visible_reconcile_epoch = uuid.uuid4().hex
+        self._visible_reconcile_revision = 0
         self._reconcile_accepting = True
         # Bound at startup so cross-thread callers can schedule onto the
         # right loop.
@@ -704,8 +707,7 @@ class SessionManager:
         self, fn: Callable[[str, str], None],
     ) -> None:
         """Wire the WS event emitter. `fn(root_id, kind)` where kind ∈
-        {'started','finished'}. Runs on the event loop thread inside
-        the per-root lock."""
+        {'started','finished'}. Runs on the event loop thread."""
         self._emit_processing_fn = fn
 
     def bind_stub_invalidated_emitter(
@@ -876,6 +878,22 @@ class SessionManager:
         t = self._in_flight_reconcile.get(root_id)
         return t is not None and not t.done()
 
+    def reconcile_processing_state(self) -> tuple[str, int, tuple[str, ...]]:
+        return (
+            self._visible_reconcile_epoch,
+            self._visible_reconcile_revision,
+            tuple(sorted(self._visible_reconcile_roots)),
+        )
+
+    def _set_reconcile_processing(self, root_id: str, active: bool) -> None:
+        if (root_id in self._visible_reconcile_roots) == active:
+            return
+        if active:
+            self._visible_reconcile_roots.add(root_id)
+        else:
+            self._visible_reconcile_roots.discard(root_id)
+        self._visible_reconcile_revision += 1
+
     def latest_assistant_finalized(self, sid: str) -> bool:
         """True iff `sid` has an assistant message AND the most recent
         one is finalized (not streaming). Used by `event_ingester.ingest`
@@ -973,6 +991,7 @@ class SessionManager:
                 ) or []
             except asyncio.TimeoutError:
                 started_emitted = True
+                self._set_reconcile_processing(root_id, True)
                 self._emit_processing("started", root_id)
                 changes = await inner or []
         finally:
@@ -981,6 +1000,7 @@ class SessionManager:
                 (time.perf_counter() - reconcile_start) * 1000,
             )
             if started_emitted:
+                self._set_reconcile_processing(root_id, False)
                 self._emit_processing("finished", root_id)
         logger.info(
             "reconcile completed: root=%s changes=%d started_emitted=%s",
@@ -1312,6 +1332,9 @@ class SessionManager:
         self._loading_roots.clear()
         self._reconcile_dirty.clear()
         self._in_flight_reconcile.clear()
+        self._visible_reconcile_roots.clear()
+        self._visible_reconcile_epoch = uuid.uuid4().hex
+        self._visible_reconcile_revision = 0
         self._since_cache.clear()
         self._since_cache_bytes.clear()
         self._since_cache_total_bytes = 0
