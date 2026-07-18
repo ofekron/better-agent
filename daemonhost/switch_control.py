@@ -1,84 +1,56 @@
 from __future__ import annotations
 
+import argparse
+import json
 from pathlib import Path
-from typing import Any
 
-from daemonhost.jsonio import read_json, write_json
-from daemonhost.paths import ba_home
-from daemonhost import pointer
+from switch_control_daemon.line_switch_runtime import control as _control
+from switch_control_daemon.line_switch_runtime import requests as _requests
 
-_REQUIRED_CHECKOUT_FILES = (
-    "daemonhost/__init__.py",
-    "daemonhost/pointer.py",
-    "daemonhost/jsonio.py",
-    "daemonhost/paths.py",
-)
-
-
-def _configured_lines(running_checkout: str) -> dict[str, str]:
-    running = pointer._canonical_checkout(running_checkout)
-    config_path = ba_home() / "switch_lines.json"
-    raw = read_json(config_path)
-    lines: dict[str, str] = {}
-    for name, value in raw.items():
-        if not isinstance(name, str) or not isinstance(value, str):
-            continue
-        try:
-            canonical = pointer._canonical_checkout(value)
-        except (OSError, ValueError):
-            continue
-        if pointer._is_runnable_checkout(canonical):
-            lines[name] = canonical
-    if lines:
-        return lines
-    seed = (
-        {"main": running, "dev": running[: -len("-main")]}
-        if running.endswith("-main")
-        else {"dev": running, "main": running + "-main"}
-    )
-    lines = {name: path for name, path in seed.items() if pointer._is_runnable_checkout(path)}
-    if lines:
-        write_json(config_path, lines)
-    return lines
+_REQUIRED_CHECKOUT_FILES = _control._REQUIRED_CHECKOUT_FILES
+_configured_lines = _control._configured_lines
+_incompatible = _control._incompatible
+request = _control.request
+state = _control.state
+bootstrap = _requests.bootstrap
+request_status = _requests.request_status
+service_tick = _requests.service_tick
+submit = _requests.submit
 
 
-def _incompatible(path: str) -> list[str]:
-    root = Path(path)
-    return [relative for relative in _REQUIRED_CHECKOUT_FILES if not (root / relative).is_file()]
-
-
-def state(running_checkout: str) -> dict[str, Any]:
-    running = pointer._canonical_checkout(running_checkout)
-    lines = _configured_lines(running)
-    incompatible = {
-        name: missing for name, path in lines.items() if (missing := _incompatible(path))
-    }
-    return {
-        "lines": lines,
-        "running_checkout": running,
-        "active_line": next((name for name, path in lines.items() if path == running), ""),
-        "incompatible": incompatible,
-        "pointer": pointer.read(),
-        "switchable": len(lines) >= 2,
-    }
-
-
-def request(running_checkout: str, target: str, request_id: str) -> dict[str, Any]:
-    snapshot = state(running_checkout)
-    lines = snapshot["lines"]
-    if target not in lines:
-        raise ValueError(f"unknown line: {target!r}")
-    target_path = lines[target]
-    if target_path == snapshot["running_checkout"]:
-        raise ValueError(f"line {target!r} is already active")
-    missing = _incompatible(target_path)
-    if missing:
-        raise ValueError(
-            f"line {target!r} cannot run switch control (missing {', '.join(missing)})"
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="line-switch")
+    commands = parser.add_subparsers(dest="command", required=True)
+    for name in ("switch", "bootstrap"):
+        command = commands.add_parser(name)
+        command.add_argument("target")
+        command.add_argument("--running-checkout", default=str(Path.cwd()))
+        command.add_argument("--request-id", default="")
+        command.add_argument("--timeout", type=float, default=180.0)
+    tick = commands.add_parser("service-tick")
+    tick.add_argument("--running-checkout", default="")
+    status_parser = commands.add_parser("status")
+    status_parser.add_argument("request_id")
+    args = parser.parse_args(argv)
+    if args.command == "service-tick":
+        print(json.dumps(service_tick(args.running_checkout or None)))
+        return 0
+    if args.command == "status":
+        print(json.dumps(request_status(args.request_id)))
+        return 0
+    request_id = args.request_id or None
+    if args.command == "bootstrap":
+        result = bootstrap(
+            args.running_checkout,
+            args.target,
+            timeout=args.timeout,
+            request_id=request_id,
         )
-    pointer.set_active(target_path, request_id)
-    return {"request_id": request_id, "target": target}
+    else:
+        result = submit(args.running_checkout, args.target, request_id)
+    print(json.dumps(result))
+    return 0
 
 
-def abort(request_id: str, reason: str) -> dict[str, Any]:
-    return pointer.revert(reason, request_id)
+if __name__ == "__main__":
+    raise SystemExit(main())
