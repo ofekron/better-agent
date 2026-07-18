@@ -691,6 +691,8 @@
   "newSession.workerRuntimeProfile": "ワーカー runtime profile",
   "newSession.cancel": "キャンセル",
   "newSession.create": "作成",
+  "newSession.createAndSend": "作成して送信",
+  "newSession.createAndSendAndOpen": "作成、送信して開く",
   "newSession.creating": "作成中…",
   "newSession.fileEdit": "ファイル編集モード",
   "newSession.machine": "マシン",

@@ -695,6 +695,8 @@
   "newSession.workerRuntimeProfile": "वर्कर runtime profile",
   "newSession.cancel": "रद्द करें",
   "newSession.create": "बनाएँ",
+  "newSession.createAndSend": "बनाएँ और भेजें",
+  "newSession.createAndSendAndOpen": "बनाएँ, भेजें और खोलें",
   "newSession.creating": "बनाया जा रहा है…",
   "newSession.fileEdit": "फ़ाइल संपादन मोड",
   "newSession.machine": "मशीन",

@@ -65,6 +65,7 @@ import {
   NewSessionModal,
   type SessionConfig,
   type InvestigationContext,
+  type NewSessionCreationAction,
 } from "./components/NewSessionModal";
 import { InvestigateContextMenu, type InvestigationData } from "./components/InvestigateContextMenu";
 import { MobileActionSheetProvider } from "./components/MobileActionSheet";
@@ -2095,6 +2096,38 @@ function AppMain({
   const [investigationCtx, setInvestigationCtx] = useState<InvestigationContext | undefined>(undefined);
   const [turnCapabilityPickerOpen, setTurnCapabilityPickerOpen] = useState(false);
   const [turnCapabilityContextsBySession, setTurnCapabilityContextsBySession] = useState<Record<string, CapabilityContext[]>>({});
+  const persistDraftPatch = useCallback(async (
+    sessionId: string,
+    value: string,
+    images?: InvestigationContext["images"],
+  ) => {
+    const seq = nextDraftSeq(Date.now());
+    applySessionMetadata(sessionId, { draft_input_seq: seq });
+    const body: Record<string, unknown> = {
+      draft_input: value,
+      client_seq: seq,
+      client_id: clientId,
+    };
+    if (images !== undefined) body.draft_images = images;
+    const response = await progressTrackedFetch(
+      `draft:save:${sessionId}`,
+      `${API}/api/sessions/${sessionId}/draft`,
+      {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      },
+      { silent: true },
+    );
+    if (!response.ok) throw new Error(`Draft save failed (${response.status})`);
+  }, [applySessionMetadata, clientId]);
+  const flushDraftPatch = useCallback((
+    sessionId: string,
+    value: string,
+    images?: InvestigationContext["images"],
+  ) => {
+    void persistDraftPatch(sessionId, value, images).catch(() => {});
+  }, [persistDraftPatch]);
 
   useEffect(() => {
     for (const entry of offlineQueue.queue) {
@@ -2224,6 +2257,13 @@ function AppMain({
                 capabilityContexts: entry.capabilityContexts,
                 folderId: queued.folder_id,
               });
+              if (queued.draft_input || queued.draft_images?.length) {
+                await persistDraftPatch(
+                  queued.id,
+                  queued.draft_input ?? "",
+                  queued.draft_images,
+                );
+              }
             } catch (createErr) {
               // Per-entry error handling so one queued create can't strand the
               // whole backlog (the loop's outer catch would abort every later
@@ -2363,7 +2403,7 @@ function AppMain({
         offlineFlushRunningRef.current = false;
       }
     })();
-  }, [connected, offlineQueue, createSession, sendMessage, setPendingForSession, offlineRetryTick]);
+  }, [connected, offlineQueue, createSession, persistDraftPatch, sendMessage, setPendingForSession, offlineRetryTick]);
 
   // Clear stale pending investigation if the user navigates to a different
   // session and the pending target is no longer the current route. This
@@ -3282,28 +3322,6 @@ function AppMain({
       timers.clear();
     };
   }, []);
-  const flushDraftPatch = useCallback((sessionId: string, value: string, images?: import("./components/InputArea").PastedImage[]) => {
-    // One monotonic seq, sent as client_seq AND stamped locally so a later
-    // stale WS echo of an earlier draft can be ordered-out by the guard.
-    const seq = nextDraftSeq(Date.now());
-    applySessionMetadata(sessionId, { draft_input_seq: seq });
-    const body: Record<string, unknown> = {
-      draft_input: value,
-      client_seq: seq,
-      client_id: clientId,
-    };
-    if (images !== undefined) body.draft_images = images;
-    progressTrackedFetch(
-      `draft:save:${sessionId}`,
-      `${API}/api/sessions/${sessionId}/draft`,
-      {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      },
-      { silent: true },
-    ).catch(() => {});
-  }, [clientId, applySessionMetadata]);
   const handleDraftChange = useCallback(
     (sessionId: string, value: string) => {
       const timers = draftDebounceRef.current;
@@ -5518,6 +5536,8 @@ function AppMain({
       initialPrompt: string,
       images: ImagePayload[],
       files: FilePayload[],
+      draftImages: InvestigationContext["images"],
+      action: NewSessionCreationAction,
       pendingStatus: ChatMessage["status"] = "offline",
     ) => {
       if (config.fileEditEnabled) {
@@ -5553,19 +5573,23 @@ function AppMain({
         offline_pending: true,
         capability_contexts: config.capabilityContexts,
         folder_id: config.folderId ?? null,
+        ...(action === "create" && (initialPrompt || draftImages.length > 0)
+          ? { draft_input: initialPrompt, draft_images: draftImages }
+          : {}),
       };
+      const shouldSend = action !== "create";
       const offlineQueued = offlineQueue.enqueue({
         type: "create_session",
         clientId,
         session: localSession,
-        prompt: initialPrompt,
-        images: images.length ? images : undefined,
-        files: files.length ? files : undefined,
+        prompt: shouldSend ? initialPrompt : "",
+        images: shouldSend && images.length ? images : undefined,
+        files: shouldSend && files.length ? files : undefined,
         capabilityContexts: config.capabilityContexts,
       });
       if (!offlineQueued) return false;
-      addOfflineSession(localSession);
-      if (initialPrompt) {
+      addOfflineSession(localSession, action === "send-and-open");
+      if (shouldSend && initialPrompt) {
         setPendingForSession(id, () => [{
           id: clientId,
           role: "user",
@@ -5578,7 +5602,7 @@ function AppMain({
       }
       setNewSessionModalOpen(false);
       setInvestigationCtx(undefined);
-      navigate(sessionPath(id));
+      if (action === "send-and-open") navigate(sessionPath(id));
       return true;
     },
     [addOfflineSession, offlineQueue, navigate, setPendingForSession, t],
@@ -5624,9 +5648,14 @@ function AppMain({
   );
 
   const handleCreateSessionFromModal = useCallback(
-    async (config: SessionConfig, investigation?: InvestigationContext) => {
+    async (
+      config: SessionConfig,
+      investigation: InvestigationContext | undefined,
+      action: NewSessionCreationAction,
+    ) => {
       const initialPrompt = (investigation?.prompt ?? config.initialPrompt).trim();
-      const images: ImagePayload[] = (investigation?.images ?? config.initialImages).map((img) => ({
+      const initialPromptImages = investigation?.images ?? config.initialImages;
+      const images: ImagePayload[] = initialPromptImages.map((img) => ({
         data: img.base64,
         media_type: img.mediaType,
       }));
@@ -5639,6 +5668,18 @@ function AppMain({
 
       const finishCreatedSession = (session: Session) => {
         if (!session?.id) return true;
+        if (action === "create") {
+          if (initialPrompt || initialPromptImages.length > 0) {
+            applySessionMetadata(session.id, {
+              draft_input: initialPrompt,
+              draft_images: initialPromptImages,
+            });
+            flushDraftPatch(session.id, initialPrompt, initialPromptImages);
+          }
+          setNewSessionModalOpen(false);
+          setInvestigationCtx(undefined);
+          return true;
+        }
         if (initialPrompt) {
           const pending = {
             sessionId: session.id,
@@ -5656,7 +5697,7 @@ function AppMain({
         }
         setNewSessionModalOpen(false);
         setInvestigationCtx(undefined);
-        navigateToCreatedSession(session);
+        if (action === "send-and-open") navigateToCreatedSession(session);
         return true;
       };
 
@@ -5684,6 +5725,8 @@ function AppMain({
               initialPrompt,
               images,
               files,
+              initialPromptImages,
+              action,
               connected ? "sending" : "offline",
             );
             return;
@@ -5695,7 +5738,7 @@ function AppMain({
       }
 
       if (!connected) {
-        queueLocalFirstSession(config, initialPrompt, images, files);
+        queueLocalFirstSession(config, initialPrompt, images, files, initialPromptImages, action);
         return;
       }
 
@@ -5719,14 +5762,14 @@ function AppMain({
         finishCreatedSession(session);
       } catch (e) {
         if (isRetryableOfflineError(e)) {
-          queueLocalFirstSession(config, initialPrompt, images, files);
+          queueLocalFirstSession(config, initialPrompt, images, files, initialPromptImages, action);
           return;
         }
         const msg = e instanceof Error ? e.message : String(e);
         window.alert(msg);
       }
     },
-    [connected, createSession, queueInitialPromptForSession, queueLocalFirstSession, navigateToCreatedSession, sendInitialPromptToSession],
+    [applySessionMetadata, connected, createSession, flushDraftPatch, navigateToCreatedSession, queueInitialPromptForSession, queueLocalFirstSession, sendInitialPromptToSession],
   );
 
 
