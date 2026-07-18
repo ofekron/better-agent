@@ -1234,9 +1234,17 @@ def _validate_skills(value: Any) -> list[dict[str, Any]]:
                 raise ExtensionError("entrypoints.skills.default_enabled must be a boolean")
             cleaned["default_enabled"] = item["default_enabled"]
         if "requires_mcp" in item:
-            if not isinstance(item["requires_mcp"], bool):
-                raise ExtensionError("entrypoints.skills.requires_mcp must be a boolean")
-            cleaned["requires_mcp"] = item["requires_mcp"]
+            requires = item["requires_mcp"]
+            if isinstance(requires, bool):
+                cleaned["requires_mcp"] = requires
+            elif isinstance(requires, list):
+                cleaned["requires_mcp"] = _validate_string_list(
+                    requires, field="entrypoints.skills.requires_mcp"
+                )
+            else:
+                raise ExtensionError(
+                    "entrypoints.skills.requires_mcp must be a boolean or a list of MCP server names"
+                )
         items.append(cleaned)
     return items
 
@@ -6095,24 +6103,30 @@ def resolve_all_settings(extension_id: str) -> dict[str, Any]:
 
 def mcp_forcing_skills(
     extension_id: str,
+    server_name: str,
     *,
     settings: dict[str, Any] | None = None,
     record: dict[str, Any] | None = None,
 ) -> list[str]:
-    """Names of enabled skills declaring requires_mcp — these force all of the
-    extension's MCP servers on so the skill's instructions stay executable."""
+    """Names of enabled skills whose requires_mcp covers this server — these
+    force it on so the skill's instructions stay executable. requires_mcp is
+    True (all of the extension's servers) or a list of server names."""
     current_record = record if record is not None else get_extension(extension_id)
     if current_record is None:
         return []
     entrypoints = (current_record.get("manifest") or {}).get("entrypoints") or {}
     data = settings if settings is not None else _load_ext_settings()
-    return [
-        item["name"]
-        for item in entrypoints.get("skills") or []
-        if isinstance(item, dict)
-        and item.get("requires_mcp") is True
-        and is_runtime_skill_enabled(extension_id, item["name"], settings=data, record=current_record)
-    ]
+    forcing: list[str] = []
+    for item in entrypoints.get("skills") or []:
+        if not isinstance(item, dict):
+            continue
+        requires = item.get("requires_mcp")
+        covers = requires is True or (isinstance(requires, list) and server_name in requires)
+        if covers and is_runtime_skill_enabled(
+            extension_id, item["name"], settings=data, record=current_record
+        ):
+            forcing.append(item["name"])
+    return forcing
 
 
 def is_mcp_server_enabled(
@@ -6142,7 +6156,7 @@ def is_mcp_server_enabled(
         explicit = bool(item.get("default_enabled", True)) if item else True
     if explicit:
         return True
-    return bool(mcp_forcing_skills(extension_id, settings=data, record=record))
+    return bool(mcp_forcing_skills(extension_id, server_name, settings=data, record=record))
 
 
 def is_runtime_skill_enabled(
@@ -6453,7 +6467,7 @@ def set_mcp_server_enabled(extension_id: str, server_name: str, enabled: bool) -
     if not _ID_RE.fullmatch(server_name):
         raise ExtensionError("Invalid MCP server name")
     if not enabled:
-        forcing = mcp_forcing_skills(extension_id, record=record)
+        forcing = mcp_forcing_skills(extension_id, server_name, record=record)
         if forcing:
             raise ExtensionError(
                 f"MCP server {server_name!r} is required by enabled skill(s): "
@@ -6626,7 +6640,6 @@ def extension_mcp_servers(extension_id: str) -> list[dict[str, Any]]:
     if get_extension(extension_id) is None:
         raise ExtensionError("Extension not installed")
     record = get_extension(extension_id)
-    forcing = mcp_forcing_skills(extension_id, record=record)
     servers: list[dict[str, Any]] = []
     for item in _stored_mcp_entrypoints(record):
         if item["name"] in _RESERVED_MCP_SERVER_NAMES:
@@ -6637,7 +6650,7 @@ def extension_mcp_servers(extension_id: str) -> list[dict[str, Any]]:
                 "label": item.get("label") or item["name"],
                 "user_facing": item.get("user_facing", True),
                 "enabled": is_mcp_server_enabled(extension_id, item["name"], record=record),
-                "forced_by_skills": forcing,
+                "forced_by_skills": mcp_forcing_skills(extension_id, item["name"], record=record),
             }
         )
     return servers

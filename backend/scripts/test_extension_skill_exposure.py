@@ -158,7 +158,12 @@ def t_default_disabled_mcp_hidden_until_forced_or_checked() -> None:
     ext = "test.mcp-default-off"
     install_skill_extension(
         ext,
-        skills=[{"name": "forcing-skill", "path": "skills/forcing-skill", "default_enabled": False, "requires_mcp": True}],
+        skills=[{
+            "name": "forcing-skill",
+            "path": "skills/forcing-skill",
+            "default_enabled": False,
+            "requires_mcp": ["internal-server"],
+        }],
         mcp=[
             {"name": "public-server", "python": "mcp/server.py"},
             {"name": "internal-server", "python": "mcp/internal_server.py", "default_enabled": False},
@@ -169,8 +174,18 @@ def t_default_disabled_mcp_hidden_until_forced_or_checked() -> None:
     extension_store.set_runtime_skill_enabled(ext, "forcing-skill", True)
     check(
         extension_store.is_mcp_server_enabled(ext, "internal-server"),
-        "enabling a requires_mcp skill forces the default-off mcp on",
+        "enabling a requires_mcp skill forces the listed default-off mcp on",
     )
+    extension_store.set_mcp_server_enabled(ext, "public-server", False)
+    check(
+        not extension_store.is_mcp_server_enabled(ext, "public-server"),
+        "unlisted mcp stays independently disableable while the skill is on",
+    )
+    check(
+        extension_store.extension_mcp_servers(ext)[0]["forced_by_skills"] == [],
+        "unlisted mcp reports no forcing skills",
+    )
+    extension_store.set_mcp_server_enabled(ext, "public-server", True)
     extension_store.set_runtime_skill_enabled(ext, "forcing-skill", False)
     check(
         not extension_store.is_mcp_server_enabled(ext, "internal-server"),
