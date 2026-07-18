@@ -7,6 +7,7 @@ import type {
   RunInfo,
   SendMode,
   Session,
+  SessionProcessingUpdate,
   WSEvent,
 } from "../types";
 import type { InlineTag } from "../types/inlineTag";
@@ -62,6 +63,30 @@ function parseStubInvalidations(data: unknown): StubInvalidation[] {
         && Array.isArray(row.stub.last_events),
     );
   });
+}
+
+const PROCESSING_EPOCH = /^[0-9a-f]{32}$/;
+
+function parseProcessingVersion(data: unknown): { epoch: string; revision: number } | null {
+  const payload = data as { epoch?: unknown; revision?: unknown } | null;
+  if (typeof payload?.epoch !== "string" || !PROCESSING_EPOCH.test(payload.epoch)) return null;
+  if (typeof payload.revision !== "number"
+    || !Number.isSafeInteger(payload.revision) || payload.revision < 0) return null;
+  return { epoch: payload.epoch, revision: payload.revision };
+}
+
+function parseProcessingRootIds(data: unknown): string[] | null {
+  const rootIds = (data as { root_ids?: unknown } | null)?.root_ids;
+  if (!Array.isArray(rootIds) || rootIds.length > 4096) return null;
+  const seen = new Set<string>();
+  let totalLength = 0;
+  for (const rootId of rootIds) {
+    if (typeof rootId !== "string" || rootId.length === 0 || rootId.length > 256) return null;
+    totalLength += rootId.length;
+    if (totalLength > 1024 * 1024 || seen.has(rootId)) return null;
+    seen.add(rootId);
+  }
+  return rootIds as string[];
 }
 
 export function resolveLiveFrameSessionId(
@@ -373,10 +398,7 @@ interface UseWebSocketOptions {
    * timer fires, `finished` when the reconcile completes (or fails).
    * `root_id` keys the per-root tree. Caller renders a tiny
    * "reconciling…" badge while the flag is `started`. */
-  onSessionProcessing?: (
-    rootId: string,
-    kind: "started" | "finished"
-  ) => void;
+  onSessionProcessing?: (update: SessionProcessingUpdate) => void;
   /** Backend reconcile completed (fast or slow). The initial GET may
    * have returned stale cache; the frontend should silently refetch
    * if the user is viewing this root's session. */
@@ -849,13 +871,21 @@ export function useWebSocket(
           event.type === "session_processing_started" ||
           event.type === "session_processing_finished"
         ) {
-          const d = event.data as { root_id?: string };
-          if (d.root_id) {
-            const kind =
-              event.type === "session_processing_started"
-                ? "started"
-                : "finished";
-            onSessionProcessingRef.current?.(d.root_id, kind);
+          const d = event.data as { root_id?: unknown };
+          const version = parseProcessingVersion(event.data);
+          const rootIds = parseProcessingRootIds(event.data);
+          if (typeof d.root_id === "string" && d.root_id.length > 0
+            && d.root_id.length <= 256 && version && rootIds) {
+            onSessionProcessingRef.current?.({ kind: "snapshot", rootIds, ...version });
+          }
+          return;
+        }
+
+        if (event.type === "session_processing_state") {
+          const rootIds = parseProcessingRootIds(event.data);
+          const version = parseProcessingVersion(event.data);
+          if (rootIds && version) {
+            onSessionProcessingRef.current?.({ kind: "snapshot", rootIds, ...version });
           }
           return;
         }

@@ -15,6 +15,13 @@ export interface FileAttachment {
   size: number;
 }
 
+export type SessionProcessingUpdate = {
+  kind: "snapshot";
+  rootIds: string[];
+  epoch: string;
+  revision: number;
+};
+
 export type WSEventType =
   // Primary inner event: a pass-through of one claude CLI session jsonl
   // line. The backend's FileTailer no longer translates these — they
@@ -173,6 +180,7 @@ export type WSEventType =
   // Async session-level processing progress (reconcile, large-replay).
   | "session_processing_started"
   | "session_processing_finished"
+  | "session_processing_state"
   // Backend reconcile completed (fast or slow). Initial GET may have
   // returned stale cache; frontend silently refetches the session tree.
   | "session_reconciled"
