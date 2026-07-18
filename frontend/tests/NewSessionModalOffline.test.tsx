@@ -55,6 +55,40 @@ const capabilityPickerClient = {
 };
 
 describe("NewSessionModal offline provider cache", () => {
+  it("offers create, send, and send-and-open as distinct actions", async () => {
+    cacheProviders([provider], provider.id);
+    cacheProviderModels(provider.id, ["cached-default"]);
+    vi.spyOn(globalThis, "fetch").mockRejectedValue(new TypeError("offline"));
+    const onCreate = vi.fn();
+
+    const { getByRole } = render(
+      <NewSessionModal
+        open
+        onClose={() => {}}
+        onCreate={onCreate}
+        defaultCwd="/tmp/project"
+        projects={[]}
+        capabilityPickerClient={capabilityPickerClient}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(getByRole("button", { name: "newSession.create" })).toBeTruthy();
+    });
+
+    fireEvent.click(getByRole("button", { name: "newSession.create" }));
+    fireEvent.click(getByRole("button", { name: "newSession.createAndSend" }));
+    fireEvent.click(getByRole("button", { name: "newSession.createAndSendAndOpen" }));
+    fireEvent.keyDown(getByRole("textbox"), { key: "Enter" });
+
+    expect(onCreate.mock.calls.map((call) => call[2])).toEqual([
+      "create",
+      "send",
+      "send-and-open",
+      "send",
+    ]);
+  });
+
   it("shows the session capability picker entry point", () => {
     const { getByText, getByRole } = render(
       <NewSessionModal
@@ -113,6 +147,7 @@ describe("NewSessionModal offline provider cache", () => {
         main: { providerId: provider.id, model: "cached-opus", reasoningEffort: "high", permission: {} },
       }),
       undefined,
+      "send-and-open",
     );
   });
 
@@ -155,6 +190,7 @@ describe("NewSessionModal offline provider cache", () => {
         orchestrationMode: "native",
       }),
       undefined,
+      "send-and-open",
     );
   });
 
@@ -188,6 +224,7 @@ describe("NewSessionModal offline provider cache", () => {
         browserHarnessHeadless: false,
       }),
       undefined,
+      "send-and-open",
     );
   });
 
@@ -225,6 +262,7 @@ describe("NewSessionModal offline provider cache", () => {
         fileEditPath: undefined,
       }),
       undefined,
+      "send-and-open",
     );
   });
 
@@ -283,6 +321,7 @@ describe("NewSessionModal offline provider cache", () => {
         ],
       }),
       undefined,
+      "send-and-open",
     );
   });
 
@@ -333,6 +372,7 @@ describe("NewSessionModal offline provider cache", () => {
         browserHarnessHeadless: true,
       }),
       undefined,
+      "send-and-open",
     );
   });
 });

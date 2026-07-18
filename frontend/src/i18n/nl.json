@@ -691,6 +691,8 @@
   "newSession.workerRuntimeProfile": "Runtimeprofiel van worker",
   "newSession.cancel": "Annuleren",
   "newSession.create": "Aanmaken",
+  "newSession.createAndSend": "Aanmaken en verzenden",
+  "newSession.createAndSendAndOpen": "Aanmaken, verzenden en openen",
   "newSession.creating": "Aanmaken…",
   "newSession.fileEdit": "Bestandsbewerkingsmodus",
   "newSession.machine": "Machine",

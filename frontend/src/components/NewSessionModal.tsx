@@ -94,10 +94,16 @@ export interface InvestigationContext {
   files?: FileAttachment[];
 }
 
+export type NewSessionCreationAction = "create" | "send" | "send-and-open";
+
 interface Props {
   open: boolean;
   onClose: () => void;
-  onCreate: (config: SessionConfig, investigation?: InvestigationContext) => void;
+  onCreate: (
+    config: SessionConfig,
+    investigation: InvestigationContext | undefined,
+    action: NewSessionCreationAction,
+  ) => void;
   defaultCwd: string;
   /** Existing projects (paths + names). Drives the project picker so
    * users don't have to type a path. Required so the modal can render
@@ -759,7 +765,7 @@ export function NewSessionModal({
   const missingProviderConfig =
     !main.providerId || (effectiveOrchestrationMode === "team" && !worker.providerId);
 
-  const handleCreate = () => {
+  const handleCreate = (action: NewSessionCreationAction) => {
     const effectiveCwd = cwd || defaultCwd;
     const baseConfig: SessionConfig = {
       orchestrationMode: effectiveOrchestrationMode,
@@ -786,14 +792,14 @@ export function NewSessionModal({
     const ctx = investigation
       ? { ...investigation, prompt: editedPrompt, images: initialImages, files: initialFiles }
       : undefined;
-    onCreate(config, ctx);
+    onCreate(config, ctx, action);
   };
 
   const handlePromptKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key !== "Enter" || e.shiftKey) return;
     e.preventDefault();
     if (!(cwd || defaultCwd) || creating) return;
-    handleCreate();
+    handleCreate("send");
   };
 
   const handlePromptPaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
@@ -1079,18 +1085,36 @@ export function NewSessionModal({
           )}
 
         </div>
-        <div className="modal-footer">
+        <div className="modal-footer ns-create-actions">
           <button className="btn-secondary" onClick={onClose} disabled={creating}>
             {t("newSession.cancel")}
           </button>
           <ProgressButton
-            className="btn-primary"
+            className="btn-secondary"
             opId="session:create"
-            onClick={handleCreate}
+            onClick={() => handleCreate("create")}
             extraDisabled={!(cwd || defaultCwd) || (!allowOfflineCreate && missingProviderConfig)}
             loadingChildren={t("newSession.creating")}
           >
             {t("newSession.create")}
+          </ProgressButton>
+          <ProgressButton
+            className="btn-secondary"
+            opId="session:create"
+            onClick={() => handleCreate("send")}
+            extraDisabled={!(cwd || defaultCwd) || (!allowOfflineCreate && missingProviderConfig)}
+            loadingChildren={t("newSession.creating")}
+          >
+            {t("newSession.createAndSend")}
+          </ProgressButton>
+          <ProgressButton
+            className="btn-primary"
+            opId="session:create"
+            onClick={() => handleCreate("send-and-open")}
+            extraDisabled={!(cwd || defaultCwd) || (!allowOfflineCreate && missingProviderConfig)}
+            loadingChildren={t("newSession.creating")}
+          >
+            {t("newSession.createAndSendAndOpen")}
           </ProgressButton>
         </div>
       </div>
