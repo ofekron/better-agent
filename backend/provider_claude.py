@@ -59,6 +59,18 @@ from provider import (
 )
 import config_store
 from extension_run_policy import disabled_builtin_extensions_for_run, extra_mcp_servers_for_run
+
+# Session-record fields _build_input_payload resolves run behavior from. Any
+# record field a run-policy resolver reads MUST be listed here, or it silently
+# resolves to its default for every run.
+RUN_CONFIG_SESSION_FIELDS = (
+    "bare_config",
+    "orchestration_mode",
+    "permission",
+    "provider_id",
+    "disabled_builtin_extensions",
+    "extra_mcp_servers",
+)
 from provider_env import is_ollama_base_url
 from reasoning_effort import CLAUDE_REASONING_EFFORTS, DEFAULT_REASONING_EFFORT
 import git_policy
@@ -536,16 +548,9 @@ class ClaudeProvider(Provider):
         # turn `app_session_id` is the (bare) manager, so its workers inherit
         # bare; a worker's own init turn uses the worker's (bare) session.
         from session_manager import manager as _sm
-        _run_config_fields = (
-            "bare_config",
-            "orchestration_mode",
-            "permission",
-            "provider_id",
-            "disabled_builtin_extensions",
-        )
-        _sess_rec = _sm.get_fields(app_session_id, _run_config_fields)
+        _sess_rec = _sm.get_fields(app_session_id, RUN_CONFIG_SESSION_FIELDS)
         _worker_sess_rec = (
-            _sm.get_fields(worker_agent_session_id, _run_config_fields)
+            _sm.get_fields(worker_agent_session_id, RUN_CONFIG_SESSION_FIELDS)
             if worker_agent_session_id else {}
         )
         from permission import resolve_for_run as _resolve_perm

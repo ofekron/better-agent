@@ -224,6 +224,24 @@ def t_session_opt_in_exposes_default_off_mcp() -> None:
     check("opt-in-server" in extension_store.all_extension_mcp_server_names(), "opt-in name is in the valid-target catalog")
 
 
+def t_run_config_fields_carry_extra_mcp_servers() -> None:
+    import provider_claude
+    from extension_run_policy import extra_mcp_servers_for_run
+
+    check(
+        "extra_mcp_servers" in provider_claude.RUN_CONFIG_SESSION_FIELDS,
+        "input-payload session-field whitelist includes extra_mcp_servers",
+    )
+    resolved = extra_mcp_servers_for_run(
+        session_record={"extra_mcp_servers": ["testape-internal", "testape-internal", ""]},
+    )
+    check(resolved == ["testape-internal"], "extra_mcp_servers_for_run normalizes the record value")
+    check(
+        extra_mcp_servers_for_run(session_record={}) == [],
+        "extra_mcp_servers_for_run defaults to empty",
+    )
+
+
 def t_unknown_skill_rejected() -> None:
     try:
         extension_store.set_runtime_skill_enabled("test.skill-toggle", "missing-skill", True)
@@ -240,6 +258,7 @@ def main() -> None:
     t_enabled_skill_forces_extension_mcp_on()
     t_default_disabled_mcp_hidden_until_forced_or_checked()
     t_session_opt_in_exposes_default_off_mcp()
+    t_run_config_fields_carry_extra_mcp_servers()
     t_unknown_skill_rejected()
     print("OK")
 
