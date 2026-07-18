@@ -350,7 +350,9 @@ export class MockBackend {
     if (method === "GET" && path === "/api/user-input/pending") {
       return {
         requests: this.state.userInputs.filter(
-          (request) => request.app_session_id === query.app_session_id && request.status === "pending",
+          (request) =>
+            request.status === "pending" &&
+            (!query.app_session_id || request.app_session_id === query.app_session_id),
         ),
       };
     }
