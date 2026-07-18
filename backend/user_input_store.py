@@ -246,6 +246,20 @@ def pending_for_session(app_session_id: str) -> list[dict[str, Any]]:
         return [dict(req) for req in _PENDING_REQUESTS_BY_SESSION.get(app_session_id, [])]
 
 
+def pending_requests() -> list[dict[str, Any]]:
+    with _LOCK:
+        _ensure_counts_locked()
+        requests = [
+            dict(req)
+            for rows in _PENDING_REQUESTS_BY_SESSION.values()
+            for req in rows
+        ]
+    return sorted(
+        requests,
+        key=lambda req: (float(req.get("created_at") or 0), str(req.get("request_id") or "")),
+    )
+
+
 def pending_count_for_session(app_session_id: str) -> int:
     with _LOCK:
         _ensure_counts_locked()

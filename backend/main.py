@@ -14923,10 +14923,14 @@ async def _broadcast_user_input_state(app_session_id: str) -> None:
 
 
 @app.get("/api/user-input/pending")
-async def get_pending_user_inputs(app_session_id: str):
+async def get_pending_user_inputs(app_session_id: str | None = None):
     sid = str(app_session_id or "").strip()
     if not sid:
-        raise HTTPException(status_code=400, detail="app_session_id is required")
+        return {
+            "requests": await asyncio.to_thread(
+                user_input_store.pending_requests,
+            )
+        }
     if await _session_lite(sid) is None:
         raise HTTPException(status_code=404, detail=t("error.session_not_found_retry"))
     return {
