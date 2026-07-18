@@ -80,6 +80,10 @@ from orchestration_tool_schemas import (
     SESSION_ORGANIZATION_INPUT_PROPERTIES as _SESSION_ORGANIZATION_INPUT_PROPERTIES,
 )
 from provider_catalog_mcp import available_provider_models_response
+from user_interaction_tool_contracts import (
+    REQUEST_USER_APPROVAL_DESCRIPTION as _REQUEST_USER_APPROVAL_DESCRIPTION,
+    REQUEST_USER_APPROVAL_SCHEMA as _REQUEST_USER_APPROVAL_SCHEMA,
+)
 
 # internal_token mtime-cache. The in-process MCP server callbacks
 # capture `internal_token` in a closure at spawn time — risky once a
@@ -2096,6 +2100,7 @@ def _build_request_user_input_tool(
             }
         payload = {
             "app_session_id": app_session_id,
+            "kind": "input",
             "questions": questions,
             "timeout_seconds": args.get("timeout_seconds"),
         }
@@ -2106,6 +2111,47 @@ def _build_request_user_input_tool(
         return _tool_success_result(result)
 
     return request_user_input
+
+
+def _build_request_user_approval_tool(
+    *,
+    app_session_id: str,
+    backend_url: str,
+    internal_token: str,
+):
+    def _post_request_user_approval_sync(payload: dict) -> dict:
+        return _post_loopback_sync(
+            payload,
+            backend_url=backend_url,
+            internal_token=internal_token,
+            url_path="/api/internal/user-input/request",
+            timeout=_DELEGATE_HTTP_TIMEOUT,
+            non_json_t_key="runner.open_file_panel_non_json",
+            log_prefix="request-user-approval POST",
+            backoff_cap=60.0,
+        )
+
+    @tool("request_user_approval", _REQUEST_USER_APPROVAL_DESCRIPTION, _REQUEST_USER_APPROVAL_SCHEMA)
+    async def request_user_approval(args: dict[str, Any]) -> dict[str, Any]:
+        prompt = str(args.get("prompt") or "").strip()
+        if not prompt:
+            return {
+                "content": [{"type": "text", "text": "`prompt` is required"}],
+                "is_error": True,
+            }
+        payload = {
+            "app_session_id": app_session_id,
+            "kind": "approval",
+            "prompt": prompt,
+            "timeout_seconds": args.get("timeout_seconds"),
+        }
+        try:
+            result = await asyncio.to_thread(_post_request_user_approval_sync, payload)
+        except Exception as e:
+            return _tool_error_response("request-user-approval", e)
+        return _tool_success_result(result)
+
+    return request_user_approval
 
 
 def _build_start_file_discussion_tool(
@@ -3176,7 +3222,12 @@ async def _run(run_dir: Path, inputs: dict) -> int:
             backend_url=backend_url,
             internal_token=internal_token,
         )
-        tools = [ofp_tool, request_user_input_tool]
+        request_user_approval_tool = _build_request_user_approval_tool(
+            app_session_id=app_session_id or "",
+            backend_url=backend_url,
+            internal_token=internal_token,
+        )
+        tools = [ofp_tool, request_user_input_tool, request_user_approval_tool]
         if file_editing_mode:
             tools.append(_build_start_file_discussion_tool(
                 app_session_id=app_session_id or "",

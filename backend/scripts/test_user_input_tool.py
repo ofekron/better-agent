@@ -225,6 +225,92 @@ def test_validation_rejects_bad_question_shape(client: TestClient) -> bool:
     return res.status_code == 200 and data.get("success") is False
 
 
+def test_approval_request_returns_approve_or_alternative(client: TestClient) -> bool:
+    sid = _new_session()
+    token = main.coordinator.internal_token
+
+    def run_case(resolution: dict) -> tuple[dict, dict]:
+        result_holder: dict = {}
+
+        def post_request() -> None:
+            result_holder["response"] = client.post(
+                "/api/internal/user-input/request",
+                headers={"X-Internal-Token": token},
+                json={
+                    "app_session_id": sid,
+                    "kind": "approval",
+                    "prompt": "Deploy the release?",
+                    "timeout_seconds": 5,
+                },
+            )
+
+        thread = threading.Thread(target=post_request)
+        thread.start()
+        deadline = time.time() + 3
+        pending: list[dict] = []
+        while time.time() < deadline:
+            pending = user_input_store.pending_for_session(sid)
+            if pending:
+                break
+            time.sleep(0.02)
+        if not pending:
+            raise AssertionError("approval request was not persisted")
+        request = pending[0]
+        resolved = client.post(
+            f"/api/user-input/{request['request_id']}/resolve",
+            json={"app_session_id": sid, **resolution},
+        )
+        thread.join(timeout=3)
+        if thread.is_alive():
+            raise AssertionError("approval request did not unblock")
+        return request, {
+            "resolved_status": resolved.status_code,
+            "result": result_holder["response"].json(),
+        }
+
+    approved_request, approved = run_case({"approved": True})
+    alternative_request, alternative = run_case({
+        "approved": False,
+        "alternative": "Run the smoke tests first",
+    })
+    return (
+        approved_request.get("kind") == "approval"
+        and approved_request.get("prompt") == "Deploy the release?"
+        and approved["resolved_status"] == 200
+        and approved["result"].get("approved") is True
+        and alternative_request.get("kind") == "approval"
+        and alternative["resolved_status"] == 200
+        and alternative["result"].get("approved") is False
+        and alternative["result"].get("alternative") == "Run the smoke tests first"
+    )
+
+
+def test_approval_validation_rejects_empty_or_ambiguous_response(client: TestClient) -> bool:
+    sid = _new_session()
+    token = main.coordinator.internal_token
+    empty_prompt = client.post(
+        "/api/internal/user-input/request",
+        headers={"X-Internal-Token": token},
+        json={"app_session_id": sid, "kind": "approval", "prompt": ""},
+    )
+    req = user_input_store.create_request(
+        app_session_id=sid,
+        kind="approval",
+        prompt="Proceed?",
+        questions=[],
+        timeout_seconds=60,
+    )
+    ambiguous = client.post(
+        f"/api/user-input/{req['request_id']}/resolve",
+        json={"app_session_id": sid, "approved": False, "alternative": ""},
+    )
+    return (
+        empty_prompt.status_code == 200
+        and empty_prompt.json().get("success") is False
+        and ambiguous.status_code == 400
+    )
+
+
 def test_sidebar_decoration_exposes_pending_count() -> bool:
     sid = _new_session()
     user_input_store.create_request(
@@ -314,6 +400,8 @@ def run() -> int:
         ("internal request waits until browser resolves", lambda: test_internal_request_waits_until_browser_resolves(client)),
         ("duplicate internal request reuses pending dialog", lambda: test_duplicate_internal_request_reuses_pending_dialog(client)),
         ("validation rejects bad question shape", lambda: test_validation_rejects_bad_question_shape(client)),
+        ("approval request returns approve or alternative", lambda: test_approval_request_returns_approve_or_alternative(client)),
+        ("approval validation rejects empty or ambiguous response", lambda: test_approval_validation_rejects_empty_or_ambiguous_response(client)),
         ("sidebar decoration exposes pending count", lambda: test_sidebar_decoration_exposes_pending_count()),
         ("request payload is session scoped", lambda: test_request_payload_is_session_scoped()),
         ("pending counts are cached after warmup", lambda: test_pending_counts_are_cached_after_warmup()),
