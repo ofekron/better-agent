@@ -15,6 +15,11 @@ import { getWsUrl } from "../api";
 import { logPromptSend } from "../lib/promptSendLog";
 import { SnapshotTransport } from "../lib/snapshotTransport";
 import { logFailure, logTiming } from "../lib/frontendLogger";
+import {
+  sendWebSocketFrame,
+  webSocketDataBytes,
+  webSocketTrafficLog,
+} from "../lib/webSocketTrafficLog";
 
 export interface ImagePayload {
   data: string;
@@ -663,10 +668,11 @@ export function useWebSocket(
 
     ws.onopen = () => {
       setConnected(true);
-      snapshotTransportRef.current.resume((frame) => ws.send(JSON.stringify(frame)));
+      snapshotTransportRef.current.resume((frame) => sendWebSocketFrame(ws, frame));
     };
 
     ws.onclose = (ev) => {
+      webSocketTrafficLog.flush("connection_closed");
       setConnected(false);
       setIsStreaming(false);
       setIsStopping(false);
@@ -691,13 +697,14 @@ export function useWebSocket(
     ws.onmessage = (e) => {
       const frameStartedAt = performance.now();
       let eventType = "unknown";
-      const byteSize = typeof e.data === "string" ? e.data.length * 4 : 0;
+      let frameFailed = false;
+      const byteSize = webSocketDataBytes(e.data);
       try {
         const event: WSEvent = JSON.parse(e.data);
         eventType = event.type;
         if (!routingVerifiedSnapshot && snapshotTransportRef.current.handle(
           event,
-          (frame) => ws.send(JSON.stringify(frame)),
+          (frame) => sendWebSocketFrame(ws, frame),
           routeVerifiedSnapshot,
           byteSize,
         )) return;
@@ -1479,12 +1486,21 @@ export function useWebSocket(
           );
         }
       } catch (err) {
+        frameFailed = true;
         logFailure("websocket", "frame_failed", err, {
           bytes: byteSize,
           event_type: eventType,
         });
         // ignore parse errors
       } finally {
+        if (!routingVerifiedSnapshot) {
+          webSocketTrafficLog.recordInbound(
+            eventType,
+            byteSize,
+            performance.now() - frameStartedAt,
+            frameFailed,
+          );
+        }
         logTiming("websocket", "frame_dispatch", frameStartedAt, {
           bytes: byteSize,
           event_type: eventType,
@@ -1507,6 +1523,7 @@ export function useWebSocket(
       ws.onerror = null;
       ws.onmessage = null;
       ws.close();
+      webSocketTrafficLog.flush("unmounted");
       snapshotTransportRef.current.clear();
     };
   }, [connect]);
@@ -1559,9 +1576,7 @@ export function useWebSocket(
     for (const id of prev) {
       if (!desired.has(id)) {
         try {
-          ws.send(
-            JSON.stringify({ type: "unsubscribe", app_session_id: id })
-          );
+          sendWebSocketFrame(ws, { type: "unsubscribe", app_session_id: id });
         } catch {
           // ignore
         }
@@ -1574,15 +1589,13 @@ export function useWebSocket(
           const sinceSeq = getSinceSeqRef.current?.(id) ?? 0;
           const eventsFromSeq = getEventsFromSeqRef.current?.(id) ?? 0;
           const eventsCursorKnown = getEventsCursorKnownRef.current?.(id) ?? false;
-          ws.send(
-            JSON.stringify({
-              type: "subscribe",
-              app_session_id: id,
-              since_seq: sinceSeq,
-              events_from_seq: eventsFromSeq,
-              events_cursor_known: eventsCursorKnown,
-            })
-          );
+          sendWebSocketFrame(ws, {
+            type: "subscribe",
+            app_session_id: id,
+            since_seq: sinceSeq,
+            events_from_seq: eventsFromSeq,
+            events_cursor_known: eventsCursorKnown,
+          });
         } catch {
           // ignore
         }
@@ -1640,23 +1653,21 @@ export function useWebSocket(
       // and turn_start will clear events when it actually starts processing
 
       try {
-        wsRef.current.send(
-          JSON.stringify({
-            type: "send_message",
-            prompt,
-            model,
-            cwd,
-            session_id: claudeSessionId || null,
-            app_session_id: appSessionId || null,
-            images: images && images.length > 0 ? images : undefined,
-            files: files && files.length > 0 ? files : undefined,
-            orchestration_mode: orchestrationMode,
-            client_id: clientId || null,
-            send_mode: sendMode || undefined,
-            send_target: sendTarget || undefined,
-            capability_contexts: capabilityContexts && capabilityContexts.length > 0 ? capabilityContexts : undefined,
-          })
-        );
+        sendWebSocketFrame(wsRef.current, {
+          type: "send_message",
+          prompt,
+          model,
+          cwd,
+          session_id: claudeSessionId || null,
+          app_session_id: appSessionId || null,
+          images: images && images.length > 0 ? images : undefined,
+          files: files && files.length > 0 ? files : undefined,
+          orchestration_mode: orchestrationMode,
+          client_id: clientId || null,
+          send_mode: sendMode || undefined,
+          send_target: sendTarget || undefined,
+          capability_contexts: capabilityContexts && capabilityContexts.length > 0 ? capabilityContexts : undefined,
+        });
       } catch (error) {
         logPromptSend("ws_send_throw", {
           ...logData,
@@ -1673,12 +1684,10 @@ export function useWebSocket(
   const stopStreaming = useCallback((appSessionId: string): boolean => {
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return false;
     setIsStopping(true);
-    wsRef.current.send(
-      JSON.stringify({
-        type: "stop_message",
-        app_session_id: appSessionId,
-      })
-    );
+    sendWebSocketFrame(wsRef.current, {
+      type: "stop_message",
+      app_session_id: appSessionId,
+    });
     return true;
   }, []);
 
@@ -1689,41 +1698,35 @@ export function useWebSocket(
     queuedIds?: string[],
   ) => {
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return false;
-    wsRef.current.send(
-      JSON.stringify({
-        type: "promote_queued",
-        app_session_id: appSessionId,
-        action,
-        queued_id: queuedId,
-        queued_ids: queuedIds,
-      })
-    );
+    sendWebSocketFrame(wsRef.current, {
+      type: "promote_queued",
+      app_session_id: appSessionId,
+      action,
+      queued_id: queuedId,
+      queued_ids: queuedIds,
+    });
     return true;
   }, []);
 
   const sendCancelQueued = useCallback((appSessionId: string, queuedId?: string) => {
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return false;
-    wsRef.current.send(
-      JSON.stringify({
-        type: "cancel_queued",
-        app_session_id: appSessionId,
-        queued_id: queuedId,
-      })
-    );
+    sendWebSocketFrame(wsRef.current, {
+      type: "cancel_queued",
+      app_session_id: appSessionId,
+      queued_id: queuedId,
+    });
     return true;
   }, []);
 
   const sendUpdateQueued = useCallback(
     (appSessionId: string, queuedId: string, content: string) => {
       if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return false;
-      wsRef.current.send(
-        JSON.stringify({
-          type: "update_queued",
-          app_session_id: appSessionId,
-          queued_id: queuedId,
-          content,
-        })
-      );
+      sendWebSocketFrame(wsRef.current, {
+        type: "update_queued",
+        app_session_id: appSessionId,
+        queued_id: queuedId,
+        content,
+      });
       return true;
     },
     []
@@ -1731,25 +1734,21 @@ export function useWebSocket(
 
   const sendBeginQueuedEdit = useCallback((appSessionId: string, queuedId: string) => {
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return false;
-    wsRef.current.send(
-      JSON.stringify({
-        type: "begin_queued_edit",
-        app_session_id: appSessionId,
-        queued_id: queuedId,
-      })
-    );
+    sendWebSocketFrame(wsRef.current, {
+      type: "begin_queued_edit",
+      app_session_id: appSessionId,
+      queued_id: queuedId,
+    });
     return true;
   }, []);
 
   const sendFinishQueuedEdit = useCallback((appSessionId: string, queuedId: string) => {
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return false;
-    wsRef.current.send(
-      JSON.stringify({
-        type: "finish_queued_edit",
-        app_session_id: appSessionId,
-        queued_id: queuedId,
-      })
-    );
+    sendWebSocketFrame(wsRef.current, {
+      type: "finish_queued_edit",
+      app_session_id: appSessionId,
+      queued_id: queuedId,
+    });
     return true;
   }, []);
 
