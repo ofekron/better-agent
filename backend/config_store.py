@@ -2,7 +2,7 @@
 
 Storage:
   - ~/.better-claude/config.json       — list of providers + active id
-  - macOS Keychain (via `keyring`)     — per-provider API keys
+  - OS credential store                — per-provider API keys
 
 Each provider record:
     {
@@ -37,6 +37,7 @@ import uuid
 from typing import Any, Callable, Optional
 
 import keyring
+import oskeychain
 
 # Captured at import time so `_get_password_with_reason`/`_set_password_with_reason`
 # can detect a test replacing `keyring.get_password`/`set_password` directly
@@ -117,6 +118,10 @@ def _keyring_services() -> tuple[str, ...]:
     return service_names(KEYRING_SERVICE, LEGACY_KEYRING_SERVICE)
 
 
+# Provider-key writes use the native Keyring API. macOS reads use the stable
+# Apple `security` binary identity so one Keychain authorization survives
+# Python interpreter and virtual-environment changes.
+#
 # `keyring`'s macOS backend never sets `kSecUseOperationPrompt`, so the OS
 # "allow access" prompt shows only the generic calling-binary identity
 # (e.g. "python" or "login") with no indication of what wants the item or
@@ -142,30 +147,6 @@ def _macos_security_api():
 
 def _keychain_reason(provider_id: str, verb: str) -> str:
     return f"Better Agent needs {verb} the API key for AI provider {provider_id!r}"
-
-
-def _macos_get_password_with_reason(service: str, username: str, reason: str) -> str | None:
-    """Like `keyring.get_password`, but the OS prompt (if shown) states
-    `reason` instead of just the calling binary's generic identity."""
-    import ctypes
-
-    api = _macos_security_api()
-    if api is None:
-        raise RuntimeError("macOS Security API unavailable")
-    query = api.create_query(
-        kSecClass=api.k_("kSecClassGenericPassword"),
-        kSecMatchLimit=api.k_("kSecMatchLimitOne"),
-        kSecAttrService=service,
-        kSecAttrAccount=username,
-        kSecReturnData=True,
-        kSecUseOperationPrompt=reason,
-    )
-    data = ctypes.c_void_p()
-    status = api.SecItemCopyMatching(query, ctypes.byref(data))
-    if status == api.error.item_not_found:
-        return None
-    api.Error.raise_for_status(status)
-    return api.cfstr_to_str(data)
 
 
 def _macos_set_password_with_reason(
@@ -194,15 +175,15 @@ def _macos_set_password_with_reason(
 
 
 def _get_password_with_reason(service: str, username: str, reason: str) -> str | None:
-    """`keyring.get_password`, using a descriptive macOS Keychain prompt
-    reason where the platform/backend supports it; falls back to the
-    plain call (generic prompt) everywhere else, including when a caller
-    (test code) has replaced `keyring.get_password` itself."""
+    """Read through macOS's stable ``security`` identity when possible."""
     if (
         keyring.get_password is _ORIGINAL_KEYRING_GET_PASSWORD
         and _macos_security_api() is not None
     ):
-        return _macos_get_password_with_reason(service, username, reason)
+        value = oskeychain.get(service, username, timeout=_KEYRING_TIMEOUT)
+        if value is None:
+            return None
+        return value[:-1] if value.endswith("\n") else value
     return keyring.get_password(service, username)
 
 
@@ -264,6 +245,18 @@ def _keyring_call(
         if failure_flag is not None:
             failure_flag.append(True)
         return default
+    if (
+        fn is _get_password_with_reason
+        and keyring.get_password is _ORIGINAL_KEYRING_GET_PASSWORD
+        and _macos_security_api() is not None
+    ):
+        try:
+            return fn(*args)
+        except Exception:
+            logger.warning("stable macOS keychain read failed for %s/%s", entry[0], entry[1])
+            if failure_flag is not None:
+                failure_flag.append(True)
+            return default
     result: list[Any] = [default]
     done = threading.Event()
 
@@ -451,13 +444,8 @@ def warm_keyring_cache() -> None:
     if not providers:
         return
 
-    # Parallelize keyring reads so multiple slow/timing-out keychain
-    # calls don't stack their 2s windows sequentially. 10 workers is
-    # enough for a typical provider list.
-    from concurrent.futures import ThreadPoolExecutor
-    with ThreadPoolExecutor(max_workers=10, thread_name_prefix="warm-keyring") as executor:
-        for p in providers:
-            executor.submit(_read_api_key, p["id"])
+    for provider in providers:
+        _read_api_key(provider["id"])
 
     # Legacy slot is read at runtime ONLY by `_load_state`'s
     # flat→providers migration path, which has already run by the time
