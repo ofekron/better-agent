@@ -1,4 +1,9 @@
 import type { WSEvent } from "../types";
+import { logTiming } from "./frontendLogger";
+import {
+  decodeSnapshotBinaryChunk,
+  SNAPSHOT_BINARY_ENCODING,
+} from "./snapshotBinary";
 
 const MAX_SNAPSHOT_BYTES = 16 * 1024 * 1024;
 const MAX_STAGED_BYTES = 32 * 1024 * 1024;
@@ -13,6 +18,7 @@ const MAX_ENCODED_CHUNK_BYTES = Math.ceil(MAX_CHUNK_BYTES / 3) * 4;
 const MAX_PENDING_CHUNK_TASKS = MAX_ACTIVE_TRANSFERS * MAX_CHUNKS;
 const MAX_PENDING_ENCODED_BYTES = Math.ceil(MAX_STAGED_BYTES * 4 / 3)
   + MAX_PENDING_CHUNK_TASKS * 4;
+const MAX_PENDING_BINARY_BYTES = MAX_STAGED_BYTES;
 const SHA256_HEX = /^[0-9a-f]{64}$/;
 const REVISION = /^[A-Za-z0-9:_-]{1,80}$/;
 const SNAPSHOT_EVENT_TYPES = new Set(["messages_replay", "stub_invalidated", "rewind_complete"]);
@@ -32,6 +38,7 @@ type Transfer = {
   totalBytes: number;
   totalChunks: number;
   chunkBytes: number;
+  encoding: "base64" | "binary-v1";
   chunks: Map<number, Uint8Array>;
   receivedBytes: number;
   nextChunk: number;
@@ -210,6 +217,7 @@ export class SnapshotTransport {
   private generation = 0;
   private pendingChunkTasks = 0;
   private pendingEncodedBytes = 0;
+  private pendingBinaryBytes = 0;
   private readonly supersededKeys = new Set<string>();
   private readonly recoveries = new Map<string, {
     terminal: boolean;
@@ -271,6 +279,55 @@ export class SnapshotTransport {
     return false;
   }
 
+  handleBinary(frame: ArrayBuffer, send: SendFrame, apply: ApplyEvent): boolean {
+    const startedAt = performance.now();
+    const decoded = decodeSnapshotBinaryChunk(frame);
+    if (!decoded) {
+      if (this.byKey.size > 0) this.failBoundary(send, apply, "corrupt");
+      return true;
+    }
+    const key = this.keyById.get(decoded.snapshotId);
+    const transfer = key ? this.byKey.get(key) : undefined;
+    if (!transfer) {
+      if (this.byKey.size > 0) this.failBoundary(send, apply, "corrupt");
+      return true;
+    }
+    if (transfer.encoding !== SNAPSHOT_BINARY_ENCODING
+      || decoded.index >= transfer.totalChunks) {
+      this.failBoundary(send, apply, "corrupt", transfer);
+      return true;
+    }
+    if (transfer.pendingChunkTasks >= MAX_CHUNKS
+      || this.pendingChunkTasks >= MAX_PENDING_CHUNK_TASKS
+      || this.pendingBinaryBytes + decoded.payload.byteLength > MAX_PENDING_BINARY_BYTES) {
+      this.failBoundary(send, apply, "overflow", transfer);
+      return true;
+    }
+    const generation = transfer.generation;
+    transfer.pendingChunkTasks += 1;
+    this.pendingChunkTasks += 1;
+    this.pendingBinaryBytes += decoded.payload.byteLength;
+    const task = transfer.work.then(() => this.acceptChunk(
+      transfer,
+      generation,
+      decoded.index,
+      decoded.payload,
+      send,
+      apply,
+    )).catch(() => {
+      if (this.isCurrent(transfer, generation)) this.failBoundary(send, apply, "corrupt", transfer);
+    }).finally(() => {
+      transfer.pendingChunkTasks -= 1;
+      this.pendingChunkTasks -= 1;
+      this.pendingBinaryBytes -= decoded.payload.byteLength;
+      logTiming("snapshot-transport", "binary_chunk", startedAt, {
+        bytes: decoded.payload.byteLength,
+      }, 10);
+    });
+    transfer.work = task.then(() => undefined, () => undefined);
+    return true;
+  }
+
   resume(send: SendFrame): void {
     for (const transfer of this.byKey.values()) {
       send({
@@ -303,6 +360,9 @@ export class SnapshotTransport {
     const revision = typeof data.revision === "string" ? data.revision : "";
     const digest = typeof data.digest === "string" ? data.digest : "";
     const refreshId = typeof data.refresh_id === "string" ? data.refresh_id : "";
+    const encoding = data.encoding === undefined
+      ? "base64"
+      : data.encoding === SNAPSHOT_BINARY_ENCODING ? SNAPSHOT_BINARY_ENCODING : null;
     const rawTotalBytes = Number.isInteger(data.total_bytes) ? Number(data.total_bytes) : null;
     const totalBytes = integer(data.total_bytes, 1, MAX_SNAPSHOT_BYTES);
     const totalChunks = integer(data.total_chunks, 1, MAX_CHUNKS);
@@ -314,7 +374,9 @@ export class SnapshotTransport {
       this.requestRecovery(send, "too_large", { key, eventType, revision, refreshId });
       return;
     }
-    if (!snapshotId || !key || !SNAPSHOT_EVENT_TYPES.has(eventType) || !REVISION.test(revision)
+    if (!snapshotId || !key || encoding === null
+      || (encoding === SNAPSHOT_BINARY_ENCODING && !/^[0-9a-f]{32}$/.test(snapshotId))
+      || !SNAPSHOT_EVENT_TYPES.has(eventType) || !REVISION.test(revision)
       || !SHA256_HEX.test(digest) || totalBytes === null || totalChunks === null
       || chunkBytes === null || resumeFrom === null
       || totalChunks !== Math.ceil(totalBytes / chunkBytes)) return;
@@ -324,7 +386,7 @@ export class SnapshotTransport {
     if (resumeFrom > 0 && current?.snapshotId === snapshotId
       && current.revision === revision && current.nextChunk === resumeFrom
       && current.totalBytes === totalBytes && current.totalChunks === totalChunks
-      && current.chunkBytes === chunkBytes) {
+      && current.chunkBytes === chunkBytes && current.encoding === encoding) {
       this.ack(current, send);
       return;
     }
@@ -338,7 +400,7 @@ export class SnapshotTransport {
     }
     const transfer: Transfer = {
       snapshotId, key, eventType, revision, refreshId, digest, totalBytes, totalChunks,
-      chunkBytes, chunks: new Map(), receivedBytes: 0, nextChunk: 0,
+      chunkBytes, encoding, chunks: new Map(), receivedBytes: 0, nextChunk: 0,
       generation: ++this.generation, state: "pending", work: Promise.resolve(),
       pendingChunkTasks: 0,
     };
@@ -355,6 +417,10 @@ export class SnapshotTransport {
     const key = this.keyById.get(snapshotId);
     const transfer = key ? this.byKey.get(key) : undefined;
     if (!transfer || data.revision !== transfer.revision) return;
+    if (transfer.encoding !== "base64") {
+      this.failBoundary(send, apply, "corrupt", transfer);
+      return;
+    }
     const index = integer(data.index, 0, transfer.totalChunks - 1);
     const payload = typeof data.payload === "string" ? data.payload : "";
     if (index === null || payload.length === 0 || payload.length > MAX_ENCODED_CHUNK_BYTES) {
@@ -451,6 +517,7 @@ export class SnapshotTransport {
     }
     await yieldToBrowser();
     if (!this.isCurrent(transfer, generation)) return;
+    const assembleStartedAt = performance.now();
     const bytes = new Uint8Array(transfer.totalBytes);
     let offset = 0;
     for (let index = 0; index < transfer.totalChunks; index += 1) {
@@ -459,6 +526,9 @@ export class SnapshotTransport {
       bytes.set(chunk, offset);
       offset += chunk.length;
     }
+    logTiming("snapshot-transport", "assemble", assembleStartedAt, {
+      bytes: transfer.totalBytes,
+    }, 10);
     let digest: string;
     try {
       digest = await sha256Hex(bytes);
@@ -473,6 +543,7 @@ export class SnapshotTransport {
     }
     await yieldToBrowser();
     if (!this.isCurrent(transfer, generation)) return;
+    const parseStartedAt = performance.now();
     try {
       const parsed: unknown = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
       if (!validSnapshotEvent(parsed, transfer.eventType)) {
@@ -485,6 +556,10 @@ export class SnapshotTransport {
       this.drain(apply);
     } catch {
       this.failBoundary(send, apply, "corrupt", transfer);
+    } finally {
+      logTiming("snapshot-transport", "decode_parse", parseStartedAt, {
+        bytes: transfer.totalBytes,
+      }, 10);
     }
   }
 
