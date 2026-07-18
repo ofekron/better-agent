@@ -5,16 +5,20 @@ export interface PendingAckState {
   skipNextAppendBySession: Set<string>;
 }
 
-export function appendPendingUnlessAcked(
+export function upsertPendingUnlessAcked(
   prev: ChatMessage[],
   sessionId: string,
   pendingMsg: ChatMessage,
   ackState: PendingAckState,
+  replacedMessageId?: string,
 ): ChatMessage[] {
-  if (ackState.ackedClientIds.has(pendingMsg.id)) return prev;
+  const next = replacedMessageId
+    ? prev.filter((message) => message.id !== replacedMessageId)
+    : prev;
+  if (ackState.ackedClientIds.has(pendingMsg.id)) return next;
   if (ackState.skipNextAppendBySession.has(sessionId)) {
     ackState.skipNextAppendBySession.delete(sessionId);
-    return prev;
+    return next;
   }
-  return [...prev, pendingMsg];
+  return [...next, pendingMsg];
 }
