@@ -695,6 +695,8 @@
   "newSession.workerRuntimeProfile": "Worker runtime profile",
   "newSession.cancel": "取消",
   "newSession.create": "创建",
+  "newSession.createAndSend": "创建并发送",
+  "newSession.createAndSendAndOpen": "创建、发送并打开",
   "newSession.creating": "创建中…",
   "newSession.fileEdit": "文件编辑模式",
   "newSession.machine": "机器",
