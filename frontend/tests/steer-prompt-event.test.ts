@@ -150,6 +150,7 @@ describe("steer prompt events", () => {
         id: "q1",
         content: "queued steer",
         client_id: "client-q1",
+        kind: "queued_behind",
       }],
     });
     const h = await renderApp({ seed: { sessions: [session] } });
@@ -186,6 +187,7 @@ describe("steer prompt events", () => {
         id: "q1",
         content: "queued steer",
         client_id: "client-q1",
+        kind: "queued_behind",
       }],
     });
     const h = await renderApp({ seed: { sessions: [session] } });
@@ -214,6 +216,119 @@ describe("steer prompt events", () => {
       }),
     );
     expect(h.$('[data-testid="queued-prompt-banner"]')).toBeNull();
+    h.unmount();
+  });
+
+  it("does not reuse a steered prompt when the next queued send beats metadata", async () => {
+    setViewportWidth(1280);
+    const tag: InlineTag = {
+      id: "tag-after-steer",
+      messageId: "u1",
+      selectedText: "selected code",
+      comment: "apply to the next prompt",
+      timestamp: "2026-07-18T12:00:00.000Z",
+    };
+    const session = makeSession({
+      provider_id: "codex",
+      messages: [
+        makeUserMsg({ id: "u1", content: "start work" }),
+        makeAssistantMsg({ id: "a1", isStreaming: true }),
+      ],
+      inline_tags: [tag],
+      queued_prompts: [{
+        id: "q1",
+        content: "already steered",
+        client_id: "client-q1",
+        kind: "queued_behind",
+      }],
+    });
+    const h = await renderApp({ seed: { sessions: [session] } });
+    await h.selectSession(session.id);
+    h.emit({
+      type: "run_state",
+      data: { app_session_id: session.id, runs: [makeRun({ target_message_id: "a1" })] },
+    });
+    await h.flush();
+
+    await h.click('[data-testid="queued-steer-btn"]');
+    expect(h.$('[data-testid="queued-prompt-banner"]')).toBeNull();
+
+    await typeAndQueue(h, "next queued work");
+    const sent = h.outbound.filter((frame) => frame.type === "send_message").at(-1);
+    expect(sent).toMatchObject({
+      prompt: expect.stringContaining("next queued work"),
+      send_mode: "queue",
+    });
+    expect(String(sent?.prompt ?? "")).not.toContain("already steered");
+
+    h.emit({
+      type: "prompt_queued",
+      data: {
+        app_session_id: session.id,
+        queued_id: "q2",
+        prompt_preview: String(sent?.prompt ?? ""),
+        send_mode: "queue",
+        queue_position: 1,
+        client_id: sent?.client_id,
+      },
+    });
+    await h.flush();
+
+    const banners = h.$$('[data-testid="queued-prompt-banner"]');
+    expect(banners).toHaveLength(1);
+    expect(banners[0]?.textContent).toContain("next queued work");
+    expect(banners[0]?.textContent).not.toContain("already steered");
+    h.unmount();
+  });
+
+  it("keeps later persisted prompts when the first queue item is consumed", async () => {
+    const session = makeSession({
+      queued_prompts: [
+        { id: "q1", content: "first", client_id: "client-q1", kind: "queued_behind" },
+        { id: "q2", content: "second", client_id: "client-q2", kind: "queued_behind" },
+      ],
+    });
+    const h = await renderApp({ seed: { sessions: [session] } });
+    await h.selectSession(session.id);
+
+    h.emit({
+      type: "queue_consumed",
+      data: { app_session_id: session.id, queued_id: "q1" },
+    });
+    await h.flush();
+
+    const banners = h.$$('[data-testid="queued-prompt-banner"]');
+    expect(banners).toHaveLength(1);
+    expect(banners[0]?.textContent).toContain("second");
+    h.unmount();
+  });
+
+  it("keeps later persisted prompts when the first user message is acknowledged", async () => {
+    const session = makeSession({
+      queued_prompts: [
+        { id: "q1", content: "first", client_id: "client-q1", kind: "queued_behind" },
+        { id: "q2", content: "second", client_id: "client-q2", kind: "queued_behind" },
+      ],
+    });
+    const h = await renderApp({ seed: { sessions: [session] } });
+    await h.selectSession(session.id);
+
+    h.emit({
+      type: "user_message_persisted",
+      data: {
+        session_id: session.id,
+        user_message: makeUserMsg({
+          id: "persisted-q1",
+          content: "first",
+          client_id: "client-q1",
+        }),
+      },
+    });
+    await h.flush();
+
+    const banners = h.$$('[data-testid="queued-prompt-banner"]');
+    expect(banners).toHaveLength(1);
+    expect(banners[0]?.textContent).toContain("second");
     h.unmount();
   });
 
