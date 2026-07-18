@@ -112,6 +112,32 @@ def test_denied_keyring_read_is_not_cached_and_a_later_read_recovers() -> None:
         config_store.keyring.get_password = real_get
 
 
+def test_failed_stable_delete_keeps_cached_provider_key() -> None:
+    real_delete = config_store.oskeychain.delete
+    real_api = config_store._macos_security_api
+
+    def denied_delete(service: str, username: str) -> None:
+        raise RuntimeError("denied")
+
+    config_store.oskeychain.delete = denied_delete
+    config_store._macos_security_api = lambda: object()
+    try:
+        _reset_cache()
+        with config_store._api_key_cache_lock:
+            config_store._api_key_cache["provider-1"] = "cached-key"
+        try:
+            config_store._delete_api_key("provider-1")
+        except RuntimeError as exc:
+            assert str(exc) == "stable macOS keychain delete failed"
+        else:
+            raise AssertionError("failed stable delete must propagate")
+        with config_store._api_key_cache_lock:
+            assert config_store._api_key_cache["provider-1"] == "cached-key"
+    finally:
+        config_store.oskeychain.delete = real_delete
+        config_store._macos_security_api = real_api
+
+
 def test_macos_read_uses_stable_security_identity_and_exact_account() -> None:
     calls = []
     real_api = config_store._macos_security_api
