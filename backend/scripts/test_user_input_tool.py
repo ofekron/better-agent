@@ -327,6 +327,37 @@ def test_sidebar_decoration_exposes_pending_count() -> bool:
     return len(rows) == 1 and rows[0].get("pending_user_input_count") == 1
 
 
+def test_pending_snapshot_supports_all_sessions(client: TestClient) -> bool:
+    first_sid = _new_session()
+    second_sid = _new_session()
+    first = user_input_store.create_request(
+        app_session_id=first_sid,
+        questions=[{"id": "first", "header": "First", "question": "One?", "options": []}],
+        timeout_seconds=60,
+    )
+    second = user_input_store.create_request(
+        app_session_id=second_sid,
+        kind="approval",
+        questions=[],
+        prompt="Proceed?",
+        timeout_seconds=60,
+    )
+    global_snapshot = client.get("/api/user-input/pending")
+    scoped_snapshot = client.get(
+        "/api/user-input/pending",
+        params={"app_session_id": first_sid},
+    )
+    return (
+        global_snapshot.status_code == 200
+        and {first["request_id"], second["request_id"]}.issubset(
+            {row["request_id"] for row in global_snapshot.json()["requests"]}
+        )
+        and scoped_snapshot.status_code == 200
+        and [row["request_id"] for row in scoped_snapshot.json()["requests"]]
+        == [first["request_id"]]
+    )
+
+
 def test_request_payload_is_session_scoped() -> bool:
     sid = _new_session()
     req = user_input_store.create_request(
@@ -403,6 +434,7 @@ def run() -> int:
         ("approval request returns approve or alternative", lambda: test_approval_request_returns_approve_or_alternative(client)),
         ("approval validation rejects empty or ambiguous response", lambda: test_approval_validation_rejects_empty_or_ambiguous_response(client)),
         ("sidebar decoration exposes pending count", lambda: test_sidebar_decoration_exposes_pending_count()),
+        ("pending snapshot supports all sessions", lambda: test_pending_snapshot_supports_all_sessions(client)),
         ("request payload is session scoped", lambda: test_request_payload_is_session_scoped()),
         ("pending counts are cached after warmup", lambda: test_pending_counts_are_cached_after_warmup()),
     ]

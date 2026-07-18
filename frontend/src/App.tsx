@@ -21,6 +21,7 @@ import {
 } from "./hooks/useMachines";
 import { useBuiltinExtensionFlags } from "./hooks/useBuiltinExtensionFlags";
 import { Chat } from "./components/Chat";
+import { UserInteractionToastStack } from "./components/UserInteractionToastStack";
 import { SessionTabs } from "./components/SessionTabs";
 import { ASK_SINGLETON_ID } from "./askSession";
 import { editSingletonId } from "./projectStructureEditSession";
@@ -100,6 +101,7 @@ import { RefreshResult } from "./components/RefreshResult";
 import { applyAppearancePrefs, type AppearancePrefs } from "./components/AppearanceSetting";
 import { scaledFontSize } from "./utils/typography";
 import { useRefreshApp } from "./hooks/useRefreshApp";
+import { usePendingUserInteractions } from "./hooks/usePendingUserInteractions";
 import { lazyWithRetry } from "./lib/lazyWithRetry";
 import { mobileRightPanelSizingStyle } from "./utils/mobileRightPanelStyle";
 import { uuidv4 } from "./lib/uuid";
@@ -977,6 +979,32 @@ function AppMain({
     focusedForkId && currentTree
       ? getNode(focusedForkId) ?? currentTree
       : currentTree;
+  const {
+    requests: pendingUserInteractions,
+    removeRequest: removePendingUserInteraction,
+  } = usePendingUserInteractions();
+  const [dismissedUserInteractionIds, setDismissedUserInteractionIds] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const backgroundUserInteractions = useMemo(
+    () => pendingUserInteractions.filter(
+      (request) =>
+        request.app_session_id !== currentSession?.id &&
+        !dismissedUserInteractionIds.has(request.request_id),
+    ),
+    [currentSession?.id, dismissedUserInteractionIds, pendingUserInteractions],
+  );
+  const openUserInteractionSession = useCallback((sessionId: string) => {
+    navigate(sessionPath(sessionId));
+  }, [navigate]);
+  const dismissUserInteraction = useCallback((requestId: string) => {
+    const pendingIds = new Set(pendingUserInteractions.map((request) => request.request_id));
+    setDismissedUserInteractionIds((current) => {
+      const next = new Set([...current].filter((id) => pendingIds.has(id)));
+      next.add(requestId);
+      return next;
+    });
+  }, [pendingUserInteractions]);
   // Ref mirror so callbacks (syncProvider) can read the current session
   // without stale closures or re-triggering effects.
   const currentSessionRef = useRef(currentSession);
@@ -7055,43 +7083,6 @@ function AppMain({
               </button>
             </div>
           ) : null;
-          const prToastElement = prToast ? (
-            <div className="pr-toast" role="status">
-              <svg
-                className="pr-toast-icon"
-                width="16"
-                height="16"
-                viewBox="0 0 16 16"
-                fill="currentColor"
-                aria-hidden="true"
-              >
-                <path d="M3.25 1A2.25 2.25 0 0 0 2.5 5.372V10.628a2.25 2.25 0 1 0 1.5 0V5.372A2.25 2.25 0 0 0 3.25 1Zm0 1.5a.75.75 0 1 1 0 1.5.75.75 0 0 1 0-1.5Zm0 9.25a.75.75 0 1 1 0 1.5.75.75 0 0 1 0-1.5ZM12.75 3a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Zm-2.25.75a2.25 2.25 0 1 1 3 2.122v4.756a2.25 2.25 0 1 1-1.5 0V5.872A2.25 2.25 0 0 1 10.5 3.75Zm2.25 8a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Z" />
-              </svg>
-              <a
-                className="pr-toast-link"
-                href={prToast.prUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                title={prToast.prUrl}
-              >
-                <span className="pr-toast-title">
-                  {prToast.prNumber
-                    ? `Pull request #${prToast.prNumber} created`
-                    : "Pull request created"}
-                </span>
-                {prToast.prRepository && (
-                  <span className="pr-toast-repo">{prToast.prRepository}</span>
-                )}
-              </a>
-              <button
-                className="pr-toast-close"
-                onClick={() => setPrToast(null)}
-                aria-label="Dismiss"
-              >
-                ×
-              </button>
-            </div>
-          ) : null;
           // Ask-singleton view: the regular <Chat> rendered for the
           // singleton. The greeting box is injected as the chat's header
           // slot; the inline session picker is injected PER TURN via
@@ -7499,6 +7490,8 @@ function AppMain({
               sessions={sessions}
               currentNodeId={selectedProjectNodeId}
               machines={machines}
+              pendingUserInteractions={pendingUserInteractions}
+              onUserInteractionDone={removePendingUserInteraction}
             />
             </ConfigPanelContext.Provider>
           );
@@ -7508,7 +7501,6 @@ function AppMain({
               <>
                 {supervisorBannerElement}
                 {chatElement}
-                {prToastElement}
               </>
             );
           }
@@ -7698,6 +7690,57 @@ function AppMain({
             </>
           );
         })()}
+        {(backgroundUserInteractions.length > 0 || prToast) ? (
+          <aside
+            className="chat-toast-stack"
+            aria-label={t("userRequest.regionLabel")}
+            aria-live="polite"
+          >
+            <UserInteractionToastStack
+              requests={backgroundUserInteractions}
+              sessions={sessions}
+              onOpenSession={openUserInteractionSession}
+              onDismiss={dismissUserInteraction}
+            />
+            {prToast ? (
+              <div className="pr-toast" role="status">
+                <svg
+                  className="pr-toast-icon"
+                  width="16"
+                  height="16"
+                  viewBox="0 0 16 16"
+                  fill="currentColor"
+                  aria-hidden="true"
+                >
+                  <path d="M3.25 1A2.25 2.25 0 0 0 2.5 5.372V10.628a2.25 2.25 0 1 0 1.5 0V5.372A2.25 2.25 0 0 0 3.25 1Zm0 1.5a.75.75 0 1 1 0 1.5.75.75 0 0 1 0-1.5Zm0 9.25a.75.75 0 1 1 0 1.5.75.75 0 0 1 0-1.5ZM12.75 3a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Zm-2.25.75a2.25 2.25 0 1 1 3 2.122v4.756a2.25 2.25 0 1 1-1.5 0V5.872A2.25 2.25 0 0 1 10.5 3.75Zm2.25 8a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Z" />
+                </svg>
+                <a
+                  className="pr-toast-link"
+                  href={prToast.prUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  title={prToast.prUrl}
+                >
+                  <span className="pr-toast-title">
+                    {prToast.prNumber
+                      ? `Pull request #${prToast.prNumber} created`
+                      : "Pull request created"}
+                  </span>
+                  {prToast.prRepository ? (
+                    <span className="pr-toast-repo">{prToast.prRepository}</span>
+                  ) : null}
+                </a>
+                <button
+                  className="pr-toast-close"
+                  onClick={() => setPrToast(null)}
+                  aria-label={t("userRequest.dismiss")}
+                >
+                  ×
+                </button>
+              </div>
+            ) : null}
+          </aside>
+        ) : null}
       </div>
 
       {/* Right Panel — desktop: always in the flex layout (collapsed
