@@ -46,6 +46,7 @@ import oskeychain
 # the real Keychain.
 _ORIGINAL_KEYRING_GET_PASSWORD = keyring.get_password
 _ORIGINAL_KEYRING_SET_PASSWORD = keyring.set_password
+_ORIGINAL_KEYRING_DELETE_PASSWORD = keyring.delete_password
 
 from json_store import read_json, write_json
 from keychain_names import LEGACY_SERVICE, PRIMARY_SERVICE, service_names
@@ -177,6 +178,16 @@ def _set_password_with_reason(
         keyring.set_password(service, username, password)
 
 
+def _delete_password(service: str, username: str) -> None:
+    if (
+        keyring.delete_password is _ORIGINAL_KEYRING_DELETE_PASSWORD
+        and _macos_security_api() is not None
+    ):
+        oskeychain.delete(service, username)
+        return
+    keyring.delete_password(service, username)
+
+
 # `keyring` on macOS calls `SecItemCopyMatching` via ctypes. When the
 # caller binary lacks the keychain item's ACL — e.g. items added by the
 # dev Python venv read from the PyInstaller-frozen `.app` (a different
@@ -243,6 +254,18 @@ def _keyring_call(
             if failure_flag is not None:
                 failure_flag.append(True)
             raise RuntimeError("stable macOS keychain write failed") from None
+    if (
+        fn is _delete_password
+        and keyring.delete_password is _ORIGINAL_KEYRING_DELETE_PASSWORD
+        and _macos_security_api() is not None
+    ):
+        try:
+            return fn(*args)
+        except Exception:
+            logger.warning("stable macOS keychain delete failed for %s/%s", entry[0], entry[1])
+            if failure_flag is not None:
+                failure_flag.append(True)
+            raise RuntimeError("stable macOS keychain delete failed") from None
     result: list[Any] = [default]
     done = threading.Event()
 
@@ -355,7 +378,7 @@ def _write_api_key(provider_id: str, api_key: str) -> None:
         for service in _keyring_services():
             try:
                 _keyring_call(
-                    keyring.delete_password,
+                    _delete_password,
                     service, _keyring_username(provider_id),
                 )
             except keyring.errors.PasswordDeleteError:
@@ -368,7 +391,7 @@ def _delete_api_key(provider_id: str) -> None:
     for service in _keyring_services():
         try:
             _keyring_call(
-                keyring.delete_password,
+                _delete_password,
                 service, _keyring_username(provider_id),
             )
         except keyring.errors.PasswordDeleteError:
@@ -407,7 +430,7 @@ def _read_legacy_api_key() -> str:
 def _delete_legacy_api_key() -> None:
     for service in _keyring_services():
         _keyring_call(
-            keyring.delete_password,
+            _delete_password,
             service, LEGACY_KEYRING_USERNAME,
         )
     with _api_key_cache_lock:
