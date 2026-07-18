@@ -772,6 +772,11 @@ _CREATE_SESSION_INPUT_SCHEMA: dict[str, Any] = {
             "type": ["string", "null"],
             "description": "OPTIONAL — working directory for the new session. Defaults to (inherits) the creating session's cwd.",
         },
+        "mcp_servers": {
+            "type": ["array", "null"],
+            "items": {"type": "string"},
+            "description": "OPTIONAL — extension MCP server names to opt this session into (servers that are default-off globally, e.g. 'testape-internal').",
+        },
         **_SESSION_ORGANIZATION_INPUT_PROPERTIES,
     },
     "required": ["name"],
@@ -804,6 +809,11 @@ _CREATE_SUB_SESSION_INPUT_SCHEMA: dict[str, Any] = {
         "cwd": {
             "type": ["string", "null"],
             "description": "OPTIONAL — working directory for the sub-session. Defaults to (inherits) the creating session's cwd.",
+        },
+        "mcp_servers": {
+            "type": ["array", "null"],
+            "items": {"type": "string"},
+            "description": "OPTIONAL — extension MCP server names to opt this session into (servers that are default-off globally, e.g. 'testape-internal').",
         },
         **_SESSION_ORGANIZATION_INPUT_PROPERTIES,
     },
@@ -1816,6 +1826,7 @@ def _build_create_session_tool(
             "node_id": node_id,
             "folder_id": args.get("folder_id"),
             "tag_ids": args.get("tag_ids") or [],
+            "mcp_servers": args.get("mcp_servers") or [],
         }
         try:
             result = await asyncio.to_thread(_post_create_session_sync, payload)
@@ -1861,6 +1872,7 @@ def _build_create_sub_session_tool(
             "node_id": node_id,
             "folder_id": args.get("folder_id"),
             "tag_ids": args.get("tag_ids") or [],
+            "mcp_servers": args.get("mcp_servers") or [],
         }
         try:
             result = await asyncio.to_thread(_post_create_sub_session_sync, payload)
