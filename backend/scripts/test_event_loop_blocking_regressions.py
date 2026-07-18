@@ -127,7 +127,7 @@ def test_stub_invalidated_broadcast_is_batched() -> None:
     source = (ROOT / "main.py").read_text(encoding="utf-8")
     flush_start = source.index("def _flush_stub_invalidated(")
     emit_start = source.index("def _emit_stub_invalidated(", flush_start)
-    emit_end = source.index("def _reconcile_catchup_state(", emit_start)
+    emit_end = source.index("async def _send_reconcile_processing_snapshot(", emit_start)
     flush_source = source[flush_start:emit_start]
     emit_source = source[emit_start:emit_end]
     assert 'broadcast_global("stub_invalidated", {"changes": changes})' in flush_source
