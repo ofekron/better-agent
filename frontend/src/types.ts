@@ -509,15 +509,26 @@ export interface UserInputQuestion {
   options: UserInputOption[];
 }
 
-export interface UserInputRequest {
+interface UserInteractionRequestBase {
   request_id: string;
   app_session_id: string;
-  questions: UserInputQuestion[];
   status: "pending" | "resolved" | "cancelled" | "expired";
   created_at: number;
   expires_at?: number | null;
   resolved_at?: number | null;
 }
+
+export interface UserInputRequest extends UserInteractionRequestBase {
+  kind: "input";
+  questions: UserInputQuestion[];
+}
+
+export interface UserApprovalRequest extends UserInteractionRequestBase {
+  kind: "approval";
+  prompt: string;
+}
+
+export type UserInteractionRequest = UserInputRequest | UserApprovalRequest;
 
 export interface WorkerPanel {
   delegation_id: string;

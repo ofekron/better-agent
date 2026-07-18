@@ -1044,6 +1044,7 @@ def t_codex_request_user_input_uses_better_agent_dynamic_tool() -> None:
         check(
             payload == {
                 "app_session_id": "session-1",
+                "kind": "input",
                 "questions": [{"id": "q", "header": "H", "question": "Q"}],
                 "timeout_seconds": 5,
             },
@@ -1710,6 +1711,66 @@ def t_request_user_input_mcp_validates_required_fields() -> None:
     check(result["success"] is False, "request-user-input MCP rejects missing questions before HTTP")
 
 
+def t_request_user_approval_contract_has_provider_parity() -> None:
+    result = open_file_panel_mcp.request_user_approval_response("")
+    check(result["success"] is False, "request-user-approval MCP rejects missing prompt before HTTP")
+    for module, label in (
+        (runner, "Claude"),
+        (runner_codex, "Codex"),
+        (runner_better_agent, "Gemini/Better Agent"),
+    ):
+        schema = module._REQUEST_USER_APPROVAL_SCHEMA
+        check(schema["required"] == ["prompt"], f"{label} uses the approval-only prompt contract")
+        check(
+            module._REQUEST_USER_APPROVAL_DESCRIPTION == runner._REQUEST_USER_APPROVAL_DESCRIPTION,
+            f"{label} shares the approval tool description",
+        )
+    mcp_tool_names = {
+        tool.name for tool in asyncio.run(open_file_panel_mcp.build_server().list_tools())
+    }
+    check("request_user_approval" in mcp_tool_names, "Gemini/native UI MCP registers request_user_approval")
+    claude_tool = runner._build_request_user_approval_tool(
+        app_session_id="session-1",
+        backend_url="http://backend",
+        internal_token="token-1",
+    )
+    check(claude_tool.name == "request_user_approval", "Claude SDK MCP registers request_user_approval")
+    codex_tools, codex_handlers = runner_codex._build_dynamic_tool_set(
+        mode="native",
+        app_session_id="session-1",
+        backend_url="http://backend",
+        internal_token="token-1",
+        mssg_sender_session_id="",
+        cwd="/tmp/project",
+        model="model-1",
+        open_file_panel_enabled=True,
+        request_user_input_enabled=True,
+        file_editing_mode=False,
+        team_orchestration_enabled=False,
+        disabled_builtin_tools=set(),
+        existing_tool_names=set(),
+    )
+    check(
+        "request_user_approval" in {tool["name"] for tool in codex_tools},
+        "Codex dynamic tools register request_user_approval",
+    )
+    check("request_user_approval" in codex_handlers, "Codex registers the approval loopback handler")
+    better_agent_schemas = runner_better_agent._tool_schemas_for_run(
+        inputs={},
+        capabilities_enabled=False,
+        loopback_enabled=True,
+        team_manager_enabled=False,
+        team_orchestration_enabled=False,
+        open_file_panel_enabled=True,
+        file_editing_mode=False,
+        coordination_enabled=False,
+    )
+    better_agent_names = {
+        schema.get("function", {}).get("name") for schema in better_agent_schemas
+    }
+    check("request_user_approval" in better_agent_names, "Better Agent runner registers request_user_approval")
+
+
 def t_provider_sources_persist_open_file_panel_flag() -> None:
     codex_src = (Path(_BACKEND) / "provider_codex.py").read_text(encoding="utf-8")
     gemini_src = (Path(_BACKEND) / "provider_gemini.py").read_text(encoding="utf-8")
@@ -1870,6 +1931,7 @@ def main() -> int:
         ("bare mcp availability matrix", t_bare_mcp_availability_matrix),
         ("open-file-panel mcp validates required fields", t_open_file_panel_mcp_validates_required_fields),
         ("request-user-input mcp validates required fields", t_request_user_input_mcp_validates_required_fields),
+        ("request-user-approval contract has provider parity", t_request_user_approval_contract_has_provider_parity),
         ("providers persist open-file-panel flag", t_provider_sources_persist_open_file_panel_flag),
         ("provider runner env pins Better Agent home", t_provider_runner_env_pins_better_agent_home),
     ]:
