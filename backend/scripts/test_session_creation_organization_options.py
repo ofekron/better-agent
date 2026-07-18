@@ -16,6 +16,7 @@ os.environ["BETTER_CLAUDE_CWD"] = "/repo"
 import communicate_mcp  # noqa: E402
 import orchestration_tool_schemas  # noqa: E402
 import runner  # noqa: E402
+import runner_better_agent  # noqa: E402
 import runner_codex  # noqa: E402
 import session_organization_store  # noqa: E402
 
@@ -71,6 +72,22 @@ def test_provider_schema_parity() -> None:
         _assert_schema(schema)
 
 
+def test_mcp_servers_schema_and_payload_parity() -> None:
+    # Regression lock: mcp_servers (the per-session extension-MCP opt-in, e.g.
+    # 'testape-internal') must reach the POST payload for every provider's
+    # in-process create_session/create_sub_session tool, not just Claude's.
+    # A Codex session missing this silently drops the opt-in with no error.
+    for schema in (
+        runner._CREATE_SESSION_INPUT_SCHEMA,
+        runner._CREATE_SUB_SESSION_INPUT_SCHEMA,
+        runner_codex._CREATE_SESSION_INPUT_SCHEMA,
+        runner_codex._CREATE_SUB_SESSION_INPUT_SCHEMA,
+        runner_better_agent._CREATE_SESSION_INPUT_SCHEMA,
+        runner_better_agent._CREATE_SUB_SESSION_INPUT_SCHEMA,
+    ):
+        assert "mcp_servers" in schema["properties"], schema
+
+
 def test_fastmcp_creation_signatures() -> None:
     for response in (
         communicate_mcp.delegate_task_response,
@@ -115,6 +132,7 @@ def test_fastmcp_creation_payloads() -> None:
 def main() -> int:
     test_store_validates_and_assigns_together()
     test_provider_schema_parity()
+    test_mcp_servers_schema_and_payload_parity()
     test_fastmcp_creation_signatures()
     test_fastmcp_creation_payloads()
     print("PASS session creation organization options")
