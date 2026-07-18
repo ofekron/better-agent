@@ -4,6 +4,7 @@ import asyncio
 import base64
 import hashlib
 import json
+import struct
 import sys
 import threading
 from pathlib import Path
@@ -33,6 +34,20 @@ class Sender:
     async def __call__(self, frame: dict, serialized) -> bool:
         self.frames.append(frame)
         self.serialized.append(serialized)
+        return True
+
+
+class BinarySender:
+    def __init__(self) -> None:
+        self.frames: list[dict] = []
+        self.binary_frames: list[bytes] = []
+
+    async def send(self, frame: dict, _serialized) -> bool:
+        self.frames.append(frame)
+        return True
+
+    async def send_binary(self, frame: bytes) -> bool:
+        self.binary_frames.append(frame)
         return True
 
 
@@ -89,6 +104,21 @@ def test_small_frame_is_unchanged_and_prepared_once() -> None:
     asyncio.run(run())
 
 
+def test_legacy_client_keeps_text_base64_transport() -> None:
+    async def run() -> None:
+        sender = Sender()
+        transport = SnapshotTransport(principal="legacy-user", send=sender)
+        assert await transport.send_event(event(SNAPSHOT_THRESHOLD_BYTES + 10))
+        begin = sender.frames[0]
+        assert "encoding" not in begin["data"]
+        assert await transport.acknowledge(ack(begin, 0))
+        chunks = [frame for frame in sender.frames if frame["type"] == "snapshot_chunk"]
+        assert chunks
+        assert all(isinstance(frame["data"]["payload"], str) for frame in chunks)
+
+    asyncio.run(run())
+
+
 def test_snapshot_is_immutable_and_digest_verified() -> None:
     async def run() -> None:
         sender = Sender()
@@ -117,6 +147,78 @@ def test_every_encoded_chunk_frame_is_bounded() -> None:
                 frame, separators=(",", ":"), ensure_ascii=False, allow_nan=False,
             ).encode("utf-8")
             assert len(encoded) <= MAX_WS_FRAME_BYTES
+
+    asyncio.run(run())
+
+
+def test_large_snapshot_emits_binary_v1_chunks_without_base64() -> None:
+    async def run() -> None:
+        sender = BinarySender()
+        transport = SnapshotTransport(
+            principal="user-a",
+            send=sender.send,
+            send_binary=sender.send_binary,
+            binary=True,
+        )
+        original = event(SNAPSHOT_CHUNK_BYTES * 2 + 17)
+        assert await transport.send_event(original)
+        begin = sender.frames[0]
+        assert begin["type"] == "snapshot_begin"
+        assert begin["data"]["encoding"] == "binary-v1"
+        total = begin["data"]["total_chunks"]
+        next_chunk = 0
+        while next_chunk < total:
+            assert await transport.acknowledge(ack(begin, next_chunk))
+            next_chunk = len(sender.binary_frames)
+        assert await transport.acknowledge(ack(begin, total))
+        assert all(frame["type"] != "snapshot_chunk" for frame in sender.frames)
+        payload = b"".join(frame[32:] for frame in sender.binary_frames)
+        assert json.loads(payload) == original
+
+    asyncio.run(run())
+
+
+def test_binary_header_is_exact_bounded_and_big_endian() -> None:
+    async def run() -> None:
+        sender = BinarySender()
+        transport = SnapshotTransport(
+            principal="user-a",
+            send=sender.send,
+            send_binary=sender.send_binary,
+            binary=True,
+        )
+        assert await transport.send_event(event(SNAPSHOT_THRESHOLD_BYTES + 10))
+        begin = sender.frames[0]
+        assert await transport.acknowledge(ack(begin, 0))
+        frame = sender.binary_frames[0]
+        magic, version, kind, flags, raw_id, index, payload_length = struct.unpack(
+            "!4sBBH16sII", frame[:32],
+        )
+        assert magic == b"BASN"
+        assert (version, kind, flags, index) == (1, 1, 0, 0)
+        assert raw_id.hex() == begin["data"]["snapshot_id"]
+        assert payload_length == len(frame) - 32
+        assert len(frame) <= MAX_WS_FRAME_BYTES
+
+    asyncio.run(run())
+
+
+def test_binary_cache_budget_counts_raw_bytes() -> None:
+    async def run() -> None:
+        cache = SnapshotCache(max_bytes=SNAPSHOT_THRESHOLD_BYTES * 2)
+        sender = BinarySender()
+        transport = SnapshotTransport(
+            principal="user-a",
+            send=sender.send,
+            send_binary=sender.send_binary,
+            binary=True,
+            cache=cache,
+        )
+        assert await transport.send_event(event(SNAPSHOT_THRESHOLD_BYTES + 10))
+        snapshot = cache.get(sender.frames[0]["data"]["snapshot_id"])
+        assert snapshot is not None
+        assert snapshot.retained_bytes == snapshot.payload_bytes
+        assert all(isinstance(chunk, bytes) for chunk in snapshot.chunks)
 
     asyncio.run(run())
 
@@ -212,7 +314,7 @@ def test_large_payload_preparation_runs_off_event_loop() -> None:
         event_loop_thread = threading.get_ident()
         observed: list[int] = []
         original_encode = ws_snapshot_transport._encode_and_digest
-        original_chunks = ws_snapshot_transport._encode_chunks
+        original_chunks = ws_snapshot_transport._split_chunks
 
         def encode(serialized):
             observed.append(threading.get_ident())
@@ -226,7 +328,7 @@ def test_large_payload_preparation_runs_off_event_loop() -> None:
         transport = SnapshotTransport(principal="off-loop-user", send=sender)
         with (
             mock.patch.object(ws_snapshot_transport, "_encode_and_digest", encode),
-            mock.patch.object(ws_snapshot_transport, "_encode_chunks", chunks),
+            mock.patch.object(ws_snapshot_transport, "_split_chunks", chunks),
         ):
             assert await transport.send_event(event(SNAPSHOT_THRESHOLD_BYTES + 1))
         assert len(observed) == 2
@@ -248,13 +350,13 @@ def test_cache_ttl_and_lru_are_byte_bounded() -> None:
             revision=digest,
             digest=digest,
             payload_bytes=len(payload),
-            chunks=(base64.b64encode(payload).decode("ascii"),),
+            chunks=(payload,),
             scope=(("sid", None),),
             refresh_id="c" * 32,
             created_at=created_at,
         )
 
-    cache = SnapshotCache(ttl_seconds=10, max_bytes=12)
+    cache = SnapshotCache(ttl_seconds=10, max_bytes=9)
     first = snapshot("a" * 32, 0)
     second = snapshot("b" * 32, 1)
     cache.put(first, now=1)
@@ -269,18 +371,12 @@ def test_global_budget_counts_unique_active_bytes_across_connections() -> None:
         payload = json.dumps(
             original, separators=(",", ":"), ensure_ascii=False, allow_nan=False,
         ).encode("utf-8")
-        retained = sum(
-            len(base64.b64encode(payload[offset:offset + SNAPSHOT_CHUNK_BYTES]))
-            for offset in range(0, len(payload), SNAPSHOT_CHUNK_BYTES)
-        )
+        retained = len(payload)
         different = event(SNAPSHOT_THRESHOLD_BYTES + 101)
         different_payload = json.dumps(
             different, separators=(",", ":"), ensure_ascii=False, allow_nan=False,
         ).encode("utf-8")
-        different_retained = sum(
-            len(base64.b64encode(different_payload[offset:offset + SNAPSHOT_CHUNK_BYTES]))
-            for offset in range(0, len(different_payload), SNAPSHOT_CHUNK_BYTES)
-        )
+        different_retained = len(different_payload)
         budget = max(retained, different_retained)
         cache = SnapshotCache(max_bytes=budget)
         first_sender = Sender()
@@ -300,7 +396,7 @@ def test_global_budget_counts_unique_active_bytes_across_connections() -> None:
         assert cache._bytes == retained
         with mock.patch.object(
             ws_snapshot_transport,
-            "_encode_chunks",
+            "_split_chunks",
             side_effect=AssertionError("unadmittable snapshot must not encode chunks"),
         ):
             assert await blocked.send_event(different)
@@ -319,6 +415,52 @@ def test_global_budget_counts_unique_active_bytes_across_connections() -> None:
         assert cache._bytes <= budget
         await retry.close()
         await blocked.close()
+
+    asyncio.run(run())
+
+
+def test_binary_resume_starts_at_exact_cumulative_index() -> None:
+    async def run() -> None:
+        cache = SnapshotCache()
+        first_sender = BinarySender()
+        first = SnapshotTransport(
+            principal="resume-user",
+            send=first_sender.send,
+            send_binary=first_sender.send_binary,
+            binary=True,
+            cache=cache,
+        )
+        assert await first.send_event(event(SNAPSHOT_CHUNK_BYTES * 3))
+        begin = first_sender.frames[0]
+        assert await first.acknowledge(ack(begin, 0))
+        assert len(first_sender.binary_frames) == 2
+        await first.close()
+
+        resumed_sender = BinarySender()
+        resumed = SnapshotTransport(
+            principal="resume-user",
+            send=resumed_sender.send,
+            send_binary=resumed_sender.send_binary,
+            binary=True,
+            cache=cache,
+        )
+        assert await resumed.resume({
+            "type": "snapshot_resume",
+            "data": {
+                "snapshot_id": begin["data"]["snapshot_id"],
+                "revision": begin["data"]["revision"],
+                "digest": begin["data"]["digest"],
+                "next_chunk": 2,
+            },
+        })
+        resumed_begin = resumed_sender.frames[0]
+        assert resumed_begin["data"]["resume_from"] == 2
+        assert resumed_begin["data"]["encoding"] == "binary-v1"
+        assert resumed_sender.binary_frames
+        _, _, _, _, _, first_index, _ = struct.unpack(
+            "!4sBBH16sII", resumed_sender.binary_frames[0][:32],
+        )
+        assert first_index == 2
 
     asyncio.run(run())
 
