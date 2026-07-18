@@ -1,0 +1,444 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Better Agent — Daily Open-Source Extension Opportunities · 2026-07-15</title>
+<style>
+  :root {
+    color-scheme: dark light;
+    --bg: #0f1115;
+    --panel: #161a21;
+    --panel-2: #1d222b;
+    --panel-3: #222834;
+    --border: #2a313d;
+    --text: #e7ecf3;
+    --muted: #9aa4b2;
+    --faint: #6b7585;
+    --accent: #4f9cf9;
+    --accent-2: #8b5cf6;
+    --green: #34d399;
+    --amber: #fbbf24;
+    --red: #f87171;
+    --shadow: 0 1px 3px rgba(0,0,0,.4);
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #f6f8fb;
+      --panel: #ffffff;
+      --panel-2: #f0f3f8;
+      --panel-3: #e7ecf3;
+      --border: #d9e0ea;
+      --text: #1a2230;
+      --muted: #5b6675;
+      --faint: #8a95a6;
+      --shadow: 0 1px 3px rgba(20,30,50,.08);
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: linear-gradient(180deg, rgba(12,14,19,.0) 0%, var(--bg) 100%), var(--bg);
+    color: var(--text);
+    font: 15px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 1120px; margin: 0 auto; padding: 32px 24px 80px; }
+  header { border-bottom: 1px solid var(--border); padding-bottom: 20px; margin-bottom: 28px; }
+  .eyebrow { color: var(--accent); font-size: 12px; letter-spacing: .14em; text-transform: uppercase; font-weight: 700; }
+  h1 { font-size: 28px; margin: 8px 0 6px; letter-spacing: -.01em; }
+  .meta { color: var(--muted); font-size: 13px; }
+  .meta b { color: var(--text); }
+  .badges { margin-top: 14px; display: flex; gap: 8px; flex-wrap: wrap; }
+  .badge { font-size: 12px; padding: 4px 10px; border-radius: 999px; border: 1px solid var(--border); background: var(--panel); color: var(--muted); }
+  .badge b { color: var(--text); }
+
+  section { margin: 40px 0; }
+  h2 { font-size: 20px; margin: 0 0 16px; display: flex; gap: 10px; align-items: baseline; }
+  h2 .n { color: var(--faint); font-size: 13px; font-weight: 600; letter-spacing:.06em; }
+
+  .exec { background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 20px 22px; box-shadow: var(--shadow); }
+  .exec p { margin: 0 0 10px; }
+  .exec p:last-of-type { margin: 0; }
+  .exec strong { color: var(--accent); }
+
+  .kpi-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-top: 16px; }
+  .kpi { background: var(--panel-2); border: 1px solid var(--border); border-radius: 12px; padding: 14px; }
+  .kpi .v { font-size: 22px; font-weight: 700; }
+  .kpi .l { color: var(--muted); font-size: 12px; margin-top: 2px; }
+
+  table { width: 100%; border-collapse: collapse; background: var(--panel); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
+  th, td { text-align: left; padding: 11px 14px; border-bottom: 1px solid var(--border); font-size: 13.5px; vertical-align: top; }
+  th { background: var(--panel-2); color: var(--muted); font-size: 11px; letter-spacing: .08em; text-transform: uppercase; }
+  tr:last-child td { border-bottom: none; }
+  .pill { font-size: 11px; padding: 2px 9px; border-radius: 999px; font-weight: 600; white-space: nowrap; }
+  .pill-h { background: rgba(79,156,249,.16); color: var(--accent); }
+  .pill-m { background: rgba(139,92,246,.16); color: var(--accent-2); }
+  .pill-l { background: rgba(148,163,184,.18); color: var(--muted); }
+  .pill-sec { background: rgba(248,113,113,.15); color: var(--red); }
+  .pill-green { background: rgba(52,211,153,.15); color: var(--green); }
+
+  a, td a, .card a, .exec a, .citations a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+  @media (max-width: 860px){ .grid, .grid-3 { grid-template-columns: 1fr; } .kpi-row { grid-template-columns: repeat(2,1fr); } }
+
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 18px 20px; box-shadow: var(--shadow); }
+  .card h3 { margin: 0 0 4px; font-size: 16px; }
+  .card .rank { color: var(--accent); font-weight: 700; font-size: 12px; letter-spacing:.08em; text-transform: uppercase; }
+  .card .lede { color: var(--muted); font-size: 13px; margin: 0 0 12px; }
+  .card dl { margin: 8px 0 0; }
+  .card dt { color: var(--faint); font-size: 11px; letter-spacing: .07em; text-transform: uppercase; margin-top: 10px; }
+  .card dd { margin: 3px 0 0; font-size: 13.5px; }
+  .card code { background: var(--panel-3); padding: 1px 5px; border-radius: 5px; font-size: 12.5px; }
+
+  .barwrap { display:flex; align-items:center; gap:10px; margin: 4px 0 8px; }
+  .bar { flex: 1; height: 8px; background: var(--panel-3); border-radius: 999px; overflow:hidden; }
+  .bar > span { display:block; height:100%; border-radius:999px; background: linear-gradient(90deg, var(--accent), var(--accent-2)); }
+  .barwrap b { font-size: 12px; color: var(--muted); width: 30px; text-align:right; }
+
+  ul.clean { margin: 6px 0 0; padding-left: 18px; }
+  ul.clean li { margin-bottom: 4px; }
+
+  .chart-card { background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 20px 22px; box-shadow: var(--shadow); }
+  .chart-row { display: grid; grid-template-columns: 230px 1fr 38px; align-items: center; gap: 12px; margin: 9px 0; }
+  .chart-label { font-size: 13px; }
+  .chart-label small { display:block; color: var(--faint); font-size: 11px; }
+  .chart-track { height: 16px; background: var(--panel-3); border-radius: 6px; overflow: hidden; }
+  .chart-fill { height: 100%; border-radius: 6px; }
+  @media (max-width: 640px){ .chart-row { grid-template-columns: 1fr; gap: 4px; } .chart-fill { width: 100% !important; } }
+
+  .citations { background: var(--panel); border:1px solid var(--border); border-radius: 12px; padding: 16px 20px; font-size: 12.5px; color: var(--muted); }
+  .citations ol { margin: 6px 0 0; padding-left: 18px; }
+  .citations li { margin-bottom: 6px; }
+  footer { margin-top: 48px; color: var(--faint); font-size: 12px; border-top: 1px solid var(--border); padding-top: 16px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <div class="eyebrow">Better Agent · Daily Open-Source Scan</div>
+  <h1>Extension &amp; Improvement Opportunities</h1>
+  <div class="meta">Report date: <b>2026-07-15</b> · Coverage window: mid Jun → mid Jul 2026 · Sources: official docs, GitHub, MCP registry/blog, package registries, engineering blogs, OWASP/NSA security guidance, OSS Insight trending.</div>
+  <div class="badges">
+    <span class="badge"><b>14</b> opportunities</span>
+    <span class="badge"><b>4</b> high-impact</span>
+    <span class="badge"><b>2</b> security-priority</span>
+    <span class="badge"><b>3</b> quick wins (low complexity)</span>
+    <span class="badge">Routine worker <b>daily-oss-extension-research</b></span>
+  </div>
+</header>
+
+<section>
+  <h2><span class="n">01</span> Executive summary</h2>
+  <div class="exec">
+    <p>This cycle's signal is dominated by a foundational protocol shift and a maturing security consensus, both of which map directly onto Better Agent's architecture. The <strong>MCP 2026-07-28 spec release candidate</strong> introduces a <strong>stateless core</strong> (dropping <code>Mcp-Session-Id</code> and the <code>initialize</code> handshake) and promotes <strong>Extensions to a first-class concept</strong> — a near-perfect fit for Better Agent's existing per-extension token identity and ambient-MCP proxying. Meanwhile the <strong>official MCP Registry</strong> is nearing <strong>~9,650 server records</strong> and has become the canonical discovery index.</p>
+    <p>On the security axis, the <strong>OWASP MCP Top 10</strong> is now published with <strong>MCP03 Tool Poisoning</strong> as a core entry, reinforced by a July 2026 CSA research note and NSA-guidance mappings. Given Better Agent spawns real CLI subprocesses and renders untrusted tool descriptions, defense-in-depth here is a direct project priority — and pairs naturally with <strong>open-source code-execution sandboxes</strong> (E2B, Daytona) that can isolate the destructive commands the harness already issues.</p>
+    <p>The capability frontier is expanding too: Anthropic's <strong>Managed Agents</strong> primitives (scheduler / dreaming / rubric outcomes) extend what Better Agent's <em>routines</em> + <em>requirements</em> already do; the <strong>Agent Skills (SKILL.md)</strong> ecosystem has consolidated around real catalogs (<code>anthropics/skills</code>, SkillsMP, ClaudeSkills.info); and open-source <strong>agent eval frameworks</strong> (DeepEval, promptfoo, agentevals) offer a ready-made assessment layer.</p>
+    <p><strong>Highest-value bets this cycle:</strong> (1) adopt the MCP 2026-07-28 stateless + Extensions model, (2) stand up a tool-poisoning inspection gate plus optional sandboxed execution, and (3) wire an open eval framework into routine assessment. All three are foundational, reversible-in-part, and compound with existing surfaces.</p>
+
+    <div class="kpi-row">
+      <div class="kpi"><div class="v">14</div><div class="l">Opportunities ranked</div></div>
+      <div class="kpi"><div class="v">~9,650</div><div class="l">MCP registry server records</div></div>
+      <div class="kpi"><div class="v">2026-07-28</div><div class="l">MCP spec RC date</div></div>
+      <div class="kpi"><div class="v">MCP03</div><div class="l">OWASP tool-poisoning entry</div></div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2><span class="n">02</span> Opportunities ranked by impact × feasibility</h2>
+  <table>
+    <thead>
+      <tr><th>#</th><th>Opportunity</th><th>Integration shape</th><th>Impact</th><th>Feasibility</th><th>Complexity</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><b>1</b></td><td>MCP 2026-07-28 stateless core + first-class Extensions</td><td>MCP bridge / proxy update</td><td><span class="pill pill-h">High</span></td><td><span class="pill pill-h">High</span></td><td><span class="pill pill-m">Medium</span></td></tr>
+      <tr><td><b>2</b></td><td>MCP03 tool-poisoning / injection defenses</td><td>Security gate + monitoring</td><td><span class="pill pill-sec">High (sec)</span></td><td><span class="pill pill-h">High</span></td><td><span class="pill pill-m">Medium</span></td></tr>
+      <tr><td><b>3</b></td><td>Sandboxed code execution (E2B / Daytona)</td><td>Daemon / runner isolation</td><td><span class="pill pill-sec">High (sec)</span></td><td><span class="pill pill-m">Medium</span></td><td><span class="pill pill-m">Med-High</span></td></tr>
+      <tr><td><b>4</b></td><td>Managed Agents: scheduler + dreaming + rubric outcomes</td><td>Routines + requirements ext.</td><td><span class="pill pill-h">High</span></td><td><span class="pill pill-m">Medium</span></td><td><span class="pill pill-m">Med-High</span></td></tr>
+      <tr><td><b>5</b></td><td>Official MCP Registry as canonical discovery</td><td>Marketplace / ambient-MCP</td><td><span class="pill pill-m">Medium</span></td><td><span class="pill pill-h">High</span></td><td><span class="pill pill-l">Low-Med</span></td></tr>
+      <tr><td><b>6</b></td><td>Agent Skills (SKILL.md) catalog + security vetting</td><td>Runtime skills import</td><td><span class="pill pill-m">Medium</span></td><td><span class="pill pill-h">High</span></td><td><span class="pill pill-l">Low</span></td></tr>
+      <tr><td><b>7</b></td><td>Open agent-eval harness (DeepEval / promptfoo / agentevals)</td><td>Routine assessment + workflow</td><td><span class="pill pill-m">Medium</span></td><td><span class="pill pill-h">High</span></td><td><span class="pill pill-l">Low-Med</span></td></tr>
+      <tr><td><b>8</b></td><td>Context7 MCP — versioned live docs as a tool</td><td>One-click ambient MCP</td><td><span class="pill pill-m">Medium</span></td><td><span class="pill pill-h">High</span></td><td><span class="pill pill-l">Low</span></td></tr>
+      <tr><td><b>9</b></td><td>Model-line routing: Fable 5 / Opus 4.8 / Haiku 4.5</td><td>Model selector + fallback</td><td><span class="pill pill-m">Medium</span></td><td><span class="pill pill-h">High</span></td><td><span class="pill pill-l">Low-Med</span></td></tr>
+      <tr><td><b>10</b></td><td>Agent SDK credit / cost telemetry</td><td>Cost UI + credit status</td><td><span class="pill pill-l">Low-Med</span></td><td><span class="pill pill-h">High</span></td><td><span class="pill pill-l">Low</span></td></tr>
+      <tr><td><b>11</b></td><td>Multi-CLI parity reference (OpenCode, Codex CLI)</td><td>Interoperability / skill</td><td><span class="pill pill-l">Low-Med</span></td><td><span class="pill pill-m">Medium</span></td><td><span class="pill pill-l">Low</span></td></tr>
+      <tr><td><b>12</b></td><td>Gemini CLI / Agents CLI provider parity</td><td>Gemini provider surface</td><td><span class="pill pill-m">Medium</span></td><td><span class="pill pill-m">Medium</span></td><td><span class="pill pill-m">Medium</span></td></tr>
+      <tr><td><b>13</b></td><td>Framework-agnostic DAG workflows + circuit breakers</td><td>Workflows runtime</td><td><span class="pill pill-m">Medium</span></td><td><span class="pill pill-l">Low-Med</span></td><td><span class="pill pill-m">Medium</span></td></tr>
+      <tr><td><b>14</b></td><td>Enterprise Admin API / governance surface</td><td>Product improvement</td><td><span class="pill pill-l">Low-Med</span></td><td><span class="pill pill-m">Medium</span></td><td><span class="pill pill-l">Low-Med</span></td></tr>
+    </tbody>
+  </table>
+</section>
+
+<section>
+  <h2><span class="n">03</span> Impact × feasibility at a glance</h2>
+  <div class="chart-card">
+    <p class="meta" style="margin:0 0 14px;">Composite editorial score (0–100) = impact × feasibility, weighted by fit with existing Better Agent surfaces. Qualitative, not a benchmark.</p>
+
+    <div class="chart-row"><div class="chart-label">1 · MCP 2026-07-28 stateless + Extensions</div><div class="chart-track"><div class="chart-fill" style="width:95%;background:linear-gradient(90deg,#4f9cf9,#8b5cf6)"></div></div><b>95</b></div>
+    <div class="chart-row"><div class="chart-label">2 · MCP03 tool-poisoning defenses</div><div class="chart-track"><div class="chart-fill" style="width:92%;background:linear-gradient(90deg,#4f9cf9,#f87171)"></div></div><b>92</b></div>
+    <div class="chart-row"><div class="chart-label">3 · Sandboxed execution (E2B/Daytona)</div><div class="chart-track"><div class="chart-fill" style="width:89%;background:linear-gradient(90deg,#4f9cf9,#f87171)"></div></div><b>89</b></div>
+    <div class="chart-row"><div class="chart-label">4 · Managed Agents: dreaming + outcomes</div><div class="chart-track"><div class="chart-fill" style="width:86%;background:linear-gradient(90deg,#4f9cf9,#8b5cf6)"></div></div><b>86</b></div>
+    <div class="chart-row"><div class="chart-label">5 · MCP Registry canonical discovery</div><div class="chart-track"><div class="chart-fill" style="width:80%;background:linear-gradient(90deg,#4f9cf9,#34d399)"></div></div><b>80</b></div>
+    <div class="chart-row"><div class="chart-label">6 · Agent Skills catalog + vetting</div><div class="chart-track"><div class="chart-fill" style="width:76%;background:linear-gradient(90deg,#4f9cf9,#34d399)"></div></div><b>76</b></div>
+    <div class="chart-row"><div class="chart-label">7 · Open agent-eval harness</div><div class="chart-track"><div class="chart-fill" style="width:73%;background:linear-gradient(90deg,#4f9cf9,#34d399)"></div></div><b>73</b></div>
+    <div class="chart-row"><div class="chart-label">8 · Context7 versioned docs</div><div class="chart-track"><div class="chart-fill" style="width:70%;background:linear-gradient(90deg,#4f9cf9,#34d399)"></div></div><b>70</b></div>
+    <div class="chart-row"><div class="chart-label">9 · Model-line routing (Fable/Opus/Haiku)</div><div class="chart-track"><div class="chart-fill" style="width:66%;background:linear-gradient(90deg,#4f9cf9,#34d399)"></div></div><b>66</b></div>
+    <div class="chart-row"><div class="chart-label">10 · Agent SDK cost telemetry</div><div class="chart-track"><div class="chart-fill" style="width:62%;background:#4f9cf9"></div></div><b>62</b></div>
+    <div class="chart-row"><div class="chart-label">11 · Multi-CLI parity reference</div><div class="chart-track"><div class="chart-fill" style="width:58%;background:#4f9cf9"></div></div><b>58</b></div>
+    <div class="chart-row"><div class="chart-label">12 · Gemini CLI / Agents CLI parity</div><div class="chart-track"><div class="chart-fill" style="width:56%;background:#4f9cf9"></div></div><b>56</b></div>
+    <div class="chart-row"><div class="chart-label">13 · DAG workflows + circuit breakers</div><div class="chart-track"><div class="chart-fill" style="width:60%;background:#4f9cf9"></div></div><b>60</b></div>
+    <div class="chart-row"><div class="chart-label">14 · Enterprise Admin API</div><div class="chart-track"><div class="chart-fill" style="width:50%;background:#4f9cf9"></div></div><b>50</b></div>
+  </div>
+</section>
+
+<section>
+  <h2><span class="n">04</span> Top opportunity cards</h2>
+  <div class="grid">
+
+    <div class="card">
+      <div class="rank">Rank 1 · Spec / foundational</div>
+      <h3>MCP 2026-07-28: stateless protocol + first-class Extensions</h3>
+      <p class="lede">The next MCP spec release candidate makes the protocol <strong>stateless</strong> (no <code>Mcp-Session-Id</code>, no <code>initialize</code> handshake) and promotes <strong>Extensions</strong> to a core concept.</p>
+      <div class="barwrap"><div class="bar"><span style="width:95%"></span></div><b>95</b></div>
+      <dl>
+        <dt>Integration shape</dt><dd>Update the MCP bridge/proxy to drop session-id lifecycle, add Extensions negotiation, and route identity via the existing per-extension token model.</dd>
+        <dt>Why now</dt><dd>RC lands 2026-07-28; the registry is already ~9,650 servers and growing. Stateless core unlocks horizontal scaling of Better Agent's MCP fan-out.</dd>
+        <dt>Risks</dt><dd><span class="pill pill-sec">Breaking</span> Hard break for session-id-based lifecycle; needs a dual-support migration window and Claude/Codex/Gemini parity preservation.</dd>
+        <dt>Evidence</dt><dd class="citations"><a href="https://blog.modelcontextprotocol.io/posts/2026-07-28-release-candidate/" target="_blank" rel="noopener">MCP blog · RC</a> · <a href="https://www.digitalapplied.com/blog/mcp-adoption-statistics-2026-model-context-protocol" target="_blank" rel="noopener">adoption stats</a> · <a href="https://workos.com/blog/everything-your-team-needs-to-know-about-mcp-in-2026" target="_blank" rel="noopener">WorkOS 2026</a></dd>
+      </dl>
+    </div>
+
+    <div class="card">
+      <div class="rank">Rank 2 · Security</div>
+      <h3>MCP03 tool-poisoning &amp; indirect prompt-injection defenses</h3>
+      <p class="lede">OWASP's MCP Top 10 lists <strong>MCP03 Tool Poisoning</strong> (malicious instructions in tool metadata, schemas, or rug-pull updates) as a core risk; a July 2026 CSA note documents live IDE CVEs.</p>
+      <div class="barwrap"><div class="bar"><span style="width:92%"></span></div><b>92</b></div>
+      <dl>
+        <dt>Integration shape</dt><dd>A tool-description inspection/sanitization gate before MCP registration, an allowlist mode, runtime anomaly monitoring, and routing sensitive tool calls through Better Agent's approvals surface.</dd>
+        <dt>Why now</dt><dd>Better Agent spawns real subprocesses and renders untrusted tool descriptions — "security is the top priority" makes this a direct project mandate.</dd>
+        <dt>Risks</dt><dd>Over-aggressive sanitization breaks legitimate tools; needs allowlist + human-in-the-loop tuning; rug-pull detection requires re-validating tool definitions on update.</dd>
+        <dt>Evidence</dt><dd class="citations"><a href="https://owasp.org/www-project-mcp-top-10/" target="_blank" rel="noopener">OWASP MCP Top 10</a> · <a href="https://owasp.org/www-community/attacks/MCP_Tool_Poisoning" target="_blank" rel="noopener">MCP03 attack page</a> · <a href="https://labs.cloudsecurityalliance.org/research/csa-research-note-mcp-tool-poisoning-auto-execution-20260701/" target="_blank" rel="noopener">CSA note (Jul 2026)</a> · <a href="https://equixsy.com/blog/2026/06/04/mapping-nsa-s-mcp-guidance-to-the-owasp-mcp-top-10-how-to-test-for-the-risks/" target="_blank" rel="noopener">NSA→OWASP mapping</a></dd>
+      </dl>
+    </div>
+
+    <div class="card">
+      <div class="rank">Rank 3 · Security / isolation</div>
+      <h3>Sandboxed code execution (E2B / Daytona)</h3>
+      <p class="lede">Open-source, purpose-built execution sandboxes — E2B (Firecracker microVMs) and Daytona (self-hostable, ~90ms provisioning) — isolate the commands autonomous agents run.</p>
+      <div class="barwrap"><div class="bar"><span style="width:89%"></span></div><b>89</b></div>
+      <dl>
+        <dt>Integration shape</dt><dd>An optional <code>daemons</code>-surface runner that executes untrusted/shell-shaped tool output inside a sandbox instead of the host, wired behind the existing approvals gate.</dd>
+        <dt>Why now</dt><dd>Better Agent is explicitly a destructive tool that runs real CLIs; sandboxing is the structural complement to the tool-poisoning gate and confines blast radius on a bad delegation.</dd>
+        <dt>Risks</dt><dd><span class="pill pill-sec">Operational</span> Adds an external dependency and latency; self-hosted Daytona needs infra; must keep secrets/env scrubbing parity and fail-closed on sandbox unavailability.</dd>
+        <dt>Evidence</dt><dd class="citations"><a href="https://e2b.dev/" target="_blank" rel="noopener">E2B</a> · <a href="https://www.daytona.io/" target="_blank" rel="noopener">Daytona</a> · <a href="https://northflank.com/blog/daytona-vs-e2b-ai-code-execution-sandboxes" target="_blank" rel="noopener">comparison (Northflank)</a></dd>
+      </dl>
+    </div>
+
+    <div class="card">
+      <div class="rank">Rank 4 · Orchestration</div>
+      <h3>Managed Agents: dreaming + rubric-graded outcomes</h3>
+      <p class="lede">Anthropic's Managed Agents layer a <em>scheduler</em>, a <em>dreaming pass</em> (cross-session lesson consolidation), and rubric-based outcome grading atop the Agent SDK.</p>
+      <div class="barwrap"><div class="bar"><span style="width:86%"></span></div><b>86</b></div>
+      <dl>
+        <dt>Integration shape</dt><dd>Extend routines' <code>assessment</code> field into a rubric + independent-evaluator "outcomes" loop; add a dreaming runtime skill that periodically distills session insights into the requirements corpus.</dd>
+        <dt>Why now</dt><dd>Better Agent already has routines (scheduler), requirements, and per-session memory — dreaming/outcomes extend existing surfaces, not new subsystems.</dd>
+        <dt>Risks</dt><dd>Extra evaluator passes cost tokens; evaluator quality gates the loop; must preserve cross-provider parity and fail-closed behavior.</dd>
+        <dt>Evidence</dt><dd class="citations"><a href="https://platform.claude.com/docs/en/release-notes/overview" target="_blank" rel="noopener">Claude release notes</a> · <a href="https://www.totalum.app/blog/claude-agent-sdk-totalum-2026" target="_blank" rel="noopener">Totalum: Agent SDK 2026</a> · <a href="https://thenewstack.io/fable-5-opus-comparison/" target="_blank" rel="noopener">The New Stack</a></dd>
+      </dl>
+    </div>
+
+    <div class="card">
+      <div class="rank">Rank 5 · Discovery</div>
+      <h3>Official MCP Registry as canonical discovery</h3>
+      <p class="lede">The registry at <code>registry.modelcontextprotocol.io</code> is nearing ~9,650 server records and a canonical REST API, with a verified-namespace trust model emerging.</p>
+      <div class="barwrap"><div class="bar"><span style="width:80%"></span></div><b>80</b></div>
+      <dl>
+        <dt>Integration shape</dt><dd>A registry-backed browser with one-click install into Better Agent's ambient-MCP surface, preferring verified namespaces; reuse provider-config-sync plumbing.</dd>
+        <dt>Risks</dt><dd>Registry API still evolving; namespace-trust model must be reflected in the UI (verified vs. community) to avoid installing unvetted servers.</dd>
+        <dt>Evidence</dt><dd class="citations"><a href="https://registry.modelcontextprotocol.io/" target="_blank" rel="noopener">Official registry</a> · <a href="https://github.com/modelcontextprotocol/servers" target="_blank" rel="noopener">servers repo</a> · <a href="https://workos.com/blog/everything-your-team-needs-to-know-about-mcp-in-2026" target="_blank" rel="noopener">WorkOS 2026</a></dd>
+      </dl>
+    </div>
+
+    <div class="card">
+      <div class="rank">Rank 6 · Skills</div>
+      <h3>Agent Skills (SKILL.md) catalog + vetting</h3>
+      <p class="lede">The SKILL.md standard now backs multiple real catalogs: <code>anthropics/skills</code> (canonical), SkillsMP, ClaudeSkills.info (381 curated), Awesome Claude (169+).</p>
+      <div class="barwrap"><div class="bar"><span style="width:76%"></span></div><b>76</b></div>
+      <dl>
+        <dt>Integration shape</dt><dd>Import/export SKILL.md packages into Better Agent's runtime skills, behind a curated catalog and a security-vetting gate (pairs with Rank 2).</dd>
+        <dt>Risks</dt><dd>Quality variance across community skills; vetting is mandatory, not optional; SKILL.md scripts execute code — treat as untrusted.</dd>
+        <dt>Evidence</dt><dd class="citations"><a href="https://github.com/anthropics/skills" target="_blank" rel="noopener">anthropics/skills</a> · <a href="https://skillsmp.com/" target="_blank" rel="noopener">SkillsMP</a> · <a href="https://claudeskills.info/skills/" target="_blank" rel="noopener">ClaudeSkills.info</a> · <a href="https://platform.claude.com/docs/en/agents-and-tools/agent-skills/overview" target="_blank" rel="noopener">Skills docs</a></dd>
+      </dl>
+    </div>
+
+    <div class="card">
+      <div class="rank">Rank 7 · Quality</div>
+      <h3>Open agent-eval harness (DeepEval / promptfoo / agentevals)</h3>
+      <p class="lede">Mature open-source eval frameworks — DeepEval (14+ metrics, CI), promptfoo, and agentevals (agent-trajectory scoring) — are the de-facto assessment layer for 2026 agents.</p>
+      <div class="barwrap"><div class="bar"><span style="width:73%"></span></div><b>73</b></div>
+      <dl>
+        <dt>Integration shape</dt><dd>A workflow that runs DeepEval/agentevals over routine outputs and turn trajectories, feeding scores into routines' assessment + the outcomes loop (Rank 4).</dd>
+        <dt>Risks</dt><dd>LLM-as-judge costs tokens and has evaluator variance; gate by task type and keep deterministic checks primary.</dd>
+        <dt>Evidence</dt><dd class="citations"><a href="https://mlflow.org/top-5-agent-evaluation-frameworks/" target="_blank" rel="noopener">MLflow: top-5</a> · <a href="https://www.confident-ai.com/knowledge-base/compare/best-ai-evaluation-tools-2026" target="_blank" rel="noopener">Confident AI 2026</a> · <a href="https://blog.agentailor.com/posts/top-ai-agent-eval-frameworks-2026" target="_blank" rel="noopener">Agentailor top-7</a></dd>
+      </dl>
+    </div>
+
+    <div class="card">
+      <div class="rank">Rank 8 · Quick win</div>
+      <h3>Context7 MCP — versioned live docs as a tool</h3>
+      <p class="lede">Upstash's Context7 serves current, version-pinned library/framework docs to any MCP client — a near-universal accuracy booster over stale training data.</p>
+      <div class="barwrap"><div class="bar"><span style="width:70%"></span></div><b>70</b></div>
+      <dl>
+        <dt>Integration shape</dt><dd>Ship a one-click ambient-MCP preset wiring Context7 into all providers; no new subsystem — reuse the ambient-MCP proxy.</dd>
+        <dt>Risks</dt><dd>External hosted endpoint (API key / rate limits); low blast radius since it is read-only doc retrieval.</dd>
+        <dt>Evidence</dt><dd class="citations"><a href="https://github.com/upstash/context7" target="_blank" rel="noopener">upstash/context7</a> · <a href="https://context7.com/" target="_blank" rel="noopener">Context7 site</a> · <a href="https://docs.stacklok.com/toolhive/guides-mcp/context7" target="_blank" rel="noopener">Stacklok guide</a></dd>
+      </dl>
+    </div>
+
+  </div>
+</section>
+
+<section>
+  <h2><span class="n">05</span> Lower-rank &amp; supporting opportunities</h2>
+  <div class="grid-3">
+    <div class="card">
+      <h3>9 · Model-line routing (Fable 5 / Opus 4.8 / Haiku 4.5)</h3>
+      <p class="lede">Fable 5 (Anthropic's top tier) and Mythos 5 redeployed Jul 1, 2026; Opus 4.8 stays current and reportedly absorbs coding routing.</p>
+      <div class="barwrap"><div class="bar"><span style="width:66%"></span></div><b>66</b></div>
+      <p class="meta">Shape: extend the model selector + a <code>fallbackModel</code> rule. <span class="pill pill-l">Low-Med</span> complexity.</p>
+      <p class="meta"><a href="https://www.anthropic.com/news/claude-fable-5-mythos-5" target="_blank" rel="noopener">Anthropic</a> · <a href="https://platform.claude.com/docs/en/about-claude/models/introducing-claude-fable-5-and-claude-mythos-5" target="_blank" rel="noopener">docs</a> · <a href="https://thenewstack.io/fable-5-opus-comparison/" target="_blank" rel="noopener">New Stack</a></p>
+    </div>
+
+    <div class="card">
+      <h3>10 · Agent SDK credit / cost telemetry</h3>
+      <p class="lede">The June 15 Agent SDK billing change was paused; a monthly Agent SDK credit ($20–$200) now draws per plan.</p>
+      <div class="barwrap"><div class="bar"><span style="width:62%"></span></div><b>62</b></div>
+      <p class="meta">Shape: surface credit status + per-run cost in the UI; truthfully represent consumed vs. remaining credit. <span class="pill pill-l">Low</span> complexity.</p>
+      <p class="meta"><a href="https://www.digitalapplied.com/blog/anthropic-claude-credit-overhaul-june-15-2026" target="_blank" rel="noopener">DigitalApplied</a> · <a href="https://zed.dev/blog/anthropic-subscription-changes" target="_blank" rel="noopener">Zed blog</a></p>
+    </div>
+
+    <div class="card">
+      <h3>11 · Multi-CLI parity reference (OpenCode, Codex CLI)</h3>
+      <p class="lede">OpenCode (~180k stars, MIT) tops open CLI-agent rankings; Codex CLI + GPT-5.5 leads Terminal-Bench. Reference for UX/parity, not adoption.</p>
+      <div class="barwrap"><div class="bar"><span style="width:58%"></span></div><b>58</b></div>
+      <p class="meta">Shape: borrow interaction patterns + keep multi-provider parity. <span class="pill pill-l">Low</span> complexity.</p>
+      <p class="meta"><a href="https://www.morphllm.com/ai-coding-agent" target="_blank" rel="noopener">MorphLLM ranking</a> · <a href="https://dev.to/lightningdev123/best-open-source-cli-coding-agents-to-explore-in-2026-5bn7" target="_blank" rel="noopener">DEV roundup</a></p>
+    </div>
+
+    <div class="card">
+      <h3>12 · Gemini CLI / Agents CLI provider parity</h3>
+      <p class="lede">Google's open-source Gemini CLI plus a new "Agents CLI" (create→production) are the Gemini-side counterparts Better Agent must keep parity with.</p>
+      <div class="barwrap"><div class="bar"><span style="width:56%"></span></div><b>56</b></div>
+      <p class="meta">Shape: extend the Gemini provider surface + instruction harness to track Gemini CLI capabilities. <span class="pill pill-m">Medium</span> complexity.</p>
+      <p class="meta"><a href="https://github.com/google-gemini/gemini-cli" target="_blank" rel="noopener">gemini-cli repo</a> · <a href="https://developers.googleblog.com/agents-cli-in-agent-platform-create-to-production-in-one-cli/" target="_blank" rel="noopener">Agents CLI</a></p>
+    </div>
+
+    <div class="card">
+      <h3>13 · DAG workflows + cost control + circuit breakers</h3>
+      <p class="lede">Framework-agnostic orchestration (awesome-ai-agents-2026 tracks 340+; routing + DAG + cost budgets) is the 2026 consolidation pattern.</p>
+      <div class="barwrap"><div class="bar"><span style="width:60%"></span></div><b>60</b></div>
+      <p class="meta">Shape: a "workflows" runtime composing manager→worker DAGs with per-run budgets — extend today's orchestration, don't fork it. <span class="pill pill-m">Medium</span> complexity.</p>
+      <p class="meta"><a href="https://github.com/caramaschiHG/awesome-ai-agents-2026" target="_blank" rel="noopener">awesome-ai-agents-2026</a> · <a href="https://ossinsight.io/trending/ai" target="_blank" rel="noopener">OSS Insight</a></p>
+    </div>
+
+    <div class="card">
+      <h3>14 · Enterprise Admin API / governance</h3>
+      <p class="lede">Claude's Admin API (Enterprise, beta) and self-serve HIPAA landed Jul 14, 2026 — signals for org-level governance Better Agent could mirror.</p>
+      <div class="barwrap"><div class="bar"><span style="width:50%"></span></div><b>50</b></div>
+      <p class="meta">Shape: an org/admin settings surface with role-scoped controls. <span class="pill pill-l">Low-Med</span> complexity.</p>
+      <p class="meta"><a href="https://platform.claude.com/docs/en/release-notes/overview" target="_blank" rel="noopener">release notes</a> · <a href="https://releasebot.io/updates/anthropic/claude" target="_blank" rel="noopener">Releasebot</a></p>
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2><span class="n">06</span> Risks &amp; security cross-cut</h2>
+  <div class="grid">
+    <div class="card">
+      <h3>Trust-boundary &amp; injection</h3>
+      <p class="lede">Better Agent spawns real CLIs and renders untrusted tool/skill metadata. The dominant 2026 threat is <b>indirect prompt injection via tool descriptions, parameter schemas, and rug-pull updates</b> (OWASP MCP03).</p>
+      <ul class="clean">
+        <li>Gate every MCP/skill registration behind a description-inspection + allowlist pass (Rank 2).</li>
+        <li>Re-validate tool definitions on update to catch rug-pulls.</li>
+        <li>Route sensitive tool calls through the existing approvals surface; fail closed on ambiguity.</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>Execution isolation</h3>
+      <p class="lede">Destructive commands deserve confinement. Open sandboxes (E2B microVMs, Daytona) give a structural blast-radius limit (Rank 3).</p>
+      <ul class="clean">
+        <li>Run shell-shaped/untrusted tool output in a sandbox, not on the host.</li>
+        <li>Keep env/secret scrubbing parity in the sandbox path — no auth tokens cross the boundary.</li>
+        <li>Fail closed if the sandbox is unavailable; never fall back to host execution silently.</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>Supply chain</h3>
+      <p class="lede">Registry (~9,650 servers) and skill catalogs (hundreds–millions of entries) are now an install surface, not just a discovery one.</p>
+      <ul class="clean">
+        <li>Prefer verified-namespace servers; mark community items clearly (Ranks 5, 6).</li>
+        <li>Treat SKILL.md bundled scripts as untrusted code; vet before install.</li>
+        <li>Preserve Better Agent's signature/trust-by-source-type model — trust is bound to install path, never self-declared.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2><span class="n">07</span> Watchlist — trends to monitor</h2>
+  <div class="grid">
+    <div class="card">
+      <h3>Spec &amp; platform</h3>
+      <ul class="clean">
+        <li><b>MCP 2026-07-28 RC → GA</b> and the <code>Mcp-Session-Id</code> removal migration wave.</li>
+        <li><b>Managed Agents GA + pricing</b> (scheduler / dreaming / outcomes leaving beta).</li>
+        <li><b>MCP Registry API stabilization</b> + verified-namespace trust model.</li>
+        <li><b>Agent SDK credit program</b> resuming after the June 15 pause.</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>Ecosystem &amp; security</h3>
+      <ul class="clean">
+        <li><b>OWASP MCP Top 10 maturing</b> into gateway/registry-level standards; NSA guidance uptake.</li>
+        <li><b>Skills marketplace consolidation</b> and security-vetting norms (anthropics/skills vs. SkillsMP vs. Skills.sh).</li>
+        <li><b>Sandboxing standardization</b> for agent code execution (E2B / Daytona / microVM norms).</li>
+        <li><b>Open CLI agents</b> (OpenCode, Codex CLI, Gemini CLI) converging on shared MCP + skills surfaces.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2><span class="n">08</span> Method &amp; citations</h2>
+  <div class="citations">
+    Sources are public and citable, prioritizing official docs, GitHub, the MCP registry/blog, OWASP/NSA security guidance, reputable engineering blogs, and OSS-trending indices. Opportunities were scored on a composite of <b>impact</b>, <b>feasibility</b> (fit with existing Better Agent surfaces), and <b>strategic/security alignment</b>; scores are qualitative editorial, not benchmarks.
+    <ol>
+      <li>MCP 2026-07-28 spec RC — <a href="https://blog.modelcontextprotocol.io/posts/2026-07-28-release-candidate/" target="_blank" rel="noopener">MCP blog</a>, <a href="https://www.digitalapplied.com/blog/mcp-adoption-statistics-2026-model-context-protocol" target="_blank" rel="noopener">adoption stats</a>, <a href="https://workos.com/blog/everything-your-team-needs-to-know-about-mcp-in-2026" target="_blank" rel="noopener">WorkOS 2026</a></li>
+      <li>MCP tool-poisoning / injection — <a href="https://owasp.org/www-project-mcp-top-10/" target="_blank" rel="noopener">OWASP MCP Top 10</a>, <a href="https://owasp.org/www-community/attacks/MCP_Tool_Poisoning" target="_blank" rel="noopener">MCP03</a>, <a href="https://labs.cloudsecurityalliance.org/research/csa-research-note-mcp-tool-poisoning-auto-execution-20260701/" target="_blank" rel="noopener">CSA note</a>, <a href="https://equixsy.com/blog/2026/06/04/mapping-nsa-s-mcp-guidance-to-the-owasp-mcp-top-10-how-to-test-for-the-risks/" target="_blank" rel="noopener">NSA→OWASP</a></li>
+      <li>Code-execution sandboxes — <a href="https://e2b.dev/" target="_blank" rel="noopener">E2B</a>, <a href="https://www.daytona.io/" target="_blank" rel="noopener">Daytona</a>, <a href="https://northflank.com/blog/daytona-vs-e2b-ai-code-execution-sandboxes" target="_blank" rel="noopener">Northflank comparison</a></li>
+      <li>MCP Registry — <a href="https://registry.modelcontextprotocol.io/" target="_blank" rel="noopener">registry</a>, <a href="https://github.com/modelcontextprotocol/servers" target="_blank" rel="noopener">servers repo</a></li>
+      <li>Agent Skills / SKILL.md — <a href="https://github.com/anthropics/skills" target="_blank" rel="noopener">anthropics/skills</a>, <a href="https://skillsmp.com/" target="_blank" rel="noopener">SkillsMP</a>, <a href="https://claudeskills.info/skills/" target="_blank" rel="noopener">ClaudeSkills.info</a>, <a href="https://platform.claude.com/docs/en/agents-and-tools/agent-skills/overview" target="_blank" rel="noopener">docs</a></li>
+      <li>Agent eval frameworks — <a href="https://mlflow.org/top-5-agent-evaluation-frameworks/" target="_blank" rel="noopener">MLflow top-5</a>, <a href="https://www.confident-ai.com/knowledge-base/compare/best-ai-evaluation-tools-2026" target="_blank" rel="noopener">Confident AI</a>, <a href="https://blog.agentailor.com/posts/top-ai-agent-eval-frameworks-2026" target="_blank" rel="noopener">Agentailor</a></li>
+      <li>Context7 — <a href="https://github.com/upstash/context7" target="_blank" rel="noopener">upstash/context7</a>, <a href="https://context7.com/" target="_blank" rel="noopener">site</a></li>
+      <li>Models — <a href="https://www.anthropic.com/news/claude-fable-5-mythos-5" target="_blank" rel="noopener">Fable 5 / Mythos 5</a>, <a href="https://platform.claude.com/docs/en/about-claude/models/introducing-claude-fable-5-and-claude-mythos-5" target="_blank" rel="noopener">docs</a>, <a href="https://thenewstack.io/fable-5-opus-comparison/" target="_blank" rel="noopener">New Stack</a></li>
+      <li>Agent SDK billing — <a href="https://www.digitalapplied.com/blog/anthropic-claude-credit-overhaul-june-15-2026" target="_blank" rel="noopener">DigitalApplied</a>, <a href="https://zed.dev/blog/anthropic-subscription-changes" target="_blank" rel="noopener">Zed</a></li>
+      <li>Open CLI agents — <a href="https://www.morphllm.com/ai-coding-agent" target="_blank" rel="noopener">MorphLLM</a>, <a href="https://dev.to/lightningdev123/best-open-source-cli-coding-agents-to-explore-in-2026-5bn7" target="_blank" rel="noopener">DEV roundup</a></li>
+      <li>Gemini CLI / Agents CLI — <a href="https://github.com/google-gemini/gemini-cli" target="_blank" rel="noopener">gemini-cli</a>, <a href="https://developers.googleblog.com/agents-cli-in-agent-platform-create-to-production-in-one-cli/" target="_blank" rel="noopener">Agents CLI</a></li>
+      <li>Orchestration frameworks — <a href="https://github.com/caramaschiHG/awesome-ai-agents-2026" target="_blank" rel="noopener">awesome-ai-agents-2026</a>, <a href="https://ossinsight.io/trending/ai" target="_blank" rel="noopener">OSS Insight</a></li>
+      <li>Enterprise/Admin — <a href="https://platform.claude.com/docs/en/release-notes/overview" target="_blank" rel="noopener">release notes</a>, <a href="https://releasebot.io/updates/anthropic/claude" target="_blank" rel="noopener">Releasebot</a></li>
+    </ol>
+  </div>
+</section>
+
+<footer>
+  Better Agent daily open-source scan · 2026-07-15 · Standalone self-contained HTML report · worker <b>daily-oss-extension-research</b>. All claims sourced from public, citable references above; qualitative scores are editorial, not measurements.
+</footer>
+
+</div>
+</body>
+</html>

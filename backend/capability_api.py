@@ -703,22 +703,18 @@ def _register_switch_control() -> None:
     async def request_switch(payload: BaseModel) -> Any:
         from daemonhost import switch_control
 
-        if os.environ.get("BETTER_CLAUDE_RUN_SH_SUPERVISOR") != "1":
-            raise HTTPException(status_code=409, detail="line switching requires the launcher supervisor")
-        request_id = str(uuid.uuid4())
-        requested = switch_control.request(running_checkout(), payload.target, request_id)
         try:
             import main
 
             restarted_nodes = await main._restart_connected_worker_nodes()
-            await main._trigger_supervisor_restart(request_id)
         except Exception as exc:
-            switch_control.abort(request_id, f"restart trigger failed: {exc}")
-            raise HTTPException(status_code=502, detail=f"restart trigger failed: {exc}") from exc
+            raise HTTPException(status_code=502, detail=f"worker-node preparation failed: {exc}") from exc
+        requested = switch_control.submit(running_checkout(), payload.target)
+        request_id = str(requested["request_id"])
         return {
             **requested,
             "restart": {
-                "status": "rebuilding",
+                "status": requested["status"],
                 "request_id": request_id,
                 "restarted_nodes": restarted_nodes,
             },

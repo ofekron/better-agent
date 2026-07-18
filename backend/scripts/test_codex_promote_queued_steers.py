@@ -46,6 +46,7 @@ def _configure_project_structure_runtime() -> None:
 class _SessionManager:
     def __init__(self) -> None:
         self.removed: list[tuple[str, str | None]] = []
+        self.operations: list[tuple[str, object]] = []
         self.updated: list[tuple[str, str, dict]] = []
         self.sessions = {
             "sid": {
@@ -59,6 +60,7 @@ class _SessionManager:
 
     def remove_queued_prompt(self, sid: str, queued_id: str | None) -> None:
         self.removed.append((sid, queued_id))
+        self.operations.append(("removed", (sid, queued_id)))
 
     def update_queued_prompt(self, sid: str, queued_id: str, updates: dict) -> None:
         self.updated.append((sid, queued_id, updates))
@@ -221,13 +223,19 @@ async def _test_promote_queued_steers_first_item() -> None:
     })
 
     steered: list[dict] = []
+    dispatched: list[tuple[str, dict]] = []
 
     async def steer_active_turn(**kwargs):
         steered.append(kwargs)
         return True
 
+    async def dispatch_raw(app_session_id: str, event: dict) -> None:
+        dispatched.append((app_session_id, event))
+        fake_session_manager.operations.append(("dispatched", event))
+
     coord.steer_active_turn = steer_active_turn  # type: ignore[method-assign]
     fake_session_manager = _SessionManager()
+    coord.dispatch_raw = dispatch_raw  # type: ignore[method-assign]
     original_session_manager = orchestrator.session_manager
     orchestrator.session_manager = fake_session_manager  # type: ignore[assignment]
     try:
@@ -245,9 +253,50 @@ async def _test_promote_queued_steers_first_item() -> None:
     }]
     assert coord._queued_ids == {"sid": ["q2"]}
     assert fake_session_manager.removed == [("sid", "q1")]
+    assert dispatched == [("sid", {
+        "type": "queue_consumed",
+        "data": {"app_session_id": "sid", "queued_id": "q1"},
+    })]
+    assert fake_session_manager.operations == [
+        ("removed", ("sid", "q1")),
+        ("dispatched", dispatched[0][1]),
+    ]
     remaining = await coord._prompt_queues["sid"].get()
     assert remaining["_queued_id"] == "q2"
     assert coord._prompt_queues["sid"].empty()
+
+
+async def _test_failed_queued_steer_does_not_consume_item() -> None:
+    coord = _new_coord()
+    coord._prompt_queues = {"sid": asyncio.Queue()}
+    coord._queued_ids = {"sid": ["q1"]}
+    await coord._prompt_queues["sid"].put({
+        "_queued_id": "q1",
+        "prompt": "visible",
+    })
+    dispatched: list[tuple[str, dict]] = []
+
+    async def steer_active_turn(**_kwargs):
+        return False
+
+    async def dispatch_raw(app_session_id: str, event: dict) -> None:
+        dispatched.append((app_session_id, event))
+
+    coord.steer_active_turn = steer_active_turn  # type: ignore[method-assign]
+    coord.dispatch_raw = dispatch_raw  # type: ignore[method-assign]
+    fake_session_manager = _SessionManager()
+    original_session_manager = orchestrator.session_manager
+    orchestrator.session_manager = fake_session_manager  # type: ignore[assignment]
+    try:
+        assert await coord.promote_queued("sid", action="steer") is False
+    finally:
+        orchestrator.session_manager = original_session_manager
+
+    assert dispatched == []
+    assert fake_session_manager.removed == []
+    assert coord._queued_ids == {"sid": ["q1"]}
+    remaining = await coord._prompt_queues["sid"].get()
+    assert remaining["_queued_id"] == "q1"
 
 
 async def _test_promote_queued_steers_persisted_item_when_memory_queue_empty() -> None:
@@ -665,7 +714,6 @@ async def _test_normal_queued_prompts_deliver_individually() -> None:
 
     async def handle_prompt(**kwargs) -> None:
         handled.append(kwargs)
-        fake_session_manager.remove_queued_prompt(sid, kwargs["queue_item_id"])
         if len(handled) == 2:
             ran.set()
 
@@ -793,7 +841,6 @@ async def _test_team_queued_prompts_deliver_individually() -> None:
 
     async def handle_prompt(**kwargs) -> None:
         handled.append(kwargs)
-        fake_session_manager.remove_queued_prompt(sid, kwargs["queue_item_id"])
         if len(handled) == 2:
             ran.set()
 
@@ -1554,6 +1601,7 @@ def main() -> None:
         asyncio.run(_test_steer_active_turn_saves_in_turn_event())
         asyncio.run(_test_steer_active_turn_waits_for_codex_turn_id())
         asyncio.run(_test_promote_queued_steers_first_item())
+        asyncio.run(_test_failed_queued_steer_does_not_consume_item())
         asyncio.run(_test_promote_queued_steers_persisted_item_when_memory_queue_empty())
         asyncio.run(_test_promote_queued_interrupts_first_item())
         asyncio.run(_test_promote_queued_interrupts_selected_item())

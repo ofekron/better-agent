@@ -20,6 +20,14 @@ async function fetchState(context) {
   return response.json();
 }
 
+export function restartStatusForRequest(payload, requestId) {
+  if (!payload || payload.request_id !== requestId) return { status: "pending", error: "" };
+  const status = payload.status === "succeeded" || payload.status === "failed"
+    ? payload.status
+    : "pending";
+  return { status, error: typeof payload.error === "string" ? payload.error : "" };
+}
+
 export function Component({ context, React }) {
   const { useState, useEffect, useCallback, useRef } = React;
   const t = typeof context.t === "function" ? context.t : (_key, fallback) => fallback;
@@ -54,14 +62,15 @@ export function Component({ context, React }) {
           );
           if (!response.ok) return;
           const payload = await response.json();
-          if (payload && payload.status === "succeeded") {
+          const result = restartStatusForRequest(payload, requestId);
+          if (result.status === "succeeded") {
             clearInterval(pollRef.current);
             window.location.reload();
           }
-          if (payload && payload.status === "failed") {
+          if (result.status === "failed") {
             clearInterval(pollRef.current);
             setSwitching(false);
-            setError(t("switchControl.buildFailed", "Frontend build failed — still on the previous line"));
+            setError(result.error || t("switchControl.buildFailed", "Frontend build failed — still on the previous line"));
             void refresh();
           }
         } catch {
