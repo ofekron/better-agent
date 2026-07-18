@@ -12272,6 +12272,80 @@ def _start_lag_watchdog(threshold: float = 1.5, cooldown: float = 5.0) -> None:
     threading.Thread(target=run, daemon=True, name="lag-watchdog").start()
 
 
+_TAILSCALE_SERVE_RECONCILE_INTERVAL_SECONDS = 300.0
+_tailscale_serve_reconciler_task: asyncio.Task | None = None
+
+
+def _tailscale_serve_reconciler_local_url() -> str | None:
+    port = os.environ.get("BETTER_AGENT_BACKEND_PORT") or os.environ.get("BETTER_CLAUDE_BACKEND_PORT")
+    if not port or not port.isdigit():
+        return None
+    return f"http://127.0.0.1:{int(port)}"
+
+
+def _start_tailscale_serve_reconciler() -> None:
+    """A phone's saved *.ts.net HTTPS URL dies whenever tailscaled loses its
+    serve config (upgrade, reset, tailnet policy change), and no client can
+    reach the backend to trigger the lazy settings-endpoint heal. Re-assert
+    the config at startup and on a fixed interval."""
+    global _tailscale_serve_reconciler_task
+    if os.environ.get("BETTER_AGENT_TEST_MODE"):
+        return
+    local_url = _tailscale_serve_reconciler_local_url()
+    if local_url is None:
+        logger.info("tailscale serve reconciler disabled: backend port env not set")
+        return
+
+    import tailscale_https
+
+    async def _loop() -> None:
+        while True:
+            try:
+                await asyncio.to_thread(tailscale_https.serve_reconcile_tick, local_url)
+            except Exception:
+                logger.exception("tailscale serve reconcile failed")
+            await asyncio.sleep(_TAILSCALE_SERVE_RECONCILE_INTERVAL_SECONDS)
+
+    _tailscale_serve_reconciler_task = asyncio.create_task(
+        _loop(), name="tailscale-serve-reconciler"
+    )
+
+
+_EXTENSION_UPDATE_CHECK_INTERVAL_SECONDS = 6 * 3600.0
+_extension_update_checker_task: asyncio.Task | None = None
+
+
+def _start_extension_update_checker() -> None:
+    """Periodically refresh the remote-extension update projection so the
+    frontend badge reflects marketplace/git state without polling. Pushes
+    `extension_updates_changed` only when the available set changes."""
+    global _extension_update_checker_task
+    if os.environ.get("BETTER_AGENT_TEST_MODE"):
+        return
+
+    async def _loop() -> None:
+        while True:
+            try:
+                previous = extension_store.cached_extension_updates()
+                snapshot = await asyncio.to_thread(
+                    extension_store.check_extension_updates, refresh=True,
+                )
+                previous_available = set((previous or {}).get("available") or [])
+                available = set(snapshot.get("available") or [])
+                if available != previous_available:
+                    await coordinator.broadcast_global(
+                        "extension_updates_changed",
+                        {"available": sorted(available)},
+                    )
+            except Exception:
+                logger.exception("extension update check failed")
+            await asyncio.sleep(_EXTENSION_UPDATE_CHECK_INTERVAL_SECONDS)
+
+    _extension_update_checker_task = asyncio.create_task(
+        _loop(), name="extension-update-checker"
+    )
+
+
 @app.on_event("startup")
 async def on_startup():
     """Boot uvicorn fast: every long-running step (migrations,
@@ -12358,6 +12432,9 @@ async def on_startup():
     # prompts through coordinator.submit_prompt.
     schedule_ticker.start()
 
+    _start_tailscale_serve_reconciler()
+    _start_extension_update_checker()
+
     # Daily model-catalog refresher. Assumes uvicorn --workers 1
     # (see auth.py:8, run.sh:132) — a second worker would fire a
     # parallel refresh tick + double-write the cache file.
@@ -12392,21 +12469,6 @@ async def on_startup():
             await requirement_prewarm.run_requirements_prewarm("startup")
         except Exception:
             logger.exception("requirements processor prewarm failed")
-
-    # Catch-all trigger for the manual-requirements git-history miner: doc
-    # commits made while the backend was offline (or before the post-commit
-    # hook was installed) would otherwise sit unmined until someone runs the
-    # CLI by hand. The per-commit trigger is the .githooks/post-commit hook;
-    # this just ensures a restart also picks up anything it missed.
-    async def _prewarm_manual_requirements_mining() -> None:
-        try:
-            import requirement_context
-
-            await asyncio.to_thread(requirement_context.ensure_manual_requirements_mining)
-        except Exception:
-            logger.exception("manual requirements mining startup trigger failed")
-
-    asyncio.create_task(_prewarm_manual_requirements_mining(), name="manual-requirements-mining-startup")
 
     async def _models_catalog_refresher() -> None:
         POLL = 300
@@ -14824,6 +14886,15 @@ def _validate_user_input_questions(raw_questions: Any) -> list[dict[str, Any]]:
     return questions
 
 
+def _validate_user_approval_prompt(raw_prompt: Any) -> str:
+    if not isinstance(raw_prompt, str):
+        raise HTTPException(status_code=400, detail="prompt must be a string")
+    prompt = raw_prompt.strip()
+    if not prompt:
+        raise HTTPException(status_code=400, detail="prompt is required")
+    return prompt[:2000]
+
+
 async def _broadcast_user_input(event_type: str, payload: dict[str, Any]) -> None:
     app_session_id = str(payload.get("app_session_id") or "").strip()
     if not app_session_id:
@@ -14870,19 +14941,33 @@ async def resolve_user_input(request_id: str, body: dict):
         raise HTTPException(status_code=403, detail="session mismatch")
     if req.get("status") != "pending":
         return {"success": False, "status": req.get("status")}
-    if not isinstance(body, dict) or not isinstance(body.get("answers"), dict):
-        raise HTTPException(status_code=400, detail="answers object is required")
-    expected = {q["id"] for q in req.get("questions") or []}
-    answers: dict[str, str] = {}
-    for qid in expected:
-        value = str(body["answers"].get(qid) or "").strip()
-        if not value:
-            raise HTTPException(status_code=400, detail=f"answer is required for {qid}")
-        answers[qid] = value[:2000]
+    kind = req.get("kind")
+    if kind == "approval":
+        approved = body.get("approved")
+        if not isinstance(approved, bool):
+            raise HTTPException(status_code=400, detail="approved must be a boolean")
+        alternative = str(body.get("alternative") or "").strip()
+        if approved and alternative:
+            raise HTTPException(status_code=400, detail="approved response cannot include alternative text")
+        if not approved and not alternative:
+            raise HTTPException(status_code=400, detail="alternative is required when approval is not granted")
+        response: dict[str, Any] = {"approved": approved}
+        if alternative:
+            response["alternative"] = alternative[:4000]
+    else:
+        if not isinstance(body.get("answers"), dict):
+            raise HTTPException(status_code=400, detail="answers object is required")
+        expected = {q["id"] for q in req.get("questions") or []}
+        response = {}
+        for qid in expected:
+            value = str(body["answers"].get(qid) or "").strip()
+            if not value:
+                raise HTTPException(status_code=400, detail=f"answer is required for {qid}")
+            response[qid] = value[:2000]
     resolved = await asyncio.to_thread(
         user_input_store.resolve_request,
         request_id,
-        answers,
+        response,
     )
     if resolved is None:
         raise HTTPException(status_code=404, detail="request not found")
@@ -14927,7 +15012,15 @@ async def internal_request_user_input(
     if await _session_lite(app_session_id) is None:
         return {"success": False, "error": t("error.session_not_found_retry")}
     try:
-        questions = _validate_user_input_questions(body.get("questions"))
+        kind = str(body.get("kind") or "input").strip()
+        if kind == "approval":
+            prompt = _validate_user_approval_prompt(body.get("prompt"))
+            questions: list[dict[str, Any]] = []
+        elif kind == "input":
+            questions = _validate_user_input_questions(body.get("questions"))
+            prompt = ""
+        else:
+            raise HTTPException(status_code=400, detail="kind must be input or approval")
     except HTTPException as exc:
         return {"success": False, "error": str(exc.detail)}
     raw_timeout = body.get("timeout_seconds")
@@ -14942,7 +15035,9 @@ async def internal_request_user_input(
     public_req, created = await asyncio.to_thread(
         user_input_store.create_or_get_pending_request,
         app_session_id=app_session_id,
+        kind=kind,
         questions=questions,
+        prompt=prompt,
         timeout_seconds=timeout_seconds,
     )
     if created:
@@ -14960,22 +15055,29 @@ async def internal_request_user_input(
         return {"success": False, "error": "request not found"}
     if completed.get("status") == "resolved":
         await _broadcast_user_input_state(str(completed.get("app_session_id") or ""))
-        return {
+        result = {
             "success": True,
             "request_id": completed["request_id"],
-            "answers": completed.get("answers") or {},
         }
+        if completed.get("kind") == "approval":
+            result.update(completed.get("response") or {})
+        else:
+            result["answers"] = completed.get("response") or {}
+        return result
     await _broadcast_user_input("user_input_resolved", {
         "request_id": completed.get("request_id"),
         "app_session_id": completed.get("app_session_id"),
         "status": completed.get("status"),
     })
     await _broadcast_user_input_state(str(completed.get("app_session_id") or ""))
-    return {
+    result = {
         "success": False,
         "request_id": completed.get("request_id"),
         "status": completed.get("status"),
     }
+    if completed.get("kind") == "approval":
+        result["approved"] = False
+    return result
 
 
 @app.post("/api/internal/open-config-panel")

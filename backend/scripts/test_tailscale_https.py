@@ -142,29 +142,96 @@ def test_serve_https_state_detects_configured_empty_and_conflict() -> None:
     ) == "conflict"
 
 
-def test_ensure_tailscale_serve_https_runs_only_when_443_is_free() -> None:
-    tailscale_https._SERVE_ATTEMPTED_TARGETS.clear()
-    calls: list[list[str]] = []
+def _foreground_semantics_run(calls: list[list[str]]):
+    """Fake tailscale CLI with real 1.98.x serve semantics: a serve apply
+    without --bg blocks in the foreground (the caller's timeout kills it and
+    the config dies with the process); with --bg it returns and persists."""
 
     def run(args: list[str], **_: object) -> subprocess.CompletedProcess[str]:
         calls.append(args)
         if args == ["tailscale", "serve", "status", "--json"]:
             return subprocess.CompletedProcess(args, 0, json.dumps({"Services": {}}), "")
+        if args[:2] == ["tailscale", "serve"] and "--bg" not in args:
+            raise subprocess.TimeoutExpired(cmd=args, timeout=5)
         return subprocess.CompletedProcess(args, 0, "", "")
+
+    return run
+
+
+def test_ensure_tailscale_serve_https_applies_persistent_background_config() -> None:
+    tailscale_https._SERVE_LAST_ATTEMPT.clear()
+    calls: list[list[str]] = []
+
+    assert tailscale_https.ensure_tailscale_serve_https(
+        "https://mac.tailnet.ts.net",
+        "http://192.168.1.20:18765",
+        run=_foreground_semantics_run(calls),
+    ) is True
+    assert calls == [
+        ["tailscale", "serve", "status", "--json"],
+        ["tailscale", "serve", "--bg", "--https=443", "http://127.0.0.1:18765"],
+    ]
+    assert tailscale_https.last_serve_failure_reason() == ""
+
+
+def test_ensure_tailscale_serve_https_reports_serve_not_enabled() -> None:
+    tailscale_https._SERVE_LAST_ATTEMPT.clear()
+
+    def run(args: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        if args == ["tailscale", "serve", "status", "--json"]:
+            return subprocess.CompletedProcess(args, 0, json.dumps({"Services": {}}), "")
+        # The CLI blocks waiting for browser approval; the timeout kills it
+        # with the reason already printed to stderr.
+        raise subprocess.TimeoutExpired(
+            cmd=args,
+            timeout=5,
+            stderr=b"Serve is not enabled on your tailnet.\nTo enable, visit: https://login.tailscale.com/f/serve",
+        )
 
     assert tailscale_https.ensure_tailscale_serve_https(
         "https://mac.tailnet.ts.net",
         "http://192.168.1.20:18765",
         run=run,
-    ) is True
-    assert calls == [
-        ["tailscale", "serve", "status", "--json"],
-        ["tailscale", "serve", "--https=443", "http://127.0.0.1:18765"],
-    ]
+    ) is False
+    assert tailscale_https.last_serve_failure_reason() == "serve_not_enabled"
+
+
+def test_ensure_tailscale_serve_https_retries_after_backoff() -> None:
+    tailscale_https._SERVE_LAST_ATTEMPT.clear()
+    apply_attempts: list[list[str]] = []
+    clock = {"now": 1000.0}
+
+    def run(args: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        if args == ["tailscale", "serve", "status", "--json"]:
+            return subprocess.CompletedProcess(args, 0, json.dumps({"Services": {}}), "")
+        apply_attempts.append(args)
+        return subprocess.CompletedProcess(args, 1, "", "boom")
+
+    def ensure() -> bool:
+        return tailscale_https.ensure_tailscale_serve_https(
+            "https://mac.tailnet.ts.net",
+            "http://192.168.1.20:18765",
+            run=run,
+            now=lambda: clock["now"],
+        )
+
+    assert ensure() is False
+    assert len(apply_attempts) == 1
+    assert tailscale_https.last_serve_failure_reason() == "serve_apply_failed"
+
+    # Within the backoff window: no second apply attempt.
+    clock["now"] += tailscale_https._SERVE_RETRY_BACKOFF_SECONDS / 2
+    assert ensure() is False
+    assert len(apply_attempts) == 1
+
+    # Past the backoff window: the heal retries instead of staying poisoned.
+    clock["now"] += tailscale_https._SERVE_RETRY_BACKOFF_SECONDS
+    assert ensure() is False
+    assert len(apply_attempts) == 2
 
 
 def test_ensure_tailscale_serve_https_does_not_overwrite_conflict() -> None:
-    tailscale_https._SERVE_ATTEMPTED_TARGETS.clear()
+    tailscale_https._SERVE_LAST_ATTEMPT.clear()
     calls: list[list[str]] = []
 
     def run(args: list[str], **_: object) -> subprocess.CompletedProcess[str]:
@@ -177,6 +244,51 @@ def test_ensure_tailscale_serve_https_does_not_overwrite_conflict() -> None:
         run=run,
     ) is False
     assert calls == [["tailscale", "serve", "status", "--json"]]
+    assert tailscale_https.last_serve_failure_reason() == "serve_conflict"
+
+
+def test_serve_reconcile_tick_reasserts_lost_config() -> None:
+    original_url = tailscale_https.current_tailscale_https_url
+    original_reachable = tailscale_https.better_agent_is_reachable
+    original_ensure = tailscale_https.ensure_tailscale_serve_https
+    ensured: list[tuple[str, str]] = []
+    try:
+        tailscale_https.current_tailscale_https_url = lambda: "https://mac.tailnet.ts.net"  # type: ignore[assignment]
+        tailscale_https.better_agent_is_reachable = lambda url: False  # type: ignore[assignment]
+        tailscale_https.ensure_tailscale_serve_https = (  # type: ignore[assignment]
+            lambda tailscale_url, local_url: ensured.append((tailscale_url, local_url)) is None
+        )
+        assert tailscale_https.serve_reconcile_tick("http://127.0.0.1:18765") is True
+        assert ensured == [("https://mac.tailnet.ts.net", "http://127.0.0.1:18765")]
+
+        tailscale_https.current_tailscale_https_url = lambda: None  # type: ignore[assignment]
+        assert tailscale_https.serve_reconcile_tick("http://127.0.0.1:18765") is False
+        assert len(ensured) == 1
+    finally:
+        tailscale_https.current_tailscale_https_url = original_url  # type: ignore[assignment]
+        tailscale_https.better_agent_is_reachable = original_reachable  # type: ignore[assignment]
+        tailscale_https.ensure_tailscale_serve_https = original_ensure  # type: ignore[assignment]
+
+
+def test_serve_reconciler_local_url_requires_port_env() -> None:
+    import os
+
+    saved = {
+        key: os.environ.pop(key, None)
+        for key in ("BETTER_AGENT_BACKEND_PORT", "BETTER_CLAUDE_BACKEND_PORT")
+    }
+    try:
+        assert main._tailscale_serve_reconciler_local_url() is None
+        os.environ["BETTER_CLAUDE_BACKEND_PORT"] = "18765"
+        assert main._tailscale_serve_reconciler_local_url() == "http://127.0.0.1:18765"
+        os.environ["BETTER_AGENT_BACKEND_PORT"] = "not-a-port"
+        assert main._tailscale_serve_reconciler_local_url() is None
+    finally:
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
 
 def test_preferred_external_url_falls_back_when_unreachable() -> None:
@@ -356,8 +468,12 @@ def main_run() -> int:
         test_local_serve_target_uses_loopback_port_only,
         test_local_https_candidates_include_configured_and_verified_shapes,
         test_serve_https_state_detects_configured_empty_and_conflict,
-        test_ensure_tailscale_serve_https_runs_only_when_443_is_free,
+        test_ensure_tailscale_serve_https_applies_persistent_background_config,
+        test_ensure_tailscale_serve_https_reports_serve_not_enabled,
+        test_ensure_tailscale_serve_https_retries_after_backoff,
         test_ensure_tailscale_serve_https_does_not_overwrite_conflict,
+        test_serve_reconcile_tick_reasserts_lost_config,
+        test_serve_reconciler_local_url_requires_port_env,
         test_preferred_external_url_falls_back_when_unreachable,
         test_preferred_external_url_uses_local_https_after_tailscale,
         test_preferred_external_url_reports_http_fallback,

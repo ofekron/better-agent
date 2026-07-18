@@ -14,6 +14,7 @@ import { NativeImportSetting } from "./NativeImportSetting";
 import { DelegateTaskPolicySetting } from "./DelegateTaskPolicySetting";
 import { InternalLLMSetting } from "./InternalLLMSetting";
 import { SearchInput } from "./SearchInput";
+import { eventBus } from "../lib/eventBus";
 import { LanguageSelector } from "./LanguageSelector";
 import {
   availableModesForForm,
@@ -953,7 +954,8 @@ interface ExtensionConfigRow {
   harnessAdditions: ExtensionHarnessAddition[];
   internalLlmTasks: string[];
   userInstructions: string;
-  mcp: Array<{ name: string; label: string; enabled: boolean }>;
+  mcp: Array<{ name: string; label: string; enabled: boolean; forced_by_skills?: string[] }>;
+  skills: Array<{ name: string; enabled: boolean }>;
   remoteServices: ExtensionRemoteService[];
   settingsSchema: SettingSpec[];
   settingsValues: Record<string, unknown>;
@@ -1118,6 +1120,8 @@ export function ExtensionUiSettingsSection() {
   const [error, setError] = useState("");
   const [creatingPersonalHarness, setCreatingPersonalHarness] = useState(false);
   const [deletingIds, setDeletingIds] = useState<Set<string>>(() => new Set());
+  const [availableUpdates, setAvailableUpdates] = useState<Record<string, { availableVersion: string }>>({});
+  const [updatingIds, setUpdatingIds] = useState<Set<string>>(() => new Set());
   const [savingNativeExposure, setSavingNativeExposure] = useState<Set<string>>(() => new Set());
   const [nativeExposureErrors, setNativeExposureErrors] = useState<Record<string, string>>({});
   const [openConfigModule, setOpenConfigModule] = useState<{
@@ -1186,6 +1190,7 @@ export function ExtensionUiSettingsSection() {
               : [],
             userInstructions: typeof cfg.user_instructions === "string" ? cfg.user_instructions : "",
             mcp: Array.isArray(cfg.mcp) ? cfg.mcp : [],
+            skills: Array.isArray(cfg.skills) ? cfg.skills : [],
             remoteServices: Array.isArray(cfg.remote_services) ? cfg.remote_services : [],
             settingsSchema: Array.isArray(cfg.settings?.schema) ? cfg.settings.schema : [],
             settingsValues: cfg.settings?.values || {},
@@ -1210,9 +1215,39 @@ export function ExtensionUiSettingsSection() {
     }
   }, []);
 
+  const refreshUpdates = useCallback(async () => {
+    try {
+      const res = await fetch(`${API}/api/extensions/updates`, { credentials: "include" });
+      if (!res.ok) return;
+      const data = await res.json();
+      const next: Record<string, { availableVersion: string }> = {};
+      for (const row of Array.isArray(data.results) ? data.results : []) {
+        if (row?.update_available === true && typeof row.extension_id === "string") {
+          next[row.extension_id] = {
+            availableVersion: typeof row.available_version === "string" ? row.available_version : "",
+          };
+        }
+      }
+      setAvailableUpdates(next);
+    } catch {
+      // offline: keep the last known projection
+    }
+  }, []);
+
   useEffect(() => {
     void refresh();
-  }, [refresh]);
+    void refreshUpdates();
+    const unsubscribeUpdates = eventBus.subscribe("extension_updates_changed", () => {
+      void refreshUpdates();
+    });
+    const unsubscribeExtensions = eventBus.subscribe("extensions_changed", () => {
+      void refreshUpdates();
+    });
+    return () => {
+      unsubscribeUpdates();
+      unsubscribeExtensions();
+    };
+  }, [refresh, refreshUpdates]);
 
   const patch = useCallback(
     async (path: string, body: unknown, onError?: () => void) => {
@@ -1271,6 +1306,31 @@ export function ExtensionUiSettingsSection() {
       void patch(`/api/extensions/${encodeURIComponent(id)}/mcp/${encodeURIComponent(server)}/enabled`, {
         enabled: next,
       });
+    },
+    [patch],
+  );
+
+  const toggleSkill = useCallback(
+    (id: string, skill: string, next: boolean) => {
+      setRows((prev) =>
+        prev.map((r) =>
+          r.id === id
+            ? { ...r, skills: r.skills.map((s) => (s.name === skill ? { ...s, enabled: next } : s)) }
+            : r,
+        ),
+      );
+      void patch(
+        `/api/extensions/${encodeURIComponent(id)}/skills/${encodeURIComponent(skill)}/enabled`,
+        { enabled: next },
+        () =>
+          setRows((prev) =>
+            prev.map((r) =>
+              r.id === id
+                ? { ...r, skills: r.skills.map((s) => (s.name === skill ? { ...s, enabled: !next } : s)) }
+                : r,
+            ),
+          ),
+      );
     },
     [patch],
   );
@@ -1469,6 +1529,39 @@ export function ExtensionUiSettingsSection() {
     [refresh, t],
   );
 
+  const updateExtension = useCallback(
+    async (id: string) => {
+      setUpdatingIds((prev) => new Set(prev).add(id));
+      setError("");
+      try {
+        const res = await fetch(`${API}/api/extensions/${encodeURIComponent(id)}/update`, {
+          method: "POST",
+          credentials: "include",
+        });
+        if (!res.ok) {
+          let detail = "";
+          try {
+            const payload = await res.json();
+            detail = typeof payload.detail === "string" ? payload.detail : "";
+          } catch {
+            detail = await res.text();
+          }
+          throw new Error(detail || t("settings.extensionsUpdateFailed"));
+        }
+        await Promise.all([refresh(), refreshUpdates()]);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : t("settings.extensionsUpdateFailed"));
+      } finally {
+        setUpdatingIds((prev) => {
+          const next = new Set(prev);
+          next.delete(id);
+          return next;
+        });
+      }
+    },
+    [refresh, refreshUpdates, t],
+  );
+
   const createPersonalHarness = useCallback(async () => {
     setCreatingPersonalHarness(true);
     setError("");
@@ -1504,6 +1597,7 @@ export function ExtensionUiSettingsSection() {
         row.id,
         row.description,
         ...row.mcp.flatMap((server) => [server.name, server.label]),
+        ...row.skills.map((skill) => skill.name),
         ...row.frontendModules.flatMap((module) => [module.slot, module.id, module.label]),
         ...row.harnessAdditions.flatMap((item) => [item.name, item.detail ?? ""]),
         ...row.remoteServices.flatMap((service) => [service.name, service.base_url, service.purpose]),
@@ -1551,6 +1645,28 @@ export function ExtensionUiSettingsSection() {
               )}
             </div>
             <div className="extension-ui-settings-header-actions">
+              {availableUpdates[row.id] && (
+                <>
+                  <span className="extension-ui-settings-update-badge">
+                    {availableUpdates[row.id].availableVersion
+                      ? t("settings.extensionsUpdateAvailableVersion", {
+                          version: availableUpdates[row.id].availableVersion,
+                        })
+                      : t("settings.extensionsUpdateAvailable")}
+                  </span>
+                  <button
+                    type="button"
+                    className="btn-secondary extension-ui-settings-update"
+                    disabled={updatingIds.has(row.id)}
+                    onClick={() => void updateExtension(row.id)}
+                  >
+                    <Icon name="refresh" size={13} />
+                    {updatingIds.has(row.id)
+                      ? t("settings.extensionsUpdating")
+                      : t("settings.extensionsUpdate")}
+                  </button>
+                </>
+              )}
               <label className="extension-ui-settings-toggle extension-ui-settings-main-toggle">
                 <input
                   type="checkbox"
@@ -1702,14 +1818,41 @@ export function ExtensionUiSettingsSection() {
                 title={t("settings.extensionsMcpServers")}
                 description={t("settings.extensionsMcpServersHelp")}
               >
-                {row.mcp.map((server) => (
-                  <label key={server.name} className="extension-ui-settings-toggle">
+                {row.mcp.map((server) => {
+                  const forcedBy = server.forced_by_skills ?? [];
+                  const forced = forcedBy.length > 0;
+                  return (
+                    <label key={server.name} className="extension-ui-settings-toggle">
+                      <input
+                        type="checkbox"
+                        checked={forced || server.enabled}
+                        disabled={forced}
+                        onChange={(e) => toggleMcp(row.id, server.name, e.target.checked)}
+                      />
+                      {server.label}
+                      {forced && (
+                        <span className="extension-ui-settings-mcp-forced">
+                          {t("settings.extensionsMcpForcedBySkill", { skills: forcedBy.join(", ") })}
+                        </span>
+                      )}
+                    </label>
+                  );
+                })}
+              </ExtensionConfigGroup>
+            )}
+            {row.skills.length > 0 && (
+              <ExtensionConfigGroup
+                title={t("settings.extensionsSkills")}
+                description={t("settings.extensionsSkillsHelp")}
+              >
+                {row.skills.map((skill) => (
+                  <label key={skill.name} className="extension-ui-settings-toggle">
                     <input
                       type="checkbox"
-                      checked={server.enabled}
-                      onChange={(e) => toggleMcp(row.id, server.name, e.target.checked)}
+                      checked={skill.enabled}
+                      onChange={(e) => toggleSkill(row.id, skill.name, e.target.checked)}
                     />
-                    {server.label}
+                    {skill.name}
                   </label>
                 ))}
               </ExtensionConfigGroup>

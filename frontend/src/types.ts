@@ -129,6 +129,9 @@ export type WSEventType =
   | "provider_install_finished"
   | "provider_config_sync_changed"
   | "extensions_changed"
+  // The set of remote extensions with an available update changed —
+  // frontend refetches `/api/extensions/updates`.
+  | "extension_updates_changed"
   // Per-provider model catalog delta — fired by the daily refresher
   // (and manual refresh endpoints) when the cached model list changes.
   // Frontend refetches `/api/models`. Payload carries four disjoint
@@ -506,15 +509,26 @@ export interface UserInputQuestion {
   options: UserInputOption[];
 }
 
-export interface UserInputRequest {
+interface UserInteractionRequestBase {
   request_id: string;
   app_session_id: string;
-  questions: UserInputQuestion[];
   status: "pending" | "resolved" | "cancelled" | "expired";
   created_at: number;
   expires_at?: number | null;
   resolved_at?: number | null;
 }
+
+export interface UserInputRequest extends UserInteractionRequestBase {
+  kind: "input";
+  questions: UserInputQuestion[];
+}
+
+export interface UserApprovalRequest extends UserInteractionRequestBase {
+  kind: "approval";
+  prompt: string;
+}
+
+export type UserInteractionRequest = UserInputRequest | UserApprovalRequest;
 
 export interface WorkerPanel {
   delegation_id: string;
