@@ -39,7 +39,6 @@ import { VoiceActivation } from "./VoiceActivation";
 import { SessionBackgroundStrip } from "./SessionBackgroundStrip";
 import { ShortcutResponses } from "./ShortcutResponses";
 import { useSessionMeta } from "../lib/sessionRegistry";
-import { notifyUserRequest } from "../utils/userInputNotifications";
 import { registerMobileHandlers, clearMobileHandlers } from "../contexts/MobileHandlersContext";
 import {
   extractAssistantOutputTextFromEvents,
@@ -578,6 +577,8 @@ interface Props {
   /** Machine snapshots for resolving node_id → display name. */
   machines?: import("../types").NodeSnapshot[];
   userDisplayName?: string | null;
+  pendingUserInteractions?: UserInteractionRequest[];
+  onUserInteractionDone?: (requestId: string) => void;
 }
 
 export function Chat({
@@ -674,6 +675,8 @@ export function Chat({
   currentNodeId = "primary",
   machines = [],
   userDisplayName = null,
+  pendingUserInteractions = [],
+  onUserInteractionDone,
 }: Props) {
   const { t } = useTranslation();
   const chatInlineActionModules = useExtensionFrontendModules("chat-inline-actions");
@@ -848,72 +851,10 @@ export function Chat({
     if (last.type !== "credential_consent_changed") return;
     refetchCredentials();
   }, [streamingEvents, refetchCredentials]);
-  const [pendingUserInputs, setPendingUserInputs] = useState<UserInteractionRequest[]>([]);
-  const pendingUserInputsSessionRef = useRef<string | null>(null);
-  const pendingUserInputsFetchSeqRef = useRef(0);
-  pendingUserInputsSessionRef.current = session?.id ?? null;
-  useEffect(() => {
-    // <Chat> is a long-lived singleton across session switches. Clear
-    // immediately so a pending card from the previously viewed session never
-    // paints in the newly selected session while its REST snapshot loads.
-    setPendingUserInputs([]);
-  }, [session?.id]);
-  const removePendingUserInput = useCallback((requestId: string) => {
-    setPendingUserInputs((prev) => prev.filter((req) => req.request_id !== requestId));
-  }, []);
-  const refetchUserInputs = useCallback(async () => {
-    const sid = session?.id;
-    const fetchSeq = ++pendingUserInputsFetchSeqRef.current;
-    if (!sid) {
-      setPendingUserInputs([]);
-      return;
-    }
-    try {
-      const res = await fetch(
-        `${API}/api/user-input/pending?app_session_id=${encodeURIComponent(sid)}`,
-        { credentials: "include" },
-      );
-      if (!res.ok) return;
-      const data = await res.json();
-      if (fetchSeq !== pendingUserInputsFetchSeqRef.current || pendingUserInputsSessionRef.current !== sid) return;
-      const fetched = Array.isArray(data.requests) ? (data.requests as UserInteractionRequest[]) : [];
-      setPendingUserInputs(fetched.filter((req) => req.app_session_id === sid));
-    } catch {
-      // ignore
-    }
-  }, [session?.id]);
-  useEffect(() => {
-    refetchUserInputs();
-  }, [refetchUserInputs]);
-  useEffect(() => {
-    const onRequested = (e: Event) => {
-      const detail = (e as CustomEvent<UserInteractionRequest>).detail;
-      if (!detail) return;
-      void notifyUserRequest(detail, t("userApproval.title"), t("userInput.title"));
-      const sid = pendingUserInputsSessionRef.current;
-      if (!sid || detail?.app_session_id !== sid) return;
-      setPendingUserInputs((prev) => {
-        const rest = prev.filter((req) => req.request_id !== detail.request_id);
-        return [...rest, detail];
-      });
-    };
-    const onResolved = (e: Event) => {
-      const detail = (e as CustomEvent<{ request_id?: string; app_session_id?: string }>).detail;
-      const sid = pendingUserInputsSessionRef.current;
-      if (!sid || detail?.app_session_id !== sid || !detail.request_id) return;
-      removePendingUserInput(detail.request_id);
-    };
-    window.addEventListener("user_input_requested", onRequested);
-    window.addEventListener("user_input_resolved", onResolved);
-    return () => {
-      window.removeEventListener("user_input_requested", onRequested);
-      window.removeEventListener("user_input_resolved", onResolved);
-    };
-  }, [removePendingUserInput, t]);
   const visiblePendingUserInputs = useMemo(() => {
     const sid = session?.id;
-    return sid ? pendingUserInputs.filter((req) => req.app_session_id === sid) : [];
-  }, [pendingUserInputs, session?.id]);
+    return sid ? pendingUserInteractions.filter((req) => req.app_session_id === sid) : [];
+  }, [pendingUserInteractions, session?.id]);
   // Interactive tool/command approvals (Claude can_use_tool / Codex app-server).
   // Backend holds them in-memory with a fail-closed timeout; rehydrate on
   // mount/reconnect so a missed WS event doesn't silently become a denial.
@@ -1531,9 +1472,9 @@ export function Chat({
             transition={{ duration: 0.24, ease: "easeOut" }}
           >
             {request.kind === "approval" ? (
-              <UserApprovalCard request={request} onDone={removePendingUserInput} />
+              <UserApprovalCard request={request} onDone={(requestId) => onUserInteractionDone?.(requestId)} />
             ) : (
-              <UserInputCard request={request} onDone={removePendingUserInput} />
+              <UserInputCard request={request} onDone={(requestId) => onUserInteractionDone?.(requestId)} />
             )}
           </motion.div>
         ))}
