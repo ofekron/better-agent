@@ -7,9 +7,14 @@ const MAX_BUFFERED_LIVE_BYTES = 4 * 1024 * 1024;
 const MAX_BUFFERED_LIVE_EVENTS = 2048;
 const MAX_CHUNKS = 128;
 const MAX_CHUNK_BYTES = 180 * 1024;
+const BASE64_QUARTETS_PER_SLICE = 2048;
+const BYTE_COMPARE_SLICE_BYTES = 16 * 1024;
+const MAX_ENCODED_CHUNK_BYTES = Math.ceil(MAX_CHUNK_BYTES / 3) * 4;
+const MAX_PENDING_CHUNK_TASKS = MAX_ACTIVE_TRANSFERS * MAX_CHUNKS;
+const MAX_PENDING_ENCODED_BYTES = Math.ceil(MAX_STAGED_BYTES * 4 / 3)
+  + MAX_PENDING_CHUNK_TASKS * 4;
 const SHA256_HEX = /^[0-9a-f]{64}$/;
 const REVISION = /^[A-Za-z0-9:_-]{1,80}$/;
-const BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 const SNAPSHOT_EVENT_TYPES = new Set(["messages_replay", "stub_invalidated", "rewind_complete"]);
 const UTF8_ENCODER = new TextEncoder();
 
@@ -32,6 +37,8 @@ type Transfer = {
   nextChunk: number;
   generation: number;
   state: "pending" | "ready" | "cancelled";
+  work: Promise<void>;
+  pendingChunkTasks: number;
   readyEvent?: WSEvent;
 };
 
@@ -51,17 +58,6 @@ function integer(value: unknown, min: number, max: number): number | null {
     : null;
 }
 
-function decodeBase64(value: unknown): Uint8Array | null {
-  if (typeof value !== "string" || value.length === 0 || !BASE64.test(value)) return null;
-  try {
-    const decoded = atob(value);
-    if (decoded.length > MAX_CHUNK_BYTES) return null;
-    return Uint8Array.from(decoded, (char) => char.charCodeAt(0));
-  } catch {
-    return null;
-  }
-}
-
 async function sha256Hex(bytes: Uint8Array): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", bytes as BufferSource);
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
@@ -69,6 +65,88 @@ async function sha256Hex(bytes: Uint8Array): Promise<string> {
 
 function yieldToBrowser(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+function base64Value(code: number): number {
+  if (code >= 65 && code <= 90) return code - 65;
+  if (code >= 97 && code <= 122) return code - 71;
+  if (code >= 48 && code <= 57) return code + 4;
+  if (code === 43) return 62;
+  if (code === 47) return 63;
+  return -1;
+}
+
+type DecodeResult =
+  | { status: "ok"; bytes: Uint8Array }
+  | { status: "invalid" }
+  | { status: "stale" };
+
+async function decodeBase64Cooperatively(
+  value: string,
+  isCurrent: () => boolean,
+): Promise<DecodeResult> {
+  if (value.length === 0 || value.length > MAX_ENCODED_CHUNK_BYTES || value.length % 4 !== 0) {
+    return { status: "invalid" };
+  }
+  const padding = value.endsWith("==") ? 2 : value.endsWith("=") ? 1 : 0;
+  const decodedLength = value.length / 4 * 3 - padding;
+  if (decodedLength < 1 || decodedLength > MAX_CHUNK_BYTES) return { status: "invalid" };
+  const bytes = new Uint8Array(decodedLength);
+  const totalQuartets = value.length / 4;
+  let output = 0;
+  for (let quartetStart = 0; quartetStart < totalQuartets; quartetStart += BASE64_QUARTETS_PER_SLICE) {
+    if (!isCurrent()) return { status: "stale" };
+    const quartetEnd = Math.min(totalQuartets, quartetStart + BASE64_QUARTETS_PER_SLICE);
+    for (let quartet = quartetStart; quartet < quartetEnd; quartet += 1) {
+      const offset = quartet * 4;
+      const last = quartet === totalQuartets - 1;
+      const first = base64Value(value.charCodeAt(offset));
+      const second = base64Value(value.charCodeAt(offset + 1));
+      const thirdCode = value.charCodeAt(offset + 2);
+      const fourthCode = value.charCodeAt(offset + 3);
+      const third = base64Value(thirdCode);
+      const fourth = base64Value(fourthCode);
+      if (first < 0 || second < 0) return { status: "invalid" };
+      bytes[output++] = (first << 2) | (second >> 4);
+      if (thirdCode === 61) {
+        if (!last || fourthCode !== 61 || padding !== 2) return { status: "invalid" };
+        continue;
+      }
+      if (third < 0) return { status: "invalid" };
+      bytes[output++] = ((second & 15) << 4) | (third >> 2);
+      if (fourthCode === 61) {
+        if (!last || padding !== 1) return { status: "invalid" };
+        continue;
+      }
+      if (fourth < 0) return { status: "invalid" };
+      bytes[output++] = ((third & 3) << 6) | fourth;
+    }
+    if (quartetEnd < totalQuartets) {
+      await yieldToBrowser();
+      if (!isCurrent()) return { status: "stale" };
+    }
+  }
+  return output === decodedLength ? { status: "ok", bytes } : { status: "invalid" };
+}
+
+async function equalBytesCooperatively(
+  left: Uint8Array,
+  right: Uint8Array,
+  isCurrent: () => boolean,
+): Promise<boolean | null> {
+  if (left.length !== right.length) return false;
+  for (let start = 0; start < left.length; start += BYTE_COMPARE_SLICE_BYTES) {
+    if (!isCurrent()) return null;
+    const end = Math.min(left.length, start + BYTE_COMPARE_SLICE_BYTES);
+    for (let index = start; index < end; index += 1) {
+      if (left[index] !== right[index]) return false;
+    }
+    if (end < left.length) {
+      await yieldToBrowser();
+      if (!isCurrent()) return null;
+    }
+  }
+  return true;
 }
 
 function validSnapshotEvent(value: unknown, eventType: string): value is WSEvent {
@@ -130,6 +208,8 @@ export class SnapshotTransport {
   private bufferedLiveBytes = 0;
   private bufferedLiveEvents = 0;
   private generation = 0;
+  private pendingChunkTasks = 0;
+  private pendingEncodedBytes = 0;
   private readonly supersededKeys = new Set<string>();
   private readonly recoveries = new Map<string, {
     terminal: boolean;
@@ -152,7 +232,7 @@ export class SnapshotTransport {
       return true;
     }
     if (event.type === "snapshot_chunk") {
-      this.chunk(event.data, send, apply);
+      this.queueChunk(event.data, send, apply);
       return true;
     }
     if (event.type === "snapshot_end") {
@@ -259,7 +339,8 @@ export class SnapshotTransport {
     const transfer: Transfer = {
       snapshotId, key, eventType, revision, refreshId, digest, totalBytes, totalChunks,
       chunkBytes, chunks: new Map(), receivedBytes: 0, nextChunk: 0,
-      generation: ++this.generation, state: "pending",
+      generation: ++this.generation, state: "pending", work: Promise.resolve(),
+      pendingChunkTasks: 0,
     };
     this.byKey.set(key, transfer);
     this.keyById.set(snapshotId, key);
@@ -267,7 +348,7 @@ export class SnapshotTransport {
     this.ack(transfer, send);
   }
 
-  private chunk(raw: unknown, send: SendFrame, apply: ApplyEvent): void {
+  private queueChunk(raw: unknown, send: SendFrame, apply: ApplyEvent): void {
     const data = objectData(raw);
     if (!data) return;
     const snapshotId = typeof data.snapshot_id === "string" ? data.snapshot_id : "";
@@ -275,11 +356,52 @@ export class SnapshotTransport {
     const transfer = key ? this.byKey.get(key) : undefined;
     if (!transfer || data.revision !== transfer.revision) return;
     const index = integer(data.index, 0, transfer.totalChunks - 1);
-    const bytes = decodeBase64(data.payload);
-    if (index === null || !bytes) {
+    const payload = typeof data.payload === "string" ? data.payload : "";
+    if (index === null || payload.length === 0 || payload.length > MAX_ENCODED_CHUNK_BYTES) {
       this.failBoundary(send, apply, "corrupt", transfer);
       return;
     }
+    if (transfer.pendingChunkTasks >= MAX_CHUNKS
+      || this.pendingChunkTasks >= MAX_PENDING_CHUNK_TASKS
+      || this.pendingEncodedBytes + payload.length > MAX_PENDING_ENCODED_BYTES) {
+      this.failBoundary(send, apply, "overflow", transfer);
+      return;
+    }
+    const generation = transfer.generation;
+    transfer.pendingChunkTasks += 1;
+    this.pendingChunkTasks += 1;
+    this.pendingEncodedBytes += payload.length;
+    const task = transfer.work.then(async () => {
+      if (!this.isCurrent(transfer, generation)) return;
+      const decoded = await decodeBase64Cooperatively(
+        payload,
+        () => this.isCurrent(transfer, generation),
+      );
+      if (decoded.status === "stale") return;
+      if (decoded.status === "invalid") {
+        if (this.isCurrent(transfer, generation)) this.failBoundary(send, apply, "corrupt", transfer);
+        return;
+      }
+      await this.acceptChunk(transfer, generation, index, decoded.bytes, send, apply);
+    }).catch(() => {
+      if (this.isCurrent(transfer, generation)) this.failBoundary(send, apply, "corrupt", transfer);
+    }).finally(() => {
+      transfer.pendingChunkTasks -= 1;
+      this.pendingChunkTasks -= 1;
+      this.pendingEncodedBytes -= payload.length;
+    });
+    transfer.work = task.then(() => undefined, () => undefined);
+  }
+
+  private async acceptChunk(
+    transfer: Transfer,
+    generation: number,
+    index: number,
+    bytes: Uint8Array,
+    send: SendFrame,
+    apply: ApplyEvent,
+  ): Promise<void> {
+    if (!this.isCurrent(transfer, generation)) return;
     const expectedBytes = index === transfer.totalChunks - 1
       ? transfer.totalBytes - (transfer.totalChunks - 1) * transfer.chunkBytes
       : transfer.chunkBytes;
@@ -289,7 +411,13 @@ export class SnapshotTransport {
     }
     const prior = transfer.chunks.get(index);
     if (prior) {
-      if (prior.length !== bytes.length || prior.some((byte, offset) => byte !== bytes[offset])) {
+      const equal = await equalBytesCooperatively(
+        prior,
+        bytes,
+        () => this.isCurrent(transfer, generation),
+      );
+      if (equal === null) return;
+      if (!equal) {
         this.failBoundary(send, apply, "corrupt", transfer);
       } else {
         this.ack(transfer, send);
@@ -303,7 +431,7 @@ export class SnapshotTransport {
     transfer.chunks.set(index, bytes);
     transfer.receivedBytes += bytes.length;
     while (transfer.chunks.has(transfer.nextChunk)) transfer.nextChunk += 1;
-    this.ack(transfer, send);
+    if (this.isCurrent(transfer, generation)) this.ack(transfer, send);
   }
 
   private async end(raw: unknown, send: SendFrame, apply: ApplyEvent): Promise<void> {
@@ -314,11 +442,13 @@ export class SnapshotTransport {
     const transfer = key ? this.byKey.get(key) : undefined;
     if (!transfer || data.revision !== transfer.revision || data.digest !== transfer.digest
       || data.total_bytes !== transfer.totalBytes || data.total_chunks !== transfer.totalChunks) return;
+    const generation = transfer.generation;
+    await transfer.work;
+    if (!this.isCurrent(transfer, generation)) return;
     if (transfer.nextChunk !== transfer.totalChunks || transfer.receivedBytes !== transfer.totalBytes) {
       this.ack(transfer, send);
       return;
     }
-    const generation = transfer.generation;
     await yieldToBrowser();
     if (!this.isCurrent(transfer, generation)) return;
     const bytes = new Uint8Array(transfer.totalBytes);
