@@ -85,7 +85,7 @@ describe("NewSessionModal offline provider cache", () => {
       "create",
       "send",
       "send-and-open",
-      "send",
+      "send-and-open",
     ]);
   });
 
