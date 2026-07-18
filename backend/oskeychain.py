@@ -91,9 +91,14 @@ def delete(service: str, account: str) -> None:
         except PasswordDeleteError:
             pass
         return
-    subprocess.run(
-        ["/usr/bin/security", "delete-generic-password",
-         "-s", service, "-a", account],
-        check=False, timeout=_TIMEOUT,
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    )
+    try:
+        proc = subprocess.run(
+            ["/usr/bin/security", "delete-generic-password",
+             "-s", service, "-a", account],
+            check=False, timeout=_TIMEOUT,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("OS credential delete timed out") from None
+    if proc.returncode not in {0, 44}:
+        raise RuntimeError("OS credential delete was denied or unavailable")
