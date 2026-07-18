@@ -325,14 +325,15 @@ def test_local_keychain_executor_cross_platform():
     assert res.ok is True and res.body == "stored"
     assert kr_calls == [("testape", "login.password", SECRET)]
 
-    # darwin writes through Keyring so plaintext never appears in process argv.
+    # Darwin writes through the stable security identity.
     darwin_calls = []
     sys.platform = "darwin"
-    keyring.set_password = lambda *args: darwin_calls.append(args)
+    real_store = oskeychain.store
+    oskeychain.store = lambda *args: darwin_calls.append(args)
     try:
         res = ex.execute(desc, SECRET)
     finally:
-        sys.platform, keyring.set_password = real_platform, real_set
+        sys.platform, oskeychain.store = real_platform, real_store
     assert res.ok is True
     assert darwin_calls == [("testape", "login.password", SECRET)]
 

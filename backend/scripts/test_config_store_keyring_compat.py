@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 import json
+from pathlib import Path
+import subprocess
 import sys
 import tempfile
 import threading
@@ -135,6 +137,147 @@ def test_macos_read_uses_stable_security_identity_and_exact_account() -> None:
     )]
 
 
+def test_macos_write_uses_stable_security_identity_without_secret_argv() -> None:
+    calls = []
+    real_api = config_store._macos_security_api
+    real_store = config_store.oskeychain.store
+    config_store._macos_security_api = lambda: object()
+    config_store.oskeychain.store = lambda service, account, value: calls.append(
+        (service, account, value)
+    )
+    try:
+        config_store._set_password_with_reason(
+            config_store.KEYRING_SERVICE,
+            config_store._keyring_username("provider-1"),
+            "secret-value",
+            "unused by stable security writer",
+        )
+    finally:
+        config_store._macos_security_api = real_api
+        config_store.oskeychain.store = real_store
+    assert calls == [(
+        config_store.KEYRING_SERVICE,
+        "provider:provider-1",
+        "secret-value",
+    )]
+
+
+def test_macos_store_input_keeps_secret_out_of_argv_and_quotes_identifiers() -> None:
+    payload = config_store.oskeychain._store_input(
+        "service '; $()",
+        'account "quoted" ; $(x) \\ path',
+        "secret-value",
+    )
+    assert b"secret-value" not in payload
+    assert b"7365637265742d76616c7565" in payload
+    assert b'\\"quoted\\"' in payload
+    assert b'$(x)' in payload
+    try:
+        config_store.oskeychain._store_input("bad\nservice", "account", "value")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("control characters must be rejected")
+
+
+def test_macos_write_failure_propagates_without_cache_update() -> None:
+    real_api = config_store._macos_security_api
+    real_store = config_store.oskeychain.store
+    config_store._macos_security_api = lambda: object()
+    config_store.oskeychain.store = lambda *args: (_ for _ in ()).throw(
+        RuntimeError("denied")
+    )
+    _reset_cache()
+    try:
+        try:
+            config_store._write_api_key("provider-failed", "secret-value")
+        except RuntimeError as exc:
+            assert "secret-value" not in str(exc)
+        else:
+            raise AssertionError("failed writes must propagate")
+        with config_store._api_key_cache_lock:
+            assert "provider-failed" not in config_store._api_key_cache
+    finally:
+        config_store._macos_security_api = real_api
+        config_store.oskeychain.store = real_store
+
+
+def test_macos_security_stdin_real_keychain_lifecycle() -> None:
+    if sys.platform != "darwin":
+        return
+    with tempfile.TemporaryDirectory() as directory:
+        keychain = Path(directory) / "probe.keychain-db"
+        subprocess.run(
+            ["/usr/bin/security", "create-keychain", "-p", "probe-pass", str(keychain)],
+            check=True,
+            stdout=subprocess.DEVNULL,
+        )
+        try:
+            subprocess.run(
+                ["/usr/bin/security", "unlock-keychain", "-p", "probe-pass", str(keychain)],
+                check=True,
+            )
+            service = "probe service '; $()"
+            account = 'account "quoted" ; $(x) \\ path'
+            for value in ("first-value", "second-value"):
+                payload = config_store.oskeychain._store_input(service, account, value)
+                command = payload.decode("utf-8").rstrip("\n")
+                proc = subprocess.run(
+                    ["/usr/bin/security", "-q", "-i"],
+                    input=(command + f' "{keychain}"\n').encode("utf-8"),
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=5,
+                )
+                assert proc.returncode == 0
+            stored = subprocess.run(
+                [
+                    "/usr/bin/security", "find-generic-password",
+                    "-s", service, "-a", account, "-w", str(keychain),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.rstrip("\n")
+            assert stored == "second-value"
+
+            python_binary = subprocess.run(
+                [sys.executable, "-c", "import sys; print(sys.executable)"],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            legacy_account = "legacy-python-owner"
+            subprocess.run(
+                [
+                    "/usr/bin/security", "add-generic-password",
+                    "-s", service, "-a", legacy_account,
+                    "-w", "legacy-value", "-T", python_binary, "-T", "", str(keychain),
+                ],
+                check=True,
+                stdout=subprocess.DEVNULL,
+            )
+            legacy_payload = config_store.oskeychain._store_input(
+                service, legacy_account, "migrated-value"
+            )
+            legacy_command = legacy_payload.decode("utf-8").rstrip("\n")
+            legacy_update = subprocess.run(
+                ["/usr/bin/security", "-q", "-i"],
+                input=(legacy_command + f' "{keychain}"\n').encode("utf-8"),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=5,
+            )
+            assert legacy_update.returncode == 0
+        finally:
+            subprocess.run(
+                ["/usr/bin/security", "delete-keychain", str(keychain)],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+
+
 def test_warm_keyring_cache_serializes_provider_reads() -> None:
     active = 0
     peak = 0
@@ -199,6 +342,10 @@ if __name__ == "__main__":
     test_provider_api_key_uses_agent_service_and_legacy_fallback()
     test_denied_keyring_read_is_not_cached_and_a_later_read_recovers()
     test_macos_read_uses_stable_security_identity_and_exact_account()
+    test_macos_write_uses_stable_security_identity_without_secret_argv()
+    test_macos_store_input_keeps_secret_out_of_argv_and_quotes_identifiers()
+    test_macos_write_failure_propagates_without_cache_update()
+    test_macos_security_stdin_real_keychain_lifecycle()
     test_warm_keyring_cache_serializes_provider_reads()
     test_load_state_uses_fingerprint_cache_and_external_invalidates()
     print("OK: config_store keyring compatibility")
