@@ -1290,6 +1290,32 @@ class Coordinator:
         if key and self._active_prompt_client_ids.get(key) == item_id:
             self._active_prompt_client_ids.pop(key, None)
 
+    async def _remove_consumed_queue_item(
+        self,
+        app_session_id: str,
+        item_id: str,
+    ) -> None:
+        ids = self._queued_ids.get(app_session_id, [])
+        if item_id in ids:
+            ids.remove(item_id)
+            if not ids:
+                self._queued_ids.pop(app_session_id, None)
+        await asyncio.to_thread(
+            session_manager.remove_queued_prompt,
+            app_session_id,
+            item_id,
+        )
+        try:
+            await self.dispatch_raw(app_session_id, {
+                "type": "queue_consumed",
+                "data": {
+                    "app_session_id": app_session_id,
+                    "queued_id": item_id,
+                },
+            })
+        except Exception:
+            logger.debug("queue_consumed emit failed", exc_info=True)
+
     def try_claim_prompt_client_id(
         self,
         app_session_id: str,
@@ -2987,16 +3013,7 @@ class Coordinator:
                 lifecycle_msg_id=first.get("lifecycle_msg_id") or str(uuid.uuid4()),
             ):
                 item_id = first.get("_queued_id")
-                ids = self._queued_ids.get(app_session_id, [])
-                if item_id in ids:
-                    ids.remove(item_id)
-                if not ids:
-                    self._queued_ids.pop(app_session_id, None)
-                await asyncio.to_thread(
-                    session_manager.remove_queued_prompt,
-                    app_session_id,
-                    item_id,
-                )
+                await self._remove_consumed_queue_item(app_session_id, item_id)
                 self._forget_active_prompt_item(item_id)
                 for item in items:
                     await q.put(item)
@@ -3230,30 +3247,7 @@ class Coordinator:
                 nonlocal queue_consumed
                 if not item_id or queue_consumed:
                     return
-                ids = self._queued_ids.get(app_session_id, [])
-                if item_id in ids:
-                    ids.remove(item_id)
-                    if not ids:
-                        self._queued_ids.pop(app_session_id, None)
-                await asyncio.to_thread(
-                    session_manager.remove_queued_prompt,
-                    app_session_id,
-                    item_id,
-                )
-                # Notify all subscribers that this queue item was consumed.
-                # Critical for frontends that are subscribed to this session
-                # but NOT currently viewing it — they won't get turn_start
-                # unless they clear the stale queuedBySession entry now.
-                try:
-                    await self.dispatch_raw(app_session_id, {
-                        "type": "queue_consumed",
-                        "data": {
-                            "app_session_id": app_session_id,
-                            "queued_id": item_id,
-                        },
-                    })
-                except Exception:
-                    logger.debug("queue_consumed emit failed", exc_info=True)
+                await self._remove_consumed_queue_item(app_session_id, item_id)
                 queue_consumed = True
             # If marked as interrupt, prepend the interruption prefix to
             # BOTH the displayed prompt AND the model-facing cli_prompt
