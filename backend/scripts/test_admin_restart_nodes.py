@@ -18,6 +18,8 @@ if _BACKEND not in sys.path:
 import main  # noqa: E402
 import node_link  # noqa: E402
 import node_store  # noqa: E402
+from daemonhost.jsonio import write_json  # noqa: E402
+from daemonhost.paths import switch_request_path  # noqa: E402
 from session_manager import manager as session_manager  # noqa: E402
 
 
@@ -65,7 +67,27 @@ async def _run() -> None:
         assert killed, "primary restart signal was not scheduled"
         status = await main.admin_restart_status("restart-test")
         assert status["accepted"] is True, status
+        assert status["status"] == "pending", status
         assert status["refresh_result"] is None, status
+
+        write_json(switch_request_path(), {
+            "request_id": "line-switch-test",
+            "target": "dev",
+            "status": "accepted",
+            "error": "",
+        })
+        switch_status = await main.admin_restart_status("line-switch-test")
+        assert switch_status["accepted"] is True, switch_status
+        assert switch_status["status"] == "accepted", switch_status
+        write_json(switch_request_path(), {
+            "request_id": "line-switch-test",
+            "target": "dev",
+            "status": "failed",
+            "error": "backend failed",
+        })
+        switch_status = await main.admin_restart_status("line-switch-test")
+        assert switch_status["status"] == "failed", switch_status
+        assert switch_status["error"] == "backend failed", switch_status
     finally:
         if old_supervisor is None:
             os.environ.pop("BETTER_CLAUDE_RUN_SH_SUPERVISOR", None)
