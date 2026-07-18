@@ -1,5 +1,5 @@
 """Single source of truth for the model-facing descriptions of the
-session-orchestration tools (mssg / ask / delegate_task /
+session-orchestration tools (mssg / stop_turn / ask / delegate_task /
 create_session / create_sub_session / create_worker).
 
 All three provider runners import these constants so the descriptions cannot
@@ -31,6 +31,12 @@ MSSG_DESCRIPTION = (
     f"mode='{ASK_MODE_WAIT_AND_GRAB_LAST_ASSISTANT_MSSG_IN_TURN}' instead. With "
     "target_worker_pool, pass pool_affinity_key to continue the same thread on "
     "the same pool worker."
+)
+
+STOP_TURN_DESCRIPTION = (
+    "Stop the currently running turn in target_session_id. Allowed only when "
+    "the calling session created that exact turn through Communicate; otherwise "
+    "the request is blocked. Does not cancel queued turns."
 )
 
 ASK_DESCRIPTION = (

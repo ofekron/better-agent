@@ -694,6 +694,8 @@
   "newSession.workerRuntimeProfile": "ملف تشغيل العامل",
   "newSession.cancel": "إلغاء",
   "newSession.create": "إنشاء",
+  "newSession.createAndSend": "إنشاء وإرسال",
+  "newSession.createAndSendAndOpen": "إنشاء وإرسال وفتح",
   "newSession.creating": "جارٍ الإنشاء…",
   "newSession.fileEdit": "وضع تعديل الملف",
   "newSession.machine": "الجهاز",

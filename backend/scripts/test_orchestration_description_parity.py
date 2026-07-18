@@ -1,6 +1,6 @@
 """Locks the single-source-of-truth for orchestration-tool descriptions.
 
-The descriptions of mssg / ask / delegate_task / create_session /
+The descriptions of mssg / stop_turn / ask / delegate_task / create_session /
 create_sub_session / create_worker live in ONE module
 (orchestration_tool_descriptions) and are consumed identically by all three
 provider runners:
@@ -31,6 +31,7 @@ import communicate_mcp  # noqa: E402
 # tool name -> (shared constant, [substrings that MUST survive any edit])
 SPEC = {
     "mssg": (otd.MSSG_DESCRIPTION, ["backend accepts", "final report"]),
+    "stop_turn": (otd.STOP_TURN_DESCRIPTION, ["created", "blocked"]),
     "ask": (
         otd.ASK_DESCRIPTION,
         ["wait_and_grab_last_assistant_mssg_in_turn", "continue_and_expect_mssg_back_async", "fork",
@@ -56,6 +57,7 @@ SPEC = {
 # The `_`-prefixed alias each runner imports must BE the same object (no fork).
 _CLAUDE_ALIASES = {
     "mssg": runner._MSSG_DESCRIPTION,
+    "stop_turn": runner._STOP_TURN_DESCRIPTION,
     "ask": runner._ASK_DESCRIPTION,
     "delegate_task": runner._DELEGATE_TASK_DESCRIPTION,
     "create_session": runner._CREATE_SESSION_DESCRIPTION,
@@ -66,6 +68,7 @@ _CLAUDE_ALIASES = {
 }
 _CODEX_ALIASES = {
     "mssg": runner_codex._MSSG_DESCRIPTION,
+    "stop_turn": runner_codex._STOP_TURN_DESCRIPTION,
     "ask": runner_codex._ASK_DESCRIPTION,
     "delegate_task": runner_codex._DELEGATE_TASK_DESCRIPTION,
     "create_session": runner_codex._CREATE_SESSION_DESCRIPTION,

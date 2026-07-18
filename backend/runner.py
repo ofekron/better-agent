@@ -72,12 +72,14 @@ from orchestration_tool_descriptions import (
     LIST_AVAILABLE_PROVIDER_MODELS_DESCRIPTION as _LIST_AVAILABLE_PROVIDER_MODELS_DESCRIPTION,
     MSSG_DESCRIPTION as _MSSG_DESCRIPTION,
     SET_CHAT_SENDER_POLICY_DESCRIPTION as _SET_CHAT_SENDER_POLICY_DESCRIPTION,
+    STOP_TURN_DESCRIPTION as _STOP_TURN_DESCRIPTION,
 )
 from orchestration_tool_schemas import (
     DELEGATE_TASK_INPUT_SCHEMA as _DELEGATE_TASK_INPUT_SCHEMA,
     ENSURE_NAMED_WORKER_INPUT_SCHEMA as _ENSURE_NAMED_WORKER_INPUT_SCHEMA,
     LIST_AVAILABLE_PROVIDER_MODELS_INPUT_SCHEMA as _LIST_AVAILABLE_PROVIDER_MODELS_INPUT_SCHEMA,
     SESSION_ORGANIZATION_INPUT_PROPERTIES as _SESSION_ORGANIZATION_INPUT_PROPERTIES,
+    STOP_TURN_INPUT_SCHEMA as _STOP_TURN_INPUT_SCHEMA,
 )
 from provider_catalog_mcp import available_provider_models_response
 from user_interaction_tool_contracts import (
@@ -922,6 +924,7 @@ _DISABLEABLE_BUILTIN_TOOLS = frozenset({
     "mssg",
     "read_chat_history",
     "set_chat_sender_policy",
+    "stop_turn",
 })
 
 
@@ -1503,6 +1506,42 @@ def _build_mssg_tool(
         return _tool_success_result(result)
 
     return mssg
+
+
+def _build_stop_turn_tool(
+    *,
+    sender_session_id: str,
+    backend_url: str,
+    internal_token: str,
+):
+    @tool("stop_turn", _STOP_TURN_DESCRIPTION, _STOP_TURN_INPUT_SCHEMA)
+    async def stop_turn(args: dict[str, Any]) -> dict[str, Any]:
+        target_session_id = str(args.get("target_session_id") or "").strip()
+        if not target_session_id:
+            return {
+                "content": [{"type": "text", "text": "target_session_id is required"}],
+                "is_error": True,
+            }
+        try:
+            result = await asyncio.to_thread(
+                _post_loopback_sync,
+                {
+                    "caller_session_id": sender_session_id,
+                    "target_session_id": target_session_id,
+                },
+                backend_url=backend_url,
+                internal_token=internal_token,
+                url_path="/api/internal/stop-turn",
+                timeout=30,
+                non_json_t_key="runner.stop_turn_non_json",
+                log_prefix="stop_turn POST",
+                backoff_cap=5.0,
+            )
+        except Exception as e:
+            return _tool_error_response("stop_turn", e)
+        return _tool_success_result(result)
+
+    return stop_turn
 
 
 def _build_chat_tool(*, sender_session_id: str):
@@ -3082,6 +3121,12 @@ async def _run(run_dir: Path, inputs: dict) -> int:
         communicate_tools = []
         if "mssg" not in disabled_builtin_tools:
             communicate_tools.append(_build_mssg_tool(
+                sender_session_id=str(mssg_sender_session_id),
+                backend_url=backend_url,
+                internal_token=internal_token,
+            ))
+        if "stop_turn" not in disabled_builtin_tools:
+            communicate_tools.append(_build_stop_turn_tool(
                 sender_session_id=str(mssg_sender_session_id),
                 backend_url=backend_url,
                 internal_token=internal_token,

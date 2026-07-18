@@ -694,6 +694,8 @@
   "newSession.workerRuntimeProfile": "Perfil de runtime de worker",
   "newSession.cancel": "Cancelar",
   "newSession.create": "Crear",
+  "newSession.createAndSend": "Crear y enviar",
+  "newSession.createAndSendAndOpen": "Crear, enviar y abrir",
   "newSession.creating": "Creando…",
   "newSession.fileEdit": "Modo de edición de archivos",
   "newSession.machine": "Máquina",

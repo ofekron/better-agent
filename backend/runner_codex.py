@@ -83,12 +83,14 @@ from orchestration_tool_descriptions import (
     LIST_AVAILABLE_PROVIDER_MODELS_DESCRIPTION as _LIST_AVAILABLE_PROVIDER_MODELS_DESCRIPTION,
     MSSG_DESCRIPTION as _MSSG_DESCRIPTION,
     SET_CHAT_SENDER_POLICY_DESCRIPTION as _SET_CHAT_SENDER_POLICY_DESCRIPTION,
+    STOP_TURN_DESCRIPTION as _STOP_TURN_DESCRIPTION,
 )
 from orchestration_tool_schemas import (
     DELEGATE_TASK_INPUT_SCHEMA as _DELEGATE_TASK_INPUT_SCHEMA,
     ENSURE_NAMED_WORKER_INPUT_SCHEMA as _ENSURE_NAMED_WORKER_INPUT_SCHEMA,
     LIST_AVAILABLE_PROVIDER_MODELS_INPUT_SCHEMA as _LIST_AVAILABLE_PROVIDER_MODELS_INPUT_SCHEMA,
     SESSION_ORGANIZATION_INPUT_PROPERTIES as _SESSION_ORGANIZATION_INPUT_PROPERTIES,
+    STOP_TURN_INPUT_SCHEMA as _STOP_TURN_INPUT_SCHEMA,
 )
 from paths import ba_home
 from provider_catalog_mcp import available_provider_models_response
@@ -484,6 +486,11 @@ _CREATE_SESSION_INPUT_SCHEMA: dict[str, Any] = {
         "provider_id": {"type": "string"},
         "model": {"type": "string"},
         "reasoning_effort": {"type": "string"},
+        "mcp_servers": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "OPTIONAL — extension MCP server names to opt this session into (servers that are default-off globally, e.g. 'testape-internal').",
+        },
         **_SESSION_ORGANIZATION_INPUT_PROPERTIES,
     },
     "required": ["name"],
@@ -498,6 +505,11 @@ _CREATE_SUB_SESSION_INPUT_SCHEMA: dict[str, Any] = {
         "provider_id": {"type": "string"},
         "model": {"type": "string"},
         "reasoning_effort": {"type": "string"},
+        "mcp_servers": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "OPTIONAL — extension MCP server names to opt this session into (servers that are default-off globally, e.g. 'testape-internal').",
+        },
         **_SESSION_ORGANIZATION_INPUT_PROPERTIES,
     },
     "required": [],
@@ -545,6 +557,7 @@ _DISABLEABLE_BUILTIN_TOOLS = frozenset({
     "mssg",
     "read_chat_history",
     "set_chat_sender_policy",
+    "stop_turn",
 })
 
 
@@ -829,6 +842,14 @@ def _build_mssg_dynamic_tool() -> dict:
     }
 
 
+def _build_stop_turn_dynamic_tool() -> dict:
+    return {
+        "name": "stop_turn",
+        "description": _STOP_TURN_DESCRIPTION,
+        "inputSchema": _STOP_TURN_INPUT_SCHEMA,
+    }
+
+
 def _build_ask_dynamic_tool() -> dict:
     return {
         "name": "ask",
@@ -949,6 +970,46 @@ def _build_mssg_tool_handler(
         return _dynamic_tool_json_result(result, success=not is_error)
 
     return mssg
+
+
+def _build_stop_turn_tool_handler(
+    *,
+    sender_session_id: str,
+    backend_url: str,
+    internal_token: str,
+):
+    async def stop_turn(params: dict) -> dict:
+        args = params.get("arguments") or {}
+        if not isinstance(args, dict):
+            return _dynamic_tool_text_result(
+                "stop_turn arguments must be an object",
+                success=False,
+            )
+        target_session_id = str(args.get("target_session_id") or "").strip()
+        if not target_session_id:
+            return _dynamic_tool_text_result(
+                "target_session_id is required",
+                success=False,
+            )
+        try:
+            result = await asyncio.to_thread(
+                _post_loopback_sync,
+                {
+                    "caller_session_id": sender_session_id,
+                    "target_session_id": target_session_id,
+                },
+                backend_url=backend_url,
+                internal_token=internal_token,
+                url_path="/api/internal/stop-turn",
+                timeout_s=30.0,
+            )
+        except Exception as e:
+            logger.exception("stop_turn dynamic tool handler failed")
+            return _dynamic_tool_text_result(f"stop_turn failed: {e}", success=False)
+        is_error = bool(result.get("error")) or result.get("success") is False
+        return _dynamic_tool_json_result(result, success=not is_error)
+
+    return stop_turn
 
 
 
@@ -1191,6 +1252,7 @@ def _build_create_session_tool_handler(
                     "node_id": node_id,
                     "folder_id": args.get("folder_id"),
                     "tag_ids": args.get("tag_ids") or [],
+                    "mcp_servers": args.get("mcp_servers") or [],
                 },
                 backend_url=backend_url,
                 internal_token=internal_token,
@@ -1237,6 +1299,7 @@ def _build_create_sub_session_tool_handler(
                     "node_id": node_id,
                     "folder_id": args.get("folder_id"),
                     "tag_ids": args.get("tag_ids") or [],
+                    "mcp_servers": args.get("mcp_servers") or [],
                 },
                 backend_url=backend_url,
                 internal_token=internal_token,
@@ -1614,6 +1677,18 @@ def _build_dynamic_tool_set(
                 tool_handlers,
                 _build_mssg_dynamic_tool(),
                 _build_mssg_tool_handler(
+                    sender_session_id=mssg_sender_session_id,
+                    backend_url=backend_url,
+                    internal_token=internal_token,
+                ),
+                existing_tool_names=existing_tool_names,
+            )
+        if "stop_turn" not in disabled_builtin_tools:
+            _add_dynamic_tool(
+                dynamic_tools,
+                tool_handlers,
+                _build_stop_turn_dynamic_tool(),
+                _build_stop_turn_tool_handler(
                     sender_session_id=mssg_sender_session_id,
                     backend_url=backend_url,
                     internal_token=internal_token,

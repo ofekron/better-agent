@@ -695,6 +695,8 @@
   "newSession.workerRuntimeProfile": "Runtime-профиль воркера",
   "newSession.cancel": "Отмена",
   "newSession.create": "Создать",
+  "newSession.createAndSend": "Создать и отправить",
+  "newSession.createAndSendAndOpen": "Создать, отправить и открыть",
   "newSession.creating": "Создание…",
   "newSession.fileEdit": "Режим редактирования файлов",
   "newSession.machine": "Машина",

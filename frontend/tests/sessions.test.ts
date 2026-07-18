@@ -33,6 +33,15 @@ async function clickNewSession(h: Awaited<ReturnType<typeof renderApp>>) {
   await h.clickByText(/^(\+ New|session\.newButton)$/);
 }
 
+async function enterNewSessionPrompt(
+  h: Awaited<ReturnType<typeof renderApp>>,
+  text: string,
+) {
+  const prompt = h.$(".ns-investigation-textarea") as HTMLTextAreaElement;
+  fireEvent.input(prompt, { target: { value: text } });
+  await h.flush();
+}
+
 describe("sessions CRUD + subscribe lifecycle", () => {
   it("changes a newly created empty session model before the first prompt", async () => {
     const h = await renderApp({
@@ -99,6 +108,107 @@ describe("sessions CRUD + subscribe lifecycle", () => {
     const view = h.toJSON();
     expect(view.sidebar.sessions).toHaveLength(1);
     expect(view.sidebar.sessions[0].active).toBe(true);
+    h.unmount();
+  });
+
+  it("Create stores the initial prompt as a draft and keeps the current session open", async () => {
+    const current = makeSession({ id: "current", cwd: "/tmp/project" });
+    const h = await renderApp({
+      seed: {
+        sessions: [current],
+        projects: [{
+          path: "/tmp/project",
+          name: "project",
+          created_at: new Date().toISOString(),
+          last_used: new Date().toISOString(),
+        }],
+      },
+    });
+    await h.selectSession(current.id);
+    await clickNewSession(h);
+    await enterNewSessionPrompt(h, "draft this in the new session");
+    await h.clickByText(/^(Create|newSession\.create)$/);
+    await h.flush();
+
+    expect(window.location.pathname).toBe("/s/current");
+    expect(await waitForSend(h, "draft this in the new session")).toBeUndefined();
+    expect(h.restCalls).toContainEqual(expect.objectContaining({
+      method: "PATCH",
+      path: "/api/sessions/sess-2/draft",
+      body: expect.objectContaining({ draft_input: "draft this in the new session" }),
+    }));
+    expect(h.backend.state.sessions.find((session) => session.id === "sess-2")?.draft_input)
+      .toBe("draft this in the new session");
+    h.unmount();
+  });
+
+  it("Create & Send dispatches the initial prompt and keeps the current session open", async () => {
+    const current = makeSession({ id: "current", cwd: "/tmp/project" });
+    const h = await renderApp({
+      seed: {
+        sessions: [current],
+        projects: [{
+          path: "/tmp/project",
+          name: "project",
+          created_at: new Date().toISOString(),
+          last_used: new Date().toISOString(),
+        }],
+      },
+    });
+    await h.selectSession(current.id);
+    await clickNewSession(h);
+    await enterNewSessionPrompt(h, "send this in the background");
+    await h.clickByText(/^(Create & Send|newSession\.createAndSend)$/);
+    await h.flush();
+
+    expect(window.location.pathname).toBe("/s/current");
+    expect(await waitForSend(h, "send this in the background")).toEqual(
+      expect.objectContaining({ app_session_id: "sess-2" }),
+    );
+    h.unmount();
+  });
+
+  it("Create preserves an offline draft without switching sessions or sending it", async () => {
+    const current = makeSession({ id: "current", cwd: "/tmp/project" });
+    const h = await renderApp({
+      seed: {
+        sessions: [current],
+        projects: [{
+          path: "/tmp/project",
+          name: "project",
+          created_at: new Date().toISOString(),
+          last_used: new Date().toISOString(),
+        }],
+      },
+    });
+    await h.selectSession(current.id);
+    h.dropConnection();
+    h.backend.setOffline(true);
+    await h.flush();
+    await clickNewSession(h);
+    await enterNewSessionPrompt(h, "keep this offline draft");
+    await h.clickByText(/^(Create|newSession\.create)$/);
+    await h.flush();
+
+    const [queued] = JSON.parse(localStorage.getItem("better_agent_offline_queue") || "[]");
+    expect(window.location.pathname).toBe("/s/current");
+    expect(queued).toEqual(expect.objectContaining({
+      type: "create_session",
+      prompt: "",
+      session: expect.objectContaining({ draft_input: "keep this offline draft" }),
+    }));
+
+    h.backend.setOffline(false);
+    h.reopenConnection();
+    for (let i = 0; i < 10 && localStorage.getItem("better_agent_offline_queue"); i++) {
+      await h.flush();
+    }
+
+    expect(window.location.pathname).toBe("/s/current");
+    expect(h.outbound.some((frame) => frame.type === "send_message")).toBe(false);
+    expect(h.backend.state.sessions.find((session) => session.id === queued.session.id)?.draft_input)
+      .toBe("keep this offline draft");
+    expect(localStorage.getItem("better_agent_offline_queue")).toBeNull();
     h.unmount();
   });
 

@@ -182,6 +182,16 @@ def test_gemini_delegate_task_params_match_shared_schema():
     )
 
 
+def test_stop_turn_schema_is_shared_across_providers():
+    assert runner._STOP_TURN_INPUT_SCHEMA is ots.STOP_TURN_INPUT_SCHEMA
+    assert runner_codex._STOP_TURN_INPUT_SCHEMA is ots.STOP_TURN_INPUT_SCHEMA
+    tools = {t.name: t for t in communicate_mcp.build_server()._tool_manager.list_tools()}
+    assert "stop_turn" in tools, "Gemini communicate server missing stop_turn"
+    gemini_props = set((tools["stop_turn"].parameters or {}).get("properties", {}).keys())
+    shared_props = set(ots.STOP_TURN_INPUT_SCHEMA["properties"].keys())
+    assert gemini_props == shared_props
+
+
 # ---------------------------------------------------------------------------
 # S5 — Builtin MCP registry: equivalent reserved-server set across providers.
 # ---------------------------------------------------------------------------

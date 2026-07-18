@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { renderApp } from "./harness";
 import { makeSession, makeUserMsg } from "./fixtures";
-import { appendPendingUnlessAcked } from "../src/utils/pendingMessages";
+import { upsertPendingUnlessAcked } from "../src/utils/pendingMessages";
 
 /**
  * The optimistic pendingMessages list is keyed by session_id, and the
@@ -49,7 +49,7 @@ describe("client_id matching + per-session pending", () => {
     const prev = [makeUserMsg({ id: "existing", content: "existing", seq: 0 })];
     const ackedClientIds = new Set(["pending-fast"]);
     const skipNextAppendBySession = new Set<string>();
-    const next = appendPendingUnlessAcked(
+    const next = upsertPendingUnlessAcked(
       prev,
       "sess-1",
       makeUserMsg({ id: "pending-fast", content: "fast ack", seq: 1 }),
@@ -63,7 +63,7 @@ describe("client_id matching + per-session pending", () => {
     const prev = [makeUserMsg({ id: "existing", content: "existing", seq: 0 })];
     const ackedClientIds = new Set<string>();
     const skipNextAppendBySession = new Set(["sess-1"]);
-    const next = appendPendingUnlessAcked(
+    const next = upsertPendingUnlessAcked(
       prev,
       "sess-1",
       makeUserMsg({ id: "pending-legacy", content: "legacy fast ack", seq: 1 }),
@@ -71,6 +71,56 @@ describe("client_id matching + per-session pending", () => {
     );
 
     expect(next).toBe(prev);
+    expect(skipNextAppendBySession.has("sess-1")).toBe(false);
+  });
+
+  it("replaces an existing optimistic failure with one fresh retry", () => {
+    const prev = [makeUserMsg({ id: "pending-failed", status: "error" })];
+    const retry = makeUserMsg({ id: "pending-retry", status: "sending" });
+
+    const next = upsertPendingUnlessAcked(
+      prev,
+      "sess-1",
+      retry,
+      { ackedClientIds: new Set(), skipNextAppendBySession: new Set() },
+      "pending-failed",
+    );
+
+    expect(next).toEqual([retry]);
+  });
+
+  it("removes the old failure without appending when the retry ack wins the race", () => {
+    const prev = [makeUserMsg({ id: "pending-failed", status: "error" })];
+    const retry = makeUserMsg({ id: "pending-retry", status: "sending" });
+
+    const next = upsertPendingUnlessAcked(
+      prev,
+      "sess-1",
+      retry,
+      {
+        ackedClientIds: new Set(["pending-retry"]),
+        skipNextAppendBySession: new Set(),
+      },
+      "pending-failed",
+    );
+
+    expect(next).toEqual([]);
+  });
+
+  it("removes the old failure without appending after a legacy retry ack", () => {
+    const prev = [makeUserMsg({ id: "pending-failed", status: "error" })];
+    const retry = makeUserMsg({ id: "pending-retry", status: "sending" });
+    const skipNextAppendBySession = new Set(["sess-1"]);
+
+    const next = upsertPendingUnlessAcked(
+      prev,
+      "sess-1",
+      retry,
+      { ackedClientIds: new Set(), skipNextAppendBySession },
+      "pending-failed",
+    );
+
+    expect(next).toEqual([]);
     expect(skipNextAppendBySession.has("sess-1")).toBe(false);
   });
 
@@ -185,6 +235,109 @@ describe("client_id matching + per-session pending", () => {
       .map((f) => f.client_id);
     expect(new Set(ids).size).toBe(3);
     expect(ids.every((id) => typeof id === "string" && id.startsWith("pending-"))).toBe(true);
+    h.unmount();
+  });
+
+  it("retrying a persisted failed prompt immediately appends a pending retry", async () => {
+    const failed = makeUserMsg({
+      id: "u-failed",
+      content: "retry this persisted prompt",
+      status: "error",
+      errorText: "offline",
+      seq: 0,
+    });
+    const session = makeSession({ messages: [failed] });
+    const h = await renderApp({ seed: { sessions: [session] } });
+    await h.selectSession(session.id);
+
+    await h.clickByText("Retry");
+
+    const sent = h.outbound.find((frame) => frame.type === "send_message");
+    expect(sent).toEqual(expect.objectContaining({
+      prompt: "retry this persisted prompt",
+      client_id: expect.stringMatching(/^pending-/),
+    }));
+    expect(h.toJSON().chat.messages.filter((message) => message.role === "user")).toEqual([
+      expect.objectContaining({ id: "u-failed", status: "error" }),
+      expect.objectContaining({ id: sent!.client_id, status: "sending" }),
+    ]);
+
+    h.emit({
+      type: "user_message_persisted",
+      data: {
+        session_id: session.id,
+        user_message: makeUserMsg({
+          id: "u-retry",
+          content: "retry this persisted prompt",
+          client_id: sent!.client_id as string,
+          seq: 1,
+        }),
+      },
+    });
+    await h.flush();
+
+    const userMessages = h.toJSON().chat.messages.filter((message) => message.role === "user");
+    expect(userMessages).toEqual([
+      expect.objectContaining({ id: "u-failed" }),
+      expect.objectContaining({ id: "u-retry" }),
+    ]);
+    expect(userMessages.filter((message) => message.id === sent!.client_id)).toHaveLength(0);
+    h.unmount();
+  });
+
+  it("keeps a failed retry visible when its source was a persisted prompt", async () => {
+    const session = makeSession({
+      messages: [makeUserMsg({
+        id: "u-persisted-failure",
+        content: "retry while disconnected",
+        status: "error",
+        errorText: "offline",
+        seq: 0,
+      })],
+    });
+    const h = await renderApp({ seed: { sessions: [session] } });
+    await h.selectSession(session.id);
+    h.dropConnection();
+
+    await h.clickByText("Retry");
+
+    const userMessages = h.toJSON().chat.messages.filter((message) => message.role === "user");
+    expect(userMessages).toEqual([
+      expect.objectContaining({ id: "u-persisted-failure", status: "error" }),
+      expect.objectContaining({
+        id: expect.stringMatching(/^pending-/),
+        status: "error",
+      }),
+    ]);
+    h.unmount();
+  });
+
+  it("replaces an optimistic failed prompt when its retry cannot send", async () => {
+    const session = makeSession();
+    const h = await renderApp({ seed: { sessions: [session] } });
+    await h.selectSession(session.id);
+    await h.typeAndSend("retry optimistic failure");
+    const firstSend = h.outbound.find((frame) => frame.type === "send_message")!;
+    h.emit({
+      type: "error",
+      data: {
+        app_session_id: session.id,
+        client_id: firstSend.client_id,
+        error: "offline",
+      },
+    });
+    await h.flush();
+    h.dropConnection();
+
+    await h.clickByText("Retry");
+
+    const userMessages = h.toJSON().chat.messages.filter((message) => message.role === "user");
+    expect(userMessages).toHaveLength(1);
+    expect(userMessages[0]).toEqual(expect.objectContaining({
+      id: expect.stringMatching(/^pending-/),
+      status: "error",
+    }));
+    expect(userMessages[0].id).not.toBe(firstSend.client_id);
     h.unmount();
   });
 });

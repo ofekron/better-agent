@@ -694,6 +694,8 @@
   "newSession.workerRuntimeProfile": "워커 runtime profile",
   "newSession.cancel": "취소",
   "newSession.create": "만들기",
+  "newSession.createAndSend": "만들고 보내기",
+  "newSession.createAndSendAndOpen": "만들고 보내서 열기",
   "newSession.creating": "만드는 중…",
   "newSession.fileEdit": "파일 편집 모드",
   "newSession.machine": "머신",

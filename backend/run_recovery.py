@@ -1718,6 +1718,11 @@ async def _integrate_one_locked(
                         run_id[:8], pid, exc_info=True,
                     )
             coordinator.turn_manager.active_run_ids.setdefault(app_sid, []).append(run_id)
+            coordinator.turn_manager.register_recovered_turn_creator(
+                app_sid,
+                sess,
+                recovering_msg_id,
+            )
             await _to_thread_joined(
                 coordinator.turn_manager.run_state_add,
                 app_sid,

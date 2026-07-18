@@ -1359,12 +1359,13 @@ export function useSession(authStatus?: string) {
     [sortForList]
   );
 
-  const addOfflineSession = useCallback((session: Session) => {
+  const addOfflineSession = useCallback((session: Session, select: boolean) => {
     setSessions((prev) =>
       prev.some((s) => s.id === session.id)
         ? prev
         : sortForList([session, ...prev]),
     );
+    if (!select) return;
     selectRequestIdRef.current++;
     selectInFlightIdRef.current = null;
     setCurrentSession(session);
