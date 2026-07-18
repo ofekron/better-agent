@@ -4,6 +4,8 @@ import os
 import json
 import sys
 import tempfile
+import threading
+import time
 
 import _test_home
 _test_home.isolate("bc-test-config-keyring-")
@@ -108,6 +110,63 @@ def test_denied_keyring_read_is_not_cached_and_a_later_read_recovers() -> None:
         config_store.keyring.get_password = real_get
 
 
+def test_macos_read_uses_stable_security_identity_and_exact_account() -> None:
+    calls = []
+    real_api = config_store._macos_security_api
+    real_get = config_store.oskeychain.get
+    config_store._macos_security_api = lambda: object()
+    config_store.oskeychain.get = lambda service, account, **kwargs: calls.append(
+        (service, account, kwargs["timeout"])
+    ) or "  key  \n"
+    try:
+        value = config_store._get_password_with_reason(
+            config_store.KEYRING_SERVICE,
+            config_store._keyring_username("provider-1"),
+            "unused by stable security reader",
+        )
+    finally:
+        config_store._macos_security_api = real_api
+        config_store.oskeychain.get = real_get
+    assert value == "  key  "
+    assert calls == [(
+        config_store.KEYRING_SERVICE,
+        "provider:provider-1",
+        config_store._KEYRING_TIMEOUT,
+    )]
+
+
+def test_warm_keyring_cache_serializes_provider_reads() -> None:
+    active = 0
+    peak = 0
+    active_lock = threading.Lock()
+    real_load = config_store._load_state
+    real_read = config_store._read_api_key
+
+    def read(provider_id: str) -> str:
+        nonlocal active, peak
+        with active_lock:
+            active += 1
+            peak = max(peak, active)
+        time.sleep(0.02)
+        with active_lock:
+            active -= 1
+        return provider_id
+
+    config_store._load_state = lambda: {
+        "providers": [
+            {"id": f"provider-{index}", "mode": "api_key"}
+            for index in range(4)
+        ]
+    }
+    config_store._read_api_key = read
+    try:
+        config_store.warm_keyring_cache()
+    finally:
+        config_store._load_state = real_load
+        config_store._read_api_key = real_read
+    assert peak == 1
+
+
 def test_load_state_uses_fingerprint_cache_and_external_invalidates() -> None:
     _reset_cache()
     first = config_store._load_state()
@@ -139,5 +198,7 @@ def test_load_state_uses_fingerprint_cache_and_external_invalidates() -> None:
 if __name__ == "__main__":
     test_provider_api_key_uses_agent_service_and_legacy_fallback()
     test_denied_keyring_read_is_not_cached_and_a_later_read_recovers()
+    test_macos_read_uses_stable_security_identity_and_exact_account()
+    test_warm_keyring_cache_serializes_provider_reads()
     test_load_state_uses_fingerprint_cache_and_external_invalidates()
     print("OK: config_store keyring compatibility")

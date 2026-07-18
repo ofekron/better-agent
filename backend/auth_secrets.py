@@ -119,8 +119,8 @@ def read_all_parallel() -> tuple[str, str, str]:
 # ── First-run bootstrap (write side) ─────────────────────────────────
 # `run.sh` writes these entries on a dev checkout; the desktop app's
 # first-run setup writes them via `write_credentials`. Both go through
-# `/usr/bin/security` so `security` owns each entry's ACL — reads then
-# need no GUI prompt (see the module docstring).
+# the native OS credential API without exposing plaintext in process argv.
+# Reads use `/usr/bin/security`, whose stable identity can be authorized once.
 
 
 def _account_exists(account: str) -> bool:
