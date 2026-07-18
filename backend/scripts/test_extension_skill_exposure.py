@@ -154,6 +154,40 @@ def t_enabled_skill_forces_extension_mcp_on() -> None:
     )
 
 
+def t_default_disabled_mcp_hidden_until_forced_or_checked() -> None:
+    ext = "test.mcp-default-off"
+    install_skill_extension(
+        ext,
+        skills=[{"name": "forcing-skill", "path": "skills/forcing-skill", "default_enabled": False, "requires_mcp": True}],
+        mcp=[
+            {"name": "public-server", "python": "mcp/server.py"},
+            {"name": "internal-server", "python": "mcp/internal_server.py", "default_enabled": False},
+        ],
+    )
+    check(extension_store.is_mcp_server_enabled(ext, "public-server"), "mcp without default_enabled stays on by default")
+    check(not extension_store.is_mcp_server_enabled(ext, "internal-server"), "default_enabled:false mcp starts off")
+    extension_store.set_runtime_skill_enabled(ext, "forcing-skill", True)
+    check(
+        extension_store.is_mcp_server_enabled(ext, "internal-server"),
+        "enabling a requires_mcp skill forces the default-off mcp on",
+    )
+    extension_store.set_runtime_skill_enabled(ext, "forcing-skill", False)
+    check(
+        not extension_store.is_mcp_server_enabled(ext, "internal-server"),
+        "disabling the skill returns the mcp to its default-off state",
+    )
+    extension_store.set_mcp_server_enabled(ext, "internal-server", True)
+    check(
+        extension_store.is_mcp_server_enabled(ext, "internal-server"),
+        "explicitly checking a default-off mcp enables it without the skill",
+    )
+    extension_store.set_mcp_server_enabled(ext, "internal-server", False)
+    check(
+        not extension_store.is_mcp_server_enabled(ext, "internal-server"),
+        "explicit disable via the override map sticks",
+    )
+
+
 def t_unknown_skill_rejected() -> None:
     try:
         extension_store.set_runtime_skill_enabled("test.skill-toggle", "missing-skill", True)
@@ -168,6 +202,7 @@ def main() -> None:
     t_default_disabled_skill_is_hidden_until_checked()
     t_unchecking_hides_skill_and_purges_native()
     t_enabled_skill_forces_extension_mcp_on()
+    t_default_disabled_mcp_hidden_until_forced_or_checked()
     t_unknown_skill_rejected()
     print("OK")
 

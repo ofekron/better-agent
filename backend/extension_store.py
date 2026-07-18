@@ -1865,10 +1865,14 @@ def _validate_mcp_entrypoints(value: Any, *, extension_id: str) -> list[dict[str
         label = str(item.get("label") or "").strip()
         if label and len(label) > 80:
             raise ExtensionError("entrypoints.mcp.label must be at most 80 characters")
+        default_enabled = item.get("default_enabled", True)
+        if not isinstance(default_enabled, bool):
+            raise ExtensionError("entrypoints.mcp.default_enabled must be a boolean")
         items.append(
             {
                 "name": name,
                 "label": label,
+                "default_enabled": default_enabled,
                 "python": python_path,
                 "module": module,
                 "command": command,
@@ -6118,10 +6122,25 @@ def is_mcp_server_enabled(
     settings: dict[str, Any] | None = None,
     record: dict[str, Any] | None = None,
 ) -> bool:
+    """Explicit user choice wins (mcp_enabled map, legacy mcp_disabled list),
+    else the manifest item's default_enabled (default True). A disabled outcome
+    is overridden while an enabled requires_mcp skill forces the server on."""
     data = settings if settings is not None else _load_ext_settings()
     entry = data["extensions"].get(extension_id, {})
-    disabled = entry.get("mcp_disabled") if isinstance(entry, dict) else None
-    if not isinstance(disabled, list) or server_name not in set(disabled):
+    explicit: bool | None = None
+    if isinstance(entry, dict):
+        overrides = entry.get("mcp_enabled")
+        if isinstance(overrides, dict) and server_name in overrides:
+            explicit = bool(overrides[server_name])
+        else:
+            disabled = entry.get("mcp_disabled")
+            if isinstance(disabled, list) and server_name in set(disabled):
+                explicit = False
+    if explicit is None:
+        current_record = record if record is not None else get_extension(extension_id)
+        item = _harness_addition(current_record, "mcp", server_name) if current_record else None
+        explicit = bool(item.get("default_enabled", True)) if item else True
+    if explicit:
         return True
     return bool(mcp_forcing_skills(extension_id, settings=data, record=record))
 
@@ -6442,14 +6461,16 @@ def set_mcp_server_enabled(extension_id: str, server_name: str, enabled: bool) -
             )
     data = _load_ext_settings()
     entry = _ext_settings_entry(data, extension_id)
-    disabled = set(entry.get("mcp_disabled") or [])
-    if enabled:
-        disabled.discard(server_name)
-    else:
-        disabled.add(server_name)
-    entry["mcp_disabled"] = sorted(disabled)
+    overrides = entry.get("mcp_enabled")
+    if not isinstance(overrides, dict):
+        overrides = {}
+    overrides[server_name] = enabled
+    entry["mcp_enabled"] = overrides
+    legacy_disabled = set(entry.get("mcp_disabled") or [])
+    legacy_disabled.discard(server_name)
+    entry["mcp_disabled"] = sorted(legacy_disabled)
     _save_ext_settings(data)
-    return server_name not in entry["mcp_disabled"]
+    return enabled
 
 
 def extension_config(extension_id: str) -> dict[str, Any]:
