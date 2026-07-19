@@ -1,5 +1,5 @@
 import { type ButtonHTMLAttributes, type ReactNode } from "react";
-import { useOpProgress } from "./store";
+import { useOpProgress, type OpProgress } from "./store";
 
 interface Props extends Omit<ButtonHTMLAttributes<HTMLButtonElement>, "disabled"> {
   opId: string | readonly string[];
@@ -8,6 +8,7 @@ interface Props extends Omit<ButtonHTMLAttributes<HTMLButtonElement>, "disabled"
   extraDisabled?: boolean;
   /** Optional content shown while inflight. Defaults to `children`. */
   loadingChildren?: ReactNode;
+  progress?: OpProgress;
   children: ReactNode;
 }
 
@@ -15,11 +16,13 @@ export function ProgressButton({
   opId,
   extraDisabled,
   loadingChildren,
+  progress,
   children,
   className,
   ...rest
 }: Props) {
-  const { inflight, error } = useOpProgress(opId);
+  const observedProgress = useOpProgress(opId);
+  const { inflight, error } = progress ?? observedProgress;
   const disabled = inflight || !!extraDisabled;
   const cls = [
     className,

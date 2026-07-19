@@ -68,6 +68,7 @@ export function NewSessionCreateButton({
       <ProgressButton
         className="btn-primary ns-create-primary"
         opId="session:create"
+        progress={{ inflight: creating, error: null }}
         onClick={() => runAction(selectedAction)}
         extraDisabled={disabled}
         loadingChildren={loadingLabel}
