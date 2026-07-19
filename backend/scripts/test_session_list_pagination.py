@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gzip
 import json
 import os
 import shutil
@@ -143,6 +144,105 @@ def test_paginates_after_global_sort(client: TestClient) -> bool:
         and body.get("has_more") is True
     )
     print(f"{PASS if ok else FAIL} /api/sessions paginates after pinned/updated sort")
+    return ok
+
+
+def test_session_list_compresses_large_payload(client: TestClient) -> bool:
+    _reset_home()
+    small = client.get(
+        "/api/sessions?offset=0&limit=1",
+        headers={**HEADERS, "Accept-Encoding": "gzip"},
+    )
+    if small.status_code != 200 or small.headers.get("content-encoding") is not None:
+        print(f"{FAIL} small API response stays uncompressed")
+        return False
+
+    for index in range(50):
+        _write(_record_with(
+            f"session-{index}",
+            f"2026-06-{(index % 28) + 1:02d}T00:00:00+00:00",
+            current_tasks=[
+                {
+                    "subject": "Mobile session loading performance",
+                    "status": "in_progress",
+                }
+                for _ in range(8)
+            ],
+            current_todos=[
+                {
+                    "content": "Measure session payload transport",
+                    "status": "completed",
+                }
+                for _ in range(8)
+            ],
+        ))
+
+    url = "/api/sessions?offset=0&limit=50"
+    identity = client.get(
+        url,
+        headers={**HEADERS, "Accept-Encoding": "identity"},
+    )
+    refused = client.get(
+        url,
+        headers={**HEADERS, "Accept-Encoding": "gzip;q=0"},
+    )
+    explicitly_refused = client.get(
+        url,
+        headers={**HEADERS, "Accept-Encoding": "gzip;q=0, *;q=1"},
+    )
+    invalid_quality = client.get(
+        url,
+        headers={**HEADERS, "Accept-Encoding": "gzip;q=1.5"},
+    )
+    duplicate_quality = client.get(
+        url,
+        headers={**HEADERS, "Accept-Encoding": "gzip;q=0;q=1"},
+    )
+    with client.stream(
+        "GET",
+        url,
+        headers={**HEADERS, "Accept-Encoding": "gzip"},
+    ) as compressed:
+        compressed_body = b"".join(compressed.iter_raw())
+        content_encoding = compressed.headers.get("content-encoding")
+        vary = compressed.headers.get("vary", "")
+        status_code = compressed.status_code
+
+    summary_ids = ",".join(f"session-{index}" for index in range(5))
+    summaries_url = f"/api/sessions/summaries?ids={summary_ids}"
+    summaries_identity = client.get(
+        summaries_url,
+        headers={**HEADERS, "Accept-Encoding": "identity"},
+    )
+    summaries_compressed = client.get(
+        summaries_url,
+        headers={**HEADERS, "Accept-Encoding": "gzip"},
+    )
+
+    ok = (
+        identity.status_code == 200
+        and "accept-encoding" in identity.headers.get("vary", "").lower()
+        and refused.status_code == 200
+        and refused.headers.get("content-encoding") is None
+        and "accept-encoding" in refused.headers.get("vary", "").lower()
+        and refused.content == identity.content
+        and explicitly_refused.headers.get("content-encoding") is None
+        and explicitly_refused.content == identity.content
+        and invalid_quality.headers.get("content-encoding") is None
+        and invalid_quality.content == identity.content
+        and duplicate_quality.headers.get("content-encoding") is None
+        and duplicate_quality.content == identity.content
+        and status_code == 200
+        and content_encoding == "gzip"
+        and "accept-encoding" in vary.lower()
+        and len(compressed_body) < len(identity.content) // 4
+        and gzip.decompress(compressed_body) == identity.content
+        and summaries_identity.status_code == 200
+        and summaries_compressed.status_code == 200
+        and summaries_compressed.headers.get("content-encoding") == "gzip"
+        and summaries_compressed.json() == summaries_identity.json()
+    )
+    print(f"{PASS if ok else FAIL} large /api/sessions response uses gzip")
     return ok
 
 
@@ -1164,6 +1264,7 @@ def main_run() -> int:
         ok = test_session_list_source_filter_user_awareness(client) and ok
         ok = test_session_list_does_not_schedule_snapshot_prewarm(client) and ok
         ok = test_connected_first_page_caps_remote_cache_copy(client) and ok
+        ok = test_session_list_compresses_large_payload(client) and ok
         return 0 if ok else 1
     finally:
         shutil.rmtree(_TMP_HOME, ignore_errors=True)

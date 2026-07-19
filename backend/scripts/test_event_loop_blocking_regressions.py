@@ -2551,10 +2551,9 @@ def test_visible_order_cache_uses_order_version_not_summary_version() -> None:
     helper_end = source.index("def _local_session_page_for_sidebar_preserving_order(", helper_start)
     helper_source = source[helper_start:helper_end]
     assert "expected_summary_order_version: int" in helper_source
+    assert "expected_summary_index_version: int" in helper_source
     assert "key = (sort_by, project_path, offset, limit, expected_summary_order_version)" in helper_source
-    assert "expected_summary_index_version" not in helper_source
-    assert "session_store.get_indexed_session_summary(ordered_id)" in helper_source
-    assert "get_indexed_session_summary_if_current" not in helper_source
+    assert "get_indexed_session_summary_if_current" in helper_source
 
     page_start = source.index("def _local_session_page_for_sidebar_preserving_order(")
     page_end = source.index("def _root_session_file_path(", page_start)
@@ -2925,7 +2924,7 @@ def test_search_sessions_response_cache_uses_metadata_version() -> None:
     cache_start = route_source.index("cache_key = (")
     cache_end = route_source.index(")", cache_start)
     cache_source = route_source[cache_start:cache_end]
-    assert "cached_response = _sessions_list_cache_get(cache_key)" in route_source
+    assert "cached_response = _sessions_list_cache_get(cache_key, accept_encoding)" in route_source
     assert "cache_response = not (" not in route_source
     assert "search_query" in cache_source
     assert "\n        search,\n" not in cache_source
@@ -2941,15 +2940,16 @@ def test_session_summaries_response_cache_precedes_lookup() -> None:
     route_start = source.index("@app.get(\"/api/sessions/summaries\")")
     route_end = source.index("@app.get(\"/api/sessions/{session_id}/stats\")", route_start)
     route_source = source[route_start:route_end]
-    assert "cached_response = _session_summaries_cache_get(cache_key)" in route_source
-    assert route_source.index("cached_response = _session_summaries_cache_get(cache_key)") < route_source.index(
+    cache_call = "cached_response = _session_summaries_cache_get(cache_key, accept_encoding)"
+    assert cache_call in route_source
+    assert route_source.index(cache_call) < route_source.index(
         "_local_session_summaries_by_ids"
     )
-    assert route_source.index("cached_response = _session_summaries_cache_get(cache_key)") < route_source.index(
+    assert route_source.index(cache_call) < route_source.index(
         "_decorate_local_sidebar_sessions"
     )
     cache_start = route_source.index("cache_key = (")
-    cache_end = route_source.index("cached_response = _session_summaries_cache_get(cache_key)", cache_start)
+    cache_end = route_source.index(cache_call, cache_start)
     cache_source = route_source[cache_start:cache_end]
     assert "_sessions_list_transient_state_version()" not in cache_source
 
@@ -4003,7 +4003,7 @@ def test_default_session_page_uses_visible_order_cache() -> None:
     assert "expected_summary_index_version" in helper_source
     assert "get_indexed_session_summary_if_current" in helper_source
     assert "page_ids.append(str(sid))" in helper_source
-    assert 'key = (sort_by, project_path, offset, limit, expected_summary_index_version)' in helper_source
+    assert 'key = (sort_by, project_path, offset, limit, expected_summary_order_version)' in helper_source
     assert "session_matches_project(summary, project_path)" in helper_source
 
     page_start = source.index("def _local_session_page_for_sidebar_preserving_order(")
