@@ -373,6 +373,13 @@ class BackendSupervisor:
             "PATH": capture_login_path(),
             **dual_env_many({"BETTER_CLAUDE_DESKTOP_SHELL": "1"}),
         }
+        for key in (
+            "BETTER_AGENT_CREDENTIAL_SESSION_ADDRESS",
+            "BETTER_AGENT_CREDENTIAL_SESSION_AUTH",
+            "BETTER_AGENT_CREDENTIAL_SESSION_FAMILY",
+            "BETTER_AGENT_CREDENTIAL_SESSION_FD",
+        ):
+            self._env.pop(key, None)
 
     def start(
         self, on_port_conflict: Optional[PortConflictHandler] = None,
@@ -563,6 +570,7 @@ class BackendSupervisor:
             backend_argv(self.role, checkout), env=self._env, cwd=checkout / "backend",
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True, bufsize=1,  # line-buffered text stream
+            **self._credential_session.backend_popen_kwargs(),
         )
         threading.Thread(
             target=self._forward_backend_output, args=(proc,),
