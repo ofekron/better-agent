@@ -44,6 +44,7 @@ import {
 import { ExtensionQuickButtons, type HookActionContext } from "./ExtensionUiHooks";
 import { isSaveShortcutEvent } from "../hooks/useSaveShortcut";
 import { ServerSetting } from "./ServerSetting";
+import { BasCompanionAppsSetting } from "./BasCompanionAppsSetting";
 
 import { API } from "../api";
 import { providerQuotaStatus } from "../utils/quotaStatus";
@@ -96,6 +97,7 @@ type SettingsSection =
   | "language"
   | "appearance"
   | "desktop"
+  | "recovery"
   | "shortcuts"
   | "delegation"
   | "context"
@@ -2147,6 +2149,7 @@ function ProvidersList({
     { id: "language", label: t("language.label") },
     { id: "appearance", label: t("settings.appearanceTitle") },
     { id: "desktop", label: t("settings.desktopTitle") },
+    { id: "recovery", label: t("settings.recoveryTitle") },
     { id: "shortcuts", label: t("settings.shortcutsTitle") },
     ...(teamEnabled ? [{ id: "delegation" as const, label: t("settings.delegationTitle") }] : []),
     { id: "context", label: t("settings.contextTitle") },
@@ -2220,6 +2223,7 @@ function ProvidersList({
           <AutoRestartOnIdleSetting />
         </>
       )}
+      {section === "recovery" && <BasCompanionAppsSetting />}
       {section === "shortcuts" && <ShortcutSettings />}
       {section === "delegation" && teamEnabled && (
         <>

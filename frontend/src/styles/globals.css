@@ -9174,6 +9174,7 @@ button.run-badge-clickable:focus-visible {
 .settings-page-content > .user-display-name-setting,
 .settings-page-content > .shortcut-settings,
 .settings-page-content > .desktop-app-setting,
+.settings-page-content > .bas-companion-setting,
 .settings-page-content > .context-strategy-setting,
 .settings-page-content > .internal-llm-setting,
 .settings-page-content > .session-auto-delete-setting,
@@ -9369,6 +9370,116 @@ button.run-badge-clickable:focus-visible {
 .desktop-app-download.disabled {
   opacity: 0.55;
   cursor: default;
+}
+
+.bas-companion-setting {
+  display: grid;
+  gap: 16px;
+  transition: opacity 180ms ease, transform 180ms ease;
+}
+
+.bas-companion-setting.is-busy {
+  opacity: 0.72;
+  transform: translateY(1px);
+}
+
+.bas-companion-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+}
+
+.bas-companion-header h3 {
+  margin: 0;
+  font-size: calc(15px * var(--app-font-scale));
+}
+
+.bas-companion-header p,
+.bas-companion-pair p,
+.bas-companion-apps > p {
+  margin: 4px 0 0;
+  color: var(--text-secondary);
+  font-size: calc(13px * var(--app-font-scale));
+}
+
+.bas-companion-pair {
+  display: grid;
+  gap: 8px;
+  animation: bas-companion-enter 180ms ease-out;
+}
+
+.bas-companion-pair label {
+  color: var(--text-secondary);
+  font-size: calc(12px * var(--app-font-scale));
+}
+
+.bas-companion-pair-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+
+.bas-companion-pair-row input {
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text-primary);
+  background: var(--bg-input);
+}
+
+.bas-companion-apps {
+  display: grid;
+  gap: 10px;
+  animation: bas-companion-enter 180ms ease-out;
+}
+
+.bas-companion-app {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-secondary);
+}
+
+.bas-companion-app-icon {
+  display: grid;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  border-radius: 12px;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, var(--bg-tertiary));
+}
+
+.bas-companion-app strong,
+.bas-companion-app small {
+  display: block;
+}
+
+.bas-companion-app small,
+.bas-companion-loading {
+  margin-top: 3px;
+  color: var(--text-muted);
+  font-size: calc(12px * var(--app-font-scale));
+}
+
+@keyframes bas-companion-enter {
+  from { opacity: 0; transform: translateY(5px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bas-companion-setting,
+  .bas-companion-pair,
+  .bas-companion-apps {
+    animation: none;
+    transition: none;
+  }
 }
 
 .modal-overlay {
@@ -16804,6 +16915,7 @@ button.progress-inflight {
   .settings-page-content > .user-display-name-setting,
   .settings-page-content > .shortcut-settings,
   .settings-page-content > .desktop-app-setting,
+  .settings-page-content > .bas-companion-setting,
   .settings-page-content > .context-strategy-setting,
   .settings-page-content > .internal-llm-setting,
   .settings-page-content > .session-auto-delete-setting,
@@ -16856,6 +16968,27 @@ button.progress-inflight {
 
   .desktop-app-downloads {
     grid-template-columns: 1fr;
+  }
+
+  .bas-companion-header {
+    flex-direction: column;
+  }
+
+  .bas-companion-header > button {
+    width: 100%;
+  }
+
+  .bas-companion-pair-row,
+  .bas-companion-app {
+    grid-template-columns: 1fr;
+  }
+
+  .bas-companion-app-icon {
+    display: none;
+  }
+
+  .bas-companion-app > button {
+    width: 100%;
   }
 
   .language-setting,
