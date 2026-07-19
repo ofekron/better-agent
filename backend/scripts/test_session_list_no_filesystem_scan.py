@@ -48,6 +48,7 @@ def _run() -> None:
     session_store._ensure_summary_index(blocking=True)
 
     original_session_files = session_store._session_json_files
+    original_root_file_path = session_store._root_file_path
     scan_attempts = 0
     scan_lock = threading.Lock()
 
@@ -58,10 +59,13 @@ def _run() -> None:
         raise AssertionError("session-list projection read touched the filesystem")
         yield
 
+    def fail_if_root_path_requested(_sid: str):
+        raise AssertionError("session-list projection read resolved a root file path")
+
     def read_projection() -> None:
         listed = session_store.list_sessions()
         ordered = session_store.ordered_session_summary_ids("updated_at")
-        selected = session_store.get_session_summaries_by_ids([sid])
+        selected = session_store.get_session_summaries_by_ids([sid, "missing-session"])
         indexed = session_store.get_indexed_session_summary(sid)
         indexed_many = session_store.get_indexed_session_summaries_by_ids([sid])
         assert [item["id"] for item in listed] == [sid]
@@ -71,6 +75,7 @@ def _run() -> None:
         assert [item["id"] for item in indexed_many] == [sid]
 
     session_store._session_json_files = fail_if_scanned
+    session_store._root_file_path = fail_if_root_path_requested
     started = time.perf_counter()
     try:
         with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
@@ -79,6 +84,7 @@ def _run() -> None:
                 future.result(timeout=1.0)
     finally:
         session_store._session_json_files = original_session_files
+        session_store._root_file_path = original_root_file_path
         shutil.rmtree(_TMP_HOME, ignore_errors=True)
 
     elapsed = time.perf_counter() - started

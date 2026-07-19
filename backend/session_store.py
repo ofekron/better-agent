@@ -5125,17 +5125,11 @@ def get_session_summaries_by_ids(session_ids: Iterable[str]) -> list[dict]:
         return []
     _ensure_summary_index(blocking=False)
     with _summary_index_lock:
-        found = {
-            sid: _summary_index[sid]
+        return [
+            _summary_index[sid]
             for sid in ids
             if sid in _summary_index
-        }
-    missing = [sid for sid in ids if sid not in found]
-    for sid in missing:
-        summary = _load_summary_for_requested_id(sid)
-        if summary is not None:
-            found[sid] = summary
-    return [found[sid] for sid in ids if sid in found]
+        ]
 
 
 def get_indexed_session_summaries_by_ids_if_current(
@@ -5187,36 +5181,6 @@ def get_indexed_session_summaries_by_ids(session_ids: Iterable[str]) -> list[dic
             for sid in ids
             if sid in _summary_index
         ]
-
-
-def _load_summary_for_requested_id(sid: str) -> Optional[dict]:
-    path = _root_file_path(sid)
-    if not path.exists():
-        return None
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-        if not isinstance(raw, dict) or raw.get("id") != sid:
-            return None
-        summary = _build_summary_for_root(_migrate_session(raw))
-        _publish_requested_summary(sid, summary)
-        _write_summary_file(sid, summary)
-        return summary
-    except (json.JSONDecodeError, KeyError, ValueError, OSError):
-        return None
-
-
-def _publish_requested_summary(sid: str, summary: dict) -> None:
-    global _summary_index_version, _summary_order_version, _summary_metadata_version
-    with _summary_index_lock:
-        existing = _summary_index.get(sid)
-        if existing == summary:
-            return
-        _summary_index[sid] = summary
-        _summary_index_version += 1
-        if _summary_order_changed(existing, summary):
-            _summary_order_version += 1
-        if _summary_metadata_changed(existing, summary):
-            _summary_metadata_version += 1
 
 
 def iter_all_sessions() -> Iterator[dict]:

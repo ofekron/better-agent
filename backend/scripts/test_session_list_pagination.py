@@ -280,18 +280,11 @@ def test_default_list_uses_indexed_summary_lookup(client: TestClient) -> bool:
     _write(_record("old", "2026-06-16T00:00:00+00:00"))
     _write(_record("new", "2026-06-18T00:00:00+00:00"))
 
-    original_loader = session_store._load_summary_for_requested_id
     original_prefs = main._session_list_user_prefs
-
-    def fail_disk_fallback(_sid: str):
-        raise AssertionError("default session list should not fallback-load summaries")
-
-    session_store._load_summary_for_requested_id = fail_disk_fallback
     main._session_list_user_prefs = lambda: (False, "updated_at", False)
     try:
         response = client.get("/api/sessions?offset=0&limit=1", headers=HEADERS)
     finally:
-        session_store._load_summary_for_requested_id = original_loader
         main._session_list_user_prefs = original_prefs
     if response.status_code != 200:
         print(f"{FAIL} /api/sessions indexed summary lookup status {response.status_code}")
