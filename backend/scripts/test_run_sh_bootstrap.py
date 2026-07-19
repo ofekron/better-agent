@@ -17,6 +17,21 @@ def test_run_sh_uses_non_standard_backend_port_by_default() -> None:
     assert "BETTER_CLAUDE_BACKEND_PORT:-8000" not in source
 
 
+def test_run_sh_without_bas_launches_only_main() -> None:
+    source = _run_sh()
+
+    guard = source.index("if ! bas_available && ! current_checkout_is_main_line; then")
+    home_setup = source.index('BA_HOME="${BETTER_AGENT_HOME:-${BETTER_CLAUDE_HOME:-$HOME/.better-claude}}"')
+
+    assert guard < home_setup
+    assert 'command -v bas >/dev/null 2>&1 || [ -x "$HOME/ba-switch/bas" ]' in source
+    assert 'case "$(basename "$DIR")" in' in source
+    assert 'candidate="$parent/${name%-qa}-main"' in source
+    assert 'candidate="$DIR-main"' in source
+    assert 'exec "$MAIN_CHECKOUT/run.sh" "$@"' in source
+    assert "Refusing to launch a non-main line" in source
+
+
 def test_run_sh_initializes_provider_config_sync_before_frontend_build() -> None:
     source = _run_sh()
 
@@ -77,6 +92,7 @@ def test_windows_bootstrap_installs_base_prereqs_with_winget() -> None:
 
 if __name__ == "__main__":
     test_run_sh_uses_non_standard_backend_port_by_default()
+    test_run_sh_without_bas_launches_only_main()
     test_run_sh_initializes_provider_config_sync_before_frontend_build()
     test_run_sh_installs_node_dependencies_before_frontend_build()
     test_run_sh_exports_backend_port_for_mobile_candidate_generation()
