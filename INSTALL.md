@@ -70,6 +70,11 @@ download artifacts.
 venv, installs the `bagent` CLI, builds the frontend, and serves everything on
 `http://127.0.0.1:18765` by default.
 
+If BAS is installed and its configuration owns this checkout, plain `./run.sh`
+delegates startup to that BAS line so BAS's configured state home and port stay
+authoritative. If BAS is absent or does not own the checkout, `run.sh` starts
+the checkout directly.
+
 First run prompts once for a **username + password** (stored only in your OS
 credential store) and asks whether the backend should listen **only on this
 computer** or **on your trusted local network**. Open the printed URL.

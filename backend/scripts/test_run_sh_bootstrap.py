@@ -36,6 +36,15 @@ def test_run_sh_without_bas_prefers_main_then_uses_current_checkout() -> None:
     assert "BETTER_AGENT_RUN_SH_SERVICE_CHILD" in source
 
 
+def test_plain_run_sh_delegates_matching_checkout_to_bas() -> None:
+    source = _run_sh()
+    delegation = source.index('BAS_LINE="$("$BAS_BIN" resolve-line "$DIR"')
+    fallback = source.index('if [ "${BETTER_AGENT_RUN_SH_SERVICE_CHILD:-0}" != "1" ] && ! bas_available')
+    assert delegation < fallback
+    assert 'exec "$BAS_BIN" exec-line "$BAS_LINE"' in source
+    assert '[[ "$BAS_LINE" =~ ^[a-z0-9][a-z0-9_.-]{0,31}$ ]]' in source
+
+
 def test_run_sh_initializes_provider_config_sync_before_frontend_build() -> None:
     source = _run_sh()
 
@@ -97,6 +106,7 @@ def test_windows_bootstrap_installs_base_prereqs_with_winget() -> None:
 if __name__ == "__main__":
     test_run_sh_uses_non_standard_backend_port_by_default()
     test_run_sh_without_bas_prefers_main_then_uses_current_checkout()
+    test_plain_run_sh_delegates_matching_checkout_to_bas()
     test_run_sh_initializes_provider_config_sync_before_frontend_build()
     test_run_sh_installs_node_dependencies_before_frontend_build()
     test_run_sh_exports_backend_port_for_mobile_candidate_generation()
