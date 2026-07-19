@@ -76,6 +76,36 @@ computer** or **on your trusted local network**. Open the printed URL.
 
 > Reset stored credentials anytime: `./run.sh --reset-auth`
 
+### 1.4 Optional: run Better Agent as an automatic service
+
+On macOS or Linux, you can opt in to running the current checkout as a user
+service:
+
+```bash
+./run.sh --install-service
+```
+
+The service starts immediately, starts again after login or a machine restart,
+and automatically restarts if `run.sh` crashes. It stays pinned to the checkout
+where you ran the install command. BAS is not required.
+
+Check whether the service process is running:
+
+```bash
+./run.sh --service-status
+```
+
+Stop it and remove the automatic-start registration:
+
+```bash
+./run.sh --uninstall-service
+```
+
+Do not start another copy with plain `./run.sh` while the service is running;
+both copies would compete for the same backend port. Service mode uses a macOS
+LaunchAgent or a Linux systemd user service. Windows repository installs should
+continue using plain `./run.sh` from Git Bash.
+
 That's the whole base install. Everything below is optional.
 
 ---
