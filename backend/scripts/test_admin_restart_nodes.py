@@ -51,14 +51,12 @@ async def _run() -> None:
         killed.append((pid, sig))
 
     old_supervisor = os.environ.get("BETTER_CLAUDE_RUN_SH_SUPERVISOR")
-    old_parallel_lines = os.environ.get("BETTER_AGENT_PARALLEL_LINES")
     old_snapshot = node_store.snapshot
     old_send_restart = node_link.send_restart
     old_kill = main.os.kill
     old_active_checkout = os.environ.get("BETTER_AGENT_ACTIVE_CHECKOUT")
     try:
         os.environ["BETTER_CLAUDE_RUN_SH_SUPERVISOR"] = "1"
-        os.environ["BETTER_AGENT_PARALLEL_LINES"] = "1"
         node_store.snapshot = fake_snapshot
         node_link.send_restart = fake_send_restart
         main.os.kill = fake_kill
@@ -106,20 +104,29 @@ async def _run() -> None:
             os.makedirs(os.path.dirname(path), exist_ok=True)
             with open(path, "w", encoding="utf-8"):
                 pass
+        preparation_started = asyncio.Event()
+        release_preparation = asyncio.Event()
         preparation_calls = 0
 
-        async def unexpected_preparation() -> list[str]:
+        async def blocking_preparation() -> list[str]:
             nonlocal preparation_calls
             preparation_calls += 1
+            preparation_started.set()
+            await release_preparation.wait()
             return []
 
-        main._restart_connected_worker_nodes = unexpected_preparation
+        main._restart_connected_worker_nodes = blocking_preparation
         try:
-            parallel_result = await handler(capability_api._SwitchTargetPayload(target="dev"))
-            assert parallel_result["status"] == "succeeded", parallel_result
-            assert parallel_result["target_url"] == "http://127.0.0.1:18765", parallel_result
-            assert preparation_calls == 0, "parallel line switch restarted worker nodes"
+            first_call = asyncio.create_task(handler(capability_api._SwitchTargetPayload(target="dev")))
+            await asyncio.wait_for(preparation_started.wait(), timeout=1)
+            duplicate_result = await handler(capability_api._SwitchTargetPayload(target="dev"))
+            assert duplicate_result["status"] == "preparing", duplicate_result
+            assert preparation_calls == 1, "duplicate caller repeated worker-node preparation"
+            release_preparation.set()
+            first_result = await asyncio.wait_for(first_call, timeout=1)
+            assert first_result["status"] == "pending", first_result
         finally:
+            release_preparation.set()
             main._restart_connected_worker_nodes = old_prepare
 
         result = await main.admin_restart({"request_id": "restart-test"})
@@ -156,10 +163,6 @@ async def _run() -> None:
             os.environ.pop("BETTER_CLAUDE_RUN_SH_SUPERVISOR", None)
         else:
             os.environ["BETTER_CLAUDE_RUN_SH_SUPERVISOR"] = old_supervisor
-        if old_parallel_lines is None:
-            os.environ.pop("BETTER_AGENT_PARALLEL_LINES", None)
-        else:
-            os.environ["BETTER_AGENT_PARALLEL_LINES"] = old_parallel_lines
         node_store.snapshot = old_snapshot
         node_link.send_restart = old_send_restart
         main.os.kill = old_kill

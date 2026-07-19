@@ -1,6 +1,8 @@
-// Line Switch quick button: shows the active line and moves the UI to the
-// selected line. Parallel line instances navigate by port; legacy switches
-// poll restart status until the selected checkout is live.
+// Line Switch quick button: shows the active line (dev/main) and switches the
+// running backend+frontend to the other worktree. Truthful states only: the
+// pointer/status come from the backend; while the backend restarts we show an
+// explicit indeterminate "switching" state and poll until the new build is up,
+// then hard-reload so the page matches the new line's bundle.
 
 const EXT = "ofek-dev.switch-control";
 const POLL_MS = 2000;
@@ -30,21 +32,6 @@ export function activeSwitchRequest(state) {
   const request = state && state.request;
   if (!request || typeof request.request_id !== "string") return null;
   return ["preparing", "pending", "accepted"].includes(request.status) ? request : null;
-}
-
-export function redirectUrlForLine(state, target, currentHref) {
-  const lineTarget = state && state.line_targets && state.line_targets[target];
-  const port = lineTarget && Number(lineTarget.backend_port);
-  if (!Number.isInteger(port) || port < 1 || port > 65535) return "";
-  const url = new URL(currentHref);
-  url.port = String(port);
-  return url.toString();
-}
-
-export function switchTargetUrl(payload) {
-  return payload && typeof payload.target_url === "string" && payload.target_url
-    ? payload.target_url
-    : "";
 }
 
 export function Component({ context, React }) {
@@ -125,11 +112,6 @@ export function Component({ context, React }) {
         });
         if (!response.ok) throw new Error(await response.text());
         const payload = await response.json();
-        const redirect = switchTargetUrl(payload) || redirectUrlForLine(state, target, window.location.href);
-        if (payload.status === "succeeded" && redirect) {
-          window.location.assign(redirect);
-          return;
-        }
         waitForNewLine(payload.request_id);
       } catch (e) {
         setSwitching(false);
@@ -137,7 +119,7 @@ export function Component({ context, React }) {
         void refresh();
       }
     },
-    [context, refresh, state, waitForNewLine],
+    [context, refresh, waitForNewLine],
   );
 
   if (!state || !state.switchable) return null;
