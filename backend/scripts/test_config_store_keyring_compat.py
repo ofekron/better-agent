@@ -24,9 +24,10 @@ import config_store  # noqa: E402
 def _reset_cache() -> None:
     with config_store._api_key_cache_lock:
         config_store._api_key_cache.clear()
+        config_store._api_key_read_locks.clear()
     with config_store._state_cache_lock:
         config_store._state_cache = None
-    config_store._keyring_blocked = False
+    config_store._keyring_blocked_entries.clear()
 
 
 def test_provider_api_key_uses_agent_service_and_legacy_fallback() -> None:
@@ -111,6 +112,95 @@ def test_denied_keyring_read_is_not_cached_and_a_later_read_recovers() -> None:
             assert config_store._api_key_cache["provider-denied"] == "real-key"
     finally:
         config_store.keyring.get_password = real_get
+
+
+def test_failed_stable_read_is_suppressed_until_credential_mutation() -> None:
+    real_get = config_store.oskeychain.get
+    real_store = config_store.oskeychain.store
+    real_api = config_store._use_stable_macos_keychain
+    reads = 0
+
+    def denied_get(service: str, username: str, *, timeout: float) -> str | None:
+        nonlocal reads
+        reads += 1
+        raise RuntimeError("denied")
+
+    config_store.oskeychain.get = denied_get
+    config_store.oskeychain.store = lambda service, username, password: None
+    config_store._use_stable_macos_keychain = lambda: True
+    try:
+        _reset_cache()
+        barrier = threading.Barrier(8)
+        results: list[str] = []
+
+        def read() -> None:
+            barrier.wait()
+            results.append(config_store._read_api_key("provider-blocked"))
+
+        threads = [threading.Thread(target=read) for _ in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        assert results == [""] * 8
+        assert reads == 1
+
+        config_store._write_api_key("provider-blocked", "replacement")
+        with config_store._api_key_cache_lock:
+            config_store._api_key_cache.pop("provider-blocked", None)
+        assert config_store._read_api_key("provider-blocked") == ""
+        assert reads == 2
+    finally:
+        config_store.oskeychain.get = real_get
+        config_store.oskeychain.store = real_store
+        config_store._use_stable_macos_keychain = real_api
+
+
+def test_native_session_provider_kind_never_reads_keychain() -> None:
+    import native_session_miner
+
+    real_metadata = config_store.get_provider_metadata
+    real_provider = config_store.get_provider
+    config_store.get_provider_metadata = lambda provider_id: {
+        "id": provider_id,
+        "kind": "codex",
+    }
+    config_store.get_provider = lambda provider_id: (_ for _ in ()).throw(
+        AssertionError("metadata classification must not read credential status")
+    )
+    try:
+        assert native_session_miner._provider_kind({"provider_id": "provider-1"}) == "codex"
+    finally:
+        config_store.get_provider_metadata = real_metadata
+        config_store.get_provider = real_provider
+
+
+def test_distinct_provider_reads_do_not_block_each_other() -> None:
+    real_get = config_store.oskeychain.get
+    real_api = config_store._use_stable_macos_keychain
+    overlap = threading.Barrier(2)
+
+    def denied_get(service: str, username: str, *, timeout: float) -> str | None:
+        overlap.wait(timeout=1)
+        raise RuntimeError("denied")
+
+    config_store.oskeychain.get = denied_get
+    config_store._use_stable_macos_keychain = lambda: True
+    try:
+        _reset_cache()
+        threads = [
+            threading.Thread(target=config_store._read_api_key, args=(provider_id,))
+            for provider_id in ("provider-a", "provider-b")
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=2)
+        assert all(not thread.is_alive() for thread in threads)
+    finally:
+        config_store.oskeychain.get = real_get
+        config_store._use_stable_macos_keychain = real_api
 
 
 def test_failed_stable_delete_keeps_cached_provider_key() -> None:
@@ -409,6 +499,9 @@ def test_load_state_uses_fingerprint_cache_and_external_invalidates() -> None:
 if __name__ == "__main__":
     test_provider_api_key_uses_agent_service_and_legacy_fallback()
     test_denied_keyring_read_is_not_cached_and_a_later_read_recovers()
+    test_failed_stable_read_is_suppressed_until_credential_mutation()
+    test_native_session_provider_kind_never_reads_keychain()
+    test_distinct_provider_reads_do_not_block_each_other()
     test_macos_read_uses_stable_security_identity_and_exact_account()
     test_macos_write_uses_stable_security_identity_without_secret_argv()
     test_darwin_stable_write_does_not_depend_on_keyring_backend()
