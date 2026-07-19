@@ -49,6 +49,18 @@ bas_available() {
   command -v bas >/dev/null 2>&1 || [ -x "$HOME/ba-switch/bas" ]
 }
 
+bas_executable() {
+  if command -v bas >/dev/null 2>&1; then
+    command -v bas
+    return
+  fi
+  if [ -x "$HOME/ba-switch/bas" ]; then
+    printf '%s\n' "$HOME/ba-switch/bas"
+    return
+  fi
+  return 1
+}
+
 current_checkout_is_main_line() {
   case "$(basename "$DIR")" in
     *-main)
@@ -82,6 +94,17 @@ main_checkout_for_current_line() {
   fi
   return 1
 }
+
+if [ "${BETTER_AGENT_RUN_SH_SERVICE_CHILD:-0}" != "1" ]; then
+  BAS_BIN="$(bas_executable || true)"
+  if [ -n "$BAS_BIN" ]; then
+    BAS_LINE="$("$BAS_BIN" resolve-line "$DIR" 2>/dev/null || true)"
+    if [[ "$BAS_LINE" =~ ^[a-z0-9][a-z0-9_.-]{0,31}$ ]]; then
+      echo "BAS owns this checkout as line $BAS_LINE; delegating startup"
+      exec "$BAS_BIN" exec-line "$BAS_LINE"
+    fi
+  fi
+fi
 
 if [ "${BETTER_AGENT_RUN_SH_SERVICE_CHILD:-0}" != "1" ] && ! bas_available && ! current_checkout_is_main_line; then
   MAIN_CHECKOUT="$(main_checkout_for_current_line || true)"
