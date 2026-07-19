@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import json
 from pathlib import Path
+import platform
 import subprocess
 import sys
 import tempfile
@@ -114,13 +115,13 @@ def test_denied_keyring_read_is_not_cached_and_a_later_read_recovers() -> None:
 
 def test_failed_stable_delete_keeps_cached_provider_key() -> None:
     real_delete = config_store.oskeychain.delete
-    real_api = config_store._macos_security_api
+    real_api = config_store._use_stable_macos_keychain
 
     def denied_delete(service: str, username: str) -> None:
         raise RuntimeError("denied")
 
     config_store.oskeychain.delete = denied_delete
-    config_store._macos_security_api = lambda: object()
+    config_store._use_stable_macos_keychain = lambda: True
     try:
         _reset_cache()
         with config_store._api_key_cache_lock:
@@ -135,14 +136,14 @@ def test_failed_stable_delete_keeps_cached_provider_key() -> None:
             assert config_store._api_key_cache["provider-1"] == "cached-key"
     finally:
         config_store.oskeychain.delete = real_delete
-        config_store._macos_security_api = real_api
+        config_store._use_stable_macos_keychain = real_api
 
 
 def test_macos_read_uses_stable_security_identity_and_exact_account() -> None:
     calls = []
-    real_api = config_store._macos_security_api
+    real_api = config_store._use_stable_macos_keychain
     real_get = config_store.oskeychain.get
-    config_store._macos_security_api = lambda: object()
+    config_store._use_stable_macos_keychain = lambda: True
     config_store.oskeychain.get = lambda service, account, **kwargs: calls.append(
         (service, account, kwargs["timeout"])
     ) or "  key  \n"
@@ -153,7 +154,7 @@ def test_macos_read_uses_stable_security_identity_and_exact_account() -> None:
             "unused by stable security reader",
         )
     finally:
-        config_store._macos_security_api = real_api
+        config_store._use_stable_macos_keychain = real_api
         config_store.oskeychain.get = real_get
     assert value == "  key  "
     assert calls == [(
@@ -165,9 +166,9 @@ def test_macos_read_uses_stable_security_identity_and_exact_account() -> None:
 
 def test_macos_write_uses_stable_security_identity_without_secret_argv() -> None:
     calls = []
-    real_api = config_store._macos_security_api
+    real_api = config_store._use_stable_macos_keychain
     real_store = config_store.oskeychain.store
-    config_store._macos_security_api = lambda: object()
+    config_store._use_stable_macos_keychain = lambda: True
     config_store.oskeychain.store = lambda service, account, value: calls.append(
         (service, account, value)
     )
@@ -179,13 +180,54 @@ def test_macos_write_uses_stable_security_identity_without_secret_argv() -> None
             "unused by stable security writer",
         )
     finally:
-        config_store._macos_security_api = real_api
+        config_store._use_stable_macos_keychain = real_api
         config_store.oskeychain.store = real_store
     assert calls == [(
         config_store.KEYRING_SERVICE,
         "provider:provider-1",
         "secret-value",
     )]
+
+
+def test_darwin_stable_write_does_not_depend_on_keyring_backend() -> None:
+    stable_calls = []
+    fallback_calls = []
+    real_system = platform.system
+    real_get_keyring = config_store.keyring.get_keyring
+    real_set_password = config_store.keyring.set_password
+    real_original_set = config_store._ORIGINAL_KEYRING_SET_PASSWORD
+    real_store = config_store.oskeychain.store
+
+    def fallback_set(service: str, account: str, value: str) -> None:
+        fallback_calls.append((service, account, value))
+
+    platform.system = lambda: "Darwin"
+    config_store.keyring.get_keyring = lambda: object()
+    config_store.keyring.set_password = fallback_set
+    config_store._ORIGINAL_KEYRING_SET_PASSWORD = fallback_set
+    config_store.oskeychain.store = lambda service, account, value: stable_calls.append(
+        (service, account, value)
+    )
+    try:
+        config_store._set_password_with_reason(
+            config_store.KEYRING_SERVICE,
+            config_store._keyring_username("provider-isolated"),
+            "secret-value",
+            "unused by stable security writer",
+        )
+    finally:
+        platform.system = real_system
+        config_store.keyring.get_keyring = real_get_keyring
+        config_store.keyring.set_password = real_set_password
+        config_store._ORIGINAL_KEYRING_SET_PASSWORD = real_original_set
+        config_store.oskeychain.store = real_store
+
+    assert stable_calls == [(
+        config_store.KEYRING_SERVICE,
+        "provider:provider-isolated",
+        "secret-value",
+    )]
+    assert fallback_calls == []
 
 
 def test_macos_store_input_keeps_secret_out_of_argv_and_quotes_identifiers() -> None:
@@ -207,9 +249,9 @@ def test_macos_store_input_keeps_secret_out_of_argv_and_quotes_identifiers() -> 
 
 
 def test_macos_write_failure_propagates_without_cache_update() -> None:
-    real_api = config_store._macos_security_api
+    real_api = config_store._use_stable_macos_keychain
     real_store = config_store.oskeychain.store
-    config_store._macos_security_api = lambda: object()
+    config_store._use_stable_macos_keychain = lambda: True
     config_store.oskeychain.store = lambda *args: (_ for _ in ()).throw(
         RuntimeError("denied")
     )
@@ -224,7 +266,7 @@ def test_macos_write_failure_propagates_without_cache_update() -> None:
         with config_store._api_key_cache_lock:
             assert "provider-failed" not in config_store._api_key_cache
     finally:
-        config_store._macos_security_api = real_api
+        config_store._use_stable_macos_keychain = real_api
         config_store.oskeychain.store = real_store
 
 
@@ -369,6 +411,7 @@ if __name__ == "__main__":
     test_denied_keyring_read_is_not_cached_and_a_later_read_recovers()
     test_macos_read_uses_stable_security_identity_and_exact_account()
     test_macos_write_uses_stable_security_identity_without_secret_argv()
+    test_darwin_stable_write_does_not_depend_on_keyring_backend()
     test_macos_store_input_keeps_secret_out_of_argv_and_quotes_identifiers()
     test_macos_write_failure_propagates_without_cache_update()
     test_macos_security_stdin_real_keychain_lifecycle()
