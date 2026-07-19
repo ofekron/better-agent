@@ -175,7 +175,7 @@ async def _rollup_loop() -> None:
     while True:
         try:
             await asyncio.sleep(ROLLUP_SECS)
-            flush()
+            await asyncio.to_thread(flush)
         except asyncio.CancelledError:
             raise
         except Exception:
