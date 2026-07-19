@@ -726,6 +726,13 @@ export function SettingsPage({
             }).promise;
             await refetch();
           })}
+          onRetryCredential={(p) => runBusyAction(setBusy, setError, "credential retry failed", async () => {
+            await trackPromise(`provider:credential:retry:${p.id}`, async () => {
+              const r = await fetch(`${API}/api/providers/${p.id}/credential/retry`, { method: "POST" });
+              if (!r.ok) throw new Error(await r.text());
+            }).promise;
+            await refetch();
+          })}
           onDelete={async (p) => {
             if (!confirm(t('setup.deleteConfirm'))) return;
             await runBusyAction(setBusy, setError, "delete failed", async () => {
@@ -855,6 +862,7 @@ interface ProvidersListProps {
   onEdit: (p: Provider) => void;
   onActivate: (p: Provider) => void;
   onSuspend: (p: Provider, suspended: boolean) => void;
+  onRetryCredential: (p: Provider) => void;
   onDelete: (p: Provider) => void;
   onOpenProviderConfigSync?: () => void;
   setupStatuses: ProviderSetupStatus[];
@@ -2100,6 +2108,7 @@ function ProvidersList({
   onEdit,
   onActivate,
   onSuspend,
+  onRetryCredential,
   onDelete,
   onOpenProviderConfigSync,
   setupStatuses,
@@ -2169,6 +2178,7 @@ function ProvidersList({
           onEdit={onEdit}
           onActivate={onActivate}
           onSuspend={onSuspend}
+          onRetryCredential={onRetryCredential}
           onDelete={onDelete}
           onRefreshApp={onRefreshApp}
           refreshAppDisabled={refreshAppDisabled}
@@ -2373,6 +2383,7 @@ function ProvidersSettingsSection({
   onEdit,
   onActivate,
   onSuspend,
+  onRetryCredential,
   onDelete,
   setupStatuses,
   projects,
@@ -2443,8 +2454,9 @@ function ProvidersSettingsSection({
         {providers.map((p) => {
           const isActive = p.id === activeId;
           const isSuspended = p.suspended === true;
+          const credentialStatus = p.credential_status || (p.has_api_key ? "available" : "unknown");
           return (
-            <div key={p.id} className={`provider-row ${isActive ? "active" : ""} ${isSuspended ? "suspended" : ""}`}>
+            <div key={p.id} className={`provider-row ${isActive ? "active" : ""} ${isSuspended ? "suspended" : ""} credential-${credentialStatus}`}>
               <div className="provider-row-main" onClick={() => onEdit(p)}>
                 <div className="provider-row-name">
                   {p.name}
@@ -2467,12 +2479,24 @@ function ProvidersSettingsSection({
                   {p.mode === "subscription"
                     ? t('setup.subscriptionMode')
                     : `API key${
-                        p.has_api_key ? "" : ` — ${t('setup.apiKeyMissing')}`
+                        credentialStatus === "available"
+                          ? ""
+                          : ` — ${t(`setup.apiKeyStatus.${credentialStatus}`)}`
                       }${p.base_url ? ` · ${p.base_url}` : ""}`}
                 </div>
                 <QuotaIndicator status={providerQuotaStatus(quotaStatus, p)} />
               </div>
               <div className="provider-row-actions">
+                {p.mode === "api_key" && credentialStatus === "blocked" && (
+                  <button
+                    type="button"
+                    className="btn-warning provider-credential-retry"
+                    disabled={busy}
+                    onClick={() => onRetryCredential(p)}
+                  >
+                    {t('backendUnavailable.retry')}
+                  </button>
+                )}
                 {!isActive && !isSuspended && (
                   <button
                     type="button"
@@ -3478,7 +3502,7 @@ function EditProvider({
         mode="edit"
         providerId={provider.id}
         initial={provider}
-        initialHasKey={provider.has_api_key}
+        initialHasKey={provider.credential_status !== "missing"}
         onClose={onClose}
         onBack={onBack}
         onSubmit={onSubmit}

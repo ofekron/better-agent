@@ -1260,6 +1260,7 @@ export interface Provider {
   last_model?: string;
   last_reasoning_effort?: ReasoningEffort;
   has_api_key: boolean;
+  credential_status?: "unknown" | "available" | "missing" | "blocked";
   /** Whether this provider can branch a session via the CLI's
    * fork-session primitive. Drives UI gating for Fork, Fork-and-send,
    * Adversarial Sync, Prompt-Engineer refine.
