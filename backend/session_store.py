@@ -571,14 +571,13 @@ def _wait_root_change_observation(generation: int, timeout: float = 0.05) -> boo
     )
     return observed
 _OPENED_CACHE_MAX = 256
-_summary_roots_fingerprint: tuple[str, ...] = ()
 
 
 def _reset_home_scoped_caches() -> None:
     global _index_loaded, _index_fingerprint, _dir_fingerprint_cache
     global _summary_index_loaded, _summary_index_version, _summary_order_version
     global _summary_metadata_version, _summary_sorted_cache_version
-    global _metadata_trigram_index_version, _summary_roots_fingerprint
+    global _metadata_trigram_index_version
 
     with _index_lock:
         _fork_index.clear()
@@ -613,7 +612,6 @@ def _reset_home_scoped_caches() -> None:
         _migrated_root_cache.clear()
     with _opened_cache_lock:
         _opened_cache.clear()
-    _summary_roots_fingerprint = ()
 
 
 def _clear_negative_root_resolve_cache() -> None:
@@ -1383,6 +1381,19 @@ def _opened_path(root_id: str) -> Path:
     return _root_file_path(root_id).with_name(f"{root_id}.opened.json")
 
 
+def _remove_deleted_root_sidecars(root_id: str) -> None:
+    for path in (
+        _drafts_path(root_id),
+        _seen_cursor_path(root_id),
+        _opened_path(root_id),
+    ):
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
+    _opened_cache_invalidate(root_id)
+
+
 def _opened_file_signature(path: Path) -> tuple[int, int, int, int] | None:
     try:
         st = path.stat()
@@ -1830,13 +1841,6 @@ def _schedule_summary_sidecar_write(
             pass
 
 
-def _root_summary_ids_on_disk() -> tuple[str, ...]:
-    try:
-        return tuple(sorted(p.stem for p in _session_json_files()))
-    except OSError:
-        return ()
-
-
 def _cleanup_orphan_summary_sidecars(root_ids: set[str]) -> None:
     entries: list[Path] = []
     for storage_dir in _session_storage_dirs():
@@ -1859,47 +1863,6 @@ def _cleanup_orphan_summary_sidecars(root_ids: set[str]) -> None:
                 _opened_cache_invalidate(sid)
         except OSError:
             pass
-
-
-def _purge_missing_summary_roots_locked(root_ids: set[str]) -> bool:
-    global _summary_index_version, _summary_order_version, _summary_metadata_version
-    removed = [
-        sid for sid in list(_summary_index)
-        if sid not in root_ids
-        and not _root_file_path(sid).exists()
-    ]
-    if not removed:
-        return False
-    for sid in removed:
-        _summary_index.pop(sid, None)
-        parent = _root_file_path(sid).parent
-        try:
-            (parent / f"{sid}.summary.json").unlink(missing_ok=True)
-        except OSError:
-            pass
-        try:
-            (parent / f"{sid}.opened.json").unlink(missing_ok=True)
-            _opened_cache_invalidate(sid)
-        except OSError:
-            pass
-    _summary_index_version += 1
-    _summary_order_version += 1
-    _summary_metadata_version += 1
-    return True
-
-
-def _reconcile_summary_index_roots() -> None:
-    global _summary_roots_fingerprint
-    root_ids_tuple = _root_summary_ids_on_disk()
-    root_ids = set(root_ids_tuple)
-    with _summary_index_lock:
-        if _summary_index_loaded and root_ids_tuple == _summary_roots_fingerprint:
-            return
-        _purge_missing_summary_roots_locked(root_ids)
-        if _summary_index_loaded:
-            _summary_roots_fingerprint = root_ids_tuple
-            _summary_sorted_id_caches.clear()
-    _cleanup_orphan_summary_sidecars(root_ids)
 
 
 def _summary_index_cache_path() -> Path:
@@ -2113,7 +2076,8 @@ def _do_build_summary_index_unsafe() -> None:
         is already cached. Cold build → not cached → no
         `_summary_build_lock → session_manager-RLock` edge forms.
     """
-    global _summary_index_loaded, _summary_index_version, _summary_order_version, _summary_metadata_version, _summary_roots_fingerprint
+    global _summary_index_loaded, _summary_index_version
+    global _summary_order_version, _summary_metadata_version
     _ensure_dir()
     full_files: dict[str, Path] = {}
     summary_files: dict[str, Path] = {}
@@ -2151,7 +2115,6 @@ def _do_build_summary_index_unsafe() -> None:
             _summary_order_version += 1
             _summary_metadata_version += 1
             _summary_index_loaded = True
-            _summary_roots_fingerprint = tuple(sorted(full_files))
         _start_summary_projection_repair()
         _start_metadata_search_index_warm()
         return
@@ -2267,7 +2230,6 @@ def _do_build_summary_index_unsafe() -> None:
                 }
                 _summary_index_version += 1
         _summary_index_loaded = True
-        _summary_roots_fingerprint = tuple(sorted(full_files))
 
     _start_summary_projection_repair()
     _start_metadata_search_index_warm()
@@ -3398,6 +3360,7 @@ def project_external_root_delete(root_id: str) -> bool:
         _clear_negative_root_resolve_cache()
         generation = _bump_index_generation_locked()
     _remove_summary(root_id)
+    _remove_deleted_root_sidecars(root_id)
     if updated is not None:
         _publish_dir_fingerprint_cache(updated, generation)
         _persist_index_sidecar_if_loaded(updated, expected_generation=generation)
@@ -5116,7 +5079,6 @@ def list_sessions() -> list[dict]:
     """
     global _summary_sorted_cache_version, _summary_sorted_id_cache
     _ensure_summary_index(blocking=False)
-    _reconcile_summary_index_roots()
     with _summary_index_lock:
         if _summary_sorted_cache_version != _summary_order_version:
             _summary_sorted_id_cache = [
@@ -5138,7 +5100,6 @@ def list_sessions() -> list[dict]:
 
 def ordered_session_summary_ids(sort_by: str) -> list[str]:
     _ensure_summary_index(blocking=False)
-    _reconcile_summary_index_roots()
     with _summary_index_lock:
         cached = _summary_sorted_id_caches.get(sort_by)
         if cached is None or cached[0] != _summary_order_version:
@@ -5163,7 +5124,6 @@ def get_session_summaries_by_ids(session_ids: Iterable[str]) -> list[dict]:
     if not ids:
         return []
     _ensure_summary_index(blocking=False)
-    _reconcile_summary_index_roots()
     with _summary_index_lock:
         found = {
             sid: _summary_index[sid]
@@ -5212,7 +5172,6 @@ def get_indexed_session_summary(session_id: str) -> Optional[dict]:
     if not session_id:
         return None
     _ensure_summary_index(blocking=False)
-    _reconcile_summary_index_roots()
     with _summary_index_lock:
         return _summary_index.get(session_id)
 
@@ -5222,7 +5181,6 @@ def get_indexed_session_summaries_by_ids(session_ids: Iterable[str]) -> list[dic
     if not ids:
         return []
     _ensure_summary_index(blocking=False)
-    _reconcile_summary_index_roots()
     with _summary_index_lock:
         return [
             _summary_index[sid]
@@ -5712,9 +5670,6 @@ def delete_session(root_id: str) -> bool:
     path = _root_file_path(root_id)
     if not path.exists():
         return False
-    drafts_path = _drafts_path(root_id)
-    seen_cursor_path = _seen_cursor_path(root_id)
-    opened_path = _opened_path(root_id)
     root = _migrate_session(json.loads(path.read_text(encoding="utf-8")))
     receipt = _get_durability_writer().unlink(path)
     _wait_durability(receipt)
@@ -5750,19 +5705,7 @@ def delete_session(root_id: str) -> bool:
         _abandon_root_change(root_change)
         raise
     _complete_root_change(root_change)
-    try:
-        drafts_path.unlink(missing_ok=True)
-    except OSError:
-        pass
-    try:
-        seen_cursor_path.unlink(missing_ok=True)
-    except OSError:
-        pass
-    try:
-        opened_path.unlink(missing_ok=True)
-        _opened_cache_invalidate(root_id)
-    except OSError:
-        pass
+    _remove_deleted_root_sidecars(root_id)
     return True
 
 
