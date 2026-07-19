@@ -35,9 +35,7 @@ immutable backup refs, rebase `dev` onto `main`, reset `qa` to the current
 shared refs with exact force-with-lease protection. Never rebase published
 `main` or `qa`; rebase published `dev` only during this backed-up repair flow.
 
-The running backend+frontend follow the active-checkout pointer
-(`active_checkout.json` under the Better Agent state home), switched from the
-UI (or the switch-control capability). Do not edit the pointer file by hand;
-use the Line Switch control or ask the user. If a switch is in flight
-(pointer status `switching`), do not start work that depends on backend
-availability until it completes.
+The dev, qa, and main backend+frontend stacks run as separate line instances
+with separate Better Agent homes and ports. The Line Switch control moves the
+UI to the selected line's URL. Legacy single-stack switches may still use
+`active_checkout.json`; do not edit that pointer file by hand.

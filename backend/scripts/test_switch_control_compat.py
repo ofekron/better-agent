@@ -41,8 +41,10 @@ finally:
 
 projection_home = tempfile.mkdtemp(prefix="ba-switch-lines-")
 prior_home = os.environ.get("BETTER_AGENT_HOME")
+prior_parallel = os.environ.get("BETTER_AGENT_PARALLEL_LINES")
 try:
     os.environ["BETTER_AGENT_HOME"] = projection_home
+    os.environ["BETTER_AGENT_PARALLEL_LINES"] = "1"
     base = Path(projection_home) / "better-agent"
     dev = base
     qa = Path(f"{base}-qa")
@@ -64,12 +66,25 @@ try:
         "qa": str(qa.resolve()),
         "main": str(main.resolve()),
     }, discovered
+    assert discovered["line_targets"]["dev"]["home"].endswith(".better-claude")
+    assert discovered["line_targets"]["dev"]["backend_port"] == 18765
+    assert discovered["line_targets"]["main"]["home"].endswith(".better-claude-main")
+    assert discovered["line_targets"]["main"]["backend_port"] == 18766
+    assert discovered["line_targets"]["qa"]["home"].endswith(".better-claude-qa")
+    assert discovered["line_targets"]["qa"]["backend_port"] == 18767
     assert discovered["active_line"] == "main" and discovered["switchable"] is True
+    parallel_request = switch_control.reserve(str(main), "dev", "parallel-dev")
+    assert parallel_request["status"] == "succeeded"
+    assert parallel_request["target_url"] == "http://127.0.0.1:18765"
 finally:
     if prior_home is None:
         os.environ.pop("BETTER_AGENT_HOME", None)
     else:
         os.environ["BETTER_AGENT_HOME"] = prior_home
+    if prior_parallel is None:
+        os.environ.pop("BETTER_AGENT_PARALLEL_LINES", None)
+    else:
+        os.environ["BETTER_AGENT_PARALLEL_LINES"] = prior_parallel
     shutil.rmtree(projection_home)
 
 print("OK test_switch_control_compat")
