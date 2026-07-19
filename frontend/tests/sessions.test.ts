@@ -33,6 +33,14 @@ async function clickNewSession(h: Awaited<ReturnType<typeof renderApp>>) {
   await h.clickByText(/^(\+ New|session\.newButton)$/);
 }
 
+async function chooseNewSessionAction(
+  h: Awaited<ReturnType<typeof renderApp>>,
+  action: RegExp,
+) {
+  await h.click(".ns-create-toggle");
+  await h.clickByText(action);
+}
+
 async function enterNewSessionPrompt(
   h: Awaited<ReturnType<typeof renderApp>>,
   text: string,
@@ -127,7 +135,7 @@ describe("sessions CRUD + subscribe lifecycle", () => {
     await h.selectSession(current.id);
     await clickNewSession(h);
     await enterNewSessionPrompt(h, "draft this in the new session");
-    await h.clickByText(/^(Create|newSession\.create)$/);
+    await chooseNewSessionAction(h, /^(Create|newSession\.create)$/);
     await h.flush();
 
     expect(window.location.pathname).toBe("/s/current");
@@ -158,7 +166,7 @@ describe("sessions CRUD + subscribe lifecycle", () => {
     await h.selectSession(current.id);
     await clickNewSession(h);
     await enterNewSessionPrompt(h, "send this in the background");
-    await h.clickByText(/^(Create & Send|newSession\.createAndSend)$/);
+    await chooseNewSessionAction(h, /^(Create & Send|newSession\.createAndSend)$/);
     await h.flush();
 
     expect(window.location.pathname).toBe("/s/current");
@@ -187,7 +195,7 @@ describe("sessions CRUD + subscribe lifecycle", () => {
     await h.flush();
     await clickNewSession(h);
     await enterNewSessionPrompt(h, "keep this offline draft");
-    await h.clickByText(/^(Create|newSession\.create)$/);
+    await chooseNewSessionAction(h, /^(Create|newSession\.create)$/);
     await h.flush();
 
     const [queued] = JSON.parse(localStorage.getItem("better_agent_offline_queue") || "[]");
@@ -682,6 +690,39 @@ describe("sessions CRUD + subscribe lifecycle", () => {
         prompt: "prompt after empty offline session",
       }),
     );
+    h.unmount();
+  });
+
+  it("keeps a new-session modal available while an offline create syncs", async () => {
+    const h = await renderApp({
+      seed: {
+        sessions: [],
+        projects: [{
+          path: "/tmp/project",
+          name: "project",
+          created_at: new Date().toISOString(),
+          last_used: new Date().toISOString(),
+        }],
+      },
+    });
+    h.dropConnection();
+    h.backend.setOffline(true);
+    await h.flush();
+    await clickNewSession(h);
+    await h.click(".modal-footer .btn-primary");
+
+    const releaseCreate = h.backend.holdNext("POST", "/api/sessions");
+    h.backend.setOffline(false);
+    h.reopenConnection();
+    await h.flush();
+    await clickNewSession(h);
+
+    const createButton = h.$(".ns-create-primary") as HTMLButtonElement;
+    expect(createButton.disabled).toBe(false);
+    expect(createButton.dataset.progressInflight).toBeUndefined();
+
+    releaseCreate();
+    await h.flush();
     h.unmount();
   });
 

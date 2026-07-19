@@ -17,7 +17,7 @@ import {
   type ProviderConfigSyncCapabilityPickerOutput,
   type ProviderConfigSyncCapabilityPickerSource,
 } from "@better-agent/provider-config-sync-ui";
-import { trackedFetch, useOpProgress } from "../progress/store";
+import { trackedFetch } from "../progress/store";
 import { useMachines } from "../hooks/useMachines";
 import { useLocalNodeId } from "../hooks/useLocalNodeId";
 import { useBackButtonDismiss } from "../hooks/useBackButtonDismiss";
@@ -103,7 +103,7 @@ interface Props {
     config: SessionConfig,
     investigation: InvestigationContext | undefined,
     action: NewSessionCreationAction,
-  ) => void;
+  ) => void | Promise<void>;
   defaultCwd: string;
   /** Existing projects (paths + names). Drives the project picker so
    * users don't have to type a path. Required so the modal can render
@@ -512,7 +512,8 @@ export function NewSessionModal({
 }: Props) {
   const { t } = useTranslation();
   useBackButtonDismiss(open, onClose);
-  const { inflight: creating } = useOpProgress("session:create");
+  const [creating, setCreating] = useState(false);
+  const creatingRef = useRef(false);
   const [providers, setProviders] = useState<Provider[]>([]);
   const [editedPrompt, setEditedPrompt] = useState("");
   const [initialPrompt, setInitialPrompt] = useState("");
@@ -780,35 +781,45 @@ export function NewSessionModal({
   const missingProviderConfig =
     !main.providerId || (effectiveOrchestrationMode === "team" && !worker.providerId);
 
-  const handleCreate = (action: NewSessionCreationAction) => {
-    const effectiveCwd = cwd || defaultCwd;
-    const baseConfig: SessionConfig = {
-      orchestrationMode: effectiveOrchestrationMode,
-      main,
-      worker,
-      cwd: effectiveCwd,
-      browserHarnessEnabled: false,
-      browserHarnessHeadless: true,
-      fileEditEnabled,
-      fileEditPath: undefined,
-      nodeId,
-      initialPrompt,
-      initialImages,
-      initialFiles,
-      capabilityContexts,
-      folderId,
-    };
-    const config = applyExtensionOptionsToSessionConfig(
-      baseConfig,
-      sessionExtensionOptions,
-      extensionOptionValues,
-    );
-    saveDefaults(config, action);
-    setCreationAction(action);
-    const ctx = investigation
-      ? { ...investigation, prompt: editedPrompt, images: initialImages, files: initialFiles }
-      : undefined;
-    onCreate(config, ctx, action);
+  const handleCreate = async (action: NewSessionCreationAction) => {
+    if (creatingRef.current) return;
+    creatingRef.current = true;
+    setCreating(true);
+    try {
+      const effectiveCwd = cwd || defaultCwd;
+      const baseConfig: SessionConfig = {
+        orchestrationMode: effectiveOrchestrationMode,
+        main,
+        worker,
+        cwd: effectiveCwd,
+        browserHarnessEnabled: false,
+        browserHarnessHeadless: true,
+        fileEditEnabled,
+        fileEditPath: undefined,
+        nodeId,
+        initialPrompt,
+        initialImages,
+        initialFiles,
+        capabilityContexts,
+        folderId,
+      };
+      const config = applyExtensionOptionsToSessionConfig(
+        baseConfig,
+        sessionExtensionOptions,
+        extensionOptionValues,
+      );
+      saveDefaults(config, action);
+      setCreationAction(action);
+      const ctx = investigation
+        ? { ...investigation, prompt: editedPrompt, images: initialImages, files: initialFiles }
+        : undefined;
+      await onCreate(config, ctx, action);
+    } catch (error) {
+      window.alert(error instanceof Error ? error.message : String(error));
+    } finally {
+      creatingRef.current = false;
+      setCreating(false);
+    }
   };
 
   const handlePromptKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {

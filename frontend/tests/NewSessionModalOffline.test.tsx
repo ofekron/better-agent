@@ -1,4 +1,4 @@
-import { fireEvent, render, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -7,6 +7,7 @@ import {
   type SessionConfig,
 } from "../src/components/NewSessionModal";
 import type { Provider } from "../src/types";
+import { completeOp, startOp } from "../src/progress/store";
 import { cacheProviderModels, cacheProviders } from "../src/utils/providerCache";
 
 vi.mock("../src/hooks/useMachines", () => ({
@@ -59,6 +60,56 @@ describe("NewSessionModal offline provider cache", () => {
     localStorage.clear();
   });
 
+  it("only shows creating for this modal's own submission", async () => {
+    cacheProviders([provider], provider.id);
+    cacheProviderModels(provider.id, ["cached-default"]);
+    vi.spyOn(globalThis, "fetch").mockRejectedValue(new TypeError("offline"));
+    let resolveCreate!: () => void;
+    const createPending = new Promise<void>((resolve) => {
+      resolveCreate = resolve;
+    });
+    const onCreate = vi.fn(() => createPending);
+    const modal = render(
+      <NewSessionModal
+        open
+        onClose={() => {}}
+        onCreate={onCreate}
+        defaultCwd="/tmp/project"
+        projects={[]}
+        capabilityPickerClient={capabilityPickerClient}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(modal.container.querySelector(".ns-create-primary")).toBeTruthy();
+    });
+    const createButton = modal.container.querySelector(".ns-create-primary") as HTMLButtonElement;
+
+    act(() => startOp("session:create"));
+    try {
+      expect(createButton.disabled).toBe(false);
+      expect(createButton.dataset.progressInflight).toBeUndefined();
+
+      fireEvent.click(createButton);
+      fireEvent.click(createButton);
+      expect(onCreate).toHaveBeenCalledTimes(1);
+      expect(createButton.disabled).toBe(true);
+      expect(createButton.dataset.progressInflight).toBe("1");
+
+      act(() => resolveCreate());
+      await waitFor(() => expect(createButton.disabled).toBe(false));
+      expect(createButton.dataset.progressInflight).toBeUndefined();
+
+      const alert = vi.spyOn(window, "alert").mockImplementation(() => {});
+      onCreate.mockRejectedValueOnce(new Error("create failed"));
+      fireEvent.click(createButton);
+      await waitFor(() => expect(createButton.disabled).toBe(false));
+      expect(alert).toHaveBeenCalledWith("create failed");
+    } finally {
+      act(() => completeOp("session:create"));
+    }
+  });
+
   it("offers all create actions and remembers the last selection", async () => {
     cacheProviders([provider], provider.id);
     cacheProviderModels(provider.id, ["cached-default"]);
@@ -85,6 +136,9 @@ describe("NewSessionModal offline provider cache", () => {
     }));
     expect(modal.getAllByRole("menuitem")).toHaveLength(3);
     fireEvent.click(modal.getByRole("menuitem", { name: "newSession.createAndSend" }));
+    await waitFor(() => {
+      expect(modal.getByRole("button", { name: "newSession.createAndSend" })).toBeTruthy();
+    });
     fireEvent.click(modal.getByRole("button", { name: "newSession.createAndSend" }));
 
     expect(onCreate.mock.calls.map((call) => call[2])).toEqual(["send", "send"]);
