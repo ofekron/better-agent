@@ -145,6 +145,27 @@ records[extension_store.BUILTIN_SWITCH_CONTROL_EXTENSION_ID] = {
 entries = extension_daemons.publish_registry()
 switch_key = f"{extension_store.BUILTIN_SWITCH_CONTROL_EXTENSION_ID}:line-switch"
 assert entries[switch_key]["source_root"] == str(BACKEND.parent / "switch_control_daemon")
+
+records[extension_store.BUILTIN_SWITCH_CONTROL_EXTENSION_ID]["manifest"] = {
+    **validated_switch_manifest,
+    "version": "0.1.0",
+    "entrypoints": {
+        **validated_switch_manifest["entrypoints"],
+        "daemons": [{"name": "switcher", "module": "daemon.switcher", "lifecycle": "supervisor"}],
+    },
+}
+write_json(registry_path(), {"daemons": {
+    f"{extension_store.BUILTIN_SWITCH_CONTROL_EXTENSION_ID}:switcher": {
+        "extension_id": extension_store.BUILTIN_SWITCH_CONTROL_EXTENSION_ID,
+        "name": "switcher",
+        "module": "daemon.switcher",
+        "lifecycle": "supervisor",
+        "source_root": str(BACKEND.parent / "extensions" / "switch-control"),
+    },
+}})
+entries = extension_daemons.publish_registry()
+assert switch_key in entries, "bundled switch daemon must override a stale installed manifest"
+assert f"{extension_store.BUILTIN_SWITCH_CONTROL_EXTENSION_ID}:switcher" not in entries
 del records[extension_store.BUILTIN_SWITCH_CONTROL_EXTENSION_ID]
 
 # Package missing on this line (root None): entry survives untouched.
