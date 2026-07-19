@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import threading
 import time
 import uuid
@@ -9,6 +10,8 @@ from pathlib import Path
 from typing import Any
 
 from paths import ba_home
+
+logger = logging.getLogger(__name__)
 
 _LOCK = threading.RLock()
 _SCHEMA_VERSION = 2
@@ -42,11 +45,22 @@ def _read_locked() -> dict[str, Any]:
     if not path.exists():
         return {"schema_version": _SCHEMA_VERSION, "requests": {}}
     data = json.loads(path.read_text(encoding="utf-8"))
-    if data.get("schema_version") != _SCHEMA_VERSION:
-        raise RuntimeError("unexpected user input store schema")
+    schema_version = data.get("schema_version")
     requests = data.get("requests")
-    if not isinstance(requests, dict):
-        raise RuntimeError("invalid user input store")
+    if schema_version != _SCHEMA_VERSION or not isinstance(requests, dict):
+        # Pre-existing on-disk store from before schema_version was introduced
+        # (or otherwise corrupted): this is a rebuildable pending-request queue,
+        # not a durable source of truth, so self-heal to empty rather than
+        # permanently 500ing every caller (create_request, sidebar pending
+        # counts, etc.) -- any requests here are already stale (any turn that
+        # was genuinely still awaiting one has been failing on every call to
+        # this store, i.e. already broken, since the schema bump landed).
+        logger.warning(
+            "user_input_store: resetting store with stale schema_version=%r at %s",
+            schema_version,
+            path,
+        )
+        return {"schema_version": _SCHEMA_VERSION, "requests": {}}
     return data
 
 
