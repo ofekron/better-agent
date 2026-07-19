@@ -1486,15 +1486,7 @@ import ui_selection
 # go through `Provider.build_env()` and don't depend on this — but
 # in-process fallbacks still might.
 #
-# `warm_keyring_cache()` BEFORE `apply_env_vars()`: this pulls every
-# api_key provider's secret into the in-process cache so subsequent
-# request-hot-path callers (runtime provider resolution, explicit UI
-# credential-status snapshots, every `apply_env_vars` reapply at prompt-send)
-# hit the cache instead of macOS Keychain. The 2s-timeout-per-call risk
-# in `_keyring_call` is paid ONCE at startup, off the event loop. See
-# the comment over `_api_key_cache` in `config_store.py`.
-config_store.warm_keyring_cache()
-config_store.apply_env_vars()
+config_store.apply_provider_config_env_vars()
 
 from pydantic import BaseModel
 
@@ -2626,6 +2618,18 @@ async def set_provider_suspended(provider_id: str, body: dict = Body(default={})
             logger.exception("failed to cancel runs for suspended provider %s", provider_id)
     await _broadcast_provider_changed()
     return {"suspended": suspended, "cancelled_runs": cancelled, **state}
+
+
+@app.post("/api/providers/{provider_id}/credential/retry")
+async def retry_provider_credential(provider_id: str):
+    provider = await asyncio.to_thread(config_store.get_provider, provider_id)
+    if provider is None:
+        raise HTTPException(status_code=404, detail=t("error.provider_not_found"))
+    if provider.get("mode") != "api_key":
+        raise HTTPException(status_code=409, detail="Provider does not use an API key.")
+    status = await asyncio.to_thread(config_store.retry_provider_credential, provider_id)
+    await _broadcast_provider_changed()
+    return {"credential_status": status, "has_api_key": status == "available"}
 
 
 @app.delete("/api/providers/{provider_id}")

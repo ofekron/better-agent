@@ -69,6 +69,7 @@ if str(_BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(_BACKEND_DIR))
 
 from env_compat import dual_env_many
+from credential_session import ProviderCredentialSession
 
 
 def _ba_home() -> Path:
@@ -363,6 +364,7 @@ class BackendSupervisor:
         self._backend_logger: Optional[logging.Logger] = None
         self._daemon_host = None
         self._daemon_host_thread: Optional[threading.Thread] = None
+        self._credential_session = ProviderCredentialSession()
         self._active_checkout = _REPO_ROOT.resolve()
         # The backend — and every runner it spawns — inherits this PATH so
         # `claude`/`gemini`/`node` resolve under launchd's stripped PATH.
@@ -394,7 +396,13 @@ class BackendSupervisor:
             self.port = resolution["port"]
             self.health_url = self._health_url()
         self._set_port_env()
-        self._proc = self._spawn_backend()
+        self._credential_session.start()
+        self._env.update(self._credential_session.backend_env())
+        try:
+            self._proc = self._spawn_backend()
+        except Exception:
+            self._credential_session.stop()
+            raise
         if self.role == "primary":
             self._start_daemon_host()
 
@@ -649,6 +657,7 @@ class BackendSupervisor:
         hangs."""
         self._stop_daemon_host()
         if self._proc is None or self._proc.poll() is not None:
+            self._credential_session.stop()
             return
         flag = _ba_home() / "kill_runners_requested"
         if kill_runners:
@@ -671,3 +680,5 @@ class BackendSupervisor:
         except subprocess.TimeoutExpired:
             self._proc.kill()
             self._proc.wait()
+        finally:
+            self._credential_session.stop()

@@ -42,7 +42,7 @@ from backend_instance_lock import (
 from paths import ba_home
 import config_store
 
-config_store.apply_env_vars()  # apply provider env vars before SDK-touching imports
+config_store.apply_provider_config_env_vars()
 
 from provider import default_provider, load_all_providers  # noqa: E402
 from topology import load_topology  # noqa: E402

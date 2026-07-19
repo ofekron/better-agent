@@ -801,11 +801,17 @@ body {
   border: 1px solid var(--border);
   border-radius: 6px;
   background: var(--bg-tertiary);
+  transition: border-color 180ms ease, background 180ms ease, opacity 180ms ease;
   color: var(--text-secondary);
   font-size: calc(12px * var(--app-font-scale));
   cursor: pointer;
   transition: all 0.15s;
   text-align: center;
+}
+
+.provider-row.credential-blocked {
+  border-color: rgba(210, 153, 34, 0.7);
+  background: color-mix(in srgb, var(--bg-tertiary) 78%, rgba(210, 153, 34, 0.22));
 }
 
 .ns-modal-orch-btn:hover {

@@ -28,6 +28,7 @@ def _reset_cache() -> None:
     with config_store._state_cache_lock:
         config_store._state_cache = None
     config_store._keyring_blocked_entries.clear()
+    config_store._credential_status.clear()
 
 
 def test_provider_api_key_uses_agent_service_and_legacy_fallback() -> None:
@@ -178,6 +179,7 @@ def test_native_session_provider_kind_never_reads_keychain() -> None:
 def test_provider_config_reads_are_pure_and_ui_status_is_explicit() -> None:
     real_load = config_store._load_state
     real_read = config_store._read_api_key
+    real_status = config_store.provider_credential_status
     provider = {
         "id": "provider-pure",
         "name": "Pure provider",
@@ -186,6 +188,7 @@ def test_provider_config_reads_are_pure_and_ui_status_is_explicit() -> None:
         "capabilities": {"supports_fork": False},
     }
     reads: list[str] = []
+    status_reads: list[str] = []
     config_store._load_state = lambda: {
         "default_provider_id": provider["id"],
         "providers": [provider],
@@ -196,6 +199,9 @@ def test_provider_config_reads_are_pure_and_ui_status_is_explicit() -> None:
         return "secret"
 
     config_store._read_api_key = read
+    config_store.provider_credential_status = lambda provider_id: (
+        status_reads.append(provider_id) or "available"
+    )
     try:
         listed = config_store.list_providers()
         fetched = config_store.get_provider(provider["id"])
@@ -203,18 +209,22 @@ def test_provider_config_reads_are_pure_and_ui_status_is_explicit() -> None:
         exported = config_store.export_provider_sync_state()
 
         assert reads == []
+        assert status_reads == []
         for record in (listed["providers"][0], fetched, resolved, exported["providers"][0]):
             assert record is not None
             assert record["supports_fork"] is False
             assert "has_api_key" not in record
 
         ui_state = config_store.list_provider_ui_state()
-        assert reads == [provider["id"]]
+        assert reads == []
+        assert status_reads == [provider["id"]]
+        assert ui_state["providers"][0]["credential_status"] == "available"
         assert ui_state["providers"][0]["has_api_key"] is True
         assert ui_state["providers"][0]["supports_fork"] is False
     finally:
         config_store._load_state = real_load
         config_store._read_api_key = real_read
+        config_store.provider_credential_status = real_status
 
 
 def test_distinct_provider_reads_do_not_block_each_other() -> None:
@@ -477,38 +487,6 @@ def test_macos_security_stdin_real_keychain_lifecycle() -> None:
             )
 
 
-def test_warm_keyring_cache_serializes_provider_reads() -> None:
-    active = 0
-    peak = 0
-    active_lock = threading.Lock()
-    real_load = config_store._load_state
-    real_read = config_store._read_api_key
-
-    def read(provider_id: str) -> str:
-        nonlocal active, peak
-        with active_lock:
-            active += 1
-            peak = max(peak, active)
-        time.sleep(0.02)
-        with active_lock:
-            active -= 1
-        return provider_id
-
-    config_store._load_state = lambda: {
-        "providers": [
-            {"id": f"provider-{index}", "mode": "api_key"}
-            for index in range(4)
-        ]
-    }
-    config_store._read_api_key = read
-    try:
-        config_store.warm_keyring_cache()
-    finally:
-        config_store._load_state = real_load
-        config_store._read_api_key = real_read
-    assert peak == 1
-
-
 def test_load_state_uses_fingerprint_cache_and_external_invalidates() -> None:
     _reset_cache()
     first = config_store._load_state()
@@ -550,6 +528,5 @@ if __name__ == "__main__":
     test_macos_store_input_keeps_secret_out_of_argv_and_quotes_identifiers()
     test_macos_write_failure_propagates_without_cache_update()
     test_macos_security_stdin_real_keychain_lifecycle()
-    test_warm_keyring_cache_serializes_provider_reads()
     test_load_state_uses_fingerprint_cache_and_external_invalidates()
     print("OK: config_store keyring compatibility")

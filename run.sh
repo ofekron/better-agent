@@ -365,6 +365,7 @@ FRONTEND_BUILD_PID=""
 BACKEND_PID=""
 ZAI_STARTUP_CHECK_PID=""
 DAEMON_HOST_PID=""
+CREDENTIAL_SESSION_PID=""
 
 tracked_child_is_running() {
   local pid="$1"
@@ -425,6 +426,12 @@ stop_child_process() {
   echo "$pids" | xargs kill -9 2>/dev/null || true
 }
 
+stop_credential_session() {
+  stop_child_process "credential session" "$CREDENTIAL_SESSION_PID"
+  [ -n "${CREDENTIAL_SESSION_ADDRESS:-}" ] && rm -f "$CREDENTIAL_SESSION_ADDRESS"
+  [ -n "${CREDENTIAL_SESSION_DIR:-}" ] && rmdir "$CREDENTIAL_SESSION_DIR" 2>/dev/null || true
+}
+
 shutdown_children() {
   local signal="${1:-TERM}"
   local exit_code=143
@@ -441,6 +448,7 @@ shutdown_children() {
   stop_child_process "frontend build" "$FRONTEND_BUILD_PID"
   stop_child_process "daemon host" "$DAEMON_HOST_PID"
   stop_child_process "backend" "$BACKEND_PID"
+  stop_credential_session
   exit "$exit_code"
 }
 
@@ -676,6 +684,36 @@ PY
 }
 sync_backend_deps
 
+# Credential reads belong to the supervisor lifetime, not a replaceable backend.
+# A denied provider is retried only through the explicit Settings action.
+CREDENTIAL_SESSION_DIR="$(mktemp -d "${TMPDIR:-/tmp}/better-agent-credentials.XXXXXX")"
+chmod 700 "$CREDENTIAL_SESSION_DIR"
+CREDENTIAL_SESSION_ADDRESS="$CREDENTIAL_SESSION_DIR/session.sock"
+CREDENTIAL_SESSION_FAMILY="AF_UNIX"
+CREDENTIAL_SESSION_AUTH="$($PY -c 'import secrets; print(secrets.token_hex(32))')"
+BETTER_AGENT_CREDENTIAL_SESSION_ADDRESS="$CREDENTIAL_SESSION_ADDRESS" \
+BETTER_AGENT_CREDENTIAL_SESSION_FAMILY="$CREDENTIAL_SESSION_FAMILY" \
+BETTER_AGENT_CREDENTIAL_SESSION_AUTH="$CREDENTIAL_SESSION_AUTH" \
+PYTHONPATH="$DIR:$DIR/backend" \
+  "$PY" -m desktop.credential_session &
+CREDENTIAL_SESSION_PID=$!
+
+credential_session_attempts=0
+while [ ! -S "$CREDENTIAL_SESSION_ADDRESS" ]; do
+  if ! kill -0 "$CREDENTIAL_SESSION_PID" 2>/dev/null; then
+    echo "Credential session failed to start." >&2
+    stop_credential_session
+    exit 1
+  fi
+  if [ "$credential_session_attempts" -ge 40 ]; then
+    echo "Credential session startup timed out." >&2
+    stop_credential_session
+    exit 1
+  fi
+  credential_session_attempts=$((credential_session_attempts + 1))
+  sleep 0.05
+done
+
 # --- Install the `bagent` CLI command onto PATH (idempotent) --------
 # Other tools (e.g. TestApe locator healing) shell out to `bagent`.
 bash "$DIR/scripts/install-bagent.sh" || echo "bagent install failed (non-fatal)"
@@ -864,7 +902,12 @@ PY
   # on EOF when uvicorn exits.
   : > "$BACKEND_LOG"
   echo "--- backend start $(date '+%Y-%m-%dT%H:%M:%S%z') port=$BACKEND_PORT ---" >> "$BACKEND_LOG"
-  (cd "$ACTIVE_DIR/backend" && source .venv/bin/activate && exec uvicorn main:app --host "$bind_host" --port "$BACKEND_PORT" --no-proxy-headers --ws-per-message-deflate false) > >(tee -a "$BACKEND_LOG") 2>&1 &
+  (cd "$ACTIVE_DIR/backend" && \
+    export BETTER_AGENT_CREDENTIAL_SESSION_ADDRESS="$CREDENTIAL_SESSION_ADDRESS" && \
+    export BETTER_AGENT_CREDENTIAL_SESSION_FAMILY="$CREDENTIAL_SESSION_FAMILY" && \
+    export BETTER_AGENT_CREDENTIAL_SESSION_AUTH="$CREDENTIAL_SESSION_AUTH" && \
+    source .venv/bin/activate && \
+    exec uvicorn main:app --host "$bind_host" --port "$BACKEND_PORT" --no-proxy-headers --ws-per-message-deflate false) > >(tee -a "$BACKEND_LOG") 2>&1 &
   BACKEND_PID=$!
 }
 
@@ -1234,3 +1277,4 @@ fi
 reap_completed_children
 stop_child_process "frontend build" "$FRONTEND_BUILD_PID"
 stop_child_process "daemon host" "$DAEMON_HOST_PID"
+stop_credential_session
