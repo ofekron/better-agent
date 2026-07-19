@@ -1121,9 +1121,8 @@ def default_session_reasoning_effort() -> str:
 # ----------------------------------------------------------------------------
 
 
-def _strip(provider: dict) -> dict:
-    """Public view of a provider: includes has_api_key and the full
-    capability matrix. Never the api_key itself."""
+def _provider_config(provider: dict) -> dict:
+    """Resolved non-secret provider configuration and capabilities."""
     kind = provider.get("kind", "claude")
     runtime_kind = _runtime_kind_for_provider(provider)
     caps = _capabilities_for(provider)
@@ -1163,7 +1162,6 @@ def _strip(provider: dict) -> dict:
         # target with a user secret. Empty list = broker rejects all
         # credential requests from this provider (fail-closed).
         "allowed_sinks": list(provider.get("allowed_sinks", [])),
-        "has_api_key": bool(_read_api_key(provider["id"])) if provider.get("mode") == "api_key" else False,
         # Capabilities — kind defaults overridden by the per-provider
         # `capabilities` map (kind is not the only decider). Frontend
         # reads these to gate buttons (Fork, Adv-Sync, Prompt-Engineer
@@ -1175,6 +1173,17 @@ def _strip(provider: dict) -> dict:
         # provider editor render the tri-state (inherit / force-on /
         # force-off) without confusing an override with a kind default.
         "capability_overrides": _clean_capabilities(provider.get("capabilities")),
+    }
+
+
+def _provider_ui_state(provider: dict) -> dict:
+    return {
+        **_provider_config(provider),
+        "has_api_key": (
+            bool(_read_api_key(provider["id"]))
+            if provider.get("mode") == "api_key"
+            else False
+        ),
     }
 
 
@@ -1314,8 +1323,29 @@ def list_providers() -> dict:
     state = _load_state()
     return {
         "default_provider_id": state.get("default_provider_id"),
-        "providers": [_strip(p) for p in state.get("providers", [])],
+        "providers": [_provider_config(p) for p in state.get("providers", [])],
     }
+
+
+def list_provider_ui_state() -> dict:
+    state = _load_state()
+    return {
+        "default_provider_id": state.get("default_provider_id"),
+        "providers": [_provider_ui_state(p) for p in state.get("providers", [])],
+    }
+
+
+def list_provider_metadata() -> list[dict]:
+    """Least-data provider identity/config view derived from pure config."""
+    return [
+        {
+            "id": provider.get("id", ""),
+            "name": provider.get("name", ""),
+            "kind": provider.get("kind", "claude"),
+            "config_dir": provider.get("config_dir", ""),
+        }
+        for provider in list_providers().get("providers", [])
+    ]
 
 
 def _clean_provider_sync_api_key_ids(provider_api_key_ids: object) -> tuple[str, ...]:
@@ -1367,7 +1397,7 @@ def export_provider_sync_state(provider_api_key_ids: object = None) -> dict:
     and transport checks.
     """
     state = _load_state()
-    providers = [_strip(p) for p in state.get("providers", [])]
+    providers = [_provider_config(p) for p in state.get("providers", [])]
     payload = {
         "default_provider_id": state.get("default_provider_id"),
         "providers": providers,
@@ -1487,32 +1517,11 @@ def import_provider_sync_state(payload: dict) -> dict:
     return result
 
 
-def list_provider_metadata() -> list[dict]:
-    """Provider identity/config paths without capabilities or Keychain reads."""
-    state = _load_state()
-    return [
-        {
-            "id": p.get("id", ""),
-            "name": p.get("name", ""),
-            "kind": p.get("kind", "claude"),
-            "config_dir": p.get("config_dir", ""),
-        }
-        for p in state.get("providers", [])
-    ]
-
-
 def get_provider(provider_id: str) -> Optional[dict]:
     state = _load_state()
     for p in state.get("providers", []):
         if p.get("id") == provider_id:
-            return _strip(p)
-    return None
-
-
-def get_provider_metadata(provider_id: str) -> Optional[dict]:
-    for provider in list_provider_metadata():
-        if provider.get("id") == provider_id:
-            return provider
+            return _provider_config(p)
     return None
 
 
@@ -1524,10 +1533,10 @@ def resolve_provider_ref(provider_ref: str) -> Optional[dict]:
     providers = list(state.get("providers", []))
     for p in providers:
         if p.get("id") == ref:
-            return _strip(p)
+            return _provider_config(p)
     matches = [p for p in providers if str(p.get("name") or "") == ref]
     if len(matches) == 1:
-        return _strip(matches[0])
+        return _provider_config(matches[0])
     if len(matches) > 1:
         raise ValueError(f"provider name {ref!r} is ambiguous")
     folded = ref.casefold()
@@ -1536,7 +1545,7 @@ def resolve_provider_ref(provider_ref: str) -> Optional[dict]:
         if str(p.get("name") or "").casefold() == folded
     ]
     if len(matches) == 1:
-        return _strip(matches[0])
+        return _provider_config(matches[0])
     if len(matches) > 1:
         raise ValueError(f"provider name {ref!r} is ambiguous")
     return None
@@ -1646,7 +1655,7 @@ def add_provider(payload: dict) -> dict:
             _write_api_key(pid, api_key)
     state["providers"].append(provider)
     _save_state(state)
-    return _strip(provider)
+    return _provider_ui_state(provider)
 
 
 def update_provider(provider_id: str, payload: dict) -> Optional[dict]:
@@ -1738,7 +1747,7 @@ def update_provider(provider_id: str, payload: dict) -> Optional[dict]:
     # If we just updated the active provider, re-apply env so changes take.
     if state.get("default_provider_id") == provider_id:
         apply_env_vars()
-    return _strip(target)
+    return _provider_ui_state(target)
 
 
 def provider_record_version(provider_id: str) -> Optional[int]:
@@ -1777,7 +1786,7 @@ def set_default_provider(provider_id: str) -> Optional[dict]:
     state["default_provider_id"] = provider_id
     _save_state(state)
     apply_env_vars()
-    return list_providers()
+    return list_provider_ui_state()
 
 
 def set_provider_suspended(provider_id: str, suspended: bool) -> Optional[dict]:
@@ -1802,7 +1811,7 @@ def set_provider_suspended(provider_id: str, suspended: bool) -> Optional[dict]:
         state["default_provider_id"] = replacement
     _save_state(state)
     apply_env_vars()
-    return list_providers()
+    return list_provider_ui_state()
 
 
 def add_custom_model_to_default(name: str) -> Optional[dict]:
@@ -1819,7 +1828,7 @@ def add_custom_model_to_default(name: str) -> Optional[dict]:
                 cm.append(name)
                 p["custom_models"] = cm
                 _save_state(state)
-            return _strip(p)
+            return _provider_ui_state(p)
     return None
 
 
