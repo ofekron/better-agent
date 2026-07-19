@@ -1806,7 +1806,7 @@ class TurnManager:
             }})
 
             trace.finalize()
-            trace.save()
+            await _to_turn_dispatch_thread(trace.save)
 
             workers = list(workers_list)
             workers_used = [w["worker_session_id"] for w in workers]
@@ -1861,7 +1861,7 @@ class TurnManager:
         except _Cancelled:
             logger.info("Turn cancelled for session %s", app_session_id)
             trace.finalize()
-            trace.save()
+            await _to_turn_dispatch_thread(trace.save)
 
             workers = list(workers_list)
             workers_used = [w["worker_session_id"] for w in workers]
@@ -1937,7 +1937,7 @@ class TurnManager:
                 )
             try:
                 trace.finalize()
-                trace.save()
+                await _to_turn_dispatch_thread(trace.save)
             except Exception:
                 logger.exception("Failed to save trace on task cancel")
             try:
@@ -1958,7 +1958,7 @@ class TurnManager:
             error_text = f"{type(e).__name__}: {e}\n\n{traceback.format_exc()}"
             try:
                 trace.finalize()
-                trace.save()
+                await _to_turn_dispatch_thread(trace.save)
             except Exception:
                 logger.exception("Failed to save trace during error handling")
             try:
