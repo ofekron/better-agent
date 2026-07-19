@@ -14,89 +14,49 @@ CredentialStatus = Literal["unknown", "available", "missing", "blocked"]
 _MAX_FRAME_BYTES = 128 * 1024
 
 
-class ProviderCredentialSession:
+class ProviderCredentialBroker:
     def __init__(self) -> None:
-        self._server_connection, self._backend_connection = Pipe(duplex=True)
-        self._thread: threading.Thread | None = None
-        self._stopping = threading.Event()
         self._states: dict[str, tuple[CredentialStatus, str]] = {}
         self._locks: dict[str, threading.Lock] = {}
         self._locks_guard = threading.Lock()
 
-    def start(self) -> None:
-        if self._thread is not None:
-            return
-        if os.name == "nt":
-            os.set_handle_inheritable(self._backend_connection.fileno(), True)
-        else:
-            os.set_inheritable(self._backend_connection.fileno(), True)
-        self._thread = threading.Thread(
-            target=self._serve,
-            name="provider-credential-session",
-            daemon=True,
-        )
-        self._thread.start()
+    def open_session(self) -> "ProviderCredentialSession":
+        return ProviderCredentialSession(self)
 
-    def backend_env(self) -> dict[str, str]:
-        return {
-            "BETTER_AGENT_CREDENTIAL_SESSION_FD": str(
-                self._backend_connection.fileno()
-            ),
-        }
-
-    def backend_popen_kwargs(self) -> dict[str, object]:
-        if os.name == "nt":
-            startupinfo = subprocess.STARTUPINFO()
-            startupinfo.lpAttributeList = {
-                "handle_list": [self._backend_connection.fileno()]
-            }
-            return {"close_fds": True, "startupinfo": startupinfo}
-        return {"pass_fds": (self._backend_connection.fileno(),)}
-
-    def stop(self) -> None:
-        if self._thread is None:
-            return
-        self._stopping.set()
-        try:
-            self._backend_connection.send_bytes(b'{"op":"shutdown"}')
-        except (OSError, EOFError):
-            pass
-        self._thread.join(timeout=5)
-        self._thread = None
+    def clear(self) -> None:
         self._states.clear()
-        self._server_connection.close()
-        self._backend_connection.close()
+        self._locks.clear()
 
     def _provider_lock(self, provider_id: str) -> threading.Lock:
         with self._locks_guard:
             return self._locks.setdefault(provider_id, threading.Lock())
 
-    def _serve(self) -> None:
-        while not self._stopping.is_set():
-            try:
-                payload = self._server_connection.recv_bytes(maxlength=_MAX_FRAME_BYTES)
-                request = json.loads(payload.decode("utf-8"))
-                response = self._handle(request)
-                if isinstance(request, dict) and isinstance(request.get("request_id"), str):
-                    response["request_id"] = request["request_id"]
-                self._server_connection.send_bytes(
-                    json.dumps(response, separators=(",", ":")).encode("utf-8")
-                )
-            except (EOFError, OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
-                try:
-                    self._server_connection.send_bytes(
-                        b'{"status":"blocked","error":"invalid request"}'
-                    )
-                except (EOFError, OSError):
-                    return
+    @staticmethod
+    def _provider_label(provider_id: str) -> str:
+        try:
+            from paths import bc_home
 
-    def _handle(self, request: object) -> dict[str, str]:
+            raw = json.loads((bc_home() / "config.json").read_text(encoding="utf-8"))
+            if not isinstance(raw, dict):
+                return "configured AI provider"
+            for provider in raw.get("providers", []):
+                if not isinstance(provider, dict) or provider.get("id") != provider_id:
+                    continue
+                name = provider.get("name")
+                if (
+                    isinstance(name, str)
+                    and 0 < len(name) <= 128
+                    and not any(character in name for character in "\0\r\n")
+                ):
+                    return name
+        except (OSError, ValueError, TypeError):
+            pass
+        return "configured AI provider"
+
+    def handle(self, request: object) -> dict[str, str]:
         if not isinstance(request, dict):
             raise ValueError("request must be an object")
         op = request.get("op")
-        if op == "shutdown":
-            self._stopping.set()
-            return {"status": "unknown"}
         request_id = request.get("request_id")
         if not isinstance(request_id, str) or len(request_id) != 32:
             raise ValueError("invalid request_id")
@@ -132,9 +92,14 @@ class ProviderCredentialSession:
                 response["value"] = value
             return response
         account = f"provider:{provider_id}"
+        label = self._provider_label(provider_id)
         try:
             for service in service_names(PRIMARY_SERVICE, LEGACY_SERVICE):
-                value = oskeychain.get(service, account)
+                value = oskeychain.get(
+                    service,
+                    account,
+                    reason=f"Better Agent needs the API key for {label}",
+                )
                 if value:
                     value = value[:-1] if value.endswith("\n") else value
                     self._states[provider_id] = ("available", value)
@@ -149,9 +114,15 @@ class ProviderCredentialSession:
         if self._states.get(provider_id, ("unknown", ""))[0] == "blocked":
             return {"status": "blocked"}
         account = f"provider:{provider_id}"
+        label = self._provider_label(provider_id)
         try:
             for service in service_names(PRIMARY_SERVICE, LEGACY_SERVICE):
-                oskeychain.store(service, account, value)
+                oskeychain.store(
+                    service,
+                    account,
+                    value,
+                    reason=f"Better Agent needs to save the API key for {label}",
+                )
         except RuntimeError:
             self._states[provider_id] = ("blocked", "")
             return {"status": "blocked"}
@@ -162,11 +133,100 @@ class ProviderCredentialSession:
         if self._states.get(provider_id, ("unknown", ""))[0] == "blocked":
             return {"status": "blocked"}
         account = f"provider:{provider_id}"
+        label = self._provider_label(provider_id)
         try:
             for service in service_names(PRIMARY_SERVICE, LEGACY_SERVICE):
-                oskeychain.delete(service, account)
+                oskeychain.delete(
+                    service,
+                    account,
+                    reason=f"Better Agent needs to remove the API key for {label}",
+                )
         except RuntimeError:
             self._states[provider_id] = ("blocked", "")
             return {"status": "blocked"}
         self._states[provider_id] = ("missing", "")
         return {"status": "missing"}
+
+
+class ProviderCredentialSession:
+    def __init__(self, broker: ProviderCredentialBroker | None = None) -> None:
+        self._broker = broker or ProviderCredentialBroker()
+        self._owns_broker = broker is None
+        self._server_connection, self._backend_connection = Pipe(duplex=True)
+        self._thread: threading.Thread | None = None
+        self._stopping = threading.Event()
+
+    def start(self) -> None:
+        if self._thread is not None:
+            return
+        if os.name == "nt":
+            os.set_handle_inheritable(self._backend_connection.fileno(), True)
+        else:
+            os.set_inheritable(self._backend_connection.fileno(), True)
+        self._thread = threading.Thread(
+            target=self._serve,
+            name="provider-credential-session",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def backend_env(self) -> dict[str, str]:
+        return {
+            "BETTER_AGENT_CREDENTIAL_SESSION_FD": str(
+                self._backend_connection.fileno()
+            ),
+        }
+
+    def backend_popen_kwargs(self) -> dict[str, object]:
+        if os.name == "nt":
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.lpAttributeList = {
+                "handle_list": [self._backend_connection.fileno()]
+            }
+            return {"close_fds": True, "startupinfo": startupinfo}
+        return {"pass_fds": (self._backend_connection.fileno(),)}
+
+    def revoke_backend_inheritance(self) -> None:
+        if os.name == "nt":
+            os.set_handle_inheritable(self._backend_connection.fileno(), False)
+        else:
+            os.set_inheritable(self._backend_connection.fileno(), False)
+
+    def stop(self) -> None:
+        if self._thread is None:
+            return
+        self._stopping.set()
+        try:
+            self._backend_connection.close()
+        except OSError:
+            pass
+        self._thread.join(timeout=2)
+        if self._thread.is_alive():
+            self._server_connection.close()
+            self._thread.join(timeout=1)
+        self._thread = None
+        try:
+            self._server_connection.close()
+        except OSError:
+            pass
+        if self._owns_broker:
+            self._broker.clear()
+
+    def _serve(self) -> None:
+        while not self._stopping.is_set():
+            try:
+                payload = self._server_connection.recv_bytes(maxlength=_MAX_FRAME_BYTES)
+                request = json.loads(payload.decode("utf-8"))
+                response = self._broker.handle(request)
+                if isinstance(request, dict) and isinstance(request.get("request_id"), str):
+                    response["request_id"] = request["request_id"]
+                self._server_connection.send_bytes(
+                    json.dumps(response, separators=(",", ":")).encode("utf-8")
+                )
+            except (EOFError, OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
+                try:
+                    self._server_connection.send_bytes(
+                        b'{"status":"blocked","error":"invalid request"}'
+                    )
+                except (EOFError, OSError):
+                    return

@@ -388,6 +388,9 @@ FRONTEND_BUILD_PID=""
 BACKEND_PID=""
 ZAI_STARTUP_CHECK_PID=""
 DAEMON_HOST_PID=""
+CREDENTIAL_BACKEND_SUPERVISOR_PID=""
+CREDENTIAL_BACKEND_CONTROL_DIR=""
+CREDENTIAL_BACKEND_CONTROL=""
 
 tracked_child_is_running() {
   local pid="$1"
@@ -448,6 +451,48 @@ stop_child_process() {
   echo "$pids" | xargs kill -9 2>/dev/null || true
 }
 
+credential_backend_control() {
+  PYTHONPATH="$DIR:$DIR/backend:$DIR/desktop" "$PY" \
+    -m desktop.browser_backend_control --control "$CREDENTIAL_BACKEND_CONTROL" "$@"
+}
+
+start_credential_backend_supervisor() {
+  local attempts=0
+  CREDENTIAL_BACKEND_CONTROL_DIR="$(mktemp -d "/tmp/ba-bs.XXXXXX")"
+  chmod 700 "$CREDENTIAL_BACKEND_CONTROL_DIR"
+  CREDENTIAL_BACKEND_CONTROL="$CREDENTIAL_BACKEND_CONTROL_DIR/control.sock"
+  PYTHONPATH="$DIR:$DIR/backend:$DIR/desktop" "$PY" \
+    -m desktop.browser_backend_supervisor \
+    --control "$CREDENTIAL_BACKEND_CONTROL" \
+    --launcher-root "$DIR" \
+    --controller-pid "$$" &
+  CREDENTIAL_BACKEND_SUPERVISOR_PID=$!
+  while [ ! -S "$CREDENTIAL_BACKEND_CONTROL" ]; do
+    if ! tracked_child_is_running "$CREDENTIAL_BACKEND_SUPERVISOR_PID"; then
+      echo "Credential backend supervisor failed to start." >&2
+      return 1
+    fi
+    if [ "$attempts" -ge 40 ]; then
+      echo "Credential backend supervisor startup timed out." >&2
+      return 1
+    fi
+    attempts=$((attempts + 1))
+    sleep 0.05
+  done
+}
+
+stop_credential_backend_supervisor() {
+  if [ -n "$CREDENTIAL_BACKEND_CONTROL" ] && [ -S "$CREDENTIAL_BACKEND_CONTROL" ]; then
+    credential_backend_control shutdown >/dev/null 2>&1 || true
+  fi
+  stop_child_process "credential backend supervisor" "$CREDENTIAL_BACKEND_SUPERVISOR_PID"
+  [ -n "$CREDENTIAL_BACKEND_CONTROL" ] && rm -f "$CREDENTIAL_BACKEND_CONTROL"
+  [ -n "$CREDENTIAL_BACKEND_CONTROL_DIR" ] && rmdir "$CREDENTIAL_BACKEND_CONTROL_DIR" 2>/dev/null || true
+  CREDENTIAL_BACKEND_SUPERVISOR_PID=""
+  CREDENTIAL_BACKEND_CONTROL=""
+  CREDENTIAL_BACKEND_CONTROL_DIR=""
+}
+
 shutdown_children() {
   local signal="${1:-TERM}"
   local exit_code=143
@@ -463,7 +508,11 @@ shutdown_children() {
   stop_child_process "startup checker" "$ZAI_STARTUP_CHECK_PID"
   stop_child_process "frontend build" "$FRONTEND_BUILD_PID"
   stop_child_process "daemon host" "$DAEMON_HOST_PID"
-  stop_child_process "backend" "$BACKEND_PID"
+  if [ -n "$CREDENTIAL_BACKEND_SUPERVISOR_PID" ]; then
+    stop_credential_backend_supervisor
+  else
+    stop_child_process "backend" "$BACKEND_PID"
+  fi
   exit "$exit_code"
 }
 
@@ -699,11 +748,6 @@ PY
 }
 sync_backend_deps
 
-if [ "${BETTER_AGENT_CREDENTIAL_SESSION_WRAPPED:-0}" != "1" ]; then
-  exec env PYTHONPATH="$DIR:$DIR/backend" \
-    "$PY" -m desktop.credential_run_wrapper "$DIR/run.sh" "$@"
-fi
-
 # --- Install the `bagent` CLI command onto PATH (idempotent) --------
 # Other tools (e.g. TestApe locator healing) shell out to `bagent`.
 bash "$DIR/scripts/install-bagent.sh" || echo "bagent install failed (non-fatal)"
@@ -857,6 +901,7 @@ open_first_run_browser() {
 
 start_backend() {
   local bind_host
+  local pid_file="$CREDENTIAL_BACKEND_CONTROL_DIR/backend.pid"
   bind_host=$("$PY" - "$BA_HOME/user_prefs.json" <<'PY'
 import json
 import sys
@@ -886,16 +931,14 @@ PY
   export BETTER_AGENT_BACKEND_PORT="$BACKEND_PORT"
   export BETTER_AGENT_BACKEND_URL="http://127.0.0.1:$BACKEND_PORT"
   export BA_BACKEND_PORT="$BACKEND_PORT"
-  # Capture uvicorn stdout+stderr to a fresh log file AND the terminal so the
-  # startup checker can read a crash traceback after the backend exits. `exec`
-  # makes BACKEND_PID the uvicorn process itself (clean kill/wait); tee drains
-  # on EOF when uvicorn exits.
+  # The Python supervisor owns uvicorn and its private credential channel. It
+  # forwards output to this terminal and the backend log.
   : > "$BACKEND_LOG"
   echo "--- backend start $(date '+%Y-%m-%dT%H:%M:%S%z') port=$BACKEND_PORT ---" >> "$BACKEND_LOG"
-  (cd "$ACTIVE_DIR/backend" && \
-    source .venv/bin/activate && \
-    exec uvicorn main:app --host "$bind_host" --port "$BACKEND_PORT" --no-proxy-headers --ws-per-message-deflate false) > >(tee -a "$BACKEND_LOG") 2>&1 &
-  BACKEND_PID=$!
+  credential_backend_control start \
+    --checkout "$ACTIVE_DIR" --host "$bind_host" --port "$BACKEND_PORT" > "$pid_file"
+  IFS= read -r BACKEND_PID < "$pid_file"
+  rm -f "$pid_file"
 }
 
 wait_for_backend() {
@@ -904,7 +947,6 @@ wait_for_backend() {
   while [ "$attempts" -lt 240 ]; do
     if ! kill -0 "$BACKEND_PID" 2>/dev/null; then
       echo "Backend exited before becoming healthy."
-      wait "$BACKEND_PID" || true
       BACKEND_PID=""
       return 1
     fi
@@ -919,8 +961,7 @@ wait_for_backend() {
     sleep 0.25
   done
   echo "Backend did not become healthy within 60 seconds."
-  kill "$BACKEND_PID" 2>/dev/null || true
-  wait "$BACKEND_PID" || true
+  credential_backend_control signal --signal TERM >/dev/null 2>&1 || true
   BACKEND_PID=""
   return 1
 }
@@ -936,7 +977,7 @@ wait_for_backend_exit() {
       fi
       if [ "$restart_attempts" -ge "$restart_limit" ]; then
         echo "Graceful restart timeout expired; forcing backend shutdown."
-        kill -9 "$BACKEND_PID" 2>/dev/null || true
+        credential_backend_control signal --signal KILL >/dev/null 2>&1 || true
         break
       fi
       restart_attempts=$((restart_attempts + 1))
@@ -944,198 +985,11 @@ wait_for_backend_exit() {
     sleep 0.25
   done
 
-  wait "$BACKEND_PID" || true
   BACKEND_PID=""
-}
-
-run_zai_startup_check() {
-  local backend_healthy="${1:-0}"
-  local log_path="$BA_HOME/zai_glm52_startup_check.log"
-
-  if [ "${BETTER_AGENT_SKIP_ZAI_STARTUP_CHECK:-${BETTER_CLAUDE_SKIP_ZAI_STARTUP_CHECK:-0}}" = "1" ]; then
-    echo "Skipping Z.AI glm-5.2 startup checker because startup checker skip env is set."
-    return 0
-  fi
-
-  echo "Running Z.AI glm-5.2 startup checker agent (backend_healthy=$backend_healthy)..."
-  if "$PY" - "$DIR" "$BACKEND_PORT" "$BACKEND_PID" "$backend_healthy" "$BACKEND_LOG" >"$log_path" 2>&1 <<'PY'
-import json
-import os
-import re
-import shutil
-import subprocess
-import sys
-import time
-
-repo = sys.argv[1]
-backend_port = sys.argv[2]
-backend_pid = sys.argv[3]
-backend_healthy = sys.argv[4] == "1"
-backend_log = sys.argv[5]
-checker_started_epoch = time.time()
-sys.path.insert(0, os.path.join(repo, "backend"))
-
-import config_store
-
-provider = None
-for candidate in config_store.list_providers().get("providers", []):
-    if str(candidate.get("name") or "").casefold() == "z.ai":
-        provider = config_store.get_provider_with_key(str(candidate.get("id") or ""))
-        break
-if not provider:
-    print("Z.AI provider is not configured; skipping optional startup checker.")
-    raise SystemExit(0)
-if provider.get("kind") != "claude":
-    raise SystemExit("Z.AI startup check requires a Claude-compatible provider")
-if provider.get("mode") != "api_key":
-    raise SystemExit("Z.AI startup check requires API-key mode")
-api_key = str(provider.get("api_key") or "")
-if not api_key:
-    raise SystemExit("Z.AI provider API key is missing")
-
-claude = shutil.which("claude")
-if not claude:
-    raise SystemExit("claude CLI is not on PATH")
-
-env = os.environ.copy()
-env["ANTHROPIC_API_KEY"] = api_key
-base_url = str(provider.get("base_url") or "")
-if base_url:
-    env["ANTHROPIC_BASE_URL"] = base_url
-else:
-    env.pop("ANTHROPIC_BASE_URL", None)
-env.pop("ANTHROPIC_AUTH_TOKEN", None)
-env["BETTER_AGENT_SKIP_ZAI_STARTUP_CHECK"] = "1"
-env["BETTER_CLAUDE_SKIP_ZAI_STARTUP_CHECK"] = "1"
-config_dir = str(provider.get("config_dir") or "")
-if config_dir:
-    env["CLAUDE_CONFIG_DIR"] = os.path.expanduser(os.path.expandvars(config_dir))
-else:
-    env.pop("CLAUDE_CONFIG_DIR", None)
-
-prompt = f"""
-You are the Better Agent run.sh startup checker. You are running as a direct
-Claude Code CLI process configured for the Z.AI Claude-compatible provider,
-not through Better Agent.
-
-Goal: verify that the run.sh invocation that spawned you actually succeeded.
-Do not treat a successful model response as success. Success means the Better
-Agent app is operational.
-
-Current launch:
-- repo: {repo}
-- backend port: {backend_port}
-- backend pid: {backend_pid}
-- backend reached healthy: {"yes" if backend_healthy else "NO — backend exited before becoming healthy"}
-- backend run log (uvicorn stdout+stderr, includes any startup traceback): {backend_log}
-- state home: {os.environ.get("BETTER_AGENT_HOME") or os.environ.get("BETTER_CLAUDE_HOME") or ""}
-- checker log: {os.path.join(os.environ.get("BETTER_AGENT_HOME") or os.environ.get("BETTER_CLAUDE_HOME") or os.path.expanduser("~/.better-claude"), "zai_glm52_startup_check.log")}
-- checker started epoch: {checker_started_epoch}
-
-If "backend reached healthy" is NO, the backend crashed on startup. Read the
-backend run log above FIRST — it holds the uvicorn traceback (e.g.
-ModuleNotFoundError, schema/migration errors, import failures). Diagnose the
-root cause from that traceback, fix it in the repo, then rerun run.sh yourself
-to confirm the backend comes up. Do NOT report ok while the backend is down.
-
-Required checks:
-1. Verify backend health and key REST endpoints using direct shell commands,
-   not Better Agent's CLI. Protected /api endpoints may return 401 without a
-   browser session; treat 401/403 from protected endpoints as proof that the
-   auth gate is alive, not as a startup failure. Public /healthz or /health
-   must return 200.
-2. Verify the frontend is being served from the backend and the built assets
-   are reachable.
-3. Inspect recent backend/run logs for ERROR tracebacks, ModuleNotFoundError,
-   NameError, AttributeError, frontend build failures, unhandled RuntimeWarning,
-   and lag-watchdog/event-loop-blocked lines after this launch began. Ignore
-   entries older than the checker started epoch above.
-4. If you find a real issue and the fix is clear, edit the repo, run focused
-   tests, then rerun run.sh yourself. Your environment already includes
-   BETTER_AGENT_SKIP_ZAI_STARTUP_CHECK=1, so reruns will not recursively launch
-   another checker. Stop the rerun once you have verified startup.
-5. If you cannot prove success, fail clearly.
-
-Rules:
-- Do not call backend/cli.py, bagent, or any Better Agent prompt/session path.
-- Use shell commands, file inspection, curl, and direct logs.
-- Do not stage, commit, push, or stash.
-- Keep edits tightly scoped to startup/runtime breakages you can prove.
-- Final response must be exactly JSON:
-  {{"status":"ok"|"failed","summary":"short reason","fixed":true|false}}
-""".strip()
-
-cmd = [
-    claude,
-    "--bare",
-    "-p",
-    "--output-format", "json",
-    "--permission-mode", "bypassPermissions",
-    "--input-format", "text",
-    "--model", "glm-5.2",
-    prompt,
-]
-result = subprocess.run(
-    cmd,
-    cwd=repo,
-    env=env,
-    stdin=subprocess.DEVNULL,
-    stdout=subprocess.PIPE,
-    stderr=subprocess.PIPE,
-    text=True,
-    timeout=1800,
-)
-if result.stdout:
-    print(result.stdout, end="")
-if result.stderr:
-    print(result.stderr, end="", file=sys.stderr)
-if result.returncode != 0:
-    raise SystemExit(result.returncode)
-try:
-    payload = json.loads(result.stdout or "{}")
-except json.JSONDecodeError as exc:
-    raise SystemExit(f"claude returned non-JSON output: {exc}") from exc
-if isinstance(payload, dict) and payload.get("is_error"):
-    raise SystemExit("claude returned is_error=true")
-raw_result = payload.get("result") if isinstance(payload, dict) else None
-if not isinstance(raw_result, str):
-    raise SystemExit("claude JSON output did not contain a string result")
-
-def parse_checker_result(raw):
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError:
-        pass
-    fenced = re.findall(r"```(?:json)?\s*(\{[\s\S]*?\})\s*```", raw)
-    candidates = fenced or re.findall(r"\{[\s\S]*?\}", raw)
-    for candidate in reversed(candidates):
-        try:
-            parsed = json.loads(candidate)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(parsed, dict) and "status" in parsed:
-            return parsed
-    raise ValueError("no checker status JSON object found")
-
-try:
-    checker_result = parse_checker_result(raw_result)
-except ValueError as exc:
-    raise SystemExit(f"checker result was not JSON: {raw_result}") from exc
-if not isinstance(checker_result, dict) or checker_result.get("status") != "ok":
-    raise SystemExit(f"startup checker failed: {raw_result}")
-PY
-  then
-    echo "Z.AI glm-5.2 startup checker completed successfully."
-    return 0
-  fi
-
-  echo "Z.AI glm-5.2 startup checker failed. See $log_path"
-  return 0
 }
 
 PENDING_REFRESH_ID=""
 INITIAL_FRONTEND_BUILD_STARTED=0
-ZAI_STARTUP_CHECK_DONE=0
 # Platform daemon host: supervises supervisor-lifecycle extension daemons so
 # they outlive backend restarts. Runs the launcher checkout's code (fixed
 # point) and reads its desired set from ba_home()/daemons/registry.json.
@@ -1161,6 +1015,7 @@ PY
 )"
   echo "Normal exit cleanup test ready: frontend=$FRONTEND_BUILD_PID daemon=$DAEMON_HOST_PID checker=$ZAI_STARTUP_CHECK_PID"
 else
+  start_credential_backend_supervisor
   while true; do
     # Line switching: run the backend from the active checkout (dev/main worktree)
     # named by the pointer. Resolve it every iteration — a switch or an auto-revert
@@ -1206,24 +1061,11 @@ else
     INITIAL_FRONTEND_BUILD_STARTED=1
 
     start_backend
-    # Capture health without aborting under `set -e`: a crashed backend must still
-    # reach the startup checker so it can read the traceback and auto-fix.
+    # Capture health without aborting under `set -e` so line-switch recovery runs.
     if wait_for_backend; then
       BACKEND_HEALTHY=1
     else
       BACKEND_HEALTHY=0
-    fi
-
-    if [ "$ZAI_STARTUP_CHECK_DONE" -eq 0 ]; then
-      # Background the checker: its CLI agent can run up to 30 min, and it must
-      # never block the refresh/restart loop or backend serving. It self-contains
-      # its own success/failure (always returns 0), so it cannot fail run.sh.
-      # A backgrounded child survives run.sh exiting, so on a crash it can still
-      # fix + rerun after we break below.
-      run_zai_startup_check "$BACKEND_HEALTHY" &
-      ZAI_STARTUP_CHECK_PID=$!
-      disown "$ZAI_STARTUP_CHECK_PID" 2>/dev/null || true
-      ZAI_STARTUP_CHECK_DONE=1
     fi
 
     if [ "$BACKEND_HEALTHY" -ne 1 ]; then
@@ -1234,7 +1076,7 @@ else
         echo "Line switch failed — recovering to a runnable checkout..."
         continue
       fi
-      echo "Backend never became healthy — startup checker launched in background to fix+rerun; exiting."
+      echo "Backend never became healthy; exiting."
       break
     fi
     PYTHONPATH="$DIR" "$PY" -m daemonhost.pointer confirm-healthy \
@@ -1264,3 +1106,4 @@ fi
 reap_completed_children
 stop_child_process "frontend build" "$FRONTEND_BUILD_PID"
 stop_child_process "daemon host" "$DAEMON_HOST_PID"
+stop_credential_backend_supervisor

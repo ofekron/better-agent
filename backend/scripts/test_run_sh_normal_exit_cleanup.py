@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import re
+import socket
 import signal
 import subprocess
 import tempfile
@@ -43,6 +44,10 @@ def main() -> None:
         env["BETTER_AGENT_HOME"] = home
         env["BETTER_CLAUDE_HOME"] = home
         env["BETTER_AGENT_RUN_SH_TEST_NORMAL_EXIT_CLEANUP"] = "1"
+        env["BETTER_AGENT_RUN_SH_SERVICE_CHILD"] = "1"
+        with socket.socket() as listener:
+            listener.bind(("127.0.0.1", 0))
+            env["BETTER_AGENT_BACKEND_PORT"] = str(listener.getsockname()[1])
         proc = subprocess.run(
             ["bash", str(repo / "run.sh")],
             cwd=repo,

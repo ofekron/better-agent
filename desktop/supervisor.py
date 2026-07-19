@@ -69,7 +69,7 @@ if str(_BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(_BACKEND_DIR))
 
 from env_compat import dual_env_many
-from credential_session import ProviderCredentialSession
+from credential_session import ProviderCredentialBroker, ProviderCredentialSession
 
 
 def _ba_home() -> Path:
@@ -364,7 +364,8 @@ class BackendSupervisor:
         self._backend_logger: Optional[logging.Logger] = None
         self._daemon_host = None
         self._daemon_host_thread: Optional[threading.Thread] = None
-        self._credential_session = ProviderCredentialSession()
+        self._credential_broker = ProviderCredentialBroker()
+        self._credential_session: ProviderCredentialSession | None = None
         self._active_checkout = _REPO_ROOT.resolve()
         # The backend — and every runner it spawns — inherits this PATH so
         # `claude`/`gemini`/`node` resolve under launchd's stripped PATH.
@@ -403,12 +404,11 @@ class BackendSupervisor:
             self.port = resolution["port"]
             self.health_url = self._health_url()
         self._set_port_env()
-        self._credential_session.start()
-        self._env.update(self._credential_session.backend_env())
         try:
             self._proc = self._spawn_backend()
         except Exception:
-            self._credential_session.stop()
+            self._close_credential_session()
+            self._credential_broker.clear()
             raise
         if self.role == "primary":
             self._start_daemon_host()
@@ -566,17 +566,33 @@ class BackendSupervisor:
             "BETTER_CLAUDE_ACTIVE_CHECKOUT": str(checkout),
             "BETTER_CLAUDE_RUN_SH_SUPERVISOR": "1",
         }))
-        proc = subprocess.Popen(
-            backend_argv(self.role, checkout), env=self._env, cwd=checkout / "backend",
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, bufsize=1,  # line-buffered text stream
-            **self._credential_session.backend_popen_kwargs(),
-        )
+        self._close_credential_session()
+        session = self._credential_broker.open_session()
+        session.start()
+        child_env = {**self._env, **session.backend_env()}
+        try:
+            proc = subprocess.Popen(
+                backend_argv(self.role, checkout), env=child_env, cwd=checkout / "backend",
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, bufsize=1,  # line-buffered text stream
+                **session.backend_popen_kwargs(),
+            )
+        except Exception:
+            session.stop()
+            raise
+        session.revoke_backend_inheritance()
+        self._credential_session = session
         threading.Thread(
             target=self._forward_backend_output, args=(proc,),
             daemon=True, name="backend-log-forwarder",
         ).start()
         return proc
+
+    def _close_credential_session(self) -> None:
+        session = self._credential_session
+        self._credential_session = None
+        if session is not None:
+            session.stop()
 
     def _resolved_checkout(self) -> Path:
         if self.role != "primary" or getattr(sys, "frozen", False):
@@ -665,7 +681,8 @@ class BackendSupervisor:
         hangs."""
         self._stop_daemon_host()
         if self._proc is None or self._proc.poll() is not None:
-            self._credential_session.stop()
+            self._close_credential_session()
+            self._credential_broker.clear()
             return
         flag = _ba_home() / "kill_runners_requested"
         if kill_runners:
@@ -689,4 +706,5 @@ class BackendSupervisor:
             self._proc.kill()
             self._proc.wait()
         finally:
-            self._credential_session.stop()
+            self._close_credential_session()
+            self._credential_broker.clear()
