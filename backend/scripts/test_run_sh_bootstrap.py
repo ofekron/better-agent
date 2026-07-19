@@ -20,10 +20,11 @@ def test_run_sh_uses_non_standard_backend_port_by_default() -> None:
 def test_run_sh_without_bas_prefers_main_then_uses_current_checkout() -> None:
     source = _run_sh()
 
-    guard = source.index("if ! bas_available && ! current_checkout_is_main_line; then")
+    guard = source.index('if [ "${BETTER_AGENT_RUN_SH_SERVICE_CHILD:-0}" != "1" ] && ! bas_available')
     home_setup = source.index('BA_HOME="${BETTER_AGENT_HOME:-${BETTER_CLAUDE_HOME:-$HOME/.better-claude}}"')
 
-    assert guard < home_setup
+    service_dispatch = source.index('--install-service|--uninstall-service|--service-status')
+    assert home_setup < service_dispatch < guard
     assert 'command -v bas >/dev/null 2>&1 || [ -x "$HOME/ba-switch/bas" ]' in source
     assert 'case "$(basename "$DIR")" in' in source
     assert 'candidate="$parent/${name%-qa}-main"' in source
@@ -32,6 +33,7 @@ def test_run_sh_without_bas_prefers_main_then_uses_current_checkout() -> None:
     assert 'exec "$MAIN_CHECKOUT/run.sh" "$@"' in source
     assert "launching current checkout at $DIR" in source
     assert "Refusing to launch a non-main line" not in source
+    assert "BETTER_AGENT_RUN_SH_SERVICE_CHILD" in source
 
 
 def test_run_sh_initializes_provider_config_sync_before_frontend_build() -> None:

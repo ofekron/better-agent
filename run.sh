@@ -25,6 +25,22 @@ set -e
 set -o pipefail
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
+BA_HOME="${BETTER_AGENT_HOME:-${BETTER_CLAUDE_HOME:-$HOME/.better-claude}}"
+
+case "${1:-}" in
+  --install-service|--uninstall-service|--service-status)
+    case "$1" in
+      --install-service) SERVICE_ACTION=install ;;
+      --uninstall-service) SERVICE_ACTION=uninstall ;;
+      --service-status) SERVICE_ACTION=status ;;
+    esac
+    exec python3 "$DIR/scripts/run_service.py" "$SERVICE_ACTION" --checkout "$DIR" --home "$BA_HOME"
+    ;;
+  --service-child)
+    export BETTER_AGENT_RUN_SH_SERVICE_CHILD=1
+    shift
+    ;;
+esac
 
 bas_available() {
   if [ "${BETTER_AGENT_RUN_SH_ASSUME_NO_BAS:-0}" = "1" ]; then
@@ -67,7 +83,7 @@ main_checkout_for_current_line() {
   return 1
 }
 
-if ! bas_available && ! current_checkout_is_main_line; then
+if [ "${BETTER_AGENT_RUN_SH_SERVICE_CHILD:-0}" != "1" ] && ! bas_available && ! current_checkout_is_main_line; then
   MAIN_CHECKOUT="$(main_checkout_for_current_line || true)"
   if [ -n "$MAIN_CHECKOUT" ]; then
     echo "bas is not installed; launching main checkout at $MAIN_CHECKOUT"
@@ -76,7 +92,6 @@ if ! bas_available && ! current_checkout_is_main_line; then
   echo "bas is not installed and no sibling main checkout is available; launching current checkout at $DIR"
 fi
 
-BA_HOME="${BETTER_AGENT_HOME:-${BETTER_CLAUDE_HOME:-$HOME/.better-claude}}"
 export BETTER_AGENT_HOME="${BETTER_AGENT_HOME:-$BA_HOME}"
 export BETTER_CLAUDE_HOME="${BETTER_CLAUDE_HOME:-$BA_HOME}"
 FLAG="$BA_HOME/restart_requested"
