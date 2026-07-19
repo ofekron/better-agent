@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import os
-from multiprocessing.connection import Client
+import secrets
+import threading
+from multiprocessing.connection import Connection
 from typing import Literal, TypedDict
 
 CredentialStatus = Literal["unknown", "available", "missing", "blocked"]
@@ -14,35 +16,48 @@ class CredentialResponse(TypedDict, total=False):
     error: str
 
 
-_ADDRESS = os.environ.pop("BETTER_AGENT_CREDENTIAL_SESSION_ADDRESS", "")
-_FAMILY = os.environ.pop("BETTER_AGENT_CREDENTIAL_SESSION_FAMILY", "")
-_AUTH_HEX = os.environ.pop("BETTER_AGENT_CREDENTIAL_SESSION_AUTH", "")
+_FD_TEXT = os.environ.pop("BETTER_AGENT_CREDENTIAL_SESSION_FD", "")
 try:
-    _AUTHKEY = bytes.fromhex(_AUTH_HEX) if _AUTH_HEX else b""
-except ValueError:
-    _AUTHKEY = b""
-_AUTH_HEX = ""
+    _FD = int(_FD_TEXT) if _FD_TEXT else -1
+    if _FD >= 0:
+        os.fstat(_FD)
+    _CONNECTION = Connection(_FD) if _FD >= 0 else None
+except (OSError, ValueError):
+    _CONNECTION = None
+_FD_TEXT = ""
+_LOCK = threading.Lock()
 
 
 def available() -> bool:
-    return bool(_ADDRESS and _FAMILY in {"AF_UNIX", "AF_PIPE"} and _AUTHKEY)
+    return _CONNECTION is not None
 
 
 def request(op: str, provider_id: str, *, value: str | None = None) -> CredentialResponse:
     if not available():
         raise RuntimeError("desktop credential session is unavailable")
-    payload: dict[str, str] = {"op": op, "provider_id": provider_id}
+    request_id = secrets.token_hex(16)
+    payload: dict[str, str] = {
+        "op": op,
+        "provider_id": provider_id,
+        "request_id": request_id,
+    }
     if value is not None:
         payload["value"] = value
-    conn = Client(_ADDRESS, family=_FAMILY, authkey=_AUTHKEY)
-    try:
-        conn.send_bytes(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
-        raw = conn.recv_bytes(maxlength=128 * 1024)
-    finally:
-        conn.close()
-    response = json.loads(raw.decode("utf-8"))
+    assert _CONNECTION is not None
+    with _LOCK:
+        _CONNECTION.send_bytes(
+            json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        )
+        for _ in range(8):
+            raw = _CONNECTION.recv_bytes(maxlength=128 * 1024)
+            response = json.loads(raw.decode("utf-8"))
+            if isinstance(response, dict) and response.get("request_id") == request_id:
+                break
+        else:
+            raise RuntimeError("credential session response correlation failed")
     if not isinstance(response, dict) or response.get("status") not in {
         "unknown", "available", "missing", "blocked",
     }:
         raise RuntimeError("invalid desktop credential response")
+    response.pop("request_id", None)
     return response
