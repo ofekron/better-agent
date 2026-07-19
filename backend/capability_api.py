@@ -52,10 +52,6 @@ class _AskSearchPayload(_StrictPayload):
     node_id: str = ""
 
 
-class _SwitchTargetPayload(_StrictPayload):
-    target: str = Field(pattern=r"^(dev|main)$")
-
-
 class _MarketplaceSearchPayload(_StrictPayload):
     query: str = ""
     limit: int = Field(default=20, ge=1, le=100)
@@ -688,51 +684,6 @@ def _register_provider_config_sync() -> None:
     register("provider-config-sync", "change.broadcast", _ProviderConfigBroadcastPayload, broadcast)
 
 
-def _register_switch_control() -> None:
-    def running_checkout() -> str:
-        value = os.environ.get("BETTER_AGENT_ACTIVE_CHECKOUT", "").strip()
-        if not value:
-            raise HTTPException(status_code=409, detail="launcher did not declare the active checkout")
-        return value
-
-    def get_state(_payload: BaseModel) -> Any:
-        from daemonhost import switch_control
-
-        return switch_control.state(running_checkout())
-
-    async def request_switch(payload: BaseModel) -> Any:
-        from daemonhost import switch_control
-
-        requested = switch_control.reserve(running_checkout(), payload.target)
-        reservation_created = bool(requested.pop("_reservation_created", False))
-        preparation_token = str(requested.pop("_preparation_token", ""))
-        request_id = str(requested["request_id"])
-        if requested.get("status") != "preparing" or not reservation_created:
-            return {
-                **requested,
-                "restart": {"status": requested["status"], "request_id": request_id, "restarted_nodes": []},
-            }
-        try:
-            import main
-
-            restarted_nodes = await main._restart_connected_worker_nodes()
-        except Exception as exc:
-            switch_control.fail(request_id, f"worker-node preparation failed: {exc}", preparation_token)
-            raise HTTPException(status_code=502, detail=f"worker-node preparation failed: {exc}") from exc
-        requested = switch_control.activate(request_id, preparation_token)
-        return {
-            **requested,
-            "restart": {
-                "status": requested["status"],
-                "request_id": request_id,
-                "restarted_nodes": restarted_nodes,
-            },
-        }
-
-    register("switch-control", "state.get", _StrictPayload, get_state)
-    register("switch-control", "switch.request", _SwitchTargetPayload, request_switch)
-
-
 def _register_core() -> None:
     async def mcp_job_results(payload: BaseModel) -> Any:
         import main
@@ -1149,7 +1100,6 @@ def _register_session_events() -> None:
 _register_ask()
 _register_core()
 _register_provider_config_sync()
-_register_switch_control()
 _register_marketplace()
 _register_session_control()
 _register_session_bridge()

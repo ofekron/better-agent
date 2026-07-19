@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shutil
+import json
 import os
 import sys
 import tempfile
@@ -13,13 +14,13 @@ sys.path.insert(0, str(REPO))
 
 from daemonhost import switch_control
 
-ROUTES = REPO / "extensions" / "switch-control" / "backend" / "routes.py"
+MANIFEST = REPO / "extensions" / "switch-control" / "better-agent-extension.json"
 
-source = ROUTES.read_text(encoding="utf-8")
-for forbidden in ("daemonhost", "sys.path", "active_checkout", "call_internal"):
-    assert forbidden not in source, f"extension route crosses core boundary via {forbidden}"
-assert 'invoke_capability("switch-control", "state.get")' in source
-assert '"switch.request"' in source
+manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
+assert manifest["surfaces"] == ["instructions", "daemons"], manifest
+assert "backend_module" not in manifest["entrypoints"], manifest
+assert manifest["permissions"] == {"daemons": "supervisor"}, manifest
+assert "access-url" not in (REPO / "daemonhost" / "switch_control.py").read_text(encoding="utf-8")
 
 assert switch_control._incompatible(str(REPO)) == []
 
@@ -56,7 +57,14 @@ try:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("", encoding="utf-8")
     (Path(projection_home) / "switch_lines.json").write_text(
-        '{"main": "' + str(main) + '"}', encoding="utf-8"
+        json.dumps(
+            {
+                "dev": {"checkout": str(dev), "backend_port": 18765},
+                "qa": {"checkout": str(qa), "backend_port": 18767},
+                "main": {"checkout": str(main), "backend_port": 18766},
+            }
+        ),
+        encoding="utf-8",
     )
     discovered = switch_control.state(str(main))
     assert discovered["lines"] == {
@@ -64,6 +72,10 @@ try:
         "qa": str(qa.resolve()),
         "main": str(main.resolve()),
     }, discovered
+    assert discovered["line_targets"]["dev"]["backend_port"] == 18765
+    parallel_request = switch_control.reserve(str(main), "dev", "parallel-dev")
+    assert parallel_request["status"] == "succeeded"
+    assert parallel_request["target_url"] == "http://127.0.0.1:18765"
     assert discovered["active_line"] == "main" and discovered["switchable"] is True
 finally:
     if prior_home is None:

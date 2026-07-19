@@ -2,12 +2,10 @@ from __future__ import annotations
 
 import argparse
 import json
-import socket
 from pathlib import Path
 
 from switch_control_daemon.line_switch_runtime import control as _control
 from switch_control_daemon.line_switch_runtime import requests as _requests
-from switch_control_daemon.line_switch_runtime.web import _access_config
 
 _REQUIRED_CHECKOUT_FILES = _control._REQUIRED_CHECKOUT_FILES
 _configured_lines = _control._configured_lines
@@ -36,18 +34,7 @@ def main(argv: list[str] | None = None) -> int:
     tick.add_argument("--running-checkout", default="")
     status_parser = commands.add_parser("status")
     status_parser.add_argument("request_id")
-    commands.add_parser("access-url")
     args = parser.parse_args(argv)
-    if args.command == "access-url":
-        config = _access_config()
-        try:
-            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
-                probe.connect(("192.0.2.1", 80))
-                host = probe.getsockname()[0]
-        except OSError:
-            host = "127.0.0.1"
-        print(f"http://{host}:{config['port']}/#{config['token']}")
-        return 0
     if args.command == "service-tick":
         print(json.dumps(service_tick(args.running_checkout or None)))
         return 0
