@@ -12,6 +12,8 @@
   "userApproval.approve": "Одобрить",
   "userApproval.failed": "Решение не отправлено. Повторите попытку.",
   "userRequest.openSession": "Открыть сессию",
+  "userRequest.respond": "Ответить здесь",
+  "userRequest.collapse": "Свернуть",
   "userRequest.dismiss": "Скрыть",
   "userRequest.regionLabel": "Запросы, ожидающие вашего ответа",
   "extensions.catalogUnavailable": "Не удалось загрузить расширения интерфейса.",

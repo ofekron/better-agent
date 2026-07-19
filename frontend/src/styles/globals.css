@@ -14766,9 +14766,37 @@ html[dir="rtl"] .user-request-toast::before {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.user-request-toast__actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  margin-top: 3px;
+}
+.user-request-toast__respond {
+  padding: 4px 9px;
+  border: 1px solid rgba(145, 200, 255, 0.42);
+  border-radius: 999px;
+  background: rgba(114, 183, 255, 0.1);
+  color: #b8dcff;
+  cursor: pointer;
+  font-size: calc(12px * var(--app-font-scale));
+  font-weight: 650;
+  line-height: 1.25;
+}
+.user-request-toast[data-kind="approval"] .user-request-toast__respond {
+  border-color: rgba(237, 201, 127, 0.42);
+  background: rgba(231, 183, 92, 0.1);
+  color: #f2d89f;
+}
+.user-request-toast__respond:hover {
+  background: rgba(114, 183, 255, 0.18);
+}
+.user-request-toast[data-kind="approval"] .user-request-toast__respond:hover {
+  background: rgba(231, 183, 92, 0.18);
+}
 .user-request-toast__link {
   align-self: flex-start;
-  margin-top: 3px;
   color: #91c8ff;
   font-size: calc(12px * var(--app-font-scale));
   font-weight: 650;
@@ -14782,9 +14810,27 @@ html[dir="rtl"] .user-request-toast::before {
   text-underline-offset: 3px;
 }
 .user-request-toast__link:focus-visible,
+.user-request-toast__respond:focus-visible,
 .user-request-toast__close:focus-visible {
   outline: 2px solid #91c8ff;
   outline-offset: 2px;
+}
+.user-request-toast__response {
+  margin-top: 4px;
+  animation: user-request-response-in 0.22s cubic-bezier(0.2, 0.78, 0.28, 1);
+  transform-origin: top center;
+}
+.user-request-toast__response .user-input-card {
+  margin: 4px 0 0;
+  border-color: rgba(145, 200, 255, 0.24);
+  background: rgba(6, 11, 17, 0.32);
+}
+.user-request-toast[data-kind="approval"] .user-request-toast__response .user-input-card {
+  border-color: rgba(237, 201, 127, 0.24);
+}
+@keyframes user-request-response-in {
+  from { opacity: 0; transform: translateY(-6px) scaleY(0.96); }
+  to { opacity: 1; transform: translateY(0) scaleY(1); }
 }
 .user-request-toast__close {
   display: grid;
@@ -14806,6 +14852,7 @@ html[dir="rtl"] .user-request-toast::before {
 }
 @media (prefers-reduced-motion: reduce) {
   .user-request-toast,
+  .user-request-toast__response,
   .pr-toast {
     animation: none;
   }

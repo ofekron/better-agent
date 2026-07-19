@@ -12,6 +12,8 @@
   "userApproval.approve": "Approva",
   "userApproval.failed": "La decisione non è stata inviata. Riprova.",
   "userRequest.openSession": "Apri sessione",
+  "userRequest.respond": "Rispondi qui",
+  "userRequest.collapse": "Comprimi",
   "userRequest.dismiss": "Nascondi",
   "userRequest.regionLabel": "Richieste in attesa della tua risposta",
   "extensions.catalogUnavailable": "Impossibile caricare le estensioni dell’interfaccia.",

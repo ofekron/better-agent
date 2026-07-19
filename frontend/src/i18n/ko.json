@@ -12,6 +12,8 @@
   "userApproval.approve": "승인",
   "userApproval.failed": "결정을 보내지 못했습니다. 다시 시도하세요.",
   "userRequest.openSession": "세션 열기",
+  "userRequest.respond": "여기서 응답",
+  "userRequest.collapse": "접기",
   "userRequest.dismiss": "닫기",
   "userRequest.regionLabel": "응답을 기다리는 요청",
   "extensions.catalogUnavailable": "UI 확장 프로그램을 불러오지 못했습니다.",
