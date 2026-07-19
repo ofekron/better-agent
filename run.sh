@@ -25,6 +25,59 @@ set -e
 set -o pipefail
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
+
+bas_available() {
+  if [ "${BETTER_AGENT_RUN_SH_ASSUME_NO_BAS:-0}" = "1" ]; then
+    return 1
+  fi
+  command -v bas >/dev/null 2>&1 || [ -x "$HOME/ba-switch/bas" ]
+}
+
+current_checkout_is_main_line() {
+  case "$(basename "$DIR")" in
+    *-main)
+      return 0
+      ;;
+  esac
+  if command -v git >/dev/null 2>&1; then
+    local branch
+    branch="$(git -C "$DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+    [ "$branch" = "main" ] || [ "$branch" = "master" ]
+    return
+  fi
+  return 1
+}
+
+main_checkout_for_current_line() {
+  local name parent candidate
+  name="$(basename "$DIR")"
+  parent="$(dirname "$DIR")"
+  case "$name" in
+    *-qa)
+      candidate="$parent/${name%-qa}-main"
+      ;;
+    *)
+      candidate="$DIR-main"
+      ;;
+  esac
+  if [ -x "$candidate/run.sh" ]; then
+    printf '%s\n' "$candidate"
+    return 0
+  fi
+  return 1
+}
+
+if ! bas_available && ! current_checkout_is_main_line; then
+  MAIN_CHECKOUT="$(main_checkout_for_current_line || true)"
+  if [ -z "$MAIN_CHECKOUT" ]; then
+    echo "bas is not installed, and this checkout is not main. Refusing to launch a non-main line." >&2
+    echo "Install bas, run from the main checkout, or place the sibling main checkout next to this one." >&2
+    exit 1
+  fi
+  echo "bas is not installed; launching main checkout at $MAIN_CHECKOUT"
+  exec "$MAIN_CHECKOUT/run.sh" "$@"
+fi
+
 BA_HOME="${BETTER_AGENT_HOME:-${BETTER_CLAUDE_HOME:-$HOME/.better-claude}}"
 export BETTER_AGENT_HOME="${BETTER_AGENT_HOME:-$BA_HOME}"
 export BETTER_CLAUDE_HOME="${BETTER_CLAUDE_HOME:-$BA_HOME}"
