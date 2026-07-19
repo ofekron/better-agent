@@ -384,6 +384,62 @@ def test_backend_argv_uses_target_checkout_interpreter() -> bool:
     return True
 
 
+def test_packaged_restart_preserves_denial_and_rotates_channel() -> bool:
+    import credential_session
+    import supervisor as supervisor_module
+
+    reads = 0
+    spawns: list[dict] = []
+    real_get = credential_session.oskeychain.get
+    real_popen = supervisor_module.subprocess.Popen
+    sup = BackendSupervisor()
+
+    def denied_get(service: str, account: str, **kwargs):
+        nonlocal reads
+        reads += 1
+        raise RuntimeError("denied")
+
+    class FakeProcess:
+        pid = 4242
+        stdout: list[str] = []
+
+        def poll(self):
+            return None
+
+    def fake_popen(*args, **kwargs):
+        spawns.append(kwargs)
+        return FakeProcess()
+
+    credential_session.oskeychain.get = denied_get
+    supervisor_module.subprocess.Popen = fake_popen
+    try:
+        request = {
+            "op": "read",
+            "provider_id": "provider-denied",
+            "request_id": "0" * 32,
+        }
+        assert sup._credential_broker.handle(request) == {"status": "blocked"}
+        first = sup._spawn_backend()
+        first_session = sup._credential_session
+        second = sup._spawn_backend()
+        assert first is not second
+        assert first_session is not sup._credential_session
+        assert sup._credential_broker.handle(request) == {"status": "blocked"}
+        assert reads == 1
+        assert len(spawns) == 2
+        assert all(
+            "BETTER_AGENT_CREDENTIAL_SESSION_FD" in spawn["env"]
+            for spawn in spawns
+        )
+        assert "BETTER_AGENT_CREDENTIAL_SESSION_FD" not in sup._env
+        return True
+    finally:
+        sup._close_credential_session()
+        sup._credential_broker.clear()
+        credential_session.oskeychain.get = real_get
+        supervisor_module.subprocess.Popen = real_popen
+
+
 def test_source_switch_rejects_missing_frontend() -> bool:
     from daemonhost import pointer
 
@@ -431,6 +487,8 @@ TESTS = [
      test_backend_argv_uses_target_checkout_interpreter),
     ("source switch rejects a target without a built frontend",
      test_source_switch_rejects_missing_frontend),
+    ("packaged restart preserves denial and rotates credential channel",
+     test_packaged_restart_preserves_denial_and_rotates_channel),
 ]
 
 

@@ -15,6 +15,7 @@ for _p in (_HERE, _BACKEND):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
+import app_main
 from app_main import _role
 
 PASS = "\x1b[32mPASS\x1b[0m"
@@ -37,9 +38,27 @@ def test_role_dispatch() -> bool:
     return True
 
 
+def test_keychain_helper_dispatch() -> bool:
+    import oskeychain
+
+    real_argv = sys.argv
+    real_main = oskeychain._main
+    calls = []
+    oskeychain._main = lambda argv: calls.append(argv) or 17
+    sys.argv = ["Better Agent", "--keychain-helper", "read", "s", "a", "reason"]
+    try:
+        result = app_main.main()
+    finally:
+        sys.argv = real_argv
+        oskeychain._main = real_main
+    return result == 17 and calls == [["--keychain-helper", "read", "s", "a", "reason"]]
+
+
 TESTS = [
     ("app_main._role classifies shell vs backend invocations",
      test_role_dispatch),
+    ("frozen app dispatches bounded Keychain helper",
+     test_keychain_helper_dispatch),
 ]
 
 

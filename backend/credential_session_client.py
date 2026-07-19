@@ -19,9 +19,14 @@ class CredentialResponse(TypedDict, total=False):
 _FD_TEXT = os.environ.pop("BETTER_AGENT_CREDENTIAL_SESSION_FD", "")
 try:
     _FD = int(_FD_TEXT) if _FD_TEXT else -1
-    if _FD >= 0:
+    if _FD >= 0 and os.name != "nt":
         os.fstat(_FD)
     _CONNECTION = Connection(_FD) if _FD >= 0 else None
+    if _FD >= 0:
+        if os.name == "nt":
+            os.set_handle_inheritable(_FD, False)
+        else:
+            os.set_inheritable(_FD, False)
 except (OSError, ValueError):
     _CONNECTION = None
 _FD_TEXT = ""

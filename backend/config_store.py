@@ -120,8 +120,8 @@ def _keyring_services() -> tuple[str, ...]:
     return service_names(KEYRING_SERVICE, LEGACY_KEYRING_SERVICE)
 
 
-# Provider-key reads and writes use the stable Apple `security` binary identity
-# so one Keychain authorization survives interpreter and environment changes.
+# Provider-key reads and writes use a bounded helper process so a blocked native
+# Keychain prompt cannot prevent Better Agent from closing.
 #
 # `keyring`'s macOS backend never sets `kSecUseOperationPrompt`, so the OS
 # "allow access" prompt shows only the generic calling-binary identity
@@ -142,12 +142,14 @@ def _keychain_reason(provider_id: str, verb: str) -> str:
 
 
 def _get_password_with_reason(service: str, username: str, reason: str) -> str | None:
-    """Read through macOS's stable ``security`` identity when possible."""
+    """Read with a descriptive, bounded macOS Keychain prompt when possible."""
     if (
         keyring.get_password is _ORIGINAL_KEYRING_GET_PASSWORD
         and _use_stable_macos_keychain()
     ):
-        value = oskeychain.get(service, username, timeout=_KEYRING_TIMEOUT)
+        value = oskeychain.get(
+            service, username, timeout=_KEYRING_TIMEOUT, reason=reason,
+        )
         if value is None:
             return None
         return value[:-1] if value.endswith("\n") else value
@@ -165,17 +167,17 @@ def _set_password_with_reason(
         keyring.set_password is _ORIGINAL_KEYRING_SET_PASSWORD
         and _use_stable_macos_keychain()
     ):
-        oskeychain.store(service, username, password)
+        oskeychain.store(service, username, password, reason=reason)
     else:
         keyring.set_password(service, username, password)
 
 
-def _delete_password(service: str, username: str) -> None:
+def _delete_password(service: str, username: str, reason: str | None = None) -> None:
     if (
         keyring.delete_password is _ORIGINAL_KEYRING_DELETE_PASSWORD
         and _use_stable_macos_keychain()
     ):
-        oskeychain.delete(service, username)
+        oskeychain.delete(service, username, reason=reason)
         return
     keyring.delete_password(service, username)
 
@@ -420,6 +422,7 @@ def _write_api_key(provider_id: str, api_key: str) -> None:
                 _keyring_call(
                     _delete_password,
                     service, _keyring_username(provider_id),
+                    _keychain_reason(provider_id, "to remove"),
                 )
             except keyring.errors.PasswordDeleteError:
                 pass
@@ -442,6 +445,7 @@ def _delete_api_key(provider_id: str) -> None:
             _keyring_call(
                 _delete_password,
                 service, _keyring_username(provider_id),
+                _keychain_reason(provider_id, "to remove"),
             )
         except keyring.errors.PasswordDeleteError:
             pass
@@ -512,6 +516,7 @@ def _delete_legacy_api_key() -> None:
         _keyring_call(
             _delete_password,
             service, LEGACY_KEYRING_USERNAME,
+            "Better Agent needs to remove a legacy provider API key",
         )
     with _api_key_cache_lock:
         _api_key_cache.pop(_LEGACY_CACHE_KEY, None)

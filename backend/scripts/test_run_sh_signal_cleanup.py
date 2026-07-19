@@ -7,6 +7,7 @@ import signal
 import subprocess
 import tempfile
 import time
+import socket
 from pathlib import Path
 
 
@@ -43,6 +44,11 @@ def main() -> None:
         env["BETTER_AGENT_HOME"] = home
         env["BETTER_CLAUDE_HOME"] = home
         env["BETTER_AGENT_RUN_SH_TEST_SIGNAL_CLEANUP"] = "1"
+        env["BETTER_AGENT_RUN_SH_ASSUME_NO_BAS"] = "1"
+        env["BETTER_AGENT_RUN_SH_SERVICE_CHILD"] = "1"
+        with socket.socket() as listener:
+            listener.bind(("127.0.0.1", 0))
+            env["BETTER_AGENT_BACKEND_PORT"] = str(listener.getsockname()[1])
         proc = subprocess.Popen(
             ["bash", str(repo / "run.sh")],
             cwd=repo,

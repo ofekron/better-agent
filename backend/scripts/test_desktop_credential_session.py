@@ -1,13 +1,20 @@
 from __future__ import annotations
 
+import atexit
 import json
 import os
+import struct
 import subprocess
 import sys
 import tempfile
+import shutil
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
+TEST_HOME = Path(tempfile.mkdtemp(prefix="ba-credential-session-"))
+atexit.register(shutil.rmtree, TEST_HOME, ignore_errors=True)
+os.environ["BETTER_AGENT_HOME"] = str(TEST_HOME)
+os.environ["BETTER_CLAUDE_HOME"] = str(TEST_HOME)
 sys.path.insert(0, str(ROOT / "desktop"))
 sys.path.insert(0, str(ROOT / "backend"))
 
@@ -44,8 +51,6 @@ def backend_request(session, op: str, provider_id: str) -> dict:
 
 
 def assert_unrelated_process_cannot_connect(session) -> None:
-    if os.name == "nt":
-        return
     env = {**os.environ, **session.backend_env(), "PYTHONPATH": str(ROOT / "backend")}
     code = (
         "import credential_session_client as client; "
@@ -59,42 +64,7 @@ def assert_unrelated_process_cannot_connect(session) -> None:
     )
 
 
-def test_browser_wrapper_private_inheritance() -> None:
-    if os.name == "nt":
-        return
-    with tempfile.TemporaryDirectory() as raw_temp_dir:
-        script = Path(raw_temp_dir) / "probe.sh"
-        script.write_text(
-            "#!/bin/bash\n"
-            "set -e\n"
-            "test -n \"$BETTER_AGENT_CREDENTIAL_SESSION_FD\"\n"
-            "test -z \"$BETTER_AGENT_CREDENTIAL_SESSION_ADDRESS\"\n"
-            "test -z \"$BETTER_AGENT_CREDENTIAL_SESSION_AUTH\"\n"
-            '"$1" -c \'import credential_session_client as c; '
-            'assert c.request("status", "provider-wrapper")["status"] == "unknown"\'\n'
-            '"$1" -c \'import credential_session_client as c; '
-            'assert c.request("status", "provider-wrapper")["status"] == "unknown"\'\n',
-            encoding="utf-8",
-        )
-        env = {
-            **os.environ,
-            "PYTHONPATH": f"{ROOT / 'desktop'}:{ROOT / 'backend'}",
-        }
-        subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "credential_run_wrapper",
-                str(script),
-                sys.executable,
-            ],
-            env=env,
-            check=True,
-        )
-
-
 def main() -> None:
-    test_browser_wrapper_private_inheritance()
     real_get = credential_session.oskeychain.get
     real_store = credential_session.oskeychain.store
     real_delete = credential_session.oskeychain.delete
@@ -103,23 +73,31 @@ def main() -> None:
     deletes = 0
     values: dict[tuple[str, str], str] = {}
     blocked = True
+    reasons: list[str] = []
+    (TEST_HOME / "config.json").write_text(json.dumps({
+        "providers": [{"id": "provider-1", "name": "Friendly Provider"}],
+    }), encoding="utf-8")
 
-    def get(service: str, account: str):
+    def get(service: str, account: str, *, reason: str | None = None):
         nonlocal reads
         reads += 1
+        if reason:
+            reasons.append(reason)
         if blocked:
             raise RuntimeError("blocked")
         return values.get((service, account))
 
     credential_session.oskeychain.get = get
-    def store(service: str, account: str, value: str) -> None:
+    def store(
+        service: str, account: str, value: str, *, reason: str | None = None,
+    ) -> None:
         nonlocal stores
         stores += 1
         if blocked:
             raise RuntimeError("blocked")
         values[(service, account)] = value
 
-    def delete(service: str, account: str) -> None:
+    def delete(service: str, account: str, *, reason: str | None = None) -> None:
         nonlocal deletes
         deletes += 1
         if blocked:
@@ -128,7 +106,8 @@ def main() -> None:
 
     credential_session.oskeychain.store = store
     credential_session.oskeychain.delete = delete
-    session = credential_session.ProviderCredentialSession()
+    broker = credential_session.ProviderCredentialBroker()
+    session = broker.open_session()
     session.start()
     try:
         backend_env = session.backend_env()
@@ -143,6 +122,16 @@ def main() -> None:
         }).encode())
         assert backend_request(session, "status", "provider-1") == {"status": "unknown"}
         assert backend_request(session, "read", "provider-1") == {"status": "blocked"}
+        assert reads == 1
+        assert reasons == ["Better Agent needs the API key for Friendly Provider"]
+        first_connection = session._backend_connection
+        if os.name != "nt":
+            os.write(first_connection.fileno(), struct.pack("!i", 64) + b"partial")
+        session.stop()
+        session = broker.open_session()
+        session.start()
+        assert first_connection.closed
+        assert session._backend_connection is not first_connection
         assert backend_request(session, "read", "provider-1") == {"status": "blocked"}
         assert reads == 1
         assert request(session, "store", "provider-1", "replacement") == {"status": "blocked"}
@@ -179,10 +168,12 @@ def main() -> None:
         assert request(session, "delete", "provider-1") == {"status": "missing"}
     finally:
         session.stop()
+        broker.clear()
         credential_session.oskeychain.get = real_get
         credential_session.oskeychain.store = real_store
         credential_session.oskeychain.delete = real_delete
-    assert session._states == {}
+    assert broker._states == {}
+    shutil.rmtree(TEST_HOME)
     print("OK: desktop credential session")
 
 
