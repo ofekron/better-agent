@@ -194,30 +194,39 @@ _KEYRING_TIMEOUT = 2.0
 _keyring_blocked_entries: set = set()
 
 
+def _keyring_entry(fn: Callable[..., Any], args: tuple[Any, ...]) -> tuple[str, str]:
+    if len(args) < 2:
+        return ("", fn.__name__)
+    return (str(args[0]), str(args[1]))
+
+
+def _unblock_keyring_entry(service: str, username: str) -> None:
+    _keyring_blocked_entries.discard((service, username))
+
+
 def _keyring_call(
     fn: Callable[..., Any], *args: Any, default: Any = None,
     failure_flag: list[bool] | None = None,
 ) -> Any:
     """Run a keyring operation with a `_KEYRING_TIMEOUT` deadline. After
-    a timeout the specific (service, account) entry is treated as
+    an inaccessible stable-macOS read or a timeout, the specific
+    (service, account) entry is treated as
     inaccessible for the rest of the process lifetime — the worker
     thread is still blocked in `SecItemCopyMatching` and cannot be
     cancelled, so we don't waste additional 2s windows re-probing it.
     Other entries keep working.
 
     If `failure_flag` is given, an item is appended to it whenever the
-    call did not complete successfully (raised — e.g. the user denied a
-    one-off Keychain access prompt — or timed out). Callers that cache
-    the result (`_read_api_key` et al.) use this to avoid caching a
-    denied/failed read as if it were a confirmed value: a single
-    accidental "Deny" click must not permanently disable the provider
-    for the rest of the process's life."""
-    # A timed-out worker thread stays blocked in SecItemCopyMatching, so a
-    # retry of the SAME entry would burn another timeout window every call —
-    # but one ACL-locked item must not disable the keychain for every other
-    # entry (that skipped readable provider keys process-wide).
-    entry = (str(args[0]), str(args[1])) if len(args) >= 2 else ("", fn.__name__)
-    if entry in _keyring_blocked_entries:
+    call did not complete successfully (raised or timed out). Callers that
+    cache the result (`_read_api_key` et al.) use this to avoid caching a
+    failed read as if it were a confirmed value. Explicit credential
+    mutations unblock the entry before accessing it again."""
+    # A failed entry must not be re-probed on every caller. Generic keyring
+    # backends may leave a timed-out worker blocked; stable macOS reads kill
+    # their bounded subprocess but would otherwise reopen the same prompt.
+    entry = _keyring_entry(fn, args)
+    is_mutation = fn in {_set_password_with_reason, _delete_password}
+    if not is_mutation and entry in _keyring_blocked_entries:
         if failure_flag is not None:
             failure_flag.append(True)
         return default
@@ -229,6 +238,7 @@ def _keyring_call(
         try:
             return fn(*args)
         except Exception:
+            _keyring_blocked_entries.add(entry)
             logger.warning("stable macOS keychain read failed for %s/%s", entry[0], entry[1])
             if failure_flag is not None:
                 failure_flag.append(True)
@@ -314,25 +324,33 @@ def _keyring_call(
 _LEGACY_CACHE_KEY = "__legacy__"
 _api_key_cache: dict[str, str] = {}
 _api_key_cache_lock = threading.Lock()
+_api_key_read_locks: dict[str, threading.Lock] = {}
+
+
+def _api_key_read_lock(provider_id: str) -> threading.Lock:
+    with _api_key_cache_lock:
+        return _api_key_read_locks.setdefault(provider_id, threading.Lock())
 
 
 def _read_api_key(provider_id: str) -> str:
     with _api_key_cache_lock:
         if provider_id in _api_key_cache:
             return _api_key_cache[provider_id]
-    value, ok = _read_api_key_uncached(provider_id)
-    if ok:
+    with _api_key_read_lock(provider_id):
         with _api_key_cache_lock:
-            _api_key_cache[provider_id] = value
-    return value
+            if provider_id in _api_key_cache:
+                return _api_key_cache[provider_id]
+        value, ok = _read_api_key_uncached(provider_id)
+        if ok:
+            with _api_key_cache_lock:
+                _api_key_cache[provider_id] = value
+        return value
 
 
 def _read_api_key_uncached(provider_id: str) -> tuple[str, bool]:
     """Returns `(value, ok)`. `ok` is False when the underlying keyring
     read did not complete successfully (denied/raised, or timed out) —
-    the caller must not cache that as a confirmed "no key" result, since
-    a retry once the transient condition clears could still find the
-    real key."""
+    the caller must not cache that as a confirmed "no key" result."""
     reason = _keychain_reason(provider_id, "to read")
     for service in _keyring_services():
         failure: list[bool] = []
@@ -359,6 +377,7 @@ def _write_api_key(provider_id: str, api_key: str) -> None:
     if api_key:
         reason = _keychain_reason(provider_id, "to save")
         for service in _keyring_services():
+            _unblock_keyring_entry(service, _keyring_username(provider_id))
             _keyring_call(
                 _set_password_with_reason,
                 service, _keyring_username(provider_id), api_key, reason,
@@ -367,6 +386,7 @@ def _write_api_key(provider_id: str, api_key: str) -> None:
             _api_key_cache[provider_id] = api_key
     else:
         for service in _keyring_services():
+            _unblock_keyring_entry(service, _keyring_username(provider_id))
             try:
                 _keyring_call(
                     _delete_password,
@@ -1486,6 +1506,13 @@ def get_provider(provider_id: str) -> Optional[dict]:
     for p in state.get("providers", []):
         if p.get("id") == provider_id:
             return _strip(p)
+    return None
+
+
+def get_provider_metadata(provider_id: str) -> Optional[dict]:
+    for provider in list_provider_metadata():
+        if provider.get("id") == provider_id:
+            return provider
     return None
 
 
