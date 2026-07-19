@@ -505,7 +505,45 @@ async def _structured_retry_after_and_destination_wake() -> None:
         queue._RETRY_MAX_SECONDS = original_max
 
 
+async def _cached_depth_is_io_free_and_registered_for_perf_gauge() -> None:
+    """Regression for the loop-block signature: perf.flush() (called
+    synchronously from perf._rollup_loop on the event loop) must read the
+    lag-incident queue depth without doing filesystem I/O on that thread.
+    """
+    _reset_spool()
+    assert queue.enqueue(_payload("c" * 16))
+    # _pending_files() (used by enqueue's capacity check, off-loop) refreshes
+    # the cache as a side effect.
+    assert queue.depth() == 1
+    assert queue.cached_depth() == 1
+
+    original_pending_files = queue._pending_files
+
+    def _fail_if_called(*args: object, **kwargs: object) -> list:
+        raise AssertionError("cached_depth() must not scan the spool directory")
+
+    queue._pending_files = _fail_if_called
+    try:
+        # This is the exact call perf.flush() makes on the event loop.
+        assert queue.cached_depth() == 1
+    finally:
+        queue._pending_files = original_pending_files
+
+    import perf
+
+    async def dispatch(_body: bytes) -> bool:
+        return True
+
+    queue.start(dispatch)
+    try:
+        assert perf._queue_gauges.get("lag_incidents") is queue.cached_depth
+    finally:
+        await queue.stop()
+    _reset_spool()
+
+
 def main_test() -> None:
+    asyncio.run(_cached_depth_is_io_free_and_registered_for_perf_gauge())
     asyncio.run(_blocked_loop_eventual_exactly_once())
     asyncio.run(_restart_and_unavailable_retry())
     asyncio.run(_corruption_fails_closed())
