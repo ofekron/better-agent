@@ -29,6 +29,8 @@ _RETRY_MAX_SECONDS = 60.0
 _RETRY_JITTER_RATIO = 0.2
 _FILE_SUFFIX = ".json"
 _lock = threading.Lock()
+_depth_lock = threading.Lock()
+_cached_depth = 0
 _wake: asyncio.Event | None = None
 _loop: asyncio.AbstractEventLoop | None = None
 _task: asyncio.Task | None = None
@@ -151,6 +153,12 @@ def _unlink_if_identity(dir_fd: int, name: str, identity: EntryIdentity) -> None
     _fsync_dir(dir_fd)
 
 
+def _set_cached_depth(value: int) -> None:
+    global _cached_depth
+    with _depth_lock:
+        _cached_depth = value
+
+
 def _pending_files(*, strict: bool = False) -> list[Path]:
     dir_fd: int | None = None
     try:
@@ -161,7 +169,9 @@ def _pending_files(*, strict: bool = False) -> list[Path]:
                 for entry in os.scandir(root)
                 if entry.name.endswith(_FILE_SUFFIX)
             ]
-            return [path for _, path in sorted(entries, key=lambda item: (item[0], item[1].name))]
+            result = [path for _, path in sorted(entries, key=lambda item: (item[0], item[1].name))]
+            _set_cached_depth(len(result))
+            return result
         dir_fd = _open_spool_dir_fd(root)
         entries: list[tuple[int, str]] = []
         for name in os.listdir(dir_fd):
@@ -169,7 +179,9 @@ def _pending_files(*, strict: bool = False) -> list[Path]:
                 continue
             info = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
             entries.append((info.st_mtime_ns, name))
-        return [root / name for _, name in sorted(entries)]
+        result = [root / name for _, name in sorted(entries)]
+        _set_cached_depth(len(result))
+        return result
     except OSError:
         if strict:
             raise
@@ -182,6 +194,20 @@ def _pending_files(*, strict: bool = False) -> list[Path]:
 
 def depth() -> int:
     return len(_pending_files())
+
+
+def cached_depth() -> int:
+    """O(1), I/O-free queue-depth read for the perf rollup gauge.
+
+    `depth()` does a synchronous spool directory scan (mkdir/lstat/resolve +
+    listdir + per-entry stat) and must never run on the event loop — see
+    `perf.flush()`'s `_queue_gauges` call, which executes synchronously from
+    `perf._rollup_loop` on the loop. Under filesystem/swap pressure this scan
+    has been observed to take over 20s, freezing the whole process. This
+    reads the value `_pending_files()` last computed off-loop instead.
+    """
+    with _depth_lock:
+        return _cached_depth
 
 
 def _normalize_payload(payload: object) -> dict[str, object]:
@@ -517,7 +543,7 @@ def start(dispatch: Callable[[bytes], Awaitable[DispatchResult]]) -> None:
     _loop = loop
     _wake = asyncio.Event()
     _stopping = False
-    perf.register_queue("lag_incidents", depth)
+    perf.register_queue("lag_incidents", cached_depth)
     _task = loop.create_task(_run(dispatch), name="lag-incident-dispatcher")
     _wake.set()
 
