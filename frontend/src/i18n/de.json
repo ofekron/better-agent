@@ -12,6 +12,8 @@
   "userApproval.approve": "Genehmigen",
   "userApproval.failed": "Entscheidung wurde nicht gesendet. Erneut versuchen.",
   "userRequest.openSession": "Sitzung öffnen",
+  "userRequest.respond": "Hier antworten",
+  "userRequest.collapse": "Einklappen",
   "userRequest.dismiss": "Ausblenden",
   "userRequest.regionLabel": "Anfragen, die auf Ihre Antwort warten",
   "extensions.catalogUnavailable": "UI-Erweiterungen konnten nicht geladen werden.",

@@ -12,6 +12,8 @@
   "userApproval.approve": "موافقة",
   "userApproval.failed": "لم يتم إرسال القرار. حاول مرة أخرى.",
   "userRequest.openSession": "فتح الجلسة",
+  "userRequest.respond": "الرد هنا",
+  "userRequest.collapse": "طي",
   "userRequest.dismiss": "تجاهل",
   "userRequest.regionLabel": "طلبات تنتظر ردك",
   "extensions.catalogUnavailable": "تعذر تحميل إضافات الواجهة.",

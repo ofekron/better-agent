@@ -12,6 +12,8 @@
   "userApproval.approve": "批准",
   "userApproval.failed": "未能发送决定。请重试。",
   "userRequest.openSession": "打开会话",
+  "userRequest.respond": "在此回复",
+  "userRequest.collapse": "收起",
   "userRequest.dismiss": "关闭",
   "userRequest.regionLabel": "等待您回复的请求",
   "extensions.catalogUnavailable": "无法加载界面扩展。",

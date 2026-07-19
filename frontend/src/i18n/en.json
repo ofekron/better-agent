@@ -12,6 +12,8 @@
   "userApproval.approve": "Approve",
   "userApproval.failed": "Decision was not sent. Try again.",
   "userRequest.openSession": "Open session",
+  "userRequest.respond": "Respond here",
+  "userRequest.collapse": "Collapse",
   "userRequest.dismiss": "Dismiss",
   "userRequest.regionLabel": "Requests waiting for your response",
   "extensions.catalogUnavailable": "UI extensions could not be loaded.",

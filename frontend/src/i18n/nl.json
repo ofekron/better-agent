@@ -12,6 +12,8 @@
   "userApproval.approve": "Goedkeuren",
   "userApproval.failed": "Beslissing is niet verzonden. Probeer opnieuw.",
   "userRequest.openSession": "Sessie openen",
+  "userRequest.respond": "Hier antwoorden",
+  "userRequest.collapse": "Inklappen",
   "userRequest.dismiss": "Verbergen",
   "userRequest.regionLabel": "Verzoeken die op uw antwoord wachten",
   "extensions.catalogUnavailable": "UI-extensies konden niet worden geladen.",
