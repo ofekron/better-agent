@@ -16,6 +16,9 @@ import platform
 import subprocess
 import sys
 import threading
+import time
+import urllib.error
+import urllib.request
 
 import webview
 
@@ -58,6 +61,26 @@ def _error_window(message: str) -> None:
         ),
     )
     webview.start()
+
+
+def _line_switch_fallback() -> bool:
+    try:
+        from switch_control_daemon.line_switch_runtime.web import _access_config
+        config = _access_config()
+        url = f"http://127.0.0.1:{config['port']}/#{config['token']}"
+    except (ImportError, OSError, ValueError):
+        return False
+    deadline = time.monotonic() + 4
+    while time.monotonic() < deadline:
+        try:
+            with urllib.request.urlopen(url.split("#", 1)[0], timeout=0.5) as response:
+                if response.status == 200:
+                    webview.create_window("Better Agent — Line Switch", url)
+                    webview.start()
+                    return True
+        except (OSError, urllib.error.URLError):
+            time.sleep(0.1)
+    return False
 
 
 def _applescript_string(value: str) -> str:
@@ -143,11 +166,13 @@ def main() -> int:
         _error_window(str(e))
         return 1
     if not sup.wait_healthy():
-        sup.shutdown(kill_runners=True)
-        _error_window(
+        message = (
             f"The backend did not come up on port {sup.port} "
             f"(it may have failed during startup — check the logs)."
         )
+        if not _line_switch_fallback():
+            _error_window(message)
+        sup.shutdown(kill_runners=True)
         return 1
 
     local_url = sup.local_url()

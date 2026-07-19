@@ -5,9 +5,12 @@ import json
 import os
 import secrets
 import stat
+import struct
 import tempfile
 import threading
 import time
+import urllib.parse
+import zlib
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
@@ -15,13 +18,23 @@ from typing import Any
 from .control import state
 from .paths import pointer_path, web_access_path
 from .requests import submit
-from .web_ui import HTML
+from .web_ui import HTML, MANIFEST, SERVICE_WORKER
 
 DEFAULT_HOST = "0.0.0.0"
-DEFAULT_PORT = 18766
+DEFAULT_PORT = 18768
 _MAX_BODY = 1024
 _AUTH_WINDOW_SECONDS = 60
 _AUTH_FAILURE_LIMIT = 12
+
+
+def _png_icon(size: int) -> bytes:
+    def chunk(kind: bytes, payload: bytes) -> bytes:
+        return struct.pack(">I", len(payload)) + kind + payload + struct.pack(">I", zlib.crc32(kind + payload))
+
+    pixel = bytes((17, 23, 37, 255))
+    rows = b"".join(b"\0" + pixel * size for _ in range(size))
+    header = struct.pack(">IIBBBBB", size, size, 8, 6, 0, 0, 0)
+    return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", header) + chunk(b"IDAT", zlib.compress(rows, 9)) + chunk(b"IEND", b"")
 
 
 def _access_config() -> dict[str, Any]:
@@ -93,15 +106,45 @@ class _Handler(BaseHTTPRequestHandler):
     def log_message(self, _format: str, *_args: object) -> None:
         return
 
+    def _allowed_origin(self) -> str:
+        origin = self.headers.get("Origin", "")
+        if not origin:
+            return ""
+        try:
+            parsed = urllib.parse.urlsplit(origin)
+            request_host = urllib.parse.urlsplit(f"//{self.headers.get('Host', '')}").hostname
+        except ValueError:
+            return ""
+        if parsed.scheme not in {"http", "https", "capacitor"} or not parsed.hostname:
+            return ""
+        if parsed.hostname not in {"localhost", "127.0.0.1", "::1", request_host}:
+            return ""
+        return origin
+
     def _headers(self, status: HTTPStatus, content_type: str, *, nonce: str = "") -> None:
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Cache-Control", "no-store")
         executable = f"'nonce-{nonce}'" if nonce else "'none'"
-        self.send_header("Content-Security-Policy", f"default-src 'none'; script-src {executable}; style-src {executable}; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'")
+        self.send_header("Content-Security-Policy", f"default-src 'none'; script-src {executable}; style-src {executable}; connect-src 'self'; manifest-src 'self'; worker-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("X-Frame-Options", "DENY")
         self.send_header("Referrer-Policy", "no-referrer")
+        origin = self._allowed_origin()
+        if origin:
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Vary", "Origin")
+
+    def do_OPTIONS(self) -> None:
+        if self.path not in {"/api/state", "/api/switch"} or not self._allowed_origin():
+            self._json(HTTPStatus.FORBIDDEN, {"error": "origin is not allowed"})
+            return
+        self._headers(HTTPStatus.NO_CONTENT, "text/plain; charset=utf-8")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Authorization, Content-Type")
+        self.send_header("Access-Control-Max-Age", "600")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
 
     def _json(self, status: HTTPStatus, payload: dict[str, Any]) -> None:
         body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
@@ -128,6 +171,29 @@ class _Handler(BaseHTTPRequestHandler):
             nonce = secrets.token_urlsafe(18)
             body = HTML.replace("__NONCE__", nonce).encode("utf-8")
             self._headers(HTTPStatus.OK, "text/html; charset=utf-8", nonce=nonce)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if self.path == "/manifest.webmanifest":
+            body = MANIFEST.encode("utf-8")
+            self._headers(HTTPStatus.OK, "application/manifest+json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if self.path == "/sw.js":
+            body = SERVICE_WORKER.encode("utf-8")
+            self._headers(HTTPStatus.OK, "text/javascript; charset=utf-8")
+            self.send_header("Service-Worker-Allowed", "/")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if self.path in {"/icon-192.png", "/icon-512.png"}:
+            size = 192 if self.path == "/icon-192.png" else 512
+            body = _png_icon(size)
+            self._headers(HTTPStatus.OK, "image/png")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)

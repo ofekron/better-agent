@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { DEFAULT_BACKEND_PORT, normalizeServerUrl, writeNativeServerUrl } from "../nativeServerConfig";
 import { SERVER_CANDIDATES } from "../serverCandidates.generated";
+import { IndependentLineSwitch } from "./IndependentLineSwitch";
 
 interface Props {
   onConfigured: () => void;
@@ -116,6 +117,7 @@ export function ServerSetup({ onConfigured, initialUrl }: Props) {
             {testing ? t("serverSetup.testing") : t("serverSetup.connect")}
           </button>
         </form>
+        <IndependentLineSwitch />
       </div>
     </div>
   );
