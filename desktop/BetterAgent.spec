@@ -47,6 +47,7 @@ hiddenimports = [
     "main", "main_node", "app_entry", "runner", "runner_gemini",
     "runner_codex", "runner_better_agent", "runner_agy", "runner_copilot",
     "shell", "supervisor", "shell_env", "setup", "auth_secrets",
+    "keyring.backends.macOS.api",
     "updater", "_version",
     "node_client", "node_identity", "node_link", "node_protocol",
     "node_registry_store", "node_rpc_handlers", "node_store", "topology",

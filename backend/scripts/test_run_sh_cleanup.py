@@ -11,6 +11,7 @@ RUN_SH = ROOT / "run.sh"
 RUN_WINDOWS = ROOT / "run_windows.bat"
 APP_ENTRY = ROOT / "backend" / "app_entry.py"
 MAIN = ROOT / "backend" / "main.py"
+BROWSER_SUPERVISOR = ROOT / "desktop" / "browser_backend_supervisor.py"
 
 
 def check(name: str, ok: bool, failures: list[str]) -> None:
@@ -25,9 +26,7 @@ def main() -> int:
     windows_text = RUN_WINDOWS.read_text(encoding="utf-8")
     app_entry_text = APP_ENTRY.read_text(encoding="utf-8")
     main_text = MAIN.read_text(encoding="utf-8")
-    zai_start = text.index("run_zai_startup_check() {")
-    zai_end = text.index('\nPENDING_REFRESH_ID=""', zai_start)
-    zai_check = text[zai_start:zai_end]
+    browser_supervisor_text = BROWSER_SUPERVISOR.read_text(encoding="utf-8")
 
     check(
         "launchctl bootout helper exists",
@@ -109,16 +108,16 @@ def main() -> int:
         failures,
     )
     check(
-        "direct uvicorn launch skips proxy header parsing",
-        "--no-proxy-headers" in text
+        "supervised uvicorn launch skips proxy header parsing",
+        "--no-proxy-headers" in browser_supervisor_text
         and "--no-proxy-headers" in windows_text
         and app_entry_text.count("proxy_headers=False") >= 2
         and "proxy_headers=False" in main_text,
         failures,
     )
     check(
-        "direct uvicorn launch disables websocket compression",
-        "--ws-per-message-deflate false" in text
+        "supervised uvicorn launch disables websocket compression",
+        '"--ws-per-message-deflate",\n                "false"' in browser_supervisor_text
         and app_entry_text.count("ws_per_message_deflate=False") >= 2
         and "ws_per_message_deflate=False" in main_text,
         failures,
@@ -128,7 +127,7 @@ def main() -> int:
         "wait_for_backend_exit() {" in text
         and "Restart requested — waiting up to ${GRACEFUL_RESTART_TIMEOUT_SECONDS}s for graceful shutdown..." in text
         and "Graceful restart timeout expired; forcing backend shutdown." in text
-        and 'kill -9 "$BACKEND_PID"' in text,
+        and "credential_backend_control signal --signal KILL" in text,
         failures,
     )
     check(
@@ -137,49 +136,17 @@ def main() -> int:
         failures,
     )
     check(
-        "Z.AI startup checker calls claude CLI directly",
-        'claude = shutil.which("claude")' in zai_check
-        and '"--model", "glm-5.2"' in zai_check
-        and "You are the Better Agent run.sh startup checker" in zai_check,
+        "credential control client stays a direct launcher child",
+        "credential_backend_control start" in text
+        and '> "$pid_file"' in text
+        and 'BACKEND_PID="$(credential_backend_control' not in text,
         failures,
     )
     check(
-        "Z.AI startup checker does not use Better Agent prompt/session path",
-        '"$DIR/backend/cli.py"' not in zai_check
-        and "Do not call backend/cli.py, bagent" in zai_check
-        and "Better Agent prompt/session path" in zai_check,
-        failures,
-    )
-    check(
-        "Z.AI startup checker uses provider config without Better Agent dependency",
-        "config_store.list_providers()" in zai_check
-        and "ANTHROPIC_API_KEY" in zai_check
-        and "ANTHROPIC_BASE_URL" in zai_check
-        and "not through Better Agent" in zai_check,
-        failures,
-    )
-    check(
-        "Z.AI startup checker verifies run.sh operational success",
-        "verify that the run.sh invocation that spawned you actually succeeded" in zai_check
-        and "Verify backend health and key REST endpoints using direct shell commands" in zai_check
-        and "Verify the frontend is being served from the backend" in zai_check
-        and "Inspect recent backend/run logs" in zai_check,
-        failures,
-    )
-    check(
-        "Z.AI startup checker reruns without recursive checker",
-        "BETTER_AGENT_SKIP_ZAI_STARTUP_CHECK=1" in zai_check,
-        failures,
-    )
-    check(
-        "Z.AI startup checker honors legacy skip env",
-        '${BETTER_AGENT_SKIP_ZAI_STARTUP_CHECK:-${BETTER_CLAUDE_SKIP_ZAI_STARTUP_CHECK:-0}}' in zai_check,
-        failures,
-    )
-    check(
-        "Z.AI startup checker cannot fail run.sh",
-        'echo "Z.AI glm-5.2 startup checker failed. See $log_path"' in zai_check
-        and "return 0" in zai_check.split('echo "Z.AI glm-5.2 startup checker failed. See $log_path"', 1)[1],
+        "run.sh never reads provider credentials outside the broker",
+        "get_provider_with_key" not in text
+        and "ANTHROPIC_API_KEY" not in text
+        and "run_zai_startup_check" not in text,
         failures,
     )
     loop_cleanup = text[text.index("\nreap_completed_children\n", text.index("while true; do")) :]
@@ -187,6 +154,7 @@ def main() -> int:
         "normal run.sh loop exit cleans owned long-lived children",
         'stop_child_process "frontend build" "$FRONTEND_BUILD_PID"' in loop_cleanup
         and 'stop_child_process "daemon host" "$DAEMON_HOST_PID"' in loop_cleanup
+        and "stop_credential_backend_supervisor" in loop_cleanup
         and 'stop_child_process "startup checker" "$ZAI_STARTUP_CHECK_PID"' not in loop_cleanup,
         failures,
     )
