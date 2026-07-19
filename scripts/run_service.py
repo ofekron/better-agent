@@ -2,16 +2,28 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import plistlib
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 
 LABEL = "com.betteragent.repository"
 UNIT = "better-agent.service"
+LINE_NAME = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,31}$")
+
+
+@dataclass(frozen=True)
+class ServiceTarget:
+    checkout: Path
+    home: Path
+    command: tuple[str, ...]
+    environment: tuple[tuple[str, str], ...]
 
 
 def _canonical_checkout(raw: str) -> Path:
@@ -29,25 +41,74 @@ def _canonical_home(raw: str) -> Path:
     return home
 
 
-def launch_agent(checkout: Path, home: Path) -> dict:
+def _bas_executable() -> str:
+    discovered = shutil.which("bas")
+    if discovered:
+        return discovered
+    conventional = Path.home() / "ba-switch" / "bas"
+    return str(conventional) if conventional.is_file() and os.access(conventional, os.X_OK) else ""
+
+
+def resolve_target(checkout: Path, home: Path) -> ServiceTarget:
+    executable = _bas_executable()
+    if executable:
+        env = dict(os.environ)
+        env["BAS_NO_SELF_UPDATE"] = "1"
+        try:
+            result = subprocess.run(
+                [executable, "config"], capture_output=True, text=True, timeout=10, env=env,
+            )
+            config = json.loads(result.stdout) if result.returncode == 0 else {}
+        except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError):
+            config = {}
+        for name, line in (config.get("lines") or {}).items():
+            if not LINE_NAME.fullmatch(str(name)) or not isinstance(line, dict):
+                continue
+            try:
+                configured_checkout = Path(str(line["checkout"])).resolve()
+                configured_home = Path(str(line["home"])).resolve()
+                port = int(line["port"])
+            except (KeyError, OSError, TypeError, ValueError):
+                continue
+            if configured_checkout == checkout and 1 <= port <= 65535:
+                target_environment = [("BAS_NO_SELF_UPDATE", "1")]
+                if os.environ.get("BA_SWITCH_HOME", "").strip():
+                    target_environment.append(("BA_SWITCH_HOME", os.environ["BA_SWITCH_HOME"]))
+                return ServiceTarget(
+                    checkout=checkout,
+                    home=configured_home,
+                    command=(executable, "exec-line", str(name)),
+                    environment=tuple(target_environment),
+                )
+    return ServiceTarget(
+        checkout=checkout,
+        home=home,
+        command=("/bin/bash", str(checkout / "run.sh"), "--service-child"),
+        environment=(),
+    )
+
+
+def launch_agent(target: ServiceTarget) -> dict:
+    environment = {
+        "BETTER_AGENT_HOME": str(target.home),
+        "BETTER_CLAUDE_HOME": str(target.home),
+        **dict(target.environment),
+    }
     return {
         "Label": LABEL,
-        "ProgramArguments": ["/bin/bash", str(checkout / "run.sh"), "--service-child"],
-        "WorkingDirectory": str(checkout),
-        "EnvironmentVariables": {
-            "BETTER_AGENT_HOME": str(home),
-            "BETTER_CLAUDE_HOME": str(home),
-        },
+        "ProgramArguments": list(target.command),
+        "WorkingDirectory": str(target.checkout),
+        "EnvironmentVariables": environment,
         "RunAtLoad": True,
         "KeepAlive": True,
         "ThrottleInterval": 5,
         "ProcessType": "Interactive",
-        "StandardOutPath": str(home / "run-service.log"),
-        "StandardErrorPath": str(home / "run-service.log"),
+        "StandardOutPath": str(target.home / "run-service.log"),
+        "StandardErrorPath": str(target.home / "run-service.log"),
     }
 
 
-def systemd_unit(checkout: Path, home: Path) -> str:
+def systemd_unit(target: ServiceTarget) -> str:
     def quote(value: str) -> str:
         return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
@@ -58,10 +119,11 @@ def systemd_unit(checkout: Path, home: Path) -> str:
         "",
         "[Service]",
         "Type=simple",
-        f"WorkingDirectory={quote(str(checkout))}",
-        f"Environment={quote('BETTER_AGENT_HOME=' + str(home))}",
-        f"Environment={quote('BETTER_CLAUDE_HOME=' + str(home))}",
-        f"ExecStart=/bin/bash {quote(str(checkout / 'run.sh'))} --service-child",
+        f"WorkingDirectory={quote(str(target.checkout))}",
+        f"Environment={quote('BETTER_AGENT_HOME=' + str(target.home))}",
+        f"Environment={quote('BETTER_CLAUDE_HOME=' + str(target.home))}",
+        *(f"Environment={quote(key + '=' + value)}" for key, value in target.environment),
+        "ExecStart=" + " ".join(quote(part) for part in target.command),
         "Restart=always",
         "RestartSec=5",
         "",
@@ -91,9 +153,9 @@ def _run(command: list[str]) -> subprocess.CompletedProcess:
     return subprocess.run(command, capture_output=True, text=True, timeout=20)
 
 
-def install_macos(checkout: Path, home: Path) -> None:
+def install_macos(target: ServiceTarget) -> None:
     path = Path.home() / "Library" / "LaunchAgents" / f"{LABEL}.plist"
-    _atomic_write(path, plistlib.dumps(launch_agent(checkout, home)))
+    _atomic_write(path, plistlib.dumps(launch_agent(target)))
     domain = f"gui/{os.getuid()}"
     _run(["launchctl", "bootout", f"{domain}/{LABEL}"])
     result = _run(["launchctl", "bootstrap", domain, str(path)])
@@ -112,9 +174,9 @@ def status_macos() -> bool:
     return result.returncode == 0 and "state = running" in result.stdout
 
 
-def install_linux(checkout: Path, home: Path) -> None:
+def install_linux(target: ServiceTarget) -> None:
     path = Path.home() / ".config" / "systemd" / "user" / UNIT
-    _atomic_write(path, systemd_unit(checkout, home).encode())
+    _atomic_write(path, systemd_unit(target).encode())
     result = _run(["systemctl", "--user", "daemon-reload"])
     if result.returncode == 0:
         result = _run(["systemctl", "--user", "enable", "--now", UNIT])
@@ -147,8 +209,11 @@ def main() -> int:
     else:
         raise RuntimeError("repository service mode requires macOS launchd or Linux systemd")
     if args.action == "install":
-        install(checkout, home)
-        print(f"Better Agent service installed for {checkout}")
+        target = resolve_target(checkout, home)
+        target.home.mkdir(parents=True, exist_ok=True)
+        install(target)
+        owner = "BAS" if target.command[0] != "/bin/bash" else "run.sh"
+        print(f"Better Agent service installed for {checkout} through {owner}")
         return 0
     if args.action == "uninstall":
         uninstall()
