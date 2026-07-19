@@ -2,7 +2,7 @@
   "kind": "better-agent-extension",
   "id": "ofek-dev.switch-control",
   "name": "Line Switch",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Switch the running backend+frontend between development lines through a backend-independent supervisor daemon.",
   "surfaces": [
     "backend_feature",
@@ -36,7 +36,8 @@
         "restart_policy": {
           "max_restarts": 5,
           "backoff_seconds": 1
-        }
+        },
+        "ports": [18766]
       }
     ]
   },

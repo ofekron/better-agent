@@ -48,6 +48,10 @@ def switch_request_path() -> Path:
     return ba_home() / "switch_request.json"
 
 
+def web_access_path() -> Path:
+    return ba_home() / "switch_control_web.json"
+
+
 def restart_request_path() -> Path:
     return ba_home() / "restart_requested"
 
