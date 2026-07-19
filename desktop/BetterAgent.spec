@@ -90,8 +90,6 @@ hiddenimports += [
     "switch_control_daemon.line_switch_runtime.requests",
     "switch_control_daemon.line_switch_runtime.service",
     "switch_control_daemon.line_switch_runtime.transaction",
-    "switch_control_daemon.line_switch_runtime.web",
-    "switch_control_daemon.line_switch_runtime.web_ui",
 ]
 
 a = Analysis(                                            # noqa: F821
