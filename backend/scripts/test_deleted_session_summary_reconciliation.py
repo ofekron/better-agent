@@ -48,7 +48,6 @@ def _reset_home() -> None:
     session_store._summary_sorted_id_cache = []
     session_store._summary_sorted_id_caches.clear()
     session_store._summary_sorted_cache_version = -1
-    session_store._summary_roots_fingerprint = ()
 
 
 def _record(sid: str) -> dict:
@@ -108,7 +107,7 @@ def _listed_ids() -> set[str]:
     return {str(s.get("id")) for s in session_store.list_sessions()}
 
 
-def test_manual_root_delete_reconciles_hot_summary_index() -> bool:
+def test_root_change_owner_delete_projects_hot_summary_index() -> bool:
     _reset_home()
     sid = "manual-delete-root"
     _write_root(sid)
@@ -116,16 +115,17 @@ def test_manual_root_delete_reconciles_hot_summary_index() -> bool:
     before = sid in _listed_ids()
     _write_orphan_sidecars(sid)
     (_sessions_dir() / f"{sid}.json").unlink()
+    session_store.project_external_root_delete(sid)
 
     listed = sid in _listed_ids()
     summary_exists = (_sessions_dir() / f"{sid}.summary.json").exists()
     opened_exists = (_sessions_dir() / f"{sid}.opened.json").exists()
     ok = before and not listed and not summary_exists and not opened_exists
-    print(f"{PASS if ok else FAIL} manual root delete purges hot summary row")
+    print(f"{PASS if ok else FAIL} projected root delete purges hot summary row")
     return ok
 
 
-def test_manual_root_delete_reconciles_warming_summary_index() -> bool:
+def test_root_change_owner_delete_projects_warming_summary_index() -> bool:
     _reset_home()
     sid = "manual-delete-warming-root"
     _write_root(sid)
@@ -136,13 +136,14 @@ def test_manual_root_delete_reconciles_warming_summary_index() -> bool:
         before = sid in _listed_ids()
         snapshot_complete = session_store.summary_index_snapshot_complete()
         (_sessions_dir() / f"{sid}.json").unlink()
+        session_store.project_external_root_delete(sid)
 
         listed = sid in _listed_ids()
         summary_exists = (_sessions_dir() / f"{sid}.summary.json").exists()
     finally:
         session_store._start_summary_index_warm = original_warm
     ok = before and not snapshot_complete and not listed and not summary_exists
-    print(f"{PASS if ok else FAIL} manual root delete purges warming summary row")
+    print(f"{PASS if ok else FAIL} projected root delete purges warming summary row")
     return ok
 
 
@@ -311,8 +312,8 @@ def test_summary_sidecar_batch_failure_does_not_block_other_roots() -> bool:
 
 if __name__ == "__main__":
     results = [
-        test_manual_root_delete_reconciles_hot_summary_index(),
-        test_manual_root_delete_reconciles_warming_summary_index(),
+        test_root_change_owner_delete_projects_hot_summary_index(),
+        test_root_change_owner_delete_projects_warming_summary_index(),
         test_orphan_sidecars_are_removed_on_summary_build(),
         test_queued_summary_write_does_not_resurrect_deleted_root(),
         test_summary_sidecar_batch_coalesces_latest_per_root(),

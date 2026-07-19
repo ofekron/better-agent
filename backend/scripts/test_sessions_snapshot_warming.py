@@ -30,7 +30,6 @@ def _reset_summary_index() -> None:
     session_store._summary_sorted_id_cache = []
     session_store._summary_sorted_cache_version = -1
     session_store._summary_order_version = 0
-    session_store._summary_roots_fingerprint = None
 
 
 def _write_root_session(session_id: str) -> None:
