@@ -449,9 +449,27 @@ class BackendSupervisor:
         flag = _ba_home() / "restart_requested"
         while self._proc.poll() is None:
             if flag.exists():
-                _signal_stop_backend(self._proc.pid)
+                if not self._stop_tracked_backend():
+                    raise RuntimeError("backend did not exit after restart request")
+                break
             time.sleep(0.1)
         return int(self._proc.returncode or 0)
+
+    def _stop_tracked_backend(self, timeout: float = 8.0) -> bool:
+        proc = self._proc
+        if proc is None or proc.poll() is not None:
+            return True
+        proc.terminate()
+        try:
+            proc.wait(timeout=timeout)
+            return True
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        try:
+            proc.wait(timeout=2.0)
+        except subprocess.TimeoutExpired:
+            return False
+        return True
 
     def local_url(self) -> str:
         return f"http://127.0.0.1:{self.port}/"
@@ -491,6 +509,9 @@ class BackendSupervisor:
             self._proc = self._spawn_backend()
         if self.wait_healthy():
             return True
+        if not self._stop_tracked_backend():
+            logger.error("failed switch backend did not terminate")
+            return False
         if not self._recover_failed_switch("backend failed to become healthy"):
             return False
         self._proc = self._spawn_backend()

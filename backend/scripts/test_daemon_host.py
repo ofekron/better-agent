@@ -130,6 +130,43 @@ assert "test.ext:worker" not in read_json(state_path())["daemons"]
 host.stop()
 host._shutdown_all()
 
+# Recovery is independent of the source checkout still being present.
+recovery_daemon_root = daemon.root
+shutil.rmtree(dh_install.previous_dir(recovery_daemon_root), ignore_errors=True)
+dh_install.current_dir(recovery_daemon_root).rename(dh_install.previous_dir(recovery_daemon_root))
+daemon.spec = {**daemon.spec, "source_root": str(Path(_TMP) / "missing-source")}
+assert host._ensure_installed(daemon) is True
+assert dh_install.current_dir(recovery_daemon_root).is_dir()
+with (dh_install.current_dir(recovery_daemon_root) / "corrupt").open("w", encoding="utf-8") as handle:
+    handle.write("corrupt")
+assert host._ensure_installed(daemon) is False, "corrupt current must not spawn without source"
+
+# Interrupted install swaps recover the predecessor before any new install.
+recovery_root = Path(_TMP) / "install-recovery"
+(recovery_root / "previous").mkdir(parents=True)
+(recovery_root / "previous" / "marker").write_text("previous", encoding="utf-8")
+dh_install.seal_copy(recovery_root / "previous")
+assert dh_install.recover_current(recovery_root) is True
+assert (recovery_root / "current" / "marker").read_text(encoding="utf-8") == "previous"
+shutil.rmtree(recovery_root / "current")
+(recovery_root / "last_good").mkdir()
+(recovery_root / "last_good" / "marker").write_text("last-good", encoding="utf-8")
+dh_install.seal_copy(recovery_root / "last_good")
+assert dh_install.recover_current(recovery_root) is True
+assert (recovery_root / "current" / "marker").read_text(encoding="utf-8") == "last-good"
+
+atomic_root = Path(_TMP) / "atomic-last-good"
+(atomic_root / "current").mkdir(parents=True)
+(atomic_root / "current" / "marker").write_text("good", encoding="utf-8")
+dh_install.seal_copy(atomic_root / "current")
+write_json(atomic_root / "install.json", {"promoted": False})
+dh_install.promote_last_good(atomic_root)
+(atomic_root / "current" / "marker").write_text("bad", encoding="utf-8")
+assert dh_install.rollback_to_last_good(atomic_root) is True
+assert (atomic_root / "current" / "marker").read_text(encoding="utf-8") == "good"
+assert not (atomic_root / "rollback_staging").exists()
+assert not dh_install.previous_dir(atomic_root).exists()
+
 # --- pointer semantics ------------------------------------------------------
 def _make_checkout(name: str) -> str:
     root = Path(_TMP) / name

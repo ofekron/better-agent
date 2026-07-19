@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +14,7 @@ _REQUIRED_CHECKOUT_FILES = (
     "daemonhost/jsonio.py",
     "daemonhost/paths.py",
 )
+_LINE_NAME = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 
 
 def _conventional_lines(running: str) -> dict[str, str]:
@@ -33,17 +35,17 @@ def _conventional_lines(running: str) -> dict[str, str]:
 def _configured_lines(running_checkout: str) -> dict[str, str]:
     running = pointer._canonical_checkout(running_checkout)
     raw = read_json(switch_lines_path())
-    lines: dict[str, str] = {}
+    configured: dict[str, str] = {}
     for name, value in raw.items():
-        if not isinstance(name, str) or not isinstance(value, str):
+        if not isinstance(name, str) or not _LINE_NAME.fullmatch(name) or not isinstance(value, str):
             continue
         try:
             canonical = pointer._canonical_checkout(value)
         except (OSError, ValueError):
             continue
         if pointer._is_runnable_checkout(canonical):
-            lines[name] = canonical
-    reconciled = {**_conventional_lines(running), **lines}
+            configured[name] = canonical
+    reconciled = {**_conventional_lines(running), **configured}
     if reconciled != raw:
         write_json(switch_lines_path(), reconciled)
     return reconciled
@@ -60,12 +62,21 @@ def state(running_checkout: str) -> dict[str, Any]:
     incompatible = {
         name: missing for name, path in lines.items() if (missing := _incompatible(path))
     }
+    from .requests import read_request
+
+    request_data = read_request()
+    request_projection = {
+        key: request_data.get(key)
+        for key in ("request_id", "target", "status", "error")
+        if key in request_data
+    }
     return {
         "lines": lines,
         "running_checkout": running,
         "active_line": next((name for name, path in lines.items() if path == running), ""),
         "incompatible": incompatible,
         "pointer": pointer.read(),
+        "request": request_projection,
         "switchable": len(lines) >= 2,
     }
 
