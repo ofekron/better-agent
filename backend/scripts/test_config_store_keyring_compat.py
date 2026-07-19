@@ -160,20 +160,61 @@ def test_failed_stable_read_is_suppressed_until_credential_mutation() -> None:
 def test_native_session_provider_kind_never_reads_keychain() -> None:
     import native_session_miner
 
-    real_metadata = config_store.get_provider_metadata
-    real_provider = config_store.get_provider
-    config_store.get_provider_metadata = lambda provider_id: {
-        "id": provider_id,
-        "kind": "codex",
+    real_load = config_store._load_state
+    real_read = config_store._read_api_key
+    config_store._load_state = lambda: {
+        "providers": [{"id": "provider-1", "kind": "codex", "mode": "api_key"}],
     }
-    config_store.get_provider = lambda provider_id: (_ for _ in ()).throw(
-        AssertionError("metadata classification must not read credential status")
+    config_store._read_api_key = lambda provider_id: (_ for _ in ()).throw(
+        AssertionError("metadata classification must not read credentials")
     )
     try:
         assert native_session_miner._provider_kind({"provider_id": "provider-1"}) == "codex"
     finally:
-        config_store.get_provider_metadata = real_metadata
-        config_store.get_provider = real_provider
+        config_store._load_state = real_load
+        config_store._read_api_key = real_read
+
+
+def test_provider_config_reads_are_pure_and_ui_status_is_explicit() -> None:
+    real_load = config_store._load_state
+    real_read = config_store._read_api_key
+    provider = {
+        "id": "provider-pure",
+        "name": "Pure provider",
+        "kind": "codex",
+        "mode": "api_key",
+        "capabilities": {"supports_fork": False},
+    }
+    reads: list[str] = []
+    config_store._load_state = lambda: {
+        "default_provider_id": provider["id"],
+        "providers": [provider],
+    }
+
+    def read(provider_id: str) -> str:
+        reads.append(provider_id)
+        return "secret"
+
+    config_store._read_api_key = read
+    try:
+        listed = config_store.list_providers()
+        fetched = config_store.get_provider(provider["id"])
+        resolved = config_store.resolve_provider_ref("Pure provider")
+        exported = config_store.export_provider_sync_state()
+
+        assert reads == []
+        for record in (listed["providers"][0], fetched, resolved, exported["providers"][0]):
+            assert record is not None
+            assert record["supports_fork"] is False
+            assert "has_api_key" not in record
+
+        ui_state = config_store.list_provider_ui_state()
+        assert reads == [provider["id"]]
+        assert ui_state["providers"][0]["has_api_key"] is True
+        assert ui_state["providers"][0]["supports_fork"] is False
+    finally:
+        config_store._load_state = real_load
+        config_store._read_api_key = real_read
 
 
 def test_distinct_provider_reads_do_not_block_each_other() -> None:
@@ -501,6 +542,7 @@ if __name__ == "__main__":
     test_denied_keyring_read_is_not_cached_and_a_later_read_recovers()
     test_failed_stable_read_is_suppressed_until_credential_mutation()
     test_native_session_provider_kind_never_reads_keychain()
+    test_provider_config_reads_are_pure_and_ui_status_is_explicit()
     test_distinct_provider_reads_do_not_block_each_other()
     test_macos_read_uses_stable_security_identity_and_exact_account()
     test_macos_write_uses_stable_security_identity_without_secret_argv()
