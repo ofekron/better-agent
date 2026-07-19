@@ -36,8 +36,8 @@ shared refs with exact force-with-lease protection. Never rebase published
 `main` or `qa`; rebase published `dev` only during this backed-up repair flow.
 
 The running backend+frontend follow the active-checkout pointer
-(`active_checkout.json` under the Better Agent state home), switched from the
-UI (or the switch-control capability). Do not edit the pointer file by hand;
-use the Line Switch control or ask the user. If a switch is in flight
-(pointer status `switching`), do not start work that depends on backend
+(`active_checkout.json` under the Better Agent state home). Better Agent Switch
+owns user-triggered line switching; Better Agent only retains supervisor
+metadata for recovery. Do not edit the pointer file by hand. If a switch is in
+flight (pointer status `switching`), do not start work that depends on backend
 availability until it completes.

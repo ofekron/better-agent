@@ -3,14 +3,12 @@
   "id": "ofek-dev.switch-control",
   "name": "Line Switch",
   "version": "0.3.0",
-  "description": "Switch the running backend+frontend between development lines through a backend-independent supervisor daemon.",
+  "description": "Keeps development-line supervisor metadata available to Better Agent Switch.",
   "surfaces": [
-    "backend_feature",
     "instructions",
     "daemons"
   ],
   "entrypoints": {
-    "backend_module": "backend.routes",
     "instructions": [
       {
         "name": "switch-lines",
@@ -31,11 +29,6 @@
     ]
   },
   "permissions": {
-    "backend_routes": true,
-    "capabilities": [
-      "switch-control.state.get",
-      "switch-control.switch.request"
-    ],
     "daemons": "supervisor"
   },
   "marketplace": {
@@ -51,7 +44,6 @@
         "instructions/global.md"
       ],
       "python_modules": [
-        "backend.routes",
         "line_switch_runtime.service"
       ]
     }

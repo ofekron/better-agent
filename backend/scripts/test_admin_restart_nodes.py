@@ -16,7 +16,6 @@ if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
 import main  # noqa: E402
-import capability_api  # noqa: E402
 import node_link  # noqa: E402
 import node_store  # noqa: E402
 from daemonhost.jsonio import write_json  # noqa: E402
@@ -54,80 +53,11 @@ async def _run() -> None:
     old_snapshot = node_store.snapshot
     old_send_restart = node_link.send_restart
     old_kill = main.os.kill
-    old_active_checkout = os.environ.get("BETTER_AGENT_ACTIVE_CHECKOUT")
     try:
         os.environ["BETTER_CLAUDE_RUN_SH_SUPERVISOR"] = "1"
         node_store.snapshot = fake_snapshot
         node_link.send_restart = fake_send_restart
         main.os.kill = fake_kill
-
-        invalid_root = os.path.join(_TMP_HOME, "invalid-main")
-        os.makedirs(os.path.join(invalid_root, "backend", ".venv", "bin"), exist_ok=True)
-        for relative in ("backend/main.py", "backend/.venv/bin/python"):
-            with open(os.path.join(invalid_root, relative), "w", encoding="utf-8"):
-                pass
-        os.environ["BETTER_AGENT_ACTIVE_CHECKOUT"] = invalid_root
-        from daemonhost import pointer
-        pointer.confirm_healthy(invalid_root)
-        preparation_calls = 0
-
-        async def count_preparation() -> list[str]:
-            nonlocal preparation_calls
-            preparation_calls += 1
-            return []
-
-        old_prepare = main._restart_connected_worker_nodes
-        main._restart_connected_worker_nodes = count_preparation
-        try:
-            handler = capability_api._ACTIONS[("switch-control", "switch.request")].handler
-            try:
-                await handler(capability_api._SwitchTargetPayload(target="dev"))
-            except ValueError:
-                pass
-            else:
-                raise AssertionError("unknown line switch target must be rejected")
-            assert preparation_calls == 0, "invalid switch restarted worker nodes before validation"
-        finally:
-            main._restart_connected_worker_nodes = old_prepare
-
-        valid_dev = os.path.join(_TMP_HOME, "invalid")
-        os.makedirs(os.path.join(valid_dev, "backend", ".venv", "bin"), exist_ok=True)
-        for relative in (
-            "backend/main.py",
-            "backend/.venv/bin/python",
-            "daemonhost/__init__.py",
-            "daemonhost/pointer.py",
-            "daemonhost/jsonio.py",
-            "daemonhost/paths.py",
-        ):
-            path = os.path.join(valid_dev, relative)
-            os.makedirs(os.path.dirname(path), exist_ok=True)
-            with open(path, "w", encoding="utf-8"):
-                pass
-        preparation_started = asyncio.Event()
-        release_preparation = asyncio.Event()
-        preparation_calls = 0
-
-        async def blocking_preparation() -> list[str]:
-            nonlocal preparation_calls
-            preparation_calls += 1
-            preparation_started.set()
-            await release_preparation.wait()
-            return []
-
-        main._restart_connected_worker_nodes = blocking_preparation
-        try:
-            first_call = asyncio.create_task(handler(capability_api._SwitchTargetPayload(target="dev")))
-            await asyncio.wait_for(preparation_started.wait(), timeout=1)
-            duplicate_result = await handler(capability_api._SwitchTargetPayload(target="dev"))
-            assert duplicate_result["status"] == "preparing", duplicate_result
-            assert preparation_calls == 1, "duplicate caller repeated worker-node preparation"
-            release_preparation.set()
-            first_result = await asyncio.wait_for(first_call, timeout=1)
-            assert first_result["status"] == "pending", first_result
-        finally:
-            release_preparation.set()
-            main._restart_connected_worker_nodes = old_prepare
 
         result = await main.admin_restart({"request_id": "restart-test"})
         await asyncio.sleep(0.35)
@@ -166,10 +96,6 @@ async def _run() -> None:
         node_store.snapshot = old_snapshot
         node_link.send_restart = old_send_restart
         main.os.kill = old_kill
-        if old_active_checkout is None:
-            os.environ.pop("BETTER_AGENT_ACTIVE_CHECKOUT", None)
-        else:
-            os.environ["BETTER_AGENT_ACTIVE_CHECKOUT"] = old_active_checkout
         shutil.rmtree(_TMP_HOME, ignore_errors=True)
 
 

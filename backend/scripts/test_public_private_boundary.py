@@ -53,12 +53,16 @@ def test_tracked_production_and_tests_do_not_name_private_sibling() -> None:
 def test_capability_only_extensions_do_not_request_raw_loopback() -> None:
     import json
 
-    capability_only = ("ask", "marketplace", "provider-config-sync", "session-control", "session-bridge", "switch-control")
+    capability_only = ("ask", "marketplace", "provider-config-sync", "session-control", "session-bridge")
     for name in capability_only:
         manifest = json.loads((ROOT / "extensions" / name / "better-agent-extension.json").read_text(encoding="utf-8"))
         permissions = manifest["permissions"]
         assert permissions.get("capabilities")
         assert "internal_loopback" not in permissions
+
+    switch_manifest = json.loads((ROOT / "extensions" / "switch-control" / "better-agent-extension.json").read_text(encoding="utf-8"))
+    assert switch_manifest["permissions"] == {"daemons": "supervisor"}
+    assert "backend_feature" not in switch_manifest["surfaces"]
 
 
 def test_core_role_resolution_and_missing_role_fail_closed(monkeypatch) -> None:

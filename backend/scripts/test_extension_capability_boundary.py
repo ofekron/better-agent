@@ -129,7 +129,7 @@ def test_switch_capability_runtime_gets_identity_token(monkeypatch) -> None:
     env = extension_backend_loader._extension_sdk_env(
         {
             "extension_id": "ofek-dev.switch-control",
-            "permissions": {"capabilities": ["switch-control.state.get"]},
+            "permissions": {"capabilities": ["switch-control.test.ping"]},
             "effective_permissions": {},
             "sdk_pythonpath": "",
         },
