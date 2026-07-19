@@ -69,13 +69,11 @@ main_checkout_for_current_line() {
 
 if ! bas_available && ! current_checkout_is_main_line; then
   MAIN_CHECKOUT="$(main_checkout_for_current_line || true)"
-  if [ -z "$MAIN_CHECKOUT" ]; then
-    echo "bas is not installed, and this checkout is not main. Refusing to launch a non-main line." >&2
-    echo "Install bas, run from the main checkout, or place the sibling main checkout next to this one." >&2
-    exit 1
+  if [ -n "$MAIN_CHECKOUT" ]; then
+    echo "bas is not installed; launching main checkout at $MAIN_CHECKOUT"
+    exec "$MAIN_CHECKOUT/run.sh" "$@"
   fi
-  echo "bas is not installed; launching main checkout at $MAIN_CHECKOUT"
-  exec "$MAIN_CHECKOUT/run.sh" "$@"
+  echo "bas is not installed and no sibling main checkout is available; launching current checkout at $DIR"
 fi
 
 BA_HOME="${BETTER_AGENT_HOME:-${BETTER_CLAUDE_HOME:-$HOME/.better-claude}}"

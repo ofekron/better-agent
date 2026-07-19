@@ -17,7 +17,7 @@ def test_run_sh_uses_non_standard_backend_port_by_default() -> None:
     assert "BETTER_CLAUDE_BACKEND_PORT:-8000" not in source
 
 
-def test_run_sh_without_bas_launches_only_main() -> None:
+def test_run_sh_without_bas_prefers_main_then_uses_current_checkout() -> None:
     source = _run_sh()
 
     guard = source.index("if ! bas_available && ! current_checkout_is_main_line; then")
@@ -28,8 +28,10 @@ def test_run_sh_without_bas_launches_only_main() -> None:
     assert 'case "$(basename "$DIR")" in' in source
     assert 'candidate="$parent/${name%-qa}-main"' in source
     assert 'candidate="$DIR-main"' in source
+    assert 'if [ -n "$MAIN_CHECKOUT" ]; then' in source
     assert 'exec "$MAIN_CHECKOUT/run.sh" "$@"' in source
-    assert "Refusing to launch a non-main line" in source
+    assert "launching current checkout at $DIR" in source
+    assert "Refusing to launch a non-main line" not in source
 
 
 def test_run_sh_initializes_provider_config_sync_before_frontend_build() -> None:
@@ -92,7 +94,7 @@ def test_windows_bootstrap_installs_base_prereqs_with_winget() -> None:
 
 if __name__ == "__main__":
     test_run_sh_uses_non_standard_backend_port_by_default()
-    test_run_sh_without_bas_launches_only_main()
+    test_run_sh_without_bas_prefers_main_then_uses_current_checkout()
     test_run_sh_initializes_provider_config_sync_before_frontend_build()
     test_run_sh_installs_node_dependencies_before_frontend_build()
     test_run_sh_exports_backend_port_for_mobile_candidate_generation()
