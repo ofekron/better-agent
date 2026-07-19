@@ -17680,6 +17680,111 @@ button.progress-inflight {
   background: var(--bg-secondary);
 }
 
+.independent-line-switch {
+  display: grid;
+  gap: 12px;
+  margin-top: 20px;
+  padding-top: 18px;
+  border-top: 1px solid var(--border-subtle);
+  transition: opacity 180ms ease, transform 180ms ease;
+}
+
+.independent-line-switch.is-busy {
+  opacity: 0.72;
+  transform: translateY(1px);
+}
+
+.independent-line-switch-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.independent-line-switch-forget {
+  border: 0;
+  color: var(--text-secondary);
+  background: transparent;
+  cursor: pointer;
+}
+
+.independent-line-switch-pair,
+.independent-line-switch-lines {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  animation: independent-line-switch-enter 180ms ease-out;
+}
+
+.independent-line-switch-pair label {
+  grid-column: 1 / -1;
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+.independent-line-switch-pair input {
+  grid-column: 1 / 3;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 9px;
+  color: var(--text-primary);
+  background: var(--bg-input);
+}
+
+.independent-line-switch button {
+  min-height: 42px;
+  padding: 8px 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 9px;
+  color: var(--text-primary);
+  background: var(--bg-input);
+  cursor: pointer;
+  transition: border-color 160ms ease, background 160ms ease, transform 160ms ease;
+}
+
+.independent-line-switch button:hover:not(:disabled) {
+  border-color: var(--accent);
+  transform: translateY(-1px);
+}
+
+.independent-line-switch button.active {
+  border-color: var(--success, #3ba779);
+  background: color-mix(in srgb, var(--success, #3ba779) 16%, var(--bg-input));
+}
+
+.independent-line-switch button:disabled {
+  cursor: not-allowed;
+  opacity: 0.58;
+}
+
+@keyframes independent-line-switch-enter {
+  from { opacity: 0; transform: translateY(5px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@media (max-width: 480px) {
+  .independent-line-switch-pair,
+  .independent-line-switch-lines {
+    grid-template-columns: 1fr;
+  }
+
+  .independent-line-switch-pair input {
+    grid-column: 1;
+    min-height: 46px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .independent-line-switch,
+  .independent-line-switch-pair,
+  .independent-line-switch-lines,
+  .independent-line-switch button {
+    animation: none;
+    transition: none;
+  }
+}
+
 @media (max-width: 480px) {
   .login-shell {
     padding: 0;
