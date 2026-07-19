@@ -92,7 +92,7 @@ def _provider_kind(data: dict) -> str:
     if isinstance(provider_id, str) and provider_id:
         try:
             import config_store
-            rec = config_store.get_provider_metadata(provider_id)
+            rec = config_store.get_provider(provider_id)
         except Exception:
             rec = None
         if isinstance(rec, dict):

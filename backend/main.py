@@ -1488,8 +1488,8 @@ import ui_selection
 #
 # `warm_keyring_cache()` BEFORE `apply_env_vars()`: this pulls every
 # api_key provider's secret into the in-process cache so subsequent
-# request-hot-path callers (`get_default_provider`, `_strip`'s
-# `has_api_key` probe, every `apply_env_vars` reapply at prompt-send)
+# request-hot-path callers (runtime provider resolution, explicit UI
+# credential-status snapshots, every `apply_env_vars` reapply at prompt-send)
 # hit the cache instead of macOS Keychain. The 2s-timeout-per-call risk
 # in `_keyring_call` is paid ONCE at startup, off the event loop. See
 # the comment over `_api_key_cache` in `config_store.py`.
@@ -2157,7 +2157,7 @@ class ProviderSetupInstallPayload(BaseModel):
 
 
 async def _broadcast_provider_changed():
-    state = await asyncio.to_thread(config_store.list_providers)
+    state = await asyncio.to_thread(config_store.list_provider_ui_state)
     await coordinator.broadcast_global(
         "provider_changed",
         state,
@@ -2553,7 +2553,7 @@ async def internal_get_nodes(
 @app.get("/api/providers")
 async def get_providers():
     state, last_models, last_efforts = await asyncio.gather(
-        asyncio.to_thread(config_store.list_providers),
+        asyncio.to_thread(config_store.list_provider_ui_state),
         asyncio.to_thread(user_prefs.get_last_models),
         asyncio.to_thread(user_prefs.get_last_reasoning_efforts),
     )
