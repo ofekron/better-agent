@@ -6,21 +6,11 @@
   "description": "Switch the running backend+frontend between development lines through a backend-independent supervisor daemon.",
   "surfaces": [
     "backend_feature",
-    "frontend_feature",
     "instructions",
     "daemons"
   ],
   "entrypoints": {
     "backend_module": "backend.routes",
-    "frontend": "ui/index.html",
-    "quick_button": {
-      "label": "Line",
-      "placements": ["settings"],
-      "action": {
-        "type": "module",
-        "module_url": "ui/switch.entry.js"
-      }
-    },
     "instructions": [
       {
         "name": "switch-lines",
@@ -58,8 +48,6 @@
     "smoke_test": {
       "required_paths": [
         "better-agent-extension.json",
-        "ui/index.html",
-        "ui/switch.entry.js",
         "instructions/global.md"
       ],
       "python_modules": [
