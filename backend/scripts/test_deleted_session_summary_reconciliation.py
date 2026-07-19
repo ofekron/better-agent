@@ -22,6 +22,7 @@ FAIL = "\x1b[31mFAIL\x1b[0m"
 
 
 def _reset_home() -> None:
+    session_store.shutdown_root_change_owner()
     session_store._summary_sidecar_write_queue.join()
     session_store._index_sidecar_write_queue.join()
     sessions_dir = Path(_TMP_HOME) / "sessions"
@@ -107,6 +108,16 @@ def _listed_ids() -> set[str]:
     return {str(s.get("id")) for s in session_store.list_sessions()}
 
 
+def _externally_delete_and_wait(sid: str) -> bool:
+    session_store.start_root_change_owner()
+    session_store._wait_root_change_owner_ready()
+    owner = session_store._root_change_owner
+    assert owner is not None
+    generation = owner.observation_generation
+    (_sessions_dir() / f"{sid}.json").unlink()
+    return owner.wait_for_observation(generation, 2.0)
+
+
 def test_root_change_owner_delete_projects_hot_summary_index() -> bool:
     _reset_home()
     sid = "manual-delete-root"
@@ -114,13 +125,14 @@ def test_root_change_owner_delete_projects_hot_summary_index() -> bool:
     session_store._ensure_summary_index(blocking=True)
     before = sid in _listed_ids()
     _write_orphan_sidecars(sid)
-    (_sessions_dir() / f"{sid}.json").unlink()
-    session_store.project_external_root_delete(sid)
-
-    listed = sid in _listed_ids()
-    summary_exists = (_sessions_dir() / f"{sid}.summary.json").exists()
-    opened_exists = (_sessions_dir() / f"{sid}.opened.json").exists()
-    ok = before and not listed and not summary_exists and not opened_exists
+    try:
+        observed = _externally_delete_and_wait(sid)
+        listed = sid in _listed_ids()
+        summary_exists = (_sessions_dir() / f"{sid}.summary.json").exists()
+        opened_exists = (_sessions_dir() / f"{sid}.opened.json").exists()
+    finally:
+        session_store.shutdown_root_change_owner()
+    ok = observed and before and not listed and not summary_exists and not opened_exists
     print(f"{PASS if ok else FAIL} projected root delete purges hot summary row")
     return ok
 
@@ -135,14 +147,13 @@ def test_root_change_owner_delete_projects_warming_summary_index() -> bool:
     try:
         before = sid in _listed_ids()
         snapshot_complete = session_store.summary_index_snapshot_complete()
-        (_sessions_dir() / f"{sid}.json").unlink()
-        session_store.project_external_root_delete(sid)
-
+        observed = _externally_delete_and_wait(sid)
         listed = sid in _listed_ids()
         summary_exists = (_sessions_dir() / f"{sid}.summary.json").exists()
     finally:
+        session_store.shutdown_root_change_owner()
         session_store._start_summary_index_warm = original_warm
-    ok = before and not snapshot_complete and not listed and not summary_exists
+    ok = observed and before and not snapshot_complete and not listed and not summary_exists
     print(f"{PASS if ok else FAIL} projected root delete purges warming summary row")
     return ok
 
