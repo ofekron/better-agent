@@ -9440,21 +9440,117 @@ button.run-badge-clickable:focus-visible {
 
 .ns-create-actions {
   flex-wrap: wrap;
+  align-items: stretch;
+}
+
+.ns-create-split {
+  position: relative;
+  display: flex;
+  min-width: 220px;
+}
+
+.ns-create-primary {
+  flex: 1;
+  border-start-end-radius: 0;
+  border-end-end-radius: 0;
+}
+
+.ns-create-toggle {
+  display: grid;
+  width: 36px;
+  place-items: center;
+  padding: 0;
+  margin-inline-start: -1px;
+  border-start-start-radius: 0;
+  border-end-start-radius: 0;
+  border-inline-start-color: color-mix(in srgb, #fff 28%, transparent);
+}
+
+.ns-create-menu {
+  position: absolute;
+  z-index: 10;
+  inset-inline-end: 0;
+  bottom: calc(100% + 8px);
+  display: grid;
+  width: max(100%, 240px);
+  padding: 5px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.28);
+  transform-origin: bottom right;
+  animation: ns-create-menu-in 150ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+[dir="rtl"] .ns-create-menu {
+  transform-origin: bottom left;
+}
+
+.ns-create-menu button {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  min-height: 36px;
+  padding: 8px 10px;
+  color: var(--text-secondary);
+  font-size: calc(12px * var(--app-font-scale));
+  text-align: start;
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.ns-create-menu button:hover,
+.ns-create-menu button:focus-visible,
+.ns-create-menu button.selected {
+  color: var(--text-primary);
+  background: var(--bg-tertiary);
+}
+
+.ns-create-menu button:focus-visible {
+  outline: 2px solid var(--accent, #7b68ee);
+  outline-offset: -2px;
+}
+
+@keyframes ns-create-menu-in {
+  from {
+    opacity: 0;
+    transform: translateY(5px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
 }
 
 @media (max-width: 640px) {
   .ns-create-actions {
     display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: minmax(0, 1fr);
   }
 
-  .ns-create-actions > button {
+  .ns-create-actions > button,
+  .ns-create-primary,
+  .ns-create-toggle {
     min-height: 40px;
     white-space: normal;
   }
 
-  .ns-create-actions > .btn-primary {
-    grid-column: 1 / -1;
+  .ns-create-split {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .ns-create-menu {
+    width: 100%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ns-create-menu {
+    animation: none;
   }
 }
 
