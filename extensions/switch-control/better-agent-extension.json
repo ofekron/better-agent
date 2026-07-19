@@ -36,8 +36,7 @@
         "restart_policy": {
           "max_restarts": 5,
           "backoff_seconds": 1
-        },
-        "ports": [18768]
+        }
       }
     ]
   },

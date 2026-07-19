@@ -12,6 +12,8 @@ tested); this module is the thin pywebview wiring.
 from __future__ import annotations
 
 import html
+import json
+import os
 import platform
 import subprocess
 import sys
@@ -19,6 +21,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 import webview
 
@@ -65,10 +68,12 @@ def _error_window(message: str) -> None:
 
 def _line_switch_fallback() -> bool:
     try:
-        from switch_control_daemon.line_switch_runtime.web import _access_config
-        config = _access_config()
+        switch_home = Path(os.environ.get("BA_SWITCH_HOME", "~/.ba-switch")).expanduser()
+        config = json.loads((switch_home / "web.json").read_text(encoding="utf-8"))
+        if not isinstance(config.get("port"), int) or not isinstance(config.get("token"), str):
+            return False
         url = f"http://127.0.0.1:{config['port']}/#{config['token']}"
-    except (ImportError, OSError, ValueError):
+    except (json.JSONDecodeError, OSError, ValueError):
         return False
     deadline = time.monotonic() + 4
     while time.monotonic() < deadline:
