@@ -87,7 +87,9 @@ service:
 
 The service starts immediately, starts again after login or a machine restart,
 and automatically restarts if `run.sh` crashes. It stays pinned to the checkout
-where you ran the install command. BAS is not required.
+where you ran the install command. When BAS is installed and owns that checkout,
+service mode uses BAS's configured line, state home, and port. Otherwise it
+supervises the checkout directly; BAS is not required.
 
 Check whether the service process is running:
 
