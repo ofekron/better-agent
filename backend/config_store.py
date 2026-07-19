@@ -38,6 +38,7 @@ from typing import Any, Callable, Optional
 
 import keyring
 import oskeychain
+import credential_session_client
 
 # Captured at import time so `_get_password_with_reason`/`_set_password_with_reason`
 # can detect a test replacing `keyring.get_password`/`set_password` directly
@@ -325,6 +326,7 @@ _LEGACY_CACHE_KEY = "__legacy__"
 _api_key_cache: dict[str, str] = {}
 _api_key_cache_lock = threading.Lock()
 _api_key_read_locks: dict[str, threading.Lock] = {}
+_credential_status: dict[str, str] = {}
 
 
 def _api_key_read_lock(provider_id: str) -> threading.Lock:
@@ -340,7 +342,17 @@ def _read_api_key(provider_id: str) -> str:
         with _api_key_cache_lock:
             if provider_id in _api_key_cache:
                 return _api_key_cache[provider_id]
-        value, ok = _read_api_key_uncached(provider_id)
+        if credential_session_client.available():
+            response = credential_session_client.request("read", provider_id)
+            status = response["status"]
+            _credential_status[provider_id] = status
+            value = response.get("value", "") if status == "available" else ""
+            ok = status in {"available", "missing"}
+        else:
+            value, ok = _read_api_key_uncached(provider_id)
+            _credential_status[provider_id] = (
+                "available" if value else ("missing" if ok else "blocked")
+            )
         if ok:
             with _api_key_cache_lock:
                 _api_key_cache[provider_id] = value
@@ -374,6 +386,22 @@ def _write_api_key(provider_id: str, api_key: str) -> None:
     # "known empty" from "absent" only via dict membership — which today
     # nobody reads, but a future caller using `cache.get(pid)` vs.
     # `pid in cache` won't see asymmetry between the two write paths.
+    if credential_session_client.available():
+        response = credential_session_client.request(
+            "store" if api_key else "delete",
+            provider_id,
+            value=api_key if api_key else None,
+        )
+        status = response["status"]
+        if status == "blocked":
+            raise RuntimeError("OS credential access is blocked")
+        _credential_status[provider_id] = status
+        with _api_key_cache_lock:
+            if api_key:
+                _api_key_cache[provider_id] = api_key
+            else:
+                _api_key_cache.pop(provider_id, None)
+        return
     if api_key:
         reason = _keychain_reason(provider_id, "to save")
         for service in _keyring_services():
@@ -384,6 +412,7 @@ def _write_api_key(provider_id: str, api_key: str) -> None:
             )
         with _api_key_cache_lock:
             _api_key_cache[provider_id] = api_key
+        _credential_status[provider_id] = "available"
     else:
         for service in _keyring_services():
             _unblock_keyring_entry(service, _keyring_username(provider_id))
@@ -396,9 +425,18 @@ def _write_api_key(provider_id: str, api_key: str) -> None:
                 pass
         with _api_key_cache_lock:
             _api_key_cache.pop(provider_id, None)
+        _credential_status[provider_id] = "missing"
 
 
 def _delete_api_key(provider_id: str) -> None:
+    if credential_session_client.available():
+        response = credential_session_client.request("delete", provider_id)
+        if response["status"] == "blocked":
+            raise RuntimeError("OS credential access is blocked")
+        _credential_status[provider_id] = response["status"]
+        with _api_key_cache_lock:
+            _api_key_cache.pop(provider_id, None)
+        return
     for service in _keyring_services():
         try:
             _keyring_call(
@@ -409,6 +447,37 @@ def _delete_api_key(provider_id: str) -> None:
             pass
     with _api_key_cache_lock:
         _api_key_cache.pop(provider_id, None)
+    _credential_status[provider_id] = "missing"
+
+
+def provider_credential_status(provider_id: str) -> str:
+    if credential_session_client.available():
+        response = credential_session_client.request("status", provider_id)
+        _credential_status[provider_id] = response["status"]
+    return _credential_status.get(provider_id, "unknown")
+
+
+def retry_provider_credential(provider_id: str) -> str:
+    with _api_key_read_lock(provider_id):
+        with _api_key_cache_lock:
+            _api_key_cache.pop(provider_id, None)
+        if credential_session_client.available():
+            response = credential_session_client.request("retry", provider_id)
+            status = response["status"]
+            _credential_status[provider_id] = status
+            if status == "available":
+                with _api_key_cache_lock:
+                    _api_key_cache[provider_id] = response.get("value", "")
+            return status
+        for service in _keyring_services():
+            _unblock_keyring_entry(service, _keyring_username(provider_id))
+        value, ok = _read_api_key_uncached(provider_id)
+        status = "available" if value else ("missing" if ok else "blocked")
+        _credential_status[provider_id] = status
+        if status == "available":
+            with _api_key_cache_lock:
+                _api_key_cache[provider_id] = value
+        return status
 
 
 def _read_legacy_api_key() -> str:
@@ -446,34 +515,6 @@ def _delete_legacy_api_key() -> None:
         )
     with _api_key_cache_lock:
         _api_key_cache.pop(_LEGACY_CACHE_KEY, None)
-
-
-def warm_keyring_cache() -> None:
-    """Pre-read every api_key provider's key (and the legacy slot) into
-    the in-process cache. Called from `main.py` import-time alongside
-    `apply_env_vars()` so the first `POST /api/sessions` or
-    `GET /api/providers` after backend startup hits the cache instead
-    of macOS Keychain. Idempotent; safe to call more than once."""
-    try:
-        state = _load_state()
-    except Exception:
-        logger.warning("warm_keyring_cache: _load_state failed", exc_info=True)
-        return
-
-    providers = [p for p in (state.get("providers", []) or []) if p.get("mode") == "api_key"]
-    if not providers:
-        return
-
-    for provider in providers:
-        _read_api_key(provider["id"])
-
-    # Legacy slot is read at runtime ONLY by `_load_state`'s
-    # flat→providers migration path, which has already run by the time
-    # this function returns (we just called `_load_state` above). Once
-    # migrated, the legacy keychain entry is deleted and no production
-    # code path reads it again — so no warm-up needed. Calling
-    # `_read_legacy_api_key()` here would just pay one extra keychain
-    # call to cache an empty string nobody consumes.
 
 
 # ----------------------------------------------------------------------------
@@ -1177,13 +1218,15 @@ def _provider_config(provider: dict) -> dict:
 
 
 def _provider_ui_state(provider: dict) -> dict:
+    credential_status = (
+        provider_credential_status(provider["id"])
+        if provider.get("mode") == "api_key"
+        else "available"
+    )
     return {
         **_provider_config(provider),
-        "has_api_key": (
-            bool(_read_api_key(provider["id"]))
-            if provider.get("mode") == "api_key"
-            else False
-        ),
+        "credential_status": credential_status,
+        "has_api_key": credential_status == "available",
     }
 
 
@@ -1480,8 +1523,7 @@ def _import_provider_sync_api_keys(payload: dict, providers: list[dict]) -> int:
 
     for provider_id, api_key in normalized:
         _write_api_key(provider_id, api_key)
-        verified_value, verified_ok = _read_api_key_uncached(provider_id)
-        if not verified_ok or verified_value != api_key:
+        if _read_api_key(provider_id) != api_key:
             with _api_key_cache_lock:
                 _api_key_cache.pop(provider_id, None)
             raise ValueError(f"provider credential {provider_id!r} could not be stored")
@@ -1746,7 +1788,7 @@ def update_provider(provider_id: str, payload: dict) -> Optional[dict]:
     _save_state(state)
     # If we just updated the active provider, re-apply env so changes take.
     if state.get("default_provider_id") == provider_id:
-        apply_env_vars()
+        apply_provider_config_env_vars()
     return _provider_ui_state(target)
 
 
@@ -1785,7 +1827,7 @@ def set_default_provider(provider_id: str) -> Optional[dict]:
         raise RuntimeError("provider is suspended")
     state["default_provider_id"] = provider_id
     _save_state(state)
-    apply_env_vars()
+    apply_provider_config_env_vars()
     return list_provider_ui_state()
 
 
@@ -1810,7 +1852,7 @@ def set_provider_suspended(provider_id: str, suspended: bool) -> Optional[dict]:
         )
         state["default_provider_id"] = replacement
     _save_state(state)
-    apply_env_vars()
+    apply_provider_config_env_vars()
     return list_provider_ui_state()
 
 
@@ -1835,6 +1877,31 @@ def add_custom_model_to_default(name: str) -> Optional[dict]:
 # ----------------------------------------------------------------------------
 # Env application — sourced from the active provider
 # ----------------------------------------------------------------------------
+
+
+def apply_provider_config_env_vars() -> None:
+    """Apply non-secret active-provider environment during startup/config edits."""
+    state = _load_state()
+    active_id = state.get("default_provider_id")
+    active = get_provider(active_id) if active_id else None
+    os.environ.pop("ANTHROPIC_API_KEY", None)
+    os.environ.pop("ANTHROPIC_AUTH_TOKEN", None)
+    if not active or _provider_is_suspended(active):
+        os.environ.pop("ANTHROPIC_BASE_URL", None)
+        os.environ.pop("CLAUDE_CONFIG_DIR", None)
+        _write_engine_env({})
+        return
+    base_url = active.get("base_url") if active.get("mode") == "api_key" else ""
+    if base_url:
+        os.environ["ANTHROPIC_BASE_URL"] = str(base_url)
+    else:
+        os.environ.pop("ANTHROPIC_BASE_URL", None)
+    cfg_dir = active.get("config_dir") or ""
+    if _uses_claude_env(active) and cfg_dir:
+        os.environ["CLAUDE_CONFIG_DIR"] = _resolved_provider_config_dir(cfg_dir)
+    else:
+        os.environ.pop("CLAUDE_CONFIG_DIR", None)
+    _write_engine_env(active)
 
 
 def apply_env_vars(provider_id: Optional[str] = None) -> None:
