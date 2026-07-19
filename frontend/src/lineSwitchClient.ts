@@ -23,6 +23,11 @@ export interface LineSwitchApp {
   kind: "native" | "pwa";
   platforms: LineSwitchAppPlatform[];
   url: string;
+  launch_url?: string;
+  version?: string;
+  architecture?: string;
+  sha256?: string;
+  signature?: string;
 }
 
 export interface LineSwitchAppCatalog {
@@ -31,6 +36,12 @@ export interface LineSwitchAppCatalog {
 }
 
 const APP_PLATFORMS = new Set<LineSwitchAppPlatform>(["android", "ios", "macos", "windows", "web"]);
+const APP_SIGNATURES: Partial<Record<LineSwitchAppPlatform, string>> = {
+  android: "android-play-signing",
+  ios: "apple-app-store",
+  macos: "apple-notarized",
+  windows: "authenticode",
+};
 
 function storage(): Storage | null {
   try {
@@ -100,9 +111,12 @@ function exactKeys(value: Record<string, unknown>, expected: string[]): boolean 
 }
 
 function parseLineSwitchApp(value: unknown): LineSwitchApp {
-  if (!isRecord(value) || !exactKeys(value, ["id", "kind", "label", "platforms", "url"])) {
+  if (!isRecord(value)) {
     throw new Error("invalid BAS app catalog");
   }
+  const pwaKeys = ["id", "kind", "label", "platforms", "url"];
+  const nativeKeys = ["architecture", "id", "kind", "label", "launch_url", "platforms", "sha256", "signature", "url", "version"];
+  if (!exactKeys(value, value.kind === "native" ? nativeKeys : pwaKeys)) throw new Error("invalid BAS app catalog");
   if (
     typeof value.id !== "string" || !/^[a-z0-9][a-z0-9-]{0,63}$/.test(value.id) ||
     typeof value.label !== "string" || !value.label.trim() || value.label.length > 80 ||
@@ -113,13 +127,33 @@ function parseLineSwitchApp(value: unknown): LineSwitchApp {
   ) {
     throw new Error("invalid BAS app catalog");
   }
+  if (value.kind === "native" && (
+    typeof value.launch_url !== "string" || value.launch_url !== "betteragentswitch://open" ||
+    typeof value.version !== "string" || !value.version ||
+    typeof value.architecture !== "string" || !value.architecture ||
+    typeof value.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(value.sha256) ||
+    typeof value.signature !== "string" || value.signature !== APP_SIGNATURES[(value.platforms as LineSwitchAppPlatform[])[0]]
+  )) throw new Error("invalid BAS app catalog");
   return {
     id: value.id,
     label: value.label,
     kind: value.kind,
     platforms: value.platforms as LineSwitchAppPlatform[],
     url: value.url,
+    ...(value.kind === "native" ? {
+      launch_url: value.launch_url as string,
+      version: value.version as string,
+      architecture: value.architecture as string,
+      sha256: value.sha256 as string,
+      signature: value.signature as string,
+    } : {}),
   };
+}
+
+export function lineSwitchLaunchUrl(connection: LineSwitchConnection, app: LineSwitchApp): string {
+  if (app.kind === "pwa") return lineSwitchAppUrl(connection, app);
+  if (app.launch_url !== "betteragentswitch://open") throw new Error("invalid BAS app launch URL");
+  return app.launch_url;
 }
 
 export async function fetchLineSwitchApps(connection: LineSwitchConnection): Promise<LineSwitchAppCatalog> {

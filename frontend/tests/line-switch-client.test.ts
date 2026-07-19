@@ -3,6 +3,7 @@ import {
   clearLineSwitchConnection,
   fetchLineSwitchApps,
   lineSwitchAppUrl,
+  lineSwitchLaunchUrl,
   parseLineSwitchAccessUrl,
   readLineSwitchConnection,
   targetServerUrl,
@@ -96,5 +97,20 @@ describe("independent line switch pairing", () => {
       platforms: ["web"],
       url: "/",
     })).toBe(`https://switch.example.test/#${connection.token}`);
+  });
+
+  it("accepts only integrity-described native releases", async () => {
+    const connection = { baseUrl: "https://switch.example.test", token: "x".repeat(43) };
+    const native = {
+      id: "native-macos", label: "Better Agent Switch for macOS", kind: "native" as const,
+      platforms: ["macos" as const], url: "https://downloads.example/switch.dmg",
+      launch_url: "betteragentswitch://open", version: "1.0.0", architecture: "universal",
+      sha256: "a".repeat(64), signature: "apple-notarized",
+    };
+    vi.spyOn(globalThis, "fetch").mockResolvedValue({
+      ok: true, json: async () => ({ version: 1, apps: [native] }),
+    } as Response);
+    const catalog = await fetchLineSwitchApps(connection);
+    expect(lineSwitchLaunchUrl(connection, catalog.apps[0])).toBe("betteragentswitch://open");
   });
 });

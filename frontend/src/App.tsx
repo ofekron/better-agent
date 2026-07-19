@@ -92,7 +92,7 @@ import { useNativeAppUpdate } from "./hooks/useNativeAppUpdate";
 import { Setup } from "./components/Setup";
 import { DownloadRedirect } from "./components/DownloadRedirect";
 import { ServerSetup } from "./components/ServerSetup";
-import { IndependentLineSwitch } from "./components/IndependentLineSwitch";
+import { OpenRecoveryAppButton } from "./components/OpenRecoveryAppButton";
 import { NotesPanel } from "./components/NotesPanel";
 import { TodosPanel, todoProgress } from "./components/TodosPanel";
 import { CommentsPanel } from "./components/CommentsPanel";
@@ -374,7 +374,7 @@ function BackendUnavailable({
             {t("backendUnavailable.changeServer")}
           </button>
         )}
-        <IndependentLineSwitch />
+        <OpenRecoveryAppButton />
       </div>
     </div>
   );
