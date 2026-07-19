@@ -4976,7 +4976,18 @@ class SessionManager:
             if sess is None:
                 return result
 
-            if isinstance(client_id, str) and client_id:
+            for existing_prompt in sess.get("queued_prompts") or []:
+                if existing_prompt.get("id") == prompt.get("id"):
+                    result["session"] = sess
+                    result["existing_queued_prompt"] = existing_prompt
+                    projection_record = self._project_queue_record(sess)
+                    break
+
+            if (
+                result["session"] is None
+                and isinstance(client_id, str)
+                and client_id
+            ):
                 for existing_msg in sess.get("messages") or []:
                     if (
                         existing_msg.get("role") == "user"
@@ -5022,6 +5033,16 @@ class SessionManager:
     def add_queued_prompt(self, sid: str, prompt: dict) -> Optional[dict]:
         admission = self.admit_queued_prompt(sid, prompt)
         return admission.get("session")
+
+    def admit_queued_prompt_durable(self, sid: str, prompt: dict) -> dict:
+        admission = self.admit_queued_prompt(sid, prompt)
+        if not admission.get("admitted"):
+            return admission
+        root_id = self._root_id_for(sid)
+        if root_id is None:
+            raise RuntimeError(f"session disappeared during prompt admission: {sid}")
+        self.flush_root_persist(root_id)
+        return admission
 
     def update_queued_prompt(
         self, sid: str, queued_id: str, updates: dict,
