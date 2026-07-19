@@ -11671,22 +11671,80 @@ async def set_session_draft(session_id: str, body: dict):
     return result
 
 
-async def _re_enqueue_queued_prompts(*, runtime: bool = False) -> None:
+_PROMPT_HANDOFF_TASKS: set[asyncio.Task] = set()
+_PROMPT_HANDOFFS_OPEN = True
+
+
+async def _durably_admit_and_submit_prompt(
+    session_id: str,
+    queued_prompt: dict,
+    params: dict,
+    admitted: asyncio.Future,
+) -> None:
+    await asyncio.to_thread(
+        coordinator._reject_if_adv_sync_fork_locked,
+        session_id,
+    )
+    admission = await asyncio.to_thread(
+        session_manager.admit_queued_prompt_durable,
+        session_id,
+        queued_prompt,
+    )
+    admitted.set_result(admission)
+    if admission.get("admitted"):
+        await coordinator.submit_prompt_async(session_id, params)
+
+
+def _observe_prompt_handoff(task: asyncio.Task, admitted: asyncio.Future) -> None:
+    _PROMPT_HANDOFF_TASKS.discard(task)
+    if task.cancelled():
+        if not admitted.done():
+            admitted.cancel()
+        return
+    error = task.exception()
+    if error is not None:
+        if not admitted.done():
+            admitted.set_exception(error)
+        logger.error(
+            "durable prompt handoff failed",
+            exc_info=(type(error), error, error.__traceback__),
+        )
+
+
+async def _start_prompt_handoff(
+    session_id: str,
+    queued_prompt: dict,
+    params: dict,
+) -> dict:
+    if not _PROMPT_HANDOFFS_OPEN:
+        raise RuntimeError("prompt handoff is closed")
+    admitted = asyncio.get_running_loop().create_future()
+    task = asyncio.create_task(
+        _durably_admit_and_submit_prompt(
+            session_id,
+            queued_prompt,
+            params,
+            admitted,
+        ),
+        name=f"prompt-handoff-{str(queued_prompt.get('id') or '')[:8]}",
+    )
+    _PROMPT_HANDOFF_TASKS.add(task)
+    task.add_done_callback(lambda done: _observe_prompt_handoff(done, admitted))
+    return await asyncio.shield(admitted)
+
+
+async def _drain_prompt_handoffs() -> None:
+    tasks = tuple(_PROMPT_HANDOFF_TASKS)
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def _re_enqueue_queued_prompts() -> None:
     """Re-enqueue accepted prompts that have not become user messages.
 
-    Runs once at startup (``runtime=False``) as the canonical recovery of
-    admitted-but-unprocessed prompts, and periodically from the runtime
-    re-enqueue watchdog (``runtime=True``) so a prompt whose in-memory
-    ``submit_prompt`` was lost — event-loop starvation, a processor task
-    that died, a WS handler interrupted before submit — self-heals within
-    seconds instead of sitting in the durable queue forever. A persisted
-    prompt must never be silently dropped just because no backend restart
-    happens.
-
-    At runtime, items the coordinator already knows about (queued or being
-    processed) are skipped via ``coordinator.is_prompt_item_in_flight`` so a
-    re-enqueue can never double-run a prompt, and the full count rebuild is
-    skipped (counts are maintained incrementally elsewhere)."""
+    Runs once at startup as crash recovery for the durable prompt outbox.
+    Runtime admission uses a coordinator-independent handoff task, so normal
+    operation never scans the global session projection."""
     import session_queue_projection
     import team_messaging
 
@@ -11694,8 +11752,7 @@ async def _re_enqueue_queued_prompts(*, runtime: bool = False) -> None:
         rebuilt = await asyncio.to_thread(
             session_queue_projection.ensure_current_or_rebuild,
         )
-        if not runtime:
-            await asyncio.to_thread(session_manager.rebuild_queued_prompt_counts)
+        await asyncio.to_thread(session_manager.rebuild_queued_prompt_counts)
     logger.info(
         "re-enqueue: queue projection %s; scanning projected queued records",
         "rebuilt" if rebuilt else "current",
@@ -11721,12 +11778,6 @@ async def _re_enqueue_queued_prompts(*, runtime: bool = False) -> None:
 
             for qp in list(queued):
                 qp_id = qp.get("id")
-                # Runtime safety: if the coordinator already has this item
-                # queued or being processed, it is not lost — skip it so the
-                # watchdog never double-runs a prompt. No-op at fresh startup
-                # where in-memory state is empty.
-                if qp_id and coordinator.is_prompt_item_in_flight(sid, qp_id):
-                    continue
                 client_id = qp.get("client_id")
                 lifecycle_msg_id = qp.get("lifecycle_msg_id")
                 if not lifecycle_msg_id:
@@ -11791,31 +11842,6 @@ async def _re_enqueue_queued_prompts(*, runtime: bool = False) -> None:
         "startup.recovery.re_enqueue",
         (time.perf_counter() - re_enqueue_started) * 1000.0,
     )
-
-
-# Worst-case recovery latency for a prompt whose in-memory submit was lost:
-# the watchdog re-drains it from the durable queue within one interval. An
-# event-loop stall only delays this, never drops it.
-_QUEUE_REENQUEUE_WATCHDOG_INTERVAL = 15.0
-
-
-async def _queue_reenqueue_watchdog() -> None:
-    """Self-heal prompts that were admitted to the durable queue but never
-    reached a running turn — the in-memory ``submit_prompt`` was lost to
-    event-loop starvation, a crashed processor task, or a WS handler
-    interrupted before submit. Without this the prompt would sit in the
-    persisted queue forever (startup re-enqueue only fires on a restart,
-    and no restart may ever come). Reuses the canonical
-    ``_re_enqueue_queued_prompts`` drain; idempotent and double-run-safe via
-    ``is_prompt_item_in_flight``."""
-    while True:
-        try:
-            await asyncio.sleep(_QUEUE_REENQUEUE_WATCHDOG_INTERVAL)
-            await _re_enqueue_queued_prompts(runtime=True)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logger.exception("queue re-enqueue watchdog pass failed")
 
 
 async def _recover_in_flight_task() -> None:
@@ -12627,9 +12653,11 @@ async def on_startup():
     global _uvicorn_sigint_handler, _intentional_shutdown
     global _kill_runners_on_shutdown, _sigint_count
     global _project_match_executor, _project_match_ready
+    global _PROMPT_HANDOFFS_OPEN
     _intentional_shutdown = False
     _kill_runners_on_shutdown = False
     _sigint_count = 0
+    _PROMPT_HANDOFFS_OPEN = True
     _second_sigint_event.clear()
     try:
         current = signal.getsignal(signal.SIGINT)
@@ -12766,10 +12794,6 @@ async def on_startup():
         name="extension-readiness-refresher",
     )
 
-    asyncio.create_task(
-        _queue_reenqueue_watchdog(),
-        name="queue-reenqueue-watchdog",
-    )
     # Reset the heartbeat right before arming the watchdog: the module-level
     # init at import time is long stale by on_startup (heavy imports), which
     # would otherwise trip one spurious "blocked" dump before the monitor
@@ -13165,6 +13189,8 @@ async def on_shutdown():
     prompt lives here (not the signal handler) so it runs off the
     signal frame and can't block the event loop or re-enter readline."""
     global _kill_runners_on_shutdown, _STARTUP_ORCHESTRATOR_TASK
+    global _PROMPT_HANDOFFS_OPEN
+    _PROMPT_HANDOFFS_OPEN = False
     startup_task = _STARTUP_ORCHESTRATOR_TASK
     _STARTUP_ORCHESTRATOR_TASK = None
     if startup_task is not None and not startup_task.done():
@@ -13204,6 +13230,7 @@ async def on_shutdown():
         logger.info("on_shutdown: user chose to leave runners alive")
     else:
         logger.info("on_shutdown: reload detected, leaving runners alive for recovery")
+    await _drain_prompt_handoffs()
     await coordinator.quiesce_prompt_processors()
     try:
         import native_transcript_index
@@ -18841,10 +18868,10 @@ async def websocket_chat(websocket: WebSocket):
                     "created_at": datetime.now().isoformat(),
                 }
                 try:
-                    admission = await asyncio.to_thread(
-                        session_manager.admit_queued_prompt,
+                    admission = await _start_prompt_handoff(
                         app_session_id,
                         queued_prompt,
+                        params,
                     )
                 except Exception:
                     _release_claim_on_failure()
@@ -18920,18 +18947,6 @@ async def websocket_chat(websocket: WebSocket):
                         **lifecycle_queued_payload,
                     },
                 })
-                try:
-                    await coordinator.submit_prompt_async(app_session_id, params)
-                except Exception:
-                    # Release the client_id claim taken above so the
-                    # failed item doesn't block a later genuine re-send.
-                    _release_claim_on_failure()
-                    await asyncio.to_thread(
-                        session_manager.remove_queued_prompt,
-                        app_session_id,
-                        item_id,
-                    )
-                    raise
                 if is_queued:
                     try:
                         await emit_queued(
