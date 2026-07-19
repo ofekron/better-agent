@@ -1,5 +1,5 @@
 import { fireEvent, render, waitFor } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   NewSessionModal,
@@ -55,13 +55,17 @@ const capabilityPickerClient = {
 };
 
 describe("NewSessionModal offline provider cache", () => {
-  it("offers create, send, and send-and-open as distinct actions", async () => {
+  beforeEach(() => {
+    localStorage.clear();
+  });
+
+  it("offers all create actions and remembers the last selection", async () => {
     cacheProviders([provider], provider.id);
     cacheProviderModels(provider.id, ["cached-default"]);
     vi.spyOn(globalThis, "fetch").mockRejectedValue(new TypeError("offline"));
     const onCreate = vi.fn();
 
-    const { getByRole } = render(
+    const modal = render(
       <NewSessionModal
         open
         onClose={() => {}}
@@ -73,20 +77,37 @@ describe("NewSessionModal offline provider cache", () => {
     );
 
     await waitFor(() => {
-      expect(getByRole("button", { name: "newSession.create" })).toBeTruthy();
+      expect(modal.getByRole("button", { name: "newSession.createAndSendAndOpen" })).toBeTruthy();
     });
 
-    fireEvent.click(getByRole("button", { name: "newSession.create" }));
-    fireEvent.click(getByRole("button", { name: "newSession.createAndSend" }));
-    fireEvent.click(getByRole("button", { name: "newSession.createAndSendAndOpen" }));
-    fireEvent.keyDown(getByRole("textbox"), { key: "Enter" });
+    fireEvent.click(modal.getByRole("button", {
+      name: "newSession.createAndSendAndOpen — newSession.create",
+    }));
+    expect(modal.getAllByRole("menuitem")).toHaveLength(3);
+    fireEvent.click(modal.getByRole("menuitem", { name: "newSession.createAndSend" }));
+    fireEvent.click(modal.getByRole("button", { name: "newSession.createAndSend" }));
 
-    expect(onCreate.mock.calls.map((call) => call[2])).toEqual([
-      "create",
-      "send",
-      "send-and-open",
-      "send-and-open",
-    ]);
+    expect(onCreate.mock.calls.map((call) => call[2])).toEqual(["send", "send"]);
+    expect(JSON.parse(localStorage.getItem("better-agent-new-session-defaults") ?? "{}"))
+      .toEqual(expect.objectContaining({ creationAction: "send" }));
+
+    modal.unmount();
+    const reopened = render(
+      <NewSessionModal
+        open
+        onClose={() => {}}
+        onCreate={onCreate}
+        defaultCwd="/tmp/project"
+        projects={[]}
+        capabilityPickerClient={capabilityPickerClient}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(reopened.getByRole("button", { name: "newSession.createAndSend" })).toBeTruthy();
+    });
+    fireEvent.click(reopened.getByRole("button", { name: "newSession.createAndSend" }));
+    expect(onCreate.mock.calls.at(-1)?.[2]).toBe("send");
   });
 
   it("shows the session capability picker entry point", () => {

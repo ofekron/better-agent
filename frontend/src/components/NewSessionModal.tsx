@@ -26,8 +26,8 @@ import { API, fetchSessionOrganization, createSessionFolder } from "../api";
 import { optionLabelWithQuota, summarizeProvider } from "../utils/quotaStatus";
 import { useQuotaStatus } from "../hooks/useQuotaStatus";
 import { extId } from "../extensionIds";
-import { ProgressButton } from "../progress/ProgressButton";
 import Icon from "./Icon";
+import { NewSessionCreateButton } from "./NewSessionCreateButton";
 import { SessionFolderPopover } from "./SessionFolderPopover";
 import type { PopoverAnchor } from "./SessionTagPopover";
 import { buildFolderPathMap } from "../sessionFolders";
@@ -134,16 +134,27 @@ interface Props {
 const STORAGE_KEY = "better-agent-new-session-defaults";
 const EMPTY_EXTENSION_OPTIONS: NewSessionExtensionOption[] = [];
 
-function loadDefaults(): Partial<SessionConfig> {
+interface NewSessionDefaults extends Partial<SessionConfig> {
+  creationAction?: NewSessionCreationAction;
+}
+
+function isCreationAction(value: unknown): value is NewSessionCreationAction {
+  return value === "create" || value === "send" || value === "send-and-open";
+}
+
+function loadDefaults(): NewSessionDefaults {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    return raw ? JSON.parse(raw) : {};
+    if (!raw) return {};
+    const defaults = JSON.parse(raw) as NewSessionDefaults;
+    if (!isCreationAction(defaults.creationAction)) delete defaults.creationAction;
+    return defaults;
   } catch {
     return {};
   }
 }
 
-function saveDefaults(config: SessionConfig) {
+function saveDefaults(config: SessionConfig, creationAction: NewSessionCreationAction) {
   localStorage.setItem(
     STORAGE_KEY,
     JSON.stringify({
@@ -153,6 +164,7 @@ function saveDefaults(config: SessionConfig) {
       browserHarnessEnabled: config.browserHarnessEnabled,
       browserHarnessHeadless: config.browserHarnessHeadless,
       folderId: config.folderId,
+      creationAction,
     }),
   );
 }
@@ -526,6 +538,9 @@ export function NewSessionModal({
     () => loadDefaults().folderId ?? null,
   );
   const [folderPopover, setFolderPopover] = useState<PopoverAnchor | null>(null);
+  const [creationAction, setCreationAction] = useState<NewSessionCreationAction>(
+    () => loadDefaults().creationAction ?? "send-and-open",
+  );
 
   const [orchestrationMode, setOrchestrationMode] = useState<OrchestrationMode>(
     teamEnabled ? "team" : "native",
@@ -788,7 +803,8 @@ export function NewSessionModal({
       sessionExtensionOptions,
       extensionOptionValues,
     );
-    saveDefaults(config);
+    saveDefaults(config, action);
+    setCreationAction(action);
     const ctx = investigation
       ? { ...investigation, prompt: editedPrompt, images: initialImages, files: initialFiles }
       : undefined;
@@ -1089,33 +1105,18 @@ export function NewSessionModal({
           <button className="btn-secondary" onClick={onClose} disabled={creating}>
             {t("newSession.cancel")}
           </button>
-          <ProgressButton
-            className="btn-secondary"
-            opId="session:create"
-            onClick={() => handleCreate("create")}
-            extraDisabled={!(cwd || defaultCwd) || (!allowOfflineCreate && missingProviderConfig)}
-            loadingChildren={t("newSession.creating")}
-          >
-            {t("newSession.create")}
-          </ProgressButton>
-          <ProgressButton
-            className="btn-secondary"
-            opId="session:create"
-            onClick={() => handleCreate("send")}
-            extraDisabled={!(cwd || defaultCwd) || (!allowOfflineCreate && missingProviderConfig)}
-            loadingChildren={t("newSession.creating")}
-          >
-            {t("newSession.createAndSend")}
-          </ProgressButton>
-          <ProgressButton
-            className="btn-primary"
-            opId="session:create"
-            onClick={() => handleCreate("send-and-open")}
-            extraDisabled={!(cwd || defaultCwd) || (!allowOfflineCreate && missingProviderConfig)}
-            loadingChildren={t("newSession.creating")}
-          >
-            {t("newSession.createAndSendAndOpen")}
-          </ProgressButton>
+          <NewSessionCreateButton
+            selectedAction={creationAction}
+            labels={{
+              create: t("newSession.create"),
+              send: t("newSession.createAndSend"),
+              "send-and-open": t("newSession.createAndSendAndOpen"),
+            }}
+            loadingLabel={t("newSession.creating")}
+            disabled={!(cwd || defaultCwd) || (!allowOfflineCreate && missingProviderConfig)}
+            creating={creating}
+            onAction={handleCreate}
+          />
         </div>
       </div>
     </div>
