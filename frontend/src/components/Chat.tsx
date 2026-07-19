@@ -85,7 +85,7 @@ import { extBackendBase } from "../extensionIds";
 
 const teamOrchestrationApi = () => extBackendBase("team");
 
-function UserInputCard({
+export function UserInputCard({
   request,
   onDone,
 }: {
@@ -197,7 +197,7 @@ function UserInputCard({
   );
 }
 
-function UserApprovalCard({
+export function UserApprovalCard({
   request,
   onDone,
 }: {

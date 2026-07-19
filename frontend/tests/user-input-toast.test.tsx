@@ -14,11 +14,61 @@ function approval(sessionId: string, requestId = "approval-remote"): UserInterac
   };
 }
 
+function inputRequest(sessionId: string, requestId = "input-remote"): UserInteractionRequest {
+  return {
+    request_id: requestId,
+    app_session_id: sessionId,
+    kind: "input",
+    questions: [{
+      id: "scope",
+      header: "Scope",
+      question: "Include documentation?",
+      options: [
+        { label: "Yes", description: "Update the guide" },
+        { label: "No", description: "Code only" },
+      ],
+    }],
+    status: "pending",
+    created_at: 1,
+  };
+}
+
 afterEach(() => {
   Object.defineProperty(window, "pywebview", { value: undefined, configurable: true });
 });
 
 describe("cross-session user request toast", () => {
+  it("expands and resolves an input request without leaving the current session", async () => {
+    const current = makeSession({ id: "current", name: "Current work" });
+    const source = makeSession({ id: "source", name: "Release work" });
+    const request = inputRequest(source.id);
+    const h = await renderApp({
+      seed: { sessions: [current, source], userInputs: [request] },
+    });
+    await h.selectSession(current.id);
+    await h.flush();
+
+    const toastSelector = '[data-testid="user-request-toast"][data-session-id="source"]';
+    expect(h.$(`${toastSelector} .user-request-toast__response`)?.hasAttribute("hidden")).toBe(true);
+
+    await h.click(`${toastSelector} [data-action="respond-in-place"]`);
+    expect(h.$(`${toastSelector} .user-request-toast__response`)?.hasAttribute("hidden")).toBe(false);
+
+    await h.click(`${toastSelector} .user-input-card__option:nth-child(2) input[type="radio"]`);
+    await h.click(`${toastSelector} [data-action="respond-in-place"]`);
+    await h.click(`${toastSelector} [data-action="respond-in-place"]`);
+    await h.click(`${toastSelector} .user-input-card__actions .primary`);
+
+    expect(h.$(toastSelector)).toBeNull();
+    expect(h.$('[data-testid="user-input-card"]')).toBeNull();
+    expect(h.restCalls).toContainEqual(expect.objectContaining({
+      method: "POST",
+      path: `/api/user-input/${request.request_id}/resolve`,
+      body: { app_session_id: source.id, answers: { scope: "No" } },
+    }));
+    h.unmount();
+  });
+
   it("links a background request to its interactive session", async () => {
     const current = makeSession({ id: "current", name: "Current work" });
     const source = makeSession({ id: "source", name: "Release work" });

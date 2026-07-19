@@ -12,6 +12,8 @@
   "userApproval.approve": "承認",
   "userApproval.failed": "決定を送信できませんでした。もう一度お試しください。",
   "userRequest.openSession": "セッションを開く",
+  "userRequest.respond": "ここで回答",
+  "userRequest.collapse": "折りたたむ",
   "userRequest.dismiss": "閉じる",
   "userRequest.regionLabel": "回答待ちのリクエスト",
   "extensions.catalogUnavailable": "UI 拡張機能を読み込めませんでした。",

@@ -12,6 +12,8 @@
   "userApproval.approve": "אשר",
   "userApproval.failed": "ההחלטה לא נשלחה. נסה שוב.",
   "userRequest.openSession": "פתח סשן",
+  "userRequest.respond": "השב כאן",
+  "userRequest.collapse": "כווץ",
   "userRequest.dismiss": "הסתר",
   "userRequest.regionLabel": "בקשות שממתינות לתגובה שלך",
   "extensions.catalogUnavailable": "לא ניתן לטעון את הרחבות הממשק.",

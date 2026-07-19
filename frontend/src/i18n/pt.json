@@ -12,6 +12,8 @@
   "userApproval.approve": "Aprovar",
   "userApproval.failed": "A decisão não foi enviada. Tente novamente.",
   "userRequest.openSession": "Abrir sessão",
+  "userRequest.respond": "Responder aqui",
+  "userRequest.collapse": "Recolher",
   "userRequest.dismiss": "Dispensar",
   "userRequest.regionLabel": "Solicitações aguardando sua resposta",
   "extensions.catalogUnavailable": "Não foi possível carregar as extensões da interface.",
