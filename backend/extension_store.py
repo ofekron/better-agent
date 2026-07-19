@@ -3457,6 +3457,12 @@ def runtime_package_root(extension_id: str) -> Path | None:
     return runtime_package_root_for_record(record)
 
 
+def supervisor_daemon_package_root(extension_id: str, extension_root: Path) -> Path:
+    if extension_id == BUILTIN_SWITCH_CONTROL_EXTENSION_ID:
+        return _repo_root() / "switch_control_daemon"
+    return extension_root
+
+
 def _record_runtime_ready(record: dict[str, Any]) -> bool:
     return _record_runtime_ready_verified(record)
 
@@ -3503,6 +3509,11 @@ def _runtime_package_fingerprint(record: dict[str, Any]) -> str | None:
     modules = set(protocol["smoke_test"].get("python_modules") or [])
     modules.update(_required_smoke_python_modules(entrypoints))
     root = Path(str((record.get("source") or {}).get("install_path") or "")).resolve()
+    daemon_root = supervisor_daemon_package_root(str(manifest.get("id") or ""), root)
+    if daemon_root != root:
+        modules.difference_update(
+            str(item.get("module") or "") for item in entrypoints.get("daemons") or []
+        )
     for module in modules:
         static_path = static_modules.get(module)
         if static_path:
@@ -3800,11 +3811,24 @@ def _run_extension_smoke_test(manifest: dict[str, Any], package_dir: Path) -> di
     python_modules = list(smoke.get("python_modules") or [])
     for rel_path in required_paths:
         _require_smoke_path(package_dir, rel_path)
+    extension_id = str(manifest.get("id") or "")
+    daemon_root = supervisor_daemon_package_root(extension_id, package_dir)
+    daemon_modules = {
+        str(item.get("module") or "") for item in (manifest.get("entrypoints") or {}).get("daemons") or []
+    }
+    extension_modules = [
+        module for module in python_modules if daemon_root == package_dir or module not in daemon_modules
+    ]
     _run_python_module_smoke(
         package_dir,
-        python_modules,
+        extension_modules,
         static_modules=_smoke_static_modules(manifest.get("entrypoints") or {}),
     )
+    if daemon_root != package_dir:
+        _run_python_module_smoke(
+            daemon_root,
+            [module for module in python_modules if module in daemon_modules],
+        )
     return {
         "status": "passed",
         "checked_at": _now(),

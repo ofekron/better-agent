@@ -23,11 +23,13 @@ from pathlib import Path
 from typing import Any
 
 from daemonhost.install import (
+    copy_is_valid,
     current_dir,
     install,
     install_meta,
     needs_install,
     promote_last_good,
+    recover_current,
     rollback_to_last_good,
 )
 from daemonhost.jsonio import read_json, write_json
@@ -146,14 +148,17 @@ class DaemonHost:
     def _ensure_installed(self, daemon: _Daemon) -> bool:
         source = Path(str(daemon.spec.get("source_root") or ""))
         env = scrubbed_env(daemon.spec.get("env_allowlist") or [])
+        if not current_dir(daemon.root).is_dir():
+            recover_current(daemon.root)
         if source.is_dir() and needs_install(daemon.root, source):
             ok, error = install(daemon.root, source, daemon.spec["module"], sys.executable, env)
             daemon.install_error = "" if ok else f"install rejected: {error}"
             if not ok and not current_dir(daemon.root).is_dir():
                 daemon.status = "failed"
-        if not current_dir(daemon.root).is_dir():
+        current = current_dir(daemon.root)
+        if not current.is_dir() or not copy_is_valid(current):
             daemon.status = "unavailable"
-            daemon.error = daemon.error or "no installed copy and no source available"
+            daemon.error = daemon.error or "no valid installed copy and no usable source"
             return False
         return True
 

@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 
-import { restartStatusForRequest } from "../../extensions/switch-control/ui/switch.entry.js";
+import {
+  activeSwitchRequest,
+  restartStatusForRequest,
+} from "../../extensions/switch-control/ui/switch.entry.js";
 
 describe("Line Switch restart status", () => {
   it("reads the canonical top-level switch projection", () => {
@@ -22,5 +25,14 @@ describe("Line Switch restart status", () => {
       status: "pending",
       error: "",
     });
+  });
+});
+
+describe("Line Switch durable progress", () => {
+  it("restores switching state from the backend request projection", () => {
+    const request = { request_id: "r1", target: "dev", status: "accepted", error: "" };
+    expect(activeSwitchRequest({ request })).toEqual(request);
+    expect(activeSwitchRequest({ request: { ...request, status: "succeeded" } })).toBeNull();
+    expect(activeSwitchRequest({ request: { ...request, status: "failed" } })).toBeNull();
   });
 });
