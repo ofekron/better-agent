@@ -18,6 +18,7 @@ Two responsibilities, matching the two lifecycles:
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 import threading
@@ -36,6 +37,7 @@ import extension_store  # noqa: E402
 
 _lock = threading.Lock()
 _backend_procs: dict[str, subprocess.Popen] = {}
+_BUILTIN_SWITCH_MANIFEST = _REPO_ROOT / "extensions" / "switch-control" / "better-agent-extension.json"
 
 
 def _daemon_key(extension_id: str, name: str) -> str:
@@ -50,6 +52,10 @@ def _declared_daemons() -> list[tuple[str, dict[str, Any], dict[str, Any]]]:
         extension_id = str(manifest.get("id") or "")
         if not extension_id:
             continue
+        if extension_id == extension_store.BUILTIN_SWITCH_CONTROL_EXTENSION_ID:
+            manifest = extension_store.validate_manifest(
+                json.loads(_BUILTIN_SWITCH_MANIFEST.read_text(encoding="utf-8"))
+            )
         for spec in (manifest.get("entrypoints") or {}).get("daemons") or []:
             triples.append((extension_id, record, spec))
     return triples
@@ -58,12 +64,19 @@ def _declared_daemons() -> list[tuple[str, dict[str, Any], dict[str, Any]]]:
 def publish_registry() -> dict[str, Any]:
     existing = read_json(registry_path()).get("daemons")
     entries: dict[str, Any] = dict(existing) if isinstance(existing, dict) else {}
-    known_ids = set()
-    for extension_id, record, spec in _declared_daemons():
+    declared = _declared_daemons()
+    known_ids = {
+        str((record.get("manifest") or {}).get("id") or "")
+        for record in extension_store.list_extensions(include_hidden=True)
+    }
+    desired_keys: dict[str, set[str]] = {}
+    available_ids: set[str] = set()
+    for extension_id, record, spec in declared:
         known_ids.add(extension_id)
         key = _daemon_key(extension_id, spec["name"])
         if spec.get("lifecycle") != "supervisor":
             continue
+        desired_keys.setdefault(extension_id, set()).add(key)
         if not record.get("enabled"):
             entries.pop(key, None)
             continue
@@ -71,6 +84,7 @@ def publish_registry() -> dict[str, Any]:
         if source_root is None:
             # Package unavailable on this line: keep whatever the host has.
             continue
+        available_ids.add(extension_id)
         source_root = extension_store.supervisor_daemon_package_root(extension_id, source_root)
         entries[key] = {
             "extension_id": extension_id,
@@ -87,6 +101,9 @@ def publish_registry() -> dict[str, Any]:
     # yielded by list_extensions and are in known_ids, so they survive.
     for key in list(entries):
         extension_id = str(entries[key].get("extension_id") or "")
+        if extension_id in available_ids and key not in desired_keys.get(extension_id, set()):
+            del entries[key]
+            continue
         if extension_id not in known_ids and extension_store.get_extension(extension_id) is None:
             del entries[key]
     write_json(registry_path(), {"daemons": entries})
