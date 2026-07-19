@@ -146,7 +146,6 @@ def reserve(
             raise ValueError(f"unknown line: {target!r}")
         if snapshot["incompatible"].get(target):
             raise ValueError(f"line {target!r} is incompatible")
-        target_url = snapshot.get("line_targets", {}).get(target, {}).get("backend_url")
         existing = read_request()
         if existing.get("status") in _NONTERMINAL:
             if existing.get("target") == target:
@@ -169,21 +168,6 @@ def reserve(
         refresh = read_json(refresh_result_path())
         if refresh.get("request_id") == request_id:
             raise ValueError("request id already has restart result evidence")
-        if isinstance(target_url, str) and target_url:
-            return _reservation_result(
-                {
-                    "version": 1,
-                    "request_id": request_id,
-                    "target": target,
-                    "target_path": snapshot["lines"][target],
-                    "running_checkout": snapshot["running_checkout"],
-                    "status": "succeeded",
-                    "target_url": target_url,
-                    "error": "",
-                    "created_at": time.time(),
-                },
-                False,
-            )
         token = uuid.uuid4().hex
         if not _acquire_preparation_owner(token):
             raise ValueError("line switch preparation owner is unavailable")

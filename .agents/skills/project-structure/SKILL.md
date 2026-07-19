@@ -20,7 +20,7 @@ Runtime profile is the formal name for a provider/model/reasoning-effort selecti
 - `backend/tailscale_https.py`: Tailscale status/health helper for preferring verified `https://*.ts.net` external URLs with local fallback.
 - `frontend/`: React UI, session/workspace views, settings, i18n, hooks, and UI tests.
 - `extensions/`: bundled Better Agent extensions and their backend/MCP surfaces.
-- `switch_control_daemon/line_switch_runtime/`: line-instance selector and legacy durable line-switch transaction engine. Dev/main/qa run with separate Better Agent homes and ports; switch-control moves the UI to the selected line URL, while `daemonhost/` keeps launcher-compatible adapters for legacy pointer switches.
+- `switch_control_daemon/line_switch_runtime/`: canonical durable line-switch transaction engine, installed as a last-good supervisor daemon so switching survives backend and active-line failures; `daemonhost/` exposes launcher-compatible adapters.
 - `provider-config-sync/`: source checkout for provider capability/config synchronization across Codex, Claude, and Gemini. Better Agent runtime/build consumers use pinned artifacts under `vendor/provider-config-sync/`, never source-path injection.
 - Private extensions are installed packages discovered through persisted manifests. Public core must not import or probe the nested `better-agent-private` source tree.
 - Root instruction files: `AGENTS.md`, `CLAUDE.md`, and `GEMINI.md` hold provider-facing repo instructions.

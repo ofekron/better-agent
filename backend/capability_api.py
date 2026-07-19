@@ -53,7 +53,7 @@ class _AskSearchPayload(_StrictPayload):
 
 
 class _SwitchTargetPayload(_StrictPayload):
-    target: str = Field(pattern=r"^[a-z][a-z0-9_-]{0,31}$")
+    target: str = Field(pattern=r"^(dev|main)$")
 
 
 class _MarketplaceSearchPayload(_StrictPayload):
