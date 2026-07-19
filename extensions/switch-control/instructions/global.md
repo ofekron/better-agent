@@ -13,14 +13,14 @@ Flow: `dev` → `qa` → `main`.
   and `qa` must be an ancestor of `dev`. `qa` may intentionally lag behind
   `dev` between promotions.
 - Develop and iterate on `dev`.
-- When a change is ready to be tested end-to-end, fast-forward `qa` to the
-  selected `dev` commit and switch the running stack to `qa`. Never create a
-  merge commit, cherry-pick onto `qa`, or commit directly on `qa`. TestApe
-  (`test_ui`) must target `qa`, not `dev` — switch the active checkout to
-  `qa` before running UI tests, since TestApe just drives whatever line is
-  currently active. Do not move `qa` while a TestApe or QA session is
-  actively running against it; verify the active checkout and test-session
-  state first.
+- Before promoting a change for end-to-end testing, verify that no TestApe or
+  QA session is actively running against `qa`. Then fast-forward `qa` to the
+  selected `dev` commit. Never create a merge commit, cherry-pick onto `qa`,
+  or commit directly on `qa`. TestApe (`test_ui`) provisions and drives its
+  own isolated instance from the pinned `qa` checkout. The active-checkout
+  pointer and the user's running stack are irrelevant to `test_ui`; never
+  switch or restart them for TestApe validation. Do not move `qa` while a
+  TestApe or QA session is actively running against it.
 - Promotion from `qa` to `main` happens ONLY on the user's explicit request.
   Fast-forward `main` to `qa`; never create a merge commit, cherry-pick onto
   `main`, or commit directly on `main`. Never promote or switch the running

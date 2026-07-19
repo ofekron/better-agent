@@ -131,18 +131,9 @@ def _keyring_services() -> tuple[str, ...]:
 # `keyring`'s own `backends.macOS.api` module already builds the CFDictionary
 # query via ctypes; reuse those bindings here and add the one extra key
 # `keyring` omits, rather than duplicating the ctypes plumbing.
-def _macos_security_api():
-    try:
-        import platform
-        if platform.system() != "Darwin":
-            return None
-        from keyring.backends import macOS as _mac_backend
-        if not isinstance(keyring.get_keyring(), _mac_backend.Keyring):
-            return None
-        from keyring.backends.macOS import api as _mac_api
-        return _mac_api
-    except Exception:
-        return None
+def _use_stable_macos_keychain() -> bool:
+    import platform
+    return platform.system() == "Darwin"
 
 
 def _keychain_reason(provider_id: str, verb: str) -> str:
@@ -153,7 +144,7 @@ def _get_password_with_reason(service: str, username: str, reason: str) -> str |
     """Read through macOS's stable ``security`` identity when possible."""
     if (
         keyring.get_password is _ORIGINAL_KEYRING_GET_PASSWORD
-        and _macos_security_api() is not None
+        and _use_stable_macos_keychain()
     ):
         value = oskeychain.get(service, username, timeout=_KEYRING_TIMEOUT)
         if value is None:
@@ -171,7 +162,7 @@ def _set_password_with_reason(
     (test code) has replaced `keyring.set_password` itself."""
     if (
         keyring.set_password is _ORIGINAL_KEYRING_SET_PASSWORD
-        and _macos_security_api() is not None
+        and _use_stable_macos_keychain()
     ):
         oskeychain.store(service, username, password)
     else:
@@ -181,7 +172,7 @@ def _set_password_with_reason(
 def _delete_password(service: str, username: str) -> None:
     if (
         keyring.delete_password is _ORIGINAL_KEYRING_DELETE_PASSWORD
-        and _macos_security_api() is not None
+        and _use_stable_macos_keychain()
     ):
         oskeychain.delete(service, username)
         return
@@ -233,7 +224,7 @@ def _keyring_call(
     if (
         fn is _get_password_with_reason
         and keyring.get_password is _ORIGINAL_KEYRING_GET_PASSWORD
-        and _macos_security_api() is not None
+        and _use_stable_macos_keychain()
     ):
         try:
             return fn(*args)
@@ -245,7 +236,7 @@ def _keyring_call(
     if (
         fn is _set_password_with_reason
         and keyring.set_password is _ORIGINAL_KEYRING_SET_PASSWORD
-        and _macos_security_api() is not None
+        and _use_stable_macos_keychain()
     ):
         try:
             return fn(*args)
@@ -257,7 +248,7 @@ def _keyring_call(
     if (
         fn is _delete_password
         and keyring.delete_password is _ORIGINAL_KEYRING_DELETE_PASSWORD
-        and _macos_security_api() is not None
+        and _use_stable_macos_keychain()
     ):
         try:
             return fn(*args)
