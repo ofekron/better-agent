@@ -6,6 +6,7 @@ import contextvars
 import copy
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 import faulthandler
+import gzip
 import hashlib
 import json
 import logging
@@ -871,8 +872,55 @@ def _machine_nodes_enabled_cached() -> bool:
     return enabled
 
 
-def _sessions_list_response(content: bytes) -> Response:
-    return Response(content=content, media_type="application/json")
+def _accepts_gzip(accept_encoding: str) -> bool:
+    gzip_quality: float | None = None
+    wildcard_quality: float | None = None
+    for entry in accept_encoding.lower().split(","):
+        encoding, *params = entry.strip().split(";")
+        if encoding not in {"gzip", "*"}:
+            continue
+        quality = 1.0
+        quality_seen = False
+        for param in params:
+            key, separator, value = param.strip().partition("=")
+            if key != "q":
+                continue
+            if quality_seen or not separator:
+                return False
+            quality_seen = True
+            if not re.fullmatch(r"(?:0(?:\.\d{0,3})?|1(?:\.0{0,3})?)", value):
+                return False
+            quality = float(value)
+        if encoding == "gzip":
+            gzip_quality = quality
+        else:
+            wildcard_quality = quality
+    if gzip_quality is not None:
+        return gzip_quality > 0
+    return wildcard_quality is not None and wildcard_quality > 0
+
+
+def _sessions_list_response(content: bytes, accept_encoding: str) -> Response:
+    if len(content) < 1024:
+        return Response(content=content, media_type="application/json")
+    if not _accepts_gzip(accept_encoding):
+        return Response(
+            content=content,
+            media_type="application/json",
+            headers={"Vary": "Accept-Encoding"},
+        )
+    with perf.timed("sessions.list.response_gzip"):
+        compressed = gzip.compress(content, compresslevel=4, mtime=0)
+    perf.record_count("sessions.list.response_gzip.input_bytes", len(content))
+    perf.record_count("sessions.list.response_gzip.output_bytes", len(compressed))
+    return Response(
+        content=compressed,
+        media_type="application/json",
+        headers={
+            "Content-Encoding": "gzip",
+            "Vary": "Accept-Encoding",
+        },
+    )
 
 
 def _json_bytes_response(value: dict) -> Response:
@@ -901,16 +949,18 @@ def _sessions_list_response_maybe_cache(
     value: dict,
     *,
     cache_response: bool,
+    accept_encoding: str,
 ) -> Response:
     if cache_response:
-        return _sessions_list_cache_put(cache_key, value)
+        return _sessions_list_cache_put(cache_key, value, accept_encoding)
     return _sessions_list_response(
         json.dumps(
             value,
             ensure_ascii=False,
             allow_nan=False,
             separators=(",", ":"),
-        ).encode("utf-8")
+        ).encode("utf-8"),
+        accept_encoding,
     )
 
 
@@ -1008,7 +1058,7 @@ def _sessions_list_transient_state_version() -> tuple[int, int, int]:
     )
 
 
-def _sessions_list_cache_get(key: tuple) -> Response | None:
+def _sessions_list_cache_get(key: tuple, accept_encoding: str) -> Response | None:
     cached = _sessions_list_response_cache.get(key)
     if cached is None:
         return None
@@ -1018,10 +1068,14 @@ def _sessions_list_cache_get(key: tuple) -> Response | None:
     if cached[2] != _sessions_list_transient_state_version():
         _sessions_list_response_cache.pop(key, None)
         return None
-    return _sessions_list_response(cached[1])
+    return _sessions_list_response(cached[1], accept_encoding)
 
 
-def _sessions_list_cache_put(key: tuple, value: dict) -> Response:
+def _sessions_list_cache_put(
+    key: tuple,
+    value: dict,
+    accept_encoding: str,
+) -> Response:
     if len(_sessions_list_response_cache) >= 64:
         oldest = min(
             _sessions_list_response_cache,
@@ -1039,20 +1093,27 @@ def _sessions_list_cache_put(key: tuple, value: dict) -> Response:
         content,
         _sessions_list_transient_state_version(),
     )
-    return _sessions_list_response(content)
+    return _sessions_list_response(content, accept_encoding)
 
 
-def _session_summaries_cache_get(key: tuple) -> Response | None:
+def _session_summaries_cache_get(
+    key: tuple,
+    accept_encoding: str,
+) -> Response | None:
     cached = _session_summaries_response_cache.get(key)
     if cached is None:
         return None
     if time.monotonic() - cached[0] > _SESSIONS_LIST_RESPONSE_TTL_SECONDS:
         _session_summaries_response_cache.pop(key, None)
         return None
-    return _sessions_list_response(cached[1])
+    return _sessions_list_response(cached[1], accept_encoding)
 
 
-def _session_summaries_cache_put(key: tuple, value: dict) -> Response:
+def _session_summaries_cache_put(
+    key: tuple,
+    value: dict,
+    accept_encoding: str,
+) -> Response:
     if len(_session_summaries_response_cache) >= 64:
         oldest = min(
             _session_summaries_response_cache,
@@ -1070,7 +1131,7 @@ def _session_summaries_cache_put(key: tuple, value: dict) -> Response:
         content,
         0,
     )
-    return _sessions_list_response(content)
+    return _sessions_list_response(content, accept_encoding)
 
 
 def _sessions_list_cache_version(search_query: str, search_fields: set[str]) -> tuple[int, int | None] | int:
@@ -3308,6 +3369,7 @@ def _local_visible_order_page_ids(
     project_path: str | None,
     offset: int,
     limit: int,
+    expected_summary_index_version: int,
     expected_summary_order_version: int,
 ) -> tuple[list[str], int] | None:
     import working_mode as _wm
@@ -3323,7 +3385,10 @@ def _local_visible_order_page_ids(
     end = offset + limit
     with perf.timed("sessions.list.local.visible_order_build"):
         for ordered_id in ordered_ids:
-            summary = session_store.get_indexed_session_summary(ordered_id)
+            summary = session_store.get_indexed_session_summary_if_current(
+                ordered_id,
+                expected_summary_index_version,
+            )
             if summary is None:
                 return None
             if project_path is not None and not session_matches_project(summary, project_path):
@@ -3381,6 +3446,7 @@ def _local_session_page_for_sidebar_preserving_order(
                 project_path,
                 offset,
                 limit,
+                expected_summary_index_version,
                 expected_summary_order_version,
             )
             if visible_page is None:
@@ -6914,6 +6980,7 @@ def _session_search_candidate_limit(offset: int, limit: int) -> int:
 
 @app.get("/api/sessions")
 async def get_sessions(
+    request: Request,
     offset: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=200),
     project_path: str | None = Query(None),
@@ -6930,6 +6997,7 @@ async def get_sessions(
     search_fields: str | None = Query(None),
     sort_by: str | None = Query(None),
 ):
+    accept_encoding = request.headers.get("accept-encoding", "")
     search_query = (search or "").strip()
     connected_version = 0
     connected: tuple[str, ...] = ()
@@ -6998,7 +7066,7 @@ async def get_sessions(
         _remote_sessions_cache_version_snapshot() if connected else 0,
         _sessions_list_cache_version(search_query, effective_search_fields),
     )
-    cached_response = _sessions_list_cache_get(cache_key)
+    cached_response = _sessions_list_cache_get(cache_key, accept_encoding)
     if cached_response is not None:
         perf.record("sessions.list.response_cache.hit", 1.0)
         return cached_response
@@ -7063,6 +7131,7 @@ async def get_sessions(
             cache_key,
             response_payload,
             cache_response=cache_response and response_payload.get("snapshot_complete") is True,
+            accept_encoding=accept_encoding,
         )
     if not connected:
         page, total = await _run_session_list_hot_path(
@@ -7084,6 +7153,7 @@ async def get_sessions(
             cache_key,
             response_payload,
             cache_response=cache_response and response_payload.get("snapshot_complete") is True,
+            accept_encoding=accept_encoding,
         )
 
     content_scores: dict[str, int] = {}
@@ -7235,7 +7305,8 @@ async def get_sessions(
                         ensure_ascii=False,
                         allow_nan=False,
                         separators=(",", ":"),
-                    ).encode("utf-8")
+                    ).encode("utf-8"),
+                    accept_encoding,
                 )
         if may_include_virtual:
             if handled_virtual_sessions:
@@ -7337,6 +7408,7 @@ async def get_sessions(
             cache_key,
             response_payload,
             cache_response=cache_response and response_payload.get("snapshot_complete") is True,
+            accept_encoding=accept_encoding,
         )
 
     if (
@@ -7367,6 +7439,7 @@ async def get_sessions(
             cache_key,
             response_payload,
             cache_response=cache_response and response_payload.get("snapshot_complete") is True,
+            accept_encoding=accept_encoding,
         )
 
     state_snapshot = (
@@ -7478,12 +7551,14 @@ async def get_sessions(
                 ensure_ascii=False,
                 allow_nan=False,
                 separators=(",", ":"),
-            ).encode("utf-8")
+            ).encode("utf-8"),
+            accept_encoding,
         )
     return _sessions_list_response_maybe_cache(
         cache_key,
         response_payload,
         cache_response=cache_response and response_payload.get("snapshot_complete") is True,
+        accept_encoding=accept_encoding,
     )
 
 
@@ -8690,7 +8765,8 @@ async def get_topbar_pinned_sessions():
 
 
 @app.get("/api/sessions/summaries")
-async def get_session_summaries(ids: str = Query("")):
+async def get_session_summaries(request: Request, ids: str = Query("")):
+    accept_encoding = request.headers.get("accept-encoding", "")
     requested_ids = [
         sid.strip()
         for sid in ids.split(",")
@@ -8702,7 +8778,7 @@ async def get_session_summaries(ids: str = Query("")):
         tuple(requested_ids),
         session_store.summary_index_version(),
     )
-    cached_response = _session_summaries_cache_get(cache_key)
+    cached_response = _session_summaries_cache_get(cache_key, accept_encoding)
     if cached_response is not None:
         perf.record("sessions.summaries.response_cache.hit", 1.0)
         return cached_response
@@ -8723,7 +8799,11 @@ async def get_session_summaries(ids: str = Query("")):
         tuple(requested_ids),
         session_store.summary_index_version(),
     )
-    return _session_summaries_cache_put(final_cache_key, {"sessions": page})
+    return _session_summaries_cache_put(
+        final_cache_key,
+        {"sessions": page},
+        accept_encoding,
+    )
 
 
 @app.get("/api/sessions/{session_id}/stats")
