@@ -2,14 +2,9 @@ from __future__ import annotations
 
 import json
 import os
-import secrets
-import signal
-import sys
-import tempfile
+import subprocess
 import threading
-from multiprocessing import AuthenticationError
-from multiprocessing.connection import Client, Listener
-from pathlib import Path
+from multiprocessing import Pipe
 from typing import Literal
 
 import oskeychain
@@ -20,25 +15,8 @@ _MAX_FRAME_BYTES = 128 * 1024
 
 
 class ProviderCredentialSession:
-    def __init__(
-        self,
-        *,
-        address: str | None = None,
-        family: str | None = None,
-        authkey: bytes | None = None,
-    ) -> None:
-        self._authkey = authkey or secrets.token_bytes(32)
-        self._family = family or ("AF_PIPE" if os.name == "nt" else "AF_UNIX")
-        self._temp_dir: Path | None = None
-        if address:
-            self._address = address
-        elif self._family == "AF_PIPE":
-            self._address = rf"\\.\pipe\better-agent-credentials-{secrets.token_hex(16)}"
-        else:
-            self._temp_dir = Path(tempfile.mkdtemp(prefix="better-agent-credentials-"))
-            self._temp_dir.chmod(0o700)
-            self._address = str(self._temp_dir / "session.sock")
-        self._listener: Listener | None = None
+    def __init__(self) -> None:
+        self._server_connection, self._backend_connection = Pipe(duplex=True)
         self._thread: threading.Thread | None = None
         self._stopping = threading.Event()
         self._states: dict[str, tuple[CredentialStatus, str]] = {}
@@ -48,13 +26,10 @@ class ProviderCredentialSession:
     def start(self) -> None:
         if self._thread is not None:
             return
-        self._listener = Listener(
-            address=self._address,
-            family=self._family,
-            authkey=self._authkey,
-        )
-        if self._temp_dir is not None:
-            Path(self._address).chmod(0o600)
+        if os.name == "nt":
+            os.set_handle_inheritable(self._backend_connection.fileno(), True)
+        else:
+            os.set_inheritable(self._backend_connection.fileno(), True)
         self._thread = threading.Thread(
             target=self._serve,
             name="provider-credential-session",
@@ -64,59 +39,56 @@ class ProviderCredentialSession:
 
     def backend_env(self) -> dict[str, str]:
         return {
-            "BETTER_AGENT_CREDENTIAL_SESSION_ADDRESS": self._address,
-            "BETTER_AGENT_CREDENTIAL_SESSION_FAMILY": self._family,
-            "BETTER_AGENT_CREDENTIAL_SESSION_AUTH": self._authkey.hex(),
+            "BETTER_AGENT_CREDENTIAL_SESSION_FD": str(
+                self._backend_connection.fileno()
+            ),
         }
+
+    def backend_popen_kwargs(self) -> dict[str, object]:
+        if os.name == "nt":
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.lpAttributeList = {
+                "handle_list": [self._backend_connection.fileno()]
+            }
+            return {"close_fds": True, "startupinfo": startupinfo}
+        return {"pass_fds": (self._backend_connection.fileno(),)}
 
     def stop(self) -> None:
         if self._thread is None:
             return
         self._stopping.set()
         try:
-            conn = Client(self._address, family=self._family, authkey=self._authkey)
-            conn.send_bytes(b'{"op":"shutdown"}')
-            conn.close()
+            self._backend_connection.send_bytes(b'{"op":"shutdown"}')
         except (OSError, EOFError):
             pass
         self._thread.join(timeout=5)
         self._thread = None
-        if self._listener is not None:
-            self._listener.close()
-            self._listener = None
         self._states.clear()
-        if self._temp_dir is not None:
-            try:
-                Path(self._address).unlink()
-            except FileNotFoundError:
-                pass
-            self._temp_dir.rmdir()
+        self._server_connection.close()
+        self._backend_connection.close()
 
     def _provider_lock(self, provider_id: str) -> threading.Lock:
         with self._locks_guard:
             return self._locks.setdefault(provider_id, threading.Lock())
 
     def _serve(self) -> None:
-        assert self._listener is not None
         while not self._stopping.is_set():
             try:
-                conn = self._listener.accept()
-            except AuthenticationError:
-                continue
-            except (OSError, EOFError):
-                return
-            try:
-                payload = conn.recv_bytes(maxlength=_MAX_FRAME_BYTES)
+                payload = self._server_connection.recv_bytes(maxlength=_MAX_FRAME_BYTES)
                 request = json.loads(payload.decode("utf-8"))
                 response = self._handle(request)
-                conn.send_bytes(json.dumps(response, separators=(",", ":")).encode("utf-8"))
+                if isinstance(request, dict) and isinstance(request.get("request_id"), str):
+                    response["request_id"] = request["request_id"]
+                self._server_connection.send_bytes(
+                    json.dumps(response, separators=(",", ":")).encode("utf-8")
+                )
             except (EOFError, OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
                 try:
-                    conn.send_bytes(b'{"status":"blocked","error":"invalid request"}')
+                    self._server_connection.send_bytes(
+                        b'{"status":"blocked","error":"invalid request"}'
+                    )
                 except (EOFError, OSError):
-                    pass
-            finally:
-                conn.close()
+                    return
 
     def _handle(self, request: object) -> dict[str, str]:
         if not isinstance(request, dict):
@@ -125,6 +97,9 @@ class ProviderCredentialSession:
         if op == "shutdown":
             self._stopping.set()
             return {"status": "unknown"}
+        request_id = request.get("request_id")
+        if not isinstance(request_id, str) or len(request_id) != 32:
+            raise ValueError("invalid request_id")
         provider_id = request.get("provider_id")
         if not isinstance(provider_id, str) or not provider_id or len(provider_id) > 128:
             raise ValueError("invalid provider_id")
@@ -195,30 +170,3 @@ class ProviderCredentialSession:
             return {"status": "blocked"}
         self._states[provider_id] = ("missing", "")
         return {"status": "missing"}
-
-
-def _serve_from_environment() -> int:
-    address = os.environ.pop("BETTER_AGENT_CREDENTIAL_SESSION_ADDRESS", "")
-    family = os.environ.pop("BETTER_AGENT_CREDENTIAL_SESSION_FAMILY", "")
-    auth_hex = os.environ.pop("BETTER_AGENT_CREDENTIAL_SESSION_AUTH", "")
-    if not address or family not in {"AF_UNIX", "AF_PIPE"} or not auth_hex:
-        raise RuntimeError("credential session environment is incomplete")
-    session = ProviderCredentialSession(
-        address=address,
-        family=family,
-        authkey=bytes.fromhex(auth_hex),
-    )
-    auth_hex = ""
-    stopped = threading.Event()
-    for signum in (signal.SIGTERM, signal.SIGINT):
-        signal.signal(signum, lambda *_: stopped.set())
-    session.start()
-    try:
-        stopped.wait()
-    finally:
-        session.stop()
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(_serve_from_environment())
