@@ -13,7 +13,10 @@ _incompatible = _control._incompatible
 request = _control.request
 state = _control.state
 bootstrap = _requests.bootstrap
+activate = _requests.activate
+fail = _requests.fail
 request_status = _requests.request_status
+reserve = _requests.reserve
 service_tick = _requests.service_tick
 submit = _requests.submit
 

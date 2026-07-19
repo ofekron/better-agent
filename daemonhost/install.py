@@ -21,6 +21,7 @@ from typing import Any
 from daemonhost.jsonio import read_json, write_json
 
 _SKIP_DIRS = {"__pycache__", ".venv", "node_modules", ".git"}
+_COPY_MARKER = ".daemon-copy.json"
 SELFTEST_TIMEOUT_SECONDS = 60
 
 
@@ -30,6 +31,8 @@ def tree_hash(source_dir: Path) -> str:
         if any(part in _SKIP_DIRS for part in path.relative_to(source_dir).parts):
             continue
         if not path.is_file():
+            continue
+        if path.name == _COPY_MARKER:
             continue
         digest.update(str(path.relative_to(source_dir)).encode("utf-8"))
         digest.update(path.read_bytes())
@@ -48,8 +51,77 @@ def last_good_dir(daemon_root: Path) -> Path:
     return daemon_root / "last_good"
 
 
+def previous_dir(daemon_root: Path) -> Path:
+    return daemon_root / "previous"
+
+
+def seal_copy(copy_dir: Path) -> None:
+    write_json(copy_dir / _COPY_MARKER, {"content_hash": tree_hash(copy_dir)})
+
+
+def copy_is_valid(copy_dir: Path) -> bool:
+    marker = read_json(copy_dir / _COPY_MARKER)
+    return marker.get("content_hash") == tree_hash(copy_dir)
+
+
+def _recover_predecessor(target: Path, predecessor: Path) -> bool:
+    if target.is_dir() and copy_is_valid(target):
+        return True
+    shutil.rmtree(target, ignore_errors=True)
+    if predecessor.is_dir() and copy_is_valid(predecessor):
+        predecessor.rename(target)
+        return True
+    shutil.rmtree(predecessor, ignore_errors=True)
+    return False
+
+
+def recover_current(daemon_root: Path) -> bool:
+    current = current_dir(daemon_root)
+    if current.is_dir() and copy_is_valid(current):
+        return True
+    shutil.rmtree(current, ignore_errors=True)
+    previous = previous_dir(daemon_root)
+    if previous.is_dir() and copy_is_valid(previous):
+        previous.rename(current)
+        return True
+    shutil.rmtree(previous, ignore_errors=True)
+    last_good = last_good_dir(daemon_root)
+    if last_good.is_dir() and copy_is_valid(last_good):
+        _replace_tree(
+            last_good,
+            current,
+            daemon_root / "recovery_staging",
+            previous_dir(daemon_root),
+        )
+        return True
+    return False
+
+
+def _replace_tree(source: Path, target: Path, staging: Path, predecessor: Path) -> None:
+    shutil.rmtree(staging, ignore_errors=True)
+    shutil.copytree(source, staging)
+    if tree_hash(staging) != tree_hash(source):
+        shutil.rmtree(staging, ignore_errors=True)
+        raise OSError("staged daemon copy failed verification")
+    seal_copy(staging)
+    if not copy_is_valid(staging):
+        shutil.rmtree(staging, ignore_errors=True)
+        raise OSError("staged daemon copy seal failed verification")
+    shutil.rmtree(predecessor, ignore_errors=True)
+    if target.exists():
+        target.rename(predecessor)
+    try:
+        staging.rename(target)
+    except OSError:
+        _recover_predecessor(target, predecessor)
+        raise
+    shutil.rmtree(predecessor, ignore_errors=True)
+
+
 def needs_install(daemon_root: Path, source_dir: Path) -> bool:
     if not current_dir(daemon_root).is_dir():
+        return True
+    if not copy_is_valid(current_dir(daemon_root)):
         return True
     return install_meta(daemon_root).get("source_hash") != tree_hash(source_dir)
 
@@ -86,10 +158,20 @@ def install(daemon_root: Path, source_dir: Path, module: str, python_exe: str, e
     if not ok:
         shutil.rmtree(staging, ignore_errors=True)
         return False, error or "selftest failed"
+    seal_copy(staging)
     current = current_dir(daemon_root)
+    previous = previous_dir(daemon_root)
+    if previous.exists():
+        shutil.rmtree(previous)
     if current.exists():
-        shutil.rmtree(current)
-    staging.rename(current)
+        current.rename(previous)
+    try:
+        staging.rename(current)
+    except OSError as exc:
+        if previous.is_dir() and not current.exists():
+            previous.rename(current)
+        return False, str(exc)
+    shutil.rmtree(previous, ignore_errors=True)
     write_json(
         daemon_root / "install.json",
         {"source_hash": tree_hash(source_dir), "installed_at": time.time(), "promoted": False},
@@ -106,21 +188,29 @@ def promote_last_good(daemon_root: Path) -> None:
     if not current.is_dir():
         return
     last_good = last_good_dir(daemon_root)
-    if last_good.exists():
-        shutil.rmtree(last_good)
-    shutil.copytree(current, last_good)
+    _recover_predecessor(last_good, daemon_root / "last_good_previous")
+    _replace_tree(
+        current,
+        last_good,
+        daemon_root / "last_good_staging",
+        daemon_root / "last_good_previous",
+    )
     meta["promoted"] = True
     write_json(daemon_root / "install.json", meta)
 
 
 def rollback_to_last_good(daemon_root: Path) -> bool:
     last_good = last_good_dir(daemon_root)
+    _recover_predecessor(last_good, daemon_root / "last_good_previous")
     if not last_good.is_dir():
         return False
     current = current_dir(daemon_root)
-    if current.exists():
-        shutil.rmtree(current)
-    shutil.copytree(last_good, current)
+    _replace_tree(
+        last_good,
+        current,
+        daemon_root / "rollback_staging",
+        previous_dir(daemon_root),
+    )
     meta = install_meta(daemon_root)
     meta["promoted"] = True
     meta["rolled_back_at"] = time.time()

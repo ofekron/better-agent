@@ -272,6 +272,29 @@ def test_wait_exit_returns_exit_code() -> bool:
     return True
 
 
+def test_stop_tracked_backend_force_kills_stubborn_child() -> bool:
+    child = (
+        "import signal, time\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "time.sleep(30)\n"
+    )
+    sup = BackendSupervisor()
+    sup._proc = subprocess.Popen([sys.executable, "-c", child])
+    time.sleep(0.2)
+    try:
+        if not sup._stop_tracked_backend(timeout=0.1):
+            print("  stubborn backend was not force-killed")
+            return False
+        if sup._proc.poll() is None:
+            print("  stubborn backend remained alive")
+            return False
+        return True
+    finally:
+        if sup._proc.poll() is None:
+            sup._proc.kill()
+            sup._proc.wait()
+
+
 def test_shutdown_signal_choice() -> bool:
     """`shutdown(kill_runners=True)` delivers SIGINT with an explicit
     kill flag; `False` delivers SIGTERM and clears stale kill flags."""
@@ -399,6 +422,7 @@ TESTS = [
     ("restart flag is detected once then consumed",
      test_restart_flag_detected_and_consumed),
     ("wait_exit returns the backend exit code", test_wait_exit_returns_exit_code),
+    ("tracked backend shutdown escalates to kill", test_stop_tracked_backend_force_kills_stubborn_child),
     ("shutdown sends SIGINT to kill runners, SIGTERM to keep them",
      test_shutdown_signal_choice),
     ("restart aborts when port is held instead of spawning a dead backend",

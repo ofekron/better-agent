@@ -703,14 +703,23 @@ def _register_switch_control() -> None:
     async def request_switch(payload: BaseModel) -> Any:
         from daemonhost import switch_control
 
+        requested = switch_control.reserve(running_checkout(), payload.target)
+        reservation_created = bool(requested.pop("_reservation_created", False))
+        preparation_token = str(requested.pop("_preparation_token", ""))
+        request_id = str(requested["request_id"])
+        if requested.get("status") != "preparing" or not reservation_created:
+            return {
+                **requested,
+                "restart": {"status": requested["status"], "request_id": request_id, "restarted_nodes": []},
+            }
         try:
             import main
 
             restarted_nodes = await main._restart_connected_worker_nodes()
         except Exception as exc:
+            switch_control.fail(request_id, f"worker-node preparation failed: {exc}", preparation_token)
             raise HTTPException(status_code=502, detail=f"worker-node preparation failed: {exc}") from exc
-        requested = switch_control.submit(running_checkout(), payload.target)
-        request_id = str(requested["request_id"])
+        requested = switch_control.activate(request_id, preparation_token)
         return {
             **requested,
             "restart": {

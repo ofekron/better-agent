@@ -28,6 +28,12 @@ export function restartStatusForRequest(payload, requestId) {
   return { status, error: typeof payload.error === "string" ? payload.error : "" };
 }
 
+export function activeSwitchRequest(state) {
+  const request = state && state.request;
+  if (!request || typeof request.request_id !== "string") return null;
+  return ["preparing", "pending", "accepted"].includes(request.status) ? request : null;
+}
+
 export function Component({ context, React }) {
   const { useState, useEffect, useCallback, useRef } = React;
   const t = typeof context.t === "function" ? context.t : (_key, fallback) => fallback;
@@ -82,6 +88,14 @@ export function Component({ context, React }) {
     [context, refresh, t],
   );
 
+  useEffect(() => {
+    const request = activeSwitchRequest(state);
+    if (!request) return;
+    setSwitching(true);
+    setOpen(false);
+    waitForNewLine(request.request_id);
+  }, [state, waitForNewLine]);
+
   useEffect(() => () => pollRef.current && clearInterval(pollRef.current), []);
 
   const doSwitch = useCallback(
@@ -111,7 +125,8 @@ export function Component({ context, React }) {
   if (!state || !state.switchable) return null;
   const active = state.active_line || "?";
   const pointerStatus = (state.pointer && state.pointer.status) || "";
-  const label = switching
+  const isSwitching = switching || Boolean(activeSwitchRequest(state));
+  const label = isSwitching
     ? t("switchControl.switching", "Switching…")
     : `${t("switchControl.line", "Line")}: ${active}`;
 
@@ -122,18 +137,18 @@ export function Component({ context, React }) {
         key: "btn",
         type: "button",
         className: "setup-btn switch-control-btn",
-        disabled: switching,
+        disabled: isSwitching,
         title: t("switchControl.tooltip", "Switch the running app between the main and dev lines"),
         "aria-label": label,
-        "aria-busy": switching,
+        "aria-busy": isSwitching,
         onClick: () => setOpen((value) => !value),
       },
-      switching ? React.createElement("span", { className: "switch-control-spinner" }, "⟳ ") : null,
+      isSwitching ? React.createElement("span", { className: "switch-control-spinner" }, "⟳ ") : null,
       label,
     ),
   ];
 
-  if (open && !switching) {
+  if (open && !isSwitching) {
     children.push(
       React.createElement(
         "div",

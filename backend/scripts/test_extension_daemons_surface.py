@@ -8,6 +8,7 @@ Run: backend/.venv/bin/python backend/scripts/test_extension_daemons_surface.py
 
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 from pathlib import Path
@@ -124,6 +125,27 @@ records["test.daemons"] = {
 entries = extension_daemons.publish_registry()
 key = "test.daemons:worker"
 assert key in entries and entries[key]["source_root"] == str(source_root)
+
+switch_manifest = json.loads(
+    (BACKEND.parent / "extensions" / "switch-control" / "better-agent-extension.json").read_text(
+        encoding="utf-8"
+    )
+)
+validated_switch_manifest = extension_store.validate_manifest(switch_manifest)
+smoke = extension_store._run_extension_smoke_test(
+    validated_switch_manifest,
+    BACKEND.parent / "extensions" / "switch-control",
+)
+assert smoke["status"] == "passed"
+records[extension_store.BUILTIN_SWITCH_CONTROL_EXTENSION_ID] = {
+    "enabled": True,
+    "manifest": validated_switch_manifest,
+    "_root": BACKEND.parent / "extensions" / "switch-control",
+}
+entries = extension_daemons.publish_registry()
+switch_key = f"{extension_store.BUILTIN_SWITCH_CONTROL_EXTENSION_ID}:line-switch"
+assert entries[switch_key]["source_root"] == str(BACKEND.parent / "switch_control_daemon")
+del records[extension_store.BUILTIN_SWITCH_CONTROL_EXTENSION_ID]
 
 # Package missing on this line (root None): entry survives untouched.
 records["test.daemons"]["_root"] = None
