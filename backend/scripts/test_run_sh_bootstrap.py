@@ -14,6 +14,11 @@ def test_run_sh_uses_non_standard_backend_port_by_default() -> None:
     source = _run_sh()
 
     assert "DEFAULT_BACKEND_PORT=18765" in source
+    assert 'DEFAULT_BA_HOME="$HOME/.better-claude-main"' in source
+    assert "LINE_DEFAULT_BACKEND_PORT=18766" in source
+    assert 'DEFAULT_BA_HOME="$HOME/.better-claude-qa"' in source
+    assert "LINE_DEFAULT_BACKEND_PORT=18767" in source
+    assert 'export BETTER_AGENT_PARALLEL_LINES="${BETTER_AGENT_PARALLEL_LINES:-1}"' in source
     assert "BETTER_CLAUDE_BACKEND_PORT:-8000" not in source
 
 
