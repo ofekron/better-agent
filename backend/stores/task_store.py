@@ -11,6 +11,7 @@ from typing import Optional
 
 from json_store import write_json
 from paths import ba_home
+from task_session_types import VALID as VALID_SESSION_TYPES
 
 logger = logging.getLogger(__name__)
 
@@ -23,8 +24,6 @@ MAX_RECENT_RUNS = 10
 
 _VALID_ORCH_MODES = ("team", "native")
 _VALID_WORKER_POLICIES = ("ask", "approve", "deny")
-_VALID_SESSION_TYPES = ("normal", "provisioned_direct", "provisioned_fork")
-
 _VALID_TRIGGER_KINDS = ("manual", "schedule", "script", "turn_end", "api")
 _VALID_ASSESSMENT_KINDS = ("none", "script", "llm_judge")
 _VALID_SCHEDULE_MODES = ("once", "recurring")
@@ -406,8 +405,8 @@ def _validate_core(
     if worker_creation_policy not in _VALID_WORKER_POLICIES:
         raise ValueError(
             f"worker_creation_policy must be one of {_VALID_WORKER_POLICIES}")
-    if session_type not in _VALID_SESSION_TYPES:
-        raise ValueError(f"session_type must be one of {_VALID_SESSION_TYPES}")
+    if session_type not in VALID_SESSION_TYPES:
+        raise ValueError(f"session_type must be one of {VALID_SESSION_TYPES}")
 
 
 def create(

@@ -193,7 +193,13 @@ def _normalize_storage_scope(storage_scope: Optional[dict]) -> Optional[dict]:
     if kind != "routine":
         raise ValueError(f"unsupported storage_scope kind: {kind}")
     routine_id = _validate_storage_segment(storage_scope.get("routine_id"), "routine_id")
-    return {"kind": "routine", "routine_id": routine_id}
+    memory = storage_scope.get("memory", False)
+    if not isinstance(memory, bool):
+        raise ValueError("storage_scope.memory must be a boolean")
+    normalized = {"kind": "routine", "routine_id": routine_id}
+    if memory:
+        normalized["memory"] = True
+    return normalized
 
 
 def _storage_dir_for_scope(storage_scope: Optional[dict]) -> Path:
@@ -5369,6 +5375,11 @@ def fork_session(root: dict, parent_id: str, name: Optional[str] = None) -> dict
         },
         "token_usage_last": None,
     }
+    storage_scope = _normalize_storage_scope(
+        parent.get("storage_scope") or root.get("storage_scope")
+    )
+    if storage_scope is not None:
+        child["storage_scope"] = storage_scope
     parent.setdefault("forks", []).append(child)
     _index_set(child["id"], root["id"])
     return child
