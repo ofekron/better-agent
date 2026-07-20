@@ -81,6 +81,7 @@ from requirements_query_runner import (
 import user_input_store
 import file_panel_drafts
 import file_preview_urls
+import task_output_preview_urls
 import mobile_bundle_ticket
 from secret_redaction import install_access_log_redaction, redact_secrets
 from ws_serialization import (
@@ -1908,10 +1909,17 @@ _AUTH_PUBLIC_ARTIFACT_ROUTES = frozenset({
 # WebView as "Failed to fetch dynamically imported module". Treat these
 # static assets as public, exactly like the frontend shell.
 _EXTENSION_FRONTEND_ASSET_RE = re.compile(r"^/api/extensions/[^/]+/frontend/")
+_TASK_OUTPUT_PREVIEW_RE = re.compile(
+    r"^/api/task-output/preview/[^/]+/[A-Za-z0-9_-]{1,64}/[a-f0-9]{12}$"
+)
 
 
 def _is_extension_frontend_asset(path: str) -> bool:
     return bool(_EXTENSION_FRONTEND_ASSET_RE.match(path))
+
+
+def _is_task_output_preview_request(request: Request) -> bool:
+    return request.method == "GET" and bool(_TASK_OUTPUT_PREVIEW_RE.fullmatch(request.url.path))
 
 
 @app.middleware("http")
@@ -1932,6 +1940,7 @@ async def auth_gate(request, call_next):
         path.startswith("/api/")
         and path not in _AUTH_PUBLIC_ARTIFACT_ROUTES
         and not _is_extension_frontend_asset(path)
+        and not _is_task_output_preview_request(request)
     ):
         try:
             browser_trust.validate_http_request(request)
@@ -1949,6 +1958,7 @@ async def auth_gate(request, call_next):
         or path in _AUTH_PUBLIC_ARTIFACT_ROUTES
         or any(path.startswith(prefix) for prefix in _AUTH_PUBLIC_PREFIXES)
         or _is_extension_frontend_asset(path)
+        or _is_task_output_preview_request(request)
     ):
         return await call_next(request)
     if path.startswith("/api/internal/"):
@@ -15748,6 +15758,51 @@ async def internal_task_output_content(
                 "style-src 'unsafe-inline'; font-src data:; base-uri 'none'"
             ),
             "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
+@app.get("/api/task-outputs/{task_id}/{output_id}/preview-url")
+async def task_output_preview_url(task_id: str, output_id: str):
+    from stores import task_output_store
+
+    try:
+        await asyncio.to_thread(task_output_store.content_path, task_id, output_id)
+        token = task_output_preview_urls.mint(task_id, output_id)
+    except (FileNotFoundError, ValueError):
+        raise HTTPException(status_code=404, detail="unknown output")
+    return {"url": f"/api/task-output/preview/{token}/{task_id}/{output_id}"}
+
+
+@app.get("/api/task-output/preview/{token}/{task_id}/{output_id}")
+async def task_output_preview(token: str, task_id: str, output_id: str):
+    from fastapi.responses import FileResponse
+    from stores import task_output_store
+
+    try:
+        task_output_preview_urls.verify(token, task_id, output_id)
+    except ValueError:
+        raise HTTPException(status_code=403, detail="invalid preview token")
+    try:
+        path, content_type = await asyncio.to_thread(
+            task_output_store.content_path,
+            task_id,
+            output_id,
+        )
+    except (FileNotFoundError, ValueError):
+        raise HTTPException(status_code=404, detail="unknown output")
+    return FileResponse(
+        path,
+        media_type=content_type,
+        headers={
+            "Content-Security-Policy": (
+                "sandbox allow-popups allow-popups-to-escape-sandbox; "
+                "default-src 'none'; img-src data: blob: https:; "
+                "style-src 'unsafe-inline'; font-src data:; base-uri 'none'"
+            ),
+            "X-Content-Type-Options": "nosniff",
+            "Referrer-Policy": "no-referrer",
+            "Cache-Control": "private, no-store",
         },
     )
 
