@@ -134,29 +134,7 @@ def main() -> None:
         assert session._backend_connection is not first_connection
         assert backend_request(session, "read", "provider-1") == {"status": "blocked"}
         assert reads == 1
-        assert request(session, "store", "provider-1", "replacement") == {"status": "blocked"}
-        assert request(session, "delete", "provider-1") == {"status": "blocked"}
-        assert stores == 0
-        assert deletes == 0
-
-        assert request(session, "store", "provider-store-blocked", "replacement") == {
-            "status": "blocked"
-        }
-        assert request(session, "read", "provider-store-blocked") == {"status": "blocked"}
-        assert stores == 1
-        assert reads == 1
-
-        assert request(session, "delete", "provider-delete-blocked") == {"status": "blocked"}
-        assert request(session, "read", "provider-delete-blocked") == {"status": "blocked"}
-        assert deletes == 1
-        assert reads == 1
-
         blocked = False
-        assert request(session, "retry", "provider-1") == {"status": "missing"}
-        assert reads == 4
-        assert request(session, "read", "provider-1") == {"status": "missing"}
-        assert reads == 4
-
         assert request(session, "store", "provider-1", "replacement") == {
             "status": "available"
         }
@@ -164,7 +142,34 @@ def main() -> None:
             "status": "available",
             "value": "replacement",
         }
-        assert reads == 5
+        blocked = True
+        assert request(session, "delete", "provider-1") == {"status": "blocked"}
+        assert stores == 1
+        assert deletes == 4
+
+        assert request(session, "store", "provider-store-blocked", "replacement") == {
+            "status": "blocked"
+        }
+        assert request(session, "read", "provider-store-blocked") == {"status": "blocked"}
+        assert stores == 2
+        assert reads == 2
+
+        assert request(session, "delete", "provider-delete-blocked") == {"status": "blocked"}
+        assert request(session, "read", "provider-delete-blocked") == {"status": "blocked"}
+        assert deletes == 5
+        assert reads == 2
+
+        blocked = False
+        assert request(session, "retry", "provider-1") == {
+            "status": "available",
+            "value": "replacement",
+        }
+        assert reads == 3
+        assert request(session, "read", "provider-1") == {
+            "status": "available",
+            "value": "replacement",
+        }
+        assert reads == 3
         assert request(session, "delete", "provider-1") == {"status": "missing"}
     finally:
         session.stop()

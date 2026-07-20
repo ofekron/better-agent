@@ -14,7 +14,7 @@ function response(body: unknown) {
 describe("provider credential denial", () => {
   afterEach(() => vi.restoreAllMocks());
 
-  it("shows blocked state and retries only after an explicit click", async () => {
+  it("keeps retry and explicit key re-entry as separate blocked-state actions", async () => {
     const provider = {
       id: "provider-blocked",
       name: "Blocked provider",
@@ -45,6 +45,9 @@ describe("provider credential denial", () => {
       if (url.endsWith("/credential/retry")) {
         return response({ credential_status: "available", has_api_key: true });
       }
+      if (url.endsWith("/api/providers/provider-blocked/models")) {
+        return response({ models: [] });
+      }
       if (url.includes("/api/providers")) {
         return response({ providers: [provider], default_provider_id: provider.id });
       }
@@ -58,7 +61,9 @@ describe("provider credential denial", () => {
       return Promise.resolve({ ok: false, status: 404, text: () => Promise.resolve("") } as Response);
     });
 
-    render(<SettingsPage onClose={() => {}} onOpenProviderConfigSync={() => {}} />);
+    const { unmount } = render(
+      <SettingsPage onClose={() => {}} onOpenProviderConfigSync={() => {}} />,
+    );
 
     expect(await screen.findByText(/access blocked/)).toBeTruthy();
     expect(fetchMock.mock.calls.some(([url, init]) => (
@@ -72,5 +77,27 @@ describe("provider credential denial", () => {
         String(url).endsWith("/credential/retry") && init?.method === "POST"
       ))).toHaveLength(1);
     });
+
+    fireEvent.click(screen.getByRole("button", { name: "Re-enter key" }));
+
+    expect(await screen.findByText(/stored API key cannot be accessed/i)).toBeTruthy();
+    const keyInput = screen.getByLabelText("OPENAI_API_KEY");
+    const saveButton = screen.getByRole("button", { name: "Save changes" });
+    expect((saveButton as HTMLButtonElement).disabled).toBe(true);
+
+    fireEvent.change(keyInput, { target: { value: "replacement-key" } });
+    expect((saveButton as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.click(saveButton);
+
+    await waitFor(() => {
+      const patch = fetchMock.mock.calls.find(([url, init]) => (
+        String(url).endsWith("/api/providers/provider-blocked") && init?.method === "PATCH"
+      ));
+      expect(patch).toBeTruthy();
+      expect(JSON.parse(String(patch?.[1]?.body))).toMatchObject({
+        api_key: "replacement-key",
+      });
+    });
+    unmount();
   });
 });

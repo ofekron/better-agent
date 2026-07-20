@@ -27,7 +27,11 @@ import provider_openai  # noqa: E402
 import provider_credentials  # noqa: E402
 import models  # noqa: E402
 from keychain_names import LEGACY_SERVICE, PRIMARY_SERVICE  # noqa: E402
-from provider_credentials import CANONICAL_PROVIDER_SERVICE, LEGACY_FLAT_ACCOUNT  # noqa: E402
+from provider_credentials import (  # noqa: E402
+    CANONICAL_PROVIDER_SERVICE,
+    LEGACY_CANONICAL_PROVIDER_SERVICE,
+    LEGACY_FLAT_ACCOUNT,
+)
 
 
 def _backend_request(session, op: str, provider_id: str) -> dict:
@@ -82,14 +86,15 @@ def test_legacy_credential_migrates_before_cleanup_and_survives_restart() -> Non
             "status": "available",
             "value": "legacy-secret",
         }
-        assert events[:4] == [
+        assert events[:5] == [
             ("get", CANONICAL_PROVIDER_SERVICE),
+            ("legacy_get", LEGACY_CANONICAL_PROVIDER_SERVICE),
             ("legacy_get", PRIMARY_SERVICE),
             ("store", CANONICAL_PROVIDER_SERVICE),
             ("get", CANONICAL_PROVIDER_SERVICE),
         ]
         first_delete = events.index(("legacy_delete", PRIMARY_SERVICE))
-        assert first_delete > 3
+        assert first_delete > 4
 
         session.stop()
         session = broker.open_session()
@@ -167,6 +172,60 @@ def test_canonical_denial_never_attempts_legacy_recovery() -> None:
     finally:
         broker.clear()
         provider_credentials.oskeychain.native_get = real_get
+
+
+def test_explicit_reentry_replaces_blocked_legacy_canonical_entry() -> None:
+    provider_id = "provider-reentry"
+    account = f"provider:{provider_id}"
+    values: dict[tuple[str, str], str] = {}
+    events: list[tuple[str, str]] = []
+    real_get = provider_credentials.oskeychain.native_get
+    real_store = provider_credentials.oskeychain.native_store
+    real_delete = provider_credentials.oskeychain.native_delete
+
+    def get(service: str, requested_account: str):
+        events.append(("get", service))
+        if service == LEGACY_CANONICAL_PROVIDER_SERVICE:
+            raise RuntimeError("legacy ACL denied")
+        return values.get((service, requested_account))
+
+    def store(service: str, requested_account: str, value: str) -> None:
+        events.append(("store", service))
+        values[(service, requested_account)] = value
+
+    def delete(service: str, _requested_account: str) -> None:
+        events.append(("delete", service))
+        if service == LEGACY_CANONICAL_PROVIDER_SERVICE:
+            raise RuntimeError("legacy ACL denied")
+
+    provider_credentials.oskeychain.native_get = get
+    provider_credentials.oskeychain.native_store = store
+    provider_credentials.oskeychain.native_delete = delete
+    broker = credential_session.ProviderCredentialBroker()
+    try:
+        assert broker.handle({
+            "op": "read",
+            "provider_id": provider_id,
+            "request_id": "3" * 32,
+        }) == {"status": "blocked"}
+        assert broker.handle({
+            "op": "store",
+            "provider_id": provider_id,
+            "request_id": "4" * 32,
+            "value": "replacement-secret",
+        }) == {"status": "available"}
+        assert values[(CANONICAL_PROVIDER_SERVICE, account)] == "replacement-secret"
+        assert ("store", LEGACY_CANONICAL_PROVIDER_SERVICE) not in events
+        assert broker.handle({
+            "op": "read",
+            "provider_id": provider_id,
+            "request_id": "5" * 32,
+        }) == {"status": "available", "value": "replacement-secret"}
+    finally:
+        broker.clear()
+        provider_credentials.oskeychain.native_get = real_get
+        provider_credentials.oskeychain.native_store = real_store
+        provider_credentials.oskeychain.native_delete = real_delete
 
 
 def test_flat_credential_migrates_inside_broker_authority() -> None:
@@ -304,6 +363,7 @@ if __name__ == "__main__":
     test_legacy_credential_migrates_before_cleanup_and_survives_restart()
     test_failed_canonical_verification_never_cleans_legacy()
     test_canonical_denial_never_attempts_legacy_recovery()
+    test_explicit_reentry_replaces_blocked_legacy_canonical_entry()
     test_flat_credential_migrates_inside_broker_authority()
     test_api_key_provider_fails_before_runtime_env_without_broker()
     test_broker_death_blocks_direct_http_consumers_before_network()

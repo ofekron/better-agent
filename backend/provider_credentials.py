@@ -7,7 +7,8 @@ from keychain_names import LEGACY_SERVICE, PRIMARY_SERVICE, service_names
 
 logger = logging.getLogger(__name__)
 
-CANONICAL_PROVIDER_SERVICE = "better-agent-provider-credentials-v2"
+CANONICAL_PROVIDER_SERVICE = "better-agent-provider-credentials-v3"
+LEGACY_CANONICAL_PROVIDER_SERVICE = "better-agent-provider-credentials-v2"
 LEGACY_FLAT_ACCOUNT = "anthropic-api-key"
 
 
@@ -63,7 +64,10 @@ class ProviderCredentialStore:
             oskeychain.native_delete(service, LEGACY_FLAT_ACCOUNT)
 
     def _migrate_legacy(self, provider_id: str, account: str) -> str | None:
-        for service in service_names(PRIMARY_SERVICE, LEGACY_SERVICE):
+        for service in (
+            LEGACY_CANONICAL_PROVIDER_SERVICE,
+            *service_names(PRIMARY_SERVICE, LEGACY_SERVICE),
+        ):
             value = _normalize(oskeychain.native_get(service, account))
             if not value:
                 continue
@@ -76,7 +80,10 @@ class ProviderCredentialStore:
         return None
 
     def _cleanup_legacy(self, provider_id: str, account: str) -> None:
-        for service in service_names(PRIMARY_SERVICE, LEGACY_SERVICE):
+        for service in (
+            LEGACY_CANONICAL_PROVIDER_SERVICE,
+            *service_names(PRIMARY_SERVICE, LEGACY_SERVICE),
+        ):
             try:
                 oskeychain.native_delete(service, account)
             except RuntimeError:

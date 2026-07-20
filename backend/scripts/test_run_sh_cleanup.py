@@ -12,6 +12,8 @@ RUN_WINDOWS = ROOT / "run_windows.bat"
 APP_ENTRY = ROOT / "backend" / "app_entry.py"
 MAIN = ROOT / "backend" / "main.py"
 BROWSER_SUPERVISOR = ROOT / "desktop" / "browser_backend_supervisor.py"
+LOCAL_CODESIGN = ROOT / "desktop" / "local_codesign.sh"
+CREDENTIAL_BUILD = ROOT / "desktop" / "build_credential_authority.sh"
 
 
 def check(name: str, ok: bool, failures: list[str]) -> None:
@@ -27,6 +29,8 @@ def main() -> int:
     app_entry_text = APP_ENTRY.read_text(encoding="utf-8")
     main_text = MAIN.read_text(encoding="utf-8")
     browser_supervisor_text = BROWSER_SUPERVISOR.read_text(encoding="utf-8")
+    local_codesign_text = LOCAL_CODESIGN.read_text(encoding="utf-8")
+    credential_build_text = CREDENTIAL_BUILD.read_text(encoding="utf-8")
 
     check(
         "launchctl bootout helper exists",
@@ -140,6 +144,30 @@ def main() -> int:
         "credential_backend_control start" in text
         and '> "$pid_file"' in text
         and 'BACKEND_PID="$(credential_backend_control' not in text,
+        failures,
+    )
+    check(
+        "macOS run.sh uses the signed Better Agent credential authority",
+        'CREDENTIAL_AUTHORITY="$DIR/desktop/dist/BetterAgentCredentialAuthority"' in text
+        and '"$DIR/desktop/build_credential_authority.sh" >/dev/null' in text
+        and '"$CREDENTIAL_AUTHORITY" \\' in text,
+        failures,
+    )
+    check(
+        "local credential authority signing is stable and least-privilege",
+        'IDENTIFIER="com.betteragent.app"' in local_codesign_text
+        and 'security find-identity -v -p codesigning' in local_codesign_text
+        and '-x -T /usr/bin/codesign' in local_codesign_text
+        and ' -A ' not in local_codesign_text
+        and 'codesign --verify --deep --strict' in local_codesign_text,
+        failures,
+    )
+    check(
+        "credential authority rebuilds when credential code changes",
+        '"$DIR/browser_backend_supervisor.py"' in credential_build_text
+        and '"$DIR/credential_session.py"' in credential_build_text
+        and '"$REPO/backend/provider_credentials.py"' in credential_build_text
+        and '"$REPO/backend/oskeychain.py"' in credential_build_text,
         failures,
     )
     check(

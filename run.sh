@@ -124,6 +124,7 @@ KC_SVC="better-agent"
 KC_LEGACY_SVC="better-claude"
 export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"
 PY="$DIR/backend/.venv/bin/python"
+CREDENTIAL_AUTHORITY="$DIR/desktop/dist/BetterAgentCredentialAuthority"
 DEFAULT_BACKEND_PORT=18765
 BACKEND_PORT="${BETTER_AGENT_BACKEND_PORT:-${BETTER_CLAUDE_BACKEND_PORT:-$DEFAULT_BACKEND_PORT}}"
 FRONTEND_PORT="${BETTER_AGENT_FRONTEND_PORT:-${BETTER_CLAUDE_FRONTEND_PORT:-5173}}"
@@ -461,11 +462,19 @@ start_credential_backend_supervisor() {
   CREDENTIAL_BACKEND_CONTROL_DIR="$(mktemp -d "/tmp/ba-bs.XXXXXX")"
   chmod 700 "$CREDENTIAL_BACKEND_CONTROL_DIR"
   CREDENTIAL_BACKEND_CONTROL="$CREDENTIAL_BACKEND_CONTROL_DIR/control.sock"
-  PYTHONPATH="$DIR:$DIR/backend:$DIR/desktop" "$PY" \
-    -m desktop.browser_backend_supervisor \
-    --control "$CREDENTIAL_BACKEND_CONTROL" \
-    --launcher-root "$DIR" \
-    --controller-pid "$$" &
+  if [ "$(uname -s)" = "Darwin" ]; then
+    "$DIR/desktop/build_credential_authority.sh" >/dev/null
+    "$CREDENTIAL_AUTHORITY" \
+      --control "$CREDENTIAL_BACKEND_CONTROL" \
+      --launcher-root "$DIR" \
+      --controller-pid "$$" &
+  else
+    PYTHONPATH="$DIR:$DIR/backend:$DIR/desktop" "$PY" \
+      -m desktop.browser_backend_supervisor \
+      --control "$CREDENTIAL_BACKEND_CONTROL" \
+      --launcher-root "$DIR" \
+      --controller-pid "$$" &
+  fi
   CREDENTIAL_BACKEND_SUPERVISOR_PID=$!
   while [ ! -S "$CREDENTIAL_BACKEND_CONTROL" ]; do
     if ! tracked_child_is_running "$CREDENTIAL_BACKEND_SUPERVISOR_PID"; then
