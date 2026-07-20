@@ -1,12 +1,6 @@
 #!/bin/bash
 # Build the Better Agent macOS desktop app:
-#   frontend build → PyInstaller → ad-hoc code-sign → .dmg
-#
-# Ad-hoc signing (`codesign --sign -`) is free and is enough to RUN the
-# app on Apple Silicon and on the machine that built it. A downloaded
-# copy would still hit Gatekeeper — for distribution to other people,
-# add Developer ID signing + notarization (needs an Apple Developer
-# account); that is intentionally out of scope here.
+#   frontend build → PyInstaller → local identity signing → .dmg
 
 set -euo pipefail
 
@@ -48,8 +42,11 @@ if [ ! -d "$APP" ]; then
   exit 1
 fi
 
-echo "==> Ad-hoc code-signing the app"
-codesign --force --deep --sign - "$APP"
+echo "==> Building the credential authority"
+"$DIR/build_credential_authority.sh" >/dev/null
+
+echo "==> Signing with the stable local Better Agent identity"
+"$DIR/local_codesign.sh" sign "$APP"
 
 echo "==> Building the .dmg"
 DMG="$DIR/dist/BetterAgent.dmg"

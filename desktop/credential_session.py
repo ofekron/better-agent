@@ -83,8 +83,6 @@ class ProviderCredentialBroker:
         return {"status": "missing"}
 
     def _store(self, provider_id: str, value: str) -> dict[str, str]:
-        if self._states.get(provider_id, ("unknown", ""))[0] == "blocked":
-            return {"status": "blocked"}
         try:
             self._credential_store.store(provider_id, value)
         except RuntimeError:

@@ -110,7 +110,7 @@ exe = EXE(                                               # noqa: F821
     name="Better Agent",
     console=False,          # windowed app — no terminal
     target_arch=None,       # build for the host architecture
-    codesign_identity=None,  # ad-hoc signed by build_macos.sh
+    codesign_identity=None,  # signed by desktop/local_codesign.sh
 )
 coll = COLLECT(                                          # noqa: F821
     exe,

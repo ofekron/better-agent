@@ -2492,14 +2492,24 @@ function ProvidersSettingsSection({
               </div>
               <div className="provider-row-actions">
                 {p.mode === "api_key" && credentialStatus === "blocked" && (
-                  <button
-                    type="button"
-                    className="btn-warning provider-credential-retry"
-                    disabled={busy}
-                    onClick={() => onRetryCredential(p)}
-                  >
-                    {t('backendUnavailable.retry')}
-                  </button>
+                  <>
+                    <button
+                      type="button"
+                      className="btn-warning provider-credential-retry"
+                      disabled={busy}
+                      onClick={() => onRetryCredential(p)}
+                    >
+                      {t('backendUnavailable.retry')}
+                    </button>
+                    <button
+                      type="button"
+                      className="btn-secondary"
+                      disabled={busy}
+                      onClick={() => onEdit(p)}
+                    >
+                      {t('setup.apiKeyReenter')}
+                    </button>
+                  </>
                 )}
                 {!isActive && !isSuspended && (
                   <button
@@ -3033,6 +3043,7 @@ function ProviderForm({
   providerId,
   initial,
   initialHasKey,
+  credentialBlocked = false,
   onClose,
   onBack,
   onSubmit,
@@ -3051,6 +3062,7 @@ function ProviderForm({
     suspended?: boolean;
   };
   initialHasKey: boolean;
+  credentialBlocked?: boolean;
   onClose: () => void;
   onBack: () => void;
   onSubmit: (payload: FormPayload) => Promise<void>;
@@ -3258,12 +3270,18 @@ function ProviderForm({
           <div className="setup-fields">
             <div className="setup-field">
               <label>{t(apiEnvCopy.keyLabelKey)}</label>
+              {credentialBlocked && (
+                <div className="setup-error">{t('setup.apiKeyBlockedReentryHint')}</div>
+              )}
               <input
                 type="password"
+                aria-label={t(apiEnvCopy.keyLabelKey)}
                 value={apiKey}
                 onChange={(e) => setApiKey(e.target.value)}
                 placeholder={
-                  initialHasKey
+                  credentialBlocked
+                    ? t('setup.apiKeyReenterPlaceholder')
+                    : initialHasKey
                     ? t('setup.apiKeyPlaceholderKeep')
                     : t(apiEnvCopy.keyPlaceholderKey)
                 }
@@ -3434,7 +3452,7 @@ function ProviderForm({
         <button
           className="setup-save-btn"
           onClick={submit}
-          disabled={submitting}
+          disabled={submitting || (credentialBlocked && !apiKey)}
         >
           {submitting
             ? t('setup.saving')
@@ -3506,7 +3524,10 @@ function EditProvider({
         mode="edit"
         providerId={provider.id}
         initial={provider}
-        initialHasKey={provider.credential_status !== "missing"}
+        initialHasKey={
+          provider.credential_status !== "missing" && provider.credential_status !== "blocked"
+        }
+        credentialBlocked={provider.credential_status === "blocked"}
         onClose={onClose}
         onBack={onBack}
         onSubmit={onSubmit}
