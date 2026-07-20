@@ -232,6 +232,7 @@ class RunState:
 # ClaudeProvider — `Provider` impl that drives Anthropic's claude CLI
 # ============================================================================
 class ClaudeProvider(Provider):
+    uses_managed_api_key = True
     """Spawns detached `runner.py` subprocesses (which use the
     `claude_agent_sdk` in-process), one-shot `claude -p` invocations,
     and `claude --rewind-files` invocations — all with env threaded
@@ -280,6 +281,7 @@ class ClaudeProvider(Provider):
         provider-config edit (which atomically swaps the record dict)
         can't expose this caller to a half-replaced state.
         """
+        self.require_runtime_credential()
         env = os.environ.copy()
         home = user_home()
         env["HOME"] = str(home)

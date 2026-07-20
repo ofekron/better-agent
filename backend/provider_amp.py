@@ -68,6 +68,7 @@ def fetch_amp_models() -> list[str]:
 
 
 class AmpProvider(GeminiProvider):
+    uses_managed_api_key = True
     """Sourcegraph Amp CLI provider. Fork is supported natively
     (`amp threads fork`); everything else is native-mode only: no
     in-process SDK MCP registration (manager mode), no mid-turn
@@ -90,6 +91,7 @@ class AmpProvider(GeminiProvider):
     supports_reasoning_effort: ClassVar[bool] = False
 
     def build_env(self) -> dict[str, str]:
+        self.require_runtime_credential()
         env = os.environ.copy()
         # Amp reads ~/.config/amp + AMP_API_KEY/AMP_URL. Clear Claude env
         # so a concurrently-configured Claude provider can't leak into

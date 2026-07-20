@@ -19,6 +19,7 @@ sys.path.insert(0, str(ROOT / "desktop"))
 sys.path.insert(0, str(ROOT / "backend"))
 
 import credential_session  # noqa: E402
+import provider_credentials  # noqa: E402
 
 
 def request(session, op: str, provider_id: str, value: str | None = None) -> dict:
@@ -65,9 +66,9 @@ def assert_unrelated_process_cannot_connect(session) -> None:
 
 
 def main() -> None:
-    real_get = credential_session.oskeychain.get
-    real_store = credential_session.oskeychain.store
-    real_delete = credential_session.oskeychain.delete
+    real_get = provider_credentials.oskeychain.native_get
+    real_store = provider_credentials.oskeychain.native_store
+    real_delete = provider_credentials.oskeychain.native_delete
     reads = 0
     stores = 0
     deletes = 0
@@ -86,7 +87,7 @@ def main() -> None:
             raise RuntimeError("blocked")
         return values.get((service, account))
 
-    credential_session.oskeychain.get = get
+    provider_credentials.oskeychain.native_get = get
     def store(
         service: str, account: str, value: str, *, reason: str | None = None,
     ) -> None:
@@ -103,8 +104,8 @@ def main() -> None:
             raise RuntimeError("blocked")
         values.pop((service, account), None)
 
-    credential_session.oskeychain.store = store
-    credential_session.oskeychain.delete = delete
+    provider_credentials.oskeychain.native_store = store
+    provider_credentials.oskeychain.native_delete = delete
     broker = credential_session.ProviderCredentialBroker()
     session = broker.open_session()
     session.start()
@@ -152,9 +153,9 @@ def main() -> None:
 
         blocked = False
         assert request(session, "retry", "provider-1") == {"status": "missing"}
-        assert reads == 3
+        assert reads == 4
         assert request(session, "read", "provider-1") == {"status": "missing"}
-        assert reads == 3
+        assert reads == 4
 
         assert request(session, "store", "provider-1", "replacement") == {
             "status": "available"
@@ -163,14 +164,14 @@ def main() -> None:
             "status": "available",
             "value": "replacement",
         }
-        assert reads == 3
+        assert reads == 5
         assert request(session, "delete", "provider-1") == {"status": "missing"}
     finally:
         session.stop()
         broker.clear()
-        credential_session.oskeychain.get = real_get
-        credential_session.oskeychain.store = real_store
-        credential_session.oskeychain.delete = real_delete
+        provider_credentials.oskeychain.native_get = real_get
+        provider_credentials.oskeychain.native_store = real_store
+        provider_credentials.oskeychain.native_delete = real_delete
     assert broker._states == {}
     shutil.rmtree(TEST_HOME)
     print("OK: desktop credential session")

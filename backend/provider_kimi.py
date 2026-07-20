@@ -137,6 +137,7 @@ class KimiProvider(GeminiProvider):
     supports_reasoning_effort: ClassVar[bool] = False
 
     def build_env(self) -> dict[str, str]:
+        self.require_runtime_credential()
         env = os.environ.copy()
         # Kimi reads ~/.kimi and KIMI_* env vars natively; pass them
         # through. Clear Claude env so a concurrently-configured Claude

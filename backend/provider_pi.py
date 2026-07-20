@@ -164,6 +164,7 @@ class PiProvider(GeminiProvider):
     supports_headless_no_tools: ClassVar[bool] = True
 
     def build_env(self) -> dict[str, str]:
+        self.require_runtime_credential()
         env = os.environ.copy()
         # pi reads its own state from ~/.pi and provider API keys from env.
         # Clear Claude-harness env so a concurrently-configured Claude

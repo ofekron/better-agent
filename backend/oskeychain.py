@@ -117,3 +117,40 @@ def delete(service: str, account: str) -> None:
         raise RuntimeError("OS credential delete timed out") from None
     if proc.returncode not in {0, 44}:
         raise RuntimeError("OS credential delete was denied or unavailable")
+
+
+def native_get(service: str, account: str) -> Optional[str]:
+    if sys.platform != "darwin":
+        return get(service, account)
+    from keyring.backends.macOS import api
+
+    try:
+        return api.find_generic_password(None, service, account, not_found_ok=True)
+    except api.Error:
+        raise RuntimeError("native OS credential read was denied or unavailable") from None
+
+
+def native_store(service: str, account: str, value: str) -> None:
+    if sys.platform != "darwin":
+        store(service, account, value)
+        return
+    from keyring.backends.macOS import api
+
+    try:
+        api.set_generic_password(None, service, account, value)
+    except api.Error:
+        raise RuntimeError("native OS credential write was denied or unavailable") from None
+
+
+def native_delete(service: str, account: str) -> None:
+    if sys.platform != "darwin":
+        delete(service, account)
+        return
+    from keyring.backends.macOS import api
+
+    try:
+        api.delete_generic_password(None, service, account)
+    except api.NotFound:
+        pass
+    except api.Error:
+        raise RuntimeError("native OS credential delete was denied or unavailable") from None

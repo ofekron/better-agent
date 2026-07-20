@@ -165,6 +165,7 @@ def _dedupe_preserve_order(seq: list[str]) -> list[str]:
 
 
 class QwenProvider(GeminiProvider):
+    uses_managed_api_key = True
     """Qwen Code CLI provider. Native-mode only: like Gemini, qwen's CLI
     has no non-interactive fork primitive, no in-process SDK MCP
     registration (manager mode), no mid-turn steering, and no
@@ -194,6 +195,7 @@ class QwenProvider(GeminiProvider):
     # (AUTH_ENV_MAPPINGS in the CLI source).
     # ------------------------------------------------------------------
     def build_env(self) -> dict[str, str]:
+        self.require_runtime_credential()
         env = os.environ.copy()
         for key in (
             "CLAUDE_CONFIG_DIR",

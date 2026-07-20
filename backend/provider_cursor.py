@@ -147,6 +147,7 @@ class CursorProvider(GeminiProvider):
     supports_reasoning_effort: ClassVar[bool] = False
 
     def build_env(self) -> dict[str, str]:
+        self.require_runtime_credential()
         env = os.environ.copy()
         # cursor-agent authenticates via its own login store or
         # CURSOR_API_KEY (passed through untouched). Clear Claude env so a

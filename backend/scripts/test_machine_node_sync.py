@@ -471,13 +471,9 @@ def test_export_provider_sync_state_includes_only_selected_api_keys() -> None:
 def test_import_provider_sync_writes_api_key_before_default_selection() -> None:
     original_write = config_store._write_api_key
     original_read = config_store._read_api_key
-    original_uncached = config_store._read_api_key_uncached
     keys: dict[str, str] = {}
     config_store._write_api_key = lambda provider_id, api_key: keys.__setitem__(provider_id, api_key)  # type: ignore[assignment]
     config_store._read_api_key = lambda provider_id: keys.get(provider_id, "")  # type: ignore[assignment]
-    config_store._read_api_key_uncached = lambda _provider_id: (_ for _ in ()).throw(  # type: ignore[assignment]
-        AssertionError("provider sync must not bypass the credential session")
-    )
     try:
         result = config_store.import_provider_sync_state({
             "default_provider_id": "api-provider",
@@ -497,7 +493,6 @@ def test_import_provider_sync_writes_api_key_before_default_selection() -> None:
     finally:
         config_store._write_api_key = original_write  # type: ignore[assignment]
         config_store._read_api_key = original_read  # type: ignore[assignment]
-        config_store._read_api_key_uncached = original_uncached  # type: ignore[assignment]
 
     assert keys == {"api-provider": "selected-secret"}
     assert result["provider_api_key_count"] == 1

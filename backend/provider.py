@@ -414,8 +414,13 @@ class ProviderSuspendedError(RuntimeError):
     """Raised when a provider is suspended and may not run work."""
 
 
+class ProviderCredentialError(RuntimeError):
+    """Raised before spawn when provider credentials are not authoritative."""
+
+
 class Provider(ABC):
     KIND: ClassVar[str]
+    uses_managed_api_key: ClassVar[bool] = False
 
     # ------------------------------------------------------------------
     # Capabilities — overridden per-provider. INVARIANT: every CLI-level
@@ -523,6 +528,29 @@ class Provider(ABC):
                 f"provider {self.id} is suspended; cannot {action}"
             )
         self.suspended = False
+
+    def require_runtime_credential(self) -> None:
+        record = self.record
+        if record.get("mode") != "api_key" or not self.uses_managed_api_key:
+            return
+        from provider_env import is_ollama_base_url
+        if is_ollama_base_url(str(record.get("base_url") or "")) and record.get("api_key"):
+            return
+        if record.get("_credential_authoritative") is not True:
+            raise ProviderCredentialError(
+                f"provider {self.id} credential is not supervisor-authoritative"
+            )
+        try:
+            status = config_store.provider_credential_status(self.id)
+        except (EOFError, OSError, RuntimeError):
+            raise ProviderCredentialError(
+                f"provider {self.id} credential authority is unavailable"
+            ) from None
+        if status == "available" and record.get("api_key"):
+            return
+        raise ProviderCredentialError(
+            f"provider {self.id} credential is {status}; cannot start provider process"
+        )
 
     # ------------------------------------------------------------------
     # Env — base for every CLI subprocess this provider spawns.

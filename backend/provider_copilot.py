@@ -246,6 +246,7 @@ class CopilotProvider(GeminiProvider):
     supports_reasoning_effort: ClassVar[bool] = False
 
     def build_env(self) -> dict[str, str]:
+        self.require_runtime_credential()
         env = os.environ.copy()
         # Copilot reads ~/.copilot by default (overridable via --config-dir
         # in the runner). Clear Claude env so a concurrently-configured
