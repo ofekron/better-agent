@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState, useCallback } from "react";
 import { LayoutGroup, motion, MotionConfig, useReducedMotion } from "framer-motion";
-import { mergeMessagesSorted, oldestNumericSeq } from "../utils/mergeMessages";
+import { mergeMessagesSorted } from "../utils/mergeMessages";
 import { useThrottledValue } from "../hooks/useThrottledValue";
 import { isGroupRunning } from "../utils/groupRunning";
 import { isUnanchoredRun } from "../utils/runTargets";
@@ -512,9 +512,11 @@ interface Props {
   sendTarget?: "worker" | "supervisor";
   onSendTargetChange?: (target: "worker" | "supervisor") => void;
   /** Load older messages on scroll-up. Takes session id + beforeSeq. */
-  onLoadOlderMessages?: (sessionId: string, beforeSeq: number) => Promise<void>;
+  onLoadOlderMessages?: (sessionId: string, beforeSeq: number) => Promise<boolean>;
   /** Whether the focused session has older messages to load. */
   hasOlderMessages?: boolean;
+  /** Backend-owned cursor for the next older-message page. */
+  oldestLoadedSeq?: number | null;
   /** True while REST fetch for the session is in flight. */
   sessionLoading?: boolean;
   /** Set when the session REST fetch failed — renders an error state with retry. */
@@ -642,6 +644,7 @@ export function Chat({
   onSendTargetChange,
   onLoadOlderMessages,
   hasOlderMessages,
+  oldestLoadedSeq,
   sessionLoading = false,
   sessionLoadError = null,
   onRetrySessionLoad,
@@ -715,23 +718,22 @@ export function Chat({
 
   const loadOlderOpId = `chat:loadOlder:${session?.id ?? "none"}`;
   const { inflight: loadingOlder } = useOpProgress(loadOlderOpId);
+  const canLoadOlderMessages = !!hasOlderMessages && typeof oldestLoadedSeq === "number";
 
   const loadOlderFn = useCallback(async () => {
-    if (!onLoadOlderMessages || !session?.id) return;
-    const oldest = oldestNumericSeq(messages);
-    if (oldest !== null && oldest > 0) {
-      await onLoadOlderMessages(session.id, oldest);
-    }
-  }, [onLoadOlderMessages, session?.id, messages]);
+    if (!onLoadOlderMessages || !session?.id || typeof oldestLoadedSeq !== "number") return;
+    return onLoadOlderMessages(session.id, oldestLoadedSeq);
+  }, [onLoadOlderMessages, oldestLoadedSeq, session?.id]);
 
   const {
     scrollRef,
     handleScroll: scrollLoadHandler,
     triggerLoadOlder: triggerChatLoadOlder,
     justPrepended,
+    loadError: loadOlderError,
   } = useScrollLoadOlder(
     loadOlderOpId,
-    !!hasOlderMessages,
+    canLoadOlderMessages,
     onLoadOlderMessages ? loadOlderFn : undefined,
   );
   const [showRaw, setShowRaw] = useState(false);
@@ -1303,7 +1305,7 @@ export function Chat({
       >
         {headerNode}
 
-        {hasOlderMessages && !sessionLoading && (
+        {canLoadOlderMessages && !sessionLoading && (
           <div className="load-older-wrapper">
             {loadingOlder ? (
               <div className="load-older-spinner">
@@ -1311,6 +1313,13 @@ export function Chat({
                 <span className="load-older-dots" aria-hidden="true">
                   <i /><i /><i />
                 </span>
+              </div>
+            ) : loadOlderError ? (
+              <div className="load-older-error" role="alert">
+                <span>{t("chat.loadOlderFailed")}</span>
+                <button className="load-older-link" onClick={triggerChatLoadOlder}>
+                  {t("chat.sessionLoadRetry")}
+                </button>
               </div>
             ) : (
               <button className="load-older-link" onClick={triggerChatLoadOlder}>

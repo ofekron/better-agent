@@ -11,6 +11,7 @@ import os
 import symtable
 import sys
 import time
+from typing import Any, Callable, Coroutine
 from unittest import mock
 from pathlib import Path
 
@@ -4505,7 +4506,111 @@ def test_startup_extension_package_resolution_stays_off_loop() -> None:
     assert "\n            spec = requirement_context.get_requirements_processor_spec()" not in fn_source
 
 
+def _assert_event_loop_progresses_while_blocked(
+    run: Callable[[], Coroutine[Any, Any, None]],
+    entered: threading.Event,
+    release: threading.Event,
+) -> None:
+    loop_progressed = threading.Event()
+    observed_progress: list[bool] = []
+
+    def release_after_observation() -> None:
+        assert entered.wait(timeout=1)
+        observed_progress.append(loop_progressed.wait(timeout=0.5))
+        release.set()
+
+    async def exercise() -> None:
+        task = asyncio.create_task(run())
+        await asyncio.sleep(0)
+        loop_progressed.set()
+        await task
+
+    observer = threading.Thread(target=release_after_observation)
+    observer.start()
+    try:
+        asyncio.run(exercise())
+    finally:
+        release.set()
+        observer.join(timeout=1)
+    assert observed_progress == [True]
+
+
+def test_model_refresh_credential_lookup_does_not_block_event_loop() -> None:
+    import config_store
+    import models
+
+    entered = threading.Event()
+    release = threading.Event()
+
+    def blocking_provider_lookup(_provider_id: str) -> None:
+        entered.set()
+        release.wait()
+        return None
+
+    real_suspended = config_store.provider_suspended
+    real_lookup = models.get_provider_with_key
+    config_store.provider_suspended = lambda _provider_id: False
+    models.get_provider_with_key = blocking_provider_lookup
+    try:
+        _assert_event_loop_progresses_while_blocked(
+            lambda: models.refresh_one("blocked-credential"), entered, release,
+        )
+    finally:
+        config_store.provider_suspended = real_suspended
+        models.get_provider_with_key = real_lookup
+
+
+def test_model_refresh_cache_commit_does_not_block_event_loop() -> None:
+    import models
+
+    entered = threading.Event()
+    release = threading.Event()
+
+    def blocking_commit(_provider_id: str, _fetched: list[str]) -> None:
+        entered.set()
+        release.wait()
+        return None
+
+    real_preflight = models._resolve_refresh_preflight
+    real_commit = models._commit_refresh_result
+    models._resolve_refresh_preflight = lambda _provider_id: lambda: ["model"]
+    models._commit_refresh_result = blocking_commit
+    try:
+        _assert_event_loop_progresses_while_blocked(
+            lambda: models.refresh_one("blocked-cache"), entered, release,
+        )
+    finally:
+        models._resolve_refresh_preflight = real_preflight
+        models._commit_refresh_result = real_commit
+
+
+def test_model_refresh_due_discovery_does_not_block_event_loop() -> None:
+    import models
+
+    entered = threading.Event()
+    release = threading.Event()
+
+    def blocking_due(_threshold_seconds: int) -> list[str]:
+        entered.set()
+        release.wait()
+        return []
+
+    async def consume_due() -> None:
+        async for _item in models.refresh_all_due():
+            pass
+
+    real_due = models._due_provider_ids
+    models._due_provider_ids = blocking_due
+    try:
+        _assert_event_loop_progresses_while_blocked(consume_due, entered, release)
+    finally:
+        models._due_provider_ids = real_due
+
+
 if __name__ == "__main__":
+    test_model_refresh_credential_lookup_does_not_block_event_loop()
+    test_model_refresh_cache_commit_does_not_block_event_loop()
+    test_model_refresh_due_discovery_does_not_block_event_loop()
     test_hook_runner_loads_config_off_loop()
     test_hot_path_warning_logs_are_off_loop()
     test_websocket_json_serializes_off_loop()

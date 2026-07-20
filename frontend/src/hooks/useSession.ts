@@ -19,6 +19,11 @@ import { useLocalStorage } from "./useLocalStorage";
 import { sortSessionsForList } from "../lib/sessionSort";
 import { sessionRegistry, statusRankForRow } from "../lib/sessionRegistry";
 import { subscribeMany } from "../lib/eventBus";
+import {
+  applyOlderMessagePage,
+  parseOlderMessagePage,
+} from "../lib/messagePagination";
+import { SingleFlight } from "../lib/singleFlight";
 
 export { sortSessionsForList };
 
@@ -781,6 +786,7 @@ export function useSession(authStatus?: string) {
   const pendingReplayRef = useRef<
     { sessionId: string; messages: ChatMessage[] }[]
   >([]);
+  const olderMessageRequestsRef = useRef(new SingleFlight<string>());
   const sessionTreeCacheRef = useRef<Map<string, Session>>(new Map());
   const sessionTreeRootByNodeRef = useRef<Map<string, string>>(new Map());
 
@@ -2720,31 +2726,26 @@ export function useSession(authStatus?: string) {
   /** Load older messages for a session node (scroll-up pagination).
    * Prepends them to the node's messages array and updates pagination. */
   const loadOlderMessages = useCallback(
-    async (sessionId: string, beforeSeq: number) => {
-      const res = await fetch(
-        `${API}/api/sessions/${sessionId}/messages?before_seq=${beforeSeq}&exchange_count=${exchangePageSize}`
-      );
-      if (!res.ok) return;
-      const data = await res.json();
-      const older: ChatMessage[] = data.messages || [];
-      if (older.length === 0) return;
-      setCurrentSession((prev) => {
-        if (!prev) return prev;
-        return updateNodeById(prev, sessionId, (node) => {
-          const existing = node.messages || [];
-          const oldest = older[0]?.seq ?? null;
-          return {
-            ...node,
-            messages: [...older, ...existing],
-            pagination: {
-              total_messages: data.total_messages,
-              oldest_loaded_seq: oldest,
-              has_older: data.has_older,
-            },
-          };
+    (sessionId: string, beforeSeq: number) =>
+      olderMessageRequestsRef.current.run(`${sessionId}:${beforeSeq}`, async () => {
+        const res = await fetch(
+          `${API}/api/sessions/${encodeURIComponent(sessionId)}/messages?before_seq=${beforeSeq}&exchange_count=${exchangePageSize}`
+        );
+        if (!res.ok) throw await responseError(res);
+        const page = parseOlderMessagePage(await res.json());
+        const currentNode = currentSessionRef.current
+          ? findNode(currentSessionRef.current, sessionId)
+          : null;
+        const prepended = currentNode?.pagination?.oldest_loaded_seq === beforeSeq
+          && page.messages.length > 0;
+        setCurrentSession((prev) => {
+          if (!prev) return prev;
+          return updateNodeById(prev, sessionId, (node) =>
+            applyOlderMessagePage(node, beforeSeq, page)
+          );
         });
-      });
-    },
+        return prepended;
+      }),
     [exchangePageSize]
   );
 
