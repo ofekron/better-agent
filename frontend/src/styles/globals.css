@@ -19512,6 +19512,16 @@ button.progress-inflight {
   color: var(--accent, #a896ff);
   text-decoration: none;
 }
+.routine-output-open:is(button) {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  font: inherit;
+}
+.routine-output-open:disabled {
+  cursor: wait;
+  opacity: 0.55;
+}
 .routine-output-preview {
   display: block;
   width: 100%;

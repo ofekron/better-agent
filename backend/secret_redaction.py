@@ -7,6 +7,9 @@ import logging
 _QUERY_SECRET_RE = re.compile(
     r"(?i)([?&](?:token|access_token|refresh_token|ticket)=)[^&#\s]+"
 )
+_PATH_SECRET_RE = re.compile(
+    r"(?i)(/api/(?:file/preview|task-output/preview)/)[^/?\s]+"
+)
 _BEARER_RE = re.compile(r"(?i)(\bBearer\s+)[A-Za-z0-9._~+/=-]+")
 _NAMED_SECRET_RE = re.compile(
     r"(?i)(\b(?:token|access_token|refresh_token|ticket)\s*[:=]\s*)[^\s,;]+"
@@ -15,6 +18,7 @@ _NAMED_SECRET_RE = re.compile(
 
 def redact_secrets(value: str) -> str:
     redacted = _QUERY_SECRET_RE.sub(r"\1[REDACTED]", value)
+    redacted = _PATH_SECRET_RE.sub(r"\1[REDACTED]", redacted)
     redacted = _BEARER_RE.sub(r"\1[REDACTED]", redacted)
     return _NAMED_SECRET_RE.sub(r"\1[REDACTED]", redacted)
 
