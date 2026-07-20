@@ -2144,10 +2144,9 @@ function AppMain({
       }
     }
   }, [offlineQueue.queue, restoreOfflineSession]);
-  // Pending investigation auto-submit: stored when a session is created with
-  // investigation context. A useEffect watches for the target session to be
-  // the current session AND the WS to be connected, then submits the prompt.
-  const pendingInvestigationRef = useRef<{
+  // Pending initial prompt: a useEffect submits only after the target session
+  // is both the selected render tree and the active WS subscription target.
+  const pendingInitialPromptRef = useRef<{
     sessionId: string;
     prompt: string;
     images: ImagePayload[];
@@ -2159,7 +2158,7 @@ function AppMain({
   } | null>(null);
 
   const sendInitialPromptToSession = useCallback(
-    (pending: NonNullable<typeof pendingInvestigationRef.current>) => {
+    (pending: NonNullable<typeof pendingInitialPromptRef.current>) => {
       const clientId = `investigate-${Date.now()}`;
       const pendingMsg: ChatMessage = {
         id: clientId,
@@ -2198,21 +2197,23 @@ function AppMain({
     [sendMessage, setPendingForSession, appendPendingForSession],
   );
 
-  // Reliable investigation auto-submit: waits for the WS to be connected AND
-  // the target session to be the current session before sending. Retries
-  // automatically on reconnect; cleared on send or if the user navigates away.
+  // Retries automatically on reconnect; clears on send or navigation away.
   useEffect(() => {
-    const pending = pendingInvestigationRef.current;
+    const pending = pendingInitialPromptRef.current;
     if (!pending) return;
     if (!connected) return;
     if (currentSession?.id !== pending.sessionId) return;
-    // Session is active and WS is open — safe to send.
-    pendingInvestigationRef.current = null;
+    if (wsTargetSessionId !== pending.sessionId) return;
+    pendingInitialPromptRef.current = null;
     if (!sendInitialPromptToSession(pending)) {
-      // WS not actually open — roll back and keep pending for next trigger.
-      pendingInvestigationRef.current = pending;
+      pendingInitialPromptRef.current = pending;
     }
-  }, [connected, currentSession?.id, sendInitialPromptToSession]);
+  }, [
+    connected,
+    currentSession?.id,
+    sendInitialPromptToSession,
+    wsTargetSessionId,
+  ]);
 
   // Flush the durable offline-action backlog sequentially. Creation
   // actions use their client-generated session UUID as the backend id,
@@ -2413,16 +2414,16 @@ function AppMain({
     })();
   }, [connected, offlineQueue, createSession, persistDraftPatch, sendMessage, setPendingForSession, offlineRetryTick]);
 
-  // Clear stale pending investigation if the user navigates to a different
+  // Clear a stale pending initial prompt if the user navigates to a different
   // session and the pending target is no longer the current route. This
   // prevents the base64 image data from lingering in memory indefinitely.
   useEffect(() => {
-    const pending = pendingInvestigationRef.current;
+    const pending = pendingInitialPromptRef.current;
     if (!pending) return;
     // Clear when we're not on the pending target session (a different
     // session, or a non-session route like /machines).
     if (route.kind !== "session" || route.sessionId !== pending.sessionId) {
-      pendingInvestigationRef.current = null;
+      pendingInitialPromptRef.current = null;
     }
   }, [route]);
 
@@ -5714,9 +5715,19 @@ function AppMain({
             orchestrationMode: config.orchestrationMode,
             capabilityContexts: config.capabilityContexts,
           };
-          const promptAccepted = sendInitialPromptToSession(pending)
-            || queueInitialPromptForSession(session.id, config, initialPrompt, images, files);
-          if (!promptAccepted) return false;
+          if (action === "send-and-open") {
+            pendingInitialPromptRef.current = pending;
+          } else {
+            const promptAccepted = sendInitialPromptToSession(pending)
+              || queueInitialPromptForSession(
+                session.id,
+                config,
+                initialPrompt,
+                images,
+                files,
+              );
+            if (!promptAccepted) return false;
+          }
         }
         setNewSessionModalOpen(false);
         setInvestigationCtx(undefined);
@@ -6017,7 +6028,7 @@ function AppMain({
    * `handleAskChoose` and `handleAskCreateNew` so an Ask prompt's
    * attachments survive the hand-off to the picked / new session. Lives
    * here because both handlers also produce
-   * ImagePayload[] for `pendingInvestigationRef`; centralising the
+   * ImagePayload[] for `pendingInitialPromptRef`; centralising the
    * fetch keeps the conversion one place. */
   const fetchAskImage = useCallback(
     async (img: import("./types").MessageImage): Promise<import("./components/InputArea").PastedImage> => {
@@ -6077,7 +6088,7 @@ function AppMain({
    * producing turn (so the chosen row stays highlighted across reloads /
    * tabs / previous turns), then navigate to the chosen session and
    * auto-submit the original raw query + attached images via the same
-   * `pendingInvestigationRef` pattern the Investigate flow uses. The
+   * `pendingInitialPromptRef` pattern the Investigate flow uses. The
    * picked session's own model/cwd/mode wins. */
   const handleAskChoose = useCallback(
     async (
@@ -6109,7 +6120,7 @@ function AppMain({
           console.warn("ask choose: image hand-off failed", e);
         }
       }
-      pendingInvestigationRef.current = {
+      pendingInitialPromptRef.current = {
         sessionId: picked.id,
         prompt: trimmed,
         images,
@@ -6153,9 +6164,9 @@ function AppMain({
    * channel) AND the Ask agent's project suggestion (pre-fills the
    * project + machine pickers; user can change). The modal's create
    * handler routes to `handleCreateSessionFromModal`, which seeds
-   * `pendingInvestigationRef` with the new session id — and the
-   * existing effect at App.tsx:861 fires the prompt once the WS lands
-   * on the new session. */
+   * `pendingInitialPromptRef` with the new session id — and the
+   * shared pending-initial-prompt effect fires once the WS lands on the
+   * new session. */
   const handleAskCreateNew = useCallback(
     async (
       prompt: string,
