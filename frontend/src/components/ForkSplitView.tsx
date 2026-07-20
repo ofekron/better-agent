@@ -12,7 +12,7 @@ import { TurnGroup } from "./MessageBubble";
 import { buildThreadColorMap } from "../threadColors";
 import { useOpProgress } from "../progress/store";
 import { useViewport } from "../hooks/useViewport";
-import { mergeMessagesSorted, oldestNumericSeq } from "../utils/mergeMessages";
+import { mergeMessagesSorted } from "../utils/mergeMessages";
 import { useScrollLoadOlder } from "../hooks/useScrollLoadOlder";
 import { isUnanchoredRun } from "../utils/runTargets";
 import { providerNameForId } from "../utils/providerCache";
@@ -51,7 +51,7 @@ interface Props {
   onRetryStopped?: (assistantMessage: ChatMessage) => void;
   userDisplayName?: string | null;
   /** Load older messages for a pane. Keyed by session id. */
-  onLoadOlderMessages?: (sessionId: string, beforeSeq: number) => Promise<void>;
+  onLoadOlderMessages?: (sessionId: string, beforeSeq: number) => Promise<boolean>;
   /** Click handler for adversarial-sync agreed-text spans. The
    * overlay carries the two fork ids; App navigates the focused
    * pane to the supportive fork. */
@@ -141,14 +141,13 @@ export function ForkSplitView({
 
   // Scroll-triggered load-older for the shared region (root messages
   // above the fork point). Uses tree.pagination from the root node.
-  const sharedHasOlder = !!(tree.pagination?.has_older);
+  const sharedOldestLoadedSeq = tree.pagination?.oldest_loaded_seq;
+  const sharedHasOlder = !!tree.pagination?.has_older
+    && typeof sharedOldestLoadedSeq === "number";
   const sharedLoadOlderFn = useCallback(async () => {
-    if (!onLoadOlderMessages) return;
-    const oldest = oldestNumericSeq(sharedMessages);
-    if (oldest !== null && oldest > 0) {
-      await onLoadOlderMessages(tree.id, oldest);
-    }
-  }, [onLoadOlderMessages, tree.id, sharedMessages]);
+    if (!onLoadOlderMessages || typeof sharedOldestLoadedSeq !== "number") return;
+    return onLoadOlderMessages(tree.id, sharedOldestLoadedSeq);
+  }, [onLoadOlderMessages, sharedOldestLoadedSeq, tree.id]);
 
   const sharedOlderOpId = `messages:loadOlder:shared:${tree.id}`;
   const { inflight: sharedLoadingOlder } = useOpProgress(sharedOlderOpId);
@@ -156,6 +155,7 @@ export function ForkSplitView({
     scrollRef: sharedScrollRef,
     handleScroll: sharedScrollHandler,
     triggerLoadOlder: triggerSharedLoadOlder,
+    loadError: sharedLoadOlderError,
   } = useScrollLoadOlder(
     sharedOlderOpId,
     sharedHasOlder,
@@ -283,6 +283,13 @@ export function ForkSplitView({
           <div className="load-older-sentinel">
             {sharedLoadingOlder ? (
               <div className="load-older-spinner">{t("fork.loading")}</div>
+            ) : sharedLoadOlderError ? (
+              <div className="load-older-error" role="alert">
+                <span>{t("chat.loadOlderFailed")}</span>
+                <button className="load-older-link" onClick={triggerSharedLoadOlder}>
+                  {t("chat.sessionLoadRetry")}
+                </button>
+              </div>
             ) : (
               <button className="load-older-link" onClick={triggerSharedLoadOlder}>
                 {t("chat.loadOlderMessages")}
@@ -385,6 +392,9 @@ export function ForkSplitView({
           const isFocusedViewHidden = focusedViewActive && pane.id !== focusedViewPaneId;
           const isClosed = !!pane.fork_closed;
           const isRoot = pane.id === tree.id;
+          const paneOldestLoadedSeq = pane.pagination?.oldest_loaded_seq;
+          const paneHasOlder = !!pane.pagination?.has_older
+            && typeof paneOldestLoadedSeq === "number";
           return (
             <ForkPane
               key={pane.id}
@@ -410,17 +420,10 @@ export function ForkSplitView({
               onViewDiff={onViewDiff}
               onRetry={onRetry}
               onRetryStopped={onRetryStopped}
-              onLoadOlderMessages={
-                onLoadOlderMessages
-                  ? async () => {
-                      const oldest = oldestNumericSeq(msgs);
-                      if (oldest !== null && oldest > 0) {
-                        await onLoadOlderMessages(pane.id, oldest);
-                      }
-                    }
-                  : undefined
-              }
-              hasOlderMessages={pane.pagination?.has_older}
+              onLoadOlderMessages={onLoadOlderMessages && paneHasOlder
+                ? () => onLoadOlderMessages(pane.id, paneOldestLoadedSeq)
+                : undefined}
+              hasOlderMessages={paneHasOlder}
               advSyncOverlays={tree.adv_sync_overlays}
               onAdvSyncClick={onAdvSyncClick}
             />
@@ -451,7 +454,7 @@ interface PaneProps {
   onViewDiff?: (path: string, oldStr: string, newStr: string) => void;
   onRetry?: (message: ChatMessage) => void;
   onRetryStopped?: (assistantMessage: ChatMessage) => void;
-  onLoadOlderMessages?: () => Promise<void>;
+  onLoadOlderMessages?: () => Promise<boolean>;
   hasOlderMessages?: boolean;
   advSyncOverlays?: AdvSyncOverlay[];
   onAdvSyncClick?: (overlay: AdvSyncOverlay) => void;
@@ -486,7 +489,12 @@ function ForkPane({
   const loadOlderOpId = `messages:loadOlder:${pane.id}`;
   const { inflight: loadingOlder } = useOpProgress(loadOlderOpId);
 
-  const { scrollRef, handleScroll: handlePaneScroll, triggerLoadOlder: triggerPaneLoadOlder } = useScrollLoadOlder(
+  const {
+    scrollRef,
+    handleScroll: handlePaneScroll,
+    triggerLoadOlder: triggerPaneLoadOlder,
+    loadError: paneLoadOlderError,
+  } = useScrollLoadOlder(
     loadOlderOpId,
     !!hasOlderMessages,
     onLoadOlder,
@@ -595,6 +603,13 @@ function ForkPane({
           <div className="load-older-sentinel">
             {loadingOlder ? (
               <div className="load-older-spinner">{t("fork.loading")}</div>
+            ) : paneLoadOlderError ? (
+              <div className="load-older-error" role="alert">
+                <span>{t("chat.loadOlderFailed")}</span>
+                <button className="load-older-link" onClick={triggerPaneLoadOlder}>
+                  {t("chat.sessionLoadRetry")}
+                </button>
+              </div>
             ) : (
               <button className="load-older-link" onClick={triggerPaneLoadOlder}>
                 {t("chat.loadOlderMessages")}

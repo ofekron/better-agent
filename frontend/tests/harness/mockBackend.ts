@@ -486,6 +486,27 @@ export class MockBackend {
         .map((s) => sessionSummary(s));
       return { sessions };
     }
+    const olderMessagesMatch = path.match(
+      /^\/api\/sessions\/([^/]+)\/messages$/,
+    );
+    if (method === "GET" && olderMessagesMatch) {
+      const sessionId = decodeURIComponent(olderMessagesMatch[1]);
+      const session = this.state.sessions.find((s) => s.id === sessionId);
+      if (!session) return notFound();
+      const beforeSeq = Number.parseInt(query.before_seq ?? "", 10);
+      const older = (session.messages ?? []).filter(
+        (message) => typeof message.seq === "number" && message.seq < beforeSeq,
+      );
+      const oldestLoadedSeq = older.length > 0
+        ? Math.min(...older.map((message) => message.seq as number))
+        : null;
+      return {
+        messages: older,
+        has_older: false,
+        oldest_loaded_seq: oldestLoadedSeq,
+        total_messages: session.messages?.length ?? 0,
+      };
+    }
     const messageEventsMatch = path.match(
       /^\/api\/sessions\/([^/]+)\/messages\/([^/]+)\/events$/,
     );

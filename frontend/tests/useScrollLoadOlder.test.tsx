@@ -33,14 +33,16 @@ type Hook = ReturnType<typeof useScrollLoadOlder>;
 // mirrors the real Chat: the DOM grows from THROTTLED render data that can
 // land in a later commit than the state change that triggered the load.
 function Harness({
+  opId = "test-op",
   onLoadOlder,
   out,
 }: {
+  opId?: string;
   tick: number;
-  onLoadOlder: () => Promise<void>;
+  onLoadOlder: () => Promise<boolean | void>;
   out: { hook?: Hook };
 }) {
-  out.hook = useScrollLoadOlder("test-op", true, onLoadOlder);
+  out.hook = useScrollLoadOlder(opId, true, onLoadOlder);
   return <div ref={out.hook.scrollRef} data-testid="scroller" />;
 }
 
@@ -143,6 +145,51 @@ describe("useScrollLoadOlder", () => {
     // The fix restores position on this growth commit.
     expect(el.scrollTop).toBe(100);
     expect(out.hook!.justPrepended.current).toBe(true);
+
+    await m.unmount();
+  });
+
+  it("isolates late failures and scroll snapshots across operation ids", async () => {
+    const out: { hook?: Hook } = {};
+    const height = { value: 100 };
+    let rejectFirst!: (error: Error) => void;
+    const first = () => new Promise<void>((_resolve, reject) => {
+      rejectFirst = reject;
+    });
+    let secondCalls = 0;
+    const second = async () => {
+      secondCalls += 1;
+      return false;
+    };
+
+    const m = await mount(
+      <Harness opId="session-a" tick={0} onLoadOlder={first} out={out} />,
+    );
+    const el = m.container.querySelector<HTMLDivElement>('[data-testid="scroller"]')!;
+    installGeometry(el, height);
+
+    let firstRequest!: Promise<void>;
+    await act(async () => {
+      firstRequest = out.hook!.triggerLoadOlder();
+      await Promise.resolve();
+    });
+    await m.rerender(
+      <Harness opId="session-b" tick={1} onLoadOlder={second} out={out} />,
+    );
+    await act(async () => {
+      await out.hook!.triggerLoadOlder();
+      rejectFirst(new Error("late failure"));
+      await firstRequest;
+    });
+
+    height.value = 200;
+    await m.rerender(
+      <Harness opId="session-b" tick={2} onLoadOlder={second} out={out} />,
+    );
+    expect(secondCalls).toBe(1);
+    expect(out.hook!.loadError).toBe(false);
+    expect(out.hook!.justPrepended.current).toBe(false);
+    expect(el.scrollTop).toBe(0);
 
     await m.unmount();
   });

@@ -634,14 +634,7 @@ def models_catalog(provider_id: Optional[str] = None) -> dict:
 # diff the caller broadcasts via WS.
 # ---------------------------------------------------------------------
 
-async def refresh_one(pid: str) -> Optional[dict]:
-    """Refresh one provider's catalog. Returns the four-disjoint-set
-    transition payload if anything changed, else None.
-
-    No-op (returns None without acquiring the lock) when the provider
-    is not refreshable right now: Gemini CLI not installed, Claude
-    subscription Keychain entry missing, api_key empty, etc.
-    """
+def _resolve_refresh_preflight(pid: str) -> Optional[Callable[[], list[str]]]:
     import config_store
     if config_store.provider_suspended(pid):
         return None
@@ -656,68 +649,87 @@ async def refresh_one(pid: str) -> Optional[dict]:
         except provider_mod.ProviderCredentialError as exc:
             logger.warning("model refresh blocked for %s: %s", pid, exc)
             return None
-    fetch = _resolve_refresh_fetch(rec)
-    if fetch is None:
+    return _resolve_refresh_fetch(rec)
+
+
+def _commit_refresh_result(pid: str, fetched: list[str]) -> Optional[dict]:
+    prev = _read_cache(pid) or {
+        "schema": SCHEMA_VERSION, "models": [],
+        "retired": [], "last_fetch_state": "ok",
+    }
+    prev_models = list(prev.get("models") or [])
+    prev_retired = list(prev.get("retired") or [])
+    prev_retired_ids = {record["id"] for record in prev_retired}
+
+    if not fetched:
+        if prev_models:
+            logger.warning(
+                "empty model fetch for %s — keeping previous catalog, "
+                "marking last_fetch_state=failing", pid,
+            )
+            _update_cache(pid, last_fetch_state="failing")
+            return None
+        _update_cache(pid, models=[], last_fetch_state="failing")
         return None
 
+    fetched_set = set(fetched)
+    prev_models_set = set(prev_models)
+    removed_now = sorted(prev_models_set - fetched_set)
+    reappeared = sorted(prev_retired_ids & fetched_set)
+    new_retired_records, evicted_ids = _merge_retired(
+        prev_retired, removed_now, reappeared, time.time(),
+    )
+    new_retired_ids = {record["id"] for record in new_retired_records}
+
+    if (
+        sorted(fetched) == sorted(prev_models)
+        and sorted(new_retired_ids) == sorted(prev_retired_ids)
+        and prev.get("last_fetch_state") == "ok"
+    ):
+        _update_cache(pid, last_fetch_state="ok")
+        return None
+
+    _update_cache(
+        pid,
+        models=fetched,
+        retired=new_retired_records,
+        last_fetch_state="ok",
+    )
+    return {
+        "newly_added": sorted(fetched_set - prev_models_set - prev_retired_ids),
+        "became_active": list(reappeared),
+        "went_retired": list(removed_now),
+        "truly_removed": sorted(evicted_ids),
+    }
+
+
+def _due_provider_ids(threshold_seconds: int) -> list[str]:
+    now = time.time()
+    due: list[str] = []
+    for rec_public in list_providers().get("providers", []):
+        if rec_public.get("suspended"):
+            continue
+        pid = rec_public["id"]
+        cached = _read_cache(pid) or {}
+        if cached.get("last_refreshed_at", 0) + threshold_seconds <= now:
+            due.append(pid)
+    return due
+
+
+async def refresh_one(pid: str) -> Optional[dict]:
+    """Refresh one provider's catalog. Returns the four-disjoint-set
+    transition payload if anything changed, else None.
+
+    No-op when the provider is not refreshable right now: Gemini CLI
+    not installed, Claude subscription Keychain entry missing, api_key
+    empty, etc.
+    """
     async with _lock_for(pid):
+        fetch = await asyncio.to_thread(_resolve_refresh_preflight, pid)
+        if fetch is None:
+            return None
         fetched = await asyncio.to_thread(fetch)
-        prev = _read_cache(pid) or {
-            "schema": SCHEMA_VERSION, "models": [],
-            "retired": [], "last_fetch_state": "ok",
-        }
-        prev_models = list(prev.get("models") or [])
-        prev_retired = list(prev.get("retired") or [])
-        prev_retired_ids = {r["id"] for r in prev_retired}
-
-        if not fetched:
-            if prev_models:
-                logger.warning(
-                    "empty model fetch for %s — keeping previous catalog, "
-                    "marking last_fetch_state=failing", pid,
-                )
-                _update_cache(pid, last_fetch_state="failing")
-                return None
-            _update_cache(pid, models=[], last_fetch_state="failing")
-            return None
-
-        fetched_set = set(fetched)
-        prev_models_set = set(prev_models)
-        removed_now = sorted(prev_models_set - fetched_set)
-        reappeared = sorted(prev_retired_ids & fetched_set)
-
-        now = time.time()
-        new_retired_records, evicted_ids = _merge_retired(
-            prev_retired, removed_now, reappeared, now,
-        )
-        new_retired_ids = {r["id"] for r in new_retired_records}
-
-        models_unchanged = sorted(fetched) == sorted(prev_models)
-        retired_unchanged = sorted(new_retired_ids) == sorted(prev_retired_ids)
-        state_unchanged = prev.get("last_fetch_state") == "ok"
-        if models_unchanged and retired_unchanged and state_unchanged:
-            _update_cache(pid, last_fetch_state="ok")
-            return None
-
-        _update_cache(
-            pid,
-            models=fetched,
-            retired=new_retired_records,
-            last_fetch_state="ok",
-        )
-
-        newly_added = sorted(
-            fetched_set - prev_models_set - prev_retired_ids,
-        )
-        became_active = list(reappeared)
-        went_retired = list(removed_now)
-        truly_removed = sorted(evicted_ids)
-        return {
-            "newly_added": newly_added,
-            "became_active": became_active,
-            "went_retired": went_retired,
-            "truly_removed": truly_removed,
-        }
+        return await asyncio.to_thread(_commit_refresh_result, pid, fetched)
 
 
 async def refresh_all_due(threshold_seconds: int = REFRESH_THRESHOLD_SECONDS):
@@ -726,22 +738,7 @@ async def refresh_all_due(threshold_seconds: int = REFRESH_THRESHOLD_SECONDS):
     `(provider_id, diff_or_None)` per refreshed provider so the caller
     can broadcast per-provider as each completes.
     """
-    now = time.time()
-    state = list_providers()
-    for rec_public in state.get("providers", []):
-        if rec_public.get("suspended"):
-            continue
-        pid = rec_public["id"]
-        # Threshold check FIRST — cheap (disk read of small JSON).
-        # `_resolve_refresh_fetch` may shell out to `security` /
-        # `which gemini` so we MUST NOT call it for providers that
-        # aren't due. `refresh_one` does its own resolve under the
-        # per-provider lock; returns None gracefully when the provider
-        # can't be refreshed right now.
-        cached = _read_cache(pid) or {}
-        last = cached.get("last_refreshed_at", 0)
-        if last + threshold_seconds > now:
-            continue
+    for pid in await asyncio.to_thread(_due_provider_ids, threshold_seconds):
         try:
             diff = await refresh_one(pid)
         except Exception:

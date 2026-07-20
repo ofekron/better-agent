@@ -7537,6 +7537,7 @@ function AppMain({
                   : undefined
               }
               hasOlderMessages={currentSession?.pagination?.has_older}
+              oldestLoadedSeq={currentSession?.pagination?.oldest_loaded_seq}
               sessionLoading={sessionLoading}
               sessionLoadError={sessionLoadError}
               onRetrySessionLoad={selectSession}
