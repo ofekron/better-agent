@@ -17,11 +17,15 @@ from provider_claude import ClaudeProvider
 def main() -> int:
     original_read_api_key = config_store._read_api_key
     original_write_api_key = config_store._write_api_key
+    original_authority = config_store.provider_credential_authority_available
+    original_status = config_store.provider_credential_status
     keys: dict[str, str] = {}
     try:
         os.environ["CLAUDE_CODE_SIMPLE"] = "1"
         config_store._read_api_key = lambda provider_id: keys.get(provider_id, "")
         config_store._write_api_key = lambda provider_id, value: keys.__setitem__(provider_id, value)
+        config_store.provider_credential_authority_available = lambda: True
+        config_store.provider_credential_status = lambda _provider_id: "available"
 
         provider = config_store.add_provider({
             "name": "Ollama",
@@ -95,6 +99,8 @@ def main() -> int:
     finally:
         config_store._read_api_key = original_read_api_key
         config_store._write_api_key = original_write_api_key
+        config_store.provider_credential_authority_available = original_authority
+        config_store.provider_credential_status = original_status
         shutil.rmtree(_HOME, ignore_errors=True)
 
 

@@ -82,11 +82,17 @@ def test_capability_matrix() -> bool:
 
 
 def test_build_env_clears_claude_and_routes_credentials() -> bool:
+    real_status = provider_amp.config_store.provider_credential_status
+    provider_amp.config_store.provider_credential_status = lambda _provider_id: "available"
     inst = provider_amp.AmpProvider({
         "id": "a1", "kind": "amp", "mode": "api_key",
         "api_key": "test-amp-key", "base_url": "https://amp.example.com",
+        "_credential_authoritative": True,
     })
-    env = inst.build_env()
+    try:
+        env = inst.build_env()
+    finally:
+        provider_amp.config_store.provider_credential_status = real_status
     cleared = not any(k in env for k in (
         "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN",
         "CLAUDE_CONFIG_DIR", "CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING",

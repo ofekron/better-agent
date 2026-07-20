@@ -142,6 +142,7 @@ class RunState:
 # OpenAIProvider
 # ============================================================================
 class OpenAIProvider(Provider):
+    uses_managed_api_key = True
     """Drives the BA-owned `runner_better_agent.py` subprocess. The runner
     performs Chat Completions calls + in-process tool execution itself
     and writes normalized events to `session_events.jsonl`; this provider
@@ -173,6 +174,7 @@ class OpenAIProvider(Provider):
     # Env — copy os.environ, strip foreign-provider vars, add OpenAI auth
     # ------------------------------------------------------------------
     def build_env(self) -> dict[str, str]:
+        self.require_runtime_credential()
         env = os.environ.copy()
         # Clear foreign-provider env so it can't interfere with the runner.
         env.pop("CLAUDE_CONFIG_DIR", None)
@@ -874,6 +876,7 @@ class OpenAIProvider(Provider):
         path never sends tools.
         """
         self.assert_not_suspended(action="run headless work")
+        self.require_runtime_credential()
         del cwd, no_tools
         rec = self.record
         base_url = str(rec.get("base_url") or "").strip()

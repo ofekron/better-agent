@@ -84,11 +84,17 @@ def test_build_env_clears_foreign_providers() -> bool:
 
 
 def test_build_env_api_key_mode_sets_openai_vars() -> bool:
-    env = _mk(
-        mode="api_key",
-        api_key="sk-test",
-        base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
-    ).build_env()
+    real_status = provider_qwen.config_store.provider_credential_status
+    provider_qwen.config_store.provider_credential_status = lambda _provider_id: "available"
+    try:
+        env = _mk(
+            mode="api_key",
+            api_key="sk-test",
+            base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+            _credential_authoritative=True,
+        ).build_env()
+    finally:
+        provider_qwen.config_store.provider_credential_status = real_status
     sub_env = _mk().build_env()
     return (
         env.get("OPENAI_API_KEY") == "sk-test"

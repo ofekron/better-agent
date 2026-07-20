@@ -7,8 +7,7 @@ import threading
 from multiprocessing import Pipe
 from typing import Literal
 
-import oskeychain
-from keychain_names import LEGACY_SERVICE, PRIMARY_SERVICE, service_names
+from provider_credentials import ProviderCredentialStore
 
 CredentialStatus = Literal["unknown", "available", "missing", "blocked"]
 _MAX_FRAME_BYTES = 128 * 1024
@@ -19,6 +18,7 @@ class ProviderCredentialBroker:
         self._states: dict[str, tuple[CredentialStatus, str]] = {}
         self._locks: dict[str, threading.Lock] = {}
         self._locks_guard = threading.Lock()
+        self._credential_store = ProviderCredentialStore()
 
     def open_session(self) -> "ProviderCredentialSession":
         return ProviderCredentialSession(self)
@@ -51,6 +51,8 @@ class ProviderCredentialBroker:
                 return self._read(provider_id, retry=False)
             if op == "retry":
                 return self._read(provider_id, retry=True)
+            if op == "migrate_flat":
+                return self._migrate_flat(provider_id)
             if op == "store":
                 value = request.get("value")
                 if not isinstance(value, str) or not value or len(value) > 128 * 1024:
@@ -69,14 +71,11 @@ class ProviderCredentialBroker:
             if status == "available":
                 response["value"] = value
             return response
-        account = f"provider:{provider_id}"
         try:
-            for service in service_names(PRIMARY_SERVICE, LEGACY_SERVICE):
-                value = oskeychain.get(service, account)
-                if value:
-                    value = value[:-1] if value.endswith("\n") else value
-                    self._states[provider_id] = ("available", value)
-                    return {"status": "available", "value": value}
+            value = self._credential_store.read(provider_id)
+            if value:
+                self._states[provider_id] = ("available", value)
+                return {"status": "available", "value": value}
         except RuntimeError:
             self._states[provider_id] = ("blocked", "")
             return {"status": "blocked"}
@@ -86,23 +85,31 @@ class ProviderCredentialBroker:
     def _store(self, provider_id: str, value: str) -> dict[str, str]:
         if self._states.get(provider_id, ("unknown", ""))[0] == "blocked":
             return {"status": "blocked"}
-        account = f"provider:{provider_id}"
         try:
-            for service in service_names(PRIMARY_SERVICE, LEGACY_SERVICE):
-                oskeychain.store(service, account, value)
+            self._credential_store.store(provider_id, value)
         except RuntimeError:
             self._states[provider_id] = ("blocked", "")
             return {"status": "blocked"}
         self._states[provider_id] = ("available", value)
         return {"status": "available"}
 
+    def _migrate_flat(self, provider_id: str) -> dict[str, str]:
+        try:
+            value = self._credential_store.migrate_flat(provider_id)
+        except RuntimeError:
+            self._states[provider_id] = ("blocked", "")
+            return {"status": "blocked"}
+        if not value:
+            self._states[provider_id] = ("missing", "")
+            return {"status": "missing"}
+        self._states[provider_id] = ("available", value)
+        return {"status": "available", "value": value}
+
     def _delete(self, provider_id: str) -> dict[str, str]:
         if self._states.get(provider_id, ("unknown", ""))[0] == "blocked":
             return {"status": "blocked"}
-        account = f"provider:{provider_id}"
         try:
-            for service in service_names(PRIMARY_SERVICE, LEGACY_SERVICE):
-                oskeychain.delete(service, account)
+            self._credential_store.delete(provider_id)
         except RuntimeError:
             self._states[provider_id] = ("blocked", "")
             return {"status": "blocked"}

@@ -143,6 +143,7 @@ class OpencodeProvider(GeminiProvider):
     default_reasoning_effort: ClassVar[str] = ""
 
     def build_env(self) -> dict[str, str]:
+        self.require_runtime_credential()
         env = os.environ.copy()
         # OpenCode reads $XDG_DATA_HOME/opencode (default
         # ~/.local/share/opencode) — nothing to configure. Clear Claude

@@ -648,6 +648,14 @@ async def refresh_one(pid: str) -> Optional[dict]:
     rec = get_provider_with_key(pid)
     if not rec:
         return None
+    import provider as provider_mod
+    runtime_provider = provider_mod.get_provider(pid)
+    if runtime_provider is not None:
+        try:
+            runtime_provider.require_runtime_credential()
+        except provider_mod.ProviderCredentialError as exc:
+            logger.warning("model refresh blocked for %s: %s", pid, exc)
+            return None
     fetch = _resolve_refresh_fetch(rec)
     if fetch is None:
         return None

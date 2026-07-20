@@ -320,6 +320,7 @@ class GeminiProvider(Provider):
     # Env — minimal for Gemini (subscription mode, no API keys)
     # ------------------------------------------------------------------
     def build_env(self) -> dict[str, str]:
+        self.require_runtime_credential()
         env = os.environ.copy()
         # Gemini CLI uses ~/.gemini by default — nothing to configure.
         # Clear any Claude-specific env so they don't interfere.

@@ -71,6 +71,7 @@ class AgyProvider(GeminiProvider):
     supports_reasoning_effort: ClassVar[bool] = False
 
     def build_env(self) -> dict[str, str]:
+        self.require_runtime_credential()
         env = os.environ.copy()
         env.pop("CLAUDE_CONFIG_DIR", None)
         env.pop("ANTHROPIC_API_KEY", None)

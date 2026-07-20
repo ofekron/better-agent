@@ -34,23 +34,11 @@ import re
 import threading
 import traceback
 import uuid
-from typing import Any, Callable, Optional
+from typing import Optional
 
-import keyring
-import oskeychain
 import credential_session_client
 
-# Captured at import time so `_get_password_with_reason`/`_set_password_with_reason`
-# can detect a test replacing `keyring.get_password`/`set_password` directly
-# (e.g. to mock the keychain) and fall back to calling those — rather than
-# the macOS ctypes path below, which would silently bypass the mock and hit
-# the real Keychain.
-_ORIGINAL_KEYRING_GET_PASSWORD = keyring.get_password
-_ORIGINAL_KEYRING_SET_PASSWORD = keyring.set_password
-_ORIGINAL_KEYRING_DELETE_PASSWORD = keyring.delete_password
-
 from json_store import read_json, write_json
-from keychain_names import LEGACY_SERVICE, PRIMARY_SERVICE, service_names
 from paths import ba_home, resolve_claude_config_dir, resolve_provider_config_dir, user_home
 from provider_env import is_ollama_base_url
 from reasoning_effort import (
@@ -95,10 +83,6 @@ def _uses_claude_env(provider: dict) -> bool:
     return bool(spec and spec.uses_claude_env)
 
 
-KEYRING_SERVICE = PRIMARY_SERVICE
-LEGACY_KEYRING_SERVICE = LEGACY_SERVICE
-LEGACY_KEYRING_USERNAME = "anthropic-api-key"  # pre-providers-refactor
-
 # Sentinel returned from the frontend to mean "keep the existing key".
 KEEP_SENTINEL = "__keep__"
 
@@ -107,222 +91,14 @@ SAKANA_FUGU_REASONING_EFFORTS = ("high", "xhigh")
 ZAI_ANTHROPIC_CONFIG_DIR = "~/.claude-zai"
 
 
-# ----------------------------------------------------------------------------
-# Keychain helpers (per-provider)
-# ----------------------------------------------------------------------------
-
-
-def _keyring_username(provider_id: str) -> str:
-    return f"provider:{provider_id}"
-
-
-def _keyring_services() -> tuple[str, ...]:
-    return service_names(KEYRING_SERVICE, LEGACY_KEYRING_SERVICE)
-
-
-# Provider-key reads and writes use the stable Apple `security` binary identity
-# so one Keychain authorization survives interpreter and environment changes.
+# Per-process api_key cache, keyed by provider_id. Turns every steady-state
+# supervisor credential read into an O(1) dict lookup.
 #
-# `keyring`'s macOS backend never sets `kSecUseOperationPrompt`, so the OS
-# "allow access" prompt shows only the generic calling-binary identity
-# (e.g. "python" or "login") with no indication of what wants the item or
-# why — a real source of accidental "Deny" clicks (see the caching fix
-# above this module makes safe to recover from). macOS's underlying
-# `SecItemCopyMatching`/`SecItemAdd` DO support a custom operation prompt;
-# `keyring`'s own `backends.macOS.api` module already builds the CFDictionary
-# query via ctypes; reuse those bindings here and add the one extra key
-# `keyring` omits, rather than duplicating the ctypes plumbing.
-def _use_stable_macos_keychain() -> bool:
-    import platform
-    return platform.system() == "Darwin"
-
-
-def _keychain_reason(provider_id: str, verb: str) -> str:
-    return f"Better Agent needs {verb} the API key for AI provider {provider_id!r}"
-
-
-def _get_password_with_reason(service: str, username: str, reason: str) -> str | None:
-    """Read through macOS's stable ``security`` identity when possible."""
-    if (
-        keyring.get_password is _ORIGINAL_KEYRING_GET_PASSWORD
-        and _use_stable_macos_keychain()
-    ):
-        value = oskeychain.get(service, username, timeout=_KEYRING_TIMEOUT)
-        if value is None:
-            return None
-        return value[:-1] if value.endswith("\n") else value
-    return keyring.get_password(service, username)
-
-
-def _set_password_with_reason(
-    service: str, username: str, password: str, reason: str,
-) -> None:
-    """`keyring.set_password`, using a descriptive macOS Keychain prompt
-    reason where the platform/backend supports it; falls back to the
-    plain call (generic prompt) everywhere else, including when a caller
-    (test code) has replaced `keyring.set_password` itself."""
-    if (
-        keyring.set_password is _ORIGINAL_KEYRING_SET_PASSWORD
-        and _use_stable_macos_keychain()
-    ):
-        oskeychain.store(service, username, password)
-    else:
-        keyring.set_password(service, username, password)
-
-
-def _delete_password(service: str, username: str, reason: str | None = None) -> None:
-    if (
-        keyring.delete_password is _ORIGINAL_KEYRING_DELETE_PASSWORD
-        and _use_stable_macos_keychain()
-    ):
-        oskeychain.delete(service, username)
-        return
-    keyring.delete_password(service, username)
-
-
-# `keyring` on macOS calls `SecItemCopyMatching` via ctypes. When the
-# caller binary lacks the keychain item's ACL — e.g. items added by the
-# dev Python venv read from the PyInstaller-frozen `.app` (a different
-# binary) — macOS shows a blocking "allow access" GUI prompt, and a
-# launchd-launched `.app` may never get focus to answer it. So every
-# keyring call below runs on a daemon thread with a hard timeout; on
-# timeout we proceed without the value rather than block startup.
-_KEYRING_TIMEOUT = 2.0
-# Set to True the first time a keyring call times out — every subsequent
-# call in this process short-circuits to its `default`. Without this,
-# code that hits keyring in a loop (e.g. `recover_all_in_flight` per
-# run-dir) accumulates 2s per call and minutes of startup latency.
-_keyring_blocked_entries: set = set()
-
-
-def _keyring_entry(fn: Callable[..., Any], args: tuple[Any, ...]) -> tuple[str, str]:
-    if len(args) < 2:
-        return ("", fn.__name__)
-    return (str(args[0]), str(args[1]))
-
-
-def _unblock_keyring_entry(service: str, username: str) -> None:
-    _keyring_blocked_entries.discard((service, username))
-
-
-def _keyring_call(
-    fn: Callable[..., Any], *args: Any, default: Any = None,
-    failure_flag: list[bool] | None = None,
-) -> Any:
-    """Run a keyring operation with a `_KEYRING_TIMEOUT` deadline. After
-    an inaccessible stable-macOS read or a timeout, the specific
-    (service, account) entry is treated as
-    inaccessible for the rest of the process lifetime — the worker
-    thread is still blocked in `SecItemCopyMatching` and cannot be
-    cancelled, so we don't waste additional 2s windows re-probing it.
-    Other entries keep working.
-
-    If `failure_flag` is given, an item is appended to it whenever the
-    call did not complete successfully (raised or timed out). Callers that
-    cache the result (`_read_api_key` et al.) use this to avoid caching a
-    failed read as if it were a confirmed value. Explicit credential
-    mutations unblock the entry before accessing it again."""
-    # A failed entry must not be re-probed on every caller. Generic keyring
-    # backends may leave a timed-out worker blocked; stable macOS reads kill
-    # their bounded subprocess but would otherwise reopen the same prompt.
-    entry = _keyring_entry(fn, args)
-    is_mutation = fn in {_set_password_with_reason, _delete_password}
-    if not is_mutation and entry in _keyring_blocked_entries:
-        if failure_flag is not None:
-            failure_flag.append(True)
-        return default
-    if (
-        fn is _get_password_with_reason
-        and keyring.get_password is _ORIGINAL_KEYRING_GET_PASSWORD
-        and _use_stable_macos_keychain()
-    ):
-        try:
-            return fn(*args)
-        except Exception:
-            _keyring_blocked_entries.add(entry)
-            logger.warning("stable macOS keychain read failed for %s/%s", entry[0], entry[1])
-            if failure_flag is not None:
-                failure_flag.append(True)
-            return default
-    if (
-        fn is _set_password_with_reason
-        and keyring.set_password is _ORIGINAL_KEYRING_SET_PASSWORD
-        and _use_stable_macos_keychain()
-    ):
-        try:
-            return fn(*args)
-        except Exception:
-            logger.warning("stable macOS keychain write failed for %s/%s", entry[0], entry[1])
-            if failure_flag is not None:
-                failure_flag.append(True)
-            raise RuntimeError("stable macOS keychain write failed") from None
-    if (
-        fn is _delete_password
-        and keyring.delete_password is _ORIGINAL_KEYRING_DELETE_PASSWORD
-        and _use_stable_macos_keychain()
-    ):
-        try:
-            return fn(*args)
-        except Exception:
-            logger.warning("stable macOS keychain delete failed for %s/%s", entry[0], entry[1])
-            if failure_flag is not None:
-                failure_flag.append(True)
-            raise RuntimeError("stable macOS keychain delete failed") from None
-    result: list[Any] = [default]
-    done = threading.Event()
-
-    def worker() -> None:
-        try:
-            result[0] = fn(*args)
-        except Exception as e:
-            logger.warning("keyring %s failed: %s", fn.__name__, e)
-            if failure_flag is not None:
-                failure_flag.append(True)
-        finally:
-            done.set()
-
-    threading.Thread(
-        target=worker, daemon=True, name=f"keyring-{fn.__name__}",
-    ).start()
-    if not done.wait(timeout=_KEYRING_TIMEOUT):
-        _keyring_blocked_entries.add(entry)
-        logger.warning(
-            "keyring %s timed out after %.1fs for %s/%s — disabling this "
-            "entry for the rest of the process. (This binary likely lacks "
-            "the keychain ACL of an item written by another Python; "
-            "re-enter that credential via the app UI.)",
-            fn.__name__, _KEYRING_TIMEOUT, entry[0], entry[1],
-        )
-        if failure_flag is not None:
-            failure_flag.append(True)
-    return result[0]
-
-
-# Per-process api_key cache, keyed by provider_id (or the
-# `_LEGACY_CACHE_KEY` sentinel for the pre-multi-provider slot). Turns
-# every steady-state keyring read into an O(1) dict lookup.
+# The event loop resolves the active provider from multiple endpoints. This
+# cache keeps the credential broker round-trip off those steady-state reads.
 #
-# Why: `_keyring_call` spawns a worker thread + waits up to 2s on macOS
-# Keychain access. The event loop reaches `_read_api_key` from every
-# async endpoint that resolves the active provider (`POST /api/sessions`
-# via `get_default_provider`, `GET /api/providers` via `_strip`'s
-# `has_api_key` probe, `apply_env_vars` at user-prompt send time...).
-# Without this cache each request paid that thread-spawn + Event.wait
-# on the asyncio loop; if Keychain ACLs went weird (the .app vs dev
-# Python case in `_keyring_call`'s comment) the loop stalled the full
-# 2s. With the cache, only the very first read per provider can stall;
-# `warm_keyring_cache` moves even that first stall to startup, OFF the
-# request hot path.
-#
-# INVARIANT — coherency: every write (`_write_api_key`, `_delete_api_key`,
-# `_delete_legacy_api_key`) updates the cache, so the in-memory copy
-# matches what `keyring.get_password` would return for the rest of this
-# process. Manual `/usr/bin/security` edits from outside the backend are
-# NOT reflected; restart the backend to pick them up. (Same constraint
-# already applied implicitly via the post-timeout `_keyring_blocked_entries`
-# short-circuit — once that fires, the cache value is whatever was read
-# successfully; this is strictly an improvement.)
-_LEGACY_CACHE_KEY = "__legacy__"
+# INVARIANT — coherency: every write and delete updates this cache. External
+# keychain edits are reflected after backend restart.
 _api_key_cache: dict[str, str] = {}
 _api_key_cache_lock = threading.Lock()
 _api_key_read_locks: dict[str, threading.Lock] = {}
@@ -342,41 +118,18 @@ def _read_api_key(provider_id: str) -> str:
         with _api_key_cache_lock:
             if provider_id in _api_key_cache:
                 return _api_key_cache[provider_id]
-        if credential_session_client.available():
-            response = credential_session_client.request("read", provider_id)
-            status = response["status"]
-            _credential_status[provider_id] = status
-            value = response.get("value", "") if status == "available" else ""
-            ok = status in {"available", "missing"}
-        else:
-            value, ok = _read_api_key_uncached(provider_id)
-            _credential_status[provider_id] = (
-                "available" if value else ("missing" if ok else "blocked")
-            )
+        if not credential_session_client.available():
+            _credential_status[provider_id] = "blocked"
+            return ""
+        response = credential_session_client.request("read", provider_id)
+        status = response["status"]
+        _credential_status[provider_id] = status
+        value = response.get("value", "") if status == "available" else ""
+        ok = status in {"available", "missing"}
         if ok:
             with _api_key_cache_lock:
                 _api_key_cache[provider_id] = value
         return value
-
-
-def _read_api_key_uncached(provider_id: str) -> tuple[str, bool]:
-    """Returns `(value, ok)`. `ok` is False when the underlying keyring
-    read did not complete successfully (denied/raised, or timed out) —
-    the caller must not cache that as a confirmed "no key" result."""
-    reason = _keychain_reason(provider_id, "to read")
-    for service in _keyring_services():
-        failure: list[bool] = []
-        value = _keyring_call(
-            _get_password_with_reason,
-            service, _keyring_username(provider_id), reason,
-            default="",
-            failure_flag=failure,
-        ) or ""
-        if failure:
-            return "", False
-        if value:
-            return value, True
-    return "", True
 
 
 def _write_api_key(provider_id: str, api_key: str) -> None:
@@ -386,76 +139,44 @@ def _write_api_key(provider_id: str, api_key: str) -> None:
     # "known empty" from "absent" only via dict membership — which today
     # nobody reads, but a future caller using `cache.get(pid)` vs.
     # `pid in cache` won't see asymmetry between the two write paths.
-    if credential_session_client.available():
-        response = credential_session_client.request(
-            "store" if api_key else "delete",
-            provider_id,
-            value=api_key if api_key else None,
-        )
-        status = response["status"]
-        if status == "blocked":
-            raise RuntimeError("OS credential access is blocked")
-        _credential_status[provider_id] = status
-        with _api_key_cache_lock:
-            if api_key:
-                _api_key_cache[provider_id] = api_key
-            else:
-                _api_key_cache.pop(provider_id, None)
-        return
-    if api_key:
-        reason = _keychain_reason(provider_id, "to save")
-        for service in _keyring_services():
-            _unblock_keyring_entry(service, _keyring_username(provider_id))
-            _keyring_call(
-                _set_password_with_reason,
-                service, _keyring_username(provider_id), api_key, reason,
-            )
-        with _api_key_cache_lock:
+    if not credential_session_client.available():
+        raise RuntimeError("provider credential authority is unavailable")
+    response = credential_session_client.request(
+        "store" if api_key else "delete",
+        provider_id,
+        value=api_key if api_key else None,
+    )
+    status = response["status"]
+    if status == "blocked":
+        raise RuntimeError("OS credential access is blocked")
+    _credential_status[provider_id] = status
+    with _api_key_cache_lock:
+        if api_key:
             _api_key_cache[provider_id] = api_key
-        _credential_status[provider_id] = "available"
-    else:
-        for service in _keyring_services():
-            _unblock_keyring_entry(service, _keyring_username(provider_id))
-            try:
-                _keyring_call(
-                    _delete_password,
-                    service, _keyring_username(provider_id),
-                    _keychain_reason(provider_id, "to remove"),
-                )
-            except keyring.errors.PasswordDeleteError:
-                pass
-        with _api_key_cache_lock:
+        else:
             _api_key_cache.pop(provider_id, None)
-        _credential_status[provider_id] = "missing"
 
 
 def _delete_api_key(provider_id: str) -> None:
-    if credential_session_client.available():
-        response = credential_session_client.request("delete", provider_id)
-        if response["status"] == "blocked":
-            raise RuntimeError("OS credential access is blocked")
-        _credential_status[provider_id] = response["status"]
-        with _api_key_cache_lock:
-            _api_key_cache.pop(provider_id, None)
-        return
-    for service in _keyring_services():
-        try:
-            _keyring_call(
-                _delete_password,
-                service, _keyring_username(provider_id),
-                _keychain_reason(provider_id, "to remove"),
-            )
-        except keyring.errors.PasswordDeleteError:
-            pass
+    if not credential_session_client.available():
+        raise RuntimeError("provider credential authority is unavailable")
+    response = credential_session_client.request("delete", provider_id)
+    if response["status"] == "blocked":
+        raise RuntimeError("OS credential access is blocked")
+    _credential_status[provider_id] = response["status"]
     with _api_key_cache_lock:
         _api_key_cache.pop(provider_id, None)
-    _credential_status[provider_id] = "missing"
+
+
+def provider_credential_authority_available() -> bool:
+    return credential_session_client.available()
 
 
 def provider_credential_status(provider_id: str) -> str:
-    if credential_session_client.available():
-        response = credential_session_client.request("status", provider_id)
-        _credential_status[provider_id] = response["status"]
+    if not credential_session_client.available():
+        return "blocked"
+    response = credential_session_client.request("status", provider_id)
+    _credential_status[provider_id] = response["status"]
     return _credential_status.get(provider_id, "unknown")
 
 
@@ -463,61 +184,29 @@ def retry_provider_credential(provider_id: str) -> str:
     with _api_key_read_lock(provider_id):
         with _api_key_cache_lock:
             _api_key_cache.pop(provider_id, None)
-        if credential_session_client.available():
-            response = credential_session_client.request("retry", provider_id)
-            status = response["status"]
-            _credential_status[provider_id] = status
-            if status == "available":
-                with _api_key_cache_lock:
-                    _api_key_cache[provider_id] = response.get("value", "")
-            return status
-        for service in _keyring_services():
-            _unblock_keyring_entry(service, _keyring_username(provider_id))
-        value, ok = _read_api_key_uncached(provider_id)
-        status = "available" if value else ("missing" if ok else "blocked")
+        if not credential_session_client.available():
+            _credential_status[provider_id] = "blocked"
+            return "blocked"
+        response = credential_session_client.request("retry", provider_id)
+        status = response["status"]
         _credential_status[provider_id] = status
         if status == "available":
             with _api_key_cache_lock:
-                _api_key_cache[provider_id] = value
+                _api_key_cache[provider_id] = response.get("value", "")
         return status
 
 
-def _read_legacy_api_key() -> str:
-    with _api_key_cache_lock:
-        if _LEGACY_CACHE_KEY in _api_key_cache:
-            return _api_key_cache[_LEGACY_CACHE_KEY]
-    value = ""
-    ok = True
-    reason = "Better Agent needs to read the legacy AI provider API key"
-    for service in _keyring_services():
-        failure: list[bool] = []
-        value = _keyring_call(
-            _get_password_with_reason,
-            service, LEGACY_KEYRING_USERNAME, reason,
-            default="",
-            failure_flag=failure,
-        ) or ""
-        if failure:
-            ok = False
-            value = ""
-            break
-        if value:
-            break
-    if ok:
+def _migrate_legacy_api_key(provider_id: str) -> str:
+    if not credential_session_client.available():
+        raise RuntimeError("provider credential authority is unavailable")
+    response = credential_session_client.request("migrate_flat", provider_id)
+    if response["status"] == "blocked":
+        raise RuntimeError("OS credential access is blocked")
+    value = response.get("value", "") if response["status"] == "available" else ""
+    if value:
         with _api_key_cache_lock:
-            _api_key_cache[_LEGACY_CACHE_KEY] = value
+            _api_key_cache[provider_id] = value
     return value
-
-
-def _delete_legacy_api_key() -> None:
-    for service in _keyring_services():
-        _keyring_call(
-            _delete_password,
-            service, LEGACY_KEYRING_USERNAME,
-            "Better Agent needs to remove a legacy provider API key",
-        )
-    with _api_key_cache_lock:
-        _api_key_cache.pop(_LEGACY_CACHE_KEY, None)
 
 
 # ----------------------------------------------------------------------------
@@ -672,7 +361,7 @@ def _migrate_flat_to_providers(flat: dict) -> dict:
         value=flat.get("config_dir", ""),
     )
     custom_models = flat.get("custom_models", []) or []
-    pid = str(uuid.uuid4())
+    pid = str(uuid.uuid5(uuid.NAMESPACE_URL, f"better-agent:legacy-provider:{_config_path()}"))
     provider = {
         "id": pid,
         "name": _detect_provider_name(mode, base_url),
@@ -686,9 +375,8 @@ def _migrate_flat_to_providers(flat: dict) -> dict:
         "runner": _clean_runner("claude", ""),
         "suspended": False,
     }
-    legacy_key = _read_legacy_api_key()
-    if legacy_key and provider["mode"] == "api_key":
-        _write_api_key(pid, legacy_key)
+    if provider["mode"] == "api_key":
+        _migrate_legacy_api_key(pid)
     return {"default_provider_id": pid, "providers": [provider]}
 
 
@@ -878,14 +566,10 @@ def _load_state() -> dict:
             state = _normalize_loaded_state(raw)
             _state_cache = (fingerprint, copy.deepcopy(state))
             return state
-        # Old flat schema → migrate, persist, then drop the legacy keychain
-        # slot. Order matters: save first so a crash during
-        # _delete_legacy_api_key leaves the new schema in place; the new
-        # keychain slot was populated before save inside
-        # _migrate_flat_to_providers.
+        # Old flat schema → migrate through the supervisor-owned credential
+        # authority, then persist the deterministic provider id.
         state = _migrate_flat_to_providers(raw)
         _save_state(state)
-        _delete_legacy_api_key()
         return copy.deepcopy(_state_cache[1])
 
 
@@ -1605,7 +1289,12 @@ def get_provider_with_key(provider_id: str) -> Optional[dict]:
             if _provider_is_suspended(p):
                 return None
             cp = dict(p)
-            cp["api_key"] = _read_api_key(provider_id) if p.get("mode") == "api_key" else ""
+            api_key = _read_api_key(provider_id) if p.get("mode") == "api_key" else ""
+            cp["api_key"] = api_key
+            if p.get("mode") == "api_key":
+                cp["_credential_authoritative"] = bool(
+                    provider_credential_authority_available() and api_key
+                )
             return cp
     return None
 
@@ -1625,7 +1314,12 @@ def get_default_provider() -> Optional[dict]:
             if _provider_is_suspended(p):
                 return None
             cp = dict(p)
-            cp["api_key"] = _read_api_key(active_id) if p.get("mode") == "api_key" else ""
+            api_key = _read_api_key(active_id) if p.get("mode") == "api_key" else ""
+            cp["api_key"] = api_key
+            if p.get("mode") == "api_key":
+                cp["_credential_authoritative"] = bool(
+                    provider_credential_authority_available() and api_key
+                )
             return cp
     return None
 

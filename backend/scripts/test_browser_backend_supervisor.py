@@ -17,6 +17,7 @@ sys.path.insert(0, str(ROOT / "backend"))
 sys.path.insert(0, str(ROOT / "desktop"))
 
 import credential_session  # noqa: E402
+import provider_credentials  # noqa: E402
 from desktop.browser_backend_control import request as control_request  # noqa: E402
 from desktop.browser_backend_supervisor import BrowserBackendSupervisor  # noqa: E402
 
@@ -78,14 +79,14 @@ def test_fresh_channels_preserve_denial_without_leaking_to_children(temp_root: P
     probe_path = temp_root / "probe.jsonl"
     checkout = _fake_checkout(temp_root / "checkout", probe_path, read=True)
     reads = 0
-    real_get = credential_session.oskeychain.get
+    real_get = provider_credentials.oskeychain.native_get
 
     def blocked_get(_service: str, _account: str, *, reason: str | None = None):
         nonlocal reads
         reads += 1
         raise RuntimeError("blocked")
 
-    credential_session.oskeychain.get = blocked_get
+    provider_credentials.oskeychain.native_get = blocked_get
     supervisor = BrowserBackendSupervisor(
         checkout,
         {
@@ -116,7 +117,7 @@ def test_fresh_channels_preserve_denial_without_leaking_to_children(temp_root: P
         assert all(row["child_available"] == "False" for row in rows)
     finally:
         supervisor.shutdown()
-        credential_session.oskeychain.get = real_get
+        provider_credentials.oskeychain.native_get = real_get
 
 
 def test_control_server_keeps_handle_out_of_launcher(temp_root: Path) -> None:

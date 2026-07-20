@@ -385,12 +385,12 @@ def test_backend_argv_uses_target_checkout_interpreter() -> bool:
 
 
 def test_packaged_restart_preserves_denial_and_rotates_channel() -> bool:
-    import credential_session
+    import provider_credentials
     import supervisor as supervisor_module
 
     reads = 0
     spawns: list[dict] = []
-    real_get = credential_session.oskeychain.get
+    real_get = provider_credentials.oskeychain.native_get
     real_popen = supervisor_module.subprocess.Popen
     sup = BackendSupervisor()
 
@@ -410,7 +410,7 @@ def test_packaged_restart_preserves_denial_and_rotates_channel() -> bool:
         spawns.append(kwargs)
         return FakeProcess()
 
-    credential_session.oskeychain.get = denied_get
+    provider_credentials.oskeychain.native_get = denied_get
     supervisor_module.subprocess.Popen = fake_popen
     try:
         request = {
@@ -436,7 +436,7 @@ def test_packaged_restart_preserves_denial_and_rotates_channel() -> bool:
     finally:
         sup._close_credential_session()
         sup._credential_broker.clear()
-        credential_session.oskeychain.get = real_get
+        provider_credentials.oskeychain.native_get = real_get
         supervisor_module.subprocess.Popen = real_popen
 
 

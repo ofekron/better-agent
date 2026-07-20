@@ -359,6 +359,7 @@ class CodexProvider(Provider):
     # Env — minimal for Codex (subscription mode, no API keys)
     # ------------------------------------------------------------------
     def build_env(self) -> dict[str, str]:
+        self.require_runtime_credential()
         env = os.environ.copy()
         # Clear other provider env vars so they don't interfere.
         env.pop("CLAUDE_CONFIG_DIR", None)
