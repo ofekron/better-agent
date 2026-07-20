@@ -70,9 +70,6 @@ def _role(argv: list[str]) -> str:
 
 def main() -> int:
     argv = sys.argv[1:]
-    if argv and argv[0] == "--keychain-helper":
-        from oskeychain import _main as keychain_main
-        return keychain_main(argv)
     if _role(argv) == "backend":
         from app_entry import _main as backend_main
         return backend_main(argv)

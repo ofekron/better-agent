@@ -73,7 +73,7 @@ def main() -> None:
     deletes = 0
     values: dict[tuple[str, str], str] = {}
     blocked = True
-    reasons: list[str] = []
+    keychain_options: list[dict[str, str]] = []
     (TEST_HOME / "config.json").write_text(json.dumps({
         "providers": [{"id": "provider-1", "name": "Friendly Provider"}],
     }), encoding="utf-8")
@@ -81,8 +81,7 @@ def main() -> None:
     def get(service: str, account: str, *, reason: str | None = None):
         nonlocal reads
         reads += 1
-        if reason:
-            reasons.append(reason)
+        keychain_options.append({"reason": reason} if reason else {})
         if blocked:
             raise RuntimeError("blocked")
         return values.get((service, account))
@@ -123,7 +122,7 @@ def main() -> None:
         assert backend_request(session, "status", "provider-1") == {"status": "unknown"}
         assert backend_request(session, "read", "provider-1") == {"status": "blocked"}
         assert reads == 1
-        assert reasons == ["Better Agent needs the API key for Friendly Provider"]
+        assert keychain_options == [{}]
         first_connection = session._backend_connection
         if os.name != "nt":
             os.write(first_connection.fileno(), struct.pack("!i", 64) + b"partial")
