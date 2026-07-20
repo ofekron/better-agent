@@ -3,10 +3,21 @@ from __future__ import annotations
 import logging
 import hashlib
 import json
+import re
 from datetime import datetime
 from typing import Any, Optional
 
+from task_session_types import (
+    FORKED as FORKED_SESSION_TYPES,
+    NORMAL as NORMAL_SESSION_TYPE,
+    PROVISIONED as PROVISIONED_SESSION_TYPES,
+    PROVISIONED_DIRECT,
+    has_memory,
+)
+
 logger = logging.getLogger(__name__)
+
+_TASK_ID_PATTERN = re.compile(r"^[0-9a-f]{12}$")
 
 
 class TaskLaunchError(Exception):
@@ -40,6 +51,9 @@ def _routine_prompt(task: dict, prompt: str) -> str:
         parts.append(f"Summary: {summary}")
     if criteria:
         parts.append(f"Success criteria: {criteria}")
+    memory_prompt = _routine_memory_prompt(task)
+    if memory_prompt:
+        parts.append(memory_prompt)
     parts.append(f"Routine description:\n{prompt.strip()}")
     return "\n\n".join(parts)
 
@@ -60,9 +74,27 @@ def _routine_run_prompt(task: dict, prompt: str) -> str:
         ),
     ]
     override = str(prompt or "").strip()
+    memory_prompt = _routine_memory_prompt(task)
+    if memory_prompt:
+        parts.append(memory_prompt)
     if override and override != str(task.get("prompt") or "").strip():
         parts.append(f"Run override:\n{override}")
     return "\n\n".join(parts)
+
+
+def _routine_memory_prompt(task: dict) -> str:
+    if not has_memory(str(task.get("session_type") or "")):
+        return ""
+    task_id = str(task.get("id") or "").strip()
+    if not _TASK_ID_PATTERN.fullmatch(task_id):
+        raise ValueError("memory-enabled routine has an invalid id")
+    return (
+        "You own the persistent memory directory at "
+        f"routine-memory/{task_id} under the directory specified by the "
+        "BETTER_AGENT_HOME environment variable. "
+        "Create and maintain your own memory layer there. "
+        "Choose how it works and what it contains."
+    )
 
 
 def _resolve_singleton_session(task: dict):
@@ -90,7 +122,10 @@ def _routine_spec_version(task: dict) -> int:
 
 
 def _routine_storage_scope(task: dict) -> dict:
-    return {"kind": "routine", "routine_id": str(task.get("id") or "").strip()}
+    scope = {"kind": "routine", "routine_id": str(task.get("id") or "").strip()}
+    if has_memory(str(task.get("session_type") or "")):
+        scope["memory"] = True
+    return scope
 
 
 def _provisioned_task_spec(
@@ -156,13 +191,13 @@ async def _resolve_launch_session(
 
     from session_manager import manager as session_manager
 
-    session_type = task.get("session_type") or "normal"
+    session_type = task.get("session_type") or NORMAL_SESSION_TYPE
     if task.get("singleton"):
         session = await asyncio.to_thread(_resolve_singleton_session, task)
         if session is not None:
             return session, True
 
-    if session_type == "normal":
+    if session_type == NORMAL_SESSION_TYPE:
         session = await asyncio.to_thread(
             lambda: session_manager.create(
                 name=task.get("name") or "Routine",
@@ -192,12 +227,12 @@ async def _resolve_launch_session(
     )
     cfg = provisioning.resolve_config(spec)
     base_session_id = await provisioning.ensure_warm_base(spec, cfg)
-    if session_type == "provisioned_direct":
+    if session_type == PROVISIONED_DIRECT:
         session = await asyncio.to_thread(session_manager.get, base_session_id)
         if session is None:
             raise TaskLaunchError("provisioned base session disappeared", status=409)
         return session, False
-    if session_type == "provisioned_fork":
+    if session_type in FORKED_SESSION_TYPES:
         session = await asyncio.to_thread(
             session_manager.fork,
             base_session_id,
@@ -314,7 +349,7 @@ async def launch_task(
         raise TaskLaunchError(f"could not create task session: {exc}", status=400) from exc
 
     session_id = session["id"]
-    if task.get("session_type") in ("provisioned_direct", "provisioned_fork"):
+    if task.get("session_type") in PROVISIONED_SESSION_TYPES:
         prompt = _routine_run_prompt(task, str(run_prompt))
 
     if event_receipt_id is not None:
