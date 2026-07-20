@@ -607,6 +607,58 @@ async def _terminate(proc: Optional[asyncio.subprocess.Process]) -> None:
             pass
 
 
+def _scan_direct_subagent_metas(
+    sub_dir: Path, known: set[str]
+) -> list[tuple[str, Path, dict]]:
+    """Synchronous filesystem scan for `_final_drain_subagents`: discover
+    direct Agent/Task subagent meta files not yet in `known` whose jsonl
+    exists, parsing each meta. Pure I/O, touches no shared mutable state —
+    safe to run off the event loop via `asyncio.to_thread`.
+    """
+    results: list[tuple[str, Path, dict]] = []
+    for meta_path in sub_dir.glob("agent-*.meta.json"):
+        key = str(meta_path)
+        if key in known:
+            continue
+        agent_id = meta_path.name[len("agent-"):-len(".meta.json")]
+        jsonl_path = sub_dir / f"agent-{agent_id}.jsonl"
+        if not jsonl_path.exists():
+            continue
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        results.append((key, jsonl_path, meta))
+    return results
+
+
+def _scan_workflow_subagent_metas(
+    wf_base: Path, known: set[str]
+) -> list[tuple[str, str, Path]]:
+    """Synchronous filesystem scan for `_final_drain_subagents`: discover
+    workflow subagent meta files under `subagents/workflows/wf_*/` not yet
+    in `known` whose jsonl exists. Pure I/O, touches no shared mutable
+    state — safe to run off the event loop via `asyncio.to_thread`.
+    """
+    results: list[tuple[str, str, Path]] = []
+    if not wf_base.exists():
+        return results
+    for wf_path in sorted(wf_base.iterdir()):
+        if not wf_path.is_dir() or not wf_path.name.startswith("wf_"):
+            continue
+        run_id = wf_path.name
+        for meta_path in wf_path.glob("agent-*.meta.json"):
+            key = str(meta_path)
+            if key in known:
+                continue
+            agent_id = meta_path.name[len("agent-"):-len(".meta.json")]
+            jsonl_path = wf_path / f"agent-{agent_id}.jsonl"
+            if not jsonl_path.exists():
+                continue
+            results.append((run_id, key, jsonl_path))
+    return results
+
+
 # ============================================================================
 # ClaudeJsonlTailer — concrete: tail -F on a Claude CLI jsonl
 # ============================================================================
@@ -777,22 +829,20 @@ class ClaudeJsonlTailer(JsonlEventTailer):
         ancestry. Sub-agent UUIDs deduped downstream by event_ingester.
 
         Also drains workflow subagents from `subagents/workflows/wf_*/`.
+
+        Directory globbing/stat/read is offloaded to a thread
+        (`asyncio.to_thread`) so a large subagents/ tree doesn't block the
+        event loop during teardown; the discovered candidates are then
+        claimed/dispatched back on the loop, unchanged from before.
         """
         sub_dir = self._subagents_dir()
-        if not sub_dir.exists():
+        if not await asyncio.to_thread(sub_dir.exists):
             return
         # Direct Agent/Task subagents
-        for meta_path in sub_dir.glob("agent-*.meta.json"):
-            key = str(meta_path)
+        for key, jsonl_path, meta in await asyncio.to_thread(
+            _scan_direct_subagent_metas, sub_dir, self._known_meta_files
+        ):
             if key in self._known_meta_files:
-                continue
-            agent_id = meta_path.name[len("agent-"):-len(".meta.json")]
-            jsonl_path = sub_dir / f"agent-{agent_id}.jsonl"
-            if not jsonl_path.exists():
-                continue
-            try:
-                meta = json.loads(meta_path.read_text(encoding="utf-8"))
-            except Exception:
                 continue
             parent_tuid = self.subagent_registry.claim(
                 meta.get("agentType", "") or "",
@@ -804,27 +854,19 @@ class ClaudeJsonlTailer(JsonlEventTailer):
             await self._drain_agent_jsonl(jsonl_path, parent_tuid)
         # Workflow subagents
         wf_base = sub_dir / "workflows"
-        if wf_base.exists():
-            for wf_path in sorted(wf_base.iterdir()):
-                if not wf_path.is_dir() or not wf_path.name.startswith("wf_"):
-                    continue
-                run_id = wf_path.name
-                # Bind if not yet bound
-                if run_id not in self.subagent_registry._workflow_bindings:
-                    self.subagent_registry.claim_workflow(run_id)
-                parent_tuid = self.subagent_registry.get_workflow_parent(run_id)
-                if not parent_tuid:
-                    continue
-                for meta_path in wf_path.glob("agent-*.meta.json"):
-                    key = str(meta_path)
-                    if key in self._known_meta_files:
-                        continue
-                    agent_id = meta_path.name[len("agent-"):-len(".meta.json")]
-                    jsonl_path = wf_path / f"agent-{agent_id}.jsonl"
-                    if not jsonl_path.exists():
-                        continue
-                    self._known_meta_files.add(key)
-                    await self._drain_agent_jsonl(jsonl_path, parent_tuid)
+        for run_id, key, jsonl_path in await asyncio.to_thread(
+            _scan_workflow_subagent_metas, wf_base, self._known_meta_files
+        ):
+            if key in self._known_meta_files:
+                continue
+            # Bind if not yet bound
+            if run_id not in self.subagent_registry._workflow_bindings:
+                self.subagent_registry.claim_workflow(run_id)
+            parent_tuid = self.subagent_registry.get_workflow_parent(run_id)
+            if not parent_tuid:
+                continue
+            self._known_meta_files.add(key)
+            await self._drain_agent_jsonl(jsonl_path, parent_tuid)
 
     async def _drain_agent_jsonl(self, jsonl_path: Path, parent_tuid: str) -> None:
         """Read an agent jsonl end-to-end and dispatch each enriched line."""
