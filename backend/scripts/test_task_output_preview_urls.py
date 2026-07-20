@@ -43,7 +43,13 @@ def test_authenticated_mint_and_signed_redemption() -> None:
     assert preview_url.startswith("/api/task-output/preview/")
 
     anonymous = TestClient(main.app, client=("127.0.0.1", 50001))
-    preview = anonymous.get(preview_url, headers={"Origin": "https://untrusted.example"})
+    preview = anonymous.get(
+        preview_url,
+        headers={
+            "Origin": "https://untrusted.example",
+            "Referer": "http://localhost/routines",
+        },
+    )
     assert preview.status_code == 200, preview.text
     assert preview.text == "<html><body>ok</body></html>"
     assert preview.headers["content-type"].startswith("text/html")
