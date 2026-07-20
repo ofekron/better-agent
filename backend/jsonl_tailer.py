@@ -1348,6 +1348,19 @@ class OwnedClaudeJsonlTailer:
         )
         return token
 
+    async def _ensure_owner_token_off_loop(self):
+        """Async wrapper for `_ensure_owner_token` used by `_dispatch`.
+        The common case (token already cached) is a plain attribute read
+        with no lock involved, so it's answered inline on the loop; only
+        the cache-miss path (which calls `claim_owner` -> acquires
+        session_manager's per-root RLock, also held by to_thread-dispatched
+        work elsewhere) pays for a thread-pool round-trip."""
+        if self._owner_retired:
+            return None
+        if self._owner_token is not None:
+            return self._owner_token
+        return await asyncio.to_thread(self._ensure_owner_token)
+
     @perf.timed_fn("tailer.dispatch")
     async def _dispatch(self, enriched: dict) -> None:
         # Two routing branches keyed on whether `self.agent_sid` is the
@@ -1398,7 +1411,15 @@ class OwnedClaudeJsonlTailer:
                 # dedup in apply_event only checks the target message,
                 # so UUIDs already present in a prior message would pass
                 # through undetected.
-                token = self._ensure_owner_token()
+                # _ensure_owner_token synchronously acquires session_manager's
+                # per-root RLock (claim_owner -> _lock_for_root). That lock is
+                # also held by to_thread-dispatched work (e.g.
+                # get_messages_since), so calling it inline here blocks the
+                # event loop for every session while a worker thread holds
+                # the lock. Route through _ensure_owner_token_off_loop (only
+                # pays a thread hop on a cache miss) like the sibling call
+                # below so only this coroutine's own wait is affected.
+                token = await self._ensure_owner_token_off_loop()
                 if token is None:
                     return
                 accepted, _ = await asyncio.to_thread(
@@ -1433,7 +1454,9 @@ class OwnedClaudeJsonlTailer:
         # backup only.
         try:
             from event_journal import FORK_BACKUP_SOURCE, publish_event_sync
-            token = self._ensure_owner_token()
+            # See the primary-agent branch above for why this must run
+            # off the event loop (session_manager's per-root RLock).
+            token = await self._ensure_owner_token_off_loop()
             if token is None:
                 return
             accepted, _ = await asyncio.to_thread(
