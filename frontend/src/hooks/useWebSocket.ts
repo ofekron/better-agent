@@ -1601,6 +1601,17 @@ export function useWebSocket(
     }
     return Array.from(ids).sort().join("|");
   })();
+  const subscribeSession = useCallback((ws: WebSocket, id: string) => {
+    if (subscribedIdsRef.current.has(id)) return;
+    sendWebSocketFrame(ws, {
+      type: "subscribe",
+      app_session_id: id,
+      since_seq: getSinceSeqRef.current?.(id) ?? 0,
+      events_from_seq: getEventsFromSeqRef.current?.(id) ?? 0,
+      events_cursor_known: getEventsCursorKnownRef.current?.(id) ?? false,
+    });
+    subscribedIdsRef.current = new Set(subscribedIdsRef.current).add(id);
+  }, []);
   useEffect(() => {
     if (!connected) {
       // WS went down — drop our local record of subscriptions so that
@@ -1621,6 +1632,9 @@ export function useWebSocket(
       if (!desired.has(id)) {
         try {
           sendWebSocketFrame(ws, { type: "unsubscribe", app_session_id: id });
+          const next = new Set(subscribedIdsRef.current);
+          next.delete(id);
+          subscribedIdsRef.current = next;
         } catch {
           // ignore
         }
@@ -1628,24 +1642,12 @@ export function useWebSocket(
     }
     // Subscribe ids that are newly desired.
     for (const id of desired) {
-      if (!prev.has(id)) {
-        try {
-          const sinceSeq = getSinceSeqRef.current?.(id) ?? 0;
-          const eventsFromSeq = getEventsFromSeqRef.current?.(id) ?? 0;
-          const eventsCursorKnown = getEventsCursorKnownRef.current?.(id) ?? false;
-          sendWebSocketFrame(ws, {
-            type: "subscribe",
-            app_session_id: id,
-            since_seq: sinceSeq,
-            events_from_seq: eventsFromSeq,
-            events_cursor_known: eventsCursorKnown,
-          });
-        } catch {
-          // ignore
-        }
+      try {
+        subscribeSession(ws, id);
+      } catch {
+        // ignore
       }
     }
-    subscribedIdsRef.current = desired;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [connected, desiredSetKey]);
 
@@ -1697,7 +1699,9 @@ export function useWebSocket(
       // and turn_start will clear events when it actually starts processing
 
       try {
-        sendWebSocketFrame(wsRef.current, {
+        const ws = wsRef.current;
+        if (appSessionId) subscribeSession(ws, appSessionId);
+        sendWebSocketFrame(ws, {
           type: "send_message",
           prompt,
           model,
@@ -1722,7 +1726,7 @@ export function useWebSocket(
       logPromptSend("ws_send_ok", logData);
       return true;
     },
-    [isStreaming]
+    [isStreaming, subscribeSession]
   );
 
   const stopStreaming = useCallback((appSessionId: string): boolean => {

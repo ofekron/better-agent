@@ -416,9 +416,10 @@ describe("sessions CRUD + subscribe lifecycle", () => {
   });
 
   it("pressing Enter in the new-session initial prompt creates and sends", async () => {
+    const current = makeSession({ id: "current", cwd: "/tmp/project" });
     const h = await renderApp({
       seed: {
-        sessions: [],
+        sessions: [current],
         projects: [{
           path: "/tmp/project",
           name: "project",
@@ -427,6 +428,7 @@ describe("sessions CRUD + subscribe lifecycle", () => {
         }],
       },
     });
+    await h.selectSession(current.id);
     await clickNewSession(h);
 
     const prompt = h.$(".ns-investigation-textarea") as HTMLTextAreaElement;
@@ -451,9 +453,16 @@ describe("sessions CRUD + subscribe lifecycle", () => {
       credentials: "include",
       body: expect.objectContaining({ cwd: "/tmp/project" }),
     }));
-    expect(await waitForSend(h, "create and send from enter")).toEqual(
-      expect.objectContaining({ type: "send_message" }),
+    const sent = await waitForSend(h, "create and send from enter");
+    expect(sent).toEqual(expect.objectContaining({ type: "send_message" }));
+    const subscribeIndex = h.outbound.findIndex(
+      (frame) =>
+        frame.type === "subscribe" &&
+        frame.app_session_id === sent?.app_session_id,
     );
+    const sendIndex = h.outbound.indexOf(sent!);
+    expect(subscribeIndex).toBeGreaterThan(-1);
+    expect(subscribeIndex).toBeLessThan(sendIndex);
     h.unmount();
   });
 
