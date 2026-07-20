@@ -131,6 +131,19 @@ describe("ExtensionModuleSlot context stability", () => {
     });
   });
 
+  it("provides Component modules the host portal primitive", async () => {
+    let receivedPortal = false;
+    const Comp = (props: { createPortal?: unknown }) => {
+      receivedPortal = typeof props.createPortal === "function";
+      return null;
+    };
+    loadMock.mockResolvedValue({ Component: Comp });
+
+    render(<ExtensionModuleSlot module={TEST_MODULE} />);
+
+    await vi.waitFor(() => expect(receivedPortal).toBe(true));
+  });
+
   it("unmounts Component roots before their host slot is detached", async () => {
     const unmountConnectedStates: boolean[] = [];
     const replaceChildrenSpy = vi.spyOn(HTMLElement.prototype, "replaceChildren");

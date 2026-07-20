@@ -1,5 +1,6 @@
 import * as ReactRuntime from "react";
 import { createElement, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { createRoot } from "react-dom/client";
 import { useTranslation } from "react-i18next";
 import { API } from "src/api";
@@ -68,6 +69,7 @@ type ExtensionMount = (args: {
 type ExtensionComponent = (props: {
   context: ExtensionMountContext;
   React: typeof ReactRuntime;
+  createPortal: typeof createPortal;
 }) => ReactRuntime.ReactNode;
 type ExtensionModule = {
   mount?: ExtensionMount;
@@ -468,7 +470,11 @@ export function ExtensionModuleSlot({
         if (typeof imported.Component === "function") {
           const root = createRoot(targetContainer);
           const component = imported.Component;
-          root.render(createElement(component, { context: buildMountContext(), React: ReactRuntime }));
+          root.render(createElement(component, {
+            context: buildMountContext(),
+            React: ReactRuntime,
+            createPortal,
+          }));
           rootRef.current = root;
           componentRef.current = component;
           mountedKindRef.current = "component";
@@ -514,7 +520,11 @@ export function ExtensionModuleSlot({
     const root = rootRef.current;
     const component = componentRef.current;
     if (!root || !component) return;
-    root.render(createElement(component, { context: buildMountContext(), React: ReactRuntime }));
+    root.render(createElement(component, {
+      context: buildMountContext(),
+      React: ReactRuntime,
+      createPortal,
+    }));
   }, [context, buildMountContext]);
 
   const classes = ["extension-module-slot", className].filter(Boolean).join(" ");
