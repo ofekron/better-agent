@@ -5,7 +5,7 @@ import os
 import re
 from pathlib import Path
 
-from provisioning.config import ProvisionedConfig
+from provisioning.config import ProvisionedConfig, provider_supports_fork
 from provisioning.spec import DirtyPolicy, ProvisionedSessionSpec
 
 
@@ -93,7 +93,7 @@ class InlineProvisionedSessionSpec(ProvisionedSessionSpec):
         selected_model = str(resolved.get("model") or "").strip()
         if not provider_id or not selected_model:
             raise RuntimeError(f"inline provisioned task {self.task_key!r} has no model configured")
-        if not _provider_supports_fork(provider_id):
+        if not provider_supports_fork(provider_id):
             raise RuntimeError(
                 f"inline provisioned task {self.task_key!r} requires a fork-capable provider"
             )
@@ -278,9 +278,3 @@ def _leak_markers(value: object) -> tuple[str, ...]:
             raise ValueError("inline_spec dirty_policy leak_markers contains an invalid marker")
         markers.append(text)
     return tuple(markers)
-
-
-def _provider_supports_fork(provider_id: str) -> bool:
-    from provider import get_provider
-
-    return bool(getattr(get_provider(provider_id), "supports_fork", False))

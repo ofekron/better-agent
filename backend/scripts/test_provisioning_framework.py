@@ -36,7 +36,9 @@ if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
 import provisioning  # noqa: E402
+import provisioning.config as prov_config  # noqa: E402
 import provisioning.dispatch as prov_dispatch  # noqa: E402
+import provisioning.inline_spec as inline_spec  # noqa: E402
 import provisioning.manager as prov_manager  # noqa: E402
 import working_mode  # noqa: E402
 from provisioning import (  # noqa: E402
@@ -263,6 +265,38 @@ def test_resolve_config_overlay() -> bool:
         pass
     print(f"{PASS} resolve_config: env overlay + choice validation + missing model rejection")
     return True
+
+
+def test_fork_capability_checks_never_resolve_credentials() -> bool:
+    import config_store
+    import provider
+
+    original_resolve = config_store.resolve_provider_ref
+    original_list = config_store.list_providers
+    original_get_provider = provider.get_provider
+    config_store.resolve_provider_ref = lambda provider_id: {
+        "id": provider_id,
+        "supports_fork": provider_id == "forkable",
+    }
+    config_store.list_providers = lambda: {"default_provider_id": "forkable"}
+    provider.get_provider = lambda _provider_id: (_ for _ in ()).throw(
+        AssertionError("fork capability checks must not resolve credentials")
+    )
+    try:
+        values = (
+            prov_config.provider_supports_fork("forkable"),
+            inline_spec.provider_supports_fork("forkable"),
+            prov_config.provider_supports_fork("direct-only"),
+            inline_spec.provider_supports_fork("direct-only"),
+            prov_config.provider_supports_fork(""),
+        )
+    finally:
+        config_store.resolve_provider_ref = original_resolve
+        config_store.list_providers = original_list
+        provider.get_provider = original_get_provider
+    ok = values == (True, True, False, False, True)
+    print(f"{PASS if ok else FAIL} provisioning fork checks avoid credential reads")
+    return ok
 
 
 def test_resolve_config_uses_current_disk_token() -> bool:
@@ -1154,6 +1188,7 @@ def main_run() -> int:
         test_expired_reason,
         test_spec_and_registry,
         test_resolve_config_overlay,
+        test_fork_capability_checks_never_resolve_credentials,
         test_resolve_config_uses_current_disk_token,
         test_dispatch_sends_resolved_disk_token,
         test_extract_fork_text,

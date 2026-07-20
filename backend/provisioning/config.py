@@ -127,7 +127,7 @@ def _resolve_run_mode(spec: ProvisionedSessionSpec, provider_id: str) -> str:
         raise RuntimeError(f"{spec.env_prefix}_RUN_MODE must be 'fork' or 'direct'")
     if requested == "direct":
         return requested
-    if not _provider_supports_fork(provider_id):
+    if not provider_supports_fork(provider_id):
         raise RuntimeError(
             f"{spec.env_prefix} fork run_mode requires a fork-capable provider "
             f"(provider {provider_id!r} does not support fork)"
@@ -135,17 +135,16 @@ def _resolve_run_mode(spec: ProvisionedSessionSpec, provider_id: str) -> str:
     return requested
 
 
-def _provider_supports_fork(provider_id: str) -> bool:
+def provider_supports_fork(provider_id: str) -> bool:
+    import config_store
+
     if not provider_id:
-        return True
-    try:
-        from provider import get_provider
-    except Exception:
-        return True
-    try:
-        return bool(getattr(get_provider(provider_id), "supports_fork", True))
-    except Exception:
-        return True
+        state = config_store.list_providers()
+        provider_id = str(state.get("default_provider_id") or "")
+        if not provider_id:
+            return False
+    provider = config_store.resolve_provider_ref(provider_id)
+    return bool(provider and provider.get("supports_fork"))
 
 
 def _resolve_internal_token(spec: ProvisionedSessionSpec) -> str:
