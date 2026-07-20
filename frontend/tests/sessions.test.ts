@@ -466,6 +466,86 @@ describe("sessions CRUD + subscribe lifecycle", () => {
     h.unmount();
   });
 
+  it("keeps a deferred new-session prompt durable across reload and pre-ack replay", async () => {
+    const promptText = "survive the new-session handoff";
+    const current = makeSession({ id: "current", cwd: "/tmp/project" });
+    const projects = [{
+      path: "/tmp/project",
+      name: "project",
+      created_at: new Date().toISOString(),
+      last_used: new Date().toISOString(),
+    }];
+    const first = await renderApp({
+      seed: { sessions: [current], projects },
+    });
+    await first.selectSession(current.id);
+    const releaseDetail = first.backend.holdNext("GET", "/api/sessions/sess-2");
+    await clickNewSession(first);
+    await enterNewSessionPrompt(first, promptText);
+    await first.click(".modal-footer .btn-primary");
+    await first.flush();
+
+    expect(
+      first.outbound.some(
+        (frame) => frame.type === "send_message" && frame.prompt === promptText,
+      ),
+    ).toBe(false);
+    const [durable] = JSON.parse(
+      localStorage.getItem("better_agent_offline_queue") || "[]",
+    );
+    expect(durable).toEqual(expect.objectContaining({
+      sessionId: "sess-2",
+      prompt: promptText,
+      deferUntilTargetReady: true,
+    }));
+    const clientId = durable.clientId as string;
+    const created = first.backend.state.sessions.find((session) => session.id === "sess-2")!;
+    first.unmount();
+    releaseDetail();
+
+    const second = await renderApp({
+      seed: { sessions: [current, created], projects },
+    });
+    const firstReplay = await waitForSend(second, promptText);
+    expect(firstReplay).toEqual(expect.objectContaining({
+      app_session_id: "sess-2",
+      client_id: clientId,
+    }));
+    const subscribeIndex = second.outbound.findIndex(
+      (frame) =>
+        frame.type === "subscribe" &&
+        frame.app_session_id === "sess-2",
+    );
+    expect(subscribeIndex).toBeLessThan(second.outbound.indexOf(firstReplay!));
+    expect(JSON.parse(
+      localStorage.getItem("better_agent_offline_queue") || "[]",
+    )).toHaveLength(1);
+    second.unmount();
+
+    const third = await renderApp({
+      seed: { sessions: [current, created], projects },
+    });
+    const secondReplay = await waitForSend(third, promptText);
+    expect(secondReplay).toEqual(expect.objectContaining({
+      app_session_id: "sess-2",
+      client_id: clientId,
+    }));
+    third.emit({
+      type: "user_message_persisted",
+      data: {
+        session_id: "sess-2",
+        user_message: makeUserMsg({
+          content: promptText,
+          client_id: clientId,
+        }),
+      },
+    });
+    await third.flush();
+
+    expect(localStorage.getItem("better_agent_offline_queue")).toBeNull();
+    third.unmount();
+  });
+
   it("sends new-session initial prompt attachments with the first message", async () => {
     const h = await renderApp({
       seed: {

@@ -19,6 +19,7 @@ export interface OfflinePromptEntry {
   sendMode?: SendMode | null;
   sendTarget?: "worker" | "supervisor" | null;
   capabilityContexts?: CapabilityContext[];
+  deferUntilTargetReady?: boolean;
 }
 
 export interface OfflineCreateSessionEntry {
