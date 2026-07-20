@@ -2144,9 +2144,7 @@ function AppMain({
       }
     }
   }, [offlineQueue.queue, restoreOfflineSession]);
-  // Pending initial prompt: a useEffect submits only after the target session
-  // is both the selected render tree and the active WS subscription target.
-  const pendingInitialPromptRef = useRef<{
+  type InitialPromptPayload = {
     sessionId: string;
     prompt: string;
     images: ImagePayload[];
@@ -2155,24 +2153,60 @@ function AppMain({
     cwd: string;
     orchestrationMode: OrchestrationMode;
     capabilityContexts: CapabilityContext[];
-  } | null>(null);
+  };
+  type PendingInitialPrompt = InitialPromptPayload & { clientId: string };
 
-  const sendInitialPromptToSession = useCallback(
-    (pending: NonNullable<typeof pendingInitialPromptRef.current>) => {
-      const clientId = `investigate-${Date.now()}`;
-      const pendingMsg: ChatMessage = {
+  // Pending initial prompt: durable queue owns the accepted action; this ref
+  // only coordinates when the currently mounted tab may dispatch it.
+  const pendingInitialPromptRef = useRef<PendingInitialPrompt | null>(null);
+
+  const persistInitialPromptForSession = useCallback(
+    (
+      initial: InitialPromptPayload,
+      deferUntilTargetReady: boolean,
+    ): PendingInitialPrompt | null => {
+      const clientId = `initial-${uuidv4()}`;
+      const queued = offlineQueue.enqueue({
+        sessionId: initial.sessionId,
+        clientId,
+        prompt: initial.prompt,
+        model: initial.model,
+        cwd: initial.cwd,
+        images: initial.images.length > 0 ? initial.images : undefined,
+        files: initial.files.length > 0 ? initial.files : undefined,
+        orchestrationMode: initial.orchestrationMode,
+        sendMode: "queue",
+        capabilityContexts: initial.capabilityContexts,
+        deferUntilTargetReady,
+      });
+      if (!queued) return null;
+      appendPendingForSession(initial.sessionId, {
         id: clientId,
         role: "user",
-        content: pending.prompt,
+        content: initial.prompt,
         events: [],
         timestamp: new Date().toISOString(),
         isStreaming: false,
-        status: "sending",
-      };
-      appendPendingForSession(pending.sessionId, pendingMsg);
-      if (pending.images.length > 0) {
-        retryPayloadsRef.current.set(pendingMsg.id, pending.images);
+        status: connected ? "sending" : "offline",
+      });
+      if (initial.images.length > 0) {
+        retryPayloadsRef.current.set(clientId, initial.images);
       }
+      return { ...initial, clientId };
+    },
+    [appendPendingForSession, connected, offlineQueue],
+  );
+
+  const sendInitialPromptToSession = useCallback(
+    (pending: PendingInitialPrompt) => {
+      offlineDispatchedRef.current.add(pending.clientId);
+      setPendingForSession(pending.sessionId, (prev) =>
+        prev.map((message) =>
+          message.id === pending.clientId
+            ? { ...message, status: "sending" as const }
+            : message
+        )
+      );
       const sent = sendMessage(
         pending.prompt,
         pending.model,
@@ -2181,20 +2215,24 @@ function AppMain({
         pending.sessionId,
         pending.images.length > 0 ? pending.images : undefined,
         pending.orchestrationMode,
-        clientId,
-        undefined,
+        pending.clientId,
+        "queue",
         undefined,
         pending.files.length > 0 ? pending.files : undefined,
         pending.capabilityContexts,
       );
       if (sent) return true;
+      offlineDispatchedRef.current.delete(pending.clientId);
       setPendingForSession(pending.sessionId, (prev) =>
-        prev.filter((m) => m.id !== clientId)
+        prev.map((message) =>
+          message.id === pending.clientId
+            ? { ...message, status: "offline" as const }
+            : message
+        )
       );
-      retryPayloadsRef.current.delete(clientId);
       return false;
     },
-    [sendMessage, setPendingForSession, appendPendingForSession],
+    [sendMessage, setPendingForSession],
   );
 
   // Retries automatically on reconnect; clears on send or navigation away.
@@ -2222,6 +2260,7 @@ function AppMain({
   useEffect(() => {
     if (!connected) offlineDispatchedRef.current.clear();
   }, [connected]);
+  const routeSessionId = route.kind === "session" ? route.sessionId : null;
   useEffect(() => {
     if (!connected || offlineFlushRunningRef.current) return;
     offlineFlushRunningRef.current = true;
@@ -2233,6 +2272,17 @@ function AppMain({
       const failedCreateSessionIds = new Set<string>();
       try {
         for (const entry of offlineQueue.getAll()) {
+          if (
+            entry.type !== "create_session" &&
+            entry.deferUntilTargetReady &&
+            routeSessionId === entry.sessionId &&
+            (
+              currentSession?.id !== entry.sessionId ||
+              wsTargetSessionId !== entry.sessionId
+            )
+          ) {
+            continue;
+          }
           if (offlineDispatchedRef.current.has(entry.clientId)) continue;
           if (shouldSkipDependentSend(entry, failedCreateSessionIds)) {
             logPromptSend("offline_flush_skip_dependent", {
@@ -2412,7 +2462,18 @@ function AppMain({
         offlineFlushRunningRef.current = false;
       }
     })();
-  }, [connected, offlineQueue, createSession, persistDraftPatch, sendMessage, setPendingForSession, offlineRetryTick]);
+  }, [
+    connected,
+    createSession,
+    currentSession?.id,
+    offlineQueue,
+    offlineRetryTick,
+    persistDraftPatch,
+    routeSessionId,
+    sendMessage,
+    setPendingForSession,
+    wsTargetSessionId,
+  ]);
 
   // Clear a stale pending initial prompt if the user navigates to a different
   // session and the pending target is no longer the current route. This
@@ -5632,45 +5693,6 @@ function AppMain({
     [addOfflineSession, offlineQueue, navigate, setPendingForSession, t],
   );
 
-  const queueInitialPromptForSession = useCallback(
-    (
-      sessionId: string,
-      config: SessionConfig,
-      initialPrompt: string,
-      images: ImagePayload[],
-      files: FilePayload[],
-    ) => {
-      const clientId = `investigate-${Date.now()}`;
-      const offlineQueued = offlineQueue.enqueue({
-        sessionId,
-        clientId,
-        prompt: initialPrompt,
-        model: config.main.model,
-        cwd: config.cwd,
-        images: images.length > 0 ? images : undefined,
-        files: files.length > 0 ? files : undefined,
-        orchestrationMode: config.orchestrationMode,
-        sendMode: "queue",
-        capabilityContexts: config.capabilityContexts,
-      });
-      if (!offlineQueued) return false;
-      setPendingForSession(sessionId, (prev) => [
-        ...prev,
-        {
-          id: clientId,
-          role: "user",
-          content: initialPrompt,
-          events: [],
-          timestamp: new Date().toISOString(),
-          isStreaming: false,
-          status: "offline",
-        },
-      ]);
-      return true;
-    },
-    [offlineQueue, setPendingForSession],
-  );
-
   const handleCreateSessionFromModal = useCallback(
     async (
       config: SessionConfig,
@@ -5715,18 +5737,15 @@ function AppMain({
             orchestrationMode: config.orchestrationMode,
             capabilityContexts: config.capabilityContexts,
           };
+          const durablePending = persistInitialPromptForSession(
+            pending,
+            action === "send-and-open",
+          );
+          if (!durablePending) return false;
           if (action === "send-and-open") {
-            pendingInitialPromptRef.current = pending;
+            pendingInitialPromptRef.current = durablePending;
           } else {
-            const promptAccepted = sendInitialPromptToSession(pending)
-              || queueInitialPromptForSession(
-                session.id,
-                config,
-                initialPrompt,
-                images,
-                files,
-              );
-            if (!promptAccepted) return false;
+            sendInitialPromptToSession(durablePending);
           }
         }
         setNewSessionModalOpen(false);
@@ -5803,7 +5822,7 @@ function AppMain({
         window.alert(msg);
       }
     },
-    [applySessionMetadata, connected, createSession, flushDraftPatch, navigateToCreatedSession, queueInitialPromptForSession, queueLocalFirstSession, sendInitialPromptToSession],
+    [applySessionMetadata, connected, createSession, flushDraftPatch, navigateToCreatedSession, persistInitialPromptForSession, queueLocalFirstSession, sendInitialPromptToSession],
   );
 
 
@@ -6099,16 +6118,6 @@ function AppMain({
     ) => {
       const trimmed = prompt.trim();
       if (!trimmed) return;
-      // Persist the choice first so the highlight survives even if the
-      // user navigates away before the prompt auto-submits.
-      void fetch(
-        `${API}/api/sessions/${ASK_SINGLETON_ID}/messages/${msgId}/ask-choice`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ chosen_session_id: picked.id }),
-        },
-      ).catch((e) => console.warn("ask choose: persist failed", e));
       let images: ImagePayload[] = [];
       if (imageRefs.length > 0) {
         try {
@@ -6120,7 +6129,7 @@ function AppMain({
           console.warn("ask choose: image hand-off failed", e);
         }
       }
-      pendingInitialPromptRef.current = {
+      const durablePending = persistInitialPromptForSession({
         sessionId: picked.id,
         prompt: trimmed,
         images,
@@ -6130,10 +6139,20 @@ function AppMain({
         orchestrationMode:
           (picked.orchestration_mode as OrchestrationMode) ?? "team",
         capabilityContexts: [],
-      };
+      }, true);
+      if (!durablePending) return;
+      void fetch(
+        `${API}/api/sessions/${ASK_SINGLETON_ID}/messages/${msgId}/ask-choice`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ chosen_session_id: picked.id }),
+        },
+      ).catch((e) => console.warn("ask choose: persist failed", e));
+      pendingInitialPromptRef.current = durablePending;
       navigate(sessionPath(picked.id));
     },
-    [navigate, fetchAskImage],
+    [navigate, fetchAskImage, persistInitialPromptForSession],
   );
 
   const handleAskDismiss = useCallback((msgId: string) => {
