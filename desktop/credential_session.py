@@ -31,28 +31,6 @@ class ProviderCredentialBroker:
         with self._locks_guard:
             return self._locks.setdefault(provider_id, threading.Lock())
 
-    @staticmethod
-    def _provider_label(provider_id: str) -> str:
-        try:
-            from paths import bc_home
-
-            raw = json.loads((bc_home() / "config.json").read_text(encoding="utf-8"))
-            if not isinstance(raw, dict):
-                return "configured AI provider"
-            for provider in raw.get("providers", []):
-                if not isinstance(provider, dict) or provider.get("id") != provider_id:
-                    continue
-                name = provider.get("name")
-                if (
-                    isinstance(name, str)
-                    and 0 < len(name) <= 128
-                    and not any(character in name for character in "\0\r\n")
-                ):
-                    return name
-        except (OSError, ValueError, TypeError):
-            pass
-        return "configured AI provider"
-
     def handle(self, request: object) -> dict[str, str]:
         if not isinstance(request, dict):
             raise ValueError("request must be an object")
@@ -92,14 +70,9 @@ class ProviderCredentialBroker:
                 response["value"] = value
             return response
         account = f"provider:{provider_id}"
-        label = self._provider_label(provider_id)
         try:
             for service in service_names(PRIMARY_SERVICE, LEGACY_SERVICE):
-                value = oskeychain.get(
-                    service,
-                    account,
-                    reason=f"Better Agent needs the API key for {label}",
-                )
+                value = oskeychain.get(service, account)
                 if value:
                     value = value[:-1] if value.endswith("\n") else value
                     self._states[provider_id] = ("available", value)
@@ -114,15 +87,9 @@ class ProviderCredentialBroker:
         if self._states.get(provider_id, ("unknown", ""))[0] == "blocked":
             return {"status": "blocked"}
         account = f"provider:{provider_id}"
-        label = self._provider_label(provider_id)
         try:
             for service in service_names(PRIMARY_SERVICE, LEGACY_SERVICE):
-                oskeychain.store(
-                    service,
-                    account,
-                    value,
-                    reason=f"Better Agent needs to save the API key for {label}",
-                )
+                oskeychain.store(service, account, value)
         except RuntimeError:
             self._states[provider_id] = ("blocked", "")
             return {"status": "blocked"}
@@ -133,14 +100,9 @@ class ProviderCredentialBroker:
         if self._states.get(provider_id, ("unknown", ""))[0] == "blocked":
             return {"status": "blocked"}
         account = f"provider:{provider_id}"
-        label = self._provider_label(provider_id)
         try:
             for service in service_names(PRIMARY_SERVICE, LEGACY_SERVICE):
-                oskeychain.delete(
-                    service,
-                    account,
-                    reason=f"Better Agent needs to remove the API key for {label}",
-                )
+                oskeychain.delete(service, account)
         except RuntimeError:
             self._states[provider_id] = ("blocked", "")
             return {"status": "blocked"}

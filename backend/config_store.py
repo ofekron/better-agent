@@ -120,8 +120,8 @@ def _keyring_services() -> tuple[str, ...]:
     return service_names(KEYRING_SERVICE, LEGACY_KEYRING_SERVICE)
 
 
-# Provider-key reads and writes use a bounded helper process so a blocked native
-# Keychain prompt cannot prevent Better Agent from closing.
+# Provider-key reads and writes use the stable Apple `security` binary identity
+# so one Keychain authorization survives interpreter and environment changes.
 #
 # `keyring`'s macOS backend never sets `kSecUseOperationPrompt`, so the OS
 # "allow access" prompt shows only the generic calling-binary identity
@@ -142,14 +142,12 @@ def _keychain_reason(provider_id: str, verb: str) -> str:
 
 
 def _get_password_with_reason(service: str, username: str, reason: str) -> str | None:
-    """Read with a descriptive, bounded macOS Keychain prompt when possible."""
+    """Read through macOS's stable ``security`` identity when possible."""
     if (
         keyring.get_password is _ORIGINAL_KEYRING_GET_PASSWORD
         and _use_stable_macos_keychain()
     ):
-        value = oskeychain.get(
-            service, username, timeout=_KEYRING_TIMEOUT, reason=reason,
-        )
+        value = oskeychain.get(service, username, timeout=_KEYRING_TIMEOUT)
         if value is None:
             return None
         return value[:-1] if value.endswith("\n") else value
@@ -167,7 +165,7 @@ def _set_password_with_reason(
         keyring.set_password is _ORIGINAL_KEYRING_SET_PASSWORD
         and _use_stable_macos_keychain()
     ):
-        oskeychain.store(service, username, password, reason=reason)
+        oskeychain.store(service, username, password)
     else:
         keyring.set_password(service, username, password)
 
@@ -177,7 +175,7 @@ def _delete_password(service: str, username: str, reason: str | None = None) -> 
         keyring.delete_password is _ORIGINAL_KEYRING_DELETE_PASSWORD
         and _use_stable_macos_keychain()
     ):
-        oskeychain.delete(service, username, reason=reason)
+        oskeychain.delete(service, username)
         return
     keyring.delete_password(service, username)
 

@@ -290,7 +290,7 @@ def test_macos_read_uses_stable_security_identity_and_exact_account() -> None:
     real_get = config_store.oskeychain.get
     config_store._use_stable_macos_keychain = lambda: True
     config_store.oskeychain.get = lambda service, account, **kwargs: calls.append(
-        (service, account, kwargs["timeout"], kwargs["reason"])
+        (service, account, kwargs)
     ) or "  key  \n"
     try:
         value = config_store._get_password_with_reason(
@@ -305,8 +305,7 @@ def test_macos_read_uses_stable_security_identity_and_exact_account() -> None:
     assert calls == [(
         config_store.KEYRING_SERVICE,
         "provider:provider-1",
-        config_store._KEYRING_TIMEOUT,
-        "unused by stable security reader",
+        {"timeout": config_store._KEYRING_TIMEOUT},
     )]
 
 
@@ -316,7 +315,7 @@ def test_macos_write_uses_stable_security_identity_without_secret_argv() -> None
     real_store = config_store.oskeychain.store
     config_store._use_stable_macos_keychain = lambda: True
     config_store.oskeychain.store = lambda service, account, value, **kwargs: calls.append(
-        (service, account, value, kwargs["reason"])
+        (service, account, value, kwargs)
     )
     try:
         config_store._set_password_with_reason(
@@ -332,7 +331,7 @@ def test_macos_write_uses_stable_security_identity_without_secret_argv() -> None
         config_store.KEYRING_SERVICE,
         "provider:provider-1",
         "secret-value",
-        "unused by stable security writer",
+        {},
     )]
 
 
@@ -353,7 +352,7 @@ def test_darwin_stable_write_does_not_depend_on_keyring_backend() -> None:
     config_store.keyring.set_password = fallback_set
     config_store._ORIGINAL_KEYRING_SET_PASSWORD = fallback_set
     config_store.oskeychain.store = lambda service, account, value, **kwargs: stable_calls.append(
-        (service, account, value, kwargs["reason"])
+        (service, account, value, kwargs)
     )
     try:
         config_store._set_password_with_reason(
@@ -373,7 +372,7 @@ def test_darwin_stable_write_does_not_depend_on_keyring_backend() -> None:
         config_store.KEYRING_SERVICE,
         "provider:provider-isolated",
         "secret-value",
-        "unused by stable security writer",
+        {},
     )]
     assert fallback_calls == []
 
@@ -418,84 +417,6 @@ def test_macos_write_failure_propagates_without_cache_update() -> None:
         config_store.oskeychain.store = real_store
 
 
-def test_native_prompt_helper_is_bounded_and_keeps_secret_off_argv() -> None:
-    calls = []
-    real_run = config_store.oskeychain.subprocess.run
-
-    class Result:
-        returncode = 1
-        stdout = ""
-
-    def denied_run(command, **kwargs):
-        calls.append((command, kwargs))
-        return Result()
-
-    config_store.oskeychain.subprocess.run = denied_run
-    try:
-        try:
-            config_store.oskeychain._run_native(
-                "store", "service", "account", "clear reason", value="secret-value",
-            )
-        except RuntimeError:
-            pass
-        else:
-            raise AssertionError("native denial must normalize to RuntimeError")
-    finally:
-        config_store.oskeychain.subprocess.run = real_run
-    command, kwargs = calls[0]
-    assert "secret-value" not in command
-    assert kwargs["input"] == "secret-value"
-    assert kwargs["timeout"] == config_store.oskeychain._TIMEOUT
-
-
-def test_native_update_failure_never_deletes_or_adds() -> None:
-    calls = []
-
-    class Callable:
-        restype = None
-        argtypes = None
-
-        def __call__(self, *args):
-            calls.append("update")
-            return -128
-
-    class ErrorType:
-        @staticmethod
-        def raise_for_status(status):
-            if status:
-                raise RuntimeError("denied")
-
-    class FakeApi:
-        OS_status = int
-        Error = ErrorType
-        _sec = type("Security", (), {"SecItemUpdate": Callable()})()
-        error = type("Statuses", (), {"item_not_found": -25300})()
-
-        @staticmethod
-        def create_query(**kwargs):
-            calls.append("query")
-            return kwargs
-
-        @staticmethod
-        def SecItemAdd(*args):
-            calls.append("add")
-            return 0
-
-        @staticmethod
-        def k_(value):
-            return value
-
-    try:
-        config_store.oskeychain._native_store(
-            FakeApi, {}, "service", "account", "replacement", "clear reason",
-        )
-    except RuntimeError:
-        pass
-    else:
-        raise AssertionError("failed native update must propagate")
-    assert calls == ["query", "update"]
-
-
 def test_non_darwin_keyring_failures_normalize_to_runtime_error() -> None:
     real_platform = config_store.oskeychain.sys.platform
     real_get = config_store.keyring.get_password
@@ -526,6 +447,35 @@ def test_non_darwin_keyring_failures_normalize_to_runtime_error() -> None:
         config_store.keyring.get_password = real_get
         config_store.keyring.set_password = real_store
         config_store.keyring.delete_password = real_delete
+
+
+def test_macos_operations_use_stable_security_binary() -> None:
+    calls = []
+    real_platform = config_store.oskeychain.sys.platform
+    real_run = config_store.oskeychain.subprocess.run
+
+    class Result:
+        returncode = 0
+        stdout = "stored-value\n"
+
+    config_store.oskeychain.sys.platform = "darwin"
+    config_store.oskeychain.subprocess.run = lambda command, **kwargs: calls.append(
+        (command, kwargs)
+    ) or Result()
+    try:
+        config_store.oskeychain.store("service", "account", "secret-value")
+        assert config_store.oskeychain.get("service", "account") == "stored-value\n"
+        config_store.oskeychain.delete("service", "account")
+    finally:
+        config_store.oskeychain.sys.platform = real_platform
+        config_store.oskeychain.subprocess.run = real_run
+
+    assert [command[:2] for command, _ in calls] == [
+        ["/usr/bin/security", "-q"],
+        ["/usr/bin/security", "find-generic-password"],
+        ["/usr/bin/security", "delete-generic-password"],
+    ]
+    assert all("secret-value" not in command for command, _ in calls)
 
 
 def test_macos_security_stdin_real_keychain_lifecycle() -> None:
@@ -644,9 +594,8 @@ if __name__ == "__main__":
     test_darwin_stable_write_does_not_depend_on_keyring_backend()
     test_macos_store_input_keeps_secret_out_of_argv_and_quotes_identifiers()
     test_macos_write_failure_propagates_without_cache_update()
-    test_native_prompt_helper_is_bounded_and_keeps_secret_off_argv()
-    test_native_update_failure_never_deletes_or_adds()
     test_non_darwin_keyring_failures_normalize_to_runtime_error()
+    test_macos_operations_use_stable_security_binary()
     test_macos_security_stdin_real_keychain_lifecycle()
     test_load_state_uses_fingerprint_cache_and_external_invalidates()
     print("OK: config_store keyring compatibility")
