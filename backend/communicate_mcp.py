@@ -27,14 +27,17 @@ from orchestration_tool_descriptions import (
     DELETE_CHAT_DESCRIPTION,
     DELEGATE_TASK_DESCRIPTION,
     ENSURE_NAMED_WORKER_DESCRIPTION,
+    INBOX_DESCRIPTION,
     LIST_AVAILABLE_PROVIDER_MODELS_DESCRIPTION,
     MSSG_DESCRIPTION,
+    READ_INBOX_HISTORY_DESCRIPTION,
     SET_CHAT_SENDER_POLICY_DESCRIPTION,
     STOP_TURN_DESCRIPTION,
 )
 
 
 import chat_store
+import inbox_store
 from provider_catalog_mcp import available_provider_models_response
 
 
@@ -65,9 +68,11 @@ _DISABLEABLE_BUILTIN_TOOLS = frozenset({
     "delegate_task",
     "delete_chat",
     "ensure_named_worker",
+    "inbox",
     "list_available_provider_models",
     "mssg",
     "read_chat_history",
+    "read_inbox_history",
     "set_chat_sender_policy",
     "stop_turn",
 })
@@ -514,7 +519,8 @@ def build_server() -> FastMCP:
             "their own coordinator), create_sub_session (hidden native "
             "sub-session; send work to it later with mssg or ask), and "
             "stop_turn (stops only a running turn created by this caller), "
-            "create_worker (team worker, may require approval), and chat/create_chat/"
+            "create_worker (team worker, may require approval), inbox "
+            "(private per-session mail: anyone sends, only the recipient reads), and chat/create_chat/"
             "delete_chat (a shared team chat room: every session reads the same chat; "
             "chat returns only messages newer than your last-read position). Leave provider/"
             "model/reasoning selectors unprovided unless a specific different "
@@ -579,6 +585,30 @@ def build_server() -> FastMCP:
                 reader_id=_env_required("BETTER_CLAUDE_MSSG_SENDER_SESSION_ID"),
                 message=message,
                 history_mode=history_mode,
+            ))()
+
+    if "inbox" not in disabled_tools:
+        @server.tool(description=INBOX_DESCRIPTION)
+        def inbox(
+            recipient_session_id: str = "",
+            message: str = "",
+        ) -> dict[str, Any]:
+            return _safe_result(lambda: inbox_store.post_or_read(
+                caller_session_id=_env_required("BETTER_CLAUDE_MSSG_SENDER_SESSION_ID"),
+                recipient_session_id=recipient_session_id,
+                message=message,
+            ))()
+
+    if "read_inbox_history" not in disabled_tools:
+        @server.tool(description=READ_INBOX_HISTORY_DESCRIPTION)
+        def read_inbox_history(
+            limit: int = 50,
+            before_seq: int | None = None,
+        ) -> dict[str, Any]:
+            return _safe_result(lambda: inbox_store.read_history(
+                recipient_session_id=_env_required("BETTER_CLAUDE_MSSG_SENDER_SESSION_ID"),
+                limit=limit,
+                before_seq=before_seq,
             ))()
 
     if "read_chat_history" not in disabled_tools:

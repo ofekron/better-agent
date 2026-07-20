@@ -99,6 +99,20 @@ CHAT_DESCRIPTION = (
     "exist (create it with create_chat)."
 )
 
+INBOX_DESCRIPTION = (
+    "Send to or read your private per-session inbox. To send, pass a non-empty "
+    "message with recipient_session_id; any session may send to any existing "
+    "session. To read, omit both fields. Reads are always bound to your own "
+    "session id, return only messages newer than your last read, and advance "
+    "your cursor. A sender cannot read the recipient's inbox."
+)
+
+READ_INBOX_HISTORY_DESCRIPTION = (
+    "Read older messages from your own private per-session inbox without changing "
+    "your unread cursor. The recipient is always your current session and cannot "
+    "be selected."
+)
+
 CREATE_CHAT_DESCRIPTION = (
     "Create a shared team chat by chat_id. Once created, any team session can "
     "read it, and anyone can post by default. The creator owns the chat and may "

@@ -29,6 +29,47 @@ STOP_TURN_INPUT_SCHEMA: dict[str, Any] = {
 }
 
 
+INBOX_INPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "recipient_session_id": {
+            "type": "string",
+            "description": (
+                "Existing Better Agent session to receive message. Required when "
+                "sending; omit when reading your own inbox."
+            ),
+        },
+        "message": {
+            "type": "string",
+            "maxLength": 10000,
+            "description": (
+                "Non-empty message to send. Omit both fields to read your own "
+                "unread inbox."
+            ),
+        },
+    },
+    "required": [],
+    "additionalProperties": False,
+}
+
+
+READ_INBOX_HISTORY_INPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "limit": {
+            "type": "integer",
+            "description": "Maximum messages to return, clamped to 1..200. Defaults to 50.",
+        },
+        "before_seq": {
+            "type": ["integer", "null"],
+            "description": "Return messages older than this sequence. Omit for newest history.",
+        },
+    },
+    "required": [],
+    "additionalProperties": False,
+}
+
+
 DELEGATE_TASK_INPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {

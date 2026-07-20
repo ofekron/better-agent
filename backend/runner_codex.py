@@ -63,6 +63,7 @@ from communication_modes import (
     normalize_ask_mode,
 )
 import chat_store
+import inbox_store
 import extension_store
 from runs_dir import atomic_write_json
 from env_compat import get_env
@@ -80,15 +81,19 @@ from orchestration_tool_descriptions import (
     DELETE_CHAT_DESCRIPTION as _DELETE_CHAT_DESCRIPTION,
     DELEGATE_TASK_DESCRIPTION as _DELEGATE_TASK_DESCRIPTION,
     ENSURE_NAMED_WORKER_DESCRIPTION as _ENSURE_NAMED_WORKER_DESCRIPTION,
+    INBOX_DESCRIPTION as _INBOX_DESCRIPTION,
     LIST_AVAILABLE_PROVIDER_MODELS_DESCRIPTION as _LIST_AVAILABLE_PROVIDER_MODELS_DESCRIPTION,
     MSSG_DESCRIPTION as _MSSG_DESCRIPTION,
+    READ_INBOX_HISTORY_DESCRIPTION as _READ_INBOX_HISTORY_DESCRIPTION,
     SET_CHAT_SENDER_POLICY_DESCRIPTION as _SET_CHAT_SENDER_POLICY_DESCRIPTION,
     STOP_TURN_DESCRIPTION as _STOP_TURN_DESCRIPTION,
 )
 from orchestration_tool_schemas import (
     DELEGATE_TASK_INPUT_SCHEMA as _DELEGATE_TASK_INPUT_SCHEMA,
     ENSURE_NAMED_WORKER_INPUT_SCHEMA as _ENSURE_NAMED_WORKER_INPUT_SCHEMA,
+    INBOX_INPUT_SCHEMA as _INBOX_INPUT_SCHEMA,
     LIST_AVAILABLE_PROVIDER_MODELS_INPUT_SCHEMA as _LIST_AVAILABLE_PROVIDER_MODELS_INPUT_SCHEMA,
+    READ_INBOX_HISTORY_INPUT_SCHEMA as _READ_INBOX_HISTORY_INPUT_SCHEMA,
     SESSION_ORGANIZATION_INPUT_PROPERTIES as _SESSION_ORGANIZATION_INPUT_PROPERTIES,
     STOP_TURN_INPUT_SCHEMA as _STOP_TURN_INPUT_SCHEMA,
 )
@@ -553,9 +558,11 @@ _DISABLEABLE_BUILTIN_TOOLS = frozenset({
     "delete_chat",
     "delegate_task",
     "ensure_named_worker",
+    "inbox",
     "list_available_provider_models",
     "mssg",
     "read_chat_history",
+    "read_inbox_history",
     "set_chat_sender_policy",
     "stop_turn",
 })
@@ -898,6 +905,22 @@ def _build_chat_dynamic_tool() -> dict:
     }
 
 
+def _build_inbox_dynamic_tool() -> dict:
+    return {
+        "name": "inbox",
+        "description": _INBOX_DESCRIPTION,
+        "inputSchema": _INBOX_INPUT_SCHEMA,
+    }
+
+
+def _build_read_inbox_history_dynamic_tool() -> dict:
+    return {
+        "name": "read_inbox_history",
+        "description": _READ_INBOX_HISTORY_DESCRIPTION,
+        "inputSchema": _READ_INBOX_HISTORY_INPUT_SCHEMA,
+    }
+
+
 def _build_create_chat_dynamic_tool() -> dict:
     return {
         "name": "create_chat",
@@ -1038,6 +1061,52 @@ def _build_chat_tool_handler(*, sender_session_id: str):
         return _dynamic_tool_json_result(result, success=not is_error)
 
     return chat
+
+
+def _build_inbox_tool_handler(*, sender_session_id: str):
+    async def inbox(params: dict) -> dict:
+        args = params.get("arguments") or {}
+        if not isinstance(args, dict):
+            return _dynamic_tool_text_result("inbox arguments must be an object", success=False)
+        try:
+            result = await asyncio.to_thread(
+                inbox_store.post_or_read,
+                caller_session_id=sender_session_id,
+                recipient_session_id=str(args.get("recipient_session_id") or ""),
+                message=str(args.get("message") or ""),
+            )
+        except Exception as e:
+            logger.exception("inbox dynamic tool handler failed")
+            return _dynamic_tool_text_result(f"inbox failed: {e}", success=False)
+        return _dynamic_tool_json_result(result, success=True)
+
+    return inbox
+
+
+def _build_read_inbox_history_tool_handler(*, sender_session_id: str):
+    async def read_inbox_history(params: dict) -> dict:
+        args = params.get("arguments") or {}
+        if not isinstance(args, dict):
+            return _dynamic_tool_text_result(
+                "read_inbox_history arguments must be an object",
+                success=False,
+            )
+        try:
+            result = await asyncio.to_thread(
+                inbox_store.read_history,
+                recipient_session_id=sender_session_id,
+                limit=int(args.get("limit") or 50),
+                before_seq=args.get("before_seq"),
+            )
+        except Exception as e:
+            logger.exception("read_inbox_history dynamic tool handler failed")
+            return _dynamic_tool_text_result(
+                f"read_inbox_history failed: {e}",
+                success=False,
+            )
+        return _dynamic_tool_json_result(result, success=True)
+
+    return read_inbox_history
 
 
 def _build_read_chat_history_dynamic_tool() -> dict:
@@ -1736,6 +1805,24 @@ def _build_dynamic_tool_set(
                 tool_handlers,
                 _build_chat_dynamic_tool(),
                 _build_chat_tool_handler(sender_session_id=mssg_sender_session_id),
+                existing_tool_names=existing_tool_names,
+            )
+        if "inbox" not in disabled_builtin_tools:
+            _add_dynamic_tool(
+                dynamic_tools,
+                tool_handlers,
+                _build_inbox_dynamic_tool(),
+                _build_inbox_tool_handler(sender_session_id=mssg_sender_session_id),
+                existing_tool_names=existing_tool_names,
+            )
+        if "read_inbox_history" not in disabled_builtin_tools:
+            _add_dynamic_tool(
+                dynamic_tools,
+                tool_handlers,
+                _build_read_inbox_history_dynamic_tool(),
+                _build_read_inbox_history_tool_handler(
+                    sender_session_id=mssg_sender_session_id,
+                ),
                 existing_tool_names=existing_tool_names,
             )
         if "read_chat_history" not in disabled_builtin_tools:

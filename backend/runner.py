@@ -50,6 +50,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
 
 import chat_store
+import inbox_store
 import extension_store
 from communication_modes import (
     ASK_MODE_CONTINUE_AND_EXPECT_MSSG_BACK_ASYNC,
@@ -69,15 +70,19 @@ from orchestration_tool_descriptions import (
     DELETE_CHAT_DESCRIPTION as _DELETE_CHAT_DESCRIPTION,
     DELEGATE_TASK_DESCRIPTION as _DELEGATE_TASK_DESCRIPTION,
     ENSURE_NAMED_WORKER_DESCRIPTION as _ENSURE_NAMED_WORKER_DESCRIPTION,
+    INBOX_DESCRIPTION as _INBOX_DESCRIPTION,
     LIST_AVAILABLE_PROVIDER_MODELS_DESCRIPTION as _LIST_AVAILABLE_PROVIDER_MODELS_DESCRIPTION,
     MSSG_DESCRIPTION as _MSSG_DESCRIPTION,
+    READ_INBOX_HISTORY_DESCRIPTION as _READ_INBOX_HISTORY_DESCRIPTION,
     SET_CHAT_SENDER_POLICY_DESCRIPTION as _SET_CHAT_SENDER_POLICY_DESCRIPTION,
     STOP_TURN_DESCRIPTION as _STOP_TURN_DESCRIPTION,
 )
 from orchestration_tool_schemas import (
     DELEGATE_TASK_INPUT_SCHEMA as _DELEGATE_TASK_INPUT_SCHEMA,
     ENSURE_NAMED_WORKER_INPUT_SCHEMA as _ENSURE_NAMED_WORKER_INPUT_SCHEMA,
+    INBOX_INPUT_SCHEMA as _INBOX_INPUT_SCHEMA,
     LIST_AVAILABLE_PROVIDER_MODELS_INPUT_SCHEMA as _LIST_AVAILABLE_PROVIDER_MODELS_INPUT_SCHEMA,
+    READ_INBOX_HISTORY_INPUT_SCHEMA as _READ_INBOX_HISTORY_INPUT_SCHEMA,
     SESSION_ORGANIZATION_INPUT_PROPERTIES as _SESSION_ORGANIZATION_INPUT_PROPERTIES,
     STOP_TURN_INPUT_SCHEMA as _STOP_TURN_INPUT_SCHEMA,
 )
@@ -920,9 +925,11 @@ _DISABLEABLE_BUILTIN_TOOLS = frozenset({
     "delete_chat",
     "delegate_task",
     "ensure_named_worker",
+    "inbox",
     "list_available_provider_models",
     "mssg",
     "read_chat_history",
+    "read_inbox_history",
     "set_chat_sender_policy",
     "stop_turn",
 })
@@ -1568,6 +1575,44 @@ def _build_chat_tool(*, sender_session_id: str):
         return _tool_success_result(result)
 
     return chat
+
+
+def _build_inbox_tool(*, sender_session_id: str):
+    @tool("inbox", _INBOX_DESCRIPTION, _INBOX_INPUT_SCHEMA)
+    async def inbox(args: dict[str, Any]) -> dict[str, Any]:
+        try:
+            result = await asyncio.to_thread(
+                inbox_store.post_or_read,
+                caller_session_id=sender_session_id,
+                recipient_session_id=str(args.get("recipient_session_id") or ""),
+                message=str(args.get("message") or ""),
+            )
+        except Exception as e:
+            return _tool_error_response("inbox", e)
+        return _tool_success_result(result)
+
+    return inbox
+
+
+def _build_read_inbox_history_tool(*, sender_session_id: str):
+    @tool(
+        "read_inbox_history",
+        _READ_INBOX_HISTORY_DESCRIPTION,
+        _READ_INBOX_HISTORY_INPUT_SCHEMA,
+    )
+    async def read_inbox_history(args: dict[str, Any]) -> dict[str, Any]:
+        try:
+            result = await asyncio.to_thread(
+                inbox_store.read_history,
+                recipient_session_id=sender_session_id,
+                limit=int(args.get("limit") or 50),
+                before_seq=args.get("before_seq"),
+            )
+        except Exception as e:
+            return _tool_error_response("read_inbox_history", e)
+        return _tool_success_result(result)
+
+    return read_inbox_history
 
 
 def _build_read_chat_history_tool():
@@ -3150,6 +3195,14 @@ async def _run(run_dir: Path, inputs: dict) -> int:
             communicate_tools.append(_build_list_available_provider_models_tool())
         if "chat" not in disabled_builtin_tools:
             communicate_tools.append(_build_chat_tool(
+                sender_session_id=str(mssg_sender_session_id),
+            ))
+        if "inbox" not in disabled_builtin_tools:
+            communicate_tools.append(_build_inbox_tool(
+                sender_session_id=str(mssg_sender_session_id),
+            ))
+        if "read_inbox_history" not in disabled_builtin_tools:
+            communicate_tools.append(_build_read_inbox_history_tool(
                 sender_session_id=str(mssg_sender_session_id),
             ))
         if "read_chat_history" not in disabled_builtin_tools:
