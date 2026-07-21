@@ -3828,17 +3828,35 @@ body {
   margin-bottom: 8px;
 }
 
+.message-image-open,
+.image-preview-open {
+  display: block;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  cursor: zoom-in;
+}
+
+.message-image-open:focus-visible,
+.image-preview-open:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
 .message-image {
+  display: block;
   max-width: 300px;
   max-height: 200px;
   border-radius: 8px;
   object-fit: contain;
-  cursor: pointer;
   border: 1px solid var(--border);
+  transition: border-color 160ms ease, transform 160ms ease;
 }
 
-.message-image:hover {
+.message-image-open:hover .message-image {
   border-color: var(--accent);
+  transform: scale(1.015);
 }
 
 .message-files {
@@ -3935,6 +3953,28 @@ body {
   transform: translateX(-50%);
   color: rgba(255, 255, 255, 0.7);
   font-size: calc(14px * var(--app-font-scale));
+}
+
+@media (max-width: 600px) {
+  .image-lightbox-img {
+    max-width: calc(100vw - 24px);
+    max-height: calc(100vh - 112px);
+  }
+
+  .image-lightbox-close {
+    top: max(12px, env(safe-area-inset-top));
+    right: 12px;
+  }
+
+  .image-lightbox-prev { left: 8px; }
+  .image-lightbox-next { right: 8px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .message-image,
+  .image-preview-item img {
+    transition: none;
+  }
 }
 
 .message-status {
@@ -6845,6 +6885,12 @@ button.run-badge-clickable:focus-visible {
   border-radius: 6px;
   border: 1px solid var(--border);
   display: block;
+  transition: border-color 160ms ease, transform 160ms ease;
+}
+
+.image-preview-open:hover img {
+  border-color: var(--accent);
+  transform: scale(1.025);
 }
 
 .image-remove-btn {

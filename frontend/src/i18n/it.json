@@ -1014,6 +1014,8 @@
   "schedulesPage.clearAllFailed": "Impossibile cancellare alcune pianificazioni",
   "rightPanel.communications": "Communications",
   "common.close": "Chiudi",
+  "imagePreview.previous": "Immagine precedente",
+  "imagePreview.next": "Immagine successiva",
   "settings.extensionsConfigure": "Configura",
   "settings.extensionsModuleSlot": "Slot: {{slot}}",
   "extensionPayment.title": "Completa il tuo acquisto",

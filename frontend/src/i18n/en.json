@@ -1097,6 +1097,8 @@
   "schedulesPage.clearAllConfirm": "Confirm clear all",
   "schedulesPage.clearAllFailed": "Some schedules could not be cleared",
   "common.close": "Close",
+  "imagePreview.previous": "Previous image",
+  "imagePreview.next": "Next image",
   "settings.extensionsConfigure": "Configure",
   "settings.extensionsModuleSlot": "Slot: {{slot}}",
   "extensionPayment.title": "Complete your purchase",

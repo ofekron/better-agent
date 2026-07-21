@@ -1013,6 +1013,8 @@
   "schedulesPage.clearAllFailed": "تعذر مسح بعض الجدولات",
   "rightPanel.communications": "Communications",
   "common.close": "إغلاق",
+  "imagePreview.previous": "الصورة السابقة",
+  "imagePreview.next": "الصورة التالية",
   "settings.extensionsConfigure": "تهيئة",
   "settings.extensionsModuleSlot": "الموضع: {{slot}}",
   "extensionPayment.title": "أكمل عملية الشراء",

@@ -1010,6 +1010,8 @@
   "schedulesPage.clearAllFailed": "一部のスケジュールをクリアできませんでした",
   "rightPanel.communications": "Communications",
   "common.close": "閉じる",
+  "imagePreview.previous": "前の画像",
+  "imagePreview.next": "次の画像",
   "settings.extensionsConfigure": "設定",
   "settings.extensionsModuleSlot": "スロット: {{slot}}",
   "extensionPayment.title": "購入を完了する",

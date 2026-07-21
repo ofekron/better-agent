@@ -1013,6 +1013,8 @@
   "schedulesPage.clearAllFailed": "일부 예약을 지우지 못했습니다",
   "rightPanel.communications": "Communications",
   "common.close": "닫기",
+  "imagePreview.previous": "이전 이미지",
+  "imagePreview.next": "다음 이미지",
   "settings.extensionsConfigure": "구성",
   "settings.extensionsModuleSlot": "슬롯: {{slot}}",
   "extensionPayment.title": "구매 완료하기",

@@ -1010,6 +1010,8 @@
   "schedulesPage.clearAllFailed": "Einige Zeitpläne konnten nicht gelöscht werden",
   "rightPanel.communications": "Communications",
   "common.close": "Schließen",
+  "imagePreview.previous": "Vorheriges Bild",
+  "imagePreview.next": "Nächstes Bild",
   "settings.extensionsConfigure": "Konfigurieren",
   "settings.extensionsModuleSlot": "Slot: {{slot}}",
   "extensionPayment.title": "Kauf abschließen",

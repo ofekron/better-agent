@@ -1013,6 +1013,8 @@
   "schedulesPage.clearAllFailed": "No se pudieron borrar algunas programaciones",
   "rightPanel.communications": "Communications",
   "common.close": "Cerrar",
+  "imagePreview.previous": "Imagen anterior",
+  "imagePreview.next": "Imagen siguiente",
   "settings.extensionsConfigure": "Configurar",
   "settings.extensionsModuleSlot": "Ranura: {{slot}}",
   "extensionPayment.title": "Completa tu compra",

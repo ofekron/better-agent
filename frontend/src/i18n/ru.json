@@ -1016,6 +1016,8 @@
   "schedulesPage.clearAllFailed": "Не удалось удалить некоторые расписания",
   "rightPanel.communications": "Communications",
   "common.close": "Закрыть",
+  "imagePreview.previous": "Предыдущее изображение",
+  "imagePreview.next": "Следующее изображение",
   "settings.extensionsConfigure": "Настроить",
   "settings.extensionsModuleSlot": "Слот: {{slot}}",
   "extensionPayment.title": "Завершите покупку",

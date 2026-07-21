@@ -4,8 +4,6 @@ import { lazyWithRetry } from "../lib/lazyWithRetry";
 import { turnMessageHeader } from "../lib/turnMessageHeader";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import MarkdownPreview from "@uiw/react-markdown-preview";
-import "@uiw/react-markdown-preview/markdown.css";
 import { useTranslation } from "react-i18next";
 import { motion } from "framer-motion";
 import type { ChatMessage, EntityBlock, FileFocus, OrchestrationMode, RunInfo, TodoItem, WorkerPanel, WSEvent } from "../types";
@@ -15,6 +13,8 @@ import { ThinkingBlock } from "./ThinkingBlock";
 import { JsonNode } from "./JsonNode";
 import { RunBadgeStack } from "./RunBadge";
 import Icon from "./Icon";
+import { ImageLightboxGallery } from "./ImageLightboxGallery";
+import { SafeMarkdownPreview } from "./SafeMarkdownPreview";
 import { applyAdvSyncOverlays } from "../utils/advSyncOverlays";
 import { useMessageDecorations } from "../hooks/useMessageDecorations";
 import type { AdvSyncOverlay } from "../types";
@@ -34,7 +34,6 @@ import { isUnanchoredRun } from "../utils/runTargets";
 import { dedupeWorkerPanels, isCreationPanelKind, panelKindLabel } from "../utils/mergeEvents";
 import { API } from "../api";
 import { isSaveShortcutEvent } from "../hooks/useSaveShortcut";
-import { useBackButtonDismiss } from "../hooks/useBackButtonDismiss";
 import { flattenClaudeMessages } from "../utils/agentMessages";
 import { formatWholeJsonMessage } from "../utils/formatWholeJsonMessage";
 import { buildMessageImageUrl } from "../utils/messageImages";
@@ -366,7 +365,7 @@ function ScaledMarkdown({
   components: ReturnType<typeof markdownLinkifyComponents>;
 }) {
   const md = (key: string, text: string) => (
-    <MarkdownPreview
+    <SafeMarkdownPreview
       key={key}
       source={sessionMarkersToMarkdown(text)}
       wrapperElement={{ "data-color-mode": "dark" }}
@@ -2980,9 +2979,16 @@ function MessageStatus({
 
 /** Render attached images for a user message */
 function UserImages({ images, sessionId }: { images?: ChatMessage["images"]; sessionId?: string }) {
-  const [lightbox, setLightbox] = useState<{ url: string; index: number } | null>(null);
-  const [resolvedUrls, setResolvedUrls] = useState<string[]>([]);
-  useBackButtonDismiss(lightbox !== null, () => setLightbox(null));
+  const { t } = useTranslation();
+  const directUrls = useMemo(
+    () => images?.map((image) => image.dataUrl || buildMessageImageUrl(sessionId, image.filename)).filter(Boolean) ?? [],
+    [images, sessionId],
+  );
+  const sourceKey = directUrls.join("\n");
+  const [resolved, setResolved] = useState<{ sourceKey: string; urls: string[] }>({
+    sourceKey: "",
+    urls: [],
+  });
 
   useEffect(() => {
     let cancelled = false;
@@ -2990,7 +2996,7 @@ function UserImages({ images, sessionId }: { images?: ChatMessage["images"]; ses
 
     async function loadImages() {
       if (!images || images.length === 0) {
-        setResolvedUrls([]);
+        setResolved({ sourceKey, urls: [] });
         return;
       }
       const next = await Promise.all(
@@ -3013,7 +3019,7 @@ function UserImages({ images, sessionId }: { images?: ChatMessage["images"]; ses
         objectUrls.forEach((url) => URL.revokeObjectURL(url));
         return;
       }
-      setResolvedUrls(next.filter(Boolean));
+      setResolved({ sourceKey, urls: next.filter(Boolean) });
     }
 
     void loadImages();
@@ -3021,46 +3027,36 @@ function UserImages({ images, sessionId }: { images?: ChatMessage["images"]; ses
       cancelled = true;
       objectUrls.forEach((url) => URL.revokeObjectURL(url));
     };
-  }, [images, sessionId]);
+  }, [images, sessionId, sourceKey]);
 
   if (!images || images.length === 0) return null;
 
-  const urls = resolvedUrls;
+  const urls = resolved.sourceKey === sourceKey ? resolved.urls : directUrls;
   if (urls.length === 0) return null;
 
-  const navigate = (dir: 1 | -1) => {
-    if (!lightbox) return;
-    const next = (lightbox.index + dir + urls.length) % urls.length;
-    setLightbox({ url: urls[next], index: next });
-  };
-
   return (
-    <>
-      <div className="message-images">
-        {urls.map((url, i) => (
-          <img
-            key={i}
-            src={url}
-            alt={`Attachment ${i + 1}`}
-            className="message-image"
-            onClick={() => setLightbox({ url, index: i })}
-          />
-        ))}
-      </div>
-      {lightbox && (
-        <div className="image-lightbox-overlay" onClick={() => setLightbox(null)}>
-          <img src={lightbox.url} className="image-lightbox-img" onClick={e => e.stopPropagation()} />
-          {urls.length > 1 && (
-            <>
-              <button className="image-lightbox-nav image-lightbox-prev" onClick={e => { e.stopPropagation(); navigate(-1); }}>‹</button>
-              <button className="image-lightbox-nav image-lightbox-next" onClick={e => { e.stopPropagation(); navigate(1); }}>›</button>
-            </>
-          )}
-          <button className="image-lightbox-close" onClick={() => setLightbox(null)}><Icon name="x" size={18} /></button>
-          <div className="image-lightbox-counter">{lightbox.index + 1} / {urls.length}</div>
+    <ImageLightboxGallery
+      images={urls.map((url, index) => ({
+        src: url,
+        alt: t("input.attachedImageAlt", { index: index + 1 }),
+      }))}
+    >
+      {(openImage) => (
+        <div className="message-images">
+          {urls.map((url, i) => (
+            <button
+              key={url}
+              type="button"
+              className="message-image-open"
+              aria-label={t("input.attachedImageAlt", { index: i + 1 })}
+              onClick={() => openImage(i)}
+            >
+              <img src={url} alt="" className="message-image" />
+            </button>
+          ))}
         </div>
       )}
-    </>
+    </ImageLightboxGallery>
   );
 }
 

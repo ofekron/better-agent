@@ -28,6 +28,7 @@ import { optionLabelWithQuota, summarizeProvider } from "../utils/quotaStatus";
 import { useQuotaStatus } from "../hooks/useQuotaStatus";
 import { extId } from "../extensionIds";
 import Icon from "./Icon";
+import { ComposerImagePreviews } from "./ComposerImagePreviews";
 import { NewSessionCreateButton } from "./NewSessionCreateButton";
 import { SessionFolderPopover } from "./SessionFolderPopover";
 import type { PopoverAnchor } from "./SessionTagPopover";
@@ -937,26 +938,13 @@ export function NewSessionModal({
         <div className="modal-body">
           <div className="ns-modal-section">
             <div className="ns-modal-section-title">{t("newSession.initialPrompt", "Initial Prompt")}</div>
-            {promptImages.length > 0 && (
-              <div className="image-previews ns-initial-attachments">
-                {promptImages.map((img, i) => (
-                  <div key={`ns-img-${i}`} className="image-preview-item">
-                    <img
-                      src={img.dataUrl}
-                      alt={t("input.attachedImageAlt", { index: i + 1, defaultValue: `Attached image ${i + 1}` })}
-                    />
-                    <button
-                      type="button"
-                      className="image-remove-btn"
-                      onClick={() => setInitialImages((prev) => prev.filter((_, index) => index !== i))}
-                      title={t("input.removeImageTitle")}
-                    >
-                      ×
-                    </button>
-                  </div>
-                ))}
-              </div>
-            )}
+            <ComposerImagePreviews
+              images={promptImages}
+              className="ns-initial-attachments"
+              onRemove={(index) => {
+                setInitialImages((previous) => previous.filter((_, imageIndex) => imageIndex !== index));
+              }}
+            />
             {promptFiles.length > 0 && (
               <div className="file-previews ns-initial-attachments">
                 {promptFiles.map((file, i) => (

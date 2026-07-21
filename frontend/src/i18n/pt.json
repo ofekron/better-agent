@@ -1014,6 +1014,8 @@
   "schedulesPage.clearAllFailed": "Não foi possível limpar alguns agendamentos",
   "rightPanel.communications": "Communications",
   "common.close": "Fechar",
+  "imagePreview.previous": "Imagem anterior",
+  "imagePreview.next": "Próxima imagem",
   "settings.extensionsConfigure": "Configurar",
   "settings.extensionsModuleSlot": "Slot: {{slot}}",
   "extensionPayment.title": "Conclua sua compra",

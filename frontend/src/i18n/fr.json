@@ -1014,6 +1014,8 @@
   "schedulesPage.clearAllFailed": "Certaines planifications n'ont pas pu être effacées",
   "rightPanel.communications": "Communications",
   "common.close": "Fermer",
+  "imagePreview.previous": "Image précédente",
+  "imagePreview.next": "Image suivante",
   "settings.extensionsConfigure": "Configurer",
   "settings.extensionsModuleSlot": "Emplacement : {{slot}}",
   "extensionPayment.title": "Finalisez votre achat",

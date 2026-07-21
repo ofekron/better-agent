@@ -1069,6 +1069,8 @@
   "schedulesPage.clearAllFailed": "לא ניתן היה לנקות חלק מהתזמונים",
   "rightPanel.communications": "Communications",
   "common.close": "סגירה",
+  "imagePreview.previous": "תמונה קודמת",
+  "imagePreview.next": "תמונה הבאה",
   "settings.extensionsConfigure": "הגדרה",
   "settings.extensionsModuleSlot": "מיקום: {{slot}}",
   "extensionPayment.title": "השלמת הרכישה",

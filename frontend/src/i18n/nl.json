@@ -1010,6 +1010,8 @@
   "schedulesPage.clearAllFailed": "Sommige planningen konden niet worden gewist",
   "rightPanel.communications": "Communications",
   "common.close": "Sluiten",
+  "imagePreview.previous": "Vorige afbeelding",
+  "imagePreview.next": "Volgende afbeelding",
   "settings.extensionsConfigure": "Configureren",
   "settings.extensionsModuleSlot": "Slot: {{slot}}",
   "extensionPayment.title": "Voltooi je aankoop",

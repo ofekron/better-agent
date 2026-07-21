@@ -1014,6 +1014,8 @@
   "schedulesPage.clearAllFailed": "कुछ शेड्यूल हटाए नहीं जा सके",
   "rightPanel.communications": "Communications",
   "common.close": "बंद करें",
+  "imagePreview.previous": "पिछली छवि",
+  "imagePreview.next": "अगली छवि",
   "settings.extensionsConfigure": "कॉन्फ़िगर करें",
   "settings.extensionsModuleSlot": "स्लॉट: {{slot}}",
   "extensionPayment.title": "अपनी खरीदारी पूरी करें",

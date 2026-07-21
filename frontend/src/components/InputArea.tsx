@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import { useViewport } from "../hooks/useViewport";
 import { useLocalStorage } from "../hooks/useLocalStorage";
 import Icon from "./Icon";
+import { ComposerImagePreviews } from "./ComposerImagePreviews";
 import {
   ExtensionModuleSlot,
   ExtensionCatalogRecovery,
@@ -735,22 +736,7 @@ export function InputArea({
   return (
     <div className="input-area" data-testid="input-area">
       {headerNode}
-      {images.length > 0 && (
-        <div className="image-previews">
-          {images.map((img, i) => (
-            <div key={`img-${i}`} className="image-preview-item">
-              <img src={img.dataUrl} alt={`Pasted image ${i + 1}`} />
-              <button
-                className="image-remove-btn"
-                onClick={() => removeImage(i)}
-                title={t("input.removeImageTitle")}
-              >
-                ×
-              </button>
-            </div>
-          ))}
-        </div>
-      )}
+      <ComposerImagePreviews images={images} onRemove={removeImage} />
       {files.length > 0 && (
         <div className="file-previews">
           {files.map((f, i) => (
