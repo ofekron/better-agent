@@ -40,10 +40,12 @@ def available_provider_models_response(
     provider: str = "",
     model: str = "",
     reasoning_effort: str = "",
+    runner: str = "",
 ) -> dict[str, Any]:
     provider_query = _text(provider)
     model_query = _text(model)
     effort_query = _text(reasoning_effort)
+    runner_query = _text(runner)
     state = config_store.list_providers()
     providers: list[dict[str, Any]] = []
     for record in state.get("providers", []):
@@ -53,6 +55,8 @@ def available_provider_models_response(
             provider_query,
             [record.get("id"), record.get("name"), record.get("kind")],
         ):
+            continue
+        if not _fuzzy_matches(runner_query, [record.get("runner")]):
             continue
         provider_id = _text(record.get("id"))
         matched_models = _matching_values(
@@ -71,6 +75,7 @@ def available_provider_models_response(
             "provider_id": provider_id,
             "name": record.get("name", ""),
             "kind": record.get("kind", ""),
+            "runner": record.get("runner", ""),
             "is_default": provider_id == state.get("default_provider_id"),
             "default_model": record.get("default_model", ""),
             "default_reasoning_effort": record.get("default_reasoning_effort", ""),
@@ -83,6 +88,7 @@ def available_provider_models_response(
             "provider": provider_query,
             "model": model_query,
             "reasoning_effort": effort_query,
+            "runner": runner_query,
         },
         "providers": providers,
         "count": len(providers),

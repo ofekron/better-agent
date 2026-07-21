@@ -566,11 +566,13 @@ def build_server() -> FastMCP:
             provider: str = "",
             model: str = "",
             reasoning_effort: str = "",
+            runner: str = "",
         ) -> dict[str, Any]:
             return _safe_result(available_provider_models_response)(
-                provider,
-                model,
-                reasoning_effort,
+                provider=provider,
+                model=model,
+                reasoning_effort=reasoning_effort,
+                runner=runner,
             )
 
     if "chat" not in disabled_tools:

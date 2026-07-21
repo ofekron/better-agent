@@ -187,5 +187,9 @@ LIST_AVAILABLE_PROVIDER_MODELS_INPUT_SCHEMA: dict[str, Any] = {
             "type": "string",
             "description": "Optional fuzzy reasoning effort filter.",
         },
+        "runner": {
+            "type": "string",
+            "description": "Optional fuzzy runner filter.",
+        },
     },
 }
