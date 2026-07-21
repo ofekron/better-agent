@@ -21,6 +21,14 @@ class SearchLimits:
     wall_seconds: int
 
 
+@dataclass(frozen=True)
+class SupervisedOutput:
+    stdout: bytes
+    stderr: bytes
+    exceeded_resource: str | None = None
+    exceeded_limit: str | None = None
+
+
 SEARCH_LIMITS = {
     "unit_rg": SearchLimits(memory_mb=512, cpu_seconds=20, wall_seconds=30),
     "unit_fts": SearchLimits(memory_mb=768, cpu_seconds=25, wall_seconds=40),
@@ -28,6 +36,7 @@ SEARCH_LIMITS = {
     "index_sql": SearchLimits(memory_mb=768, cpu_seconds=35, wall_seconds=45),
 }
 _MAX_RESULT_BYTES = 64 * 1024 * 1024
+_POSIX_MEMORY_POLL_SECONDS = 0.2
 _WORKER = Path(__file__).with_name("requirements_search_worker.py")
 
 
@@ -61,7 +70,6 @@ def run_supervised_search(action: str, **kwargs: Any) -> dict[str, Any]:
     launch: dict[str, Any] = {
         "env": {
             **os.environ,
-            "BETTER_AGENT_SEARCH_MEMORY_BYTES": str(limits.memory_mb * 1024 * 1024),
             "BETTER_AGENT_SEARCH_CPU_SECONDS": str(limits.cpu_seconds),
         }
     }
@@ -80,17 +88,16 @@ def run_supervised_search(action: str, **kwargs: Any) -> dict[str, Any]:
     )
     windows_job = _assign_windows_job(process, limits) if os.name == "nt" else None
     try:
-        try:
-            stdout, stderr = process.communicate(payload, timeout=limits.wall_seconds)
-        except subprocess.TimeoutExpired:
-            _terminate_process_tree(process, windows_job)
-            process.communicate()
-            return _failure(action, "wall-time", f"{limits.wall_seconds}s")
+        output = _communicate_with_limits(process, payload, limits, windows_job)
     finally:
         if windows_job is not None:
             import ctypes
 
             ctypes.windll.kernel32.CloseHandle(windows_job)
+    if output.exceeded_resource is not None and output.exceeded_limit is not None:
+        return _failure(action, output.exceeded_resource, output.exceeded_limit)
+    stdout = output.stdout
+    stderr = output.stderr
     elapsed_ms = (time.perf_counter() - started) * 1000
     logger.info(
         "requirements_search_lane action=%s pid=%s elapsed_ms=%.1f returncode=%s",
@@ -134,6 +141,89 @@ def run_supervised_search(action: str, **kwargs: Any) -> dict[str, Any]:
     if not isinstance(result, dict):
         raise TypeError("requirements search worker result must be an object")
     return result
+
+
+def _communicate_with_limits(
+    process: subprocess.Popen[bytes],
+    payload: bytes,
+    limits: SearchLimits,
+    windows_job: int | None,
+) -> SupervisedOutput:
+    if os.name == "posix":
+        return _communicate_with_posix_limits(process, payload, limits, windows_job)
+    try:
+        stdout, stderr = process.communicate(payload, timeout=limits.wall_seconds)
+    except subprocess.TimeoutExpired:
+        _terminate_process_tree(process, windows_job)
+        stdout, stderr = process.communicate()
+        return SupervisedOutput(stdout, stderr, "wall-time", f"{limits.wall_seconds}s")
+    return SupervisedOutput(stdout, stderr)
+
+
+def _communicate_with_posix_limits(
+    process: subprocess.Popen[bytes],
+    payload: bytes,
+    limits: SearchLimits,
+    windows_job: int | None,
+) -> SupervisedOutput:
+    deadline = time.monotonic() + limits.wall_seconds
+    pending_input: bytes | None = payload
+    memory_limit_kb = limits.memory_mb * 1024
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            _terminate_process_tree(process, windows_job)
+            stdout, stderr = process.communicate()
+            return SupervisedOutput(stdout, stderr, "wall-time", f"{limits.wall_seconds}s")
+        try:
+            stdout, stderr = process.communicate(
+                pending_input,
+                timeout=min(_POSIX_MEMORY_POLL_SECONDS, remaining),
+            )
+            return SupervisedOutput(stdout, stderr)
+        except subprocess.TimeoutExpired:
+            pending_input = None
+            rss_kb = _process_group_rss_kb(process.pid)
+            if rss_kb is None and process.poll() is None:
+                _terminate_process_tree(process, windows_job)
+                stdout, stderr = process.communicate()
+                return SupervisedOutput(stdout, stderr, "memory", f"{limits.memory_mb}MB")
+            if rss_kb is not None and rss_kb > memory_limit_kb:
+                _terminate_process_tree(process, windows_job)
+                stdout, stderr = process.communicate()
+                return SupervisedOutput(stdout, stderr, "memory", f"{limits.memory_mb}MB")
+
+
+def _process_group_rss_kb(pid: int) -> int | None:
+    try:
+        pgid = os.getpgid(pid)
+    except ProcessLookupError:
+        return None
+    result = subprocess.run(
+        ["ps", "-e", "-o", "pgid=,rss="],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return None
+    total = 0
+    found = False
+    for line in result.stdout.splitlines():
+        parts = line.split()
+        if len(parts) != 2:
+            continue
+        try:
+            process_pgid = int(parts[0])
+            rss_kb = int(parts[1])
+        except ValueError:
+            continue
+        if process_pgid == pgid:
+            total += rss_kb
+            found = True
+    if not found:
+        return None
+    return total
 
 
 def _terminate_process_tree(process: subprocess.Popen[bytes], windows_job: int | None) -> None:

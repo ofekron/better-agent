@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -10,7 +11,12 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 import requirements_search_supervisor as supervisor
-from requirements_search_supervisor import SEARCH_LIMITS, _failure
+from requirements_search_supervisor import (
+    SEARCH_LIMITS,
+    SearchLimits,
+    _communicate_with_posix_limits,
+    _failure,
+)
 from requirements_search_worker import _set_posix_limit
 
 
@@ -44,43 +50,21 @@ def test_resource_failure_is_clear_and_retryable() -> None:
     assert result["resource"] == "memory"
 
 
-def test_posix_worker_applies_memory_and_cpu_limits() -> None:
+def test_posix_worker_applies_cpu_limit_without_startup_memory_limit() -> None:
     if os.name != "posix":
         return
     worker = (ROOT / "requirements_search_worker.py").read_text(encoding="utf-8")
-    assert "RLIMIT_AS" in worker
     assert "RLIMIT_CPU" in worker
+    assert "RLIMIT_AS" not in worker
 
 
-def test_posix_memory_limit_failure_names_the_exceeded_limit() -> None:
-    resource = SimpleNamespace(
-        RLIMIT_AS=9,
-        RLIM_INFINITY=9223372036854775807,
-        setrlimit=lambda limit, pair: (_ for _ in ()).throw(
-            ValueError("current limit exceeds maximum limit")
-        ),
+def test_posix_supervisor_isolates_worker_process_group() -> None:
+    if os.name != "posix":
+        return
+    supervisor_source = (ROOT / "requirements_search_supervisor.py").read_text(
+        encoding="utf-8"
     )
-    try:
-        _set_posix_limit(
-            resource,
-            resource.RLIMIT_AS,
-            "memory",
-            "bytes",
-            3072 * 1024 * 1024,
-            3072 * 1024 * 1024,
-            resource.RLIM_INFINITY,
-            resource.RLIM_INFINITY,
-        )
-    except RuntimeError as exc:
-        message = str(exc)
-    else:
-        raise AssertionError("memory limit setup failure must be re-raised clearly")
-
-    assert "memory limit" in message
-    assert "RLIMIT_AS" in message
-    assert "requested soft=3072MB hard=3072MB" in message
-    assert "inherited soft=unlimited hard=unlimited" in message
-    assert "current limit exceeds maximum limit" in message
+    assert 'launch["start_new_session"] = True' in supervisor_source
 
 
 def test_posix_cpu_limit_failure_names_the_exceeded_limit() -> None:
@@ -96,7 +80,6 @@ def test_posix_cpu_limit_failure_names_the_exceeded_limit() -> None:
             resource,
             resource.RLIMIT_CPU,
             "CPU",
-            "seconds",
             75,
             76,
             resource.RLIM_INFINITY,
@@ -112,13 +95,50 @@ def test_posix_cpu_limit_failure_names_the_exceeded_limit() -> None:
     assert "requested soft=75s hard=76s" in message
 
 
+def test_posix_memory_limit_is_enforced_after_worker_starts() -> None:
+    if os.name != "posix":
+        return
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import sys, time\n"
+                "sys.stdin.read()\n"
+                "sys.stderr.write('started\\n')\n"
+                "sys.stderr.flush()\n"
+                "blocks = []\n"
+                "for _ in range(128):\n"
+                "    blocks.append(bytearray(1024 * 1024))\n"
+                "    time.sleep(0.01)\n"
+                "time.sleep(5)\n"
+            ),
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+    assert os.getpgid(process.pid) == process.pid
+    output = _communicate_with_posix_limits(
+        process,
+        b"{}",
+        SearchLimits(memory_mb=16, cpu_seconds=20, wall_seconds=10),
+        None,
+    )
+
+    assert output.exceeded_resource == "memory"
+    assert output.exceeded_limit == "16MB"
+    assert b"started" in output.stderr
+
+
 def test_worker_setup_failure_detail_surfaces_through_supervisor() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         worker = Path(tmp) / "worker.py"
         worker.write_text(
             "import sys\n"
-            "sys.stderr.write('RuntimeError: failed to apply POSIX memory limit "
-            "(RLIMIT_AS): requested soft=3072MB hard=3072MB; inherited "
+            "sys.stderr.write('RuntimeError: failed to apply POSIX CPU limit "
+            "(RLIMIT_CPU): requested soft=75s hard=76s; inherited "
             "soft=unlimited hard=unlimited; system error: current limit exceeds "
             "maximum limit\\n')\n"
             "raise SystemExit(1)\n",
@@ -132,9 +152,9 @@ def test_worker_setup_failure_detail_surfaces_through_supervisor() -> None:
             supervisor._WORKER = original_worker
 
     assert result["error_code"] == "requirements_search_worker_failed"
-    assert "memory limit" in result["error"]
-    assert "RLIMIT_AS" in result["error"]
-    assert "requested soft=3072MB hard=3072MB" in result["error"]
+    assert "CPU limit" in result["error"]
+    assert "RLIMIT_CPU" in result["error"]
+    assert "requested soft=75s hard=76s" in result["error"]
     assert "Traceback" not in result["error"]
 
 
