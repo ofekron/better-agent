@@ -9,6 +9,21 @@ from typing import Optional
 _TIMEOUT = 5  # seconds — fail loud rather than hang on a locked keychain
 
 
+def disable_native_user_interaction() -> None:
+    if sys.platform != "darwin":
+        return
+    import ctypes
+
+    security = ctypes.CDLL(
+        "/System/Library/Frameworks/Security.framework/Security"
+    )
+    set_interaction_allowed = security.SecKeychainSetUserInteractionAllowed
+    set_interaction_allowed.argtypes = [ctypes.c_ubyte]
+    set_interaction_allowed.restype = ctypes.c_int32
+    if set_interaction_allowed(0) != 0:
+        raise RuntimeError("failed to disable OS credential interaction")
+
+
 def _interactive_arg(value: str) -> str:
     if any(character in value for character in "\0\r\n"):
         raise ValueError("OS credential identifiers cannot contain control characters")

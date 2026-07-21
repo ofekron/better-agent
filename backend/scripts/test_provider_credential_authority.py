@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import atexit
 import asyncio
+import ctypes
 import inspect
 import json
 import os
@@ -32,6 +33,37 @@ from provider_credentials import (  # noqa: E402
     LEGACY_CANONICAL_PROVIDER_SERVICE,
     LEGACY_FLAT_ACCOUNT,
 )
+
+
+def test_native_authority_disables_keychain_interaction() -> None:
+    calls: list[tuple[str, int]] = []
+    real_platform = provider_credentials.oskeychain.sys.platform
+    real_cdll = ctypes.CDLL
+
+    class FakeFunction:
+        argtypes = None
+        restype = None
+
+        def __call__(self, allowed: int) -> int:
+            calls.append(("allowed", allowed))
+            return 0
+
+    class FakeSecurity:
+        SecKeychainSetUserInteractionAllowed = FakeFunction()
+
+    provider_credentials.oskeychain.sys.platform = "darwin"
+    ctypes.CDLL = lambda path: (
+        calls.append((path, -1)) or FakeSecurity()
+    )
+    try:
+        provider_credentials.oskeychain.disable_native_user_interaction()
+        assert calls == [
+            ("/System/Library/Frameworks/Security.framework/Security", -1),
+            ("allowed", 0),
+        ]
+    finally:
+        provider_credentials.oskeychain.sys.platform = real_platform
+        ctypes.CDLL = real_cdll
 
 
 def _backend_request(session, op: str, provider_id: str) -> dict:
@@ -360,6 +392,7 @@ def test_broker_death_blocks_direct_http_consumers_before_network() -> None:
 
 
 if __name__ == "__main__":
+    test_native_authority_disables_keychain_interaction()
     test_legacy_credential_migrates_before_cleanup_and_survives_restart()
     test_failed_canonical_verification_never_cleans_legacy()
     test_canonical_denial_never_attempts_legacy_recovery()

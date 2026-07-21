@@ -5,7 +5,7 @@ set -euo pipefail
 DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(dirname "$DIR")"
 VENV="$REPO/backend/.venv"
-TARGET="$DIR/dist/BetterAgentCredentialAuthority"
+TARGET="$DIR/dist/BetterAgentCredentialAuthority/BetterAgentCredentialAuthority"
 SOURCES=(
   "$DIR/CredentialAuthority.spec"
   "$DIR/credential_supervisor_main.py"
@@ -32,7 +32,7 @@ if [ "$needs_build" -eq 1 ]; then
     UV="$(command -v uv || printf '%s' "$HOME/.local/bin/uv")"
     (cd "$REPO/backend" && "$UV" pip install -q --python "$VENV/bin/python" pyinstaller)
   fi
-  rm -rf "$DIR/build/CredentialAuthority"
+  rm -rf "$DIR/build/CredentialAuthority" "$DIR/dist/BetterAgentCredentialAuthority"
   (cd "$DIR" && "$VENV/bin/pyinstaller" --noconfirm CredentialAuthority.spec)
 fi
 
