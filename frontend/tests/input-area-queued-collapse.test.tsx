@@ -151,6 +151,22 @@ describe("queued list collapse CSS", () => {
     );
   });
 
+  it("gives mobile queue content and composer actions their own responsive tracks", () => {
+    expect(css).toMatch(
+      /@media \(max-width: 640px\)[\s\S]*\.queued-list-bulk-actions\s*\{[^}]*grid-column:\s*1\s*\/\s*-1[^}]*display:\s*grid[^}]*grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)/,
+    );
+    expect(css).toMatch(
+      /@media \(max-width: 640px\)[\s\S]*\.queued-prompt-banner:not\(\.is-minimized\)\s*\{[^}]*display:\s*grid[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)/,
+    );
+    expect(css).toMatch(
+      /\.queued-prompt-banner:not\(\.is-minimized\)\s*>\s*\.queued-prompt-preview[^}]*\{[^}]*grid-column:\s*1\s*\/\s*-1[^}]*min-width:\s*0/,
+    );
+    expect(css).toMatch(
+      /\.mobile-steer-actions\s*\{[^}]*display:\s*grid[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)\s+minmax\(0,\s*2fr\)[^}]*gap:\s*8px/,
+    );
+    expect(css).not.toMatch(/\.mobile-steer-actions\s*\{[^}]*gap:\s*120px/);
+  });
+
   it("disables the banner animation under reduced motion", () => {
     expect(css).toMatch(
       /@media \(prefers-reduced-motion: reduce\)\s*\{\s*\.queued-prompt-banner\s*\{[^}]*animation:\s*none/,

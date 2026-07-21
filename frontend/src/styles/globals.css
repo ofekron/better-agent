@@ -7031,8 +7031,9 @@ button.run-badge-clickable:focus-visible {
 }
 
 .mobile-steer-actions {
-  display: flex;
-  gap: 120px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 2fr);
+  gap: 8px;
   align-items: stretch;
 }
 
@@ -7497,6 +7498,12 @@ button.run-badge-clickable:focus-visible {
 .queued-list-summary:hover {
   color: var(--fg);
 }
+.queued-list-bulk-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-inline-start: auto;
+}
 @keyframes queued-banner-in {
   from {
     opacity: 0;
@@ -7722,6 +7729,95 @@ button.run-badge-clickable:focus-visible {
 }
 .queued-prompt-preview:hover {
   background: var(--border);
+}
+@media (max-width: 640px) {
+  .queued-list-header {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: 6px 8px;
+    padding: 2px 0 4px;
+  }
+  .queued-list-summary {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .queued-list-bulk-actions {
+    grid-column: 1 / -1;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    width: 100%;
+    margin-inline-start: 0;
+    gap: 8px;
+  }
+  .queued-list-bulk-actions > button {
+    width: 100%;
+    min-height: 36px;
+    padding-inline: 8px;
+  }
+  .queued-prompt-banner:not(.is-minimized) {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    align-items: start;
+    gap: 10px;
+    padding: 12px;
+    border-radius: 12px;
+  }
+  .queued-prompt-banner:not(.is-minimized) > .queued-prompt-header,
+  .queued-prompt-banner:not(.is-minimized) > .queued-attachments,
+  .queued-prompt-banner:not(.is-minimized) > .queued-tags-cards,
+  .queued-prompt-banner:not(.is-minimized) > .queued-prompt-actions {
+    grid-column: 1 / -1;
+    min-width: 0;
+  }
+  .queued-prompt-banner:not(.is-minimized) > .queued-prompt-header {
+    width: 100%;
+  }
+  .queued-prompt-banner:not(.is-minimized) > .queued-prompt-header .queued-minimize-btn {
+    order: 3;
+    margin-inline-start: auto;
+  }
+  .queued-prompt-banner:not(.is-minimized) > .queued-prompt-preview {
+    grid-column: 1 / -1;
+    width: 100%;
+    min-width: 0;
+    padding: 2px 0;
+    line-height: 1.5;
+    overflow-wrap: break-word;
+  }
+  .queued-prompt-banner:not(.is-minimized) > .queued-prompt-actions {
+    width: 100%;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .queued-prompt-banner:not(.is-minimized) > .queued-prompt-actions > button,
+  .queued-prompt-banner:not(.is-minimized) > .queued-prompt-actions .queued-overflow-trigger {
+    min-height: 36px;
+  }
+  .queued-prompt-banner.is-minimized {
+    flex-wrap: wrap;
+    padding: 8px;
+    border-radius: 10px;
+  }
+  .queued-prompt-banner.is-minimized .queued-prompt-preview {
+    flex: 1 1 140px;
+    min-width: 0;
+  }
+  .queued-prompt-banner.is-minimized .queued-prompt-actions {
+    margin-inline-start: auto;
+    flex-wrap: wrap;
+  }
+  .mobile-steer-actions {
+    margin-bottom: 8px;
+  }
+  .input-row {
+    --input-action-height: 40px;
+    gap: 4px;
+    padding: 5px;
+    border-radius: 16px;
+  }
 }
 .queued-prompt-edit-input {
   flex: 1;
