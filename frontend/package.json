@@ -47,6 +47,7 @@
     "react-i18next": "^17.0.7",
     "react-markdown": "^10.1.0",
     "recharts": "^3.8.1",
+    "rehype-attr": "4.0.2",
     "rehype-highlight": "^7.0.2",
     "remark-gfm": "^4.0.1",
     "send-intent": "^7.0.0"
