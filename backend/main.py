@@ -5084,11 +5084,12 @@ async def internal_requirements_unit_fts(
     if not isinstance(include_all_fields, bool):
         raise HTTPException(status_code=400, detail="include_all_fields must be a boolean")
 
-    import requirement_context
+    from requirements_search_supervisor import run_supervised_search
     return await run_requirements_query(
         "requirements.unit_fts",
-        requirement_context.search_requirement_units_fts,
+        run_supervised_search,
         executor=REQUIREMENTS_SEARCH_EXECUTOR,
+        action="unit_fts",
         query=payload["query"],
         cwd=payload["cwd"],
         cwds=payload["cwds"],
@@ -5116,11 +5117,12 @@ async def internal_requirements_unit_vector(
     if not isinstance(include_all_fields, bool):
         raise HTTPException(status_code=400, detail="include_all_fields must be a boolean")
 
-    import requirement_context
+    from requirements_search_supervisor import run_supervised_search
     return await run_requirements_query(
         "requirements.unit_vector",
-        requirement_context.search_requirement_units_vector,
+        run_supervised_search,
         executor=REQUIREMENTS_SEARCH_EXECUTOR,
+        action="unit_vector",
         query=payload["query"],
         cwd=payload["cwd"],
         cwds=payload["cwds"],
@@ -5208,11 +5210,12 @@ async def internal_requirements_index_sql(
     if not isinstance(sql, str) or not sql.strip():
         raise HTTPException(status_code=400, detail="sql must be a non-empty string")
 
-    import requirement_context
+    from requirements_search_supervisor import run_supervised_search
     response = await run_requirements_query(
         "requirements.index_sql",
-        requirement_context.run_native_index_sql,
+        run_supervised_search,
         executor=REQUIREMENTS_SEARCH_EXECUTOR,
+        action="index_sql",
         sql=sql,
     )
     from fastapi.responses import JSONResponse
@@ -5474,11 +5477,12 @@ async def internal_search_requirements(
     ):
         raise HTTPException(status_code=400, detail="max_matches must be a positive integer when provided")
 
-    import requirement_context
+    from requirements_search_supervisor import run_supervised_search
     return await run_requirements_query(
         "requirements.search",
-        requirement_context.search_requirements,
+        run_supervised_search,
         executor=REQUIREMENTS_SEARCH_EXECUTOR,
+        action="unit_rg",
         rg_args=rg_args,
         query=query,
         cwd=cwd,
