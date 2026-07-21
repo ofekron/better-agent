@@ -173,6 +173,10 @@ function previewEventsForMessage(message: ChatMessage | undefined, mode?: Orches
   return getStrategy(mode).getEvents(message);
 }
 
+function hasStubPreviewEvents(message: ChatMessage | undefined): boolean {
+  return (message?.stub?.last_events?.length ?? 0) > 0;
+}
+
 function decodeEscapedUnicodeForDisplay(text: string): string {
   return text.replace(/\\u([0-9a-fA-F]{4})/g, (_match, hex: string) => {
     const codePoint = Number.parseInt(hex, 16);
@@ -204,25 +208,6 @@ function TeamMessageFrom({ message }: { message: ChatMessage }) {
       {linkifyFilePaths(sessionLinkMarker(senderSessionId, senderName))}
     </div>
   );
-}
-
-function eventAssistantText(event: WSEvent): string {
-  const data = event.data as Record<string, unknown> | undefined;
-  const message = data?.message as Record<string, unknown> | undefined;
-  if (data?.type !== "assistant" || message?.role !== "assistant") return "";
-  const content = message.content;
-  if (!Array.isArray(content)) return "";
-  return content
-    .map((part) => {
-      if (!part || typeof part !== "object") return "";
-      const item = part as Record<string, unknown>;
-      return item.type === "text" && typeof item.text === "string"
-        ? item.text
-        : "";
-    })
-    .filter(Boolean)
-    .join("\n")
-    .trim();
 }
 
 function normalizeAssistantContentText(text: string): string {
@@ -257,11 +242,6 @@ function visibleEventsRepresentAssistantContent(events: WSEvent[], content: stri
     .filter(Boolean);
   if (normalizedOutputs.some((text) => text === normalizedContent)) return true;
   return normalizeAssistantContentText(normalizedOutputs.join("\n")) === normalizedContent;
-}
-
-function eventTailContainsAssistantContent(events: WSEvent[], content: string): boolean {
-  return visibleEventsRepresentAssistantContent(events, content) ||
-    events.some((event) => normalizeAssistantContentText(eventAssistantText(event)) === normalizeAssistantContentText(content));
 }
 
 /**
@@ -3318,9 +3298,11 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
     const content = src?.content;
     const events = previewEventsForMessage(src, orchestrationMode);
     if (
-      content &&
+      typeof content === "string" &&
+      !isEffectivelyEmpty(content) &&
+      events.length > 0 &&
       !src?.isStreaming &&
-      eventTailContainsAssistantContent(events, content)
+      !hasStubPreviewEvents(src)
     ) {
       return wrapWithTs(
         <OutputEvent text={content} onFileClick={onFileClick} />,

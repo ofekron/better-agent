@@ -421,6 +421,96 @@ describe("TurnGroup collapsed interrupted indicator", () => {
     expect(container.textContent).not.toContain("Bash output should not be the preview");
   });
 
+  it("prefers finalized assistant content over unrelated collapsed event previews", () => {
+    const { container } = render(
+      <TurnGroup
+        initiatorMessage={makeUserMsg({ id: "u1", content: "is it safe?" })}
+        responseMessage={makeAssistantMsg({
+          id: "a1",
+          content: "Final safety answer visible to user",
+          events: [
+            {
+              type: "output",
+              data: { output: "Action output should not be the collapsed preview" },
+            },
+          ],
+        })}
+        defaultCollapsed
+        orchestrationMode="native"
+      />,
+    );
+
+    expect(container.textContent).toContain("Final safety answer visible to user");
+    expect(container.textContent).not.toContain("Action output should not be the collapsed preview");
+  });
+
+  it("keeps finalized assistant content when output events carry the same text", () => {
+    const { container } = render(
+      <TurnGroup
+        initiatorMessage={makeUserMsg({ id: "u1", content: "summarize" })}
+        responseMessage={makeAssistantMsg({
+          id: "a1",
+          content: "Final content mirrors output event",
+          events: [
+            {
+              type: "output",
+              data: { output: "Final content mirrors output event" },
+            },
+          ],
+        })}
+        defaultCollapsed
+        orchestrationMode="native"
+      />,
+    );
+
+    expect(container.textContent).toContain("Final content mirrors output event");
+  });
+
+  it("keeps streaming collapsed groups on the latest event preview", () => {
+    const { container } = render(
+      <TurnGroup
+        initiatorMessage={makeUserMsg({ id: "u1", content: "keep going" })}
+        responseMessage={makeAssistantMsg({
+          id: "a1",
+          content: "partial assistant text",
+          isStreaming: true,
+          events: [
+            {
+              type: "output",
+              data: { output: "Streaming action preview remains visible" },
+            },
+          ],
+        })}
+        defaultCollapsed
+        orchestrationMode="native"
+      />,
+    );
+
+    expect(container.textContent).toContain("Streaming action preview remains visible");
+  });
+
+  it("keeps completed no-content collapsed groups on the latest event preview", () => {
+    const { container } = render(
+      <TurnGroup
+        initiatorMessage={makeUserMsg({ id: "u1", content: "run action" })}
+        responseMessage={makeAssistantMsg({
+          id: "a1",
+          content: "",
+          events: [
+            {
+              type: "output",
+              data: { output: "Completed action preview remains visible" },
+            },
+          ],
+        })}
+        defaultCollapsed
+        orchestrationMode="native"
+      />,
+    );
+
+    expect(container.textContent).toContain("Completed action preview remains visible");
+  });
+
   it("renders escaped unicode bullet separators as bullets", () => {
     const { container } = render(
       <TurnGroup
