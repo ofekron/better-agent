@@ -13,7 +13,7 @@ sys.path.insert(0, str(ROOT / "sdk"))
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 import capability_api
 import extension_backend_loader
@@ -106,11 +106,36 @@ def test_private_feature_actions_are_registered_with_strict_schemas() -> None:
         ("project-structure", "updates.mark-seen"),
         ("project-structure", "edit.status"),
         ("project-structure", "edit.ensure"),
+        ("auto-tagging", "current-task"),
+        ("auto-tagging", "snapshot"),
+        ("auto-tagging", "select-tags"),
+        ("auto-tagging", "ensure-tag"),
+        ("auto-tagging", "update-tag"),
+        ("auto-tagging", "delete-tag"),
+        ("auto-tagging", "sync-session-tags"),
+        ("auto-tagging", "tags-sql"),
     }
     assert expected <= set(capability_api._ACTIONS)
     for key in expected:
         schema = capability_api._ACTIONS[key].schema
         assert schema.model_config.get("extra") == "forbid"
+
+
+def test_auto_tagging_update_rejects_unsupported_patch_fields() -> None:
+    schema = capability_api._ACTIONS[("auto-tagging", "update-tag")].schema
+    invalid_patches = [
+        {},
+        {"project_id": "other"},
+        {"name": ""},
+        {"name": ["wrong-type"]},
+        {"color": ["wrong-type"]},
+    ]
+    for patch in invalid_patches:
+        try:
+            schema.model_validate({"tag_id": "tag-1", "patch": patch})
+        except ValidationError:
+            continue
+        raise AssertionError(f"auto-tagging update accepted invalid patch: {patch!r}")
 
 
 def test_public_sdk_has_no_raw_route_transport() -> None:

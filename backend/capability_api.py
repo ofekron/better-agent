@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
 from fastapi import APIRouter, Header, HTTPException
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 import extension_store
 import extension_token_registry
@@ -217,6 +217,29 @@ class _AutoTaggingEnsurePayload(_StrictPayload):
     name: str = Field(min_length=1)
     project_id: str = ""
     color: str | None = None
+
+
+class _AutoTaggingUpdatePayload(_StrictPayload):
+    tag_id: str = Field(min_length=1)
+    patch: dict[str, Any]
+
+    @field_validator("patch")
+    @classmethod
+    def validate_patch(cls, patch: dict[str, Any]) -> dict[str, Any]:
+        unknown = set(patch) - {"name", "color"}
+        if unknown:
+            raise ValueError("patch contains unsupported fields")
+        if not patch:
+            raise ValueError("patch must include name or color")
+        if "name" in patch and (not isinstance(patch["name"], str) or not patch["name"].strip()):
+            raise ValueError("patch name must be a non-empty string")
+        if "color" in patch and patch["color"] is not None and not isinstance(patch["color"], str):
+            raise ValueError("patch color must be a string or null")
+        return patch
+
+
+class _AutoTaggingDeletePayload(_StrictPayload):
+    tag_id: str = Field(min_length=1)
 
 
 class _AutoTaggingSyncPayload(_StrictPayload):
@@ -925,6 +948,8 @@ def _register_private_workflows() -> None:
         "snapshot": _AutoTaggingSnapshotPayload,
         "select-tags": _AutoTaggingSelectPayload,
         "ensure-tag": _AutoTaggingEnsurePayload,
+        "update-tag": _AutoTaggingUpdatePayload,
+        "delete-tag": _AutoTaggingDeletePayload,
         "sync-session-tags": _AutoTaggingSyncPayload,
         "tags-sql": _AutoTaggingSqlPayload,
     }

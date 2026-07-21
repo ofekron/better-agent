@@ -5438,6 +5438,26 @@ async def internal_auto_tagging(
             )
             await _broadcast_session_organization_changed()
             return {"success": True, "tag": tag}
+        if action == "update-tag":
+            try:
+                tag = await asyncio.to_thread(
+                    session_organization_store.update_tag,
+                    body.get("tag_id"),
+                    body.get("patch") or {},
+                )
+            except KeyError:
+                raise HTTPException(status_code=404, detail="tag not found")
+            await _broadcast_session_organization_changed()
+            return {"success": True, "tag": tag}
+        if action == "delete-tag":
+            deleted = await asyncio.to_thread(
+                session_organization_store.delete_tag,
+                body.get("tag_id"),
+            )
+            if not deleted:
+                raise HTTPException(status_code=404, detail="tag not found")
+            await _broadcast_session_organization_changed()
+            return {"success": True, "deleted": True}
         if action == "sync-session-tags":
             session_id = str(body.get("session_id") or "").strip()
             if not await _session_exists(session_id):
