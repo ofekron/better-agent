@@ -191,6 +191,7 @@
   "setup.apiKeyStatus.missing": "отсутствует",
   "setup.apiKeyStatus.blocked": "доступ заблокирован",
   "setup.apiKeyReenter": "Ввести ключ заново",
+  "setup.apiKeyWaitingAccess": "Ожидание доступа к учётным данным…",
   "setup.apiKeyBlockedReentryHint": "Нет доступа к сохранённому API-ключу. Введите его заново, чтобы заменить.",
   "setup.apiKeyReenterPlaceholder": "Введите API-ключ заново",
   "setup.setDefaultButton": "Сделать по умолчанию",

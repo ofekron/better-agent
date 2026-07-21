@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import atexit
 import asyncio
+from contextlib import contextmanager
 import ctypes
 import inspect
 import json
@@ -64,6 +65,107 @@ def test_native_authority_disables_keychain_interaction() -> None:
     finally:
         provider_credentials.oskeychain.sys.platform = real_platform
         ctypes.CDLL = real_cdll
+
+
+def test_native_interaction_is_disabled_after_failure() -> None:
+    allowed_values: list[int] = []
+    real_platform = provider_credentials.oskeychain.sys.platform
+    real_cdll = ctypes.CDLL
+
+    class FakeFunction:
+        argtypes = None
+        restype = None
+
+        def __call__(self, allowed: int) -> int:
+            allowed_values.append(allowed)
+            return 0
+
+    class FakeSecurity:
+        SecKeychainSetUserInteractionAllowed = FakeFunction()
+
+    provider_credentials.oskeychain.sys.platform = "darwin"
+    ctypes.CDLL = lambda _path: FakeSecurity()
+    try:
+        try:
+            with provider_credentials.oskeychain.native_user_interaction():
+                raise RuntimeError("migration failed")
+        except RuntimeError as exc:
+            assert str(exc) == "migration failed"
+        else:
+            raise AssertionError("the migration failure must propagate")
+        assert allowed_values == [1, 0]
+    finally:
+        provider_credentials.oskeychain.sys.platform = real_platform
+        ctypes.CDLL = real_cdll
+
+
+def test_retry_interactively_migrates_blocked_legacy() -> None:
+    provider_id = "provider-interactive-migration"
+    account = f"provider:{provider_id}"
+    values = {(PRIMARY_SERVICE, account): "legacy-secret"}
+    interactive = False
+    interaction_entries = 0
+    disable_calls = 0
+    real_disable = credential_session.oskeychain.disable_native_user_interaction
+    real_interaction = credential_session.oskeychain.native_user_interaction
+    real_get = provider_credentials.oskeychain.native_get
+    real_store = provider_credentials.oskeychain.native_store
+    real_delete = provider_credentials.oskeychain.native_delete
+
+    def disable() -> None:
+        nonlocal disable_calls
+        disable_calls += 1
+
+    @contextmanager
+    def allow_interaction():
+        nonlocal interactive, interaction_entries
+        interaction_entries += 1
+        interactive = True
+        try:
+            yield
+        finally:
+            interactive = False
+
+    def get(service: str, requested_account: str):
+        if service in {PRIMARY_SERVICE, LEGACY_SERVICE} and not interactive:
+            raise RuntimeError("legacy ACL denied")
+        return values.get((service, requested_account))
+
+    credential_session.oskeychain.disable_native_user_interaction = disable
+    credential_session.oskeychain.native_user_interaction = allow_interaction
+    provider_credentials.oskeychain.native_get = get
+    provider_credentials.oskeychain.native_store = (
+        lambda service, requested_account, value: values.__setitem__(
+            (service, requested_account), value
+        )
+    )
+    provider_credentials.oskeychain.native_delete = (
+        lambda service, requested_account: values.pop((service, requested_account), None)
+    )
+    broker = credential_session.ProviderCredentialBroker()
+    try:
+        request = {
+            "provider_id": provider_id,
+            "request_id": "9" * 32,
+        }
+        assert broker.handle({**request, "op": "read"}) == {"status": "blocked"}
+        assert interaction_entries == 0
+        assert broker.handle({**request, "op": "retry"}) == {
+            "status": "available",
+            "value": "legacy-secret",
+        }
+        assert interaction_entries == 1
+        assert disable_calls == 1
+        assert not interactive
+        assert values[(CANONICAL_PROVIDER_SERVICE, account)] == "legacy-secret"
+        assert (PRIMARY_SERVICE, account) not in values
+    finally:
+        broker.clear()
+        credential_session.oskeychain.disable_native_user_interaction = real_disable
+        credential_session.oskeychain.native_user_interaction = real_interaction
+        provider_credentials.oskeychain.native_get = real_get
+        provider_credentials.oskeychain.native_store = real_store
+        provider_credentials.oskeychain.native_delete = real_delete
 
 
 def _backend_request(session, op: str, provider_id: str) -> dict:
@@ -393,6 +495,8 @@ def test_broker_death_blocks_direct_http_consumers_before_network() -> None:
 
 if __name__ == "__main__":
     test_native_authority_disables_keychain_interaction()
+    test_native_interaction_is_disabled_after_failure()
+    test_retry_interactively_migrates_blocked_legacy()
     test_legacy_credential_migrates_before_cleanup_and_survives_restart()
     test_failed_canonical_verification_never_cleans_legacy()
     test_canonical_denial_never_attempts_legacy_recovery()

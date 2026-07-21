@@ -15,6 +15,10 @@ describe("provider credential denial", () => {
   afterEach(() => vi.restoreAllMocks());
 
   it("keeps retry and explicit key re-entry as separate blocked-state actions", async () => {
+    let resolveRetry: ((value: Response) => void) | undefined;
+    const retryResponse = new Promise<Response>((resolve) => {
+      resolveRetry = resolve;
+    });
     const provider = {
       id: "provider-blocked",
       name: "Blocked provider",
@@ -43,7 +47,7 @@ describe("provider credential denial", () => {
     const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
       const url = String(input);
       if (url.endsWith("/credential/retry")) {
-        return response({ credential_status: "available", has_api_key: true });
+        return retryResponse;
       }
       if (url.endsWith("/api/providers/provider-blocked/models")) {
         return response({ models: [] });
@@ -72,11 +76,24 @@ describe("provider credential denial", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
 
+    const waitingButton = await screen.findByRole("button", {
+      name: "Waiting for credential access…",
+    });
+    expect((waitingButton as HTMLButtonElement).disabled).toBe(true);
+
     await waitFor(() => {
       expect(fetchMock.mock.calls.filter(([url, init]) => (
         String(url).endsWith("/credential/retry") && init?.method === "POST"
       ))).toHaveLength(1);
     });
+
+    resolveRetry?.({
+      ok: true,
+      json: () => Promise.resolve({ credential_status: "available", has_api_key: true }),
+      text: () => Promise.resolve(""),
+    } as Response);
+
+    await screen.findByRole("button", { name: "Retry" });
 
     fireEvent.click(screen.getByRole("button", { name: "Re-enter key" }));
 

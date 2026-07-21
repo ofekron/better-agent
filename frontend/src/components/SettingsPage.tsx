@@ -503,6 +503,7 @@ export function SettingsPage({
   const [view, setView] = useState<View>({ kind: "list" });
   const [section, setSection] = useState<SettingsSection>("providers");
   const [busy, setBusy] = useState(false);
+  const [credentialRetryingId, setCredentialRetryingId] = useState<string | null>(null);
   const [error, setError] = useState("");
 
   const refetch = async () => {
@@ -728,13 +729,21 @@ export function SettingsPage({
             }).promise;
             await refetch();
           })}
-          onRetryCredential={(p) => runBusyAction(setBusy, setError, "credential retry failed", async () => {
-            await trackPromise(`provider:credential:retry:${p.id}`, async () => {
-              const r = await fetch(`${API}/api/providers/${p.id}/credential/retry`, { method: "POST" });
-              if (!r.ok) throw new Error(await r.text());
-            }).promise;
-            await refetch();
-          })}
+          credentialRetryingId={credentialRetryingId}
+          onRetryCredential={async (p) => {
+            setCredentialRetryingId(p.id);
+            try {
+              await runBusyAction(setBusy, setError, "credential retry failed", async () => {
+                await trackPromise(`provider:credential:retry:${p.id}`, async () => {
+                  const r = await fetch(`${API}/api/providers/${p.id}/credential/retry`, { method: "POST" });
+                  if (!r.ok) throw new Error(await r.text());
+                }).promise;
+                await refetch();
+              });
+            } finally {
+              setCredentialRetryingId(null);
+            }
+          }}
           onDelete={async (p) => {
             if (!confirm(t('setup.deleteConfirm'))) return;
             await runBusyAction(setBusy, setError, "delete failed", async () => {
@@ -864,6 +873,7 @@ interface ProvidersListProps {
   onEdit: (p: Provider) => void;
   onActivate: (p: Provider) => void;
   onSuspend: (p: Provider, suspended: boolean) => void;
+  credentialRetryingId: string | null;
   onRetryCredential: (p: Provider) => void;
   onDelete: (p: Provider) => void;
   onOpenProviderConfigSync?: () => void;
@@ -2110,6 +2120,7 @@ function ProvidersList({
   onEdit,
   onActivate,
   onSuspend,
+  credentialRetryingId,
   onRetryCredential,
   onDelete,
   onOpenProviderConfigSync,
@@ -2181,6 +2192,7 @@ function ProvidersList({
           onEdit={onEdit}
           onActivate={onActivate}
           onSuspend={onSuspend}
+          credentialRetryingId={credentialRetryingId}
           onRetryCredential={onRetryCredential}
           onDelete={onDelete}
           onRefreshApp={onRefreshApp}
@@ -2387,6 +2399,7 @@ function ProvidersSettingsSection({
   onEdit,
   onActivate,
   onSuspend,
+  credentialRetryingId,
   onRetryCredential,
   onDelete,
   setupStatuses,
@@ -2458,6 +2471,7 @@ function ProvidersSettingsSection({
         {providers.map((p) => {
           const isActive = p.id === activeId;
           const isSuspended = p.suspended === true;
+          const isCredentialRetrying = p.id === credentialRetryingId;
           const credentialStatus = p.credential_status || (p.has_api_key ? "available" : "unknown");
           return (
             <div key={p.id} className={`provider-row ${isActive ? "active" : ""} ${isSuspended ? "suspended" : ""} credential-${credentialStatus}`}>
@@ -2499,7 +2513,10 @@ function ProvidersSettingsSection({
                       disabled={busy}
                       onClick={() => onRetryCredential(p)}
                     >
-                      {t('backendUnavailable.retry')}
+                      {isCredentialRetrying && <span className="retrying-spinner" aria-hidden="true" />}
+                      {isCredentialRetrying
+                        ? t('setup.apiKeyWaitingAccess')
+                        : t('backendUnavailable.retry')}
                     </button>
                     <button
                       type="button"

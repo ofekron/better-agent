@@ -201,6 +201,7 @@
   "setup.apiKeyStatus.missing": "missing",
   "setup.apiKeyStatus.blocked": "access blocked",
   "setup.apiKeyReenter": "Re-enter key",
+  "setup.apiKeyWaitingAccess": "Waiting for credential access…",
   "setup.apiKeyBlockedReentryHint": "The stored API key cannot be accessed. Enter it again to replace it.",
   "setup.apiKeyReenterPlaceholder": "Enter the API key again",
   "setup.setDefaultButton": "Set default",

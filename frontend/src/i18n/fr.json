@@ -191,6 +191,7 @@
   "setup.apiKeyStatus.missing": "manquante",
   "setup.apiKeyStatus.blocked": "accès bloqué",
   "setup.apiKeyReenter": "Saisir à nouveau la clé",
+  "setup.apiKeyWaitingAccess": "En attente de l’accès aux identifiants…",
   "setup.apiKeyBlockedReentryHint": "La clé API enregistrée est inaccessible. Saisissez-la à nouveau pour la remplacer.",
   "setup.apiKeyReenterPlaceholder": "Saisissez à nouveau la clé API",
   "setup.setDefaultButton": "Définir par défaut",

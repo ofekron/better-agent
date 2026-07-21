@@ -191,6 +191,7 @@
   "setup.apiKeyStatus.missing": "不足",
   "setup.apiKeyStatus.blocked": "アクセスがブロックされています",
   "setup.apiKeyReenter": "キーを再入力",
+  "setup.apiKeyWaitingAccess": "認証情報へのアクセスを待機中…",
   "setup.apiKeyBlockedReentryHint": "保存されたAPIキーにアクセスできません。置き換えるには再入力してください。",
   "setup.apiKeyReenterPlaceholder": "APIキーを再入力してください",
   "setup.setDefaultButton": "デフォルトに設定",

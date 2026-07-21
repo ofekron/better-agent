@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import subprocess
 import sys
+import threading
+from collections.abc import Iterator
 from typing import Optional
 
 _TIMEOUT = 5  # seconds — fail loud rather than hang on a locked keychain
+_NATIVE_INTERACTION_LOCK = threading.Lock()
 
 
-def disable_native_user_interaction() -> None:
+def _set_native_user_interaction(allowed: bool) -> None:
     if sys.platform != "darwin":
         return
     import ctypes
@@ -20,8 +24,25 @@ def disable_native_user_interaction() -> None:
     set_interaction_allowed = security.SecKeychainSetUserInteractionAllowed
     set_interaction_allowed.argtypes = [ctypes.c_ubyte]
     set_interaction_allowed.restype = ctypes.c_int32
-    if set_interaction_allowed(0) != 0:
-        raise RuntimeError("failed to disable OS credential interaction")
+    if set_interaction_allowed(int(allowed)) != 0:
+        raise RuntimeError("failed to configure OS credential interaction")
+
+
+def disable_native_user_interaction() -> None:
+    _set_native_user_interaction(False)
+
+
+@contextmanager
+def native_user_interaction() -> Iterator[None]:
+    if sys.platform != "darwin":
+        yield
+        return
+    with _NATIVE_INTERACTION_LOCK:
+        _set_native_user_interaction(True)
+        try:
+            yield
+        finally:
+            _set_native_user_interaction(False)
 
 
 def _interactive_arg(value: str) -> str:

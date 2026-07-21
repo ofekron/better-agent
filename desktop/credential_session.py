@@ -7,6 +7,7 @@ import threading
 from multiprocessing import Pipe
 from typing import Literal
 
+import oskeychain
 from provider_credentials import ProviderCredentialStore
 
 CredentialStatus = Literal["unknown", "available", "missing", "blocked"]
@@ -15,9 +16,11 @@ _MAX_FRAME_BYTES = 128 * 1024
 
 class ProviderCredentialBroker:
     def __init__(self) -> None:
+        oskeychain.disable_native_user_interaction()
         self._states: dict[str, tuple[CredentialStatus, str]] = {}
         self._locks: dict[str, threading.Lock] = {}
         self._locks_guard = threading.Lock()
+        self._keychain_lock = threading.Lock()
         self._credential_store = ProviderCredentialStore()
 
     def open_session(self) -> "ProviderCredentialSession":
@@ -72,7 +75,12 @@ class ProviderCredentialBroker:
                 response["value"] = value
             return response
         try:
-            value = self._credential_store.read(provider_id)
+            with self._keychain_lock:
+                if retry:
+                    with oskeychain.native_user_interaction():
+                        value = self._credential_store.read(provider_id)
+                else:
+                    value = self._credential_store.read(provider_id)
             if value:
                 self._states[provider_id] = ("available", value)
                 return {"status": "available", "value": value}
@@ -84,7 +92,8 @@ class ProviderCredentialBroker:
 
     def _store(self, provider_id: str, value: str) -> dict[str, str]:
         try:
-            self._credential_store.store(provider_id, value)
+            with self._keychain_lock:
+                self._credential_store.store(provider_id, value)
         except RuntimeError:
             self._states[provider_id] = ("blocked", "")
             return {"status": "blocked"}
@@ -93,7 +102,8 @@ class ProviderCredentialBroker:
 
     def _migrate_flat(self, provider_id: str) -> dict[str, str]:
         try:
-            value = self._credential_store.migrate_flat(provider_id)
+            with self._keychain_lock:
+                value = self._credential_store.migrate_flat(provider_id)
         except RuntimeError:
             self._states[provider_id] = ("blocked", "")
             return {"status": "blocked"}
@@ -107,7 +117,8 @@ class ProviderCredentialBroker:
         if self._states.get(provider_id, ("unknown", ""))[0] == "blocked":
             return {"status": "blocked"}
         try:
-            self._credential_store.delete(provider_id)
+            with self._keychain_lock:
+                self._credential_store.delete(provider_id)
         except RuntimeError:
             self._states[provider_id] = ("blocked", "")
             return {"status": "blocked"}

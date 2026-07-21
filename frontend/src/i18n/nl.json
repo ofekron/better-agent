@@ -191,6 +191,7 @@
   "setup.apiKeyStatus.missing": "ontbreekt",
   "setup.apiKeyStatus.blocked": "toegang geblokkeerd",
   "setup.apiKeyReenter": "Sleutel opnieuw invoeren",
+  "setup.apiKeyWaitingAccess": "Wachten op toegang tot inloggegevens…",
   "setup.apiKeyBlockedReentryHint": "De opgeslagen API-sleutel is niet toegankelijk. Voer hem opnieuw in om hem te vervangen.",
   "setup.apiKeyReenterPlaceholder": "Voer de API-sleutel opnieuw in",
   "setup.setDefaultButton": "Als standaard instellen",
