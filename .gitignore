@@ -20,6 +20,9 @@ marketing/better-agent/downloads/
 frontend/src/styles/*.bak
 *.bc-sync-backup
 test-results/
+/frontend/.next/
+/routine-outputs/
+/.routine-reports/
 
 # Editor / OS
 .DS_Store
