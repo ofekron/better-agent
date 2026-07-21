@@ -520,10 +520,12 @@ def build_server() -> FastMCP:
     server = FastMCP(
         "communicate",
         instructions=(
-            "Team tools for Better Agent sessions: mssg (queued message, "
-            "fire-and-forget), ask (waits by default; mode="
-            "'continue_and_expect_inbox_back_async' continues and expects a "
-            "later inbox reply), delegate_task "
+            "Team tools for Better Agent sessions: mssg is one-way and never "
+            "waits; ask waits inline by default. With mode="
+            "'continue_and_expect_inbox_back_async', ask returns immediately. "
+            "For async ask and delegate_task, the target sends the final result "
+            "with inbox(recipient_session_id=caller_session_id, message=result), "
+            "and the caller reads it later with inbox(). delegate_task "
             "(detached handoff — offload "
             "heavy tangential/off-topic real work so you can remain focused; "
             "not for reviews; auto-routing may run session search and has a "

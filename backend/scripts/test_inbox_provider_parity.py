@@ -19,6 +19,9 @@ import session_store
 
 
 def test_shared_descriptions_and_schemas() -> None:
+    assert "targets send" in descriptions.INBOX_DESCRIPTION
+    assert "inbox(recipient_session_id=<caller session id>" in descriptions.INBOX_DESCRIPTION
+    assert "call inbox()" in descriptions.INBOX_DESCRIPTION
     assert runner._INBOX_DESCRIPTION is descriptions.INBOX_DESCRIPTION
     assert runner_codex._INBOX_DESCRIPTION is descriptions.INBOX_DESCRIPTION
     assert runner._READ_INBOX_HISTORY_DESCRIPTION is descriptions.READ_INBOX_HISTORY_DESCRIPTION

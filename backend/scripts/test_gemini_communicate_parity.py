@@ -24,6 +24,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import communicate_mcp
 
 
+def test_communicate_server_instructions_explain_inbox_return_flow():
+    instructions = communicate_mcp.build_server().instructions
+    assert "async ask and delegate_task" in instructions
+    assert "inbox(recipient_session_id=caller_session_id, message=result)" in instructions
+    assert "caller reads it later with inbox()" in instructions
+
+
 def _instrument():
     captured: list[tuple] = []
 

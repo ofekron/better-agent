@@ -24,10 +24,11 @@ _PROVIDER_SELECTOR_NOTE = (
 )
 
 MSSG_DESCRIPTION = (
-    "Send a queued message to one target and return after the backend accepts "
-    "it. Target with exactly one of target_session_id, "
-    "target_worker_id, or target_worker_pool. Use for direct coordination or a "
-    "worker's final report to its manager. For a reply you read inline, use ask "
+    "Send a one-way queued message to one target and return after the backend "
+    "accepts it; this does not wait for target execution or a reply. Target "
+    "with exactly one of target_session_id, "
+    "target_worker_id, or target_worker_pool. Use for direct coordination. Async "
+    "ask and delegate_task results use inbox, not mssg. For an inline reply, use ask "
     f"mode='{ASK_MODE_WAIT_AND_GRAB_LAST_ASSISTANT_MSSG_IN_TURN}' instead. With "
     "target_worker_pool, pass pool_affinity_key to continue the same thread on "
     "the same pool worker."
@@ -44,8 +45,9 @@ ASK_DESCRIPTION = (
     f"{ASK_MODE_WAIT_AND_GRAB_LAST_ASSISTANT_MSSG_IN_TURN}' waits for its turn to finish "
     "and returns the reply inline, in this turn; mode='"
     f"{ASK_MODE_CONTINUE_AND_EXPECT_INBOX_BACK_ASYNC}' continues it and returns "
-    "immediately; the target sends its final result to your inbox. Call inbox() "
-    "later to read it. run_mode='direct' (default) "
+    "immediately; the target is instructed to call inbox(recipient_session_id="
+    "<caller session id>, message=<final result>). Call inbox() later to read it. "
+    "run_mode='direct' (default) "
     "runs the real session; "
     "run_mode='fork' runs an ISOLATED branch that does NOT mutate the session's "
     "durable context — use fork for audits/reviews/checks (set ephemeral=true to "
@@ -58,15 +60,16 @@ ASK_DESCRIPTION = (
 )
 
 DELEGATE_TASK_DESCRIPTION = (
-    "Hand a task to another session and keep working — DETACHED fire-and-forget, shouldnt be using this if you need an answer, you want get an answer from it this turn for sure. "
-    "that does NOT hold your turn open (unlike ask wait mode). The backend "
+    "Hand a task to another session and keep working — a DETACHED handoff that "
+    "does NOT hold your turn open (unlike ask wait mode). The target is "
+    "instructed to call inbox(recipient_session_id=<caller session id>, "
+    "message=<final result>); call inbox() later to read it. The backend "
     "auto-routes (searches across sessions for a fitting session or creates one) unless you pass a "
     "known target_session_id to bypass routing. Use to offload heavy tangential / "
     "off-topic work so you stay focused. Not for reviews — use ask(run_mode='fork'). "
     "Pass provider_id only when auto-routing should be constrained to that provider; provider_id='ANY' keeps cross-provider search. "
     "Distinct from the session-bridge delegate_to_session tool, which waits for the "
-    "result. Detached results are delivered to the caller's inbox; call inbox() "
-    "later to read them." + _PROVIDER_SELECTOR_NOTE
+    "result." + _PROVIDER_SELECTOR_NOTE
 )
 
 CREATE_SESSION_DESCRIPTION = (
@@ -106,8 +109,10 @@ INBOX_DESCRIPTION = (
     "message with recipient_session_id; any session may send to any existing "
     "session. To read, omit both fields. Reads are always bound to your own "
     "session id, return only messages newer than your last read, and advance "
-    "your cursor. Async ask and delegate_task results arrive here. A sender "
-    "cannot read the recipient's inbox."
+    "your cursor. Async ask and delegate_task targets send their final results "
+    "with inbox(recipient_session_id=<caller session id>, message=<final result>); "
+    "callers call inbox() later to read them. A sender cannot read the "
+    "recipient's inbox."
 )
 
 READ_INBOX_HISTORY_DESCRIPTION = (

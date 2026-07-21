@@ -30,17 +30,19 @@ import communicate_mcp  # noqa: E402
 
 # tool name -> (shared constant, [substrings that MUST survive any edit])
 SPEC = {
-    "mssg": (otd.MSSG_DESCRIPTION, ["backend accepts", "final report"]),
+    "mssg": (otd.MSSG_DESCRIPTION, ["does not wait", "use inbox"]),
     "stop_turn": (otd.STOP_TURN_DESCRIPTION, ["created", "blocked"]),
     "ask": (
         otd.ASK_DESCRIPTION,
         ["wait_and_grab_last_assistant_mssg_in_turn", "continue_and_expect_inbox_back_async", "fork",
-         "Call inbox()", "delegate_to_session"],
+         "inbox(recipient_session_id=<caller session id>", "Call inbox()", "delegate_to_session"],
     ),
     "delegate_task": (
         otd.DELEGATE_TASK_DESCRIPTION,
-        ["DETACHED", "does NOT hold your turn", "call inbox()", "delegate_to_session"],
+        ["DETACHED", "does NOT hold your turn", "inbox(recipient_session_id=<caller session id>",
+         "call inbox()", "delegate_to_session"],
     ),
+    "inbox": (otd.INBOX_DESCRIPTION, ["targets send", "call inbox()"]),
     "create_session": (otd.CREATE_SESSION_DESCRIPTION, ["STANDALONE", "create_worker"]),
     "create_sub_session": (otd.CREATE_SUB_SESSION_DESCRIPTION, ["hidden"]),
     "create_worker": (otd.CREATE_WORKER_DESCRIPTION, ["TEAM", "approval"]),
@@ -60,6 +62,7 @@ _CLAUDE_ALIASES = {
     "stop_turn": runner._STOP_TURN_DESCRIPTION,
     "ask": runner._ASK_DESCRIPTION,
     "delegate_task": runner._DELEGATE_TASK_DESCRIPTION,
+    "inbox": runner._INBOX_DESCRIPTION,
     "create_session": runner._CREATE_SESSION_DESCRIPTION,
     "create_sub_session": runner._CREATE_SUB_SESSION_DESCRIPTION,
     "create_worker": runner._CREATE_WORKER_DESCRIPTION,
@@ -71,6 +74,7 @@ _CODEX_ALIASES = {
     "stop_turn": runner_codex._STOP_TURN_DESCRIPTION,
     "ask": runner_codex._ASK_DESCRIPTION,
     "delegate_task": runner_codex._DELEGATE_TASK_DESCRIPTION,
+    "inbox": runner_codex._INBOX_DESCRIPTION,
     "create_session": runner_codex._CREATE_SESSION_DESCRIPTION,
     "create_sub_session": runner_codex._CREATE_SUB_SESSION_DESCRIPTION,
     "create_worker": runner_codex._CREATE_WORKER_DESCRIPTION,
