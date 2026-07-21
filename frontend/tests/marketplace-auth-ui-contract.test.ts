@@ -20,6 +20,9 @@ describe("marketplace settings authentication", () => {
     expect(html).not.toContain("Marketplace access token");
     expect(html).not.toContain("window.localStorage");
     expect(html).not.toContain("fetch(");
+    expect(html).toContain('<script src="./bridge.js"></script>');
+    expect(html).toContain("globalThis.marketplaceBridge");
+    expect(html).not.toContain("crypto.randomUUID()");
     expect(html).toContain('requestAction("marketplace-install"');
     expect(html).not.toContain('requestJson("/api/extensions/install"');
   });

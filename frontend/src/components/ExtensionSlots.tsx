@@ -6,6 +6,7 @@ import { useTranslation } from "react-i18next";
 import { API } from "src/api";
 import { eventBus } from "src/lib/eventBus";
 import { trackPromise } from "src/progress/store";
+import { uuidv4 } from "src/lib/uuid";
 import { loadExtensionModule } from "./extensionModuleLoader";
 import { ExtensionPaymentModal, type ExtensionPaymentResult } from "./ExtensionPaymentModal";
 import { MarketplaceInstallModal, type MarketplaceInstallManifest } from "./MarketplaceInstallModal";
@@ -301,7 +302,7 @@ export function ExtensionModuleSlot({
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const authPopupRef = useRef<Window | null>(null);
   const authStateRef = useRef("");
-  const bridgeNonceRef = useRef(crypto.randomUUID());
+  const bridgeNonceRef = useRef(uuidv4());
   const [paymentRequest, setPaymentRequest] = useState<{ requestId: string; productId: string } | null>(null);
   const [installRequest, setInstallRequest] = useState<{
     requestId: string;

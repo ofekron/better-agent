@@ -206,8 +206,10 @@
       <div id="grid" class="grid"></div>
     </main>
     <script src="./catalog.js"></script>
+    <script src="./bridge.js"></script>
     <script type="module">
       const { isMarketplaceManaged, marketplaceRows } = globalThis.marketplaceCatalog;
+      const { uuidv4 } = globalThis.marketplaceBridge;
       const statusEl = document.getElementById("status");
       const gridEl = document.getElementById("grid");
       const refreshEl = document.getElementById("refresh");
@@ -220,7 +222,7 @@
 
       async function requestJson(url, options = {}) {
         if (!bridgeNonce) throw new Error("Marketplace connection is not ready");
-        const requestId = crypto.randomUUID();
+        const requestId = uuidv4();
         const body = typeof options.body === "string" ? JSON.parse(options.body) : options.body;
         const result = new Promise((resolve, reject) => {
           pendingRequests.set(requestId, { resolve, reject, raw: false });
@@ -239,7 +241,7 @@
 
       async function requestAction(action, payload = {}) {
         if (!bridgeNonce) throw new Error("Marketplace connection is not ready");
-        const requestId = crypto.randomUUID();
+        const requestId = uuidv4();
         const result = new Promise((resolve, reject) => {
           pendingRequests.set(requestId, { resolve, reject, raw: true });
         });
@@ -280,7 +282,7 @@
               source: "ba-extension",
               nonce: bridgeNonce,
               action: "marketplace-auth-start",
-              requestId: crypto.randomUUID(),
+              requestId: uuidv4(),
               provider: provider.id,
             }, "*");
           });

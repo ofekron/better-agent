@@ -108,6 +108,31 @@ describe("extension payment bridge", () => {
     expect(screen.queryByText("extensionPayment.title")).toBeNull();
   });
 
+  it("initializes the iframe bridge when crypto.randomUUID is unavailable", () => {
+    vi.stubGlobal("crypto", {
+      randomUUID: undefined,
+      getRandomValues: (bytes: Uint8Array) => {
+        for (let index = 0; index < bytes.length; index += 1) bytes[index] = index;
+        return bytes;
+      },
+    });
+
+    render(<ExtensionModuleSlot module={makeModule()} />);
+    const iframe = renderedIframe();
+    const replySpy = vi.spyOn(iframe.contentWindow as Window, "postMessage");
+    fireEvent.load(iframe);
+
+    expect(replySpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: "marketplace-auth-init",
+        nonce: expect.stringMatching(
+          /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+        ),
+      }),
+      "*",
+    );
+  });
+
   it("handles auth-start only from the iframe source and replies over the bridge", async () => {
     const popup = { close: vi.fn(), closed: false } as unknown as Window;
     const openSpy = vi.spyOn(window, "open").mockReturnValue(popup);
