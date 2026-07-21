@@ -27,11 +27,16 @@ pyz = PYZ(analysis.pure)  # noqa: F821
 exe = EXE(  # noqa: F821
     pyz,
     analysis.scripts,
-    analysis.binaries,
-    analysis.datas,
     [],
     name="BetterAgentCredentialAuthority",
     console=True,
+    exclude_binaries=True,
     target_arch=None,
     codesign_identity=None,
+)
+collect = COLLECT(  # noqa: F821
+    exe,
+    analysis.binaries,
+    analysis.datas,
+    name="BetterAgentCredentialAuthority",
 )

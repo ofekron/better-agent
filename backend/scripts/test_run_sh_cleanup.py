@@ -148,7 +148,7 @@ def main() -> int:
     )
     check(
         "macOS run.sh uses the signed Better Agent credential authority",
-        'CREDENTIAL_AUTHORITY="$DIR/desktop/dist/BetterAgentCredentialAuthority"' in text
+        'CREDENTIAL_AUTHORITY="$DIR/desktop/dist/BetterAgentCredentialAuthority/BetterAgentCredentialAuthority"' in text
         and '"$DIR/desktop/build_credential_authority.sh" >/dev/null' in text
         and '"$CREDENTIAL_AUTHORITY" \\' in text,
         failures,
