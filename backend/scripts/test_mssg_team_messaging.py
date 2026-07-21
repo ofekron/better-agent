@@ -777,6 +777,43 @@ def test_submit_team_message_can_expect_async_inbox_response(monkeypatch):
     assert "mssg(target_session_id=" not in captured["params"]["cli_prompt"]
 
 
+def test_async_inbox_response_requires_inbox_on_both_sessions(monkeypatch):
+    for blocked_role in ("sender", "target"):
+        sender = session_manager.create(
+            name=f"{blocked_role} blocked manager",
+            cwd="/repo",
+            orchestration_mode="manager",
+            disallowed_tools=["inbox"] if blocked_role == "sender" else [],
+        )
+        target = session_manager.create(
+            name=f"{blocked_role} blocked worker",
+            cwd="/repo",
+            orchestration_mode="native",
+            disallowed_tools=["inbox"] if blocked_role == "target" else [],
+        )
+        coordinator = Coordinator()
+        submitted = []
+        monkeypatch.setattr(
+            coordinator,
+            "submit_prompt",
+            lambda *_args, **_kwargs: submitted.append(True),
+        )
+
+        try:
+            asyncio.run(coordinator.submit_team_message(
+                sender_session_id=sender["id"],
+                target_session_id=target["id"],
+                message="run test",
+                detach=True,
+                expect_inbox_response=True,
+            ))
+        except ValueError as exc:
+            assert str(exc) == f"async response requires inbox for the {blocked_role} session"
+        else:
+            raise AssertionError(f"async response accepted inbox-blocked {blocked_role}")
+        assert submitted == []
+
+
 def test_submit_team_message_can_target_sub_session(monkeypatch):
     sender = session_manager.create(
         name="manager",

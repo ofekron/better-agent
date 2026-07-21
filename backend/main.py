@@ -16840,13 +16840,16 @@ async def internal_enqueue_worker_pool_prompt(
         raise HTTPException(status_code=400, detail="tag, sender_session_id, and prompt are required")
     if not await _session_lite(sender_session_id):
         raise HTTPException(status_code=404, detail="sender_session_id does not exist")
-    queued = await _enqueue_worker_pool_message(
-        tag=tag,
-        sender_session_id=sender_session_id,
-        prompt=prompt,
-        expect_inbox_response=bool((body or {}).get("expect_inbox_response")),
-        pool_affinity_key=_api_optional_pool_affinity_key((body or {}).get("pool_affinity_key")),
-    )
+    try:
+        queued = await _enqueue_worker_pool_message(
+            tag=tag,
+            sender_session_id=sender_session_id,
+            prompt=prompt,
+            expect_inbox_response=bool((body or {}).get("expect_inbox_response")),
+            pool_affinity_key=_api_optional_pool_affinity_key((body or {}).get("pool_affinity_key")),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"success": True, **queued}
 
 
@@ -16864,7 +16867,14 @@ async def _enqueue_worker_pool_message(
     wait_for_ask_response: bool = False,
     ask_id: str = "",
 ) -> dict:
+    import team_messaging
     from stores import worker_store as _ws
+
+    if expect_inbox_response:
+        sender = await _session_lite(sender_session_id)
+        if not sender:
+            raise ValueError("sender_session_id does not exist")
+        team_messaging.validate_inbox_response_session("sender", sender)
 
     item = {
         "id": str(uuid.uuid4()),

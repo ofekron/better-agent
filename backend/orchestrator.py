@@ -1485,6 +1485,8 @@ class Coordinator:
             sender_session_id=sender_session_id,
             target_session_id=target_session_id,
         )
+        if expect_inbox_response:
+            team_messaging.validate_inbox_response_route(sender, target)
         run_config = self._resolve_delegation_run_config(
             model_task_key,
             sender=sender,

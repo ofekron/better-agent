@@ -13,6 +13,7 @@ os.environ["BETTER_CLAUDE_TEST_AUTH_BYPASS"] = "1"
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import main  # noqa: E402
+from stores import worker_store  # noqa: E402
 from communication_modes import (  # noqa: E402
     ASK_MODE_CONTINUE_AND_EXPECT_INBOX_BACK_ASYNC,
     ASK_MODE_WAIT_AND_GRAB_LAST_ASSISTANT_MSSG_IN_TURN,
@@ -139,6 +140,83 @@ async def _run() -> None:
 
 def test_internal_communication_modes() -> None:
     asyncio.run(_run())
+
+
+def test_pool_enqueue_endpoint_maps_unavailable_inbox_to_400(monkeypatch) -> None:
+    sender = main.session_manager.create(
+        name="inbox blocked endpoint caller",
+        cwd="/repo",
+        orchestration_mode="native",
+        disallowed_tools=["inbox"],
+    )
+    monkeypatch.setattr(main, "_require_team_orchestration_internal", lambda _token: None)
+
+    try:
+        asyncio.run(main.internal_enqueue_worker_pool_prompt(
+            body={
+                "tag": "review",
+                "sender_session_id": sender["id"],
+                "prompt": "review later",
+                "expect_inbox_response": True,
+            },
+            x_internal_token="test",
+        ))
+    except main.HTTPException as exc:
+        assert exc.status_code == 400
+        assert exc.detail == "async response requires inbox for the sender session"
+    else:
+        raise AssertionError("pool enqueue endpoint returned success for an unavailable inbox")
+
+
+def test_pool_dispatch_rejects_inbox_blocked_target(monkeypatch) -> None:
+    sender = main.session_manager.create(
+        name="pool caller",
+        cwd="/repo",
+        orchestration_mode="native",
+    )
+    target = main.session_manager.create(
+        name="inbox blocked pool worker",
+        cwd="/repo",
+        orchestration_mode="native",
+        disallowed_tools=["inbox"],
+    )
+    item = {
+        "id": "pool-item",
+        "sender_session_id": sender["id"],
+        "prompt": "review later",
+        "expect_inbox_response": True,
+    }
+    queued = iter((item, None))
+    failures = []
+    submitted = []
+    original_coordinator = main.coordinator
+    coordinator = main.Coordinator()
+
+    monkeypatch.setattr(worker_store, "peek_pool_task", lambda _tag: next(queued))
+    monkeypatch.setattr(
+        worker_store,
+        "record_pool_task_failure",
+        lambda _tag, _item_id, error: failures.append(error) or {"action": "failed"},
+    )
+    monkeypatch.setattr(
+        main,
+        "_pick_pool_worker_for_sender",
+        lambda *_args: {"agent_session_id": target["id"]},
+    )
+    monkeypatch.setattr(coordinator, "submit_prompt", lambda *_args, **_kwargs: submitted.append(True))
+
+    async def broadcast_workers_changed(_cwd) -> None:
+        return None
+
+    monkeypatch.setattr(coordinator, "broadcast_workers_changed", broadcast_workers_changed)
+    try:
+        main.coordinator = coordinator
+        asyncio.run(main._process_worker_pool_queue("review"))
+    finally:
+        main.coordinator = original_coordinator
+
+    assert failures == ["async response requires inbox for the target session"]
+    assert submitted == []
 
 
 def test_ask_execution_matrix() -> None:

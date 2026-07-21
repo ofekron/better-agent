@@ -40,6 +40,21 @@ def validate_message_route(
     return sender, target
 
 
+def validate_inbox_response_session(role: str, session: dict) -> None:
+    disallowed = {
+        str(tool).strip().lower()
+        for tool in session.get("disallowed_tools", [])
+        if str(tool).strip()
+    }
+    if "inbox" in disallowed:
+        raise ValueError(f"async response requires inbox for the {role} session")
+
+
+def validate_inbox_response_route(sender: dict, target: dict) -> None:
+    validate_inbox_response_session("sender", sender)
+    validate_inbox_response_session("target", target)
+
+
 def build_message_metadata(
     *,
     sender_session_id: str,
