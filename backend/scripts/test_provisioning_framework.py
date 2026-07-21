@@ -83,6 +83,14 @@ def test_dirty_reason() -> bool:
         print(f"{FAIL} dirty: no agent_sid should be clean")
         return False
 
+    if "no provider session id" not in dirty_reason(
+        {"messages": [{"role": "user", "content": "stuck prep"}]},
+        policy,
+        cwd,
+    ):
+        print(f"{FAIL} dirty: failed initialization not detected")
+        return False
+
     # compute_jsonl_path globs real disk; monkeypatch it to map our fake
     # agent_sids to temp jsonl files we control.
     import orchs.jsonl_helpers as jh
@@ -145,7 +153,7 @@ def test_dirty_reason() -> bool:
     finally:
         jh.compute_jsonl_path = original  # type: ignore[assignment]
 
-    print(f"{PASS} dirty_reason: clean / size / turn-count / leak / api-error")
+    print(f"{PASS} dirty_reason: clean / failed-init / size / turn-count / leak / api-error")
     return True
 
 
@@ -1127,36 +1135,23 @@ def test_startup_wires_requirements_processor_prewarm() -> bool:
     return True
 
 
-def test_working_mode_lookup_prefilters_summaries() -> bool:
+def test_working_mode_lookup_reads_hidden_sessions() -> bool:
     class _FakeSessionManager:
         def __init__(self) -> None:
-            self.get_calls: list[str] = []
+            self.iter_all_calls = 0
 
         def list(self) -> list[dict]:
+            return []
+
+        def iter_all(self) -> list[dict]:
+            self.iter_all_calls += 1
             return [
-                {
-                    "id": f"skip-{idx}",
-                    "working_mode": "other",
-                    "working_mode_meta": {"cwd": "/repo"},
-                }
-                for idx in range(50)
-            ] + [
                 {
                     "id": "target",
                     "working_mode": "target_mode",
                     "working_mode_meta": {"cwd": "/repo", "model": "m"},
                 }
             ]
-
-        def get(self, sid: str) -> dict | None:
-            self.get_calls.append(sid)
-            if sid != "target":
-                return None
-            return {
-                "id": sid,
-                "working_mode": "target_mode",
-                "working_mode_meta": {"cwd": "/repo", "model": "m"},
-            }
 
     fake = _FakeSessionManager()
     original = working_mode.session_manager
@@ -1171,12 +1166,12 @@ def test_working_mode_lookup_prefilters_summaries() -> bool:
         working_mode.session_manager = original
 
     if not found or found.get("id") != "target":
-        print(f"{FAIL} working-mode lookup: did not return target")
+        print(f"{FAIL} working-mode lookup: did not return hidden target")
         return False
-    if fake.get_calls != ["target"]:
-        print(f"{FAIL} working-mode lookup: full reads {fake.get_calls!r}")
+    if fake.iter_all_calls != 1:
+        print(f"{FAIL} working-mode lookup: iter_all calls {fake.iter_all_calls}")
         return False
-    print(f"{PASS} working-mode lookup prefilters summaries")
+    print(f"{PASS} working-mode lookup reads hidden sessions")
     return True
 
 
@@ -1206,7 +1201,7 @@ def main_run() -> int:
         test_run_sync_survives_lifecycle_plus_full_dispatch,
         test_lifecycle_lock_budget_stays_on_provision_timeout,
         test_startup_wires_requirements_processor_prewarm,
-        test_working_mode_lookup_prefilters_summaries,
+        test_working_mode_lookup_reads_hidden_sessions,
     ]
     results = []
     for fn in tests:

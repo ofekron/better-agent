@@ -30,6 +30,8 @@ def dirty_reason(
     that would fetch the transcript via the node RPC."""
     agent_sid = str(session.get("agent_session_id") or "").strip()
     if not agent_sid:
+        if session.get("messages"):
+            return "base has messages but no provider session id"
         return ""  # not yet provisioned
     try:
         from orchs.jsonl_helpers import compute_jsonl_path

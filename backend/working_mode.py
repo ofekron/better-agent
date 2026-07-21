@@ -60,12 +60,9 @@ def find_working_session(
     """Return the first live working session whose mode matches and whose
     ``working_mode_meta`` contains all ``**match`` key-value pairs, or
     ``None``."""
-    for summary in session_manager.list():
-        if not _matches_working_mode(summary, mode, match):
-            continue
-        s = session_manager.get(summary["id"]) or {}
-        if _matches_working_mode(s, mode, match):
-            return s
+    for session in session_manager.iter_all():
+        if _matches_working_mode(session, mode, match):
+            return session
     return None
 
 
