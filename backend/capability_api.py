@@ -5,12 +5,13 @@ import contextvars
 import hashlib
 import inspect
 import os
+import re
 import uuid
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable
+from typing import Annotated, Any, Awaitable, Callable, Literal
 
 from fastapi import APIRouter, Header, HTTPException
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError, field_validator
 
 import extension_store
 import extension_token_registry
@@ -197,30 +198,57 @@ class _PromptEngineerCommentPayload(_SessionIdPayload):
     client_id: str = ""
 
 
+_AutoTaggingId = Annotated[
+    str,
+    StringConstraints(
+        strip_whitespace=True,
+        min_length=1,
+        max_length=256,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+    ),
+]
+_AutoTaggingProjectId = Annotated[str, StringConstraints(strip_whitespace=True, max_length=4096)]
+_AutoTaggingLabel = Annotated[
+    str,
+    StringConstraints(strip_whitespace=True, min_length=1, max_length=48),
+]
+_AutoTaggingColor = Annotated[
+    str,
+    StringConstraints(strip_whitespace=True, pattern=r"^#[0-9A-Fa-f]{6}$"),
+]
+
+
 class _AutoTaggingCurrentTaskPayload(_StrictPayload):
-    session_id: str = Field(min_length=1)
+    session_id: _AutoTaggingId
 
 
 class _AutoTaggingSnapshotPayload(_StrictPayload):
-    project_id: str = ""
+    project_id: _AutoTaggingProjectId = ""
+
+
+class _AutoTaggingEvidenceRow(_StrictPayload):
+    text: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=2000)]
+    role: Literal["user", "assistant"]
+    ts: Annotated[str, StringConstraints(strip_whitespace=True, max_length=64)] | None = None
 
 
 class _AutoTaggingSelectPayload(_StrictPayload):
-    task: str = ""
-    evidence: list[dict[str, Any]] = Field(default_factory=list)
-    existing_tags: list[str] = Field(default_factory=list)
-    max_tags: int = Field(default=5, ge=1)
-    cwd: str = ""
+    session_id: _AutoTaggingId
+    task: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=2000)]
+    evidence: list[_AutoTaggingEvidenceRow] = Field(min_length=1, max_length=40)
+    existing_tags: list[_AutoTaggingLabel] = Field(default_factory=list, max_length=500)
+    max_tags: int = Field(default=5, ge=1, le=5)
+    cwd: _AutoTaggingProjectId = ""
 
 
 class _AutoTaggingEnsurePayload(_StrictPayload):
-    name: str = Field(min_length=1)
-    project_id: str = ""
-    color: str | None = None
+    name: _AutoTaggingLabel
+    project_id: _AutoTaggingProjectId = ""
+    color: _AutoTaggingColor | None = None
 
 
 class _AutoTaggingUpdatePayload(_StrictPayload):
-    tag_id: str = Field(min_length=1)
+    tag_id: _AutoTaggingId
     patch: dict[str, Any]
 
     @field_validator("patch")
@@ -231,26 +259,32 @@ class _AutoTaggingUpdatePayload(_StrictPayload):
             raise ValueError("patch contains unsupported fields")
         if not patch:
             raise ValueError("patch must include name or color")
-        if "name" in patch and (not isinstance(patch["name"], str) or not patch["name"].strip()):
-            raise ValueError("patch name must be a non-empty string")
-        if "color" in patch and patch["color"] is not None and not isinstance(patch["color"], str):
-            raise ValueError("patch color must be a string or null")
+        name = patch.get("name")
+        if "name" in patch and (
+            not isinstance(name, str) or not name.strip() or len(name.strip()) > 48
+        ):
+            raise ValueError("patch name must contain 1 to 48 characters")
+        color = patch.get("color")
+        if "color" in patch and color is not None and (
+            not isinstance(color, str) or re.fullmatch(r"#[0-9A-Fa-f]{6}", color.strip()) is None
+        ):
+            raise ValueError("patch color must be a six-digit hex color or null")
         return patch
 
 
 class _AutoTaggingDeletePayload(_StrictPayload):
-    tag_id: str = Field(min_length=1)
+    tag_id: _AutoTaggingId
 
 
 class _AutoTaggingSyncPayload(_StrictPayload):
-    session_id: str = Field(min_length=1)
-    tag_ids: list[str] = Field(default_factory=list)
-    source: str = ""
+    session_id: _AutoTaggingId
+    tag_ids: list[_AutoTaggingId] = Field(default_factory=list, max_length=500)
+    source: Literal["auto_tagging"] = "auto_tagging"
     merge: bool = False
 
 
 class _AutoTaggingSqlPayload(_StrictPayload):
-    sql: str = Field(min_length=1)
+    sql: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=16384)]
 
 
 class _ScheduleCreatePayload(_StrictPayload):

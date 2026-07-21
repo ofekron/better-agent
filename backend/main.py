@@ -5391,6 +5391,10 @@ async def internal_auto_tagging(
                 "eligible": _session_auto_tagging_eligible(session),
             }
         if action == "select-tags":
+            session_id = str(body.get("session_id") or "").strip()
+            session = await asyncio.to_thread(session_manager.get_lite, session_id) or {}
+            if not session or not _session_auto_tagging_eligible(session):
+                raise HTTPException(status_code=403, detail="session is not eligible for auto tagging")
             task = str(body.get("task") or "").strip()
             if not task:
                 raise ValueError("task is required")
@@ -5406,6 +5410,8 @@ async def internal_auto_tagging(
             cwd = body.get("cwd") or ""
             if not isinstance(cwd, str):
                 raise ValueError("cwd must be a string")
+            if cwd != str(session.get("cwd") or ""):
+                raise HTTPException(status_code=403, detail="cwd must match the session cwd")
             selector = _auto_tagging_selector_module()
             try:
                 labels = await asyncio.to_thread(

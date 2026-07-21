@@ -138,6 +138,50 @@ def test_auto_tagging_update_rejects_unsupported_patch_fields() -> None:
         raise AssertionError(f"auto-tagging update accepted invalid patch: {patch!r}")
 
 
+def test_auto_tagging_capability_payloads_are_bounded() -> None:
+    invalid = [
+        ("current-task", {"session_id": "/not-an-id"}),
+        ("snapshot", {"project_id": "x" * 4097}),
+        (
+            "select-tags",
+            {
+                "session_id": "sid-1",
+                "task": "task",
+                "evidence": [{"text": "evidence", "role": "system"}],
+                "existing_tags": [],
+                "max_tags": 5,
+                "cwd": "/repo",
+            },
+        ),
+        (
+            "select-tags",
+            {
+                "session_id": "sid-1",
+                "task": "task",
+                "evidence": [{"text": "evidence", "role": "user"}],
+                "existing_tags": [],
+                "max_tags": 6,
+                "cwd": "/repo",
+            },
+        ),
+        ("ensure-tag", {"name": "x" * 49, "project_id": "", "color": None}),
+        ("ensure-tag", {"name": "tag", "project_id": "", "color": "blue"}),
+        ("delete-tag", {"tag_id": "/not-an-id"}),
+        (
+            "sync-session-tags",
+            {"session_id": "sid-1", "tag_ids": [], "source": "manual", "merge": False},
+        ),
+        ("tags-sql", {"sql": "x" * 16385}),
+    ]
+    for action, payload in invalid:
+        schema = capability_api._ACTIONS[("auto-tagging", action)].schema
+        try:
+            schema.model_validate(payload)
+        except ValidationError:
+            continue
+        raise AssertionError(f"auto-tagging {action} accepted invalid payload")
+
+
 def test_public_sdk_has_no_raw_route_transport() -> None:
     assert not hasattr(Client, "request_internal")
     client = Client(internal_token="token")

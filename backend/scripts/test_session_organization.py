@@ -600,7 +600,7 @@ def test_internal_auto_tagging_tags_sql_is_read_only(client: TestClient) -> bool
             "source": "requirement_analysis",
         },
     )
-    if source_attempt.status_code != 400:
+    if source_attempt.status_code != 422:
         print(f"  expected auto-tagging source pin rejection, got {source_attempt.status_code}: {source_attempt.text}")
         return False
     return True
