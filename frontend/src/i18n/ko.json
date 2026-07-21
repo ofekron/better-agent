@@ -1088,5 +1088,15 @@
   "routines.output.codeHealth.severity.critical": "Critical",
   "routines.output.codeHealth.severity.high": "High",
   "routines.output.codeHealth.severity.medium": "Medium",
-  "routines.output.codeHealth.severity.low": "Low"
+  "routines.output.codeHealth.severity.low": "Low",
+  "gitTree.title": "저장소 기록",
+  "gitTree.open": "저장소 기록 열기",
+  "gitTree.close": "저장소 기록 닫기",
+  "gitTree.refresh": "저장소 기록 새로고침",
+  "gitTree.loading": "저장소 기록을 불러오는 중…",
+  "gitTree.loadFailed": "저장소 기록을 불러올 수 없습니다.",
+  "gitTree.retry": "다시 시도",
+  "gitTree.empty": "아직 커밋이 없습니다.",
+  "gitTree.commits": "커밋 · {{count}}",
+  "gitTree.changed": "변경 · {{count}}"
 }

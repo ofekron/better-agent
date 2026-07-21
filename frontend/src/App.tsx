@@ -75,6 +75,7 @@ import type { FileAnchorComment } from "./components/FileEditor";
 import { ProjectSettings } from "./components/ProjectSettings";
 import { ProjectTabs } from "./components/ProjectTabs";
 import { ProjectGitStatus } from "./components/ProjectGitStatus";
+import { GitTreeView } from "./components/GitTreeView";
 import { SessionSelectorControls } from "./components/SessionSelectorControls";
 import { ModelPickerModal } from "./components/ModelPickerModal";
 import type { SelectorUpdates } from "./components/modelPicker";
@@ -731,6 +732,7 @@ function AppMain({
   const { machines } = useMachines(authStatus);
   const showMachinesLink = builtinExtensions.machineNodes && machines.length > 1;
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+  const [gitTreeOpen, setGitTreeOpen] = useState(false);
   // Header action icons collapse into a kebab menu when they don't fit
   // one line (width-based, not viewport-based). Config stays out always.
   const [headerMenuOpen, setHeaderMenuOpen] = useState(false);
@@ -764,6 +766,7 @@ function AppMain({
   // close innermost-first via the hook's module-scope stack).
   useBackButtonDismiss(mobileSidebarOpen, () => setMobileSidebarOpen(false));
   useBackButtonDismiss(mobileRightOpen, closeMobileRightPanel);
+  useBackButtonDismiss(gitTreeOpen, () => setGitTreeOpen(false));
   // Close the header overflow menu on outside click.
   useEffect(() => {
     if (!headerMenuOpen) return;
@@ -6960,6 +6963,10 @@ function AppMain({
             <ProjectGitStatus
               cwd={selectedProjectPath}
               nodeId={selectedProjectNodeId}
+              onOpenTree={() => {
+                setGitTreeOpen(true);
+                if (isMobile) setMobileSidebarOpen(false);
+              }}
             />
           </div>
         )}
@@ -7091,6 +7098,16 @@ function AppMain({
       {/* Center Panel */}
       <div className="main-panel">
         {(() => {
+          if (gitTreeOpen && selectedProjectPath) {
+            return (
+              <GitTreeView
+                key={`${selectedProjectNodeId}:${selectedProjectPath}`}
+                cwd={selectedProjectPath}
+                nodeId={selectedProjectNodeId}
+                onClose={() => setGitTreeOpen(false)}
+              />
+            );
+          }
           if (route.kind === "extensionPanel") {
             const matchingPanelModules = extensionPanelModules.filter(
               (module) =>

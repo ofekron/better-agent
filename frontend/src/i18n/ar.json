@@ -1088,5 +1088,15 @@
   "routines.output.codeHealth.severity.critical": "Critical",
   "routines.output.codeHealth.severity.high": "High",
   "routines.output.codeHealth.severity.medium": "Medium",
-  "routines.output.codeHealth.severity.low": "Low"
+  "routines.output.codeHealth.severity.low": "Low",
+  "gitTree.title": "سجل المستودع",
+  "gitTree.open": "فتح سجل المستودع",
+  "gitTree.close": "إغلاق سجل المستودع",
+  "gitTree.refresh": "تحديث سجل المستودع",
+  "gitTree.loading": "جارٍ تحميل سجل المستودع…",
+  "gitTree.loadFailed": "تعذّر تحميل سجل المستودع.",
+  "gitTree.retry": "إعادة المحاولة",
+  "gitTree.empty": "لا توجد التزامات بعد.",
+  "gitTree.commits": "الالتزامات · {{count}}",
+  "gitTree.changed": "التغييرات · {{count}}"
 }

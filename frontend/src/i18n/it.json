@@ -1089,5 +1089,15 @@
   "routines.output.codeHealth.severity.critical": "Critical",
   "routines.output.codeHealth.severity.high": "High",
   "routines.output.codeHealth.severity.medium": "Medium",
-  "routines.output.codeHealth.severity.low": "Low"
+  "routines.output.codeHealth.severity.low": "Low",
+  "gitTree.title": "Cronologia del repository",
+  "gitTree.open": "Apri cronologia del repository",
+  "gitTree.close": "Chiudi cronologia del repository",
+  "gitTree.refresh": "Aggiorna cronologia del repository",
+  "gitTree.loading": "Caricamento della cronologia del repository…",
+  "gitTree.loadFailed": "Impossibile caricare la cronologia del repository.",
+  "gitTree.retry": "Riprova",
+  "gitTree.empty": "Ancora nessun commit.",
+  "gitTree.commits": "Commit · {{count}}",
+  "gitTree.changed": "Modifiche · {{count}}"
 }

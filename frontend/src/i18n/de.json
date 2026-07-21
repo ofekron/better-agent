@@ -1085,5 +1085,15 @@
   "routines.output.codeHealth.severity.critical": "Critical",
   "routines.output.codeHealth.severity.high": "High",
   "routines.output.codeHealth.severity.medium": "Medium",
-  "routines.output.codeHealth.severity.low": "Low"
+  "routines.output.codeHealth.severity.low": "Low",
+  "gitTree.title": "Repository-Verlauf",
+  "gitTree.open": "Repository-Verlauf öffnen",
+  "gitTree.close": "Repository-Verlauf schließen",
+  "gitTree.refresh": "Repository-Verlauf aktualisieren",
+  "gitTree.loading": "Repository-Verlauf wird geladen…",
+  "gitTree.loadFailed": "Repository-Verlauf konnte nicht geladen werden.",
+  "gitTree.retry": "Erneut versuchen",
+  "gitTree.empty": "Noch keine Commits.",
+  "gitTree.commits": "Commits · {{count}}",
+  "gitTree.changed": "Änderungen · {{count}}"
 }

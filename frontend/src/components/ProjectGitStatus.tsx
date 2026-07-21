@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
+import { useTranslation } from "react-i18next";
 import { API } from "../api";
 
 interface GitStatus {
@@ -13,6 +14,7 @@ interface GitStatus {
 interface Props {
   cwd: string;
   nodeId: string;
+  onOpenTree: () => void;
 }
 
 interface GitCommitResult {
@@ -24,7 +26,8 @@ interface GitCommitResult {
   committed?: boolean;
 }
 
-export function ProjectGitStatus({ cwd, nodeId }: Props) {
+export function ProjectGitStatus({ cwd, nodeId, onOpenTree }: Props) {
+  const { t } = useTranslation();
   const [status, setStatus] = useState<GitStatus | null>(null);
   const [committing, setCommitting] = useState(false);
   const [pushing, setPushing] = useState(false);
@@ -34,24 +37,33 @@ export function ProjectGitStatus({ cwd, nodeId }: Props) {
   const [message, setMessage] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
 
-  const fetchStatus = useCallback(async () => {
+  const requestStatus = useCallback(async (): Promise<GitStatus | null> => {
     try {
       const params = new URLSearchParams({ cwd, node_id: nodeId });
       const res = await fetch(`${API}/api/git-status?${params}`);
       if (res.ok) {
-        const data = await res.json();
-        setStatus(data);
+        return await res.json();
       }
     } catch {
-      // ignore fetch errors
+      return null;
     }
+    return null;
   }, [cwd, nodeId]);
 
   useEffect(() => {
-    fetchStatus();
-    const id = setInterval(fetchStatus, 15_000);
-    return () => clearInterval(id);
-  }, [fetchStatus]);
+    let active = true;
+    const refresh = () => {
+      void requestStatus().then((nextStatus) => {
+        if (active && nextStatus) setStatus(nextStatus);
+      });
+    };
+    refresh();
+    const id = setInterval(refresh, 15_000);
+    return () => {
+      active = false;
+      clearInterval(id);
+    };
+  }, [requestStatus]);
 
   useEffect(() => {
     if (showCommitInput) inputRef.current?.focus();
@@ -91,7 +103,8 @@ export function ProjectGitStatus({ cwd, nodeId }: Props) {
       if (data.ok) {
         setMessage("");
         setShowCommitInput(false);
-        fetchStatus();
+        const nextStatus = await requestStatus();
+        if (nextStatus) setStatus(nextStatus);
       }
     } catch {
       setLastResult({
@@ -108,14 +121,20 @@ export function ProjectGitStatus({ cwd, nodeId }: Props) {
 
   return (
     <div className="project-git-status">
-      <div className="project-git-info">
+      <button
+        type="button"
+        className="project-git-info"
+        onClick={onOpenTree}
+        title={t("gitTree.open")}
+        aria-label={t("gitTree.open")}
+      >
         <span className="project-git-branch" title={status.branch}>
           <span className="git-branch-icon">⎇</span> {status.branch}
         </span>
         <span className={`project-git-dirty${isClean ? " clean" : ""}`}>
           {isClean ? "clean" : `${dirtyCount} changed`}
         </span>
-      </div>
+      </button>
       {lastResult && (
         <button
           type="button"

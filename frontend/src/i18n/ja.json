@@ -1085,5 +1085,15 @@
   "routines.output.codeHealth.severity.critical": "Critical",
   "routines.output.codeHealth.severity.high": "High",
   "routines.output.codeHealth.severity.medium": "Medium",
-  "routines.output.codeHealth.severity.low": "Low"
+  "routines.output.codeHealth.severity.low": "Low",
+  "gitTree.title": "リポジトリ履歴",
+  "gitTree.open": "リポジトリ履歴を開く",
+  "gitTree.close": "リポジトリ履歴を閉じる",
+  "gitTree.refresh": "リポジトリ履歴を更新",
+  "gitTree.loading": "リポジトリ履歴を読み込み中…",
+  "gitTree.loadFailed": "リポジトリ履歴を読み込めませんでした。",
+  "gitTree.retry": "再試行",
+  "gitTree.empty": "まだコミットはありません。",
+  "gitTree.commits": "コミット · {{count}}",
+  "gitTree.changed": "変更 · {{count}}"
 }
