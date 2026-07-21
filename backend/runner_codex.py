@@ -2362,10 +2362,16 @@ async def _start_app_server(
             result = await client.request("thread/start", thread_start_params)
         thread = result.get("thread") or {}
         client.thread_id = thread.get("id") or session_id
-        await client._mapped.put((json.dumps({
+        thread_started_event = {
             "type": "thread.started",
             "thread_id": client.thread_id,
-        }) + "\n").encode("utf-8"))
+        }
+        if fork and client.thread_id and client.thread_id != session_id:
+            from codex_native import resolve_rollout_path_polled
+            rollout_path = await resolve_rollout_path_polled(client.thread_id, timeout=5.0)
+            if rollout_path:
+                thread_started_event["rollout_byte_offset"] = _file_size(rollout_path)
+        await client._mapped.put((json.dumps(thread_started_event) + "\n").encode("utf-8"))
         await client.request("turn/start", {
             "threadId": client.thread_id,
             "input": turn_input,
@@ -2747,6 +2753,15 @@ def _rollout_attempt_boundary(
     return _file_size(rollout_path), rollout_path is not None or not session_id
 
 
+def _thread_started_rollout_boundary(raw_event: dict[str, Any]) -> Optional[int]:
+    byte_offset = raw_event.get("rollout_byte_offset")
+    if isinstance(byte_offset, bool):
+        return None
+    if isinstance(byte_offset, int) and byte_offset >= 0:
+        return byte_offset
+    return None
+
+
 async def _settle_app_server_process(
     proc: _AppServerProcess,
     *,
@@ -3057,6 +3072,10 @@ async def _run(run_dir: Path, inputs: dict) -> int:
                             discovered_sid = thread_id
                             from codex_native import resolve_rollout_path_polled
                             rollout_path = await resolve_rollout_path_polled(thread_id)
+                            event_boundary = _thread_started_rollout_boundary(raw_event)
+                            if event_boundary is not None:
+                                attempt_start_byte = event_boundary
+                                attempt_boundary_known = True
                             state["session_id"] = thread_id
                             state["jsonl_path"] = str(rollout_path) if rollout_path else None
                             state["rollout_path"] = str(rollout_path) if rollout_path else None
@@ -3064,8 +3083,6 @@ async def _run(run_dir: Path, inputs: dict) -> int:
                             # can re-attach to a still-running CLI whose wrapper
                             # died, instead of declaring the run dead.
                             state["cli_pid"] = proc.pid
-                            if not initial_byte_offset:
-                                state["pre_query_byte_offset"] = attempt_start_byte
                             # Per-attempt rollout boundary for the ghost
                             # guard: thread.started is the first event of
                             # THIS attempt, so the file size at this moment
@@ -3075,6 +3092,8 @@ async def _run(run_dir: Path, inputs: dict) -> int:
                             # retry are excluded — distinct from
                             # pre_query_byte_offset, which is the whole-run
                             # start used by provider ingestion.
+                            if event_boundary is not None or not initial_byte_offset:
+                                state["pre_query_byte_offset"] = attempt_start_byte
                             if rollout_path:
                                 if not attempt_boundary_known:
                                     log.warning(
