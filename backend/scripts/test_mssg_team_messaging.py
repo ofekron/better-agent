@@ -826,10 +826,15 @@ def test_ask_team_message_can_target_sub_session(monkeypatch):
         parent_session_id=sender["id"],
         name="hidden auditor",
         cwd="/repo",
+        runner="native",
     )
     coordinator = Coordinator()
+    captured: dict = {}
 
     def fake_submit_prompt(sid: str, params: dict, **_kwargs) -> str:
+        captured["sid"] = sid
+        captured["params"] = params
+
         async def finish() -> None:
             await asyncio.sleep(0)
             session = session_manager.get(sid)
@@ -876,6 +881,8 @@ def test_ask_team_message_can_target_sub_session(monkeypatch):
     assert result["success"] is True
     assert result["target_session_id"] == sub["id"]
     assert result["assistant_content"] == "sub answer"
+    assert captured["sid"] == sub["id"]
+    assert captured["params"]["runner"] == "native"
 
 
 def test_ask_team_message_failed_target_returns_error_without_empty_response(monkeypatch):
@@ -1561,7 +1568,7 @@ def test_session_creation_panel_is_separate_from_message_turn_panel():
     panels = coordinator.turn_manager.current_turn_workers[sender["id"]]
     assert [panel["delegation_id"] for panel in panels] == [
         f"created_{sub['id']}",
-        "team_message_queue-review",
+        f"{team_messaging.SOURCE}_queue-review",
     ]
     assert panels[0]["panel_kind"] == "sub_session_created"
     assert panels[0]["run_mode"] == "created"

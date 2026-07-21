@@ -31,6 +31,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from orchestrator import Coordinator  # noqa: E402
 from session_manager import manager as session_manager  # noqa: E402
+import config_store  # noqa: E402
 
 
 def teardown_module():
@@ -104,7 +105,6 @@ def test_supervisor_direct_turn_without_override_keeps_prompt(monkeypatch):
         orchestration_mode="native",
     )
     real_get = session_manager.get
-
     def supervisor_enabled_get(sid):
         s = real_get(sid)
         if s and sid == session["id"]:
@@ -114,6 +114,7 @@ def test_supervisor_direct_turn_without_override_keeps_prompt(monkeypatch):
         return s
 
     monkeypatch.setattr(session_manager, "get", supervisor_enabled_get)
+    monkeypatch.setattr(session_manager, "get_lite", supervisor_enabled_get)
     monkeypatch.setattr(
         extension_store,
         "runtime_not_ready_message",
@@ -142,3 +143,34 @@ def test_supervisor_direct_turn_without_override_keeps_prompt(monkeypatch):
     asyncio.run(run())
     assert captured["cli_prompt"] == "review this"
 
+
+def test_model_override_without_runner_uses_session_runner(monkeypatch):
+    provider_id = config_store.list_providers()["default_provider_id"]
+    session = session_manager.create(
+        name="ask target",
+        cwd="/repo",
+        orchestration_mode="native",
+        model="opus",
+        provider_id=provider_id,
+        runner="native",
+    )
+    coordinator = Coordinator()
+    captured: dict = {}
+
+    async def fake_run_turn(**kwargs):
+        captured["runner"] = kwargs.get("runner")
+
+    monkeypatch.setattr(coordinator.turn_manager, "run_turn", fake_run_turn)
+
+    async def run():
+        await coordinator.handle_prompt(
+            prompt="review this",
+            app_session_id=session["id"],
+            model="opus",
+            cwd="/repo",
+            ws_callback=_noop_ws_callback,
+            allow_model_override=True,
+        )
+
+    asyncio.run(run())
+    assert captured["runner"] == "native"
