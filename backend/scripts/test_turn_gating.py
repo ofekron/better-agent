@@ -400,7 +400,7 @@ def test_native_non_user_turn_gets_loopback_credentials() -> None:
 
 
 def test_drive_cli_run_flushes_target_before_spawn() -> None:
-    print("T5c _drive_cli_run flushes target assistant before provider spawn")
+    print("T5c _drive_cli_run flushes target and records provider submission")
     c = _StubCoordinator()
     tm = TurnManager(c)
     sid = session_manager.create(name="durable-target", cwd="/tmp", model="sonnet")["id"]
@@ -409,6 +409,21 @@ def test_drive_cli_run_flushes_target_before_spawn() -> None:
     session_manager.append_assistant_msg(sid, assistant)
     tm.current_assistant_msgs[sid] = assistant
     durable_checks: list[bool] = []
+    threshold_threads: list[str] = []
+    emitted_snapshots: list[list[dict]] = []
+    turn_run_id = "turn-durable-target"
+    tm._run_state[sid] = [{"run_id": turn_run_id}]
+
+    def _load_threshold() -> int:
+        threshold_threads.append(threading.current_thread().name)
+        return 73
+
+    async def _capture_broadcast(_sid, event_type, payload, **_kwargs) -> None:
+        if event_type == "run_state":
+            emitted_snapshots.append(payload["runs"])
+
+    tm._load_task_start_silence_seconds = _load_threshold
+    c.broadcast_session = _capture_broadcast
 
     class _Provider:
         KIND = "codex"
@@ -450,10 +465,29 @@ def test_drive_cli_run_flushes_target_before_spawn() -> None:
         cancel_event=asyncio.Event(),
         session_id_field="agent_session_id",
         mode="native",
-        turn_run_id="turn-durable-target",
+        turn_run_id=turn_run_id,
     ))
+    submitted_state = tm._run_state[sid][0]
     check("result success", result.get("success") is True)
     check("target assistant durable before start_run", durable_checks == [True])
+    check(
+        "startup threshold loaded on turn-dispatch executor",
+        len(threshold_threads) == 1
+        and threshold_threads[0].startswith("turn-dispatch"),
+    )
+    check(
+        "startup threshold recorded",
+        submitted_state.get("startup_silence_threshold_seconds") == 73,
+    )
+    check(
+        "provider submission recorded",
+        submitted_state.get("last_activity_kind") == "provider_submitted",
+    )
+    check(
+        "provider submission emitted",
+        bool(emitted_snapshots)
+        and emitted_snapshots[0][0].get("startup_silence_threshold_seconds") == 73,
+    )
 
 
 def test_rate_limit_wait_keeps_turn_active_and_cancellable() -> None:

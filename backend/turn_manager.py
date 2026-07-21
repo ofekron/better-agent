@@ -2685,7 +2685,7 @@ class TurnManager:
                     target_message_id=target_message_id,
                         turn_run_id=turn_run_id,
                     )
-                silence_threshold_seconds = await self._to_turn_dispatch_thread(
+                silence_threshold_seconds = await _to_turn_dispatch_thread(
                     self._load_task_start_silence_seconds,
                 )
                 self.run_state_mark_provider_submitted(
