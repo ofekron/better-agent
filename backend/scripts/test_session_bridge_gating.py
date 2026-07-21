@@ -184,7 +184,7 @@ async def _run_tests():
 
     # 6b. coordination lock_ops acquires by key, rejects competing holders, requires the
     # holder token to release, and expires after the fixed lease window.
-    coordination._locks.clear()  # type: ignore[attr-defined]
+    coordination._clear_for_tests()  # type: ignore[attr-defined]
     now = {"value": 100.0}
     original_now = coordination._now  # type: ignore[attr-defined]
     coordination._now = lambda: now["value"]  # type: ignore[attr-defined]
@@ -211,7 +211,7 @@ async def _run_tests():
               "lock_ops replaces expired lock")
     finally:
         coordination._now = original_now  # type: ignore[attr-defined]
-        coordination._locks.clear()  # type: ignore[attr-defined]
+        coordination._clear_for_tests()  # type: ignore[attr-defined]
 
     # 7. resolve_delegation security: only a proposed id (or None) is accepted.
     session_bridge.session_manager.set_msg_ask_result = (  # type: ignore

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -22,7 +25,7 @@ def check(cond: bool, msg: str) -> None:
 
 
 async def test_multi_lock_accumulates_until_all_locked() -> None:
-    coordination._locks.clear()
+    coordination._clear_for_tests()  # type: ignore[attr-defined]
     blocker = await coordination.lock_ops(key="file-b")
 
     async def release_blocker() -> None:
@@ -68,11 +71,11 @@ async def test_multi_lock_accumulates_until_all_locked() -> None:
         release=True,
         holder_token=str(result["holder_token"]),
     )
-    coordination._locks.clear()
+    coordination._clear_for_tests()  # type: ignore[attr-defined]
 
 
 async def test_immediate_acquire_reports_no_wait() -> None:
-    coordination._locks.clear()
+    coordination._clear_for_tests()  # type: ignore[attr-defined]
 
     single = await coordination.lock_ops(key="file-a")
     check(single.get("success") is True, "uncontended single-key acquire succeeds")
@@ -87,11 +90,11 @@ async def test_immediate_acquire_reports_no_wait() -> None:
     await coordination.lock_ops(
         key="", keys=multi["keys"], release=True, holder_token=str(multi["holder_token"])
     )
-    coordination._locks.clear()
+    coordination._clear_for_tests()  # type: ignore[attr-defined]
 
 
 async def test_multi_lock_timeout_releases_partial_locks() -> None:
-    coordination._locks.clear()
+    coordination._clear_for_tests()  # type: ignore[attr-defined]
     blocker = await coordination.lock_ops(
         key="file-b",
         owner={"source": "blocking-test", "app_session_id": "holder-session"},
@@ -110,11 +113,11 @@ async def test_multi_lock_timeout_releases_partial_locks() -> None:
     check(result.get("blocked_keys") == ["file-b"], "multi lock timeout reports precise blocked key")
 
     await coordination.lock_ops(key="file-b", release=True, holder_token=str(blocker["holder_token"]))
-    coordination._locks.clear()
+    coordination._clear_for_tests()  # type: ignore[attr-defined]
 
 
 async def test_single_lock_conflict_reports_holder_metadata_without_token() -> None:
-    coordination._locks.clear()
+    coordination._clear_for_tests()  # type: ignore[attr-defined]
     long_source = "x" * (coordination._OWNER_FIELD_MAX_CHARS + 20)  # type: ignore[attr-defined]
     blocker = await coordination.lock_ops(
         key="file-a",
@@ -136,11 +139,11 @@ async def test_single_lock_conflict_reports_holder_metadata_without_token() -> N
     check("holder_token" not in holder and "holder_token" not in result, "single lock conflict does not expose holder token")
 
     await coordination.lock_ops(key="file-a", release=True, holder_token=str(blocker["holder_token"]))
-    coordination._locks.clear()
+    coordination._clear_for_tests()  # type: ignore[attr-defined]
 
 
 async def test_multi_release_is_atomic() -> None:
-    coordination._locks.clear()
+    coordination._clear_for_tests()  # type: ignore[attr-defined]
     acquired = await coordination.lock_ops(keys=["file-a", "file-b"], key="")
     result = await coordination.lock_ops(
         keys=["file-a", "file-b"],
@@ -163,7 +166,7 @@ async def test_multi_release_is_atomic() -> None:
 
 
 async def test_non_lease_ops_ignore_invalid_lease_seconds() -> None:
-    coordination._locks.clear()
+    coordination._clear_for_tests()  # type: ignore[attr-defined]
     acquired = await coordination.lock_ops(key="file-a")
     token = str(acquired["holder_token"])
     validated = await coordination.lock_ops(
@@ -174,7 +177,7 @@ async def test_non_lease_ops_ignore_invalid_lease_seconds() -> None:
         key="file-a", release=True, holder_token=token, lease_seconds="not-a-number"
     )
     check(released.get("success") is True, "release ignores irrelevant invalid lease_seconds")
-    coordination._locks.clear()
+    coordination._clear_for_tests()  # type: ignore[attr-defined]
 
 
 async def test_better_agent_runner_lock_ops_handler_defaults_provider_id() -> None:
@@ -263,7 +266,7 @@ async def test_better_agent_runner_lock_ops_handler_defaults_provider_id() -> No
 
 
 async def test_renew_validate_and_reattach_by_trusted_owner() -> None:
-    coordination._locks.clear()
+    coordination._clear_for_tests()  # type: ignore[attr-defined]
     owner = {"principal_extension_id": "core", "app_session_id": "session-a", "cwd": "/repo", "provider_id": "p"}
     other = {"principal_extension_id": "core", "app_session_id": "session-b", "cwd": "/repo", "provider_id": "p"}
     acquired = await coordination.lock_ops(key="file-a", owner=owner, lease_seconds=5)
@@ -290,11 +293,11 @@ async def test_renew_validate_and_reattach_by_trusted_owner() -> None:
 
     released = await coordination.lock_ops(key="file-a", op="release_owned", owner=owner)
     check(released.get("success") is True and released.get("released") is True, "release_owned releases same-owner locks without holder token")
-    coordination._locks.clear()
+    coordination._clear_for_tests()  # type: ignore[attr-defined]
 
 
 async def test_multi_key_success_reports_remaining_ttl_after_wait() -> None:
-    coordination._locks.clear()
+    coordination._clear_for_tests()  # type: ignore[attr-defined]
     blocker = await coordination.lock_ops(key="file-b")
 
     async def release_blocker() -> None:
@@ -312,7 +315,64 @@ async def test_multi_key_success_reports_remaining_ttl_after_wait() -> None:
     check(result.get("waited_keys") == ["file-b"], "multi-key TTL regression records waited key")
     check(0 < int(result.get("expires_in_seconds") or 0) < 5, "multi-key acquire reports remaining TTL after wait")
     await coordination.lock_ops(key="", keys=result["keys"], release=True, holder_token=str(result["holder_token"]))
-    coordination._locks.clear()
+    coordination._clear_for_tests()  # type: ignore[attr-defined]
+
+
+async def test_lock_survives_in_memory_registry_loss() -> None:
+    coordination._clear_for_tests()  # type: ignore[attr-defined]
+    acquired = await coordination.lock_ops(key="file-restart", lease_seconds=30)
+    token = str(acquired["holder_token"])
+
+    coordination._drop_memory_for_tests()  # type: ignore[attr-defined]
+    blocked = await coordination.lock_ops(key="file-restart")
+    check(
+        blocked.get("success") is False and blocked.get("error") == "locked",
+        "lock_ops preserves live locks when in-memory registry is lost",
+    )
+
+    coordination._drop_memory_for_tests()  # type: ignore[attr-defined]
+    validated = await coordination.lock_ops(key="file-restart", op="validate", holder_token=token)
+    check(validated.get("success") is True, "lock_ops validates a durable lock after memory reset")
+    await coordination.lock_ops(key="file-restart", release=True, holder_token=token)
+    coordination._clear_for_tests()  # type: ignore[attr-defined]
+
+
+async def test_lock_blocks_competing_process() -> None:
+    coordination._clear_for_tests()  # type: ignore[attr-defined]
+    acquired = await coordination.lock_ops(key="file-cross-process", lease_seconds=30)
+    token = str(acquired["holder_token"])
+    root = Path(__file__).resolve().parents[2]
+    code = """
+import asyncio
+import json
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path.cwd() / "backend"))
+import coordination
+
+async def main():
+    result = await coordination.lock_ops(key="file-cross-process")
+    print(json.dumps(result))
+
+asyncio.run(main())
+"""
+    child = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=root,
+        env=dict(os.environ),
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    check(child.returncode == 0, "competing process can call lock_ops against the same home")
+    result = json.loads(child.stdout.strip().splitlines()[-1])
+    check(
+        result.get("success") is False and result.get("error") == "locked",
+        "lock_ops blocks a competing process while durable lock is live",
+    )
+    await coordination.lock_ops(key="file-cross-process", release=True, holder_token=token)
+    coordination._clear_for_tests()  # type: ignore[attr-defined]
 
 
 async def test_runner_write_gate_validates_backend_liveness() -> None:
@@ -428,6 +488,8 @@ async def main() -> int:
     await test_better_agent_runner_lock_ops_handler_defaults_provider_id()
     await test_renew_validate_and_reattach_by_trusted_owner()
     await test_multi_key_success_reports_remaining_ttl_after_wait()
+    await test_lock_survives_in_memory_registry_loss()
+    await test_lock_blocks_competing_process()
     await test_runner_write_gate_validates_backend_liveness()
     await test_runner_write_gate_reattaches_same_owner_lock()
     test_better_agent_runner_requires_own_live_file_lock()
