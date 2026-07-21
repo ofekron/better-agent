@@ -1049,7 +1049,7 @@ export function Chat({
     let pendingUser: ChatMessage | null = null;
 
     for (const m of allMessages) {
-      if (m.role === "user") {
+      if (m.role === "user" || m.role === "operator") {
         if (pendingUser) pairs.push({ initiatorMessage: pendingUser });
         pendingUser = m;
       } else if (m.role === "assistant") {

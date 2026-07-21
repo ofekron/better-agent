@@ -17,7 +17,9 @@ if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
 import file_editor  # noqa: E402
+import config_store  # noqa: E402
 import main as main_api  # noqa: E402
+import models  # noqa: E402
 import render_stub  # noqa: E402
 import synthetic_messages  # noqa: E402
 import working_mode  # noqa: E402
@@ -75,7 +77,10 @@ file_editor._ensure_file_edit_base = _fake_ensure_file_edit_base  # type: ignore
 _FAKE_PROVIDER = {
     "id": "test-provider",
     "name": "Test Provider",
+    "kind": "claude",
     "default_model": "test-model",
+    "custom_models": ["test-model"],
+    "runner": "native",
     "supports_reasoning_effort": False,
 }
 
@@ -86,9 +91,12 @@ def _fake_provider_record(provider_id: str | None = None) -> dict:
 
 file_editor._provider_record = _fake_provider_record  # type: ignore[assignment]
 file_editor._require_fork_support = lambda provider_id: None  # type: ignore[assignment]
+config_store.get_provider = lambda provider_id: dict(_FAKE_PROVIDER) if provider_id == "test-provider" else None  # type: ignore[assignment]
+models.available_models = lambda provider_id=None: ["test-model"] if provider_id == "test-provider" else []  # type: ignore[assignment]
+models.available_models_including_retired = models.available_models  # type: ignore[assignment]
 main_api._provider_for_required_model = lambda provider_id: dict(_FAKE_PROVIDER)  # type: ignore[assignment]
-main_api._provider_reasoning_effort = lambda provider_id, requested: ""  # type: ignore[assignment]
-main_api._provider_permission = lambda provider_id, requested: requested or {}  # type: ignore[assignment]
+main_api._provider_reasoning_effort = lambda *args, **kwargs: ""  # type: ignore[assignment]
+main_api._provider_permission = lambda provider_id, requested, *args, **kwargs: requested or {}  # type: ignore[assignment]
 
 
 PASS = "\x1b[32mPASS\x1b[0m"
@@ -160,12 +168,12 @@ def test_empty_session_then_file_creates_new_session_same_base() -> bool:
     return True
 
 
-def test_empty_ask_appends_visible_assistant_message() -> bool:
+def test_empty_ask_appends_visible_operator_message() -> bool:
     d = _project("visible_ask")
     result = asyncio.run(file_editor.start_empty(cwd=str(d), persistent=True))
     ask = result.get("user_ask") or ""
     asyncio.run(
-        synthetic_messages.append_assistant_message(
+        synthetic_messages.append_operator_message(
             result["session_id"],
             content=ask,
             source="file_editor",
@@ -180,8 +188,8 @@ def test_empty_ask_appends_visible_assistant_message() -> bool:
         print(f"  expected exactly one visible message, got {len(messages)}")
         return False
     msg = messages[0]
-    if msg.get("role") != "assistant":
-        print(f"  expected assistant message, got {msg.get('role')!r}")
+    if msg.get("role") != "operator":
+        print(f"  expected operator message, got {msg.get('role')!r}")
         return False
     if msg.get("content") != ask:
         print(f"  wrong message content: {msg.get('content')!r}")
@@ -215,8 +223,8 @@ def test_create_session_returns_visible_empty_ask() -> bool:
         print(f"  expected returned session to include one ask message, got {len(messages)}")
         return False
     msg = messages[0]
-    if msg.get("role") != "assistant":
-        print(f"  expected assistant message, got {msg.get('role')!r}")
+    if msg.get("role") != "operator":
+        print(f"  expected operator message, got {msg.get('role')!r}")
         return False
     if msg.get("source") != "file_editor":
         print(f"  wrong source: {msg.get('source')!r}")
@@ -298,7 +306,7 @@ def main() -> int:
     tests = [
         test_empty_session_has_no_required_file,
         test_empty_session_then_file_creates_new_session_same_base,
-        test_empty_ask_appends_visible_assistant_message,
+        test_empty_ask_appends_visible_operator_message,
         test_create_session_returns_visible_empty_ask,
         test_empty_session_reopen_creates_fresh_prompt,
         test_empty_session_requires_cwd,

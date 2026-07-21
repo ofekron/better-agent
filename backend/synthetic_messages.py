@@ -99,7 +99,7 @@ async def inject(
     }
 
 
-async def append_assistant_message(
+async def append_operator_message(
     session_id: str,
     *,
     content: str,
@@ -117,17 +117,17 @@ async def append_assistant_message(
     event_uuid = str(uuid.uuid4())
     msg = {
         "id": str(uuid.uuid4()),
-        "role": "assistant",
+        "role": "operator",
         "content": content,
         "events": [
             {
                 "type": "agent_message",
                 "data": {
-                    "type": "assistant",
+                    "type": "operator",
                     "uuid": event_uuid,
                     "timestamp": now,
                     "message": {
-                        "role": "assistant",
+                        "role": "operator",
                         "content": [{"type": "text", "text": content}],
                     },
                 },
@@ -156,3 +156,6 @@ async def append_assistant_message(
         event_id=event_uuid,
     )
     return {"success": True, "session_id": session_id, "message": msg}
+
+
+append_assistant_message = append_operator_message

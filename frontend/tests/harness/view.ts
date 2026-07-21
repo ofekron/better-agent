@@ -4,7 +4,7 @@
 
 export interface MessageView {
   id: string;
-  role: "user" | "assistant";
+  role: "user" | "assistant" | "operator";
   text: string;
   status?: string;
 }
@@ -86,10 +86,10 @@ function readSessions(container: HTMLElement): SessionItemView[] {
   });
 }
 
-function readMessage(el: HTMLElement, role: "user" | "assistant"): MessageView {
+function readMessage(el: HTMLElement, role: "user" | "assistant" | "operator"): MessageView {
   const id = el.getAttribute("data-message-id") ?? "";
   let textNode: HTMLElement | null = null;
-  if (role === "user") {
+  if (role === "user" || role === "operator") {
     textNode = el.querySelector<HTMLElement>(".message-box-body");
   } else {
     textNode = el.querySelector<HTMLElement>(".message-content") ?? el;
@@ -110,10 +110,14 @@ function readMessages(container: HTMLElement): MessageView[] {
   if (!chatMessages) return out;
   // Walk in document order so user/assistant pairs interleave correctly.
   const all = chatMessages.querySelectorAll<HTMLElement>(
-    '[data-testid="user-message"], [data-testid="assistant-message"]',
+    '[data-testid="user-message"], [data-testid="operator-message"], [data-testid="assistant-message"]',
   );
   for (const el of Array.from(all)) {
-    const role = el.dataset.testid === "user-message" ? "user" : "assistant";
+    const role = el.dataset.testid === "user-message"
+      ? "user"
+      : el.dataset.testid === "operator-message"
+        ? "operator"
+        : "assistant";
     out.push(readMessage(el, role));
   }
   return out;

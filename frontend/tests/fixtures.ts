@@ -41,6 +41,19 @@ export function makeAssistantMsg(overrides: Partial<ChatMessage> = {}): ChatMess
   };
 }
 
+export function makeOperatorMsg(overrides: Partial<ChatMessage> = {}): ChatMessage {
+  return {
+    id: `o-${Math.random().toString(36).slice(2, 8)}`,
+    role: "operator",
+    content: "",
+    events: [],
+    timestamp: new Date().toISOString(),
+    isStreaming: false,
+    source: "operator",
+    ...overrides,
+  };
+}
+
 export function makeRun(overrides: Partial<RunInfo> = {}): RunInfo {
   const now = new Date().toISOString();
   return {

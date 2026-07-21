@@ -19,6 +19,8 @@ describe("turnMessageHeader", () => {
       "adv_sync",
       "subprocess_agent",
       "assistant",
+      "file_editor",
+      "operator",
       "some_future_unknown_source",
     ];
     for (const s of injected) {
@@ -31,6 +33,8 @@ describe("turnMessageHeader", () => {
     expect(turnMessageHeader("mssg").label).toBe("Message");
     expect(turnMessageHeader("team_ask").label).toBe("Ask");
     expect(turnMessageHeader("assistant").label).toBe("Assistant");
+    expect(turnMessageHeader("file_editor").label).toBe("Operator");
+    expect(turnMessageHeader("operator").label).toBe("Operator");
   });
 
   it("groups source families under their base label", () => {

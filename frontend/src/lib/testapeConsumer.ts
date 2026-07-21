@@ -7,7 +7,7 @@ type TestApeClient = {
 
 type ChatPanelMessage = {
   id: string;
-  role: "user" | "assistant";
+  role: "user" | "assistant" | "operator";
   text: string;
 };
 
@@ -102,8 +102,10 @@ function readMessage(el: HTMLElement): ChatPanelMessage | null {
   const role =
     el.dataset.testid === "user-message" || el.classList.contains("user-message")
       ? "user"
-      : el.dataset.testid === "assistant-message"
-        ? "assistant"
+      : el.dataset.testid === "operator-message"
+        ? "operator"
+        : el.dataset.testid === "assistant-message"
+          ? "assistant"
         : null;
   const id = el.getAttribute("data-message-id");
   if (!role || !id) return null;
@@ -127,6 +129,7 @@ function readRegion(
     root.querySelectorAll<HTMLElement>(
       [
         '[data-testid="user-message"]',
+        '[data-testid="operator-message"]',
         '[data-testid="assistant-message"]',
         ".user-message[data-message-id]",
       ].join(", "),

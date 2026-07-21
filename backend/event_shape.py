@@ -127,6 +127,8 @@ NON_RENDER_AGENT_DATA_TYPES = frozenset({
     "mode",
 })
 
+TEXT_AGENT_DATA_TYPES = frozenset({"assistant", "operator"})
+
 
 def is_metadata_event(event: dict) -> bool:
     """True for non-render agent_message metadata (ai-title, last-prompt,
@@ -155,8 +157,8 @@ def strip_synthetic_events(events: list[dict]) -> list[dict]:
 _TextUnit = tuple[str, str | None, list[str] | None, bool, str]
 
 
-def _assistant_text_units(event: dict) -> list[_TextUnit]:
-    """Flatten one assistant event into text runs and non-text boundaries.
+def _text_units(event: dict) -> list[_TextUnit]:
+    """Flatten one text message event into text runs and non-text boundaries.
 
     Each unit is `(kind, uuid, parts, final, origin)`. `final` is True for
     events the provider marked as final-answer emissions (Codex
@@ -173,7 +175,7 @@ def _assistant_text_units(event: dict) -> list[_TextUnit]:
     if event.get("type") != "agent_message":
         return []
     data = event.get("data") or {}
-    if data.get("type") != "assistant":
+    if data.get("type") not in TEXT_AGENT_DATA_TYPES:
         return []
     if data.get("parent_tool_use_id"):
         return []
@@ -292,7 +294,7 @@ def _collect_text_units(events: list[dict]) -> list[_TextUnit]:
     units: list[_TextUnit] = []
     prev_uuid: str | None = None
     for e in events:
-        ev_units = _assistant_text_units(e)
+        ev_units = _text_units(e)
         if ev_units:
             ev_uuid = next(
                 (uid for _, uid, _, _, _ in ev_units if uid is not None),
@@ -381,7 +383,7 @@ def has_assistant_text(events: list[dict]) -> bool:
     return any(
         kind == "text"
         for e in events or []
-        for kind, _uid, _parts, _final, _origin in _assistant_text_units(e)
+        for kind, _uid, _parts, _final, _origin in _text_units(e)
     )
 
 

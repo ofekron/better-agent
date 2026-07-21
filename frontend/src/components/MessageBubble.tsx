@@ -3444,10 +3444,10 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
           assistant message renders in its own slot below. */}
       {!initiatorMessage.id.startsWith("__synth-") && (
       <div
-        className="message-box user-message-box"
+        className={`message-box user-message-box${initiatorMessage.role === "operator" ? " operator-message-box" : ""}`}
         id={`msg-${initiatorMessage.id}`}
         data-message-id={initiatorMessage.id}
-        data-testid="user-message"
+        data-testid={initiatorMessage.role === "operator" ? "operator-message" : "user-message"}
         data-status={initiatorMessage.status ?? ""}
         ref={initiatorContainerRef}
       >
@@ -4032,7 +4032,7 @@ function SyntheticPromptChip({
 
 /** Standalone assistant message (for streaming before pairing) */
 export function MessageBubble({ message, sessionId, userDisplayName, onFileClick, onViewDiff, onRetry, threadColorMap, orchestrationMode, runs = [] }: Props) {
-  if (message.role === "user") {
+  if (message.role === "user" || message.role === "operator") {
     // Synthetic prompts injected by the supervisor verdict loop carry
     // `source` ∈ {"supervisor", "worker"}. These are programmatic
     // adversarial prompts containing embedded worker output as
@@ -4054,13 +4054,13 @@ export function MessageBubble({ message, sessionId, userDisplayName, onFileClick
     const hasArtificial = hasArtificialSections(rawContent);
     return (
       <div className="message user-message" data-message-id={message.id}>
-        {message.source && (
+        {(message.source || message.role === "operator") && (
           <div className="message-box-header standalone-user-source">
             <span className="message-box-icon orchestration-icon">
-              {turnMessageHeader(message.source).icon}
+              {turnMessageHeader(message.source || message.role).icon}
             </span>
             <span className="message-box-label orchestration-label">
-              {turnMessageHeader(message.source, userDisplayName).label}
+              {turnMessageHeader(message.source || message.role, userDisplayName).label}
             </span>
             <TeamMessageFrom message={message} />
           </div>

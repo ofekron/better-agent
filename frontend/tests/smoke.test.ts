@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { renderApp } from "./harness";
-import { makeAssistantMsg, makeSession, makeUserMsg } from "./fixtures";
+import { makeAssistantMsg, makeOperatorMsg, makeSession, makeUserMsg } from "./fixtures";
 
 describe("harness smoke", () => {
   it("boots with a seeded session and lists it in the sidebar", async () => {
@@ -29,10 +29,11 @@ describe("harness smoke", () => {
         original_contents: {},
       },
       messages: [
-        makeAssistantMsg({
+        makeOperatorMsg({
           id: "file-edit-ask",
           content: "Which file or files do you want to edit?",
           seq: 0,
+          source: "file_editor",
         }),
       ],
     });
@@ -66,10 +67,11 @@ describe("harness smoke", () => {
         original_contents: {},
       },
       messages: [
-        makeAssistantMsg({
+        makeOperatorMsg({
           id: "file-edit-ask",
           content: "Which file or files do you want to edit?",
           seq: 0,
+          source: "file_editor",
         }),
         makeUserMsg({
           id: "file-edit-user",
@@ -98,10 +100,11 @@ describe("harness smoke", () => {
         original_contents: {},
       },
       messages: [
-        makeAssistantMsg({
+        makeOperatorMsg({
           id: "file-edit-ask",
           content: "Which file or files do you want to edit?",
           seq: 0,
+          source: "file_editor",
         }),
       ],
     });

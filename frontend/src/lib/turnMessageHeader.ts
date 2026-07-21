@@ -17,6 +17,8 @@ const INJECTED_SOURCE_LABELS: Record<string, { icon: string; label: string }> = 
   provisioning: { icon: "⚙", label: "Provisioning" },
   subprocess_agent: { icon: "🤖", label: "Agent" },
   assistant: { icon: "🤖", label: "Assistant" },
+  file_editor: { icon: "✎", label: "Operator" },
+  operator: { icon: "✎", label: "Operator" },
 };
 
 function humanizeSource(source: string): string {

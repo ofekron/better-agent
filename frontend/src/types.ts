@@ -653,7 +653,7 @@ export interface ChatMessage {
    * message for status display (MessageStatus). */
   lifecycle_msg_id?: string | null;
   file_discussion_id?: string | null;
-  role: "user" | "assistant";
+  role: "user" | "assistant" | "operator";
   content: string;
   cli_prompt?: string | null;
   events: WSEvent[];

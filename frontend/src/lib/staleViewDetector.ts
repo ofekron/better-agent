@@ -76,7 +76,7 @@ export interface StaleViewReport {
 
 export interface RenderedMessage {
   id: string;
-  role: "user" | "assistant";
+  role: "user" | "assistant" | "operator";
   text: string;
 }
 
@@ -144,7 +144,7 @@ export function messageTextCandidates(message: ChatMessage): string[] {
 
 interface ExpectedMessage {
   id: string;
-  role: "user" | "assistant";
+  role: "user" | "assistant" | "operator";
   texts: string[];
 }
 
@@ -172,7 +172,7 @@ function messageEntries(
   const out: ExpectedMessage[] = [];
   for (const m of node.messages || []) {
     if (include && !include(m)) continue;
-    if ((m.role === "user" || m.role === "assistant") && m.id) {
+    if ((m.role === "user" || m.role === "assistant" || m.role === "operator") && m.id) {
       out.push({ id: m.id, role: m.role, texts: messageTextCandidates(m) });
     }
   }
