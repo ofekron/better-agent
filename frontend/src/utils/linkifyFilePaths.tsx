@@ -5,6 +5,7 @@ import {
   Fragment,
   isValidElement,
   type ReactElement,
+  type MouseEvent as ReactMouseEvent,
   type ReactNode,
   type SyntheticEvent,
 } from "react";
@@ -15,6 +16,7 @@ import {
   getMediaType,
 } from "../components/MediaPreviewInline";
 import { requestMessageFocus } from "src/utils/messageFocus";
+import { navigateRoute, sessionPath } from "src/hooks/useRoute";
 
 const WIN_ABS_RE = /^[A-Za-z]:[/\\]/;
 const URL_SCHEME_RE = /^[A-Za-z][A-Za-z0-9+.-]*:/;
@@ -166,10 +168,6 @@ function eventLinkLabel(messageId: string, name: string): string {
   return `${label} · ${messageId.slice(0, 6)}`;
 }
 
-function sessionPath(sessionId: string): string {
-  return `/s/${encodeURIComponent(sessionId)}`;
-}
-
 function eventPath(sessionId: string, messageId: string): string {
   return `${sessionPath(sessionId)}?m=${encodeURIComponent(messageId)}`;
 }
@@ -189,12 +187,6 @@ function parseSessionHref(href: string): { sessionId: string; messageId?: string
       messageId: params.get("m") || undefined,
     };
   }
-}
-
-function openSession(sessionId: string) {
-  const path = sessionPath(sessionId);
-  if (window.location.pathname !== path) window.history.pushState(null, "", path);
-  window.dispatchEvent(new PopStateEvent("popstate"));
 }
 
 /** A name is never allowed to carry raw copy-id marker syntax — embedding an
@@ -312,33 +304,36 @@ function FileLinkButton({
   );
 }
 
-function SessionLinkButton({
+function SessionLink({
   sessionId,
   messageId,
   label,
+  interactive = true,
 }: {
   sessionId: string;
   messageId?: string;
   label: ReactNode;
+  interactive?: boolean;
 }) {
-  const activate = (e: SyntheticEvent) => {
-    e.stopPropagation();
+  if (!interactive) {
+    return <span className="session-smart-link session-smart-link-static">{label}</span>;
+  }
+  const href = messageId ? eventPath(sessionId, messageId) : sessionPath(sessionId);
+  const activate = (e: ReactMouseEvent<HTMLAnchorElement>) => {
+    if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
     e.preventDefault();
-    openSession(sessionId);
+    e.stopPropagation();
     if (messageId) requestMessageFocus(sessionId, messageId);
+    navigateRoute(sessionPath(sessionId));
   };
   return (
-    <span
-      role="link"
-      tabIndex={0}
+    <a
+      href={href}
       className="session-smart-link"
       onClick={activate}
-      onKeyDown={(e) => {
-        if (e.key === "Enter" || e.key === " ") activate(e);
-      }}
     >
       {label}
-    </span>
+    </a>
   );
 }
 
@@ -413,6 +408,7 @@ function linkifyRawFileString(
 function linkifyRawString(
   text: string,
   onFileClick?: (path: string, focus?: FileFocus) => void,
+  sessionLinks: "interactive" | "static" = "interactive",
 ): ReactNode {
   const parts: ReactNode[] = [];
   let last = 0;
@@ -435,11 +431,12 @@ function linkifyRawString(
         ? sessionLinkLabel(parsed.sessionId, parsed.name)
         : eventLinkLabel(parsed.messageId, parsed.name);
     parts.push(
-      <SessionLinkButton
+      <SessionLink
         key={`ba-${start}-${parsed.sessionId}-${parsed.kind === "event" ? parsed.messageId : ""}`}
         sessionId={parsed.sessionId}
         messageId={parsed.kind === "event" ? parsed.messageId : undefined}
         label={label}
+        interactive={sessionLinks === "interactive"}
       />,
     );
     last = start + whole.length;
@@ -455,15 +452,18 @@ function linkifyRawString(
 export function linkifyFilePaths(
   children: ReactNode,
   onFileClick?: (path: string, focus?: FileFocus) => void,
+  options: { sessionLinks?: "interactive" | "static" } = {},
 ): ReactNode {
   if (children === null || children === undefined || typeof children === "boolean") {
     return children;
   }
-  if (typeof children === "string") return linkifyRawString(children, onFileClick);
+  if (typeof children === "string") {
+    return linkifyRawString(children, onFileClick, options.sessionLinks);
+  }
   if (typeof children === "number") return children;
   if (Array.isArray(children)) {
     return Children.map(children, (c, i) => (
-      <Fragment key={i}>{linkifyFilePaths(c, onFileClick)}</Fragment>
+      <Fragment key={i}>{linkifyFilePaths(c, onFileClick, options)}</Fragment>
     ));
   }
   if (isValidElement(children)) {
@@ -471,7 +471,7 @@ export function linkifyFilePaths(
     if (el.type === "a") return el;
     const inner = el.props?.children;
     if (inner === undefined) return el;
-    return cloneElement(el, undefined, linkifyFilePaths(inner, onFileClick));
+    return cloneElement(el, undefined, linkifyFilePaths(inner, onFileClick, options));
   }
   return children;
 }
@@ -504,7 +504,7 @@ export function markdownLinkifyComponents(
     const parsedSession = typeof href === "string" ? parseSessionHref(href) : null;
     if (parsedSession) {
       return (
-        <SessionLinkButton
+        <SessionLink
           sessionId={parsedSession.sessionId}
           messageId={parsedSession.messageId}
           label={

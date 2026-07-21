@@ -49,8 +49,9 @@ describe("copy-id reference markers", () => {
 
   it("renders an event href as a link that requests message focus on click", () => {
     const { container } = render(<Anchor href="/s/sid-9?m=msg-9">jump</Anchor>);
-    const link = container.querySelector('[role="link"]');
+    const link = container.querySelector("a");
     expect(link).not.toBeNull();
+    expect(link?.getAttribute("href")).toBe("/s/sid-9?m=msg-9");
     fireEvent.click(link!);
     expect(focus.requestMessageFocus).toHaveBeenCalledWith("sid-9", "msg-9");
   });

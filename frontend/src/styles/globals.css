@@ -3247,6 +3247,12 @@ body {
   cursor: pointer;
 }
 
+.session-smart-link-static {
+  color: inherit;
+  text-decoration: none;
+  cursor: inherit;
+}
+
 @media (max-width: 480px) {
   .session-tab {
     padding: 4px 8px;

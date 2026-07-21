@@ -1,7 +1,13 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
-import { useRoute, sessionPath, type Route } from "../src/hooks/useRoute";
+import {
+  navigateRoute,
+  ROUTE_NAVIGATE_EVENT,
+  useRoute,
+  sessionPath,
+  type Route,
+} from "../src/hooks/useRoute";
 
 /** Mount a probe that surfaces the current route + navigate fn. */
 function mountRouter() {
@@ -38,6 +44,55 @@ describe("useRoute — /share", () => {
     act(() => r.get().navigate(sessionPath("abc")));
     expect(r.get().route).toEqual({ kind: "session", sessionId: "abc" });
     r.cleanup();
+  });
+});
+
+describe("navigateRoute", () => {
+  it("uses one internal route event and never synthesizes popstate", () => {
+    window.history.pushState(null, "", "/");
+    const routeEvent = vi.fn();
+    const popstate = vi.fn();
+    window.addEventListener(ROUTE_NAVIGATE_EVENT, routeEvent);
+    window.addEventListener("popstate", popstate);
+
+    navigateRoute("/s/session-1");
+
+    expect(routeEvent).toHaveBeenCalledOnce();
+    expect(popstate).not.toHaveBeenCalled();
+    window.removeEventListener(ROUTE_NAVIGATE_EVENT, routeEvent);
+    window.removeEventListener("popstate", popstate);
+  });
+
+  it("rejects cross-origin routes before mutating history or notifying", () => {
+    window.history.pushState(null, "", "/");
+    const pushState = vi.spyOn(window.history, "pushState");
+    const routeEvent = vi.fn();
+    window.addEventListener(ROUTE_NAVIGATE_EVENT, routeEvent);
+
+    expect(() => navigateRoute("https://example.com/s/session-1")).toThrow(
+      "Route navigation must stay on the current origin",
+    );
+
+    expect(pushState).not.toHaveBeenCalled();
+    expect(routeEvent).not.toHaveBeenCalled();
+    window.removeEventListener(ROUTE_NAVIGATE_EVENT, routeEvent);
+    pushState.mockRestore();
+  });
+
+  it("deduplicates the exact URL while keeping query and hash changes distinct", () => {
+    window.history.pushState(null, "", "/s/session-1?m=one#top");
+    const pushState = vi.spyOn(window.history, "pushState");
+    const routeEvent = vi.fn();
+    window.addEventListener(ROUTE_NAVIGATE_EVENT, routeEvent);
+
+    navigateRoute("/s/session-1?m=one#top");
+    navigateRoute("/s/session-1?m=two#top");
+    navigateRoute("/s/session-1?m=two#bottom");
+
+    expect(pushState).toHaveBeenCalledTimes(2);
+    expect(routeEvent).toHaveBeenCalledTimes(3);
+    window.removeEventListener(ROUTE_NAVIGATE_EVENT, routeEvent);
+    pushState.mockRestore();
   });
 });
 

@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { ToolCall } from "../src/components/ToolCall";
+import { sessionLinkMarker } from "../src/utils/linkifyFilePaths";
 
 // Bootstrap i18n so `useTranslation` inside ToolCall has something to
 // resolve against. Side-effecting import is intentional.
@@ -375,6 +376,26 @@ describe("ToolCall — get_requirements result rendering", () => {
     expect(h.container.textContent).toContain("backend/requirement_context.py");
     expect(h.container.textContent).toContain("requirement unit extraction already running");
 
+    h.unmount();
+  });
+});
+
+describe("ToolCall — session marker nesting", () => {
+  it("keeps the collapsed toggle static and renders a native link after expansion", async () => {
+    const marker = sessionLinkMarker("sid-123", "Linked Session");
+    const h = await mount(
+      <ToolCall tool="example_tool" args="{}" result={`${marker} ${"details ".repeat(20)}`} />,
+    );
+    const button = h.container.querySelector(".tool-result-toggle");
+
+    expect(button?.textContent).toContain("Linked Session · sid-");
+    expect(button?.querySelector("a")).toBeNull();
+
+    await act(async () => {
+      button?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    expect(h.container.querySelector('.tool-result-content a[href="/s/sid-123"]')).not.toBeNull();
     h.unmount();
   });
 });

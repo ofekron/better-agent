@@ -937,7 +937,10 @@ function ToolResult({ result, tool, filePath, onFileClick }: { result: string; t
       >
         <span className="diff-arrow">{showResult ? "\u25BC" : "\u25B6"}</span>
         {parsedJson != null && <span className="json-embedded-tag">{t('toolCall.jsonTag')}</span>}
-        <span className="tool-result-preview">{linkifyFilePaths(preview, onFileClick)}{charCount}</span>
+        <span className="tool-result-preview">
+          {linkifyFilePaths(preview, onFileClick, { sessionLinks: "static" })}
+          {charCount}
+        </span>
       </button>
       {showResult && (
         parsedJson ? (
