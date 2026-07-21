@@ -13,6 +13,16 @@ os.environ["BETTER_CLAUDE_TEST_AUTH_BYPASS"] = "1"
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import main  # noqa: E402
+from communication_modes import (  # noqa: E402
+    ASK_MODE_CONTINUE_AND_EXPECT_INBOX_BACK_ASYNC,
+    ASK_MODE_WAIT_AND_GRAB_LAST_ASSISTANT_MSSG_IN_TURN,
+    append_ask_response_contract,
+    normalize_ask_execution,
+)
+from orchs.manager._delegation import (  # noqa: E402
+    _ask_assistant_content,
+    _build_worker_prompt,
+)
 
 
 class _Coordinator:
@@ -129,6 +139,96 @@ async def _run() -> None:
 
 def test_internal_communication_modes() -> None:
     asyncio.run(_run())
+
+
+def test_ask_execution_matrix() -> None:
+    assert normalize_ask_execution(None, None) == (
+        ASK_MODE_WAIT_AND_GRAB_LAST_ASSISTANT_MSSG_IN_TURN,
+        "direct",
+    )
+    assert normalize_ask_execution(
+        ASK_MODE_WAIT_AND_GRAB_LAST_ASSISTANT_MSSG_IN_TURN,
+        "fork",
+    ) == (ASK_MODE_WAIT_AND_GRAB_LAST_ASSISTANT_MSSG_IN_TURN, "fork")
+    assert normalize_ask_execution(
+        ASK_MODE_CONTINUE_AND_EXPECT_INBOX_BACK_ASYNC,
+        "direct",
+    ) == (ASK_MODE_CONTINUE_AND_EXPECT_INBOX_BACK_ASYNC, "direct")
+    try:
+        normalize_ask_execution(
+            ASK_MODE_CONTINUE_AND_EXPECT_INBOX_BACK_ASYNC,
+            "fork",
+        )
+    except ValueError as exc:
+        assert str(exc) == "async ask mode requires run_mode='direct'"
+    else:
+        raise AssertionError("asynchronous fork ask was accepted")
+
+
+def test_ask_response_contracts_are_mode_specific() -> None:
+    sync_prompt = append_ask_response_contract(
+        "task",
+        ASK_MODE_WAIT_AND_GRAB_LAST_ASSISTANT_MSSG_IN_TURN,
+    )
+    assert "last assistant text batch" in sync_prompt
+    assert "Do not call mssg or inbox" in sync_prompt
+
+    async_prompt = append_ask_response_contract(
+        "task",
+        ASK_MODE_CONTINUE_AND_EXPECT_INBOX_BACK_ASYNC,
+        sender_session_id='sender&"1',
+    )
+    assert 'recipient_session_id="sender&amp;&quot;1"' in async_prompt
+    assert "exactly once" in async_prompt
+    assert "sender is not waiting" in async_prompt
+
+
+def test_fork_prompt_appends_sync_contract_after_user_prompt() -> None:
+    prompt = _build_worker_prompt(
+        "generic team guidance permits mssg",
+        "review this",
+        ASK_MODE_WAIT_AND_GRAB_LAST_ASSISTANT_MSSG_IN_TURN,
+        "caller",
+    )
+    assert prompt.index("</user_prompt>") < prompt.index("<response_contract>")
+    assert "Do not call mssg or inbox" in prompt
+    detached = _build_worker_prompt(
+        "generic team guidance permits mssg",
+        "review this",
+        "",
+        "caller",
+    )
+    assert "<response_contract>" not in detached
+
+
+def test_fork_ask_returns_only_final_assistant_text_batch() -> None:
+    def assistant(text: str) -> dict:
+        return {
+            "type": "agent_message",
+            "data": {
+                "type": "assistant",
+                "uuid": text,
+                "message": {"content": [{"type": "text", "text": text}]},
+            },
+        }
+
+    events = [
+        assistant("working"),
+        {
+            "type": "agent_message",
+            "data": {
+                "type": "assistant",
+                "uuid": "tool",
+                "message": {"content": [{"type": "tool_use", "name": "Read"}]},
+            },
+        },
+        assistant("final result"),
+    ]
+    assert _ask_assistant_content(
+        events,
+        ASK_MODE_WAIT_AND_GRAB_LAST_ASSISTANT_MSSG_IN_TURN,
+    ) == "final result"
+    assert _ask_assistant_content(events, "") is None
 
 
 if __name__ == "__main__":

@@ -55,7 +55,7 @@ import extension_store
 from communication_modes import (
     ASK_MODE_CONTINUE_AND_EXPECT_INBOX_BACK_ASYNC,
     ASK_MODE_WAIT_AND_GRAB_LAST_ASSISTANT_MSSG_IN_TURN,
-    normalize_ask_mode,
+    normalize_ask_execution,
 )
 from env_compat import get_env
 from loopback_http import raise_loopback_http_error
@@ -2009,9 +2009,11 @@ def _build_ask_tool(
         target_worker_pool = str(args.get("target_worker_pool") or "").strip()
         pool_affinity_key = str(args.get("pool_affinity_key") or "").strip()
         message = str(args.get("message") or "").strip()
-        run_mode = str(args.get("run_mode") or "direct").strip() or "direct"
         try:
-            mode = normalize_ask_mode(args.get("mode"))
+            mode, run_mode = normalize_ask_execution(
+                args.get("mode"),
+                args.get("run_mode"),
+            )
         except ValueError as exc:
             return {
                 "content": [{"type": "text", "text": str(exc)}],
@@ -2023,16 +2025,6 @@ def _build_ask_tool(
                     "type": "text",
                     "text": "one target and message are required",
                 }],
-                "is_error": True,
-            }
-        if run_mode not in ("direct", "fork"):
-            return {
-                "content": [{"type": "text", "text": "run_mode must be 'direct' or 'fork'"}],
-                "is_error": True,
-            }
-        if mode == ASK_MODE_CONTINUE_AND_EXPECT_INBOX_BACK_ASYNC and run_mode == "fork":
-            return {
-                "content": [{"type": "text", "text": "async ask mode requires run_mode='direct'"}],
                 "is_error": True,
             }
         ephemeral = bool(args.get("ephemeral"))
@@ -2072,6 +2064,7 @@ def _build_ask_tool(
                 "cwd": cwd,
                 "client_delegation_id": client_delegation_id,
                 "run_mode": "fork",
+                "ask_mode": mode,
                 "worker_registry_cwd": worker_registry_cwd,
                 "ephemeral": ephemeral,
             }

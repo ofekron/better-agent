@@ -41,6 +41,7 @@ raise_fd_limit()
 from capability_contexts import normalize_capability_contexts
 from communication_modes import (
     ASK_MODE_CONTINUE_AND_EXPECT_INBOX_BACK_ASYNC,
+    normalize_ask_execution,
     normalize_ask_mode,
 )
 from backend_instance_lock import (
@@ -13498,6 +13499,12 @@ async def _handle_internal_ask_fork(body: dict) -> dict[str, Any]:
             body.get("provisioned_tool_profile"),
             body,
         )
+        ask_mode = str(body.get("ask_mode") or "").strip()
+        if ask_mode:
+            try:
+                ask_mode, _ = normalize_ask_execution(ask_mode, "fork")
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
         try:
             return await coordinator.run_delegation(
                 app_session_id=body["app_session_id"],
@@ -13520,6 +13527,7 @@ async def _handle_internal_ask_fork(body: dict) -> dict[str, Any]:
                 provision_prompt=_api_optional_provision_prompt(body.get("provision_prompt")),
                 provisioned_tool_profile=provisioned_tool_profile,
                 include_events=body.get("include_events") is True,
+                ask_mode=ask_mode,
             )
         except DelegateForkParentMissing as exc:
             # Race: the parent agent session vanished between the

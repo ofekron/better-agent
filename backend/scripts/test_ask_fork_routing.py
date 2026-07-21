@@ -19,6 +19,7 @@ _test_home.isolate("bc-test-ask-fork-")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import runner
+from communication_modes import ASK_MODE_WAIT_AND_GRAB_LAST_ASSISTANT_MSSG_IN_TURN
 
 
 def _instrument():
@@ -65,6 +66,7 @@ def test_ask_fork_routes_to_delegate_engine():
     assert payload["worker_session_id"] == "w1"
     assert payload["worker_description"] == "auditor"
     assert payload["run_mode"] == "fork"
+    assert payload["ask_mode"] == ASK_MODE_WAIT_AND_GRAB_LAST_ASSISTANT_MSSG_IN_TURN
     assert payload["ephemeral"] is False
     assert payload["worker_registry_cwd"] == "/r"
     assert payload["client_delegation_id"].startswith("del_")

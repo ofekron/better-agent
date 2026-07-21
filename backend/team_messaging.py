@@ -6,6 +6,10 @@ from typing import Optional
 from urllib.parse import quote
 
 from prompt_templates import render_prompt
+from communication_modes import (
+    ASK_MODE_CONTINUE_AND_EXPECT_INBOX_BACK_ASYNC,
+    ask_response_contract,
+)
 from session_manager import manager as session_manager
 from session_manager import strip_link_marker_syntax
 import team_store
@@ -158,13 +162,9 @@ def format_team_message_prompt(
     sender_display_line = _sender_display_line(metadata)
     response_contract = ""
     if metadata.get("response_mode") == INBOX_RESPONSE_MODE and metadata.get("sender_session_id"):
-        response_contract = (
-            "\n\n<response_contract>\n"
-            "When the task is complete, call "
-            f'inbox(recipient_session_id="{escape(str(metadata["sender_session_id"]), quote=True)}", '
-            "message=<result>) to send the result back to the sender.\n"
-            "Use inbox for the final result because this incoming message is asynchronous.\n"
-            "</response_contract>"
+        response_contract = "\n\n" + ask_response_contract(
+            ASK_MODE_CONTINUE_AND_EXPECT_INBOX_BACK_ASYNC,
+            sender_session_id=str(metadata["sender_session_id"]),
         )
     team_context = _target_team_context(target_session_id)
     prompt = render_prompt(

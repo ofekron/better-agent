@@ -47,6 +47,10 @@ from typing import Awaitable, Callable, Literal, Optional
 from typing import NamedTuple
 
 from i18n import t
+from communication_modes import (
+    ASK_MODE_WAIT_AND_GRAB_LAST_ASSISTANT_MSSG_IN_TURN,
+    append_ask_response_contract,
+)
 from provider import StreamEvent, ProviderSuspendedError, default_provider, get_provider, known_providers
 from runs_dir import pid_alive as _pid_alive
 from trace_collector import (
@@ -2416,14 +2420,9 @@ class Coordinator:
                 queue_item_id=queue_item_id,
                 run_mode=team_messaging.ASK_SOURCE,
             )
-        ask_prompt = (
-            f"{message}\n\n"
-            "<response_contract>\n"
-            "The sender is waiting for this turn to finish. Put the answer in "
-            "your assistant response for this turn. The ask tool automatically "
-            "captures your last assistant text batch and returns it to the "
-            "sender as the tool result — do NOT mssg the sender back\n"
-            "</response_contract>"
+        ask_prompt = append_ask_response_contract(
+            message,
+            ASK_MODE_WAIT_AND_GRAB_LAST_ASSISTANT_MSSG_IN_TURN,
         )
         done: asyncio.Future = asyncio.get_running_loop().create_future()
         forwarding_active = False
@@ -4722,6 +4721,7 @@ class Coordinator:
         provision_prompt: Optional[str] = None,
         provisioned_tool_profile: str = "",
         include_events: bool = False,
+        ask_mode: str = "",
     ) -> dict:
         from orchs.manager._delegation import run_delegation as _impl
         return await _impl(
@@ -4746,6 +4746,7 @@ class Coordinator:
             provision_prompt=provision_prompt,
             provisioned_tool_profile=provisioned_tool_profile,
             include_events=include_events,
+            ask_mode=ask_mode,
         )
 
     async def _init_target_agent_session(

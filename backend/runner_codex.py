@@ -60,7 +60,7 @@ from loopback_http import raise_loopback_http_error
 from communication_modes import (
     ASK_MODE_CONTINUE_AND_EXPECT_INBOX_BACK_ASYNC,
     ASK_MODE_WAIT_AND_GRAB_LAST_ASSISTANT_MSSG_IN_TURN,
-    normalize_ask_mode,
+    normalize_ask_execution,
 )
 import chat_store
 import inbox_store
@@ -1412,9 +1412,11 @@ def _build_ask_tool_handler(
         target_worker_pool = str(args.get("target_worker_pool") or "").strip()
         pool_affinity_key = str(args.get("pool_affinity_key") or "").strip()
         message = str(args.get("message") or "").strip()
-        run_mode = str(args.get("run_mode") or "direct").strip() or "direct"
         try:
-            mode = normalize_ask_mode(args.get("mode"))
+            mode, run_mode = normalize_ask_execution(
+                args.get("mode"),
+                args.get("run_mode"),
+            )
         except ValueError as exc:
             return _dynamic_tool_text_result(str(exc), success=False)
         if (not target_session_id and not target_worker_id and not target_worker_pool) or not message:
@@ -1422,10 +1424,6 @@ def _build_ask_tool_handler(
                 "one target and message are required",
                 success=False,
             )
-        if run_mode not in ("direct", "fork"):
-            return _dynamic_tool_text_result("run_mode must be 'direct' or 'fork'", success=False)
-        if mode == ASK_MODE_CONTINUE_AND_EXPECT_INBOX_BACK_ASYNC and run_mode == "fork":
-            return _dynamic_tool_text_result("async ask mode requires run_mode='direct'", success=False)
         ephemeral = bool(args.get("ephemeral"))
         if ephemeral and run_mode != "fork":
             return _dynamic_tool_text_result(
@@ -1456,6 +1454,7 @@ def _build_ask_tool_handler(
                 "cwd": cwd,
                 "client_delegation_id": client_delegation_id,
                 "run_mode": "fork",
+                "ask_mode": mode,
                 "worker_registry_cwd": worker_registry_cwd,
                 "ephemeral": ephemeral,
             }

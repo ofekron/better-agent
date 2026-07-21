@@ -131,6 +131,7 @@ def test_ask_fork_existing_target_enters_delegation():
         "reasoning_effort": "high",
         "cwd": "/tmp",
         "run_mode": "fork",
+        "ask_mode": "wait_and_grab_last_assistant_mssg_in_turn",
     }
     try:
         result = asyncio.run(main.internal_ask_fork(
@@ -147,6 +148,46 @@ def test_ask_fork_existing_target_enters_delegation():
     assert called[0]["reasoning_effort"] == "high"
     assert called[0]["provisioned_tool_profile"] == ""
     assert called[0]["include_events"] is False
+    assert called[0]["ask_mode"] == "wait_and_grab_last_assistant_mssg_in_turn"
+
+
+def test_ask_fork_rejects_asynchronous_mode_before_delegation():
+    async def fail_run_delegation(**_kwargs):
+        raise AssertionError("asynchronous fork ask entered delegation")
+
+    target = main.session_manager.create(
+        name="target-async-mode",
+        cwd="/tmp",
+        orchestration_mode="native",
+        model="model",
+        source="test",
+    )
+    original = main.coordinator.run_delegation
+    main.coordinator.run_delegation = fail_run_delegation
+    try:
+        try:
+            asyncio.run(main.internal_ask_fork(
+                {
+                    "app_session_id": "caller-session",
+                    "instructions": "check this",
+                    "worker_session_id": target["id"],
+                    "worker_description": "",
+                    "model": "model",
+                    "cwd": "/tmp",
+                    "run_mode": "fork",
+                    "ask_mode": "continue_and_expect_inbox_back_async",
+                },
+                x_internal_token=main.coordinator.internal_token,
+            ))
+        except HTTPException as exc:
+            error = exc
+        else:
+            raise AssertionError("asynchronous fork ask did not raise")
+    finally:
+        main.coordinator.run_delegation = original
+
+    assert error.status_code == 400
+    assert error.detail == "async ask mode requires run_mode='direct'"
 
 
 def test_ask_fork_rejects_reserved_requirements_processor_profile_from_general_callers():

@@ -15,7 +15,7 @@ from mcp.server.fastmcp import FastMCP
 from communication_modes import (
     ASK_MODE_CONTINUE_AND_EXPECT_INBOX_BACK_ASYNC,
     DEFAULT_ASK_MODE,
-    normalize_ask_mode,
+    normalize_ask_execution,
 )
 from orchestration_tool_descriptions import (
     ASK_DESCRIPTION,
@@ -299,15 +299,10 @@ def ask_response(
     message = (message or "").strip()
     if not any((target_session_id, target_worker_id, target_worker_pool)) or not message:
         return {"success": False, "error": "one target and message are required"}
-    run_mode = (run_mode or "direct").strip() or "direct"
-    if run_mode not in ("direct", "fork"):
-        return {"success": False, "error": "run_mode must be 'direct' or 'fork'"}
     try:
-        mode = normalize_ask_mode(mode)
+        mode, run_mode = normalize_ask_execution(mode, run_mode)
     except ValueError as exc:
         return {"success": False, "error": str(exc)}
-    if mode == ASK_MODE_CONTINUE_AND_EXPECT_INBOX_BACK_ASYNC and run_mode == "fork":
-        return {"success": False, "error": "async ask mode requires run_mode='direct'"}
     if run_mode == "fork" and not target_session_id:
         return {"success": False, "error": "run_mode='fork' requires target_session_id"}
     if ephemeral and run_mode != "fork":
@@ -334,6 +329,7 @@ def ask_response(
             "cwd": cwd,
             "client_delegation_id": client_delegation_id,
             "run_mode": "fork",
+            "ask_mode": mode,
             "worker_registry_cwd": registry_cwd or None,
             "ephemeral": bool(ephemeral),
         }, timeout=_LONG_TIMEOUT)

@@ -41,6 +41,8 @@ from orchs.manager._approval import (
 from orchs.manager._rewind import _safe_delete_forks
 from provider import StreamEvent
 from event_shape import is_synthetic_event as _is_synthetic_event
+from event_shape import extract_output_text, strip_synthetic_events
+from communication_modes import append_ask_response_contract, normalize_ask_mode
 from session_manager import manager as session_manager
 import delegation_status_store
 
@@ -48,6 +50,31 @@ if TYPE_CHECKING:
     from orchestrator import Coordinator
 
 logger = logging.getLogger(__name__)
+
+
+def _build_worker_prompt(
+    team_context: str,
+    instructions: str,
+    ask_mode: str,
+    sender_session_id: str,
+) -> str:
+    prompt = "\n\n".join([
+        team_context,
+        f"<user_prompt>\n{instructions}\n</user_prompt>",
+    ])
+    if not ask_mode:
+        return prompt
+    return append_ask_response_contract(
+        prompt,
+        ask_mode,
+        sender_session_id=sender_session_id,
+    )
+
+
+def _ask_assistant_content(collected: list[dict], ask_mode: str) -> Optional[str]:
+    if not ask_mode:
+        return None
+    return extract_output_text(strip_synthetic_events(collected))
 
 
 def _jsonl_line_has_final_text(raw: bytes, expected: str) -> bool:
@@ -380,6 +407,7 @@ async def run_delegation(
     provision_prompt: Optional[str] = None,
     provisioned_tool_profile: str = "",
     include_events: bool = False,
+    ask_mode: str = "",
 ) -> dict:
     """Run a worker for one delegate tool call.
 
@@ -413,6 +441,7 @@ async def run_delegation(
             worker_session_id, worker_description,
             "ephemeral is only valid for run_mode='fork'",
         )
+    normalized_ask_mode = normalize_ask_mode(ask_mode) if ask_mode else ""
     # Capture the turn's save callback ONCE at delegation start.  The
     # runner's HTTP POST blocks until run_delegation returns, so the
     # manager turn cannot finalize mid-delegation — the callback is
@@ -810,6 +839,7 @@ async def run_delegation(
                 reasoning_effort=worker_reasoning_effort,
                 runner=worker_runner,
                 provisioned_tool_profile=provisioned_tool_profile,
+                ask_mode=normalized_ask_mode,
             )
     finally:
         new_depth = coordinator.active_delegations.get(app_session_id, 1) - 1
@@ -857,6 +887,7 @@ async def run_delegation_locked(
     reasoning_effort: str = "",
     runner: str = "",
     provisioned_tool_profile: str = "",
+    ask_mode: str = "",
 ) -> dict:
     """Inner worker-run body — runs under the per-(caller, worker) lock.
 
@@ -1023,10 +1054,12 @@ async def run_delegation_locked(
             manager_session_id=app_session_id,
             manager_description=str(manager_session.get("name") or "manager"),
         )
-        worker_prompt = "\n\n".join([
+        worker_prompt = _build_worker_prompt(
             team_context,
-            f"<user_prompt>\n{instructions}\n</user_prompt>",
-        ])
+            instructions,
+            ask_mode,
+            app_session_id,
+        )
     try:
         with perf.timed("delegate.provider_start_run"):
             import startup_recovery_gate
@@ -1419,6 +1452,7 @@ async def run_delegation_locked(
         except Exception:
             logger.exception("touch_worker/touch_fork failed")
 
+    assistant_content = _ask_assistant_content(collected, ask_mode)
     result_payload = {
         "success": success,
         "error": error,
@@ -1442,6 +1476,8 @@ async def run_delegation_locked(
             "runner_enqueue_to_terminal_event": terminal_event_ms,
         },
     }
+    if ask_mode:
+        result_payload["assistant_content"] = assistant_content
     if include_events:
         result_payload["events"] = collected
     try:
