@@ -35,6 +35,14 @@ interface RunDetails {
   pid: number | null;
   started_at: string;
   last_event_at: string;
+  provider_kind: string | null;
+  startup_phase: string | null;
+  startup_expected_activity: string | null;
+  startup_phase_started_at: string | null;
+  startup_silence_threshold_seconds: number | null;
+  stalled_at: string | null;
+  last_activity_at: string | null;
+  last_activity_kind: string | null;
   provider: ProviderInfo | null;
   processes: ProcessEntry[];
 }
@@ -164,6 +172,22 @@ function RunDetailsBody({ details }: { details: RunDetails }) {
         <KV k="pid" v={details.pid == null ? "—" : String(details.pid)} mono />
         <KV k="started_at" v={details.started_at} mono />
         <KV k="last_event_at" v={details.last_event_at} mono />
+        <KV k="provider_kind" v={details.provider_kind ?? "—"} />
+        <KV k="startup_phase" v={details.startup_phase ?? "—"} />
+        <KV
+          k="startup_expected_activity"
+          v={details.startup_expected_activity ?? "—"}
+        />
+        <KV
+          k="startup_silence_threshold_seconds"
+          v={details.startup_silence_threshold_seconds == null
+            ? "—"
+            : String(details.startup_silence_threshold_seconds)}
+        />
+        <KV k="startup_phase_started_at" v={details.startup_phase_started_at ?? "—"} mono />
+        <KV k="last_activity_at" v={details.last_activity_at ?? "—"} mono />
+        <KV k="last_activity_kind" v={details.last_activity_kind ?? "—"} />
+        <KV k="stalled_at" v={details.stalled_at ?? "—"} mono />
         <KV
           k="target_message_id"
           v={details.target_message_id ?? t("runDetails.noAnchoredMessage")}

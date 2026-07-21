@@ -6,6 +6,7 @@ import { trackPromise } from "../progress/store";
 import { ShortcutSettings } from "./ShortcutSettings";
 import { CrossSessionDelegateSetting } from "./CrossSessionDelegateSetting";
 import { AutoRestartOnIdleSetting } from "./AutoRestartOnIdleSetting";
+import { TaskStartSilenceSetting } from "./TaskStartSilenceSetting";
 import { ContextStrategySetting } from "./ContextStrategySetting";
 import { SessionTabsSettings } from "./SessionTabsSettings";
 import { VoiceSettings } from "./VoiceSettings";
@@ -2233,6 +2234,7 @@ function ProvidersList({
           <DesktopAppSettingsSection />
           <div className="setup-divider" />
           <AutoRestartOnIdleSetting />
+          <TaskStartSilenceSetting />
         </>
       )}
       {section === "recovery" && <BasCompanionAppsSetting />}

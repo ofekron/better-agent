@@ -171,6 +171,12 @@ _RECOVERED_CANCEL_ESCALATE_AFTER_S = 5.0
 _CONTEXT_CONTINUATION_PREEMPT_RATIO = 0.90
 _RATE_LIMIT_MIN_WAIT_S = 5.0
 _RATE_LIMIT_FALLBACK_WAIT_S = 60.0
+_STARTUP_ACTIVITY_KINDS = {
+    "codex": "task_started",
+    "fugu": "task_started",
+    "claude": "provider_response",
+    "gemini": "init",
+}
 
 
 def _provider_capability_contexts(
@@ -836,6 +842,46 @@ class TurnManager:
             )
         return True
 
+    def _update_startup_stalls(self, sid: str) -> bool:
+        runs = self._run_state.get(sid)
+        if not runs:
+            return False
+        changed = False
+        now = datetime.now(timezone.utc)
+        for run in runs:
+            if run.get("startup_phase") not in (
+                "awaiting_provider_start",
+                "awaiting_provider_ready",
+            ):
+                continue
+            started_raw = run.get("startup_phase_started_at")
+            try:
+                started = datetime.fromisoformat(str(started_raw))
+                if started.tzinfo is None:
+                    started = started.replace(tzinfo=timezone.utc)
+            except (TypeError, ValueError):
+                continue
+            threshold = run.get("startup_silence_threshold_seconds")
+            if not isinstance(threshold, int) or threshold <= 0:
+                continue
+            silence_seconds = max(0, int((now - started).total_seconds()))
+            if silence_seconds < threshold:
+                continue
+            run["startup_phase"] = "stalled"
+            run["stalled_at"] = now.isoformat()
+            changed = True
+            logger.warning(
+                "TURN_START_STALLED sid=%s run=%s provider=%s expected=%s "
+                "silence_seconds=%s threshold_seconds=%s",
+                sid[:8],
+                str(run.get("run_id") or "?")[:8],
+                run.get("provider_kind") or "unknown",
+                run.get("startup_expected_activity") or "unknown",
+                silence_seconds,
+                threshold,
+            )
+        return changed
+
     def tick_running_state(
         self, app_session_id: Optional[str] = None,
     ) -> None:
@@ -844,11 +890,13 @@ class TurnManager:
             if app_session_id is not None
             else list(self._run_state.keys())
         )
-        pruned_sids: list[str] = []
+        changed_sids: list[str] = []
         for sid in sids:
             try:
                 if self._prune_dead_entries(sid):
-                    pruned_sids.append(sid)
+                    changed_sids.append(sid)
+                if self._update_startup_stalls(sid):
+                    changed_sids.append(sid)
             except Exception:
                 logger.warning(
                     "tick_running_state: prune failed for %s", sid[:8],
@@ -868,8 +916,8 @@ class TurnManager:
         # frontends keep a stale non-empty run list until an unrelated
         # emit or a reload. This runs on a background OS thread, so the
         # coroutine is handed to the captured event loop threadsafe.
-        if pruned_sids and self._loop is not None:
-            for sid in pruned_sids:
+        if changed_sids and self._loop is not None:
+            for sid in dict.fromkeys(changed_sids):
                 try:
                     asyncio.run_coroutine_threadsafe(
                         self.emit_run_state(sid), self._loop,
@@ -1068,13 +1116,102 @@ class TurnManager:
         )
         return discrepancies
 
-    def _run_state_touch(self, app_session_id: str) -> None:
+    def run_state_mark_provider_submitted(
+        self,
+        app_session_id: str,
+        run_id: str,
+        provider_kind: str,
+        silence_threshold_seconds: Optional[int] = None,
+    ) -> None:
+        expected = _STARTUP_ACTIVITY_KINDS.get(provider_kind)
         runs = self._run_state.get(app_session_id)
         if not runs:
             return
-        now = datetime.now().isoformat()
-        for r in runs:
-            r["last_event_at"] = now
+        now = datetime.now(timezone.utc).isoformat()
+        for run in runs:
+            if run.get("run_id") != run_id:
+                continue
+            run["provider_kind"] = provider_kind
+            run["startup_monitoring_supported"] = expected is not None
+            run["startup_expected_activity"] = expected
+            run["startup_phase"] = (
+                "awaiting_provider_start" if expected is not None else "unsupported"
+            )
+            run["startup_phase_started_at"] = now
+            run["last_activity_at"] = now
+            run["last_activity_kind"] = "provider_submitted"
+            if expected is not None:
+                run["startup_silence_threshold_seconds"] = (
+                    silence_threshold_seconds
+                    if silence_threshold_seconds is not None
+                    else self._load_task_start_silence_seconds()
+                )
+            logger.info(
+                "TURN_START_MONITORING sid=%s run=%s provider=%s expected=%s "
+                "threshold_seconds=%s",
+                app_session_id[:8], run_id[:8], provider_kind,
+                expected or "unsupported",
+                run.get("startup_silence_threshold_seconds"),
+            )
+            return
+
+    @staticmethod
+    def _load_task_start_silence_seconds() -> int:
+        import user_prefs
+
+        return user_prefs.get_task_start_silence_seconds()
+
+    def run_state_record_activity(
+        self,
+        app_session_id: str,
+        run_id: str,
+        activity_kind: str,
+    ) -> bool:
+        runs = self._run_state.get(app_session_id)
+        if not runs:
+            return False
+        now = datetime.now(timezone.utc).isoformat()
+        for run in runs:
+            if run.get("run_id") != run_id:
+                continue
+            previous = run.get("startup_phase")
+            run["last_event_at"] = now
+            run["last_activity_at"] = now
+            run["last_activity_kind"] = activity_kind
+            if (
+                run.get("provider_kind") in ("codex", "fugu")
+                and activity_kind == "task_started"
+                and previous in ("awaiting_provider_start", "stalled")
+            ):
+                run["startup_phase"] = "awaiting_provider_ready"
+                run["startup_phase_started_at"] = now
+                run["startup_expected_activity"] = "turn_context"
+                run.pop("stalled_at", None)
+                logger.info(
+                    "TURN_START_ACCEPTED sid=%s run=%s provider=%s "
+                    "next_expected=turn_context recovered_from_stall=%s",
+                    app_session_id[:8], run_id[:8],
+                    run.get("provider_kind") or "unknown",
+                    previous == "stalled",
+                )
+                return True
+            if previous not in (
+                "awaiting_provider_start",
+                "awaiting_provider_ready",
+                "stalled",
+            ):
+                return False
+            run["startup_phase"] = "running"
+            run.pop("stalled_at", None)
+            logger.info(
+                "TURN_START_ACKNOWLEDGED sid=%s run=%s provider=%s activity=%s "
+                "recovered_from_stall=%s",
+                app_session_id[:8], run_id[:8],
+                run.get("provider_kind") or "unknown", activity_kind,
+                previous == "stalled",
+            )
+            return True
+        return False
 
     def run_state_set_pid(
         self, app_session_id: str, run_id: str, pid: int,
@@ -1520,7 +1657,12 @@ class TurnManager:
                     )
                     if live_msg is not msg:
                         assistant_msg_holder[0] = live_msg
-                self._run_state_touch(app_session_id)
+                if self.run_state_record_activity(
+                    app_session_id,
+                    turn_run_id,
+                    str(event_dict.get("type") or "provider_event"),
+                ):
+                    await self.emit_run_state(app_session_id)
             except Exception as exc:
                 from event_journal import EventJournalWriteError
                 if isinstance(exc, EventJournalWriteError) and "writer is closed" in str(exc):
@@ -2543,6 +2685,16 @@ class TurnManager:
                     target_message_id=target_message_id,
                         turn_run_id=turn_run_id,
                     )
+                silence_threshold_seconds = await self._to_turn_dispatch_thread(
+                    self._load_task_start_silence_seconds,
+                )
+                self.run_state_mark_provider_submitted(
+                    app_session_id,
+                    turn_run_id,
+                    provider_kind or "unknown",
+                    silence_threshold_seconds,
+                )
+                await self.emit_run_state(app_session_id)
                 spawn_elapsed = _time.monotonic() - spawn_started
                 if spawn_elapsed > 2.0:
                     logger.warning(
@@ -2745,6 +2897,30 @@ class TurnManager:
                             break
 
                         event: StreamEvent = get_task.result()
+                        if event.type == "run_activity":
+                            activity_kind = event.data.get("kind")
+                            if isinstance(activity_kind, str) and activity_kind:
+                                if self.run_state_record_activity(
+                                    app_session_id,
+                                    turn_run_id,
+                                    activity_kind,
+                                ):
+                                    await self.emit_run_state(app_session_id)
+                            continue
+                        provider_start_observed = (
+                            provider_kind == "claude" and event.type == "agent_message"
+                        ) or (
+                            provider_kind == "gemini"
+                            and event.type in ("session_discovered", "agent_message")
+                        )
+                        if provider_start_observed:
+                            expected_kind = _STARTUP_ACTIVITY_KINDS[provider_kind]
+                            if self.run_state_record_activity(
+                                app_session_id,
+                                turn_run_id,
+                                expected_kind,
+                            ):
+                                await self.emit_run_state(app_session_id)
                         if event.type == "context_usage":
                             context_window = event.data.get("context_window")
                             context_tokens = event.data.get("context_tokens")

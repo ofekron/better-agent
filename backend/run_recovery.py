@@ -1731,6 +1731,28 @@ async def _integrate_one_locked(
                 target_message_id=recovering_msg_id,
                 pid=int(pid) if pid else None,
             )
+            await _to_thread_joined(
+                coordinator.turn_manager.run_state_mark_provider_submitted,
+                app_sid,
+                run_id,
+                getattr(provider, "KIND", "unknown"),
+            )
+            recovered_activity = getattr(provider, "recovered_startup_activity", None)
+            if callable(recovered_activity):
+                for activity_kind in await _to_thread_joined(recovered_activity, desc):
+                    await _to_thread_joined(
+                        coordinator.turn_manager.run_state_record_activity,
+                        app_sid,
+                        run_id,
+                        activity_kind,
+                    )
+            elif getattr(provider, "KIND", "unknown") in ("claude", "gemini"):
+                await _to_thread_joined(
+                    coordinator.turn_manager.run_state_record_activity,
+                    app_sid,
+                    run_id,
+                    "recovered_run",
+                )
             # Push the updated counts to any connected Home tab so it
             # doesn't need to wait for a page refresh.
             await coordinator.turn_manager.emit_run_state(app_sid)
@@ -2592,6 +2614,12 @@ async def _retry_recovered_run(
         kind=mode,
         target_message_id=recovering_msg_id,
         pid=int(pid) if pid else None,
+    )
+    await asyncio.to_thread(
+        coordinator.turn_manager.run_state_mark_provider_submitted,
+        app_sid,
+        new_run_id,
+        getattr(provider, "KIND", "unknown"),
     )
     await coordinator.turn_manager.emit_run_state(app_sid)
 

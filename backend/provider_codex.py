@@ -347,6 +347,48 @@ class CodexProvider(Provider):
     reasoning_effort_options: ClassVar[tuple[str, ...]] = CODEX_REASONING_EFFORTS
     default_reasoning_effort: ClassVar[str] = DEFAULT_REASONING_EFFORT
 
+    def recovered_startup_activity(self, desc: dict) -> list[str]:
+        path_raw = desc.get("jsonl_path") or desc.get("rollout_path")
+        if not isinstance(path_raw, str) or not path_raw:
+            return []
+        try:
+            start_byte = max(0, int(desc.get("pre_query_byte_offset") or 0))
+        except (TypeError, ValueError):
+            start_byte = 0
+        seen: list[str] = []
+        try:
+            with Path(path_raw).open("rb") as file:
+                file.seek(start_byte)
+                for raw in file:
+                    if not raw.endswith(b"\n"):
+                        break
+                    try:
+                        row = json.loads(raw.decode("utf-8", errors="replace"))
+                    except json.JSONDecodeError:
+                        continue
+                    row_type = row.get("type")
+                    payload = row.get("payload")
+                    activity = (
+                        row_type
+                        if row_type in ("task_started", "turn_context")
+                        else payload.get("type")
+                        if row_type == "event_msg" and isinstance(payload, dict)
+                        else None
+                    )
+                    if activity in (
+                        "task_started",
+                        "turn_context",
+                        "user_message",
+                    ) and activity not in seen:
+                        seen.append(activity)
+        except OSError:
+            logger.debug(
+                "failed reading recovered Codex startup activity path=%s",
+                path_raw,
+                exc_info=True,
+            )
+        return seen
+
     def __init__(self, record: dict) -> None:
         super().__init__(record)
         self._runs: dict[str, RunState] = {}
@@ -683,6 +725,15 @@ class CodexProvider(Provider):
                     _rs.run_id,
                 )
 
+        def _on_lifecycle_update(kind: str, _rs: RunState = rs) -> None:
+            try:
+                _rs.queue.put_nowait(StreamEvent("run_activity", {"kind": kind}))
+            except Exception:
+                logger.exception(
+                    "CodexJsonlTailer lifecycle update failed for run %s",
+                    _rs.run_id,
+                )
+
         rs.tailer = CodexRolloutTailer(
             path=rs.jsonl_path,
             start_byte=start_byte,
@@ -690,6 +741,7 @@ class CodexProvider(Provider):
             dispatch=_dispatch_to_queue,
             on_cursor_advance=_on_cursor,
             on_context_update=_on_context_update,
+            on_lifecycle_update=_on_lifecycle_update,
         )
         rs.tailer_task = asyncio.get_event_loop().create_task(
             rs.tailer.run(),

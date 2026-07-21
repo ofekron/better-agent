@@ -1099,5 +1099,17 @@
   "gitTree.retry": "다시 시도",
   "gitTree.empty": "아직 커밋이 없습니다.",
   "gitTree.commits": "커밋 · {{count}}",
-  "gitTree.changed": "변경 · {{count}}"
+  "gitTree.changed": "변경 · {{count}}",
+  "runBadge.providerFallback": "제공자",
+  "runBadge.stalledTitle": "{{provider}}에서 작업을 시작하지 않았습니다",
+  "runBadge.stalledDescription": "{{seconds}}초 안에 제공자의 시작 확인이 도착하지 않았습니다. 프로세스가 아직 실행 중일 수 있습니다.",
+  "runBadge.cancelFailed": "취소하지 못했습니다. 다시 시도하세요.",
+  "runBadge.cancelling": "취소 중…",
+  "runBadge.cancel": "취소",
+  "runBadge.retry": "다시 시도",
+  "runBadge.retryAfterCancelHint": "취소가 확인되면 다시 시도할 수 있습니다.",
+  "runBadge.details": "세부 정보",
+  "settings.taskStartSilence": "시작 응답 없음 경고",
+  "settings.seconds": "초",
+  "settings.taskStartSilenceHint": "제공자가 이 시간 내에 작업 시작을 확인하지 않으면 멈춤 경고를 표시합니다. 실행을 자동으로 중지하지는 않습니다."
 }

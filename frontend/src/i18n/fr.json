@@ -1100,5 +1100,17 @@
   "gitTree.retry": "Réessayer",
   "gitTree.empty": "Aucun commit pour le moment.",
   "gitTree.commits": "Commits · {{count}}",
-  "gitTree.changed": "Modifications · {{count}}"
+  "gitTree.changed": "Modifications · {{count}}",
+  "runBadge.providerFallback": "Fournisseur",
+  "runBadge.stalledTitle": "{{provider}} n’a pas démarré la tâche",
+  "runBadge.stalledDescription": "Aucun accusé de démarrage du fournisseur n’est arrivé dans les {{seconds}} secondes. Le processus est peut-être toujours en cours.",
+  "runBadge.cancelFailed": "L’annulation a échoué. Réessayez.",
+  "runBadge.cancelling": "Annulation…",
+  "runBadge.cancel": "Annuler",
+  "runBadge.retry": "Réessayer",
+  "runBadge.retryAfterCancelHint": "Vous pourrez réessayer une fois l’annulation confirmée.",
+  "runBadge.details": "Détails",
+  "settings.taskStartSilence": "Avertissement de silence au démarrage",
+  "settings.seconds": "secondes",
+  "settings.taskStartSilenceHint": "Affiche un avertissement de blocage si le fournisseur ne confirme pas le démarrage de la tâche dans ce délai. Cela n’arrête jamais l’exécution automatiquement."
 }

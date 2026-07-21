@@ -679,10 +679,6 @@ export interface ChatMessage {
    * keeps the CLI process alive. Stamped by `turn_detached` WS event;
    * cleared on reconnect when REST replay overwrites the message. */
   isDetached?: boolean;
-  /** No events arrived while streaming for STALE_TIMEOUT_MS. The
-   * orchestrator task likely died silently. Cleared on the next event
-   * or terminal transition (REST replay overwrites the message). */
-  isStale?: boolean;
   /** ISO timestamp of the next retry attempt. Set by the backend on
    * upstream 429 / rate-limit while it sleeps between attempts and
    * cleared the moment the retry fires. Pushed via
@@ -787,6 +783,15 @@ export interface RunInfo {
    * this run. Used internally for staleness tracking; the frontend
    * badge displays elapsed time from `started_at` instead. */
   last_event_at: string;
+  provider_kind?: string;
+  startup_monitoring_supported?: boolean;
+  startup_expected_activity?: string | null;
+  startup_phase?: "awaiting_provider_start" | "awaiting_provider_ready" | "running" | "stalled" | "unsupported";
+  startup_phase_started_at?: string;
+  startup_silence_threshold_seconds?: number;
+  stalled_at?: string;
+  last_activity_at?: string;
+  last_activity_kind?: string;
 }
 
 export type OrchestrationMode = "team" | "native" | "virtual";

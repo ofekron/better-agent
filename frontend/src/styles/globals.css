@@ -1079,6 +1079,28 @@ body {
   }
 }
 
+.task-start-silence-setting {
+  display: grid;
+  gap: 6px;
+  margin-top: 14px;
+}
+
+.task-start-silence-setting__control {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.task-start-silence-setting__control input {
+  width: 96px;
+  min-height: 36px;
+}
+
+.task-start-silence-setting__hint {
+  color: var(--text-muted);
+  font-size: calc(11px * var(--app-font-scale));
+}
+
 
 .session-search input:focus {
   border-color: var(--accent, #7b68ee);
@@ -4206,6 +4228,105 @@ button.run-badge-clickable:focus-visible {
   font-variant-numeric: tabular-nums;
 }
 
+.turn-stalled-card {
+  display: flex;
+  width: min(100%, 560px);
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid color-mix(in srgb, #d6a800 55%, var(--border));
+  border-radius: 10px;
+  background: color-mix(in srgb, #d6a800 10%, var(--bg-secondary));
+  color: var(--text-primary);
+  animation: turn-stalled-enter 220ms ease-out;
+}
+
+.turn-stalled-card__icon {
+  display: grid;
+  place-items: center;
+  flex: 0 0 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: #d6a800;
+  color: #181818;
+  font-weight: 800;
+}
+
+.turn-stalled-card__body {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 5px;
+  font-size: calc(12px * var(--app-font-scale));
+  line-height: 1.4;
+}
+
+.turn-stalled-card__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.turn-stalled-card__actions button {
+  min-height: 36px;
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color 160ms ease, border-color 160ms ease, opacity 160ms ease;
+}
+
+.turn-stalled-card__actions button:hover:not(:disabled) {
+  border-color: #d6a800;
+  background: color-mix(in srgb, #d6a800 14%, var(--bg-tertiary));
+}
+
+.turn-stalled-card__actions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.turn-stalled-card__cancel {
+  border-color: color-mix(in srgb, #d65b3a 60%, var(--border)) !important;
+}
+
+.turn-stalled-card__hint,
+.turn-stalled-card__error {
+  color: var(--text-muted);
+  font-size: calc(11px * var(--app-font-scale));
+}
+
+.turn-stalled-card__error {
+  color: #d65b3a;
+}
+
+@keyframes turn-stalled-enter {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@media (max-width: 480px) {
+  .turn-stalled-card {
+    width: 100%;
+  }
+
+  .turn-stalled-card__actions button {
+    min-height: 44px;
+    flex: 1 1 100px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .turn-stalled-card {
+    animation: none;
+  }
+}
+
 @keyframes run-badge-pulse {
   0% {
     box-shadow: 0 0 0 0 currentColor;
@@ -4286,23 +4407,6 @@ button.run-badge-clickable:focus-visible {
   border: 1.5px solid currentColor;
   border-top-color: transparent;
   animation: recovering-spin 0.9s linear infinite;
-}
-
-/* Stale pill: no events arrived while streaming for 90s. The
- * orchestrator task likely died silently. */
-.stale-pill {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 3px 10px 3px 8px;
-  margin-bottom: 8px;
-  border-radius: 999px;
-  background: rgba(255, 99, 71, 0.10);
-  border: 1px solid rgba(255, 99, 71, 0.40);
-  color: #d65b3a;
-  font-size: calc(11px * var(--app-font-scale));
-  font-weight: 500;
-  line-height: 1;
 }
 
 /* Rate-limit retry pill: the orchestrator is sleeping between a 429

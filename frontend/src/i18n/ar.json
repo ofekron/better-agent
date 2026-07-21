@@ -1099,5 +1099,17 @@
   "gitTree.retry": "إعادة المحاولة",
   "gitTree.empty": "لا توجد التزامات بعد.",
   "gitTree.commits": "الالتزامات · {{count}}",
-  "gitTree.changed": "التغييرات · {{count}}"
+  "gitTree.changed": "التغييرات · {{count}}",
+  "runBadge.providerFallback": "المزوّد",
+  "runBadge.stalledTitle": "لم يبدأ {{provider}} المهمة",
+  "runBadge.stalledDescription": "لم يصل تأكيد بدء من المزوّد خلال {{seconds}} ثانية. قد تظل العملية قيد التشغيل.",
+  "runBadge.cancelFailed": "فشل الإلغاء. حاول مرة أخرى.",
+  "runBadge.cancelling": "جارٍ الإلغاء…",
+  "runBadge.cancel": "إلغاء",
+  "runBadge.retry": "إعادة المحاولة",
+  "runBadge.retryAfterCancelHint": "ستتوفر إعادة المحاولة بعد تأكيد الإلغاء.",
+  "runBadge.details": "التفاصيل",
+  "settings.taskStartSilence": "تحذير تأخر بدء التشغيل",
+  "settings.seconds": "ثانية",
+  "settings.taskStartSilenceHint": "اعرض تحذيرًا بالتعطل عندما لا يؤكد المزوّد بدء المهمة خلال هذه المدة. لا يؤدي ذلك إلى إيقاف التشغيل تلقائيًا مطلقًا."
 }

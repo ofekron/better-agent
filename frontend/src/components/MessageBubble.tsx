@@ -2836,18 +2836,13 @@ const AssistantMessage = memo(function AssistantMessage({
             onRetry={onRetryStopped}
           />
         )}
-        {message.isDetached && !message.isStale && (
+        {message.isDetached && (
           <div className="detached-pill" role="status" aria-live="polite">
             <span className="detached-spinner" aria-hidden="true" />
             <span>Reconnecting — agent still running…</span>
           </div>
         )}
-        {message.isStale && (
-          <div className="stale-pill" role="status" aria-live="polite">
-            Connection lost — no updates for 90s
-          </div>
-        )}
-        {message.isRecovering && (
+        {message.isRecovering && !runs.some((run) => run.startup_phase === "stalled") && (
           <div
             className="recovering-pill"
             data-testid="message-recovering-pill"
@@ -2896,7 +2891,7 @@ const AssistantMessage = memo(function AssistantMessage({
          * (`isStreaming`), not raw run-entry presence, or it lies about
          * still-generating long after the content is done. */}
         {message.isStreaming &&
-          (runs.length > 0 || (!message.stopped_at && !message.isStale)) && (
+          (runs.length > 0 || !message.stopped_at) && (
           <div className="streaming-footer">
             {runs.length > 0 ? (
               <RunBadgeStack

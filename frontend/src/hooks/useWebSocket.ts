@@ -180,12 +180,6 @@ interface UseWebSocketOptions {
    * assistant message so the bubble renders "Reconnecting…" instead of
    * a stuck "Running…" spinner. Clears on reconnect via REST replay. */
   onTurnDetached?: (appSessionId: string) => void;
-  /** No WS events arrived while streaming for STALE_TIMEOUT_MS.
-   * Covers the case where the orchestrator task dies silently without
-   * emitting turn_stopped/turn_complete/error. Caller stamps the
-   * in-flight message as stale so the UI shows a warning instead of a
-   * stuck spinner. Clears on the next event or terminal transition. */
-  onTurnStale?: (appSessionId: string) => void;
   /** User-message lifecycle state transitions emitted by the backend's
    * event bus. Five event types — `user_message_queued`,
    * `user_message_sent`, `user_message_received`, `user_message_done`,
@@ -465,7 +459,6 @@ export function useWebSocket(
   const onLiveTurnEventRef = useRef(options.onLiveTurnEvent);
   const onTurnTerminalRef = useRef(options.onTurnTerminal);
   const onTurnDetachedRef = useRef(options.onTurnDetached);
-  const onTurnStaleRef = useRef(options.onTurnStale);
   const onUserMsgLifecycleRef = useRef(options.onUserMsgLifecycle);
   const getSinceSeqRef = useRef(options.getSinceSeq);
   const getEventsFromSeqRef = useRef(options.getEventsFromSeq);
@@ -524,7 +517,6 @@ export function useWebSocket(
     onLiveTurnEventRef.current = options.onLiveTurnEvent;
     onTurnTerminalRef.current = options.onTurnTerminal;
     onTurnDetachedRef.current = options.onTurnDetached;
-    onTurnStaleRef.current = options.onTurnStale;
     onUserMsgLifecycleRef.current = options.onUserMsgLifecycle;
     getSinceSeqRef.current = options.getSinceSeq;
     getEventsFromSeqRef.current = options.getEventsFromSeq;
@@ -568,7 +560,6 @@ export function useWebSocket(
     options.onLiveTurnEvent,
     options.onTurnTerminal,
     options.onTurnDetached,
-    options.onTurnStale,
     options.onUserMsgLifecycle,
     options.getSinceSeq,
     options.getEventsFromSeq,
@@ -641,30 +632,6 @@ export function useWebSocket(
   const isStreamingRef = useRef(false);
   useEffect(() => {
     isStreamingRef.current = isStreaming;
-  }, [isStreaming]);
-  // Mirror streamingAppSessionId into a ref for the stale watchdog.
-  const streamingSidRef = useRef<string | null>(null);
-  useEffect(() => {
-    streamingSidRef.current = streamingAppSessionId;
-  }, [streamingAppSessionId]);
-
-  // Stale-turn watchdog: if streaming is active and no events arrive
-  // for 90s, the orchestrator task likely died silently. Fires
-  // onTurnStale so the UI can surface a warning instead of a stuck
-  // spinner. Resets on every event or terminal transition.
-  const STALE_TIMEOUT_MS = 90_000;
-  const lastEventAtRef = useRef<number>(0);
-  useEffect(() => {
-    if (!isStreaming) return;
-    lastEventAtRef.current = Date.now();
-    const id = setInterval(() => {
-      if (!isStreamingRef.current) return;
-      if (Date.now() - lastEventAtRef.current >= STALE_TIMEOUT_MS) {
-        const sid = streamingSidRef.current;
-        if (sid) onTurnStaleRef.current?.(sid);
-      }
-    }, 10_000);
-    return () => clearInterval(id);
   }, [isStreaming]);
 
   const connect = useCallback(() => {
@@ -916,9 +883,6 @@ export function useWebSocket(
           }
           return;
         }
-
-        // Reset stale-turn watchdog on every turn-scoped event.
-        if (isStreamingRef.current) lastEventAtRef.current = Date.now();
 
         // Live turn frames — route onto the canonical assistant
         // message for the SPECIFIC session the event belongs to. The

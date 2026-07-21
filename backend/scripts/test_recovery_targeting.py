@@ -405,6 +405,8 @@ def test_retry_recovered_run_uses_passed_coordinator() -> None:
         popen = _Popen()
 
     class _Provider:
+        KIND = "claude"
+
         def __init__(self) -> None:
             self._runs = {}
             self.started: list[str] = []
@@ -419,10 +421,16 @@ def test_retry_recovered_run_uses_passed_coordinator() -> None:
         def __init__(self) -> None:
             self.active_run_ids = {}
             self.added: list[tuple[str, str]] = []
+            self.submitted: list[tuple[str, str, str]] = []
             self.emitted: list[str] = []
 
         def run_state_add(self, sid: str, *, run_id: str, **kwargs) -> None:
             self.added.append((sid, run_id))
+
+        def run_state_mark_provider_submitted(
+            self, sid: str, run_id: str, provider_kind: str,
+        ) -> None:
+            self.submitted.append((sid, run_id, provider_kind))
 
         async def emit_run_state(self, sid: str) -> None:
             self.emitted.append(sid)
@@ -472,6 +480,10 @@ def test_retry_recovered_run_uses_passed_coordinator() -> None:
     check("provider retried run", bool(new_run_id))
     check("active_run_ids updated", coordinator.turn_manager.active_run_ids == {"sid": [new_run_id]})
     check("run_state_add used coordinator", coordinator.turn_manager.added == [("sid", new_run_id)])
+    check(
+        "provider startup monitoring registered",
+        coordinator.turn_manager.submitted == [("sid", new_run_id, "claude")],
+    )
     check("run_state emitted", coordinator.turn_manager.emitted == ["sid"])
     check("retry preserves source", provider.kwargs.get("source") == "mssg")
 

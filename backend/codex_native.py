@@ -959,6 +959,7 @@ class CodexRolloutTailer:
         on_cursor_advance: Optional[Callable[[int], None]] = None,
         on_context_update: Optional[Callable[[Optional[int], Optional[int]], Any]] = None,
         on_terminal_update: Optional[Callable[[bool], Any]] = None,
+        on_lifecycle_update: Optional[Callable[[str], Any]] = None,
     ) -> None:
         self.path = path
         self.namespace = namespace
@@ -966,6 +967,7 @@ class CodexRolloutTailer:
         self.on_cursor_advance = on_cursor_advance
         self.on_context_update = on_context_update
         self.on_terminal_update = on_terminal_update
+        self.on_lifecycle_update = on_lifecycle_update
         self.processed_byte = max(0, int(start_byte))
         self._stop_event = asyncio.Event()
         self._drain_lock = asyncio.Lock()
@@ -989,9 +991,24 @@ class CodexRolloutTailer:
             before = (normalizer.context_window, normalizer.context_tokens)
             terminal_state = None
             try:
-                terminal_state = _codex_terminal_state(
-                    json.loads(raw.decode("utf-8", errors="replace"))
+                raw_event = json.loads(raw.decode("utf-8", errors="replace"))
+                terminal_state = _codex_terminal_state(raw_event)
+                event_type = raw_event.get("type")
+                payload = raw_event.get("payload")
+                lifecycle_kind = (
+                    event_type
+                    if event_type in ("task_started", "turn_context")
+                    else payload.get("type")
+                    if event_type == "event_msg" and isinstance(payload, dict)
+                    else None
                 )
+                if (
+                    lifecycle_kind in ("task_started", "turn_context", "user_message")
+                    and self.on_lifecycle_update is not None
+                ):
+                    res = self.on_lifecycle_update(str(lifecycle_kind))
+                    if inspect.isawaitable(res):
+                        await res
             except json.JSONDecodeError:
                 terminal_state = None
             for event in normalizer.normalize_line(
