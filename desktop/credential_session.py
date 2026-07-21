@@ -8,7 +8,11 @@ from multiprocessing import Pipe
 from typing import Literal
 
 import oskeychain
-from provider_credentials import ProviderCredentialStore
+from provider_credentials import (
+    ProviderCredentialAccessBlocked,
+    ProviderCredentialCandidate,
+    ProviderCredentialStore,
+)
 
 CredentialStatus = Literal["unknown", "available", "missing", "blocked"]
 _MAX_FRAME_BYTES = 128 * 1024
@@ -18,6 +22,7 @@ class ProviderCredentialBroker:
     def __init__(self) -> None:
         oskeychain.disable_native_user_interaction()
         self._states: dict[str, tuple[CredentialStatus, str]] = {}
+        self._blocked_candidates: dict[str, ProviderCredentialCandidate] = {}
         self._locks: dict[str, threading.Lock] = {}
         self._locks_guard = threading.Lock()
         self._keychain_lock = threading.Lock()
@@ -28,6 +33,7 @@ class ProviderCredentialBroker:
 
     def clear(self) -> None:
         self._states.clear()
+        self._blocked_candidates.clear()
         self._locks.clear()
 
     def _provider_lock(self, provider_id: str) -> threading.Lock:
@@ -67,7 +73,7 @@ class ProviderCredentialBroker:
 
     def _read(self, provider_id: str, *, retry: bool) -> dict[str, str]:
         if retry:
-            self._states.pop(provider_id, None)
+            return self._retry(provider_id)
         status, value = self._states.get(provider_id, ("unknown", ""))
         if status != "unknown":
             response = {"status": status}
@@ -76,19 +82,58 @@ class ProviderCredentialBroker:
             return response
         try:
             with self._keychain_lock:
-                if retry:
-                    with oskeychain.native_user_interaction():
-                        value = self._credential_store.read(provider_id)
-                else:
-                    value = self._credential_store.read(provider_id)
+                value = self._credential_store.read(provider_id)
             if value:
+                self._blocked_candidates.pop(provider_id, None)
                 self._states[provider_id] = ("available", value)
                 return {"status": "available", "value": value}
+        except ProviderCredentialAccessBlocked as exc:
+            self._blocked_candidates[provider_id] = exc.candidate
+            self._states[provider_id] = ("blocked", "")
+            return {"status": "blocked"}
         except RuntimeError:
             self._states[provider_id] = ("blocked", "")
             return {"status": "blocked"}
+        self._blocked_candidates.pop(provider_id, None)
         self._states[provider_id] = ("missing", "")
         return {"status": "missing"}
+
+    def _retry(self, provider_id: str) -> dict[str, str]:
+        candidate = self._blocked_candidates.get(provider_id)
+        if candidate is None:
+            self._states.pop(provider_id, None)
+            discovered = self._read(provider_id, retry=False)
+            if discovered["status"] != "blocked":
+                return discovered
+            candidate = self._blocked_candidates.get(provider_id)
+            if candidate is None:
+                return discovered
+        try:
+            with self._keychain_lock:
+                with oskeychain.native_user_interaction():
+                    value = self._credential_store.retry_candidate(
+                        provider_id,
+                        candidate,
+                    )
+                if value:
+                    value = self._credential_store.adopt_candidate(
+                        provider_id,
+                        candidate,
+                        value,
+                    )
+        except ProviderCredentialAccessBlocked as exc:
+            self._blocked_candidates[provider_id] = exc.candidate
+            self._states[provider_id] = ("blocked", "")
+            return {"status": "blocked"}
+        except RuntimeError:
+            self._states[provider_id] = ("blocked", "")
+            return {"status": "blocked"}
+        self._blocked_candidates.pop(provider_id, None)
+        if value:
+            self._states[provider_id] = ("available", value)
+            return {"status": "available", "value": value}
+        self._states.pop(provider_id, None)
+        return self._read(provider_id, retry=False)
 
     def _store(self, provider_id: str, value: str) -> dict[str, str]:
         try:
@@ -97,6 +142,7 @@ class ProviderCredentialBroker:
         except RuntimeError:
             self._states[provider_id] = ("blocked", "")
             return {"status": "blocked"}
+        self._blocked_candidates.pop(provider_id, None)
         self._states[provider_id] = ("available", value)
         return {"status": "available"}
 
@@ -108,8 +154,10 @@ class ProviderCredentialBroker:
             self._states[provider_id] = ("blocked", "")
             return {"status": "blocked"}
         if not value:
+            self._blocked_candidates.pop(provider_id, None)
             self._states[provider_id] = ("missing", "")
             return {"status": "missing"}
+        self._blocked_candidates.pop(provider_id, None)
         self._states[provider_id] = ("available", value)
         return {"status": "available", "value": value}
 
@@ -122,6 +170,7 @@ class ProviderCredentialBroker:
         except RuntimeError:
             self._states[provider_id] = ("blocked", "")
             return {"status": "blocked"}
+        self._blocked_candidates.pop(provider_id, None)
         self._states[provider_id] = ("missing", "")
         return {"status": "missing"}
 
