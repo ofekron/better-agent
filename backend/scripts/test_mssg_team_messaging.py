@@ -294,6 +294,7 @@ def test_run_delegate_task_submits_delegated_task_wrapper(monkeypatch):
     )
     assert "</delegated-task>" in captured["params"]["cli_prompt"]
     assert "<mssg" not in captured["params"]["cli_prompt"]
+    assert f'inbox(recipient_session_id="{sender["id"]}"' in captured["params"]["cli_prompt"]
     queued = session_manager.get(target["id"])["queued_prompts"]
     assert queued[0]["source"] == team_messaging.DELEGATE_TASK_SOURCE
     assert queued[0]["cli_prompt"].startswith(
@@ -737,7 +738,7 @@ def test_submit_team_message_explicit_model_overrides_preference(monkeypatch):
     assert captured["params"]["model"] == "explicit-model"
 
 
-def test_submit_team_message_can_expect_async_mssg_response(monkeypatch):
+def test_submit_team_message_can_expect_async_inbox_response(monkeypatch):
     sender = session_manager.create(
         name="manager",
         cwd="/repo",
@@ -763,15 +764,17 @@ def test_submit_team_message_can_expect_async_mssg_response(monkeypatch):
         target_session_id=target["id"],
         message="run test",
         detach=True,
-        expect_mssg_response=True,
+        expect_inbox_response=True,
     ))
 
     metadata = captured["params"]["team_message"]["metadata"]
     assert result["expects_response"] is True
     assert metadata["expects_response"] is True
-    assert metadata["response_mode"] == team_messaging.MSSG_RESPONSE_MODE
+    assert metadata["response_mode"] == team_messaging.INBOX_RESPONSE_MODE
     assert 'expects_response="true"' in captured["params"]["cli_prompt"]
-    assert f'mssg(target_session_id="{sender["id"]}"' in captured["params"]["cli_prompt"]
+    assert f'inbox(recipient_session_id="{sender["id"]}"' in captured["params"]["cli_prompt"]
+    assert "Use inbox for the final result" in captured["params"]["cli_prompt"]
+    assert "mssg(target_session_id=" not in captured["params"]["cli_prompt"]
 
 
 def test_submit_team_message_can_target_sub_session(monkeypatch):

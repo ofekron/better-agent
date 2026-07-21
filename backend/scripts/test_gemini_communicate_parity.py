@@ -158,7 +158,7 @@ def test_ask_async_mode_routes_to_ask_endpoint():
         "run in background",
         target_worker_pool="testape",
         pool_affinity_key="thread-1",
-        mode="continue_and_expect_mssg_back_async",
+        mode="continue_and_expect_inbox_back_async",
     )
     endpoint, payload, timeout = captured[0]
     assert endpoint == "/api/internal/ask"
@@ -166,7 +166,7 @@ def test_ask_async_mode_routes_to_ask_endpoint():
     assert payload["target_worker_pool"] == "testape"
     assert payload["pool_affinity_key"] == "thread-1"
     assert payload["message"] == "run in background"
-    assert payload["mode"] == "continue_and_expect_mssg_back_async"
+    assert payload["mode"] == "continue_and_expect_inbox_back_async"
     assert payload["provider_id"] is None
     assert payload["model"] == ""
     assert payload["reasoning_effort"] is None

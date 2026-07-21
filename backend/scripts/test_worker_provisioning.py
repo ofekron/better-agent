@@ -392,7 +392,7 @@ def test_worker_pool_enqueue_dispatches_to_idle_tagged_worker():
                 "tag": "review",
                 "sender_session_id": sender["id"],
                 "prompt": "review this",
-                "expect_mssg_response": True,
+                "expect_inbox_response": True,
                 "pool_affinity_key": "thread-1",
             },
             headers={"X-Internal-Token": main.coordinator.internal_token},
@@ -405,7 +405,7 @@ def test_worker_pool_enqueue_dispatches_to_idle_tagged_worker():
         assert dispatched[0]["sender_session_id"] == sender["id"]
         assert dispatched[0]["message"] == "review this"
         assert dispatched[0]["detach"] is True
-        assert dispatched[0]["expect_mssg_response"] is True
+        assert dispatched[0]["expect_inbox_response"] is True
         assert dispatched[0]["target_selector"] == {
             "kind": "pool",
             "value": "review",
@@ -488,7 +488,7 @@ def test_worker_pool_wait_ask_retry_reuses_existing_queue_item():
         "tag": "review",
         "sender_session_id": "sender-retry",
         "prompt": "answer existing",
-        "expect_mssg_response": True,
+        "expect_inbox_response": False,
         "pool_affinity_key": "",
         "provider_id": "",
         "model": "",

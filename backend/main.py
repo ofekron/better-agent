@@ -40,7 +40,7 @@ raise_fd_limit()
 
 from capability_contexts import normalize_capability_contexts
 from communication_modes import (
-    ASK_MODE_CONTINUE_AND_EXPECT_MSSG_BACK_ASYNC,
+    ASK_MODE_CONTINUE_AND_EXPECT_INBOX_BACK_ASYNC,
     normalize_ask_mode,
 )
 from backend_instance_lock import (
@@ -14882,7 +14882,7 @@ async def _handle_internal_mssg(body: dict) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-async def _ask_continue_and_expect_mssg_back_async(
+async def _ask_continue_and_expect_inbox_back_async(
     body: dict,
     sender_session_id: str,
     message: str,
@@ -14908,7 +14908,7 @@ async def _ask_continue_and_expect_mssg_back_async(
                 tag=target_worker_pool,
                 sender_session_id=sender_session_id,
                 prompt=message,
-                expect_mssg_response=True,
+                expect_inbox_response=True,
                 pool_affinity_key=pool_affinity_key,
                 provider_id=requested_provider_id,
                 model=requested_model,
@@ -14924,7 +14924,7 @@ async def _ask_continue_and_expect_mssg_back_async(
         target_session_id=target_session_id,
         message=message,
         detach=True,
-        expect_mssg_response=True,
+        expect_inbox_response=True,
         provider_id=requested_provider_id,
         model=requested_model,
         reasoning_effort=str(body.get("reasoning_effort") or "").strip(),
@@ -14969,7 +14969,7 @@ async def _ask_wait_and_grab_last_assistant_mssg_in_turn(
                 tag=target_worker_pool,
                 sender_session_id=sender_session_id,
                 prompt=message,
-                expect_mssg_response=True,
+                expect_inbox_response=False,
                 pool_affinity_key=pool_affinity_key,
                 provider_id=requested_provider_id,
                 model=requested_model,
@@ -15022,8 +15022,8 @@ async def _handle_internal_ask(body: dict) -> dict[str, Any]:
             requested_model,
         )
         mode = normalize_ask_mode(body.get("mode"))
-        if mode == ASK_MODE_CONTINUE_AND_EXPECT_MSSG_BACK_ASYNC:
-            return await _ask_continue_and_expect_mssg_back_async(
+        if mode == ASK_MODE_CONTINUE_AND_EXPECT_INBOX_BACK_ASYNC:
+            return await _ask_continue_and_expect_inbox_back_async(
                 body,
                 sender_session_id,
                 message,
@@ -16836,7 +16836,7 @@ async def internal_enqueue_worker_pool_prompt(
         tag=tag,
         sender_session_id=sender_session_id,
         prompt=prompt,
-        expect_mssg_response=bool((body or {}).get("expect_mssg_response")),
+        expect_inbox_response=bool((body or {}).get("expect_inbox_response")),
         pool_affinity_key=_api_optional_pool_affinity_key((body or {}).get("pool_affinity_key")),
     )
     return {"success": True, **queued}
@@ -16847,7 +16847,7 @@ async def _enqueue_worker_pool_message(
     tag: str,
     sender_session_id: str,
     prompt: str,
-    expect_mssg_response: bool,
+    expect_inbox_response: bool,
     pool_affinity_key: str = "",
     provider_id: str = "",
     model: str = "",
@@ -16863,7 +16863,7 @@ async def _enqueue_worker_pool_message(
         "tag": tag,
         "sender_session_id": sender_session_id,
         "prompt": prompt,
-        "expect_mssg_response": expect_mssg_response,
+        "expect_inbox_response": expect_inbox_response,
         "pool_affinity_key": pool_affinity_key,
         "provider_id": provider_id,
         "model": model,
@@ -16937,7 +16937,7 @@ async def _process_worker_pool_queue(tag: str) -> None:
                     target_session_id=target["agent_session_id"],
                     message=str(item.get("prompt") or ""),
                     detach=True,
-                    expect_mssg_response=bool(item.get("expect_mssg_response")),
+                    expect_inbox_response=bool(item.get("expect_inbox_response")),
                     provider_id=str(item.get("provider_id") or ""),
                     model=str(item.get("model") or ""),
                     reasoning_effort=str(item.get("reasoning_effort") or ""),

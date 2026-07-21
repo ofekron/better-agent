@@ -15,7 +15,7 @@ and fork-for-review. A description-parity test locks these against drift.
 from __future__ import annotations
 
 from communication_modes import (
-    ASK_MODE_CONTINUE_AND_EXPECT_MSSG_BACK_ASYNC,
+    ASK_MODE_CONTINUE_AND_EXPECT_INBOX_BACK_ASYNC,
     ASK_MODE_WAIT_AND_GRAB_LAST_ASSISTANT_MSSG_IN_TURN,
 )
 
@@ -43,8 +43,8 @@ ASK_DESCRIPTION = (
     "Message an existing session. mode='"
     f"{ASK_MODE_WAIT_AND_GRAB_LAST_ASSISTANT_MSSG_IN_TURN}' waits for its turn to finish "
     "and returns the reply inline, in this turn; mode='"
-    f"{ASK_MODE_CONTINUE_AND_EXPECT_MSSG_BACK_ASYNC}' continues it and returns "
-    "immediately while expecting a later mssg back. run_mode='direct' (default) "
+    f"{ASK_MODE_CONTINUE_AND_EXPECT_INBOX_BACK_ASYNC}' continues it and returns "
+    "immediately while expecting a later reply in your inbox. run_mode='direct' (default) "
     "runs the real session; "
     "run_mode='fork' runs an ISOLATED branch that does NOT mutate the session's "
     "durable context — use fork for audits/reviews/checks (set ephemeral=true to "
@@ -64,7 +64,7 @@ DELEGATE_TASK_DESCRIPTION = (
     "off-topic work so you stay focused. Not for reviews — use ask(run_mode='fork'). "
     "Pass provider_id only when auto-routing should be constrained to that provider; provider_id='ANY' keeps cross-provider search. "
     "Distinct from the session-bridge delegate_to_session tool, which waits for the "
-    "result." + _PROVIDER_SELECTOR_NOTE
+    "result. Detached results are delivered to the caller's inbox." + _PROVIDER_SELECTOR_NOTE
 )
 
 CREATE_SESSION_DESCRIPTION = (

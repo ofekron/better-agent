@@ -13,7 +13,7 @@ from env_compat import get_env, require_env
 from mcp.server.fastmcp import FastMCP
 
 from communication_modes import (
-    ASK_MODE_CONTINUE_AND_EXPECT_MSSG_BACK_ASYNC,
+    ASK_MODE_CONTINUE_AND_EXPECT_INBOX_BACK_ASYNC,
     DEFAULT_ASK_MODE,
     normalize_ask_mode,
 )
@@ -306,7 +306,7 @@ def ask_response(
         mode = normalize_ask_mode(mode)
     except ValueError as exc:
         return {"success": False, "error": str(exc)}
-    if mode == ASK_MODE_CONTINUE_AND_EXPECT_MSSG_BACK_ASYNC and run_mode == "fork":
+    if mode == ASK_MODE_CONTINUE_AND_EXPECT_INBOX_BACK_ASYNC and run_mode == "fork":
         return {"success": False, "error": "async ask mode requires run_mode='direct'"}
     if run_mode == "fork" and not target_session_id:
         return {"success": False, "error": "run_mode='fork' requires target_session_id"}
@@ -522,8 +522,8 @@ def build_server() -> FastMCP:
         instructions=(
             "Team tools for Better Agent sessions: mssg (queued message, "
             "fire-and-forget), ask (waits by default; mode="
-            "'continue_and_expect_mssg_back_async' continues and expects a "
-            "later mssg reply), delegate_task "
+            "'continue_and_expect_inbox_back_async' continues and expects a "
+            "later inbox reply), delegate_task "
             "(detached handoff — offload "
             "heavy tangential/off-topic real work so you can remain focused; "
             "not for reviews; auto-routing may run session search and has a "

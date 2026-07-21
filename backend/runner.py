@@ -53,7 +53,7 @@ import chat_store
 import inbox_store
 import extension_store
 from communication_modes import (
-    ASK_MODE_CONTINUE_AND_EXPECT_MSSG_BACK_ASYNC,
+    ASK_MODE_CONTINUE_AND_EXPECT_INBOX_BACK_ASYNC,
     ASK_MODE_WAIT_AND_GRAB_LAST_ASSISTANT_MSSG_IN_TURN,
     normalize_ask_mode,
 )
@@ -883,12 +883,12 @@ _ASK_INPUT_SCHEMA: dict[str, Any] = {
             "type": "string",
             "enum": [
                 ASK_MODE_WAIT_AND_GRAB_LAST_ASSISTANT_MSSG_IN_TURN,
-                ASK_MODE_CONTINUE_AND_EXPECT_MSSG_BACK_ASYNC,
+                ASK_MODE_CONTINUE_AND_EXPECT_INBOX_BACK_ASYNC,
             ],
             "description": (
                 "wait_and_grab_last_assistant_mssg_in_turn waits and returns the reply; "
-                "continue_and_expect_mssg_back_async returns after enqueue and "
-                "expects a later mssg back."
+                "continue_and_expect_inbox_back_async returns after enqueue and "
+                "expects a later reply in the caller's inbox."
             ),
         },
         "worker_description": {
@@ -2030,7 +2030,7 @@ def _build_ask_tool(
                 "content": [{"type": "text", "text": "run_mode must be 'direct' or 'fork'"}],
                 "is_error": True,
             }
-        if mode == ASK_MODE_CONTINUE_AND_EXPECT_MSSG_BACK_ASYNC and run_mode == "fork":
+        if mode == ASK_MODE_CONTINUE_AND_EXPECT_INBOX_BACK_ASYNC and run_mode == "fork":
             return {
                 "content": [{"type": "text", "text": "async ask mode requires run_mode='direct'"}],
                 "is_error": True,
@@ -2119,11 +2119,11 @@ def _build_ask_tool(
                 backend_url=backend_url,
                 internal_token=internal_token,
                 url_path="/api/internal/ask",
-                timeout=30 if mode == ASK_MODE_CONTINUE_AND_EXPECT_MSSG_BACK_ASYNC else _DELEGATE_HTTP_TIMEOUT,
+                timeout=30 if mode == ASK_MODE_CONTINUE_AND_EXPECT_INBOX_BACK_ASYNC else _DELEGATE_HTTP_TIMEOUT,
                 non_json_t_key="runner.mssg_non_json",
                 log_prefix="ask POST",
                 backoff_cap=60.0,
-                recover=(None if mode == ASK_MODE_CONTINUE_AND_EXPECT_MSSG_BACK_ASYNC else lambda: _recover_ask_result(ask_id)),
+                recover=(None if mode == ASK_MODE_CONTINUE_AND_EXPECT_INBOX_BACK_ASYNC else lambda: _recover_ask_result(ask_id)),
             )
 
         try:

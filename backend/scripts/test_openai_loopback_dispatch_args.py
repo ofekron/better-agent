@@ -234,7 +234,7 @@ def test_real_ask_async_mode_accepts_dispatched_args() -> None:
                     "target_worker_pool": "testape",
                     "pool_affinity_key": "thread-1",
                     "message": "run async",
-                    "mode": "continue_and_expect_mssg_back_async",
+                    "mode": "continue_and_expect_inbox_back_async",
                 }
             ),
         }
@@ -265,7 +265,7 @@ def test_real_ask_async_mode_accepts_dispatched_args() -> None:
     assert captured[0][1]["target_worker_pool"] == "testape"
     assert captured[0][1]["pool_affinity_key"] == "thread-1"
     assert captured[0][1]["message"] == "run async"
-    assert captured[0][1]["mode"] == "continue_and_expect_mssg_back_async"
+    assert captured[0][1]["mode"] == "continue_and_expect_inbox_back_async"
 
 
 def test_real_ensure_named_worker_handler_accepts_dispatched_args() -> None:

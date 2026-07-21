@@ -34,12 +34,12 @@ SPEC = {
     "stop_turn": (otd.STOP_TURN_DESCRIPTION, ["created", "blocked"]),
     "ask": (
         otd.ASK_DESCRIPTION,
-        ["wait_and_grab_last_assistant_mssg_in_turn", "continue_and_expect_mssg_back_async", "fork",
+        ["wait_and_grab_last_assistant_mssg_in_turn", "continue_and_expect_inbox_back_async", "fork",
          "delegate_to_session"],
     ),
     "delegate_task": (
         otd.DELEGATE_TASK_DESCRIPTION,
-        ["DETACHED", "does NOT hold your turn", "delegate_to_session"],
+        ["DETACHED", "does NOT hold your turn", "inbox", "delegate_to_session"],
     ),
     "create_session": (otd.CREATE_SESSION_DESCRIPTION, ["STANDALONE", "create_worker"]),
     "create_sub_session": (otd.CREATE_SUB_SESSION_DESCRIPTION, ["hidden"]),

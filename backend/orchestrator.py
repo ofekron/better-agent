@@ -1462,7 +1462,7 @@ class Coordinator:
         target_session_id: str,
         message: str,
         detach: bool = False,
-        expect_mssg_response: bool = False,
+        expect_inbox_response: bool = False,
         provider_id: str = "",
         model: str = "",
         reasoning_effort: str = "",
@@ -1506,11 +1506,11 @@ class Coordinator:
             if isinstance(target.get("disallowed_tools"), list)
             else None
         )
-        if expect_mssg_response:
+        if expect_inbox_response:
             if collapse_key:
                 raise ValueError("collapse_key is not supported for response-waiting messages")
             metadata["expects_response"] = True
-            metadata["response_mode"] = team_messaging.MSSG_RESPONSE_MODE
+            metadata["response_mode"] = team_messaging.INBOX_RESPONSE_MODE
         message_source = source or team_messaging.source_for_message_route(sender, target)
         if message_source not in team_messaging.MESSAGE_SOURCES:
             raise ValueError("source must be a team message source")
@@ -1583,7 +1583,7 @@ class Coordinator:
                     "success": True,
                     "queued_id": collapsed_id,
                     "target_session_id": target_session_id,
-                    "expects_response": expect_mssg_response,
+                    "expects_response": expect_inbox_response,
                     "collapsed": True,
                 }
         panel = await self._start_team_message_panel(
@@ -1633,7 +1633,7 @@ class Coordinator:
             "success": True,
             "queued_id": queue_item_id,
             "target_session_id": target_session_id,
-            "expects_response": expect_mssg_response,
+            "expects_response": expect_inbox_response,
         }
 
     async def collapse_queued_prompt_take_latest(
@@ -2060,6 +2060,7 @@ class Coordinator:
         await self.submit_team_message(
             sender_session_id=caller, target_session_id=target,
             message=task, detach=True,
+            expect_inbox_response=True,
             source=team_messaging.DELEGATE_TASK_SOURCE,
             provider_id=run_config.get("provider_id") or "",
             model=run_config.get("model") or "",

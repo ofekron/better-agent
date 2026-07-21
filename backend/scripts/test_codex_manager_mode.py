@@ -408,7 +408,7 @@ async def _exercise_ask_async_mode_handler(failures: list[str]) -> None:
             "arguments": {
                 "target_session_id": "worker-1",
                 "message": "run async",
-                "mode": "continue_and_expect_mssg_back_async",
+                "mode": "continue_and_expect_inbox_back_async",
             }
         })
     finally:
@@ -420,7 +420,7 @@ async def _exercise_ask_async_mode_handler(failures: list[str]) -> None:
     check(payload["sender_session_id"] == "sender-1", "ask async mode payload has sender", failures)
     check(payload["target_session_id"] == "worker-1", "ask async mode payload has target", failures)
     check(payload["message"] == "run async", "ask async mode payload has message", failures)
-    check(payload["mode"] == "continue_and_expect_mssg_back_async", "ask async mode payload has mode", failures)
+    check(payload["mode"] == "continue_and_expect_inbox_back_async", "ask async mode payload has mode", failures)
 
 
 async def _exercise_create_session_handler(failures: list[str]) -> None:

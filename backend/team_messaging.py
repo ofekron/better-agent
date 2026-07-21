@@ -17,7 +17,7 @@ ASK_SOURCE = "team_ask"
 UPDATE_SOURCE = "update"
 DELEGATE_TASK_SOURCE = "delegate_task"
 MESSAGE_SOURCES = (SOURCE, ASK_SOURCE, UPDATE_SOURCE, DELEGATE_TASK_SOURCE)
-MSSG_RESPONSE_MODE = "mssg"
+INBOX_RESPONSE_MODE = "inbox"
 COLLAPSE_POLICY_TAKE_LATEST = "take_latest"
 COLLAPSE_POLICIES = (COLLAPSE_POLICY_TAKE_LATEST,)
 
@@ -157,13 +157,13 @@ def format_team_message_prompt(
         )
     sender_display_line = _sender_display_line(metadata)
     response_contract = ""
-    if metadata.get("response_mode") == MSSG_RESPONSE_MODE and metadata.get("sender_session_id"):
+    if metadata.get("response_mode") == INBOX_RESPONSE_MODE and metadata.get("sender_session_id"):
         response_contract = (
             "\n\n<response_contract>\n"
             "When the task is complete, call "
-            f'mssg(target_session_id="{escape(str(metadata["sender_session_id"]), quote=True)}", '
+            f'inbox(recipient_session_id="{escape(str(metadata["sender_session_id"]), quote=True)}", '
             "message=<result>) to send the result back to the sender.\n"
-            "Use mssg for the final result even though this incoming message is asynchronous.\n"
+            "Use inbox for the final result because this incoming message is asynchronous.\n"
             "</response_contract>"
         )
     team_context = _target_team_context(target_session_id)

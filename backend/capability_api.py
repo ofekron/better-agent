@@ -492,7 +492,7 @@ class _WorkerPoolEnqueuePayload(_StrictPayload):
     sender_session_id: str = Field(min_length=1)
     prompt: str = Field(min_length=1)
     pool_affinity_key: str = ""
-    expect_mssg_response: bool = False
+    expect_inbox_response: bool = False
 
 
 class _WorkerFromSessionPayload(_StrictPayload):

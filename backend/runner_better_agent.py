@@ -51,7 +51,7 @@ from typing import Any, AsyncIterator, Awaitable, Callable, Optional
 import httpx
 
 from communication_modes import (
-    ASK_MODE_CONTINUE_AND_EXPECT_MSSG_BACK_ASYNC,
+    ASK_MODE_CONTINUE_AND_EXPECT_INBOX_BACK_ASYNC,
     ASK_MODE_WAIT_AND_GRAB_LAST_ASSISTANT_MSSG_IN_TURN,
     normalize_ask_mode,
 )
@@ -1015,7 +1015,7 @@ _ASK_INPUT_SCHEMA: dict[str, Any] = {
             "type": "string",
             "enum": [
                 ASK_MODE_WAIT_AND_GRAB_LAST_ASSISTANT_MSSG_IN_TURN,
-                ASK_MODE_CONTINUE_AND_EXPECT_MSSG_BACK_ASYNC,
+                ASK_MODE_CONTINUE_AND_EXPECT_INBOX_BACK_ASYNC,
             ],
         },
         "worker_description": {"type": "string"},
@@ -1858,7 +1858,7 @@ def _build_loopback_tool_handlers(
             return _dynamic_tool_text_result("one target and message are required", success=False)
         if run_mode not in ("direct", "fork"):
             return _dynamic_tool_text_result("run_mode must be 'direct' or 'fork'", success=False)
-        if mode == ASK_MODE_CONTINUE_AND_EXPECT_MSSG_BACK_ASYNC and run_mode == "fork":
+        if mode == ASK_MODE_CONTINUE_AND_EXPECT_INBOX_BACK_ASYNC and run_mode == "fork":
             return _dynamic_tool_text_result("async ask mode requires run_mode='direct'", success=False)
         ephemeral = bool(args.get("ephemeral"))
         if ephemeral and run_mode != "fork":
@@ -1899,7 +1899,7 @@ def _build_loopback_tool_handlers(
             url_path = "/api/internal/ask"
             recover = (
                 None
-                if mode == ASK_MODE_CONTINUE_AND_EXPECT_MSSG_BACK_ASYNC
+                if mode == ASK_MODE_CONTINUE_AND_EXPECT_INBOX_BACK_ASYNC
                 else lambda: _recover_ask_result(ask_id)
             )
         try:
@@ -1909,7 +1909,7 @@ def _build_loopback_tool_handlers(
                 backend_url=backend_url,
                 internal_token=internal_token,
                 url_path=url_path,
-                timeout_s=30.0 if mode == ASK_MODE_CONTINUE_AND_EXPECT_MSSG_BACK_ASYNC else DELEGATE_HTTP_TIMEOUT_S,
+                timeout_s=30.0 if mode == ASK_MODE_CONTINUE_AND_EXPECT_INBOX_BACK_ASYNC else DELEGATE_HTTP_TIMEOUT_S,
                 recover=recover,
             )
         except Exception as e:
