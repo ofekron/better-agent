@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import threading
+from dataclasses import dataclass
 from multiprocessing import Pipe
 from typing import Literal
 
@@ -18,11 +19,26 @@ CredentialStatus = Literal["unknown", "available", "missing", "blocked"]
 _MAX_FRAME_BYTES = 128 * 1024
 
 
+@dataclass(frozen=True)
+class _ProviderCredentialState:
+    status: CredentialStatus
+    value: str = ""
+    blocked_candidate: ProviderCredentialCandidate | None = None
+
+    def response(self) -> dict[str, str]:
+        response = {"status": self.status}
+        if self.status == "available":
+            response["value"] = self.value
+        return response
+
+
+_UNKNOWN_CREDENTIAL_STATE = _ProviderCredentialState("unknown")
+
+
 class ProviderCredentialBroker:
     def __init__(self) -> None:
         oskeychain.disable_native_user_interaction()
-        self._states: dict[str, tuple[CredentialStatus, str]] = {}
-        self._blocked_candidates: dict[str, ProviderCredentialCandidate] = {}
+        self._states: dict[str, _ProviderCredentialState] = {}
         self._locks: dict[str, threading.Lock] = {}
         self._locks_guard = threading.Lock()
         self._keychain_lock = threading.Lock()
@@ -33,7 +49,6 @@ class ProviderCredentialBroker:
 
     def clear(self) -> None:
         self._states.clear()
-        self._blocked_candidates.clear()
         self._locks.clear()
 
     def _provider_lock(self, provider_id: str) -> threading.Lock:
@@ -53,13 +68,12 @@ class ProviderCredentialBroker:
         if any(character in provider_id for character in "\0\r\n"):
             raise ValueError("invalid provider_id")
         if op == "status":
-            status, _ = self._states.get(provider_id, ("unknown", ""))
-            return {"status": status}
+            return {"status": self._state(provider_id).status}
         with self._provider_lock(provider_id):
             if op == "read":
-                return self._read(provider_id, retry=False)
+                return self._read(provider_id)
             if op == "retry":
-                return self._read(provider_id, retry=True)
+                return self._retry(provider_id)
             if op == "migrate_flat":
                 return self._migrate_flat(provider_id)
             if op == "store":
@@ -71,41 +85,33 @@ class ProviderCredentialBroker:
                 return self._delete(provider_id)
         raise ValueError("unsupported operation")
 
-    def _read(self, provider_id: str, *, retry: bool) -> dict[str, str]:
-        if retry:
-            return self._retry(provider_id)
-        status, value = self._states.get(provider_id, ("unknown", ""))
-        if status != "unknown":
-            response = {"status": status}
-            if status == "available":
-                response["value"] = value
-            return response
+    def _read(self, provider_id: str) -> dict[str, str]:
+        state = self._state(provider_id)
+        if state.status != "unknown":
+            return state.response()
         try:
             with self._keychain_lock:
                 value = self._credential_store.read(provider_id)
             if value:
-                self._blocked_candidates.pop(provider_id, None)
-                self._states[provider_id] = ("available", value)
-                return {"status": "available", "value": value}
+                return self._remember(provider_id, "available", value=value)
         except ProviderCredentialAccessBlocked as exc:
-            self._blocked_candidates[provider_id] = exc.candidate
-            self._states[provider_id] = ("blocked", "")
-            return {"status": "blocked"}
+            return self._remember(
+                provider_id,
+                "blocked",
+                blocked_candidate=exc.candidate,
+            )
         except RuntimeError:
-            self._states[provider_id] = ("blocked", "")
-            return {"status": "blocked"}
-        self._blocked_candidates.pop(provider_id, None)
-        self._states[provider_id] = ("missing", "")
-        return {"status": "missing"}
+            return self._remember(provider_id, "blocked")
+        return self._remember(provider_id, "missing")
 
     def _retry(self, provider_id: str) -> dict[str, str]:
-        candidate = self._blocked_candidates.get(provider_id)
+        candidate = self._state(provider_id).blocked_candidate
         if candidate is None:
             self._states.pop(provider_id, None)
-            discovered = self._read(provider_id, retry=False)
+            discovered = self._read(provider_id)
             if discovered["status"] != "blocked":
                 return discovered
-            candidate = self._blocked_candidates.get(provider_id)
+            candidate = self._state(provider_id).blocked_candidate
             if candidate is None:
                 return discovered
         try:
@@ -122,28 +128,29 @@ class ProviderCredentialBroker:
                         value,
                     )
         except ProviderCredentialAccessBlocked as exc:
-            self._blocked_candidates[provider_id] = exc.candidate
-            self._states[provider_id] = ("blocked", "")
-            return {"status": "blocked"}
+            return self._remember(
+                provider_id,
+                "blocked",
+                blocked_candidate=exc.candidate,
+            )
         except RuntimeError:
-            self._states[provider_id] = ("blocked", "")
-            return {"status": "blocked"}
-        self._blocked_candidates.pop(provider_id, None)
+            return self._remember(
+                provider_id,
+                "blocked",
+                blocked_candidate=candidate,
+            )
         if value:
-            self._states[provider_id] = ("available", value)
-            return {"status": "available", "value": value}
+            return self._remember(provider_id, "available", value=value)
         self._states.pop(provider_id, None)
-        return self._read(provider_id, retry=False)
+        return self._read(provider_id)
 
     def _store(self, provider_id: str, value: str) -> dict[str, str]:
         try:
             with self._keychain_lock:
                 self._credential_store.store(provider_id, value)
         except RuntimeError:
-            self._states[provider_id] = ("blocked", "")
-            return {"status": "blocked"}
-        self._blocked_candidates.pop(provider_id, None)
-        self._states[provider_id] = ("available", value)
+            return self._remember(provider_id, "blocked")
+        self._remember(provider_id, "available", value=value)
         return {"status": "available"}
 
     def _migrate_flat(self, provider_id: str) -> dict[str, str]:
@@ -151,28 +158,35 @@ class ProviderCredentialBroker:
             with self._keychain_lock:
                 value = self._credential_store.migrate_flat(provider_id)
         except RuntimeError:
-            self._states[provider_id] = ("blocked", "")
-            return {"status": "blocked"}
+            return self._remember(provider_id, "blocked")
         if not value:
-            self._blocked_candidates.pop(provider_id, None)
-            self._states[provider_id] = ("missing", "")
-            return {"status": "missing"}
-        self._blocked_candidates.pop(provider_id, None)
-        self._states[provider_id] = ("available", value)
-        return {"status": "available", "value": value}
+            return self._remember(provider_id, "missing")
+        return self._remember(provider_id, "available", value=value)
 
     def _delete(self, provider_id: str) -> dict[str, str]:
-        if self._states.get(provider_id, ("unknown", ""))[0] == "blocked":
+        if self._state(provider_id).status == "blocked":
             return {"status": "blocked"}
         try:
             with self._keychain_lock:
                 self._credential_store.delete(provider_id)
         except RuntimeError:
-            self._states[provider_id] = ("blocked", "")
-            return {"status": "blocked"}
-        self._blocked_candidates.pop(provider_id, None)
-        self._states[provider_id] = ("missing", "")
-        return {"status": "missing"}
+            return self._remember(provider_id, "blocked")
+        return self._remember(provider_id, "missing")
+
+    def _state(self, provider_id: str) -> _ProviderCredentialState:
+        return self._states.get(provider_id, _UNKNOWN_CREDENTIAL_STATE)
+
+    def _remember(
+        self,
+        provider_id: str,
+        status: CredentialStatus,
+        *,
+        value: str = "",
+        blocked_candidate: ProviderCredentialCandidate | None = None,
+    ) -> dict[str, str]:
+        state = _ProviderCredentialState(status, value, blocked_candidate)
+        self._states[provider_id] = state
+        return state.response()
 
 
 class ProviderCredentialSession:
