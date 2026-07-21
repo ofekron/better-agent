@@ -987,6 +987,12 @@ interface ExtensionConfigRow {
   permissions: ExtensionPermissionView[];
 }
 
+type PersonalHarnessFile = {
+  name: string;
+  content: string;
+  level: "global";
+};
+
 const KNOWN_EXTENSION_PERMISSIONS = [
   "session_state",
   "spawn_runs",
@@ -1140,6 +1146,8 @@ export function ExtensionUiSettingsSection() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [creatingPersonalHarness, setCreatingPersonalHarness] = useState(false);
+  const [personalHarnessFiles, setPersonalHarnessFiles] = useState<PersonalHarnessFile[]>([]);
+  const personalHarnessInputRef = useRef<HTMLInputElement | null>(null);
   const [deletingIds, setDeletingIds] = useState<Set<string>>(() => new Set());
   const [availableUpdates, setAvailableUpdates] = useState<Record<string, { availableVersion: string }>>({});
   const [updatingIds, setUpdatingIds] = useState<Set<string>>(() => new Set());
@@ -1583,6 +1591,34 @@ export function ExtensionUiSettingsSection() {
     [refresh, refreshUpdates, t],
   );
 
+  const loadPersonalHarnessFiles = useCallback(async (fileList: FileList | null) => {
+    const files = Array.from(fileList ?? []);
+    if (files.length === 0) return;
+    setError("");
+    try {
+      const loaded = await Promise.all(
+        files.map(async (file) => ({
+          name: file.name,
+          content: await file.text(),
+          level: "global" as const,
+        })),
+      );
+      setPersonalHarnessFiles((prev) => [...prev, ...loaded]);
+      if (personalHarnessInputRef.current) {
+        personalHarnessInputRef.current.value = "";
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : t("settings.extensionsPersonalHarnessFailed"));
+    }
+  }, [t]);
+
+  const clearPersonalHarnessFiles = useCallback(() => {
+    setPersonalHarnessFiles([]);
+    if (personalHarnessInputRef.current) {
+      personalHarnessInputRef.current.value = "";
+    }
+  }, []);
+
   const createPersonalHarness = useCallback(async () => {
     setCreatingPersonalHarness(true);
     setError("");
@@ -1590,6 +1626,11 @@ export function ExtensionUiSettingsSection() {
       const res = await fetch(`${API}/api/extensions/personal-harness`, {
         method: "POST",
         credentials: "include",
+        headers: personalHarnessFiles.length > 0 ? { "Content-Type": "application/json" } : undefined,
+        body:
+          personalHarnessFiles.length > 0
+            ? JSON.stringify({ instruction_files: personalHarnessFiles })
+            : undefined,
       });
       if (!res.ok) {
         let detail = "";
@@ -1602,12 +1643,13 @@ export function ExtensionUiSettingsSection() {
         throw new Error(detail || t("settings.extensionsPersonalHarnessFailed"));
       }
       await refresh();
+      clearPersonalHarnessFiles();
     } catch (e) {
       setError(e instanceof Error ? e.message : t("settings.extensionsPersonalHarnessFailed"));
     } finally {
       setCreatingPersonalHarness(false);
     }
-  }, [refresh, t]);
+  }, [clearPersonalHarnessFiles, personalHarnessFiles, refresh, t]);
 
   const normalizedSearch = search.trim().toLowerCase();
   const visibleRows = useMemo(() => {
@@ -1633,6 +1675,44 @@ export function ExtensionUiSettingsSection() {
   return (
     <div className="extension-ui-settings">
       <div className="extension-ui-settings-toolbar">
+        <input
+          ref={personalHarnessInputRef}
+          className="extension-ui-settings-personal-harness-input"
+          type="file"
+          multiple
+          accept=".md,.markdown,.txt"
+          onChange={(event) => {
+            void loadPersonalHarnessFiles(event.currentTarget.files);
+          }}
+        />
+        <button
+          type="button"
+          className="btn-secondary extension-ui-settings-personal-harness"
+          disabled={creatingPersonalHarness}
+          onClick={() => personalHarnessInputRef.current?.click()}
+        >
+          <Icon name="folder-plus" size={13} />
+          {t("settings.extensionsPersonalHarnessAddFiles")}
+        </button>
+        {personalHarnessFiles.length > 0 && (
+          <div className="extension-ui-settings-personal-harness-files">
+            <span>
+              {t("settings.extensionsPersonalHarnessFilesSelected", {
+                count: personalHarnessFiles.length,
+              })}
+            </span>
+            <button
+              type="button"
+              className="icon-btn"
+              aria-label={t("settings.extensionsPersonalHarnessClearFiles")}
+              title={t("settings.extensionsPersonalHarnessClearFiles")}
+              disabled={creatingPersonalHarness}
+              onClick={clearPersonalHarnessFiles}
+            >
+              <Icon name="x" size={13} />
+            </button>
+          </div>
+        )}
         <button
           type="button"
           className="btn-secondary extension-ui-settings-personal-harness"

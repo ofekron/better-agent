@@ -1978,6 +1978,46 @@ def test_create_personal_harness_extension_snapshots_instructions_and_skills() -
             os.environ["CODEX_HOME"] = old_codex_home
 
 
+def test_create_personal_harness_extension_adds_instruction_files() -> None:
+    record = personal_harness_extension.create(
+        project_paths=[],
+        instruction_files=[
+            {"name": "global-rules.md", "content": "global file rule\n", "level": "global"},
+            {"name": "project-rules.md", "content": "project file rule\n", "level": "project"},
+        ],
+    )
+    try:
+        root = extension_store.runtime_package_root(record["manifest"]["id"])
+        if root is None:
+            raise AssertionError("personal harness install path missing")
+        global_text = (root / "instructions" / "global.md").read_text(encoding="utf-8")
+        project_text = (root / "instructions" / "project.md").read_text(encoding="utf-8")
+        if "global-rules.md" not in global_text or "global file rule" not in global_text:
+            raise AssertionError(global_text)
+        if "project-rules.md" not in project_text or "project file rule" not in project_text:
+            raise AssertionError(project_text)
+    finally:
+        try:
+            extension_store.uninstall(personal_harness_extension.PERSONAL_HARNESS_EXTENSION_ID)
+        except Exception:
+            pass
+
+
+def test_create_personal_harness_extension_rejects_invalid_instruction_file_level() -> None:
+    try:
+        personal_harness_extension.create(
+            project_paths=[],
+            instruction_files=[
+                {"name": "rules.md", "content": "rule\n", "level": "workspace"},
+            ],
+        )
+    except extension_store.ExtensionError as exc:
+        if "level must be global or project" not in str(exc):
+            raise AssertionError(str(exc)) from exc
+    else:
+        raise AssertionError("invalid instruction file level was accepted")
+
+
 def test_runtime_ready_only_spawn_runs_requires_default_session_llm() -> None:
     import config_store
 

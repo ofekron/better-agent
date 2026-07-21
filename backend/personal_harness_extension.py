@@ -17,21 +17,29 @@ import extension_store
 PERSONAL_HARNESS_EXTENSION_ID = "personal.harness"
 
 _ID_RE = re.compile(r"^[a-z0-9][a-z0-9_.-]{2,79}$")
+_MAX_INSTRUCTION_FILE_COUNT = 20
+_MAX_INSTRUCTION_FILE_BYTES = 512 * 1024
 _MANAGED_BLOCK_RE = re.compile(
     r"<!-- BEGIN better-(?:agent|claude):[^\n]*?-->.*?<!-- END better-(?:agent|claude):[^\n]*?-->",
     re.DOTALL,
 )
 
 
-def create(*, project_paths: list[str] | None = None) -> dict[str, Any]:
+def create(
+    *,
+    project_paths: list[str] | None = None,
+    instruction_files: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     projects = _project_paths(project_paths)
+    extra_global_content = _instruction_file_content("global", instruction_files)
+    extra_project_content = _instruction_file_content("project", instruction_files)
     tmp_parent = ba_home() / "extensions" / "tmp"
     tmp_parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="personal-harness-", dir=tmp_parent) as tmp:
         package_dir = Path(tmp) / "package"
         package_dir.mkdir(parents=True)
-        global_content = _instruction_content("global", projects)
-        project_content = _instruction_content("project", projects)
+        global_content = _join_content(_instruction_content("global", projects), extra_global_content)
+        project_content = _join_content(_instruction_content("project", projects), extra_project_content)
         skills = _copy_skills(package_dir, projects)
         instructions: list[dict[str, str]] = []
         required_paths = ["better-agent-extension.json"]
@@ -170,6 +178,44 @@ def _instruction_paths(scope: str, projects: list[Path]) -> list[Path]:
 
 def _strip_managed_blocks(text: str) -> str:
     return re.sub(r"\n{3,}", "\n\n", _MANAGED_BLOCK_RE.sub("", text)).strip() + "\n"
+
+
+def _instruction_file_content(scope: str, instruction_files: list[dict[str, Any]] | None) -> str:
+    if not instruction_files:
+        return ""
+    if len(instruction_files) > _MAX_INSTRUCTION_FILE_COUNT:
+        raise extension_store.ExtensionError("Too many personal harness files")
+    sections: list[str] = []
+    for item in instruction_files:
+        if not isinstance(item, dict):
+            raise extension_store.ExtensionError("personal harness file entries must be objects")
+        item_scope = str(item.get("level") or "global").strip()
+        if item_scope not in {"global", "project"}:
+            raise extension_store.ExtensionError("personal harness file level must be global or project")
+        if item_scope != scope:
+            continue
+        name = _instruction_file_name(item.get("name"))
+        content = item.get("content")
+        if not isinstance(content, str):
+            raise extension_store.ExtensionError("personal harness file content must be text")
+        if len(content.encode("utf-8")) > _MAX_INSTRUCTION_FILE_BYTES:
+            raise extension_store.ExtensionError(f"personal harness file is too large: {name}")
+        cleaned = _strip_managed_blocks(content).strip()
+        if cleaned:
+            sections.append(f"# {name}\n\n{cleaned}")
+    return "\n\n".join(sections).strip() + ("\n" if sections else "")
+
+
+def _instruction_file_name(value: Any) -> str:
+    name = str(value or "").strip()
+    if not name:
+        raise extension_store.ExtensionError("personal harness file name is required")
+    return re.sub(r"[\r\n]+", " ", name)
+
+
+def _join_content(*parts: str) -> str:
+    sections = [part.strip() for part in parts if part.strip()]
+    return "\n\n".join(sections).strip() + ("\n" if sections else "")
 
 
 def _dedupe_existing_paths(paths: list[Path]) -> list[Path]:

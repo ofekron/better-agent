@@ -172,6 +172,16 @@ class InstallExtensionRequest(BaseModel):
     marketplace_metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class PersonalHarnessInstructionFile(BaseModel):
+    name: str
+    content: str
+    level: str = "global"
+
+
+class PersonalHarnessCreateRequest(BaseModel):
+    instruction_files: list[PersonalHarnessInstructionFile] = Field(default_factory=list)
+
+
 class SetEnabledRequest(BaseModel):
     enabled: bool
 
@@ -902,9 +912,13 @@ async def install_extension(req: InstallExtensionRequest):
 
 
 @router.post("/personal-harness")
-async def create_personal_harness_extension():
+async def create_personal_harness_extension(req: PersonalHarnessCreateRequest | None = None):
     try:
-        record = await asyncio.to_thread(personal_harness_extension.create)
+        files = [item.model_dump() for item in req.instruction_files] if req else None
+        record = await asyncio.to_thread(
+            personal_harness_extension.create,
+            instruction_files=files,
+        )
     except extension_store.ExtensionError as exc:
         raise _extension_error(exc) from exc
     await _broadcast_extensions_changed()
