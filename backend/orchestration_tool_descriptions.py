@@ -142,7 +142,7 @@ ENSURE_NAMED_WORKER_DESCRIPTION = (
 )
 
 LIST_AVAILABLE_PROVIDER_MODELS_DESCRIPTION = (
-    "List selectable Better Agent providers with their available models and "
-    "reasoning efforts. Inputs are optional fuzzy filters; omit all inputs to "
-    "return every non-suspended provider."
+    "List selectable Better Agent providers with their runners, available "
+    "models, and reasoning efforts. Inputs are optional fuzzy filters; omit "
+    "all inputs to return every non-suspended provider."
 )

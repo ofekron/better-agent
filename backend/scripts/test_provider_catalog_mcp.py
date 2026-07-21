@@ -33,9 +33,10 @@ def test_returns_all_non_suspended_providers() -> None:
     assert "Claude" in _names(result)
     assert "Codex" in _names(result)
     assert suspended["name"] not in _names(result)
+    assert all("runner" in provider for provider in result["providers"])
 
 
-def test_fuzzy_provider_model_and_effort_filters() -> None:
+def test_fuzzy_provider_model_effort_and_runner_filters() -> None:
     config_store.add_provider({
         "name": "Router Lab",
         "kind": "openai",
@@ -60,10 +61,18 @@ def test_fuzzy_provider_model_and_effort_filters() -> None:
     assert _names(effort_result) == {"Codex"}
     assert "xhigh" in effort_result["providers"][0]["reasoning_efforts"]
 
+    runner_result = available_provider_models_response(
+        provider="ruter",
+        runner="better agent",
+    )
+    assert _names(runner_result) == {"Router Lab"}
+    assert runner_result["providers"][0]["runner"] == "better_agent_runner"
+    assert runner_result["filters"]["runner"] == "better agent"
+
 
 def main() -> int:
     test_returns_all_non_suspended_providers()
-    test_fuzzy_provider_model_and_effort_filters()
+    test_fuzzy_provider_model_effort_and_runner_filters()
     print("provider catalog MCP: OK")
     return 0
 

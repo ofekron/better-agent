@@ -192,6 +192,27 @@ def test_stop_turn_schema_is_shared_across_providers():
     assert gemini_props == shared_props
 
 
+def test_provider_catalog_schema_is_shared_across_providers():
+    assert (
+        runner._LIST_AVAILABLE_PROVIDER_MODELS_INPUT_SCHEMA
+        is ots.LIST_AVAILABLE_PROVIDER_MODELS_INPUT_SCHEMA
+    )
+    assert (
+        runner_codex._LIST_AVAILABLE_PROVIDER_MODELS_INPUT_SCHEMA
+        is ots.LIST_AVAILABLE_PROVIDER_MODELS_INPUT_SCHEMA
+    )
+    tools = {t.name: t for t in communicate_mcp.build_server()._tool_manager.list_tools()}
+    gemini_props = set(
+        (tools["list_available_provider_models"].parameters or {})
+        .get("properties", {})
+        .keys()
+    )
+    shared_props = set(
+        ots.LIST_AVAILABLE_PROVIDER_MODELS_INPUT_SCHEMA["properties"].keys()
+    )
+    assert gemini_props == shared_props
+
+
 # ---------------------------------------------------------------------------
 # S5 — Builtin MCP registry: equivalent reserved-server set across providers.
 # ---------------------------------------------------------------------------

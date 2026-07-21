@@ -1648,9 +1648,10 @@ def _build_list_available_provider_models_tool():
         try:
             result = await asyncio.to_thread(
                 available_provider_models_response,
-                str(args.get("provider") or ""),
-                str(args.get("model") or ""),
-                str(args.get("reasoning_effort") or ""),
+                provider=str(args.get("provider") or ""),
+                model=str(args.get("model") or ""),
+                reasoning_effort=str(args.get("reasoning_effort") or ""),
+                runner=str(args.get("runner") or ""),
             )
         except Exception as e:
             return _tool_error_response("list_available_provider_models", e)
