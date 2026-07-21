@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { resolveRuntimeProfile } from "../src/components/NewSessionModal";
+import { effortsForRuntime } from "../src/components/modelPicker";
 import type { Provider } from "../src/types";
 
 function provider(overrides: Partial<Provider>): Provider {
@@ -14,6 +15,7 @@ function provider(overrides: Partial<Provider>): Provider {
     default_model: "default-model",
     runner: "native",
     runner_options: ["native"],
+    runner_profiles: [{ runner: "native", reasoning_efforts: ["low", "medium", "high", "xhigh"] }],
     suspended: false,
     reasoning_effort_options: ["low", "medium", "high", "xhigh"],
     default_reasoning_effort: "medium",
@@ -38,35 +40,35 @@ const MODELS = {
 describe("resolveRuntimeProfile model precedence", () => {
   it("main role: backend last_model outranks the locally-saved default", () => {
     const r = resolveRuntimeProfile(
-      { providerId: "p1", model: "saved-model", reasoningEffort: "high" },
+      { providerId: "p1", model: "saved-model", reasoningEffort: "high", runner: "native", permission: {} },
       [provider({ last_model: "last-model" })],
       "p1",
       MODELS,
       "main",
     );
-    expect(r).toEqual({ providerId: "p1", model: "last-model", reasoningEffort: "high", permission: {} });
+    expect(r).toEqual({ providerId: "p1", model: "last-model", reasoningEffort: "high", runner: "native", permission: {} });
   });
 
   it("worker role: saved default outranks backend last_model (main usage must not override the worker pick)", () => {
     const r = resolveRuntimeProfile(
-      { providerId: "p1", model: "saved-model", reasoningEffort: "high" },
+      { providerId: "p1", model: "saved-model", reasoningEffort: "high", runner: "native", permission: {} },
       [provider({ last_model: "last-model" })],
       "p1",
       MODELS,
       "worker",
     );
-    expect(r).toEqual({ providerId: "p1", model: "saved-model", reasoningEffort: "high", permission: {} });
+    expect(r).toEqual({ providerId: "p1", model: "saved-model", reasoningEffort: "high", runner: "native", permission: {} });
   });
 
   it("worker role falls back to last_model when nothing is saved for the provider", () => {
     const r = resolveRuntimeProfile(
-      { providerId: "other", model: "irrelevant", reasoningEffort: "low" },
+      { providerId: "other", model: "irrelevant", reasoningEffort: "low", runner: "native", permission: {} },
       [provider({ id: "p1", last_model: "last-model" })],
       "p1",
       MODELS,
       "worker",
     );
-    expect(r).toEqual({ providerId: "p1", model: "last-model", reasoningEffort: "medium", permission: {} });
+    expect(r).toEqual({ providerId: "p1", model: "last-model", reasoningEffort: "medium", runner: "native", permission: {} });
   });
 
   it.each(["main", "worker"] as const)(
@@ -79,7 +81,7 @@ describe("resolveRuntimeProfile model precedence", () => {
         MODELS,
         role,
       );
-      expect(r).toEqual({ providerId: "p1", model: "default-model", reasoningEffort: "medium", permission: {} });
+      expect(r).toEqual({ providerId: "p1", model: "default-model", reasoningEffort: "medium", runner: "native", permission: {} });
     },
   );
 
@@ -91,7 +93,7 @@ describe("resolveRuntimeProfile model precedence", () => {
       MODELS,
       "main",
     );
-    expect(r).toEqual({ providerId: "p1", model: "default-model", reasoningEffort: "medium", permission: {} });
+    expect(r).toEqual({ providerId: "p1", model: "default-model", reasoningEffort: "medium", runner: "native", permission: {} });
   });
 
   it("accepts last_model unvalidated when the model list is empty (not yet fetched)", () => {
@@ -102,12 +104,12 @@ describe("resolveRuntimeProfile model precedence", () => {
       {},
       "main",
     );
-    expect(r).toEqual({ providerId: "p1", model: "last-model", reasoningEffort: "medium", permission: {} });
+    expect(r).toEqual({ providerId: "p1", model: "last-model", reasoningEffort: "medium", runner: "native", permission: {} });
   });
 
   it("main role: backend last_reasoning_effort outranks the locally-saved effort", () => {
     const r = resolveRuntimeProfile(
-      { providerId: "p1", model: "saved-model", reasoningEffort: "low" },
+      { providerId: "p1", model: "saved-model", reasoningEffort: "low", runner: "native", permission: {} },
       [provider({ last_reasoning_effort: "high" })],
       "p1",
       MODELS,
@@ -118,12 +120,49 @@ describe("resolveRuntimeProfile model precedence", () => {
 
   it("worker role: saved effort outranks backend last_reasoning_effort", () => {
     const r = resolveRuntimeProfile(
-      { providerId: "p1", model: "saved-model", reasoningEffort: "low" },
+      { providerId: "p1", model: "saved-model", reasoningEffort: "low", runner: "native", permission: {} },
       [provider({ last_reasoning_effort: "high" })],
       "p1",
       MODELS,
       "worker",
     );
     expect(r.reasoningEffort).toBe("low");
+  });
+
+  it("keeps a supported saved runner and resolves effort from that runner profile", () => {
+    const r = resolveRuntimeProfile(
+      {
+        providerId: "p1",
+        model: "saved-model",
+        reasoningEffort: "minimal",
+        runner: "better_agent_runner",
+        permission: {},
+      },
+      [provider({
+        runner_options: ["native", "better_agent_runner"],
+        runner_profiles: [
+          { runner: "native", reasoning_efforts: ["medium", "high"] },
+          { runner: "better_agent_runner", reasoning_efforts: ["minimal", "low"] },
+        ],
+      })],
+      "p1",
+      MODELS,
+      "worker",
+    );
+    expect(r.runner).toBe("better_agent_runner");
+    expect(r.reasoningEffort).toBe("minimal");
+  });
+
+  it("uses model-specific effort combinations when the catalog provides them", () => {
+    const gemini = provider({
+      kind: "gemini",
+      runner_options: ["native", "better_agent_runner"],
+    });
+    const profiles = [
+      { runner: "better_agent_runner" as const, model: "gemini-2.5-flash", reasoning_efforts: ["none", "minimal"] as const },
+      { runner: "better_agent_runner" as const, model: "gemini-3.5-flash", reasoning_efforts: ["minimal"] as const },
+    ].map((profile) => ({ ...profile, reasoning_efforts: [...profile.reasoning_efforts] }));
+    expect(effortsForRuntime(gemini, "better_agent_runner", "gemini-2.5-flash", profiles)).toContain("none");
+    expect(effortsForRuntime(gemini, "better_agent_runner", "gemini-3.5-flash", profiles)).not.toContain("none");
   });
 });

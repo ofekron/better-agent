@@ -102,6 +102,7 @@ class InlineProvisionedSessionSpec(ProvisionedSessionSpec):
             model=selected_model,
             provider_id=provider_id,
             reasoning_effort=str(resolved.get("reasoning_effort") or ""),
+            runner=str(resolved.get("runner") or ""),
             run_mode="fork",
             dispatch="in_process",
             on_no_fork="error",

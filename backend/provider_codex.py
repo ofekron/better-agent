@@ -1166,6 +1166,7 @@ class CodexProvider(Provider):
             "turn_run_id": rs.turn_run_id,
             "ingestion_version": CODEX_INGESTION_VERSION,
             "provider_id": self.id,
+            "runner": self.record.get("runner"),
             "child_sources": rs.child_sources,
         }
         try:

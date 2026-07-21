@@ -60,17 +60,20 @@ type ModelRunMeta = {
   providerId?: string | null;
   model?: string | null;
   reasoningEffort?: string | null;
+  runner?: string | null;
 };
 
-function buildRunMetaParts(meta?: ModelRunMeta): Array<{ key: string; label: string; value: string }> {
+function buildRunMetaParts(meta?: ModelRunMeta): Array<{ key: string; label: string; value: string; valueKey?: string }> {
   if (!meta) return [];
-  const parts: Array<{ key: string; label: string; value: string }> = [];
+  const parts: Array<{ key: string; label: string; value: string; valueKey?: string }> = [];
   const providerName = providerNameForId(meta.providerId);
   const model = meta.model?.trim();
   const reasoningEffort = meta.reasoningEffort?.trim();
+  const runner = meta.runner?.trim();
   if (providerName) parts.push({ key: "provider", label: "message.provider", value: providerName });
   if (model) parts.push({ key: "model", label: "message.model", value: model });
   if (reasoningEffort) parts.push({ key: "effort", label: "message.effort", value: reasoningEffort });
+  if (runner) parts.push({ key: "runner", label: "message.runner", value: runner, valueKey: `setup.runner.${runner}` });
   return parts;
 }
 
@@ -79,19 +82,19 @@ function RunMetaChips({ meta }: { meta?: ModelRunMeta }) {
   const parts = buildRunMetaParts(meta);
   if (parts.length === 0) return null;
   return (
-    <span className="run-meta-chips" title={parts.map((part) => `${t(part.label)}: ${part.value}`).join(" / ")}>
+    <span className="run-meta-chips" title={parts.map((part) => `${t(part.label)}: ${part.valueKey ? t(part.valueKey) : part.value}`).join(" / ")}>
       {parts.map((part) => (
         <span className="run-meta-chip" key={part.key}>
           <span className="run-meta-chip-label">{t(part.label)}</span>
-          <span className="run-meta-chip-value">{part.value}</span>
+          <span className="run-meta-chip-value">{part.valueKey ? t(part.valueKey) : part.value}</span>
         </span>
       ))}
     </span>
   );
 }
 
-/** Per-turn provider/model/effort badge on an assistant bubble. Falls
- *  back to `fallbackMeta` (the session's current provider/model/effort)
+/** Per-turn runtime-profile badge on an assistant bubble. Falls
+ *  back to `fallbackMeta` (the session's current runtime profile)
  *  when the turn's own scaffold predates `run_meta` (no backfill) — the
  *  caller only supplies a fallback for the latest turn, where the
  *  session's current settings are guaranteed to match what it ran with. */
@@ -108,6 +111,7 @@ function AssistantRunMeta({
         providerId: meta.provider_id ?? null,
         model: meta.model ?? null,
         reasoningEffort: meta.reasoning_effort ?? null,
+        runner: meta.runner ?? null,
       }
     : {};
   // A present-but-empty `run_meta` (e.g. all fields null) is still
@@ -908,6 +912,7 @@ function CompleteEvent({ data }: { data: Record<string, unknown> }) {
 }
 
 function ModelSwitchedEvent({ data }: { data: Record<string, unknown> }) {
+  const { t } = useTranslation();
   const model = typeof data.model === "string" ? data.model : "";
   const providerId = typeof data.provider_id === "string" ? data.provider_id : "";
   const providerName = typeof data.provider_name === "string" ? data.provider_name : "";
@@ -918,19 +923,27 @@ function ModelSwitchedEvent({ data }: { data: Record<string, unknown> }) {
   const previousProviderKind = typeof data.previous_provider_kind === "string" ? data.previous_provider_kind : "";
   const reasoningEffort = typeof data.reasoning_effort === "string" ? data.reasoning_effort : "";
   const previousReasoningEffort = typeof data.previous_reasoning_effort === "string" ? data.previous_reasoning_effort : "";
+  const runner = typeof data.runner === "string" ? data.runner : "";
+  const previousRunner = typeof data.previous_runner === "string" ? data.previous_runner : "";
   const changed = Array.isArray(data.changed) ? data.changed : [];
   const hasModelChange = changed.includes("model") || changed.includes("provider_id");
   const hasReasoningChange = changed.includes("reasoning_effort");
-  if (!model && !providerId && !reasoningEffort) return null;
+  const hasRunnerChange = changed.includes("runner");
+  if (!model && !providerId && !reasoningEffort && !runner) return null;
   const fromProvider = previousProviderName || previousProviderKind || previousProviderId;
   const toProvider = providerName || providerKind || providerId;
   const includeEffort = hasReasoningChange || Boolean(reasoningEffort || previousReasoningEffort);
-  const from = [fromProvider, previousModel, includeEffort ? previousReasoningEffort : ""].filter(Boolean).join(" / ");
-  const to = [toProvider, model, includeEffort ? reasoningEffort : ""].filter(Boolean).join(" / ");
+  const includeRunner = hasRunnerChange || Boolean(runner || previousRunner);
+  const fromRunner = previousRunner ? t(`setup.runner.${previousRunner}`) : "";
+  const toRunner = runner ? t(`setup.runner.${runner}`) : "";
+  const from = [fromProvider, previousModel, includeEffort ? previousReasoningEffort : "", includeRunner ? fromRunner : ""].filter(Boolean).join(" / ");
+  const to = [toProvider, model, includeEffort ? reasoningEffort : "", includeRunner ? toRunner : ""].filter(Boolean).join(" / ");
   const reasoning = previousReasoningEffort && reasoningEffort
     ? `${previousReasoningEffort} to ${reasoningEffort}`
     : reasoningEffort;
-  const label = hasModelChange || !hasReasoningChange ? "Model switched" : "Reasoning changed";
+  const label = hasRunnerChange
+    ? t("message.runtimeChanged")
+    : hasModelChange || !hasReasoningChange ? "Model switched" : "Reasoning changed";
   return (
     <div className="event-model-switched">
       <span>{label}</span>
@@ -2183,6 +2196,7 @@ function renderEntityBlock(
           providerId: block.providerId,
           model: block.model,
           reasoningEffort: block.reasoningEffort,
+          runner: block.runner,
         }}
         defaultOpen={workerDefaultOpenById?.get(block.entityId) ?? false}
       />
@@ -2399,6 +2413,7 @@ function renderManagerStreamLegacy(
                 providerId: worker.provider_id,
                 model: worker.model,
                 reasoningEffort: worker.reasoning_effort,
+                runner: worker.runner,
               }}
               defaultOpen={workerDefaultOpenById.get(worker.delegation_id) ?? false}
             />
@@ -2492,6 +2507,7 @@ function renderManagerStreamLegacy(
           providerId: w.provider_id,
           model: w.model,
           reasoningEffort: w.reasoning_effort,
+          runner: w.runner,
         }}
         defaultOpen={workerDefaultOpenById.get(w.delegation_id) ?? false}
       />

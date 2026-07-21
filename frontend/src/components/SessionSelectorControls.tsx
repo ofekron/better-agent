@@ -37,6 +37,7 @@ export function SessionSelectorControls({
       provider_id: session.provider_id,
       model: session.model,
       reasoning_effort: session.reasoning_effort,
+      runner: session.runner,
       permission: session.permission,
     };
     onChange(updates);
@@ -62,7 +63,10 @@ export function SessionSelectorControls({
 
   const selectedProviderId = session.provider_id || providers.find((p) => !p.suspended)?.id || "";
   const selectedProvider = providers.find((p) => p.id === selectedProviderId);
-  const selectorSummary = [selectedProvider?.name, session.model].filter(Boolean).join(" / ");
+  const runnerLabel = selectedProvider && selectedProvider.runner_options.length > 1
+    ? t(`setup.runner.${session.runner || selectedProvider.runner}`, session.runner || selectedProvider.runner)
+    : "";
+  const selectorSummary = [selectedProvider?.name, session.model, runnerLabel].filter(Boolean).join(" / ");
 
   if (!providers.length) return null;
 
@@ -71,7 +75,7 @@ export function SessionSelectorControls({
       className="session-selector-controls"
       title={t(
         "chat.sessionSelectorsHint",
-        "Change this session's provider/model. The next prompt continues in a fresh provider subprocess if needed.",
+        "Change this session's runtime profile. The next prompt continues in a fresh provider subprocess if needed.",
       )}
     >
       <button

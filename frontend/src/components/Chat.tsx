@@ -1402,6 +1402,7 @@ export function Chat({
                               providerId: session.provider_id ?? null,
                               model: session.model ?? null,
                               reasoningEffort: session.reasoning_effort ?? null,
+                              runner: session.runner ?? null,
                             }
                           : undefined
                       }

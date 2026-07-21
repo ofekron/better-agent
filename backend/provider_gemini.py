@@ -758,6 +758,7 @@ class GeminiProvider(Provider):
             "target_message_id": rs.target_message_id,
             "turn_run_id": rs.turn_run_id,
             "provider_id": self.id,
+            "runner": self.record.get("runner"),
         }
         try:
             _atomic_write_json(self._backend_state_path(rs), data)

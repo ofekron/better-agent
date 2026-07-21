@@ -98,6 +98,7 @@ def test_runner_choices_are_valid():
     assert pm.default_runner_for("claude") == "native"
     assert pm.default_runner_for("openai") == "better_agent_runner"
     assert pm.runner_choices_for("fugu") == ("native", "better_agent_runner")
+    assert pm.runner_choices_for("gemini") == ("native", "better_agent_runner")
 
 
 def test_provider_runner_round_trips():
@@ -130,7 +131,7 @@ def test_provider_runner_round_trips():
         "default_model": "fugu",
     })
     assert fugu_native["runner"] == "native"
-    assert fugu_native["runner_options"] == ["native", "better_agent_runner"]
+    assert fugu_native["runner_options"] == ["native"]
 
     fugu_ba = config_store.add_provider({
         "name": "Fugu BA",
@@ -145,6 +146,15 @@ def test_provider_runner_round_trips():
     assert fugu_ba["runner_options"] == ["native", "better_agent_runner"]
     assert fugu_ba["permission_options"] == {"mode": ["default", "bypassPermissions"]}
     assert fugu_ba["reasoning_effort_options"] == ["high", "xhigh"]
+
+    gemini = config_store.add_provider({
+        "name": "Gemini API",
+        "kind": "gemini",
+        "mode": "api_key",
+        "default_model": "gemini-3.5-flash",
+        "runner": "native",
+    })
+    assert gemini["runner_options"] == ["native", "better_agent_runner"]
 
     import provider
     assert provider._provider_runtime_kind({"kind": "fugu", "runner": "better_agent_runner"}) == "openai"

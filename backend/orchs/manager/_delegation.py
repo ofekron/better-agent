@@ -368,6 +368,7 @@ async def run_delegation(
     cwd: str,
     provider_id: str = "",
     reasoning_effort: str = "",
+    runner: str = "",
     justification: Optional[str] = None,
     proposed_orchestration_mode: Optional[str] = None,
     client_delegation_id: Optional[str] = None,
@@ -677,6 +678,7 @@ async def run_delegation(
     worker_model = worker_session.get("model") or model
     worker_provider_id = worker_session.get("provider_id") or provider_id
     worker_reasoning_effort = worker_session.get("reasoning_effort") or reasoning_effort
+    worker_runner = worker_session.get("runner") or runner
     started_at = datetime.now(timezone.utc).isoformat()
     # Inline position in the manager stream where this delegation occurs:
     # the count of manager events already on the in-flight assistant
@@ -698,6 +700,7 @@ async def run_delegation(
         "provider_id": worker_provider_id,
         "model": worker_model,
         "reasoning_effort": worker_reasoning_effort,
+        "runner": worker_runner,
         "run_mode": run_mode,
         "is_new": False,
         "instructions_preview": instructions_preview,
@@ -723,6 +726,7 @@ async def run_delegation(
         "provider_id": worker_provider_id,
         "model": worker_model,
         "reasoning_effort": worker_reasoning_effort,
+        "runner": worker_runner,
         "is_new": False,
         "instructions_preview": instructions_preview,
         "events": [],
@@ -802,8 +806,9 @@ async def run_delegation(
                 ephemeral=ephemeral,
                 machine_completion=machine_completion,
                 include_events=include_events,
-                provider_id=provider_id,
-                reasoning_effort=reasoning_effort,
+                provider_id=worker_provider_id,
+                reasoning_effort=worker_reasoning_effort,
+                runner=worker_runner,
                 provisioned_tool_profile=provisioned_tool_profile,
             )
     finally:
@@ -850,6 +855,7 @@ async def run_delegation_locked(
     include_events: bool = False,
     provider_id: str = "",
     reasoning_effort: str = "",
+    runner: str = "",
     provisioned_tool_profile: str = "",
 ) -> dict:
     """Inner worker-run body — runs under the per-(caller, worker) lock.
@@ -992,6 +998,7 @@ async def run_delegation_locked(
         coordinator.provider_for_run,
         worker_agent_session_id,
         provider_id,
+        runner,
     )
     provider_run_config = worker_session.get("provider_run_config") or None
     capability_contexts = worker_session.get("capability_contexts") or None

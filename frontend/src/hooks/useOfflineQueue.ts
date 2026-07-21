@@ -31,6 +31,7 @@ export interface OfflineCreateSessionEntry {
     | "name"
     | "model"
     | "reasoning_effort"
+    | "runner"
     | "permission"
     | "cwd"
     | "orchestration_mode"

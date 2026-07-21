@@ -128,11 +128,13 @@ def test_mssg_still_routes_to_mssg_endpoint():
         provider_id="provider-1",
         model="model-1",
         reasoning_effort="high",
+        runner="native",
     )
     assert captured[0][0] == "/api/internal/mssg"
     assert captured[0][1]["provider_id"] == "provider-1"
     assert captured[0][1]["model"] == "model-1"
     assert captured[0][1]["reasoning_effort"] == "high"
+    assert captured[0][1]["runner"] == "native"
     assert captured[0][2] == 30.0
 
 
@@ -179,6 +181,7 @@ def test_delegate_task_routes_to_delegate_task_endpoint():
         provider_id="provider-1",
         model="model-1",
         reasoning_effort="high",
+        runner="native",
         sub_session=False,
     )
     assert res["success"] is True
@@ -190,6 +193,7 @@ def test_delegate_task_routes_to_delegate_task_endpoint():
     assert payload["provider_id"] == "provider-1"
     assert payload["model"] == "model-1"
     assert payload["reasoning_effort"] == "high"
+    assert payload["runner"] == "native"
     assert payload["sub_session"] is False
     assert timeout == communicate_mcp._LONG_TIMEOUT
 
@@ -218,6 +222,7 @@ def test_create_session_routes_to_create_session_endpoint():
         provider_id="provider-1",
         model="model-1",
         reasoning_effort="high",
+        runner="native",
     )
     assert res["success"] is True
     endpoint, payload, timeout = captured[0]
@@ -229,6 +234,7 @@ def test_create_session_routes_to_create_session_endpoint():
     assert payload["provider_id"] == "provider-1"
     assert payload["model"] == "model-1"
     assert payload["reasoning_effort"] == "high"
+    assert payload["runner"] == "native"
     assert payload["node_id"] is None
 
 

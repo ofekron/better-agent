@@ -21,6 +21,8 @@ describe("existing-session provider/model selectors", () => {
     expect(component).toContain("openPicker");
     expect(component).toContain("onConfirm={(updates) => void save(updates)}");
     expect(modal).toContain("changedUpdates(session, draft)");
+    expect(modal).toContain("draftProvider.runner_options.length > 1");
+    expect(component).toContain("runner: session.runner");
     expect(modal).toContain('t("newSession.cancel", "Cancel")');
     expect(modal).toContain('t("common.ok", "OK")');
     expect(modal).not.toContain("onChange={(e) => changeModel(e.target.value)}");

@@ -4195,6 +4195,7 @@ class SessionManager:
         orchestration_mode: str = "team",
         source: str = "web",
         provider_id: Optional[str] = None,
+        runner: Optional[str] = None,
         reasoning_effort: Optional[str] = None,
         permission: Optional[dict] = None,
         browser_harness_enabled: bool = True,
@@ -4219,6 +4220,13 @@ class SessionManager:
         # created this session (see session_store user-initiation taxonomy).
         # Defaults to False — fail-closed so a caller that forgets it never
         # surfaces a hidden helper session as user-facing.
+        if provider_id is None:
+            default_profile = config_store.resolve_internal_llm("default_session")
+            provider_id = default_profile.get("provider_id")
+            model = model or default_profile.get("model") or None
+            runner = runner or default_profile.get("runner") or None
+            if reasoning_effort is None:
+                reasoning_effort = default_profile.get("reasoning_effort") or None
         _validate_orchestration_mode_against_provider(
             orchestration_mode=orchestration_mode, provider_id=provider_id,
         )
@@ -4226,6 +4234,7 @@ class SessionManager:
             name=name, model=model, cwd=cwd,
             orchestration_mode=orchestration_mode, source=source,
             provider_id=provider_id,
+            runner=runner,
             reasoning_effort=reasoning_effort,
             permission=permission,
             browser_harness_enabled=browser_harness_enabled,
@@ -4328,6 +4337,7 @@ class SessionManager:
         name: str,
         model: Optional[str] = None,
         provider_id: Optional[str] = None,
+        runner: Optional[str] = None,
         reasoning_effort: Optional[str] = None,
         permission: Optional[dict] = None,
         cwd: str = "",
@@ -4352,6 +4362,7 @@ class SessionManager:
                 name=name,
                 model=model,
                 provider_id=provider_id,
+                runner=runner,
                 reasoning_effort=reasoning_effort,
                 permission=permission,
                 cwd=cwd,
@@ -4754,6 +4765,7 @@ class SessionManager:
         sid: str,
         *,
         model: Optional[str] = None,
+        runner: Optional[str] = None,
         reasoning_effort: Optional[str] = None,
         permission: Optional[dict] = None,
         cwd: Optional[str] = None,
@@ -4800,7 +4812,9 @@ class SessionManager:
                 raise ValueError("permission must be a dict")
             existing = self.get(sid) or {}
             perm_provider = provider_id or existing.get("provider_id")
-            permission = session_store._session_permission(permission, perm_provider)
+            permission = session_store._session_permission(
+                permission, perm_provider, runner or existing.get("runner")
+            )
         if provider_id is not None:
             if not isinstance(provider_id, str) or not provider_id.strip():
                 raise ValueError(
@@ -4811,11 +4825,18 @@ class SessionManager:
             _validate_orchestration_mode_against_provider(
                 orchestration_mode=mode, provider_id=provider_id,
             )
+        if runner is not None:
+            existing = self.get(sid) or {}
+            runner = session_store._session_runner(
+                runner, provider_id or existing.get("provider_id")
+            )
         def _do(s: dict) -> None:
             # Inside the per-root lock.
             pass
             if model is not None:
                 s["model"] = model
+            if runner is not None:
+                s["runner"] = runner
             if reasoning_effort is not None:
                 s["reasoning_effort"] = reasoning_effort
             if permission is not None:
@@ -4829,6 +4850,7 @@ class SessionManager:
             {
                 "kind": "selectors_set",
                 "model": model,
+                "runner": runner,
                 "reasoning_effort": reasoning_effort,
                 "permission": permission,
                 "cwd": cwd,
@@ -4845,6 +4867,7 @@ class SessionManager:
         *,
         provider_id: Optional[str] = None,
         model: Optional[str] = None,
+        runner: Optional[str] = None,
         bump_updated_at: bool = True,
     ) -> Optional[dict]:
         field = session_store._agent_sid_field_for_mode(mode)
@@ -4853,12 +4876,15 @@ class SessionManager:
             if agent_sid is not None:
                 p_id = provider_id or s.get("provider_id")
                 m_val = model or s.get("model")
+                r_val = runner or s.get("runner")
                 if field == "supervisor_agent_session_id":
                     s["last_active_supervisor_provider_id"] = p_id
                     s["last_active_supervisor_model"] = m_val
+                    s["last_active_supervisor_runner"] = r_val
                 else:
                     s["last_active_provider_id"] = p_id
                     s["last_active_model"] = m_val
+                    s["last_active_runner"] = r_val
         sess = self._run(
             sid,
             _do,

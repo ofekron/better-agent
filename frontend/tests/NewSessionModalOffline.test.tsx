@@ -187,7 +187,7 @@ describe("NewSessionModal offline provider cache", () => {
       "better-agent-new-session-defaults",
       JSON.stringify({
         orchestrationMode: "native",
-        main: { providerId: provider.id, model: "cached-opus", reasoningEffort: "high" },
+        main: { providerId: provider.id, model: "cached-opus", reasoningEffort: "high", runner: "native", permission: {} },
       }),
     );
     vi.spyOn(globalThis, "fetch").mockRejectedValue(new TypeError("offline"));
@@ -219,7 +219,7 @@ describe("NewSessionModal offline provider cache", () => {
 
     expect(onCreate).toHaveBeenCalledWith(
       expect.objectContaining({
-        main: { providerId: provider.id, model: "cached-opus", reasoningEffort: "high", permission: {} },
+        main: { providerId: provider.id, model: "cached-opus", reasoningEffort: "high", runner: "native", permission: {} },
       }),
       undefined,
       "send-and-open",

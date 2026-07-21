@@ -617,6 +617,7 @@ class OpenAIProvider(Provider):
             "target_message_id": rs.target_message_id,
             "turn_run_id": rs.turn_run_id,
             "provider_id": self.id,
+            "runner": self.record.get("runner"),
             "provider_kind": self.KIND,
             "ingestion_version": OPENAI_INGESTION_VERSION,
         }

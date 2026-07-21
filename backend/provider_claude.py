@@ -1395,6 +1395,7 @@ class ClaudeProvider(Provider):
             # Stamp the owning provider so cross-provider recovery can
             # dispatch this run dir to the right Provider instance.
             "provider_id": self.id,
+            "runner": self.record.get("runner"),
         }
         try:
             _atomic_write_json(self._backend_state_path(rs), data)

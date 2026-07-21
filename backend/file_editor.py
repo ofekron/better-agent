@@ -142,10 +142,10 @@ def _provider_record(provider_id: Optional[str]) -> dict:
     return provider
 
 
-def _require_fork_support(provider_id: str) -> None:
+def _require_fork_support(provider_id: str, runner: str) -> None:
     try:
         from provider import get_provider
-        provider = get_provider(provider_id)
+        provider = get_provider(provider_id, runner)
     except KeyError as exc:
         raise ValueError("provider not found") from exc
     if not getattr(provider, "supports_fork", True):
@@ -160,6 +160,7 @@ def _file_edit_config(
     project_cwd: str,
     model: Optional[str],
     provider_id: Optional[str],
+    runner: Optional[str],
     reasoning_effort: Optional[str],
     node_id: str,
 ) -> ProvisionedConfig:
@@ -167,7 +168,9 @@ def _file_edit_config(
     resolved_provider_id = str(provider.get("id") or provider_id or "")
     if not resolved_provider_id:
         raise ValueError("provider not found")
-    _require_fork_support(resolved_provider_id)
+    from runtime_profile import resolve_runner
+    resolved_runner = resolve_runner(provider, runner)
+    _require_fork_support(resolved_provider_id, resolved_runner)
     resolved_model = str(model or provider.get("default_model") or "").strip()
     if not resolved_model:
         resolved_model = config_store.default_session_model()
@@ -187,6 +190,7 @@ def _file_edit_config(
         model=resolved_model,
         provider_id=resolved_provider_id,
         reasoning_effort=resolved_effort,
+        runner=resolved_runner,
         run_mode="fork",
         dispatch="in_process",
         on_no_fork="error",
@@ -250,6 +254,7 @@ async def _create_interactive_fork(
         orchestration_mode="native",
         source="web",
         provider_id=cfg.provider_id,
+        runner=cfg.runner,
         reasoning_effort=cfg.reasoning_effort or None,
         node_id=cfg.node_id,
         # File-editing sessions are opened by an explicit user action.
@@ -287,6 +292,7 @@ async def start_empty(
     cwd: str,
     model: Optional[str] = None,
     provider_id: Optional[str] = None,
+    runner: Optional[str] = None,
     reasoning_effort: Optional[str] = None,
     persistent: bool = False,
     node_id: str = "primary",
@@ -300,6 +306,7 @@ async def start_empty(
         project_cwd=project_cwd,
         model=model,
         provider_id=provider_id,
+        runner=runner,
         reasoning_effort=reasoning_effort,
         node_id=node_id,
     )
@@ -329,6 +336,7 @@ async def start(
     cwd: str,
     model: Optional[str] = None,
     provider_id: Optional[str] = None,
+    runner: Optional[str] = None,
     reasoning_effort: Optional[str] = None,
     persistent: bool = False,
     node_id: str = "primary",
@@ -363,6 +371,7 @@ async def start(
         project_cwd=project_cwd,
         model=model,
         provider_id=provider_id,
+        runner=runner,
         reasoning_effort=reasoning_effort,
         node_id=node_id,
     )

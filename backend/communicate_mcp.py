@@ -158,6 +158,7 @@ def _communication_payload(
     provider_id: str = "",
     model: str = "",
     reasoning_effort: str = "",
+    runner: str = "",
     collapse_key: str = "",
     collapse_policy: str = "",
 ) -> dict[str, Any]:
@@ -180,6 +181,7 @@ def _communication_payload(
         "provider_id": (provider_id or "").strip() or None,
         "model": (model or "").strip(),
         "reasoning_effort": (reasoning_effort or "").strip() or None,
+        "runner": (runner or "").strip() or None,
         "collapse_key": (collapse_key or "").strip(),
         "collapse_policy": (collapse_policy or "").strip(),
     }
@@ -194,6 +196,7 @@ def mssg_response(
     provider_id: str = "",
     model: str = "",
     reasoning_effort: str = "",
+    runner: str = "",
     collapse_key: str = "",
     collapse_policy: str = "",
 ) -> dict[str, Any]:
@@ -206,6 +209,7 @@ def mssg_response(
         provider_id,
         model,
         reasoning_effort,
+        runner,
         collapse_key,
         collapse_policy,
     )
@@ -240,6 +244,7 @@ def delegate_task_response(
     provider_id: str = "",
     model: str = "",
     reasoning_effort: str = "",
+    runner: str = "",
     sub_session: bool = True,
     cwd: str = "",
     folder_id: str = "",
@@ -264,6 +269,7 @@ def delegate_task_response(
         "provider_id": (provider_id or "").strip() or None,
         "model": (model or "").strip(),
         "reasoning_effort": (reasoning_effort or "").strip() or None,
+        "runner": (runner or "").strip() or None,
         "sub_session": sub_session is not False,
         "folder_id": (folder_id or "").strip() or None,
         "tag_ids": tag_ids or [],
@@ -283,6 +289,7 @@ def ask_response(
     provider_id: str = "",
     model: str = "",
     reasoning_effort: str = "",
+    runner: str = "",
     mode: str = DEFAULT_ASK_MODE,
 ) -> dict[str, Any]:
     target_session_id = (target_session_id or "").strip()
@@ -323,6 +330,7 @@ def ask_response(
             "model": selected_model,
             "provider_id": (provider_id or "").strip() or None,
             "reasoning_effort": (reasoning_effort or "").strip() or None,
+            "runner": (runner or "").strip() or None,
             "cwd": cwd,
             "client_delegation_id": client_delegation_id,
             "run_mode": "fork",
@@ -343,6 +351,7 @@ def ask_response(
         "provider_id": (provider_id or "").strip() or None,
         "model": (model or "").strip(),
         "reasoning_effort": (reasoning_effort or "").strip() or None,
+        "runner": (runner or "").strip() or None,
     }, timeout=_LONG_TIMEOUT)
 
 
@@ -391,6 +400,7 @@ def ensure_named_worker_response(
     provider_id: str = "",
     model: str = "",
     reasoning_effort: str = "",
+    runner: str = "",
     node_id: str = "",
     folder_id: str = "",
     tag_ids: list[str] | None = None,
@@ -421,6 +431,8 @@ def ensure_named_worker_response(
         spec["model"] = model.strip()
     if (reasoning_effort or "").strip():
         spec["reasoning_effort"] = reasoning_effort.strip()
+    if (runner or "").strip():
+        spec["runner"] = runner.strip()
     result = _post_json("/api/internal/workers/provision", {
         "cwd": cwd,
         "workers": [spec],
@@ -446,6 +458,7 @@ def create_session_response(
     provider_id: str = "",
     model: str = "",
     reasoning_effort: str = "",
+    runner: str = "",
     cwd: str = "",
     folder_id: str = "",
     tag_ids: list[str] | None = None,
@@ -466,6 +479,7 @@ def create_session_response(
         "provider_id": (provider_id or "").strip() or None,
         "model": (model or "").strip(),
         "reasoning_effort": (reasoning_effort or "").strip() or None,
+        "runner": (runner or "").strip() or None,
         "orchestration_mode": mode,
         "node_id": node_id.strip() or None,
         "folder_id": (folder_id or "").strip() or None,
@@ -480,6 +494,7 @@ def create_sub_session_response(
     provider_id: str = "",
     model: str = "",
     reasoning_effort: str = "",
+    runner: str = "",
     cwd: str = "",
     folder_id: str = "",
     tag_ids: list[str] | None = None,
@@ -492,6 +507,7 @@ def create_sub_session_response(
         "provider_id": (provider_id or "").strip() or None,
         "model": (model or "").strip(),
         "reasoning_effort": (reasoning_effort or "").strip() or None,
+        "runner": (runner or "").strip() or None,
         "node_id": node_id.strip() or None,
         "folder_id": (folder_id or "").strip() or None,
         "tag_ids": tag_ids or [],
@@ -523,7 +539,7 @@ def build_server() -> FastMCP:
             "(private per-session mail: anyone sends, only the recipient reads), and chat/create_chat/"
             "delete_chat (a shared team chat room: every session reads the same chat; "
             "chat returns only messages newer than your last-read position). Leave provider/"
-            "model/reasoning selectors unprovided unless a specific different "
+            "model/reasoning/runner selectors unprovided unless a specific different "
             "provider or model is truly required."
         ),
     )
@@ -539,6 +555,7 @@ def build_server() -> FastMCP:
             provider_id: str = "",
             model: str = "",
             reasoning_effort: str = "",
+            runner: str = "",
             collapse_key: str = "",
             collapse_policy: str = "",
         ) -> dict[str, Any]:
@@ -551,6 +568,7 @@ def build_server() -> FastMCP:
                 provider_id,
                 model,
                 reasoning_effort,
+                runner,
                 collapse_key,
                 collapse_policy,
             )
@@ -673,6 +691,7 @@ def build_server() -> FastMCP:
             provider_id: str = "",
             model: str = "",
             reasoning_effort: str = "",
+            runner: str = "",
             sub_session: bool = True,
             cwd: str = "",
             folder_id: str = "",
@@ -684,6 +703,7 @@ def build_server() -> FastMCP:
                 provider_id,
                 model,
                 reasoning_effort,
+                runner,
                 sub_session,
                 cwd,
                 folder_id,
@@ -699,6 +719,7 @@ def build_server() -> FastMCP:
             provider_id: str = "",
             model: str = "",
             reasoning_effort: str = "",
+            runner: str = "",
             cwd: str = "",
             folder_id: str = "",
             tag_ids: list[str] | None = None,
@@ -711,6 +732,7 @@ def build_server() -> FastMCP:
                 provider_id,
                 model,
                 reasoning_effort,
+                runner,
                 cwd,
                 folder_id,
                 tag_ids,
@@ -725,6 +747,7 @@ def build_server() -> FastMCP:
             provider_id: str = "",
             model: str = "",
             reasoning_effort: str = "",
+            runner: str = "",
             cwd: str = "",
             folder_id: str = "",
             tag_ids: list[str] | None = None,
@@ -736,6 +759,7 @@ def build_server() -> FastMCP:
                 provider_id,
                 model,
                 reasoning_effort,
+                runner,
                 cwd,
                 folder_id,
                 tag_ids,
@@ -757,6 +781,7 @@ def build_server() -> FastMCP:
             provider_id: str = "",
             model: str = "",
             reasoning_effort: str = "",
+            runner: str = "",
             mode: str = DEFAULT_ASK_MODE,
         ) -> dict[str, Any]:
             return _safe_result(ask_response)(
@@ -772,6 +797,7 @@ def build_server() -> FastMCP:
                 provider_id,
                 model,
                 reasoning_effort,
+                runner,
                 mode,
             )
 
@@ -801,13 +827,15 @@ def build_server() -> FastMCP:
             provider_id: str = "",
             model: str = "",
             reasoning_effort: str = "",
+            runner: str = "",
             node_id: str = "",
             folder_id: str = "",
             tag_ids: list[str] | None = None,
         ) -> dict[str, Any]:
             return _safe_result(ensure_named_worker_response)(
                 name, orchestration_mode, cwd, provision_prompt, description,
-                provider_id, model, reasoning_effort, node_id, folder_id, tag_ids,
+                provider_id, model, reasoning_effort, runner, node_id, folder_id,
+                tag_ids,
             )
 
     return server

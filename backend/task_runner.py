@@ -134,6 +134,7 @@ def _provisioned_task_spec(
     model: str,
     provider_id: str,
     reasoning_effort: Optional[str],
+    runner: str,
 ):
     import os
     from provisioning.config import ProvisionedConfig
@@ -165,6 +166,7 @@ def _provisioned_task_spec(
                 model=model or str(ctx_model),
                 provider_id=str(provider_id or ""),
                 reasoning_effort=str(reasoning_effort or ""),
+                runner=runner,
                 run_mode="fork",
                 dispatch="in_process",
                 on_no_fork="error",
@@ -186,6 +188,7 @@ async def _resolve_launch_session(
     model: str,
     provider_id: str,
     reasoning_effort: Optional[str],
+    runner: str,
 ) -> tuple[dict, bool]:
     import asyncio
 
@@ -206,6 +209,7 @@ async def _resolve_launch_session(
                 orchestration_mode=task.get("orchestration_mode") or "native",
                 source="web",
                 provider_id=provider_id,
+                runner=runner,
                 reasoning_effort=reasoning_effort,
                 permission=task.get("permission"),
                 node_id=task.get("node_id") or "primary",
@@ -224,6 +228,7 @@ async def _resolve_launch_session(
         model=model,
         provider_id=provider_id,
         reasoning_effort=reasoning_effort,
+        runner=runner,
     )
     cfg = provisioning.resolve_config(spec)
     base_session_id = await provisioning.ensure_warm_base(spec, cfg)
@@ -308,12 +313,15 @@ async def launch_task(
     provider_id = task.get("provider_id")
     model = task.get("model")
     reasoning_effort = task.get("reasoning_effort")
+    runner = task.get("runner")
     if not provider_id or not model:
         defaults = await asyncio.to_thread(config_store.resolve_internal_llm, "default_session")
         provider_id = provider_id or defaults.get("provider_id")
         model = model or defaults.get("model")
         if reasoning_effort is None:
             reasoning_effort = defaults.get("reasoning_effort") or None
+        if not runner:
+            runner = defaults.get("runner") or ""
     if not model:
         raise TaskLaunchError(
             "no model configured - pin a model on the task or configure a "
@@ -344,6 +352,7 @@ async def launch_task(
             model=model,
             provider_id=provider_id,
             reasoning_effort=reasoning_effort,
+            runner=str(runner or ""),
         )
     except ValueError as exc:
         raise TaskLaunchError(f"could not create task session: {exc}", status=400) from exc

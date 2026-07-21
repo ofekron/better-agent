@@ -422,6 +422,7 @@ def create(
     model: Optional[str] = None,
     provider_id: Optional[str] = None,
     reasoning_effort: Optional[str] = None,
+    runner: Optional[str] = None,
     permission: Optional[dict] = None,
     capability_contexts=None,
     singleton: bool = False,
@@ -451,6 +452,7 @@ def create(
     model = _clean_str(model, field="model", max_len=200, required=False) or None
     provider_id = _clean_str(provider_id, field="provider_id", max_len=200, required=False) or None
     reasoning_effort = _clean_str(reasoning_effort, field="reasoning_effort", max_len=64, required=False) or None
+    runner = _clean_str(runner, field="runner", max_len=64, required=False) or None
     goal = _clean_str(goal, field="goal", max_len=MAX_GOAL_LEN, required=False)
     trigger = _coerce_trigger(trigger)
     if trigger.get("kind") == "turn_end" and not singleton:
@@ -472,6 +474,7 @@ def create(
         "model": model,
         "provider_id": provider_id,
         "reasoning_effort": reasoning_effort,
+        "runner": runner,
         "permission": permission,
         "capability_contexts": capability_contexts,
         "singleton": bool(singleton),
@@ -524,7 +527,7 @@ def get(task_id: str) -> Optional[dict]:
 
 _EDITABLE_FIELDS = (
     "name", "description", "prompt", "orchestration_mode",
-    "worker_creation_policy", "session_type", "model", "provider_id", "reasoning_effort",
+    "worker_creation_policy", "session_type", "model", "provider_id", "reasoning_effort", "runner",
     "permission", "capability_contexts", "singleton", "stopped",
     "goal", "trigger", "scripts", "assessment",
 )
@@ -560,6 +563,7 @@ def update(task_id: str, patch: dict) -> Optional[dict]:
             model = _clean_str(merged.get("model"), field="model", max_len=200, required=False) or None
             provider_id = _clean_str(merged.get("provider_id"), field="provider_id", max_len=200, required=False) or None
             reasoning_effort = _clean_str(merged.get("reasoning_effort"), field="reasoning_effort", max_len=64, required=False) or None
+            runner = _clean_str(merged.get("runner"), field="runner", max_len=64, required=False) or None
             goal = _clean_str(merged.get("goal"), field="goal", max_len=MAX_GOAL_LEN, required=False) if "goal" in merged else t.get("goal", "")
             trigger = _coerce_trigger(merged.get("trigger")) if "trigger" in merged else t.get("trigger")
             scripts = _coerce_scripts(merged.get("scripts")) if "scripts" in merged else t.get("scripts")
@@ -574,6 +578,7 @@ def update(task_id: str, patch: dict) -> Optional[dict]:
             t["model"] = model
             t["provider_id"] = provider_id
             t["reasoning_effort"] = reasoning_effort
+            t["runner"] = runner
             t["permission"] = permission
             t["capability_contexts"] = capability_contexts
             singleton = bool(merged.get("singleton"))

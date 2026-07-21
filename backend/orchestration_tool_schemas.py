@@ -96,6 +96,10 @@ DELEGATE_TASK_INPUT_SCHEMA: dict[str, Any] = {
             "type": "string",
             "description": "OPTIONAL - reasoning effort for a newly-created target session. Defaults to the creating session's effort.",
         },
+        "runner": {
+            "type": "string",
+            "description": "OPTIONAL - runner for a newly-created target session. Defaults to the creating session's runner.",
+        },
         "sub_session": {
             "type": "boolean",
             "description": "OPTIONAL - default true. If false, auto-created targets are standalone native sessions instead of hidden sub-sessions.",
@@ -161,6 +165,10 @@ ENSURE_NAMED_WORKER_INPUT_SCHEMA: dict[str, Any] = {
         "reasoning_effort": {
             "type": "string",
             "description": "OPTIONAL - reasoning effort for the worker. Defaults to the creating session's effort.",
+        },
+        "runner": {
+            "type": "string",
+            "description": "OPTIONAL - runner for the worker. Defaults to the creating session's runner.",
         },
         "node_id": {
             "type": "string",

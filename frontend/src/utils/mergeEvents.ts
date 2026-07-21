@@ -176,6 +176,7 @@ export function tagEvents(
         providerId: w.provider_id,
         model: w.model,
         reasoningEffort: w.reasoning_effort,
+        runner: w.runner,
         seq: seq++,
       });
       return;
@@ -191,6 +192,7 @@ export function tagEvents(
         providerId: w.provider_id,
         model: w.model,
         reasoningEffort: w.reasoning_effort,
+        runner: w.runner,
         seq: seq++,
       });
     }
@@ -246,6 +248,7 @@ export function groupByEntity(tagged: TaggedEvent[]): EntityBlock[] {
     providerId: tagged[0].providerId,
     model: tagged[0].model,
     reasoningEffort: tagged[0].reasoningEffort,
+    runner: tagged[0].runner,
     events: [],
     timestamps: [],
   };
@@ -265,6 +268,7 @@ export function groupByEntity(tagged: TaggedEvent[]): EntityBlock[] {
         providerId: t.providerId,
         model: t.model,
         reasoningEffort: t.reasoningEffort,
+        runner: t.runner,
         events: [t.event],
         timestamps: [eventTimestamp(t.event)],
       };

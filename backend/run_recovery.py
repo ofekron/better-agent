@@ -606,7 +606,7 @@ async def _integrate_recovered_session_group(
             owner = None
             if owner_id:
                 try:
-                    owner = get_provider(owner_id)
+                    owner = get_provider(owner_id, desc.get("runner") or None)
                 except KeyError:
                     owner = None
                 # `get_provider` returns the cached instance even when the
@@ -3039,6 +3039,7 @@ async def _prepare_remote_desc(
         "mode": bs.get("mode"),
         "has_complete_json": True,
         "provider_id": bs.get("provider_id") or f"remote:{node_id}",
+        "runner": bs.get("runner") or "",
         "provider_kind": bs.get("provider_kind") or _provider_kind(bs),
         "ingestion_version": bs.get("ingestion_version"),
         "target_message_id": bs.get("target_message_id"),

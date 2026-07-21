@@ -1,6 +1,6 @@
 """Per-spec config resolution.
 
-Model / provider / reasoning-effort come from the app-settings single source
+Model / provider / reasoning-effort / runner come from the app-settings single source
 of truth — `config_store.resolve_internal_llm(spec.task_key)` — so a
 provisioned session honors the same per-task configuration the user set in
 the UI. Everything else (cwd, dispatch, run-mode, session-id pins, http
@@ -8,7 +8,7 @@ token) is resolved here with a per-spec env overlay.
 
 Env overlay (per spec `env_prefix`, e.g. `REQ_ANALYSIS` / `SESSION_SEARCH`),
 overriding app-settings where set:
-  {PREFIX}_MODEL, {PREFIX}_PROVIDER_ID, {PREFIX}_REASONING_EFFORT,
+  {PREFIX}_MODEL, {PREFIX}_PROVIDER_ID, {PREFIX}_REASONING_EFFORT, {PREFIX}_RUNNER,
   {PREFIX}_CWD, {PREFIX}_RUN_MODE (fork|direct), {PREFIX}_DISPATCH
   (http|in_process), {PREFIX}_ON_NO_FORK (error|fallback_native),
   {PREFIX}_NODE_ID (target node; "primary" runs locally), {PREFIX}_PROVISIONED_SESSION_ID,
@@ -45,6 +45,7 @@ class ProvisionedConfig:
     provisioned_session_id: str | None   # env pin, else None
     caller_session_id: str | None        # env pin, else None
     worker_description: str
+    runner: str = ""
 
 
 def resolve_config(
@@ -52,7 +53,7 @@ def resolve_config(
 ) -> ProvisionedConfig:
     custom = spec.build_config(model=model)
     if custom is not None:
-        return custom
+        return _with_resolved_runner(custom)
     resolved = _resolve_task(spec)
 
     model = model or _env(spec, "MODEL") or resolved.get("model") or spec.default_model
@@ -62,9 +63,10 @@ def resolve_config(
     reasoning_effort = _env(spec, "REASONING_EFFORT")
     if reasoning_effort is None:
         reasoning_effort = resolved.get("reasoning_effort") or ""
+    runner = _env(spec, "RUNNER") or resolved.get("runner") or ""
 
     run_mode = _resolve_run_mode(spec, provider_id)
-    return ProvisionedConfig(
+    return _with_resolved_runner(ProvisionedConfig(
         cwd=(
             _env(spec, "CWD")
             or spec.default_cwd
@@ -86,7 +88,19 @@ def resolve_config(
         provisioned_session_id=_env(spec, "PROVISIONED_SESSION_ID"),
         caller_session_id=_env(spec, "CALLER_SESSION_ID"),
         worker_description=_env(spec, "WORKER_DESCRIPTION") or spec.name,
-    )
+        runner=runner,
+    ))
+
+
+def _with_resolved_runner(cfg: ProvisionedConfig) -> ProvisionedConfig:
+    if cfg.runner or not cfg.provider_id:
+        return cfg
+    import config_store
+    import runtime_profile
+    provider = config_store.get_provider(cfg.provider_id)
+    if provider:
+        cfg.runner = runtime_profile.default_runner(provider)
+    return cfg
 
 
 def _resolve_task(spec: ProvisionedSessionSpec) -> dict:

@@ -75,6 +75,7 @@ SPECS: dict[str, ProviderSpec] = {
         runner_module="runner_gemini", recovery_family="gemini",
         installable=False, hosts_ui_mcp=True,
         context_continuation=False, uses_claude_env=False,
+        runner_choices=("native", "better_agent_runner"),
     ),
     "codex": ProviderSpec(
         kind="codex", module="provider_codex", cls="CodexProvider",

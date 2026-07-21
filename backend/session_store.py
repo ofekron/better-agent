@@ -53,6 +53,7 @@ from grouped_durability_writer import DurabilityReceipt, GroupedDurabilityWriter
 from root_change_wal import RootChange, RootChangeOwner, RootChangeWal
 from i18n import t
 from reasoning_effort import normalize_reasoning_effort
+import runtime_profile
 from permission import normalize_permission, default_permission_for_kind
 # `worker_store` is imported lazily inside `list_sessions` — the
 # single call site. Keeping it lazy here lets `worker_store` and
@@ -3541,24 +3542,34 @@ def _detect_provider_for_session(
     return None
 
 
-def _default_reasoning_effort_for_provider(provider_id: Optional[str]) -> str:
-    if not provider_id:
-        return ""
-    record = config_store.get_provider(provider_id)
-    effort = normalize_reasoning_effort(
-        (record or {}).get("default_reasoning_effort")
-    )
-    options = (record or {}).get("reasoning_effort_options") or []
-    return effort if effort and effort in options else ""
-
-
 def _session_reasoning_effort(
-    value: Optional[str], provider_id: Optional[str],
+    value: Optional[str],
+    provider_id: Optional[str],
+    runner: object,
+    model: str,
+    *,
+    strict: bool = True,
 ) -> str:
+    record = config_store.get_provider(provider_id) if provider_id else None
+    if not record:
+        raise ValueError("session provider is not configured")
+    options = runtime_profile.reasoning_efforts(record, runner, model=model)
     effort = normalize_reasoning_effort(value)
-    if effort:
+    if effort and effort in options:
         return effort
-    return _default_reasoning_effort_for_provider(provider_id)
+    if effort and strict:
+        raise ValueError(
+            f"reasoning_effort {effort!r} is not supported for this runtime profile"
+        )
+    default = normalize_reasoning_effort(record.get("default_reasoning_effort"))
+    return default if default in options else (options[0] if options else "")
+
+
+def _session_runner(value: object, provider_id: Optional[str]) -> str:
+    record = config_store.get_provider(provider_id) if provider_id else None
+    if not record:
+        raise ValueError("session provider is not configured")
+    return runtime_profile.resolve_runner(record, value)
 
 
 def _kind_for_provider(provider_id: Optional[str]) -> str:
@@ -3568,18 +3579,23 @@ def _kind_for_provider(provider_id: Optional[str]) -> str:
     return (record or {}).get("kind", "") or ""
 
 
-def _default_permission_for_provider(provider_id: Optional[str]) -> dict:
+def _default_permission_for_provider(
+    provider_id: Optional[str], runner: object = None,
+) -> dict:
     record = config_store.get_provider(provider_id) if provider_id else None
-    kind = (record or {}).get("kind", "") or ""
+    kind = runtime_profile.runtime_kind(record or {}, runner) if record else ""
     default = (record or {}).get("default_permission")
     norm = normalize_permission(kind, default)
     return norm if norm is not None else default_permission_for_kind(kind)
 
 
-def _session_permission(value: object, provider_id: Optional[str]) -> dict:
+def _session_permission(
+    value: object, provider_id: Optional[str], runner: object = None,
+) -> dict:
     """Effective permission override to persist on the session. Empty dict =
     inherit the provider default (no per-session override)."""
-    kind = _kind_for_provider(provider_id)
+    record = config_store.get_provider(provider_id) if provider_id else None
+    kind = runtime_profile.runtime_kind(record or {}, runner) if record else ""
     norm = normalize_permission(kind, value)
     if norm is not None:
         return norm
@@ -4199,21 +4215,31 @@ def _migrate_session(session: dict, ctx: Optional[dict] = None) -> dict:
                 session["provider_id"] = chosen
                 session["_provider_id_source"] = "active_fallback"
                 ctx["dirty"][0] = True
-    if "reasoning_effort" not in session:
-        session["reasoning_effort"] = _default_reasoning_effort_for_provider(
-            session.get("provider_id")
-        )
+    if "runner" not in session:
+        session["runner"] = _session_runner(None, session.get("provider_id"))
         ctx["dirty"][0] = True
     else:
-        normalized_effort = _session_reasoning_effort(
-            session.get("reasoning_effort"), session.get("provider_id")
+        normalized_runner = _session_runner(
+            session.get("runner"), session.get("provider_id")
         )
-        if normalized_effort != session.get("reasoning_effort"):
-            session["reasoning_effort"] = normalized_effort
+        if normalized_runner != session.get("runner"):
+            session["runner"] = normalized_runner
             ctx["dirty"][0] = True
+    normalized_effort = _session_reasoning_effort(
+        session.get("reasoning_effort"),
+        session.get("provider_id"),
+        session.get("runner"),
+        str(session.get("model") or ""),
+        strict=False,
+    )
+    if normalized_effort != session.get("reasoning_effort"):
+        session["reasoning_effort"] = normalized_effort
+        ctx["dirty"][0] = True
+    session.setdefault("last_active_runner", None)
+    session.setdefault("last_active_supervisor_runner", None)
     stored_permission = session.get("permission")
     normalized_permission = _session_permission(
-        stored_permission, session.get("provider_id")
+        stored_permission, session.get("provider_id"), session.get("runner")
     )
     if normalized_permission != stored_permission:
         session["permission"] = normalized_permission
@@ -4473,6 +4499,7 @@ def create_session(
     orchestration_mode: str = "team",
     source: str = "web",
     provider_id: Optional[str] = None,
+    runner: Optional[str] = None,
     reasoning_effort: Optional[str] = None,
     permission: Optional[dict] = None,
     browser_harness_enabled: bool = True,
@@ -4499,7 +4526,7 @@ def create_session(
     user-aware (fail-closed: hidden helper sessions never leak into
     user-facing surfaces just because a caller omitted the flag).
 
-    `provider_id`, `model`, and `reasoning_effort` default to the
+    `provider_id`, `model`, `reasoning_effort`, and `runner` default to the
     `default_session` internal-LLM assignment (which itself falls back to
     the active provider's values) — see `config_store.resolve_internal_llm`.
     `provider_id` is stamped on the session at create time and is intended
@@ -4517,17 +4544,23 @@ def create_session(
     storage_dir = _storage_dir_for_scope(normalized_storage_scope)
     storage_dir.mkdir(parents=True, exist_ok=True)
     if provider_id is None:
-        provider_id = config_store.default_session_provider_id()
+        default_profile = config_store.resolve_internal_llm("default_session")
+        provider_id = default_profile.get("provider_id")
+        if not model:
+            model = default_profile.get("model") or ""
+        if reasoning_effort is None:
+            reasoning_effort = default_profile.get("reasoning_effort") or None
+        if runner is None:
+            runner = default_profile.get("runner") or None
     if not model:
         model = config_store.default_session_model()
-    if reasoning_effort is None:
-        reasoning_effort = config_store.default_session_reasoning_effort() or None
     sid = id or str(uuid.uuid4())
     if id is not None and _root_file_path(sid).exists():
         raise ValueError(f"session id already exists: {sid}")
     _remember_root_file_dir(sid, storage_dir)
+    resolved_runner = _session_runner(runner, provider_id)
     resolved_reasoning_effort = _session_reasoning_effort(
-        reasoning_effort, provider_id,
+        reasoning_effort, provider_id, resolved_runner, model,
     )
     session = {
         "id": sid,
@@ -4535,8 +4568,9 @@ def create_session(
         "_schema_version": SCHEMA_VERSION,
         "name": name or t("session.default_name", time=datetime.now().strftime('%H:%M')),
         "model": model,
+        "runner": resolved_runner,
         "reasoning_effort": resolved_reasoning_effort,
-        "permission": _session_permission(permission, provider_id),
+        "permission": _session_permission(permission, provider_id, resolved_runner),
         "cwd": cwd or str(Path.home()),
         "cwd_explicit": bool(cwd),
         # `created_at` may be supplied (native import preserves the original
@@ -4549,8 +4583,10 @@ def create_session(
         "provider_id": provider_id,
         "last_active_provider_id": None,
         "last_active_model": None,
+        "last_active_runner": None,
         "last_active_supervisor_provider_id": None,
         "last_active_supervisor_model": None,
+        "last_active_supervisor_runner": None,
         "agent_session_id": None,
         "supervisor_agent_session_id": None,
         "supervisor_bootstrap_received": False,
@@ -5311,6 +5347,7 @@ def fork_session(root: dict, parent_id: str, name: Optional[str] = None) -> dict
         "_schema_version": SCHEMA_VERSION,
         "name": name,
         "model": parent.get("model") or config_store.default_session_model(),
+        "runner": parent.get("runner") or _session_runner(None, parent.get("provider_id")),
         "reasoning_effort": parent.get("reasoning_effort") or "",
         "cwd": parent.get("cwd") or str(Path.home()),
         "created_at": now,
@@ -5322,8 +5359,10 @@ def fork_session(root: dict, parent_id: str, name: Optional[str] = None) -> dict
         "provider_id": parent.get("provider_id"),
         "last_active_provider_id": parent.get("last_active_provider_id"),
         "last_active_model": parent.get("last_active_model"),
+        "last_active_runner": parent.get("last_active_runner"),
         "last_active_supervisor_provider_id": parent.get("last_active_supervisor_provider_id"),
         "last_active_supervisor_model": parent.get("last_active_supervisor_model"),
+        "last_active_supervisor_runner": parent.get("last_active_supervisor_runner"),
         # Forks inherit the parent's node: the fork's claude jsonl
         # branches off the parent's, which lives on that node's disk.
         "node_id": parent.get("node_id") or "primary",
@@ -5392,6 +5431,7 @@ def create_sub_session(
     name: str,
     model: Optional[str] = None,
     provider_id: Optional[str] = None,
+    runner: Optional[str] = None,
     reasoning_effort: Optional[str] = None,
     permission: Optional[dict] = None,
     cwd: str = "",
@@ -5412,13 +5452,17 @@ def create_sub_session(
     )
     if reasoning_effort is None:
         reasoning_effort = parent.get("reasoning_effort")
+    resolved_runner = _session_runner(
+        runner if runner is not None else parent.get("runner"),
+        resolved_provider_id,
+    )
     resolved_effort = _session_reasoning_effort(
-        reasoning_effort, resolved_provider_id,
+        reasoning_effort, resolved_provider_id, resolved_runner, resolved_model,
     )
     if permission is None:
         permission = parent.get("permission")
     resolved_permission = _session_permission(
-        permission, resolved_provider_id,
+        permission, resolved_provider_id, resolved_runner,
     )
     now = datetime.now().isoformat()
     child = {
@@ -5427,6 +5471,7 @@ def create_sub_session(
         "_schema_version": SCHEMA_VERSION,
         "name": name or "sub-session",
         "model": resolved_model,
+        "runner": resolved_runner,
         "reasoning_effort": resolved_effort,
         "permission": resolved_permission,
         "cwd": cwd or parent.get("cwd") or str(Path.home()),
@@ -5436,8 +5481,10 @@ def create_sub_session(
         "provider_id": resolved_provider_id,
         "last_active_provider_id": None,
         "last_active_model": None,
+        "last_active_runner": None,
         "last_active_supervisor_provider_id": None,
         "last_active_supervisor_model": None,
+        "last_active_supervisor_runner": None,
         "node_id": node_id or parent.get("node_id") or "primary",
         "agent_session_id": None,
         "supervisor_agent_session_id": None,

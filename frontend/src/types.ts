@@ -568,6 +568,7 @@ export interface WorkerPanel {
   provider_id?: string | null;
   model?: string | null;
   reasoning_effort?: ReasoningEffort | "" | null;
+  runner?: ProviderRunner | null;
   is_new: boolean;
   instructions_preview: string;
   events: WSEvent[];
@@ -595,6 +596,7 @@ export interface TaggedEvent {
   providerId?: string | null;
   model?: string | null;
   reasoningEffort?: ReasoningEffort | "" | null;
+  runner?: ProviderRunner | null;
   seq: number;
 }
 
@@ -608,6 +610,7 @@ export interface EntityBlock {
   providerId?: string | null;
   model?: string | null;
   reasoningEffort?: ReasoningEffort | "" | null;
+  runner?: ProviderRunner | null;
   events: WSEvent[];
   /** Timestamps matching each event (parallel array). */
   timestamps: (string | undefined)[];
@@ -716,6 +719,7 @@ export interface ChatMessage {
     provider_id?: string | null;
     model?: string | null;
     reasoning_effort?: string | null;
+    runner?: ProviderRunner | null;
   } | null;
   workers?: WorkerPanel[];
   images?: MessageImage[];
@@ -973,6 +977,7 @@ export interface Session {
   model: string;
   model_history?: string[];
   reasoning_effort?: ReasoningEffort | "";
+  runner?: ProviderRunner;
   permission?: Permission;
   provider_id?: string;
   cwd: string;
@@ -1255,6 +1260,10 @@ export interface Provider {
   default_model: string;
   runner: ProviderRunner;
   runner_options: ProviderRunner[];
+  runner_profiles?: Array<{
+    runner: ProviderRunner;
+    reasoning_efforts: ReasoningEffort[];
+  }>;
   suspended: boolean;
   reasoning_effort_options: ReasoningEffort[];
   default_reasoning_effort: ReasoningEffort | "";

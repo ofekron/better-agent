@@ -775,7 +775,9 @@ class Coordinator:
         Single-machine path (default): unchanged — pick the session's
         configured provider, fall back to the active provider when
         the record's provider_id is missing or defunct."""
-        sess = session_manager.get_fields(app_session_id, ("node_id", "provider_id"))
+        sess = session_manager.get_fields(
+            app_session_id, ("node_id", "provider_id", "runner")
+        )
         node_id = (sess or {}).get("node_id") or "primary"
         try:
             from topology import local_node_id
@@ -796,7 +798,7 @@ class Coordinator:
         pid = (sess or {}).get("provider_id")
         if pid:
             try:
-                prov = get_provider(pid)
+                prov = get_provider(pid, (sess or {}).get("runner"))
                 if getattr(prov, "suspended", False):
                     raise ProviderSuspendedError(
                         f"provider {pid} is suspended; cannot start runs"
@@ -818,12 +820,25 @@ class Coordinator:
                 )
         return default_provider()
 
-    def provider_for_run(self, app_session_id: str, provider_id: Optional[str] = None):
+    def provider_for_run(
+        self,
+        app_session_id: str,
+        provider_id: Optional[str] = None,
+        runner: Optional[str] = None,
+    ):
         pid = str(provider_id or "").strip()
         if not pid:
             return self.provider_for_session(app_session_id)
+        session_selectors = session_manager.get_fields(
+            app_session_id, ("provider_id", "runner")
+        ) or {}
+        selected_runner = runner or (
+            session_selectors.get("runner")
+            if pid == session_selectors.get("provider_id")
+            else None
+        )
         try:
-            prov = get_provider(pid)
+            prov = get_provider(pid, selected_runner)
             if getattr(prov, "suspended", False):
                 raise ProviderSuspendedError(
                     f"provider {pid} is suspended; cannot start runs"
@@ -1451,6 +1466,7 @@ class Coordinator:
         provider_id: str = "",
         model: str = "",
         reasoning_effort: str = "",
+        runner: str = "",
         model_task_key: str = "delegation_message",
         collapse_key: str = "",
         collapse_policy: str = "",
@@ -1472,6 +1488,7 @@ class Coordinator:
             provider_id=provider_id,
             model=model,
             reasoning_effort=reasoning_effort,
+            runner=runner,
         )
         metadata = await asyncio.to_thread(
             team_messaging.build_message_metadata,
@@ -1537,6 +1554,7 @@ class Coordinator:
             "provider_id": run_config.get("provider_id") or "",
             "model": run_config.get("model") or "",
             "reasoning_effort": run_config.get("reasoning_effort") or "",
+            "runner": run_config.get("runner") or "",
             "allow_model_override": True,
             "cwd": target.get("cwd") or sender.get("cwd") or "",
             "orchestration_mode": target.get("orchestration_mode") or "team",
@@ -1707,6 +1725,7 @@ class Coordinator:
         provider_id: str = "",
         model: str = "",
         reasoning_effort: str = "",
+        runner: str = "",
     ) -> dict[str, str]:
         import config_store
 
@@ -1715,6 +1734,7 @@ class Coordinator:
             provider_id = ""
         model = str(model or "").strip()
         reasoning_effort = str(reasoning_effort or "").strip()
+        runner = str(runner or "").strip()
         assignment = config_store.get_internal_llm_task(task_key)
         if assignment:
             resolved = config_store.resolve_internal_llm(task_key)
@@ -1731,10 +1751,27 @@ class Coordinator:
                 name = provider.get("name") or provider_id
                 raise ValueError(f"{name} has no default model configured")
         target = target or {}
+        resolved_provider_id = provider_id or str(
+            target.get("provider_id") or sender.get("provider_id") or ""
+        ).strip()
+        inherited_runner = str(
+            target.get("runner") or sender.get("runner") or ""
+        ).strip()
+        if runner:
+            from runtime_profile import resolve_runner
+            provider_record = config_store.get_provider(resolved_provider_id) or {}
+            runner = resolve_runner(provider_record, runner)
+        elif provider_id:
+            from runtime_profile import default_runner
+            provider_record = config_store.get_provider(resolved_provider_id) or {}
+            runner = default_runner(provider_record)
+        else:
+            runner = inherited_runner
         return {
-            "provider_id": provider_id or str(target.get("provider_id") or sender.get("provider_id") or "").strip(),
+            "provider_id": resolved_provider_id,
             "model": model or str(target.get("model") or sender.get("model") or "").strip(),
             "reasoning_effort": reasoning_effort or str(target.get("reasoning_effort") or sender.get("reasoning_effort") or "").strip(),
+            "runner": runner,
         }
 
     def register_mssg_turn_waiter(
@@ -1795,6 +1832,7 @@ class Coordinator:
         *,
         provider_id: Optional[str] = None,
         reasoning_effort: Optional[str] = None,
+        runner: Optional[str] = None,
         sub_session: bool = True,
     ) -> str:
         """Mint the session target for an auto-created delegate_task."""
@@ -1812,6 +1850,7 @@ class Coordinator:
                 cwd=cwd,
                 model=model,
                 provider_id=provider_id,
+                runner=runner,
                 reasoning_effort=reasoning_effort,
             )
             return sess["id"]
@@ -1819,6 +1858,7 @@ class Coordinator:
             name=name, cwd=cwd, orchestration_mode="native",
             model=model,
             provider_id=provider_id,
+            runner=runner,
             reasoning_effort=reasoning_effort,
             source="cli",
         )
@@ -1834,6 +1874,7 @@ class Coordinator:
         cwd: str = "",
         provider_id: str = "",
         reasoning_effort: str = "",
+        runner: str = "",
         sub_session: bool = True,
         run_mode: str = "direct",
         folder_id: Optional[str] = None,
@@ -1857,6 +1898,7 @@ class Coordinator:
             provider_id=provider_id,
             model=model,
             reasoning_effort=reasoning_effort,
+            runner=runner,
         )
         requested_provider_id = str(provider_id or "").strip()
         delegate_search_provider_id = (
@@ -1866,6 +1908,7 @@ class Coordinator:
         )
         delegate_provider_id = create_config.get("provider_id") or None
         delegate_reasoning_effort = create_config.get("reasoning_effort") or None
+        delegate_runner = create_config.get("runner") or None
         if run_mode not in ("direct", "fork"):
             raise ValueError("run_mode must be direct or fork")
         if run_mode == "fork" and not target_session_id:
@@ -1888,6 +1931,7 @@ class Coordinator:
                     cwd,
                     provider_id=delegate_provider_id,
                     reasoning_effort=delegate_reasoning_effort,
+                    runner=delegate_runner,
                     sub_session=sub_session,
                 )
                 created = True
@@ -1919,6 +1963,7 @@ class Coordinator:
                         cwd,
                         provider_id=delegate_provider_id,
                         reasoning_effort=delegate_reasoning_effort,
+                        runner=delegate_runner,
                         sub_session=sub_session,
                     )
                     created = True
@@ -2010,6 +2055,7 @@ class Coordinator:
             provider_id=provider_id,
             model=model,
             reasoning_effort=reasoning_effort,
+            runner=runner,
         )
         await self.submit_team_message(
             sender_session_id=caller, target_session_id=target,
@@ -2018,6 +2064,7 @@ class Coordinator:
             provider_id=run_config.get("provider_id") or "",
             model=run_config.get("model") or "",
             reasoning_effort=run_config.get("reasoning_effort") or "",
+            runner=run_config.get("runner") or "",
             model_task_key="delegation_task",
         )
         created_target = session_manager.get(target) if created else None
@@ -2302,6 +2349,7 @@ class Coordinator:
         provider_id: str = "",
         model: str = "",
         reasoning_effort: str = "",
+        runner: str = "",
         model_task_key: str = "delegation_ask",
         target_selector: Optional[dict] = None,
     ) -> dict:
@@ -2338,6 +2386,7 @@ class Coordinator:
             provider_id=provider_id,
             model=model,
             reasoning_effort=reasoning_effort,
+            runner=runner,
         )
         metadata = await asyncio.to_thread(
             team_messaging.build_message_metadata,
@@ -4431,6 +4480,7 @@ class Coordinator:
             cwd = stored_cwd
 
         stored_model = session.get("model")
+        stored_runner = session.get("runner")
         if stored_model and not allow_model_override:
             if model and model != stored_model:
                 logger.warning(
@@ -4439,12 +4489,16 @@ class Coordinator:
                     model, app_session_id, stored_model,
                 )
             model = stored_model
+            runner = stored_runner
         elif allow_model_override:
             if not model:
                 model = stored_model or ""
+            if not runner:
+                runner = stored_runner
         else:
             provider_id = None
             reasoning_effort = None
+            runner = stored_runner
 
         # Note: WS registration is owned by the /ws/chat handler in main.py,
         # which registers before putting the prompt on the queue. No need to
@@ -4505,6 +4559,7 @@ class Coordinator:
                     ws_callback=ws_callback,
                     provider_id=provider_id,
                     reasoning_effort=reasoning_effort,
+                    runner=runner,
                     images=images,
                     files=files,
                     trace_step_name="supervisor_direct",
@@ -4584,6 +4639,7 @@ class Coordinator:
                 ws_callback=ws_callback,
                 provider_id=provider_id,
                 reasoning_effort=reasoning_effort,
+                runner=runner,
                 images=images,
                 files=files,
                 client_id=client_id,
@@ -4651,6 +4707,7 @@ class Coordinator:
         cwd: str,
         provider_id: str = "",
         reasoning_effort: str = "",
+        runner: str = "",
         justification: Optional[str] = None,
         proposed_orchestration_mode: Optional[str] = None,
         client_delegation_id: Optional[str] = None,
@@ -4673,6 +4730,7 @@ class Coordinator:
             provider_id=provider_id,
             model=model,
             reasoning_effort=reasoning_effort,
+            runner=runner,
             cwd=cwd,
             justification=justification,
             proposed_orchestration_mode=proposed_orchestration_mode,
@@ -4836,6 +4894,7 @@ class Coordinator:
                 str(reasoning_effort or "").strip()
                 or session.get("reasoning_effort")
             ) or None,
+            "runner": session.get("runner") or None,
         }
         if any(v for v in resolved.values()):
             scaffold["run_meta"] = {k: v for k, v in resolved.items() if v}

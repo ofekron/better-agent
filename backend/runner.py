@@ -630,6 +630,10 @@ _MSSG_INPUT_SCHEMA: dict[str, Any] = {
             "type": ["string", "null"],
             "description": "OPTIONAL — reasoning effort for this continuation turn.",
         },
+        "runner": {
+            "type": ["string", "null"],
+            "description": "OPTIONAL — runner for this continuation turn.",
+        },
         "collapse_key": {
             "type": "string",
             "description": "Optional key for coalescing pending mssg work on the target session.",
@@ -779,6 +783,10 @@ _CREATE_SESSION_INPUT_SCHEMA: dict[str, Any] = {
             "type": ["string", "null"],
             "description": "OPTIONAL — reasoning effort for the new session. Defaults to the creating session's effort.",
         },
+        "runner": {
+            "type": ["string", "null"],
+            "description": "OPTIONAL — runner for the new session. Defaults to the creating session's runner.",
+        },
         "cwd": {
             "type": ["string", "null"],
             "description": "OPTIONAL — working directory for the new session. Defaults to (inherits) the creating session's cwd.",
@@ -816,6 +824,10 @@ _CREATE_SUB_SESSION_INPUT_SCHEMA: dict[str, Any] = {
         "reasoning_effort": {
             "type": ["string", "null"],
             "description": "OPTIONAL — reasoning effort for the sub-session. Defaults to the creating session's effort.",
+        },
+        "runner": {
+            "type": ["string", "null"],
+            "description": "OPTIONAL — runner for the sub-session. Defaults to the creating session's runner.",
         },
         "cwd": {
             "type": ["string", "null"],
@@ -910,6 +922,10 @@ _ASK_INPUT_SCHEMA: dict[str, Any] = {
         "reasoning_effort": {
             "type": ["string", "null"],
             "description": "OPTIONAL — reasoning effort for this continuation/fork turn.",
+        },
+        "runner": {
+            "type": ["string", "null"],
+            "description": "OPTIONAL — runner for this continuation/fork turn.",
         },
     },
     "required": ["message"],
@@ -1429,6 +1445,7 @@ def _build_ensure_named_worker_tool(
             "provider_id": args.get("provider_id"),
             "model": args.get("model"),
             "reasoning_effort": args.get("reasoning_effort"),
+            "runner": args.get("runner"),
             "node_id": node_id,
             "tags": [name],
             "folder_id": args.get("folder_id"),
@@ -1503,6 +1520,7 @@ def _build_mssg_tool(
             "provider_id": str(args.get("provider_id") or "").strip() or None,
             "model": str(args.get("model") or "").strip(),
             "reasoning_effort": str(args.get("reasoning_effort") or "").strip() or None,
+            "runner": str(args.get("runner") or "").strip() or None,
             "collapse_key": str(args.get("collapse_key") or "").strip(),
             "collapse_policy": str(args.get("collapse_policy") or "").strip(),
         }
@@ -1772,6 +1790,7 @@ def _build_delegate_task_tool(
             "provider_id": str(args.get("provider_id") or "").strip() or None,
             "model": str(args.get("model") or "").strip(),
             "reasoning_effort": str(args.get("reasoning_effort") or "").strip() or None,
+            "runner": str(args.get("runner") or "").strip() or None,
             "sub_session": args.get("sub_session") is not False,
             "folder_id": args.get("folder_id"),
             "tag_ids": args.get("tag_ids") or [],
@@ -1911,6 +1930,7 @@ def _build_create_session_tool(
             "provider_id": str(args.get("provider_id") or "").strip() or None,
             "model": str(args.get("model") or "").strip(),
             "reasoning_effort": str(args.get("reasoning_effort") or "").strip() or None,
+            "runner": str(args.get("runner") or "").strip() or None,
             "orchestration_mode": args.get("orchestration_mode") or "native",
             "node_id": node_id,
             "folder_id": args.get("folder_id"),
@@ -1958,6 +1978,7 @@ def _build_create_sub_session_tool(
             "provider_id": str(args.get("provider_id") or "").strip() or None,
             "model": str(args.get("model") or "").strip(),
             "reasoning_effort": str(args.get("reasoning_effort") or "").strip() or None,
+            "runner": str(args.get("runner") or "").strip() or None,
             "node_id": node_id,
             "folder_id": args.get("folder_id"),
             "tag_ids": args.get("tag_ids") or [],
@@ -2047,6 +2068,7 @@ def _build_ask_tool(
                 "provider_id": str(args.get("provider_id") or "").strip() or None,
                 "model": str(args.get("model") or "").strip() or model,
                 "reasoning_effort": str(args.get("reasoning_effort") or "").strip() or None,
+                "runner": str(args.get("runner") or "").strip() or None,
                 "cwd": cwd,
                 "client_delegation_id": client_delegation_id,
                 "run_mode": "fork",
@@ -2088,6 +2110,7 @@ def _build_ask_tool(
             "provider_id": str(args.get("provider_id") or "").strip() or None,
             "model": str(args.get("model") or "").strip(),
             "reasoning_effort": str(args.get("reasoning_effort") or "").strip() or None,
+            "runner": str(args.get("runner") or "").strip() or None,
         }
 
         def _post_ask_sync() -> dict:

@@ -1146,6 +1146,7 @@ def _import_session_locked(sess: NativeSession) -> str:
         # idempotency registry is the source of truth for "already imported".
         source="import",
         provider_id=sess.provider_id or None,
+        runner="native",
         # The user explicitly triggered the import; they are aware of and
         # own the resulting session.
         user_initiated=True,

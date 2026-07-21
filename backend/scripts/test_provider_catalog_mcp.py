@@ -34,6 +34,12 @@ def test_returns_all_non_suspended_providers() -> None:
     assert "Codex" in _names(result)
     assert suspended["name"] not in _names(result)
     assert all("runner" in provider for provider in result["providers"])
+    assert all("runtime_profiles" in provider for provider in result["providers"])
+    assert all(
+        "model_profiles" in profile
+        for provider in result["providers"]
+        for profile in provider["runtime_profiles"]
+    )
 
 
 def test_fuzzy_provider_model_effort_and_runner_filters() -> None:
@@ -67,7 +73,22 @@ def test_fuzzy_provider_model_effort_and_runner_filters() -> None:
     )
     assert _names(runner_result) == {"Router Lab"}
     assert runner_result["providers"][0]["runner"] == "better_agent_runner"
+    assert runner_result["providers"][0]["runners"] == ["better_agent_runner"]
     assert runner_result["filters"]["runner"] == "better agent"
+
+    config_store.add_provider({
+        "name": "Gemini Matrix",
+        "kind": "gemini",
+        "mode": "api_key",
+        "default_model": "gemini-2.5-flash",
+        "custom_models": ["gemini-3.5-flash"],
+    })
+    matrix = available_provider_models_response(
+        provider="Gemini Matrix", runner="better_agent_runner",
+    )["providers"][0]["runtime_profiles"][0]["model_profiles"]
+    by_model = {profile["model"]: profile["reasoning_efforts"] for profile in matrix}
+    assert "none" in by_model["gemini-2.5-flash"]
+    assert "none" not in by_model["gemini-3.5-flash"]
 
 
 def main() -> int:

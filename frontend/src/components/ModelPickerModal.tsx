@@ -6,15 +6,26 @@ import { trackedFetch, useOpProgress } from "../progress/store";
 import { cacheProviderModels, readProviderCache } from "../utils/providerCache";
 import { optionLabelWithQuota, summarizeProvider } from "../utils/quotaStatus";
 import { useQuotaStatus } from "../hooks/useQuotaStatus";
-import { changedUpdates, makeDraft, modelForProvider, type SelectorDraft, type SelectorUpdates } from "./modelPicker";
+import {
+  changedUpdates,
+  effortsForRuntime,
+  makeDraft,
+  modelForProvider,
+  runnerForProvider,
+  type SelectorDraft,
+  type SelectorUpdates,
+  type ModelRuntimeProfile,
+} from "./modelPicker";
 
 interface ModelCatalog {
   models?: string[];
+  runtime_profiles?: ModelRuntimeProfile[];
 }
 
 interface ModelCatalogState {
   providerId: string;
   models: string[];
+  runtimeProfiles: ModelRuntimeProfile[];
   error?: string;
 }
 
@@ -64,13 +75,18 @@ export function ModelPickerModal({
         if (cancelled) return;
         const list = catalog.models || [];
         cacheProviderModels(modelProviderId, list);
-        setModelsResult({ providerId: modelProviderId, models: list });
+        setModelsResult({
+          providerId: modelProviderId,
+          models: list,
+          runtimeProfiles: catalog.runtime_profiles || [],
+        });
       })
       .catch((e) => {
         if (cancelled) return;
         setModelsResult({
           providerId: modelProviderId,
           models: readProviderCache()?.modelsByProvider[modelProviderId] ?? [],
+          runtimeProfiles: [],
           error: e instanceof Error ? e.message : String(e),
         });
       });
@@ -87,6 +103,7 @@ export function ModelPickerModal({
       provider_id: providerId,
       model: modelForProvider(nextProvider, providerCachedModels),
       reasoning_effort: nextProvider.default_reasoning_effort || "",
+      runner: runnerForProvider(nextProvider),
       permission: nextProvider.default_permission || {},
     });
   };
@@ -119,6 +136,9 @@ export function ModelPickerModal({
 
   const draftProvider = draft ? providers.find((p) => p.id === draft.provider_id) : null;
   const draftQuota = summarizeProvider(quotaStatus, draftProvider);
+  const runtimeProfiles = modelsResult?.providerId === modelProviderId
+    ? modelsResult.runtimeProfiles
+    : [];
 
   return (
     <div className="modal-overlay session-model-picker-overlay" onClick={() => !busy && onClose()}>
@@ -162,12 +182,46 @@ export function ModelPickerModal({
               })}
             </select>
           </label>
+          {draftProvider && draftProvider.runner_options.length > 1 ? (
+            <label className="session-model-picker-field session-runtime-axis">
+              <span>{t("newSession.runner")}</span>
+              <select
+                value={draft.runner}
+                disabled={busy}
+                onChange={(e) => {
+                  const runner = e.target.value as Provider["runner"];
+                  const options = effortsForRuntime(draftProvider, runner, draft.model, runtimeProfiles);
+                  const reasoning_effort = options.includes(draft.reasoning_effort as ReasoningEffort)
+                    ? draft.reasoning_effort
+                    : options.includes(draftProvider.default_reasoning_effort as ReasoningEffort)
+                      ? draftProvider.default_reasoning_effort
+                      : options[0] || "";
+                  setDraft({ ...draft, runner, reasoning_effort });
+                }}
+              >
+                {draftProvider.runner_options.map((runner) => (
+                  <option key={runner} value={runner}>{t(`setup.runner.${runner}`)}</option>
+                ))}
+              </select>
+            </label>
+          ) : null}
           <label className="session-model-picker-field">
             <span>{t("newSession.model", "Model")}</span>
             <select
               value={draft.model}
               disabled={busy || loadingModels || !modelOptions.length}
-              onChange={(e) => setDraft({ ...draft, model: e.target.value })}
+              onChange={(e) => {
+                const model = e.target.value;
+                const options = draftProvider
+                  ? effortsForRuntime(draftProvider, draft.runner, model, runtimeProfiles)
+                  : [];
+                const reasoning_effort = options.includes(draft.reasoning_effort as ReasoningEffort)
+                  ? draft.reasoning_effort
+                  : options.includes(draftProvider?.default_reasoning_effort as ReasoningEffort)
+                    ? draftProvider?.default_reasoning_effort || ""
+                    : options[0] || "";
+                setDraft({ ...draft, model, reasoning_effort });
+              }}
             >
               {modelOptions.length ? (
                 <>
@@ -183,7 +237,7 @@ export function ModelPickerModal({
               )}
             </select>
           </label>
-          {draftProvider?.reasoning_effort_options?.length ? (
+          {draftProvider && effortsForRuntime(draftProvider, draft.runner, draft.model, runtimeProfiles).length ? (
             <label className="session-model-picker-field">
               <span>{t("newSession.reasoningEffort", "Effort")}</span>
               <select
@@ -194,7 +248,7 @@ export function ModelPickerModal({
                 {!draft.reasoning_effort ? (
                   <option value="">{t("reasoningEffort.none", "None")}</option>
                 ) : null}
-                {draftProvider.reasoning_effort_options.map((effort) => (
+                {effortsForRuntime(draftProvider, draft.runner, draft.model, runtimeProfiles).map((effort) => (
                   <option key={effort} value={effort}>{t(`reasoningEffort.${effort}`, effort)}</option>
                 ))}
               </select>

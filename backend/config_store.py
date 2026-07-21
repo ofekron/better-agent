@@ -37,6 +37,7 @@ import uuid
 from typing import Optional
 
 import credential_session_client
+import runtime_profile
 
 from json_store import read_json, write_json
 from paths import ba_home, resolve_claude_config_dir, resolve_provider_config_dir, user_home
@@ -716,11 +717,11 @@ def set_disabled_builtin_extensions(extension_ids: list[str]) -> list[str]:
 # ----------------------------------------------------------------------------
 # Public API: internal-LLM task assignments (global setting)
 # ----------------------------------------------------------------------------
-# Which provider + model + reasoning effort runs each backend-internal LLM
+# Which provider + model + reasoning effort + runner runs each backend-internal LLM
 # task. A task with no assignment (or empty fields) inherits from the active
 # provider at resolve time — so the unconfigured state is never a hardcode.
 #
-# `default_session` is the model/provider/effort stamped on every newly
+# `default_session` is the runtime profile stamped on every newly
 # created user-facing session when the caller doesn't specify one.
 # Core tasks owned by the backend itself. Extension-contributed tasks
 # (public builtins and private-registry extensions) come from
@@ -733,7 +734,7 @@ _CORE_INTERNAL_LLM_TASKS = (
     "delegation_ask",
     "delegation_session_bridge",
 )
-_INTERNAL_LLM_FIELDS = ("provider_id", "model", "reasoning_effort")
+_INTERNAL_LLM_FIELDS = ("provider_id", "model", "reasoning_effort", "runner")
 
 
 def internal_llm_tasks() -> tuple[str, ...]:
@@ -792,7 +793,7 @@ def get_internal_llm_task(task_key: str) -> dict:
 
 
 def resolve_internal_llm(task_key: str) -> dict:
-    """Concrete `{provider_id, model, reasoning_effort}` for a task.
+    """Concrete `{provider_id, model, reasoning_effort, runner}` for a task.
 
     Each field falls back to the active provider's value when the assignment
     doesn't pin it, so a fully-unconfigured task resolves to the active
@@ -821,15 +822,22 @@ def resolve_internal_llm(task_key: str) -> dict:
             provider = None
         provider_id = provider["id"] if provider else None
     model = assignment.get("model") or (provider.get("default_model") if provider else "")
+    runner = runtime_profile.resolve_runner(provider, assignment.get("runner")) if provider else ""
     effort = ""
-    if provider and _capabilities_for(provider).get("supports_reasoning_effort"):
-        options = reasoning_effort_options_for_provider(provider)
+    if provider:
+        options = runtime_profile.reasoning_efforts(provider, runner, model=model)
         chosen = assignment.get("reasoning_effort")
         if chosen in options:
             effort = chosen
         else:
-            effort = provider.get("default_reasoning_effort") or (options[0] if options else "")
-    return {"provider_id": provider_id, "model": model, "reasoning_effort": effort}
+            default_effort = provider.get("default_reasoning_effort") or ""
+            effort = default_effort if default_effort in options else (options[0] if options else "")
+    return {
+        "provider_id": provider_id,
+        "model": model,
+        "reasoning_effort": effort,
+        "runner": runner,
+    }
 
 
 def default_session_model() -> str:
@@ -879,8 +887,12 @@ def _provider_config(provider: dict) -> dict:
         "config_dir": provider.get("config_dir", ""),
         "custom_models": provider.get("custom_models", []),
         "default_model": provider.get("default_model", ""),
-        "runner": _clean_runner(kind, provider.get("runner")),
-        "runner_options": _runner_choices_for_kind(kind),
+        "runner": runtime_profile.default_runner(provider),
+        "runner_options": list(runtime_profile.supported_runners(provider)),
+        "runner_profiles": runtime_profile.runner_profiles({
+            **provider,
+            "reasoning_effort_options": effort_options,
+        }),
         "suspended": _provider_is_suspended(provider),
         "reasoning_effort_options": effort_options,
         "default_reasoning_effort": default_effort if effort_options else "",

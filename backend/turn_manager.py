@@ -1512,6 +1512,7 @@ class TurnManager:
         mode: Literal["native", "manager"],
         provider_id: Optional[str] = None,
         reasoning_effort: Optional[str] = None,
+        runner: Optional[str] = None,
         client_id: Optional[str] = None,
         supervised: bool = False,
         supervisor_agent_session_id: Optional[str] = None,
@@ -1835,12 +1836,13 @@ class TurnManager:
                 and new_sid != session.get(session_id_field)
                 and session_id_field != "supervisor_agent_session_id"
             ):
-                provider = self._c.provider_for_run(app_session_id, provider_id)
+                provider = self._c.provider_for_run(app_session_id, provider_id, runner)
                 persist_mode = session.get("orchestration_mode") or mode
                 with session_manager.batch(persist_id):
                     session_manager.set_agent_sid(
                         persist_id, persist_mode, new_sid,
                         provider_id=provider.id, model=model,
+                        runner=str(provider.record.get("runner") or ""),
                     )
                     if session.get("forked_from_agent_sid"):
                         session_manager.clear_forked_from(persist_id)
@@ -1891,7 +1893,7 @@ class TurnManager:
             await trace.end_step(step)
 
             try:
-                provider_record = self._c.provider_for_run(app_session_id, provider_id)
+                provider_record = self._c.provider_for_run(app_session_id, provider_id, runner)
                 await _to_turn_dispatch_thread(
                     llm_call_log.append_call,
                     source=source or "turn",
@@ -2427,16 +2429,21 @@ class TurnManager:
             if session_id_field == "supervisor_agent_session_id":
                 last_prov = session_rec.get("last_active_supervisor_provider_id")
                 last_mod = session_rec.get("last_active_supervisor_model")
+                last_runner = session_rec.get("last_active_supervisor_runner")
             else:
                 last_prov = session_rec.get("last_active_provider_id")
                 last_mod = session_rec.get("last_active_model")
+                last_runner = session_rec.get("last_active_runner")
 
             current_prov_id = session_rec.get("provider_id")
             current_model = session_rec.get("model")
+            current_runner = session_rec.get("runner")
 
             if last_prov is not None and current_prov_id != last_prov:
                 return True
             if last_mod is not None and current_model != last_mod:
+                return True
+            if last_runner is not None and current_runner != last_runner:
                 return True
             return False
 
@@ -2512,6 +2519,7 @@ class TurnManager:
                 "provider_id": getattr(provider, "id", None),
                 "model": (model or "").strip() or None,
                 "reasoning_effort": (str(reasoning_effort or "").strip()) or None,
+                "runner": str(_session_rec.get("runner") or "").strip() or None,
             }
             new_meta = {k: v for k, v in resolved.items() if v}
             if inflight is not None and inflight.get("run_meta") == new_meta:
@@ -2955,6 +2963,7 @@ class TurnManager:
                                     discovery_mode, sid,
                                     provider_id=provider.id,
                                     model=model,
+                                    runner=str(provider.record.get("runner") or ""),
                                 )
 
                         if event.type in ("complete", "error"):

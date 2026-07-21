@@ -8,6 +8,7 @@ import type {
   PastedImage,
   Project,
   Provider,
+  ProviderRunner,
   ReasoningEffort,
   Permission,
 } from "../types";
@@ -39,11 +40,18 @@ import {
   cacheProviders,
   readProviderCache,
 } from "../utils/providerCache";
+import {
+  effortsForRuntime,
+  effortsForRunner,
+  runnerForProvider,
+  type ModelRuntimeProfile,
+} from "./modelPicker";
 
 interface RuntimeProfile {
   providerId: string;
   model: string;
   reasoningEffort: ReasoningEffort | "";
+  runner: ProviderRunner;
   /** Per-session permission override. {} = inherit provider default. */
   permission: Permission;
 }
@@ -244,11 +252,15 @@ function capabilityContextFromPickerSource(
 function resolveReasoningEffort(
   saved: RuntimeProfile | undefined,
   provider: Provider,
+  runner: ProviderRunner,
   role: "main" | "worker",
 ): ReasoningEffort | "" {
-  const options = provider.reasoning_effort_options ?? [];
+  const options = effortsForRunner(provider, runner);
   if (options.length === 0) return "";
-  const savedEffort = saved?.providerId === provider.id ? saved.reasoningEffort : "";
+  const savedRunner = saved?.runner || runnerForProvider(provider);
+  const savedEffort = saved?.providerId === provider.id && savedRunner === runner
+    ? saved.reasoningEffort
+    : "";
   const lastEffort = provider.last_reasoning_effort ?? "";
   const defaultEffort = provider.default_reasoning_effort || "";
   const candidates =
@@ -282,7 +294,12 @@ export function resolveRuntimeProfile(
     availableProviders.find((item) => item.id === saved?.providerId)
     ?? availableProviders.find((item) => item.id === defaultProviderId)
     ?? availableProviders[0];
-  if (!provider) return { providerId: "", model: "", reasoningEffort: "", permission: {} };
+  if (!provider) return { providerId: "", model: "", reasoningEffort: "", runner: "native", permission: {} };
+
+  const savedRunner = saved?.providerId === provider.id ? saved.runner : undefined;
+  const runner = savedRunner && provider.runner_options.includes(savedRunner)
+    ? savedRunner
+    : runnerForProvider(provider);
 
   const models = modelsByProvider[provider.id] ?? [];
   const savedModel = saved?.providerId === provider.id ? saved.model : "";
@@ -302,7 +319,8 @@ export function resolveRuntimeProfile(
   return {
     providerId: provider.id,
     model,
-    reasoningEffort: resolveReasoningEffort(saved, provider, role),
+    reasoningEffort: resolveReasoningEffort(saved, provider, runner, role),
+    runner,
     permission: resolvePermission(saved, provider),
   };
 }
@@ -323,6 +341,7 @@ function RuntimeProfilePicker({
   const { t } = useTranslation();
   const quotaStatus = useQuotaStatus(API, providers);
   const [models, setModels] = useState<string[]>([]);
+  const [runtimeProfiles, setRuntimeProfiles] = useState<ModelRuntimeProfile[]>([]);
   const [prevProviderId, setPrevProviderId] = useState("");
   const selectedProvider = providers.find((p) => p.id === value.providerId);
   const selectedQuota = summarizeProvider(quotaStatus, selectedProvider);
@@ -330,12 +349,14 @@ function RuntimeProfilePicker({
   useEffect(() => {
     if (!value.providerId) {
       setModels([]);
+      setRuntimeProfiles([]);
       return;
     }
     if (value.providerId === prevProviderId) return;
     setPrevProviderId(value.providerId);
     const cachedModels = readProviderCache()?.modelsByProvider[value.providerId] ?? [];
     setModels(cachedModels);
+    setRuntimeProfiles([]);
     trackedFetch(
       `providers:fetchModels:${value.providerId}`,
       `${API}/api/providers/${value.providerId}/models`,
@@ -345,6 +366,7 @@ function RuntimeProfilePicker({
         const list: string[] = d.models || [];
         cacheProviderModels(value.providerId, list);
         setModels(list);
+        setRuntimeProfiles(d.runtime_profiles || []);
         if (list.length && !list.includes(value.model)) {
           onChange({ ...value, model: list[0] });
         }
@@ -365,7 +387,8 @@ function RuntimeProfilePicker({
             onChange({
               providerId: e.target.value,
               model: p?.last_model || p?.default_model || "",
-              reasoningEffort: p ? resolveReasoningEffort(undefined, p, role) : "",
+              reasoningEffort: p ? resolveReasoningEffort(undefined, p, runnerForProvider(p), role) : "",
+              runner: runnerForProvider(p),
               permission: p ? resolvePermission(undefined, p) : {},
             });
           }}
@@ -381,11 +404,46 @@ function RuntimeProfilePicker({
           })}
         </select>
       </div>
+      {selectedProvider && selectedProvider.runner_options.length > 1 ? (
+        <div className="ns-modal-row ns-runtime-axis">
+          <label>{t("newSession.runner")}</label>
+          <select
+            value={value.runner}
+            onChange={(e) => {
+              const runner = e.target.value as ProviderRunner;
+              const options = effortsForRuntime(selectedProvider, runner, value.model, runtimeProfiles);
+              const reasoningEffort = options.includes(value.reasoningEffort as ReasoningEffort)
+                ? value.reasoningEffort
+                : options.includes(selectedProvider.default_reasoning_effort as ReasoningEffort)
+                  ? selectedProvider.default_reasoning_effort
+                  : options[0] || "";
+              onChange({ ...value, runner, reasoningEffort });
+            }}
+          >
+            {selectedProvider.runner_options.map((runner) => (
+              <option key={runner} value={runner}>{t(`setup.runner.${runner}`)}</option>
+            ))}
+          </select>
+        </div>
+      ) : null}
       <div className="ns-modal-row">
         <label>{t("newSession.model")}</label>
         <select
           value={value.model}
-          onChange={(e) => onChange({ ...value, model: e.target.value })}
+          onChange={(e) => {
+            const model = e.target.value;
+            if (!selectedProvider) {
+              onChange({ ...value, model });
+              return;
+            }
+            const options = effortsForRuntime(selectedProvider, value.runner, model, runtimeProfiles);
+            const reasoningEffort = options.includes(value.reasoningEffort as ReasoningEffort)
+              ? value.reasoningEffort
+              : options.includes(selectedProvider.default_reasoning_effort as ReasoningEffort)
+                ? selectedProvider.default_reasoning_effort
+                : options[0] || "";
+            onChange({ ...value, model, reasoningEffort });
+          }}
         >
           {models.map((m) => (
             <option key={m} value={m}>
@@ -397,14 +455,14 @@ function RuntimeProfilePicker({
           )}
         </select>
       </div>
-      {selectedProvider?.reasoning_effort_options?.length ? (
+      {selectedProvider && effortsForRuntime(selectedProvider, value.runner, value.model, runtimeProfiles).length ? (
         <div className="ns-modal-row">
           <label>{t("newSession.reasoningEffort")}</label>
           <select
             value={value.reasoningEffort}
             onChange={(e) => onChange({ ...value, reasoningEffort: e.target.value as ReasoningEffort })}
           >
-            {selectedProvider.reasoning_effort_options.map((effort) => (
+            {effortsForRuntime(selectedProvider, value.runner, value.model, runtimeProfiles).map((effort) => (
               <option key={effort} value={effort}>
                 {t(`reasoningEffort.${effort}`)}
               </option>
@@ -546,8 +604,8 @@ export function NewSessionModal({
   const [orchestrationMode, setOrchestrationMode] = useState<OrchestrationMode>(
     teamEnabled ? "team" : "native",
   );
-  const [main, setMain] = useState<RuntimeProfile>({ providerId: "", model: "", reasoningEffort: "", permission: {} });
-  const [worker, setWorker] = useState<RuntimeProfile>({ providerId: "", model: "", reasoningEffort: "", permission: {} });
+  const [main, setMain] = useState<RuntimeProfile>({ providerId: "", model: "", reasoningEffort: "", runner: "native", permission: {} });
+  const [worker, setWorker] = useState<RuntimeProfile>({ providerId: "", model: "", reasoningEffort: "", runner: "native", permission: {} });
   const sessionExtensionOptions = useMemo<NewSessionExtensionOption[]>(
     () => [
       ...(
@@ -751,7 +809,8 @@ export function NewSessionModal({
       setMain({
         providerId: fb.id,
         model: fb.default_model,
-        reasoningEffort: resolveReasoningEffort(undefined, fb, "main"),
+        reasoningEffort: resolveReasoningEffort(undefined, fb, runnerForProvider(fb), "main"),
+        runner: runnerForProvider(fb),
         permission: resolvePermission(main, fb),
       });
     }

@@ -4,6 +4,7 @@ import { Select } from "./Select";
 import { API } from "../api";
 import { trackPromise } from "../progress/store";
 import type { Provider } from "../types";
+import { effortsForRunner, runnerForProvider } from "./modelPicker";
 
 /** Per-task runtime profile assignment for the
  * backend's internal LLM calls (requirement analysis, config-sync review,
@@ -15,6 +16,7 @@ type Assignment = {
   provider_id?: string;
   model?: string;
   reasoning_effort?: string;
+  runner?: Provider["runner"];
 };
 
 const INHERIT = "";
@@ -72,11 +74,16 @@ export function InternalLLMSetting({ tasks: taskOverride, showHint = true, exten
     const entry: Assignment = { ...(next[task] || {}) };
     if (value === INHERIT) delete entry[field];
     else (entry[field] as string) = value;
-    // Drop an effort value that the resolved provider no longer supports.
-    if (field === "provider_id") {
+    if (field === "provider_id" || field === "runner") {
       const id = value === INHERIT ? defaultProviderId || "" : value;
-      const p = id ? providerById[id] : undefined;
-      const opts = p?.reasoning_effort_options || [];
+      const p = field === "provider_id" ? (id ? providerById[id] : undefined) : effectiveProvider(task);
+      if (field === "provider_id" && entry.runner && p && !p.runner_options.includes(entry.runner)) {
+        delete entry.runner;
+      }
+      const runner = field === "runner" && value !== INHERIT
+        ? value as Provider["runner"]
+        : p ? runnerForProvider(p) : "native";
+      const opts = p ? effortsForRunner(p, runner) : [];
       if (entry.reasoning_effort && opts && !opts.includes(entry.reasoning_effort as never)) {
         delete entry.reasoning_effort;
       }
@@ -110,9 +117,10 @@ export function InternalLLMSetting({ tasks: taskOverride, showHint = true, exten
       {tasks.map((task) => {
         const a = assignments[task] || {};
         const provider = effectiveProvider(task);
-        const effortOptions = provider?.supports_reasoning_effort
-          ? provider.reasoning_effort_options || []
-          : [];
+        const runner = a.runner && provider?.runner_options.includes(a.runner)
+          ? a.runner
+          : provider ? runnerForProvider(provider) : "native";
+        const effortOptions = provider ? effortsForRunner(provider, runner) : [];
         const modelSet = new Set<string>();
         if (provider?.default_model) modelSet.add(provider.default_model);
         for (const m of provider?.custom_models || []) modelSet.add(m);
@@ -132,6 +140,23 @@ export function InternalLLMSetting({ tasks: taskOverride, showHint = true, exten
                 ]}
               />
             </label>
+            {provider && provider.runner_options.length > 1 && (
+              <label className="context-strategy-row session-runtime-axis">
+                <span>{t("newSession.runner")}</span>
+                <Select
+                  value={a.runner || INHERIT}
+                  disabled={saving}
+                  onChange={(v) => void change(task, "runner", v)}
+                  options={[
+                    { value: INHERIT, label: t("settings.internalLlmInherit") },
+                    ...provider.runner_options.map((value) => ({
+                      value,
+                      label: t(`setup.runner.${value}`),
+                    })),
+                  ]}
+                />
+              </label>
+            )}
             <label className="context-strategy-row">
               <span>{t("settings.internalLlmModel")}</span>
               <Select

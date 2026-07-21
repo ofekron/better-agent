@@ -268,9 +268,10 @@ async def spawn_approved_worker(
     fresh-worker popup (the "ask" policy). Under "approve" the worker is
     spawned automatically with no popup, so the user is not aware of it.
     """
+    runtime_provider = coordinator.provider_for_session(app_session_id)
     new_bc = session_manager.create(
         name=description, model=model, cwd=cwd, orchestration_mode=mode,
-        provider_id=provider_id, node_id=node_id,
+        provider_id=provider_id, runner=runtime_provider.record.get("runner"), node_id=node_id,
         user_initiated=user_initiated,
     )
     # Register a cancel event keyed on the new BC id so DELETE

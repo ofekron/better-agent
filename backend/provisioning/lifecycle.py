@@ -148,7 +148,7 @@ def ensure_caller(spec: ProvisionedSessionSpec, cfg: ProvisionedConfig) -> str:
         raise RuntimeError("provisioning cannot create caller session") from exc
     existing = working_mode.find_working_session(
         spec.caller_key, cwd=cfg.cwd, provider_id=cfg.provider_id,
-        model=cfg.model, node_id=cfg.node_id,
+        model=cfg.model, runner=cfg.runner, node_id=cfg.node_id,
     )
     if existing and existing.get("id"):
         if _storage_scope_matches(existing, spec):
@@ -161,6 +161,7 @@ def ensure_caller(spec: ProvisionedSessionSpec, cfg: ProvisionedConfig) -> str:
         model=cfg.model,
         source="internal",
         provider_id=cfg.provider_id,
+        runner=cfg.runner or None,
         reasoning_effort=cfg.reasoning_effort or None,
         node_id=cfg.node_id,
         worker_creation_policy=spec.worker_creation_policy,
@@ -171,6 +172,7 @@ def ensure_caller(spec: ProvisionedSessionSpec, cfg: ProvisionedConfig) -> str:
         sess["id"],
         mode=spec.caller_key,
         meta={"cwd": cfg.cwd, "provider_id": cfg.provider_id, "model": cfg.model,
+              "runner": cfg.runner,
               "node_id": cfg.node_id},
     )
     return str(sess["id"])
@@ -206,6 +208,7 @@ def _find(spec: ProvisionedSessionSpec, cfg: ProvisionedConfig) -> Optional[dict
         cwd=cfg.cwd,
         provider_id=cfg.provider_id,
         model=cfg.model,
+        runner=cfg.runner,
         machine_completion=spec.machine_completion,
         version=spec.version,
         node_id=cfg.node_id,
@@ -217,12 +220,13 @@ def _validate_provider(session: dict, cfg: ProvisionedConfig) -> None:
     if (
         session.get("provider_id") != cfg.provider_id
         or session.get("model") != cfg.model
+        or session.get("runner") != cfg.runner
     ):
         raise RuntimeError(
-            f"{cfg.worker_description}: provider/model mismatch "
+            f"{cfg.worker_description}: runtime profile mismatch "
             f"(session={session.get('id')} provider={session.get('provider_id')} "
-            f"model={session.get('model')}; required provider={cfg.provider_id} "
-            f"model={cfg.model})"
+            f"model={session.get('model')} runner={session.get('runner')}; "
+            f"required provider={cfg.provider_id} model={cfg.model} runner={cfg.runner})"
         )
     # Routing is keyed off the session's node_id at dispatch time, so a
     # mismatch here would silently run on the wrong node — reject it.
@@ -247,6 +251,7 @@ def _create_session(spec: ProvisionedSessionSpec, cfg: ProvisionedConfig) -> str
         model=cfg.model,
         source="internal",
         provider_id=cfg.provider_id,
+        runner=cfg.runner or None,
         reasoning_effort=cfg.reasoning_effort or None,
         node_id=cfg.node_id,
         worker_creation_policy=spec.worker_creation_policy,
@@ -260,6 +265,7 @@ def _create_session(spec: ProvisionedSessionSpec, cfg: ProvisionedConfig) -> str
             "cwd": cfg.cwd,
             "provider_id": cfg.provider_id,
             "model": cfg.model,
+            "runner": cfg.runner,
             "machine_completion": spec.machine_completion,
             "version": spec.version,
             "node_id": cfg.node_id,

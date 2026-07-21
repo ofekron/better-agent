@@ -1042,7 +1042,7 @@ class Provider(ABC):
 # ============================================================================
 # Registry / factory
 # ============================================================================
-_PROVIDER_CACHE: dict[str, Provider] = {}
+_PROVIDER_CACHE: dict[tuple[str, str], Provider] = {}
 _CACHE_LOCK = threading.Lock()
 
 
@@ -1060,13 +1060,11 @@ def _resolve_class(kind: str) -> type[Provider]:
 
 
 def _provider_runtime_kind(record: dict) -> str:
-    runner = str(record.get("runner") or "").strip()
-    if runner == "better_agent_runner":
-        return "openai"
-    return record.get("kind") or "claude"
+    import runtime_profile
+    return runtime_profile.runtime_kind(record, record.get("runner"))
 
 
-def get_provider(provider_id: str) -> Provider:
+def get_provider(provider_id: str, runner: Optional[str] = None) -> Provider:
     """Return the cached `Provider` for `provider_id`, refreshing its
     record from disk on every call so config edits are visible.
 
@@ -1083,7 +1081,18 @@ def get_provider(provider_id: str) -> Provider:
     record = config_store.get_provider_with_key(provider_id)
     suspended_record = record is None and config_store.provider_suspended(provider_id)
     with _CACHE_LOCK:
-        cached = _PROVIDER_CACHE.get(provider_id)
+        if record is not None:
+            import runtime_profile
+            record = runtime_profile.provider_record_for_runner(record, runner)
+            cache_key = (provider_id, record["runner"])
+        else:
+            requested_runner = str(runner or "").strip()
+            candidates = [
+                item for (pid, cached_runner), item in _PROVIDER_CACHE.items()
+                if pid == provider_id and (not requested_runner or cached_runner == requested_runner)
+            ]
+            cache_key = (provider_id, requested_runner)
+        cached = _PROVIDER_CACHE.get(cache_key) if record is not None else (candidates[0] if candidates else None)
         if record is None:
             if cached is not None:
                 if suspended_record:
@@ -1130,7 +1139,7 @@ def get_provider(provider_id: str) -> Provider:
                     f"provider {provider_id} runner changed while runs are active"
                 )
         instance = cls(record)
-        _PROVIDER_CACHE[provider_id] = instance
+        _PROVIDER_CACHE[cache_key] = instance
         return instance
 
 
@@ -1164,8 +1173,11 @@ def cancel_provider_runs(provider_id: str, *, run_ids: Iterable[str] | None = No
     ids = set(run_ids or [])
     ids.update(_run_ids_for_provider(provider_id))
     with _CACHE_LOCK:
-        cached = _PROVIDER_CACHE.get(provider_id)
-    if cached is not None:
+        cached_instances = [
+            instance for (pid, _runner), instance in _PROVIDER_CACHE.items()
+            if pid == provider_id
+        ]
+    for cached in cached_instances:
         try:
             ids.update(run.get("run_id") for run in cached.active_runs() if run.get("run_id"))
         except Exception:
@@ -1181,13 +1193,13 @@ def cancel_provider_runs(provider_id: str, *, run_ids: Iterable[str] | None = No
         except Exception:
             logger.debug("cancel_provider_runs: containment kill failed", exc_info=True)
         signalled = False
-        if cached is not None:
+        for cached in cached_instances:
             try:
-                signalled = bool(cached.cancel_run(run_id))
+                signalled = bool(cached.cancel_run(run_id)) or signalled
             except Exception:
                 logger.exception("cancel_provider_runs: cancel_run failed run=%s", run_id)
-        count += 1 if signalled or cached is None else 0
-    if cached is not None:
+        count += 1 if signalled or not cached_instances else 0
+    for cached in cached_instances:
         cached.suspended = config_store.provider_suspended(provider_id)
     return count
 
@@ -1295,7 +1307,7 @@ def _recover_all_in_flight_owned(
     )
 
     # Group run_ids by owning provider_id.
-    by_provider: dict[Optional[str], list[str]] = {}
+    by_provider: dict[tuple[Optional[str], str], list[str]] = {}
     enumerated = 0
     indexed_skips = 0
     marker_fallback_reads = 0
@@ -1337,14 +1349,16 @@ def _recover_all_in_flight_owned(
                 pass
         bs_path = child / "backend_state.json"
         pid: Optional[str] = None
+        runner = ""
         if bs_path.exists():
             backend_state_reads += 1
             try:
                 bs = json.loads(bs_path.read_text(encoding="utf-8"))
                 pid = bs.get("provider_id")
+                runner = str(bs.get("runner") or "").strip()
             except Exception:
                 pass
-        by_provider.setdefault(pid, []).append(child.name)
+        by_provider.setdefault((pid, runner), []).append(child.name)
     perf.record(
         "startup.recovery.discovery",
         (time.perf_counter() - phase_started) * 1000.0,
@@ -1362,7 +1376,7 @@ def _recover_all_in_flight_owned(
     # Fall back: runs without a provider_id go to the active provider
     # (legacy data; fix is forward-only).
     fallback_id: Optional[str] = None
-    if None in by_provider:
+    if any(pid is None for pid, _runner in by_provider):
         try:
             fallback_id = default_provider().id
         except Exception:
@@ -1372,7 +1386,7 @@ def _recover_all_in_flight_owned(
 
     scan_inputs: list[tuple[str, Provider, set[str]]] = []
     phase_started = time.perf_counter()
-    for pid, run_ids in by_provider.items():
+    for (pid, runner), run_ids in by_provider.items():
         owner_id = pid or fallback_id
         if owner_id is not None and owner_id.startswith("remote:"):
             # Remote run dirs can't be classified without the node
@@ -1394,7 +1408,7 @@ def _recover_all_in_flight_owned(
             continue
         owner = None
         try:
-            owner = get_provider(owner_id)
+            owner = get_provider(owner_id, runner or None)
         except ProviderSuspendedError:
             log.info(
                 "recover_all_in_flight: %d run(s) owned by suspended "
@@ -1460,6 +1474,9 @@ def _recover_all_in_flight_owned(
             "startup.recovery.provider_scan",
             (time.perf_counter() - scan_started) * 1000.0,
         )
+        runner = str(owner.record.get("runner") or "").strip()
+        for descriptor in recovered:
+            descriptor.setdefault("runner", runner)
         return recovered
 
     if parallelism <= 1:

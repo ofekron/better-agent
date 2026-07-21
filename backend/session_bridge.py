@@ -94,6 +94,7 @@ async def _run_turn(
     provider_id: str = "",
     model: str = "",
     reasoning_effort: str = "",
+    runner: str = "",
 ) -> dict:
     """Submit `prompt` to session `sid`, await turn completion, return the
     final assistant message text + id. Reuses session_search's in-process
@@ -146,7 +147,8 @@ async def _run_turn(
             "provider_id": provider_id or sess.get("provider_id") or "",
             "model": model or sess.get("model"),
             "reasoning_effort": reasoning_effort or sess.get("reasoning_effort") or "",
-            "allow_model_override": bool(provider_id or model or reasoning_effort),
+            "runner": runner or sess.get("runner") or "",
+            "allow_model_override": bool(provider_id or model or reasoning_effort or runner),
             "cwd": sess.get("cwd"),
             "ws_callback": _ws,
             "lifecycle_msg_id": lifecycle_msg_id,
@@ -178,10 +180,12 @@ def _resolve_bridge_run_config(
     provider_id: str = "",
     model: str = "",
     reasoning_effort: str = "",
+    runner: str = "",
 ) -> dict[str, str]:
     provider_id = str(provider_id or "").strip()
     model = str(model or "").strip()
     reasoning_effort = str(reasoning_effort or "").strip()
+    runner = str(runner or "").strip()
     assignment = config_store.get_internal_llm_task("delegation_session_bridge")
     if assignment:
         resolved = config_store.resolve_internal_llm("delegation_session_bridge")
@@ -191,14 +195,26 @@ def _resolve_bridge_run_config(
             reasoning_effort
             or str(resolved.get("reasoning_effort") or "").strip()
         )
+        runner = runner or str(resolved.get("runner") or "").strip()
     if provider_id and not model:
         provider = config_store.get_provider(provider_id) or {}
         model = str(provider.get("default_model") or "").strip()
     target = target or {}
+    resolved_provider_id = provider_id or str(target.get("provider_id") or caller.get("provider_id") or "").strip()
+    inherited_runner = ""
+    for session in (target, caller):
+        if session.get("provider_id") == resolved_provider_id:
+            inherited_runner = str(session.get("runner") or "").strip()
+            if inherited_runner:
+                break
+    from runtime_profile import resolve_runner
+    provider = config_store.get_provider(resolved_provider_id) or {}
+    resolved_runner = resolve_runner(provider, runner or inherited_runner)
     return {
-        "provider_id": provider_id or str(target.get("provider_id") or caller.get("provider_id") or "").strip(),
+        "provider_id": resolved_provider_id,
         "model": model or str(target.get("model") or caller.get("model") or "").strip(),
         "reasoning_effort": reasoning_effort or str(target.get("reasoning_effort") or caller.get("reasoning_effort") or "").strip(),
+        "runner": resolved_runner,
     }
 
 
@@ -222,6 +238,7 @@ async def _run(
     provider_id: str = "",
     model: str = "",
     reasoning_effort: str = "",
+    runner: str = "",
 ) -> dict:
     caller = session_manager.get(caller_sid) or {}
     target_session = session_manager.get(target_sid) or {}
@@ -231,6 +248,7 @@ async def _run(
         provider_id=provider_id,
         model=model,
         reasoning_effort=reasoning_effort,
+        runner=runner,
     )
     if run_mode == "fork":
         config_store.apply_env_vars()
@@ -261,6 +279,7 @@ async def _run(
         provider_id=run_config.get("provider_id") or "",
         model=run_config.get("model") or "",
         reasoning_effort=run_config.get("reasoning_effort") or "",
+        runner=run_config.get("runner") or "",
     )
     if final.get("error"):
         return {"error": final["error"]}
@@ -282,6 +301,7 @@ async def _run_new(
     provider_id: str = "",
     model: str = "",
     reasoning_effort: str = "",
+    runner: str = "",
 ) -> dict:
     """Create a brand-new session inheriting the caller's config and run
     the prompt in it. Returns the same shape as `_run`."""
@@ -291,6 +311,7 @@ async def _run_new(
         provider_id=provider_id,
         model=model,
         reasoning_effort=reasoning_effort,
+        runner=runner,
     )
     config_store.apply_env_vars()
     sess = session_manager.create(
@@ -299,6 +320,7 @@ async def _run_new(
         cwd=caller.get("cwd", ""),
         orchestration_mode=caller.get("orchestration_mode", "native"),
         provider_id=run_config.get("provider_id") or caller.get("provider_id"),
+        runner=run_config.get("runner") or caller.get("runner"),
         reasoning_effort=run_config.get("reasoning_effort") or caller.get("reasoning_effort"),
         # New-session mode always reaches here only after the user approves
         # the picker, so this session is user-aware.
@@ -314,6 +336,7 @@ async def _run_new(
         provider_id=run_config.get("provider_id") or "",
         model=run_config.get("model") or "",
         reasoning_effort=run_config.get("reasoning_effort") or "",
+        runner=run_config.get("runner") or "",
     )
     if final.get("error"):
         return {"error": final["error"]}
@@ -466,6 +489,7 @@ async def delegate(
     provider_id: str = "",
     model: str = "",
     reasoning_effort: str = "",
+    runner: str = "",
 ) -> dict:
     """Entry point for the `delegate_to_session` MCP tool. Returns either
     `{session_id, run_mode, final_message, turn_id}` or `{error: ...}`.
@@ -516,6 +540,7 @@ async def delegate(
             provider_id=provider_id,
             model=model,
             reasoning_effort=reasoning_effort,
+            runner=runner,
         )
 
     auto_ok = (
@@ -538,6 +563,7 @@ async def delegate(
             provider_id=provider_id,
             model=model,
             reasoning_effort=reasoning_effort,
+            runner=runner,
         )
 
     try:
@@ -559,4 +585,5 @@ async def delegate(
             provider_id=provider_id,
             model=model,
             reasoning_effort=reasoning_effort,
+            runner=runner,
         )

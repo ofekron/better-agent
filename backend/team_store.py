@@ -10,7 +10,7 @@ from json_store import read_json, write_json
 from paths import ba_home
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 _revision_lock = threading.Lock()
 _revision = 0
 
@@ -99,6 +99,7 @@ def create(
         "provider_id": "",
         "model": "",
         "reasoning_effort": "",
+        "runner": "",
         "run_mode": "",
         "parent_member_id": "",
         "status": "active",
@@ -147,6 +148,7 @@ def upsert_member(
     provider_id: str = "",
     model: str = "",
     reasoning_effort: str = "",
+    runner: str = "",
     run_mode: str = "",
     parent_member_id: str = "",
     status: str = "active",
@@ -173,6 +175,7 @@ def upsert_member(
         "provider_id": str(provider_id or "").strip(),
         "model": str(model or "").strip(),
         "reasoning_effort": str(reasoning_effort or "").strip(),
+        "runner": str(runner or "").strip(),
         "run_mode": str(run_mode or "").strip(),
         "parent_member_id": str(parent_member_id or "").strip(),
         "status": str(status or "active").strip(),

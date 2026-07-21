@@ -3427,6 +3427,14 @@ body {
   color: var(--text-primary);
   font-size: calc(13px * var(--app-font-scale));
 }
+.session-runtime-axis,
+.ns-runtime-axis {
+  animation: runtimeAxisIn 180ms ease-out both;
+}
+@keyframes runtimeAxisIn {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
 .session-model-picker-error {
   color: var(--danger, #d44);
   font-size: calc(12px * var(--app-font-scale));
@@ -3445,11 +3453,22 @@ body {
   transition: filter 160ms ease, border-color 160ms ease, color 160ms ease;
 }
 @media (max-width: 480px) {
+  .ns-runtime-axis {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .ns-runtime-axis label {
+    min-width: 0;
+  }
   .session-model-picker-actions button {
     flex: 1;
   }
 }
 @media (prefers-reduced-motion: reduce) {
+  .session-runtime-axis,
+  .ns-runtime-axis {
+    animation: none;
+  }
   .session-model-picker-actions button {
     transition: none;
   }

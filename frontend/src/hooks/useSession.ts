@@ -2,6 +2,7 @@ import { useState, useCallback, useEffect, useRef } from "react";
 import type {
   OpenFilePanel,
   OrchestrationMode,
+  ProviderRunner,
   RunInfo,
   Session,
   SessionProcessingUpdate,
@@ -57,6 +58,7 @@ export interface CreateSessionOptions {
   fileEditPath?: string;
   nodeId?: string;
   reasoningEffort?: string;
+  runner?: ProviderRunner;
   permission?: Record<string, string>;
   clientSessionId?: string;
   capabilityContexts?: CapabilityContext[];
@@ -1324,6 +1326,7 @@ export function useSession(authStatus?: string) {
         fileEditPath,
         nodeId = "primary",
         reasoningEffort,
+        runner,
         permission,
         clientSessionId,
         capabilityContexts,
@@ -1347,6 +1350,7 @@ export function useSession(authStatus?: string) {
             file_edit_path: fileEditPath,
             node_id: nodeId,
             reasoning_effort: reasoningEffort,
+            runner,
             permission: permission && Object.keys(permission).length > 0 ? permission : undefined,
             client_session_id: clientSessionId,
             capability_contexts: capabilityContexts && capabilityContexts.length > 0 ? capabilityContexts : undefined,

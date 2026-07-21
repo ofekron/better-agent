@@ -698,7 +698,7 @@ def _record_model_switched_event(
     after: dict,
     updates: dict,
 ) -> None:
-    keys = ("model", "provider_id", "reasoning_effort")
+    keys = ("model", "provider_id", "reasoning_effort", "runner")
     changed = [
         key for key in keys
         if key in updates and before.get(key) != after.get(key)
@@ -725,11 +725,13 @@ def _record_model_switched_event(
         "provider_name": (provider or {}).get("name"),
         "provider_kind": (provider or {}).get("kind"),
         "reasoning_effort": after.get("reasoning_effort"),
+        "runner": after.get("runner"),
         "previous_model": before.get("model"),
         "previous_provider_id": before.get("provider_id"),
         "previous_provider_name": (previous_provider or {}).get("name"),
         "previous_provider_kind": (previous_provider or {}).get("kind"),
         "previous_reasoning_effort": before.get("reasoning_effort"),
+        "previous_runner": before.get("runner"),
         "changed": changed,
         "app_session_id": session_id,
         "msg_id": msg_id,
@@ -1535,6 +1537,7 @@ from starlette.websockets import WebSocketState
 from fastapi.responses import FileResponse
 
 import config_store
+import runtime_profile
 import pre_send_advisory
 import shortcut_picker
 import user_prefs
@@ -2358,7 +2361,10 @@ def _is_authorized_provisioned_tool_profile(body: dict | None, profile: str) -> 
 
 
 def _provider_reasoning_effort(
-    provider_id: str | None, effort: str | None,
+    provider_id: str | None,
+    effort: str | None,
+    runner: str | None = None,
+    model: str = "",
 ) -> str | None:
     if effort is None:
         return None
@@ -2368,7 +2374,9 @@ def _provider_reasoning_effort(
     if record is None:
         active = config_store.get_default_provider()
         record = config_store.get_provider(active["id"]) if active else None
-    options = (record or {}).get("reasoning_effort_options") or []
+    options = runtime_profile.reasoning_efforts(
+        record or {}, runner, model=model,
+    )
     if effort not in options:
         name = (record or {}).get("name") or provider_id or "active provider"
         raise HTTPException(
@@ -2376,6 +2384,19 @@ def _provider_reasoning_effort(
             detail=f"{name} does not support reasoning_effort={effort!r}",
         )
     return effort
+
+
+def _provider_runner(provider_id: str | None, runner: object = None) -> str:
+    record = config_store.get_provider(provider_id) if provider_id else None
+    if record is None:
+        active = config_store.get_default_provider()
+        record = config_store.get_provider(active["id"]) if active else None
+    if record is None:
+        raise HTTPException(status_code=400, detail="provider does not exist")
+    try:
+        return runtime_profile.resolve_runner(record, runner)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 def _api_permission(value: object) -> dict | None:
@@ -2392,7 +2413,9 @@ def _api_permission(value: object) -> dict | None:
 
 
 def _provider_permission(
-    provider_id: str | None, value: dict | None,
+    provider_id: str | None,
+    value: dict | None,
+    runner: str | None = None,
 ) -> dict | None:
     """Strictly validate a permission dict against the provider's native
     options. Returns normalized dict, {} (inherit default), or None (absent)."""
@@ -2405,7 +2428,9 @@ def _provider_permission(
         active = config_store.get_default_provider()
         record = config_store.get_provider(active["id"]) if active else None
     name = (record or {}).get("name") or provider_id or "active provider"
-    options = (record or {}).get("permission_options") or {}
+    from permission import permission_axes_for_kind
+    runtime_kind = runtime_profile.runtime_kind(record or {}, runner)
+    options = permission_axes_for_kind(runtime_kind)
     if not options:
         raise HTTPException(
             status_code=400, detail=f"{name} has no permission options"
@@ -2856,6 +2881,24 @@ async def get_models():
     return models_mod.models_catalog()
 
 
+def _provider_models_catalog(provider_id: str) -> dict:
+    import models as models_mod
+    catalog = models_mod.models_catalog(provider_id)
+    record = config_store.get_provider(provider_id) or {}
+    catalog["runtime_profiles"] = [
+        {
+            "runner": runner,
+            "model": model,
+            "reasoning_efforts": list(runtime_profile.reasoning_efforts(
+                record, runner, model=model,
+            )),
+        }
+        for runner in runtime_profile.supported_runners(record)
+        for model in catalog.get("models", [])
+    ]
+    return catalog
+
+
 @app.post("/api/models/refresh")
 async def refresh_active_models_endpoint():
     """Manual refresh for the active provider. Bounded ~10s by
@@ -2869,7 +2912,7 @@ async def refresh_active_models_endpoint():
     diff = await models_mod.refresh_one(active["id"])
     if diff:
         await _broadcast_models_catalog_changed(active["id"], diff)
-    return models_mod.models_catalog(active["id"])
+    return _provider_models_catalog(active["id"])
 
 
 @app.post("/api/providers/{provider_id}/models/refresh")
@@ -2883,7 +2926,7 @@ async def refresh_provider_models_endpoint(provider_id: str):
     diff = await models_mod.refresh_one(provider_id)
     if diff:
         await _broadcast_models_catalog_changed(provider_id, diff)
-    return models_mod.models_catalog(provider_id)
+    return _provider_models_catalog(provider_id)
 
 
 @app.get("/api/providers/{provider_id}/models")
@@ -2896,7 +2939,7 @@ async def get_provider_models(provider_id: str):
     record = await asyncio.to_thread(config_store.get_provider, provider_id)
     if record is None:
         raise HTTPException(status_code=404, detail=t("error.provider_not_found"))
-    return models_mod.models_catalog(provider_id)
+    return _provider_models_catalog(provider_id)
 
 
 @app.get("/api/provider-setup/status")
@@ -9228,15 +9271,21 @@ async def create_session(body: Any = Body(default=None)):
         requested_provider_id,
     )
     model = _required_model_from_body_or_provider(body, provider_record)
+    requested_runner = _provider_runner(
+        requested_provider_id, body.get("runner"),
+    )
     requested_effort = await asyncio.to_thread(
         _provider_reasoning_effort,
         requested_provider_id,
         _api_reasoning_effort(body.get("reasoning_effort")),
+        requested_runner,
+        model,
     )
     requested_permission = await asyncio.to_thread(
         _provider_permission,
         requested_provider_id,
         _api_permission(body.get("permission")),
+        requested_runner,
     )
     node_id = _resolve_session_node_id(body)
     requested_folder_id = body.get("folder_id")
@@ -9257,6 +9306,7 @@ async def create_session(body: Any = Body(default=None)):
                     cwd=body.get("cwd", ""),
                     model=model,
                     provider_id=requested_provider_id,
+                    runner=requested_runner,
                     reasoning_effort=requested_effort,
                     persistent=True,
                     node_id=node_id,
@@ -9266,6 +9316,7 @@ async def create_session(body: Any = Body(default=None)):
                     cwd=body.get("cwd", ""),
                     model=model,
                     provider_id=requested_provider_id,
+                    runner=requested_runner,
                     reasoning_effort=requested_effort,
                     persistent=True,
                     node_id=node_id,
@@ -9326,6 +9377,7 @@ async def create_session(body: Any = Body(default=None)):
         orchestration_mode=requested_orchestration_mode,
         source=requested_source,
         provider_id=requested_provider_id,
+        runner=requested_runner,
         reasoning_effort=requested_effort,
         permission=requested_permission or None,
         browser_harness_enabled=browser_harness_enabled,
@@ -9808,6 +9860,9 @@ async def _resolve_selector_updates(session_id: str, body: dict) -> dict:
     applies selectors through the SAME validation + fail-closed path."""
     body = body or {}
     updates: dict = {}
+    session_snapshot = await _session_lite(session_id)
+    if not session_snapshot:
+        raise HTTPException(status_code=404, detail=t("error.session_not_found_retry"))
     requested_provider_id = (
         body.get("provider_id").strip()
         if isinstance(body.get("provider_id"), str) and body.get("provider_id").strip()
@@ -9834,7 +9889,7 @@ async def _resolve_selector_updates(session_id: str, body: dict) -> dict:
         requested_model = body["model"].strip()
         provider_for_model = (
             requested_provider_id
-            or ((await _session_lite(session_id)) or {}).get("provider_id")
+            or session_snapshot.get("provider_id")
         )
         # Fail closed: with no resolvable provider, `available_models(None)`
         # would validate against the DEFAULT provider — letting a foreign
@@ -9852,16 +9907,26 @@ async def _resolve_selector_updates(session_id: str, body: dict) -> dict:
             requested_provider_id,
             provider_record or {},
         )
+    profile_provider_id = requested_provider_id or session_snapshot.get("provider_id")
+    if "runner" in body:
+        if not isinstance(body.get("runner"), str) or not body["runner"].strip():
+            raise HTTPException(status_code=400, detail="runner is required")
+        updates["runner"] = _provider_runner(profile_provider_id, body["runner"])
+    elif requested_provider_id:
+        updates["runner"] = _provider_runner(profile_provider_id)
+    profile_runner = updates.get("runner") or session_snapshot.get("runner")
+    profile_model = updates.get("model") or session_snapshot.get("model") or ""
+    profile_record = provider_record or config_store.get_provider(profile_provider_id)
     if "reasoning_effort" in body:
         requested_effort = _api_reasoning_effort(body.get("reasoning_effort"))
         if requested_effort is None:
             raise HTTPException(status_code=400, detail="reasoning_effort is required")
         provider_for_effort = (
             requested_provider_id
-            or ((await _session_lite(session_id)) or {}).get("provider_id")
+            or session_snapshot.get("provider_id")
         )
         updates["reasoning_effort"] = _provider_reasoning_effort(
-            provider_for_effort, requested_effort,
+            provider_for_effort, requested_effort, profile_runner, profile_model,
         )
     if "permission" in body:
         requested_permission = _api_permission(body.get("permission"))
@@ -9869,22 +9934,27 @@ async def _resolve_selector_updates(session_id: str, body: dict) -> dict:
             raise HTTPException(status_code=400, detail="permission is required")
         provider_for_permission = (
             requested_provider_id
-            or ((await _session_lite(session_id)) or {}).get("provider_id")
+            or session_snapshot.get("provider_id")
         )
         updates["permission"] = _provider_permission(
-            provider_for_permission, requested_permission,
+            provider_for_permission, requested_permission, profile_runner,
         )
     if "cwd" in body and isinstance(body["cwd"], str) and body["cwd"].strip():
         updates["cwd"] = body["cwd"].strip()
-    if requested_provider_id:
+    if requested_provider_id or "runner" in updates or "model" in updates:
         if "reasoning_effort" not in updates:
-            updates["reasoning_effort"] = (
-                (provider_record or {}).get("default_reasoning_effort") or ""
+            default_effort = (profile_record or {}).get("default_reasoning_effort") or ""
+            allowed_efforts = runtime_profile.reasoning_efforts(
+                profile_record or {}, profile_runner, model=profile_model,
             )
+            current_effort = session_snapshot.get("reasoning_effort") or ""
+            updates["reasoning_effort"] = current_effort if current_effort in allowed_efforts else (
+                default_effort if default_effort in allowed_efforts
+                else (allowed_efforts[0] if allowed_efforts else "")
+            )
+    if requested_provider_id:
         if "permission" not in updates:
-            updates["permission"] = (
-                (provider_record or {}).get("default_permission") or {}
-            )
+            updates["permission"] = {}
     if "orchestration_mode" in body:
         raise HTTPException(
             status_code=409,
@@ -11512,17 +11582,21 @@ async def start_file_editor(body: dict = Body(default={})):
     if not file_path:
         raise HTTPException(status_code=400, detail=t("error.file_path_required"))
     try:
+        runner = _provider_runner(body.get("provider_id"), body.get("runner"))
+        model = body.get("model") or await asyncio.to_thread(config_store.default_session_model)
         reasoning_effort = await asyncio.to_thread(
             _provider_reasoning_effort,
             body.get("provider_id"),
             _api_reasoning_effort(body.get("reasoning_effort")),
+            runner,
+            model,
         )
-        default_model = await asyncio.to_thread(config_store.default_session_model)
         result = await file_editor.start(
             file_path,
             cwd=body.get("cwd", ""),
-            model=body.get("model") or default_model,
+            model=model,
             provider_id=body.get("provider_id"),
+            runner=runner,
             reasoning_effort=reasoning_effort,
             node_id=body.get("node_id") or "primary",
         )
@@ -13433,6 +13507,7 @@ async def _handle_internal_ask_fork(body: dict) -> dict[str, Any]:
                 provider_id=requested_provider_id,
                 model=body["model"],
                 reasoning_effort=str(body.get("reasoning_effort") or "").strip(),
+                runner=str(body.get("runner") or "").strip(),
                 cwd=body["cwd"],
                 justification=body.get("justification"),
                 proposed_orchestration_mode=body.get("proposed_orchestration_mode"),
@@ -13587,6 +13662,7 @@ async def _handle_internal_delegate_task(body: dict) -> dict[str, Any]:
             provider_id=requested_provider_id,
             model=model,
             reasoning_effort=str(body.get("reasoning_effort") or "").strip(),
+            runner=str(body.get("runner") or "").strip(),
             sub_session=body.get("sub_session") is not False,
             cwd=str(body.get("cwd") or ""),
             run_mode=str(body.get("run_mode") or "direct").strip() or "direct",
@@ -13767,6 +13843,7 @@ async def internal_register_team_member(
             provider_id=provider_id,
             model=str(body.get("model") or ""),
             reasoning_effort=str(body.get("reasoning_effort") or ""),
+            runner=str(body.get("runner") or ""),
             run_mode=str(body.get("run_mode") or ""),
             parent_member_id=str(body.get("parent_member_id") or ""),
             status=str(body.get("status") or "active"),
@@ -13949,6 +14026,7 @@ async def _run_team_definition_activation(
             provider_id=str(manager.get("provider_id") or ""),
             model=str(manager.get("model") or ""),
             reasoning_effort=str(manager.get("reasoning_effort") or ""),
+            runner=str(manager.get("runner") or ""),
             run_mode=str(manager.get("run_mode") or "direct"),
         )
         finalize_specs = plan.get("finalize_with")
@@ -14067,6 +14145,11 @@ async def internal_create_session(
     provider_id = provider_id or None
     if provider_id and not await asyncio.to_thread(config_store.get_provider, provider_id):
         raise HTTPException(status_code=400, detail="provider_id does not exist")
+    runner_input = body.get("runner")
+    if not str(runner_input or "").strip() and sender_session:
+        if provider_id == sender_session.get("provider_id"):
+            runner_input = sender_session.get("runner")
+    runner = _provider_runner(provider_id, runner_input)
     requested_model = str(body.get("model") or "").strip()
     model = ""
     if requested_model:
@@ -14089,6 +14172,8 @@ async def internal_create_session(
         _provider_reasoning_effort,
         provider_id,
         _api_reasoning_effort(reasoning_effort),
+        runner,
+        model,
     )
     node_id = str(body.get("node_id") or "").strip() or "primary"
     extra_mcp_servers = _api_extra_mcp_servers(body.get("mcp_servers"))
@@ -14101,6 +14186,7 @@ async def internal_create_session(
             orchestration_mode=mode,
             model=model,
             provider_id=provider_id,
+            runner=runner,
             reasoning_effort=reasoning_effort,
             node_id=node_id,
             source="cli",
@@ -14128,6 +14214,7 @@ async def internal_create_session(
         "node_id": node_id,
         "provider_id": sess.get("provider_id"),
         "model": sess.get("model"),
+        "runner": sess.get("runner"),
         "reasoning_effort": sess.get("reasoning_effort"),
         "bare_config": sess.get("bare_config"),
         "capability_contexts": sess.get("capability_contexts") or [],
@@ -14157,6 +14244,10 @@ async def internal_create_sub_session(
     provider_id = provider_id or None
     if provider_id and not await asyncio.to_thread(config_store.get_provider, provider_id):
         raise HTTPException(status_code=400, detail="provider_id does not exist")
+    runner_input = body.get("runner")
+    if not str(runner_input or "").strip() and provider_id == parent.get("provider_id"):
+        runner_input = parent.get("runner")
+    runner = _provider_runner(provider_id, runner_input)
     requested_model = str(body.get("model") or "").strip()
     model = requested_model
     if not model and requested_provider_id and provider_id:
@@ -14180,6 +14271,8 @@ async def internal_create_sub_session(
         _provider_reasoning_effort,
         provider_id,
         _api_reasoning_effort(reasoning_effort),
+        runner,
+        model,
     )
     cwd = str(body.get("cwd") or "").strip() or str(parent.get("cwd") or "").strip()
     node_id = str(body.get("node_id") or "").strip() or str(parent.get("node_id") or "primary")
@@ -14195,6 +14288,7 @@ async def internal_create_sub_session(
                 name=name,
                 model=model,
                 provider_id=provider_id,
+                runner=runner,
                 reasoning_effort=reasoning_effort,
                 cwd=cwd,
                 node_id=node_id,
@@ -14223,6 +14317,7 @@ async def internal_create_sub_session(
         "node_id": sub.get("node_id") or node_id,
         "provider_id": sub.get("provider_id"),
         "model": sub.get("model"),
+        "runner": sub.get("runner"),
         "reasoning_effort": sub.get("reasoning_effort"),
         "disallowed_tools": sub.get("disallowed_tools") or [],
         "disabled_builtin_extensions": sub.get("disabled_builtin_extensions") or [],
@@ -14445,6 +14540,10 @@ async def internal_managed_run_create_session(
     provider_id = provider_id or None
     if provider_id and not await asyncio.to_thread(config_store.get_provider, provider_id):
         raise HTTPException(status_code=400, detail="provider_id does not exist")
+    runner_input = body.get("runner")
+    if not str(runner_input or "").strip() and provider_id == (parent or {}).get("provider_id"):
+        runner_input = (parent or {}).get("runner")
+    runner = _provider_runner(provider_id, runner_input)
     model = str(body.get("model") or "").strip() or str((parent or {}).get("model") or "").strip()
     if not model:
         model = await asyncio.to_thread(config_store.default_session_model)
@@ -14456,6 +14555,7 @@ async def internal_managed_run_create_session(
             orchestration_mode="native",
             model=model,
             provider_id=provider_id,
+            runner=runner,
             node_id=node_id,
             source="extension",
             browser_harness_enabled=False,
@@ -14475,6 +14575,7 @@ async def internal_managed_run_create_session(
         "cwd": sess.get("cwd") or cwd,
         "model": sess.get("model"),
         "provider_id": sess.get("provider_id"),
+        "runner": sess.get("runner"),
         "node_id": sess.get("node_id"),
     }
 
@@ -14772,6 +14873,7 @@ async def _handle_internal_mssg(body: dict) -> dict[str, Any]:
             provider_id=requested_provider_id,
             model=requested_model,
             reasoning_effort=str(body.get("reasoning_effort") or "").strip(),
+            runner=str(body.get("runner") or "").strip(),
             collapse_key=str(body.get("collapse_key") or "").strip(),
             collapse_policy=str(body.get("collapse_policy") or "").strip(),
             target_selector=_communication_target_selector(body),
@@ -14811,6 +14913,7 @@ async def _ask_continue_and_expect_mssg_back_async(
                 provider_id=requested_provider_id,
                 model=requested_model,
                 reasoning_effort=str(body.get("reasoning_effort") or "").strip(),
+                runner=str(body.get("runner") or "").strip(),
             )
             return {"success": True, "queued": True, **queued}
         target_session_id = str(target.get("agent_session_id") or "")
@@ -14825,6 +14928,7 @@ async def _ask_continue_and_expect_mssg_back_async(
         provider_id=requested_provider_id,
         model=requested_model,
         reasoning_effort=str(body.get("reasoning_effort") or "").strip(),
+        runner=str(body.get("runner") or "").strip(),
         target_selector=_communication_target_selector(body),
     )
 
@@ -14870,6 +14974,7 @@ async def _ask_wait_and_grab_last_assistant_mssg_in_turn(
                 provider_id=requested_provider_id,
                 model=requested_model,
                 reasoning_effort=str(body.get("reasoning_effort") or "").strip(),
+                runner=str(body.get("runner") or "").strip(),
                 wait_for_ask_response=True,
                 ask_id=ask_id,
             )
@@ -14893,6 +14998,7 @@ async def _ask_wait_and_grab_last_assistant_mssg_in_turn(
         provider_id=requested_provider_id,
         model=requested_model,
         reasoning_effort=str(body.get("reasoning_effort") or "").strip(),
+        runner=str(body.get("runner") or "").strip(),
         target_selector=_communication_target_selector(body),
     )
 
@@ -15642,6 +15748,7 @@ async def internal_tasks(
                 model=(body or {}).get("model"),
                 provider_id=(body or {}).get("provider_id"),
                 reasoning_effort=(body or {}).get("reasoning_effort"),
+                runner=(body or {}).get("runner"),
                 permission=(body or {}).get("permission"),
                 capability_contexts=(body or {}).get("capability_contexts"),
                 singleton=bool((body or {}).get("singleton", False)),
@@ -16094,6 +16201,7 @@ async def _handle_internal_session_bridge_delegate(body: dict) -> dict[str, Any]
         provider_id=requested_provider_id,
         model=requested_model,
         reasoning_effort=str(body.get("reasoning_effort") or "").strip(),
+        runner=str(body.get("runner") or "").strip(),
     )
     return result
 
@@ -16744,6 +16852,7 @@ async def _enqueue_worker_pool_message(
     provider_id: str = "",
     model: str = "",
     reasoning_effort: str = "",
+    runner: str = "",
     wait_for_ask_response: bool = False,
     ask_id: str = "",
 ) -> dict:
@@ -16759,6 +16868,7 @@ async def _enqueue_worker_pool_message(
         "provider_id": provider_id,
         "model": model,
         "reasoning_effort": reasoning_effort,
+        "runner": runner,
         "wait_for_ask_response": wait_for_ask_response,
         "ask_id": ask_id,
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -16808,6 +16918,7 @@ async def _process_worker_pool_queue(tag: str) -> None:
                     provider_id=str(item.get("provider_id") or ""),
                     model=str(item.get("model") or ""),
                     reasoning_effort=str(item.get("reasoning_effort") or ""),
+                    runner=str(item.get("runner") or ""),
                     target_selector={
                         "kind": "pool",
                         "value": tag,
@@ -16830,6 +16941,7 @@ async def _process_worker_pool_queue(tag: str) -> None:
                     provider_id=str(item.get("provider_id") or ""),
                     model=str(item.get("model") or ""),
                     reasoning_effort=str(item.get("reasoning_effort") or ""),
+                    runner=str(item.get("runner") or ""),
                     target_selector={
                         "kind": "pool",
                         "value": tag,
@@ -17147,6 +17259,7 @@ async def _provision_workers_from_body(body: dict):
                     "model": spec.get("model"),
                     "provider_id": spec.get("provider_id"),
                     "reasoning_effort": spec.get("reasoning_effort"),
+                    "runner": spec.get("runner"),
                     "node_id": spec.get("node_id"),
                     "role_key": key,
                     "tags": spec.get("tags"),
@@ -17208,6 +17321,7 @@ def _register_provisioned_team_member(team_store_module, body: dict, spec: dict,
         provider_id=str(spec.get("provider_id") or "").strip(),
         model=str(spec.get("model") or "").strip(),
         reasoning_effort=str(spec.get("reasoning_effort") or "").strip(),
+        runner=str(spec.get("runner") or "").strip(),
         run_mode=str(spec.get("run_mode") or "").strip(),
         parent_member_id=str(spec.get("parent_member_id") or "").strip(),
         status="active",
@@ -17267,9 +17381,12 @@ def _create_pending_worker_from_body(body: dict):
         raise HTTPException(status_code=400, detail=str(exc))
     provider_record = _provider_for_required_model(provider_id)
     model = _required_model_from_body_or_provider(body, provider_record)
+    runner = _provider_runner(provider_id, body.get("runner"))
     reasoning_effort = _provider_reasoning_effort(
         provider_id,
         _api_reasoning_effort(body.get("reasoning_effort")),
+        runner,
+        model,
     )
     if not cwd:
         raise HTTPException(status_code=400, detail=t("error.cwd_required"))
@@ -17284,6 +17401,7 @@ def _create_pending_worker_from_body(body: dict):
         cwd=cwd,
         orchestration_mode=mode,
         provider_id=provider_id,
+        runner=runner,
         reasoning_effort=reasoning_effort,
         node_id=node_id,
         bare_config=True,
@@ -17331,10 +17449,13 @@ async def _create_worker_from_body(body: dict, broadcast: bool = True):
         raise HTTPException(status_code=400, detail=str(exc))
     provider_record = await asyncio.to_thread(_provider_for_required_model, provider_id)
     model = _required_model_from_body_or_provider(body, provider_record)
+    runner = _provider_runner(provider_id, body.get("runner"))
     reasoning_effort = await asyncio.to_thread(
         _provider_reasoning_effort,
         provider_id,
         _api_reasoning_effort(body.get("reasoning_effort")),
+        runner,
+        model,
     )
     if not cwd:
         raise HTTPException(status_code=400, detail=t("error.cwd_required"))
@@ -17348,6 +17469,7 @@ async def _create_worker_from_body(body: dict, broadcast: bool = True):
         lambda: session_manager.create(
             name=session_name, model=model, cwd=cwd, orchestration_mode=mode,
             provider_id=provider_id,
+            runner=runner,
             reasoning_effort=reasoning_effort,
             node_id=node_id, bare_config=bool(body.get("bare_config", False)),
             capability_contexts=capability_contexts,
