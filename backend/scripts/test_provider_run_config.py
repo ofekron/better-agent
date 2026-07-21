@@ -1901,28 +1901,6 @@ def t_provider_runner_env_pins_better_agent_home() -> None:
     check("CLAUDE_CONFIG_DIR" not in env, "runner env does not override provider Claude config")
 
 
-def t_provider_runner_env_pins_better_agent_home() -> None:
-    env = provider.build_better_agent_run_env(
-        backend_url="http://127.0.0.1:8000",
-        internal_token="secret",
-        app_session_id="session-1",
-        cwd="/tmp/project",
-        model="model",
-        provider_id="provider-1",
-        bare_config=True,
-        user_facing=False,
-        disabled_builtin_extensions=["ofek.testape-internal"],
-    )
-    home = str(ba_home())
-    check(env["BETTER_AGENT_HOME"] == home, "runner env pins primary Better Agent home")
-    check(env["BETTER_CLAUDE_HOME"] == home, "runner env pins legacy Better Agent home")
-    check(
-        env["BETTER_CLAUDE_DISABLED_BUILTIN_EXTENSIONS"] == "ofek.testape-internal",
-        "runner env keeps disabled built-in extensions",
-    )
-    check("CLAUDE_CONFIG_DIR" not in env, "runner env does not override provider Claude config")
-
-
 def main() -> int:
     for name, fn in [
         ("normalizes unified mcp key", t_normalizes_unified_mcp_key),

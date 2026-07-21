@@ -14365,18 +14365,6 @@ pre .inline-tag-highlight {
 .file-viewer-latest-diff > section > div {
   height: 100%;
 }
-.file-viewer-latest-diff {
-  flex: 1;
-  min-height: 0;
-  display: flex;
-}
-.file-viewer-latest-diff > section {
-  flex: 1;
-  min-height: 0;
-}
-.file-viewer-latest-diff > section > div {
-  height: 100%;
-}
 .file-viewer-rendered-wrap {
   flex: 1;
   min-height: 0;
@@ -16279,29 +16267,6 @@ button.progress-inflight {
 }
 .mobile-backdrop {
   display: none;
-}
-
-/* Short (small vertical) screens scroll the menu like mobile: the whole
-   sidebar becomes the single scroll column instead of clipping the header
-   and scrolling only .session-list-items internally. Width-independent —
-   a short-but-wide desktop window gets the same whole-drawer scroll the
-   ≤1024px mobile block applies. */
-@media (max-height: 600px) {
-  .sidebar {
-    overflow-y: auto;
-    -webkit-overflow-scrolling: touch;
-    overscroll-behavior: contain;
-  }
-  .session-list-wrapper,
-  .session-list {
-    flex: 0 0 auto;
-    min-height: 0;
-    overflow: visible;
-  }
-  .session-list-items {
-    overflow: visible;
-    min-height: calc(7 * 80px);
-  }
 }
 
 @media (max-width: 1024px) {

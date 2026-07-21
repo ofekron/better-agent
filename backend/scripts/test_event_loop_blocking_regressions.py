@@ -160,12 +160,6 @@ def test_ws_gap_fill_paginates_until_target_seq() -> None:
     assert "if not has_more:" in fill_source
     assert "break" in fill_source
 
-    frontend_start = source.index("async def frontend_log(")
-    frontend_end = source.index("@app.get(\"/api/mobile/bundle/manifest\")", frontend_start)
-    frontend_source = source[frontend_start:frontend_end]
-    assert "_frontend_log_off_loop(log_level, line)" in frontend_source
-    assert "frontend_logger.log(log_level, line)" not in frontend_source
-
 
 def test_jsonl_dispatch_reads_session_lite_off_loop() -> None:
     source = (ROOT / "jsonl_tailer.py").read_text(encoding="utf-8")
@@ -552,49 +546,6 @@ def test_delegation_state_store_calls_run_off_loop() -> None:
     assert "session_manager.create_delegate_fork(" not in locked_source
 
 
-def test_async_provider_resolution_runs_off_loop() -> None:
-    delegation_source = (ROOT / "orchs" / "manager" / "_delegation.py").read_text(encoding="utf-8")
-    run_start = delegation_source.index("async def run_delegation(")
-    locked_start = delegation_source.index("async def run_delegation_locked(")
-    run_source = delegation_source[run_start:locked_start]
-    locked_source = delegation_source[locked_start:]
-    assert "await asyncio.to_thread(\n                    coordinator.provider_for_session" in run_source
-    assert "coordinator.provider_for_session(worker_session_id)" not in run_source
-    assert "coordinator.provider_for_session,\n            worker_session_id" in run_source
-    assert "coordinator.provider_for_run(worker_agent_session_id, provider_id)" not in locked_source
-    assert "coordinator.provider_for_run,\n        worker_agent_session_id" in locked_source
-
-    main_source = (ROOT / "main.py").read_text(encoding="utf-8")
-    route_start = main_source.index("@app.post(\"/api/internal/headless-generate\")")
-    route_end = main_source.index("@app.post(\"/api/internal/headless-run\")", route_start)
-    route_source = main_source[route_start:route_end]
-    assert "provider = await asyncio.to_thread(coordinator.provider_for_session, session_id)" in route_source
-
-
-def test_delegation_state_store_calls_run_off_loop() -> None:
-    source = (ROOT / "orchs" / "manager" / "_delegation.py").read_text(encoding="utf-8")
-    run_start = source.index("async def run_delegation(")
-    locked_start = source.index("async def run_delegation_locked(")
-    run_source = source[run_start:locked_start]
-    locked_source = source[locked_start:]
-
-    assert "caller_session = await asyncio.to_thread(session_manager.get" in run_source
-    assert "worker_session = await asyncio.to_thread(session_manager.get" in run_source
-    assert "worker_record_result = await asyncio.to_thread(\n        _find_worker_record" in run_source
-    assert "session_manager.get(worker_session_id)" not in run_source
-    assert "worker_store.get_worker(candidate_cwd, worker_session_id)" not in run_source
-    assert "worker_store.remove_worker(candidate_cwd, worker_session_id)" not in run_source
-
-    assert "await asyncio.to_thread(\n                session_fork_store.get_fork_record" in locked_source
-    assert "await asyncio.to_thread(session_manager.get, fork_agent_session_id)" in locked_source
-    assert "await asyncio.to_thread(session_manager.delete, fork_agent_session_id)" in locked_source
-    assert "fork_bc = await asyncio.to_thread(\n                session_manager.create_delegate_fork" in locked_source
-    assert "manager_session = await asyncio.to_thread(session_manager.get, app_session_id)" in locked_source
-    assert "session_fork_store.get_fork_record(cwd, app_session_id" not in locked_source
-    assert "session_manager.get(fork_agent_session_id)" not in locked_source
-    assert "session_manager.create_delegate_fork(" not in locked_source
-
-
 def test_provider_event_rewrite_uses_file_ref_context_not_lite_copy() -> None:
     source = (ROOT / "orchs" / "base.py").read_text(encoding="utf-8")
     start = source.index("def prepare_provider_event_for_journal(")
@@ -856,49 +807,6 @@ def test_broadcast_session_journal_write_runs_off_loop() -> None:
     assert "await asyncio.to_thread(" not in broadcast_source
     assert "_broadcast_session_sync" not in broadcast_source
     assert "publish_event_sync(" not in broadcast_source
-
-
-def test_build_assistant_msg_skips_same_session_lookup() -> None:
-    import orchestrator
-    import orchs
-
-    session = {"id": "same-session", "orchestration_mode": "native"}
-    with (
-        mock.patch.object(orchestrator.session_manager, "get") as get_session,
-        mock.patch.object(orchs, "get_strategy", side_effect=_ModeEchoStrategy),
-    ):
-        result = orchestrator.Coordinator._build_assistant_msg(
-            object(),
-            session=session,
-            app_session_id="same-session",
-        )
-
-    assert result == {"mode": "native"}
-    get_session.assert_not_called()
-
-
-def test_build_assistant_msg_uses_app_session_for_cross_session_mode() -> None:
-    import orchestrator
-    import orchs
-
-    session = {"id": "worker-session", "orchestration_mode": "native"}
-    app_session = {"id": "app-session", "orchestration_mode": "supervisor"}
-    with (
-        mock.patch.object(
-            orchestrator.session_manager,
-            "get",
-            return_value=app_session,
-        ) as get_session,
-        mock.patch.object(orchs, "get_strategy", side_effect=_ModeEchoStrategy),
-    ):
-        result = orchestrator.Coordinator._build_assistant_msg(
-            object(),
-            session=session,
-            app_session_id="app-session",
-        )
-
-    assert result == {"mode": "supervisor"}
-    get_session.assert_called_once_with("app-session")
 
 
 def test_build_assistant_msg_skips_same_session_lookup() -> None:
@@ -3661,17 +3569,6 @@ def test_run_state_emit_debug_logging_is_gated() -> None:
     assert "await self._c.broadcast_session" in run_state_source
 
 
-def test_run_state_emit_debug_logging_is_gated() -> None:
-    source = (ROOT / "turn_manager.py").read_text(encoding="utf-8")
-    start = source.index("def _dbg_runstate(")
-    end = source.index("# ======================================================================", start)
-    run_state_source = source[start:end]
-    assert "logger.isEnabledFor(logging.DEBUG)" in run_state_source
-    assert "logger.debug(" in run_state_source
-    assert "logger.info(" not in run_state_source
-    assert "await self._c.broadcast_session" in run_state_source
-
-
 def test_startup_session_search_rebuild_skips_persisted_index() -> None:
     source = (ROOT / "main.py").read_text(encoding="utf-8")
     startup_start = source.index("async def on_startup()")
@@ -3786,16 +3683,6 @@ def test_event_projections_do_not_eager_warm_detail_snapshots() -> None:
     warm_source = source[warm_start:warm_end]
     assert "_session_detail_snapshot_sync(" not in warm_source
     assert "session_manager.schedule_reconcile_if_needed" not in warm_source
-
-
-def test_render_hydrate_worker_fingerprint_is_batched() -> None:
-    source = (ROOT / "render_tree_hydrate.py").read_text(encoding="utf-8")
-    start = source.index("            pre_worker_fingerprint = (")
-    end = source.index("            for raw in orphan_rows:", start)
-    worker_source = source[start:end]
-    assert "before_worker" not in worker_source
-    assert worker_source.count("_message_timeline_fingerprint(m)") == 2
-    assert "pre_worker_fingerprint is not None" in worker_source
 
 
 def test_render_hydrate_worker_fingerprint_is_batched() -> None:
