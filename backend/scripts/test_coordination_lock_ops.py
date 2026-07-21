@@ -7,6 +7,9 @@ import subprocess
 import sys
 from pathlib import Path
 
+import _test_home
+_TMP = _test_home.isolate("bc-coordination-locks-")
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import coordination  # noqa: E402
@@ -318,6 +321,47 @@ async def test_multi_key_success_reports_remaining_ttl_after_wait() -> None:
     coordination._clear_for_tests()  # type: ignore[attr-defined]
 
 
+async def test_multi_key_reacquires_partial_locks_that_expire_while_waiting() -> None:
+    coordination._clear_for_tests()  # type: ignore[attr-defined]
+    now = {"value": 100.0}
+    original_now = coordination._now  # type: ignore[attr-defined]
+    coordination._now = lambda: now["value"]  # type: ignore[attr-defined]
+    try:
+        blocker = await coordination.lock_ops(key="file-b", lease_seconds=30)
+
+        async def release_after_partial_expiry() -> None:
+            await asyncio.sleep(0.03)
+            now["value"] += 6.0
+            await coordination.lock_ops(key="file-b", release=True, holder_token=str(blocker["holder_token"]))
+
+        acquire_task = asyncio.create_task(
+            coordination.lock_ops(keys=["file-a", "file-b"], key="", timeout_seconds=20, lease_seconds=5)
+        )
+        release_task = asyncio.create_task(release_after_partial_expiry())
+        result = await acquire_task
+        await release_task
+
+        check(result.get("success") is True, "multi-key acquire succeeds after partial lock expires while waiting")
+        check(
+            all(
+                coordination._locks.get(key, {}).get("holder_token") == result.get("holder_token")
+                for key in result.get("keys", [])
+            ),
+            "multi-key acquire returns success only when every requested key is durably held",
+        )
+        check(
+            all(
+                float(coordination._locks.get(key, {}).get("expires_at") or 0) > now["value"]
+                for key in result.get("keys", [])
+            ),
+            "multi-key reacquired locks have live expiry after partial expiry",
+        )
+        await coordination.lock_ops(key="", keys=result["keys"], release=True, holder_token=str(result["holder_token"]))
+    finally:
+        coordination._now = original_now  # type: ignore[attr-defined]
+        coordination._clear_for_tests()  # type: ignore[attr-defined]
+
+
 async def test_lock_survives_in_memory_registry_loss() -> None:
     coordination._clear_for_tests()  # type: ignore[attr-defined]
     acquired = await coordination.lock_ops(key="file-restart", lease_seconds=30)
@@ -488,6 +532,7 @@ async def main() -> int:
     await test_better_agent_runner_lock_ops_handler_defaults_provider_id()
     await test_renew_validate_and_reattach_by_trusted_owner()
     await test_multi_key_success_reports_remaining_ttl_after_wait()
+    await test_multi_key_reacquires_partial_locks_that_expire_while_waiting()
     await test_lock_survives_in_memory_registry_loss()
     await test_lock_blocks_competing_process()
     await test_runner_write_gate_validates_backend_liveness()
