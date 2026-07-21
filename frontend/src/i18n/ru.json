@@ -1100,5 +1100,17 @@
   "gitTree.retry": "Повторить",
   "gitTree.empty": "Коммитов пока нет.",
   "gitTree.commits": "Коммиты · {{count}}",
-  "gitTree.changed": "Изменения · {{count}}"
+  "gitTree.changed": "Изменения · {{count}}",
+  "runBadge.providerFallback": "Провайдер",
+  "runBadge.stalledTitle": "{{provider}} не запустил задачу",
+  "runBadge.stalledDescription": "Подтверждение запуска от провайдера не поступило в течение {{seconds}} секунд. Возможно, процесс всё ещё выполняется.",
+  "runBadge.cancelFailed": "Не удалось отменить. Повторите попытку.",
+  "runBadge.cancelling": "Отмена…",
+  "runBadge.cancel": "Отменить",
+  "runBadge.retry": "Повторить",
+  "runBadge.retryAfterCancelHint": "Повторить попытку можно будет после подтверждения отмены.",
+  "runBadge.details": "Подробности",
+  "settings.taskStartSilence": "Предупреждение о задержке запуска",
+  "settings.seconds": "секунд",
+  "settings.taskStartSilenceHint": "Показывать предупреждение о зависании, если провайдер не подтверждает запуск задачи за это время. Выполнение никогда не останавливается автоматически."
 }

@@ -1100,5 +1100,17 @@
   "gitTree.retry": "Riprova",
   "gitTree.empty": "Ancora nessun commit.",
   "gitTree.commits": "Commit · {{count}}",
-  "gitTree.changed": "Modifiche · {{count}}"
+  "gitTree.changed": "Modifiche · {{count}}",
+  "runBadge.providerFallback": "Provider",
+  "runBadge.stalledTitle": "{{provider}} non ha avviato l’attività",
+  "runBadge.stalledDescription": "Non è arrivata alcuna conferma di avvio dal provider entro {{seconds}} secondi. Il processo potrebbe essere ancora in esecuzione.",
+  "runBadge.cancelFailed": "Annullamento non riuscito. Riprova.",
+  "runBadge.cancelling": "Annullamento…",
+  "runBadge.cancel": "Annulla",
+  "runBadge.retry": "Riprova",
+  "runBadge.retryAfterCancelHint": "Potrai riprovare dopo la conferma dell’annullamento.",
+  "runBadge.details": "Dettagli",
+  "settings.taskStartSilence": "Avviso di silenzio all’avvio",
+  "settings.seconds": "secondi",
+  "settings.taskStartSilenceHint": "Mostra un avviso di blocco se il provider non conferma l’avvio dell’attività entro questo intervallo. L’esecuzione non viene mai interrotta automaticamente."
 }

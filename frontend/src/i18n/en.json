@@ -1171,5 +1171,17 @@
   "gitTree.retry": "Try again",
   "gitTree.empty": "No commits yet.",
   "gitTree.commits": "Commits · {{count}}",
-  "gitTree.changed": "Changes · {{count}}"
+  "gitTree.changed": "Changes · {{count}}",
+  "runBadge.providerFallback": "Provider",
+  "runBadge.stalledTitle": "{{provider}} has not started the task",
+  "runBadge.stalledDescription": "No provider start acknowledgement arrived within {{seconds}} seconds. The process may still be running.",
+  "runBadge.cancelFailed": "Cancellation failed. Try again.",
+  "runBadge.cancelling": "Cancelling…",
+  "runBadge.cancel": "Cancel",
+  "runBadge.retry": "Retry",
+  "runBadge.retryAfterCancelHint": "Retry becomes available after cancellation is confirmed.",
+  "runBadge.details": "Details",
+  "settings.taskStartSilence": "Startup silence warning",
+  "settings.seconds": "seconds",
+  "settings.taskStartSilenceHint": "Show a stalled warning when the provider does not acknowledge task startup within this time. This never stops the run automatically."
 }

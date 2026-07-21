@@ -3024,6 +3024,10 @@ async def patch_user_prefs(request: Request, body: dict = Body(...)):
             if not isinstance(val, bool):
                 raise ValueError("auto_restart_on_idle must be a boolean")
             user_prefs.set_auto_restart_on_idle(val)
+        if "task_start_silence_seconds" in body:
+            user_prefs.set_task_start_silence_seconds(
+                body["task_start_silence_seconds"]
+            )
         return user_prefs.get_all(login_username)
 
     try:
@@ -8730,7 +8734,6 @@ def _merge_in_flight_replay(
             continue
         merged = dict(m)
         merged["isStreaming"] = in_flight.get("isStreaming", True)
-        merged["isStale"] = in_flight.get("isStale")
         logger.info(
             "WS replay %s: cache over in-flight (%d>%d evts), stamping isStreaming",
             app_session_id[:8], cache_evts, in_flight_evts,
@@ -10088,6 +10091,16 @@ async def get_run_details(session_id: str, run_id: str):
         "pid": pid,
         "started_at": entry.get("started_at"),
         "last_event_at": entry.get("last_event_at"),
+        "provider_kind": entry.get("provider_kind"),
+        "startup_phase": entry.get("startup_phase"),
+        "startup_expected_activity": entry.get("startup_expected_activity"),
+        "startup_phase_started_at": entry.get("startup_phase_started_at"),
+        "startup_silence_threshold_seconds": entry.get(
+            "startup_silence_threshold_seconds"
+        ),
+        "stalled_at": entry.get("stalled_at"),
+        "last_activity_at": entry.get("last_activity_at"),
+        "last_activity_kind": entry.get("last_activity_kind"),
         "provider": provider_info,
         "processes": processes,
     }

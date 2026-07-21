@@ -672,9 +672,6 @@ class Coordinator:
     def _run_state_set_target(self, *a, **kw):
         return self._ensure_tm()._run_state_set_target(*a, **kw)
 
-    def _run_state_touch(self, *a, **kw):
-        return self._ensure_tm()._run_state_touch(*a, **kw)
-
     def get_run_state(self, *a, **kw):
         return self._ensure_tm().get_run_state(*a, **kw)
 

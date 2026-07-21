@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { API } from "../api";
 import type { RunInfo } from "../types";
 import { RunDetailsModal } from "./RunDetailsModal";
 
@@ -34,6 +35,8 @@ export function RunBadge({
   const { t } = useTranslation();
   const [now, setNow] = useState(() => Date.now());
   const [modalOpen, setModalOpen] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
+  const [cancelError, setCancelError] = useState(false);
   useEffect(() => {
     const id = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(id);
@@ -52,6 +55,83 @@ export function RunBadge({
       : run.kind === "native"
       ? ""
       : run.kind;
+
+  const isStalled = run.startup_phase === "stalled";
+  const cancel = async () => {
+    if (!sessionId || cancelling) return;
+    setCancelling(true);
+    setCancelError(false);
+    try {
+      const response = await fetch(
+        `${API}/api/sessions/${encodeURIComponent(sessionId)}/stop`,
+        { method: "POST", credentials: "include" },
+      );
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    } catch {
+      setCancelError(true);
+      setCancelling(false);
+    }
+  };
+
+  if (isStalled) {
+    const providerKind = run.provider_kind || t("runBadge.providerFallback");
+    const provider = providerKind.charAt(0).toUpperCase() + providerKind.slice(1);
+    const threshold = run.startup_silence_threshold_seconds ?? 0;
+    return (
+      <div className="turn-stalled-card" role="status" aria-live="polite">
+        <div className="turn-stalled-card__icon" aria-hidden="true">!</div>
+        <div className="turn-stalled-card__body">
+          <strong>{t("runBadge.stalledTitle", { provider })}</strong>
+          <span>
+            {t("runBadge.stalledDescription", { seconds: threshold })}
+          </span>
+          {cancelError && (
+            <span className="turn-stalled-card__error">
+              {t("runBadge.cancelFailed")}
+            </span>
+          )}
+          <div className="turn-stalled-card__actions">
+            <button
+              type="button"
+              className="turn-stalled-card__cancel"
+              onClick={() => void cancel()}
+              disabled={!sessionId || cancelling}
+            >
+              {cancelling ? t("runBadge.cancelling") : t("runBadge.cancel")}
+            </button>
+            <button
+              type="button"
+              className="turn-stalled-card__retry"
+              disabled
+              title={t("runBadge.retryAfterCancelHint")}
+            >
+              {t("runBadge.retry")}
+            </button>
+            {sessionId && (
+              <button
+                type="button"
+                className="turn-stalled-card__details"
+                onClick={() => setModalOpen(true)}
+              >
+                {t("runBadge.details")}
+              </button>
+            )}
+          </div>
+          <span className="turn-stalled-card__hint">
+            {t("runBadge.retryAfterCancelHint")}
+          </span>
+        </div>
+        {sessionId && (
+          <RunDetailsModal
+            open={modalOpen}
+            sessionId={sessionId}
+            runId={run.run_id}
+            onClose={() => setModalOpen(false)}
+          />
+        )}
+      </div>
+    );
+  }
 
   const inner = (
     <>

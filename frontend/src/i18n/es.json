@@ -1099,5 +1099,17 @@
   "gitTree.retry": "Reintentar",
   "gitTree.empty": "Aún no hay commits.",
   "gitTree.commits": "Commits · {{count}}",
-  "gitTree.changed": "Cambios · {{count}}"
+  "gitTree.changed": "Cambios · {{count}}",
+  "runBadge.providerFallback": "Proveedor",
+  "runBadge.stalledTitle": "{{provider}} no ha iniciado la tarea",
+  "runBadge.stalledDescription": "No se recibió la confirmación de inicio del proveedor en {{seconds}} segundos. Es posible que el proceso siga ejecutándose.",
+  "runBadge.cancelFailed": "No se pudo cancelar. Inténtalo de nuevo.",
+  "runBadge.cancelling": "Cancelando…",
+  "runBadge.cancel": "Cancelar",
+  "runBadge.retry": "Reintentar",
+  "runBadge.retryAfterCancelHint": "Podrás reintentar cuando se confirme la cancelación.",
+  "runBadge.details": "Detalles",
+  "settings.taskStartSilence": "Aviso de silencio al iniciar",
+  "settings.seconds": "segundos",
+  "settings.taskStartSilenceHint": "Muestra un aviso de bloqueo cuando el proveedor no confirma el inicio de la tarea dentro de este tiempo. Esto nunca detiene la ejecución automáticamente."
 }

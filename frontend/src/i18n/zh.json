@@ -1100,5 +1100,17 @@
   "gitTree.retry": "重试",
   "gitTree.empty": "还没有提交。",
   "gitTree.commits": "提交 · {{count}}",
-  "gitTree.changed": "更改 · {{count}}"
+  "gitTree.changed": "更改 · {{count}}",
+  "runBadge.providerFallback": "提供方",
+  "runBadge.stalledTitle": "{{provider}} 尚未启动任务",
+  "runBadge.stalledDescription": "{{seconds}} 秒内未收到提供方的启动确认。进程可能仍在运行。",
+  "runBadge.cancelFailed": "取消失败，请重试。",
+  "runBadge.cancelling": "正在取消…",
+  "runBadge.cancel": "取消",
+  "runBadge.retry": "重试",
+  "runBadge.retryAfterCancelHint": "确认取消后即可重试。",
+  "runBadge.details": "详细信息",
+  "settings.taskStartSilence": "启动无响应警告",
+  "settings.seconds": "秒",
+  "settings.taskStartSilenceHint": "如果提供方未在此时间内确认任务启动，则显示停滞警告。此设置绝不会自动停止运行。"
 }

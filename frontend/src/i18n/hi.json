@@ -1100,5 +1100,17 @@
   "gitTree.retry": "फिर से कोशिश करें",
   "gitTree.empty": "अभी कोई कमिट नहीं है।",
   "gitTree.commits": "कमिट · {{count}}",
-  "gitTree.changed": "बदलाव · {{count}}"
+  "gitTree.changed": "बदलाव · {{count}}",
+  "runBadge.providerFallback": "प्रदाता",
+  "runBadge.stalledTitle": "{{provider}} ने कार्य शुरू नहीं किया है",
+  "runBadge.stalledDescription": "{{seconds}} सेकंड के भीतर प्रदाता से शुरू होने की पुष्टि नहीं मिली। प्रक्रिया अभी भी चल रही हो सकती है।",
+  "runBadge.cancelFailed": "रद्द नहीं हो सका। फिर से प्रयास करें।",
+  "runBadge.cancelling": "रद्द किया जा रहा है…",
+  "runBadge.cancel": "रद्द करें",
+  "runBadge.retry": "फिर से प्रयास करें",
+  "runBadge.retryAfterCancelHint": "रद्द होने की पुष्टि के बाद फिर से प्रयास उपलब्ध होगा।",
+  "runBadge.details": "विवरण",
+  "settings.taskStartSilence": "स्टार्टअप में देरी की चेतावनी",
+  "settings.seconds": "सेकंड",
+  "settings.taskStartSilenceHint": "जब प्रदाता इस समय के भीतर कार्य शुरू होने की पुष्टि न करे, तब रुके होने की चेतावनी दिखाएँ। इससे रन कभी भी अपने आप बंद नहीं होता।"
 }

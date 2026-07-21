@@ -58,6 +58,9 @@ DEFAULT_NETWORK_BIND_ADDRESS: NetworkBindAddress = "127.0.0.1"
 # the system transitions from busy to idle. Off by default — restarting a
 # running server is opt-in.
 DEFAULT_AUTO_RESTART_ON_IDLE = False
+DEFAULT_TASK_START_SILENCE_SECONDS = 90
+MIN_TASK_START_SILENCE_SECONDS = 15
+MAX_TASK_START_SILENCE_SECONDS = 3600
 DEFAULT_SHORTCUT_RESPONSES = [
     "TLDR",
     "Didn't read, but I trust you go ahead",
@@ -503,6 +506,33 @@ def set_auto_restart_on_idle(enabled: bool) -> bool:
     return enabled
 
 
+def get_task_start_silence_seconds() -> int:
+    return _bounded_int_pref(
+        _load(),
+        "task_start_silence_seconds",
+        DEFAULT_TASK_START_SILENCE_SECONDS,
+        MIN_TASK_START_SILENCE_SECONDS,
+        MAX_TASK_START_SILENCE_SECONDS,
+    )
+
+
+def set_task_start_silence_seconds(seconds: int) -> int:
+    if (
+        isinstance(seconds, bool)
+        or not isinstance(seconds, int)
+        or seconds < MIN_TASK_START_SILENCE_SECONDS
+        or seconds > MAX_TASK_START_SILENCE_SECONDS
+    ):
+        raise ValueError(
+            "task_start_silence_seconds must be an integer between "
+            f"{MIN_TASK_START_SILENCE_SECONDS} and {MAX_TASK_START_SILENCE_SECONDS}"
+        )
+    prefs = _load()
+    prefs["task_start_silence_seconds"] = seconds
+    _save(prefs)
+    return seconds
+
+
 def get_all(login_username: str | None = None) -> dict:
     prefs = _load()
     return {
@@ -579,6 +609,13 @@ def get_all(login_username: str | None = None) -> dict:
             prefs,
             "auto_restart_on_idle",
             DEFAULT_AUTO_RESTART_ON_IDLE,
+        ),
+        "task_start_silence_seconds": _bounded_int_pref(
+            prefs,
+            "task_start_silence_seconds",
+            DEFAULT_TASK_START_SILENCE_SECONDS,
+            MIN_TASK_START_SILENCE_SECONDS,
+            MAX_TASK_START_SILENCE_SECONDS,
         ),
     }
 

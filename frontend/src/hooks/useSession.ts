@@ -687,7 +687,6 @@ export function applyLiveEventToMessages(
   const target = targetIdx >= 0 ? msgs[targetIdx] : undefined;
   if (target && target.role === "assistant") {
     let base = target;
-    if (base.isStale) base = { ...base, isStale: false };
 
     const evUuid = extractLiveEventUuid(event);
     if (evUuid) {
@@ -2099,7 +2098,6 @@ export function useSession(authStatus?: string) {
           const updated: ChatMessage = {
             ...last,
             isStreaming: false,
-            isStale: false,
             isDetached: false,
             ...(stoppedAt ? { stopped_at: stoppedAt } : {}),
             ...(interruptedByMsgId ? { interrupted_by_msg_id: interruptedByMsgId } : {}),
@@ -2133,7 +2131,6 @@ export function useSession(authStatus?: string) {
             ...last,
             isStreaming: false,
             isDetached: true,
-            isStale: false,
           };
           return {
             ...node,
@@ -2145,31 +2142,6 @@ export function useSession(authStatus?: string) {
     []
   );
 
-  /** Mark the last assistant message as stale — no events arrived for
-   * STALE_TIMEOUT_MS while streaming. The orchestrator task likely died
-   * silently. Stamps `isStale: true` so the bubble shows a warning
-   * instead of a stuck spinner. Clears on the next event or terminal. */
-  const markTurnStale = useCallback(
-    (sessionId: string) => {
-      setCurrentSession((prev) => {
-        if (!prev) return prev;
-        return updateNodeById(prev, sessionId, (node) => {
-          const msgs = node.messages || [];
-          const lastIdx = msgs.length - 1;
-          const last = msgs[lastIdx];
-          if (!last || last.role !== "assistant" || !last.isStreaming)
-            return node;
-          if (last.isStale) return node;
-          const updated: ChatMessage = { ...last, isStale: true };
-          return {
-            ...node,
-            messages: [...msgs.slice(0, lastIdx), updated],
-          };
-        });
-      });
-    },
-    []
-  );
 
   /** Flip the `isRecovering` flag on a specific assistant message in
    * response to backend `message_recovering_changed` WS frames. The
@@ -2289,7 +2261,6 @@ export function useSession(authStatus?: string) {
           const next: ChatMessage = {
             ...msgs[idx],
             content,
-            isStale: false,
             isDetached: false,
           };
           return {
@@ -2955,7 +2926,6 @@ export function useSession(authStatus?: string) {
     applyLiveEvent,
     markTurnTerminal,
     markTurnDetached,
-    markTurnStale,
     applyMessageRecovering,
     applyMessageRetrying,
     applyMessageAutoRetry,

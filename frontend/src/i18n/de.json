@@ -1096,5 +1096,17 @@
   "gitTree.retry": "Erneut versuchen",
   "gitTree.empty": "Noch keine Commits.",
   "gitTree.commits": "Commits · {{count}}",
-  "gitTree.changed": "Änderungen · {{count}}"
+  "gitTree.changed": "Änderungen · {{count}}",
+  "runBadge.providerFallback": "Anbieter",
+  "runBadge.stalledTitle": "{{provider}} hat die Aufgabe nicht gestartet",
+  "runBadge.stalledDescription": "Innerhalb von {{seconds}} Sekunden ist keine Startbestätigung des Anbieters eingegangen. Der Prozess läuft möglicherweise noch.",
+  "runBadge.cancelFailed": "Abbruch fehlgeschlagen. Versuche es erneut.",
+  "runBadge.cancelling": "Wird abgebrochen…",
+  "runBadge.cancel": "Abbrechen",
+  "runBadge.retry": "Erneut versuchen",
+  "runBadge.retryAfterCancelHint": "Ein neuer Versuch ist möglich, sobald der Abbruch bestätigt wurde.",
+  "runBadge.details": "Details",
+  "settings.taskStartSilence": "Warnung bei ausbleibendem Start",
+  "settings.seconds": "Sekunden",
+  "settings.taskStartSilenceHint": "Zeigt eine Warnung an, wenn der Anbieter den Aufgabenstart nicht innerhalb dieser Zeit bestätigt. Der Lauf wird dadurch niemals automatisch beendet."
 }

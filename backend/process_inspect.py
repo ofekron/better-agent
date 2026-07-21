@@ -11,10 +11,24 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import subprocess
 from typing import Optional
 
 logger = logging.getLogger(__name__)
+
+_SENSITIVE_NAME = r"[A-Za-z0-9_-]*(?:token|key|secret|password)[A-Za-z0-9_-]*"
+_SENSITIVE_EQUALS_RE = re.compile(
+    rf"(?i)(?P<prefix>(?:--?{_SENSITIVE_NAME}|{_SENSITIVE_NAME})=)(?P<value>[^\s]+)"
+)
+_SENSITIVE_ARG_RE = re.compile(
+    rf"(?i)(?P<prefix>--?{_SENSITIVE_NAME}\s+)(?P<value>[^\s]+)"
+)
+
+
+def _redact_command(command: str) -> str:
+    redacted = _SENSITIVE_EQUALS_RE.sub(r"\g<prefix>[REDACTED]", command)
+    return _SENSITIVE_ARG_RE.sub(r"\g<prefix>[REDACTED]", redacted)
 
 
 # Single-letter ps state codes → human-readable description. Sourced
@@ -133,7 +147,7 @@ def _ps_info(pids: list[int]) -> dict[int, dict]:
         except ValueError:
             rss_kb = 0
         etime = parts[5]
-        cmd = parts[6]
+        cmd = _redact_command(parts[6])
         result[pid] = {
             "pid": pid,
             "ppid": ppid,

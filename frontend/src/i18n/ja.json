@@ -1096,5 +1096,17 @@
   "gitTree.retry": "再試行",
   "gitTree.empty": "まだコミットはありません。",
   "gitTree.commits": "コミット · {{count}}",
-  "gitTree.changed": "変更 · {{count}}"
+  "gitTree.changed": "変更 · {{count}}",
+  "runBadge.providerFallback": "プロバイダー",
+  "runBadge.stalledTitle": "{{provider}} がタスクを開始していません",
+  "runBadge.stalledDescription": "{{seconds}} 秒以内にプロバイダーから開始確認が届きませんでした。プロセスはまだ実行中の可能性があります。",
+  "runBadge.cancelFailed": "キャンセルできませんでした。もう一度お試しください。",
+  "runBadge.cancelling": "キャンセル中…",
+  "runBadge.cancel": "キャンセル",
+  "runBadge.retry": "再試行",
+  "runBadge.retryAfterCancelHint": "キャンセルが確認されると再試行できるようになります。",
+  "runBadge.details": "詳細",
+  "settings.taskStartSilence": "起動応答なしの警告",
+  "settings.seconds": "秒",
+  "settings.taskStartSilenceHint": "この時間内にプロバイダーがタスク開始を確認しない場合、停止状態の警告を表示します。実行が自動的に停止されることはありません。"
 }

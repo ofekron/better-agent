@@ -1096,5 +1096,17 @@
   "gitTree.retry": "Opnieuw proberen",
   "gitTree.empty": "Nog geen commits.",
   "gitTree.commits": "Commits · {{count}}",
-  "gitTree.changed": "Wijzigingen · {{count}}"
+  "gitTree.changed": "Wijzigingen · {{count}}",
+  "runBadge.providerFallback": "Provider",
+  "runBadge.stalledTitle": "{{provider}} heeft de taak niet gestart",
+  "runBadge.stalledDescription": "Binnen {{seconds}} seconden is geen startbevestiging van de provider ontvangen. Het proces is mogelijk nog actief.",
+  "runBadge.cancelFailed": "Annuleren mislukt. Probeer het opnieuw.",
+  "runBadge.cancelling": "Bezig met annuleren…",
+  "runBadge.cancel": "Annuleren",
+  "runBadge.retry": "Opnieuw proberen",
+  "runBadge.retryAfterCancelHint": "Opnieuw proberen wordt beschikbaar zodra het annuleren is bevestigd.",
+  "runBadge.details": "Details",
+  "settings.taskStartSilence": "Waarschuwing bij stille opstart",
+  "settings.seconds": "seconden",
+  "settings.taskStartSilenceHint": "Toon een vastgelopen-waarschuwing als de provider de taakstart niet binnen deze tijd bevestigt. Hierdoor wordt de uitvoering nooit automatisch gestopt."
 }

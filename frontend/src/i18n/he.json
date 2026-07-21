@@ -1143,5 +1143,17 @@
   "gitTree.retry": "לנסות שוב",
   "gitTree.empty": "עדיין אין קומיטים.",
   "gitTree.commits": "קומיטים · {{count}}",
-  "gitTree.changed": "שינויים · {{count}}"
+  "gitTree.changed": "שינויים · {{count}}",
+  "runBadge.providerFallback": "ספק",
+  "runBadge.stalledTitle": "{{provider}} לא התחיל את המשימה",
+  "runBadge.stalledDescription": "לא התקבל אישור התחלה מהספק בתוך {{seconds}} שניות. ייתכן שהתהליך עדיין פועל.",
+  "runBadge.cancelFailed": "הביטול נכשל. נסה שוב.",
+  "runBadge.cancelling": "מבטל…",
+  "runBadge.cancel": "ביטול",
+  "runBadge.retry": "נסה שוב",
+  "runBadge.retryAfterCancelHint": "האפשרות לנסות שוב תהיה זמינה לאחר אישור הביטול.",
+  "runBadge.details": "פרטים",
+  "settings.taskStartSilence": "אזהרת עיכוב בהפעלה",
+  "settings.seconds": "שניות",
+  "settings.taskStartSilenceHint": "הצג אזהרת תקיעה כאשר הספק אינו מאשר את תחילת המשימה בתוך פרק זמן זה. הפעולה לעולם לא נעצרת אוטומטית."
 }
