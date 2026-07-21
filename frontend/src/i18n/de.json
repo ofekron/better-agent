@@ -191,6 +191,7 @@
   "setup.apiKeyStatus.missing": "fehlt",
   "setup.apiKeyStatus.blocked": "Zugriff blockiert",
   "setup.apiKeyReenter": "Schlüssel erneut eingeben",
+  "setup.apiKeyWaitingAccess": "Warten auf Anmeldedatenzugriff…",
   "setup.apiKeyBlockedReentryHint": "Auf den gespeicherten API-Schlüssel kann nicht zugegriffen werden. Gib ihn erneut ein, um ihn zu ersetzen.",
   "setup.apiKeyReenterPlaceholder": "API-Schlüssel erneut eingeben",
   "setup.setDefaultButton": "Als Standard festlegen",

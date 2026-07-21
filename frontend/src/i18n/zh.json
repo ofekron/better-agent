@@ -191,6 +191,7 @@
   "setup.apiKeyStatus.missing": "缺失",
   "setup.apiKeyStatus.blocked": "访问被阻止",
   "setup.apiKeyReenter": "重新输入密钥",
+  "setup.apiKeyWaitingAccess": "正在等待凭据访问…",
   "setup.apiKeyBlockedReentryHint": "无法访问已存储的 API 密钥。请重新输入以替换它。",
   "setup.apiKeyReenterPlaceholder": "重新输入 API 密钥",
   "setup.setDefaultButton": "设为默认",

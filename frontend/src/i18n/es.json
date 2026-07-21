@@ -191,6 +191,7 @@
   "setup.apiKeyStatus.missing": "falta",
   "setup.apiKeyStatus.blocked": "acceso bloqueado",
   "setup.apiKeyReenter": "Volver a introducir la clave",
+  "setup.apiKeyWaitingAccess": "Esperando acceso a las credenciales…",
   "setup.apiKeyBlockedReentryHint": "No se puede acceder a la clave API guardada. Introdúcela de nuevo para reemplazarla.",
   "setup.apiKeyReenterPlaceholder": "Introduce de nuevo la clave API",
   "setup.setDefaultButton": "Definir como predeterminado",

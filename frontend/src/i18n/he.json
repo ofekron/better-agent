@@ -190,6 +190,7 @@
   "setup.apiKeyStatus.missing": "חסר",
   "setup.apiKeyStatus.blocked": "הגישה חסומה",
   "setup.apiKeyReenter": "הזן מפתח מחדש",
+  "setup.apiKeyWaitingAccess": "ממתין לגישה לפרטי ההתחברות…",
   "setup.apiKeyBlockedReentryHint": "לא ניתן לגשת למפתח ה-API השמור. הזן אותו מחדש כדי להחליף אותו.",
   "setup.apiKeyReenterPlaceholder": "הזן שוב את מפתח ה-API",
   "setup.setDefaultButton": "קבע כברירת מחדל",

@@ -191,6 +191,7 @@
   "setup.apiKeyStatus.missing": "अनुपस्थित",
   "setup.apiKeyStatus.blocked": "पहुँच अवरुद्ध",
   "setup.apiKeyReenter": "कुंजी फिर से दर्ज करें",
+  "setup.apiKeyWaitingAccess": "क्रेडेंशियल एक्सेस की प्रतीक्षा…",
   "setup.apiKeyBlockedReentryHint": "संग्रहीत API कुंजी तक पहुँचा नहीं जा सकता। इसे बदलने के लिए फिर से दर्ज करें।",
   "setup.apiKeyReenterPlaceholder": "API कुंजी फिर से दर्ज करें",
   "setup.setDefaultButton": "डिफ़ॉल्ट सेट करें",
