@@ -3375,6 +3375,52 @@ body {
   color: var(--text-primary);
   font-size: calc(13px * var(--app-font-scale));
 }
+.harness-profile-selector-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 34px;
+  gap: 6px;
+  align-items: center;
+}
+.harness-profile-selector.ns-modal-row > span:first-child {
+  min-width: 60px;
+  color: var(--text-secondary);
+  font-size: calc(12px * var(--app-font-scale));
+}
+.harness-profile-selector.ns-modal-row .harness-profile-selector-row {
+  flex: 1;
+  min-width: 0;
+}
+.harness-profile-selector.ns-modal-row .harness-profile-revision {
+  flex-basis: 100%;
+}
+.harness-profile-package-button {
+  width: 34px;
+  height: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  transition: border-color 160ms ease, background-color 160ms ease, transform 160ms ease;
+}
+.harness-profile-package-button:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: var(--bg-tertiary);
+  transform: translateY(-1px);
+}
+.harness-profile-package-button:disabled {
+  opacity: 0.62;
+}
+.harness-profile-revision {
+  overflow: hidden;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: calc(10px * var(--app-font-scale));
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .session-runtime-axis,
 .ns-runtime-axis {
   animation: runtimeAxisIn 180ms ease-out both;

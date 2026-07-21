@@ -1154,5 +1154,9 @@
   "credentialError.checking": "Richiesta di accesso alle credenziali — approva l'avviso del portachiavi di sistema se compare…",
   "credentialError.fixed": "Accesso ripristinato — invia di nuovo il messaggio.",
   "credentialError.stillBlocked": "Accesso ancora bloccato — approva l'avviso del portachiavi di sistema e riprova.",
-  "credentialError.missing": "Nessuna chiave API salvata per questo provider — aggiungila nelle Impostazioni."
+  "credentialError.missing": "Nessuna chiave API salvata per questo provider — aggiungila nelle Impostazioni.",
+  "harnessProfile.label": "Profilo harness",
+  "harnessProfile.inherit": "Harness attuale",
+  "harnessProfile.bare": "Nudo",
+  "harnessProfile.packageCurrent": "Crea pacchetto harness attuale"
 }

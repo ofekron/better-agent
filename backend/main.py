@@ -1552,7 +1552,10 @@ import coordination
 import project_update_store
 import project_structure_edit_session
 import virtual_session_prompt_handlers
+import extension_instructions
 import extension_store
+import harness_profile_resolver
+import harness_profile_store
 
 # Log directory is intentionally captured at module-load. The
 # "no module-load Path caching" rule (CLAUDE.md, A12) applies to
@@ -3952,6 +3955,233 @@ def _capabilities_snapshot(sess: dict) -> dict:
     return {"capabilities": catalog, "active_capability_ids": active}
 
 
+def _harness_profile_selection(body: dict) -> tuple[str, str]:
+    profile_id = str((body or {}).get("harness_profile_id") or "").strip()
+    revision = str((body or {}).get("harness_profile_revision") or "").strip()
+    if not profile_id:
+        if revision:
+            raise HTTPException(status_code=400, detail="harness_profile_revision requires harness_profile_id")
+        return "", ""
+    profile = harness_profile_store.get_profile(profile_id, revision or None)
+    if not profile:
+        raise HTTPException(status_code=404, detail="harness profile not found")
+    try:
+        harness_profile_resolver.resolve_for_session(
+            {"harness_profile_id": profile_id, "harness_profile_revision": profile["revision"]},
+            profile_id=profile_id,
+            revision=profile["revision"],
+        )
+    except harness_profile_resolver.HarnessProfileResolutionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return profile_id, profile["revision"]
+
+
+def _harness_profile_id_from_name(value: object) -> str:
+    text = str(value or "current personal harness").strip().lower()
+    clean = re.sub(r"[^a-z0-9_.-]+", "-", text).strip(".-")
+    clean = re.sub(r"[-_.]{2,}", "-", clean)
+    if len(clean) < 3:
+        clean = "current-personal-harness"
+    return clean[:80]
+
+
+def _package_current_harness_profile_payload(body: dict) -> dict[str, Any]:
+    name = str(body.get("name") or "Current personal harness").strip()
+    profile_id = str(body.get("id") or "").strip() or _harness_profile_id_from_name(name)
+    payload: dict[str, Any] = {
+        "id": profile_id,
+        "name": name,
+        "description": str(body.get("description") or "Packaged from the currently active extension harness.").strip(),
+        "base_mode": str(body.get("base_mode") or "bare").strip(),
+        "source": "package-current",
+        "extension_instances": [],
+        "extension_setting_overlays": {},
+        "secret_refs": {},
+        "instruction_sources": [],
+    }
+    for record in extension_store.list_extensions(include_hidden=True):
+        manifest = record.get("manifest") or {}
+        extension_id = str(manifest.get("id") or "").strip()
+        if not extension_id or not extension_store.is_extension_runtime_ready(extension_id):
+            continue
+        instance = {
+            "extension_id": extension_id,
+            "extension_revision": harness_profile_resolver._extension_revision(record),
+            "surfaces": [],
+            "mcp_servers": [
+                item["name"]
+                for item in extension_store.extension_mcp_servers(extension_id)
+                if item.get("enabled")
+            ],
+            "skills": [
+                item["name"]
+                for item in extension_store.extension_runtime_skills(extension_id)
+                if item.get("enabled")
+            ],
+            "instruction_names": [],
+        }
+        instruction_sources: list[dict[str, str]] = []
+        instruction_state = extension_instructions.normalize_state(record)
+        if instruction_state.get("global"):
+            for item in extension_instructions.instruction_items_from_entrypoints(manifest.get("entrypoints") or {}) or []:
+                if not isinstance(item, dict) or not item.get("name"):
+                    continue
+                instruction_name = str(item["name"])
+                instance["instruction_names"].append(instruction_name)
+                instruction_sources.append({
+                    "kind": "extension",
+                    "extension_id": extension_id,
+                    "name": instruction_name,
+                })
+        user_instructions = extension_store.get_user_instructions(extension_id).strip()
+        if user_instructions:
+            instruction_sources.append({
+                "kind": "inline",
+                "name": f"{extension_id} user instructions",
+                "content": user_instructions,
+            })
+        if instruction_sources:
+            instance["surfaces"].append("instructions")
+            payload["instruction_sources"].extend(instruction_sources)
+        if instance["skills"]:
+            instance["surfaces"].append("skills")
+        if instance["mcp_servers"]:
+            instance["surfaces"].append("mcp")
+        settings = extension_store.get_extension_settings(extension_id)
+        overlays: dict[str, Any] = {}
+        secret_refs: list[str] = []
+        for item in settings.get("schema") or []:
+            if not isinstance(item, dict) or not item.get("key"):
+                continue
+            key = str(item["key"])
+            if item.get("type") == "secret":
+                if (settings.get("secret_present") or {}).get(key):
+                    secret_refs.append(f"extension-setting:{extension_id}:{key}")
+                continue
+            overlays[key] = {
+                "value": copy.deepcopy((settings.get("values") or {}).get(key)),
+                "schema_hash": harness_profile_resolver._setting_schema_hash(record, key),
+            }
+        if overlays:
+            payload["extension_setting_overlays"][extension_id] = overlays
+        if secret_refs:
+            payload["secret_refs"][extension_id] = secret_refs
+        if instance["surfaces"] or overlays or secret_refs:
+            payload["extension_instances"].append(instance)
+    return payload
+
+
+def _extension_settings_harness_inputs(extension_id: str, body: dict) -> dict[str, Any] | None:
+    raw = body.get("harness_launcher_projection") if isinstance(body, dict) else None
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    try:
+        projection = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail="invalid harness launcher projection") from exc
+    if not isinstance(projection, dict):
+        raise HTTPException(status_code=400, detail="invalid harness launcher projection")
+    revisions = projection.get("extension_revisions")
+    if not isinstance(revisions, dict) or extension_id not in revisions:
+        raise HTTPException(status_code=403, detail="harness profile does not select this extension")
+    record = extension_store.get_extension(extension_id)
+    if record is None:
+        raise HTTPException(status_code=403, detail="extension not active")
+    expected = str(revisions.get(extension_id) or "")
+    actual = harness_profile_resolver._extension_revision(record)
+    if expected and actual and expected != actual:
+        raise HTTPException(status_code=409, detail="extension revision changed")
+    return {"resolved_harness_run_config": {"launcher_projection": projection, **projection}}
+
+
+async def _broadcast_harness_profiles_changed() -> None:
+    try:
+        await coordinator.broadcast_global(
+            "harness_profiles_changed",
+            {"profiles": harness_profile_store.list_profiles()},
+        )
+    except Exception:
+        logger.exception("failed to broadcast harness profile change")
+
+
+@app.get("/api/harness-profiles")
+async def list_harness_profiles():
+    return {"profiles": await asyncio.to_thread(harness_profile_store.list_profiles)}
+
+
+@app.post("/api/harness-profiles")
+async def create_harness_profile(body: dict = Body(default={})):
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="request body must be an object")
+    try:
+        profile = await asyncio.to_thread(harness_profile_store.upsert_profile, body, body.get("id"))
+    except harness_profile_store.HarnessProfileError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    await _broadcast_harness_profiles_changed()
+    return profile
+
+
+@app.post("/api/harness-profiles/package-current")
+async def package_current_harness_profile(body: dict = Body(default={})):
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="request body must be an object")
+    try:
+        payload = await asyncio.to_thread(_package_current_harness_profile_payload, body)
+        profile = await asyncio.to_thread(harness_profile_store.upsert_profile, payload, payload["id"])
+    except (harness_profile_store.HarnessProfileError, extension_store.ExtensionError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    await _broadcast_harness_profiles_changed()
+    return profile
+
+
+@app.put("/api/harness-profiles/{profile_id}")
+async def update_harness_profile(profile_id: str, body: dict = Body(default={})):
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="request body must be an object")
+    try:
+        profile = await asyncio.to_thread(harness_profile_store.upsert_profile, body, profile_id)
+    except harness_profile_store.HarnessProfileError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    await _broadcast_harness_profiles_changed()
+    return profile
+
+
+@app.delete("/api/harness-profiles/{profile_id}")
+async def delete_harness_profile(profile_id: str, revision: str = ""):
+    try:
+        deleted = await asyncio.to_thread(
+            harness_profile_store.delete_profile,
+            profile_id,
+            revision or None,
+        )
+    except harness_profile_store.HarnessProfileError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if not deleted:
+        raise HTTPException(status_code=404, detail="harness profile not found")
+    await _broadcast_harness_profiles_changed()
+    return {"success": True}
+
+
+@app.patch("/api/sessions/{session_id}/harness-profile")
+async def update_session_harness_profile(session_id: str, body: dict = Body(default={})):
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="request body must be an object")
+    profile_id, revision = _harness_profile_selection(body)
+    session = await asyncio.to_thread(
+        session_manager.set_harness_profile,
+        session_id,
+        profile_id,
+        revision,
+    )
+    if not session:
+        raise HTTPException(status_code=404, detail=t("error.session_not_found_retry"))
+    return {
+        "id": session_id,
+        "harness_profile_id": session.get("harness_profile_id") or "",
+        "harness_profile_revision": session.get("harness_profile_revision") or "",
+    }
+
+
 @app.post("/api/internal/sessions/{sid}/capabilities")
 async def internal_session_capabilities(
     sid: str,
@@ -4242,7 +4472,10 @@ async def internal_extension_settings(
         raise HTTPException(status_code=403, detail="extension not active")
     key = str(body.get("key") or "").strip() if isinstance(body, dict) else ""
     try:
-        resolved = extension_store.resolve_all_settings(extension_id)
+        resolved = extension_store.resolve_all_settings(
+            extension_id,
+            inputs=_extension_settings_harness_inputs(extension_id, body or {}),
+        )
     except extension_store.ExtensionError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if key:
@@ -9371,6 +9604,7 @@ async def create_session(body: Any = Body(default=None)):
         requested_preset = session_presets.normalize_preset(body.get("preset"))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+    harness_profile_id, harness_profile_revision = _harness_profile_selection(body)
     requested_provider_id = body.get("provider_id")
     provider_record = await asyncio.to_thread(
         _provider_for_required_model,
@@ -9491,6 +9725,8 @@ async def create_session(body: Any = Body(default=None)):
         node_id=node_id,
         worker_creation_policy=worker_creation_policy,
         bare_config=bare_config,
+        harness_profile_id=harness_profile_id,
+        harness_profile_revision=harness_profile_revision,
         # The UI/CLI `POST /api/sessions` is always an explicit user
         # action — the user is aware of (and owns) this session.
         user_initiated=True,
@@ -10046,6 +10282,10 @@ async def _resolve_selector_updates(session_id: str, body: dict) -> dict:
         updates["permission"] = _provider_permission(
             provider_for_permission, requested_permission, profile_runner,
         )
+    if "harness_profile_id" in body or "harness_profile_revision" in body:
+        profile_id, revision = _harness_profile_selection(body)
+        updates["harness_profile_id"] = profile_id
+        updates["harness_profile_revision"] = revision
     if "cwd" in body and isinstance(body["cwd"], str) and body["cwd"].strip():
         updates["cwd"] = body["cwd"].strip()
     if requested_provider_id or "runner" in updates or "model" in updates:
@@ -12057,6 +12297,8 @@ async def _re_enqueue_queued_prompts() -> None:
                     "disallowed_tools": qp.get("disallowed_tools"),
                     "disabled_builtin_extensions": qp.get("disabled_builtin_extensions"),
                     "capability_contexts": qp.get("capability_contexts") or [],
+                    "harness_profile_id": qp.get("harness_profile_id") or "",
+                    "harness_profile_revision": qp.get("harness_profile_revision") or "",
                     "_alter_rewind_latest": bool(qp.get("alter_rewind_latest")),
                     "collapse_key": qp.get("collapse_key") or "",
                     "collapse_policy": qp.get("collapse_policy") or "",
@@ -14318,6 +14560,7 @@ async def internal_create_session(
         capability_contexts = normalize_capability_contexts(body.get("capability_contexts"))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+    harness_profile_id, harness_profile_revision = _harness_profile_selection(body)
     sender_session_id = str(body.get("sender_session_id") or "").strip()
     sender_session = await _session_lite(sender_session_id) if sender_session_id else None
     if sender_session_id and not sender_session:
@@ -14379,6 +14622,8 @@ async def internal_create_session(
             bare_config=bare_config,
             capability_contexts=capability_contexts,
             extra_mcp_servers=extra_mcp_servers,
+            harness_profile_id=harness_profile_id,
+            harness_profile_revision=harness_profile_revision,
         )
     )
     await _apply_initial_session_organization(sess["id"], folder_id, tag_ids)
@@ -14404,6 +14649,8 @@ async def internal_create_session(
         "reasoning_effort": sess.get("reasoning_effort"),
         "bare_config": sess.get("bare_config"),
         "capability_contexts": sess.get("capability_contexts") or [],
+        "harness_profile_id": sess.get("harness_profile_id") or "",
+        "harness_profile_revision": sess.get("harness_profile_revision") or "",
     }
 
 
@@ -18930,6 +19177,11 @@ async def websocket_chat(websocket: WebSocket):
                 except ValueError as e:
                     await _send_message_error(str(e))
                     continue
+                harness_profile_id = str(msg.get("harness_profile_id") or "").strip()
+                harness_profile_revision = str(msg.get("harness_profile_revision") or "").strip()
+                if harness_profile_revision and not harness_profile_id:
+                    await _send_message_error("harness_profile_revision requires harness_profile_id")
+                    continue
 
                 # Register this WS so /api/internal/ask-fork can fan out worker events.
                 _register(app_session_id)
@@ -19273,6 +19525,8 @@ async def websocket_chat(websocket: WebSocket):
                     "disabled_builtin_extensions": disabled_builtin_extensions,
                     "known_worker_registry_cwds": known_worker_registry_cwds,
                     "capability_contexts": capability_contexts,
+                    "harness_profile_id": harness_profile_id,
+                    "harness_profile_revision": harness_profile_revision,
                     "_queued_id": item_id,
                     "_client_id_claimed": bool(_claim_cid),
                 }
@@ -19334,6 +19588,8 @@ async def websocket_chat(websocket: WebSocket):
                     "client_id": msg.get("client_id"),
                     "alter_rewind_latest": alter_rewind_latest,
                     "capability_contexts": capability_contexts,
+                    "harness_profile_id": harness_profile_id,
+                    "harness_profile_revision": harness_profile_revision,
                     "created_at": datetime.now().isoformat(),
                 }
                 try:

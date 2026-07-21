@@ -1197,5 +1197,9 @@
   "credentialError.checking": "מבקש גישה לפרטי הזיהוי — אשרו את חלון מחזיק המפתחות של המערכת אם יופיע…",
   "credentialError.fixed": "הגישה שוחזרה — שלחו את ההודעה מחדש.",
   "credentialError.stillBlocked": "הגישה עדיין חסומה — אשרו את חלון מחזיק המפתחות ונסו שוב.",
-  "credentialError.missing": "לא שמור מפתח API לספק זה — הוסיפו אותו בהגדרות."
+  "credentialError.missing": "לא שמור מפתח API לספק זה — הוסיפו אותו בהגדרות.",
+  "harnessProfile.label": "פרופיל harness",
+  "harnessProfile.inherit": "ה-harness הנוכחי",
+  "harnessProfile.bare": "נקי",
+  "harnessProfile.packageCurrent": "ארוז את ה-harness הנוכחי"
 }

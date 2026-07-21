@@ -62,6 +62,8 @@ export interface CreateSessionOptions {
   permission?: Record<string, string>;
   clientSessionId?: string;
   capabilityContexts?: CapabilityContext[];
+  harnessProfileId?: string;
+  harnessProfileRevision?: string;
   folderId?: string | null;
   preset?: string;
 }
@@ -1383,6 +1385,8 @@ export function useSession(authStatus?: string) {
         permission,
         clientSessionId,
         capabilityContexts,
+        harnessProfileId,
+        harnessProfileRevision,
         folderId,
         preset,
       } = opts;
@@ -1408,6 +1412,8 @@ export function useSession(authStatus?: string) {
             permission: permission && Object.keys(permission).length > 0 ? permission : undefined,
             client_session_id: clientSessionId,
             capability_contexts: capabilityContexts && capabilityContexts.length > 0 ? capabilityContexts : undefined,
+            harness_profile_id: harnessProfileId || undefined,
+            harness_profile_revision: harnessProfileId ? harnessProfileRevision || undefined : undefined,
             folder_id: folderId || undefined,
             preset: preset || undefined,
           }),

@@ -1154,5 +1154,9 @@
   "credentialError.checking": "Demande d'accès aux identifiants — validez l'invite du trousseau système si elle apparaît…",
   "credentialError.fixed": "Accès rétabli — renvoyez le message.",
   "credentialError.stillBlocked": "Accès toujours bloqué — validez l'invite du trousseau système puis réessayez.",
-  "credentialError.missing": "Aucune clé API enregistrée pour ce fournisseur — ajoutez-la dans les Réglages."
+  "credentialError.missing": "Aucune clé API enregistrée pour ce fournisseur — ajoutez-la dans les Réglages.",
+  "harnessProfile.label": "Profil de harness",
+  "harnessProfile.inherit": "Harness actuel",
+  "harnessProfile.bare": "Nu",
+  "harnessProfile.packageCurrent": "Packager le harness actuel"
 }

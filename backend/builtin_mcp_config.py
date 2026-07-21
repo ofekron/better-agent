@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import os
 from typing import Any
 
 import extension_store
 import installation_profile
+import harness_run_projection
 from env_compat import dual_env_many, get_env
 
 
@@ -142,6 +144,11 @@ def native_mcp_runtime_env(inputs: dict) -> dict[str, str]:
         for item in inputs.get("disabled_builtin_extensions") or []
         if str(item or "").strip()
     ]
+    active_capability_ids = [
+        str(item).strip()
+        for item in inputs.get("active_capability_ids") or []
+        if str(item or "").strip()
+    ]
     return dual_env_many({
         "BETTER_CLAUDE_BACKEND_URL": backend_url,
         "BETTER_CLAUDE_RUNTIME_BROKER": runtime_broker,
@@ -154,4 +161,10 @@ def native_mcp_runtime_env(inputs: dict) -> dict[str, str]:
         "BETTER_CLAUDE_USER_FACING": "1" if user_facing else "0",
         "BETTER_CLAUDE_FILE_EDITING": "1" if inputs.get("working_mode") == "file_editing" else "0",
         "BETTER_CLAUDE_DISABLED_BUILTIN_EXTENSIONS": ",".join(disabled_extensions),
+        "BETTER_CLAUDE_ACTIVE_CAPABILITY_IDS": ",".join(active_capability_ids),
+        "BETTER_CLAUDE_HARNESS_LAUNCHER_PROJECTION": json.dumps(
+            harness_run_projection.launcher_projection(inputs),
+            separators=(",", ":"),
+            sort_keys=True,
+        ),
     })

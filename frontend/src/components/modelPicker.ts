@@ -1,7 +1,7 @@
 import type { Permission, Provider, ReasoningEffort, Session } from "../types";
 
 export type SelectorUpdates = Partial<
-  Pick<Session, "provider_id" | "model" | "reasoning_effort" | "runner" | "permission">
+  Pick<Session, "provider_id" | "model" | "reasoning_effort" | "runner" | "permission" | "harness_profile_id" | "harness_profile_revision">
 >;
 
 export interface SelectorDraft {
@@ -10,6 +10,8 @@ export interface SelectorDraft {
   reasoning_effort: ReasoningEffort | "";
   runner: Provider["runner"];
   permission: Permission;
+  harness_profile_id: string;
+  harness_profile_revision: string;
 }
 
 export interface ModelRuntimeProfile {
@@ -77,6 +79,8 @@ export function makeDraft(session: Session, providerId: string, providers: Provi
     reasoning_effort: session.reasoning_effort ?? "",
     runner: session.runner || (provider ? runnerForProvider(provider) : "native"),
     permission: session.permission ?? {},
+    harness_profile_id: session.harness_profile_id ?? "",
+    harness_profile_revision: session.harness_profile_revision ?? "",
   };
 }
 
@@ -91,5 +95,12 @@ export function changedUpdates(session: Session, draft: SelectorDraft): Selector
   if (draft.reasoning_effort !== (session.reasoning_effort || "")) updates.reasoning_effort = draft.reasoning_effort;
   if (draft.runner !== (session.runner || "")) updates.runner = draft.runner;
   if (JSON.stringify(draft.permission) !== JSON.stringify(session.permission ?? {})) updates.permission = draft.permission;
+  if (
+    draft.harness_profile_id !== (session.harness_profile_id || "")
+    || draft.harness_profile_revision !== (session.harness_profile_revision || "")
+  ) {
+    updates.harness_profile_id = draft.harness_profile_id;
+    updates.harness_profile_revision = draft.harness_profile_revision;
+  }
   return updates;
 }

@@ -1153,5 +1153,9 @@
   "credentialError.checking": "자격 증명 접근 요청 중 — 시스템 키체인 확인 창이 나타나면 승인하세요…",
   "credentialError.fixed": "접근이 복구되었습니다 — 메시지를 다시 보내세요.",
   "credentialError.stillBlocked": "접근이 여전히 차단되어 있습니다 — 키체인 확인 창을 승인한 후 다시 시도하세요.",
-  "credentialError.missing": "이 제공자의 API 키가 저장되어 있지 않습니다 — 설정에서 추가하세요."
+  "credentialError.missing": "이 제공자의 API 키가 저장되어 있지 않습니다 — 설정에서 추가하세요.",
+  "harnessProfile.label": "하네스 프로필",
+  "harnessProfile.inherit": "현재 하네스",
+  "harnessProfile.bare": "베어",
+  "harnessProfile.packageCurrent": "현재 harness 패키징"
 }

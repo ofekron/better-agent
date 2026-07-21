@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import sys
+import json
 
 from env_compat import get_env
 import extension_store
@@ -19,6 +20,16 @@ def _internal_token() -> str:
 
 
 def _runtime_inputs() -> dict:
+    projection_raw = get_env("BETTER_CLAUDE_HARNESS_LAUNCHER_PROJECTION")
+    try:
+        projection = json.loads(projection_raw) if projection_raw else {}
+    except json.JSONDecodeError:
+        projection = {}
+    resolved_harness_run_config = (
+        {"launcher_projection": projection, **projection}
+        if isinstance(projection, dict) and projection
+        else {}
+    )
     return {
         "backend_url": get_env("BETTER_CLAUDE_BACKEND_URL"),
         "internal_token": _internal_token(),
@@ -45,6 +56,7 @@ def _runtime_inputs() -> dict:
             for item in get_env("BETTER_CLAUDE_ACTIVE_CAPABILITY_IDS").split(",")
             if item
         ],
+        "resolved_harness_run_config": resolved_harness_run_config,
         "extension_mcp_launcher_context": True,
     }
 

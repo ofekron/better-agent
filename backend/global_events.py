@@ -23,6 +23,7 @@ _EVENT_OWNERS: Mapping[str, tuple[str, ...]] = {
     ),
     "extension": (
         "extensions_changed", "extension_updates_changed", "extension_event",
+        "harness_profiles_changed",
     ),
     "schedule_store": ("schedules_changed",),
     "user_prefs": ("user_prefs_changed", "ui_selection_changed"),

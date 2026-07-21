@@ -1154,5 +1154,9 @@
   "credentialError.checking": "क्रेडेंशियल एक्सेस का अनुरोध हो रहा है — सिस्टम कीचेन संकेत दिखे तो उसे स्वीकृत करें…",
   "credentialError.fixed": "एक्सेस बहाल हो गया — संदेश फिर से भेजें.",
   "credentialError.stillBlocked": "एक्सेस अभी भी अवरुद्ध है — सिस्टम कीचेन संकेत स्वीकृत करें और फिर प्रयास करें.",
-  "credentialError.missing": "इस प्रदाता के लिए कोई API कुंजी सहेजी नहीं है — सेटिंग्स में जोड़ें."
+  "credentialError.missing": "इस प्रदाता के लिए कोई API कुंजी सहेजी नहीं है — सेटिंग्स में जोड़ें.",
+  "harnessProfile.label": "हार्नेस प्रोफ़ाइल",
+  "harnessProfile.inherit": "मौजूदा हार्नेस",
+  "harnessProfile.bare": "खाली",
+  "harnessProfile.packageCurrent": "मौजूदा harness पैकेज करें"
 }

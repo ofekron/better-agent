@@ -30,6 +30,7 @@ import { extId } from "../extensionIds";
 import Icon from "./Icon";
 import { ComposerImagePreviews } from "./ComposerImagePreviews";
 import { NewSessionCreateButton } from "./NewSessionCreateButton";
+import { HarnessProfileSelector } from "./HarnessProfileSelector";
 import { SessionFolderPopover } from "./SessionFolderPopover";
 import type { PopoverAnchor } from "./SessionTagPopover";
 import { buildFolderPathMap } from "../sessionFolders";
@@ -80,6 +81,8 @@ interface SessionConfig {
    * "" = full capabilities; "reviewer" strips session-reach MCP tools
    * and all runtime skills. */
   preset: string;
+  harnessProfileId: string;
+  harnessProfileRevision: string;
   /** Optional folder to file the new session into. `null` means "no
    * folder" (Unfiled) — a valid, persistable choice. Persisted across
    * opens as the last selection; re-validated against the chosen
@@ -178,6 +181,8 @@ function saveDefaults(config: SessionConfig, creationAction: NewSessionCreationA
       browserHarnessEnabled: config.browserHarnessEnabled,
       browserHarnessHeadless: config.browserHarnessHeadless,
       folderId: config.folderId,
+      harnessProfileId: config.harnessProfileId,
+      harnessProfileRevision: config.harnessProfileRevision,
       creationAction,
     }),
   );
@@ -584,6 +589,8 @@ export function NewSessionModal({
   const [initialImages, setInitialImages] = useState<PastedImage[]>([]);
   const [initialFiles, setInitialFiles] = useState<FileAttachment[]>([]);
   const [capabilityContexts, setCapabilityContexts] = useState<CapabilityContext[]>([]);
+  const [harnessProfileId, setHarnessProfileId] = useState("");
+  const [harnessProfileRevision, setHarnessProfileRevision] = useState("");
   const [capabilityPickerOpen, setCapabilityPickerOpen] = useState(false);
   const attachmentInputRef = useRef<HTMLInputElement>(null);
   // cwd state — picker writes here, handleCreate reads from here.
@@ -666,11 +673,14 @@ export function NewSessionModal({
   // Reset state from localStorage defaults + fetch providers when modal opens
   useEffect(() => {
     if (!open) return;
+    const defaults = loadDefaults();
     setEditedPrompt(investigation?.prompt ?? "");
     setInitialPrompt("");
     setInitialImages(investigation?.images ?? []);
     setInitialFiles(investigation?.files ?? []);
     setCapabilityContexts([]);
+    setHarnessProfileId(defaults.harnessProfileId ?? "");
+    setHarnessProfileRevision(defaults.harnessProfileRevision ?? "");
     // Prefer the Ask flow's proposed project, else fall back to defaultCwd
     // (the project currently selected in the sidebar), else first project.
     // Re-run on every open so reopening with a new shortcut doesn't show
@@ -681,7 +691,6 @@ export function NewSessionModal({
     const initialCwd = initialProjectPath || defaultCwd || projects[0]?.path || "";
     setCwd(initialCwd);
     nodeIdTouchedRef.current = false;
-    const defaults = loadDefaults();
     setOrchestrationMode(
       teamEnabled
         ? defaults.orchestrationMode || "team"
@@ -868,6 +877,8 @@ export function NewSessionModal({
         initialFiles,
         capabilityContexts,
         preset,
+        harnessProfileId,
+        harnessProfileRevision,
         folderId,
       };
       const config = applyExtensionOptionsToSessionConfig(
@@ -1128,6 +1139,18 @@ export function NewSessionModal({
               />
               {t("newSession.fileEdit")}
             </label>
+          </div>
+
+          <div className="ns-modal-section">
+            <HarnessProfileSelector
+              value={harnessProfileId}
+              className="ns-modal-row harness-profile-selector"
+              disabled={creating}
+              onChange={(profileId, revision) => {
+                setHarnessProfileId(profileId);
+                setHarnessProfileRevision(revision);
+              }}
+            />
           </div>
 
           {effectiveOrchestrationMode === "native" && (

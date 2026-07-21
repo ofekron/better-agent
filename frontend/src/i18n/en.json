@@ -1225,5 +1225,9 @@
   "credentialError.checking": "Requesting credential access — approve the system keychain prompt if it appears…",
   "credentialError.fixed": "Credential access restored — send the message again.",
   "credentialError.stillBlocked": "Access is still blocked — approve the system keychain prompt and try again.",
-  "credentialError.missing": "No API key is stored for this provider — add one in Settings."
+  "credentialError.missing": "No API key is stored for this provider — add one in Settings.",
+  "harnessProfile.label": "Harness profile",
+  "harnessProfile.inherit": "Current harness",
+  "harnessProfile.bare": "Bare",
+  "harnessProfile.packageCurrent": "Package current harness"
 }

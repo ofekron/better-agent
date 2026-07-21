@@ -1156,5 +1156,9 @@
   "credentialError.checking": "Запрос доступа к учётным данным — подтвердите запрос системной связки ключей, если он появится…",
   "credentialError.fixed": "Доступ восстановлен — отправьте сообщение ещё раз.",
   "credentialError.stillBlocked": "Доступ по-прежнему заблокирован — подтвердите запрос связки ключей и попробуйте снова.",
-  "credentialError.missing": "Для этого провайдера не сохранён API-ключ — добавьте его в настройках."
+  "credentialError.missing": "Для этого провайдера не сохранён API-ключ — добавьте его в настройках.",
+  "harnessProfile.label": "Профиль harness",
+  "harnessProfile.inherit": "Текущий harness",
+  "harnessProfile.bare": "Пустой",
+  "harnessProfile.packageCurrent": "Упаковать текущий harness"
 }

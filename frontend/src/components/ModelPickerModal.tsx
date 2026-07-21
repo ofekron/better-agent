@@ -6,6 +6,7 @@ import { trackedFetch, useOpProgress } from "../progress/store";
 import { cacheProviderModels, readProviderCache } from "../utils/providerCache";
 import { optionLabelWithQuota, summarizeProvider } from "../utils/quotaStatus";
 import { useQuotaStatus } from "../hooks/useQuotaStatus";
+import { HarnessProfileSelector } from "./HarnessProfileSelector";
 import {
   changedUpdates,
   effortsForRuntime,
@@ -100,13 +101,15 @@ export function ModelPickerModal({
     const nextProvider = providers.find((p) => p.id === providerId && !p.suspended);
     if (!nextProvider) return;
     const providerCachedModels = readProviderCache()?.modelsByProvider[providerId] ?? [];
-    setDraft({
+    setDraft((current) => ({
       provider_id: providerId,
       model: modelForProvider(nextProvider, providerCachedModels),
       reasoning_effort: nextProvider.default_reasoning_effort || "",
       runner: runnerForProvider(nextProvider),
       permission: nextProvider.default_permission || {},
-    });
+      harness_profile_id: current.harness_profile_id,
+      harness_profile_revision: current.harness_profile_revision,
+    }));
   };
 
   const confirm = () => {
@@ -269,6 +272,13 @@ export function ModelPickerModal({
               </label>
             ))
             : null}
+          <HarnessProfileSelector
+            value={draft.harness_profile_id}
+            disabled={busy}
+            onChange={(harness_profile_id, harness_profile_revision) =>
+              setDraft({ ...draft, harness_profile_id, harness_profile_revision })
+            }
+          />
           {error || modelLoadError ? <div className="session-model-picker-error">{error || modelLoadError}</div> : null}
         </div>
         <div className="modal-actions session-model-picker-actions">

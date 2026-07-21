@@ -39,6 +39,7 @@ import re
 from i18n import t
 from builtin_mcp_config import native_mcp_runtime_env, with_builtin_mcp_servers
 from capability_contexts import prepend_capability_context
+import harness_run_projection
 from continuation import (
     PROVIDER_CAPABILITIES_CHANGED_ERROR,
     normalize_context_overflow_error,
@@ -3436,6 +3437,7 @@ def main(run_dir: Path) -> int:
         inputs = json.loads((run_dir / "input.json").read_text(encoding="utf-8"))
         from runner_operation_host import hydrate_runner_inputs
         inputs = hydrate_runner_inputs(inputs, run_dir)
+        inputs = harness_run_projection.apply_to_inputs(inputs)
     except Exception as e:
         _fail(run_dir, f"failed to read input.json: {e}")
         return 1

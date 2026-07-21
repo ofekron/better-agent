@@ -88,6 +88,10 @@ class Client:
         self.internal_token = overrides.get("internal_token") or _env("BETTER_CLAUDE_INTERNAL_TOKEN")
         self.app_session_id = overrides.get("app_session_id") or _env("BETTER_CLAUDE_APP_SESSION_ID")
         self.cwd = overrides.get("cwd") or _env("BETTER_CLAUDE_CWD")
+        self.harness_launcher_projection = (
+            overrides.get("harness_launcher_projection")
+            or _env("BETTER_CLAUDE_HARNESS_LAUNCHER_PROJECTION")
+        )
         self.extension_id = overrides.get("extension_id") or _env("BETTER_CLAUDE_EXTENSION_ID")
         self.model = overrides.get("model") or _env("BETTER_CLAUDE_MODEL")
         self.provider_id = overrides.get("provider_id") or _env("BETTER_CLAUDE_PROVIDER_ID")
@@ -399,10 +403,17 @@ class Client:
         """Read this extension's own declared settings (manifest
         ``entrypoints.settings``). Secrets are resolved server-side from the
         keychain; nothing sensitive transits the environment."""
-        return self._post("/api/internal/extension-settings", {}, timeout=10.0)
+        return self._post("/api/internal/extension-settings", self._settings_body(), timeout=10.0)
 
     def get_setting(self, key: str) -> dict[str, Any]:
-        return self._post("/api/internal/extension-settings", {"key": key}, timeout=10.0)
+        body = self._settings_body()
+        body["key"] = key
+        return self._post("/api/internal/extension-settings", body, timeout=10.0)
+
+    def _settings_body(self) -> dict[str, Any]:
+        if not self.harness_launcher_projection:
+            return {}
+        return {"harness_launcher_projection": self.harness_launcher_projection}
 
     # ── coordination ─────────────────────────────────────────────────
     def lock_ops(

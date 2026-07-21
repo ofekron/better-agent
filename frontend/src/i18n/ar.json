@@ -1153,5 +1153,9 @@
   "credentialError.checking": "جارٍ طلب الوصول إلى بيانات الاعتماد — وافق على مطالبة سلسلة مفاتيح النظام إذا ظهرت…",
   "credentialError.fixed": "تمت استعادة الوصول — أعد إرسال الرسالة.",
   "credentialError.stillBlocked": "لا يزال الوصول محظورًا — وافق على مطالبة سلسلة المفاتيح ثم حاول مجددًا.",
-  "credentialError.missing": "لا يوجد مفتاح API محفوظ لهذا المزوّد — أضفه من الإعدادات."
+  "credentialError.missing": "لا يوجد مفتاح API محفوظ لهذا المزوّد — أضفه من الإعدادات.",
+  "harnessProfile.label": "ملف تعريف الحزمة",
+  "harnessProfile.inherit": "الحزمة الحالية",
+  "harnessProfile.bare": "مجرد",
+  "harnessProfile.packageCurrent": "تجميع الـ harness الحالي"
 }

@@ -1154,5 +1154,9 @@
   "credentialError.checking": "正在请求凭据访问 — 如出现系统钥匙串提示，请予以批准…",
   "credentialError.fixed": "访问已恢复 — 请重新发送消息。",
   "credentialError.stillBlocked": "访问仍被阻止 — 请批准系统钥匙串提示后重试。",
-  "credentialError.missing": "未为此提供商保存 API 密钥 — 请在设置中添加。"
+  "credentialError.missing": "未为此提供商保存 API 密钥 — 请在设置中添加。",
+  "harnessProfile.label": "Harness 配置文件",
+  "harnessProfile.inherit": "当前 harness",
+  "harnessProfile.bare": "裸配置",
+  "harnessProfile.packageCurrent": "打包当前 harness"
 }

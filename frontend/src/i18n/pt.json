@@ -1154,5 +1154,9 @@
   "credentialError.checking": "A solicitar acesso às credenciais — aprove o aviso das chaves do sistema se aparecer…",
   "credentialError.fixed": "Acesso restaurado — envie a mensagem novamente.",
   "credentialError.stillBlocked": "Acesso ainda bloqueado — aprove o aviso das chaves do sistema e tente novamente.",
-  "credentialError.missing": "Não há chave de API guardada para este fornecedor — adicione-a nas Definições."
+  "credentialError.missing": "Não há chave de API guardada para este fornecedor — adicione-a nas Definições.",
+  "harnessProfile.label": "Perfil de harness",
+  "harnessProfile.inherit": "Harness atual",
+  "harnessProfile.bare": "Sem base",
+  "harnessProfile.packageCurrent": "Empacotar harness atual"
 }

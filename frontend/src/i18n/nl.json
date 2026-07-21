@@ -1150,5 +1150,9 @@
   "credentialError.checking": "Toegang tot referenties wordt aangevraagd — keur de sleutelhangerprompt van het systeem goed als die verschijnt…",
   "credentialError.fixed": "Toegang hersteld — verstuur het bericht opnieuw.",
   "credentialError.stillBlocked": "Toegang nog steeds geblokkeerd — keur de sleutelhangerprompt goed en probeer opnieuw.",
-  "credentialError.missing": "Er is geen API-sleutel opgeslagen voor deze provider — voeg die toe in Instellingen."
+  "credentialError.missing": "Er is geen API-sleutel opgeslagen voor deze provider — voeg die toe in Instellingen.",
+  "harnessProfile.label": "Harness-profiel",
+  "harnessProfile.inherit": "Huidige harness",
+  "harnessProfile.bare": "Kaal",
+  "harnessProfile.packageCurrent": "Huidige harness verpakken"
 }

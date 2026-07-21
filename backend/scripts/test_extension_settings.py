@@ -7,6 +7,7 @@ import json
 import os
 import sys
 import tempfile
+import types
 from pathlib import Path
 
 import _test_home
@@ -14,6 +15,22 @@ _TMP_HOME = _test_home.isolate("bc-test-extension-settings-")
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "sdk"))
+
+if "provider_config_sync_backend" not in sys.modules:
+    pcs_pkg = types.ModuleType("provider_config_sync_backend")
+    pcs_pkg.api = types.SimpleNamespace(
+        KNOWN_PROVIDER_KINDS=set(),
+        configure=lambda **_kwargs: None,
+        _current_unified_for_tool=lambda *_args, **_kwargs: ({"unified": {}, "specifics": []}, "", False),
+        _mcp_tool_content=lambda *_args, **_kwargs: {"mcpServers": {}},
+        _expected_content=lambda current, _exists: current,
+        _write_entry_if_unchanged=lambda *_args, **_kwargs: None,
+        _read_entry_current=lambda *_args, **_kwargs: ("", False),
+        reconcile_managed_instruction_blocks=lambda *_args, **_kwargs: None,
+        sweep_orphan_managed_instruction_blocks=lambda *_args, **_kwargs: 0,
+    )
+    sys.modules["provider_config_sync_backend"] = pcs_pkg
+    sys.modules["provider_config_sync_backend.api"] = pcs_pkg.api
 
 import extension_store  # noqa: E402
 import builtin_mcp_config  # noqa: E402
@@ -585,6 +602,12 @@ def test_sdk_setting_builder_and_read_surface() -> None:
     assert {s["key"] for s in v["entrypoints"]["settings"]} == {"token", "refresh", "mode"}
     assert callable(sdk.Client.get_settings)
     assert callable(sdk.Client.get_setting)
+    client = sdk.Client(
+        internal_token="tok",
+        backend_url="http://core",
+        harness_launcher_projection='{"profile_id":"p"}',
+    )
+    assert client._settings_body() == {"harness_launcher_projection": '{"profile_id":"p"}'}
 
 
 if __name__ == "__main__":

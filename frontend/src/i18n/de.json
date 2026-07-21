@@ -1150,5 +1150,9 @@
   "credentialError.checking": "Zugriff wird angefordert — bestätige ggf. die System-Schlüsselbund-Abfrage…",
   "credentialError.fixed": "Zugriff wiederhergestellt — sende die Nachricht erneut.",
   "credentialError.stillBlocked": "Zugriff weiterhin blockiert — bestätige die Schlüsselbund-Abfrage und versuche es erneut.",
-  "credentialError.missing": "Für diesen Anbieter ist kein API-Schlüssel gespeichert — füge ihn in den Einstellungen hinzu."
+  "credentialError.missing": "Für diesen Anbieter ist kein API-Schlüssel gespeichert — füge ihn in den Einstellungen hinzu.",
+  "harnessProfile.label": "Harness-Profil",
+  "harnessProfile.inherit": "Aktueller Harness",
+  "harnessProfile.bare": "Leer",
+  "harnessProfile.packageCurrent": "Aktuelles Harness paketieren"
 }
