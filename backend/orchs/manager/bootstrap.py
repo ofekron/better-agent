@@ -129,7 +129,9 @@ def format_team_context(
         "</team>",
         "<messaging>",
         "Use mssg(target_session_id, message) to send a message to any team member by that member's session_id.",
-        "Use mssg for coordination with workers; sending final reports to the manager is valid when the manager requested the work.",
+        "Use mssg for one-way coordination.",
+        "Use inbox(recipient_session_id, message) to return final results requested by async ask or delegate_task.",
+        "Call inbox() to read your own pending results.",
         "</messaging>",
     ])
 

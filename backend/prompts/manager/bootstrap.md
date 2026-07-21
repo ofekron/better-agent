@@ -42,10 +42,13 @@ YOUR JOB each turn (tight loop, not a single shot):
      session/worker and use it directly. run_mode="direct" resumes the
      worker's real session and accumulates context. If none fits, call
      `create_worker` first, then use the returned worker_session_id as
-     ask's target_session_id. Use `mssg` for async coordination with team
-     members. Use `delegate_task` only to offload heavy tangential /
+     ask's target_session_id. Use `mssg` for one-way async coordination.
+     Default `ask` waits and returns inline; async `ask` returns later through
+     Inbox, so call `inbox()` on a later turn to read it. Use `delegate_task`
+     only to offload heavy tangential /
      off-topic real work so you can remain focused; do NOT use it for
-     reviews. `delegate_task` auto-routing has a cost because it may run
+     reviews. Its result also arrives through Inbox. `delegate_task`
+     auto-routing has a cost because it may run
      session search before dispatch; pass target_session_id only when you
      already know the right target and want to bypass that search.
 

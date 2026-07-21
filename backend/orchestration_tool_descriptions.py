@@ -44,7 +44,8 @@ ASK_DESCRIPTION = (
     f"{ASK_MODE_WAIT_AND_GRAB_LAST_ASSISTANT_MSSG_IN_TURN}' waits for its turn to finish "
     "and returns the reply inline, in this turn; mode='"
     f"{ASK_MODE_CONTINUE_AND_EXPECT_INBOX_BACK_ASYNC}' continues it and returns "
-    "immediately while expecting a later reply in your inbox. run_mode='direct' (default) "
+    "immediately; the target sends its final result to your inbox. Call inbox() "
+    "later to read it. run_mode='direct' (default) "
     "runs the real session; "
     "run_mode='fork' runs an ISOLATED branch that does NOT mutate the session's "
     "durable context — use fork for audits/reviews/checks (set ephemeral=true to "
@@ -64,7 +65,8 @@ DELEGATE_TASK_DESCRIPTION = (
     "off-topic work so you stay focused. Not for reviews — use ask(run_mode='fork'). "
     "Pass provider_id only when auto-routing should be constrained to that provider; provider_id='ANY' keeps cross-provider search. "
     "Distinct from the session-bridge delegate_to_session tool, which waits for the "
-    "result. Detached results are delivered to the caller's inbox." + _PROVIDER_SELECTOR_NOTE
+    "result. Detached results are delivered to the caller's inbox; call inbox() "
+    "later to read them." + _PROVIDER_SELECTOR_NOTE
 )
 
 CREATE_SESSION_DESCRIPTION = (
@@ -104,7 +106,8 @@ INBOX_DESCRIPTION = (
     "message with recipient_session_id; any session may send to any existing "
     "session. To read, omit both fields. Reads are always bound to your own "
     "session id, return only messages newer than your last read, and advance "
-    "your cursor. A sender cannot read the recipient's inbox."
+    "your cursor. Async ask and delegate_task results arrive here. A sender "
+    "cannot read the recipient's inbox."
 )
 
 READ_INBOX_HISTORY_DESCRIPTION = (
