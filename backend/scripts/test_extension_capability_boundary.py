@@ -184,6 +184,7 @@ def test_auto_tagging_capability_payloads_are_bounded() -> None:
 
 def test_public_sdk_has_no_raw_route_transport() -> None:
     assert not hasattr(Client, "request_internal")
+    assert not hasattr(Client, "auto_tagging_action")
     client = Client(internal_token="token")
     try:
         client.invoke_capability("ask", "ensure", {}, path="/api/internal/ask-ui/ensure")
@@ -191,6 +192,21 @@ def test_public_sdk_has_no_raw_route_transport() -> None:
         pass
     else:
         raise AssertionError("invoke_capability accepted a raw path")
+
+
+def test_composer_fill_capability_payload_is_bounded() -> None:
+    schema = capability_api._ACTIONS[("composer-fill", "generate")].schema
+    schema.model_validate({"session_id": "sid-1", "prompt": "continue"})
+    for payload in (
+        {"session_id": "", "prompt": "continue"},
+        {"session_id": "sid-1", "prompt": "x" * 12_001},
+        {"session_id": "sid-1", "prompt": "continue", "path": "/api/internal/headless-generate"},
+    ):
+        try:
+            schema.model_validate(payload)
+        except ValidationError:
+            continue
+        raise AssertionError(f"composer-fill accepted invalid payload: {payload.keys()}")
 
 
 def test_switch_capability_runtime_gets_identity_token(monkeypatch) -> None:

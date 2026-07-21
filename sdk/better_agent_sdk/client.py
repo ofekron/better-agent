@@ -604,13 +604,6 @@ class Client:
             timeout=10.0,
         )
 
-    def auto_tagging_action(self, action: str, **payload: Any) -> dict[str, Any]:
-        return self._post(
-            "/api/internal/auto-tagging",
-            {"action": action, **payload},
-            timeout=30.0,
-        )
-
     # ── provisioned-session discovery ─────────────────────────────────
     def list_provisioned_specs(self) -> dict[str, Any]:
         """List the registered provisioned-session spec types this client may

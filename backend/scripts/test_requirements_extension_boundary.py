@@ -43,8 +43,7 @@ def _run() -> bool:
         ),
         (
             "requirements extension may replace reserved MCP server",
-            es._BUILTIN_MCP_REPLACEMENTS_BY_EXTENSION_ID.get(es.extension_id_for_role('requirements'))
-            == frozenset({"get-requirements"}),
+            es._MCP_REPLACEMENT_CORE_ROLES.get("get-requirements") == "requirements",
             "missing replacement allow-list entry",
         ),
         (
@@ -83,10 +82,11 @@ def _run() -> bool:
             "generic loader can expose an install root without validating package availability",
         ),
         (
-            "requirements runtime files are an extension readiness gate",
-            es._BUILTIN_RUNTIME_REQUIRED_PATHS.get(es.extension_id_for_role('requirements'))
-            == ("requirement_analysis",),
-            "requirements MCP can be runtime-ready without requirement_analysis",
+            "extension protocol owns runtime module readiness",
+            not es._BUILTIN_RUNTIME_REQUIRED_PATHS
+            and "python_modules" in extension_store
+            and "def _run_extension_smoke_test" in extension_store,
+            "runtime readiness still depends on private id maps",
         ),
     ]
     passed = sum(1 for _, ok, _ in results if ok)

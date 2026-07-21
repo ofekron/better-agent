@@ -395,6 +395,11 @@ class _AssistantHeadlessPayload(_StrictPayload):
     prompt: str = Field(min_length=1)
 
 
+class _ComposerFillGeneratePayload(_StrictPayload):
+    session_id: str = Field(min_length=1, max_length=200)
+    prompt: str = Field(min_length=1, max_length=12_000)
+
+
 class _AssistantAskPayload(_AssistantMessagePayload):
     target_worker_id: str = ""
     target_worker_pool: str = ""
@@ -977,6 +982,10 @@ def _register_private_workflows() -> None:
             "assistant", action, schema,
             _main_action(function_name, extension_role="assistant"),
         )
+    register(
+        "composer-fill", "generate", _ComposerFillGeneratePayload,
+        _main_action("internal_headless_generate", extension_role="composer-fill"),
+    )
     auto_tagging_actions = {
         "current-task": _AutoTaggingCurrentTaskPayload,
         "snapshot": _AutoTaggingSnapshotPayload,

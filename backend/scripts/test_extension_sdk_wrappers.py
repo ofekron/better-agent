@@ -236,6 +236,7 @@ def main_test() -> int:
               "get_internal_llm -> GET settings/internal-llm")
 
         check(not hasattr(c, "call_internal"), "SDK exposes no raw internal path transport")
+        check(not hasattr(c, "auto_tagging_action"), "SDK exposes no legacy auto-tagging route wrapper")
 
         # ask_fork payload shape (many fields — spot check the key ones)
         captured.clear()
