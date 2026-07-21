@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
 import { ASK_SINGLETON_ID } from "../askSession";
 
+export const ROUTE_NAVIGATE_EVENT = "better-agent:route-navigate";
+
 /** Path patterns the app cares about. */
 export type Route =
   | { kind: "session"; sessionId: string }
@@ -87,24 +89,31 @@ export function useRoute(): {
   const [route, setRoute] = useState<Route>(() => parseRoutePath(window.location.pathname));
 
   useEffect(() => {
-    const onPop = () => setRoute(parseRoutePath(window.location.pathname));
-    window.addEventListener("popstate", onPop);
-    return () => window.removeEventListener("popstate", onPop);
+    const syncRoute = () => setRoute(parseRoutePath(window.location.pathname));
+    window.addEventListener("popstate", syncRoute);
+    window.addEventListener(ROUTE_NAVIGATE_EVENT, syncRoute);
+    return () => {
+      window.removeEventListener("popstate", syncRoute);
+      window.removeEventListener(ROUTE_NAVIGATE_EVENT, syncRoute);
+    };
   }, []);
 
   const navigate = useCallback((path: string) => {
-    // Idempotent: skip pushState when the URL is already there
-    // (prevents history spam from React Strict Mode double-invoke
-    // and from inner components that "navigate to current" defensively).
-    if (window.location.pathname === path) {
-      setRoute(parseRoutePath(path));
-      return;
-    }
-    window.history.pushState(null, "", path);
-    setRoute(parseRoutePath(path));
+    navigateRoute(path);
   }, []);
 
   return { route, navigate };
+}
+
+export function navigateRoute(path: string): void {
+  const destination = new URL(path, window.location.href);
+  if (destination.origin !== window.location.origin) {
+    throw new Error("Route navigation must stay on the current origin");
+  }
+  const next = `${destination.pathname}${destination.search}${destination.hash}`;
+  const current = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+  if (current !== next) window.history.pushState(null, "", next);
+  window.dispatchEvent(new Event(ROUTE_NAVIGATE_EVENT));
 }
 
 /** Convenience: build a session URL from an id. Centralized so a

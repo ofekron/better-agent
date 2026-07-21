@@ -11,6 +11,16 @@ import {
   sessionLinkMarker,
   sessionMarkersToMarkdown,
 } from "../src/utils/linkifyFilePaths";
+import { ROUTE_NAVIGATE_EVENT, useRoute } from "../src/hooks/useRoute";
+
+function RouteProbe() {
+  const { route } = useRoute();
+  return createElement(
+    "output",
+    { "data-testid": "route" },
+    route.kind === "session" ? route.sessionId : route.kind,
+  );
+}
 
 // Regression lock for the Windows file-ref bug: handleOpenFilePanel
 // (App.tsx) only joined cwd when `!path.startsWith("/")`, so a Windows
@@ -191,6 +201,7 @@ describe("linkifyFilePaths", () => {
     const html = renderToStaticMarkup(linkifyFilePaths(`open ${marker}`));
 
     expect(marker).toBe("[[ba-session:session-abcdef|Linked%20Session]]");
+    expect(html).toContain('<a href="/s/session-abcdef"');
     expect(html).toContain("Linked Session · sess");
     expect(html).not.toContain("[[ba-session:");
   });
@@ -202,10 +213,43 @@ describe("linkifyFilePaths", () => {
 
   it("opens the session route when a smart session link is clicked", () => {
     window.history.pushState(null, "", "/");
-    render(createElement("div", null, linkifyFilePaths(sessionLinkMarker("session-abcdef", "Linked Session"))));
+    render(createElement(
+      "div",
+      null,
+      createElement(RouteProbe),
+      linkifyFilePaths(sessionLinkMarker("session-abcdef", "Linked Session")),
+    ));
 
-    fireEvent.click(screen.getByRole("link", { name: "Linked Session · sess" }));
+    const link = screen.getByRole("link", { name: "Linked Session · sess" });
+    expect(link.tagName).toBe("A");
+    expect(link.getAttribute("href")).toBe("/s/session-abcdef");
+    fireEvent.click(link);
 
     expect(window.location.pathname).toBe("/s/session-abcdef");
+    expect(screen.getByTestId("route").textContent).toBe("session-abcdef");
+  });
+
+  it.each([
+    ["Ctrl-click", { ctrlKey: true }],
+    ["Meta-click", { metaKey: true }],
+    ["Shift-click", { shiftKey: true }],
+    ["Alt-click", { altKey: true }],
+    ["middle-click", { button: 1 }],
+  ] as const)("preserves native %s behavior", (_label, modifiers) => {
+    window.history.pushState(null, "", "/");
+    render(createElement("div", null, linkifyFilePaths(sessionLinkMarker("session-abcdef", "Linked Session"))));
+    const link = screen.getByRole("link", { name: "Linked Session · sess" });
+    const click = new MouseEvent("click", { bubbles: true, cancelable: true, ...modifiers });
+    let routeEvents = 0;
+    const onRoute = () => { routeEvents += 1; };
+    window.addEventListener(ROUTE_NAVIGATE_EVENT, onRoute);
+
+    try {
+      link.dispatchEvent(click);
+      expect(click.defaultPrevented).toBe(false);
+      expect(routeEvents).toBe(0);
+    } finally {
+      window.removeEventListener(ROUTE_NAVIGATE_EVENT, onRoute);
+    }
   });
 });

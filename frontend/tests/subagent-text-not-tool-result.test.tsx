@@ -4,6 +4,7 @@ import React from "react";
 import { MessageBubble } from "../src/components/MessageBubble";
 import { makeAssistantMsg } from "./fixtures";
 import type { WSEvent } from "../src/types";
+import { sessionLinkMarker } from "../src/utils/linkifyFilePaths";
 
 const TASK_ID = "toolu_task_1";
 const READ_ID = "toolu_read_1";
@@ -80,6 +81,21 @@ function resultContainersWith(container: HTMLElement, text: string): HTMLElement
 }
 
 describe("subagent text events render standalone, not as tool results", () => {
+  it("converts a persisted assistant session marker before Markdown rendering", () => {
+    const targetId = "6d0a35c1-b3fc-4ed5-96df-e92e6b2c74cb";
+    const marker = sessionLinkMarker(targetId, "Referenced Target");
+    const msg = makeAssistantMsg({ id: "session-marker", content: marker, events: [] });
+
+    const { container } = render(
+      <MessageBubble message={msg} sessionId="s1" orchestrationMode="native" />,
+    );
+
+    expect(container.textContent).toContain(
+      `[Referenced Target · 6d0a](/s/${targetId})`,
+    );
+    expect(container.textContent).not.toContain("[[ba-session:");
+  });
+
   it("assistant errorText without content renders as visible output", () => {
     const msg = makeAssistantMsg({
       id: "err",

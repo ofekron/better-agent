@@ -6,10 +6,28 @@ import { Chat } from "../src/components/Chat";
 import { TurnGroup } from "../src/components/MessageBubble";
 import { makeAssistantMsg, makeSession, makeUserMsg } from "./fixtures";
 import { renderApp } from "./harness";
+import { sessionLinkMarker } from "../src/utils/linkifyFilePaths";
 
 afterEach(cleanup);
 
 describe("TurnGroup collapsed interrupted indicator", () => {
+  it("renders a collapsed assistant session marker as a native link", () => {
+    const targetId = "6d0a35c1-b3fc-4ed5-96df-e92e6b2c74cb";
+    const marker = sessionLinkMarker(targetId, "Referenced Target");
+    const { container } = render(
+      <TurnGroup
+        initiatorMessage={makeUserMsg({ id: "u-marker", content: "open it" })}
+        responseMessage={makeAssistantMsg({ id: "a-marker", content: marker })}
+        defaultCollapsed
+        orchestrationMode="native"
+      />,
+    );
+
+    const summary = container.querySelector(".collapse-summary");
+    expect(summary?.querySelector(`a[href="/s/${targetId}"]`)).not.toBeNull();
+    expect(summary?.textContent).not.toContain("[[ba-session:");
+  });
+
   it("collapses the latest completed chat group", async () => {
     const realFetch = globalThis.fetch;
     globalThis.fetch = vi.fn(async () =>

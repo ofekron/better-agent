@@ -3711,7 +3711,7 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
               {collapsedLastEvent}
             </>
           ) : summary ? (
-            <div className="collapse-summary">{summary}</div>
+            <div className="collapse-summary">{linkifyFilePaths(summary, onFileClick)}</div>
           ) : null}
           {effectiveResponse?.stopped_at && (
             <StoppedIndicator
