@@ -3654,6 +3654,19 @@ class SessionManager:
         return session_store.ordered_session_summary_ids(sort_by)
 
     def iter_all(self):
+        return self.iter_all_entities()
+
+    def iter_root_sessions(self):
+        """Yield every root session record as deep copies."""
+        for root in session_store.iter_root_sessions():
+            yield copy.deepcopy(root)
+
+    def iter_fork_sessions(self):
+        """Yield every embedded fork session record as deep copies."""
+        for fork in session_store.iter_fork_sessions():
+            yield copy.deepcopy(fork)
+
+    def iter_all_entities(self):
         """Yield every session record (root + every embedded fork,
         depth-first). Returns deep copies so callers can iterate without
         racing concurrent mutations. Used by session_watcher and

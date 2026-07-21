@@ -16,12 +16,13 @@ plumbing here.
 import logging
 import shutil
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 
 from event_bus import bus, BusEvent
 from session_manager import manager as session_manager
 
 logger = logging.getLogger(__name__)
+WorkingSessionLookupScope = Literal["roots", "forks", "any"]
 
 
 # ── Session marking ────────────────────────────────────────────────
@@ -55,15 +56,27 @@ def mark_working_mode(
 
 def find_working_session(
     mode: str,
+    *,
+    scope: WorkingSessionLookupScope = "roots",
     **match: object,
 ) -> Optional[dict]:
     """Return the first live working session whose mode matches and whose
     ``working_mode_meta`` contains all ``**match`` key-value pairs, or
     ``None``."""
-    for session in session_manager.iter_all():
+    for session in _iter_lookup_sessions(scope):
         if _matches_working_mode(session, mode, match):
             return session
     return None
+
+
+def _iter_lookup_sessions(scope: WorkingSessionLookupScope):
+    if scope == "roots":
+        return session_manager.iter_root_sessions()
+    if scope == "forks":
+        return session_manager.iter_fork_sessions()
+    if scope == "any":
+        return session_manager.iter_all_entities()
+    raise ValueError(f"unknown working session lookup scope: {scope}")
 
 
 def _matches_working_mode(session: dict, mode: str, match: dict[str, object]) -> bool:

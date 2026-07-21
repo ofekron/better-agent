@@ -5225,10 +5225,8 @@ def get_indexed_session_summaries_by_ids(session_ids: Iterable[str]) -> list[dic
         ]
 
 
-def iter_all_sessions() -> Iterator[dict]:
-    """Yield every session record across all roots — root, then each of
-    its forks (depth-first). Used by session_watcher / run_recovery to
-    walk the full session universe regardless of nesting.
+def iter_root_sessions() -> Iterator[dict]:
+    """Yield every root session record.
 
     Persists any first-time provider_id backfill so SessionWatcher
     ticks don't re-run detection on the same record across restarts.
@@ -5246,6 +5244,20 @@ def iter_all_sessions() -> Iterator[dict]:
         if not isinstance(root, dict) or "id" not in root:
             continue
         _index_tree(root)
+        yield root
+
+
+def iter_fork_sessions() -> Iterator[dict]:
+    """Yield every embedded fork session record across all roots."""
+    for root in iter_root_sessions():
+        yield from _walk_forks(root)
+
+
+def iter_all_sessions() -> Iterator[dict]:
+    """Yield every session record across all roots — root, then each of
+    its forks (depth-first). Used by session_watcher / run_recovery to
+    walk the full session universe regardless of nesting."""
+    for root in iter_root_sessions():
         yield root
         yield from _walk_forks(root)
 

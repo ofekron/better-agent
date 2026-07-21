@@ -1135,21 +1135,43 @@ def test_startup_wires_requirements_processor_prewarm() -> bool:
     return True
 
 
-def test_working_mode_lookup_reads_hidden_sessions() -> bool:
+def test_working_mode_lookup_uses_explicit_entity_scopes() -> bool:
     class _FakeSessionManager:
         def __init__(self) -> None:
-            self.iter_all_calls = 0
+            self.root_calls = 0
+            self.fork_calls = 0
+            self.any_calls = 0
 
         def list(self) -> list[dict]:
             return []
 
-        def iter_all(self) -> list[dict]:
-            self.iter_all_calls += 1
+        def iter_root_sessions(self) -> list[dict]:
+            self.root_calls += 1
             return [
                 {
-                    "id": "target",
+                    "id": "root-target",
                     "working_mode": "target_mode",
-                    "working_mode_meta": {"cwd": "/repo", "model": "m"},
+                    "working_mode_meta": {"cwd": "/repo", "model": "root"},
+                }
+            ]
+
+        def iter_fork_sessions(self) -> list[dict]:
+            self.fork_calls += 1
+            return [
+                {
+                    "id": "fork-target",
+                    "working_mode": "target_mode",
+                    "working_mode_meta": {"cwd": "/repo", "model": "fork"},
+                }
+            ]
+
+        def iter_all_entities(self) -> list[dict]:
+            self.any_calls += 1
+            return [
+                {
+                    "id": "any-target",
+                    "working_mode": "target_mode",
+                    "working_mode_meta": {"cwd": "/repo", "model": "any"},
                 }
             ]
 
@@ -1157,21 +1179,42 @@ def test_working_mode_lookup_reads_hidden_sessions() -> bool:
     original = working_mode.session_manager
     working_mode.session_manager = fake  # type: ignore[assignment]
     try:
-        found = working_mode.find_working_session(
+        root = working_mode.find_working_session(
             "target_mode",
             cwd="/repo",
-            model="m",
+            model="root",
+        )
+        fork = working_mode.find_working_session(
+            "target_mode",
+            scope="forks",
+            cwd="/repo",
+            model="fork",
+        )
+        any_entity = working_mode.find_working_session(
+            "target_mode",
+            scope="any",
+            cwd="/repo",
+            model="any",
         )
     finally:
         working_mode.session_manager = original
 
-    if not found or found.get("id") != "target":
-        print(f"{FAIL} working-mode lookup: did not return hidden target")
+    if not root or root.get("id") != "root-target":
+        print(f"{FAIL} working-mode lookup: did not return root target")
         return False
-    if fake.iter_all_calls != 1:
-        print(f"{FAIL} working-mode lookup: iter_all calls {fake.iter_all_calls}")
+    if not fork or fork.get("id") != "fork-target":
+        print(f"{FAIL} working-mode lookup: did not return fork target")
         return False
-    print(f"{PASS} working-mode lookup reads hidden sessions")
+    if not any_entity or any_entity.get("id") != "any-target":
+        print(f"{FAIL} working-mode lookup: did not return any-entity target")
+        return False
+    if (fake.root_calls, fake.fork_calls, fake.any_calls) != (1, 1, 1):
+        print(
+            f"{FAIL} working-mode lookup: calls "
+            f"{(fake.root_calls, fake.fork_calls, fake.any_calls)!r}"
+        )
+        return False
+    print(f"{PASS} working-mode lookup uses explicit entity scopes")
     return True
 
 
@@ -1201,7 +1244,7 @@ def main_run() -> int:
         test_run_sync_survives_lifecycle_plus_full_dispatch,
         test_lifecycle_lock_budget_stays_on_provision_timeout,
         test_startup_wires_requirements_processor_prewarm,
-        test_working_mode_lookup_reads_hidden_sessions,
+        test_working_mode_lookup_uses_explicit_entity_scopes,
     ]
     results = []
     for fn in tests:
