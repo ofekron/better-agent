@@ -11,10 +11,13 @@ logger = logging.getLogger(__name__)
 CANONICAL_PROVIDER_SERVICE = "better-agent-provider-credentials-v3"
 LEGACY_CANONICAL_PROVIDER_SERVICE = "better-agent-provider-credentials-v2"
 LEGACY_FLAT_ACCOUNT = "anthropic-api-key"
-PROVIDER_CREDENTIAL_SERVICES = (
-    CANONICAL_PROVIDER_SERVICE,
+LEGACY_PROVIDER_CREDENTIAL_SERVICES = (
     LEGACY_CANONICAL_PROVIDER_SERVICE,
     *service_names(PRIMARY_SERVICE, LEGACY_SERVICE),
+)
+PROVIDER_CREDENTIAL_SERVICES = (
+    CANONICAL_PROVIDER_SERVICE,
+    *LEGACY_PROVIDER_CREDENTIAL_SERVICES,
 )
 
 
@@ -74,9 +77,8 @@ class ProviderCredentialStore:
 
     def delete(self, provider_id: str) -> None:
         account = _account(provider_id)
-        for service in service_names(PRIMARY_SERVICE, LEGACY_SERVICE):
+        for service in PROVIDER_CREDENTIAL_SERVICES:
             oskeychain.native_delete(service, account)
-        oskeychain.native_delete(CANONICAL_PROVIDER_SERVICE, account)
 
     def migrate_flat(self, provider_id: str) -> str | None:
         account = _account(provider_id)
@@ -99,7 +101,7 @@ class ProviderCredentialStore:
             oskeychain.native_delete(service, LEGACY_FLAT_ACCOUNT)
 
     def _migrate_legacy(self, provider_id: str, account: str) -> str | None:
-        for service in PROVIDER_CREDENTIAL_SERVICES[1:]:
+        for service in LEGACY_PROVIDER_CREDENTIAL_SERVICES:
             candidate = ProviderCredentialCandidate(service, account)
             value = self._read_candidate(candidate)
             if not value:
@@ -138,7 +140,7 @@ class ProviderCredentialStore:
             raise ProviderCredentialAccessBlocked(candidate) from exc
 
     def _cleanup_legacy(self, account: str) -> None:
-        for service in PROVIDER_CREDENTIAL_SERVICES[1:]:
+        for service in LEGACY_PROVIDER_CREDENTIAL_SERVICES:
             try:
                 oskeychain.native_delete(service, account)
             except RuntimeError:

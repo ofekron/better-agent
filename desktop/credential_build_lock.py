@@ -1,10 +1,14 @@
 from __future__ import annotations
 
-import fcntl
 import os
 import sys
 from pathlib import Path
 from typing import NoReturn
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+from backend import portable_lock  # noqa: E402
 
 
 def run_locked(lock_path: Path, command: list[str]) -> NoReturn:
@@ -14,7 +18,7 @@ def run_locked(lock_path: Path, command: list[str]) -> NoReturn:
         flags |= os.O_NOFOLLOW
     descriptor = os.open(lock_path, flags, 0o600)
     try:
-        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        portable_lock.lock_ex(descriptor)
         os.set_inheritable(descriptor, True)
         os.execvpe(command[0], command, os.environ)
     finally:

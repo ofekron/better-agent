@@ -33,6 +33,7 @@ from provider_credentials import (  # noqa: E402
     CANONICAL_PROVIDER_SERVICE,
     LEGACY_CANONICAL_PROVIDER_SERVICE,
     LEGACY_FLAT_ACCOUNT,
+    PROVIDER_CREDENTIAL_SERVICES,
 )
 
 
@@ -227,6 +228,24 @@ def test_denied_retry_does_not_scan_another_credential() -> None:
         credential_session.oskeychain.disable_native_user_interaction = real_disable
         credential_session.oskeychain.native_user_interaction = real_interaction
         provider_credentials.oskeychain.native_get = real_get
+
+
+def test_delete_removes_every_provider_credential_entry() -> None:
+    provider_id = "provider-delete-all"
+    account = f"provider:{provider_id}"
+    deleted: list[tuple[str, str]] = []
+    real_delete = provider_credentials.oskeychain.native_delete
+
+    provider_credentials.oskeychain.native_delete = (
+        lambda service, requested_account: deleted.append((service, requested_account))
+    )
+    try:
+        provider_credentials.ProviderCredentialStore().delete(provider_id)
+        assert deleted == [
+            (service, account) for service in PROVIDER_CREDENTIAL_SERVICES
+        ]
+    finally:
+        provider_credentials.oskeychain.native_delete = real_delete
 
 
 def _backend_request(session, op: str, provider_id: str) -> dict:
@@ -559,6 +578,7 @@ if __name__ == "__main__":
     test_native_interaction_is_disabled_after_failure()
     test_retry_interactively_migrates_blocked_legacy()
     test_denied_retry_does_not_scan_another_credential()
+    test_delete_removes_every_provider_credential_entry()
     test_legacy_credential_migrates_before_cleanup_and_survives_restart()
     test_failed_canonical_verification_never_cleans_legacy()
     test_canonical_denial_never_attempts_legacy_recovery()
