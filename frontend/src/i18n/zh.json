@@ -1089,5 +1089,15 @@
   "routines.output.codeHealth.severity.critical": "Critical",
   "routines.output.codeHealth.severity.high": "High",
   "routines.output.codeHealth.severity.medium": "Medium",
-  "routines.output.codeHealth.severity.low": "Low"
+  "routines.output.codeHealth.severity.low": "Low",
+  "gitTree.title": "仓库历史",
+  "gitTree.open": "打开仓库历史",
+  "gitTree.close": "关闭仓库历史",
+  "gitTree.refresh": "刷新仓库历史",
+  "gitTree.loading": "正在加载仓库历史…",
+  "gitTree.loadFailed": "无法加载仓库历史。",
+  "gitTree.retry": "重试",
+  "gitTree.empty": "还没有提交。",
+  "gitTree.commits": "提交 · {{count}}",
+  "gitTree.changed": "更改 · {{count}}"
 }

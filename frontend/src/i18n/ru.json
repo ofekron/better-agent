@@ -1089,5 +1089,15 @@
   "routines.output.codeHealth.severity.critical": "Critical",
   "routines.output.codeHealth.severity.high": "High",
   "routines.output.codeHealth.severity.medium": "Medium",
-  "routines.output.codeHealth.severity.low": "Low"
+  "routines.output.codeHealth.severity.low": "Low",
+  "gitTree.title": "История репозитория",
+  "gitTree.open": "Открыть историю репозитория",
+  "gitTree.close": "Закрыть историю репозитория",
+  "gitTree.refresh": "Обновить историю репозитория",
+  "gitTree.loading": "Загрузка истории репозитория…",
+  "gitTree.loadFailed": "Не удалось загрузить историю репозитория.",
+  "gitTree.retry": "Повторить",
+  "gitTree.empty": "Коммитов пока нет.",
+  "gitTree.commits": "Коммиты · {{count}}",
+  "gitTree.changed": "Изменения · {{count}}"
 }

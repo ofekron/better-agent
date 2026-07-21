@@ -5743,6 +5743,17 @@ async def get_git_status(
     return await _cached_git_status(node_id, cwd)
 
 
+@app.get("/api/git-tree")
+async def get_git_tree(
+    cwd: str = Query(...),
+    node_id: str = Query("primary"),
+    limit: int = Query(200, ge=1, le=500),
+):
+    return await _file_op(
+        node_id, "get_git_tree", {"cwd": cwd, "limit": limit},
+    )
+
+
 @app.get("/api/git-diff")
 async def get_git_diff(
     path: str = Query(...),

@@ -690,6 +690,17 @@ def _rpc_get_git_status(params: dict) -> dict:
     return get_git_status(cwd)
 
 
+def _rpc_get_git_tree(params: dict) -> dict:
+    cwd = params.get("cwd") or ""
+    limit = params.get("limit", 200)
+    _validate_path(cwd)
+    _assert_within_cwd_roots(cwd)
+    if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 500:
+        raise ValueError("limit must be an integer between 1 and 500")
+    from file_browser import get_git_tree
+    return get_git_tree(cwd, limit)
+
+
 def _rpc_get_file_diff(params: dict) -> dict:
     file_path = params.get("file_path") or ""
     cwd = params.get("cwd") or ""
@@ -1047,6 +1058,7 @@ _HANDLERS = {
     "create_directory": _rpc_create_directory,
     "reconstruct_before_edit": _rpc_reconstruct_before_edit,
     "get_git_status": _rpc_get_git_status,
+    "get_git_tree": _rpc_get_git_tree,
     "get_file_diff": _rpc_get_file_diff,
     "git_commit": _rpc_git_commit,
     "git_commit_and_push": _rpc_git_commit_and_push,

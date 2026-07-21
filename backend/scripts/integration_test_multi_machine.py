@@ -373,6 +373,7 @@ async def test_dispatch_rpc_json_serializability() -> bool:
             ("write_file_content", {"path": str(tmp_file), "content": "new"}),
             ("reconstruct_before_edit", {"file_path": str(tmp_file), "old_string": "a", "new_string": "b"}),
             ("get_git_status", {"cwd": tmp_root}),
+            ("get_git_tree", {"cwd": tmp_root, "limit": 20}),
             ("get_file_diff", {"file_path": str(tmp_file), "cwd": tmp_root}),
             ("scan_project_configs", {"cwd": tmp_root}),
             ("file_editor_baseline", {"file_path": str(tmp_file), "cwd": tmp_root}),
@@ -1440,7 +1441,7 @@ async def run_handshake_tests() -> list[bool]:
         results.append(ok)
 
         # ---------- FS endpoint routing: remote node forwards to rpc_call ----------
-        label = "FS endpoints with node_id=n1 route to rpc_call (all 9 endpoints, both query+body)"
+        label = "FS endpoints with node_id=n1 route to rpc_call (all endpoints, both query+body)"
         rpc_call_invocations = []
         async def _spy_route(node_id, method, params, *, timeout=30.0):
             rpc_call_invocations.append((node_id, method))
@@ -1453,6 +1454,7 @@ async def run_handshake_tests() -> list[bool]:
                 "write_file_content": {"path": "/tmp/x", "bytes": 4},
                 "reconstruct_before_edit": {"before_content": "", "after_content": "", "language": "plaintext"},
                 "get_git_status": {"is_git": False},
+                "get_git_tree": {"is_git": False, "commits": []},
                 "get_file_diff": {"diff": None},
                 "scan_project_configs": [],
             }
@@ -1465,6 +1467,7 @@ async def run_handshake_tests() -> list[bool]:
                 await c.get("/api/files", params={"path": "/tmp", "node_id": "n1"})
                 await c.get("/api/files/search", params={"root": "/tmp", "q": "x", "node_id": "n1"})
                 await c.get("/api/git-status", params={"cwd": "/tmp", "node_id": "n1"})
+                await c.get("/api/git-tree", params={"cwd": "/tmp", "node_id": "n1"})
                 await c.get("/api/git-diff", params={"path": "/tmp/x", "cwd": "/tmp", "node_id": "n1"})
                 await c.get("/api/project-config", params={"cwd": "/tmp", "node_id": "n1"})
                 await c.get("/api/file", params={"path": "/tmp/x", "node_id": "n1"})
@@ -1477,7 +1480,7 @@ async def run_handshake_tests() -> list[bool]:
             invoked_methods = sorted({m for _, m in rpc_call_invocations})
             expected = sorted([
                 "list_directories", "get_file_tree", "search_tree",
-                "get_git_status", "get_file_diff", "scan_project_configs",
+                "get_git_status", "get_git_tree", "get_file_diff", "scan_project_configs",
                 "get_file_content", "write_file_content", "reconstruct_before_edit",
             ])
             ok = invoked_methods == expected and all(n == "n1" for n, _ in rpc_call_invocations)

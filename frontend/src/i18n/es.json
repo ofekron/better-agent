@@ -1088,5 +1088,15 @@
   "routines.output.codeHealth.severity.critical": "Critical",
   "routines.output.codeHealth.severity.high": "High",
   "routines.output.codeHealth.severity.medium": "Medium",
-  "routines.output.codeHealth.severity.low": "Low"
+  "routines.output.codeHealth.severity.low": "Low",
+  "gitTree.title": "Historial del repositorio",
+  "gitTree.open": "Abrir historial del repositorio",
+  "gitTree.close": "Cerrar historial del repositorio",
+  "gitTree.refresh": "Actualizar historial del repositorio",
+  "gitTree.loading": "Cargando historial del repositorio…",
+  "gitTree.loadFailed": "No se pudo cargar el historial del repositorio.",
+  "gitTree.retry": "Reintentar",
+  "gitTree.empty": "Aún no hay commits.",
+  "gitTree.commits": "Commits · {{count}}",
+  "gitTree.changed": "Cambios · {{count}}"
 }

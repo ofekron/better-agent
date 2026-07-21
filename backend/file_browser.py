@@ -592,6 +592,53 @@ def get_git_status(cwd: str) -> dict:
         return {"is_git": False}
 
 
+def get_git_tree(cwd: str, limit: int = 200) -> dict:
+    if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 500:
+        raise ValueError("limit must be an integer between 1 and 500")
+
+    status = get_git_status(cwd)
+    if not status.get("is_git"):
+        return {"is_git": False, "commits": []}
+
+    result = subprocess.run(
+        [
+            "git", "log", "--all", "--topo-order", "--date-order", "-z",
+            "--format=%H%x00%P%x00%D%x00%an%x00%aI%x00%s",
+            "-n", str(limit),
+        ],
+        cwd=cwd, capture_output=True, text=True, timeout=15,
+    )
+    if result.returncode != 0:
+        return {
+            "is_git": True,
+            "branch": status.get("branch", ""),
+            "dirty_count": sum(len(status.get(key, [])) for key in ("modified", "added", "deleted", "untracked")),
+            "commits": [],
+        }
+
+    fields = result.stdout.split("\0")
+    if fields and fields[-1] == "":
+        fields.pop()
+    commits = []
+    for offset in range(0, len(fields) - 5, 6):
+        commit_hash, parents, refs, author, authored_at, subject = fields[offset:offset + 6]
+        commits.append({
+            "hash": commit_hash,
+            "parents": parents.split() if parents else [],
+            "refs": [ref.strip() for ref in refs.split(",") if ref.strip()],
+            "author": author,
+            "authored_at": authored_at,
+            "subject": subject,
+        })
+
+    return {
+        "is_git": True,
+        "branch": status.get("branch", ""),
+        "dirty_count": sum(len(status.get(key, [])) for key in ("modified", "added", "deleted", "untracked")),
+        "commits": commits,
+    }
+
+
 def git_commit(cwd: str, message: str) -> dict:
     """Stage all tracked changes and commit."""
     try:

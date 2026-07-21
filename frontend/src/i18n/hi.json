@@ -1089,5 +1089,15 @@
   "routines.output.codeHealth.severity.critical": "Critical",
   "routines.output.codeHealth.severity.high": "High",
   "routines.output.codeHealth.severity.medium": "Medium",
-  "routines.output.codeHealth.severity.low": "Low"
+  "routines.output.codeHealth.severity.low": "Low",
+  "gitTree.title": "रिपॉज़िटरी इतिहास",
+  "gitTree.open": "रिपॉज़िटरी इतिहास खोलें",
+  "gitTree.close": "रिपॉज़िटरी इतिहास बंद करें",
+  "gitTree.refresh": "रिपॉज़िटरी इतिहास रीफ़्रेश करें",
+  "gitTree.loading": "रिपॉज़िटरी इतिहास लोड हो रहा है…",
+  "gitTree.loadFailed": "रिपॉज़िटरी इतिहास लोड नहीं हो सका।",
+  "gitTree.retry": "फिर से कोशिश करें",
+  "gitTree.empty": "अभी कोई कमिट नहीं है।",
+  "gitTree.commits": "कमिट · {{count}}",
+  "gitTree.changed": "बदलाव · {{count}}"
 }

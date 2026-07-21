@@ -1132,5 +1132,15 @@
   "routines.output.codeHealth.severity.critical": "Critical",
   "routines.output.codeHealth.severity.high": "High",
   "routines.output.codeHealth.severity.medium": "Medium",
-  "routines.output.codeHealth.severity.low": "Low"
+  "routines.output.codeHealth.severity.low": "Low",
+  "gitTree.title": "היסטוריית המאגר",
+  "gitTree.open": "פתיחת היסטוריית המאגר",
+  "gitTree.close": "סגירת היסטוריית המאגר",
+  "gitTree.refresh": "רענון היסטוריית המאגר",
+  "gitTree.loading": "היסטוריית המאגר נטענת…",
+  "gitTree.loadFailed": "לא ניתן לטעון את היסטוריית המאגר.",
+  "gitTree.retry": "לנסות שוב",
+  "gitTree.empty": "עדיין אין קומיטים.",
+  "gitTree.commits": "קומיטים · {{count}}",
+  "gitTree.changed": "שינויים · {{count}}"
 }

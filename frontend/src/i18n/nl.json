@@ -1085,5 +1085,15 @@
   "routines.output.codeHealth.severity.critical": "Critical",
   "routines.output.codeHealth.severity.high": "High",
   "routines.output.codeHealth.severity.medium": "Medium",
-  "routines.output.codeHealth.severity.low": "Low"
+  "routines.output.codeHealth.severity.low": "Low",
+  "gitTree.title": "Repositorygeschiedenis",
+  "gitTree.open": "Repositorygeschiedenis openen",
+  "gitTree.close": "Repositorygeschiedenis sluiten",
+  "gitTree.refresh": "Repositorygeschiedenis vernieuwen",
+  "gitTree.loading": "Repositorygeschiedenis laden…",
+  "gitTree.loadFailed": "Repositorygeschiedenis kon niet worden geladen.",
+  "gitTree.retry": "Opnieuw proberen",
+  "gitTree.empty": "Nog geen commits.",
+  "gitTree.commits": "Commits · {{count}}",
+  "gitTree.changed": "Wijzigingen · {{count}}"
 }
