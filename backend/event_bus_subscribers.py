@@ -575,6 +575,7 @@ def register_default_subscribers() -> None:
     bind_event_journal_writer()
     bind_session_content_projection()
     bind_requirement_tags_projection()
+    bind_ask_delivery()
     bus.unsubscribe("ingester_to_events_jsonl")
     bus.unsubscribe("event_journal_persistence_adapter")
     bus.subscribe(
@@ -592,6 +593,32 @@ def register_default_subscribers() -> None:
     except Exception:
         logger.exception("event_bus: hook runner registration failed")
     bind_task_turn_end_triggers()
+
+
+def bind_ask_delivery() -> None:
+    import ask_delivery
+
+    bus.unsubscribe("ask_delivery_journal_receipt")
+    bus.unsubscribe("ask_delivery_turn_complete")
+    bus.unsubscribe("ask_delivery_turn_stopped")
+    bus.subscribe(
+        EVENT_JOURNAL_WRITTEN,
+        ask_delivery.on_journal_written,
+        priority=30,
+        name="ask_delivery_journal_receipt",
+    )
+    bus.subscribe(
+        "lifecycle.turn_complete",
+        ask_delivery.on_caller_terminal,
+        priority=30,
+        name="ask_delivery_turn_complete",
+    )
+    bus.subscribe(
+        "lifecycle.turn_stopped",
+        ask_delivery.on_caller_terminal,
+        priority=30,
+        name="ask_delivery_turn_stopped",
+    )
 
 
 def bind_session_ws_broadcaster(broadcaster) -> None:

@@ -100,6 +100,7 @@ def send(
     sender_session_id: str,
     recipient_session_id: str,
     message: str,
+    delivery_id: str = "",
 ) -> dict[str, Any]:
     sender_session_id = _clean_session_id(sender_session_id, "sender_session_id")
     recipient_session_id = _clean_session_id(
@@ -111,18 +112,36 @@ def send(
         raise InboxStoreError("message is required when recipient_session_id is set")
     if len(text) > MAX_MESSAGE_CHARS:
         raise InboxStoreError(f"message exceeds {MAX_MESSAGE_CHARS} characters")
+    delivery_id = str(delivery_id or "").strip()
+    if len(delivery_id) > 200:
+        raise InboxStoreError("delivery_id exceeds 200 characters")
     _require_session(sender_session_id)
     _require_session(recipient_session_id)
     with _locked(recipient_session_id):
         record = _load(recipient_session_id)
         messages = record["messages"]
+        if delivery_id:
+            existing = next(
+                (item for item in messages if item.get("delivery_id") == delivery_id),
+                None,
+            )
+            if existing is not None:
+                return {
+                    "recipient_session_id": recipient_session_id,
+                    "sent": True,
+                    "seq": int(existing.get("seq", 0)),
+                    "deduplicated": True,
+                }
         seq = max((int(item.get("seq", 0)) for item in messages), default=0) + 1
-        messages.append({
+        item = {
             "seq": seq,
             "sender_session_id": sender_session_id,
             "text": text,
             "ts": time.time(),
-        })
+        }
+        if delivery_id:
+            item["delivery_id"] = delivery_id
+        messages.append(item)
         write_json(_path(recipient_session_id), record)
     return {
         "recipient_session_id": recipient_session_id,

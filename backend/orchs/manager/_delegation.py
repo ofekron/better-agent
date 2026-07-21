@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
+import inspect
 import json
 import logging
 import os
@@ -44,12 +46,56 @@ from event_shape import is_synthetic_event as _is_synthetic_event
 from event_shape import extract_output_text, strip_synthetic_events
 from communication_modes import append_ask_response_contract, normalize_ask_mode
 from session_manager import manager as session_manager
+import ask_delivery
 import delegation_status_store
 
 if TYPE_CHECKING:
     from orchestrator import Coordinator
 
 logger = logging.getLogger(__name__)
+
+
+def _with_ask_delivery(fn):
+    signature = inspect.signature(fn)
+
+    @functools.wraps(fn)
+    async def _wrapped(*args, **kwargs):
+        bound = signature.bind(*args, **kwargs)
+        bound.apply_defaults()
+        ask_mode = (
+            normalize_ask_mode(bound.arguments["ask_mode"])
+            if bound.arguments["ask_mode"]
+            else ""
+        )
+        if not ask_mode:
+            return await fn(*args, **kwargs)
+        delegation_id = (
+            bound.arguments["client_delegation_id"]
+            or f"del_{uuid.uuid4().hex[:10]}"
+        )
+        bound.arguments["client_delegation_id"] = delegation_id
+        caller_session_id = bound.arguments["app_session_id"]
+        coordinator = bound.arguments["coordinator"]
+        await asyncio.to_thread(
+            ask_delivery.prepare,
+            delegation_id,
+            caller_session_id,
+        )
+        result = await fn(*bound.args, **bound.kwargs)
+        fallback_sender = str(
+            result.get("worker_session_id")
+            or bound.arguments.get("worker_session_id")
+            or ""
+        )
+        return await ask_delivery.complete(
+            delegation_id,
+            result,
+            fallback_sender,
+            caller_session_id=caller_session_id,
+            caller_active=coordinator.turn_manager.has_active_turn(caller_session_id),
+        )
+
+    return _wrapped
 
 
 def _build_worker_prompt(
@@ -385,6 +431,7 @@ def lock_for_delegation(
 
 
 @perf.timed_fn("delegate.run")
+@_with_ask_delivery
 async def run_delegation(
     coordinator: "Coordinator",
     app_session_id: str,
