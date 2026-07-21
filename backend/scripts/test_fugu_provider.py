@@ -12,9 +12,11 @@ _BACKEND = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_BACKEND))
 
 import models  # noqa: E402
-from provider import _resolve_class  # noqa: E402
+import config_store  # noqa: E402
+from provider import ProviderCredentialError, _resolve_class  # noqa: E402
 from provider_codex import CodexProvider  # noqa: E402
 from provider_fugu import FUGU_MODELS, FuguProvider, fetch_fugu_models  # noqa: E402
+from provider_runtime import _preserved_env_keys  # noqa: E402
 from runner_codex import _build_app_server_argv, _resolve_codex_cli  # noqa: E402
 
 
@@ -59,6 +61,7 @@ def test_registry_and_capabilities() -> None:
     check(FuguProvider.CODEX_BINARY == "codex", "fugu reuses the regular codex binary")
     check(FuguProvider.CODEX_PROFILE is None, "fugu does not use Codex profiles for app-server")
     check(CodexProvider.CODEX_PROFILE is None, "generic codex has no profile override")
+    check(FuguProvider.uses_managed_api_key is True, "fugu requires a broker-managed API key")
     # Fugu IS codex under the hood, so the codex app-server capabilities
     # (fork, steering, subagents, team mode) carry over unchanged.
     check(FuguProvider.supports_fork is True, "fugu inherits codex fork")
@@ -92,6 +95,8 @@ def test_argv_builder_selects_fugu_sakana_overrides() -> None:
         "-c", "model_provider=\"sakana\"",
         "-c", "model=\"fugu-ultra\"",
         "-c", "features.image_generation=false",
+        "-c", "features.shell_snapshot=false",
+        "-c", "shell_environment_policy.exclude=[\"SAKANA_API_KEY\"]",
         "-c", "model_reasoning_effort=\"high\"",
         "app-server",
     ], "fugu argv selects Sakana via config overrides before app-server")
@@ -107,9 +112,56 @@ def test_fugu_disables_image_generation_tool() -> None:
         overrides = provider.codex_config_overrides(model=model)
         check("features.image_generation=false" in overrides,
               f"fugu overrides disable image_generation for model={model!r}")
+        check("features.shell_snapshot=false" in overrides,
+              f"fugu overrides disable shell snapshots for model={model!r}")
+        check("shell_environment_policy.exclude=[\"SAKANA_API_KEY\"]" in overrides,
+              f"fugu excludes its API key from spawned commands for model={model!r}")
     # Global flags still precede the subcommand for generic profile users.
     check(_build_app_server_argv("codex", "other") == ["codex", "-p", "other", "app-server"],
           "arbitrary profile is forwarded")
+
+
+def test_fugu_runner_uses_only_broker_authoritative_key() -> None:
+    record = {
+        "id": "fugu-test",
+        "kind": "fugu",
+        "mode": "api_key",
+        "api_key": "broker-key",
+        "_credential_authoritative": True,
+    }
+    provider = FuguProvider(record)
+
+    real_status = config_store.provider_credential_status
+    old_key = os.environ.get("SAKANA_API_KEY")
+    config_store.provider_credential_status = lambda provider_id: (
+        "available" if provider_id == "fugu-test" else "missing"
+    )
+    os.environ["SAKANA_API_KEY"] = "ambient-key"
+    try:
+        env = provider.build_env()
+        check(env.get("SAKANA_API_KEY") == "broker-key", "broker key replaces ambient key")
+        check("SAKANA_API_KEY" in _preserved_env_keys(env), "isolated runtime preserves Sakana key")
+    finally:
+        config_store.provider_credential_status = real_status
+        if old_key is None:
+            os.environ.pop("SAKANA_API_KEY", None)
+        else:
+            os.environ["SAKANA_API_KEY"] = old_key
+
+
+def test_fugu_runner_rejects_non_authoritative_key() -> None:
+    provider = FuguProvider({
+        "id": "fugu-test",
+        "kind": "fugu",
+        "mode": "api_key",
+        "api_key": "ambient-key",
+    })
+    try:
+        provider.build_env()
+    except ProviderCredentialError as exc:
+        check("not supervisor-authoritative" in str(exc), "runner rejects unmanaged Fugu key")
+        return
+    raise AssertionError("Fugu runner must reject unmanaged keys")
 
 
 def test_fetch_uses_codex_with_sakana_overrides() -> None:
@@ -175,6 +227,8 @@ def main() -> int:
         test_models_catalog,
         test_argv_builder_selects_fugu_sakana_overrides,
         test_fugu_disables_image_generation_tool,
+        test_fugu_runner_uses_only_broker_authoritative_key,
+        test_fugu_runner_rejects_non_authoritative_key,
         test_fetch_uses_codex_with_sakana_overrides,
         test_codex_binary_override_mechanism,
         test_fugu_not_auto_installable,

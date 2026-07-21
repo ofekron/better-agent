@@ -16,6 +16,7 @@ provider), then add a Fugu provider.
 
 from __future__ import annotations
 
+import os
 from typing import ClassVar, Optional
 
 from provider_codex import CodexProvider
@@ -84,6 +85,7 @@ class FuguProvider(CodexProvider):
     RUNNER_KIND: ClassVar[str] = "fugu"
     CODEX_PROFILE: ClassVar[Optional[str]] = None
     CODEX_MODEL_PROVIDER: ClassVar[str] = "sakana"
+    uses_managed_api_key: ClassVar[bool] = True
 
     # Sakana's Fugu catalog advertises exactly two
     # reasoning levels for both Fugu and Fugu Ultra — `high` and `xhigh`.
@@ -103,4 +105,14 @@ class FuguProvider(CodexProvider):
             # types and rejects `image_generation` with an invalid_request_error
             # on every turn. Disable the feature for Fugu runs.
             "features.image_generation=false",
+            "features.shell_snapshot=false",
+            f"shell_environment_policy.exclude={toml_literal(['SAKANA_API_KEY'])}",
         ]
+
+    def build_env(self) -> dict[str, str]:
+        env = super().build_env()
+        env.pop("SAKANA_API_KEY", None)
+        api_key = self.record.get("api_key")
+        if isinstance(api_key, str) and api_key:
+            env["SAKANA_API_KEY"] = api_key
+        return env
