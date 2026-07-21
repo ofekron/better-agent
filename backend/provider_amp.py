@@ -108,7 +108,7 @@ class AmpProvider(GeminiProvider):
         base_url = str(record.get("base_url") or "").strip()
         if base_url:
             env["AMP_URL"] = base_url
-        return env
+        return self.finalize_env(env)
 
     def start_run(
         self,

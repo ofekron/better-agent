@@ -416,7 +416,7 @@ class CodexProvider(Provider):
         cred = config_store.provider_credential_env(self.record)
         if cred:
             env[cred[0]] = cred[1]
-        return env
+        return self.finalize_env(env)
 
     # ------------------------------------------------------------------
     # start_run

@@ -2111,7 +2111,13 @@ def _validate_dependencies(value: Any, *, extension_id: str) -> list[str]:
     return normalized
 
 
-_ALLOWED_HOOK_KEYS = ("pre_turn", "post_turn", "session_event", "pre_send_advisory")
+_ALLOWED_HOOK_KEYS = (
+    "pre_turn",
+    "post_turn",
+    "session_event",
+    "pre_send_advisory",
+    "provider_transport",
+)
 
 
 def _validate_hooks(value: Any, *, has_backend: bool) -> dict[str, Any]:
@@ -2120,8 +2126,10 @@ def _validate_hooks(value: Any, *, has_backend: bool) -> dict[str, Any]:
     ``lifecycle.turn_start``); ``post_turn`` — core invokes fire-and-forget
     after ``lifecycle.turn_complete``; ``session_event`` — per session event;
     ``pre_send_advisory`` — core queries synchronously before a prompt is
-    sent and surfaces returned advisories to the user. Every hook is a
-    backend invocation and requires ``entrypoints.backend``."""
+    sent and surfaces returned advisories to the user; ``provider_transport``
+    — core synchronously resolves the versioned, validated local transport
+    descriptor before composing a provider subprocess environment. Every hook
+    is a backend invocation and requires ``entrypoints.backend``."""
     if value is None:
         return {}
     if not isinstance(value, dict):
@@ -5492,6 +5500,10 @@ def session_event_hooks() -> list[tuple[str, str]]:
 
 def pre_send_advisory_hooks() -> list[tuple[str, str]]:
     return _hook_endpoints("pre_send_advisory")
+
+
+def provider_transport_hooks() -> list[tuple[str, str]]:
+    return _hook_endpoints("provider_transport")
 
 
 def session_field_allowlist(extension_id: str) -> list[str]:

@@ -197,7 +197,7 @@ class OpenAIProvider(Provider):
             env["OPENAI_API_KEY"] = str(api_key)
         if base_url:
             env["OPENAI_BASE_URL"] = str(base_url)
-        return env
+        return self.finalize_env(env)
 
     # ------------------------------------------------------------------
     # start_run

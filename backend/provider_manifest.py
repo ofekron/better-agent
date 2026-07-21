@@ -56,6 +56,10 @@ class ProviderSpec:
     # (claude→CLAUDE_CONFIG_DIR, codex/fugu→CODEX_HOME). None when the kind
     # has no env-selectable credential dir (a single shared login).
     credential_config_env: str | None = None
+    # Explicit local gateway endpoint used when a CLI exposes a base-URL env.
+    # Kinds without one still receive the bounded forward-proxy environment.
+    transport_gateway_env: str | None = None
+    transport_default_base_url: str | None = None
     # Virtual kinds (claude-remote) are coordinator-side proxies: never a
     # persisted disk provider, never resolved via get_provider, no runner.
     virtual: bool = False
@@ -69,6 +73,8 @@ SPECS: dict[str, ProviderSpec] = {
         installable=True, hosts_ui_mcp=True,
         context_continuation=False, uses_claude_env=True,
         credential_config_env="CLAUDE_CONFIG_DIR",
+        transport_gateway_env="ANTHROPIC_BASE_URL",
+        transport_default_base_url="https://api.anthropic.com",
     ),
     "gemini": ProviderSpec(
         kind="gemini", module="provider_gemini", cls="GeminiProvider",
@@ -83,6 +89,8 @@ SPECS: dict[str, ProviderSpec] = {
         installable=True, hosts_ui_mcp=False,
         context_continuation=True, uses_claude_env=False,
         credential_config_env="CODEX_HOME",
+        transport_gateway_env="OPENAI_BASE_URL",
+        transport_default_base_url="https://api.openai.com/v1",
     ),
     "fugu": ProviderSpec(
         kind="fugu", module="provider_fugu", cls="FuguProvider",

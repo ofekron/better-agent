@@ -153,7 +153,7 @@ class OpencodeProvider(GeminiProvider):
         env.pop("ANTHROPIC_BASE_URL", None)
         env.pop("ANTHROPIC_AUTH_TOKEN", None)
         env.pop("CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING", None)
-        return env
+        return self.finalize_env(env)
 
     def start_run(
         self,

@@ -330,7 +330,7 @@ class ClaudeProvider(Provider):
         env[BACKGROUND_TASKS_DISABLE_ENV] = "1"
         env[BG_EXIT_HANDOFF_DISABLE_ENV] = "1"
         env.pop(AUTO_BACKGROUND_ENV, None)
-        return env
+        return self.finalize_env(env)
 
     # ------------------------------------------------------------------
     # start_run — spawn runner, schedule bootstrap task, return immediately

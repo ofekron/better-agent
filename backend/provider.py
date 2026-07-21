@@ -558,6 +558,16 @@ class Provider(ABC):
     @abstractmethod
     def build_env(self) -> dict[str, str]: ...
 
+    def finalize_env(self, env: dict[str, str]) -> dict[str, str]:
+        from provider_transport import apply_provider_transport
+
+        return apply_provider_transport(
+            env,
+            provider_id=self.id,
+            provider_kind=str(self.record.get("kind") or self.KIND),
+            provider_mode=str(self.record.get("mode") or ""),
+        )
+
     # ------------------------------------------------------------------
     # Long-lived turn — spawn worker process, stream events onto queue.
     # ------------------------------------------------------------------
