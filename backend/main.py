@@ -16148,11 +16148,9 @@ async def internal_marketplace(
             )
         elif action == "install":
             extension_id = str(body.get("extension_id") or "").strip()
-            metadata_url = extension_store.marketplace_metadata_url(extension_id)
             result = {
-                "extension": await asyncio.to_thread(
-                    extension_store.install_from_marketplace_metadata,
-                    metadata_url=metadata_url,
+                "extension": await extension_api.marketplace_service.install_direct(
+                    extension_id,
                     entitlement_token=str(body.get("entitlement_token") or ""),
                 )
             }

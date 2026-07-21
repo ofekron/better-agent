@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 import extension_store
 import personal_harness_extension
 import extension_backend_loader
+import marketplace_service
 import config_store
 import perf
 from bounded_async_executor import AdmissionOverloaded, BoundedAsyncExecutor
@@ -170,6 +171,13 @@ class InstallExtensionRequest(BaseModel):
     artifact_signature: str = ""
     marketplace_metadata_url: str = ""
     marketplace_metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class MarketplaceInstallRequest(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    preview_token: str = Field(min_length=32, max_length=32, pattern=r"^[0-9a-f]{32}$", strict=True)
+    entitlement_token: str = Field(default="", max_length=8192, strict=True)
 
 
 class PersonalHarnessInstructionFile(BaseModel):
@@ -909,6 +917,58 @@ async def install_extension(req: InstallExtensionRequest):
         raise _extension_error(exc) from exc
     await _broadcast_extensions_changed()
     return {"extension": record}
+
+
+@router.post("/marketplace/{extension_id}/preview")
+async def preview_marketplace_extension(extension_id: str):
+    try:
+        prepared = await marketplace_service.prepare_install(
+            extension_id,
+        )
+    except extension_store.ExtensionError as exc:
+        raise _extension_error(exc) from exc
+    return prepared
+
+
+@router.post("/marketplace/{extension_id}/install")
+async def install_marketplace_extension(extension_id: str, req: MarketplaceInstallRequest):
+    try:
+        record = await marketplace_service.install_preview(
+            extension_id,
+            req.preview_token,
+            entitlement_token=req.entitlement_token,
+        )
+    except extension_store.ExtensionError as exc:
+        raise _extension_error(exc) from exc
+    await _broadcast_extensions_changed()
+    return {"extension": record}
+
+
+@router.patch("/marketplace/{extension_id}/enabled")
+async def set_marketplace_extension_enabled(extension_id: str, req: SetEnabledRequest):
+    try:
+        record = await asyncio.to_thread(
+            extension_store.set_enabled,
+            extension_id,
+            req.enabled,
+            required_source_type="marketplace",
+        )
+    except extension_store.ExtensionError as exc:
+        raise _extension_error(exc) from exc
+    await _broadcast_extensions_changed()
+    return {"extension": record}
+
+
+@router.delete("/marketplace/{extension_id}")
+async def uninstall_marketplace_extension(extension_id: str):
+    try:
+        await marketplace_service.uninstall(
+            extension_id,
+        )
+    except extension_store.ExtensionError as exc:
+        raise _extension_error(exc) from exc
+    await _broadcast_extensions_changed()
+    return {"ok": True}
 
 
 @router.post("/personal-harness")

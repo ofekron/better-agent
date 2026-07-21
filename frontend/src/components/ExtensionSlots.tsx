@@ -8,6 +8,7 @@ import { eventBus } from "src/lib/eventBus";
 import { trackPromise } from "src/progress/store";
 import { loadExtensionModule } from "./extensionModuleLoader";
 import { ExtensionPaymentModal, type ExtensionPaymentResult } from "./ExtensionPaymentModal";
+import { MarketplaceInstallModal, type MarketplaceInstallManifest } from "./MarketplaceInstallModal";
 
 export interface ExtensionFrontendModule {
   extension_id: string;
@@ -80,16 +81,12 @@ type MountedKind = "component" | "mount";
 
 const EMPTY_EXTENSION_CONTEXT: Record<string, unknown> = Object.freeze({});
 const EXTENSION_ID_SEGMENT = "[A-Za-z0-9][A-Za-z0-9._-]{0,127}";
+const EXTENSION_ID_RE = new RegExp(`^${EXTENSION_ID_SEGMENT}$`);
 const MARKETPLACE_REQUEST_RULES = [
   { method: "GET", path: /^\/api\/extensions$/ },
-  { method: "POST", path: /^\/api\/extensions\/install$/ },
-  { method: "PATCH", path: new RegExp(`^/api/extensions/${EXTENSION_ID_SEGMENT}/enabled$`) },
-  { method: "DELETE", path: new RegExp(`^/api/extensions/${EXTENSION_ID_SEGMENT}$`) },
   { method: "GET", path: /^\/api\/extensions\/ofek-dev\.marketplace\/backend\/auth\/(providers|status)$/ },
   { method: "POST", path: /^\/api\/extensions\/ofek-dev\.marketplace\/backend\/auth\/logout$/ },
-  { method: "GET", path: /^\/api\/extensions\/ofek-dev\.marketplace\/backend\/catalog$/ },
-  { method: "GET", path: new RegExp(`^/api/extensions/ofek-dev\\.marketplace/backend/metadata/${EXTENSION_ID_SEGMENT}$`) },
-  { method: "POST", path: new RegExp(`^/api/extensions/ofek-dev\\.marketplace/backend/extensions/${EXTENSION_ID_SEGMENT}/uninstall$`) },
+  { method: "GET", path: /^\/api\/extensions\/ofek-dev\.marketplace\/backend\/catalog(?:\?q=[A-Za-z0-9%._~!'()*-]*)?$/ },
 ] as const;
 
 function isAllowedMarketplaceRequest(path: string, method: string): boolean {
@@ -306,6 +303,15 @@ export function ExtensionModuleSlot({
   const authStateRef = useRef("");
   const bridgeNonceRef = useRef(crypto.randomUUID());
   const [paymentRequest, setPaymentRequest] = useState<{ requestId: string; productId: string } | null>(null);
+  const [installRequest, setInstallRequest] = useState<{
+    requestId: string;
+    extensionId: string;
+    previewToken: string;
+    entitlementToken: string;
+    manifest: MarketplaceInstallManifest;
+    busy: boolean;
+    error: string;
+  } | null>(null);
 
   const postToIframe = useCallback((payload: Record<string, unknown>) => {
     iframeRef.current?.contentWindow?.postMessage({ source: "ba-core", nonce: bridgeNonceRef.current, ...payload }, "*");
@@ -340,7 +346,7 @@ export function ExtensionModuleSlot({
 
     async function handleMarketplaceRequest(requestId: string, path: unknown, requestedMethod: unknown, body: unknown) {
       const method = String(requestedMethod || "GET").toUpperCase();
-      if (typeof path !== "string" || !isAllowedMarketplaceRequest(path, method)) {
+      if (typeof path !== "string" || !isAllowedMarketplaceRequest(path, method) || body !== undefined) {
         postToIframe({ action: "marketplace-response", requestId, ok: false, error: "marketplace request denied" });
         return;
       }
@@ -372,9 +378,75 @@ export function ExtensionModuleSlot({
       }
     }
 
+    async function handleMarketplaceInstall(requestId: string, rawExtensionId: unknown, rawEntitlementToken: unknown) {
+      const extensionId = typeof rawExtensionId === "string" ? rawExtensionId : "";
+      const entitlementToken = typeof rawEntitlementToken === "string" ? rawEntitlementToken : "";
+      if (!EXTENSION_ID_RE.test(extensionId) || entitlementToken.length > 8192) {
+        postToIframe({ action: "marketplace-install-result", requestId, status: "failed", error: "marketplace install denied" });
+        return;
+      }
+      try {
+        const response = await fetch(`${API}/api/extensions/marketplace/${encodeURIComponent(extensionId)}/preview`, {
+          method: "POST",
+          credentials: "include",
+        });
+        if (!response.ok) throw new Error(await response.text());
+        const payload = (await response.json()) as { manifest?: MarketplaceInstallManifest; preview_token?: string };
+        if (!payload.manifest || payload.manifest.id !== extensionId || !/^[0-9a-f]{32}$/.test(payload.preview_token ?? "")) {
+          throw new Error("marketplace preview is invalid");
+        }
+        setInstallRequest({ requestId, extensionId, previewToken: payload.preview_token!, entitlementToken, manifest: payload.manifest, busy: false, error: "" });
+      } catch (e) {
+        postToIframe({
+          action: "marketplace-install-result",
+          requestId,
+          status: "failed",
+          error: e instanceof Error ? e.message : String(e),
+        });
+      }
+    }
+
+    async function handleMarketplaceSetEnabled(requestId: string, rawExtensionId: unknown, enabled: unknown) {
+      const extensionId = typeof rawExtensionId === "string" ? rawExtensionId : "";
+      if (!EXTENSION_ID_RE.test(extensionId) || typeof enabled !== "boolean") {
+        postToIframe({ action: "marketplace-action-result", requestId, ok: false, error: "marketplace action denied" });
+        return;
+      }
+      try {
+        const response = await fetch(`${API}/api/extensions/marketplace/${encodeURIComponent(extensionId)}/enabled`, {
+          method: "PATCH",
+          credentials: "include",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ enabled }),
+        });
+        if (!response.ok) throw new Error(await response.text());
+        postToIframe({ action: "marketplace-action-result", requestId, ok: true, payload: await response.json() });
+      } catch (e) {
+        postToIframe({ action: "marketplace-action-result", requestId, ok: false, error: e instanceof Error ? e.message : String(e) });
+      }
+    }
+
+    async function handleMarketplaceUninstall(requestId: string, rawExtensionId: unknown) {
+      const extensionId = typeof rawExtensionId === "string" ? rawExtensionId : "";
+      if (!EXTENSION_ID_RE.test(extensionId)) {
+        postToIframe({ action: "marketplace-action-result", requestId, ok: false, error: "marketplace action denied" });
+        return;
+      }
+      try {
+        const response = await fetch(`${API}/api/extensions/marketplace/${encodeURIComponent(extensionId)}`, {
+          method: "DELETE",
+          credentials: "include",
+        });
+        if (!response.ok) throw new Error(await response.text());
+        postToIframe({ action: "marketplace-action-result", requestId, ok: true, payload: await response.json() });
+      } catch (e) {
+        postToIframe({ action: "marketplace-action-result", requestId, ok: false, error: e instanceof Error ? e.message : String(e) });
+      }
+    }
+
     function onMessage(event: MessageEvent) {
       if (event.source !== iframeRef.current?.contentWindow) return;
-      const data = event.data as { source?: unknown; nonce?: unknown; action?: unknown; requestId?: unknown; provider?: unknown; productId?: unknown; state?: unknown; path?: unknown; method?: unknown; body?: unknown };
+      const data = event.data as { source?: unknown; nonce?: unknown; action?: unknown; requestId?: unknown; provider?: unknown; productId?: unknown; state?: unknown; path?: unknown; method?: unknown; body?: unknown; extensionId?: unknown; entitlementToken?: unknown; enabled?: unknown };
       if (!data || data.source !== "ba-extension" || data.nonce !== bridgeNonceRef.current || typeof data.requestId !== "string") return;
       if (data.action === "marketplace-auth-start" && module.marketplace_auth) {
         void handleAuthStart(data.requestId, data.provider);
@@ -382,6 +454,18 @@ export function ExtensionModuleSlot({
       }
       if (data.action === "marketplace-request" && module.marketplace_auth) {
         void handleMarketplaceRequest(data.requestId, data.path, data.method, data.body);
+        return;
+      }
+      if (data.action === "marketplace-install" && module.marketplace_auth) {
+        void handleMarketplaceInstall(data.requestId, data.extensionId, data.entitlementToken);
+        return;
+      }
+      if (data.action === "marketplace-set-enabled" && module.marketplace_auth) {
+        void handleMarketplaceSetEnabled(data.requestId, data.extensionId, data.enabled);
+        return;
+      }
+      if (data.action === "marketplace-uninstall" && module.marketplace_auth) {
+        void handleMarketplaceUninstall(data.requestId, data.extensionId);
         return;
       }
       if (data.action === "marketplace-purchase" && module.payments) {
@@ -421,6 +505,40 @@ export function ExtensionModuleSlot({
       authPopupRef.current = null;
     };
   }, [module.kind, module.payments, module.marketplace_auth, module.extension_id, postToIframe]);
+
+  const cancelMarketplaceInstall = useCallback(() => {
+    setInstallRequest((current) => {
+      if (current && !current.busy) {
+        postToIframe({ action: "marketplace-install-result", requestId: current.requestId, status: "cancelled" });
+        return null;
+      }
+      return current;
+    });
+  }, [postToIframe]);
+
+  const confirmMarketplaceInstall = useCallback(async () => {
+    const current = installRequest;
+    if (!current || current.busy) return;
+    setInstallRequest({ ...current, busy: true, error: "" });
+    try {
+      const response = await fetch(`${API}/api/extensions/marketplace/${encodeURIComponent(current.extensionId)}/install`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ preview_token: current.previewToken, entitlement_token: current.entitlementToken }),
+      });
+      if (!response.ok) throw new Error(await response.text());
+      postToIframe({
+        action: "marketplace-install-result",
+        requestId: current.requestId,
+        status: "installed",
+        payload: await response.json(),
+      });
+      setInstallRequest(null);
+    } catch (e) {
+      setInstallRequest({ ...current, busy: false, error: e instanceof Error ? e.message : String(e) });
+    }
+  }, [installRequest, postToIframe]);
 
   const onPaymentDone = useCallback(
     (result: ExtensionPaymentResult) => {
@@ -553,6 +671,16 @@ export function ExtensionModuleSlot({
             extensionId={module.extension_id}
             productId={paymentRequest.productId}
             onDone={onPaymentDone}
+          />
+        )}
+        {installRequest && (
+          <MarketplaceInstallModal
+            open
+            manifest={installRequest.manifest}
+            busy={installRequest.busy}
+            error={installRequest.error}
+            onConfirm={() => void confirmMarketplaceInstall()}
+            onCancel={cancelMarketplaceInstall}
           />
         )}
       </>

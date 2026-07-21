@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import os
 import sys
@@ -49,14 +50,10 @@ def test_marketplace_extension_is_seeded_and_exposed_as_runtime_mcp() -> None:
     record = extension_store.get_extension(extension_store.MARKETPLACE_EXTENSION_ID)
     check(record is not None, "marketplace extension record is installed")
     check(record["enabled"] is True, "marketplace extension is enabled")
-    check(record["source"]["type"] == "better_agent_local", "marketplace extension seeds from local package")
+    check(record["source"]["type"] == "better_agent_bundled", "marketplace extension seeds from bundled package")
     check(
-        record["source"]["repo_url"] == str(ROOT.parent),
-        "marketplace local source points at public repo root",
-    )
-    check(
-        Path(record["source"]["repo_url"], record["source"]["extension_path"], "mcp", "server.py").is_file(),
-        "marketplace source root contains declared MCP server",
+        Path(record["source"]["install_path"], "mcp", "server.py").is_file(),
+        "marketplace installed package contains declared MCP server",
     )
 
     configs = builtin_mcp_config.with_builtin_mcp_servers(
@@ -152,7 +149,11 @@ def test_internal_marketplace_endpoint_requires_marketplace_extension_and_valid_
     import main
     import extension_token_registry
 
-    client = TestClient(main.app)
+    client = TestClient(
+        main.app,
+        client=("127.0.0.1", 50000),
+        base_url="http://localhost:8000",
+    )
     # Identity is token-derived: act as an extension by sending ITS minted token.
     other_token = extension_token_registry.mint("ofek-dev.coordination")
     marketplace_token = extension_token_registry.mint(extension_store.MARKETPLACE_EXTENSION_ID)
@@ -186,6 +187,83 @@ def test_internal_marketplace_endpoint_requires_marketplace_extension_and_valid_
     )
     check(response.status_code == 400, "marketplace endpoint rejects unknown actions")
 
+    from pydantic import ValidationError
+    import extension_api
+
+    try:
+        extension_api.MarketplaceInstallRequest.model_validate(
+            {"repo_url": "https://attacker.example/repo.git"}
+        )
+    except ValidationError:
+        pass
+    else:
+        raise AssertionError("semantic marketplace install accepts generic install coordinates")
+    check(True, "semantic marketplace install rejects generic install coordinates")
+
+    try:
+        extension_store.set_enabled(
+            extension_store.MARKETPLACE_EXTENSION_ID,
+            False,
+            required_source_type="marketplace",
+        )
+    except extension_store.ExtensionError:
+        pass
+    else:
+        raise AssertionError("marketplace management accepts non-marketplace sources")
+    check(True, "marketplace management rejects non-marketplace sources")
+
+
+def test_marketplace_service_uses_authenticated_backend_and_validates_uninstall_source() -> None:
+    from fastapi.responses import JSONResponse
+    import marketplace_service
+
+    calls: list[tuple[str, str, str]] = []
+    original_invoke = marketplace_service.extension_backend_loader.invoke_extension_backend
+    original_prepare = extension_store.prepare_marketplace_install
+
+    async def fake_invoke(extension_id: str, path: str, *, method: str = "POST", **_kwargs):
+        calls.append((extension_id, path, method))
+        return JSONResponse(
+            {
+                "extension_id": "ofek.adv",
+                "version": "1.0.0",
+                "artifact_url": "https://marketplace.test/ofek.adv.tar.gz",
+                "artifact_sha256": "0" * 64,
+                "signature": "signed",
+                "signature_alg": "ed25519",
+            }
+        )
+
+    def fake_prepare(extension_id: str, metadata: dict) -> dict:
+        check(extension_id == metadata["extension_id"], "authenticated metadata keeps extension identity")
+        return {"manifest": {"id": extension_id}, "preview_token": "a" * 32}
+
+    marketplace_service.extension_backend_loader.invoke_extension_backend = fake_invoke
+    extension_store.prepare_marketplace_install = fake_prepare
+    try:
+        prepared = asyncio.run(marketplace_service.prepare_install("ofek.adv"))
+    finally:
+        marketplace_service.extension_backend_loader.invoke_extension_backend = original_invoke
+        extension_store.prepare_marketplace_install = original_prepare
+    check(prepared["preview_token"] == "a" * 32, "authenticated metadata produces preview token")
+    check(
+        calls == [(extension_store.MARKETPLACE_EXTENSION_ID, "metadata/ofek.adv", "GET")],
+        "marketplace preview retrieves metadata through authenticated extension backend",
+    )
+
+    calls.clear()
+    marketplace_service.extension_backend_loader.invoke_extension_backend = fake_invoke
+    try:
+        try:
+            asyncio.run(marketplace_service.uninstall(extension_store.MARKETPLACE_EXTENSION_ID))
+        except extension_store.ExtensionError:
+            pass
+        else:
+            raise AssertionError("invalid-source marketplace uninstall was accepted")
+    finally:
+        marketplace_service.extension_backend_loader.invoke_extension_backend = original_invoke
+    check(calls == [], "invalid-source uninstall never calls marketplace backend")
+
 
 def main() -> int:
     try:
@@ -193,6 +271,7 @@ def main() -> int:
         test_marketplace_mcp_wrapper_calls_internal_marketplace_endpoint()
         test_marketplace_catalog_search_uses_static_catalog_and_filters_locally()
         test_internal_marketplace_endpoint_requires_marketplace_extension_and_valid_actions()
+        test_marketplace_service_uses_authenticated_backend_and_validates_uninstall_source()
     finally:
         if created_dist:
             index = dist_dir / "index.html"

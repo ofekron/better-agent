@@ -46,6 +46,7 @@ import { ExtensionQuickButtons, type HookActionContext } from "./ExtensionUiHook
 import { isSaveShortcutEvent } from "../hooks/useSaveShortcut";
 import { ServerSetting } from "./ServerSetting";
 import { BasCompanionAppsSetting } from "./BasCompanionAppsSetting";
+import { extensionPermissionTranslationKey } from "./extensionPermissions";
 
 import { API } from "../api";
 import { providerQuotaStatus } from "../utils/quotaStatus";
@@ -993,27 +994,6 @@ type PersonalHarnessFile = {
   level: "global";
 };
 
-const KNOWN_EXTENSION_PERMISSIONS = [
-  "session_state",
-  "spawn_runs",
-  "internal_loopback",
-  "filesystem",
-  "network",
-  "secrets",
-  "provider_config",
-  "backend_routes",
-  "storage",
-  "marketplace_auth",
-  "mutates_session_fields",
-] as const;
-
-const KNOWN_EXTENSION_PERMISSION_SET = new Set<string>(KNOWN_EXTENSION_PERMISSIONS);
-
-function permissionTranslationKey(permission: string, field: "label" | "risk"): string {
-  const key = KNOWN_EXTENSION_PERMISSION_SET.has(permission) ? permission : "unknown";
-  return `settings.extensionsPermission.${key}.${field}`;
-}
-
 function buildPermissionViews(cfg: ExtensionPermissionsConfig): ExtensionPermissionView[] {
   const declared = cfg.permissions?.declared ?? {};
   const optional = new Set<string>(
@@ -1107,10 +1087,10 @@ function ExtensionPermissionRow({
       <div className="extension-ui-settings-permission-main">
         <div className="extension-ui-settings-permission-copy">
           <div className="extension-ui-settings-permission-title">
-            {t(permissionTranslationKey(permission.name, "label"))}
+            {t(extensionPermissionTranslationKey(permission.name, "label"))}
           </div>
           <div className="extension-ui-settings-permission-risk">
-            {t(permissionTranslationKey(permission.name, "risk"))}
+            {t(extensionPermissionTranslationKey(permission.name, "risk"))}
           </div>
           {permission.scope && permission.scope.length > 0 && (
             <div className="extension-ui-settings-permission-scope">

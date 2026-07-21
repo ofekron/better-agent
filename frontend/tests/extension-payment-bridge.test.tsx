@@ -1,4 +1,4 @@
-import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ExtensionModuleSlot, type ExtensionFrontendModule } from "../src/components/ExtensionSlots";
 
@@ -209,6 +209,134 @@ describe("extension payment bridge", () => {
       "*",
     ));
     expect(fetch).not.toHaveBeenCalled();
+
+    dispatchBridgeMessage({
+      source: "ba-extension",
+      nonce: "00000000-0000-4000-8000-000000000001",
+      action: "marketplace-request",
+      requestId: "generic-install-denied",
+      path: "/api/extensions/install",
+      method: "POST",
+      body: { repo_url: "https://attacker.example/repo.git" },
+    }, iframe.contentWindow);
+
+    await waitFor(() => expect(replySpy).toHaveBeenCalledWith(
+      expect.objectContaining({ requestId: "generic-install-denied", ok: false, error: "marketplace request denied" }),
+      "*",
+    ));
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("allows a single encoded catalog query and rejects extra query parameters", async () => {
+    render(<ExtensionModuleSlot module={makeModule()} />);
+    const iframe = renderedIframe();
+    const replySpy = vi.spyOn(iframe.contentWindow as Window, "postMessage");
+    vi.mocked(fetch).mockClear();
+
+    dispatchBridgeMessage({
+      source: "ba-extension",
+      nonce: "00000000-0000-4000-8000-000000000001",
+      action: "marketplace-request",
+      requestId: "query-allowed",
+      path: "/api/extensions/ofek-dev.marketplace/backend/catalog?q=Test%20Ape",
+      method: "GET",
+    }, iframe.contentWindow);
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
+
+    vi.mocked(fetch).mockClear();
+    dispatchBridgeMessage({
+      source: "ba-extension",
+      nonce: "00000000-0000-4000-8000-000000000001",
+      action: "marketplace-request",
+      requestId: "query-denied",
+      path: "/api/extensions/ofek-dev.marketplace/backend/catalog?q=adv&admin=true",
+      method: "GET",
+    }, iframe.contentWindow);
+    await waitFor(() => expect(replySpy).toHaveBeenCalledWith(
+      expect.objectContaining({ requestId: "query-denied", ok: false }),
+      "*",
+    ));
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("previews signed permissions before semantic install and never accepts install coordinates from the iframe", async () => {
+    vi.mocked(fetch).mockImplementation(async (url) => {
+      const path = String(url);
+      if (path.endsWith("/api/extensions/marketplace/ofek-dev.adv/preview")) {
+        return new Response(JSON.stringify({
+          preview_token: "0123456789abcdef0123456789abcdef",
+          manifest: {
+            id: "ofek-dev.adv",
+            name: "ADV",
+            version: "1.0.0",
+            permissions: { network: true },
+          },
+        }), { status: 200 });
+      }
+      if (path.endsWith("/api/extensions/marketplace/ofek-dev.adv/install")) {
+        return new Response(JSON.stringify({ extension: { manifest: { id: "ofek-dev.adv" } } }), { status: 200 });
+      }
+      return new Response("{}", { status: 200 });
+    });
+    render(<ExtensionModuleSlot module={makeModule()} />);
+    const iframe = renderedIframe();
+    const replySpy = vi.spyOn(iframe.contentWindow as Window, "postMessage");
+
+    dispatchBridgeMessage({
+      source: "ba-extension",
+      nonce: "00000000-0000-4000-8000-000000000001",
+      action: "marketplace-install",
+      requestId: "install-1",
+      extensionId: "ofek-dev.adv",
+      entitlementToken: "entitlement",
+      repo_url: "https://attacker.example/ignored.git",
+    }, iframe.contentWindow);
+
+    await waitFor(() => expect(screen.getByText("settings.extensionsPermissions")).toBeTruthy());
+    expect(screen.getByText("settings.extensionsPermission.network.label")).toBeTruthy();
+    fireEvent.click(screen.getByText("app.confirm"));
+
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith(
+      expect.stringContaining("/api/extensions/marketplace/ofek-dev.adv/install"),
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          preview_token: "0123456789abcdef0123456789abcdef",
+          entitlement_token: "entitlement",
+        }),
+      }),
+    ));
+    await waitFor(() => expect(replySpy).toHaveBeenCalledWith(
+      expect.objectContaining({ requestId: "install-1", status: "installed" }),
+      "*",
+    ));
+    expect(JSON.stringify(vi.mocked(fetch).mock.calls)).not.toContain("attacker.example");
+  });
+
+  it("coordinates marketplace uninstall through one source-validated core request", async () => {
+    render(<ExtensionModuleSlot module={makeModule()} />);
+    const iframe = renderedIframe();
+    const replySpy = vi.spyOn(iframe.contentWindow as Window, "postMessage");
+    vi.mocked(fetch).mockClear();
+
+    dispatchBridgeMessage({
+      source: "ba-extension",
+      nonce: "00000000-0000-4000-8000-000000000001",
+      action: "marketplace-uninstall",
+      requestId: "uninstall-1",
+      extensionId: "ofek-dev.adv",
+    }, iframe.contentWindow);
+
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(fetch)).toHaveBeenCalledWith(
+      expect.stringContaining("/api/extensions/marketplace/ofek-dev.adv"),
+      expect.objectContaining({ method: "DELETE" }),
+    );
+    expect(JSON.stringify(vi.mocked(fetch).mock.calls)).not.toContain("/backend/extensions/");
+    await waitFor(() => expect(replySpy).toHaveBeenCalledWith(
+      expect.objectContaining({ requestId: "uninstall-1", ok: true }),
+      "*",
+    ));
   });
 
   it("reports popup cancellation when focus returns after the popup closes", async () => {

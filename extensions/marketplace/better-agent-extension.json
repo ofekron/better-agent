@@ -35,6 +35,7 @@
   },
   "permissions": {
     "backend_routes": true,
+    "internal_loopback": true,
     "marketplace_auth": true,
     "capabilities": [
       "marketplace.search",

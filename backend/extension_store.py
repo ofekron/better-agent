@@ -172,6 +172,10 @@ _DEFAULT_MARKETPLACE_PUBLIC_KEY = "a61a192e23f0f0898fa096ae64e0d22d853eb0701e2c9
 _MARKETPLACE_USER_AGENT = "BetterAgentMarketplace/1.0"
 _MARKETPLACE_QUERY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._+:/#-]{0,119}$")
 _MAX_ARTIFACT_BYTES = 50 * 1024 * 1024
+_MARKETPLACE_PREVIEW_TTL_SECONDS = 5 * 60.0
+_MAX_MARKETPLACE_PREVIEWS = 256
+_MARKETPLACE_PREVIEWS: dict[str, tuple[float, str, dict[str, Any]]] = {}
+_MARKETPLACE_PREVIEWS_LOCK = threading.Lock()
 _required_artifact_update_checked: set[str] = set()
 
 _BUILTIN_INTERNAL_LLM_TASKS: dict[str, tuple[str, ...]] = {
@@ -4263,18 +4267,15 @@ def install_from_repo(
         )
 
 
-def install_from_artifact(
+@contextmanager
+def _verified_artifact_package(
     *,
     artifact_url: str,
     artifact_sha256: str,
     artifact_signature: str,
-    entitlement_token: str = "",
     expected_extension_id: str = "",
     expected_version: str = "",
-    source_type: str = "artifact",
-    metadata_url: str = "",
-    persist: bool = True,
-) -> dict[str, Any]:
+) -> Any:
     artifact_url = _validate_artifact_url(artifact_url)
     artifact_sha256 = str(artifact_sha256 or "").strip().lower()
     if not re.fullmatch(r"[0-9a-f]{64}", artifact_sha256):
@@ -4297,23 +4298,45 @@ def install_from_artifact(
             raise ExtensionError("marketplace artifact extension id does not match metadata")
         if expected_version and manifest["version"] != expected_version:
             raise ExtensionError("marketplace artifact version does not match metadata")
-        existing = _load()["extensions"].get(manifest["id"]) if persist else None
         _verify_artifact_signature(
             extension_id=manifest["id"],
             version=manifest["version"],
             artifact_sha256=artifact_sha256,
             signature=artifact_signature,
         )
+        yield package_dir, manifest, artifact_url, artifact_sha256
+
+
+def install_from_artifact(
+    *,
+    artifact_url: str,
+    artifact_sha256: str,
+    artifact_signature: str,
+    entitlement_token: str = "",
+    expected_extension_id: str = "",
+    expected_version: str = "",
+    source_type: str = "artifact",
+    metadata_url: str = "",
+    persist: bool = True,
+) -> dict[str, Any]:
+    with _verified_artifact_package(
+        artifact_url=artifact_url,
+        artifact_sha256=artifact_sha256,
+        artifact_signature=artifact_signature,
+        expected_extension_id=expected_extension_id,
+        expected_version=expected_version,
+    ) as (package_dir, manifest, clean_artifact_url, clean_artifact_sha256):
+        existing = _load()["extensions"].get(manifest["id"]) if persist else None
         return _install_from_package_dir(
             package_dir=package_dir,
             source={
                 "type": source_type,
-                "repo_url": artifact_url,
+                "repo_url": clean_artifact_url,
                 "extension_path": "",
                 "ref": "",
-                "commit_sha": artifact_sha256,
-                "artifact_sha256": artifact_sha256,
-                "artifact_url": artifact_url,
+                "commit_sha": clean_artifact_sha256,
+                "artifact_sha256": clean_artifact_sha256,
+                "artifact_url": clean_artifact_url,
                 "metadata_url": metadata_url,
             },
             entitlement_token=entitlement_token,
@@ -4349,6 +4372,69 @@ def install_from_marketplace_metadata(
     )
 
 
+def preview_marketplace_metadata(*, metadata: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(metadata, dict):
+        raise ExtensionError("marketplace metadata is required")
+    with _verified_artifact_package(
+        artifact_url=str(metadata.get("artifact_url") or ""),
+        artifact_sha256=str(metadata.get("artifact_sha256") or ""),
+        artifact_signature=str(metadata.get("signature") or metadata.get("artifact_signature") or ""),
+        expected_extension_id=str(metadata.get("extension_id") or metadata.get("id") or ""),
+        expected_version=str(metadata.get("version") or ""),
+    ) as (_, manifest, _, _):
+        return copy.deepcopy(manifest)
+
+
+def prepare_marketplace_install(extension_id: str, metadata: dict[str, Any]) -> dict[str, Any]:
+    clean_id = str(extension_id or "").strip()
+    if not _ID_RE.fullmatch(clean_id):
+        raise ExtensionError("extension_id is invalid")
+    metadata_id = str(metadata.get("extension_id") or metadata.get("id") or "").strip()
+    if metadata_id != clean_id:
+        raise ExtensionError("marketplace metadata extension id does not match request")
+    manifest = preview_marketplace_metadata(metadata=metadata)
+    token = uuid.uuid4().hex
+    now = time.monotonic()
+    with _MARKETPLACE_PREVIEWS_LOCK:
+        expired = [key for key, (expires, _, _) in _MARKETPLACE_PREVIEWS.items() if expires <= now]
+        for key in expired:
+            _MARKETPLACE_PREVIEWS.pop(key, None)
+        if len(_MARKETPLACE_PREVIEWS) >= _MAX_MARKETPLACE_PREVIEWS:
+            oldest = min(_MARKETPLACE_PREVIEWS, key=lambda key: _MARKETPLACE_PREVIEWS[key][0])
+            _MARKETPLACE_PREVIEWS.pop(oldest, None)
+        _MARKETPLACE_PREVIEWS[token] = (
+            now + _MARKETPLACE_PREVIEW_TTL_SECONDS,
+            clean_id,
+            copy.deepcopy(metadata),
+        )
+    return {"manifest": manifest, "preview_token": token}
+
+
+def install_marketplace_preview(
+    extension_id: str,
+    preview_token: str,
+    *,
+    entitlement_token: str = "",
+) -> dict[str, Any]:
+    clean_id = str(extension_id or "").strip()
+    clean_token = str(preview_token or "").strip()
+    with _MARKETPLACE_PREVIEWS_LOCK:
+        preview = _MARKETPLACE_PREVIEWS.pop(clean_token, None)
+    if preview is None:
+        raise ExtensionError("marketplace preview is invalid or expired")
+    expires_at, preview_extension_id, metadata = preview
+    if expires_at <= time.monotonic() or preview_extension_id != clean_id:
+        raise ExtensionError("marketplace preview is invalid or expired")
+    return install_from_artifact(
+        artifact_url=str(metadata.get("artifact_url") or ""),
+        artifact_sha256=str(metadata.get("artifact_sha256") or ""),
+        artifact_signature=str(metadata.get("signature") or metadata.get("artifact_signature") or ""),
+        entitlement_token=entitlement_token,
+        expected_extension_id=clean_id,
+        expected_version=str(metadata.get("version") or ""),
+        source_type="marketplace",
+        metadata_url=marketplace_metadata_url(clean_id),
+    )
 def _git_remote_commit(repo_url: str, ref: str) -> str:
     target = str(ref or "").strip() or "HEAD"
     output = _git(["ls-remote", repo_url, target])
@@ -4562,11 +4648,31 @@ def apply_extension_update(extension_id: str) -> dict[str, Any]:
     }
 
 
-def set_enabled(extension_id: str, enabled: bool) -> dict[str, Any]:
-    data = _load()
+def _require_extension_source(
+    data: dict[str, Any],
+    extension_id: str,
+    required_source_type: str = "",
+) -> dict[str, Any]:
     record = data["extensions"].get(extension_id)
     if not record:
         raise ExtensionError("Extension not installed")
+    if required_source_type and str((record.get("source") or {}).get("type") or "") != required_source_type:
+        raise ExtensionError(f"Extension is not managed by {required_source_type}")
+    return record
+
+
+def require_extension_source(extension_id: str, required_source_type: str) -> dict[str, Any]:
+    return copy.deepcopy(_require_extension_source(_load(), extension_id, required_source_type))
+
+
+def set_enabled(
+    extension_id: str,
+    enabled: bool,
+    *,
+    required_source_type: str = "",
+) -> dict[str, Any]:
+    data = _load()
+    record = _require_extension_source(data, extension_id, required_source_type)
     if extension_id in REQUIRED_EXTENSION_IDS and not enabled:
         raise ExtensionError("Required extension cannot be disabled")
     manifest = record.get("manifest") or {}
@@ -4955,13 +5061,12 @@ def _remove_runtime_skill_path(path: Path) -> None:
         shutil.rmtree(path)
 
 
-def uninstall(extension_id: str) -> None:
+def uninstall(extension_id: str, *, required_source_type: str = "") -> None:
     if extension_id in REQUIRED_EXTENSION_IDS:
         raise ExtensionError("Required extension cannot be uninstalled")
     data = _load()
-    record = data["extensions"].pop(extension_id, None)
-    if not record:
-        raise ExtensionError("Extension not installed")
+    record = _require_extension_source(data, extension_id, required_source_type)
+    data["extensions"].pop(extension_id)
     if extension_id == extension_id_for_role('assistant'):
         import assistant_ui
         assistant_ui.cleanup_singleton()

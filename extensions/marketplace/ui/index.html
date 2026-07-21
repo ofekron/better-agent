@@ -205,7 +205,9 @@
       <div id="status" class="status"></div>
       <div id="grid" class="grid"></div>
     </main>
+    <script src="./catalog.js"></script>
     <script type="module">
+      const { isMarketplaceManaged, marketplaceRows } = globalThis.marketplaceCatalog;
       const statusEl = document.getElementById("status");
       const gridEl = document.getElementById("grid");
       const refreshEl = document.getElementById("refresh");
@@ -221,7 +223,7 @@
         const requestId = crypto.randomUUID();
         const body = typeof options.body === "string" ? JSON.parse(options.body) : options.body;
         const result = new Promise((resolve, reject) => {
-          pendingRequests.set(requestId, { resolve, reject });
+          pendingRequests.set(requestId, { resolve, reject, raw: false });
         });
         window.parent.postMessage({
           source: "ba-extension",
@@ -231,6 +233,22 @@
           path: url,
           method: options.method || "GET",
           body,
+        }, "*");
+        return result;
+      }
+
+      async function requestAction(action, payload = {}) {
+        if (!bridgeNonce) throw new Error("Marketplace connection is not ready");
+        const requestId = crypto.randomUUID();
+        const result = new Promise((resolve, reject) => {
+          pendingRequests.set(requestId, { resolve, reject, raw: true });
+        });
+        window.parent.postMessage({
+          source: "ba-extension",
+          nonce: bridgeNonce,
+          action,
+          requestId,
+          ...payload,
         }, "*");
         return result;
       }
@@ -272,9 +290,11 @@
 
       function render(catalog, installed) {
         const installedMap = installedById(installed);
+        const rows = marketplaceRows(catalog, installed);
         gridEl.replaceChildren();
-        for (const item of catalog) {
+        for (const item of rows) {
           const record = installedMap.get(item.id);
+          const marketplaceManaged = isMarketplaceManaged(record);
           const row = document.createElement("article");
           row.className = "row";
           const info = document.createElement("div");
@@ -308,8 +328,10 @@
           const button = document.createElement("button");
           button.type = "button";
           button.className = record ? "" : "primary";
-          button.disabled = busyId === item.id || item.id === "ofek-dev.marketplace";
-          button.textContent = record ? (record.enabled ? "Disable" : "Enable") : "Install";
+          button.disabled = busyId === item.id || item.id === "ofek-dev.marketplace" || Boolean(record && !marketplaceManaged);
+          button.textContent = record
+            ? (marketplaceManaged ? (record.enabled ? "Disable" : "Enable") : "Installed")
+            : "Install";
           button.addEventListener("click", () => {
             if (record) {
               void setEnabled(item.id, !record.enabled);
@@ -319,7 +341,7 @@
             void install(item, token);
           });
           actions.appendChild(button);
-          if (record && item.id !== "ofek-dev.marketplace") {
+          if (record && marketplaceManaged && item.id !== "ofek-dev.marketplace") {
             const uninstallButton = document.createElement("button");
             uninstallButton.type = "button";
             uninstallButton.disabled = busyId === item.id;
@@ -367,27 +389,14 @@
         busyId = item.id;
         statusEl.textContent = `Installing ${item.name || item.id}...`;
         try {
-          const installSpec = item.install || {};
-          let payload = {
-            repo_url: installSpec.repo_url || "",
-            extension_path: installSpec.extension_path || "",
-            ref: installSpec.ref || "",
-            entitlement_token: entitlementToken,
-          };
-          if (installSpec.metadata_url) {
-            const metadata = await requestJson(installSpec.metadata_url);
-            payload = {
-              ...payload,
-              artifact_url: metadata.artifact_url || "",
-              artifact_sha256: metadata.artifact_sha256 || "",
-              artifact_signature: metadata.signature || "",
-            };
-          }
-          await requestJson("/api/extensions/install", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(payload),
+          const result = await requestAction("marketplace-install", {
+            extensionId: item.id,
+            entitlementToken,
           });
+          if (result.status === "cancelled") {
+            statusEl.textContent = "";
+            return;
+          }
           await load();
         } catch (error) {
           statusEl.textContent = error instanceof Error ? error.message : "Install failed";
@@ -400,10 +409,9 @@
         busyId = id;
         statusEl.textContent = "Updating...";
         try {
-          await requestJson(`/api/extensions/${encodeURIComponent(id)}/enabled`, {
-            method: "PATCH",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ enabled }),
+          await requestAction("marketplace-set-enabled", {
+            extensionId: id,
+            enabled,
           });
           await load();
         } catch (error) {
@@ -417,11 +425,8 @@
         busyId = item.id;
         statusEl.textContent = `Uninstalling ${item.name || item.id}...`;
         try {
-          await requestJson(`/api/extensions/ofek-dev.marketplace/backend/extensions/${encodeURIComponent(item.id)}/uninstall`, {
-            method: "POST",
-          });
-          await requestJson(`/api/extensions/${encodeURIComponent(item.id)}`, {
-            method: "DELETE",
+          await requestAction("marketplace-uninstall", {
+            extensionId: item.id,
           });
           await load();
         } catch (error) {
@@ -447,12 +452,15 @@
           void load();
           return;
         }
-        if (event.data.nonce === bridgeNonce && event.data.action === "marketplace-response") {
+        if (event.data.nonce === bridgeNonce && typeof event.data.requestId === "string") {
           const pending = pendingRequests.get(event.data.requestId);
           if (!pending) return;
           pendingRequests.delete(event.data.requestId);
-          if (event.data.ok) pending.resolve(event.data.payload);
-          else pending.reject(new Error(event.data.error || "Marketplace request failed"));
+          if (event.data.ok === false || event.data.status === "failed") {
+            pending.reject(new Error(event.data.error || "Marketplace request failed"));
+          } else {
+            pending.resolve(pending.raw ? event.data : event.data.payload);
+          }
           return;
         }
         if (event.data.nonce !== bridgeNonce || event.data.action !== "marketplace-auth-result") return;

@@ -2755,9 +2755,14 @@ def test_install_from_marketplace_metadata_installs_artifact() -> None:
     work = _private_monorepo_test_work()
     old_public_key = os.environ.get("BETTER_AGENT_MARKETPLACE_PUBLIC_KEY")
     old_insecure = os.environ.get("BETTER_AGENT_ALLOW_INSECURE_MARKETPLACE_ARTIFACTS")
+    old_base_url = os.environ.get("BETTER_AGENT_MARKETPLACE_BASE_URL")
     try:
         repo, _ = _make_repo(work, extension_id="ofek.marketplace-metadata")
         package = repo / "extensions" / "requirements"
+        manifest_path = package / "better-agent-extension.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["permissions"] = {"network": True}
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
         key = Ed25519PrivateKey.generate()
         public_key = key.public_key().public_bytes_raw().hex()
         metadata = _write_signed_artifact(
@@ -2771,8 +2776,49 @@ def test_install_from_marketplace_metadata_installs_artifact() -> None:
         metadata["public_key"] = public_key
         os.environ["BETTER_AGENT_MARKETPLACE_PUBLIC_KEY"] = public_key
         os.environ["BETTER_AGENT_ALLOW_INSECURE_MARKETPLACE_ARTIFACTS"] = "1"
+        marketplace_root = work / "api" / "marketplace"
+        metadata_path = marketplace_root / "extensions" / "ofek.marketplace-metadata" / "metadata"
+        metadata_path.parent.mkdir(parents=True)
+        metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+        os.environ["BETTER_AGENT_MARKETPLACE_BASE_URL"] = marketplace_root.as_uri()
 
-        record = extension_store.install_from_marketplace_metadata(metadata=metadata)
+        preview = extension_store.prepare_marketplace_install(
+            "ofek.marketplace-metadata",
+            metadata,
+        )
+        if preview["manifest"]["permissions"] != {"network": True}:
+            raise AssertionError(preview)
+        original_artifact = (work / "ofek.marketplace-metadata.tar.gz").read_bytes()
+        (work / "ofek.marketplace-metadata.tar.gz").write_bytes(b"rotated after preview")
+        try:
+            extension_store.install_marketplace_preview(
+                "ofek.marketplace-metadata",
+                preview["preview_token"],
+            )
+        except extension_store.ExtensionError as exc:
+            if "digest mismatch" not in str(exc):
+                raise
+        else:
+            raise AssertionError("artifact rotation after preview was accepted")
+        (work / "ofek.marketplace-metadata.tar.gz").write_bytes(original_artifact)
+        try:
+            extension_store.install_marketplace_preview(
+                "ofek.marketplace-metadata",
+                preview["preview_token"],
+            )
+        except extension_store.ExtensionError:
+            pass
+        else:
+            raise AssertionError("marketplace preview token was reusable")
+
+        approved = extension_store.prepare_marketplace_install(
+            "ofek.marketplace-metadata",
+            metadata,
+        )
+        record = extension_store.install_marketplace_preview(
+            "ofek.marketplace-metadata",
+            approved["preview_token"],
+        )
 
         if record["manifest"]["id"] != "ofek.marketplace-metadata":
             raise AssertionError(record)
@@ -2789,6 +2835,10 @@ def test_install_from_marketplace_metadata_installs_artifact() -> None:
             os.environ.pop("BETTER_AGENT_ALLOW_INSECURE_MARKETPLACE_ARTIFACTS", None)
         else:
             os.environ["BETTER_AGENT_ALLOW_INSECURE_MARKETPLACE_ARTIFACTS"] = old_insecure
+        if old_base_url is None:
+            os.environ.pop("BETTER_AGENT_MARKETPLACE_BASE_URL", None)
+        else:
+            os.environ["BETTER_AGENT_MARKETPLACE_BASE_URL"] = old_base_url
         shutil.rmtree(work, ignore_errors=True)
 
 

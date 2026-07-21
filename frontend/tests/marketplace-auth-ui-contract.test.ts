@@ -10,7 +10,7 @@ describe("marketplace settings authentication", () => {
 
     expect(html).toContain('action: "marketplace-auth-start"');
     expect(html).toContain('action: "marketplace-request"');
-    expect(html).toContain('event.data.action === "marketplace-response"');
+    expect(html).toContain("pendingRequests.get(event.data.requestId)");
     expect(html).toContain('event.data.action === "marketplace-auth-init"');
     expect(html).toContain("refreshEl.disabled = false");
     expect(html).toContain('event.data.nonce !== bridgeNonce');
@@ -20,6 +20,8 @@ describe("marketplace settings authentication", () => {
     expect(html).not.toContain("Marketplace access token");
     expect(html).not.toContain("window.localStorage");
     expect(html).not.toContain("fetch(");
+    expect(html).toContain('requestAction("marketplace-install"');
+    expect(html).not.toContain('requestJson("/api/extensions/install"');
   });
 
   it("declares the dedicated marketplace authentication permission", () => {
