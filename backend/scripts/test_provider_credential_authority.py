@@ -105,6 +105,8 @@ def test_retry_interactively_migrates_blocked_legacy() -> None:
     values = {(PRIMARY_SERVICE, account): "legacy-secret"}
     interactive = False
     interaction_entries = 0
+    interactive_reads: list[tuple[str, str]] = []
+    noninteractive_reads: list[tuple[str, str]] = []
     disable_calls = 0
     real_disable = credential_session.oskeychain.disable_native_user_interaction
     real_interaction = credential_session.oskeychain.native_user_interaction
@@ -127,6 +129,11 @@ def test_retry_interactively_migrates_blocked_legacy() -> None:
             interactive = False
 
     def get(service: str, requested_account: str):
+        target = (service, requested_account)
+        if interactive:
+            interactive_reads.append(target)
+        else:
+            noninteractive_reads.append(target)
         if service in {PRIMARY_SERVICE, LEGACY_SERVICE} and not interactive:
             raise RuntimeError("legacy ACL denied")
         return values.get((service, requested_account))
@@ -155,6 +162,8 @@ def test_retry_interactively_migrates_blocked_legacy() -> None:
             "value": "legacy-secret",
         }
         assert interaction_entries == 1
+        assert interactive_reads == [(PRIMARY_SERVICE, account)]
+        assert (CANONICAL_PROVIDER_SERVICE, account) in noninteractive_reads
         assert disable_calls == 1
         assert not interactive
         assert values[(CANONICAL_PROVIDER_SERVICE, account)] == "legacy-secret"
@@ -166,6 +175,58 @@ def test_retry_interactively_migrates_blocked_legacy() -> None:
         provider_credentials.oskeychain.native_get = real_get
         provider_credentials.oskeychain.native_store = real_store
         provider_credentials.oskeychain.native_delete = real_delete
+
+
+def test_denied_retry_does_not_scan_another_credential() -> None:
+    provider_id = "provider-denied-migration"
+    account = f"provider:{provider_id}"
+    interactive = False
+    interactive_reads: list[tuple[str, str]] = []
+    all_reads: list[tuple[str, str]] = []
+    real_disable = credential_session.oskeychain.disable_native_user_interaction
+    real_interaction = credential_session.oskeychain.native_user_interaction
+    real_get = provider_credentials.oskeychain.native_get
+
+    @contextmanager
+    def allow_interaction():
+        nonlocal interactive
+        interactive = True
+        try:
+            yield
+        finally:
+            interactive = False
+
+    def get(service: str, requested_account: str):
+        target = (service, requested_account)
+        all_reads.append(target)
+        if service == PRIMARY_SERVICE:
+            if interactive:
+                interactive_reads.append(target)
+                raise RuntimeError("user denied access")
+            raise RuntimeError("legacy ACL denied")
+        if service == LEGACY_SERVICE:
+            raise AssertionError("a denied retry must not scan another credential")
+        return None
+
+    credential_session.oskeychain.disable_native_user_interaction = lambda: None
+    credential_session.oskeychain.native_user_interaction = allow_interaction
+    provider_credentials.oskeychain.native_get = get
+    broker = credential_session.ProviderCredentialBroker()
+    try:
+        request = {
+            "provider_id": provider_id,
+            "request_id": "8" * 32,
+        }
+        assert broker.handle({**request, "op": "read"}) == {"status": "blocked"}
+        reads_before_retry = len(all_reads)
+        assert broker.handle({**request, "op": "retry"}) == {"status": "blocked"}
+        assert all_reads[reads_before_retry:] == [(PRIMARY_SERVICE, account)]
+        assert interactive_reads == [(PRIMARY_SERVICE, account)]
+    finally:
+        broker.clear()
+        credential_session.oskeychain.disable_native_user_interaction = real_disable
+        credential_session.oskeychain.native_user_interaction = real_interaction
+        provider_credentials.oskeychain.native_get = real_get
 
 
 def _backend_request(session, op: str, provider_id: str) -> dict:
@@ -497,6 +558,7 @@ if __name__ == "__main__":
     test_native_authority_disables_keychain_interaction()
     test_native_interaction_is_disabled_after_failure()
     test_retry_interactively_migrates_blocked_legacy()
+    test_denied_retry_does_not_scan_another_credential()
     test_legacy_credential_migrates_before_cleanup_and_survives_restart()
     test_failed_canonical_verification_never_cleans_legacy()
     test_canonical_denial_never_attempts_legacy_recovery()
