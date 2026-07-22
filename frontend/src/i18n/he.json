@@ -83,7 +83,6 @@
   "sidebar.sessionsTab": "שיחות",
   "sidebar.workersTab": "Workerים",
   "sidebar.routinesTab": "שגרות",
-  "routines.sessionType.provisionedForkWithMemory": "פיצול מוקצה עם זיכרון",
   "app.reconciling": "מסנכרן…",
   "app.reconcilingTitle": "השרת מסנכרן אירועים מאוחרים (>0.3 שניות).",
   "app.supervisorBannerDismiss": "סגור",

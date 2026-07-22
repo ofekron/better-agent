@@ -84,10 +84,13 @@ def terminal_event_for_lifecycle(
     from pathlib import Path
     import session_store
 
-    root_id = _root_id_for(app_session_id)
-    if not root_id:
+    if not _root_id_for(app_session_id):
         return None
-    path = Path(session_store.session_file_path(root_id)).parent / root_id / "events.jsonl"
+    path = (
+        Path(session_store.session_file_path(app_session_id)).parent
+        / app_session_id
+        / "events.jsonl"
+    )
     if not path.exists():
         return None
     try:

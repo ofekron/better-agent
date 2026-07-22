@@ -662,7 +662,7 @@ async def lock_ops(
     if operation == "renew":
         return await _renew_keys(normalized_keys, holder_token, normalized_owner, lease)
 
-    if len(normalized_keys) > 1:
+    if len(normalized_keys) > 1 or timeout_seconds is not None:
         timeout = _clamp_timeout(timeout_seconds)
         if timeout is None:
             return {"success": False, "error": "invalid_timeout_seconds"}

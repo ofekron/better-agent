@@ -54,7 +54,6 @@ def test_store_model():
         trigger={"kind": "schedule", "config": {"mode": "recurring", "interval_seconds": 60}},
         scripts={"pre": [{"command": ["echo", "hi"]}], "post": []},
         assessment={"kind": "script", "config": {"command": ["true"]}},
-        session_type="provisioned_fork",
         model="gpt-5.5",
         provider_id="openai",
         reasoning_effort="high",
@@ -64,7 +63,7 @@ def test_store_model():
     check(rec["trigger"]["config"]["interval_seconds"] == 60, "trigger config stored")
     check(rec["assessment"]["kind"] == "script", "assessment kind stored")
     check(rec["scripts"]["pre"][0]["command"] == ["echo", "hi"], "pre-script stored")
-    check(rec["session_type"] == "provisioned_fork", "session type stored")
+    check("session_type" not in rec, "session type is not persisted")
     check(rec["model"] == "gpt-5.5", "model stored")
     check(rec["provider_id"] == "openai", "provider stored")
     check(rec["reasoning_effort"] == "high", "reasoning effort stored")
@@ -503,6 +502,7 @@ def test_routine_prompt_source_spec():
     print("T21 routine prompt treats description as source spec")
     prompt = task_runner._routine_prompt(
         {
+            "id": "a" * 12,
             "name": "Morning PR review",
             "description": "Review open PRs",
             "goal": "Summarize risky failures",

@@ -84,7 +84,6 @@
   "sidebar.sessionsTab": "सत्र",
   "sidebar.workersTab": "वर्कर",
   "sidebar.routinesTab": "रूटीन",
-  "routines.sessionType.provisionedForkWithMemory": "मेमोरी वाला प्रोविज़न्ड फ़ोर्क",
   "app.reconciling": "समाधान हो रहा है…",
   "app.reconcilingTitle": "बैकएंड पिछड़े हुए ईवेंट समाधान कर रहा है। केवल तब दिखाया जाता है जब >0.3s हो।",
   "app.supervisorBannerDismiss": "ख़ारिज करें",

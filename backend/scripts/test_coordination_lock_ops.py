@@ -96,6 +96,37 @@ async def test_immediate_acquire_reports_no_wait() -> None:
     coordination._clear_for_tests()  # type: ignore[attr-defined]
 
 
+async def test_single_key_timeout_waits_for_current_holder() -> None:
+    coordination._clear_for_tests()  # type: ignore[attr-defined]
+    blocker = await coordination.lock_ops(key="routine_memory:abc123def456")
+
+    async def release_blocker() -> None:
+        await asyncio.sleep(0.03)
+        await coordination.lock_ops(
+            key="routine_memory:abc123def456",
+            release=True,
+            holder_token=str(blocker["holder_token"]),
+        )
+
+    release_task = asyncio.create_task(release_blocker())
+    result = await coordination.lock_ops(
+        key="routine_memory:abc123def456",
+        timeout_seconds=1,
+    )
+    await release_task
+
+    check(result.get("success") is True, "single-key acquire waits when timeout is supplied")
+    check(result.get("waited") is True, "waited single-key acquire reports contention")
+    check(result.get("waited_keys") == ["routine_memory:abc123def456"],
+          "waited single-key acquire reports the precise key")
+    await coordination.lock_ops(
+        key="routine_memory:abc123def456",
+        release=True,
+        holder_token=str(result["holder_token"]),
+    )
+    coordination._clear_for_tests()  # type: ignore[attr-defined]
+
+
 async def test_multi_lock_timeout_releases_partial_locks() -> None:
     coordination._clear_for_tests()  # type: ignore[attr-defined]
     blocker = await coordination.lock_ops(
@@ -525,6 +556,7 @@ def test_better_agent_runner_requires_own_live_file_lock() -> None:
 async def main() -> int:
     await test_multi_lock_accumulates_until_all_locked()
     await test_immediate_acquire_reports_no_wait()
+    await test_single_key_timeout_waits_for_current_holder()
     await test_multi_lock_timeout_releases_partial_locks()
     await test_single_lock_conflict_reports_holder_metadata_without_token()
     await test_multi_release_is_atomic()

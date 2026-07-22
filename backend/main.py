@@ -15850,7 +15850,6 @@ async def internal_tasks(
                 description=(body or {}).get("description") or "",
                 orchestration_mode=(body or {}).get("orchestration_mode") or "native",
                 worker_creation_policy=(body or {}).get("worker_creation_policy") or "approve",
-                session_type=(body or {}).get("session_type") or "normal",
                 model=(body or {}).get("model"),
                 provider_id=(body or {}).get("provider_id"),
                 reasoning_effort=(body or {}).get("reasoning_effort"),
@@ -15886,7 +15885,12 @@ async def internal_tasks(
 
     if action == "delete":
         task_id = str((body or {}).get("task_id") or "").strip()
-        removed = await asyncio.to_thread(task_store.delete, task_id)
+        import routine_memory
+
+        try:
+            removed = await routine_memory.delete_task(task_id)
+        except (routine_memory.RoutineMemoryAccessError, routine_memory.RoutineMemoryBusyError) as exc:
+            return {"success": False, "error": str(exc)}
         if removed is None:
             return {"success": False, "error": "unknown task_id"}
         from stores import task_output_store

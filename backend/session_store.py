@@ -1388,11 +1388,11 @@ def _opened_path(root_id: str) -> Path:
     return _root_file_path(root_id).with_name(f"{root_id}.opened.json")
 
 
-def _remove_deleted_root_sidecars(root_id: str) -> None:
+def _remove_deleted_root_sidecars(root_id: str, root_path: Path) -> None:
     for path in (
-        _drafts_path(root_id),
-        _seen_cursor_path(root_id),
-        _opened_path(root_id),
+        root_path.with_name(f"{root_id}.drafts.json"),
+        root_path.with_name(f"{root_id}.seen.json"),
+        root_path.with_name(f"{root_id}.opened.json"),
     ):
         try:
             path.unlink(missing_ok=True)
@@ -3352,6 +3352,7 @@ def project_external_root_change(root_id: str) -> bool:
 def project_external_root_delete(root_id: str) -> bool:
     """Fold an explicitly announced external root delete into the projection."""
     global _index_fingerprint
+    root_path = _root_file_path(root_id)
     with _index_lock:
         file_signature = _root_index_signatures.pop(root_id, None)
         forks = _root_forks.pop(root_id, set())
@@ -3367,7 +3368,7 @@ def project_external_root_delete(root_id: str) -> bool:
         _clear_negative_root_resolve_cache()
         generation = _bump_index_generation_locked()
     _remove_summary(root_id)
-    _remove_deleted_root_sidecars(root_id)
+    _remove_deleted_root_sidecars(root_id, root_path)
     if updated is not None:
         _publish_dir_fingerprint_cache(updated, generation)
         _persist_index_sidecar_if_loaded(updated, expected_generation=generation)
@@ -5739,7 +5740,7 @@ def delete_session(root_id: str) -> bool:
         _abandon_root_change(root_change)
         raise
     _complete_root_change(root_change)
-    _remove_deleted_root_sidecars(root_id)
+    _remove_deleted_root_sidecars(root_id, path)
     return True
 
 
