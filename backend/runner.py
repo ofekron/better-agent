@@ -1486,11 +1486,15 @@ def _build_mssg_tool(
     def _post_mssg_sync(payload: dict) -> dict:
         # 30s covers the enqueue path (isolated onto _TEAM_MESSAGE_EXECUTOR
         # per 5c31f0d25 — no longer starved by unrelated slow callers on the
-        # shared default thread pool). A slow ack that still exceeds this
-        # under host-level memory pressure (swap thrashing stalling disk
-        # I/O for every thread regardless of pool) is a separate, known
-        # environment/capacity limitation, not an application bug — do not
-        # re-diagnose as pool contention before checking host memory/swap.
+        # shared default thread pool). If this still times out, don't
+        # assume host resource pressure — 2cf13e330 traced a prior instance
+        # of exactly that symptom to worker_store.list_worker_projection
+        # scanning the entire global worker registry (thousands of stale
+        # entries) with a 50ms wait-for-observation per stale lookup. Get
+        # live timing evidence (temporary per-step logging in
+        # submit_team_message, or the perf rollup's
+        # resolve_observation_wait counter) before concluding it's the
+        # environment.
         return _post_loopback_sync(
             payload,
             backend_url=backend_url,
@@ -2114,10 +2118,9 @@ def _build_ask_tool(
         }
 
         def _post_ask_sync() -> dict:
-            # Async-mode 30s: same enqueue-path isolation as mssg (see the
-            # comment on `_post_mssg_sync`) — a slow ack past this bound
-            # under host memory pressure is a separate, known environment
-            # limitation, not pool contention re-emerging.
+            # Async-mode 30s: same enqueue-path isolation as mssg — see the
+            # comment on `_post_mssg_sync` for what to check if this still
+            # times out (get live timing evidence before blaming the host).
             return _post_loopback_sync(
                 payload,
                 backend_url=backend_url,
