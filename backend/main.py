@@ -81,6 +81,7 @@ from requirements_query_runner import (
     run_requirements_query,
 )
 import user_input_store
+import device_token_store
 import file_panel_drafts
 import file_preview_urls
 import task_output_preview_urls
@@ -5926,6 +5927,41 @@ async def delete_hook(hook_id: str):
     if not deleted:
         raise HTTPException(status_code=404, detail="hook not found")
     return {"ok": True}
+
+
+_PUSH_TOKEN_MAX_LEN = 4096
+_PUSH_DEVICE_ID_MAX_LEN = 256
+_PUSH_PLATFORMS = ("android", "ios")
+
+
+@app.post("/api/push-tokens")
+async def register_push_token(body: dict):
+    device_id = str(body.get("device_id") or "").strip()
+    token = str(body.get("token") or "").strip()
+    platform = str(body.get("platform") or "").strip()
+    session_id = str(body.get("session_id") or "").strip()
+    if not device_id or len(device_id) > _PUSH_DEVICE_ID_MAX_LEN:
+        raise HTTPException(status_code=400, detail="device_id is required")
+    if not token or len(token) > _PUSH_TOKEN_MAX_LEN:
+        raise HTTPException(status_code=400, detail="token is required")
+    if platform not in _PUSH_PLATFORMS:
+        raise HTTPException(status_code=400, detail="platform must be android or ios")
+    if not session_id:
+        raise HTTPException(status_code=400, detail="session_id is required")
+    record = await asyncio.to_thread(
+        device_token_store.register_token,
+        device_id,
+        token,
+        platform,
+        session_id,
+    )
+    return {"device": record}
+
+
+@app.delete("/api/push-tokens/{device_id}")
+async def unregister_push_token(device_id: str):
+    deleted = await asyncio.to_thread(device_token_store.unregister_token, device_id)
+    return {"deleted": deleted}
 
 
 def _parse_session_timestamp(value: object) -> datetime | None:
