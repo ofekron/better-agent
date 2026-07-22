@@ -2561,7 +2561,11 @@ async def _validate_optional_run_selector(
     )
     resolved_model = model
     if not resolved_model and provider_id:
-        provider = await asyncio.to_thread(config_store.get_provider, provider_id) or {}
+        provider = await _run_hot_path(
+            "communication.validate_run_selector.get_provider",
+            config_store.get_provider,
+            provider_id,
+        ) or {}
         resolved_model = str(provider.get("default_model") or "").strip()
         if not resolved_model:
             name = provider.get("name") or provider_id
@@ -2571,7 +2575,12 @@ async def _validate_optional_run_selector(
             )
     if not resolved_model:
         resolved_model = str((sender or {}).get("model") or "").strip()
-    await asyncio.to_thread(_validate_provider_model, resolved_provider_id, resolved_model)
+    await _run_hot_path(
+        "communication.validate_run_selector.validate_provider_model",
+        _validate_provider_model,
+        resolved_provider_id,
+        resolved_model,
+    )
 
 
 def _validate_provider_default_reasoning_effort(
@@ -14987,7 +14996,8 @@ async def _ask_continue_and_expect_inbox_back_async(
         or str(body.get("target_worker_id") or "").strip()
     )
     if target_worker_pool and not has_exact_target:
-        target = await asyncio.to_thread(
+        target = await _run_hot_path(
+            "communication.ask_async.pick_pool_worker",
             _pick_pool_worker_for_sender,
             target_worker_pool,
             sender_session_id,
@@ -15144,11 +15154,16 @@ async def _resolve_communication_target(body: dict) -> str:
     if target_session_id:
         return target_session_id
     if target_worker_id:
-        worker = await asyncio.to_thread(_find_worker_by_agent_session_id, target_worker_id)
+        worker = await _run_hot_path(
+            "communication.resolve_target.find_worker",
+            _find_worker_by_agent_session_id,
+            target_worker_id,
+        )
         if not worker:
             raise HTTPException(status_code=404, detail="target_worker_id does not exist")
         return str(worker.get("agent_session_id") or "")
-    target = await asyncio.to_thread(
+    target = await _run_hot_path(
+        "communication.resolve_target.pick_pool_worker",
         _pick_pool_worker_for_sender,
         target_worker_pool,
         sender_session_id,
