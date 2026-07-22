@@ -36,15 +36,43 @@ def test_hook_runner_loads_config_off_loop() -> None:
 
 
 def test_ownership_projection_uses_dedicated_executor() -> None:
+    # Superseded by a per-root-sharded dispatcher: `_SessionProjectionDispatcher`
+    # (event_bus_subscribers.py) owns N `ThreadPoolExecutor`s keyed by
+    # root_id hash, each draining its root's rows through
+    # `_apply_session_projection_row` (ownership resolution + written-event
+    # application) in strict per-root seq order with coalescing — a
+    # strictly better isolation than the flat, unordered
+    # `_OWNERSHIP_PROJECTION_EXECUTOR`/`_CONTENT_PROJECTION_EXECUTOR` pair
+    # this test used to assert, so the code was never migrated back to
+    # that older shape.
     source = (ROOT / "event_bus_subscribers.py").read_text(encoding="utf-8")
-    assert "_OWNERSHIP_PROJECTION_EXECUTOR = ThreadPoolExecutor(" in source
-    assert "thread_name_prefix=\"ownership-projection\"" in source
-    assert "run_in_executor(\n            _OWNERSHIP_PROJECTION_EXECUTOR" in source
-    assert "asyncio.to_thread(\n            session_manager.apply_journal_ownership_resolution" not in source
-    assert "_CONTENT_PROJECTION_EXECUTOR = ThreadPoolExecutor(" in source
-    assert "thread_name_prefix=\"content-projection\"" in source
-    assert "run_in_executor(\n        _CONTENT_PROJECTION_EXECUTOR" in source
-    assert "asyncio.to_thread(\n        session_manager.apply_written_journal_event" not in source
+    assert "_OWNERSHIP_PROJECTION_EXECUTOR" not in source
+    assert "_CONTENT_PROJECTION_EXECUTOR" not in source
+
+    apply_start = source.index("def _apply_session_projection_row(")
+    apply_end = source.index("\ndef ", apply_start + 1)
+    apply_source = source[apply_start:apply_end]
+    assert "session_manager.apply_journal_ownership_resolution(" in apply_source
+    assert "session_manager.apply_written_journal_event(" in apply_source
+    assert "asyncio.to_thread(" not in apply_source
+    assert "run_in_executor(" not in apply_source
+
+    drainer_start = source.index("class SessionProjectionDrainer:")
+    drainer_end = source.index("def _new_session_projection_dispatcher(", drainer_start)
+    drainer_source = source[drainer_start:drainer_end]
+    assert "self._executors = tuple(\n            ThreadPoolExecutor(" in drainer_source
+    assert 'thread_name_prefix=f"session-projection-{i}"' in drainer_source
+    assert "for i in range(shards)" in drainer_source
+    assert "self._executor(command.root_id).submit(self._drain_chunk, command.root_id)" in drainer_source
+    assert "self._apply_row(root_id, row)" in drainer_source
+    assert "def _executor(self, root_id: str) -> ThreadPoolExecutor:" in drainer_source
+    assert "return self._executors[self._shard(root_id)]" in drainer_source
+
+    factory_start = source.index("def _new_session_projection_dispatcher(")
+    factory_end = source.index("\n\n\n", factory_start)
+    factory_source = source[factory_start:factory_end]
+    assert "_apply_session_projection_row," in factory_source
+    assert "shards=_SESSION_PROJECTION_SHARDS" in factory_source
 
 
 def test_wire_tailer_gap_fill_reads_journal_off_loop() -> None:
