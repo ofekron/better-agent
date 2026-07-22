@@ -1,4 +1,4 @@
-import { Fragment, memo, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
+import { Fragment, memo, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode, type RefObject } from "react";
 import { turnGroupPropsEqual } from "./turnGroupPropsEqual";
 import { lazyWithRetry } from "../lib/lazyWithRetry";
 import { turnMessageHeader } from "../lib/turnMessageHeader";
@@ -3419,6 +3419,11 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
     if (sent !== false) setIsEditingInitiator(false);
   }, [onAlterTurnMessage, rawInitiatorContent, initiatorEditDraft, initiatorMessage]);
 
+  const initiatorTurnHeader = turnMessageHeader(initiatorMessage.source, userDisplayName);
+  const initiatorTurnStyle = initiatorTurnHeader.color
+    ? ({ "--turn-accent": initiatorTurnHeader.color } as CSSProperties)
+    : undefined;
+
   return (
     <motion.div
       className="message-row"
@@ -3443,6 +3448,7 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
         data-message-id={initiatorMessage.id}
         data-testid={initiatorMessage.role === "operator" ? "operator-message" : "user-message"}
         data-status={initiatorMessage.status ?? ""}
+        style={initiatorTurnStyle}
         ref={initiatorContainerRef}
       >
         <div className="message-box-header-row">
@@ -3455,10 +3461,10 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
           >
             <span className="collapse-arrow">{collapsed ? "\u25B6" : "\u25BC"}</span>
             <span className={`message-box-icon${initiatorMessage.source ? " orchestration-icon" : ""}`}>
-              {turnMessageHeader(initiatorMessage.source).icon}
+              {initiatorTurnHeader.icon}
             </span>
             <span className={`message-box-label${initiatorMessage.source ? " orchestration-label" : ""}`}>
-              {turnMessageHeader(initiatorMessage.source, userDisplayName).label}
+              {initiatorTurnHeader.label}
             </span>
           </button>
           <TeamMessageFrom message={initiatorMessage} />
@@ -4046,15 +4052,19 @@ export function MessageBubble({ message, sessionId, userDisplayName, onFileClick
     const rawContent =
       typeof message.content === "string" ? message.content : "";
     const hasArtificial = hasArtificialSections(rawContent);
+    const standaloneTurnHeader = turnMessageHeader(message.source || message.role, userDisplayName);
+    const standaloneTurnStyle = standaloneTurnHeader.color
+      ? ({ "--turn-accent": standaloneTurnHeader.color } as CSSProperties)
+      : undefined;
     return (
       <div className="message user-message" data-message-id={message.id}>
         {(message.source || message.role === "operator") && (
-          <div className="message-box-header standalone-user-source">
+          <div className="message-box-header standalone-user-source" style={standaloneTurnStyle}>
             <span className="message-box-icon orchestration-icon">
-              {turnMessageHeader(message.source || message.role).icon}
+              {standaloneTurnHeader.icon}
             </span>
             <span className="message-box-label orchestration-label">
-              {turnMessageHeader(message.source || message.role, userDisplayName).label}
+              {standaloneTurnHeader.label}
             </span>
             <TeamMessageFrom message={message} />
           </div>
