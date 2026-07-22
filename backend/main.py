@@ -41,6 +41,7 @@ raise_fd_limit()
 from capability_contexts import normalize_capability_contexts
 from communication_modes import (
     ASK_MODE_CONTINUE_AND_EXPECT_INBOX_BACK_ASYNC,
+    IN_TURN_REPLY_INSTRUCTION,
     normalize_ask_execution,
     normalize_ask_mode,
 )
@@ -16769,7 +16770,10 @@ def _pool_worker_context_for_prompt(*, body: dict, bc_session_id: str, descripti
         )
     lines.extend([
         "</peers>",
-        "<messaging>Use mssg(target_session_id, message) to coordinate with pool peers that have a session_id.</messaging>",
+        "<messaging>",
+        "Use mssg(target_session_id, message) to coordinate with pool peers that have a session_id.",
+        IN_TURN_REPLY_INSTRUCTION,
+        "</messaging>",
         "</worker_pool>",
     ])
     return "\n".join(lines)

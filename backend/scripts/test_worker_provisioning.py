@@ -283,6 +283,8 @@ def test_pool_workers_receive_peer_context_in_provision_prompt():
         assert 'name="worker:review-b"' in prompt
         assert 'tags="review"' in prompt
         assert "Use mssg(target_session_id, message)" in prompt
+        assert "ask(mode='wait_and_grab_last_assistant_mssg_in_turn')" in prompt
+        assert "mssg never waits for or returns a reply" in prompt
         assert "Use inbox(recipient_session_id, message)" in prompt
         assert "Call inbox() to read your own pending results" in prompt
 

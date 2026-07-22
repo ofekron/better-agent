@@ -13,6 +13,12 @@ ASK_MODES = frozenset({
 DEFAULT_ASK_MODE = ASK_MODE_WAIT_AND_GRAB_LAST_ASSISTANT_MSSG_IN_TURN
 ASK_RUN_MODES = frozenset({"direct", "fork"})
 
+IN_TURN_REPLY_INSTRUCTION = (
+    "When you need the target's answer inline in this same turn, use "
+    f"ask(mode='{ASK_MODE_WAIT_AND_GRAB_LAST_ASSISTANT_MSSG_IN_TURN}'). "
+    "Use mssg only for one-way coordination; mssg never waits for or returns a reply."
+)
+
 
 def normalize_ask_mode(value: object) -> str:
     mode = str(value or DEFAULT_ASK_MODE).strip() or DEFAULT_ASK_MODE

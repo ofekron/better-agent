@@ -24,6 +24,8 @@ def teardown_module():
 
 
 def test_team_context_uses_session_id_and_self_identity():
+    assert "ask(mode='wait_and_grab_last_assistant_mssg_in_turn')" in bootstrap.BOOTSTRAP_PROMPT
+
     prompt = bootstrap.build_wrapped_prompt(
         "/repo",
         "do work",
@@ -47,6 +49,8 @@ def test_team_context_uses_session_id_and_self_identity():
     assert '<member session_id="mssg-manager-session" role="manager"' in prompt
     assert '<member session_id="mssg-worker-session" role="worker"' in prompt
     assert "target_session_id" in prompt
+    assert "ask(mode='wait_and_grab_last_assistant_mssg_in_turn')" in prompt
+    assert "mssg never waits for or returns a reply" in prompt
     assert "<member id=" not in prompt
 
 

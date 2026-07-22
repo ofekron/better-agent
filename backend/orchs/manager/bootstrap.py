@@ -13,12 +13,16 @@ Three pieces:
 
 from html import escape
 
+from communication_modes import IN_TURN_REPLY_INSTRUCTION
 from prompt_templates import render_prompt
 import team_store
 from stores import worker_store
 
 
-BOOTSTRAP_PROMPT = render_prompt("manager/bootstrap.md")
+BOOTSTRAP_PROMPT = render_prompt(
+    "manager/bootstrap.md",
+    {"in_turn_reply_instruction": IN_TURN_REPLY_INSTRUCTION},
+)
 
 def format_known_workers(workers: list[dict]) -> str:
     """Render the global worker registry. Positional columns under a
@@ -129,7 +133,7 @@ def format_team_context(
         "</team>",
         "<messaging>",
         "Use mssg(target_session_id, message) to send a message to any team member by that member's session_id.",
-        "Use mssg for one-way coordination.",
+        IN_TURN_REPLY_INSTRUCTION,
         "Use inbox(recipient_session_id, message) to return final results requested by async ask or delegate_task.",
         "Call inbox() to read your own pending results.",
         "</messaging>",
