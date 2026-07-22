@@ -233,6 +233,75 @@ def test_auto_route_search_uses_delegate_provider_filter():
     assert submit_calls[0]["params"]["provider_id"] == provider_id
 
 
+def test_auto_route_search_receives_scope_filters():
+    provider_id = config_store.get_default_provider()["id"]
+    coord, sender, _join_calls, _submit_calls = _make_coord(
+        model="sender-model",
+        provider_id=provider_id,
+    )
+    config_store.set_delegate_task_policy("auto")
+    captured: dict = {}
+
+    async def fake_search(query, **kwargs):
+        captured["query"] = query
+        captured["provider_id"] = kwargs.get("provider_id")
+        captured["cwd"] = kwargs.get("cwd")
+        captured["folder_id"] = kwargs.get("folder_id")
+        captured["tag_ids"] = kwargs.get("tag_ids")
+        return {"session_ids": []}
+
+    original_search = session_search.run_search_sessions_session
+    session_search.run_search_sessions_session = fake_search  # type: ignore[assignment]
+    try:
+        res = asyncio.run(coord.run_delegate_task(
+            sender_session_id=sender["id"],
+            task="scoped search tangent",
+            cwd="/repo",
+            search_cwd="/repo/app",
+            search_folder="folder-1",
+            search_tags=["tag-a", "tag-b"],
+        ))
+    finally:
+        session_search.run_search_sessions_session = original_search  # type: ignore[assignment]
+
+    assert res["success"] is True
+    assert captured == {
+        "query": "scoped search tangent",
+        "provider_id": None,
+        "cwd": "/repo/app",
+        "folder_id": "folder-1",
+        "tag_ids": ["tag-a", "tag-b"],
+    }
+
+
+def test_target_bypass_does_not_search_with_scope_filters():
+    coord, sender, _join_calls, submit_calls = _make_coord()
+    config_store.set_delegate_task_policy("auto")
+    target = session_manager.create(name="existing scoped", cwd="/repo", orchestration_mode="native")
+
+    async def fail_search(*_args, **_kwargs):
+        raise AssertionError("target bypass must not call session search")
+
+    original_search = session_search.run_search_sessions_session
+    session_search.run_search_sessions_session = fail_search  # type: ignore[assignment]
+    try:
+        res = asyncio.run(coord.run_delegate_task(
+            sender_session_id=sender["id"],
+            task="targeted scoped tangent",
+            target_session_id=target["id"],
+            cwd="/repo",
+            search_cwd="/repo/app",
+            search_folder="folder-1",
+            search_tags=["tag-a"],
+        ))
+    finally:
+        session_search.run_search_sessions_session = original_search  # type: ignore[assignment]
+
+    assert res["success"] is True
+    assert res["target_session_id"] == target["id"]
+    assert submit_calls[0]["sid"] == target["id"]
+
+
 def test_always_new_creates_session_and_dispatches():
     provider_id = config_store.get_default_provider()["id"]
     coord, sender, join_calls, submit_calls = _make_coord(

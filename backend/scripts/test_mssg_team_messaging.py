@@ -665,6 +665,117 @@ def test_detached_team_message_does_not_register_turn_join(monkeypatch):
     assert coordinator._mssg_turn_waiters == {}
 
 
+def test_detached_team_message_returns_without_waiting_for_panel_save(monkeypatch):
+    sender = session_manager.create(name="blocked sender", cwd="/repo", orchestration_mode="native")
+    target = session_manager.create(name="target after blocked sender", cwd="/repo", orchestration_mode="native")
+    coordinator = Coordinator()
+    save_started = asyncio.Event()
+    release_save = asyncio.Event()
+    submit_calls: list[dict] = []
+
+    async def blocked_save(_event: dict) -> None:
+        save_started.set()
+        await release_save.wait()
+
+    async def fake_submit_prompt_async(sid: str, params: dict, **_kwargs) -> str:
+        submit_calls.append({"sid": sid, "params": params})
+        return params["_queued_id"]
+
+    coordinator.turn_manager._turn_save_callbacks[sender["id"]] = blocked_save
+    coordinator.turn_manager.current_turn_workers[sender["id"]] = []
+    monkeypatch.setattr(coordinator, "submit_prompt_async", fake_submit_prompt_async)
+
+    async def run_detached() -> dict:
+        return await asyncio.wait_for(
+            coordinator.submit_team_message(
+                sender_session_id=sender["id"],
+                target_session_id=target["id"],
+                message="fire and forget while sender save is blocked",
+                detach=True,
+            ),
+            timeout=0.2,
+        )
+
+    async def run_joined_blocks() -> None:
+        task = asyncio.create_task(coordinator.submit_team_message(
+            sender_session_id=sender["id"],
+            target_session_id=target["id"],
+            message="joined message waits for panel save",
+            detach=False,
+        ))
+        await save_started.wait()
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=0.05)
+        except asyncio.TimeoutError:
+            pass
+        else:
+            raise AssertionError("non-detached message returned before panel save completed")
+        release_save.set()
+        await task
+
+    result = asyncio.run(run_detached())
+
+    assert result["success"] is True
+    assert submit_calls[0]["sid"] == target["id"]
+    assert session_manager.get(target["id"])["queued_prompts"][0]["content"].startswith("fire and forget")
+    assert coordinator.turn_manager.current_turn_workers[sender["id"]][0]["worker_session_id"] == target["id"]
+
+    save_started = asyncio.Event()
+    release_save = asyncio.Event()
+    asyncio.run(run_joined_blocks())
+
+
+def test_detached_panel_events_wait_for_worker_start_save():
+    sender = session_manager.create(name="ordered sender", cwd="/repo", orchestration_mode="native")
+    target = session_manager.create(name="ordered target", cwd="/repo", orchestration_mode="native")
+    coordinator = Coordinator()
+    save_started = asyncio.Event()
+    release_start = asyncio.Event()
+    saved_types: list[str] = []
+
+    async def ordered_save(event: dict) -> None:
+        if event["type"] == "worker_start":
+            save_started.set()
+            await release_start.wait()
+        saved_types.append(event["type"])
+
+    coordinator.turn_manager._turn_save_callbacks[sender["id"]] = ordered_save
+    coordinator.turn_manager.current_turn_workers[sender["id"]] = []
+
+    async def run() -> None:
+        panel = await coordinator._start_team_message_panel(
+            sender_session_id=sender["id"],
+            target_session_id=target["id"],
+            target=target,
+            message="ordered detached panel",
+            queue_item_id="queued-ordered",
+            run_mode=team_messaging.SOURCE,
+            await_save=False,
+        )
+        assert panel is not None
+        await save_started.wait()
+        event_task = asyncio.create_task(coordinator._forward_team_message_panel_event(
+            sender_session_id=sender["id"],
+            panel=panel,
+            event={"type": "agent_message", "data": {"content": "target output"}},
+        ))
+        complete_task = asyncio.create_task(coordinator._emit_team_message_panel_complete(
+            sender_session_id=sender["id"],
+            panel=panel,
+            success=True,
+        ))
+        await asyncio.sleep(0)
+        assert saved_types == []
+        assert not event_task.done()
+        assert not complete_task.done()
+        release_start.set()
+        await asyncio.gather(event_task, complete_task)
+
+    asyncio.run(run())
+
+    assert saved_types == ["worker_start", "worker_event", "worker_complete"]
+
+
 def test_submit_team_message_uses_delegation_message_model_preference(monkeypatch):
     sender = session_manager.create(
         name="manager",

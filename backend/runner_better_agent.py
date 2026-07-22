@@ -1938,6 +1938,8 @@ def _build_loopback_tool_handlers(
                     "reasoning_effort": str(args.get("reasoning_effort") or "").strip() or None,
                     "runner": str(args.get("runner") or "").strip() or None,
                     "sub_session": args.get("sub_session") is not False,
+                    "folder_id": args.get("folder_id"),
+                    "tag_ids": args.get("tag_ids") or [],
                 },
                 backend_url=backend_url,
                 internal_token=internal_token,

@@ -168,6 +168,12 @@ def _build_index() -> list[dict]:
             "model": data.get("model") or "",
             "reasoning_effort": data.get("reasoning_effort") or "",
             "node_id": data.get("node_id") or "primary",
+            "folder_id": data.get("folder_id") or "",
+            "tag_ids": [
+                tag.get("id")
+                for tag in data.get("session_tags") or []
+                if isinstance(tag, dict) and isinstance(tag.get("id"), str)
+            ],
         })
     # Most-recently-updated first — gives the model a useful prior when
     # multiple sessions look similar.
@@ -352,33 +358,57 @@ def canonical_search_response(flow: dict) -> dict:
     return response
 
 
-# ── Filters (provider / model / reasoning_effort / node) ────────────────
+# ── Filters ─────────────────────────────────────────────────────────────
 #
 # Exact-match filters applied to `_build_index()` entries. Each is optional;
 # `None` / "" means "no constraint". Matching is case-sensitive on the
-# canonical stored value (provider ids / model names are canonical). When any
-# filter is set the search worker is constrained to the matching candidate
-# ids AND its output is post-validated, so a worker that ignores the
-# constraint still can't surface a filtered-out session.
+# canonical stored value; tag filters require every requested tag. When any
+# filter is set the search worker is constrained to the matching candidate ids
+# and its output is post-validated.
 
-_FILTER_KEYS = ("provider_id", "model", "reasoning_effort", "node_id")
+_SCALAR_FILTER_KEYS = (
+    "provider_id",
+    "model",
+    "reasoning_effort",
+    "node_id",
+    "cwd",
+    "folder_id",
+)
+_LIST_FILTER_KEYS = ("tag_ids",)
 
 
 def _normalize_filters(**raw) -> dict:
     """Drop empty/None values. Returns `{}` when no filter is active."""
     out: dict = {}
-    for key in _FILTER_KEYS:
+    for key in _SCALAR_FILTER_KEYS:
         val = raw.get(key)
         if isinstance(val, str):
             val = val.strip()
         if val:
             out[key] = val
+    for key in _LIST_FILTER_KEYS:
+        vals = raw.get(key)
+        if not isinstance(vals, list):
+            continue
+        clean = [
+            val.strip()
+            for val in vals
+            if isinstance(val, str) and val.strip()
+        ]
+        if clean:
+            out[key] = clean
     return out
 
 
 def _matches_filters(stub: dict, filters: dict) -> bool:
-    for key, want in filters.items():
+    for key in _SCALAR_FILTER_KEYS:
+        want = filters.get(key)
         if want and stub.get(key) != want:
+            return False
+    tag_ids = filters.get("tag_ids")
+    if tag_ids:
+        have = stub.get("tag_ids")
+        if not isinstance(have, list) or not set(tag_ids).issubset(set(have)):
             return False
     return True
 
@@ -649,6 +679,9 @@ async def run_search_sessions_session(
     model: Optional[str] = None,
     reasoning_effort: Optional[str] = None,
     node_id: Optional[str] = None,
+    cwd: Optional[str] = None,
+    folder_id: Optional[str] = None,
+    tag_ids: Optional[list[str]] = None,
 ) -> dict:
     """Run one provisioned search-worker fork and return the ranked ids.
 
@@ -657,8 +690,7 @@ async def run_search_sessions_session(
     across calls; the fork is ephemeral. When `propose` is set, also stamps
     the picker on `propose_target`/`propose_msg_id` in the same call.
 
-    Optional filters (`provider_id` / `model` / `reasoning_effort` /
-    `node_id`) narrow the candidate set BEFORE the worker runs: the worker
+    Optional filters narrow the candidate set BEFORE the worker runs: the worker
     is constrained to the matching ids and its output is post-validated
     against the same filters, so a worker that ignores the constraint still
     cannot surface a filtered-out session. An empty candidate set short-
@@ -676,6 +708,9 @@ async def run_search_sessions_session(
         model=model,
         reasoning_effort=reasoning_effort,
         node_id=node_id,
+        cwd=cwd,
+        folder_id=folder_id,
+        tag_ids=tag_ids,
     )
     with perf.timed("ask.search_candidates"):
         candidates = await asyncio.to_thread(_search_candidates, query, filters=filters)

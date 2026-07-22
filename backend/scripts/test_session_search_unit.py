@@ -40,7 +40,9 @@ if _BACKEND not in sys.path:
 
 import session_search  # noqa: E402
 import session_search_index  # noqa: E402
+import session_organization_store  # noqa: E402
 import session_store  # noqa: E402
+import config_store  # noqa: E402
 
 
 PASS = "\x1b[32mPASS\x1b[0m"
@@ -59,6 +61,11 @@ def _reset_home() -> None:
     if sessions_dir.exists():
         shutil.rmtree(sessions_dir)
     sessions_dir.mkdir(parents=True, exist_ok=True)
+    org_path = Path(_TMP_HOME) / "session_organization.json"
+    if org_path.exists():
+        org_path.unlink()
+    session_organization_store._cache_signature = None  # type: ignore[attr-defined]
+    session_organization_store._cache_data = None  # type: ignore[attr-defined]
     with session_store._summary_index_lock:  # type: ignore[attr-defined]
         session_store._summary_index.clear()  # type: ignore[attr-defined]
         session_store._summary_sorted_id_cache.clear()  # type: ignore[attr-defined]
@@ -69,6 +76,17 @@ def _reset_home() -> None:
     with session_search_index._search_cache_lock:  # type: ignore[attr-defined]
         session_search_index._search_cache.clear()  # type: ignore[attr-defined]
         session_search_index._search_inflight.clear()  # type: ignore[attr-defined]
+
+
+def _valid_provider_ids() -> tuple[str, str]:
+    providers = [
+        p.get("id")
+        for p in config_store.list_providers().get("providers", [])
+        if isinstance(p.get("id"), str) and p.get("id")
+    ]
+    if len(providers) < 2:
+        raise RuntimeError("session search filter tests require at least two providers")
+    return providers[0], providers[1]
 
 
 def _write_session(
@@ -216,6 +234,7 @@ def test_build_index_filters_hidden_and_archived() -> bool:
         "id", "name", "cwd", "project_name", "first_user_prompt",
         "updated_at", "message_count",
         "provider_id", "model", "reasoning_effort", "node_id",
+        "folder_id", "tag_ids",
     }
     if set(auth.keys()) != expected_keys:
         print(f"{FAIL} build_index fields: got {set(auth.keys())}")
@@ -639,10 +658,11 @@ def test_build_index_exposes_filter_fields() -> bool:
     """The index now carries provider/model/reasoning_effort/node_id so
     filters can match against them (node_id defaults to "primary")."""
     _reset_home()
+    provider_a, _provider_b = _valid_provider_ids()
     _write_session(
         sid="s-openai",
         messages=[{"role": "user", "content": "x"}],
-        provider_id="openai",
+        provider_id=provider_a,
         model="gpt-4o",
         reasoning_effort="high",
         node_id="laptop",
@@ -652,7 +672,7 @@ def test_build_index_exposes_filter_fields() -> bool:
         messages=[{"role": "user", "content": "x"}],
     )
     by_id = {s["id"]: s for s in session_search._build_index()}
-    if by_id["s-openai"]["provider_id"] != "openai":
+    if by_id["s-openai"]["provider_id"] != provider_a:
         print(f"{FAIL} index provider_id: {by_id['s-openai']['provider_id']!r}")
         return False
     if by_id["s-openai"]["model"] != "gpt-4o":
@@ -668,6 +688,9 @@ def test_build_index_exposes_filter_fields() -> bool:
     if by_id["s-default"]["node_id"] != "primary":
         print(f"{FAIL} index default node_id: {by_id['s-default']['node_id']!r}")
         return False
+    if by_id["s-default"]["folder_id"] != "" or by_id["s-default"]["tag_ids"] != []:
+        print(f"{FAIL} index default organization fields: {by_id['s-default']!r}")
+        return False
     print(f"{PASS} _build_index exposes provider/model/effort/node fields")
     return True
 
@@ -676,22 +699,23 @@ def test_validate_proposed_applies_filters() -> bool:
     """validate_proposed keeps only ids whose index entry matches every
     non-empty filter; filtered-out ids are dropped even when they exist."""
     _reset_home()
+    provider_a, provider_b = _valid_provider_ids()
     _write_session(
         sid="claude-1",
         messages=[{"role": "user", "content": "x"}],
-        provider_id="claude",
+        provider_id=provider_a,
         model="claude-sonnet-4-5",
     )
     _write_session(
         sid="openai-1",
         messages=[{"role": "user", "content": "x"}],
-        provider_id="openai",
+        provider_id=provider_b,
         model="gpt-4o",
     )
     # provider filter narrows to claude only
     out = session_search.validate_proposed(
         ["claude-1", "openai-1"],
-        filters={"provider_id": "claude"},
+        filters={"provider_id": provider_a},
     )
     if out != ["claude-1"]:
         print(f"{FAIL} filter provider_id: got {out!r}")
@@ -707,7 +731,7 @@ def test_validate_proposed_applies_filters() -> bool:
     # combined filter: provider + model that nothing matches
     out = session_search.validate_proposed(
         ["claude-1", "openai-1"],
-        filters={"provider_id": "claude", "model": "gpt-4o"},
+        filters={"provider_id": provider_a, "model": "gpt-4o"},
     )
     if out != []:
         print(f"{FAIL} filter combined no-match: got {out!r}")
@@ -732,7 +756,7 @@ def test_run_search_sessions_short_circuits_empty_candidates() -> bool:
     _write_session(
         sid="claude-1",
         messages=[{"role": "user", "content": "x"}],
-        provider_id="claude",
+        provider_id=_valid_provider_ids()[0],
     )
     dispatched: list = []
 
@@ -765,17 +789,18 @@ def test_run_search_sessions_filter_bounds_candidates_and_postvalidates() -> boo
     payloads, and the worker's output is post-validated so any filtered-out id
     it returns is dropped."""
     _reset_home()
+    provider_a, provider_b = _valid_provider_ids()
     _write_session(
         sid="match-1",
         name="match target",
         messages=[{"role": "user", "content": "match auth"}],
-        provider_id="claude",
+        provider_id=provider_a,
     )
     _write_session(
         sid="other-1",
         name="match other",
         messages=[{"role": "user", "content": "match auth"}],
-        provider_id="openai",
+        provider_id=provider_b,
     )
 
     captured: dict = {}
@@ -796,7 +821,7 @@ def test_run_search_sessions_filter_bounds_candidates_and_postvalidates() -> boo
     try:
         out = asyncio.run(
             session_search.run_search_sessions_session(
-                "match", provider_id="claude",
+                "match", provider_id=provider_a,
             )
         )
     finally:
@@ -813,6 +838,89 @@ def test_run_search_sessions_filter_bounds_candidates_and_postvalidates() -> boo
         print(f"{FAIL} post-validate: got {out.get('session_ids')!r}")
         return False
     print(f"{PASS} filter bounds worker candidates + post-validates output")
+    return True
+
+
+def test_run_search_sessions_scope_filters_candidates_and_postvalidates() -> bool:
+    _reset_home()
+    _write_session(
+        sid="scoped-1",
+        name="scope target",
+        cwd="/repo/app",
+        messages=[{"role": "user", "content": "scope auth"}],
+    )
+    _write_session(
+        sid="wrong-cwd",
+        name="scope wrong cwd",
+        cwd="/repo/other",
+        messages=[{"role": "user", "content": "scope auth"}],
+    )
+    _write_session(
+        sid="wrong-tag",
+        name="scope wrong tag",
+        cwd="/repo/app",
+        messages=[{"role": "user", "content": "scope auth"}],
+    )
+    folder = session_organization_store.create_folder(
+        project_id="/repo/app",
+        name="Scoped",
+    )
+    tag_a = session_organization_store.create_tag(
+        project_id="/repo/app",
+        name="A",
+    )
+    tag_b = session_organization_store.create_tag(
+        project_id="/repo/app",
+        name="B",
+    )
+    tag_c = session_organization_store.create_tag(
+        project_id="/repo/app",
+        name="C",
+    )
+    session_organization_store.set_session_organization(
+        "scoped-1",
+        folder["id"],
+        [tag_a["id"], tag_b["id"]],
+    )
+    session_organization_store.set_session_organization(
+        "wrong-tag",
+        folder["id"],
+        [tag_a["id"], tag_c["id"]],
+    )
+
+    captured: dict = {}
+
+    async def _fake_run(spec, query, ctx=None, *, model=None):
+        captured["ctx"] = ctx or {}
+        return type("_R", (), {
+            "value": {
+                "session_ids": ["wrong-cwd", "wrong-tag", "scoped-1"],
+                "reasoning": "r",
+            },
+            "dispatch_result": {},
+        })()
+
+    original = session_search.provisioning.run
+    session_search.provisioning.run = _fake_run
+    try:
+        out = asyncio.run(
+            session_search.run_search_sessions_session(
+                "scope",
+                cwd="/repo/app",
+                folder_id=folder["id"],
+                tag_ids=[tag_a["id"], tag_b["id"]],
+            )
+        )
+    finally:
+        session_search.provisioning.run = original
+    candidate_ids = [row.get("id") for row in (captured.get("ctx") or {}).get("candidates", [])]
+    if candidate_ids != ["scoped-1"]:
+        print(f"{FAIL} scoped filtered candidates: {candidate_ids!r}")
+        return False
+    if out.get("session_ids") != ["scoped-1"]:
+        print(f"{FAIL} scoped post-validate: got {out.get('session_ids')!r}")
+        return False
+    print(f"{PASS} scoped filters bound candidates + post-validate output")
     return True
 
 
@@ -1000,6 +1108,7 @@ def main_run() -> int:
         test_run_search_sessions_worker_timeout,
         test_run_search_sessions_short_circuits_empty_candidates,
         test_run_search_sessions_filter_bounds_candidates_and_postvalidates,
+        test_run_search_sessions_scope_filters_candidates_and_postvalidates,
         test_empty_query_returns_empty_query_error,
         test_event_text_extracts_only_conversation_text,
         test_event_text_caps_per_event_length,

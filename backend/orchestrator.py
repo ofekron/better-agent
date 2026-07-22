@@ -529,6 +529,8 @@ class Coordinator:
         # initiated is still running. Resolved when the target's
         # user_message_done/failed fires (observed via a target WS callback).
         self._mssg_turn_waiters: dict[str, dict[str, asyncio.Future]] = {}
+        self._background_turn_save_tasks: set[asyncio.Task] = set()
+        self._panel_turn_save_tails: dict[tuple[str, str], asyncio.Task] = {}
         # Per-bc-session cancel events for in-flight worker init turns
         # spawned by POST /api/workers. DELETE /api/workers sets the
         # event so the init turn bails before the Better Agent session is fully
@@ -1371,16 +1373,40 @@ class Coordinator:
             raise RuntimeError("prompt processor cannot quiesce itself")
         for task in tasks:
             task.cancel()
-        if not tasks:
-            return
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        results = []
+        if tasks:
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+        background_results = await self._cancel_background_turn_save_tasks()
         failures = [
             result for result in results
             if isinstance(result, BaseException)
             and not isinstance(result, asyncio.CancelledError)
         ]
+        failures.extend(background_results)
         if failures:
             raise ExceptionGroup("prompt processor shutdown failed", failures)
+
+    async def _cancel_background_turn_save_tasks(self) -> list[BaseException]:
+        tasks = tuple(
+            task for task in self._background_turn_save_tasks
+            if not task.done()
+        )
+        if not tasks:
+            self._background_turn_save_tasks.clear()
+            self._panel_turn_save_tails.clear()
+            return []
+        for task in tasks:
+            task.cancel()
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        self._background_turn_save_tasks.difference_update(tasks)
+        for key, task in tuple(self._panel_turn_save_tails.items()):
+            if task in tasks:
+                self._panel_turn_save_tails.pop(key, None)
+        return [
+            result for result in results
+            if isinstance(result, BaseException)
+            and not isinstance(result, asyncio.CancelledError)
+        ]
 
     def active_prompt_for_client_id(
         self,
@@ -1599,6 +1625,7 @@ class Coordinator:
             message=message,
             queue_item_id=queue_item_id,
             run_mode=team_messaging.SOURCE,
+            await_save=not detach,
         )
         cancel_panel_watch = None
         if panel is not None:
@@ -1885,6 +1912,9 @@ class Coordinator:
         run_mode: str = "direct",
         folder_id: Optional[str] = None,
         tag_ids: Optional[list[str]] = None,
+        search_cwd: Optional[str] = None,
+        search_folder: Optional[str] = None,
+        search_tags: Optional[list[str]] = None,
     ) -> dict:
         """The `delegate_task` router. Per the global `delegate_task_policy`:
         resolve a target (caller-supplied → search first suggestion → create
@@ -1943,9 +1973,16 @@ class Coordinator:
                 created = True
             else:  # auto / manual → search_sessions, take the first usable suggestion
                 try:
+                    search_kwargs = {"provider_id": delegate_search_provider_id}
+                    if search_cwd:
+                        search_kwargs["cwd"] = search_cwd
+                    if search_folder:
+                        search_kwargs["folder_id"] = search_folder
+                    if search_tags is not None:
+                        search_kwargs["tag_ids"] = search_tags
                     suggestion = await session_search.run_search_sessions_session(
                         task,
-                        provider_id=delegate_search_provider_id,
+                        **search_kwargs,
                     )
                 except Exception:
                     logger.exception("delegate_task: session_search failed")
@@ -2170,6 +2207,49 @@ class Coordinator:
         loop.create_task(watch(), name=f"team-message-panel-{target_session_id[:8]}")
         return cancel_watch
 
+    def _schedule_ordered_panel_turn_save(
+        self,
+        *,
+        sender_session_id: str,
+        delegation_id: str,
+        turn_save,
+        event: dict,
+        label: str,
+    ) -> asyncio.Task:
+        key = (sender_session_id, delegation_id)
+        previous = self._panel_turn_save_tails.get(key)
+
+        async def run_save() -> None:
+            if previous is not None:
+                await asyncio.shield(previous)
+            await turn_save(event)
+
+        task = asyncio.create_task(
+            run_save(),
+            name=f"{label}-{sender_session_id[:8]}",
+        )
+        self._background_turn_save_tasks.add(task)
+        self._panel_turn_save_tails[key] = task
+
+        def done(fut: asyncio.Task) -> None:
+            self._background_turn_save_tasks.discard(fut)
+            if self._panel_turn_save_tails.get(key) is fut:
+                self._panel_turn_save_tails.pop(key, None)
+            if fut.cancelled():
+                return
+            exc = fut.exception()
+            if exc is None:
+                return
+            logger.error(
+                "%s failed for sender session %s",
+                label,
+                sender_session_id[:8],
+                exc_info=(type(exc), exc, exc.__traceback__),
+            )
+
+        task.add_done_callback(done)
+        return task
+
     async def _start_team_message_panel(
         self,
         *,
@@ -2179,6 +2259,7 @@ class Coordinator:
         message: str,
         queue_item_id: str,
         run_mode: str,
+        await_save: bool = True,
     ) -> Optional[dict]:
         turn_save = self.turn_manager.get_turn_save_callback(sender_session_id)
         panels = self.turn_manager.current_turn_workers.get(sender_session_id)
@@ -2212,7 +2293,7 @@ class Coordinator:
             "token_usage": None,
         }
         panels.append(panel)
-        await turn_save({"type": "worker_start", "data": {
+        worker_start = {"type": "worker_start", "data": {
             "delegation_id": delegation_id,
             "worker_session_id": target_session_id,
             "worker_description": description,
@@ -2226,7 +2307,24 @@ class Coordinator:
             "run_mode": run_mode,
             "is_new": False,
             "instructions_preview": message[:2000],
-        }})
+        }}
+        if await_save:
+            task = self._schedule_ordered_panel_turn_save(
+                sender_session_id=sender_session_id,
+                delegation_id=delegation_id,
+                turn_save=turn_save,
+                event=worker_start,
+                label="team-message-worker-start-save",
+            )
+            await asyncio.shield(task)
+        else:
+            self._schedule_ordered_panel_turn_save(
+                sender_session_id=sender_session_id,
+                delegation_id=delegation_id,
+                turn_save=turn_save,
+                event=worker_start,
+                label="team-message-worker-start-save",
+            )
         return panel
 
     async def emit_session_created_panel(
@@ -2303,16 +2401,26 @@ class Coordinator:
         turn_save = self.turn_manager.get_turn_save_callback(sender_session_id)
         if turn_save is None:
             return
-        await turn_save({"type": "worker_complete", "data": {
-            "delegation_id": panel["delegation_id"],
-            "worker_session_id": panel["worker_session_id"],
-            "jsonl_path": None,
-            "new_byte_offset": None,
-            "token_usage": None,
-            "success": success,
-            "error": error,
-            "run_mode": panel.get("run_mode"),
-        }})
+        task = self._schedule_ordered_panel_turn_save(
+            sender_session_id=sender_session_id,
+            delegation_id=panel["delegation_id"],
+            turn_save=turn_save,
+            event={
+                "type": "worker_complete",
+                "data": {
+                    "delegation_id": panel["delegation_id"],
+                    "worker_session_id": panel["worker_session_id"],
+                    "jsonl_path": None,
+                    "new_byte_offset": None,
+                    "token_usage": None,
+                    "success": success,
+                    "error": error,
+                    "run_mode": panel.get("run_mode"),
+                },
+            },
+            label="team-message-worker-complete-save",
+        )
+        await asyncio.shield(task)
 
     async def _forward_team_message_panel_event(
         self,
@@ -2340,10 +2448,20 @@ class Coordinator:
         turn_save = self.turn_manager.get_turn_save_callback(sender_session_id)
         if turn_save is None:
             return
-        await turn_save({"type": "worker_event", "data": {
-            "delegation_id": panel["delegation_id"],
-            "event": event,
-        }})
+        task = self._schedule_ordered_panel_turn_save(
+            sender_session_id=sender_session_id,
+            delegation_id=panel["delegation_id"],
+            turn_save=turn_save,
+            event={
+                "type": "worker_event",
+                "data": {
+                    "delegation_id": panel["delegation_id"],
+                    "event": event,
+                },
+            },
+            label="team-message-worker-event-save",
+        )
+        await asyncio.shield(task)
 
     async def ask_team_message(
         self,

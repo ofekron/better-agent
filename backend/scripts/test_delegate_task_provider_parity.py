@@ -62,14 +62,20 @@ def test_delegate_task_schema_is_shared_by_runner_providers() -> None:
         "provider_id",
         "model",
         "reasoning_effort",
+        "runner",
         "sub_session",
         "cwd",
+        "folder_id",
+        "tag_ids",
     }
     assert properties["target_session_id"]["type"] == "string"
     assert properties["provider_id"]["type"] == "string"
     assert properties["model"]["type"] == "string"
     assert properties["reasoning_effort"]["type"] == "string"
+    assert properties["runner"]["type"] == "string"
     assert properties["cwd"]["type"] == "string"
+    assert properties["folder_id"]["type"] == "string"
+    assert properties["tag_ids"]["type"] == "array"
 
 
 def test_claude_delegate_task_posts_shared_payload() -> None:
@@ -116,7 +122,10 @@ def test_claude_delegate_task_posts_shared_payload() -> None:
         "provider_id": "provider-1",
         "model": "model-1",
         "reasoning_effort": "high",
+        "runner": None,
         "sub_session": False,
+        "folder_id": None,
+        "tag_ids": [],
     }
 
 
@@ -183,7 +192,7 @@ def test_gemini_delegate_task_posts_shared_payload() -> None:
     assert result["success"] is True
     endpoint, payload, timeout = captured[0]
     assert endpoint == "/api/internal/delegate-task"
-    assert timeout == communicate_mcp._LONG_TIMEOUT
+    assert timeout == 30.0
     assert payload["target_session_id"] is None
     assert payload["provider_id"] == "provider-1"
     assert payload["model"] == "model-1"
