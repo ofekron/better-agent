@@ -1484,6 +1484,13 @@ def _build_mssg_tool(
     internal_token: str,
 ):
     def _post_mssg_sync(payload: dict) -> dict:
+        # 30s covers the enqueue path (isolated onto _TEAM_MESSAGE_EXECUTOR
+        # per 5c31f0d25 — no longer starved by unrelated slow callers on the
+        # shared default thread pool). A slow ack that still exceeds this
+        # under host-level memory pressure (swap thrashing stalling disk
+        # I/O for every thread regardless of pool) is a separate, known
+        # environment/capacity limitation, not an application bug — do not
+        # re-diagnose as pool contention before checking host memory/swap.
         return _post_loopback_sync(
             payload,
             backend_url=backend_url,
@@ -2107,6 +2114,10 @@ def _build_ask_tool(
         }
 
         def _post_ask_sync() -> dict:
+            # Async-mode 30s: same enqueue-path isolation as mssg (see the
+            # comment on `_post_mssg_sync`) — a slow ack past this bound
+            # under host memory pressure is a separate, known environment
+            # limitation, not pool contention re-emerging.
             return _post_loopback_sync(
                 payload,
                 backend_url=backend_url,
