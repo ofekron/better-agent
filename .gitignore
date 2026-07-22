@@ -73,6 +73,9 @@ test-results/
 testape
 run_results.txt
 frontend/.dist-refresh-4807
+/frontend/android/app/google-services.json
+/frontend/ios/App/App/GoogleService-Info.plist
+**/config/*service_account*.json
 
 # Added by ggshield
 .cache_ggshield
