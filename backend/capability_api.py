@@ -325,7 +325,6 @@ class _RoutineCreatePayload(_StrictPayload):
     description: str = ""
     orchestration_mode: str = "native"
     worker_creation_policy: str = "approve"
-    session_type: str = "normal"
     model: str | None = None
     provider_id: str | None = None
     reasoning_effort: str | None = None
@@ -352,6 +351,16 @@ class _RoutineUpdatePayload(_RoutineIdPayload):
 class _RoutineRunPayload(_RoutineIdPayload):
     prompt: str | None = None
     client_id: str | None = None
+
+
+class _RoutineMemoryReadPayload(_StrictPayload):
+    app_session_id: str = Field(min_length=1)
+
+
+class _RoutineMemoryCommitPayload(_RoutineMemoryReadPayload):
+    expected_revision: int = Field(ge=0)
+    content: str
+    format: str = Field(min_length=1, max_length=128)
 
 
 class _RoutineOutputsListPayload(_RoutineIdPayload):
@@ -1097,6 +1106,36 @@ def _register_private_workflows() -> None:
             "routines", action, schema,
             _role_main_handler("routines", "internal_tasks", action=action),
         )
+
+    async def routine_memory_read(payload: BaseModel) -> Any:
+        import routine_memory
+
+        try:
+            snapshot = await routine_memory.read(payload.app_session_id)
+        except routine_memory.RoutineMemoryAccessError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        return {"success": True, **snapshot}
+
+    async def routine_memory_commit(payload: BaseModel) -> Any:
+        import routine_memory
+
+        try:
+            return await routine_memory.commit(
+                payload.app_session_id,
+                expected_revision=payload.expected_revision,
+                content=payload.content,
+                memory_format=payload.format,
+            )
+        except routine_memory.RoutineMemoryAccessError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except routine_memory.RoutineMemoryValidationError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except routine_memory.RoutineMemoryBusyError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    register("routines", "memory.read", _RoutineMemoryReadPayload, routine_memory_read)
+    register("routines", "memory.commit", _RoutineMemoryCommitPayload, routine_memory_commit)
+
     output_actions = {
         "outputs.list": _RoutineOutputsListPayload,
         "outputs.publish": _RoutineOutputsPublishPayload,

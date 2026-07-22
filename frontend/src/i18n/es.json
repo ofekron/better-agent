@@ -84,7 +84,6 @@
   "sidebar.sessionsTab": "Sesiones",
   "sidebar.workersTab": "Workers",
   "sidebar.routinesTab": "Rutinas",
-  "routines.sessionType.provisionedForkWithMemory": "Bifurcación aprovisionada con memoria",
   "app.reconciling": "Reconciliando…",
   "app.reconcilingTitle": "El backend está reconciliando eventos rezagados. Se muestra solo cuando >0.3s.",
   "app.supervisorBannerDismiss": "Descartar",

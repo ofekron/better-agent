@@ -7,14 +7,6 @@ import re
 from datetime import datetime
 from typing import Any, Optional
 
-from task_session_types import (
-    FORKED as FORKED_SESSION_TYPES,
-    NORMAL as NORMAL_SESSION_TYPE,
-    PROVISIONED as PROVISIONED_SESSION_TYPES,
-    PROVISIONED_DIRECT,
-    has_memory,
-)
-
 logger = logging.getLogger(__name__)
 
 _TASK_ID_PATTERN = re.compile(r"^[0-9a-f]{12}$")
@@ -83,21 +75,20 @@ def _routine_run_prompt(task: dict, prompt: str) -> str:
 
 
 def _routine_memory_prompt(task: dict) -> str:
-    if not has_memory(str(task.get("session_type") or "")):
-        return ""
     task_id = str(task.get("id") or "").strip()
     if not _TASK_ID_PATTERN.fullmatch(task_id):
-        raise ValueError("memory-enabled routine has an invalid id")
+        raise ValueError("routine has an invalid memory identity")
     return (
-        "You own the persistent memory directory at "
-        f"routine-memory/{task_id} under the directory specified by the "
-        "BETTER_AGENT_HOME environment variable. "
-        "Create and maintain your own memory layer there. "
-        "Choose how it works and what it contains."
+        "Your persistent routine memory is core-owned. Read it with the "
+        "routine_memory_read tool and commit changes with routine_memory_commit. "
+        "Choose the memory format and contents, but do not read or write routine "
+        "memory through the filesystem. Commits are revision-checked and serialized "
+        "with lock_ops. If a commit reports revision_conflict, merge the returned "
+        "current snapshot with your changes and retry using its revision."
     )
 
 
-def _resolve_singleton_session(task: dict):
+def _resolve_singleton_session(task: dict, base_session_id: str):
     from session_manager import manager as session_manager
     from stores import task_store
 
@@ -105,7 +96,11 @@ def _resolve_singleton_session(task: dict):
     if not sid:
         return None
     existing = session_manager.get_lite(sid)
-    if existing is None or existing.get("storage_scope") != _routine_storage_scope(task):
+    if (
+        existing is None
+        or existing.get("storage_scope") != _routine_storage_scope(task)
+        or existing.get("parent_session_id") != base_session_id
+    ):
         task_store.clear_singleton_session(task["id"])
         return None
     return existing
@@ -122,10 +117,11 @@ def _routine_spec_version(task: dict) -> int:
 
 
 def _routine_storage_scope(task: dict) -> dict:
-    scope = {"kind": "routine", "routine_id": str(task.get("id") or "").strip()}
-    if has_memory(str(task.get("session_type") or "")):
-        scope["memory"] = True
-    return scope
+    return {
+        "kind": "routine",
+        "routine_id": str(task.get("id") or "").strip(),
+        "memory": True,
+    }
 
 
 def _provisioned_task_spec(
@@ -194,33 +190,6 @@ async def _resolve_launch_session(
 
     from session_manager import manager as session_manager
 
-    session_type = task.get("session_type") or NORMAL_SESSION_TYPE
-    if task.get("singleton"):
-        session = await asyncio.to_thread(_resolve_singleton_session, task)
-        if session is not None:
-            return session, True
-
-    if session_type == NORMAL_SESSION_TYPE:
-        session = await asyncio.to_thread(
-            lambda: session_manager.create(
-                name=task.get("name") or "Routine",
-                model=model,
-                cwd=task.get("cwd") or "",
-                orchestration_mode=task.get("orchestration_mode") or "native",
-                source="web",
-                provider_id=provider_id,
-                runner=runner,
-                reasoning_effort=reasoning_effort,
-                permission=task.get("permission"),
-                node_id=task.get("node_id") or "primary",
-                worker_creation_policy=task.get("worker_creation_policy") or "approve",
-                user_initiated=True,
-                capability_contexts=task.get("capability_contexts") or [],
-                storage_scope=_routine_storage_scope(task),
-            )
-        )
-        return session, False
-
     import provisioning
 
     spec = _provisioned_task_spec(
@@ -232,23 +201,22 @@ async def _resolve_launch_session(
     )
     cfg = provisioning.resolve_config(spec)
     base_session_id = await provisioning.ensure_warm_base(spec, cfg)
-    if session_type == PROVISIONED_DIRECT:
-        session = await asyncio.to_thread(session_manager.get, base_session_id)
-        if session is None:
-            raise TaskLaunchError("provisioned base session disappeared", status=409)
-        return session, False
-    if session_type in FORKED_SESSION_TYPES:
+    if task.get("singleton"):
         session = await asyncio.to_thread(
-            session_manager.fork,
-            base_session_id,
-            task.get("name") or "Routine",
-            user_initiated=True,
+            _resolve_singleton_session, task, base_session_id,
         )
-        return session, False
-    raise TaskLaunchError(f"unsupported session_type: {session_type}", status=400)
+        if session is not None:
+            return session, True
+    session = await asyncio.to_thread(
+        session_manager.fork,
+        base_session_id,
+        task.get("name") or "Routine",
+        user_initiated=True,
+    )
+    return session, False
 
 
-async def launch_task(
+async def _launch_task_once(
     task_id: str,
     *,
     coordinator,
@@ -358,8 +326,7 @@ async def launch_task(
         raise TaskLaunchError(f"could not create task session: {exc}", status=400) from exc
 
     session_id = session["id"]
-    if task.get("session_type") in PROVISIONED_SESSION_TYPES:
-        prompt = _routine_run_prompt(task, str(run_prompt))
+    prompt = _routine_run_prompt(task, str(run_prompt))
 
     if event_receipt_id is not None:
         status, admission = await asyncio.to_thread(
@@ -370,14 +337,28 @@ async def launch_task(
             now=datetime.now(),
         )
         if status == "duplicate":
+            admitted_session_id = str((admission or {}).get("session_id") or session_id)
+            if admitted_session_id != session_id and not reused:
+                deleted = await asyncio.to_thread(session_manager.delete, session_id)
+                if not deleted:
+                    raise TaskLaunchError(
+                        "duplicate trigger cleanup failed", status=500,
+                    )
             return {
                 "task_id": task_id,
-                "session_id": session_id,
+                "session_id": admitted_session_id,
                 "queue_item_id": (admission or {}).get("queue_item_id"),
                 "reused": True,
                 "source": source,
             }
         if status != "admitted":
+            if not reused:
+                deleted = await asyncio.to_thread(session_manager.delete, session_id)
+                if not deleted:
+                    raise TaskLaunchError(
+                        f"turn-end trigger admission rejected: {status}; cleanup failed",
+                        status=500,
+                    )
             raise TaskLaunchError(
                 f"turn-end trigger admission rejected: {status}",
                 status=409,
@@ -399,10 +380,6 @@ async def launch_task(
 
     item_id = None
     if task.get("singleton"):
-        # A singleton task reuses one session across fires. If a scheduled
-        # trigger fires again while the previous fire is still queued behind
-        # an in-flight run, collapse into that queued item instead of piling
-        # up an unbounded backlog of stale "check now" prompts.
         import team_messaging
 
         collapse_key = f"routine:{task_id}"
@@ -459,6 +436,62 @@ async def launch_task(
     }
 
 
+async def launch_task(
+    task_id: str,
+    *,
+    coordinator,
+    prompt_override: Optional[str] = None,
+    client_id: Optional[str] = None,
+    source: str = "manual",
+    event_receipt_id: Optional[str] = None,
+) -> dict[str, Any]:
+    import asyncio
+
+    import coordination
+    from stores import task_store
+
+    task = await asyncio.to_thread(task_store.get, task_id)
+    params = {
+        "coordinator": coordinator,
+        "prompt_override": prompt_override,
+        "client_id": client_id,
+        "source": source,
+        "event_receipt_id": event_receipt_id,
+    }
+    if task is None or not task.get("singleton"):
+        return await _launch_task_once(task_id, **params)
+
+    lock_key = f"routine_launch:{task_id}"
+    acquired = await coordination.lock_ops(
+        key=lock_key,
+        timeout_seconds=60,
+        lease_seconds=15 * 60,
+        owner={"source": "routine_launch"},
+    )
+    if acquired.get("success") is not True:
+        raise TaskLaunchError(
+            str(acquired.get("error") or "routine launch is busy"), status=409,
+        )
+    import routine_lock
+
+    lock_fd = None
+    try:
+        lock_fd = await asyncio.to_thread(routine_lock.acquire, "launch", task_id)
+        return await _launch_task_once(task_id, **params)
+    finally:
+        try:
+            if lock_fd is not None:
+                await asyncio.to_thread(routine_lock.release, lock_fd)
+        finally:
+            released = await coordination.lock_ops(
+                key=lock_key,
+                release=True,
+                holder_token=str(acquired.get("holder_token") or ""),
+            )
+            if released.get("success") is not True:
+                logger.error("routine launch lock release failed for %s", task_id)
+
+
 async def stop_task(task_id: str, *, coordinator) -> dict[str, Any]:
     """Stop a routine and tear down everything it spawned: mark it stopped
     (blocks new launches, fail-closed first), drop its armed triggers, and
@@ -477,8 +510,6 @@ async def stop_task(task_id: str, *, coordinator) -> dict[str, Any]:
     await asyncio.to_thread(task_trigger_store.unregister_task, task_id)
 
     session_ids = [s for s in (task.get("spawned_session_ids") or []) if s]
-    if task.get("singleton_session_id") and task["singleton_session_id"] not in session_ids:
-        session_ids.append(task["singleton_session_id"])
 
     # One store read for schedule attribution instead of a read per sid.
     ledger = set(session_ids)

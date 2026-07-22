@@ -179,11 +179,10 @@ def main() -> int:
     legacy = {
         "id": "legacy1",
         "recent_runs": [{"session_id": "old-a"}, {"session_id": "old-b"}],
-        "singleton_session_id": "old-c",
     }
     normalized = task_store._normalize_task(dict(legacy))
-    check(normalized["spawned_session_ids"] == ["old-a", "old-b", "old-c"],
-          "ledger seeded from recent_runs + singleton")
+    check(normalized["spawned_session_ids"] == ["old-a", "old-b"],
+          "ledger seeded from recent_runs")
     check(normalized["stopped"] is False, "legacy records default to not stopped")
 
     print("T7 update cannot stop — only the stop action can")

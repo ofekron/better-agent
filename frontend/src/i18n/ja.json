@@ -84,7 +84,6 @@
   "sidebar.sessionsTab": "セッション",
   "sidebar.workersTab": "ワーカー",
   "sidebar.routinesTab": "ルーチン",
-  "routines.sessionType.provisionedForkWithMemory": "メモリ付きプロビジョニング済みフォーク",
   "app.reconciling": "整合中…",
   "app.reconcilingTitle": "バックエンドが遅延イベントを整合しています。0.3 秒を超える場合のみ表示されます。",
   "app.supervisorBannerDismiss": "閉じる",

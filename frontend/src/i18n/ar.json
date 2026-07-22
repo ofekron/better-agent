@@ -84,7 +84,6 @@
   "sidebar.sessionsTab": "الجلسات",
   "sidebar.workersTab": "العمّال",
   "sidebar.routinesTab": "الإجراءات الروتينية",
-  "routines.sessionType.provisionedForkWithMemory": "تفرع مُجهّز مع ذاكرة",
   "app.reconciling": "جارٍ التسوية…",
   "app.reconcilingTitle": "الخادم يقوم بتسوية الأحداث المتأخرة. يظهر فقط عندما يكون >0.3 ث.",
   "app.supervisorBannerDismiss": "إخفاء",

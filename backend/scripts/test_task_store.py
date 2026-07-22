@@ -27,6 +27,7 @@ def main() -> int:
     check(task_store.get(t1["id"]) is not None, "create+get")
     check(t1["orchestration_mode"] == "native", "default mode native")
     check(t1["worker_creation_policy"] == "approve", "default policy approve")
+    check("session_type" not in t1, "routine execution type is not configurable")
     check(t1["run_count"] == 0 and t1["recent_runs"] == [], "fresh run state")
     task_store.create(cwd="/proj", name="Lint", prompt="ruff check")
     task_store.create(cwd="/other", name="Build", prompt="make")
@@ -67,6 +68,11 @@ def main() -> int:
         check(False, "update accepted empty name")
     except ValueError:
         check(True, "update rejects empty name")
+    try:
+        task_store.update(tm["id"], {"session_type": "normal"})
+        check(False, "update accepted a routine session type")
+    except ValueError:
+        check(True, "update rejects routine session type selection")
     check(task_store.update("nope", {"name": "x"}) is None, "update unknown -> None")
     upd2 = task_store.update(tm["id"], {"cwd": "/evil"})
     check(upd2 is not None and upd2["cwd"] == "/p", "cwd immutable via update")
@@ -78,7 +84,9 @@ def main() -> int:
     check(rec["run_count"] == 1, "run_count bumped")
     check(rec["recent_runs"][0]["session_id"] == "sessA", "recent_runs prepended")
     check(rec["last_run_at"] is not None, "last_run_at stamped")
-    check(rec["singleton_session_id"] == "sessA", "singleton binding set")
+    updated_rt = task_store.update(rt["id"], {"description": "new provision spec"})
+    check(updated_rt["singleton_session_id"] is None,
+          "update invalidates provisioned singleton fork")
     for i in range(task_store.MAX_RECENT_RUNS + 3):
         task_store.record_run(rt["id"], f"sess{i}")
     rec = task_store.get(rt["id"])
@@ -89,14 +97,11 @@ def main() -> int:
     check(after == before, "re-run same session de-dups in recent_runs")
 
     print("T5 session-reference cleanup")
-    bound = task_store.get(rt["id"])["singleton_session_id"]
+    bound = task_store.get(rt["id"])["recent_runs"][0]["session_id"]
     changed = task_store.drop_session_references(bound)
     check(rt["id"] in changed, "drop_session_references reports changed task")
     rec = task_store.get(rt["id"])
-    check(rec["singleton_session_id"] is None, "singleton binding cleared on delete")
     check(all(r["session_id"] != bound for r in rec["recent_runs"]), "breadcrumb removed")
-    check(task_store.clear_singleton_session(rt["id"])["singleton_session_id"] is None,
-          "clear_singleton_session idempotent")
 
     print("T6 per-project cap")
     capcwd = "/capproj"
@@ -108,10 +113,14 @@ def main() -> int:
     except ValueError:
         check(True, f"per-project cap enforced at {task_store.MAX_PER_PROJECT}")
 
-    print("T7 schema-version mismatch -> loud empty")
+    print("T7 schema-version mismatch -> explicit wipe requirement")
     task_store._path().write_text('{"version": 999, "tasks": [{}]}')
-    check(task_store.list_for_project("/proj") == [],
-          "bad version reads as empty (wipe to start fresh)")
+    task_store._data_cache = None
+    try:
+        task_store.list_for_project("/proj")
+        check(False, "bad version was accepted")
+    except RuntimeError as exc:
+        check("delete the file to start fresh" in str(exc), "bad version requires explicit wipe")
 
     print("T8 trigger validation")
     check(task_store._coerce_trigger(None) == {"kind": "manual", "config": {}},

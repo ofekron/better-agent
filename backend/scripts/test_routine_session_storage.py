@@ -14,6 +14,7 @@ _TMP_HOME = _test_home.isolate("bc-test-routine-session-storage-")
 
 import event_ingester  # noqa: E402
 import native_files_manager  # noqa: E402
+import provisioning  # noqa: E402
 import session_manager as session_manager_mod  # noqa: E402
 import session_miner  # noqa: E402
 import session_queue_projection  # noqa: E402
@@ -32,36 +33,58 @@ def check(cond, msg):
 
 
 async def _create_routine_session() -> dict:
-    return (
-        await task_runner._resolve_launch_session(
-            {
-                "id": "routine-alpha",
-                "name": "Routine Alpha",
-                "cwd": "/tmp/routine-alpha",
-                "orchestration_mode": "native",
-                "worker_creation_policy": "approve",
-                "session_type": "normal",
-            },
-            model="model-a",
-            provider_id="provider-a",
-            reasoning_effort=None,
-        )
-    )[0]
+    task = {
+        "id": "a" * 12,
+        "name": "Routine Alpha",
+        "cwd": "/tmp/routine-alpha",
+        "orchestration_mode": "native",
+        "worker_creation_policy": "approve",
+    }
+    base = session_manager_mod.manager.create(
+        name="Routine Alpha Base",
+        cwd=task["cwd"],
+        model="model-a",
+        provider_id=None,
+        storage_scope=task_runner._routine_storage_scope(task),
+    )
+    session_manager_mod.manager.set_agent_sid(base["id"], "native", "provider-parent-sid")
+    original_resolve = provisioning.resolve_config
+    original_ensure = provisioning.ensure_warm_base
+    provisioning.resolve_config = lambda spec: spec.build_config()
+
+    async def ensure_warm_base(_spec, _cfg):
+        return base["id"]
+
+    provisioning.ensure_warm_base = ensure_warm_base
+    try:
+        return (
+            await task_runner._resolve_launch_session(
+                task,
+                model="model-a",
+                provider_id=None,
+                reasoning_effort=None,
+                runner="",
+            )
+        )[0]
+    finally:
+        provisioning.resolve_config = original_resolve
+        provisioning.ensure_warm_base = original_ensure
 
 
 def test_routine_session_uses_routine_directory():
     print("T1 routine launch stores root outside sessions dir")
     session = asyncio.run(_create_routine_session())
     sid = session["id"]
-    expected = ba_home() / "routine-sessions" / "routine-alpha" / f"{sid}.json"
+    root_id = session["parent_session_id"]
+    expected = ba_home() / "routine-sessions" / ("a" * 12) / f"{root_id}.json"
     flat = ba_home() / "sessions" / f"{sid}.json"
     check(Path(session_store.session_file_path(sid)) == expected, "session_file_path resolves routine path")
     check(expected.exists(), "routine session root written under routine directory")
     check(not flat.exists(), "routine session root not written under sessions directory")
     check(session_store.get_session(sid)["id"] == sid, "get_session reads scoped root")
-    check(session_store.get_root_tree(sid)["id"] == sid, "get_root_tree reads scoped root")
+    check(session_store.get_root_tree(sid)["id"] == root_id, "get_root_tree reads scoped root")
     listed_ids = {item["id"] for item in session_store.list_sessions()}
-    check(sid in listed_ids, "list_sessions includes scoped routine root")
+    check(root_id in listed_ids, "list_sessions includes scoped routine root")
     check(event_ingester.event_ingester._events_path(sid) == expected.parent / sid / "events.jsonl",
           "event ingester stores events beside scoped root")
     seq = event_ingester.event_ingester.ingest(
@@ -75,8 +98,8 @@ def test_routine_session_uses_routine_directory():
     terminal = user_msg_lifecycle.terminal_event_for_lifecycle(sid, "life-1")
     check(terminal is not None and terminal["type"] == "user_message_done",
           "lifecycle lookup reads scoped events jsonl")
-    native_path = native_files_manager.native_files._native_paths_path(sid)
-    check(native_path == expected.parent / sid / "native_paths",
+    native_path = native_files_manager.native_files._native_paths_path(root_id)
+    check(native_path == expected.parent / root_id / "native_paths",
           "native path sidecar lives beside scoped root")
 
 
@@ -86,12 +109,13 @@ def test_scoped_roots_feed_projections_and_mining():
         name="Scoped Direct",
         cwd="/tmp/scoped-direct",
         model="model-b",
-        provider_id="provider-b",
+        provider_id=None,
         storage_scope={"kind": "routine", "routine_id": "routine-beta"},
     )
     sid = session["id"]
     fingerprint = session_queue_projection._session_files_fingerprint()
-    check(sid in fingerprint, "queue projection fingerprints scoped root")
+    check(any(key.endswith(f"/{sid}.json") for key in fingerprint),
+          "queue projection fingerprints scoped root")
     rebuilt = session_queue_projection.rebuild_from_disk()
     check(rebuilt >= 1, "queue projection rebuild sees scoped root")
     visits = list(session_miner.SessionMiner({}))
@@ -104,7 +128,7 @@ def test_delete_cleans_scoped_sidecars():
         name="Scoped Delete",
         cwd="/tmp/scoped-delete",
         model="model-c",
-        provider_id="provider-c",
+        provider_id=None,
         storage_scope={"kind": "routine", "routine_id": "routine-delete"},
     )
     sid = session["id"]
@@ -123,24 +147,16 @@ def test_delete_cleans_scoped_sidecars():
     check(all(not path.exists() for path in sidecars), "scoped sidecars removed")
 
 
-def test_reuse_paths_require_matching_scope():
-    print("T4 routine reuse paths require scoped sessions")
-    flat = session_manager_mod.manager.create(
-        name="Flat Singleton",
-        cwd="/tmp/flat-singleton",
-        model="model-d",
-        provider_id="provider-d",
-    )
-    task = {"id": "routine-singleton", "singleton_session_id": flat["id"]}
-    check(task_runner._resolve_singleton_session(task) is None,
-          "flat singleton is not reused for routine")
+def test_provisioned_spec_requires_memory_scope():
+    print("T4 provisioned routines carry memory scope")
     spec = task_runner._provisioned_task_spec(
-        {"id": "routine-provisioned", "name": "Provisioned", "cwd": "/tmp/prov"},
+        {"id": "b" * 12, "name": "Provisioned", "cwd": "/tmp/prov"},
         model="model-e",
         provider_id="provider-e",
         reasoning_effort=None,
+        runner="",
     )
-    check(spec.storage_scope == {"kind": "routine", "routine_id": "routine-provisioned"},
+    check(spec.storage_scope == {"kind": "routine", "routine_id": "b" * 12, "memory": True},
           "routine provisioned spec carries routine storage scope")
 
 
@@ -148,7 +164,7 @@ def main() -> int:
     test_routine_session_uses_routine_directory()
     test_scoped_roots_feed_projections_and_mining()
     test_delete_cleans_scoped_sidecars()
-    test_reuse_paths_require_matching_scope()
+    test_provisioned_spec_requires_memory_scope()
     print()
     if failures:
         print(f"{len(failures)} FAILURES")

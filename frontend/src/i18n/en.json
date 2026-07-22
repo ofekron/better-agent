@@ -84,7 +84,6 @@
   "sidebar.sessionsTab": "Sessions",
   "sidebar.workersTab": "Workers",
   "sidebar.routinesTab": "Routines",
-  "routines.sessionType.provisionedForkWithMemory": "Provisioned fork with memory",
   "app.reconciling": "Reconciling…",
   "app.reconcilingTitle": "Backend is reconciling lagged events. Shown only when >0.3s.",
   "app.supervisorBannerDismiss": "Dismiss",

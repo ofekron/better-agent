@@ -11,11 +11,10 @@ from typing import Optional
 
 from json_store import write_json
 from paths import ba_home
-from task_session_types import VALID as VALID_SESSION_TYPES
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 MAX_PER_PROJECT = 100
 MAX_NAME_LEN = 200
@@ -76,17 +75,13 @@ def _read() -> dict:
         )
         return _empty()
     if not isinstance(raw, dict) or raw.get("version") != SCHEMA_VERSION:
-        logger.error(
-            "task_store: unexpected shape/version at %s (expected %s, got "
-            "%r) - returning empty store. Delete the file to start fresh.",
-            path, SCHEMA_VERSION,
-            raw.get("version") if isinstance(raw, dict) else type(raw).__name__,
+        actual = raw.get("version") if isinstance(raw, dict) else type(raw).__name__
+        raise RuntimeError(
+            f"task_store: unsupported shape/version at {path} "
+            f"(expected {SCHEMA_VERSION}, got {actual!r}); delete the file to start fresh"
         )
-        return _empty()
-    raw.setdefault("tasks", [])
-    if not isinstance(raw["tasks"], list):
-        logger.error("task_store: 'tasks' is not a list - returning empty store")
-        return _empty()
+    if not isinstance(raw.get("tasks"), list):
+        raise RuntimeError("task_store: 'tasks' is not a list; delete the file to start fresh")
     for t in raw["tasks"]:
         _normalize_task(t)
     _data_cache = (fingerprint, copy.deepcopy(raw))
@@ -351,7 +346,6 @@ def _normalize_task(t: dict) -> dict:
     t.setdefault("trigger", {"kind": "manual", "config": {}})
     t.setdefault("scripts", {"pre": [], "post": []})
     t.setdefault("assessment", {"kind": "none", "config": {}})
-    t.setdefault("session_type", "normal")
     t.setdefault("stopped", False)
     if "spawned_session_ids" not in t:
         # Seed the ledger for legacy records from the run history we still
@@ -366,8 +360,6 @@ def _normalize_task(t: dict) -> dict:
         t["spawned_session_ids"] = list(dict.fromkeys(seed))
         # recent_runs is capped, so a legacy task with more runs than the
         # seed has launches the ledger can never recover — surface that.
-        # Singleton tasks reuse one session, so run_count > ledger size is
-        # their normal shape, not evidence of lost sessions.
         t["spawned_ledger_partial"] = (
             not t.get("singleton")
             and int(t.get("run_count") or 0) > len(t["spawned_session_ids"])
@@ -391,7 +383,6 @@ def _validate_core(
     cwd: str,
     orchestration_mode: str,
     worker_creation_policy: str,
-    session_type: str,
 ) -> None:
     if not name:
         raise ValueError("name is required")
@@ -405,8 +396,6 @@ def _validate_core(
     if worker_creation_policy not in _VALID_WORKER_POLICIES:
         raise ValueError(
             f"worker_creation_policy must be one of {_VALID_WORKER_POLICIES}")
-    if session_type not in VALID_SESSION_TYPES:
-        raise ValueError(f"session_type must be one of {VALID_SESSION_TYPES}")
 
 
 def create(
@@ -418,7 +407,6 @@ def create(
     description: str = "",
     orchestration_mode: str = "native",
     worker_creation_policy: str = "approve",
-    session_type: str = "normal",
     model: Optional[str] = None,
     provider_id: Optional[str] = None,
     reasoning_effort: Optional[str] = None,
@@ -440,12 +428,10 @@ def create(
     if orchestration_mode == "manager":
         orchestration_mode = "team"
     worker_creation_policy = (worker_creation_policy or "approve").strip()
-    session_type = (session_type or "normal").strip()
     _validate_core(
         name=name, prompt=prompt, cwd=cwd,
         orchestration_mode=orchestration_mode,
         worker_creation_policy=worker_creation_policy,
-        session_type=session_type,
     )
     permission = _coerce_permission(permission)
     capability_contexts = _coerce_capability_contexts(capability_contexts)
@@ -470,7 +456,6 @@ def create(
         "prompt": prompt,
         "orchestration_mode": orchestration_mode,
         "worker_creation_policy": worker_creation_policy,
-        "session_type": session_type,
         "model": model,
         "provider_id": provider_id,
         "reasoning_effort": reasoning_effort,
@@ -527,7 +512,7 @@ def get(task_id: str) -> Optional[dict]:
 
 _EDITABLE_FIELDS = (
     "name", "description", "prompt", "orchestration_mode",
-    "worker_creation_policy", "session_type", "model", "provider_id", "reasoning_effort", "runner",
+    "worker_creation_policy", "model", "provider_id", "reasoning_effort", "runner",
     "permission", "capability_contexts", "singleton", "stopped",
     "goal", "trigger", "scripts", "assessment",
 )
@@ -536,6 +521,8 @@ _EDITABLE_FIELDS = (
 def update(task_id: str, patch: dict) -> Optional[dict]:
     if not isinstance(patch, dict):
         raise ValueError("patch must be an object")
+    if "session_type" in patch:
+        raise ValueError("session_type is not configurable for routines")
     with _lock:
         data = _read()
         for t in data["tasks"]:
@@ -552,11 +539,9 @@ def update(task_id: str, patch: dict) -> Optional[dict]:
             if orch == "manager":
                 orch = "team"
             policy = (merged.get("worker_creation_policy") or "approve").strip()
-            session_type = (merged.get("session_type") or "normal").strip()
             _validate_core(
                 name=name, prompt=prompt, cwd=t["cwd"],
                 orchestration_mode=orch, worker_creation_policy=policy,
-                session_type=session_type,
             )
             permission = _coerce_permission(merged.get("permission"))
             capability_contexts = _coerce_capability_contexts(merged.get("capability_contexts"))
@@ -574,7 +559,6 @@ def update(task_id: str, patch: dict) -> Optional[dict]:
             t["prompt"] = prompt
             t["orchestration_mode"] = orch
             t["worker_creation_policy"] = policy
-            t["session_type"] = session_type
             t["model"] = model
             t["provider_id"] = provider_id
             t["reasoning_effort"] = reasoning_effort
@@ -596,6 +580,7 @@ def update(task_id: str, patch: dict) -> Optional[dict]:
             t["trigger"] = trigger
             t["scripts"] = scripts
             t["assessment"] = assessment
+            t["singleton_session_id"] = None
             t["updated_at"] = datetime.now().isoformat()
             _write(data)
             return dict(t)
@@ -749,6 +734,18 @@ def find_pending_run_for_session(session_id: str) -> Optional[tuple[str, dict]]:
     return None
 
 
+def clear_singleton_session(task_id: str) -> Optional[dict]:
+    with _lock:
+        data = _read()
+        for task in data["tasks"]:
+            if task.get("id") != task_id:
+                continue
+            task["singleton_session_id"] = None
+            _write(data)
+            return dict(task)
+    return None
+
+
 def set_run_verdict(
     task_id: str,
     session_id: str,
@@ -783,18 +780,6 @@ def set_stopped(task_id: str, stopped: bool) -> Optional[dict]:
                 continue
             t["stopped"] = bool(stopped)
             t["updated_at"] = datetime.now().isoformat()
-            _write(data)
-            return dict(t)
-    return None
-
-
-def clear_singleton_session(task_id: str) -> Optional[dict]:
-    with _lock:
-        data = _read()
-        for t in data["tasks"]:
-            if t.get("id") != task_id:
-                continue
-            t["singleton_session_id"] = None
             _write(data)
             return dict(t)
     return None
