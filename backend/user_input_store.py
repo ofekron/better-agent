@@ -11,6 +11,8 @@ from typing import Any
 
 from paths import ba_home
 
+import push_sender
+
 logger = logging.getLogger(__name__)
 
 _LOCK = threading.RLock()
@@ -217,6 +219,7 @@ def create_request(
         _write_locked(data)
         _adjust_pending_count_locked(app_session_id, 1)
         _add_pending_public_locked(req)
+    push_sender.send_pending_input_push(app_session_id, kind, req["request_id"])
     return _public(req)
 
 
@@ -251,6 +254,7 @@ def create_or_get_pending_request(
         _write_locked(data)
         _adjust_pending_count_locked(app_session_id, 1)
         _add_pending_public_locked(req)
+    push_sender.send_pending_input_push(app_session_id, kind, req["request_id"])
     return _public(req), True
 
 
