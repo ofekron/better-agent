@@ -163,6 +163,7 @@ import {
 } from "./progress/store";
 import { clearStoredToken } from "./bearerAuth";
 import { clearNativeServerUrl, hasNativeServerUrl } from "./nativeServerConfig";
+import { initMobilePushNotifications, teardownMobilePushNotifications } from "./utils/mobilePushNotifications";
 import "./styles/globals.css";
 import "@better-agent/provider-config-sync-ui/styles.css";
 
@@ -542,12 +543,24 @@ export default function App() {
     checkAuth();
   }, [checkAuth]);
 
+  // Push registration requires an authenticated request, so it's gated on
+  // authStatus rather than fired unconditionally at boot (main.tsx runs
+  // before login on a fresh install).
+  useEffect(() => {
+    if (Capacitor.isNativePlatform() && authStatus === "authed") {
+      void initMobilePushNotifications();
+    }
+  }, [authStatus]);
+
   // Logout — POST clears the better_agent_session cookie; reload so React
   // re-mounts the top-level App and re-runs the auth check.
   // replaceState to "/" so the post-login session lands on the Ask
   // entry view rather than re-entering whatever /s/<id> was open.
   const handleLogout = useCallback(async () => {
     try {
+      // Must run before the token is cleared below — unregistration is an
+      // authenticated DELETE.
+      await teardownMobilePushNotifications();
       await fetch(`${API}/api/auth/logout`, {
         method: "POST",
         credentials: "include",
