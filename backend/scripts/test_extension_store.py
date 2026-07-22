@@ -515,6 +515,134 @@ def test_internal_runtime_mcp_requires_loopback_auth_but_not_user_facing() -> No
         raise AssertionError("internal runtime MCP available without internal token")
 
 
+def test_mcp_interacts_with_user_false_maps_to_internal_runtime_mcp() -> None:
+    package = Path(tempfile.mkdtemp(prefix="bc-test-legacy-internal-runtime-mcp-")) / "internal-mcp"
+    (package / "mcp").mkdir(parents=True)
+    manifest = {
+        "kind": "better-agent-extension",
+        "id": "ofek.legacy-internal-runtime-mcp",
+        "name": "Legacy Internal Runtime MCP",
+        "version": "1.0.0",
+        "description": "Legacy internal runtime MCP fixture.",
+        "surfaces": ["runtime_mcp"],
+        "entrypoints": {
+            "mcp": [
+                {
+                    "name": "legacy-internal-runtime",
+                    "python": "mcp/server.py",
+                    "interacts_with_user": False,
+                    "bare_allowed": False,
+                    "requires_backend_auth": True,
+                }
+            ],
+        },
+        "permissions": {"internal_loopback": True},
+        "marketplace": {},
+    }
+    (package / "better-agent-extension.json").write_text(json.dumps(manifest), encoding="utf-8")
+    (package / "mcp" / "server.py").write_text("print('mcp server')\n", encoding="utf-8")
+    record = extension_store._install_from_package_dir(
+        package_dir=package,
+        source={
+            "type": "test",
+            "repo_url": "",
+            "extension_path": "internal-mcp",
+            "ref": "",
+            "commit_sha": "legacy-internal-mcp-test",
+        },
+        persist=True,
+    )
+    stored_item = record["manifest"]["entrypoints"]["mcp"][0]
+    if stored_item.get("user_facing") is not False:
+        raise AssertionError(stored_item)
+
+    inputs = {
+        "backend_url": "http://127.0.0.1:8000",
+        "internal_token": "token",
+        "app_session_id": "session-1",
+    }
+    configs = extension_store.runtime_mcp_server_configs(inputs, user_facing=False, bare=False)
+    if "legacy-internal-runtime" not in configs:
+        raise AssertionError("legacy internal runtime MCP unavailable to non-user-facing runner")
+
+
+def test_requirements_role_mcp_repair_keeps_processor_tools_available() -> None:
+    _configure_internal_llm_defaults("requirement_analysis")
+    extension_id = "fixture.requirements"
+    package = Path(tempfile.mkdtemp(prefix="bc-test-requirements-mcp-repair-")) / "requirements"
+    (package / "mcp").mkdir(parents=True)
+    (package / "requirement_analysis").mkdir(parents=True)
+    manifest = {
+        "kind": "better-agent-extension",
+        "id": extension_id,
+        "core_roles": ["requirements"],
+        "name": "Requirements",
+        "version": "1.0.0",
+        "description": "Requirements MCP fixture.",
+        "surfaces": ["runtime_mcp"],
+        "entrypoints": {
+            "mcp": [
+                {
+                    "name": "better-agent-requirements",
+                    "python": "mcp/server.py",
+                    "user_facing": True,
+                    "bare_allowed": True,
+                    "requires_backend_auth": True,
+                    "replaces_builtin": "get-requirements",
+                }
+            ],
+        },
+        "permissions": {"internal_loopback": True},
+        "protocol": {
+            "version": 1,
+            "smoke_test": {
+                "required_paths": [
+                    "better-agent-extension.json",
+                    "mcp/server.py",
+                    "requirement_analysis/__init__.py",
+                ],
+                "python_modules": ["mcp.server"],
+            },
+        },
+        "marketplace": {},
+    }
+    (package / "better-agent-extension.json").write_text(json.dumps(manifest), encoding="utf-8")
+    (package / "mcp" / "server.py").write_text("print('requirements mcp')\n", encoding="utf-8")
+    (package / "requirement_analysis" / "__init__.py").write_text("", encoding="utf-8")
+    record = extension_store._install_from_package_dir(
+        package_dir=package,
+        source={
+            "type": "test",
+            "repo_url": "",
+            "extension_path": "requirements",
+            "ref": "",
+            "commit_sha": "requirements-mcp-repair-test",
+        },
+        persist=True,
+    )
+    stored_item = record["manifest"]["entrypoints"]["mcp"][0]
+    if stored_item.get("user_facing") is not True:
+        raise AssertionError("fixture must exercise persisted user_facing=true repair")
+
+    configs = extension_store.runtime_mcp_server_configs(
+        {
+            "mode": "native",
+            "app_session_id": "requirements-processor",
+            "backend_url": "http://127.0.0.1:8000",
+            "internal_token": "secret",
+            "provisioned_tool_profile": "requirements_processor",
+        },
+        user_facing=False,
+        bare=False,
+    )
+    config = configs.get("get-requirements")
+    if not config:
+        raise AssertionError(configs)
+    env = config.get("env") or {}
+    if env.get("BETTER_CLAUDE_REQUIREMENTS_PROCESSOR") != "1":
+        raise AssertionError(env)
+
+
 def test_dynamic_runtime_mcp_can_be_disabled_per_run() -> None:
     package = Path(tempfile.mkdtemp(prefix="bc-test-dynamic-disabled-mcp-")) / "testape-mcp"
     (package / "mcp").mkdir(parents=True)
@@ -5568,6 +5696,9 @@ if __name__ == "__main__":
         test_module_based_mcp_server_config()
         test_installed_extension_exports_runtime_mcp_server_config()
         test_runtime_mcp_without_internal_loopback_does_not_receive_token()
+        test_internal_runtime_mcp_requires_loopback_auth_but_not_user_facing()
+        test_mcp_interacts_with_user_false_maps_to_internal_runtime_mcp()
+        test_requirements_role_mcp_repair_keeps_processor_tools_available()
         test_dynamic_runtime_mcp_can_be_disabled_per_run()
         test_recorded_runtime_mcp_outside_builtin_maps_can_be_disabled_per_run()
         test_native_mcp_reconcile_omits_disabled_recorded_runtime_mcp()

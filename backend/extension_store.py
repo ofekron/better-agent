@@ -1807,6 +1807,20 @@ def _mcp_predicate_matches(predicate: dict[str, Any], inputs: dict[str, Any]) ->
     return True
 
 
+def _mcp_user_facing_value(item: dict[str, Any]) -> bool:
+    if "user_facing" in item:
+        value = item.get("user_facing")
+        if not isinstance(value, bool):
+            raise ExtensionError("entrypoints.mcp.user_facing must be a boolean")
+        return value
+    if "interacts_with_user" in item:
+        value = item.get("interacts_with_user")
+        if not isinstance(value, bool):
+            raise ExtensionError("entrypoints.mcp.interacts_with_user must be a boolean")
+        return value
+    return True
+
+
 def _validate_mcp_entrypoints(value: Any, *, extension_id: str) -> list[dict[str, Any]]:
     if value is None:
         return []
@@ -1867,7 +1881,7 @@ def _validate_mcp_entrypoints(value: Any, *, extension_id: str) -> list[dict[str
         ambient_native = item.get("ambient_native", False)
         if not isinstance(ambient_native, bool):
             raise ExtensionError("entrypoints.mcp.ambient_native must be a boolean")
-        user_facing = item.get("user_facing") is not False
+        user_facing = _mcp_user_facing_value(item)
         requires_backend_auth = item.get("requires_backend_auth") is not False
         predicate = _validate_mcp_predicate(item.get("predicate"))
         if ambient_native and (user_facing or requires_backend_auth or predicate):
@@ -1902,6 +1916,16 @@ def _validate_mcp_entrypoints(value: Any, *, extension_id: str) -> list[dict[str
     return items
 
 
+def _requirements_role_mcp_item(record: dict[str, Any], item: dict[str, Any]) -> bool:
+    manifest = record.get("manifest") or {}
+    if manifest.get("id") != extension_id_for_role("requirements"):
+        return False
+    return (
+        str(item.get("name") or "") == "better-agent-requirements"
+        or str(item.get("replaces_builtin") or "") == "get-requirements"
+    )
+
+
 def _stored_mcp_entrypoints(record: dict[str, Any]) -> list[dict[str, Any]]:
     manifest = record.get("manifest") or {}
     entrypoints = manifest.get("entrypoints") or {}
@@ -1918,6 +1942,8 @@ def _stored_mcp_entrypoints(record: dict[str, Any]) -> list[dict[str, Any]]:
             continue
         if not isinstance(raw, dict):
             raise ExtensionError("stored extension entrypoints.mcp items must be objects or strings")
+        if _requirements_role_mcp_item(record, raw):
+            raw = {**raw, "user_facing": False}
         items.append(raw)
     return items
 

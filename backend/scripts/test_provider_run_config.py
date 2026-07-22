@@ -65,6 +65,16 @@ def _save_runtime_extension_record(data: dict, extension_id: str) -> None:
     extension_store._save(data)  # type: ignore[attr-defined]
 
 
+_FIXTURE_BROWSER_HARNESS_EXTENSION_ID = "fixture.browser-harness"
+_FIXTURE_CANVAS_EXTENSION_ID = "fixture.canvas"
+_FIXTURE_CREDENTIAL_BROKER_EXTENSION_ID = "fixture.credential-broker"
+_FIXTURE_PROJECT_STRUCTURE_EXTENSION_ID = "fixture.project-structure"
+_FIXTURE_REQUIREMENTS_EXTENSION_ID = "fixture.requirements"
+_FIXTURE_SCHEDULER_EXTENSION_ID = "fixture.scheduler"
+_FIXTURE_TEAM_ORCHESTRATION_EXTENSION_ID = "fixture.team-orchestration"
+_FIXTURE_TESTAPE_EXTENSION_ID = "fixture.testape"
+
+
 def _module_from_python_path(rel_path: str) -> str:
     path = Path(rel_path).with_suffix("")
     parts = list(path.parts)
@@ -124,10 +134,11 @@ def _install_requirements_extension_record(
     }
     if replaces_builtin:
         mcp_entry["replaces_builtin"] = "get-requirements"
-    data["extensions"][extension_store.extension_id_for_role('requirements')] = {
+    data["extensions"][_FIXTURE_REQUIREMENTS_EXTENSION_ID] = {
         "manifest": _write_installed_manifest(package, {
             "kind": extension_store.MANIFEST_KIND,
-            "id": extension_store.extension_id_for_role('requirements'),
+            "id": _FIXTURE_REQUIREMENTS_EXTENSION_ID,
+            "core_roles": ["requirements"],
             "name": "Requirements",
             "version": "1.0.0",
             "description": "Requirement analysis extension",
@@ -171,7 +182,7 @@ def _install_requirements_extension_record(
             "expires_at": "2099-01-01T00:00:00+00:00",
         },
     }
-    record = data["extensions"][extension_store.extension_id_for_role('requirements')]
+    record = data["extensions"][_FIXTURE_REQUIREMENTS_EXTENSION_ID]
     record["consent"] = {
         "fingerprint": extension_store.permission_consent_fingerprint(record),
         "granted_at": "2026-01-01T00:00:00+00:00",
@@ -179,7 +190,12 @@ def _install_requirements_extension_record(
     extension_store._save(data)  # type: ignore[attr-defined]
 
 
-def _install_feature_extension_record(extension_id: str, permissions: dict | None = None) -> None:
+def _install_feature_extension_record(
+    extension_id: str,
+    permissions: dict | None = None,
+    *,
+    core_role: str | None = None,
+) -> None:
     package = Path(_TMP_HOME) / f"{extension_id}-feature-extension"
     package.mkdir(parents=True, exist_ok=True)
     data = extension_store._load()  # type: ignore[attr-defined]
@@ -187,6 +203,7 @@ def _install_feature_extension_record(extension_id: str, permissions: dict | Non
         "manifest": _write_installed_manifest(package, {
             "kind": extension_store.MANIFEST_KIND,
             "id": extension_id,
+            **({"core_roles": [core_role]} if core_role else {}),
             "name": extension_id,
             "version": "1.0.0",
             "description": extension_id,
@@ -228,10 +245,11 @@ def _install_scheduler_extension_record() -> None:
     (package / "mcp").mkdir(parents=True, exist_ok=True)
     (package / "mcp" / "server.py").write_text("print('scheduler')\n", encoding="utf-8")
     data = extension_store._load()  # type: ignore[attr-defined]
-    data["extensions"][extension_store.extension_id_for_role('scheduler')] = {
+    data["extensions"][_FIXTURE_SCHEDULER_EXTENSION_ID] = {
         "manifest": _write_installed_manifest(package, {
             "kind": extension_store.MANIFEST_KIND,
-            "id": extension_store.extension_id_for_role('scheduler'),
+            "id": _FIXTURE_SCHEDULER_EXTENSION_ID,
+            "core_roles": ["scheduler"],
             "name": "Scheduler",
             "version": "1.0.0",
             "description": "Scheduler",
@@ -271,13 +289,14 @@ def _install_scheduler_extension_record() -> None:
             "expires_at": "",
         },
     }
-    _save_runtime_extension_record(data, extension_store.extension_id_for_role('scheduler'))
+    _save_runtime_extension_record(data, _FIXTURE_SCHEDULER_EXTENSION_ID)
 
 
 def _install_core_mcp_gate_extensions() -> None:
     _install_feature_extension_record(
-        extension_store.extension_id_for_role('team-orchestration'),
+        _FIXTURE_TEAM_ORCHESTRATION_EXTENSION_ID,
         {"session_state": True, "internal_loopback": True},
+        core_role="team-orchestration",
     )
     _install_coordination_extension_record()
     _install_session_bridge_extension_record()
@@ -345,10 +364,11 @@ def _install_browser_harness_extension_record() -> None:
     (package / "mcp").mkdir(parents=True, exist_ok=True)
     (package / "mcp" / "server.py").write_text("print('browser harness')\n", encoding="utf-8")
     data = extension_store._load()  # type: ignore[attr-defined]
-    data["extensions"][extension_store.extension_id_for_role('browser-harness')] = {
+    data["extensions"][_FIXTURE_BROWSER_HARNESS_EXTENSION_ID] = {
         "manifest": _write_installed_manifest(package, {
             "kind": extension_store.MANIFEST_KIND,
-            "id": extension_store.extension_id_for_role('browser-harness'),
+            "id": _FIXTURE_BROWSER_HARNESS_EXTENSION_ID,
+            "core_roles": ["browser-harness"],
             "name": "Browser Harness",
             "version": "1.0.0",
             "description": "Browser Harness",
@@ -389,7 +409,7 @@ def _install_browser_harness_extension_record() -> None:
             "expires_at": "",
         },
     }
-    _save_runtime_extension_record(data, extension_store.extension_id_for_role('browser-harness'))
+    _save_runtime_extension_record(data, _FIXTURE_BROWSER_HARNESS_EXTENSION_ID)
 
 
 def _install_credential_broker_extension_record() -> None:
@@ -397,10 +417,11 @@ def _install_credential_broker_extension_record() -> None:
     (package / "mcp").mkdir(parents=True, exist_ok=True)
     (package / "mcp" / "server.py").write_text("print('credential broker')\n", encoding="utf-8")
     data = extension_store._load()  # type: ignore[attr-defined]
-    data["extensions"][extension_store.extension_id_for_role('credential-broker')] = {
+    data["extensions"][_FIXTURE_CREDENTIAL_BROKER_EXTENSION_ID] = {
         "manifest": _write_installed_manifest(package, {
             "kind": extension_store.MANIFEST_KIND,
-            "id": extension_store.extension_id_for_role('credential-broker'),
+            "id": _FIXTURE_CREDENTIAL_BROKER_EXTENSION_ID,
+            "core_roles": ["credential-broker"],
             "name": "Credential Broker",
             "version": "1.0.0",
             "description": "Credential Broker",
@@ -441,7 +462,7 @@ def _install_credential_broker_extension_record() -> None:
             "expires_at": "",
         },
     }
-    _save_runtime_extension_record(data, extension_store.extension_id_for_role('credential-broker'))
+    _save_runtime_extension_record(data, _FIXTURE_CREDENTIAL_BROKER_EXTENSION_ID)
 
 
 def _install_session_bridge_extension_record() -> None:
@@ -559,10 +580,11 @@ def _install_canvas_extension_record() -> None:
     (package / "mcp").mkdir(parents=True, exist_ok=True)
     (package / "mcp" / "server.py").write_text("print('canvas')\n", encoding="utf-8")
     data = extension_store._load()  # type: ignore[attr-defined]
-    data["extensions"][extension_store.extension_id_for_role('canvas')] = {
+    data["extensions"][_FIXTURE_CANVAS_EXTENSION_ID] = {
         "manifest": _write_installed_manifest(package, {
             "kind": extension_store.MANIFEST_KIND,
-            "id": extension_store.extension_id_for_role('canvas'),
+            "id": _FIXTURE_CANVAS_EXTENSION_ID,
+            "core_roles": ["canvas"],
             "name": "Canvas",
             "version": "1.0.0",
             "description": "Canvas",
@@ -602,7 +624,7 @@ def _install_canvas_extension_record() -> None:
             "expires_at": "",
         },
     }
-    _save_runtime_extension_record(data, extension_store.extension_id_for_role('canvas'))
+    _save_runtime_extension_record(data, _FIXTURE_CANVAS_EXTENSION_ID)
 
 
 def _install_testape_extension_record() -> None:
@@ -610,10 +632,11 @@ def _install_testape_extension_record() -> None:
     (package / "mcp").mkdir(parents=True, exist_ok=True)
     (package / "mcp" / "server.py").write_text("print('testape')\n", encoding="utf-8")
     data = extension_store._load()  # type: ignore[attr-defined]
-    data["extensions"][extension_store.extension_id_for_role('testape')] = {
+    data["extensions"][_FIXTURE_TESTAPE_EXTENSION_ID] = {
         "manifest": _write_installed_manifest(package, {
             "kind": extension_store.MANIFEST_KIND,
-            "id": extension_store.extension_id_for_role('testape'),
+            "id": _FIXTURE_TESTAPE_EXTENSION_ID,
+            "core_roles": ["testape"],
             "name": "Testape",
             "version": "1.0.0",
             "description": "Testape",
@@ -1148,7 +1171,7 @@ def t_builtin_user_facing_mcp_servers_injected() -> None:
     check("canvas" not in servers, "public canvas MCP is not injected")
     check("project-updates" not in servers, "project-updates is no longer injected as a built-in MCP")
     env = servers["scheduler"]["env"]
-    check(env["BETTER_CLAUDE_EXTENSION_ID"] == extension_store.extension_id_for_role('scheduler'), "extension MCP env selects scheduler owner")
+    check(env["BETTER_CLAUDE_EXTENSION_ID"] == _FIXTURE_SCHEDULER_EXTENSION_ID, "extension MCP env selects scheduler owner")
     check(env["BETTER_CLAUDE_APP_SESSION_ID"] == "bc-sid", "built-in MCP carries Better Agent session id")
     check(env["BETTER_CLAUDE_PROVIDER_ID"] == "prov-1", "built-in MCP carries provider id")
     check(
@@ -1208,7 +1231,7 @@ def t_builtin_mcp_servers_are_extension_owned() -> None:
     # requirements is a dissolved private extension: it is disabled via its
     # enabled flag, not the disabled_builtin_extensions builtin override (which
     # only covers path-map builtins).
-    extension_store.set_enabled(extension_store.extension_id_for_role('requirements'), False)
+    extension_store.set_enabled(_FIXTURE_REQUIREMENTS_EXTENSION_ID, False)
     config = builtin_mcp_config.with_builtin_mcp_servers({
         "open_file_panel_enabled": True,
         "app_session_id": "bc-sid",
@@ -1219,7 +1242,7 @@ def t_builtin_mcp_servers_are_extension_owned() -> None:
     servers = config["mcp_servers"]
     check("better-agent-requirements" not in servers, "disabled requirements extension removes its private MCP server")
     check("better-agent-canvas" in servers, "other private extension MCP servers remain active")
-    extension_store.set_enabled(extension_store.extension_id_for_role('requirements'), True)
+    extension_store.set_enabled(_FIXTURE_REQUIREMENTS_EXTENSION_ID, True)
 
 
 def t_installed_extension_can_replace_reserved_builtin_mcp_name() -> None:
@@ -1229,10 +1252,11 @@ def t_installed_extension_can_replace_reserved_builtin_mcp_name() -> None:
     script = package / "mcp" / "server.py"
     script.write_text("print('project updates')\n", encoding="utf-8")
     data = extension_store._load()  # type: ignore[attr-defined]
-    data["extensions"][extension_store.extension_id_for_role('project-structure')] = {
+    data["extensions"][_FIXTURE_PROJECT_STRUCTURE_EXTENSION_ID] = {
         "manifest": _write_installed_manifest(package, {
             "kind": extension_store.MANIFEST_KIND,
-            "id": extension_store.extension_id_for_role('project-structure'),
+            "id": _FIXTURE_PROJECT_STRUCTURE_EXTENSION_ID,
+            "core_roles": ["project-structure"],
             "name": "Project Structure",
             "version": "1.0.0",
             "description": "",
@@ -1273,7 +1297,7 @@ def t_installed_extension_can_replace_reserved_builtin_mcp_name() -> None:
             "expires_at": "",
         },
     }
-    _save_runtime_extension_record(data, extension_store.extension_id_for_role('project-structure'))
+    _save_runtime_extension_record(data, _FIXTURE_PROJECT_STRUCTURE_EXTENSION_ID)
     config = builtin_mcp_config.with_builtin_mcp_servers({
         "open_file_panel_enabled": True,
         "app_session_id": "bc-sid",
@@ -1580,7 +1604,7 @@ def t_requirements_mcp_stays_on_better_agent_runtime() -> None:
     check(req is not None, "requirements MCP is injected per managed Better Agent run")
     if req:
         env = req["env"]
-        check(env["BETTER_CLAUDE_EXTENSION_ID"] == extension_store.extension_id_for_role('requirements'), "runtime requirements MCP env selects requirements extension")
+        check(env["BETTER_CLAUDE_EXTENSION_ID"] == _FIXTURE_REQUIREMENTS_EXTENSION_ID, "runtime requirements MCP env selects requirements extension")
         check(env["BETTER_CLAUDE_APP_SESSION_ID"] == "bc-sid", "runtime requirements MCP env carries app session id")
         check(env["BETTER_CLAUDE_CWD"] == "/tmp/project", "runtime requirements MCP env carries cwd")
         check(Path(req["args"][0]).name == "server.py", "runtime requirements MCP points at extension server")
@@ -1604,12 +1628,12 @@ def t_requirements_mcp_stays_on_better_agent_runtime() -> None:
     )
     # requirements is a dissolved private extension: disabling it via its enabled
     # flag (not the disabled_builtin_extensions builtin override) omits its MCP.
-    extension_store.set_enabled(extension_store.extension_id_for_role('requirements'), False)
+    extension_store.set_enabled(_FIXTURE_REQUIREMENTS_EXTENSION_ID, False)
     check(
         "get-requirements" not in builtin_mcp_config.with_builtin_mcp_servers(inputs, {})["mcp_servers"],
         "runtime requirements MCP is omitted when the extension is disabled",
     )
-    extension_store.set_enabled(extension_store.extension_id_for_role('requirements'), True)
+    extension_store.set_enabled(_FIXTURE_REQUIREMENTS_EXTENSION_ID, True)
 
 
 def t_requirements_processor_profile_marks_requirements_mcp_env() -> None:
@@ -1672,7 +1696,7 @@ def t_bare_testape_mcp_stays_on_better_agent_runtime() -> None:
     if not server:
         return
     check(Path(server["args"][0]).name == "server.py", "bare TestApe MCP uses runtime server")
-    check(server["env"]["BETTER_CLAUDE_EXTENSION_ID"] == extension_store.extension_id_for_role('testape'), "bare TestApe runtime env carries extension id")
+    check(server["env"]["BETTER_CLAUDE_EXTENSION_ID"] == _FIXTURE_TESTAPE_EXTENSION_ID, "bare TestApe runtime env carries extension id")
     check(server["env"]["BETTER_CLAUDE_APP_SESSION_ID"] == "testape-bare-sid", "bare TestApe runtime env carries session id")
     raw = extension_store.native_mcp_server_configs(inputs, user_facing=False, bare=True).get("testape")
     check(raw is None, "session-aware TestApe MCP is excluded from ambient native tools")
