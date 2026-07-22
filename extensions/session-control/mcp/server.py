@@ -35,12 +35,25 @@ def switch_model_response(
     provider_id: str = "",
     reasoning_effort: str = "",
 ) -> dict[str, Any]:
+    # Switching model/provider from an agent is currently disabled — core
+    # rejects it (409) since resuming the session's existing provider sid
+    # after a model/provider change can permanently pin a stale provider's
+    # config onto that rollout, silently breaking every later turn. Fail
+    # fast here to skip the round trip; reasoning_effort-only changes are
+    # unaffected and still go through.
+    if str(model or "").strip() or str(provider_id or "").strip():
+        return {
+            "success": False,
+            "error": (
+                "Switching model/provider from an agent is not currently "
+                "supported. Ask the user to switch it from the session "
+                "settings instead."
+            ),
+        }
     payload: dict[str, Any] = {}
     # Only forward non-empty selectors so an unset param is a no-op for that
     # field — core fails closed on an unknown model/provider.
     for key, val in (
-        ("model", model),
-        ("provider_id", provider_id),
         ("reasoning_effort", reasoning_effort),
     ):
         val = str(val or "").strip()
@@ -76,11 +89,13 @@ def build_server() -> FastMCP:
         provider_id: str = "",
         reasoning_effort: str = "",
     ) -> dict[str, Any]:
-        """Switch THIS session's model, provider, and/or reasoning effort. The
-        change persists to the session and takes effect on the next turn, which
-        runs in a fresh provider subprocess under the same session. At least one
-        of model / provider_id / reasoning_effort must be set. Use this to pick a
-        stronger, cheaper, or differently-capable model mid-task."""
+        """Switch THIS session's reasoning effort. Persists and takes effect on
+        the next turn, which runs in a fresh provider subprocess under the same
+        session. `reasoning_effort` must be set.
+
+        Switching `model` or `provider_id` from an agent is NOT currently
+        supported and is rejected — ask the user to switch those from the
+        session settings instead."""
         return switch_model_response(model, provider_id, reasoning_effort)
 
     @server.tool()

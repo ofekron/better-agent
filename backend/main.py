@@ -3998,13 +3998,30 @@ async def internal_session_control_selectors(
     reasoning_effort to the CALLER'S OWN session (`app_session_id` from the
     loopback) through the SAME validation path as the public /selectors
     endpoint. The change takes effect on the next turn via the
-    selector-change continuation (fresh provider subprocess, same session)."""
+    selector-change continuation (fresh provider subprocess, same session).
+
+    Model/provider switching from an agent is currently DISABLED: the
+    selector-change continuation resumes the session's existing provider
+    sid to preserve context, which can permanently pin a stale provider's
+    config (e.g. a custom model_provider override) onto a rollout the new
+    model/provider was never meant to share, causing every later turn to
+    silently ghost. reasoning_effort-only changes stay enabled (same
+    provider, no rollout identity risk)."""
     _require_builtin_runtime_extension(extension_store.BUILTIN_SESSION_CONTROL_EXTENSION_ID)
     if not _internal_authority_is_valid():
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
     sid = str((body or {}).get("app_session_id") or "").strip()
     if not sid:
         raise HTTPException(status_code=400, detail="app_session_id is required")
+    if "model" in (body or {}) or "provider_id" in (body or {}):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Switching model/provider from an agent is not currently "
+                "supported. Ask the user to switch it from the session "
+                "settings instead."
+            ),
+        )
     updates = await _resolve_selector_updates(sid, body or {})
     before = await asyncio.to_thread(session_manager.get, sid)
     session = await asyncio.to_thread(

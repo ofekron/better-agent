@@ -26,7 +26,6 @@ sys.path.insert(0, str(ROOT))
 
 import continuation  # noqa: E402
 import config_store  # noqa: E402
-from event_ingester import event_ingester  # noqa: E402
 import extension_store  # noqa: E402
 import session_manager  # noqa: E402
 
@@ -192,13 +191,17 @@ def test_endpoints() -> None:
             )
             check(resp.status_code == 400, "selectors rejects missing app_session_id")
 
+            # Agent-driven model switching is currently disabled: reject with
+            # 409 instead of applying it, and leave the session's model
+            # untouched (regression for the model_provider-mismatch ghost bug).
             resp = client.post(
                 "/api/internal/session-control/selectors",
                 headers={"X-Internal-Token": internal_token},
                 json={"app_session_id": sid, "model": "model-two"},
             )
-            check(resp.status_code == 200, f"selectors switches model ok ({resp.status_code})")
+            check(resp.status_code == 409, f"selectors rejects agent model switch ({resp.status_code})")
             session = session_manager.manager.get(sid) or {}
+            check(session.get("model") == "model-one", "model unchanged after rejected switch")
             assistant = next(
                 (m for m in session.get("messages", []) if m.get("id") == "assistant-switch-model"),
                 {},
@@ -207,16 +210,24 @@ def test_endpoints() -> None:
                 e for e in assistant.get("events", [])
                 if e.get("type") == "model_switched"
             ]
-            check(len(switch_events) == 1, "selectors appends model_switched to assistant events")
-            rows = event_ingester.read_ws_events(
-                sid,
-                sid_filter=sid,
-                msg_id_filter="assistant-switch-model",
+            check(len(switch_events) == 0, "no model_switched event appended for a rejected switch")
+
+            # provider_id-only switch is rejected the same way.
+            resp = client.post(
+                "/api/internal/session-control/selectors",
+                headers={"X-Internal-Token": internal_token},
+                json={"app_session_id": sid, "provider_id": provider["id"]},
             )
-            check(
-                len([e for e in rows if e.get("type") == "model_switched"]) == 1,
-                "selectors writes model_switched to events.jsonl",
+            check(resp.status_code == 409, f"selectors rejects agent provider switch ({resp.status_code})")
+
+            # reasoning_effort-only switch still works (no provider/model
+            # identity risk).
+            resp = client.post(
+                "/api/internal/session-control/selectors",
+                headers={"X-Internal-Token": internal_token},
+                json={"app_session_id": sid, "reasoning_effort": "high"},
             )
+            check(resp.status_code == 200, f"selectors still allows reasoning_effort-only ({resp.status_code})")
 
             # Bad internal token is forbidden.
             resp = client.post(
