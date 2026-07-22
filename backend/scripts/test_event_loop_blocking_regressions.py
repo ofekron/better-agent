@@ -4407,19 +4407,81 @@ def test_extension_list_reconciliation_is_off_loop() -> None:
 
 
 def test_internal_communication_worker_lookup_is_off_loop() -> None:
+    # Isolated onto `_HOT_PATH_EXECUTOR` (not the bare `asyncio.to_thread`
+    # default pool) — see test_team_message_dispatch_uses_dedicated_executor
+    # for why: mssg/ask were timing out client-side while the target session
+    # still received and processed the message, because these lookups queued
+    # behind unrelated slow work sharing the default pool.
     source = (ROOT / "main.py").read_text(encoding="utf-8")
     resolver_start = source.index("async def _resolve_communication_target(")
     resolver_end = source.index("@app.post(\"/api/internal/ask\")", resolver_start)
     resolver_source = source[resolver_start:resolver_end]
-    assert "await asyncio.to_thread(_find_worker_by_agent_session_id" in resolver_source
-    assert "await asyncio.to_thread(\n        _pick_pool_worker_for_sender" in resolver_source
+    assert 'await _run_hot_path(\n            "communication.resolve_target.find_worker",\n            _find_worker_by_agent_session_id' in resolver_source
+    assert 'await _run_hot_path(\n        "communication.resolve_target.pick_pool_worker",\n        _pick_pool_worker_for_sender' in resolver_source
+    assert "asyncio.to_thread(" not in resolver_source
 
     async_start = source.index("async def _ask_continue_and_expect_inbox_back_async(")
     async_end = source.index("async def _ask_wait_and_grab_last_assistant_mssg_in_turn(", async_start)
     async_source = source[async_start:async_end]
-    assert "await asyncio.to_thread(\n            _pick_pool_worker_for_sender" in async_source
+    assert 'await _run_hot_path(\n            "communication.ask_async.pick_pool_worker",\n            _pick_pool_worker_for_sender' in async_source
     assert "await _resolve_communication_target(body)" in async_source
     assert "target = _pick_idle_pool_worker(target_worker_pool)" not in async_source
+    assert "asyncio.to_thread(" not in async_source
+
+
+def test_communication_run_selector_validation_is_off_default_pool() -> None:
+    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    start = source.index("async def _validate_optional_run_selector(")
+    end = source.index("def _validate_provider_default_reasoning_effort(", start)
+    validator_source = source[start:end]
+    assert 'await _run_hot_path(\n            "communication.validate_run_selector.get_provider",\n            config_store.get_provider' in validator_source
+    assert 'await _run_hot_path(\n        "communication.validate_run_selector.validate_provider_model",\n        _validate_provider_model' in validator_source
+    assert "asyncio.to_thread(" not in validator_source
+
+
+def test_team_message_dispatch_uses_dedicated_executor() -> None:
+    # RCA: submit_team_message/submit_prompt_async dispatched every helper
+    # via the bare `asyncio.to_thread` default pool, shared with ~700+ other
+    # call sites (including multi-second blocking subprocess calls). Under
+    # transient saturation the enqueue call queued for a free thread past
+    # the mssg/ask client's 30s loopback timeout even though the enqueue
+    # itself is millisecond-fast, so callers saw "timed out" while the
+    # target session still received and processed the message. Isolated
+    # analogous to `_TURN_DISPATCH_EXECUTOR` in turn_manager.py.
+    source = (ROOT / "orchestrator.py").read_text(encoding="utf-8")
+    assert "_TEAM_MESSAGE_EXECUTOR = concurrent.futures.ThreadPoolExecutor(" in source
+    assert 'thread_name_prefix="team-message-dispatch"' in source
+    assert "async def _to_team_message_thread(func, /, *args, **kwargs):" in source
+    assert "run_in_executor(_TEAM_MESSAGE_EXECUTOR, func_call)" in source
+
+    submit_prompt_async_start = source.index("async def submit_prompt_async(")
+    submit_prompt_async_end = source.index("def submit_prompt(", submit_prompt_async_start)
+    submit_prompt_async_source = source[submit_prompt_async_start:submit_prompt_async_end]
+    assert "await _to_team_message_thread(self._reject_if_adv_sync_fork_locked" in submit_prompt_async_source
+    assert "asyncio.to_thread(" not in submit_prompt_async_source
+
+    team_message_start = source.index("async def submit_team_message(")
+    team_message_end = source.index("async def collapse_queued_prompt_take_latest(", team_message_start)
+    team_message_source = source[team_message_start:team_message_end]
+    assert "asyncio.to_thread(" not in team_message_source
+    for call in (
+        "team_messaging.validate_message_route",
+        "team_messaging.build_message_metadata",
+        "team_messaging.queue_payload",
+        "team_messaging.format_team_message_prompt",
+        "session_manager.add_queued_prompt",
+        "session_manager.remove_queued_prompt",
+    ):
+        assert f"_to_team_message_thread(\n" in team_message_source
+        assert call in team_message_source
+    assert team_message_source.count("_to_team_message_thread(") == 6
+
+    # The synchronous ask path (`ask_team_message`, 24h wait for the target's
+    # own turn to complete) is a different bug class — genuinely blocks for
+    # the turn's duration by design — and is intentionally left untouched.
+    ask_team_message_start = source.index("async def ask_team_message(")
+    ask_team_message_source = source[ask_team_message_start:]
+    assert "sender, target = await asyncio.to_thread(" in ask_team_message_source
 
 
 def test_ba_home_memoizes_resolution_off_loop() -> None:
@@ -4747,6 +4809,8 @@ if __name__ == "__main__":
     test_search_sessions_response_cache_uses_metadata_version()
     test_session_summaries_response_cache_precedes_lookup()
     test_internal_communication_worker_lookup_is_off_loop()
+    test_communication_run_selector_validation_is_off_default_pool()
+    test_team_message_dispatch_uses_dedicated_executor()
     test_ba_home_memoizes_resolution_off_loop()
     test_provider_start_run_is_off_loop_everywhere()
     test_startup_extension_package_resolution_stays_off_loop()

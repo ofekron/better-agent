@@ -78,6 +78,31 @@ _TOKEN_AUTH_EXECUTOR = BoundedAsyncExecutor(
     capacity=16,
     timeout_seconds=0.1,
 )
+# `submit_team_message` (mssg/ask dispatch) and `submit_prompt_async` fire a
+# handful of cheap synchronous helpers per call — genuinely millisecond-fast
+# once scheduled. Left on `asyncio.to_thread`'s process-wide default pool,
+# an unrelated slow caller elsewhere in the backend (of which there are
+# hundreds, some blocking on subprocess calls for 15-60s) can occupy every
+# worker thread and stall this dispatch past the mssg/ask client's 30s
+# loopback timeout even though the work itself never took long — the same
+# executor-starvation pattern already isolated for `_TURN_DISPATCH_EXECUTOR`
+# in turn_manager.py.
+_TEAM_MESSAGE_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+    max_workers=8,
+    thread_name_prefix="team-message-dispatch",
+)
+
+
+async def _to_team_message_thread(func, /, *args, **kwargs):
+    """`asyncio.to_thread`, routed through `_TEAM_MESSAGE_EXECUTOR` instead
+    of the default pool. Copies the calling context like `asyncio.to_thread`
+    does, so contextvars (e.g. request-authority binding) still propagate."""
+    import contextvars
+
+    loop = asyncio.get_running_loop()
+    ctx = contextvars.copy_context()
+    func_call = lambda: ctx.run(func, *args, **kwargs)
+    return await loop.run_in_executor(_TEAM_MESSAGE_EXECUTOR, func_call)
 _BOUND_PRINCIPAL: ContextVar[Optional["_RequestAuthorityBinding"]] = ContextVar(
     "bound_internal_principal",
     default=None,
@@ -1427,7 +1452,7 @@ class Coordinator:
         }
 
     async def submit_prompt_async(self, app_session_id: str, params: dict) -> str:
-        await asyncio.to_thread(self._reject_if_adv_sync_fork_locked, app_session_id)
+        await _to_team_message_thread(self._reject_if_adv_sync_fork_locked, app_session_id)
         return self.submit_prompt(app_session_id, params, _adv_sync_checked=True)
 
     def submit_prompt(
@@ -1506,7 +1531,7 @@ class Coordinator:
         import uuid
         import team_messaging
 
-        sender, target = await asyncio.to_thread(
+        sender, target = await _to_team_message_thread(
             team_messaging.validate_message_route,
             sender_session_id=sender_session_id,
             target_session_id=target_session_id,
@@ -1522,7 +1547,7 @@ class Coordinator:
             reasoning_effort=reasoning_effort,
             runner=runner,
         )
-        metadata = await asyncio.to_thread(
+        metadata = await _to_team_message_thread(
             team_messaging.build_message_metadata,
             sender_session_id=sender_session_id,
             target_session_id=target_session_id,
@@ -1557,7 +1582,7 @@ class Coordinator:
             raise ValueError("collapse_key is required when collapse_policy is set")
         queue_item_id = str(uuid.uuid4())
         lifecycle_msg_id = str(uuid.uuid4())
-        queue_item = await asyncio.to_thread(
+        queue_item = await _to_team_message_thread(
             team_messaging.queue_payload,
             queue_item_id=queue_item_id,
             sender_session_id=sender_session_id,
@@ -1569,7 +1594,7 @@ class Coordinator:
             collapse_key=collapse_key,
             collapse_policy=collapse_policy,
         )
-        cli_prompt = await asyncio.to_thread(
+        cli_prompt = await _to_team_message_thread(
             team_messaging.format_team_message_prompt,
             message,
             metadata,
@@ -1647,14 +1672,14 @@ class Coordinator:
                 target_session_id=target_session_id,
             )
         try:
-            await asyncio.to_thread(
+            await _to_team_message_thread(
                 session_manager.add_queued_prompt,
                 target_session_id,
                 queue_item,
             )
             await self.submit_prompt_async(target_session_id, prompt_params)
         except Exception:
-            await asyncio.to_thread(
+            await _to_team_message_thread(
                 session_manager.remove_queued_prompt,
                 target_session_id,
                 queue_item_id,
