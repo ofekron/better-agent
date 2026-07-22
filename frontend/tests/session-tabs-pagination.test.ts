@@ -92,8 +92,8 @@ describe("session tabs with paged sessions", () => {
         id: `backend-sess-${i + 1}`,
         name: `Backend Session ${i + 1}`,
         cwd: "/tmp/project-a",
-        last_opened_at: i === 0 || i === 59
-          ? `2026-02-${i === 59 ? "02" : "01"}T00:00:00.000Z`
+        last_opened_at: i === 0
+          ? "2026-02-01T00:00:00.000Z"
           : undefined,
       }),
     );
@@ -123,6 +123,30 @@ describe("session tabs with paged sessions", () => {
     expect(tabIds(h)).toContain("backend-sess-60");
     h.unmount();
   }, 15000);
+
+  it("keeps an open tab when reconcile returns timestamp-free session data", async () => {
+    const session = makeSession({
+      id: "reconciled-open-session",
+      name: "Reconciled open session",
+      cwd: "/tmp/project-a",
+      last_opened_at: "2026-02-01T00:00:00.000Z",
+    });
+    window.history.pushState(null, "", `/s/${session.id}`);
+    const h = await renderApp({ seed: { sessions: [session] } });
+
+    expect(await waitFor(h, () => tabIds(h).includes(session.id))).toBe(true);
+    const row = h.backend.state.sessions.find((candidate) => candidate.id === session.id);
+    if (!row) throw new Error("session missing from mock backend");
+    row.last_opened_at = undefined;
+
+    h.emit({ type: "session_reconciled", data: { root_id: session.id } });
+    await h.flush();
+
+    expect(tabIds(h)).toContain(session.id);
+    expect(JSON.parse(localStorage.getItem("better-agent-open-session-ids") || "[]"))
+      .toContain(session.id);
+    h.unmount();
+  }, 10000);
 
   it("persists open tab changes with backend auth credentials", async () => {
     const h = await renderApp();
@@ -260,7 +284,7 @@ describe("session tabs with paged sessions", () => {
     h.unmount();
   }, 15000);
 
-  it("drops restored tab ids that resolve without opened metadata", async () => {
+  it("keeps restored tab ids that resolve without opened metadata", async () => {
     const session = makeSession({
       id: "never-opened-session",
       name: "Never Opened",
@@ -286,12 +310,11 @@ describe("session tabs with paged sessions", () => {
     expect(
       await waitFor(
         h,
-        () => !JSON.parse(
-          localStorage.getItem("better-agent-open-session-ids") || "[]",
-        ).includes(session.id),
+        () => tabIds(h).includes(session.id),
       ),
     ).toBe(true);
-    expect(h.$(".session-tabs")).toBeNull();
+    expect(JSON.parse(localStorage.getItem("better-agent-open-session-ids") || "[]"))
+      .toContain(session.id);
     h.unmount();
   }, 10000);
 

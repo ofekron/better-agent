@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import asyncio
+import json
 import os
 import sys
 import uuid
-import asyncio
 
 import _test_home
 _TMP_HOME = _test_home.isolate("bc-test-detail-cache-")
@@ -20,6 +21,15 @@ import main as main_mod  # noqa: E402
 
 PASS = "\x1b[32mPASS\x1b[0m"
 FAIL = "\x1b[31mFAIL\x1b[0m"
+
+
+def _response_json(value: object) -> dict:
+    body = getattr(value, "body", None)
+    if isinstance(body, bytes):
+        return json.loads(body)
+    if isinstance(value, dict):
+        return value
+    raise TypeError(f"unexpected detail response: {type(value).__name__}")
 
 
 def _fresh_session_with_render_event() -> tuple[str, str]:
@@ -135,11 +145,47 @@ def test_route_populates_reusable_semantic_cache_key() -> bool:
     return True
 
 
+def test_last_opened_invalidates_cached_detail_response() -> bool:
+    sid, _msg_id = _fresh_session_with_render_event()
+    main_mod._session_detail_response_cache.clear()
+    main_mod._session_detail_response_cache_latest.clear()
+
+    before = _response_json(
+        asyncio.run(main_mod.get_session(sid, msg_limit=50, exchange_count=None)),
+    )
+    if before.get("last_opened_at") is not None:
+        print(f"  fresh session unexpectedly opened: {before.get('last_opened_at')!r}")
+        return False
+
+    simple_key = (sid, 50, None)
+    old_key = main_mod._session_detail_response_cache_latest.get(simple_key)
+    if not isinstance(old_key, tuple):
+        print(f"  route stored unexpected cache key: {old_key!r}")
+        return False
+
+    opened_at = "2026-07-22T08:01:28.643495"
+    session_manager.set_last_opened_at(sid, opened_at, return_session=False)
+    if main_mod._session_detail_cached_key_still_current(
+        old_key, sid, msg_limit=50, exchange_count=None,
+    ):
+        print("  last-opened mutation did not invalidate detail cache")
+        return False
+
+    after = _response_json(
+        asyncio.run(main_mod.get_session(sid, msg_limit=50, exchange_count=None)),
+    )
+    if after.get("last_opened_at") != opened_at:
+        print(f"  detail response returned stale last_opened_at: {after.get('last_opened_at')!r}")
+        return False
+    return True
+
+
 def main() -> int:
     tests = [
         ("non-render event keeps detail cache valid", test_non_render_event_keeps_detail_cache_valid),
         ("render event invalidates detail cache", test_render_event_invalidates_detail_cache),
         ("route populates reusable semantic cache key", test_route_populates_reusable_semantic_cache_key),
+        ("last-opened invalidates cached detail response", test_last_opened_invalidates_cached_detail_response),
     ]
     ok = True
     for name, fn in tests:

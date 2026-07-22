@@ -3919,14 +3919,10 @@ function AppMain({
   const openSessionRecordFetchesRef = useRef<Set<string>>(new Set());
   const openSessionRecordMissesRef = useRef<Map<string, number>>(new Map());
   const openSessionRecordRetryTimerRef = useRef<number | null>(null);
+  const openSessionRecordMountedRef = useRef(true);
   const [openSessionRecordRetryNonce, setOpenSessionRecordRetryNonce] = useState(0);
   const [knownRoutedSessionIds, setKnownRoutedSessionIds] = useState<Record<string, true>>({});
   const sessionExistenceChecksRef = useRef<Map<string, "pending" | "missing">>(new Map());
-  const isOpenSessionTabEligible = useCallback((session: Session) => {
-    if (session.topbar_pinned) return true;
-    const openedMs = session.last_opened_at ? Date.parse(session.last_opened_at) : NaN;
-    return Number.isFinite(openedMs);
-  }, []);
   const markSessionKnown = useCallback((id: string) => {
     if (!id) return;
     setKnownRoutedSessionIds((prev) => (prev[id] ? prev : { ...prev, [id]: true }));
@@ -3976,10 +3972,14 @@ function AppMain({
     });
   }, [currentTree]);
 
-  useEffect(() => () => {
-    if (openSessionRecordRetryTimerRef.current !== null) {
-      window.clearTimeout(openSessionRecordRetryTimerRef.current);
-    }
+  useEffect(() => {
+    openSessionRecordMountedRef.current = true;
+    return () => {
+      openSessionRecordMountedRef.current = false;
+      if (openSessionRecordRetryTimerRef.current !== null) {
+        window.clearTimeout(openSessionRecordRetryTimerRef.current);
+      }
+    };
   }, []);
 
   useEffect(() => {
@@ -4301,25 +4301,14 @@ function AppMain({
   useEffect(() => {
     if (!sessionsLoaded) return;
     const loadedIds = new Set(sessions.map((session) => session.id));
-    const invalidResolvedIds = new Set(
-      openSessionIds.filter((id) => {
-        const session = openSessionRecords[id] || sessions.find((s) => s.id === id);
-        return Boolean(session && !isOpenSessionTabEligible(session));
-      }),
-    );
-    if (invalidResolvedIds.size > 0) {
-      setOpenSessionIds((prev) => prev.filter((id) => !invalidResolvedIds.has(id)));
-    }
     const idsToFetch = openSessionIds.filter(
       (id) =>
-        !invalidResolvedIds.has(id) &&
         !loadedIds.has(id) &&
         !openSessionRecords[id] &&
         !openSessionRecordFetchesRef.current.has(id),
     );
     if (idsToFetch.length === 0) return;
 
-    let cancelled = false;
     for (const id of idsToFetch) {
       openSessionRecordFetchesRef.current.add(id);
     }
@@ -4329,17 +4318,12 @@ function AppMain({
     })
       .then((res) => (res.ok ? res.json() : undefined))
       .then((data: { sessions?: Session[] } | undefined) => {
-        if (cancelled || !data) return;
+        if (!openSessionRecordMountedRef.current || !data) return;
         const foundIds = new Set<string>();
-        const invalidIds = new Set<string>();
         for (const session of data?.sessions ?? []) {
           if (!session?.id) continue;
           foundIds.add(session.id);
           openSessionRecordMissesRef.current.delete(session.id);
-          if (!isOpenSessionTabEligible(session)) {
-            invalidIds.add(session.id);
-            continue;
-          }
           setOpenSessionRecords((prev) => {
             const merged = mergeOpenSessionRecord(prev[session.id], session);
             return merged === prev[session.id]
@@ -4349,7 +4333,6 @@ function AppMain({
         }
         const retryIds: string[] = [];
         const staleIds = idsToFetch.filter((id) => {
-          if (invalidIds.has(id)) return true;
           if (foundIds.has(id)) return false;
           const misses = (openSessionRecordMissesRef.current.get(id) ?? 0) + 1;
           openSessionRecordMissesRef.current.set(id, misses);
@@ -4379,17 +4362,12 @@ function AppMain({
           openSessionRecordFetchesRef.current.delete(id);
         }
       });
-
-    return () => {
-      cancelled = true;
-    };
   }, [
     openSessionIds,
     openSessionRecords,
     openSessionRecordRetryNonce,
     sessions,
     sessionsLoaded,
-    isOpenSessionTabEligible,
   ]);
 
   const addOpenSessionId = useCallback((id: string) => {
@@ -4410,8 +4388,7 @@ function AppMain({
       !currentTree?.id ||
       sessionLoadError?.sessionId === currentTree.id ||
       currentTree.id === ASK_SINGLETON_ID ||
-      currentTree.id === editSingletonId() ||
-      !isOpenSessionTabEligible(currentTree)
+      currentTree.id === editSingletonId()
     ) {
       lastViewedChatSessionIdRef.current = null;
       return;
@@ -4424,7 +4401,6 @@ function AppMain({
   }, [
     addOpenSessionId,
     currentTree,
-    isOpenSessionTabEligible,
     route.kind,
     sessionLoadError?.sessionId,
   ]);
@@ -4521,7 +4497,7 @@ function AppMain({
       .reverse();
     const records = openOrder
       .map((id) => findOpenSessionRecord(id))
-      .filter((s): s is Session => Boolean(s && isOpenSessionTabEligible(s)));
+      .filter((s): s is Session => Boolean(s));
     const tsOf = (s: Session) => {
       if (sessionTabsSort === "tab_joined_at") {
         const ms = Date.parse(openSessionJoinedAt[s.id] || "");
@@ -4554,7 +4530,6 @@ function AppMain({
     openSessionIds,
     openSessionJoinedAt,
     findOpenSessionRecord,
-    isOpenSessionTabEligible,
     sessionTabsSort,
     topbarPinnedSessions,
   ]);

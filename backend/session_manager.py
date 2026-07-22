@@ -3085,6 +3085,7 @@ class SessionManager:
                     node_sid,
                     int(node.get("next_seq") or 0),
                     node.get("updated_at"),
+                    node.get("last_opened_at"),
                     node.get("draft_input") or "",
                     tuple(
                         item.get("id")
