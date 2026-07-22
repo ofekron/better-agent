@@ -16,7 +16,7 @@ from datetime import datetime
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse
 
-import password_manager
+from better_agent_sdk import BetterAgentError, Client
 
 _MARKETPLACE_HEADERS = {
     "Accept": "application/json",
@@ -27,7 +27,6 @@ _MARKETPLACE_HEADERS = {
 # before being interpolated into a hosted URL path so a crafted id cannot inject
 # path segments ("../") or query fragments ("?", "#") into the marketplace request.
 _EXTENSION_ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
-_AUTH_SERVICE = "better-agent-marketplace"
 _SESSION_ACCOUNT = "oauth-session"
 _PENDING_PREFIX = "oauth-pending-"
 _AUTH_TTL_SECONDS = 600
@@ -78,33 +77,30 @@ def _json_request(path: str, payload: dict[str, object]) -> dict[str, object]:
     return result
 
 
+def _auth_secret(action: str, payload: dict[str, object] | None = None) -> dict[str, object]:
+    try:
+        return Client().invoke_capability("marketplace", f"auth-secret.{action}", payload or {})
+    except BetterAgentError as exc:
+        raise HTTPException(status_code=502, detail="marketplace credential store unavailable") from exc
+
+
 def _store_secret(account: str, value: dict[str, object]) -> None:
-    password_manager.store_service_password({
-        "service": _AUTH_SERVICE,
-        "account": account,
-        "password": json.dumps(value, separators=(",", ":")),
-    })
+    _auth_secret("store", {"account": account, "value": value})
 
 
 def _load_secret(account: str) -> dict[str, object] | None:
-    try:
-        value = json.loads(password_manager.get_service_password(_AUTH_SERVICE, account))
-    except (password_manager.PasswordManagerError, json.JSONDecodeError):
-        return None
+    value = _auth_secret("get", {"account": account}).get("value")
     return value if isinstance(value, dict) else None
 
 
 def _delete_secret(account: str) -> None:
-    try:
-        password_manager.delete_service_password({"service": _AUTH_SERVICE, "account": account})
-    except password_manager.PasswordManagerError:
-        pass
+    _auth_secret("delete", {"account": account})
 
 
 def _cleanup_pending() -> None:
     now = int(time.time())
-    for item in password_manager.list_service_passwords().get("items", []):
-        if item.get("service") != _AUTH_SERVICE:
+    for item in _auth_secret("list").get("items", []):
+        if not isinstance(item, dict):
             continue
         account = str(item.get("account") or "")
         if not account.startswith(_PENDING_PREFIX):

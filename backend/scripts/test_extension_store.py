@@ -5304,7 +5304,7 @@ def test_frontend_extension_exports_frontend_modules() -> None:
         entry = next(item for item in entries if item["extension_id"] == "ofek.settings-module")
         modules = entry["frontend_modules"]
         record = extension_store.get_extension("ofek.settings-module") or {}
-        v = str((record.get("source") or {}).get("commit_sha") or "")[:12]
+        v = str((record.get("source") or {}).get("commit_sha") or "")
         if modules != [
             {
                 "slot": "settings",
@@ -5490,7 +5490,7 @@ def test_frontend_extension_exports_iframe_module() -> None:
         entry = next(item for item in entries if item["extension_id"] == "ofek.iframe-panel")
         modules = entry["frontend_modules"]
         record = extension_store.get_extension("ofek.iframe-panel") or {}
-        v = str((record.get("source") or {}).get("commit_sha") or "")[:12]
+        v = str((record.get("source") or {}).get("commit_sha") or "")
         if modules != [
             {
                 "slot": "settings",
@@ -5504,6 +5504,24 @@ def test_frontend_extension_exports_iframe_module() -> None:
             raise AssertionError(modules)
     finally:
         shutil.rmtree(work, ignore_errors=True)
+
+
+def test_frontend_asset_version_tracks_installed_package_generation() -> None:
+    package_hash_a = "a" * 64
+    package_hash_b = "b" * 64
+    commit_hash = "c" * 40
+
+    first = {"source": {"commit_sha": commit_hash, "package_sha256": package_hash_a}}
+    second = {"source": {"commit_sha": commit_hash, "package_sha256": package_hash_b}}
+
+    if extension_store._frontend_asset_version(first) != package_hash_a:  # type: ignore[attr-defined]
+        raise AssertionError("frontend version ignored the installed package generation")
+    if extension_store._frontend_asset_version(second) != package_hash_b:  # type: ignore[attr-defined]
+        raise AssertionError("frontend version did not change with installed package bytes")
+    if extension_store._frontend_asset_version({"source": {"commit_sha": commit_hash}}) != commit_hash:  # type: ignore[attr-defined]
+        raise AssertionError("commit-only extensions should use their full generation")
+    if extension_store._frontend_asset_version({"source": {}}) != "":  # type: ignore[attr-defined]
+        raise AssertionError("keyless extensions must remain revalidatable")
 
 
 def test_manifest_rejects_invalid_frontend_module_kind() -> None:
@@ -5723,6 +5741,7 @@ if __name__ == "__main__":
         test_frontend_extension_exports_frontend_modules()
         test_frontend_entrypoints_use_persisted_smoke_result()
         test_frontend_extension_exports_iframe_module()
+        test_frontend_asset_version_tracks_installed_package_generation()
         test_manifest_rejects_invalid_frontend_module_kind()
         test_installed_extension_exports_team_definition_sources()
         test_manifest_dependencies_accepted_and_deduped()

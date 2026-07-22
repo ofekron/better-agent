@@ -108,6 +108,20 @@ def test_marketplace_mcp_wrapper_calls_internal_marketplace_endpoint() -> None:
     check(calls == [("marketplace", "search", {"query": "todos", "limit": 5}, 60.0)], "marketplace MCP wrapper uses exact capability action")
 
 
+def test_marketplace_backend_loads_inside_isolated_extension_host() -> None:
+    import extension_backend_loader
+
+    status, body = extension_backend_loader.invoke_extension_backend_sync(
+        extension_store.MARKETPLACE_EXTENSION_ID,
+        "auth/providers",
+        method="GET",
+        base_url="http://localhost:8000",
+    )
+    extension_backend_loader.shutdown_persistent_backends()
+
+    check(status == 200, f"marketplace backend loads in isolated host: {body!r}")
+
+
 def test_marketplace_catalog_search_uses_static_catalog_and_filters_locally() -> None:
     old_base = os.environ.get("BETTER_AGENT_MARKETPLACE_BASE_URL")
     os.environ["BETTER_AGENT_MARKETPLACE_BASE_URL"] = "https://marketplace.test/api/marketplace"
@@ -213,6 +227,91 @@ def test_internal_marketplace_endpoint_requires_marketplace_extension_and_valid_
     check(True, "marketplace management rejects non-marketplace sources")
 
 
+def test_marketplace_auth_secret_capabilities_are_scoped() -> None:
+    from fastapi.testclient import TestClient
+    import extension_token_registry
+    import main
+    import password_manager
+
+    values: dict[tuple[str, str], str] = {
+        ("other-service", "oauth-session"): "hidden",
+    }
+    original_list = password_manager.list_service_passwords
+    original_get = password_manager.get_service_password
+    original_store = password_manager.store_service_password
+    original_delete = password_manager.delete_service_password
+
+    def fake_list() -> dict[str, list[dict[str, str]]]:
+        return {"items": [{"service": service, "account": account} for service, account in values]}
+
+    def fake_get(service: str, account: str) -> str:
+        try:
+            return values[(service, account)]
+        except KeyError as exc:
+            raise password_manager.PasswordManagerError("missing") from exc
+
+    def fake_store(payload: dict[str, str]) -> dict[str, str]:
+        values[(payload["service"], payload["account"])] = payload["password"]
+        return {"service": payload["service"], "account": payload["account"]}
+
+    def fake_delete(payload: dict[str, str]) -> dict[str, str]:
+        if values.pop((payload["service"], payload["account"]), None) is None:
+            raise password_manager.PasswordManagerError("missing")
+        return {"service": payload["service"], "account": payload["account"]}
+
+    password_manager.list_service_passwords = fake_list
+    password_manager.get_service_password = fake_get
+    password_manager.store_service_password = fake_store
+    password_manager.delete_service_password = fake_delete
+    try:
+        client = TestClient(main.app, client=("127.0.0.1", 50000), base_url="http://localhost:8000")
+        marketplace_token = extension_token_registry.mint(extension_store.MARKETPLACE_EXTENSION_ID)
+        other_token = extension_token_registry.mint("ofek-dev.coordination")
+        endpoint = "/api/internal/capabilities/invoke"
+
+        def invoke(token: str, action: str, payload: dict | None = None):
+            return client.post(endpoint, headers={"X-Internal-Token": token}, json={
+                "capability": "marketplace",
+                "action": action,
+                "payload": payload or {},
+            })
+
+        response = invoke(other_token, "auth-secret.list")
+        check(response.status_code == 403, "marketplace auth secrets reject other extension tokens")
+
+        response = invoke(
+            marketplace_token,
+            "auth-secret.store",
+            {"account": "oauth-session", "value": {"access_token": "secret"}},
+        )
+        check(response.status_code == 200, "marketplace token stores its auth secret")
+        check(
+            ("better-agent-marketplace", "oauth-session") in values,
+            "marketplace auth secrets use the fixed service namespace",
+        )
+
+        response = invoke(
+            marketplace_token,
+            "auth-secret.store",
+            {"account": "arbitrary-account", "value": {}},
+        )
+        check(response.status_code == 422, "marketplace auth secrets reject arbitrary accounts")
+
+        response = invoke(marketplace_token, "auth-secret.get", {"account": "oauth-session"})
+        check(response.json() == {"value": {"access_token": "secret"}}, "marketplace reads only its scoped secret")
+
+        response = invoke(marketplace_token, "auth-secret.list")
+        check(response.json() == {"items": [{"account": "oauth-session"}]}, "marketplace secret listing excludes other services")
+
+        response = invoke(marketplace_token, "auth-secret.delete", {"account": "oauth-session"})
+        check(response.json() == {"deleted": True}, "marketplace deletes its scoped secret")
+    finally:
+        password_manager.list_service_passwords = original_list
+        password_manager.get_service_password = original_get
+        password_manager.store_service_password = original_store
+        password_manager.delete_service_password = original_delete
+
+
 def test_marketplace_service_uses_authenticated_backend_and_validates_uninstall_source() -> None:
     from fastapi.responses import JSONResponse
     import marketplace_service
@@ -269,8 +368,10 @@ def main() -> int:
     try:
         test_marketplace_extension_is_seeded_and_exposed_as_runtime_mcp()
         test_marketplace_mcp_wrapper_calls_internal_marketplace_endpoint()
+        test_marketplace_backend_loads_inside_isolated_extension_host()
         test_marketplace_catalog_search_uses_static_catalog_and_filters_locally()
         test_internal_marketplace_endpoint_requires_marketplace_extension_and_valid_actions()
+        test_marketplace_auth_secret_capabilities_are_scoped()
         test_marketplace_service_uses_authenticated_backend_and_validates_uninstall_source()
     finally:
         if created_dist:

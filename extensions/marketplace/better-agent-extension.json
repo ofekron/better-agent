@@ -44,7 +44,11 @@
       "marketplace.install",
       "marketplace.enabled.set",
       "marketplace.uninstall",
-      "marketplace.update"
+      "marketplace.update",
+      "marketplace.auth-secret.list",
+      "marketplace.auth-secret.get",
+      "marketplace.auth-secret.store",
+      "marketplace.auth-secret.delete"
     ]
   },
   "marketplace": {

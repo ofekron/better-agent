@@ -5742,15 +5742,12 @@ def frontend_entrypoints() -> list[dict[str, Any]]:
         entrypoint = (runtime_root / frontend_path).resolve()
         if not entrypoint.is_relative_to(runtime_root) or not entrypoint.is_file():
             continue
-        # Bust browser/PWA caches when an extension changes. Packaged
-        # extensions use their installed package revision.
         frontend_modules = [
             item
             for item in manifest.get("entrypoints", {}).get("frontend_modules") or []
             if is_frontend_module_enabled(manifest["id"], item["slot"], item["id"])
         ]
-        frontend_assets = [frontend_path, *[str(item.get("module") or "") for item in frontend_modules]]
-        v = _frontend_asset_version(record, runtime_root, frontend_assets)
+        v = _frontend_asset_version(record)
         bust = f"?v={v}"
         entries.append(
             {
@@ -5789,26 +5786,8 @@ def frontend_entrypoints_cache_key() -> tuple[Any, ...]:
     return (store_fingerprint(), extension_settings_fingerprint())
 
 
-def _frontend_assets_fingerprint(runtime_root: Path, asset_paths: list[str]) -> tuple[tuple[str, int, int], ...]:
-    fingerprints: list[tuple[str, int, int]] = []
-    for raw in asset_paths:
-        if not raw:
-            continue
-        try:
-            rel_path = _clean_rel_path(raw, field="asset_path")
-            path = (runtime_root / rel_path).resolve()
-            if not path.is_relative_to(runtime_root) or not path.is_file():
-                fingerprints.append((rel_path, -1, -1))
-                continue
-            stat = path.stat()
-            fingerprints.append((rel_path, stat.st_mtime_ns, stat.st_size))
-        except (ExtensionError, OSError):
-            fingerprints.append((str(raw), -1, -1))
-    return tuple(fingerprints)
-
-
-def _frontend_asset_version(record: dict[str, Any], runtime_root: Path, asset_paths: list[str]) -> str:
-    return str((record.get("source") or {}).get("commit_sha") or "")[:12] or "unversioned"
+def _frontend_asset_version(record: dict[str, Any]) -> str:
+    return _record_generation(record)
 
 
 def resolve_frontend_asset(extension_id: str, asset_path: str) -> Path:
@@ -6537,8 +6516,7 @@ def extension_frontend_modules(extension_id: str) -> list[dict[str, Any]]:
     loadable = bool(frontend_path and runtime_root is not None and _record_active(record) and _record_runtime_ready(record))
     bust = ""
     if loadable:
-        frontend_assets = [frontend_path, *[str(item.get("module") or "") for item in frontend_modules]]
-        bust = f"?v={_frontend_asset_version(record, runtime_root, frontend_assets)}"
+        bust = f"?v={_frontend_asset_version(record)}"
     result: list[dict[str, Any]] = []
     for item in frontend_modules:
         module_path = str(item.get("module") or "")

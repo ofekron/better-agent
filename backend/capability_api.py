@@ -4,6 +4,7 @@ import base64
 import contextvars
 import hashlib
 import inspect
+import json
 import os
 import re
 import uuid
@@ -68,6 +69,18 @@ class _MarketplaceInstallPayload(_ExtensionIdPayload):
 
 class _MarketplaceSetEnabledPayload(_ExtensionIdPayload):
     enabled: bool
+
+
+class _MarketplaceAuthSecretPayload(_StrictPayload):
+    account: str = Field(
+        min_length=13,
+        max_length=174,
+        pattern=r"^(?:oauth-session|oauth-pending-[A-Za-z0-9_-]{20,160})$",
+    )
+
+
+class _MarketplaceAuthSecretStorePayload(_MarketplaceAuthSecretPayload):
+    value: dict[str, Any]
 
 
 class _SessionSelectorsPayload(_StrictPayload):
@@ -826,6 +839,65 @@ def _register_marketplace() -> None:
             schema,
             _legacy_main_handler(extension_id, "internal_marketplace", action=legacy_action),
         )
+
+    service = "better-agent-marketplace"
+
+    def list_auth_secrets(_payload: BaseModel) -> dict[str, list[dict[str, str]]]:
+        import password_manager
+
+        try:
+            items = password_manager.list_service_passwords().get("items", [])
+        except password_manager.PasswordManagerError as exc:
+            raise HTTPException(status_code=500, detail="marketplace credential store unavailable") from exc
+        return {
+            "items": [
+                {"account": str(item.get("account") or "")}
+                for item in items
+                if item.get("service") == service
+            ]
+        }
+
+    def get_auth_secret(payload: _MarketplaceAuthSecretPayload) -> dict[str, Any]:
+        import password_manager
+
+        try:
+            raw = password_manager.get_service_password(service, payload.account)
+        except password_manager.PasswordManagerError:
+            return {"value": None}
+        try:
+            value = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise HTTPException(status_code=500, detail="marketplace credential is invalid") from exc
+        if not isinstance(value, dict):
+            raise HTTPException(status_code=500, detail="marketplace credential is invalid")
+        return {"value": value}
+
+    def store_auth_secret(payload: _MarketplaceAuthSecretStorePayload) -> dict[str, bool]:
+        import password_manager
+
+        try:
+            password_manager.store_service_password({
+                "service": service,
+                "account": payload.account,
+                "password": json.dumps(payload.value, separators=(",", ":")),
+            })
+        except password_manager.PasswordManagerError as exc:
+            raise HTTPException(status_code=500, detail="marketplace credential store unavailable") from exc
+        return {"stored": True}
+
+    def delete_auth_secret(payload: _MarketplaceAuthSecretPayload) -> dict[str, bool]:
+        import password_manager
+
+        try:
+            password_manager.delete_service_password({"service": service, "account": payload.account})
+        except password_manager.PasswordManagerError:
+            return {"deleted": False}
+        return {"deleted": True}
+
+    register("marketplace", "auth-secret.list", _StrictPayload, list_auth_secrets)
+    register("marketplace", "auth-secret.get", _MarketplaceAuthSecretPayload, get_auth_secret)
+    register("marketplace", "auth-secret.store", _MarketplaceAuthSecretStorePayload, store_auth_secret)
+    register("marketplace", "auth-secret.delete", _MarketplaceAuthSecretPayload, delete_auth_secret)
 
 
 def _register_session_control() -> None:
