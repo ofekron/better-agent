@@ -348,6 +348,28 @@ export async function createSessionTag(
   return (await _json<{ tag: SessionTag }>(res)).tag;
 }
 
+export async function registerPushToken(
+  deviceId: string,
+  token: string,
+  platform: string,
+  sessionId: string | null,
+): Promise<void> {
+  const res = await fetch(`${API}/api/push-tokens`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify({ device_id: deviceId, token, platform, session_id: sessionId }),
+  });
+  await _json(res);
+}
+
+export async function unregisterPushToken(deviceId: string): Promise<void> {
+  await fetch(`${API}/api/push-tokens/${encodeURIComponent(deviceId)}`, {
+    method: "DELETE",
+    credentials: "include",
+  });
+}
+
 export async function updateSessionOrganization(
   sessionId: string,
   patch: {

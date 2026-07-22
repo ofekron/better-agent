@@ -55,6 +55,15 @@
                 android:name="android.support.FILE_PROVIDER_PATHS"
                 android:resource="@xml/file_paths"></meta-data>
         </provider>
+
+        <!-- @capacitor/push-notifications: without an explicit icon FCM
+             falls back to the application icon, which isn't a white-on-
+             transparent silhouette and renders as a white square/circle on
+             some OEMs. No dedicated push icon asset exists yet, so this
+             reuses the launcher icon as a placeholder until one is added. -->
+        <meta-data
+            android:name="com.google.firebase.messaging.default_notification_icon"
+            android:resource="@mipmap/ic_launcher" />
     </application>
 
     <!-- Permissions -->
@@ -63,4 +72,7 @@
     <!-- In-app APK self-update: hand a downloaded APK to the OS package
          installer. Android still shows its own Install confirmation. -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <!-- Required at runtime on Android 13+ (API 33) for the app to post
+         notifications; requested via PushNotifications.requestPermissions(). -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 </manifest>

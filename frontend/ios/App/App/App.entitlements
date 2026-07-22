@@ -6,5 +6,8 @@
 	<array>
 		<string>group.com.betteragent.app</string>
 	</array>
+	<!-- development here talks to the APNs sandbox; switch to production at archive time for App Store / TestFlight builds. -->
+	<key>aps-environment</key>
+	<string>development</string>
 </dict>
 </plist>
