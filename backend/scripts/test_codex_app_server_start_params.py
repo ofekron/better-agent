@@ -17,16 +17,20 @@ class _FakeMapped:
 class _FakeAppServerProcess:
     requests: list[tuple[str, dict]]
     notifications: list[tuple[str, dict]]
+    tool_handlers: dict
 
     def __init__(self, _proc, _run_dir: Path, *, tool_handlers=None, approval_ctx=None):
-        del tool_handlers, approval_ctx
+        del approval_ctx
         self.thread_id = None
         self.requests = []
         self.notifications = []
+        self.tool_handlers = tool_handlers or {}
         self._mapped = _FakeMapped()
 
     async def request(self, method: str, params: dict) -> dict:
         self.requests.append((method, params))
+        if method in ("thread/resume", "thread/fork") and "dynamicTools" in params:
+            raise RuntimeError("request_user_input already registered")
         if method in ("thread/start", "thread/resume", "thread/fork"):
             return {"thread": {"id": "thread-1"}}
         return {}
@@ -66,17 +70,22 @@ async def test_app_server_uses_structured_sandbox_policy() -> None:
 
 
 async def test_app_server_resume_receives_capability_config() -> None:
+    async def tool_handler(_params: dict) -> dict:
+        return {"ok": True}
+
     created_clients, _argv = await _record_start_app_server(
         session_id="thread-existing",
         dynamic_tools=[{"name": "tool_x", "description": "Tool X", "inputSchema": {"type": "object"}}],
+        tool_handlers={"tool_x": tool_handler},
         provider_run_config={"mcp_servers": {"server-x": {"command": "echo", "args": ["ok"]}}},
     )
 
     client = created_clients[0]
     resume = next(params for method, params in client.requests if method == "thread/resume")
     assert resume["threadId"] == "thread-existing"
-    assert resume["dynamicTools"][0]["name"] == "tool_x"
+    assert "dynamicTools" not in resume
     assert resume["config"]["mcpServers"]["server-x"]["command"] == "echo"
+    assert client.tool_handlers["tool_x"] is tool_handler
 
 
 async def test_app_server_resume_preserves_mcp_tool_timeout() -> None:
@@ -100,18 +109,36 @@ async def test_app_server_resume_preserves_mcp_tool_timeout() -> None:
 
 
 async def test_app_server_fork_receives_capability_config() -> None:
+    async def tool_handler(_params: dict) -> dict:
+        return {"ok": True}
+
     created_clients, _argv = await _record_start_app_server(
         session_id="thread-existing",
         fork=True,
         dynamic_tools=[{"name": "tool_x", "description": "Tool X", "inputSchema": {"type": "object"}}],
+        tool_handlers={"tool_x": tool_handler},
         provider_run_config={"mcp_servers": {"server-x": {"command": "echo", "args": ["ok"]}}},
     )
 
     client = created_clients[0]
     fork = next(params for method, params in client.requests if method == "thread/fork")
     assert fork["threadId"] == "thread-existing"
-    assert fork["dynamicTools"][0]["name"] == "tool_x"
+    assert "dynamicTools" not in fork
     assert fork["config"]["mcpServers"]["server-x"]["command"] == "echo"
+    assert client.tool_handlers["tool_x"] is tool_handler
+
+
+async def test_app_server_start_registers_dynamic_tools() -> None:
+    created_clients, _argv = await _record_start_app_server(
+        session_id=None,
+        dynamic_tools=[{"name": "request_user_input", "description": "Ask", "inputSchema": {"type": "object"}}],
+        provider_run_config={"mcp_servers": {"server-x": {"command": "echo", "args": ["ok"]}}},
+    )
+
+    client = created_clients[0]
+    start = next(params for method, params in client.requests if method == "thread/start")
+    assert start["dynamicTools"][0]["name"] == "request_user_input"
+    assert start["config"]["mcpServers"]["server-x"]["command"] == "echo"
 
 
 async def test_app_server_passes_config_overrides_before_subcommand() -> None:
@@ -155,6 +182,7 @@ async def _record_start_app_server(
     session_id: str | None,
     dynamic_tools: list[dict] | None,
     provider_run_config: dict | None,
+    tool_handlers: dict | None = None,
     fork: bool = False,
     config_overrides: list[str] | None = None,
 ) -> tuple[list[_FakeAppServerProcess], list[str]]:
@@ -187,6 +215,7 @@ async def _record_start_app_server(
                 fork=fork,
                 turn_input=[],
                 dynamic_tools=dynamic_tools,
+                tool_handlers=tool_handlers,
                 provider_run_config=provider_run_config,
                 config_overrides=config_overrides,
             )
@@ -202,5 +231,6 @@ if __name__ == "__main__":
     asyncio.run(test_app_server_resume_receives_capability_config())
     asyncio.run(test_app_server_resume_preserves_mcp_tool_timeout())
     asyncio.run(test_app_server_fork_receives_capability_config())
+    asyncio.run(test_app_server_start_registers_dynamic_tools())
     asyncio.run(test_app_server_passes_config_overrides_before_subcommand())
     test_codex_config_overrides_preserve_mcp_tool_timeout()

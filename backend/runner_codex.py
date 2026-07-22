@@ -2331,7 +2331,7 @@ async def _start_app_server(
         await client.notify("initialized", {})
         if session_id:
             capability_params = _codex_thread_capability_params(
-                dynamic_tools=dynamic_tools,
+                dynamic_tools=None,
                 provider_run_config=provider_run_config,
             )
             if fork:
