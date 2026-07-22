@@ -880,7 +880,7 @@ def test_run_search_sessions_scope_filters_candidates_and_postvalidates() -> boo
     session_organization_store.set_session_organization(
         "scoped-1",
         folder["id"],
-        [tag_a["id"], tag_b["id"]],
+        [tag_a["id"], tag_b["id"], tag_c["id"]],
     )
     session_organization_store.set_session_organization(
         "wrong-tag",
@@ -908,7 +908,7 @@ def test_run_search_sessions_scope_filters_candidates_and_postvalidates() -> boo
                 "scope",
                 cwd="/repo/app",
                 folder_id=folder["id"],
-                tag_ids=[tag_a["id"], tag_b["id"]],
+                tag_ids=[tag_b["id"], tag_a["id"]],
             )
         )
     finally:

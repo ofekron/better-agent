@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import sys
-import tempfile
+import asyncio
 from pathlib import Path
 
 import _test_home
@@ -14,8 +14,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import extension_store  # noqa: E402
 import config_store  # noqa: E402
 import main  # noqa: E402
+import session_organization_store  # noqa: E402
 from session_manager import manager as session_manager  # noqa: E402
-from fastapi.testclient import TestClient  # noqa: E402
 
 
 def _enable_team_extension() -> None:
@@ -57,17 +57,16 @@ def test_internal_session_bridge_search_omits_empty_fields() -> None:
     main.session_search.run_search_sessions_session = fake_search
     main.session_search.index_stub_map = lambda: {}
     try:
-        response = TestClient(main.app).post(
-            "/api/internal/session-bridge/search",
-            headers={"X-Internal-Token": main.coordinator.internal_token},
-            json={"query": "needle", "app_session_id": caller["id"]},
+        response = asyncio.run(
+            main._handle_internal_session_bridge_search(
+                {"query": "needle", "app_session_id": caller["id"]}
+            )
         )
     finally:
         main.session_search.run_search_sessions_session = original_search
         main.session_search.index_stub_map = original_stubs
 
-    assert response.status_code == 200
-    assert response.json() == {"results": []}
+    assert response == {"results": []}
     assert captured["provider_id"] == provider["id"]
 
 
@@ -91,22 +90,52 @@ def test_internal_session_bridge_search_any_disables_provider_filter() -> None:
     main.session_search.run_search_sessions_session = fake_search
     main.session_search.index_stub_map = lambda: {}
     try:
-        response = TestClient(main.app).post(
-            "/api/internal/session-bridge/search",
-            headers={"X-Internal-Token": main.coordinator.internal_token},
-            json={
-                "query": "needle",
-                "app_session_id": caller["id"],
-                "provider_id": "ANY",
-            },
+        response = asyncio.run(
+            main._handle_internal_session_bridge_search(
+                {
+                    "query": "needle",
+                    "app_session_id": caller["id"],
+                    "provider_id": "ANY",
+                }
+            )
         )
     finally:
         main.session_search.run_search_sessions_session = original_search
         main.session_search.index_stub_map = original_stubs
 
-    assert response.status_code == 200
-    assert response.json() == {"results": []}
+    assert response == {"results": []}
     assert captured["provider_id"] is None
+
+
+def test_internal_session_bridge_search_uses_real_search_signature() -> None:
+    provider = config_store.list_providers()["providers"][0]
+    caller = session_manager.create(
+        name="caller-real-search",
+        cwd="/repo",
+        orchestration_mode="native",
+        provider_id=provider["id"],
+    )
+    folder = session_organization_store.create_folder(
+        project_id="/repo",
+        name="Search Folder",
+    )
+    tag = session_organization_store.create_tag(
+        project_id="/repo",
+        name="Search Tag",
+    )
+
+    response = asyncio.run(
+        main._handle_internal_session_bridge_search(
+            {
+                "query": "definitely-unmatched-search-needle",
+                "app_session_id": caller["id"],
+                "tags": [tag["id"]],
+                "folder": folder["id"],
+            }
+        )
+    )
+
+    assert response == {"results": []}
 
 
 def test_internal_delegate_task_auto_route_omits_provider_filter_by_default() -> None:
@@ -126,16 +155,15 @@ def test_internal_delegate_task_auto_route_omits_provider_filter_by_default() ->
     original = main.coordinator.run_delegate_task
     main.coordinator.run_delegate_task = fake_delegate_task  # type: ignore[assignment]
     try:
-        response = TestClient(main.app).post(
-            "/api/internal/delegate-task",
-            headers={"X-Internal-Token": main.coordinator.internal_token},
-            json={"sender_session_id": sender["id"], "task": "find target"},
+        response = asyncio.run(
+            main._handle_internal_delegate_task(
+                {"sender_session_id": sender["id"], "task": "find target"}
+            )
         )
     finally:
         main.coordinator.run_delegate_task = original  # type: ignore[assignment]
 
-    assert response.status_code == 200
-    assert response.json()["success"] is True
+    assert response["success"] is True
     assert captured["provider_id"] == ""
     assert captured["target_session_id"] is None
 
@@ -157,20 +185,19 @@ def test_internal_delegate_task_any_keeps_global_auto_route() -> None:
     original = main.coordinator.run_delegate_task
     main.coordinator.run_delegate_task = fake_delegate_task  # type: ignore[assignment]
     try:
-        response = TestClient(main.app).post(
-            "/api/internal/delegate-task",
-            headers={"X-Internal-Token": main.coordinator.internal_token},
-            json={
-                "sender_session_id": sender["id"],
-                "task": "find global target",
-                "provider_id": "ANY",
-            },
+        response = asyncio.run(
+            main._handle_internal_delegate_task(
+                {
+                    "sender_session_id": sender["id"],
+                    "task": "find global target",
+                    "provider_id": "ANY",
+                }
+            )
         )
     finally:
         main.coordinator.run_delegate_task = original  # type: ignore[assignment]
 
-    assert response.status_code == 200
-    assert response.json()["success"] is True
+    assert response["success"] is True
     assert captured["provider_id"] == "ANY"
     assert captured["target_session_id"] is None
 
@@ -192,20 +219,19 @@ def test_internal_delegate_task_explicit_provider_constrains_auto_route() -> Non
     original = main.coordinator.run_delegate_task
     main.coordinator.run_delegate_task = fake_delegate_task  # type: ignore[assignment]
     try:
-        response = TestClient(main.app).post(
-            "/api/internal/delegate-task",
-            headers={"X-Internal-Token": main.coordinator.internal_token},
-            json={
-                "sender_session_id": sender["id"],
-                "task": "find constrained target",
-                "provider_id": provider["id"],
-            },
+        response = asyncio.run(
+            main._handle_internal_delegate_task(
+                {
+                    "sender_session_id": sender["id"],
+                    "task": "find constrained target",
+                    "provider_id": provider["id"],
+                }
+            )
         )
     finally:
         main.coordinator.run_delegate_task = original  # type: ignore[assignment]
 
-    assert response.status_code == 200
-    assert response.json()["success"] is True
+    assert response["success"] is True
     assert captured["provider_id"] == provider["id"]
     assert captured["target_session_id"] is None
 
@@ -227,20 +253,19 @@ def test_internal_delegate_task_target_bypass_does_not_default_provider() -> Non
     original = main.coordinator.run_delegate_task
     main.coordinator.run_delegate_task = fake_delegate_task  # type: ignore[assignment]
     try:
-        response = TestClient(main.app).post(
-            "/api/internal/delegate-task",
-            headers={"X-Internal-Token": main.coordinator.internal_token},
-            json={
-                "sender_session_id": sender["id"],
-                "task": "direct target",
-                "target_session_id": "target-1",
-            },
+        response = asyncio.run(
+            main._handle_internal_delegate_task(
+                {
+                    "sender_session_id": sender["id"],
+                    "task": "direct target",
+                    "target_session_id": "target-1",
+                }
+            )
         )
     finally:
         main.coordinator.run_delegate_task = original  # type: ignore[assignment]
 
-    assert response.status_code == 200
-    assert response.json()["success"] is True
+    assert response["success"] is True
     assert captured["provider_id"] == ""
     assert captured["target_session_id"] == "target-1"
 
@@ -248,6 +273,7 @@ def test_internal_delegate_task_target_bypass_does_not_default_provider() -> Non
 if __name__ == "__main__":
     test_internal_session_bridge_search_omits_empty_fields()
     test_internal_session_bridge_search_any_disables_provider_filter()
+    test_internal_session_bridge_search_uses_real_search_signature()
     test_internal_delegate_task_auto_route_omits_provider_filter_by_default()
     test_internal_delegate_task_any_keeps_global_auto_route()
     test_internal_delegate_task_explicit_provider_constrains_auto_route()

@@ -284,10 +284,7 @@ def _search_candidates(
         return []
     rows = _build_index()
     if filters:
-        rows = [
-            row for row in rows
-            if all(str(row.get(k) or "") == str(v) for k, v in filters.items() if v)
-        ]
+        rows = [row for row in rows if _matches_filters(row, filters)]
     metadata_scored: list[tuple[int, dict, str]] = []
     for row in rows:
         score = _candidate_score(row, tokens)

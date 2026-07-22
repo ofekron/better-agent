@@ -46,6 +46,41 @@ def test_search_endpoint_returns_rows_for_matches() -> None:
     assert result["results"][0]["name"] == "gamma"
 
 
+def test_search_endpoint_maps_folder_and_tags_to_search_filters() -> None:
+    captured: dict = {}
+
+    async def fake_search(query: str, **kwargs) -> dict:
+        captured["query"] = query
+        captured["kwargs"] = kwargs
+        return {"session_ids": [], "reasoning": "", "error": None}
+
+    orig_search = session_search.run_search_sessions_session
+    orig_require = main._require_ask_internal
+    session_search.run_search_sessions_session = fake_search
+    main._require_ask_internal = lambda token: None
+    try:
+        result = asyncio.run(
+            main.internal_ask_ui_search_sessions(
+                body={
+                    "query": "gamma",
+                    "folder": "folder-a",
+                    "tags": ["tag-a", "", "tag-b"],
+                },
+                x_internal_token="t",
+            )
+        )
+    finally:
+        session_search.run_search_sessions_session = orig_search
+        main._require_ask_internal = orig_require
+
+    assert result == {"results": []}
+    assert captured["query"] == "gamma"
+    assert captured["kwargs"]["folder_id"] == "folder-a"
+    assert captured["kwargs"]["tag_ids"] == ["tag-a", "tag-b"]
+    assert "folder" not in captured["kwargs"]
+    assert "tags" not in captured["kwargs"]
+
+
 def test_assistant_search_uses_same_canonical_contract() -> None:
     s = session_manager.create(
         name="assistant target", model="sonnet", cwd="/tmp/assistant-search",
@@ -69,5 +104,6 @@ def test_assistant_search_uses_same_canonical_contract() -> None:
 
 if __name__ == "__main__":
     test_search_endpoint_returns_rows_for_matches()
+    test_search_endpoint_maps_folder_and_tags_to_search_filters()
     test_assistant_search_uses_same_canonical_contract()
     print("OK")

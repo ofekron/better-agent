@@ -8179,15 +8179,18 @@ async def internal_ask_ui_search_sessions(
         kwargs["max_results"] = max_results
     if isinstance(timeout, (int, float)) and timeout > 0:
         kwargs["timeout"] = float(timeout)
-    for key in ("provider_id", "model", "reasoning_effort", "node_id", "cwd", "folder"):
+    for key in ("provider_id", "model", "reasoning_effort", "node_id", "cwd"):
         val = body.get(key)
         if isinstance(val, str) and val.strip():
             kwargs[key] = val.strip()
+    folder = body.get("folder")
+    if isinstance(folder, str) and folder.strip():
+        kwargs["folder_id"] = folder.strip()
     raw_tags = body.get("tags")
     if isinstance(raw_tags, list):
         cleaned_tags = [t for t in raw_tags if isinstance(t, str) and t.strip()]
         if cleaned_tags:
-            kwargs["tags"] = cleaned_tags
+            kwargs["tag_ids"] = cleaned_tags
     result = await session_search.run_search_sessions_session(query, **kwargs)
     return await asyncio.to_thread(
         session_search.canonical_search_response, result,
@@ -16058,8 +16061,8 @@ async def _handle_internal_session_bridge_search(body: dict) -> dict[str, Any]:
         reasoning_effort=_opt_str("reasoning_effort") or None,
         node_id=_opt_str("node_id") or None,
         cwd=_opt_str("cwd") or None,
-        tags=tags,
-        folder=_opt_str("folder") or None,
+        tag_ids=tags,
+        folder_id=_opt_str("folder") or None,
     )
     return await asyncio.to_thread(session_search.canonical_search_response, flow)
 
