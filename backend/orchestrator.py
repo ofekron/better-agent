@@ -1594,15 +1594,10 @@ class Coordinator:
             collapse_key=collapse_key,
             collapse_policy=collapse_policy,
         )
-        cli_prompt = await _to_team_message_thread(
-            team_messaging.format_team_message_prompt,
-            message,
-            metadata,
-            target_session_id=target_session_id,
-            wrapper_tag="delegated-task"
-            if message_source == team_messaging.DELEGATE_TASK_SOURCE
-            else "mssg",
-        )
+        # `queue_payload` already computed this exact cli_prompt internally
+        # (same message/metadata/target_session_id/wrapper_tag) — reuse it
+        # instead of paying `_target_team_context`'s worker-store scan twice.
+        cli_prompt = queue_item["cli_prompt"]
         prompt_params = {
             "_queued_id": queue_item_id,
             "app_session_id": target_session_id,
