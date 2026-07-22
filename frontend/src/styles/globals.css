@@ -14489,6 +14489,15 @@ pre .inline-tag-highlight {
   animation: file-browser-preview-in 0.18s ease-out;
 }
 
+.file-browser-preview-toolbar {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-secondary, rgba(0, 0, 0, 0.2));
+}
+
 .file-browser-preview-note,
 .file-browser-preview-state {
   padding: 8px 10px;

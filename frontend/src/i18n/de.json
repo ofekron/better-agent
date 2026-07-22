@@ -675,6 +675,8 @@
   "filePanels.browserPreviewLoading": "HTML wird gerendert…",
   "filePanels.browserPreviewFailed": "Diese HTML-Datei konnte nicht gerendert werden.",
   "filePanels.browserPreviewSandboxNote": "Browser-Vorschau: sandboxed — Skripte laufen, aber die Seite hat keinen Zugriff auf Better Agent.",
+  "filePanels.browserPreviewToolbarLabel": "Status der Browservorschau",
+  "filePanels.browserPreviewReloadTitle": "Vorschau anhand der neuesten Datei auf der Festplatte neu laden",
   "filePanels.openInBrowserTab": "In Tab öffnen",
   "filePanels.openInBrowserTabTitle": "Diese HTML-Datei in einem neuen Browser-Tab öffnen",
   "tokens.stats": "Statistik",

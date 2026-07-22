@@ -679,6 +679,8 @@
   "filePanels.browserPreviewLoading": "HTML रेंडर हो रहा है…",
   "filePanels.browserPreviewFailed": "इस HTML फ़ाइल को रेंडर नहीं किया जा सका।",
   "filePanels.browserPreviewSandboxNote": "ब्राउज़र पूर्वावलोकन: सैंडबॉक्स्ड — स्क्रिप्ट चलती हैं, लेकिन पेज Better Agent तक नहीं पहुँच सकता।",
+  "filePanels.browserPreviewToolbarLabel": "ब्राउज़र पूर्वावलोकन स्थिति",
+  "filePanels.browserPreviewReloadTitle": "डिस्क पर नवीनतम फ़ाइल से पूर्वावलोकन फिर से लोड करें",
   "filePanels.openInBrowserTab": "टैब में खोलें",
   "filePanels.openInBrowserTabTitle": "इस HTML फ़ाइल को नए ब्राउज़र टैब में खोलें",
   "tokens.stats": "आँकड़े",

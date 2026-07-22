@@ -678,6 +678,8 @@
   "filePanels.browserPreviewLoading": "HTML 렌더링 중…",
   "filePanels.browserPreviewFailed": "이 HTML 파일을 렌더링할 수 없습니다.",
   "filePanels.browserPreviewSandboxNote": "브라우저 미리보기: 샌드박스 — 스크립트는 실행되지만 페이지는 Better Agent에 접근할 수 없습니다.",
+  "filePanels.browserPreviewToolbarLabel": "브라우저 미리보기 상태",
+  "filePanels.browserPreviewReloadTitle": "디스크의 최신 파일에서 미리보기를 다시 불러옵니다",
   "filePanels.openInBrowserTab": "탭에서 열기",
   "filePanels.openInBrowserTabTitle": "이 HTML 파일을 새 브라우저 탭에서 열기",
   "tokens.stats": "통계",

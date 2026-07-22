@@ -678,6 +678,8 @@
   "filePanels.browserPreviewLoading": "Renderizando HTML…",
   "filePanels.browserPreviewFailed": "No se pudo renderizar este archivo HTML.",
   "filePanels.browserPreviewSandboxNote": "Vista previa del navegador: aislada — los scripts se ejecutan, pero la página no puede acceder a Better Agent.",
+  "filePanels.browserPreviewToolbarLabel": "Estado de la vista previa del navegador",
+  "filePanels.browserPreviewReloadTitle": "Recargar la vista previa desde el archivo más reciente en disco",
   "filePanels.openInBrowserTab": "Abrir en pestaña",
   "filePanels.openInBrowserTabTitle": "Abrir este archivo HTML en una nueva pestaña del navegador",
   "tokens.stats": "Estadísticas",

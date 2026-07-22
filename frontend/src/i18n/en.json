@@ -707,6 +707,8 @@
   "filePanels.browserPreviewLoading": "Rendering HTML…",
   "filePanels.browserPreviewFailed": "Could not render this HTML file.",
   "filePanels.browserPreviewSandboxNote": "Browser preview: sandboxed — scripts run, but the page cannot access Better Agent.",
+  "filePanels.browserPreviewToolbarLabel": "Browser preview status",
+  "filePanels.browserPreviewReloadTitle": "Reload the preview from the latest file on disk",
   "filePanels.openInBrowserTab": "Open in tab",
   "filePanels.openInBrowserTabTitle": "Open this HTML file in a new browser tab",
   "tokens.stats": "Stats",

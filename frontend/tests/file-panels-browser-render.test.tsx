@@ -6,11 +6,15 @@ vi.mock("../src/hooks/useViewport", () => ({
   useViewport: () => ({ mode: "desktop" }),
 }));
 
-vi.mock("../src/components/FileViewer", () => ({
-  FileViewer: ({ filePath }: { filePath: string }) => (
-    <div data-testid="mock-file-viewer">source:{filePath}</div>
-  ),
-}));
+vi.mock("../src/components/FileViewer", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/components/FileViewer")>();
+  return {
+    ...actual,
+    FileViewer: ({ filePath }: { filePath: string }) => (
+      <div data-testid="mock-file-viewer">source:{filePath}</div>
+    ),
+  };
+});
 
 const { FilePanels } = await import("../src/components/FilePanels");
 

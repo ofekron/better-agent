@@ -681,6 +681,8 @@
   "filePanels.browserPreviewLoading": "Рендеринг HTML…",
   "filePanels.browserPreviewFailed": "Не удалось отобразить этот HTML-файл.",
   "filePanels.browserPreviewSandboxNote": "Предпросмотр в браузере: изолирован — скрипты выполняются, но страница не имеет доступа к Better Agent.",
+  "filePanels.browserPreviewToolbarLabel": "Статус предпросмотра в браузере",
+  "filePanels.browserPreviewReloadTitle": "Перезагрузить предпросмотр из последней версии файла на диске",
   "filePanels.openInBrowserTab": "Открыть во вкладке",
   "filePanels.openInBrowserTabTitle": "Открыть этот HTML-файл в новой вкладке браузера",
   "tokens.stats": "Статистика",

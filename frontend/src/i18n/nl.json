@@ -675,6 +675,8 @@
   "filePanels.browserPreviewLoading": "HTML renderen…",
   "filePanels.browserPreviewFailed": "Dit HTML-bestand kon niet worden gerenderd.",
   "filePanels.browserPreviewSandboxNote": "Browservoorbeeld: sandboxed — scripts draaien, maar de pagina heeft geen toegang tot Better Agent.",
+  "filePanels.browserPreviewToolbarLabel": "Status van browservoorbeeld",
+  "filePanels.browserPreviewReloadTitle": "Voorbeeld herladen vanaf de nieuwste versie op schijf",
   "filePanels.openInBrowserTab": "Openen in tabblad",
   "filePanels.openInBrowserTabTitle": "Dit HTML-bestand openen in een nieuw browsertabblad",
   "tokens.stats": "Statistieken",
