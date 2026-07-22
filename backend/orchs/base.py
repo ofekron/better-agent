@@ -709,18 +709,29 @@ class OrchestrationStrategy(ABC):
             return "worker_event", data
 
         from file_ref_resolver import (
-            assume_exists_for_node, extract_session_name, rewrite_event_data,
+            assume_exists_for_node, detect_markers, extract_session_name,
+            rewrite_event_data,
         )
-        # Agent-proposed session name MUST be extracted from RAW text HERE:
-        # on the live path this runs BEFORE apply_event on the same data
-        # dict, and rewrite_event_data below strips the complete
-        # <SESSION_NAME> tag. apply_event re-detects only for paths that
-        # skip this prepare step (crash-recovery replay).
-        session_name_tag = extract_session_name(_agent_message_text(norm_data))
+        # Agent-proposed session name and attention-marker tags MUST be
+        # detected from RAW text HERE: on the live path this runs BEFORE
+        # apply_event sees the same data dict, and rewrite_event_data below
+        # strips the tag wrappers out of it. apply_event's own detection
+        # only ever sees genuinely raw text on paths that skip this prepare
+        # step (crash-recovery replay); on the live path it now runs against
+        # already-stripped text and is a harmless no-op, so the marker MUST
+        # be applied here instead.
+        raw_text_for_tags = _agent_message_text(norm_data)
+        session_name_tag = extract_session_name(raw_text_for_tags)
         if session_name_tag:
             self._apply_agent_rename(
                 app_session_id, session_name_tag, require_allowed=False,
             )
+        if etype in self._RENDER_TREE_ETYPES:
+            for ext_id, marker in detect_markers(raw_text_for_tags):
+                if ext_id:
+                    session_manager.set_marker(app_session_id, ext_id, marker)
+                if marker.get("tag") == _ALL_TASKS_DONE_MARKER_TAG:
+                    _complete_current_work_items(app_session_id)
         try:
             cwd, node_id = session_manager.get_file_ref_context(app_session_id)
             rewrite_event_data(

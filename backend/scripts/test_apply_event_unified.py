@@ -846,6 +846,51 @@ def test_convergence_manager_event_and_agent_message_write_identical_jsonl() -> 
     return True
 
 
+def test_live_path_sets_attention_marker_from_raw_tag() -> bool:
+    """Regression: `save_ws_callback` (turn_manager.py) calls
+    `prepare_provider_event_for_journal` (which rewrites/strips the
+    `<TAG>` wrapper out of the event's data in place, for journal
+    persistence + display styling) BEFORE calling `apply_event` on
+    that SAME event dict. `apply_event`'s own marker detection reads
+    `norm_data`, which by then has already been stripped — so the
+    live path silently never called `session_manager.set_marker`,
+    even though the emitted text visibly carried the tag. Pins that
+    `prepare_provider_event_for_journal` applies the marker itself,
+    from genuinely raw text, before the strip."""
+    import file_ref_resolver
+    import session_store
+
+    sid, msg = _mk_session("native")
+    strategy = get_strategy("native")
+    ctx = ApplyEventCtx(manager_sid_holder=None, workers_list=[],
+                        user_msg=None, root_id=sid)
+
+    file_ref_resolver.set_tag_rules([{
+        "tag": "ALL_TASKS__DONE",
+        "_extension_id": "test.user-attention",
+        "strip_wrapper": True,
+        "marker": {"color": "#2563eb", "tooltip": "All tasks done"},
+    }])
+    try:
+        # Same event dict, same order as `save_ws_callback`: prepare-for-
+        # journal (mutates in place) runs BEFORE apply_event sees it.
+        ev = _agent_message("marker-uuid", "<ALL_TASKS__DONE>done</ALL_TASKS__DONE>")
+        strategy.prepare_provider_event_for_journal(app_session_id=sid, event=ev)
+        strategy.apply_event(app_session_id=sid, msg=msg, event=ev,
+                             ctx=ctx, source_is_provider_stream=True)
+
+        marker = session_store._markers_for_session(sid).get("test.user-attention")
+        if marker is None:
+            print("  no marker persisted for session — live path lost the tag")
+            return False
+        if marker.get("tag") != "ALL_TASKS__DONE":
+            print(f"  wrong marker tag persisted: {marker!r}")
+            return False
+        return True
+    finally:
+        file_ref_resolver.set_tag_rules([])
+
+
 def test_worker_event_routes_to_existing_panel_owner() -> bool:
     sid, owner_msg = _mk_session("manager")
     strategy = get_strategy("manager")
@@ -989,6 +1034,8 @@ TESTS = [
         test_reconcile_fills_partial_finalized_msg_from_orphan_tail),
     ("convergence: manager_event and agent_message write identical jsonl",
         test_convergence_manager_event_and_agent_message_write_identical_jsonl),
+    ("live path sets attention marker from raw tag before strip",
+        test_live_path_sets_attention_marker_from_raw_tag),
     ("worker_event routes to existing panel owner",
         test_worker_event_routes_to_existing_panel_owner),
     ("hydration recovers legacy worker_event owner",
