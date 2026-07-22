@@ -303,7 +303,7 @@ def list_worker_projection(cwd: str, limit: int = 20) -> list[dict]:
     so the manager doesn't see references to dead sessions.
     """
     out: list[dict] = []
-    workers = list_workers("")
+    workers = list_workers(cwd)
     chunk_size = max(limit * 2, 20)
     for start in range(0, len(workers), chunk_size):
         chunk = workers[start:start + chunk_size]

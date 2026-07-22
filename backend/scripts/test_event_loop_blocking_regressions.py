@@ -1422,6 +1422,12 @@ def test_known_worker_projection_uses_field_reads() -> None:
     assert "_sm.get_fields(agent_session_id" not in projection_source
     assert "_sm.get(agent_session_id)" not in projection_source
     assert "_sm.get_lite(agent_session_id)" not in projection_source
+    # Real bug found via live telemetry: `list_workers("")` ignored the
+    # function's own `cwd` argument, forcing every call to scan the
+    # entire global worker registry (thousands of accumulated, mostly
+    # stale entries) instead of just the target's own cwd.
+    assert "workers = list_workers(cwd)" in projection_source
+    assert 'workers = list_workers("")' not in projection_source
 
 
 def test_session_exists_uses_index_without_cold_root_load() -> None:
@@ -4496,13 +4502,19 @@ def test_team_message_dispatch_uses_dedicated_executor() -> None:
         "team_messaging.validate_message_route",
         "team_messaging.build_message_metadata",
         "team_messaging.queue_payload",
-        "team_messaging.format_team_message_prompt",
         "session_manager.add_queued_prompt",
         "session_manager.remove_queued_prompt",
     ):
         assert f"_to_team_message_thread(\n" in team_message_source
         assert call in team_message_source
-    assert team_message_source.count("_to_team_message_thread(") == 6
+    assert team_message_source.count("_to_team_message_thread(") == 5
+    # cli_prompt is NOT recomputed via a second format_team_message_prompt
+    # call — `queue_payload` already computed it once internally, and a
+    # second identical call was found (via live timing instrumentation) to
+    # double the cost of `_target_team_context`'s worker-store scan, which
+    # is itself the dominant cost under a large accumulated worker registry.
+    assert 'cli_prompt = queue_item["cli_prompt"]' in team_message_source
+    assert "team_messaging.format_team_message_prompt" not in team_message_source
 
     # The synchronous ask path (`ask_team_message`, 24h wait for the target's
     # own turn to complete) is a different bug class — genuinely blocks for
