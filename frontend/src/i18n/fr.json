@@ -679,6 +679,8 @@
   "filePanels.browserPreviewLoading": "Rendu du HTML…",
   "filePanels.browserPreviewFailed": "Impossible d'afficher ce fichier HTML.",
   "filePanels.browserPreviewSandboxNote": "Aperçu navigateur : isolé — les scripts s'exécutent, mais la page ne peut pas accéder à Better Agent.",
+  "filePanels.browserPreviewToolbarLabel": "État de l'aperçu navigateur",
+  "filePanels.browserPreviewReloadTitle": "Recharger l'aperçu à partir du dernier fichier sur le disque",
   "filePanels.openInBrowserTab": "Ouvrir dans un onglet",
   "filePanels.openInBrowserTabTitle": "Ouvrir ce fichier HTML dans un nouvel onglet du navigateur",
   "tokens.stats": "Statistiques",

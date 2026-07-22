@@ -675,6 +675,8 @@
   "filePanels.browserPreviewLoading": "HTMLをレンダリング中…",
   "filePanels.browserPreviewFailed": "このHTMLファイルをレンダリングできませんでした。",
   "filePanels.browserPreviewSandboxNote": "ブラウザプレビュー：サンドボックス化 — スクリプトは実行されますが、ページはBetter Agentにアクセスできません。",
+  "filePanels.browserPreviewToolbarLabel": "ブラウザプレビューの状態",
+  "filePanels.browserPreviewReloadTitle": "ディスク上の最新ファイルからプレビューを再読み込み",
   "filePanels.openInBrowserTab": "タブで開く",
   "filePanels.openInBrowserTabTitle": "このHTMLファイルを新しいブラウザタブで開く",
   "tokens.stats": "統計",

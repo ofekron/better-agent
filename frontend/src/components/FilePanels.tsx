@@ -1,8 +1,17 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { DiffEditor } from "@monaco-editor/react";
 import type { OpenFilePanel } from "../types";
 import { API } from "../api";
-import { FileViewer, type FileEditorHandle, type FileTagAnchor } from "./FileViewer";
+import {
+  FileViewer,
+  fetchFileIdentity,
+  fetchTextFile,
+  identitiesDiffer,
+  type FileEditorHandle,
+  type FileIdentity,
+  type FileTagAnchor,
+} from "./FileViewer";
 import { useViewport } from "../hooks/useViewport";
 
 interface Props {
@@ -44,20 +53,35 @@ export async function fetchHtmlPreviewUrl(path: string, nodeId: string): Promise
   return `${API}${data.url}`;
 }
 
+/** Loads the HTML source alongside the preview URL so staleness (mtime/size
+ * vs. disk) and an on-demand diff can mirror the source viewer's toolbar. */
 function BrowserFilePreview({ filePath, nodeId }: { filePath: string; nodeId: string }) {
   const { t } = useTranslation();
   const [src, setSrc] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
+  const [loadedSource, setLoadedSource] = useState<string | null>(null);
+  const [loadedIdentity, setLoadedIdentity] = useState<FileIdentity | null>(null);
+  const [currentIdentity, setCurrentIdentity] = useState<FileIdentity | null>(null);
+  const [diff, setDiff] = useState<{ before: string; after: string } | null>(null);
+  const [diffLoading, setDiffLoading] = useState(false);
 
-  useEffect(() => {
+  const loadOpId = `file:browser-preview:${filePath}`;
+  const diffOpId = `file:browser-preview-diff:${filePath}`;
+
+  const load = useCallback(() => {
     let cancelled = false;
     setSrc(null);
     setLoading(true);
     setError(false);
-    fetchHtmlPreviewUrl(filePath, nodeId)
-      .then((url) => {
-        if (!cancelled) setSrc(url);
+    setDiff(null);
+    Promise.all([fetchHtmlPreviewUrl(filePath, nodeId), fetchTextFile(filePath, nodeId, loadOpId)])
+      .then(([url, text]) => {
+        if (cancelled) return;
+        setSrc(url);
+        setLoadedSource(text.content);
+        setLoadedIdentity(text.identity);
+        setCurrentIdentity(text.identity);
       })
       .catch(() => {
         if (!cancelled) {
@@ -68,31 +92,125 @@ function BrowserFilePreview({ filePath, nodeId }: { filePath: string; nodeId: st
     return () => {
       cancelled = true;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filePath, nodeId]);
+
+  useEffect(() => load(), [load]);
+
+  // Poll disk identity like the source viewer, so the "changed" badge
+  // and reload/diff actions react to edits made outside this preview.
+  useEffect(() => {
+    if (!loadedIdentity) return;
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const identity = await fetchFileIdentity(filePath, nodeId);
+        if (!cancelled) setCurrentIdentity(identity);
+      } catch {
+        if (!cancelled) setCurrentIdentity(null);
+      }
+    };
+    void poll();
+    const interval = window.setInterval(() => { void poll(); }, 5000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [filePath, nodeId, loadedIdentity]);
+
+  const stale = identitiesDiffer(loadedIdentity, currentIdentity);
+
+  const viewDiff = useCallback(async () => {
+    if (loadedSource === null) return;
+    setDiffLoading(true);
+    try {
+      const latest = await fetchTextFile(filePath, nodeId, diffOpId);
+      setDiff({ before: loadedSource, after: latest.content });
+    } finally {
+      setDiffLoading(false);
+    }
+  }, [filePath, nodeId, loadedSource, diffOpId]);
 
   return (
     <div className="file-browser-preview" data-testid="file-browser-preview">
+      <div
+        className="file-browser-preview-toolbar"
+        role="group"
+        aria-label={t("filePanels.browserPreviewToolbarLabel")}
+      >
+        {stale ? (
+          <span className="file-viewer-stale" title={t("fileViewer.changedSinceLoadedTitle")}>
+            {t("fileViewer.changedSinceLoaded")}
+          </span>
+        ) : (
+          <span className="file-viewer-sync-state state-synced" title={t("fileViewer.syncedTitle")}>
+            {t("fileViewer.synced")}
+          </span>
+        )}
+        {diff && <span className="file-viewer-diff-badge">{t("fileViewer.loadedToLatest")}</span>}
+        {stale && !diff && (
+          <button
+            type="button"
+            className="btn-small"
+            onClick={load}
+            title={t("filePanels.browserPreviewReloadTitle")}
+          >
+            {t("fileViewer.updateToLatest")}
+          </button>
+        )}
+        {stale && !diff && (
+          <button
+            type="button"
+            className="btn-small"
+            onClick={() => void viewDiff()}
+            disabled={diffLoading || loadedSource === null}
+            title={t("fileViewer.viewLatestDiffTitle")}
+          >
+            {diffLoading ? t("fileViewer.loadingLatest") : t("fileViewer.viewLatestDiff")}
+          </button>
+        )}
+        {diff && (
+          <button type="button" className="btn-small" onClick={() => setDiff(null)}>
+            {t("fileViewer.backToFile")}
+          </button>
+        )}
+      </div>
       <div className="file-browser-preview-note">
         {t("filePanels.browserPreviewSandboxNote")}
       </div>
-      {error && (
-        <div className="file-browser-preview-state">
-          {t("filePanels.browserPreviewFailed")}
+      {diff ? (
+        <div className="file-viewer-latest-diff" data-testid="file-browser-preview-diff">
+          <DiffEditor
+            height="100%"
+            language="html"
+            original={diff.before}
+            modified={diff.after}
+            theme="vs-dark"
+            options={{ readOnly: true, renderSideBySide: true }}
+          />
         </div>
-      )}
-      {loading && !error && (
-        <div className="file-browser-preview-state">
-          {t("filePanels.browserPreviewLoading")}
-        </div>
-      )}
-      {src && (
-        <iframe
-          title={filePath}
-          className="file-browser-preview-frame"
-          sandbox="allow-scripts allow-popups allow-downloads allow-forms allow-modals"
-          src={src}
-          onLoad={() => setLoading(false)}
-        />
+      ) : (
+        <>
+          {error && (
+            <div className="file-browser-preview-state">
+              {t("filePanels.browserPreviewFailed")}
+            </div>
+          )}
+          {loading && !error && (
+            <div className="file-browser-preview-state">
+              {t("filePanels.browserPreviewLoading")}
+            </div>
+          )}
+          {src && (
+            <iframe
+              title={filePath}
+              className="file-browser-preview-frame"
+              sandbox="allow-scripts allow-popups allow-downloads allow-forms allow-modals"
+              src={src}
+              onLoad={() => setLoading(false)}
+            />
+          )}
+        </>
       )}
     </div>
   );

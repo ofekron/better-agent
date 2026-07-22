@@ -679,6 +679,8 @@
   "filePanels.browserPreviewLoading": "正在渲染 HTML…",
   "filePanels.browserPreviewFailed": "无法渲染此 HTML 文件。",
   "filePanels.browserPreviewSandboxNote": "浏览器预览：沙盒隔离 — 脚本可运行，但页面无法访问 Better Agent。",
+  "filePanels.browserPreviewToolbarLabel": "浏览器预览状态",
+  "filePanels.browserPreviewReloadTitle": "根据磁盘上的最新文件重新加载预览",
   "filePanels.openInBrowserTab": "在标签页中打开",
   "filePanels.openInBrowserTabTitle": "在新的浏览器标签页中打开此 HTML 文件",
   "tokens.stats": "统计",

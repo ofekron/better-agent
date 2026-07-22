@@ -684,6 +684,8 @@
   "filePanels.browserPreviewLoading": "מרנדר HTML…",
   "filePanels.browserPreviewFailed": "לא ניתן לרנדר את קובץ ה-HTML הזה.",
   "filePanels.browserPreviewSandboxNote": "תצוגת דפדפן: מבודדת — סקריפטים רצים, אך הדף אינו יכול לגשת ל-Better Agent.",
+  "filePanels.browserPreviewToolbarLabel": "מצב תצוגת הדפדפן",
+  "filePanels.browserPreviewReloadTitle": "טען מחדש את התצוגה מהקובץ העדכני בדיסק",
   "filePanels.openInBrowserTab": "פתח בלשונית",
   "filePanels.openInBrowserTabTitle": "פתח קובץ HTML זה בלשונית דפדפן חדשה",
   "tokens.stats": "סטטיסטיקה",

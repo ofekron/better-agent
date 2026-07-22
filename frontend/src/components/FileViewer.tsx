@@ -74,8 +74,8 @@ interface Props {
 
 // File-type category drives which viewer component renders the file.
 type ViewerKind = "markdown" | "csv" | "tsv" | "json" | "pdf" | "video" | "code";
-type FileIdentity = { mtime_ns?: number; size?: number };
-type LoadedTextFile = {
+export type FileIdentity = { mtime_ns?: number; size?: number };
+export type LoadedTextFile = {
   path: string;
   content: string;
   language: string;
@@ -117,7 +117,7 @@ function identityFromPayload(payload: unknown): FileIdentity | null {
   return { mtime_ns: mtime, size };
 }
 
-function identitiesDiffer(
+export function identitiesDiffer(
   loaded: FileIdentity | null,
   current: FileIdentity | null,
 ): boolean {
@@ -125,7 +125,7 @@ function identitiesDiffer(
   return loaded.mtime_ns !== current.mtime_ns || loaded.size !== current.size;
 }
 
-async function fetchFileIdentity(
+export async function fetchFileIdentity(
   path: string,
   nodeId: string,
 ): Promise<FileIdentity | null> {
@@ -135,7 +135,7 @@ async function fetchFileIdentity(
   return identityFromPayload(await response.json());
 }
 
-async function fetchTextFile(
+export async function fetchTextFile(
   path: string,
   nodeId: string,
   opId: string,
