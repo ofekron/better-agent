@@ -22,6 +22,11 @@
   --success: #3fb950;
   --error: #f85149;
   --warning: #d29922;
+  /* Turn-type accents (see lib/turnMessageHeader.ts): --agent for
+     worker/agent turns, --warning for direct file edits (already in use
+     above), plus these two dedicated hues for the remaining turn groups. */
+  --turn-review: #58a6ff;
+  --turn-external: #d2a8ff;
 
   /* Aliases consumed by the Ask panel CSS (.ask-*), which was authored
      against a light-theme var set that doesn't exist in this app. Map
@@ -12427,15 +12432,15 @@ button.run-badge-clickable:focus-visible {
   justify-content: center;
   width: 22px;
   height: 22px;
-  background: var(--accent-dim);
-  color: var(--accent);
+  background: color-mix(in srgb, var(--turn-accent, var(--accent)) 20%, transparent);
+  color: var(--turn-accent, var(--accent));
   border-radius: 4px;
   font-size: calc(12px * var(--app-font-scale));
   flex-shrink: 0;
 }
 
 .message-box-label {
-  color: var(--accent);
+  color: var(--turn-accent, var(--accent));
   font-weight: 600;
   font-size: calc(12px * var(--app-font-scale));
   font-family: "SF Mono", "Fira Code", monospace;
@@ -12443,7 +12448,6 @@ button.run-badge-clickable:focus-visible {
   letter-spacing: 0.5px;
 }
 .message-box-label.orchestration-label {
-  color: var(--text-muted, #888);
   font-style: italic;
 }
 .message-box-icon.orchestration-icon {
