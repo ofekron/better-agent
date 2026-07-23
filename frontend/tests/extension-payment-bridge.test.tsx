@@ -252,6 +252,37 @@ describe("extension payment bridge", () => {
     expect(fetch).not.toHaveBeenCalled();
   });
 
+  it("preserves structured backend error details for marketplace requests", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify({ detail: "marketplace login required" }), {
+        status: 401,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    render(<ExtensionModuleSlot module={makeModule()} />);
+    const iframe = renderedIframe();
+    const replySpy = vi.spyOn(iframe.contentWindow as Window, "postMessage");
+
+    dispatchBridgeMessage({
+      source: "ba-extension",
+      nonce: "00000000-0000-4000-8000-000000000001",
+      action: "marketplace-request",
+      requestId: "auth-expired",
+      path: "/api/extensions/ofek-dev.marketplace/backend/catalog",
+      method: "GET",
+    }, iframe.contentWindow);
+
+    await waitFor(() => expect(replySpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: "marketplace-response",
+        requestId: "auth-expired",
+        ok: false,
+        error: "marketplace login required",
+      }),
+      "*",
+    ));
+  });
+
   it("allows a single encoded catalog query and rejects extra query parameters", async () => {
     render(<ExtensionModuleSlot module={makeModule()} />);
     const iframe = renderedIframe();

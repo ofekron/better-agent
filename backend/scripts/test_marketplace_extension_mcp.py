@@ -122,6 +122,55 @@ def test_marketplace_backend_loads_inside_isolated_extension_host() -> None:
     check(status == 200, f"marketplace backend loads in isolated host: {body!r}")
 
 
+def test_marketplace_backend_clears_revoked_tokens_for_direct_catalog_calls() -> None:
+    routes_path = ROOT.parent / "extensions" / "marketplace" / "backend" / "routes.py"
+    spec = importlib.util.spec_from_file_location("marketplace_backend_routes", routes_path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec and spec.loader
+    spec.loader.exec_module(module)
+
+    deleted: list[str] = []
+    catalog_tokens: list[str] = []
+    module._session_tokens = lambda: {"access_token": "revoked", "provider": "github"}
+    module._access_token = lambda: "revoked"
+    module._account_for_access_token = lambda _token: None
+    module._delete_secret = deleted.append
+    module._ofekdev_rows = lambda token: catalog_tokens.append(token) or [{"id": "ofek.adv"}]
+
+    router = module.create_router(object())
+    catalog_endpoint = next(
+        route.endpoint for route in router.routes if route.path == "/catalog"
+    )
+    catalog = asyncio.run(catalog_endpoint())
+
+    check(catalog == {"extensions": [{"id": "ofek.adv"}]}, "revoked direct catalog call remains public")
+    check(catalog_tokens == [""], "revoked bearer is not reused for direct catalog")
+    check(deleted == [module._SESSION_ACCOUNT], "revoked marketplace session is deleted")
+
+    uninstall_tokens: list[str] = []
+    module._ofekdev_uninstall = lambda _extension_id, token: uninstall_tokens.append(token)
+    uninstall_endpoint = next(
+        route.endpoint for route in router.routes if route.path == "/extensions/{extension_id}/uninstall"
+    )
+    try:
+        asyncio.run(uninstall_endpoint("ofek.adv"))
+    except module.HTTPException as exc:
+        check(exc.status_code == 401, "revoked marketplace uninstall fails locally")
+    else:
+        raise AssertionError("revoked marketplace uninstall must require login")
+    check(uninstall_tokens == [], "revoked marketplace uninstall never reaches the remote")
+
+    module._account_for_access_token = lambda token: {"id": "account-1"} if token == "valid" else None
+    module._access_token = lambda: "valid"
+    auth_status_endpoint = next(
+        route.endpoint for route in router.routes if route.path == "/auth/status"
+    )
+    status = asyncio.run(auth_status_endpoint())
+
+    check(status["authenticated"] is True, "valid marketplace account remains authenticated")
+    check(status["account"] == {"id": "account-1"}, "validated marketplace account is returned")
+
+
 def test_marketplace_catalog_search_uses_static_catalog_and_filters_locally() -> None:
     old_base = os.environ.get("BETTER_AGENT_MARKETPLACE_BASE_URL")
     os.environ["BETTER_AGENT_MARKETPLACE_BASE_URL"] = "https://marketplace.test/api/marketplace"
@@ -369,6 +418,7 @@ def main() -> int:
         test_marketplace_extension_is_seeded_and_exposed_as_runtime_mcp()
         test_marketplace_mcp_wrapper_calls_internal_marketplace_endpoint()
         test_marketplace_backend_loads_inside_isolated_extension_host()
+        test_marketplace_backend_clears_revoked_tokens_for_direct_catalog_calls()
         test_marketplace_catalog_search_uses_static_catalog_and_filters_locally()
         test_internal_marketplace_endpoint_requires_marketplace_extension_and_valid_actions()
         test_marketplace_auth_secret_capabilities_are_scoped()
