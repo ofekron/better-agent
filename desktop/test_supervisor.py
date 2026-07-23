@@ -408,6 +408,7 @@ def test_packaged_restart_preserves_denial_and_rotates_channel() -> bool:
     reads = 0
     spawns: list[dict] = []
     real_get = provider_credentials.oskeychain.native_get
+    real_cli_get = provider_credentials.oskeychain.get
     real_popen = supervisor_module.subprocess.Popen
     sup = BackendSupervisor()
     checkout, _ = _source_checkout("packaged-restart")
@@ -431,6 +432,7 @@ def test_packaged_restart_preserves_denial_and_rotates_channel() -> bool:
         return FakeProcess()
 
     provider_credentials.oskeychain.native_get = denied_get
+    provider_credentials.oskeychain.get = denied_get
     supervisor_module.subprocess.Popen = fake_popen
     try:
         request = {
@@ -439,13 +441,15 @@ def test_packaged_restart_preserves_denial_and_rotates_channel() -> bool:
             "request_id": "0" * 32,
         }
         assert sup._credential_broker.handle(request) == {"status": "blocked"}
+        assert reads == 1
         first = sup._spawn_backend()
         first_session = sup._credential_session
         second = sup._spawn_backend()
         assert first is not second
         assert first_session is not sup._credential_session
+        # The denial survives channel rotation but is re-probed, not cached.
         assert sup._credential_broker.handle(request) == {"status": "blocked"}
-        assert reads == 1
+        assert reads == 2
         assert len(spawns) == 2
         assert all(
             "BETTER_AGENT_CREDENTIAL_SESSION_FD" in spawn["env"]
@@ -457,6 +461,7 @@ def test_packaged_restart_preserves_denial_and_rotates_channel() -> bool:
         sup._close_credential_session()
         sup._credential_broker.clear()
         provider_credentials.oskeychain.native_get = real_get
+        provider_credentials.oskeychain.get = real_cli_get
         supervisor_module.subprocess.Popen = real_popen
 
 

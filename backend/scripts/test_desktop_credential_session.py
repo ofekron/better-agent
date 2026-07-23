@@ -66,46 +66,50 @@ def assert_unrelated_process_cannot_connect(session) -> None:
 
 
 def main() -> None:
-    real_get = provider_credentials.oskeychain.native_get
-    real_store = provider_credentials.oskeychain.native_store
-    real_delete = provider_credentials.oskeychain.native_delete
+    keychain = provider_credentials.oskeychain
+    originals = {
+        name: getattr(keychain, name)
+        for name in ("get", "store", "delete", "native_get", "native_store", "native_delete")
+    }
     reads = 0
     stores = 0
     deletes = 0
     values: dict[tuple[str, str], str] = {}
     blocked = True
-    keychain_options: list[dict[str, str]] = []
+    read_kwargs: list[dict] = []
     (TEST_HOME / "config.json").write_text(json.dumps({
         "providers": [{"id": "provider-1", "name": "Friendly Provider"}],
     }), encoding="utf-8")
 
-    def get(service: str, account: str, *, reason: str | None = None):
+    def get(service: str, account: str, **kwargs):
         nonlocal reads
         reads += 1
-        keychain_options.append({"reason": reason} if reason else {})
+        read_kwargs.append(kwargs)
         if blocked:
             raise RuntimeError("blocked")
         return values.get((service, account))
 
-    provider_credentials.oskeychain.native_get = get
-    def store(
-        service: str, account: str, value: str, *, reason: str | None = None,
-    ) -> None:
+    def store(service: str, account: str, value: str) -> None:
         nonlocal stores
         stores += 1
         if blocked:
             raise RuntimeError("blocked")
         values[(service, account)] = value
 
-    def delete(service: str, account: str, *, reason: str | None = None) -> None:
+    def delete(service: str, account: str) -> None:
         nonlocal deletes
         deletes += 1
         if blocked:
             raise RuntimeError("blocked")
         values.pop((service, account), None)
 
-    provider_credentials.oskeychain.native_store = store
-    provider_credentials.oskeychain.native_delete = delete
+    keychain.get = get
+    keychain.store = store
+    keychain.delete = delete
+    keychain.native_get = get
+    keychain.native_store = store
+    keychain.native_delete = delete
+    legacy_count = len(provider_credentials.LEGACY_PROVIDER_CREDENTIAL_SERVICES)
     broker = credential_session.ProviderCredentialBroker()
     session = broker.open_session()
     session.start()
@@ -123,7 +127,7 @@ def main() -> None:
         assert backend_request(session, "status", "provider-1") == {"status": "unknown"}
         assert backend_request(session, "read", "provider-1") == {"status": "blocked"}
         assert reads == 1
-        assert keychain_options == [{}]
+        assert read_kwargs == [{}]
         first_connection = session._backend_connection
         if os.name != "nt":
             os.write(first_connection.fileno(), struct.pack("!i", 64) + b"partial")
@@ -132,51 +136,55 @@ def main() -> None:
         session.start()
         assert first_connection.closed
         assert session._backend_connection is not first_connection
+        # A blocked state is not terminal: every read re-probes the keychain.
         assert backend_request(session, "read", "provider-1") == {"status": "blocked"}
-        assert reads == 1
+        assert reads == 2
         blocked = False
         assert request(session, "store", "provider-1", "replacement") == {
             "status": "available"
         }
+        assert stores == 1
+        assert reads == 3  # canonical write is verified by reading it back
+        assert deletes == legacy_count  # legacy cleanup after canonical store
         assert request(session, "read", "provider-1") == {
             "status": "available",
             "value": "replacement",
         }
+        assert reads == 3  # available stays cached
         blocked = True
         assert request(session, "delete", "provider-1") == {"status": "blocked"}
-        assert stores == 1
-        assert deletes == 4
+        assert deletes == legacy_count + 1
 
         assert request(session, "store", "provider-store-blocked", "replacement") == {
             "status": "blocked"
         }
-        assert request(session, "read", "provider-store-blocked") == {"status": "blocked"}
         assert stores == 2
-        assert reads == 2
+        assert request(session, "read", "provider-store-blocked") == {"status": "blocked"}
+        assert reads == 4
 
         assert request(session, "delete", "provider-delete-blocked") == {"status": "blocked"}
+        assert deletes == legacy_count + 2
         assert request(session, "read", "provider-delete-blocked") == {"status": "blocked"}
-        assert deletes == 5
-        assert reads == 2
+        assert reads == 5
 
         blocked = False
         assert request(session, "retry", "provider-1") == {
             "status": "available",
             "value": "replacement",
         }
-        assert reads == 3
+        assert reads == 6
         assert request(session, "read", "provider-1") == {
             "status": "available",
             "value": "replacement",
         }
-        assert reads == 3
+        assert reads == 6
         assert request(session, "delete", "provider-1") == {"status": "missing"}
+        assert all(kwargs == {} for kwargs in read_kwargs)
     finally:
         session.stop()
         broker.clear()
-        provider_credentials.oskeychain.native_get = real_get
-        provider_credentials.oskeychain.native_store = real_store
-        provider_credentials.oskeychain.native_delete = real_delete
+        for name, fn in originals.items():
+            setattr(keychain, name, fn)
     assert broker._states == {}
     shutil.rmtree(TEST_HOME)
     print("OK: desktop credential session")

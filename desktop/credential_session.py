@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import subprocess
 import threading
@@ -14,6 +15,8 @@ from provider_credentials import (
     ProviderCredentialCandidate,
     ProviderCredentialStore,
 )
+
+logger = logging.getLogger(__name__)
 
 CredentialStatus = Literal["unknown", "available", "missing", "blocked"]
 _MAX_FRAME_BYTES = 128 * 1024
@@ -87,21 +90,24 @@ class ProviderCredentialBroker:
 
     def _read(self, provider_id: str) -> dict[str, str]:
         state = self._state(provider_id)
-        if state.status != "unknown":
+        if state.status in {"available", "missing"}:
             return state.response()
+        # "unknown" or "blocked": probe the keychain. A blocked state is
+        # re-probed on every read so transient OS denials (locked keychain,
+        # ACL churn) heal as soon as access returns, without a restart.
         try:
             with self._keychain_lock:
                 value = self._credential_store.read(provider_id)
             if value:
                 return self._remember(provider_id, "available", value=value)
         except ProviderCredentialAccessBlocked as exc:
-            return self._remember(
+            return self._remember_blocked(
                 provider_id,
-                "blocked",
+                exc,
                 blocked_candidate=exc.candidate,
             )
-        except RuntimeError:
-            return self._remember(provider_id, "blocked")
+        except RuntimeError as exc:
+            return self._remember_blocked(provider_id, exc)
         return self._remember(provider_id, "missing")
 
     def _retry(self, provider_id: str) -> dict[str, str]:
@@ -175,6 +181,32 @@ class ProviderCredentialBroker:
 
     def _state(self, provider_id: str) -> _ProviderCredentialState:
         return self._states.get(provider_id, _UNKNOWN_CREDENTIAL_STATE)
+
+    def _remember_blocked(
+        self,
+        provider_id: str,
+        cause: BaseException,
+        *,
+        blocked_candidate: ProviderCredentialCandidate | None = None,
+    ) -> dict[str, str]:
+        # WARNING only on the transition into blocked; re-probes that stay
+        # blocked log at DEBUG so a long outage doesn't flood the log.
+        level = (
+            logging.DEBUG
+            if self._state(provider_id).status == "blocked"
+            else logging.WARNING
+        )
+        logger.log(
+            level,
+            "provider credential read blocked for %s: %s",
+            provider_id,
+            cause.__cause__ or cause,
+        )
+        return self._remember(
+            provider_id,
+            "blocked",
+            blocked_candidate=blocked_candidate,
+        )
 
     def _remember(
         self,
