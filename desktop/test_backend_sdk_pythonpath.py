@@ -11,12 +11,15 @@ Run with:
 
 from __future__ import annotations
 
+import atexit
 import os
+import shutil
 import sys
 import tempfile
 from pathlib import Path
 
 _TMP_HOME = tempfile.mkdtemp(prefix="bc-test-sdk-pythonpath-")
+atexit.register(shutil.rmtree, _TMP_HOME, True)
 os.environ["BETTER_AGENT_HOME"] = _TMP_HOME
 os.environ["BETTER_CLAUDE_HOME"] = _TMP_HOME
 
