@@ -38,7 +38,7 @@ def test_write_json_retries_transient_windows_permission_error() -> None:
         path = Path(tmpdir) / "store.json"
         real_replace = json_store.os.replace
         real_sleep = json_store.time.sleep
-        real_name = json_store.os.name
+        real_is_windows = json_store._is_windows
         attempts = 0
         sleeps: list[float] = []
 
@@ -51,13 +51,13 @@ def test_write_json_retries_transient_windows_permission_error() -> None:
 
         json_store.os.replace = flaky_replace
         json_store.time.sleep = sleeps.append
-        json_store.os.name = "nt"
+        json_store._is_windows = lambda: True
         try:
             json_store.write_json(path, {"n": 1})
         finally:
             json_store.os.replace = real_replace
             json_store.time.sleep = real_sleep
-            json_store.os.name = real_name
+            json_store._is_windows = real_is_windows
 
         assert attempts == 3
         assert len(sleeps) == 2
@@ -65,10 +65,38 @@ def test_write_json_retries_transient_windows_permission_error() -> None:
         assert not list(path.parent.glob(f".{path.name}.*.tmp"))
 
 
+def test_write_json_durable_tolerates_unsupported_windows_directory_fsync() -> None:
+    with tempfile.TemporaryDirectory(prefix="bc-test-json-store-") as tmpdir:
+        path = Path(tmpdir) / "store.json"
+        real_open = json_store.os.open
+        real_is_windows = json_store._is_windows
+        denied_directory_open = False
+
+        def windows_open(candidate, flags, *args, **kwargs):
+            nonlocal denied_directory_open
+            if Path(candidate) == path.parent:
+                denied_directory_open = True
+                raise PermissionError(13, "Permission denied")
+            return real_open(candidate, flags, *args, **kwargs)
+
+        json_store.os.open = windows_open
+        json_store._is_windows = lambda: True
+        try:
+            json_store.write_json_durable(path, {"n": 1})
+        finally:
+            json_store.os.open = real_open
+            json_store._is_windows = real_is_windows
+
+        assert denied_directory_open
+        assert json.loads(path.read_text(encoding="utf-8")) == {"n": 1}
+        assert not list(path.parent.glob(f".{path.name}.*.tmp"))
+
+
 def main() -> None:
     test_write_json_uses_unique_temp_file_per_write()
     test_write_json_retries_transient_windows_permission_error()
-    print("PASS json_store atomic writes use unique temp files and retry transient Windows locks")
+    test_write_json_durable_tolerates_unsupported_windows_directory_fsync()
+    print("PASS json_store atomic and durable writes are portable across supported platforms")
 
 
 if __name__ == "__main__":

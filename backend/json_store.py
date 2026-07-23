@@ -25,6 +25,10 @@ T = TypeVar("T")
 _WINDOWS_REPLACE_RETRY_DELAYS_S = (0.01, 0.025, 0.05, 0.1, 0.2)
 
 
+def _is_windows() -> bool:
+    return os.name == "nt"
+
+
 def read_json(path: Path, default: T) -> T:
     """Parse `path` as JSON. Returns `default` if the file is missing or
     malformed. If the parsed value's type differs from the default's type,
@@ -53,10 +57,25 @@ def _replace_atomic(src: Path, dst: Path) -> None:
             os.replace(src, dst)
             return
         except PermissionError:
-            if os.name != "nt":
+            if not _is_windows():
                 raise
             time.sleep(delay)
     os.replace(src, dst)
+
+
+def _fsync_parent_directory(path: Path) -> None:
+    try:
+        directory_fd = os.open(
+            path.parent,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+        )
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    except OSError:
+        if not _is_windows():
+            raise
 
 
 def write_json(path: Path, data, mode: int = 0o700) -> None:
@@ -102,11 +121,7 @@ def write_json_durable(path: Path, data, mode: int = 0o700) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         _replace_atomic(tmp, path)
-        directory_fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-        try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
+        _fsync_parent_directory(path)
     except Exception:
         tmp.unlink(missing_ok=True)
         raise
