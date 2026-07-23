@@ -24,7 +24,12 @@ from orchs.manager._delegation import (  # noqa: E402
     _run_with_sync_wait,
     run_delegation_locked,
 )
-from sync_wait_graph import CircularSyncWaitError, SyncWaitGraph  # noqa: E402
+from sync_wait_graph import (  # noqa: E402
+    CircularSyncWaitError,
+    SyncWaitDepthError,
+    SyncWaitGraph,
+    SyncWaitRejected,
+)
 from stores import worker_store  # noqa: E402
 
 
@@ -43,6 +48,61 @@ def test_rejects_self_and_transitive_cycles() -> None:
             assert graph.snapshot() == {"A": {"B": 1}, "B": {"C": 1}}
 
     assert graph.snapshot() == {}
+
+
+def test_depth_cap_rejects_deep_chain() -> None:
+    graph = SyncWaitGraph(depth_cap=lambda: 3)
+
+    with graph.waiting("A", "B"):
+        with graph.waiting("B", "C"):
+            with graph.waiting("C", "D"):
+                # A -> B -> C -> D is exactly 3 waits: allowed. One more
+                # (D -> E, chain of 4) must be rejected.
+                with pytest.raises(SyncWaitDepthError, match="too deep"):
+                    with graph.waiting("D", "E"):
+                        raise AssertionError("over-deep wait entered")
+                # The rejected wait must not leak an edge.
+                assert "D" not in graph.snapshot()
+
+    assert graph.snapshot() == {}
+
+
+def test_depth_cap_counts_upstream_and_downstream_segments() -> None:
+    graph = SyncWaitGraph(depth_cap=lambda: 3)
+
+    # Existing separate chains A -> B and C -> D. Joining B -> C bridges
+    # them into A -> B -> C -> D (3 waits, allowed at cap 3); at cap 2 the
+    # same bridge is rejected because the TOTAL chain counts, not just the
+    # new edge's local neighborhood.
+    with graph.waiting("A", "B"):
+        with graph.waiting("C", "D"):
+            with graph.waiting("B", "C"):
+                pass
+
+    strict = SyncWaitGraph(depth_cap=lambda: 2)
+    with strict.waiting("A", "B"):
+        with strict.waiting("C", "D"):
+            with pytest.raises(SyncWaitDepthError):
+                with strict.waiting("B", "C"):
+                    raise AssertionError("bridged over-deep wait entered")
+
+
+def test_depth_cap_zero_disables_check() -> None:
+    graph = SyncWaitGraph(depth_cap=lambda: 0)
+    sessions = [f"S{i}" for i in range(12)]
+
+    from contextlib import ExitStack
+
+    with ExitStack() as stack:
+        for caller, target in zip(sessions, sessions[1:]):
+            stack.enter_context(graph.waiting(caller, target))
+        assert len(graph.snapshot()) == len(sessions) - 1
+
+
+def test_depth_and_cycle_errors_share_rejection_base() -> None:
+    assert issubclass(CircularSyncWaitError, SyncWaitRejected)
+    assert issubclass(SyncWaitDepthError, SyncWaitRejected)
+    assert issubclass(SyncWaitRejected, ValueError)
 
 
 def test_duplicate_edges_are_reference_counted_and_pruned() -> None:

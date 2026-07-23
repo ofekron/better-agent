@@ -3411,6 +3411,26 @@ def _find_parent_of(root: dict, sid: str) -> Optional[dict]:
     return None
 
 
+def node_depth(root: dict, sid: str) -> Optional[int]:
+    """Depth of `sid` within `root`'s fork tree (root itself = 0), or
+    None when `sid` is not in the tree."""
+    pending: list[tuple[dict, int]] = [(root, 0)]
+    while pending:
+        node, depth = pending.pop()
+        if node.get("id") == sid:
+            return depth
+        pending.extend(
+            (child, depth + 1) for child in node.get("forks") or []
+        )
+    return None
+
+
+def descendant_session_ids(root: dict) -> list[str]:
+    """Ids of every fork/sub-session/delegate-fork under `root` (excludes
+    the root itself)."""
+    return [f["id"] for f in _walk_forks(root) if f.get("id")]
+
+
 # ── Schema ────────────────────────────────────────────────────────────
 
 
@@ -4512,6 +4532,8 @@ def create_session(
     disallowed_tools: Optional[list[str]] = None,
     disabled_builtin_extensions: Optional[list[str]] = None,
     extra_mcp_servers: Optional[list[str]] = None,
+    disabled_builtin_tools: Optional[list[str]] = None,
+    disabled_runtime_skills: Optional[list[str]] = None,
     storage_scope: Optional[dict] = None,
     id: Optional[str] = None,
     created_at: Optional[str] = None,
@@ -4674,6 +4696,18 @@ def create_session(
         session["extra_mcp_servers"] = list(dict.fromkeys(
             str(item).strip()
             for item in extra_mcp_servers
+            if str(item or "").strip()
+        ))
+    if disabled_builtin_tools:
+        session["disabled_builtin_tools"] = list(dict.fromkeys(
+            str(item).strip()
+            for item in disabled_builtin_tools
+            if str(item or "").strip()
+        ))
+    if disabled_runtime_skills:
+        session["disabled_runtime_skills"] = list(dict.fromkeys(
+            str(item).strip()
+            for item in disabled_runtime_skills
             if str(item or "").strip()
         ))
     # Route through `write_session_full` so the single write funnel
@@ -5452,6 +5486,8 @@ def create_sub_session(
     disallowed_tools: Optional[list[str]] = None,
     disabled_builtin_extensions: Optional[list[str]] = None,
     extra_mcp_servers: Optional[list[str]] = None,
+    disabled_builtin_tools: Optional[list[str]] = None,
+    disabled_runtime_skills: Optional[list[str]] = None,
 ) -> dict:
     parent = _find_in_tree(root, parent_session_id)
     if parent is None:
@@ -5565,6 +5601,12 @@ def create_sub_session(
         **({"extra_mcp_servers": list(dict.fromkeys(
             str(item).strip() for item in extra_mcp_servers if str(item or "").strip()
         ))} if extra_mcp_servers else {}),
+        **({"disabled_builtin_tools": list(dict.fromkeys(
+            str(item).strip() for item in disabled_builtin_tools if str(item or "").strip()
+        ))} if disabled_builtin_tools else {}),
+        **({"disabled_runtime_skills": list(dict.fromkeys(
+            str(item).strip() for item in disabled_runtime_skills if str(item or "").strip()
+        ))} if disabled_runtime_skills else {}),
     }
     parent.setdefault("forks", []).append(child)
     _index_set(child["id"], root["id"])

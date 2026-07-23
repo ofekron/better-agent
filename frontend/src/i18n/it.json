@@ -707,6 +707,10 @@
   "newSession.projectLabel": "Progetto",
   "newSession.pickProject": "— Scegli un progetto —",
   "newSession.orchestration": "Orchestrazione",
+  "newSession.preset": "Preset di capacità",
+  "newSession.presetDefault": "Capacità complete (predefinito)",
+  "newSession.presetReviewer": "Revisore — senza strumenti di sessione, senza skill",
+  "newSession.presetHint": "I preset rimuovono capacità alla creazione. Una sessione revisore non può creare, contattare o attendere altre sessioni e non carica skill di runtime.",
   "newSession.provider": "Provider",
   "newSession.runner": "Runner",
   "newSession.model": "Modello",
@@ -1122,5 +1126,13 @@
   "runBadge.details": "Dettagli",
   "settings.taskStartSilence": "Avviso di silenzio all’avvio",
   "settings.seconds": "secondi",
-  "settings.taskStartSilenceHint": "Mostra un avviso di blocco se il provider non conferma l’avvio dell’attività entro questo intervallo. L’esecuzione non viene mai interrotta automaticamente."
+  "settings.taskStartSilenceHint": "Mostra un avviso di blocco se il provider non conferma l’avvio dell’attività entro questo intervallo. L’esecuzione non viene mai interrotta automaticamente.",
+  "settings.recursionGuardsTitle": "Protezioni contro la ricorsione",
+  "settings.recursionGuardsHint": "Limiti rigidi lato backend che fermano la ricorsione incontrollata degli agenti, indipendentemente dal loro comportamento. 0 disattiva una protezione.",
+  "settings.syncWaitDepthCap": "Catena massima di attese sincrone",
+  "settings.syncWaitDepthCapHint": "Catena più lunga consentita di sessioni in attesa sincrona reciproca.",
+  "settings.sessionCreationDepthCap": "Profondità massima di annidamento delle sessioni",
+  "settings.sessionCreationDepthCapHint": "Quanto in profondità sotto-sessioni e fork possono annidarsi sotto una sessione radice.",
+  "settings.sessionMaxLiveDescendants": "Sotto-sessioni attive max per radice",
+  "settings.sessionMaxLiveDescendantsHint": "Numero massimo di sotto-sessioni in esecuzione contemporanea sotto una sessione radice."
 }

@@ -75,6 +75,10 @@ interface SessionConfig {
   initialImages: PastedImage[];
   initialFiles: FileAttachment[];
   capabilityContexts: CapabilityContext[];
+  /** Named capability preset resolved by the backend at creation.
+   * "" = full capabilities; "reviewer" strips session-reach MCP tools
+   * and all runtime skills. */
+  preset: string;
   /** Optional folder to file the new session into. `null` means "no
    * folder" (Unfiled) — a valid, persistable choice. Persisted across
    * opens as the last selection; re-validated against the chosen
@@ -605,6 +609,7 @@ export function NewSessionModal({
   const [orchestrationMode, setOrchestrationMode] = useState<OrchestrationMode>(
     teamEnabled ? "team" : "native",
   );
+  const [preset, setPreset] = useState<string>("");
   const [main, setMain] = useState<RuntimeProfile>({ providerId: "", model: "", reasoningEffort: "", runner: "native", permission: {} });
   const [worker, setWorker] = useState<RuntimeProfile>({ providerId: "", model: "", reasoningEffort: "", runner: "native", permission: {} });
   const sessionExtensionOptions = useMemo<NewSessionExtensionOption[]>(
@@ -861,6 +866,7 @@ export function NewSessionModal({
         initialImages,
         initialFiles,
         capabilityContexts,
+        preset,
         folderId,
       };
       const config = applyExtensionOptionsToSessionConfig(
@@ -1101,6 +1107,16 @@ export function NewSessionModal({
               </>
             )}
             {sessionExtensionOptions.map((option) => renderExtensionOption(option))}
+            <div className="ns-modal-section-title">{t("newSession.preset")}</div>
+            <select
+              className="ns-modal-preset-select"
+              value={preset}
+              onChange={(e) => setPreset(e.target.value)}
+              title={t("newSession.presetHint")}
+            >
+              <option value="">{t("newSession.presetDefault")}</option>
+              <option value="reviewer">{t("newSession.presetReviewer")}</option>
+            </select>
           </div>
 
           <div className="ns-modal-section">

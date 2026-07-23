@@ -707,6 +707,10 @@
   "newSession.projectLabel": "Projeto",
   "newSession.pickProject": "— Escolha um projeto —",
   "newSession.orchestration": "Orquestração",
+  "newSession.preset": "Predefinição de capacidades",
+  "newSession.presetDefault": "Capacidades completas (padrão)",
+  "newSession.presetReviewer": "Revisor — sem ferramentas de sessão, sem habilidades",
+  "newSession.presetHint": "Predefinições removem capacidades na criação. Sessões revisoras não podem criar, enviar mensagens nem aguardar outras sessões e não carregam habilidades.",
   "newSession.provider": "Provedor",
   "newSession.runner": "Runner",
   "newSession.model": "Modelo",
@@ -1122,5 +1126,13 @@
   "runBadge.details": "Detalhes",
   "settings.taskStartSilence": "Aviso de silêncio na inicialização",
   "settings.seconds": "segundos",
-  "settings.taskStartSilenceHint": "Mostra um aviso de bloqueio quando o provedor não confirma o início da tarefa dentro deste período. Isso nunca interrompe a execução automaticamente."
+  "settings.taskStartSilenceHint": "Mostra um aviso de bloqueio quando o provedor não confirma o início da tarefa dentro deste período. Isso nunca interrompe a execução automaticamente.",
+  "settings.recursionGuardsTitle": "Proteções contra recursão",
+  "settings.recursionGuardsHint": "Limites rígidos do backend que param a recursão descontrolada de agentes, independentemente do comportamento do agente. 0 desativa uma proteção.",
+  "settings.syncWaitDepthCap": "Cadeia máxima de esperas síncronas",
+  "settings.syncWaitDepthCapHint": "Maior cadeia permitida de sessões esperando sincronamente umas pelas outras.",
+  "settings.sessionCreationDepthCap": "Profundidade máxima de aninhamento de sessões",
+  "settings.sessionCreationDepthCapHint": "Quão fundo subsessões e forks podem aninhar sob uma sessão raiz.",
+  "settings.sessionMaxLiveDescendants": "Máximo de subsessões ativas por raiz",
+  "settings.sessionMaxLiveDescendantsHint": "Número máximo de subsessões em execução simultânea sob uma sessão raiz."
 }

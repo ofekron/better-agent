@@ -997,6 +997,10 @@ _CREATE_SUB_SESSION_INPUT_SCHEMA: dict[str, Any] = {
             "items": {"type": "string"},
             "description": "OPTIONAL — extension MCP server names to opt this session into (servers that are default-off globally, e.g. 'testape-internal').",
         },
+        "preset": {
+            "type": "string",
+            "description": "OPTIONAL — named capability preset. 'reviewer' strips session-reach MCP tools (ask/delegate/create_*) and all runtime skills; the sub-session can only reply to you.",
+        },
     },
     "required": [],
     "additionalProperties": False,
@@ -1974,6 +1978,7 @@ def _build_loopback_tool_handlers(
                     "orchestration_mode": args.get("orchestration_mode") or "native",
                     "node_id": node_id,
                     "mcp_servers": args.get("mcp_servers") or [],
+                    "preset": str(args.get("preset") or "").strip(),
                 },
                 backend_url=backend_url,
                 internal_token=internal_token,

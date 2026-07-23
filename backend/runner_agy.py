@@ -248,6 +248,7 @@ def _materialize_agy_run_home(
     *,
     cwd: str,
     bare_config: bool = False,
+    disabled_runtime_skills: Optional[list] = None,
 ) -> Optional[dict[str, str]]:
     mcp_servers = provider_run_config.get("mcp_servers") or {}
     skills = provider_run_config.get("skills") or {}
@@ -271,10 +272,12 @@ def _materialize_agy_run_home(
     symlink_home_overlay(real_home / ".agents", overlay_home / ".agents", skip={"skills"})
 
     ext_count = materialize_runtime_skills(
-        overlay_cli / "builtin" / "skills", cwd, bare_config=bare_config
+        overlay_cli / "builtin" / "skills", cwd, bare_config=bare_config,
+        disabled=disabled_runtime_skills,
     )
     materialize_runtime_skills(
-        overlay_home / ".agents" / "skills", cwd, bare_config=bare_config
+        overlay_home / ".agents" / "skills", cwd, bare_config=bare_config,
+        disabled=disabled_runtime_skills,
     )
 
     settings = _load_json_object(real_cli / "settings.json")
@@ -1235,6 +1238,7 @@ async def _run(run_dir: Path, inputs: dict[str, Any]) -> int:
         provider_run_config,
         cwd=cwd,
         bare_config=bool(inputs.get("bare_config")),
+        disabled_runtime_skills=inputs.get("disabled_runtime_skills"),
     )
     if scoped_env:
         run_env.update(scoped_env)

@@ -14,11 +14,29 @@ _DISCOVERY_CACHE: dict[tuple, tuple[tuple, list[dict]]] = {}
 _DISCOVERY_CACHE_MAX = 32
 
 
-def runtime_skill_contexts(cwd: str, *, bare_config: bool = False) -> list[dict]:
+def _filter_disabled(
+    skills: list[dict], disabled: Optional[list[str]]
+) -> list[dict]:
+    """Drop skills excluded for this session. `disabled` holds skill names;
+    a single "*" entry disables every runtime skill."""
+    if not disabled:
+        return skills
+    names = {str(item).strip() for item in disabled if str(item or "").strip()}
+    if "*" in names:
+        return []
+    return [skill for skill in skills if skill["name"] not in names]
+
+
+def runtime_skill_contexts(
+    cwd: str,
+    *,
+    bare_config: bool = False,
+    disabled: Optional[list[str]] = None,
+) -> list[dict]:
     if bare_config or not installation_profile.integrations_enabled():
         return []
 
-    skills = _discover_skills(cwd)
+    skills = _filter_disabled(_discover_skills(cwd), disabled)
     if not skills:
         return []
 
@@ -53,13 +71,19 @@ def has_runtime_skills(cwd: str, *, bare_config: bool = False) -> bool:
     return bool(_discover_skills(cwd))
 
 
-def materialize_runtime_skills(root: Path, cwd: str, *, bare_config: bool = False) -> int:
+def materialize_runtime_skills(
+    root: Path,
+    cwd: str,
+    *,
+    bare_config: bool = False,
+    disabled: Optional[list[str]] = None,
+) -> int:
     if bare_config or not installation_profile.integrations_enabled():
         return 0
 
     count = 0
     root.mkdir(parents=True, exist_ok=True)
-    for skill in _discover_skills(cwd):
+    for skill in _filter_disabled(_discover_skills(cwd), disabled):
         source = Path(skill["dir"])
         target = root / skill["name"]
         if target.exists() or target.is_symlink():

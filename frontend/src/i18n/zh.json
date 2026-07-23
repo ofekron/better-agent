@@ -707,6 +707,10 @@
   "newSession.projectLabel": "项目",
   "newSession.pickProject": "— 选择一个项目 —",
   "newSession.orchestration": "编排",
+  "newSession.preset": "能力预设",
+  "newSession.presetDefault": "完整能力（默认）",
+  "newSession.presetReviewer": "评审者 — 无会话工具、无技能",
+  "newSession.presetHint": "预设在创建时移除能力。评审者会话无法创建、联系或等待其他会话，也不加载运行时技能。",
   "newSession.provider": "提供商",
   "newSession.runner": "Runner",
   "newSession.model": "模型",
@@ -1122,5 +1126,13 @@
   "runBadge.details": "详细信息",
   "settings.taskStartSilence": "启动无响应警告",
   "settings.seconds": "秒",
-  "settings.taskStartSilenceHint": "如果提供方未在此时间内确认任务启动，则显示停滞警告。此设置绝不会自动停止运行。"
+  "settings.taskStartSilenceHint": "如果提供方未在此时间内确认任务启动，则显示停滞警告。此设置绝不会自动停止运行。",
+  "settings.recursionGuardsTitle": "递归防护",
+  "settings.recursionGuardsHint": "后端硬性限制，无论智能体行为如何都能阻止失控的递归。0 表示禁用该防护。",
+  "settings.syncWaitDepthCap": "最大同步等待链",
+  "settings.syncWaitDepthCapHint": "允许的会话同步互相等待链的最大长度。",
+  "settings.sessionCreationDepthCap": "最大会话嵌套深度",
+  "settings.sessionCreationDepthCapHint": "子会话和分支在根会话下可嵌套的最大深度。",
+  "settings.sessionMaxLiveDescendants": "每个根会话的最大活跃子会话数",
+  "settings.sessionMaxLiveDescendantsHint": "单个根会话下同时运行的子会话数量上限。"
 }

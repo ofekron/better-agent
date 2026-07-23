@@ -703,6 +703,10 @@
   "newSession.projectLabel": "Projekt",
   "newSession.pickProject": "— Projekt auswählen —",
   "newSession.orchestration": "Orchestrierung",
+  "newSession.preset": "Fähigkeiten-Preset",
+  "newSession.presetDefault": "Volle Fähigkeiten (Standard)",
+  "newSession.presetReviewer": "Reviewer — keine Session-Tools, keine Skills",
+  "newSession.presetHint": "Presets entfernen Fähigkeiten bei der Erstellung. Reviewer-Sessions können keine anderen Sessions erstellen, anschreiben oder auf sie warten und laden keine Runtime-Skills.",
   "newSession.provider": "Provider",
   "newSession.runner": "Runner",
   "newSession.model": "Modell",
@@ -1118,5 +1122,13 @@
   "runBadge.details": "Details",
   "settings.taskStartSilence": "Warnung bei ausbleibendem Start",
   "settings.seconds": "Sekunden",
-  "settings.taskStartSilenceHint": "Zeigt eine Warnung an, wenn der Anbieter den Aufgabenstart nicht innerhalb dieser Zeit bestätigt. Der Lauf wird dadurch niemals automatisch beendet."
+  "settings.taskStartSilenceHint": "Zeigt eine Warnung an, wenn der Anbieter den Aufgabenstart nicht innerhalb dieser Zeit bestätigt. Der Lauf wird dadurch niemals automatisch beendet.",
+  "settings.recursionGuardsTitle": "Rekursionsschutz",
+  "settings.recursionGuardsHint": "Harte Backend-Limits, die außer Kontrolle geratene Agentenrekursion stoppen, unabhängig vom Agentenverhalten. 0 deaktiviert einen Schutz.",
+  "settings.syncWaitDepthCap": "Maximale synchrone Wartekette",
+  "settings.syncWaitDepthCapHint": "Längste erlaubte Kette von Sessions, die synchron aufeinander warten.",
+  "settings.sessionCreationDepthCap": "Maximale Session-Verschachtelungstiefe",
+  "settings.sessionCreationDepthCapHint": "Wie tief Sub-Sessions und Forks unter einer Root-Session verschachtelt sein dürfen.",
+  "settings.sessionMaxLiveDescendants": "Max. aktive Sub-Sessions pro Root",
+  "settings.sessionMaxLiveDescendantsHint": "Maximale Anzahl gleichzeitig laufender Sub-Sessions unter einer Root-Session."
 }
