@@ -5,6 +5,7 @@ from enum import Enum
 import hashlib
 import inspect
 import json
+import os
 from pathlib import Path
 import re
 import threading
@@ -437,22 +438,35 @@ def _artifact_digest(root: Path) -> str:
         raise RuntimeError(f"cannot read operation artifact: {root}") from exc
 
 
+def _walk_pruned(top: Path, suffixes: frozenset[str] | None) -> list[Path]:
+    """Walk ``top`` skipping generated directories entirely — descending into
+    node_modules/.venvs just to discard their entries dominates the walk cost."""
+    found: list[Path] = []
+    if not top.is_dir():
+        return found
+    for dirpath, dirnames, filenames in os.walk(top):
+        dirnames[:] = [name for name in dirnames if name not in _GENERATED_ARTIFACT_PATH_PARTS]
+        base = Path(dirpath)
+        for name in filenames:
+            if suffixes is None or Path(name).suffix in suffixes:
+                found.append(base / name)
+    return found
+
+
 def _artifact_files(root: Path) -> list[Path]:
     if (root / "AGENTS.md").is_file() and (root / "backend").is_dir():
         candidates = (
-            list((root / "backend").rglob("*.py"))
-            + list((root / "extensions").rglob("*.py"))
-            + list((root / "extensions").rglob("*.json"))
-            + list((root / "vendor").rglob("*"))
+            _walk_pruned(root / "backend", frozenset({".py"}))
+            + _walk_pruned(root / "extensions", frozenset({".py", ".json"}))
+            + _walk_pruned(root / "vendor", None)
             + [root / "backend" / "requirements.txt"]
         )
     else:
-        candidates = list(root.rglob("*"))
+        candidates = _walk_pruned(root, None)
     return sorted(
         path
         for path in candidates
         if path.is_file()
-        and not _GENERATED_ARTIFACT_PATH_PARTS.intersection(path.parts)
         and (
             path.suffix in {".py", ".json", ".toml", ".whl", ".tgz", ".txt"}
             or path.name in {"SOURCE_COMMIT", "SHA256SUMS"}
