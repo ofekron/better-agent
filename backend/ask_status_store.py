@@ -26,10 +26,15 @@ from runs_dir import atomic_write_json
 
 
 _ASK_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,200}$")
+_LIFECYCLE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,200}$")
 
 
 def is_valid_ask_id(ask_id: str) -> bool:
     return _ASK_ID_RE.fullmatch(str(ask_id or "").strip()) is not None
+
+
+def is_valid_lifecycle_id(lifecycle_msg_id: str) -> bool:
+    return _LIFECYCLE_ID_RE.fullmatch(str(lifecycle_msg_id or "").strip()) is not None
 
 
 def _safe_id(ask_id: str) -> str:
@@ -39,8 +44,60 @@ def _safe_id(ask_id: str) -> str:
     return clean
 
 
+def _safe_lifecycle_id(lifecycle_msg_id: str) -> str:
+    clean = str(lifecycle_msg_id or "").strip()
+    if not is_valid_lifecycle_id(clean):
+        raise ValueError("invalid lifecycle_msg_id")
+    return clean
+
+
 def status_path(ask_id: str) -> Path:
     return bc_home() / "ask-status" / f"{_safe_id(ask_id)}.json"
+
+
+def _lifecycle_index_root() -> Path:
+    root = bc_home() / "ask-status" / "by-lifecycle"
+    if root.is_symlink():
+        raise ValueError("ask status lifecycle index root must not be a symlink")
+    root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if not root.is_dir():
+        raise ValueError("ask status lifecycle index root must be a directory")
+    return root
+
+
+def _lifecycle_index_path(lifecycle_msg_id: str) -> Path:
+    path = _lifecycle_index_root() / f"{_safe_lifecycle_id(lifecycle_msg_id)}.json"
+    if path.is_symlink():
+        raise ValueError("ask status lifecycle index path must not be a symlink")
+    return path
+
+
+def _write_lifecycle_index(lifecycle_msg_id: str, ask_id: str) -> None:
+    """Derived, rebuildable projection of the ask-status record: maps a
+    fresh-per-dispatch `lifecycle_msg_id` to the `ask_id` waiting on it, so
+    the target-turn-terminal bus subscriber can find it in O(1) instead of
+    scanning every ask-status file on every turn completion in the system."""
+    atomic_write_json(_lifecycle_index_path(lifecycle_msg_id), {"ask_id": _safe_id(ask_id)})
+
+
+def _delete_lifecycle_index(lifecycle_msg_id: str) -> None:
+    try:
+        _lifecycle_index_path(lifecycle_msg_id).unlink()
+    except (FileNotFoundError, ValueError):
+        pass
+
+
+def find_ask_id_by_lifecycle(lifecycle_msg_id: str) -> str | None:
+    if not is_valid_lifecycle_id(lifecycle_msg_id):
+        return None
+    try:
+        data = json.loads(_lifecycle_index_path(lifecycle_msg_id).read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    ask_id = str(data.get("ask_id") or "").strip()
+    return ask_id if is_valid_ask_id(ask_id) else None
 
 
 @contextmanager
@@ -130,6 +187,9 @@ def write_status(ask_id: str, **fields: Any) -> None:
         if isinstance(result, dict):
             _project_result(ask_id, current, result)
         atomic_write_json(path, current)
+        lifecycle_msg_id = str(fields.get("lifecycle_msg_id") or "").strip()
+        if lifecycle_msg_id:
+            _write_lifecycle_index(lifecycle_msg_id, ask_id)
 
 
 def update_status(
@@ -233,7 +293,10 @@ def list_statuses() -> list[tuple[str, dict[str, Any]]]:
 
 def delete_status(ask_id: str) -> None:
     with _locked(ask_id):
+        lifecycle_msg_id = str((_read_status_unlocked(ask_id) or {}).get("lifecycle_msg_id") or "")
         try:
             status_path(ask_id).unlink()
         except FileNotFoundError:
             pass
+        if lifecycle_msg_id:
+            _delete_lifecycle_index(lifecycle_msg_id)
