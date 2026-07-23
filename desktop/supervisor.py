@@ -253,6 +253,15 @@ def backend_argv(role: BackendRole = "primary", checkout: Path | None = None) ->
     ]
 
 
+def backend_child_env(base_env: dict[str, str], checkout: Path) -> dict[str, str]:
+    """Env for the spawned backend: the checkout's sdk/ on PYTHONPATH
+    (the backend imports better_agent_sdk; frozen bundles cover it via
+    BetterAgent.spec pathex, where checkout has no sdk/ dir)."""
+    from sdk_pythonpath import apply_sdk_pythonpath
+
+    return apply_sdk_pythonpath(dict(base_env), checkout)
+
+
 def port_is_free(port: int) -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         try:
@@ -577,7 +586,7 @@ class BackendSupervisor:
         self._close_credential_session()
         session = self._credential_broker.open_session()
         session.start()
-        child_env = {**self._env, **session.backend_env()}
+        child_env = {**backend_child_env(self._env, checkout), **session.backend_env()}
         try:
             proc = subprocess.Popen(
                 backend_argv(self.role, checkout), env=child_env, cwd=checkout / "backend",
