@@ -576,6 +576,7 @@ def register_default_subscribers() -> None:
     bind_session_content_projection()
     bind_requirement_tags_projection()
     bind_ask_delivery()
+    bind_extension_job_delivery()
     bus.unsubscribe("ingester_to_events_jsonl")
     bus.unsubscribe("event_journal_persistence_adapter")
     bus.subscribe(
@@ -632,6 +633,25 @@ def bind_ask_delivery() -> None:
         ask_delivery.on_target_turn_terminal,
         priority=30,
         name="ask_delivery_target_turn_failed",
+    )
+
+
+def bind_extension_job_delivery() -> None:
+    import extension_job_delivery
+
+    bus.unsubscribe("extension_job_delivery_turn_complete")
+    bus.unsubscribe("extension_job_delivery_turn_stopped")
+    bus.subscribe(
+        "lifecycle.turn_complete",
+        extension_job_delivery.on_caller_terminal,
+        priority=30,
+        name="extension_job_delivery_turn_complete",
+    )
+    bus.subscribe(
+        "lifecycle.turn_stopped",
+        extension_job_delivery.on_caller_terminal,
+        priority=30,
+        name="extension_job_delivery_turn_stopped",
     )
 
 
