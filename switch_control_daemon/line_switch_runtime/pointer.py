@@ -45,8 +45,13 @@ def _is_runnable_checkout(path: str) -> bool:
         return False
     if not (root / "backend" / "main.py").is_file():
         return False
+    try:
+        from backend.dependency_plan import verified_active_env
+        env_dir = verified_active_env(root / "backend")
+    except (ImportError, RuntimeError):
+        return False
     return any(
-        (root / "backend" / ".venv" / sub / executable).is_file()
+        (env_dir / sub / executable).is_file()
         for sub, executable in (("bin", "python"), ("Scripts", "python.exe"))
     )
 

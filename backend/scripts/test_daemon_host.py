@@ -21,6 +21,9 @@ sys.path.insert(0, str(BACKEND))
 sys.path.insert(0, str(BACKEND.parent))
 
 import paths
+import backend.dependency_plan as backend_dependency_plan
+
+backend_dependency_plan.verified_active_env = backend_dependency_plan.active_env
 
 _TMP = tempfile.mkdtemp(prefix="ba-daemon-host-")
 paths.engage_test_home(_TMP)

@@ -23,7 +23,10 @@ import main  # noqa: E402
 
 
 def _install_team_orchestration_extension() -> None:
-    extension_id = extension_store.extension_id_for_role('team-orchestration')
+    extension_id = (
+        extension_store.extension_id_for_role("team-orchestration")
+        or "test.team-orchestration"
+    )
     package = Path(_TMP_HOME) / "private-fixtures" / extension_id
     if package.exists():
         shutil.rmtree(package)
@@ -37,6 +40,7 @@ def _install_team_orchestration_extension() -> None:
         "surfaces": ["backend_feature"],
         "entrypoints": {},
         "permissions": {},
+        "core_roles": ["team-orchestration"],
         "marketplace": {},
     }
     (package / "better-agent-extension.json").write_text(json.dumps(manifest), encoding="utf-8")

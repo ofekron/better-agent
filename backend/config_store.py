@@ -34,6 +34,7 @@ import re
 import threading
 import traceback
 import uuid
+from contextlib import contextmanager
 from functools import wraps
 from typing import Optional
 
@@ -61,6 +62,25 @@ logger = logging.getLogger(__name__)
 _state_cache_lock = threading.RLock()
 _state_cache: tuple[tuple[int, int], dict] | None = None
 _provider_mutation_lock = threading.RLock()
+_config_transaction_state = threading.local()
+
+
+@contextmanager
+def _config_file_transaction():
+    depth = int(getattr(_config_transaction_state, "depth", 0))
+    if depth:
+        _config_transaction_state.depth = depth + 1
+        try:
+            yield
+        finally:
+            _config_transaction_state.depth = depth
+        return
+    with FileLock(str(_config_path()) + ".lock", timeout=60):
+        _config_transaction_state.depth = 1
+        try:
+            yield
+        finally:
+            _config_transaction_state.depth = 0
 
 
 def _serialized_provider_mutation(function):
@@ -68,7 +88,7 @@ def _serialized_provider_mutation(function):
     def wrapped(*args, **kwargs):
         global _state_cache
         with _provider_mutation_lock:
-            with FileLock(str(_config_path()) + ".lock", timeout=60):
+            with _config_file_transaction():
                 with _state_cache_lock:
                     _state_cache = None
                 return function(*args, **kwargs)
@@ -151,12 +171,7 @@ def _read_api_key(provider_id: str) -> str:
 
 
 def _write_api_key(provider_id: str, api_key: str) -> None:
-    # `_write_api_key("", ...)` and `_delete_api_key(...)` reach the
-    # same on-keychain end state (no entry). Mirror that in the cache by
-    # popping rather than storing `""`, so the cache distinguishes
-    # "known empty" from "absent" only via dict membership — which today
-    # nobody reads, but a future caller using `cache.get(pid)` vs.
-    # `pid in cache` won't see asymmetry between the two write paths.
+    # Empty values delete the credential, so the cache mirrors the keychain.
     if not credential_session_client.available():
         raise RuntimeError("provider credential authority is unavailable")
     response = credential_session_client.request(
@@ -174,16 +189,30 @@ def _write_api_key(provider_id: str, api_key: str) -> None:
         else:
             _api_key_cache.pop(provider_id, None)
 
-
-def _delete_api_key(provider_id: str) -> None:
-    if not credential_session_client.available():
-        raise RuntimeError("provider credential authority is unavailable")
-    response = credential_session_client.request("delete", provider_id)
-    if response["status"] == "blocked":
-        raise RuntimeError("OS credential access is blocked")
-    _credential_status[provider_id] = response["status"]
-    with _api_key_cache_lock:
-        _api_key_cache.pop(provider_id, None)
+@contextmanager
+def _credential_transaction(changes: list[tuple[str, str]]):
+    snapshots = {
+        provider_id: _read_api_key(provider_id)
+        for provider_id, _value in changes
+    }
+    applied: list[str] = []
+    try:
+        for provider_id, value in changes:
+            _write_api_key(provider_id, value)
+            applied.append(provider_id)
+        yield
+    except BaseException as exc:
+        rollback_errors: list[Exception] = []
+        for provider_id in reversed(applied):
+            try:
+                _write_api_key(provider_id, snapshots[provider_id])
+            except Exception as rollback_exc:
+                rollback_errors.append(rollback_exc)
+        if rollback_errors:
+            raise RuntimeError(
+                "provider credential transaction rollback failed"
+            ) from exc
+        raise
 
 
 def provider_credential_authority_available() -> bool:
@@ -596,34 +625,23 @@ def _load_state() -> dict:
     with _state_cache_lock:
         if _state_cache is not None and _state_cache[0] == fingerprint:
             return copy.deepcopy(_state_cache[1])
-        # Cold path runs INSIDE the lock so a restart-time thundering herd
-        # performs ONE disk read + parse instead of N. The faulthandler
-        # watchdog ranked config_store._load_state -> read_json the #2
-        # event-loop blocker (137 dumps; 120 in a single restart hour)
-        # precisely because the read sat OUTSIDE the lock and every
-        # concurrent first-access caller hit disk on the loop. The
-        # fast-path check above doubles as the post-lock re-check: a herd
-        # member that blocked acquiring the lock finds the leader's
-        # populated cache (identical mtime/size fingerprint during a
-        # restart) and returns it without touching disk. `_state_cache_lock`
-        # is an RLock, so the `_save_state()` re-entry below is safe; lock
-        # order is always _state_cache_lock -> _api_key_cache_lock (the
-        # legacy-migration branch), never the reverse, so no deadlock.
-        raw = read_json(_config_path(), {})
-        if not raw:
-            state = _seed_default_state()
+    with _config_file_transaction():
+        fingerprint = _config_fingerprint()
+        with _state_cache_lock:
+            if _state_cache is not None and _state_cache[0] == fingerprint:
+                return copy.deepcopy(_state_cache[1])
+            raw = read_json(_config_path(), {})
+            if not raw:
+                state = _seed_default_state()
+                _save_state(state)
+                return copy.deepcopy(_state_cache[1])
+            if "providers" in raw and isinstance(raw.get("providers"), list):
+                state = _normalize_loaded_state(raw)
+                _state_cache = (fingerprint, copy.deepcopy(state))
+                return state
+            state = _migrate_flat_to_providers(raw)
             _save_state(state)
             return copy.deepcopy(_state_cache[1])
-        # New schema?
-        if "providers" in raw and isinstance(raw.get("providers"), list):
-            state = _normalize_loaded_state(raw)
-            _state_cache = (fingerprint, copy.deepcopy(state))
-            return state
-        # Old flat schema → migrate through the supervisor-owned credential
-        # authority, then persist the deterministic provider id.
-        state = _migrate_flat_to_providers(raw)
-        _save_state(state)
-        return copy.deepcopy(_state_cache[1])
 
 
 def _log_removed_providers(new_providers: list) -> None:
@@ -652,10 +670,14 @@ def _log_removed_providers(new_providers: list) -> None:
         logger.warning("_log_removed_providers failed", exc_info=True)
 
 
-def _save_state(state: dict) -> None:
-    global _state_cache
+def _validate_state_for_save(state: dict) -> None:
     dependency_plan.assert_state_transition_supported(state)
     dependency_plan.assert_state_supported(state)
+
+
+def _save_state(state: dict) -> None:
+    global _state_cache
+    _validate_state_for_save(state)
     new_providers = state.get("providers", [])
     _log_removed_providers(new_providers)
     payload = {
@@ -1211,18 +1233,29 @@ def export_provider_sync_state(provider_api_key_ids: object = None) -> dict:
     return payload
 
 
-def _provider_has_local_runtime_auth(provider: dict) -> bool:
+def _provider_has_local_runtime_auth(
+    provider: dict,
+    staged_api_keys: dict[str, str] | None = None,
+) -> bool:
     if _provider_is_suspended(provider):
         return False
     if provider.get("mode") != "api_key":
         return True
     provider_id = str(provider.get("id") or "")
+    if staged_api_keys is not None and provider_id in staged_api_keys:
+        return bool(staged_api_keys[provider_id])
     return bool(provider_id and _read_api_key(provider_id))
 
 
-def _clean_provider_sync_record(provider: dict) -> dict:
+def _clean_provider_sync_record(
+    provider: dict,
+    staged_api_keys: dict[str, str],
+) -> dict:
     clean = _clean_provider_record(provider)
-    if clean.get("mode") == "api_key" and not _provider_has_local_runtime_auth(clean):
+    if clean.get("mode") == "api_key" and not _provider_has_local_runtime_auth(
+        clean,
+        staged_api_keys,
+    ):
         clean["suspended"] = True
     return clean
 
@@ -1230,6 +1263,7 @@ def _clean_provider_sync_record(provider: dict) -> dict:
 def _provider_sync_default_provider_id(
     providers: list[dict],
     requested_default: str,
+    staged_api_keys: dict[str, str],
 ) -> str | None:
     providers_by_id = {
         str(provider.get("id") or ""): provider
@@ -1237,18 +1271,21 @@ def _provider_sync_default_provider_id(
         if str(provider.get("id") or "")
     }
     requested = providers_by_id.get(requested_default)
-    if requested and _provider_has_local_runtime_auth(requested):
+    if requested and _provider_has_local_runtime_auth(requested, staged_api_keys):
         return requested_default
     for provider in providers:
-        if _provider_has_local_runtime_auth(provider):
+        if _provider_has_local_runtime_auth(provider, staged_api_keys):
             return provider.get("id")
     return None
 
 
-def _import_provider_sync_api_keys(payload: dict, providers: list[dict]) -> int:
+def _prepare_provider_sync_api_keys(
+    payload: dict,
+    providers: list[dict],
+) -> list[tuple[str, str]]:
     raw_api_keys = payload.get("provider_api_keys", [])
     if raw_api_keys in (None, []):
-        return 0
+        return []
     if not isinstance(raw_api_keys, list):
         raise ValueError("provider_api_keys must be a list")
     providers_by_id = {
@@ -1278,13 +1315,7 @@ def _import_provider_sync_api_keys(payload: dict, providers: list[dict]) -> int:
         seen.add(provider_id)
         normalized.append((provider_id, api_key))
 
-    for provider_id, api_key in normalized:
-        _write_api_key(provider_id, api_key)
-        if _read_api_key(provider_id) != api_key:
-            with _api_key_cache_lock:
-                _api_key_cache.pop(provider_id, None)
-            raise ValueError(f"provider credential {provider_id!r} could not be stored")
-    return len(normalized)
+    return normalized
 
 
 @_serialized_provider_mutation
@@ -1300,21 +1331,25 @@ def import_provider_sync_state(payload: dict) -> dict:
         if isinstance(provider, dict)
     ]
     dependency_plan.assert_state_supported({"providers": clean_providers})
-    imported_api_key_count = _import_provider_sync_api_keys(payload, clean_providers)
+    credential_changes = _prepare_provider_sync_api_keys(payload, clean_providers)
+    staged_api_keys = dict(credential_changes)
     state = _load_state()
     next_state = dict(state)
     next_state["providers"] = [
-        _clean_provider_sync_record(provider)
+        _clean_provider_sync_record(provider, staged_api_keys)
         for provider in clean_providers
     ]
     requested_default = str(payload.get("default_provider_id") or "")
     next_state["default_provider_id"] = _provider_sync_default_provider_id(
         next_state["providers"],
         requested_default,
+        staged_api_keys,
     )
-    _save_state(next_state)
+    _validate_state_for_save(next_state)
+    with _credential_transaction(credential_changes):
+        _save_state(next_state)
     result = list_providers()
-    result["provider_api_key_count"] = imported_api_key_count
+    result["provider_api_key_count"] = len(credential_changes)
     return result
 
 
@@ -1462,12 +1497,15 @@ def add_provider(payload: dict) -> dict:
         provider, payload.get("default_reasoning_effort")
     )
     dependency_plan.assert_provider_supported(provider)
+    state["providers"].append(provider)
+    credential_changes: list[tuple[str, str]] = []
     if mode == "api_key":
         api_key = payload.get("api_key", "")
         if api_key and api_key != KEEP_SENTINEL:
-            _write_api_key(pid, api_key)
-    state["providers"].append(provider)
-    _save_state(state)
+            credential_changes.append((pid, api_key))
+    _validate_state_for_save(state)
+    with _credential_transaction(credential_changes):
+        _save_state(state)
     return _provider_ui_state(provider)
 
 
@@ -1550,15 +1588,18 @@ def update_provider(provider_id: str, payload: dict) -> Optional[dict]:
     if "capabilities" in payload:
         target["capabilities"] = _clean_capabilities(payload["capabilities"])
     dependency_plan.assert_provider_supported(target)
+    credential_changes: list[tuple[str, str]] = []
     if "api_key" in payload:
         new_key = payload["api_key"]
         if new_key != KEEP_SENTINEL:
-            _write_api_key(provider_id, new_key)
+            credential_changes.append((provider_id, new_key))
     # Monotonic edit counter: spawn-time snapshots (e.g. the Claude
     # handoff eligibility check) compare against it to detect that a
     # live process was configured under a different record.
     target["record_version"] = int(target.get("record_version") or 0) + 1
-    _save_state(state)
+    _validate_state_for_save(state)
+    with _credential_transaction(credential_changes):
+        _save_state(state)
     # If we just updated the active provider, re-apply env so changes take.
     if state.get("default_provider_id") == provider_id:
         apply_provider_config_env_vars()
@@ -1587,8 +1628,9 @@ def delete_provider(provider_id: str) -> tuple[bool, str]:
     state["providers"] = [p for p in state.get("providers", []) if p.get("id") != provider_id]
     if len(state["providers"]) == before:
         return False, "missing"
-    _delete_api_key(provider_id)
-    _save_state(state)
+    _validate_state_for_save(state)
+    with _credential_transaction([(provider_id, "")]):
+        _save_state(state)
     return True, "ok"
 
 
