@@ -174,6 +174,74 @@ def test_unknown_active_provider_requirement_fails_closed() -> None:
         raise AssertionError("unknown active provider requirement must fail closed")
 
 
+def test_suspended_provider_requirement_is_included() -> None:
+    installation_profile.save(mode=installation_profile.DEFAULT, provider="codex")
+    installation_profile.mark_selection_applied()
+    config_path = Path(_HOME) / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "default_provider_id": "codex-id",
+                "providers": [
+                    {
+                        "id": "codex-id",
+                        "kind": "codex",
+                        "suspended": False,
+                    },
+                    {
+                        "id": "claude-id",
+                        "kind": "claude",
+                        "suspended": True,
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    plan = dependency_plan.resolve_plan()
+
+    assert plan["provider_kinds"] == ("claude", "codex")
+    assert plan["requirements"] == (
+        "requirements.txt",
+        "requirements-mobile.txt",
+        "requirements-claude.txt",
+    )
+
+
+def test_unknown_suspended_provider_requirement_fails_closed() -> None:
+    installation_profile.save(mode=installation_profile.DEFAULT, provider="codex")
+    installation_profile.mark_selection_applied()
+    state = {
+        "default_provider_id": "codex-id",
+        "providers": [
+            {
+                "id": "codex-id",
+                "kind": "codex",
+                "suspended": False,
+            },
+            {
+                "id": "unknown-id",
+                "kind": "unknown",
+                "suspended": True,
+            },
+        ],
+    }
+    config_path = Path(_HOME) / "config.json"
+    config_path.write_text(json.dumps(state), encoding="utf-8")
+
+    for operation in (
+        dependency_plan.resolve_plan,
+        lambda: dependency_plan.assert_state_supported(state),
+    ):
+        try:
+            operation()
+        except dependency_plan.DependencyPlanError:
+            pass
+        else:
+            raise AssertionError("unknown suspended provider must fail closed")
+
+
 def test_provider_mutation_rejects_missing_runtime_before_persist() -> None:
     installation_profile.save(mode=installation_profile.DEFAULT, provider="codex")
     installation_profile.mark_selection_applied()
@@ -737,6 +805,8 @@ if __name__ == "__main__":
     test_selected_provider_is_the_only_active_provider()
     test_runtime_plan_uses_pending_selection_then_active_config()
     test_unknown_active_provider_requirement_fails_closed()
+    test_suspended_provider_requirement_is_included()
+    test_unknown_suspended_provider_requirement_fails_closed()
     test_provider_mutation_rejects_missing_runtime_before_persist()
     test_provider_plan_transition_requires_activated_candidate()
     test_provider_activation_mutations_reject_missing_runtime()

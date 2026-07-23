@@ -64,12 +64,12 @@ def _provider_kinds(state: dict[str, Any] | None = None) -> tuple[str, ...]:
         return ("claude", "codex")
     kinds: set[str] = set()
     for provider in providers:
-        if not isinstance(provider, dict) or provider.get("suspended") is True:
+        if not isinstance(provider, dict):
             continue
         kind = str(provider.get("kind") or "").strip()
         spec = provider_manifest.spec_for(kind)
         if spec is None or spec.virtual:
-            raise DependencyPlanError(f"unknown active provider kind: {kind or '<empty>'}")
+            raise DependencyPlanError(f"unknown provider kind: {kind or '<empty>'}")
         kinds.add(kind)
     return tuple(sorted(kinds))
 
@@ -218,12 +218,10 @@ def _assert_environment(env_dir: Path, plan: dict[str, Any]) -> None:
 
 
 def assert_provider_supported(provider: dict[str, Any]) -> None:
-    if provider.get("suspended") is True:
-        return
     kind = str(provider.get("kind") or "").strip()
     spec = provider_manifest.spec_for(kind)
     if spec is None or spec.virtual:
-        raise DependencyPlanError(f"unknown active provider kind: {kind or '<empty>'}")
+        raise DependencyPlanError(f"unknown provider kind: {kind or '<empty>'}")
     for module in spec.runtime_probe_imports:
         if not _module_available(module):
             raise DependencyPlanError(
