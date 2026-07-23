@@ -58,7 +58,7 @@ export const KNOWN_WEB_SOCKET_EVENT_TYPES = new Set([
   "extension_event", "switch_control_state_changed", "subscribe", "unsubscribe",
   "send_message", "stop_message", "promote_queued", "cancel_queued", "update_queued",
   "begin_queued_edit", "finish_queued_edit", "snapshot_resume", "snapshot_ack",
-  "snapshot_refresh",
+  "snapshot_refresh", "ping", "pong",
 ]);
 
 function emitTrafficSummary(

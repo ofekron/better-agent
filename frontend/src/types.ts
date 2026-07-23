@@ -251,7 +251,11 @@ export type WSEventType =
   | "schedules_updated"
   // Global ping: some schedule mutated in some session. Snapshot:
   // GET /api/schedules (the Schedules page refetches on receipt).
-  | "schedules_changed";
+  | "schedules_changed"
+  // Application-level heartbeat reply (see useWebSocket's ping/pong
+  // watchdog). Detects a TCP connection killed silently -- common on
+  // mobile network transitions -- where readyState stays OPEN forever.
+  | "pong";
 
 export interface WSEvent {
   type: WSEventType;

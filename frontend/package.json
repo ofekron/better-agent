@@ -15,14 +15,14 @@
     "postinstall": "node scripts/detect-ips.mjs",
     "prebuild": "node scripts/detect-ips.mjs",
     "prebuild:mobile": "node scripts/detect-ips.mjs",
-    "build:mobile": "tsc -b tsconfig.mobile.json && vite build --mode mobile && npx cap sync",
-    "build:release": "BC_RELEASE_BUILD=1 node scripts/detect-ips.mjs && BC_RELEASE_BUILD=1 tsc -b tsconfig.mobile.json && BC_RELEASE_BUILD=1 vite build --mode mobile && npx cap sync",
+    "build:mobile": "tsc -b tsconfig.mobile.json && vite build --mode mobile && node scripts/cap-sync.mjs",
+    "build:release": "BC_RELEASE_BUILD=1 node scripts/detect-ips.mjs && BC_RELEASE_BUILD=1 tsc -b tsconfig.mobile.json && BC_RELEASE_BUILD=1 vite build --mode mobile && node scripts/cap-sync.mjs",
     "cap:ios": "npx cap open ios",
     "cap:android": "npx cap open android",
-    "cap:dev:ios": "BA_CAP_PORT=${BA_BACKEND_PORT:-${BETTER_AGENT_BACKEND_PORT:-${BETTER_CLAUDE_BACKEND_PORT:-18765}}}; VITE_API_URL=http://$(ipconfig getifaddr en0):$BA_CAP_PORT vite build && npx cap sync && npx cap open ios",
-    "cap:dev:android": "BA_CAP_PORT=${BA_BACKEND_PORT:-${BETTER_AGENT_BACKEND_PORT:-${BETTER_CLAUDE_BACKEND_PORT:-18765}}}; VITE_API_URL=http://$(ipconfig getifaddr en0):$BA_CAP_PORT vite build && npx cap sync && npx cap open android",
-    "cap:prod:ios": "BA_CAP_PORT=${BA_BACKEND_PORT:-${BETTER_AGENT_BACKEND_PORT:-${BETTER_CLAUDE_BACKEND_PORT:-18765}}}; BA_CAP_URL=${CAPACITOR_SERVER_URL:-${VITE_API_URL:?Set CAPACITOR_SERVER_URL or VITE_API_URL explicitly - no default server URL is baked in}}; VITE_API_URL=$BA_CAP_URL CAPACITOR_SERVER_URL=$BA_CAP_URL vite build && CAPACITOR_SERVER_URL=$BA_CAP_URL npx cap sync && npx cap open ios",
-    "cap:prod:android": "BA_CAP_PORT=${BA_BACKEND_PORT:-${BETTER_AGENT_BACKEND_PORT:-${BETTER_CLAUDE_BACKEND_PORT:-18765}}}; BA_CAP_URL=${CAPACITOR_SERVER_URL:-${VITE_API_URL:?Set CAPACITOR_SERVER_URL or VITE_API_URL explicitly - no default server URL is baked in}}; VITE_API_URL=$BA_CAP_URL CAPACITOR_SERVER_URL=$BA_CAP_URL vite build && CAPACITOR_SERVER_URL=$BA_CAP_URL npx cap sync && npx cap open android"
+    "cap:dev:ios": "BA_CAP_PORT=${BA_BACKEND_PORT:-${BETTER_AGENT_BACKEND_PORT:-${BETTER_CLAUDE_BACKEND_PORT:-18765}}}; VITE_API_URL=http://$(ipconfig getifaddr en0):$BA_CAP_PORT vite build && node scripts/cap-sync.mjs && npx cap open ios",
+    "cap:dev:android": "BA_CAP_PORT=${BA_BACKEND_PORT:-${BETTER_AGENT_BACKEND_PORT:-${BETTER_CLAUDE_BACKEND_PORT:-18765}}}; VITE_API_URL=http://$(ipconfig getifaddr en0):$BA_CAP_PORT vite build && node scripts/cap-sync.mjs && npx cap open android",
+    "cap:prod:ios": "BA_CAP_PORT=${BA_BACKEND_PORT:-${BETTER_AGENT_BACKEND_PORT:-${BETTER_CLAUDE_BACKEND_PORT:-18765}}}; BA_CAP_URL=${CAPACITOR_SERVER_URL:-${VITE_API_URL:?Set CAPACITOR_SERVER_URL or VITE_API_URL explicitly - no default server URL is baked in}}; VITE_API_URL=$BA_CAP_URL CAPACITOR_SERVER_URL=$BA_CAP_URL vite build && CAPACITOR_SERVER_URL=$BA_CAP_URL node scripts/cap-sync.mjs && npx cap open ios",
+    "cap:prod:android": "BA_CAP_PORT=${BA_BACKEND_PORT:-${BETTER_AGENT_BACKEND_PORT:-${BETTER_CLAUDE_BACKEND_PORT:-18765}}}; BA_CAP_URL=${CAPACITOR_SERVER_URL:-${VITE_API_URL:?Set CAPACITOR_SERVER_URL or VITE_API_URL explicitly - no default server URL is baked in}}; VITE_API_URL=$BA_CAP_URL CAPACITOR_SERVER_URL=$BA_CAP_URL vite build && CAPACITOR_SERVER_URL=$BA_CAP_URL node scripts/cap-sync.mjs && npx cap open android"
   },
   "dependencies": {
     "@better-agent/provider-config-sync-core": "file:../vendor/provider-config-sync/0.1.0/better-agent-provider-config-sync-core-0.1.0.tgz",
