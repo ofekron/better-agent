@@ -242,13 +242,26 @@ def claim_route(
         path = status_path(ask_id)
         current = _read_status_unlocked(ask_id)
         if current is not None:
-            if (
-                current.get("sender_session_id") != sender
-                or current.get("route_kind") != route_kind
-                or current.get("route_value") != route_value
-                or current.get("route_affinity_key", "") != route_affinity_key
-            ):
-                raise ValueError("ask_id is already bound to a different route")
+            # A record can exist under this ask_id without ever having gone
+            # through claim_route: `write_status()` is called directly by
+            # code that predates route tracking, or that seeds correlation
+            # fields (lifecycle_msg_id, pool_queue_item_id, ...) before the
+            # first claim. Missing route_kind means "not yet claimed", not
+            # "claimed differently" — treat it as claimable and backfill the
+            # route fields, instead of rejecting it as a route conflict.
+            previously_claimed = "route_kind" in current
+            if previously_claimed:
+                if (
+                    current.get("sender_session_id") != sender
+                    or current.get("route_kind") != route_kind
+                    or current.get("route_value") != route_value
+                    or current.get("route_affinity_key", "") != route_affinity_key
+                ):
+                    raise ValueError("ask_id is already bound to a different route")
+            else:
+                existing_sender = current.get("sender_session_id")
+                if existing_sender and existing_sender != sender:
+                    raise ValueError("ask_id is already bound to a different route")
             current_target = str(current.get("target_session_id") or "")
             if route_kind != "pool" and current_target != target:
                 raise ValueError("ask_id is already bound to a different route")
@@ -260,6 +273,14 @@ def claim_route(
                 if current.get("lifecycle_msg_id") or current.get("result") is not None:
                     raise ValueError("ask_id is already bound to a different target")
                 current["target_session_id"] = target
+                previously_claimed = False  # force the write below
+            if not previously_claimed:
+                current["sender_session_id"] = sender
+                current["route_kind"] = route_kind
+                current["route_value"] = route_value
+                current["route_affinity_key"] = route_affinity_key
+                if target and not current.get("target_session_id"):
+                    current["target_session_id"] = target
                 atomic_write_json(path, current)
             return current
         claimed = {

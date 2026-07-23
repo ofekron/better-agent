@@ -17087,12 +17087,18 @@ async def _process_worker_pool_queue(tag: str) -> None:
                         "pool_affinity_key": str(item.get("pool_affinity_key") or ""),
                     },
                 )
+                # Pop and broadcast BEFORE waking any waiter: a caller unblocked
+                # by _complete_pool_ask_waiters can synchronously check pool
+                # state, so the item must already be gone by the time it wakes.
+                await asyncio.to_thread(_ws.pop_pool_task, tag, str(item.get("id") or ""))
+                await coordinator.broadcast_workers_changed(None)
                 ask_id = str(item.get("ask_id") or "")
                 if ask_id:
                     import ask_status_store
 
                     await ask_status_store.write_status_async(ask_id, result=result)
                 _complete_pool_ask_waiters(ask_id, result)
+                continue
             else:
                 await coordinator.submit_team_message(
                     sender_session_id=str(item.get("sender_session_id") or ""),
