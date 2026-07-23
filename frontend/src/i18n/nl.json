@@ -936,6 +936,7 @@
   "app.offlineQueued_1": "Offline — 1 actie in de wachtrij",
   "app.offlineQueued_other": "Offline — {{count}} acties in de wachtrij",
   "app.offlinePersistFailed": "Opslag is vol — acties in de wachtrij kunnen niet offline worden opgeslagen en gaan mogelijk verloren als je herlaadt. Maak ruimte vrij of ga binnenkort weer online.",
+  "app.installationSetupRequired": "Installatie-instelling is vereist — voer het installatieprogramma uit om providers en sessies in te schakelen.",
   "backendUnavailable.title": "Kan Better Agent niet bereiken",
   "backendUnavailable.subtitle": "De backend is niet beschikbaar of heeft deze browserorigin geweigerd.",
   "backendUnavailable.retry": "Opnieuw proberen",

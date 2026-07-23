@@ -936,6 +936,7 @@
   "app.offlineQueued_1": "Offline — 1 Aktion in der Warteschlange",
   "app.offlineQueued_other": "Offline — {{count}} Aktionen in der Warteschlange",
   "app.offlinePersistFailed": "Speicher ist voll — eingereihte Aktionen können offline nicht gespeichert werden und gehen beim Neuladen möglicherweise verloren. Schaffe Platz oder gehe bald wieder online.",
+  "app.installationSetupRequired": "Die Installation muss abgeschlossen werden — führe das Installationsprogramm aus, um Provider und Sitzungen zu aktivieren.",
   "backendUnavailable.title": "Better Agent nicht erreichbar",
   "backendUnavailable.subtitle": "Das Backend ist nicht verfügbar oder hat die Browser-Origin abgelehnt.",
   "backendUnavailable.retry": "Erneut versuchen",

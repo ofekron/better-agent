@@ -939,6 +939,7 @@
   "app.offlineQueued_1": "Sin conexión — 1 acción en cola",
   "app.offlineQueued_other": "Sin conexión — {{count}} acciones en cola",
   "app.offlinePersistFailed": "El almacenamiento está lleno — las acciones en cola no se pueden guardar sin conexión y podrían perderse si recargas. Libera espacio o vuelve a conectarte pronto.",
+  "app.installationSetupRequired": "Se requiere completar la instalación — ejecuta el instalador para habilitar proveedores y sesiones.",
   "backendUnavailable.title": "No se puede acceder a Better Agent",
   "backendUnavailable.subtitle": "El backend no está disponible o rechazó el origen de este navegador.",
   "backendUnavailable.retry": "Reintentar",

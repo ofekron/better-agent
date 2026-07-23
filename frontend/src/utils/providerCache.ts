@@ -62,6 +62,22 @@ function parseCache(value: unknown): ProviderCache | null {
   };
 }
 
+export interface ProvidersPayload {
+  providers: Provider[];
+  defaultProviderId: string | null;
+}
+
+export function parseProvidersPayload(value: unknown): ProvidersPayload | null {
+  if (!value || typeof value !== "object") return null;
+  const payload = value as Record<string, unknown>;
+  if (payload.default_provider_id !== null && typeof payload.default_provider_id !== "string") return null;
+  if (!Array.isArray(payload.providers) || !payload.providers.every(isProvider)) return null;
+  return {
+    providers: payload.providers,
+    defaultProviderId: payload.default_provider_id,
+  };
+}
+
 export function readProviderCache(): ProviderCache | null {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);

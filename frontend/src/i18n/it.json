@@ -940,6 +940,7 @@
   "app.offlineQueued_1": "Offline — 1 azione in coda",
   "app.offlineQueued_other": "Offline — {{count}} azioni in coda",
   "app.offlinePersistFailed": "Spazio di archiviazione pieno — le azioni in coda non possono essere salvate offline e potrebbero andare perse se ricarichi. Libera spazio o torna online presto.",
+  "app.installationSetupRequired": "È necessario completare l'installazione — esegui l'installer per abilitare provider e sessioni.",
   "backendUnavailable.title": "Impossibile raggiungere Better Agent",
   "backendUnavailable.subtitle": "Il backend non è disponibile o ha rifiutato l'origine di questo browser.",
   "backendUnavailable.retry": "Riprova",

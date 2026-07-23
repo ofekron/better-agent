@@ -939,6 +939,7 @@
   "app.offlineQueued_1": "오프라인 — 작업 1개 대기 중",
   "app.offlineQueued_other": "오프라인 — 작업 {{count}}개 대기 중",
   "app.offlinePersistFailed": "저장 공간이 가득 찼습니다 — 대기 중인 작업을 오프라인으로 저장할 수 없으며 새로 고치면 손실될 수 있습니다. 공간을 확보하거나 곧 다시 온라인으로 전환하세요.",
+  "app.installationSetupRequired": "설치 설정이 필요합니다 — 설치 프로그램을 실행하여 프로바이더와 세션을 활성화하세요.",
   "backendUnavailable.title": "Better Agent에 연결할 수 없습니다",
   "backendUnavailable.subtitle": "백엔드를 사용할 수 없거나 이 브라우저 출처가 거부되었습니다.",
   "backendUnavailable.retry": "다시 시도",

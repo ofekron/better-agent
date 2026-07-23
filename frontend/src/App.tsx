@@ -170,7 +170,7 @@ import { API, WS_URL } from "./api";
 import { extBackendBase } from "./extensionIds";
 import { eventBus } from "./lib/eventBus";
 import { makeSessionExtender } from "./utils/wsExtender";
-import { cacheProviders } from "./utils/providerCache";
+import { cacheProviders, parseProvidersPayload } from "./utils/providerCache";
 import { useProviderChanged } from "./hooks/useProviderChanged";
 import { useBackButtonDismiss } from "./hooks/useBackButtonDismiss";
 
@@ -2063,17 +2063,27 @@ function AppMain({
   const currentSessionCanFork =
     sessionHasForkSource(currentSession) && (currentProvider?.supports_fork ?? true);
   const [, setProviderName] = useState("");
+  const [setupRequired, setSetupRequired] = useState(false);
   const syncProvider = useCallback(async () => {
     try {
       const r = await fetch(`${API}/api/providers`);
-      const pd = (await r.json()) as {
-        default_provider_id: string | null;
-        providers: Provider[];
-      };
-      cacheProviders(pd.providers, pd.default_provider_id);
+      if (!r.ok) {
+        if (r.status === 503) {
+          const p = await fetch(`${API}/api/installation-profile`);
+          if (p.ok) {
+            const profile = (await p.json()) as { setup_required?: boolean };
+            setSetupRequired(profile.setup_required === true);
+          }
+        }
+        return;
+      }
+      const pd = parseProvidersPayload(await r.json());
+      if (!pd) return;
+      setSetupRequired(false);
+      cacheProviders(pd.providers, pd.defaultProviderId);
       setProviders(pd.providers);
-      setDefaultProviderId(pd.default_provider_id);
-      const active = pd.providers.find((p) => p.id === pd.default_provider_id);
+      setDefaultProviderId(pd.defaultProviderId);
+      const active = pd.providers.find((p) => p.id === pd.defaultProviderId);
       if (active) {
         setProviderName(active.name);
         // Only set model to the active provider's default when no session
@@ -6557,6 +6567,15 @@ function AppMain({
           {t(
             "app.offlinePersistFailed",
             "Storage is full — queued actions can't be saved offline and may be lost if you reload. Free up space or get back online soon.",
+          )}
+        </div>
+      )}
+      {setupRequired && (
+        <div className="offline-banner offline-banner--warn" role="alert">
+          <span className="offline-banner-dot" />
+          {t(
+            "app.installationSetupRequired",
+            "Installation setup is required — run the installer to enable providers and sessions.",
           )}
         </div>
       )}

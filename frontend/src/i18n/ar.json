@@ -939,6 +939,7 @@
   "app.offlineQueued_1": "غير متصل — إجراء واحد في الطابور",
   "app.offlineQueued_other": "غير متصل — {{count}} إجراءات في الطابور",
   "app.offlinePersistFailed": "مساحة التخزين ممتلئة — لا يمكن حفظ الإجراءات في الطابور دون اتصال وقد تُفقد إذا أعدت التحميل. حرّر بعض المساحة أو عُد للاتصال قريبًا.",
+  "app.installationSetupRequired": "مطلوب إكمال إعداد التثبيت — شغّل المثبّت لتفعيل المزوّدين والجلسات.",
   "backendUnavailable.title": "تعذّر الوصول إلى Better Agent",
   "backendUnavailable.subtitle": "الخادم غير متاح أو رفض مصدر هذا المتصفّح.",
   "backendUnavailable.retry": "إعادة المحاولة",
