@@ -24,6 +24,32 @@ export function runnerForProvider(provider: Provider): Provider["runner"] {
     : provider.runner_options[0] ?? provider.runner;
 }
 
+/** Runtime kind a runner resolves to. `better_agent_runner` always runs the
+ *  BA-owned OpenAI-compatible loop (runtime kind `openai`); the relative
+ *  `native` runner runs the provider's own engine, so it resolves to the
+ *  provider's kind. Mirrors backend `runtime_profile.runtime_kind`. */
+export function runtimeKindForRunner(
+  providerKind: string,
+  runner: Provider["runner"] | string | null | undefined,
+): string {
+  return runner === "better_agent_runner" ? "openai" : (providerKind || "claude");
+}
+
+/** i18n key for a runtime kind's engine display name (e.g. "Claude",
+ *  "Sakana Fugu", "Better Agent"). The single source for turning a
+ *  runner into a real engine label instead of the relative "native". */
+export function runtimeKindLabelKey(kind: string): string {
+  return `runtimeKind.${kind || "claude"}`;
+}
+
+/** i18n key for the engine a (providerKind, runner) pair actually runs on. */
+export function runnerLabelKey(
+  providerKind: string,
+  runner: Provider["runner"] | string | null | undefined,
+): string {
+  return runtimeKindLabelKey(runtimeKindForRunner(providerKind, runner));
+}
+
 export function effortsForRunner(
   provider: Provider,
   runner: Provider["runner"],

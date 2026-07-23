@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import { API } from "../api";
 import type { RunInfo } from "../types";
 import { RunDetailsModal } from "./RunDetailsModal";
+import { runtimeKindLabelKey } from "./modelPicker";
 
 /**
  * Animated "running" badge for one in-flight CLI run. Reflects the
@@ -74,8 +75,13 @@ export function RunBadge({
   };
 
   if (isStalled) {
-    const providerKind = run.provider_kind || t("runBadge.providerFallback");
-    const provider = providerKind.charAt(0).toUpperCase() + providerKind.slice(1);
+    const rawKind = run.provider_kind || "";
+    const capitalized = rawKind
+      ? rawKind.charAt(0).toUpperCase() + rawKind.slice(1)
+      : t("runBadge.providerFallback");
+    const provider = rawKind
+      ? t(runtimeKindLabelKey(rawKind), { defaultValue: capitalized })
+      : capitalized;
     const threshold = run.startup_silence_threshold_seconds ?? 0;
     return (
       <div className="turn-stalled-card" role="status" aria-live="polite">

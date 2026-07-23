@@ -12,6 +12,7 @@ import {
   makeDraft,
   modelForProvider,
   runnerForProvider,
+  runnerLabelKey,
   type SelectorDraft,
   type SelectorUpdates,
   type ModelRuntimeProfile,
@@ -200,7 +201,7 @@ export function ModelPickerModal({
                 }}
               >
                 {draftProvider.runner_options.map((runner) => (
-                  <option key={runner} value={runner}>{t(`setup.runner.${runner}`)}</option>
+                  <option key={runner} value={runner}>{t(runnerLabelKey(draftProvider.kind, runner))}</option>
                 ))}
               </select>
             </label>

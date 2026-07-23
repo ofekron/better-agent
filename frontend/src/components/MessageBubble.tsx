@@ -38,7 +38,8 @@ import { flattenClaudeMessages } from "../utils/agentMessages";
 import { formatWholeJsonMessage } from "../utils/formatWholeJsonMessage";
 import { buildMessageImageUrl } from "../utils/messageImages";
 import { unwrapTypedAgentMessageEnvelope, unwrapWorkerEventEnvelope } from "../utils/workerEventEnvelope";
-import { providerNameForId } from "../utils/providerCache";
+import { providerNameForId, providerKindForId } from "../utils/providerCache";
+import { runnerLabelKey, runtimeKindLabelKey } from "./modelPicker";
 
 /** Stable empty-array singleton so AssistantMessage's memo shallow
  *  compare holds when a group has no runs targeting it. A fresh `[]`
@@ -72,7 +73,7 @@ function buildRunMetaParts(meta?: ModelRunMeta): Array<{ key: string; label: str
   if (providerName) parts.push({ key: "provider", label: "message.provider", value: providerName });
   if (model) parts.push({ key: "model", label: "message.model", value: model });
   if (reasoningEffort) parts.push({ key: "effort", label: "message.effort", value: reasoningEffort });
-  if (runner) parts.push({ key: "runner", label: "message.runner", value: runner, valueKey: `setup.runner.${runner}` });
+  if (runner) parts.push({ key: "runner", label: "message.runner", value: runner, valueKey: runnerLabelKey(providerKindForId(meta.providerId), runner) });
   return parts;
 }
 
@@ -909,12 +910,16 @@ function ModelSwitchedEvent({ data }: { data: Record<string, unknown> }) {
   const hasReasoningChange = changed.includes("reasoning_effort");
   const hasRunnerChange = changed.includes("runner");
   if (!model && !providerId && !reasoningEffort && !runner) return null;
-  const fromProvider = previousProviderName || previousProviderKind || previousProviderId;
-  const toProvider = providerName || providerKind || providerId;
+  const fromProvider = previousProviderName
+    || (previousProviderKind ? t(runtimeKindLabelKey(previousProviderKind), { defaultValue: previousProviderKind }) : "")
+    || previousProviderId;
+  const toProvider = providerName
+    || (providerKind ? t(runtimeKindLabelKey(providerKind), { defaultValue: providerKind }) : "")
+    || providerId;
   const includeEffort = hasReasoningChange || Boolean(reasoningEffort || previousReasoningEffort);
   const includeRunner = hasRunnerChange || Boolean(runner || previousRunner);
-  const fromRunner = previousRunner ? t(`setup.runner.${previousRunner}`) : "";
-  const toRunner = runner ? t(`setup.runner.${runner}`) : "";
+  const fromRunner = previousRunner ? t(runnerLabelKey(previousProviderKind, previousRunner), previousRunner) : "";
+  const toRunner = runner ? t(runnerLabelKey(providerKind, runner), runner) : "";
   const from = [fromProvider, previousModel, includeEffort ? previousReasoningEffort : "", includeRunner ? fromRunner : ""].filter(Boolean).join(" / ");
   const to = [toProvider, model, includeEffort ? reasoningEffort : "", includeRunner ? toRunner : ""].filter(Boolean).join(" / ");
   const reasoning = previousReasoningEffort && reasoningEffort

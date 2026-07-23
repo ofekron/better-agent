@@ -25,6 +25,7 @@ import {
 } from "./providerFormShape";
 import { Select } from "./Select";
 import { cacheProviders } from "../utils/providerCache";
+import { runnerLabelKey, runtimeKindForRunner } from "./modelPicker";
 import { useProviderInstalls, type InstallRun } from "../hooks/useProviderInstalls";
 import { MobileSetup } from "./MobileSetup";
 import { AppearanceSetting } from "./AppearanceSetting";
@@ -2589,7 +2590,7 @@ function ProvidersSettingsSection({
                       className={`provider-runner-pill runner-${p.runner}`}
                       title={t('setup.runnerHint')}
                     >
-                      {t(`setup.runner.${p.runner}`, { defaultValue: p.runner })}
+                      {t(runnerLabelKey(p.kind, p.runner), { defaultValue: p.runner })}
                     </span>
                   )}
                 </div>
@@ -3139,10 +3140,6 @@ function runnerOptionsForKind(kind: string, saved?: Provider["runner_options"]):
   return kind === "openai" ? ["better_agent_runner"] : ["native"];
 }
 
-function runtimeKindForRunner(kind: string, runner: Provider["runner"]): string {
-  return runner === "better_agent_runner" ? "openai" : kind;
-}
-
 // Capability keys overridable per provider (kind gives the default; these
 // force it on/off). Tri-state in the editor: inherit / on / off.
 const CAPABILITY_KEYS = [
@@ -3375,7 +3372,7 @@ function ProviderForm({
             >
               {runnerOptions.map((option) => (
                 <option key={option} value={option}>
-                  {t(`setup.runner.${option}`)}
+                  {t(runnerLabelKey(kind, option))}
                 </option>
               ))}
             </select>

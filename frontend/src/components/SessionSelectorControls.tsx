@@ -4,7 +4,7 @@ import { API } from "../api";
 import type { Provider, Session } from "../types";
 import { trackedFetch, useOpProgress } from "../progress/store";
 import { ModelPickerModal } from "./ModelPickerModal";
-import type { SelectorUpdates } from "./modelPicker";
+import { runnerLabelKey, type SelectorUpdates } from "./modelPicker";
 
 interface Props {
   session: Session;
@@ -64,7 +64,7 @@ export function SessionSelectorControls({
   const selectedProviderId = session.provider_id || providers.find((p) => !p.suspended)?.id || "";
   const selectedProvider = providers.find((p) => p.id === selectedProviderId);
   const runnerLabel = selectedProvider && selectedProvider.runner_options.length > 1
-    ? t(`setup.runner.${session.runner || selectedProvider.runner}`, session.runner || selectedProvider.runner)
+    ? t(runnerLabelKey(selectedProvider.kind, session.runner || selectedProvider.runner), session.runner || selectedProvider.runner)
     : "";
   const selectorSummary = [selectedProvider?.name, session.model, runnerLabel].filter(Boolean).join(" / ");
 
