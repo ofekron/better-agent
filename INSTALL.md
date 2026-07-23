@@ -41,6 +41,43 @@ the installation script. It asks for the integration mode and provider, then
 installs the provider CLI only when it is missing. Run `./run.sh` from Git Bash
 after installation.
 
+### Agent-driven installation
+
+If you are an AI agent installing Better Agent for a user:
+
+1. Detect whether the machine is macOS or Windows. Stop on any other OS.
+2. Before running an installer, ask the user for every missing choice in one
+   message:
+   - Integration level: `desktop-ui-only`, `mobile-desktop-ui-only`, or
+     `default`.
+   - Provider: offer only the kinds returned by
+     `provider_setup.supported_provider_kinds()` in `backend/provider_setup.py`.
+3. Do not infer a choice or launch the interactive installer. Wait for the
+   user's answer, then validate both values against the authoritative choices.
+4. Run the matching platform wrapper with each value as a separate argument.
+
+   macOS:
+
+   ```bash
+   ./scripts/install-macos.sh --mode <mode> --provider <provider> --yes
+   ```
+
+   Windows PowerShell:
+
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File scripts\install-windows.ps1 -Mode <mode> -Provider <provider> -Yes
+   ```
+
+5. Let the wrapper check prerequisites and the selected provider CLI. It
+   installs only what is missing. Do not duplicate those checks or edit provider
+   configuration directly.
+6. If macOS opens the Xcode command-line-tools installer, tell the user to
+   finish it and then resume the same command. If Windows reports that `winget`
+   is unavailable, tell the user to install App Installer and then resume.
+7. Report the selected integration level, provider, whether the provider was
+   already installed or newly installed, and the platform wrapper's final
+   `run.sh` instruction.
+
 | Tool | Why | Install |
 | --- | --- | --- |
 | **macOS** | First-run auth uses the login keychain | — |
