@@ -774,6 +774,8 @@ def t_codex_materializes_mcp_and_skills() -> None:
             "---\nname: runtime-reviewer\ndescription: Runtime review.\n---\nRuntime review.\n",
             encoding="utf-8",
         )
+        (home / ".zshenv").write_text('. "$HOME/.cargo/env"\n', encoding="utf-8")
+        (home / ".bashrc").write_text(". ~/.profile\n", encoding="utf-8")
         (home / ".codex").mkdir()
         run_dir = Path(tempfile.mkdtemp(dir=_TMP_HOME))
         env = runner_codex._materialize_codex_run_home(
@@ -807,6 +809,8 @@ def t_codex_materializes_mcp_and_skills() -> None:
     skill_root = overlay_home / ".agents" / "skills"
     check(overlay_home == run_dir / "codex-home", "Codex HOME points at run-local overlay")
     check(Path(env["CODEX_HOME"]).is_symlink(), "Codex config home is linked into overlay")
+    check(not (overlay_home / ".zshenv").exists(), "Codex run home skips zsh startup files")
+    check(not (overlay_home / ".bashrc").exists(), "Codex run home skips bash startup files")
     skill = skill_root / "reviewer" / "SKILL.md"
     check(skill.is_file(), "Codex per-run skill file is materialized")
     check("Review carefully." in skill.read_text(encoding="utf-8"), "Codex skill body is written")

@@ -32,6 +32,7 @@ def runtime_skill_contexts(
     *,
     bare_config: bool = False,
     disabled: Optional[list[str]] = None,
+    display_root: str = "",
 ) -> list[dict]:
     if bare_config or not installation_profile.integrations_enabled():
         return []
@@ -52,9 +53,10 @@ def runtime_skill_contexts(
     for skill in skills:
         description = f": {skill['description']}" if skill["description"] else ""
         claude_id = f"{CLAUDE_RUNTIME_SKILLS_PLUGIN_NAME}:{skill['name']}"
+        display_path = _display_skill_path(skill, display_root)
         lines.append(
             f"- {skill['name']}{description} "
-            f"(Claude Skill id: {claude_id}; file: {skill['path']})"
+            f"(Claude Skill id: {claude_id}; file: {display_path})"
         )
 
     return [{
@@ -216,6 +218,14 @@ def _skills_fingerprint(skills: list[dict]) -> tuple:
         )
         for skill in skills
     )
+
+
+def _display_skill_path(skill: dict, display_root: str) -> str:
+    name = str(skill.get("name") or "").strip()
+    root = str(display_root or "").rstrip("/")
+    if root and name:
+        return f"{root}/{name}/SKILL.md"
+    return str(skill.get("path") or "")
 
 
 def _file_fingerprint(path: Path) -> tuple[int, int]:
