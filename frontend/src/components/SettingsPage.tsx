@@ -502,6 +502,7 @@ export function SettingsPage({
   const [repoStatus, setRepoStatus] = useState<ProviderConfigRepositoryStatus | null>(null);
   const [firstRunDone, setFirstRunDone] = useState(true);
   const [networkBindAddress, setNetworkBindAddress] = useState<NetworkBindAddress>("127.0.0.1");
+  const [mobileEnabled, setMobileEnabled] = useState(false);
   const [view, setView] = useState<View>({ kind: "list" });
   const [section, setSection] = useState<SettingsSection>("providers");
   const [busy, setBusy] = useState(false);
@@ -611,12 +612,24 @@ export function SettingsPage({
     }
   };
 
+  const refetchInstallationProfile = async () => {
+    try {
+      const r = await fetch(`${API}/api/installation-profile`);
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const profile = (await r.json()) as { mobile_enabled?: boolean };
+      setMobileEnabled(profile.mobile_enabled === true);
+    } catch {
+      setMobileEnabled(false);
+    }
+  };
+
   useEffect(() => {
     refetch();
     refetchSetupStatus();
     refetchPrefs();
     refetchProjects();
     refetchRepository();
+    refetchInstallationProfile();
   }, [providerConfigSyncEnabled]);
 
   useEffect(() => {
@@ -647,6 +660,7 @@ export function SettingsPage({
           hookActionContext={hookActionContext}
           onAdd={() => setView({ kind: "wizard-templates" })}
           onMobile={() => setView({ kind: "mobile" })}
+          mobileEnabled={mobileEnabled}
           onEdit={(p) => setView({ kind: "edit", providerId: p.id })}
           onOpenProviderConfigSync={onOpenProviderConfigSync}
           setupStatuses={setupStatuses}
@@ -872,6 +886,7 @@ interface ProvidersListProps {
   hookActionContext: HookActionContext;
   onAdd: () => void;
   onMobile: () => void;
+  mobileEnabled: boolean;
   onEdit: (p: Provider) => void;
   onActivate: (p: Provider) => void;
   onSuspend: (p: Provider, suspended: boolean) => void;
@@ -2178,6 +2193,7 @@ function ProvidersList({
   hookActionContext,
   onAdd,
   onMobile,
+  mobileEnabled,
   onEdit,
   onActivate,
   onSuspend,
@@ -2344,9 +2360,11 @@ function ProvidersList({
               {refreshAppDisabled ? "..." : <Icon name="refresh" size={14} style={{ verticalAlign: "-2px" }} />} {t("app.refreshButtonTitle")}
             </button>
           )}
-          <button type="button" className="btn-secondary settings-page-mobile-action" onClick={onMobile}>
-            {t("mobileSetup.title")}
-          </button>
+          {mobileEnabled && (
+            <button type="button" className="btn-secondary settings-page-mobile-action" onClick={onMobile}>
+              {t("mobileSetup.title")}
+            </button>
+          )}
           <button className="setup-cancel-btn settings-page-close-action" onClick={onClose}>
             {t("machines.back")}
           </button>
@@ -2485,6 +2503,7 @@ function ProvidersSettingsSection({
   ProvidersListProps,
   | "onClose"
   | "onMobile"
+  | "mobileEnabled"
   | "teamEnabled"
   | "section"
   | "onSectionChange"

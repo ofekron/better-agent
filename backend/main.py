@@ -86,6 +86,7 @@ import file_panel_drafts
 import file_preview_urls
 import task_output_preview_urls
 import mobile_bundle_ticket
+import installation_profile
 from secret_redaction import install_access_log_redaction, redact_secrets
 from ws_serialization import (
     SerializedWebSocketFrame,
@@ -10504,6 +10505,7 @@ async def frontend_log(request: Request):
 async def mobile_bundle_manifest():
     """Current web-bundle version for the Capacitor OTA updater. Gated by
     the normal auth middleware (the JS caller sends the bearer header)."""
+    await _require_mobile_enabled()
     import mobile_bundle
     info = await asyncio.to_thread(mobile_bundle.build_bundle, frontend_dist_dir())
     if not info:
@@ -10524,6 +10526,7 @@ async def mobile_bundle_download(ticket: str = Query(default="")):
 
     Public-listed because the native GET cannot send Authorization. Access is
     limited by a short-lived capability bound to the exact bundle bytes."""
+    await _require_mobile_enabled()
     import mobile_bundle
     info = await asyncio.to_thread(mobile_bundle.build_bundle, frontend_dist_dir())
     if not info:
@@ -16559,9 +16562,22 @@ def _preferred_server_url_info(request: Request, *, allow_loopback_https: bool =
     }
 
 
+async def _require_mobile_enabled() -> None:
+    enabled = await asyncio.to_thread(installation_profile.mobile_enabled)
+    if not enabled:
+        raise HTTPException(status_code=404, detail="mobile support is not enabled")
+
+
+@app.get("/api/installation-profile")
+async def get_installation_profile():
+    return await asyncio.to_thread(installation_profile.capabilities)
+
+
 @app.get("/api/download/android")
 async def download_android():
     """Serve the Android APK. Looks for any .apk file in ba_home()/mobile/."""
+    await _require_mobile_enabled()
+
     def _latest_apk() -> _PathLib | None:
         _MOBILE_DIR.mkdir(parents=True, exist_ok=True)
         apks = sorted(_MOBILE_DIR.glob("*.apk"))
@@ -16580,6 +16596,8 @@ async def download_android():
 @app.get("/api/download/ios")
 async def download_ios():
     """Serve the iOS IPA. Looks for any .ipa file in ba_home()/mobile/."""
+    await _require_mobile_enabled()
+
     def _latest_ipa() -> _PathLib | None:
         _MOBILE_DIR.mkdir(parents=True, exist_ok=True)
         ipas = sorted(_MOBILE_DIR.glob("*.ipa"))
@@ -16600,6 +16618,8 @@ async def mobile_status(request: Request):
     """Return which mobile builds are available and the server's
     phone-reachable base URL (for QR code generation). Prefer verified
     Tailscale HTTPS when available; otherwise fall back to the LAN URL."""
+    await _require_mobile_enabled()
+
     def _mobile_build_status() -> dict:
         _MOBILE_DIR.mkdir(parents=True, exist_ok=True)
         return {

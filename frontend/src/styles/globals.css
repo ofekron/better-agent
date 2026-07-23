@@ -9748,6 +9748,23 @@ button.run-badge-clickable:focus-visible {
   justify-content: flex-end;
 }
 
+.settings-page-mobile-action {
+  animation: settings-mobile-action-enter 180ms ease-out;
+}
+
+@keyframes settings-mobile-action-enter {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .settings-page-mobile-action {
+    animation: none;
+  }
+}
+
 .settings-page-layout {
   flex: 1;
   min-height: 0;

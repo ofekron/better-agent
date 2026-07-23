@@ -35,14 +35,28 @@ def _with_home() -> tempfile.TemporaryDirectory:
 def test_profile_defaults_and_strict_round_trip() -> None:
     with _with_home():
         assert installation_profile.load() == {
-            "schema_version": 1,
+            "schema_version": 2,
             "mode": "default",
             "provider": None,
         }
-        saved = installation_profile.save(mode="ui-only", provider="codex")
-        assert saved["mode"] == "ui-only"
+        assert installation_profile.capabilities() == {
+            "mode": "default",
+            "mobile_enabled": True,
+            "integrations_enabled": True,
+        }
+        saved = installation_profile.save(mode="desktop-ui-only", provider="codex")
+        assert saved["mode"] == "desktop-ui-only"
         assert saved["provider"] == "codex"
         assert not installation_profile.integrations_enabled()
+        assert not installation_profile.mobile_enabled()
+
+        installation_profile.save(mode="mobile-desktop-ui-only", provider="codex")
+        assert not installation_profile.integrations_enabled()
+        assert installation_profile.mobile_enabled()
+
+        installation_profile.save(mode="default", provider="codex")
+        assert installation_profile.integrations_enabled()
+        assert installation_profile.mobile_enabled()
 
         profile_path = Path(os.environ["BETTER_AGENT_HOME"]) / "installation.json"
         profile_path.write_text(json.dumps({**saved, "mode": "unknown"}), encoding="utf-8")
@@ -52,6 +66,14 @@ def test_profile_defaults_and_strict_round_trip() -> None:
             pass
         else:
             raise AssertionError("invalid persisted installation mode must fail closed")
+
+        profile_path.write_text(json.dumps({**saved, "schema_version": 1}), encoding="utf-8")
+        try:
+            installation_profile.load()
+        except installation_profile.InstallationProfileError:
+            pass
+        else:
+            raise AssertionError("obsolete installation profile schema must fail closed")
 
 
 def test_ui_only_suppresses_better_agent_injections() -> None:
@@ -69,7 +91,7 @@ def test_ui_only_suppresses_better_agent_injections() -> None:
         assert len(extension_store._active_records_from_data(active_data)) == 1
         default_frontend_key = extension_store.frontend_entrypoints_cache_key()
 
-        installation_profile.save(mode="ui-only", provider="claude")
+        installation_profile.save(mode="desktop-ui-only", provider="claude")
         provider_config = {"mcp_servers": {"user-owned": {"command": "user-mcp"}}}
         inputs = {
             "app_session_id": "session",
@@ -130,6 +152,11 @@ def test_ui_only_suppresses_better_agent_injections() -> None:
             {"bare_config": True}, provider_config
         ) == provider_config
 
+        installation_profile.save(mode="mobile-desktop-ui-only", provider="claude")
+        assert builtin_mcp_config.with_builtin_mcp_servers(inputs, provider_config) == provider_config
+        assert runtime_skills.runtime_skill_contexts(str(ROOT)) == []
+        assert extension_store._active_records_from_data(active_data) == []
+
 
 def test_provider_install_skips_cli_that_is_already_available() -> None:
     async def run() -> None:
@@ -150,11 +177,20 @@ def test_provider_install_skips_cli_that_is_already_available() -> None:
 
 
 def test_platform_installers_are_exactly_named() -> None:
-    assert (ROOT / "scripts" / "install.py").is_file()
+    python_installer = ROOT / "scripts" / "install.py"
+    windows_installer = ROOT / "scripts" / "install-windows.ps1"
+    assert python_installer.is_file()
     assert (ROOT / "scripts" / "install-macos.sh").is_file()
-    assert (ROOT / "scripts" / "install-windows.ps1").is_file()
+    assert windows_installer.is_file()
     assert not (ROOT / "scripts" / "bootstrap-macos.sh").exists()
     assert not (ROOT / "scripts" / "bootstrap-windows.ps1").exists()
+    python_source = python_installer.read_text(encoding="utf-8")
+    windows_source = windows_installer.read_text(encoding="utf-8")
+    assert "installation_profile.DESKTOP_UI_ONLY" in python_source
+    assert "installation_profile.MOBILE_DESKTOP_UI_ONLY" in python_source
+    assert "installation_profile.DEFAULT" in python_source
+    for mode in installation_profile.MODES:
+        assert mode in windows_source
 
 
 if __name__ == "__main__":

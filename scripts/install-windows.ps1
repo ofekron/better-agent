@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("default", "ui-only")][string]$Mode,
+    [ValidateSet("desktop-ui-only", "mobile-desktop-ui-only", "default")][string]$Mode,
     [string]$Provider,
     [switch]$Yes
 )
