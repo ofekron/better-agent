@@ -367,12 +367,20 @@ export function ExtensionModuleSlot({
             payload = text;
           }
         }
+        const structuredDetail = (
+          typeof payload === "object"
+          && payload !== null
+          && "detail" in payload
+          && typeof payload.detail === "string"
+        ) ? payload.detail : "";
         postToIframe({
           action: "marketplace-response",
           requestId,
           ok: response.ok,
           payload,
-          error: response.ok ? "" : (typeof payload === "string" ? payload : `request failed (${response.status})`),
+          error: response.ok
+            ? ""
+            : (typeof payload === "string" ? payload : structuredDetail || `request failed (${response.status})`),
         });
       } catch (e) {
         postToIframe({ action: "marketplace-response", requestId, ok: false, error: e instanceof Error ? e.message : String(e) });

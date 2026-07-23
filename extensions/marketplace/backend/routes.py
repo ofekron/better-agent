@@ -152,6 +152,44 @@ def _access_token() -> str:
     return str(tokens.get("access_token") or "")
 
 
+def _account_for_access_token(access_token: str) -> dict[str, object] | None:
+    if not access_token:
+        return None
+    request = urllib.request.Request(
+        f"{_marketplace_base_url()}/auth/me",
+        headers={**_MARKETPLACE_HEADERS, "Authorization": f"Bearer {access_token}"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        if exc.code == 401:
+            return None
+        raise HTTPException(status_code=502, detail="marketplace authentication is unavailable") from exc
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=502, detail="marketplace authentication is unavailable") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=502, detail="marketplace authentication is invalid")
+    return payload
+
+
+def _validated_access_token() -> tuple[str, dict[str, object] | None]:
+    if not _session_tokens():
+        return "", None
+    try:
+        access_token = _access_token()
+    except HTTPException as exc:
+        if exc.status_code == 401:
+            _delete_secret(_SESSION_ACCOUNT)
+            return "", None
+        raise
+    account = _account_for_access_token(access_token)
+    if account is not None:
+        return access_token, account
+    _delete_secret(_SESSION_ACCOUNT)
+    return "", None
+
+
 def _marketplace_headers(access_token: str) -> dict[str, str]:
     headers = dict(_MARKETPLACE_HEADERS)
     if access_token:
@@ -309,8 +347,15 @@ def create_router(context) -> APIRouter:
 
     @router.get("/auth/status")
     async def auth_status() -> dict[str, object]:
+        access_token, account = _validated_access_token()
+        if not access_token or account is None:
+            return {"authenticated": False, "provider": ""}
         tokens = _session_tokens()
-        return {"authenticated": bool(tokens), "provider": str((tokens or {}).get("provider") or "")}
+        return {
+            "authenticated": True,
+            "provider": str((tokens or {}).get("provider") or ""),
+            "account": account.get("account") or account,
+        }
 
     @router.post("/auth/logout")
     async def auth_logout() -> dict[str, bool]:
@@ -326,15 +371,20 @@ def create_router(context) -> APIRouter:
 
     @router.get("/catalog")
     async def catalog() -> dict[str, object]:
-        return {"extensions": _ofekdev_rows(_access_token())}
+        access_token, _ = _validated_access_token()
+        return {"extensions": _ofekdev_rows(access_token)}
 
     @router.get("/metadata/{extension_id}")
     async def metadata(extension_id: str) -> dict[str, object]:
-        return _ofekdev_metadata(extension_id, _access_token())
+        access_token, _ = _validated_access_token()
+        return _ofekdev_metadata(extension_id, access_token)
 
     @router.post("/extensions/{extension_id}/uninstall")
     async def extension_uninstall(extension_id: str) -> dict[str, bool]:
-        _ofekdev_uninstall(extension_id, _access_token())
+        access_token, _ = _validated_access_token()
+        if not access_token:
+            raise HTTPException(status_code=401, detail="marketplace login required")
+        _ofekdev_uninstall(extension_id, access_token)
         return {"ok": True}
 
     return router
