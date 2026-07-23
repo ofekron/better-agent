@@ -92,6 +92,9 @@ class _FakeSessionManager:
         if msg is not None:
             msg["transient_attempt"] = value
 
+    def set_continuation_chain(self, sid: str, chain: list[str]):
+        self.sess["continuation_chain"] = list(chain)
+
 
 def test_recovery_targets_descriptor_message_not_latest() -> None:
     print("T1 recovery mutates descriptor target, not latest assistant")
@@ -488,6 +491,115 @@ def test_retry_recovered_run_uses_passed_coordinator() -> None:
     check("retry preserves source", provider.kwargs.get("source") == "mssg")
 
 
+def test_recovered_capability_change_starts_fresh_continuation() -> None:
+    print("T8 recovered capability change starts fresh continuation")
+    run_id = "recovered-capability-change"
+    run_dir = runs_root() / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    atomic_write_json(run_dir / "input.json", {
+        "prompt": "call inbox",
+        "cwd": "/tmp",
+        "model": "gpt",
+        "continuation_chain": [],
+    })
+    fake_sm = _FakeSessionManager({
+        "agent_session_id": "newer-session-global-sid",
+        "messages": [{"id": "msg-1", "role": "assistant", "events": []}],
+    })
+
+    class _Run:
+        class _Popen:
+            pid = None
+        popen = _Popen()
+
+    class _Provider:
+        KIND = "codex"
+
+        def __init__(self) -> None:
+            self._runs = {}
+            self.kwargs: dict = {}
+
+        def start_run(self, *, run_id: str, **kwargs) -> None:
+            self.kwargs = kwargs
+            self._runs[run_id] = _Run()
+
+    class _TurnManager:
+        def __init__(self) -> None:
+            self.active_run_ids = {}
+
+        def run_state_add(self, *_args, **_kwargs) -> None:
+            pass
+
+        def run_state_mark_provider_submitted(self, *_args, **_kwargs) -> None:
+            pass
+
+        async def emit_run_state(self, _sid: str) -> None:
+            pass
+
+    class _Coordinator:
+        def __init__(self) -> None:
+            self.turn_manager = _TurnManager()
+
+    def _create_task(coro, *, name=None):
+        coro.close()
+        return None
+
+    original_sm = run_recovery.session_manager
+    original_create_task = run_recovery.asyncio.create_task
+    try:
+        run_recovery.session_manager = fake_sm
+        run_recovery.asyncio.create_task = _create_task
+        provider = _Provider()
+        asyncio.run(run_recovery._retry_recovered_run(
+            coordinator=_Coordinator(),
+            provider=provider,
+            desc={
+                "run_id": run_id,
+                "app_session_id": "sid",
+                "persist_to": "sid",
+                "mode": "native",
+                "session_id": "old-provider-sid",
+            },
+            run_dir=run_dir,
+            app_sid="sid",
+            persist_sid="sid",
+            msg_id="msg-1",
+            recovering_msg_id="msg-1",
+            fresh_continuation_reason="provider_capabilities_changed",
+        ))
+    finally:
+        run_recovery.session_manager = original_sm
+        run_recovery.asyncio.create_task = original_create_task
+
+    check("fresh recovery omits resume sid", provider.kwargs.get("session_id") is None)
+    check(
+        "fresh recovery persists old sid in chain",
+        fake_sm.sess.get("continuation_chain") == ["old-provider-sid"],
+    )
+    check(
+        "fresh recovery wraps original prompt",
+        "Available provider capabilities changed" in provider.kwargs.get("prompt", ""),
+    )
+    check(
+        "fresh recovery forwards continuation chain",
+        provider.kwargs.get("continuation_chain") == ["old-provider-sid"],
+    )
+
+
+def test_bounded_capability_recovery_targets_descriptor_message() -> None:
+    print("T9 bounded capability recovery targets descriptor message")
+    sess = {
+        "messages": [
+            {"id": "target-msg", "role": "assistant", "events": []},
+            {"id": "latest-msg", "role": "assistant", "events": []},
+        ],
+    }
+    target = run_recovery._recovery_target_assistant(sess, "target-msg")
+    latest = run_recovery._last_assistant(sess)
+    check("descriptor target resolved", target and target.get("id") == "target-msg")
+    check("descriptor target remains distinct from latest", target is not latest)
+
+
 def main() -> int:
     try:
         test_recovery_targets_descriptor_message_not_latest()
@@ -498,6 +610,8 @@ def main() -> int:
         test_missing_target_finalizer_marks_reconciled()
         test_missing_target_completed_startup_marks_reconciled()
         test_retry_recovered_run_uses_passed_coordinator()
+        test_recovered_capability_change_starts_fresh_continuation()
+        test_bounded_capability_recovery_targets_descriptor_message()
         print()
         if failures:
             print(f"FAILED: {len(failures)} check(s): {failures}")
