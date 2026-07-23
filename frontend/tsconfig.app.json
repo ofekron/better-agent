@@ -8,6 +8,15 @@
     "types": ["vite/client"],
     "baseUrl": ".",
     "paths": {
+      "@capacitor-community/speech-recognition": ["./src/platform/web/speech-recognition.ts"],
+      "@capacitor/app": ["./src/platform/web/capacitor-app.ts"],
+      "@capacitor/browser": ["./src/platform/web/capacitor-browser.ts"],
+      "@capacitor/core": ["./src/platform/web/capacitor-core.ts"],
+      "@capacitor/filesystem": ["./src/platform/web/capacitor-filesystem.ts"],
+      "@capacitor/preferences": ["./src/platform/web/capacitor-preferences.ts"],
+      "@capacitor/push-notifications": ["./src/platform/web/push-notifications.ts"],
+      "@capgo/capacitor-updater": ["./src/platform/web/capacitor-updater.ts"],
+      "send-intent": ["./src/platform/web/send-intent.ts"],
       "react": ["./node_modules/@types/react"],
       "react/jsx-runtime": ["./node_modules/@types/react/jsx-runtime.d.ts"]
     },

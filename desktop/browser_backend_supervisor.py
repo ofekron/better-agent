@@ -132,9 +132,10 @@ class BrowserBackendSupervisor:
 
     def _resolved_checkout(self) -> Path:
         from daemonhost import pointer
+        from dependency_plan import active_env
 
         checkout = Path(pointer.resolve(str(self._launcher_root))).resolve()
-        python = checkout / "backend" / ".venv" / "bin" / "python"
+        python = active_env(checkout / "backend") / "bin" / "python"
         if not python.is_file() or not (checkout / "backend" / "main.py").is_file():
             raise RuntimeError("resolved checkout is not runnable")
         return checkout
@@ -148,6 +149,9 @@ class BrowserBackendSupervisor:
         if not isinstance(port, int) or isinstance(port, bool) or not 1 <= port <= 65535:
             raise ValueError("invalid backend port")
         checkout = self._resolved_checkout()
+        from dependency_plan import active_env
+        python = active_env(checkout / "backend")
+        python = python / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
         if not isinstance(requested_checkout, str) or Path(requested_checkout).resolve() != checkout:
             raise ValueError("active checkout changed before backend start")
         with self._lock:
@@ -167,7 +171,7 @@ class BrowserBackendSupervisor:
                 "BA_BACKEND_PORT": str(port),
             }
             command = [
-                str(checkout / "backend" / ".venv" / "bin" / "python"),
+                str(python),
                 "-m",
                 "uvicorn",
                 "main:app",

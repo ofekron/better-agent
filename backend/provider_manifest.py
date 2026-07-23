@@ -64,6 +64,8 @@ class ProviderSpec:
     # persisted disk provider, never resolved via get_provider, no runner.
     virtual: bool = False
     runner_choices: tuple[str, ...] = ("native",)
+    runtime_requirements: tuple[str, ...] = ()
+    runtime_probe_imports: tuple[str, ...] = ()
 
 
 SPECS: dict[str, ProviderSpec] = {
@@ -75,6 +77,8 @@ SPECS: dict[str, ProviderSpec] = {
         credential_config_env="CLAUDE_CONFIG_DIR",
         transport_gateway_env="ANTHROPIC_BASE_URL",
         transport_default_base_url="https://api.anthropic.com",
+        runtime_requirements=("requirements-claude.txt",),
+        runtime_probe_imports=("claude_agent_sdk",),
     ),
     "gemini": ProviderSpec(
         kind="gemini", module="provider_gemini", cls="GeminiProvider",

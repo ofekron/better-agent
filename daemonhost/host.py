@@ -36,6 +36,11 @@ from daemonhost.jsonio import read_json, write_json
 from daemonhost.paths import daemon_root, logs_root, registry_path, state_path
 from daemonhost.pointer import reconcile_startup
 
+_BACKEND = Path(__file__).resolve().parent.parent / "backend"
+if str(_BACKEND) not in sys.path:
+    sys.path.insert(0, str(_BACKEND))
+import installation_profile
+
 _BASE_ENV_KEYS = ("PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "SYSTEMROOT")
 # A daemon that stays up this long has completed a healthy cycle: its copy is
 # promoted to last_good and its restart budget resets.
@@ -106,6 +111,11 @@ class DaemonHost:
         self._write_state()
 
     def _read_registry(self) -> dict[str, dict[str, Any]]:
+        try:
+            if not installation_profile.integrations_enabled():
+                return {}
+        except installation_profile.InstallationProfileError:
+            return {}
         entries = read_json(registry_path()).get("daemons")
         if not isinstance(entries, dict):
             return {}

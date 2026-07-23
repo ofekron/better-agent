@@ -9,6 +9,7 @@ Run: backend/.venv/bin/python backend/scripts/test_daemon_host.py
 from __future__ import annotations
 
 import shutil
+import json
 import sys
 import tempfile
 import time
@@ -88,6 +89,37 @@ state = read_json(state_path())["daemons"]["test.ext:worker"]
 assert state["status"] == "running" and state["pid"], state
 daemon = host._daemons["test.ext:worker"]
 assert dh_install.current_dir(daemon.root).is_dir()
+
+# UI-only ignores a stale registry and retires an already-running child.
+(Path(_TMP) / "installation.json").write_text(
+    json.dumps({
+        "schema_version": 2,
+        "mode": "desktop-ui-only",
+        "provider": "codex",
+    }),
+    encoding="utf-8",
+)
+host.reconcile_once()
+assert "test.ext:worker" not in read_json(state_path())["daemons"]
+(Path(_TMP) / "installation.json").write_text(
+    json.dumps({"schema_version": 2, "mode": "default", "provider": "codex"}),
+    encoding="utf-8",
+)
+host.reconcile_once()
+state = read_json(state_path())["daemons"]["test.ext:worker"]
+daemon = host._daemons["test.ext:worker"]
+
+# Malformed persisted mode also fails closed.
+(Path(_TMP) / "installation.json").write_text("{}", encoding="utf-8")
+host.reconcile_once()
+assert "test.ext:worker" not in read_json(state_path())["daemons"]
+(Path(_TMP) / "installation.json").write_text(
+    json.dumps({"schema_version": 2, "mode": "default", "provider": "codex"}),
+    encoding="utf-8",
+)
+host.reconcile_once()
+state = read_json(state_path())["daemons"]["test.ext:worker"]
+daemon = host._daemons["test.ext:worker"]
 
 # Selftest-rejected update: current copy keeps running untouched.
 old_hash = dh_install.install_meta(daemon.root)["source_hash"]
@@ -170,9 +202,11 @@ assert not dh_install.previous_dir(atomic_root).exists()
 # --- pointer semantics ------------------------------------------------------
 def _make_checkout(name: str) -> str:
     root = Path(_TMP) / name
-    (root / "backend" / ".venv" / "bin").mkdir(parents=True, exist_ok=True)
+    env = root / "backend" / ".venvs" / "test" / "bin"
+    env.mkdir(parents=True, exist_ok=True)
     (root / "backend" / "main.py").write_text("", encoding="utf-8")
-    (root / "backend" / ".venv" / "bin" / "python").write_text("", encoding="utf-8")
+    (env / "python").write_text("", encoding="utf-8")
+    (root / "backend" / ".active-venv").write_text(".venvs/test", encoding="utf-8")
     return str(root)
 
 
@@ -323,9 +357,10 @@ finally:
 assert calls[-1] == (17, fake_msvcrt.LK_UNLCK, 1)
 
 windows_checkout = Path(_TMP) / "co-windows"
-(windows_checkout / "backend" / ".venv" / "Scripts").mkdir(parents=True)
+(windows_checkout / "backend" / ".venvs" / "test" / "Scripts").mkdir(parents=True)
 (windows_checkout / "backend" / "main.py").write_text("", encoding="utf-8")
-(windows_checkout / "backend" / ".venv" / "Scripts" / "python.exe").write_text("", encoding="utf-8")
+(windows_checkout / "backend" / ".venvs" / "test" / "Scripts" / "python.exe").write_text("", encoding="utf-8")
+(windows_checkout / "backend" / ".active-venv").write_text(".venvs/test", encoding="utf-8")
 assert pointer._is_runnable_checkout(str(windows_checkout))
 
 print("OK test_daemon_host")

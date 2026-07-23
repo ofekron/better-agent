@@ -9,7 +9,11 @@ set -e
 
 DIR="$(cd "$(dirname "$0")/.." && pwd)"   # repo root (scripts/ lives under it)
 BACKEND="$DIR/backend"
-PY="$BACKEND/.venv/bin/python"
+PY="${BETTER_AGENT_BACKEND_PYTHON:-}"
+if [ -z "$PY" ]; then
+  ACTIVE_ENV="$(python3 "$BACKEND/dependency_plan.py" active)"
+  PY="$ACTIVE_ENV/bin/python"
+fi
 CLI="$BACKEND/cli.py"
 
 if [ ! -x "$PY" ]; then

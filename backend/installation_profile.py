@@ -21,6 +21,10 @@ def _path():
     return ba_home() / "installation.json"
 
 
+def _selection_marker_path():
+    return ba_home() / "installation-selection-applied.json"
+
+
 def _default() -> dict[str, Any]:
     return {"schema_version": SCHEMA_VERSION, "mode": DEFAULT, "provider": None}
 
@@ -66,7 +70,30 @@ def save(*, mode: str, provider: str) -> dict[str, Any]:
         "provider": provider,
     })
     write_json(_path(), profile)
+    _selection_marker_path().unlink(missing_ok=True)
     return profile
+
+
+def selection_pending() -> bool:
+    profile = load()
+    if profile["provider"] is None:
+        return False
+    marker_path = _selection_marker_path()
+    if not marker_path.exists():
+        return True
+    try:
+        marker = json.loads(marker_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return True
+    return marker != {"profile": profile}
+
+
+def mark_selection_applied() -> None:
+    profile = load()
+    if profile["provider"] is None:
+        _selection_marker_path().unlink(missing_ok=True)
+        return
+    write_json(_selection_marker_path(), {"profile": profile})
 
 
 def capabilities() -> dict[str, Any]:
@@ -84,3 +111,13 @@ def integrations_enabled() -> bool:
 
 def mobile_enabled() -> bool:
     return capabilities()["mobile_enabled"]
+
+
+def assert_orchestration_mode_allowed(mode: str) -> None:
+    normalized = "team" if mode == "manager" else mode
+    if normalized not in ("team", "native"):
+        raise InstallationProfileError("unsupported orchestration mode")
+    if normalized == "team" and not integrations_enabled():
+        raise InstallationProfileError(
+            "team orchestration is unavailable in UI-only installation modes"
+        )

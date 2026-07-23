@@ -479,6 +479,9 @@ async def run_delegation(
     Read/Grep tail pattern on the returned `jsonl_path` (which
     points at the FORK's jsonl, not the worker's Better Agent jsonl).
     """
+    import installation_profile
+    installation_profile.assert_orchestration_mode_allowed("team")
+
     if run_mode not in ("fork", "direct"):
         return delegate_error_payload(
             worker_session_id, worker_description,

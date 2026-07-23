@@ -1559,7 +1559,13 @@ config_store.apply_provider_config_env_vars()
 
 from pydantic import BaseModel
 
-from provider import default_provider, load_all_providers, recover_all_in_flight, known_providers
+from provider import (
+    cancel_provider_runs,
+    default_provider,
+    known_providers,
+    load_all_providers,
+    recover_all_in_flight,
+)
 from orchestrator import Coordinator, build_semantic_alter_prompt
 from run_recovery import integrate_recovered_runs, shutdown_recovery_lease_executor
 from event_ingester import event_ingester
@@ -2082,7 +2088,9 @@ try:
     import extension_daemons
 
     extension_daemons.reconcile()
+    _EXTENSION_DAEMONS_READY = True
 except Exception:
+    _EXTENSION_DAEMONS_READY = False
     logger.exception("startup: extension_daemons.reconcile failed")
 
 # Native-CLI-jsonl tailing is owned by native_files_manager: it folds
@@ -10390,6 +10398,19 @@ async def healthz():
     return {"ok": True}
 
 
+@app.get("/readyz")
+async def readyz():
+    if not _EXTENSION_DAEMONS_READY:
+        raise HTTPException(
+            status_code=503,
+            detail="Extension daemon registry is not ready",
+        )
+    if extension_jobs.has_active_jobs() or not extension_daemons.ui_only_quiescent():
+        if not installation_profile.integrations_enabled():
+            raise HTTPException(status_code=503, detail="UI-only cleanup is incomplete")
+    return {"ok": True}
+
+
 @app.get("/api/build-info")
 async def build_info():
     """Returns backend version and the latest supervised refresh result."""
@@ -12064,6 +12085,31 @@ async def _recover_in_flight_task() -> None:
         loop = asyncio.get_running_loop()
         with perf.timed("startup.recovery.classification"):
             recovered = await _to_thread_join_on_cancel(recover_all_in_flight, loop)
+        if recovered and not installation_profile.integrations_enabled():
+            import extension_session_ownership
+            allowed: list[dict] = []
+            for descriptor in recovered:
+                session_id = str(descriptor.get("app_session_id") or "")
+                session = session_manager.get_lite(session_id) if session_id else None
+                native_user_session = bool(
+                    session
+                    and session.get("orchestration_mode") == "native"
+                    and session.get("supervisor_enabled") is not True
+                    and not session.get("parent_session_id")
+                    and not extension_session_ownership.owner(session_id)
+                )
+                if native_user_session:
+                    allowed.append(descriptor)
+                    continue
+                provider_id = str(descriptor.get("provider_id") or "")
+                run_id = str(descriptor.get("run_id") or "")
+                if provider_id and run_id:
+                    await asyncio.to_thread(
+                        cancel_provider_runs,
+                        provider_id,
+                        run_ids=[run_id],
+                    )
+            recovered = allowed
         if recovered:
             logger.info("recover_all_in_flight: %d run(s) recovered", len(recovered))
             live = [r for r in recovered if bool(r.get("alive"))]
@@ -12829,6 +12875,13 @@ async def on_startup():
     scheduled, not awaited inline.
     """
     acquire_backend_instance_lock()
+    if not installation_profile.integrations_enabled():
+        await extension_jobs.quiesce_for_ui_only()
+        import extension_session_ownership
+        for session_id in await asyncio.to_thread(
+            extension_session_ownership.owned_session_ids
+        ):
+            await coordinator.cancel_session(session_id)
     if not os.environ.get("BETTER_AGENT_TEST_MODE"):
         _fire_and_forget(asyncio.to_thread(session_store.start_root_change_owner))
     from provider import reopen_provider_tasks
@@ -13570,6 +13623,7 @@ async def internal_ask_fork(
     (jsonl_path + byte offsets) the caller samples to verify the outcome.
     """
     with perf.timed("ask_fork.route"):
+        _require_team_orchestration_internal(x_internal_token)
         if not _internal_authority_is_valid():
             raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
         durable = await _maybe_run_core_mcp_job("ask-fork", body)
@@ -13704,8 +13758,7 @@ async def internal_delegate_task(
     suggestion → create new), optionally gates on user approval, then dispatches
     the task detached (does NOT join the sender's turn). Generic — available to
     any session."""
-    if not _internal_authority_is_valid():
-        raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
+    _require_team_orchestration_internal(x_internal_token)
     durable = await _maybe_run_core_mcp_job("delegate-task", body)
     if durable is not None:
         return durable
@@ -14228,6 +14281,8 @@ async def internal_create_session(
         mode = "team"
     if mode not in ("team", "native"):
         raise HTTPException(status_code=400, detail="orchestration_mode must be 'team' or 'native'")
+    if mode == "team":
+        _require_team_orchestration_internal(x_internal_token)
     bare_config = body.get("bare_config", False)
     if not isinstance(bare_config, bool):
         raise HTTPException(status_code=400, detail="bare_config must be a boolean")

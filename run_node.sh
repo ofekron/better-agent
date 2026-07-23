@@ -183,13 +183,7 @@ if [ ! -x "$UV" ]; then
 fi
 echo "uv: $UV ($($UV --version 2>&1))"
 
-if [ ! -d "$BACKEND/.venv" ]; then
-  echo "Creating Python venv..."
-  "$UV" venv "$BACKEND/.venv" --python "$PYTHON"
-fi
-
-PY="$BACKEND/.venv/bin/python"
-UVICORN="$BACKEND/.venv/bin/uvicorn"
+PY="$PYTHON"
 
 # ============================================================================
 # Topology — generate interactively if missing
@@ -251,7 +245,9 @@ export BETTER_CLAUDE_NODE_PORT="$NODE_PORT"
 export BETTER_AGENT_NODE_PORT="$NODE_PORT"
 
 echo "Syncing backend deps..."
-"$UV" pip install -q --python "$PY" -r "$BACKEND/requirements.txt"
+ACTIVE_ENV="$("$PY" "$BACKEND/dependency_plan.py" activate --uv "$UV")"
+PY="$ACTIVE_ENV/bin/python"
+UVICORN="$ACTIVE_ENV/bin/uvicorn"
 
 echo "Starting node (main_node:app) on :$NODE_PORT..."
 echo "  node_id : ${BETTER_AGENT_NODE_ID:-${BETTER_CLAUDE_NODE_ID:-$(hostname)}}"
