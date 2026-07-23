@@ -40,6 +40,7 @@ from typing import Optional
 import credential_session_client
 import dependency_plan
 import runtime_profile
+from filelock import FileLock
 
 from json_store import read_json, write_json
 from paths import ba_home, resolve_claude_config_dir, resolve_provider_config_dir, user_home
@@ -65,8 +66,12 @@ _provider_mutation_lock = threading.RLock()
 def _serialized_provider_mutation(function):
     @wraps(function)
     def wrapped(*args, **kwargs):
+        global _state_cache
         with _provider_mutation_lock:
-            return function(*args, **kwargs)
+            with FileLock(str(_config_path()) + ".lock", timeout=60):
+                with _state_cache_lock:
+                    _state_cache = None
+                return function(*args, **kwargs)
 
     return wrapped
 
@@ -688,6 +693,7 @@ def get_delegate_task_policy() -> str:
     return _normalize_delegate_task_policy(_load_state().get("delegate_task_policy"))
 
 
+@_serialized_provider_mutation
 def set_delegate_task_policy(policy: str) -> str:
     normalized = _normalize_delegate_task_policy(policy)
     state = _load_state()
@@ -725,6 +731,7 @@ def get_disabled_builtin_tools() -> list[str]:
     )
 
 
+@_serialized_provider_mutation
 def set_disabled_builtin_tools(tools: list[str]) -> list[str]:
     normalized = _normalize_disabled_builtin_tools(tools)
     state = _load_state()
@@ -753,6 +760,7 @@ def get_disabled_builtin_extensions() -> list[str]:
     )
 
 
+@_serialized_provider_mutation
 def set_disabled_builtin_extensions(extension_ids: list[str]) -> list[str]:
     normalized = _normalize_disabled_builtin_extensions(extension_ids)
     state = _load_state()
@@ -824,6 +832,7 @@ def get_internal_llm_assignments() -> dict:
     return _normalize_internal_llm(_load_state().get("internal_llm"))
 
 
+@_serialized_provider_mutation
 def set_internal_llm_assignments(value: dict) -> dict:
     """Replace the whole assignment map. Unknown task keys / fields are
     dropped (fail closed) rather than persisted."""
@@ -1623,6 +1632,7 @@ def set_provider_suspended(provider_id: str, suspended: bool) -> Optional[dict]:
     return list_provider_ui_state()
 
 
+@_serialized_provider_mutation
 def add_custom_model_to_default(name: str) -> Optional[dict]:
     """Append a custom model to the currently-active provider's list.
     Used by ModelSelector's "+ custom" affordance."""

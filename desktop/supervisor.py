@@ -221,9 +221,9 @@ def kill_backend_lock_holder(*, timeout: float = 5.0) -> bool:
 
 
 def _checkout_python(checkout: Path) -> Path:
-    from dependency_plan import active_env
+    from dependency_plan import verified_active_env
 
-    env_dir = active_env(checkout / "backend")
+    env_dir = verified_active_env(checkout / "backend")
     for path in (
         env_dir / "bin" / "python",
         env_dir / "Scripts" / "python.exe",

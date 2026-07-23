@@ -358,6 +358,29 @@ def test_selection_failure_restores_previous_pointer() -> None:
         assert pointer.read_text(encoding="utf-8") == ".venvs/old"
 
 
+def test_target_checkout_rejects_stale_dependency_environment() -> None:
+    with tempfile.TemporaryDirectory(prefix="ba-target-dependency-") as tmp:
+        backend = Path(tmp)
+        env_dir = backend / ".venvs" / "candidate"
+        python = env_dir / "bin" / "python"
+        python.parent.mkdir(parents=True)
+        python.symlink_to(Path(sys.executable))
+        (backend / ".active-venv").write_text(
+            ".venvs/candidate",
+            encoding="utf-8",
+        )
+        planner = backend / "dependency_plan.py"
+        planner.write_text("raise SystemExit(1)\n", encoding="utf-8")
+        try:
+            dependency_plan.verified_active_env(backend)
+        except dependency_plan.DependencyPlanError:
+            pass
+        else:
+            raise AssertionError("stale target dependency plan must fail closed")
+        planner.write_text("raise SystemExit(0)\n", encoding="utf-8")
+        assert dependency_plan.verified_active_env(backend) == env_dir.resolve()
+
+
 def test_desktop_profile_excludes_native_dependencies() -> None:
     package = json.loads(
         (ROOT / "frontend" / "package.json").read_text(encoding="utf-8")
@@ -471,6 +494,7 @@ if __name__ == "__main__":
     test_provider_activation_mutations_reject_missing_runtime()
     test_failed_dependency_stage_preserves_active_environment()
     test_selection_failure_restores_previous_pointer()
+    test_target_checkout_rejects_stale_dependency_environment()
     test_desktop_profile_excludes_native_dependencies()
     test_ui_only_rejects_team_session_creation()
     test_ui_only_ignores_stale_supervisor_registry()

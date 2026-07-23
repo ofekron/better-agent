@@ -33,6 +33,11 @@ from supervisor import (
     kill_port_listeners,
     port_is_free,
 )
+import dependency_plan
+import backend.dependency_plan as backend_dependency_plan
+
+dependency_plan.verified_active_env = dependency_plan.active_env
+backend_dependency_plan.verified_active_env = backend_dependency_plan.active_env
 
 PASS = "\x1b[32mPASS\x1b[0m"
 FAIL = "\x1b[31mFAIL\x1b[0m"
