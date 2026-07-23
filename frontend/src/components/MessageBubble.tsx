@@ -2965,13 +2965,14 @@ export function CredentialErrorFix({ meta }: { meta: NonNullable<ChatMessage["er
         </span>
       ) : (
         <>
-          {state !== "idle" && (
-            <span className="credential-fix-result" role="status">
-              {state === "missing"
-                ? t("credentialError.missing")
-                : t("credentialError.stillBlocked")}
-            </span>
-          )}
+          {state !== "idle" &&
+            !(state === "missing" && meta.credential_status === "missing") && (
+              <span className="credential-fix-result" role="status">
+                {state === "missing"
+                  ? t("credentialError.missing")
+                  : t("credentialError.stillBlocked")}
+              </span>
+            )}
           <button className="status-retry-btn" onClick={fix}>
             {t("credentialError.fix")}
           </button>
@@ -3004,6 +3005,9 @@ function MessageStatus({
   }[status];
 
   if (status === "error") {
+    // With a credential card below, the raw error text stays behind the
+    // expand arrow only \u2014 the card is the primary, readable content.
+    const hasCredentialCard = errorMeta?.kind === "provider_credential";
     const firstLine = errorText ? errorText.split("\n", 1)[0] : "";
     return (
       <div className="message-status status-error">
@@ -3022,7 +3026,7 @@ function MessageStatus({
               {errorExpanded ? "\u25BC" : "\u25B6"}
             </span>
           )}
-          {errorText && !errorExpanded && (
+          {errorText && !errorExpanded && !hasCredentialCard && (
             <span className="status-error-text">{firstLine}</span>
           )}
           {onRetry && (
@@ -3357,6 +3361,10 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
     // footer (error notice / Create-new / Never-mind). Don't render the
     // generic "No output" summary for them.
     if (src?.ask_result && !src?.content) return null;
+    // A failed turn renders its error via `collapsedResponseErrorText`
+    // below. Never reduce it to the generic "No output" summary — that
+    // hides the failure and is exactly the confusing state users hit.
+    if (src?.error) return null;
     const events = previewEventsForMessage(src, orchestrationMode);
     const workerCount = src?.workers?.length ?? 0;
     return buildTurnSummary(events, workerCount, src?.content);
