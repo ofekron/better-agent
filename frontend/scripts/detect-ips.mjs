@@ -107,6 +107,17 @@ export const SERVER_CANDIDATES: readonly string[] = ${JSON.stringify(
 }
 
 export function main() {
+  if (process.env.BC_RELEASE_BUILD === "1") {
+    // Public release builds must never bake the building machine's own
+    // network identity into the bundle. Write a neutral (empty) list
+    // instead of scanning interfaces/Tailscale.
+    writeCandidates([]);
+    console.log(
+      `[detect-ips] BC_RELEASE_BUILD=1 — wrote neutral candidate list → ${outPath}`,
+    );
+    return;
+  }
+
   let candidates = [];
   try {
     candidates = collectCandidates();
