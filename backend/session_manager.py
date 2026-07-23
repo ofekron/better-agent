@@ -2405,25 +2405,22 @@ class SessionManager:
         if not delegation_ids:
             return {}
 
-        from event_journal import event_journal_reader
+        from event_ingester import event_ingester
         from event_shape import frontend_event_from_journal_row
 
-        rows, _, _ = event_journal_reader.read_events(
-            root_id,
-            limit=999_999,
-            sid_filter=node_sid,
+        rows_by_delegation = event_ingester.worker_event_rows(
+            root_id, delegation_ids, sid_filter=node_sid,
         )
         by_delegation: dict[str, list[dict]] = {}
-        for row in rows:
-            if row.get("type") != "worker_event":
-                continue
-            data = row.get("data") if isinstance(row.get("data"), dict) else {}
-            delegation_id = data.get("delegation_id")
-            if delegation_id not in delegation_ids:
-                continue
-            event = frontend_event_from_journal_row(row)
-            if event is not None:
-                by_delegation.setdefault(str(delegation_id), []).append(event)
+        for delegation_id, rows in rows_by_delegation.items():
+            events = [
+                event for event in (
+                    frontend_event_from_journal_row(row) for row in rows
+                )
+                if event is not None
+            ]
+            if events:
+                by_delegation[delegation_id] = events
         return by_delegation
 
     def _hydrate_native_message_copy(
@@ -3377,11 +3374,18 @@ class SessionManager:
         perf.record("session.compute_snapshot.copy_messages", copy_ms)
 
         hydrate_start = time.perf_counter()
-        all_delegation_ids: set[str] = set()
+        # Journal-sourced worker events are routed ONLY into STREAMING
+        # messages. Completed messages ship stubbed worker panels
+        # (events == []): their collapsed preview comes from the
+        # summaries/stub, and the lazy per-message events endpoint
+        # hydrates the full panels on expand. Routing them here would
+        # ship every panel's full event list in every snapshot.
+        streaming_delegation_ids: set[str] = set()
         for m in copied:
-            all_delegation_ids.update(self._worker_panel_delegation_ids(m))
+            if m.get("role") == "assistant" and m.get("isStreaming"):
+                streaming_delegation_ids.update(self._worker_panel_delegation_ids(m))
         legacy_worker_events = self._legacy_worker_events_by_delegation(
-            rid, node_sid, all_delegation_ids,
+            rid, node_sid, streaming_delegation_ids,
         )
         for m in copied:
             if m.get("role") != "assistant":
@@ -3389,10 +3393,11 @@ class SessionManager:
             msg_id = m.get("id")
             if not msg_id:
                 continue
-            worker_events = []
-            for delegation_id in self._worker_panel_delegation_ids(m):
-                worker_events.extend(legacy_worker_events.get(delegation_id) or [])
             is_streaming = bool(m.get("isStreaming"))
+            worker_events = []
+            if is_streaming:
+                for delegation_id in self._worker_panel_delegation_ids(m):
+                    worker_events.extend(legacy_worker_events.get(delegation_id) or [])
             if use_journal_summaries:
                 summary = summaries.get(msg_id, {})
                 if is_streaming and summary:
@@ -3410,7 +3415,6 @@ class SessionManager:
                 elif is_streaming:
                     self._route_frontend_events_to_message_copy(m, worker_events)
                 else:
-                    self._route_frontend_events_to_message_copy(m, worker_events)
                     m["stub"] = {
                         "event_count": summary.get("event_count", 0),
                         "last_events": _copy_jsonish(
@@ -3423,7 +3427,6 @@ class SessionManager:
                         )
             elif not is_streaming:
                 render_stub.stub_message_inplace(m)
-                self._route_frontend_events_to_message_copy(m, worker_events)
         hydrate_ms = (time.perf_counter() - hydrate_start) * 1000
         perf.record("session.compute_snapshot.hydrate_events", hydrate_ms)
 
