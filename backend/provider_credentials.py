@@ -8,11 +8,24 @@ from keychain_names import LEGACY_SERVICE, PRIMARY_SERVICE, service_names
 
 logger = logging.getLogger(__name__)
 
-CANONICAL_PROVIDER_SERVICE = "better-agent-provider-credentials-v3"
-LEGACY_CANONICAL_PROVIDER_SERVICE = "better-agent-provider-credentials-v2"
+# Canonical (v4) items are created and read exclusively through the
+# /usr/bin/security CLI (oskeychain.get/store/delete). Items created that
+# way carry keychain partition_id "apple-tool:" — trust bound to Apple's
+# stable signed CLI — so access survives rebuilds of the credential
+# authority binary. Native-API creation instead pins the creating
+# binary's cdhash in the partition list (a self-signed identity has no
+# team id), which silently revokes access on every rebuild; that is why
+# v3 and older services are legacy. Legacy candidates are still read via
+# the native API so a pinned item denies cleanly in-process (prompts
+# suppressed) until the interactive retry flow adopts it into v4.
+CANONICAL_PROVIDER_SERVICE = "better-agent-provider-credentials-v4"
+LEGACY_CANONICAL_PROVIDER_SERVICES = (
+    "better-agent-provider-credentials-v3",
+    "better-agent-provider-credentials-v2",
+)
 LEGACY_FLAT_ACCOUNT = "anthropic-api-key"
 LEGACY_PROVIDER_CREDENTIAL_SERVICES = (
-    LEGACY_CANONICAL_PROVIDER_SERVICE,
+    *LEGACY_CANONICAL_PROVIDER_SERVICES,
     *service_names(PRIMARY_SERVICE, LEGACY_SERVICE),
 )
 PROVIDER_CREDENTIAL_SERVICES = (
@@ -77,12 +90,13 @@ class ProviderCredentialStore:
 
     def delete(self, provider_id: str) -> None:
         account = _account(provider_id)
-        for service in PROVIDER_CREDENTIAL_SERVICES:
+        oskeychain.delete(CANONICAL_PROVIDER_SERVICE, account)
+        for service in LEGACY_PROVIDER_CREDENTIAL_SERVICES:
             oskeychain.native_delete(service, account)
 
     def migrate_flat(self, provider_id: str) -> str | None:
         account = _account(provider_id)
-        canonical = _normalize(oskeychain.native_get(CANONICAL_PROVIDER_SERVICE, account))
+        canonical = _normalize(oskeychain.get(CANONICAL_PROVIDER_SERVICE, account))
         if canonical:
             self._delete_flat()
             return canonical
@@ -112,7 +126,7 @@ class ProviderCredentialStore:
     def _store_canonical(self, provider_id: str, value: str) -> str:
         account = _account(provider_id)
         candidate = ProviderCredentialCandidate(CANONICAL_PROVIDER_SERVICE, account)
-        oskeychain.native_store(candidate.service, candidate.account, value)
+        oskeychain.store(candidate.service, candidate.account, value)
         verified = self._read_candidate(candidate)
         if verified != value:
             raise RuntimeError("canonical provider credential verification failed")
@@ -132,10 +146,13 @@ class ProviderCredentialStore:
 
     @staticmethod
     def _read_candidate(candidate: ProviderCredentialCandidate) -> str:
+        reader = (
+            oskeychain.get
+            if candidate.service == CANONICAL_PROVIDER_SERVICE
+            else oskeychain.native_get
+        )
         try:
-            return _normalize(
-                oskeychain.native_get(candidate.service, candidate.account)
-            )
+            return _normalize(reader(candidate.service, candidate.account))
         except RuntimeError as exc:
             raise ProviderCredentialAccessBlocked(candidate) from exc
 

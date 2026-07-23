@@ -7,6 +7,7 @@ from contextlib import contextmanager
 import ctypes
 import inspect
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -31,10 +32,59 @@ import models  # noqa: E402
 from keychain_names import LEGACY_SERVICE, PRIMARY_SERVICE  # noqa: E402
 from provider_credentials import (  # noqa: E402
     CANONICAL_PROVIDER_SERVICE,
-    LEGACY_CANONICAL_PROVIDER_SERVICE,
+    LEGACY_CANONICAL_PROVIDER_SERVICES,
     LEGACY_FLAT_ACCOUNT,
-    PROVIDER_CREDENTIAL_SERVICES,
+    LEGACY_PROVIDER_CREDENTIAL_SERVICES,
 )
+
+
+@contextmanager
+def _keychain_doubles(
+    *,
+    cli_get,
+    cli_store=None,
+    cli_delete=None,
+    native_get=None,
+    native_store=None,
+    native_delete=None,
+):
+    """Swap every oskeychain accessor the credential store routes through."""
+    keychain = provider_credentials.oskeychain
+    originals = {
+        name: getattr(keychain, name)
+        for name in ("get", "store", "delete", "native_get", "native_store", "native_delete")
+    }
+    keychain.get = cli_get
+    keychain.store = cli_store or (lambda *_a, **_k: None)
+    keychain.delete = cli_delete or (lambda *_a, **_k: None)
+    keychain.native_get = native_get or (lambda *_a, **_k: None)
+    keychain.native_store = native_store or (lambda *_a, **_k: None)
+    keychain.native_delete = native_delete or (lambda *_a, **_k: None)
+    try:
+        yield
+    finally:
+        for name, fn in originals.items():
+            setattr(keychain, name, fn)
+
+
+@contextmanager
+def _capture_broker_logs():
+    records: list[logging.LogRecord] = []
+
+    class _Collector(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record)
+
+    broker_logger = logging.getLogger("credential_session")
+    handler = _Collector(level=logging.DEBUG)
+    previous_level = broker_logger.level
+    broker_logger.addHandler(handler)
+    broker_logger.setLevel(logging.DEBUG)
+    try:
+        yield records
+    finally:
+        broker_logger.removeHandler(handler)
+        broker_logger.setLevel(previous_level)
 
 
 def test_native_authority_disables_keychain_interaction() -> None:
@@ -100,6 +150,73 @@ def test_native_interaction_is_disabled_after_failure() -> None:
         ctypes.CDLL = real_cdll
 
 
+def test_canonical_service_is_cli_partition_v4() -> None:
+    assert CANONICAL_PROVIDER_SERVICE == "better-agent-provider-credentials-v4"
+    assert LEGACY_PROVIDER_CREDENTIAL_SERVICES[0] == (
+        "better-agent-provider-credentials-v3"
+    )
+    assert LEGACY_PROVIDER_CREDENTIAL_SERVICES[1] == (
+        "better-agent-provider-credentials-v2"
+    )
+    assert CANONICAL_PROVIDER_SERVICE not in LEGACY_PROVIDER_CREDENTIAL_SERVICES
+
+
+def test_canonical_ops_use_cli_partition_accessors() -> None:
+    provider_id = "provider-cli-routing"
+    account = f"provider:{provider_id}"
+    values: dict[tuple[str, str], str] = {}
+    cli_events: list[tuple[str, str]] = []
+    native_events: list[tuple[str, str]] = []
+
+    def cli_get(service: str, requested_account: str, **_kwargs):
+        cli_events.append(("get", service))
+        assert service == CANONICAL_PROVIDER_SERVICE
+        return values.get((service, requested_account))
+
+    def cli_store(service: str, requested_account: str, value: str) -> None:
+        cli_events.append(("store", service))
+        assert service == CANONICAL_PROVIDER_SERVICE
+        values[(service, requested_account)] = value
+
+    def cli_delete(service: str, requested_account: str) -> None:
+        cli_events.append(("delete", service))
+        assert service == CANONICAL_PROVIDER_SERVICE
+        values.pop((service, requested_account), None)
+
+    def native_get(service: str, _requested_account: str, **_kwargs):
+        native_events.append(("get", service))
+        assert service != CANONICAL_PROVIDER_SERVICE
+        return None
+
+    def native_store(service: str, _requested_account: str, _value: str) -> None:
+        native_events.append(("store", service))
+
+    def native_delete(service: str, _requested_account: str) -> None:
+        native_events.append(("delete", service))
+        assert service != CANONICAL_PROVIDER_SERVICE
+
+    store = provider_credentials.ProviderCredentialStore()
+    with _keychain_doubles(
+        cli_get=cli_get,
+        cli_store=cli_store,
+        cli_delete=cli_delete,
+        native_get=native_get,
+        native_store=native_store,
+        native_delete=native_delete,
+    ):
+        store.store(provider_id, "cli-secret")
+        assert values[(CANONICAL_PROVIDER_SERVICE, account)] == "cli-secret"
+        assert store.read(provider_id) == "cli-secret"
+        store.delete(provider_id)
+        assert (CANONICAL_PROVIDER_SERVICE, account) not in values
+    assert ("store", CANONICAL_PROVIDER_SERVICE) in cli_events
+    assert ("delete", CANONICAL_PROVIDER_SERVICE) in cli_events
+    assert all(event[0] != "store" for event in native_events)
+    # One legacy sweep from store()'s cleanup, one from delete().
+    legacy_round = [("delete", s) for s in LEGACY_PROVIDER_CREDENTIAL_SERVICES]
+    assert [e for e in native_events if e[0] == "delete"] == legacy_round * 2
+
+
 def test_retry_interactively_migrates_blocked_legacy() -> None:
     provider_id = "provider-interactive-migration"
     account = f"provider:{provider_id}"
@@ -107,13 +224,11 @@ def test_retry_interactively_migrates_blocked_legacy() -> None:
     interactive = False
     interaction_entries = 0
     interactive_reads: list[tuple[str, str]] = []
-    noninteractive_reads: list[tuple[str, str]] = []
+    canonical_cli_reads: list[tuple[str, str]] = []
+    canonical_cli_stores: list[tuple[str, str]] = []
     disable_calls = 0
     real_disable = credential_session.oskeychain.disable_native_user_interaction
     real_interaction = credential_session.oskeychain.native_user_interaction
-    real_get = provider_credentials.oskeychain.native_get
-    real_store = provider_credentials.oskeychain.native_store
-    real_delete = provider_credentials.oskeychain.native_delete
 
     def disable() -> None:
         nonlocal disable_calls
@@ -129,53 +244,56 @@ def test_retry_interactively_migrates_blocked_legacy() -> None:
         finally:
             interactive = False
 
-    def get(service: str, requested_account: str):
+    def cli_get(service: str, requested_account: str, **_kwargs):
+        canonical_cli_reads.append((service, requested_account))
+        return values.get((service, requested_account))
+
+    def cli_store(service: str, requested_account: str, value: str) -> None:
+        canonical_cli_stores.append((service, requested_account))
+        values[(service, requested_account)] = value
+
+    def native_get(service: str, requested_account: str, **_kwargs):
         target = (service, requested_account)
         if interactive:
             interactive_reads.append(target)
-        else:
-            noninteractive_reads.append(target)
         if service in {PRIMARY_SERVICE, LEGACY_SERVICE} and not interactive:
             raise RuntimeError("legacy ACL denied")
         return values.get((service, requested_account))
 
     credential_session.oskeychain.disable_native_user_interaction = disable
     credential_session.oskeychain.native_user_interaction = allow_interaction
-    provider_credentials.oskeychain.native_get = get
-    provider_credentials.oskeychain.native_store = (
-        lambda service, requested_account, value: values.__setitem__(
-            (service, requested_account), value
-        )
-    )
-    provider_credentials.oskeychain.native_delete = (
-        lambda service, requested_account: values.pop((service, requested_account), None)
-    )
     broker = credential_session.ProviderCredentialBroker()
     try:
-        request = {
-            "provider_id": provider_id,
-            "request_id": "9" * 32,
-        }
-        assert broker.handle({**request, "op": "read"}) == {"status": "blocked"}
-        assert interaction_entries == 0
-        assert broker.handle({**request, "op": "retry"}) == {
-            "status": "available",
-            "value": "legacy-secret",
-        }
-        assert interaction_entries == 1
-        assert interactive_reads == [(PRIMARY_SERVICE, account)]
-        assert (CANONICAL_PROVIDER_SERVICE, account) in noninteractive_reads
-        assert disable_calls == 1
-        assert not interactive
-        assert values[(CANONICAL_PROVIDER_SERVICE, account)] == "legacy-secret"
-        assert (PRIMARY_SERVICE, account) not in values
+        with _keychain_doubles(
+            cli_get=cli_get,
+            cli_store=cli_store,
+            native_get=native_get,
+            native_delete=lambda service, requested_account: values.pop(
+                (service, requested_account), None
+            ),
+        ):
+            request = {
+                "provider_id": provider_id,
+                "request_id": "9" * 32,
+            }
+            assert broker.handle({**request, "op": "read"}) == {"status": "blocked"}
+            assert interaction_entries == 0
+            assert broker.handle({**request, "op": "retry"}) == {
+                "status": "available",
+                "value": "legacy-secret",
+            }
+            assert interaction_entries == 1
+            assert interactive_reads == [(PRIMARY_SERVICE, account)]
+            assert (CANONICAL_PROVIDER_SERVICE, account) in canonical_cli_reads
+            assert canonical_cli_stores == [(CANONICAL_PROVIDER_SERVICE, account)]
+            assert disable_calls == 1
+            assert not interactive
+            assert values[(CANONICAL_PROVIDER_SERVICE, account)] == "legacy-secret"
+            assert (PRIMARY_SERVICE, account) not in values
     finally:
         broker.clear()
         credential_session.oskeychain.disable_native_user_interaction = real_disable
         credential_session.oskeychain.native_user_interaction = real_interaction
-        provider_credentials.oskeychain.native_get = real_get
-        provider_credentials.oskeychain.native_store = real_store
-        provider_credentials.oskeychain.native_delete = real_delete
 
 
 def test_denied_retry_does_not_scan_another_credential() -> None:
@@ -183,10 +301,9 @@ def test_denied_retry_does_not_scan_another_credential() -> None:
     account = f"provider:{provider_id}"
     interactive = False
     interactive_reads: list[tuple[str, str]] = []
-    all_reads: list[tuple[str, str]] = []
+    all_native_reads: list[tuple[str, str]] = []
     real_disable = credential_session.oskeychain.disable_native_user_interaction
     real_interaction = credential_session.oskeychain.native_user_interaction
-    real_get = provider_credentials.oskeychain.native_get
 
     @contextmanager
     def allow_interaction():
@@ -197,9 +314,9 @@ def test_denied_retry_does_not_scan_another_credential() -> None:
         finally:
             interactive = False
 
-    def get(service: str, requested_account: str):
+    def native_get(service: str, requested_account: str, **_kwargs):
         target = (service, requested_account)
-        all_reads.append(target)
+        all_native_reads.append(target)
         if service == PRIMARY_SERVICE:
             if interactive:
                 interactive_reads.append(target)
@@ -211,41 +328,44 @@ def test_denied_retry_does_not_scan_another_credential() -> None:
 
     credential_session.oskeychain.disable_native_user_interaction = lambda: None
     credential_session.oskeychain.native_user_interaction = allow_interaction
-    provider_credentials.oskeychain.native_get = get
     broker = credential_session.ProviderCredentialBroker()
     try:
-        request = {
-            "provider_id": provider_id,
-            "request_id": "8" * 32,
-        }
-        assert broker.handle({**request, "op": "read"}) == {"status": "blocked"}
-        reads_before_retry = len(all_reads)
-        assert broker.handle({**request, "op": "retry"}) == {"status": "blocked"}
-        assert all_reads[reads_before_retry:] == [(PRIMARY_SERVICE, account)]
-        assert interactive_reads == [(PRIMARY_SERVICE, account)]
+        with _keychain_doubles(cli_get=lambda *_a, **_k: None, native_get=native_get):
+            request = {
+                "provider_id": provider_id,
+                "request_id": "8" * 32,
+            }
+            assert broker.handle({**request, "op": "read"}) == {"status": "blocked"}
+            reads_before_retry = len(all_native_reads)
+            assert broker.handle({**request, "op": "retry"}) == {"status": "blocked"}
+            assert all_native_reads[reads_before_retry:] == [(PRIMARY_SERVICE, account)]
+            assert interactive_reads == [(PRIMARY_SERVICE, account)]
     finally:
         broker.clear()
         credential_session.oskeychain.disable_native_user_interaction = real_disable
         credential_session.oskeychain.native_user_interaction = real_interaction
-        provider_credentials.oskeychain.native_get = real_get
 
 
 def test_delete_removes_every_provider_credential_entry() -> None:
     provider_id = "provider-delete-all"
     account = f"provider:{provider_id}"
-    deleted: list[tuple[str, str]] = []
-    real_delete = provider_credentials.oskeychain.native_delete
+    cli_deleted: list[tuple[str, str]] = []
+    native_deleted: list[tuple[str, str]] = []
 
-    provider_credentials.oskeychain.native_delete = (
-        lambda service, requested_account: deleted.append((service, requested_account))
-    )
-    try:
+    with _keychain_doubles(
+        cli_get=lambda *_a, **_k: None,
+        cli_delete=lambda service, requested_account: cli_deleted.append(
+            (service, requested_account)
+        ),
+        native_delete=lambda service, requested_account: native_deleted.append(
+            (service, requested_account)
+        ),
+    ):
         provider_credentials.ProviderCredentialStore().delete(provider_id)
-        assert deleted == [
-            (service, account) for service in PROVIDER_CREDENTIAL_SERVICES
-        ]
-    finally:
-        provider_credentials.oskeychain.native_delete = real_delete
+    assert cli_deleted == [(CANONICAL_PROVIDER_SERVICE, account)]
+    assert native_deleted == [
+        (service, account) for service in LEGACY_PROVIDER_CREDENTIAL_SERVICES
+    ]
 
 
 def _backend_request(session, op: str, provider_id: str) -> dict:
@@ -270,122 +390,161 @@ def test_legacy_credential_migrates_before_cleanup_and_survives_restart() -> Non
     canonical: dict[tuple[str, str], str] = {}
     legacy = {(PRIMARY_SERVICE, account): "legacy-secret"}
     events: list[tuple[str, str]] = []
-    real_get = provider_credentials.oskeychain.native_get
-    real_store = provider_credentials.oskeychain.native_store
-    real_delete = provider_credentials.oskeychain.native_delete
 
-    def get(service: str, requested_account: str, **_kwargs):
+    def cli_get(service: str, requested_account: str, **_kwargs):
         events.append(("get", service))
-        if service == CANONICAL_PROVIDER_SERVICE:
-            return canonical.get((service, requested_account))
-        events[-1] = ("legacy_get", service)
-        return legacy.get((service, requested_account))
+        return canonical.get((service, requested_account))
 
-    def store(service: str, requested_account: str, value: str) -> None:
+    def cli_store(service: str, requested_account: str, value: str) -> None:
         events.append(("store", service))
         canonical[(service, requested_account)] = value
 
-    def delete_legacy(service: str, requested_account: str, **_kwargs) -> None:
+    def native_get(service: str, requested_account: str, **_kwargs):
+        events.append(("legacy_get", service))
+        return legacy.get((service, requested_account))
+
+    def native_delete(service: str, requested_account: str, **_kwargs) -> None:
         events.append(("legacy_delete", service))
         legacy.pop((service, requested_account), None)
 
-    provider_credentials.oskeychain.native_get = get
-    provider_credentials.oskeychain.native_store = store
-    provider_credentials.oskeychain.native_delete = delete_legacy
     broker = credential_session.ProviderCredentialBroker()
     session = broker.open_session()
     session.start()
     try:
-        assert _backend_request(session, "read", "provider-legacy") == {
-            "status": "available",
-            "value": "legacy-secret",
-        }
-        assert events[:5] == [
-            ("get", CANONICAL_PROVIDER_SERVICE),
-            ("legacy_get", LEGACY_CANONICAL_PROVIDER_SERVICE),
-            ("legacy_get", PRIMARY_SERVICE),
-            ("store", CANONICAL_PROVIDER_SERVICE),
-            ("get", CANONICAL_PROVIDER_SERVICE),
-        ]
-        first_delete = events.index(("legacy_delete", PRIMARY_SERVICE))
-        assert first_delete > 4
+        with _keychain_doubles(
+            cli_get=cli_get,
+            cli_store=cli_store,
+            native_get=native_get,
+            native_delete=native_delete,
+        ):
+            assert _backend_request(session, "read", "provider-legacy") == {
+                "status": "available",
+                "value": "legacy-secret",
+            }
+            legacy_services = LEGACY_PROVIDER_CREDENTIAL_SERVICES[:2]
+            assert events[:6] == [
+                ("get", CANONICAL_PROVIDER_SERVICE),
+                ("legacy_get", legacy_services[0]),
+                ("legacy_get", legacy_services[1]),
+                ("legacy_get", PRIMARY_SERVICE),
+                ("store", CANONICAL_PROVIDER_SERVICE),
+                ("get", CANONICAL_PROVIDER_SERVICE),
+            ]
+            first_delete = events.index(("legacy_delete", legacy_services[0]))
+            assert first_delete > 5
 
-        session.stop()
-        session = broker.open_session()
-        session.start()
-        before = list(events)
-        assert _backend_request(session, "read", "provider-legacy")["value"] == "legacy-secret"
-        assert events == before
+            session.stop()
+            session = broker.open_session()
+            session.start()
+            before = list(events)
+            assert (
+                _backend_request(session, "read", "provider-legacy")["value"]
+                == "legacy-secret"
+            )
+            assert events == before
 
-        broker.clear()
-        session.stop()
-        broker = credential_session.ProviderCredentialBroker()
-        session = broker.open_session()
-        session.start()
-        events.clear()
-        assert _backend_request(session, "read", "provider-legacy")["value"] == "legacy-secret"
-        assert events == [("get", CANONICAL_PROVIDER_SERVICE)]
+            broker.clear()
+            session.stop()
+            broker = credential_session.ProviderCredentialBroker()
+            session = broker.open_session()
+            session.start()
+            events.clear()
+            assert (
+                _backend_request(session, "read", "provider-legacy")["value"]
+                == "legacy-secret"
+            )
+            assert events == [("get", CANONICAL_PROVIDER_SERVICE)]
     finally:
         session.stop()
         broker.clear()
-        provider_credentials.oskeychain.native_get = real_get
-        provider_credentials.oskeychain.native_store = real_store
-        provider_credentials.oskeychain.native_delete = real_delete
 
 
 def test_failed_canonical_verification_never_cleans_legacy() -> None:
     events: list[str] = []
-    reads = 0
-    real_get = provider_credentials.oskeychain.native_get
-    real_store = provider_credentials.oskeychain.native_store
-    real_delete = provider_credentials.oskeychain.native_delete
+    canonical_reads = 0
 
-    def get(*_args, **_kwargs):
-        nonlocal reads
-        reads += 1
-        return None if reads == 1 else "wrong-secret"
+    def cli_get(_service: str, _requested_account: str, **_kwargs):
+        nonlocal canonical_reads
+        canonical_reads += 1
+        return None if canonical_reads == 1 else "wrong-secret"
 
-    provider_credentials.oskeychain.native_get = lambda service, *_args, **_kwargs: (
-        get() if service == CANONICAL_PROVIDER_SERVICE else "legacy-secret"
-    )
-    provider_credentials.oskeychain.native_store = lambda *_args, **_kwargs: events.append("store")
-    provider_credentials.oskeychain.native_delete = (
-        lambda *_args, **_kwargs: events.append("delete")
-    )
-    broker = credential_session.ProviderCredentialBroker()
-    try:
-        response = broker.handle({
-            "op": "read",
-            "provider_id": "provider-verify-failure",
-            "request_id": "0" * 32,
-        })
-        assert response == {"status": "blocked"}
-        assert events == ["store"]
-    finally:
-        broker.clear()
-        provider_credentials.oskeychain.native_get = real_get
-        provider_credentials.oskeychain.native_store = real_store
-        provider_credentials.oskeychain.native_delete = real_delete
+    with _keychain_doubles(
+        cli_get=cli_get,
+        cli_store=lambda *_a, **_k: events.append("store"),
+        native_get=lambda *_a, **_k: "legacy-secret",
+        native_delete=lambda *_a, **_k: events.append("delete"),
+    ):
+        broker = credential_session.ProviderCredentialBroker()
+        try:
+            response = broker.handle({
+                "op": "read",
+                "provider_id": "provider-verify-failure",
+                "request_id": "0" * 32,
+            })
+            assert response == {"status": "blocked"}
+            assert events == ["store"]
+        finally:
+            broker.clear()
 
 
 def test_canonical_denial_never_attempts_legacy_recovery() -> None:
-    real_get = provider_credentials.oskeychain.native_get
     legacy_reads: list[str] = []
-    provider_credentials.oskeychain.native_get = lambda *_args, **_kwargs: (
-        (_ for _ in ()).throw(RuntimeError("denied"))
-    )
+
+    def cli_get(*_args, **_kwargs):
+        raise RuntimeError("denied")
+
+    with _keychain_doubles(
+        cli_get=cli_get,
+        native_get=lambda service, *_a, **_k: legacy_reads.append(service),
+    ):
+        broker = credential_session.ProviderCredentialBroker()
+        try:
+            response = broker.handle({
+                "op": "read",
+                "provider_id": "provider-canonical-denied",
+                "request_id": "1" * 32,
+            })
+            assert response == {"status": "blocked"}
+            assert legacy_reads == []
+        finally:
+            broker.clear()
+
+
+def test_blocked_read_reprobes_and_recovers_with_logging() -> None:
+    provider_id = "provider-transient-blocked"
+    account = f"provider:{provider_id}"
+    values: dict[tuple[str, str], str] = {}
+    failing = True
+
+    def cli_get(service: str, requested_account: str, **_kwargs):
+        if failing:
+            raise RuntimeError("keychain transiently locked")
+        return values.get((service, requested_account))
+
     broker = credential_session.ProviderCredentialBroker()
+    request = {"provider_id": provider_id, "request_id": "7" * 32}
     try:
-        response = broker.handle({
-            "op": "read",
-            "provider_id": "provider-canonical-denied",
-            "request_id": "1" * 32,
-        })
-        assert response == {"status": "blocked"}
-        assert legacy_reads == []
+        with _keychain_doubles(cli_get=cli_get), _capture_broker_logs() as records:
+            assert broker.handle({**request, "op": "read"}) == {"status": "blocked"}
+            warnings = [r for r in records if r.levelno == logging.WARNING]
+            assert len(warnings) == 1
+            assert provider_id in warnings[0].getMessage()
+            assert "keychain transiently locked" in warnings[0].getMessage()
+
+            # Still failing: the read re-probes but only logs the transition.
+            assert broker.handle({**request, "op": "read"}) == {"status": "blocked"}
+            warnings = [r for r in records if r.levelno == logging.WARNING]
+            assert len(warnings) == 1
+
+            values[(CANONICAL_PROVIDER_SERVICE, account)] = "fresh-secret"
+            failing = False
+            assert broker.handle({**request, "op": "read"}) == {
+                "status": "available",
+                "value": "fresh-secret",
+            }
+            assert broker.handle({**request, "op": "status"}) == {"status": "available"}
     finally:
         broker.clear()
-        provider_credentials.oskeychain.native_get = real_get
 
 
 def test_explicit_reentry_replaces_blocked_legacy_canonical_entry() -> None:
@@ -393,88 +552,89 @@ def test_explicit_reentry_replaces_blocked_legacy_canonical_entry() -> None:
     account = f"provider:{provider_id}"
     values: dict[tuple[str, str], str] = {}
     events: list[tuple[str, str]] = []
-    real_get = provider_credentials.oskeychain.native_get
-    real_store = provider_credentials.oskeychain.native_store
-    real_delete = provider_credentials.oskeychain.native_delete
+    blocked_legacy = LEGACY_CANONICAL_PROVIDER_SERVICES[0]
 
-    def get(service: str, requested_account: str):
+    def cli_get(service: str, requested_account: str, **_kwargs):
         events.append(("get", service))
-        if service == LEGACY_CANONICAL_PROVIDER_SERVICE:
-            raise RuntimeError("legacy ACL denied")
         return values.get((service, requested_account))
 
-    def store(service: str, requested_account: str, value: str) -> None:
+    def cli_store(service: str, requested_account: str, value: str) -> None:
         events.append(("store", service))
         values[(service, requested_account)] = value
 
-    def delete(service: str, _requested_account: str) -> None:
+    def native_get(service: str, requested_account: str, **_kwargs):
+        events.append(("get", service))
+        if service == blocked_legacy:
+            raise RuntimeError("legacy ACL denied")
+        return values.get((service, requested_account))
+
+    def native_delete(service: str, _requested_account: str) -> None:
         events.append(("delete", service))
-        if service == LEGACY_CANONICAL_PROVIDER_SERVICE:
+        if service == blocked_legacy:
             raise RuntimeError("legacy ACL denied")
 
-    provider_credentials.oskeychain.native_get = get
-    provider_credentials.oskeychain.native_store = store
-    provider_credentials.oskeychain.native_delete = delete
-    broker = credential_session.ProviderCredentialBroker()
-    try:
-        assert broker.handle({
-            "op": "read",
-            "provider_id": provider_id,
-            "request_id": "3" * 32,
-        }) == {"status": "blocked"}
-        assert broker.handle({
-            "op": "store",
-            "provider_id": provider_id,
-            "request_id": "4" * 32,
-            "value": "replacement-secret",
-        }) == {"status": "available"}
-        assert values[(CANONICAL_PROVIDER_SERVICE, account)] == "replacement-secret"
-        assert ("store", LEGACY_CANONICAL_PROVIDER_SERVICE) not in events
-        assert broker.handle({
-            "op": "read",
-            "provider_id": provider_id,
-            "request_id": "5" * 32,
-        }) == {"status": "available", "value": "replacement-secret"}
-    finally:
-        broker.clear()
-        provider_credentials.oskeychain.native_get = real_get
-        provider_credentials.oskeychain.native_store = real_store
-        provider_credentials.oskeychain.native_delete = real_delete
+    with _keychain_doubles(
+        cli_get=cli_get,
+        cli_store=cli_store,
+        native_get=native_get,
+        native_delete=native_delete,
+    ):
+        broker = credential_session.ProviderCredentialBroker()
+        try:
+            assert broker.handle({
+                "op": "read",
+                "provider_id": provider_id,
+                "request_id": "3" * 32,
+            }) == {"status": "blocked"}
+            assert broker.handle({
+                "op": "store",
+                "provider_id": provider_id,
+                "request_id": "4" * 32,
+                "value": "replacement-secret",
+            }) == {"status": "available"}
+            assert values[(CANONICAL_PROVIDER_SERVICE, account)] == "replacement-secret"
+            assert ("store", blocked_legacy) not in events
+            assert broker.handle({
+                "op": "read",
+                "provider_id": provider_id,
+                "request_id": "5" * 32,
+            }) == {"status": "available", "value": "replacement-secret"}
+        finally:
+            broker.clear()
 
 
 def test_flat_credential_migrates_inside_broker_authority() -> None:
     provider_id = "provider-flat"
     account = f"provider:{provider_id}"
-    values = {(PRIMARY_SERVICE, LEGACY_FLAT_ACCOUNT): "flat-secret"}
-    real_get = provider_credentials.oskeychain.native_get
-    real_store = provider_credentials.oskeychain.native_store
-    real_delete = provider_credentials.oskeychain.native_delete
-    provider_credentials.oskeychain.native_get = (
-        lambda service, requested_account: values.get((service, requested_account))
-    )
-    provider_credentials.oskeychain.native_store = (
-        lambda service, requested_account, value: values.__setitem__(
+    canonical: dict[tuple[str, str], str] = {}
+    legacy = {(PRIMARY_SERVICE, LEGACY_FLAT_ACCOUNT): "flat-secret"}
+
+    with _keychain_doubles(
+        cli_get=lambda service, requested_account, **_k: canonical.get(
+            (service, requested_account)
+        ),
+        cli_store=lambda service, requested_account, value: canonical.__setitem__(
             (service, requested_account), value
-        )
-    )
-    provider_credentials.oskeychain.native_delete = (
-        lambda service, requested_account: values.pop((service, requested_account), None)
-    )
-    broker = credential_session.ProviderCredentialBroker()
-    try:
-        response = broker.handle({
-            "op": "migrate_flat",
-            "provider_id": provider_id,
-            "request_id": "2" * 32,
-        })
-        assert response == {"status": "available", "value": "flat-secret"}
-        assert values[(CANONICAL_PROVIDER_SERVICE, account)] == "flat-secret"
-        assert (PRIMARY_SERVICE, LEGACY_FLAT_ACCOUNT) not in values
-    finally:
-        broker.clear()
-        provider_credentials.oskeychain.native_get = real_get
-        provider_credentials.oskeychain.native_store = real_store
-        provider_credentials.oskeychain.native_delete = real_delete
+        ),
+        native_get=lambda service, requested_account, **_k: legacy.get(
+            (service, requested_account)
+        ),
+        native_delete=lambda service, requested_account: legacy.pop(
+            (service, requested_account), None
+        ),
+    ):
+        broker = credential_session.ProviderCredentialBroker()
+        try:
+            response = broker.handle({
+                "op": "migrate_flat",
+                "provider_id": provider_id,
+                "request_id": "2" * 32,
+            })
+            assert response == {"status": "available", "value": "flat-secret"}
+            assert canonical[(CANONICAL_PROVIDER_SERVICE, account)] == "flat-secret"
+            assert (PRIMARY_SERVICE, LEGACY_FLAT_ACCOUNT) not in legacy
+        finally:
+            broker.clear()
 
 
 def test_api_key_provider_fails_before_runtime_env_without_broker() -> None:
@@ -576,12 +736,15 @@ def test_broker_death_blocks_direct_http_consumers_before_network() -> None:
 if __name__ == "__main__":
     test_native_authority_disables_keychain_interaction()
     test_native_interaction_is_disabled_after_failure()
+    test_canonical_service_is_cli_partition_v4()
+    test_canonical_ops_use_cli_partition_accessors()
     test_retry_interactively_migrates_blocked_legacy()
     test_denied_retry_does_not_scan_another_credential()
     test_delete_removes_every_provider_credential_entry()
     test_legacy_credential_migrates_before_cleanup_and_survives_restart()
     test_failed_canonical_verification_never_cleans_legacy()
     test_canonical_denial_never_attempts_legacy_recovery()
+    test_blocked_read_reprobes_and_recovers_with_logging()
     test_explicit_reentry_replaces_blocked_legacy_canonical_entry()
     test_flat_credential_migrates_inside_broker_authority()
     test_api_key_provider_fails_before_runtime_env_without_broker()
