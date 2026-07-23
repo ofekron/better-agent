@@ -20,6 +20,7 @@ import {
   useMachines,
 } from "./hooks/useMachines";
 import { useBuiltinExtensionFlags } from "./hooks/useBuiltinExtensionFlags";
+import { useLatestEventOfTypes } from "./hooks/useLatestEventOfTypes";
 import { Chat } from "./components/Chat";
 import { UserInteractionToastStack } from "./components/UserInteractionToastStack";
 import { SessionTabs } from "./components/SessionTabs";
@@ -217,6 +218,15 @@ type PendingQueueDraft = QueuedBannerState & {
 const EMPTY_MSGS: readonly ChatMessage[] = Object.freeze([]);
 const EMPTY_RUNS_PROP: readonly import("./types").RunInfo[] = Object.freeze([]);
 const EMPTY_EVENTS: readonly import("./types").WSEvent[] = Object.freeze([]);
+// Extension contexts consume only discrete domain signals from the WS
+// stream (they read the last matching event). Projecting the raw
+// per-token buffer to just these types keeps each context's identity
+// stable across the token stream — see useLatestEventOfTypes.
+const TEAM_SIDEBAR_EVENT_TYPES: readonly string[] = Object.freeze(["workers_changed"]);
+const ROUTINES_EVENT_TYPES: readonly string[] = Object.freeze([
+  "tasks_changed",
+  "task_output_published",
+]);
 const EMPTY_INLINE_TAGS: readonly import("./types/inlineTag").InlineTag[] =
   Object.freeze([]);
 const OPEN_SESSION_FRESHNESS_FIELDS = [
@@ -5824,6 +5834,11 @@ function AppMain({
     }),
     [navigate, selectedProjectPath, cwd, handleAsk, markSessionKnown, t],
   );
+  // Stable per-context projections of the raw per-token `events` buffer.
+  // Each carries only the last event of the types that context consumes,
+  // so streaming tokens no longer churn the extension contexts.
+  const teamSidebarEvents = useLatestEventOfTypes(events, TEAM_SIDEBAR_EVENT_TYPES);
+  const routinesEvents = useLatestEventOfTypes(events, ROUTINES_EVENT_TYPES);
   const teamSidebarContext = useMemo(
     () => ({
       sessionId: currentSession?.id ?? "",
@@ -5835,7 +5850,7 @@ function AppMain({
       nodeId: currentSession?.node_id ?? "primary",
       workerCreationPolicy: currentSession?.worker_creation_policy ?? "ask",
       sessions,
-      events,
+      events: teamSidebarEvents,
     }),
     [
       currentSession?.id,
@@ -5849,7 +5864,7 @@ function AppMain({
       cwd,
       model,
       sessions,
-      events,
+      teamSidebarEvents,
     ],
   );
   // Context for the Routines sidebar module. `onOpenSession` lets a launched
@@ -5865,7 +5880,7 @@ function AppMain({
       runner: currentSession?.runner ?? "",
       t,
       language: i18n.language,
-      events,
+      events: routinesEvents,
       activeExtensionPanel:
         route.kind === "extensionPanel"
           ? {
@@ -5899,7 +5914,7 @@ function AppMain({
       currentSession?.runner,
       t,
       i18n.language,
-      events,
+      routinesEvents,
       route,
       navigate,
       isMobile,
@@ -5914,7 +5929,7 @@ function AppMain({
       nodeId: selectedProjectNodeId,
       t,
       language: i18n.language,
-      events,
+      events: routinesEvents,
       onOpenSession: (sessionId: string) => {
         if (!sessionId) return;
         navigate(sessionPath(sessionId));
@@ -5929,7 +5944,7 @@ function AppMain({
       selectedProjectNodeId,
       t,
       i18n.language,
-      events,
+      routinesEvents,
       navigate,
     ],
   );
