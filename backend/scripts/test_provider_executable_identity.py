@@ -5,7 +5,7 @@ import os
 import sys
 import tempfile
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 BACKEND = ROOT / "backend"
@@ -122,9 +122,33 @@ def test_verification_detects_mutation_before_activation() -> None:
     asyncio.run(run())
 
 
+def test_exact_native_launcher_executes_on_current_platform() -> None:
+    async def run() -> None:
+        with tempfile.TemporaryDirectory(prefix="ba-provider-native-") as tmp:
+            launcher = _launcher(
+                Path(tmp),
+                (
+                    b"@echo off\r\necho codex-test\r\nexit /b 0\r\n"
+                    if os.name == "nt"
+                    else b"#!/bin/sh\necho codex-test\n"
+                ),
+            )
+            with patch.object(
+                provider_setup,
+                "resolve_cli_binary",
+                return_value=str(launcher.absolute()),
+            ):
+                identity = await provider_setup.verified_provider_identity("codex")
+            assert identity is not None
+            assert identity["launcher_path"] == str(launcher.absolute())
+
+    asyncio.run(run())
+
+
 if __name__ == "__main__":
     test_selected_provider_is_pinned_across_path_reordering()
     test_replacement_and_in_place_mutation_fail_drift_validation()
     test_symlink_target_swap_fails_drift_validation()
     test_verification_detects_mutation_before_activation()
+    test_exact_native_launcher_executes_on_current_platform()
     print("provider executable identity tests passed")

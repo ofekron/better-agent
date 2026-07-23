@@ -13,10 +13,11 @@ _BOOTSTRAP_EXACT = frozenset({
     "/readyz",
     "/api/build-info",
     "/api/installation-profile",
+    "/api/provider-setup/installs",
+    "/api/provider-setup/status",
 })
 _BOOTSTRAP_PREFIXES = (
     "/api/auth",
-    "/api/provider-setup",
     "/api/download/desktop",
     "/api/desktop",
     "/api/admin/restart",
@@ -39,6 +40,10 @@ _INTEGRATION_PREFIXES = (
     "/api/internal/session-control",
     "/api/internal/workers",
 )
+_PROVIDER_INTERNAL_EXACT = frozenset({
+    "/api/internal/credential/execute",
+    "/api/internal/credential/request",
+})
 
 
 def capability_for_scope(scope: dict[str, Any]) -> str | None:
@@ -54,12 +59,11 @@ def capability_for_scope(scope: dict[str, Any]) -> str | None:
         return installation_profile.BOOTSTRAP
     if path.startswith(_MOBILE_PREFIXES):
         return installation_profile.MOBILE
+    if path in _PROVIDER_INTERNAL_EXACT:
+        return installation_profile.PROVIDER_CONVERSATIONS
     if (
         path.startswith(_INTEGRATION_PREFIXES)
-        or (
-            path.startswith("/api/internal/sessions/")
-            and path.endswith("/capabilities")
-        )
+        or path.startswith("/api/internal/")
     ):
         return installation_profile.INTEGRATIONS
     return installation_profile.PROVIDER_CONVERSATIONS

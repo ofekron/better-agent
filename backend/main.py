@@ -12911,6 +12911,7 @@ async def on_startup():
     scheduled, not awaited inline.
     """
     acquire_backend_instance_lock()
+    provider_runtime_enabled = installation_profile.provider_conversations_enabled()
     if not installation_profile.integrations_enabled():
         await extension_jobs.quiesce_for_ui_only()
         import extension_session_ownership
@@ -12996,7 +12997,8 @@ async def on_startup():
 
     # Backend-owned schedule ticker — fires due schedules as normal
     # prompts through coordinator.submit_prompt.
-    schedule_ticker.start()
+    if provider_runtime_enabled:
+        schedule_ticker.start()
 
     _start_tailscale_serve_reconciler()
     _start_extension_update_checker()
@@ -13023,7 +13025,8 @@ async def on_startup():
         except Exception:
             logger.exception("models prewarm_locks failed")
 
-    asyncio.create_task(_prewarm_model_locks(), name="models-prewarm-locks")
+    if provider_runtime_enabled:
+        asyncio.create_task(_prewarm_model_locks(), name="models-prewarm-locks")
 
     # Warm the get-requirements processor's provisioned base off the query
     # path — a spec version bump or restart would otherwise make the first
@@ -13053,10 +13056,11 @@ async def on_startup():
                 logger.exception("models refresher error")
             await asyncio.sleep(POLL)
 
-    asyncio.create_task(
-        _models_catalog_refresher(),
-        name="models-catalog-refresher",
-    )
+    if provider_runtime_enabled:
+        asyncio.create_task(
+            _models_catalog_refresher(),
+            name="models-catalog-refresher",
+        )
 
     async def _event_loop_lag_monitor() -> None:
         interval = 1.0
@@ -13161,6 +13165,9 @@ async def on_startup():
 
     async def _on_startup_bg_orchestrator():
         """Sequence startup tasks that have ordering dependencies."""
+        if not provider_runtime_enabled:
+            startup_recovery_gate.mark_recovery_done()
+            return
         # Provider construction is recovery's only prerequisite. Maintenance
         # must never delay the gate that protects live-run reattachment.
         startup_task_registry.register(

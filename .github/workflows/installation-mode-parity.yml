@@ -32,6 +32,8 @@ jobs:
         run: python backend/scripts/test_installation_setup_transaction.py
       - name: Run executable identity matrix
         run: python backend/scripts/test_provider_executable_identity.py
+      - name: Run startup and background policy matrix
+        run: python backend/scripts/test_installation_lifespan_policy.py
       - name: Parse macOS installer
         if: runner.os == 'macOS'
         run: bash -n scripts/install-macos.sh

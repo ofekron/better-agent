@@ -419,11 +419,13 @@ def activate_prepared_installation(
     _write_pointer(env_dir)
     try:
         _apply_pending_selection(_python_in(env_dir))
+        if installation_profile.selection_pending():
+            raise DependencyPlanError(
+                "installation activation receipt was not committed"
+            )
     except BaseException:
         _restore_pointer(previous_pointer)
         raise
-    if installation_profile.selection_pending():
-        raise DependencyPlanError("installation activation receipt was not committed")
     return env_dir
 
 
