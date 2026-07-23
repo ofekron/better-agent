@@ -707,6 +707,10 @@
   "newSession.projectLabel": "प्रोजेक्ट",
   "newSession.pickProject": "— एक प्रोजेक्ट चुनें —",
   "newSession.orchestration": "ऑर्केस्ट्रेशन",
+  "newSession.preset": "क्षमता प्रीसेट",
+  "newSession.presetDefault": "पूर्ण क्षमताएँ (डिफ़ॉल्ट)",
+  "newSession.presetReviewer": "समीक्षक — सत्र उपकरण नहीं, कौशल नहीं",
+  "newSession.presetHint": "प्रीसेट निर्माण के समय क्षमताएँ हटाते हैं। समीक्षक सत्र अन्य सत्र नहीं बना सकते, संदेश नहीं भेज सकते, प्रतीक्षा नहीं कर सकते और रनटाइम कौशल लोड नहीं करते।",
   "newSession.provider": "प्रदाता",
   "newSession.runner": "Runner",
   "newSession.model": "मॉडल",
@@ -1123,5 +1127,13 @@
   "runBadge.details": "विवरण",
   "settings.taskStartSilence": "स्टार्टअप में देरी की चेतावनी",
   "settings.seconds": "सेकंड",
-  "settings.taskStartSilenceHint": "जब प्रदाता इस समय के भीतर कार्य शुरू होने की पुष्टि न करे, तब रुके होने की चेतावनी दिखाएँ। इससे रन कभी भी अपने आप बंद नहीं होता।"
+  "settings.taskStartSilenceHint": "जब प्रदाता इस समय के भीतर कार्य शुरू होने की पुष्टि न करे, तब रुके होने की चेतावनी दिखाएँ। इससे रन कभी भी अपने आप बंद नहीं होता।",
+  "settings.recursionGuardsTitle": "पुनरावृत्ति सुरक्षा",
+  "settings.recursionGuardsHint": "बैकएंड की सख़्त सीमाएँ जो एजेंट के व्यवहार से स्वतंत्र होकर बेकाबू पुनरावृत्ति रोकती हैं। 0 सुरक्षा को निष्क्रिय करता है।",
+  "settings.syncWaitDepthCap": "अधिकतम समकालिक प्रतीक्षा शृंखला",
+  "settings.syncWaitDepthCapHint": "सत्रों की एक-दूसरे की समकालिक प्रतीक्षा की अनुमत सबसे लंबी शृंखला।",
+  "settings.sessionCreationDepthCap": "सत्र नेस्टिंग की अधिकतम गहराई",
+  "settings.sessionCreationDepthCapHint": "रूट सत्र के नीचे उप-सत्र और फोर्क कितनी गहराई तक नेस्ट हो सकते हैं।",
+  "settings.sessionMaxLiveDescendants": "प्रति रूट अधिकतम सक्रिय उप-सत्र",
+  "settings.sessionMaxLiveDescendantsHint": "एक रूट सत्र के अंतर्गत एक साथ चलने वाले उप-सत्रों की अधिकतम संख्या।"
 }

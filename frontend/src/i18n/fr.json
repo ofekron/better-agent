@@ -707,6 +707,10 @@
   "newSession.projectLabel": "Projet",
   "newSession.pickProject": "— Choisir un projet —",
   "newSession.orchestration": "Orchestration",
+  "newSession.preset": "Préréglage de capacités",
+  "newSession.presetDefault": "Capacités complètes (par défaut)",
+  "newSession.presetReviewer": "Relecteur — sans outils de session, sans compétences",
+  "newSession.presetHint": "Les préréglages retirent des capacités à la création. Une session relectrice ne peut ni créer, ni contacter, ni attendre d’autres sessions et ne charge aucune compétence.",
   "newSession.provider": "Fournisseur",
   "newSession.runner": "Runner",
   "newSession.model": "Modèle",
@@ -1123,5 +1127,13 @@
   "runBadge.details": "Détails",
   "settings.taskStartSilence": "Avertissement de silence au démarrage",
   "settings.seconds": "secondes",
-  "settings.taskStartSilenceHint": "Affiche un avertissement de blocage si le fournisseur ne confirme pas le démarrage de la tâche dans ce délai. Cela n’arrête jamais l’exécution automatiquement."
+  "settings.taskStartSilenceHint": "Affiche un avertissement de blocage si le fournisseur ne confirme pas le démarrage de la tâche dans ce délai. Cela n’arrête jamais l’exécution automatiquement.",
+  "settings.recursionGuardsTitle": "Garde-fous contre la récursion",
+  "settings.recursionGuardsHint": "Limites strictes côté backend qui stoppent la récursion incontrôlée des agents, quel que soit leur comportement. 0 désactive un garde-fou.",
+  "settings.syncWaitDepthCap": "Chaîne maximale d'attentes synchrones",
+  "settings.syncWaitDepthCapHint": "Longueur maximale autorisée d'une chaîne de sessions s'attendant mutuellement de façon synchrone.",
+  "settings.sessionCreationDepthCap": "Profondeur maximale d'imbrication des sessions",
+  "settings.sessionCreationDepthCapHint": "Profondeur maximale d'imbrication des sous-sessions et forks sous une session racine.",
+  "settings.sessionMaxLiveDescendants": "Sous-sessions actives max par racine",
+  "settings.sessionMaxLiveDescendantsHint": "Nombre maximal de sous-sessions s'exécutant simultanément sous une même session racine."
 }

@@ -706,6 +706,10 @@
   "newSession.projectLabel": "프로젝트",
   "newSession.pickProject": "— 프로젝트 선택 —",
   "newSession.orchestration": "오케스트레이션",
+  "newSession.preset": "기능 프리셋",
+  "newSession.presetDefault": "전체 기능(기본값)",
+  "newSession.presetReviewer": "리뷰어 — 세션 도구 없음, 스킬 없음",
+  "newSession.presetHint": "프리셋은 생성 시 기능을 제거합니다. 리뷰어 세션은 다른 세션을 생성·연락·대기할 수 없으며 런타임 스킬을 불러오지 않습니다.",
   "newSession.provider": "프로바이더",
   "newSession.runner": "Runner",
   "newSession.model": "모델",
@@ -1122,5 +1126,13 @@
   "runBadge.details": "세부 정보",
   "settings.taskStartSilence": "시작 응답 없음 경고",
   "settings.seconds": "초",
-  "settings.taskStartSilenceHint": "제공자가 이 시간 내에 작업 시작을 확인하지 않으면 멈춤 경고를 표시합니다. 실행을 자동으로 중지하지는 않습니다."
+  "settings.taskStartSilenceHint": "제공자가 이 시간 내에 작업 시작을 확인하지 않으면 멈춤 경고를 표시합니다. 실행을 자동으로 중지하지는 않습니다.",
+  "settings.recursionGuardsTitle": "재귀 방지 장치",
+  "settings.recursionGuardsHint": "에이전트 동작과 무관하게 폭주 재귀를 차단하는 백엔드 강제 한도입니다. 0은 해당 장치를 비활성화합니다.",
+  "settings.syncWaitDepthCap": "최대 동기 대기 체인",
+  "settings.syncWaitDepthCapHint": "세션이 서로 동기적으로 대기하는 체인의 허용 최대 길이입니다.",
+  "settings.sessionCreationDepthCap": "최대 세션 중첩 깊이",
+  "settings.sessionCreationDepthCapHint": "루트 세션 아래에 하위 세션과 포크가 중첩될 수 있는 깊이입니다.",
+  "settings.sessionMaxLiveDescendants": "루트당 최대 활성 하위 세션 수",
+  "settings.sessionMaxLiveDescendantsHint": "하나의 루트 세션 아래에서 동시에 실행되는 하위 세션의 최대 수입니다."
 }

@@ -326,6 +326,14 @@ class DelegateForkParentMissing(KeyError):
     pass
 
 
+class LineageCapExceeded(ValueError):
+    """Raised by the fork/sub-session/delegate-fork creators when a new child
+    would exceed the configured lineage caps (creation depth, or live
+    descendants per root). Subclasses `ValueError` so every existing HTTP and
+    MCP-tool boundary maps it to a 400 / tool error the calling agent sees."""
+    pass
+
+
 @dataclass(frozen=True)
 class SessionOwnerToken:
     sid: str
@@ -458,6 +466,11 @@ class SessionManager:
         self._emit_processing_fn: Optional[Callable[[str, str], None]] = None
         self._emit_stub_invalidated_fn: Optional[Callable[[list], None]] = None
         self._emit_reconciled_fn: Optional[Callable[[str], None]] = None
+        # Injected by the Coordinator at startup (turn liveness lives in
+        # turn_manager; importing it here would be circular). Backs the
+        # live-descendants lineage cap; when absent the descendant cap is
+        # skipped (depth cap still applies).
+        self._live_session_probe: Optional[Callable[[str], bool]] = None
         # A10: injected by main.py so `set_selectors` can re-check
         # `coordinator.has_active_runs(sid)` UNDER the per-root lock
         # when a provider_id change is being persisted. Closes the
@@ -4229,6 +4242,9 @@ class SessionManager:
         disallowed_tools: Optional[list[str]] = None,
         disabled_builtin_extensions: Optional[list[str]] = None,
         extra_mcp_servers: Optional[list[str]] = None,
+        disabled_builtin_tools: Optional[list[str]] = None,
+        disabled_runtime_skills: Optional[list[str]] = None,
+        preset: Optional[str] = None,
         storage_scope: Optional[dict] = None,
         id: Optional[str] = None,
         created_at: Optional[str] = None,
@@ -4251,6 +4267,12 @@ class SessionManager:
         _validate_orchestration_mode_against_provider(
             orchestration_mode=orchestration_mode, provider_id=provider_id,
         )
+        import session_presets
+        exclusions = session_presets.apply_preset(preset or "", {
+            "disabled_builtin_tools": disabled_builtin_tools,
+            "disabled_builtin_extensions": disabled_builtin_extensions,
+            "disabled_runtime_skills": disabled_runtime_skills,
+        })
         sess = session_store.create_session(
             name=name, model=model, cwd=cwd,
             orchestration_mode=orchestration_mode, source=source,
@@ -4265,8 +4287,10 @@ class SessionManager:
             bare_config=bare_config,
             user_initiated=user_initiated,
             disallowed_tools=disallowed_tools,
-            disabled_builtin_extensions=disabled_builtin_extensions,
+            disabled_builtin_extensions=exclusions["disabled_builtin_extensions"],
             extra_mcp_servers=extra_mcp_servers,
+            disabled_builtin_tools=exclusions["disabled_builtin_tools"],
+            disabled_runtime_skills=exclusions["disabled_runtime_skills"],
             storage_scope=storage_scope,
             id=id,
             created_at=created_at,
@@ -4300,6 +4324,42 @@ class SessionManager:
                 exc_info=True,
             )
 
+    def set_live_session_probe(self, probe: Callable[[str], bool]) -> None:
+        """Wire the turn-liveness probe (turn_manager.has_active_runs) that
+        backs the live-descendants lineage cap."""
+        self._live_session_probe = probe
+
+    def _enforce_lineage_caps(self, cached_root: dict, parent_id: str) -> None:
+        """Reject a new child under `parent_id` when it would exceed the
+        configured creation-depth or live-descendants caps. Called inside
+        the root lock by every fork-tree creator (fork, sub-session,
+        delegate fork) BEFORE any disk write. A cap value of 0 disables
+        that check."""
+        import user_prefs
+
+        depth_cap = user_prefs.get_session_creation_depth_cap()
+        if depth_cap > 0:
+            parent_depth = session_store.node_depth(cached_root, parent_id)
+            if parent_depth is not None and parent_depth + 1 > depth_cap:
+                raise LineageCapExceeded(
+                    f"session creation depth cap exceeded: new session would be "
+                    f"depth {parent_depth + 1}, cap {depth_cap}. Finish or stop "
+                    f"existing nested sessions instead of nesting deeper."
+                )
+        descendants_cap = user_prefs.get_session_max_live_descendants()
+        if descendants_cap > 0 and self._live_session_probe is not None:
+            live = sum(
+                1
+                for sid in session_store.descendant_session_ids(cached_root)
+                if self._live_session_probe(sid)
+            )
+            if live + 1 > descendants_cap:
+                raise LineageCapExceeded(
+                    f"live descendant sessions cap exceeded for this root: "
+                    f"{live} live, cap {descendants_cap}. Wait for or stop "
+                    f"running sub-sessions before creating more."
+                )
+
     def create_delegate_fork(
         self,
         *,
@@ -4329,6 +4389,7 @@ class SessionManager:
             cached_root = self._ensure_root_loaded(rid)
             if cached_root is None:
                 raise DelegateForkParentMissing(parent_agent_session_id)
+            self._enforce_lineage_caps(cached_root, parent_agent_session_id)
             child = session_store.create_delegate_fork(
                 cached_root,
                 parent_agent_session_id=parent_agent_session_id,
@@ -4366,6 +4427,9 @@ class SessionManager:
         disallowed_tools: Optional[list[str]] = None,
         disabled_builtin_extensions: Optional[list[str]] = None,
         extra_mcp_servers: Optional[list[str]] = None,
+        disabled_builtin_tools: Optional[list[str]] = None,
+        disabled_runtime_skills: Optional[list[str]] = None,
+        preset: Optional[str] = None,
     ) -> dict:
         rid = self._root_id_for(parent_session_id)
         if rid is None:
@@ -4373,10 +4437,20 @@ class SessionManager:
         _validate_orchestration_mode_against_provider(
             orchestration_mode="native", provider_id=provider_id,
         )
+        import session_presets
+        exclusions = session_presets.apply_preset(preset or "", {
+            "disabled_builtin_tools": disabled_builtin_tools,
+            "disabled_builtin_extensions": disabled_builtin_extensions,
+            "disabled_runtime_skills": disabled_runtime_skills,
+        })
+        disabled_builtin_tools = exclusions["disabled_builtin_tools"]
+        disabled_builtin_extensions = exclusions["disabled_builtin_extensions"]
+        disabled_runtime_skills = exclusions["disabled_runtime_skills"]
         with self._lock_for_root(rid):
             cached_root = self._ensure_root_loaded(rid)
             if cached_root is None:
                 raise KeyError(parent_session_id)
+            self._enforce_lineage_caps(cached_root, parent_session_id)
             child = session_store.create_sub_session(
                 cached_root,
                 parent_session_id=parent_session_id,
@@ -4391,6 +4465,8 @@ class SessionManager:
                 disallowed_tools=disallowed_tools,
                 disabled_builtin_extensions=disabled_builtin_extensions,
                 extra_mcp_servers=extra_mcp_servers,
+                disabled_builtin_tools=disabled_builtin_tools,
+                disabled_runtime_skills=disabled_runtime_skills,
             )
             self._index_root(cached_root)
             session_store.write_session_full(cached_root, bump_updated_at=False)
@@ -4465,6 +4541,7 @@ class SessionManager:
             cached_root = self._ensure_root_loaded(rid)
             if cached_root is None:
                 raise KeyError(parent_sid)
+            self._enforce_lineage_caps(cached_root, parent_sid)
             child = session_store.fork_session(cached_root, parent_sid, name=name)
             if kind is not None:
                 child["kind"] = kind

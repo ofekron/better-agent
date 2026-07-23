@@ -42,7 +42,11 @@ from cli_paths import resolve_cli_binary
 from ingestion_versions import marker_matches_current
 from proc_control import process_control as _process_control
 import config_store
-from extension_run_policy import disabled_builtin_extensions_for_run
+from extension_run_policy import (
+    disabled_builtin_extensions_for_run,
+    disabled_builtin_tools_for_run,
+    disabled_runtime_skills_for_run,
+)
 from config_store import GEMINI_SUBSCRIPTION_UNSUPPORTED
 from runs_dir import (
     atomic_write_json as _atomic_write_json,
@@ -467,7 +471,12 @@ class GeminiProvider(Provider):
             "target_message_id": target_message_id,
             "turn_run_id": turn_run_id,
             "provisioned_tool_profile": str(provisioned_tool_profile or "").strip(),
-            "disabled_builtin_tools": config_store.get_disabled_builtin_tools(),
+            "disabled_builtin_tools": disabled_builtin_tools_for_run(
+                session_record=_sess_rec, worker_record=_worker_sess_rec,
+            ),
+            "disabled_runtime_skills": disabled_runtime_skills_for_run(
+                session_record=_sess_rec, worker_record=_worker_sess_rec,
+            ),
             "disabled_builtin_extensions": (
                 disabled_builtin_extensions_for_run(
                     disabled_builtin_extensions,

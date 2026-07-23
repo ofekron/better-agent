@@ -5772,6 +5772,7 @@ function AppMain({
             permission: config.main.permission,
             capabilityContexts: config.capabilityContexts,
             folderId: config.folderId,
+            preset: config.preset,
           });
           finishCreatedSession(session);
         } catch (e) {
@@ -5815,6 +5816,7 @@ function AppMain({
           permission: config.main.permission,
           capabilityContexts: config.capabilityContexts,
           folderId: config.folderId,
+          preset: config.preset,
         });
         finishCreatedSession(session);
       } catch (e) {

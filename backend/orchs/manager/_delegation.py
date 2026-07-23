@@ -48,7 +48,7 @@ from communication_modes import append_ask_response_contract, normalize_ask_mode
 from session_manager import manager as session_manager
 import ask_delivery
 import delegation_status_store
-from sync_wait_graph import CircularSyncWaitError
+from sync_wait_graph import SyncWaitRejected
 
 if TYPE_CHECKING:
     from orchestrator import Coordinator
@@ -942,7 +942,7 @@ def _with_sync_wait(fn):
                 bound.arguments["worker_agent_session_id"],
                 operation,
             )
-        except CircularSyncWaitError as exc:
+        except SyncWaitRejected as exc:
             result = delegate_error_payload(
                 bound.arguments["worker_agent_session_id"],
                 bound.arguments["worker_description"],

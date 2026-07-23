@@ -3092,6 +3092,16 @@ async def patch_user_prefs(request: Request, body: dict = Body(...)):
             user_prefs.set_task_start_silence_seconds(
                 body["task_start_silence_seconds"]
             )
+        if "sync_wait_depth_cap" in body:
+            user_prefs.set_sync_wait_depth_cap(body["sync_wait_depth_cap"])
+        if "session_creation_depth_cap" in body:
+            user_prefs.set_session_creation_depth_cap(
+                body["session_creation_depth_cap"]
+            )
+        if "session_max_live_descendants" in body:
+            user_prefs.set_session_max_live_descendants(
+                body["session_max_live_descendants"]
+            )
         return user_prefs.get_all(login_username)
 
     try:
@@ -9367,6 +9377,11 @@ async def create_session(body: Any = Body(default=None)):
         capability_contexts = normalize_capability_contexts(body.get("capability_contexts"))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    import session_presets
+    try:
+        requested_preset = session_presets.normalize_preset(body.get("preset"))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     requested_provider_id = body.get("provider_id")
     provider_record = await asyncio.to_thread(
         _provider_for_required_model,
@@ -9491,6 +9506,7 @@ async def create_session(body: Any = Body(default=None)):
         # action — the user is aware of (and owns) this session.
         user_initiated=True,
         capability_contexts=capability_contexts,
+        preset=requested_preset,
         id=client_session_id,
     )
     backend_url = body.get("backend_url")
@@ -14437,6 +14453,7 @@ async def internal_create_sub_session(
     disallowed_tools = _api_disallowed_tools(body.get("disallowed_tools"))
     disabled_builtin_extensions = _api_disabled_builtin_extensions(body.get("disabled_builtin_extensions"))
     extra_mcp_servers = _api_extra_mcp_servers(body.get("mcp_servers"))
+    preset = str(body.get("preset") or "").strip()
     name = description or "sub-session"
 
     try:
@@ -14453,6 +14470,7 @@ async def internal_create_sub_session(
                 disallowed_tools=disallowed_tools,
                 disabled_builtin_extensions=disabled_builtin_extensions,
                 extra_mcp_servers=extra_mcp_servers,
+                preset=preset,
             )
         )
         await _apply_initial_session_organization(sub["id"], folder_id, tag_ids)

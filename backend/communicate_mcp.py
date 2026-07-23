@@ -481,6 +481,7 @@ def create_session_response(
         "folder_id": (folder_id or "").strip() or None,
         "tag_ids": tag_ids or [],
         "mcp_servers": mcp_servers or [],
+        "preset": (preset or "").strip(),
     }, timeout=30.0)
 
 
@@ -495,6 +496,7 @@ def create_sub_session_response(
     folder_id: str = "",
     tag_ids: list[str] | None = None,
     mcp_servers: list[str] | None = None,
+    preset: str = "",
 ) -> dict[str, Any]:
     return _post_json("/api/internal/create-sub-session", {
         "sender_session_id": _env_required("BETTER_CLAUDE_MSSG_SENDER_SESSION_ID"),

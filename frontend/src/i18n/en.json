@@ -735,6 +735,10 @@
   "newSession.projectLabel": "Project",
   "newSession.pickProject": "— Pick a project —",
   "newSession.orchestration": "Orchestration",
+  "newSession.preset": "Capability preset",
+  "newSession.presetDefault": "Full capabilities (default)",
+  "newSession.presetReviewer": "Reviewer — no session tools, no skills",
+  "newSession.presetHint": "Presets remove capabilities at creation. Reviewer sessions cannot create, message, or wait on other sessions and load no runtime skills.",
   "newSession.provider": "Provider",
   "newSession.runner": "Runner",
   "newSession.model": "Model",
@@ -1194,5 +1198,13 @@
   "runBadge.details": "Details",
   "settings.taskStartSilence": "Startup silence warning",
   "settings.seconds": "seconds",
-  "settings.taskStartSilenceHint": "Show a stalled warning when the provider does not acknowledge task startup within this time. This never stops the run automatically."
+  "settings.taskStartSilenceHint": "Show a stalled warning when the provider does not acknowledge task startup within this time. This never stops the run automatically.",
+  "settings.recursionGuardsTitle": "Recursion guards",
+  "settings.recursionGuardsHint": "Hard backend limits that stop runaway agent recursion regardless of agent behavior. 0 disables a guard.",
+  "settings.syncWaitDepthCap": "Max synchronous wait chain",
+  "settings.syncWaitDepthCapHint": "Longest allowed chain of sessions synchronously waiting on each other.",
+  "settings.sessionCreationDepthCap": "Max session nesting depth",
+  "settings.sessionCreationDepthCapHint": "How deep sub-sessions and forks may nest under a root session.",
+  "settings.sessionMaxLiveDescendants": "Max live sub-sessions per root",
+  "settings.sessionMaxLiveDescendantsHint": "Maximum concurrently running sub-sessions under one root session."
 }

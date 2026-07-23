@@ -33,7 +33,11 @@ import config_store
 import user_prefs
 from cli_paths import resolve_cli_binary
 from containment import containment
-from extension_run_policy import disabled_builtin_extensions_for_run
+from extension_run_policy import (
+    disabled_builtin_extensions_for_run,
+    disabled_builtin_tools_for_run,
+    disabled_runtime_skills_for_run,
+)
 from proc_control import process_control as _process_control
 from provider import build_better_agent_run_env, runner_argv, schedule_loop_task
 from provider_gemini import GeminiProvider, RunState
@@ -260,7 +264,12 @@ class CursorProvider(GeminiProvider):
             "target_message_id": target_message_id,
             "turn_run_id": turn_run_id,
             "provisioned_tool_profile": str(provisioned_tool_profile or "").strip(),
-            "disabled_builtin_tools": config_store.get_disabled_builtin_tools(),
+            "disabled_builtin_tools": disabled_builtin_tools_for_run(
+                session_record=session_record, worker_record=worker_record,
+            ),
+            "disabled_runtime_skills": disabled_runtime_skills_for_run(
+                session_record=session_record, worker_record=worker_record,
+            ),
             "disabled_builtin_extensions": (
                 disabled_builtin_extensions_for_run(
                     disabled_builtin_extensions,

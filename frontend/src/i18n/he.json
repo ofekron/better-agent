@@ -712,6 +712,10 @@
   "newSession.projectLabel": "פרויקט",
   "newSession.pickProject": "— בחר פרויקט —",
   "newSession.orchestration": "תזמור",
+  "newSession.preset": "פרופיל יכולות",
+  "newSession.presetDefault": "יכולות מלאות (ברירת מחדל)",
+  "newSession.presetReviewer": "סוקר — בלי כלי סשנים, בלי מיומנויות",
+  "newSession.presetHint": "פרופילים מסירים יכולות בעת היצירה. סשן סוקר לא יכול ליצור, לשלוח הודעות או להמתין לסשנים אחרים ולא טוען מיומנויות ריצה.",
   "newSession.provider": "ספק",
   "newSession.runner": "Runner",
   "newSession.model": "מודל",
@@ -1166,5 +1170,13 @@
   "runBadge.details": "פרטים",
   "settings.taskStartSilence": "אזהרת עיכוב בהפעלה",
   "settings.seconds": "שניות",
-  "settings.taskStartSilenceHint": "הצג אזהרת תקיעה כאשר הספק אינו מאשר את תחילת המשימה בתוך פרק זמן זה. הפעולה לעולם לא נעצרת אוטומטית."
+  "settings.taskStartSilenceHint": "הצג אזהרת תקיעה כאשר הספק אינו מאשר את תחילת המשימה בתוך פרק זמן זה. הפעולה לעולם לא נעצרת אוטומטית.",
+  "settings.recursionGuardsTitle": "מגני רקורסיה",
+  "settings.recursionGuardsHint": "מגבלות קשיחות בצד השרת שעוצרות רקורסיית סוכנים משתוללת, ללא תלות בהתנהגות הסוכן. 0 מבטל מגן.",
+  "settings.syncWaitDepthCap": "אורך מרבי של שרשרת המתנה סינכרונית",
+  "settings.syncWaitDepthCapHint": "השרשרת הארוכה ביותר המותרת של סשנים הממתינים זה לזה באופן סינכרוני.",
+  "settings.sessionCreationDepthCap": "עומק קינון סשנים מרבי",
+  "settings.sessionCreationDepthCapHint": "כמה עמוק תתי-סשנים ופיצולים יכולים לקנן תחת סשן שורש.",
+  "settings.sessionMaxLiveDescendants": "מקסימום תתי-סשנים פעילים לשורש",
+  "settings.sessionMaxLiveDescendantsHint": "מספר תתי-הסשנים המרבי שרצים במקביל תחת סשן שורש אחד."
 }

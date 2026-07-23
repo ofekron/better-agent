@@ -706,6 +706,10 @@
   "newSession.projectLabel": "Proyecto",
   "newSession.pickProject": "— Elige un proyecto —",
   "newSession.orchestration": "Orquestación",
+  "newSession.preset": "Preajuste de capacidades",
+  "newSession.presetDefault": "Capacidades completas (predeterminado)",
+  "newSession.presetReviewer": "Revisor — sin herramientas de sesión, sin habilidades",
+  "newSession.presetHint": "Los preajustes eliminan capacidades al crear. Una sesión revisora no puede crear, enviar mensajes ni esperar a otras sesiones y no carga habilidades.",
   "newSession.provider": "Proveedor",
   "newSession.runner": "Runner",
   "newSession.model": "Modelo",
@@ -1122,5 +1126,13 @@
   "runBadge.details": "Detalles",
   "settings.taskStartSilence": "Aviso de silencio al iniciar",
   "settings.seconds": "segundos",
-  "settings.taskStartSilenceHint": "Muestra un aviso de bloqueo cuando el proveedor no confirma el inicio de la tarea dentro de este tiempo. Esto nunca detiene la ejecución automáticamente."
+  "settings.taskStartSilenceHint": "Muestra un aviso de bloqueo cuando el proveedor no confirma el inicio de la tarea dentro de este tiempo. Esto nunca detiene la ejecución automáticamente.",
+  "settings.recursionGuardsTitle": "Protecciones contra recursión",
+  "settings.recursionGuardsHint": "Límites estrictos del backend que detienen la recursión descontrolada de agentes, sin depender de su comportamiento. 0 desactiva una protección.",
+  "settings.syncWaitDepthCap": "Cadena máxima de esperas síncronas",
+  "settings.syncWaitDepthCapHint": "Cadena más larga permitida de sesiones esperándose sincrónicamente entre sí.",
+  "settings.sessionCreationDepthCap": "Profundidad máxima de anidamiento de sesiones",
+  "settings.sessionCreationDepthCapHint": "Qué tan profundo pueden anidarse subsesiones y bifurcaciones bajo una sesión raíz.",
+  "settings.sessionMaxLiveDescendants": "Máximo de subsesiones activas por raíz",
+  "settings.sessionMaxLiveDescendantsHint": "Número máximo de subsesiones ejecutándose a la vez bajo una sesión raíz."
 }

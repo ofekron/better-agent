@@ -512,12 +512,16 @@ def _materialize_claude_skill_plugin(
     provider_run_config: dict,
     *,
     bare_config: bool,
+    disabled_runtime_skills: Optional[list] = None,
 ) -> Optional[dict[str, str]]:
     if bare_config:
         return None
     plugin_dir = run_dir / "claude-runtime-skills-plugin"
     skills_root = plugin_dir / "skills"
-    count = materialize_runtime_skills(skills_root, cwd, bare_config=bare_config)
+    count = materialize_runtime_skills(
+        skills_root, cwd, bare_config=bare_config,
+        disabled=disabled_runtime_skills,
+    )
 
     configured_skills = provider_run_config.get("skills") or {}
     if configured_skills:
@@ -837,6 +841,10 @@ _CREATE_SUB_SESSION_INPUT_SCHEMA: dict[str, Any] = {
             "type": ["array", "null"],
             "items": {"type": "string"},
             "description": "OPTIONAL — extension MCP server names to opt this session into (servers that are default-off globally, e.g. 'testape-internal').",
+        },
+        "preset": {
+            "type": ["string", "null"],
+            "description": "OPTIONAL \u2014 named capability preset for the sub-session. 'reviewer' strips session-reach MCP tools (ask/delegate/create_*) and all runtime skills; the sub-session can only reply to you.",
         },
         **_SESSION_ORGANIZATION_INPUT_PROPERTIES,
     },
@@ -1994,6 +2002,7 @@ def _build_create_sub_session_tool(
             "folder_id": args.get("folder_id"),
             "tag_ids": args.get("tag_ids") or [],
             "mcp_servers": args.get("mcp_servers") or [],
+            "preset": str(args.get("preset") or "").strip(),
         }
         try:
             result = await asyncio.to_thread(_post_create_sub_session_sync, payload)
@@ -3467,6 +3476,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
         cwd,
         provider_run_config,
         bare_config=_bare,
+        disabled_runtime_skills=inputs.get("disabled_runtime_skills"),
     )
     plugins = [skill_plugin] if skill_plugin else []
 

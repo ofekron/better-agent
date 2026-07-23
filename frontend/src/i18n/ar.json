@@ -706,6 +706,10 @@
   "newSession.projectLabel": "المشروع",
   "newSession.pickProject": "— اختر مشروعًا —",
   "newSession.orchestration": "التنسيق",
+  "newSession.preset": "إعداد القدرات المسبق",
+  "newSession.presetDefault": "قدرات كاملة (افتراضي)",
+  "newSession.presetReviewer": "مراجع — بلا أدوات جلسات وبلا مهارات",
+  "newSession.presetHint": "تزيل الإعدادات المسبقة قدرات عند الإنشاء. جلسة المراجع لا يمكنها إنشاء جلسات أخرى أو مراسلتها أو انتظارها ولا تحمّل مهارات وقت التشغيل.",
   "newSession.provider": "المزوّد",
   "newSession.runner": "Runner",
   "newSession.model": "النموذج",
@@ -1122,5 +1126,13 @@
   "runBadge.details": "التفاصيل",
   "settings.taskStartSilence": "تحذير تأخر بدء التشغيل",
   "settings.seconds": "ثانية",
-  "settings.taskStartSilenceHint": "اعرض تحذيرًا بالتعطل عندما لا يؤكد المزوّد بدء المهمة خلال هذه المدة. لا يؤدي ذلك إلى إيقاف التشغيل تلقائيًا مطلقًا."
+  "settings.taskStartSilenceHint": "اعرض تحذيرًا بالتعطل عندما لا يؤكد المزوّد بدء المهمة خلال هذه المدة. لا يؤدي ذلك إلى إيقاف التشغيل تلقائيًا مطلقًا.",
+  "settings.recursionGuardsTitle": "حواجز الحماية من التكرار",
+  "settings.recursionGuardsHint": "حدود صارمة في الخادم توقف التكرار الجامح للوكلاء بغض النظر عن سلوك الوكيل. القيمة 0 تعطّل الحاجز.",
+  "settings.syncWaitDepthCap": "الحد الأقصى لسلسلة الانتظار المتزامن",
+  "settings.syncWaitDepthCapHint": "أطول سلسلة مسموح بها من الجلسات التي تنتظر بعضها بشكل متزامن.",
+  "settings.sessionCreationDepthCap": "الحد الأقصى لعمق تداخل الجلسات",
+  "settings.sessionCreationDepthCapHint": "مدى عمق تداخل الجلسات الفرعية والتفرعات تحت الجلسة الجذرية.",
+  "settings.sessionMaxLiveDescendants": "الحد الأقصى للجلسات الفرعية النشطة لكل جذر",
+  "settings.sessionMaxLiveDescendantsHint": "أقصى عدد من الجلسات الفرعية العاملة معًا تحت جلسة جذرية واحدة."
 }

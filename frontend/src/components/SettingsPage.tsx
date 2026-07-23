@@ -7,6 +7,7 @@ import { ShortcutSettings } from "./ShortcutSettings";
 import { CrossSessionDelegateSetting } from "./CrossSessionDelegateSetting";
 import { AutoRestartOnIdleSetting } from "./AutoRestartOnIdleSetting";
 import { TaskStartSilenceSetting } from "./TaskStartSilenceSetting";
+import { RecursionGuardsSettings } from "./RecursionGuardsSettings";
 import { ContextStrategySetting } from "./ContextStrategySetting";
 import { SessionTabsSettings } from "./SessionTabsSettings";
 import { VoiceSettings } from "./VoiceSettings";
@@ -2329,6 +2330,8 @@ function ProvidersList({
           <SessionTabsSettings />
           <div className="setup-divider" />
           <SessionAutoDeleteSetting />
+          <div className="setup-divider" />
+          <RecursionGuardsSettings />
           <div className="setup-divider" />
           <NativeImportSetting />
         </>

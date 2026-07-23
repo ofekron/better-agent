@@ -703,6 +703,10 @@
   "newSession.projectLabel": "プロジェクト",
   "newSession.pickProject": "— プロジェクトを選択 —",
   "newSession.orchestration": "オーケストレーション",
+  "newSession.preset": "能力プリセット",
+  "newSession.presetDefault": "フル機能（デフォルト）",
+  "newSession.presetReviewer": "レビュアー — セッションツールなし・スキルなし",
+  "newSession.presetHint": "プリセットは作成時に能力を取り除きます。レビュアーセッションは他のセッションの作成・連絡・待機ができず、ランタイムスキルも読み込みません。",
   "newSession.provider": "プロバイダー",
   "newSession.runner": "Runner",
   "newSession.model": "モデル",
@@ -1119,5 +1123,13 @@
   "runBadge.details": "詳細",
   "settings.taskStartSilence": "起動応答なしの警告",
   "settings.seconds": "秒",
-  "settings.taskStartSilenceHint": "この時間内にプロバイダーがタスク開始を確認しない場合、停止状態の警告を表示します。実行が自動的に停止されることはありません。"
+  "settings.taskStartSilenceHint": "この時間内にプロバイダーがタスク開始を確認しない場合、停止状態の警告を表示します。実行が自動的に停止されることはありません。",
+  "settings.recursionGuardsTitle": "再帰ガード",
+  "settings.recursionGuardsHint": "エージェントの挙動に関係なく暴走再帰を止めるバックエンドの強制上限。0 でそのガードを無効化。",
+  "settings.syncWaitDepthCap": "同期待機チェーンの最大長",
+  "settings.syncWaitDepthCapHint": "セッションが同期的に待ち合う連鎖の許容最大長。",
+  "settings.sessionCreationDepthCap": "セッションの最大ネスト深度",
+  "settings.sessionCreationDepthCapHint": "ルートセッション配下でサブセッションやフォークがネストできる深さ。",
+  "settings.sessionMaxLiveDescendants": "ルートあたりの最大稼働サブセッション数",
+  "settings.sessionMaxLiveDescendantsHint": "1つのルートセッション配下で同時に実行できるサブセッションの上限。"
 }

@@ -709,6 +709,10 @@
   "newSession.projectLabel": "Проект",
   "newSession.pickProject": "— Выберите проект —",
   "newSession.orchestration": "Оркестрация",
+  "newSession.preset": "Пресет возможностей",
+  "newSession.presetDefault": "Полные возможности (по умолчанию)",
+  "newSession.presetReviewer": "Рецензент — без инструментов сессий и навыков",
+  "newSession.presetHint": "Пресеты убирают возможности при создании. Сессия-рецензент не может создавать другие сессии, писать им или ждать их и не загружает навыки.",
   "newSession.provider": "Провайдер",
   "newSession.runner": "Runner",
   "newSession.model": "Модель",
@@ -1125,5 +1129,13 @@
   "runBadge.details": "Подробности",
   "settings.taskStartSilence": "Предупреждение о задержке запуска",
   "settings.seconds": "секунд",
-  "settings.taskStartSilenceHint": "Показывать предупреждение о зависании, если провайдер не подтверждает запуск задачи за это время. Выполнение никогда не останавливается автоматически."
+  "settings.taskStartSilenceHint": "Показывать предупреждение о зависании, если провайдер не подтверждает запуск задачи за это время. Выполнение никогда не останавливается автоматически.",
+  "settings.recursionGuardsTitle": "Защита от рекурсии",
+  "settings.recursionGuardsHint": "Жёсткие ограничения на бэкенде, останавливающие неконтролируемую рекурсию агентов независимо от их поведения. 0 отключает ограничение.",
+  "settings.syncWaitDepthCap": "Макс. цепочка синхронных ожиданий",
+  "settings.syncWaitDepthCapHint": "Максимально допустимая цепочка сессий, синхронно ожидающих друг друга.",
+  "settings.sessionCreationDepthCap": "Макс. глубина вложенности сессий",
+  "settings.sessionCreationDepthCapHint": "Насколько глубоко под-сессии и форки могут вкладываться под корневую сессию.",
+  "settings.sessionMaxLiveDescendants": "Макс. активных под-сессий на корень",
+  "settings.sessionMaxLiveDescendantsHint": "Максимум одновременно работающих под-сессий под одной корневой сессией."
 }

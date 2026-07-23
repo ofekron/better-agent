@@ -38,7 +38,7 @@ from event_bus import bus
 import session_search
 import user_prefs
 from session_manager import manager as session_manager
-from sync_wait_graph import CircularSyncWaitError
+from sync_wait_graph import SyncWaitRejected
 
 logger = logging.getLogger(__name__)
 
@@ -194,7 +194,7 @@ async def _run_turn_with_sync_wait(
             run_sid,
         ):
             return await _run_turn(run_sid, prompt, **kwargs)
-    except CircularSyncWaitError as exc:
+    except SyncWaitRejected as exc:
         return {"error": str(exc)}
 
 

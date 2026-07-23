@@ -2314,6 +2314,7 @@ class TurnManager:
             runtime_skill_contexts,
             cwd,
             bare_config=bool((_session_rec or {}).get("bare_config")),
+            disabled=(_session_rec or {}).get("disabled_runtime_skills"),
         )
         dynamic_capability_contexts = await _to_turn_dispatch_thread(
             extension_audit_context,

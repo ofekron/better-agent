@@ -511,7 +511,14 @@ class Coordinator:
         # redispatch. Popped after use — see ask_team_message.
         self._ask_reattach_locks: dict[str, asyncio.Lock] = {}
         self._ask_call_gates: dict[str, _AskCallGate] = {}
-        self.sync_wait_graph = SyncWaitGraph()
+        import user_prefs as _user_prefs
+        self.sync_wait_graph = SyncWaitGraph(
+            depth_cap=_user_prefs.get_sync_wait_depth_cap,
+        )
+        # Backs the live-descendants lineage cap in session_manager
+        # (turn liveness is owned here; injecting avoids the circular
+        # import — same pattern as the reconcile/emit hooks).
+        session_manager.set_live_session_probe(self.turn_manager.has_active_runs)
         # Per-session set of prompt IDs cancelled while still queued.
         # The processor checks this before starting a dequeued prompt.
         self._cancelled_ids: dict[str, set[str]] = {}

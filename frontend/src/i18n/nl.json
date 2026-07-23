@@ -703,6 +703,10 @@
   "newSession.projectLabel": "Project",
   "newSession.pickProject": "— Kies een project —",
   "newSession.orchestration": "Orkestratie",
+  "newSession.preset": "Capaciteitenpreset",
+  "newSession.presetDefault": "Volledige capaciteiten (standaard)",
+  "newSession.presetReviewer": "Reviewer — geen sessietools, geen skills",
+  "newSession.presetHint": "Presets verwijderen capaciteiten bij aanmaak. Reviewersessies kunnen geen andere sessies aanmaken, berichten of afwachten en laden geen runtime-skills.",
   "newSession.provider": "Provider",
   "newSession.runner": "Runner",
   "newSession.model": "Model",
@@ -1119,5 +1123,13 @@
   "runBadge.details": "Details",
   "settings.taskStartSilence": "Waarschuwing bij stille opstart",
   "settings.seconds": "seconden",
-  "settings.taskStartSilenceHint": "Toon een vastgelopen-waarschuwing als de provider de taakstart niet binnen deze tijd bevestigt. Hierdoor wordt de uitvoering nooit automatisch gestopt."
+  "settings.taskStartSilenceHint": "Toon een vastgelopen-waarschuwing als de provider de taakstart niet binnen deze tijd bevestigt. Hierdoor wordt de uitvoering nooit automatisch gestopt.",
+  "settings.recursionGuardsTitle": "Recursiebeveiligingen",
+  "settings.recursionGuardsHint": "Harde backend-limieten die op hol geslagen agent-recursie stoppen, ongeacht het gedrag van de agent. 0 schakelt een beveiliging uit.",
+  "settings.syncWaitDepthCap": "Maximale synchrone wachtketen",
+  "settings.syncWaitDepthCapHint": "Langst toegestane keten van sessies die synchroon op elkaar wachten.",
+  "settings.sessionCreationDepthCap": "Maximale nestdiepte van sessies",
+  "settings.sessionCreationDepthCapHint": "Hoe diep subsessies en forks onder een rootsessie mogen nesten.",
+  "settings.sessionMaxLiveDescendants": "Max. actieve subsessies per root",
+  "settings.sessionMaxLiveDescendantsHint": "Maximaal aantal gelijktijdig draaiende subsessies onder één rootsessie."
 }

@@ -63,6 +63,7 @@ export interface CreateSessionOptions {
   clientSessionId?: string;
   capabilityContexts?: CapabilityContext[];
   folderId?: string | null;
+  preset?: string;
 }
 
 export type SessionMetadataPatch = {
@@ -1331,6 +1332,7 @@ export function useSession(authStatus?: string) {
         clientSessionId,
         capabilityContexts,
         folderId,
+        preset,
       } = opts;
       startOp("session:create");
       try {
@@ -1355,6 +1357,7 @@ export function useSession(authStatus?: string) {
             client_session_id: clientSessionId,
             capability_contexts: capabilityContexts && capabilityContexts.length > 0 ? capabilityContexts : undefined,
             folder_id: folderId || undefined,
+            preset: preset || undefined,
           }),
         });
         if (!res.ok) {

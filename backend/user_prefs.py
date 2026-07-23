@@ -61,6 +61,17 @@ DEFAULT_AUTO_RESTART_ON_IDLE = False
 DEFAULT_TASK_START_SILENCE_SECONDS = 90
 MIN_TASK_START_SILENCE_SECONDS = 15
 MAX_TASK_START_SILENCE_SECONDS = 3600
+# Recursion guards. 0 disables a guard; positive values are hard caps
+# enforced by the backend regardless of what any agent decides.
+DEFAULT_SYNC_WAIT_DEPTH_CAP = 3
+MIN_SYNC_WAIT_DEPTH_CAP = 0
+MAX_SYNC_WAIT_DEPTH_CAP = 20
+DEFAULT_SESSION_CREATION_DEPTH_CAP = 5
+MIN_SESSION_CREATION_DEPTH_CAP = 0
+MAX_SESSION_CREATION_DEPTH_CAP = 50
+DEFAULT_SESSION_MAX_LIVE_DESCENDANTS = 12
+MIN_SESSION_MAX_LIVE_DESCENDANTS = 0
+MAX_SESSION_MAX_LIVE_DESCENDANTS = 200
 DEFAULT_SHORTCUT_RESPONSES = [
     "TLDR",
     "Didn't read, but I trust you go ahead",
@@ -517,20 +528,63 @@ def get_task_start_silence_seconds() -> int:
 
 
 def set_task_start_silence_seconds(seconds: int) -> int:
-    if (
-        isinstance(seconds, bool)
-        or not isinstance(seconds, int)
-        or seconds < MIN_TASK_START_SILENCE_SECONDS
-        or seconds > MAX_TASK_START_SILENCE_SECONDS
-    ):
-        raise ValueError(
-            "task_start_silence_seconds must be an integer between "
-            f"{MIN_TASK_START_SILENCE_SECONDS} and {MAX_TASK_START_SILENCE_SECONDS}"
-        )
+    return _set_bounded_int_pref(
+        "task_start_silence_seconds", seconds,
+        MIN_TASK_START_SILENCE_SECONDS, MAX_TASK_START_SILENCE_SECONDS,
+    )
+
+
+def _set_bounded_int_pref(key: str, value: int, minimum: int, maximum: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or not (minimum <= value <= maximum):
+        raise ValueError(f"{key} must be an integer between {minimum} and {maximum}")
     prefs = _load()
-    prefs["task_start_silence_seconds"] = seconds
+    prefs[key] = value
     _save(prefs)
-    return seconds
+    return value
+
+
+def get_sync_wait_depth_cap() -> int:
+    return _bounded_int_pref(
+        _load(), "sync_wait_depth_cap",
+        DEFAULT_SYNC_WAIT_DEPTH_CAP, MIN_SYNC_WAIT_DEPTH_CAP, MAX_SYNC_WAIT_DEPTH_CAP,
+    )
+
+
+def set_sync_wait_depth_cap(value: int) -> int:
+    return _set_bounded_int_pref(
+        "sync_wait_depth_cap", value,
+        MIN_SYNC_WAIT_DEPTH_CAP, MAX_SYNC_WAIT_DEPTH_CAP,
+    )
+
+
+def get_session_creation_depth_cap() -> int:
+    return _bounded_int_pref(
+        _load(), "session_creation_depth_cap",
+        DEFAULT_SESSION_CREATION_DEPTH_CAP,
+        MIN_SESSION_CREATION_DEPTH_CAP, MAX_SESSION_CREATION_DEPTH_CAP,
+    )
+
+
+def set_session_creation_depth_cap(value: int) -> int:
+    return _set_bounded_int_pref(
+        "session_creation_depth_cap", value,
+        MIN_SESSION_CREATION_DEPTH_CAP, MAX_SESSION_CREATION_DEPTH_CAP,
+    )
+
+
+def get_session_max_live_descendants() -> int:
+    return _bounded_int_pref(
+        _load(), "session_max_live_descendants",
+        DEFAULT_SESSION_MAX_LIVE_DESCENDANTS,
+        MIN_SESSION_MAX_LIVE_DESCENDANTS, MAX_SESSION_MAX_LIVE_DESCENDANTS,
+    )
+
+
+def set_session_max_live_descendants(value: int) -> int:
+    return _set_bounded_int_pref(
+        "session_max_live_descendants", value,
+        MIN_SESSION_MAX_LIVE_DESCENDANTS, MAX_SESSION_MAX_LIVE_DESCENDANTS,
+    )
 
 
 def get_all(login_username: str | None = None) -> dict:
@@ -616,6 +670,27 @@ def get_all(login_username: str | None = None) -> dict:
             DEFAULT_TASK_START_SILENCE_SECONDS,
             MIN_TASK_START_SILENCE_SECONDS,
             MAX_TASK_START_SILENCE_SECONDS,
+        ),
+        "sync_wait_depth_cap": _bounded_int_pref(
+            prefs,
+            "sync_wait_depth_cap",
+            DEFAULT_SYNC_WAIT_DEPTH_CAP,
+            MIN_SYNC_WAIT_DEPTH_CAP,
+            MAX_SYNC_WAIT_DEPTH_CAP,
+        ),
+        "session_creation_depth_cap": _bounded_int_pref(
+            prefs,
+            "session_creation_depth_cap",
+            DEFAULT_SESSION_CREATION_DEPTH_CAP,
+            MIN_SESSION_CREATION_DEPTH_CAP,
+            MAX_SESSION_CREATION_DEPTH_CAP,
+        ),
+        "session_max_live_descendants": _bounded_int_pref(
+            prefs,
+            "session_max_live_descendants",
+            DEFAULT_SESSION_MAX_LIVE_DESCENDANTS,
+            MIN_SESSION_MAX_LIVE_DESCENDANTS,
+            MAX_SESSION_MAX_LIVE_DESCENDANTS,
         ),
     }
 

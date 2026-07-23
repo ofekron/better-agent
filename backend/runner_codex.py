@@ -251,6 +251,7 @@ def _materialize_codex_run_home(
     *,
     cwd: str,
     bare_config: bool = False,
+    disabled_runtime_skills: list | None = None,
 ) -> dict[str, str]:
     real_home = Path.home()
     overlay_home = run_dir / "codex-home"
@@ -263,7 +264,10 @@ def _materialize_codex_run_home(
         os.symlink(real_codex_home, overlay_codex_home, target_is_directory=real_codex_home.is_dir())
 
     skills_root = overlay_home / ".agents" / "skills"
-    materialize_runtime_skills(skills_root, cwd, bare_config=bare_config)
+    materialize_runtime_skills(
+        skills_root, cwd, bare_config=bare_config,
+        disabled=disabled_runtime_skills,
+    )
 
     skills = provider_run_config.get("skills") or {}
     if skills:
@@ -2928,6 +2932,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
         provider_run_config,
         cwd=cwd,
         bare_config=bare_config,
+        disabled_runtime_skills=inputs.get("disabled_runtime_skills"),
     ))
     backend_url = inputs.get("backend_url") or get_env(
         "BETTER_CLAUDE_BACKEND_URL",
