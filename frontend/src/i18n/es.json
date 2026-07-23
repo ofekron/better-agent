@@ -1134,5 +1134,11 @@
   "settings.sessionCreationDepthCap": "Profundidad máxima de anidamiento de sesiones",
   "settings.sessionCreationDepthCapHint": "Qué tan profundo pueden anidarse subsesiones y bifurcaciones bajo una sesión raíz.",
   "settings.sessionMaxLiveDescendants": "Máximo de subsesiones activas por raíz",
-  "settings.sessionMaxLiveDescendantsHint": "Número máximo de subsesiones ejecutándose a la vez bajo una sesión raíz."
+  "settings.sessionMaxLiveDescendantsHint": "Número máximo de subsesiones ejecutándose a la vez bajo una sesión raíz.",
+  "credentialError.notice": "No se pudo acceder a la clave API de este proveedor.",
+  "credentialError.fix": "Reparar acceso a credenciales",
+  "credentialError.checking": "Solicitando acceso a las credenciales — aprueba el aviso del llavero del sistema si aparece…",
+  "credentialError.fixed": "Acceso restaurado — envía el mensaje de nuevo.",
+  "credentialError.stillBlocked": "El acceso sigue bloqueado — aprueba el aviso del llavero del sistema e inténtalo de nuevo.",
+  "credentialError.missing": "No hay clave API guardada para este proveedor — añádela en Ajustes."
 }

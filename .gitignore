@@ -6,6 +6,7 @@ __pycache__/
 venv/
 /backend/.venvs/
 /backend/.active-venv
+/backend/.dependency-plan.lock
 
 # Node
 node_modules/

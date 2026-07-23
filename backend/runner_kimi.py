@@ -442,6 +442,8 @@ def main(run_dir: Path) -> int:
     (run_dir / "pid").write_text(str(os.getpid()), encoding="utf-8")
     try:
         inputs = json.loads((run_dir / "input.json").read_text(encoding="utf-8"))
+        from runner_operation_host import hydrate_runner_inputs
+        inputs = hydrate_runner_inputs(inputs, run_dir)
     except Exception as exc:
         _fail(run_dir, f"failed to read input.json: {exc}")
         return 1

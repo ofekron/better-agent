@@ -1178,5 +1178,11 @@
   "settings.sessionCreationDepthCap": "עומק קינון סשנים מרבי",
   "settings.sessionCreationDepthCapHint": "כמה עמוק תתי-סשנים ופיצולים יכולים לקנן תחת סשן שורש.",
   "settings.sessionMaxLiveDescendants": "מקסימום תתי-סשנים פעילים לשורש",
-  "settings.sessionMaxLiveDescendantsHint": "מספר תתי-הסשנים המרבי שרצים במקביל תחת סשן שורש אחד."
+  "settings.sessionMaxLiveDescendantsHint": "מספר תתי-הסשנים המרבי שרצים במקביל תחת סשן שורש אחד.",
+  "credentialError.notice": "אין גישה למפתח ה-API של ספק זה.",
+  "credentialError.fix": "תיקון גישה לפרטי הזיהוי",
+  "credentialError.checking": "מבקש גישה לפרטי הזיהוי — אשרו את חלון מחזיק המפתחות של המערכת אם יופיע…",
+  "credentialError.fixed": "הגישה שוחזרה — שלחו את ההודעה מחדש.",
+  "credentialError.stillBlocked": "הגישה עדיין חסומה — אשרו את חלון מחזיק המפתחות ונסו שוב.",
+  "credentialError.missing": "לא שמור מפתח API לספק זה — הוסיפו אותו בהגדרות."
 }

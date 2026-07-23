@@ -8,14 +8,20 @@ import json
 import os
 import re
 import uuid
+from collections.abc import Iterator, MutableMapping
 from dataclasses import dataclass
 from typing import Annotated, Any, Awaitable, Callable, Literal
 
 from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError, field_validator
+from api_surface_sync import OperationContractError
 
 import extension_store
 import extension_token_registry
+import operation_catalog
+import operation_authority
+from runtime_principal import compatibility_extension_principal
+from scoped_runtime_client import ScopedRuntimeClient
 
 
 class _StrictPayload(BaseModel):
@@ -612,7 +618,33 @@ class _Action:
     handler: Callable[[BaseModel], Any | Awaitable[Any]]
 
 
-_ACTIONS: dict[tuple[str, str], _Action] = {}
+class _ActionView(MutableMapping[tuple[str, str], _Action]):
+    def __getitem__(self, key: tuple[str, str]) -> _Action:
+        descriptor = operation_catalog.current().capability_descriptor(*key)
+        return _Action(descriptor.request_model, descriptor.handler)
+
+    def __setitem__(self, key: tuple[str, str], value: _Action) -> None:
+        operation_catalog.manager().replace_capability(
+            key[0],
+            key[1],
+            value.schema,
+            value.handler,
+        )
+
+    def __delitem__(self, key: tuple[str, str]) -> None:
+        operation_catalog.manager().remove_capability(*key)
+
+    def __iter__(self) -> Iterator[tuple[str, str]]:
+        return iter(
+            (descriptor.capability, descriptor.action)
+            for descriptor in operation_catalog.current().descriptors.values()
+        )
+
+    def __len__(self) -> int:
+        return len(operation_catalog.current().descriptors)
+
+
+_ACTIONS: MutableMapping[tuple[str, str], _Action] = _ActionView()
 _CAPABILITY_CALLER: contextvars.ContextVar[str] = contextvars.ContextVar(
     "capability_caller", default="unknown",
 )
@@ -623,11 +655,18 @@ def register(
     action: str,
     schema: type[BaseModel],
     handler: Callable[[BaseModel], Any | Awaitable[Any]],
+    *,
+    policy: operation_catalog.OperationPolicy | None = None,
+    recovery_handler: operation_catalog.RecoveryHandler | None = None,
 ) -> None:
-    key = (capability, action)
-    if key in _ACTIONS:
-        raise RuntimeError(f"duplicate capability action: {capability}.{action}")
-    _ACTIONS[key] = _Action(schema=schema, handler=handler)
+    operation_catalog.register_capability(
+        capability,
+        action,
+        schema,
+        handler,
+        policy=policy,
+        recovery_handler=recovery_handler,
+    )
 
 
 def _require_grant(token: str, capability: str, action: str) -> str:
@@ -645,13 +684,15 @@ def _require_grant(token: str, capability: str, action: str) -> str:
 
 async def _invoke(request: InvokeCapabilityRequest, token: str) -> Any:
     caller_extension = _require_grant(token, request.capability, request.action)
-    registered = _ACTIONS.get((request.capability, request.action))
-    if registered is None:
+    catalog = operation_catalog.current()
+    try:
+        registered = catalog.capability_descriptor(request.capability, request.action)
+    except KeyError:
         raise HTTPException(status_code=404, detail="unknown capability action")
-    accepted_keys = set(registered.schema.model_fields)
+    accepted_keys = set(registered.request_model.model_fields)
     accepted_keys.update(
         str(field.alias)
-        for field in registered.schema.model_fields.values()
+        for field in registered.request_model.model_fields.values()
         if field.alias
     )
     unknown_keys = sorted(set(request.payload) - accepted_keys)
@@ -660,10 +701,6 @@ async def _invoke(request: InvokeCapabilityRequest, token: str) -> Any:
             status_code=422,
             detail=f"unknown capability payload fields: {', '.join(unknown_keys)}",
         )
-    try:
-        payload = registered.schema.model_validate(request.payload)
-    except ValidationError as exc:
-        raise HTTPException(status_code=422, detail=exc.errors()) from exc
     attribution_token = None
     if request.capability == "requirements":
         from requirements_query_runner import bind_requirements_attribution
@@ -678,10 +715,21 @@ async def _invoke(request: InvokeCapabilityRequest, token: str) -> Any:
         )
     caller_token = _CAPABILITY_CALLER.set(caller_extension)
     try:
-        result = registered.handler(payload)
-        if inspect.isawaitable(result):
-            result = await result
-        return result
+        principal = compatibility_extension_principal(
+            extension_id=caller_extension,
+            operation=registered.key,
+            grant_generation=_extension_generation(caller_extension),
+        )
+        return await ScopedRuntimeClient(operation_authority.issue(principal), catalog).invoke(
+            registered.key,
+            request.payload,
+        )
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=exc.errors()) from exc
+    except OperationContractError as exc:
+        if exc.phase != "request":
+            raise
+        raise HTTPException(status_code=422, detail=exc.error.errors()) from exc
     finally:
         _CAPABILITY_CALLER.reset(caller_token)
         if attribution_token is not None:
@@ -690,12 +738,7 @@ async def _invoke(request: InvokeCapabilityRequest, token: str) -> Any:
 
 
 def _extension_generation(extension_id: str) -> str:
-    record = extension_store.get_extension(extension_id) or {}
-    source = record.get("source") if isinstance(record.get("source"), dict) else {}
-    value = source.get("install_path") or source.get("version") or record.get("version") or ""
-    if not isinstance(value, str) or not value:
-        return "unknown"
-    return hashlib.sha256(value.encode("utf-8", "surrogatepass")).hexdigest()[:16]
+    return operation_authority.current_extension_generation(extension_id)
 
 
 router = APIRouter(prefix="/api/internal/capabilities", tags=["capabilities"])
@@ -1292,3 +1335,6 @@ _register_machine_nodes()
 _register_project_structure()
 _register_git()
 _register_session_events()
+from runtime_operations import register_operations as _register_runtime_operations
+_register_runtime_operations(register)
+operation_catalog.publish()

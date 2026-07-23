@@ -2,9 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from mcp.server.fastmcp import FastMCP
-
 from better_agent_sdk import Client
+from better_agent_sdk.surfaces import OperationSpec, build_mcp_server, run_mcp_or_cli
 
 
 def lock_ops_response(
@@ -20,6 +19,7 @@ def lock_ops_response(
     reattach: bool = False,
     owned: bool = False,
 ) -> dict[str, Any]:
+    """Acquire, renew, validate, reattach, list, or release coordination locks."""
     key = (key or "").strip()
     normalized_keys = [str(item or "").strip() for item in keys or [] if str(item or "").strip()]
     normalized_op = (op or "").strip().lower().replace("-", "_")
@@ -43,35 +43,22 @@ def lock_ops_response(
         return {"success": False, "error": str(exc)}
 
 
-def build_server() -> FastMCP:
-    server = FastMCP("better-agent-coordination")
+def _specs() -> tuple[OperationSpec, ...]:
+    return (
+        OperationSpec(
+            "lock_ops",
+            lock_ops_response,
+            operation="coordination_lock_ops",
+        ),
+    )
 
-    @server.tool()
-    def lock_ops(
-        key: str = "",
-        keys: list[str] | None = None,
-        release: bool = False,
-        holder_token: str = "",
-        timeout_seconds: float | int | None = None,
-        lease_seconds: float | int | None = None,
-        op: str = "",
-        renew: bool = False,
-        validate: bool = False,
-        reattach: bool = False,
-        owned: bool = False,
-    ) -> dict[str, Any]:
-        """Acquire, renew, validate, reattach, list, or release coordination locks."""
-        return lock_ops_response(
-            key, keys, release, holder_token, timeout_seconds, lease_seconds,
-            op, renew, validate, reattach, owned,
-        )
 
-    return server
+def build_server():
+    return build_mcp_server("better-agent-coordination", _specs())
 
 
 def main() -> int:
-    build_server().run("stdio")
-    return 0
+    return run_mcp_or_cli("better-agent-coordination", _specs())
 
 
 if __name__ == "__main__":

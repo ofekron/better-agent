@@ -100,7 +100,6 @@ from orchestration_tool_schemas import (
     SESSION_ORGANIZATION_INPUT_PROPERTIES as _SESSION_ORGANIZATION_INPUT_PROPERTIES,
     STOP_TURN_INPUT_SCHEMA as _STOP_TURN_INPUT_SCHEMA,
 )
-from paths import ba_home
 from provider_catalog_mcp import available_provider_models_response
 from provider_run_config import symlink_home_overlay, toml_literal, write_skill_tree
 from runtime_skills import materialize_runtime_skills
@@ -127,25 +126,6 @@ _CODEX_SANDBOX_TO_TYPE = {
     "workspace-write": "workspaceWrite",
     "danger-full-access": "dangerFullAccess",
 }
-
-_token_cache = {"mtime": 0.0, "token": None}
-
-
-def _load_internal_token() -> Optional[str]:
-    try:
-        path = ba_home() / "internal_token"
-        st = path.stat()
-        if _token_cache["token"] is not None and _token_cache["mtime"] == st.st_mtime:
-            return _token_cache["token"]
-        token = path.read_text(encoding="utf-8").strip()
-        _token_cache["mtime"] = st.st_mtime
-        _token_cache["token"] = token or None
-        return _token_cache["token"]
-    except Exception:
-        _token_cache["mtime"] = 0.0
-        _token_cache["token"] = None
-        return None
-
 
 def _codex_sandbox_policy(sandbox: str = "danger-full-access") -> dict[str, str]:
     return {"type": _CODEX_SANDBOX_TO_TYPE.get(sandbox, "dangerFullAccess")}
@@ -680,8 +660,6 @@ def _post_loopback_sync(
     body = json.dumps(payload).encode("utf-8")
     deadline = time.monotonic() + timeout_s
     backoff = 1.0
-    tried_live_token_after_forbidden = False
-
     def _request_once(token: str) -> dict:
         req = urllib.request.Request(
             backend_url.rstrip("/") + url_path,
@@ -704,21 +682,7 @@ def _post_loopback_sync(
         try:
             return _request_once(internal_token)
         except urllib.error.HTTPError as e:
-            live_token = _load_internal_token()
-            if (
-                e.code == 403
-                and live_token
-                and live_token != internal_token
-                and not tried_live_token_after_forbidden
-            ):
-                tried_live_token_after_forbidden = True
-                try:
-                    return _request_once(live_token)
-                except urllib.error.HTTPError:
-                    raise e
-            if e.code != 403:
-                raise_loopback_http_error(e)
-            raise
+            raise_loopback_http_error(e)
         except (
             urllib.error.URLError,
             http.client.RemoteDisconnected,
@@ -3470,6 +3434,8 @@ def main(run_dir: Path) -> int:
 
     try:
         inputs = json.loads((run_dir / "input.json").read_text(encoding="utf-8"))
+        from runner_operation_host import hydrate_runner_inputs
+        inputs = hydrate_runner_inputs(inputs, run_dir)
     except Exception as e:
         _fail(run_dir, f"failed to read input.json: {e}")
         return 1

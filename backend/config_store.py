@@ -189,17 +189,32 @@ def _write_api_key(provider_id: str, api_key: str) -> None:
         else:
             _api_key_cache.pop(provider_id, None)
 
+
+def _read_api_key_authoritative(provider_id: str) -> str:
+    if not credential_session_client.available():
+        raise RuntimeError("provider credential authority is unavailable")
+    response = credential_session_client.request("read", provider_id)
+    status = response["status"]
+    if status not in {"available", "missing"}:
+        raise RuntimeError("OS credential access is blocked")
+    value = response.get("value", "") if status == "available" else ""
+    _credential_status[provider_id] = status
+    with _api_key_cache_lock:
+        _api_key_cache[provider_id] = value
+    return value
+
+
 @contextmanager
 def _credential_transaction(changes: list[tuple[str, str]]):
     snapshots = {
-        provider_id: _read_api_key(provider_id)
+        provider_id: _read_api_key_authoritative(provider_id)
         for provider_id, _value in changes
     }
     applied: list[str] = []
     try:
         for provider_id, value in changes:
-            _write_api_key(provider_id, value)
             applied.append(provider_id)
+            _write_api_key(provider_id, value)
         yield
     except BaseException as exc:
         rollback_errors: list[Exception] = []

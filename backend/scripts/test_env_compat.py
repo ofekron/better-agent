@@ -50,7 +50,6 @@ def main() -> int:
     )
     for suffix in (
         "BACKEND_URL",
-        "INTERNAL_TOKEN",
         "APP_SESSION_ID",
         "CWD",
         "MODEL",
@@ -60,6 +59,8 @@ def main() -> int:
         "DISABLED_BUILTIN_EXTENSIONS",
     ):
         assert run_env[f"BETTER_AGENT_{suffix}"] == run_env[f"BETTER_CLAUDE_{suffix}"]
+    assert "BETTER_AGENT_INTERNAL_TOKEN" not in run_env
+    assert "BETTER_CLAUDE_INTERNAL_TOKEN" not in run_env
     assert run_env["BETTER_AGENT_DISABLED_BUILTIN_EXTENSIONS"] == "a,b"
     print("PASS env compatibility")
     return 0

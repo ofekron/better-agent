@@ -6,13 +6,13 @@ from zipfile import ZipFile
 
 
 ROOT = Path(__file__).resolve().parents[2]
-VENDOR = ROOT / "vendor" / "api-surface-sync" / "0.2.0"
-WHEEL = VENDOR / "api_surface_sync-0.2.0-py3-none-any.whl"
-SOURCE_COMMIT = "9e33a567286006e0736debee17b45dc9bca8dd15"
-WHEEL_SHA256 = "0dbf44582beafd3efb51d45e118634ab51906f706119278cdfc83b872f4a13fb"
+VENDOR = ROOT / "vendor" / "api-surface-sync" / "0.2.1"
+WHEEL = VENDOR / "api_surface_sync-0.2.1-py3-none-any.whl"
+SOURCE_COMMIT = "bc012e8b547f3fc7b405919033b3a49b7ee0816e"
+WHEEL_SHA256 = "5561f559b4456306906553a4636d3dcaa09281009dba098889411704031cc881"
 REQUIREMENT = (
-    "../vendor/api-surface-sync/0.2.0/"
-    "api_surface_sync-0.2.0-py3-none-any.whl"
+    "../vendor/api-surface-sync/0.2.1/"
+    "api_surface_sync-0.2.1-py3-none-any.whl"
 )
 
 
@@ -28,7 +28,7 @@ def test_vendor_provenance_and_requirement_pin() -> None:
     assert requirements.count(REQUIREMENT) == 1
 
 
-def test_vendor_wheel_contains_v02_typed_runtime() -> None:
+def test_vendor_wheel_contains_typed_runtime() -> None:
     with ZipFile(WHEEL) as archive:
         names = set(archive.namelist())
         metadata_name = next(
@@ -37,7 +37,7 @@ def test_vendor_wheel_contains_v02_typed_runtime() -> None:
         metadata = archive.read(metadata_name).decode("utf-8")
 
     assert "Name: api-surface-sync\n" in metadata
-    assert "Version: 0.2.0\n" in metadata
+    assert "Version: 0.2.1\n" in metadata
     assert "api_surface_sync/py.typed" in names
     assert "api_surface_sync/registry.py" in names
     assert "api_surface_sync/sdk.py" in names
@@ -45,5 +45,5 @@ def test_vendor_wheel_contains_v02_typed_runtime() -> None:
 
 if __name__ == "__main__":
     test_vendor_provenance_and_requirement_pin()
-    test_vendor_wheel_contains_v02_typed_runtime()
+    test_vendor_wheel_contains_typed_runtime()
     print("api-surface-sync vendor pin: ok")

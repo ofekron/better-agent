@@ -707,6 +707,14 @@ export interface ChatMessage {
   chosen_session_id?: string | null;
   status?: "sending" | "received" | "running" | "error" | "offline";
   errorText?: string;
+  /** Structured failure classification stamped by the backend when a turn
+   * fails for a known reason. `kind: "provider_credential"` drives the
+   * in-chat credential-fix action (provider_id + credential_status). */
+  errorMeta?: {
+    kind: string;
+    provider_id?: string;
+    credential_status?: string;
+  };
   error?: boolean;
   /** Per-turn primary CLI session id for the agent that produced this
    * message (manager session in manager mode, native session otherwise).

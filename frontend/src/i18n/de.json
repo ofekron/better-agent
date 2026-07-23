@@ -1131,5 +1131,11 @@
   "settings.sessionCreationDepthCap": "Maximale Session-Verschachtelungstiefe",
   "settings.sessionCreationDepthCapHint": "Wie tief Sub-Sessions und Forks unter einer Root-Session verschachtelt sein dürfen.",
   "settings.sessionMaxLiveDescendants": "Max. aktive Sub-Sessions pro Root",
-  "settings.sessionMaxLiveDescendantsHint": "Maximale Anzahl gleichzeitig laufender Sub-Sessions unter einer Root-Session."
+  "settings.sessionMaxLiveDescendantsHint": "Maximale Anzahl gleichzeitig laufender Sub-Sessions unter einer Root-Session.",
+  "credentialError.notice": "Auf den API-Schlüssel dieses Anbieters konnte nicht zugegriffen werden.",
+  "credentialError.fix": "Zugriff auf Anmeldedaten reparieren",
+  "credentialError.checking": "Zugriff wird angefordert — bestätige ggf. die System-Schlüsselbund-Abfrage…",
+  "credentialError.fixed": "Zugriff wiederhergestellt — sende die Nachricht erneut.",
+  "credentialError.stillBlocked": "Zugriff weiterhin blockiert — bestätige die Schlüsselbund-Abfrage und versuche es erneut.",
+  "credentialError.missing": "Für diesen Anbieter ist kein API-Schlüssel gespeichert — füge ihn in den Einstellungen hinzu."
 }

@@ -1135,5 +1135,11 @@
   "settings.sessionCreationDepthCap": "सत्र नेस्टिंग की अधिकतम गहराई",
   "settings.sessionCreationDepthCapHint": "रूट सत्र के नीचे उप-सत्र और फोर्क कितनी गहराई तक नेस्ट हो सकते हैं।",
   "settings.sessionMaxLiveDescendants": "प्रति रूट अधिकतम सक्रिय उप-सत्र",
-  "settings.sessionMaxLiveDescendantsHint": "एक रूट सत्र के अंतर्गत एक साथ चलने वाले उप-सत्रों की अधिकतम संख्या।"
+  "settings.sessionMaxLiveDescendantsHint": "एक रूट सत्र के अंतर्गत एक साथ चलने वाले उप-सत्रों की अधिकतम संख्या।",
+  "credentialError.notice": "इस प्रदाता की API कुंजी तक पहुंच नहीं हो सकी.",
+  "credentialError.fix": "क्रेडेंशियल एक्सेस ठीक करें",
+  "credentialError.checking": "क्रेडेंशियल एक्सेस का अनुरोध हो रहा है — सिस्टम कीचेन संकेत दिखे तो उसे स्वीकृत करें…",
+  "credentialError.fixed": "एक्सेस बहाल हो गया — संदेश फिर से भेजें.",
+  "credentialError.stillBlocked": "एक्सेस अभी भी अवरुद्ध है — सिस्टम कीचेन संकेत स्वीकृत करें और फिर प्रयास करें.",
+  "credentialError.missing": "इस प्रदाता के लिए कोई API कुंजी सहेजी नहीं है — सेटिंग्स में जोड़ें."
 }

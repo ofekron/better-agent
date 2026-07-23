@@ -58,7 +58,18 @@ def _candidate_in_dir(raw_dir: str, name: str) -> list[str]:
     return candidates
 
 
-def resolve_cli_binary(name: str, extra_dirs: Iterable[str] = ()) -> Optional[str]:
+def resolve_cli_binary(
+    name: str,
+    extra_dirs: Iterable[str] = (),
+    *,
+    respect_installation_profile: bool = True,
+) -> Optional[str]:
+    if respect_installation_profile:
+        import installation_profile
+
+        pinned, path = installation_profile.pinned_provider_executable(name)
+        if pinned:
+            return path
     if os.name == "nt":
         path_dirs = [p for p in os.environ.get("PATH", "").split(os.pathsep) if p]
         candidates: list[str] = []

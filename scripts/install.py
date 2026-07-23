@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import shutil
 import sys
 from pathlib import Path
 
@@ -12,6 +13,7 @@ if str(BACKEND) not in sys.path:
     sys.path.insert(0, str(BACKEND))
 
 import installation_profile
+import dependency_plan
 import provider_setup
 
 
@@ -67,16 +69,41 @@ async def _configure(mode: str, provider: str) -> None:
         if event == "provider_install_progress" and payload.get("text"):
             print(payload["text"])
 
+    uv = shutil.which("uv")
+    if not uv:
+        raise RuntimeError("uv is required before Better Agent setup can activate")
+
     installer = provider_setup.installer_for(provider)
-    print(f"Checking {installer.label}...")
-    result = await provider_setup.install_if_missing(provider, report)
-    if result["state"] == "already_installed":
-        print(f"{installer.label} is already installed.")
-    elif result["state"] != "succeeded":
-        raise RuntimeError(result.get("message") or f"Failed to install {installer.label}")
-    else:
-        print(f"Installed {installer.label}.")
-    installation_profile.save(mode=mode, provider=provider)
+    with dependency_plan.activation_lock():
+        print(f"Checking {installer.label}...")
+        initial_identity = await provider_setup.verified_provider_identity(provider)
+        if initial_identity is None:
+            result = await provider_setup.install_if_missing(provider, report)
+            if result["state"] != "succeeded":
+                raise RuntimeError(
+                    result.get("message") or f"Failed to install {installer.label}"
+                )
+            print(f"Installed {installer.label}.")
+        else:
+            print(f"{installer.label} is already installed.")
+
+        provider_setup.clear_status_cache(provider)
+        verified_identity = await provider_setup.verified_provider_identity(provider)
+        if verified_identity is None:
+            raise RuntimeError(f"{installer.label} failed final verification")
+        if initial_identity is not None and initial_identity != verified_identity:
+            raise RuntimeError(
+                f"{installer.label} executable changed between verification stages"
+            )
+
+        profile = installation_profile.new_active_profile(
+            mode=mode,
+            provider=provider,
+            provider_identity=verified_identity,
+        )
+        environment = dependency_plan.prepare_installation(uv, profile)
+        dependency_plan.activate_prepared_installation(environment, profile)
+
     print(f"Better Agent installation mode: {mode}")
     print("Restart Better Agent if it is currently running so all integration projections reconcile.")
 

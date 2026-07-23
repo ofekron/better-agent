@@ -36,7 +36,7 @@ import uuid
 from datetime import datetime
 from typing import Any, Awaitable, Callable, Optional
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, status
+from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect, status
 from fastapi.exceptions import HTTPException
 
 import app_version
@@ -50,6 +50,25 @@ from topology import NodeSpec, load_topology
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+@router.post("/api/node/runtime-operations")
+async def node_runtime_operations(request: Request) -> dict[str, Any]:
+    node_id = str(request.headers.get("X-Better-Agent-Node-ID") or "").strip()
+    auth = str(request.headers.get("Authorization") or "")
+    secret = auth.removeprefix("Bearer ").strip()
+    if (
+        not node_id
+        or not node_registry_store.verify_secret(node_id, secret)
+        or node_store.get_connection(node_id) is None
+    ):
+        raise HTTPException(status_code=403, detail="node runtime authority is invalid")
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="body must be an object")
+    import runtime_operation_api
+
+    return await runtime_operation_api.handle({**body, "node_id": node_id})
 
 
 # How long a held node WS waits for a human to approve/deny before the

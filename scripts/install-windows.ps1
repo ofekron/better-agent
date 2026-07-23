@@ -67,7 +67,7 @@ if ($LASTEXITCODE -ne 0) {
 
 $Repo = Split-Path -Parent $PSScriptRoot
 $Backend = Join-Path $Repo "backend"
-$ActiveEnv = (& python (Join-Path $Backend "dependency_plan.py") activate --uv (Get-Command uv).Source).Trim()
+$ActiveEnv = (& python (Join-Path $Backend "dependency_plan.py") active).Trim()
 if ($LASTEXITCODE -ne 0 -or -not $ActiveEnv) {
     throw "Better Agent backend dependency activation failed."
 }

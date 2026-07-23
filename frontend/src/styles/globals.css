@@ -4147,6 +4147,42 @@ body {
   color: #fff;
 }
 
+.credential-error-fix {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+  padding: 8px 12px;
+  background: rgba(231, 76, 60, 0.08);
+  border: 1px solid rgba(231, 76, 60, 0.35);
+  border-radius: 6px;
+  font-size: calc(12px * var(--app-font-scale));
+  cursor: default;
+}
+
+.credential-fix-notice {
+  color: #f0a59b;
+  flex: 1 1 auto;
+  min-width: 160px;
+}
+
+.credential-fix-progress {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-secondary);
+}
+
+.credential-fix-result {
+  color: #f0a59b;
+  transition: color 0.25s ease;
+}
+
+.credential-fix-ok {
+  color: #2ecc71;
+}
+
 .status-retry-btn--secondary {
   border-color: var(--border);
   color: var(--text-secondary);

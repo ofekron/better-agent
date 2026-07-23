@@ -7,10 +7,11 @@ import time
 import urllib.error
 import urllib.request
 import uuid
+from functools import wraps
 from typing import Any
 
+from better_agent_sdk.surfaces import OperationSpec, build_mcp_server, run_mcp_or_cli
 from env_compat import get_env, require_env
-from mcp.server.fastmcp import FastMCP
 
 from communication_modes import (
     ASK_MODE_CONTINUE_AND_EXPECT_INBOX_BACK_ASYNC,
@@ -139,6 +140,7 @@ def _post_mcp_job(endpoint: str, operation: str, payload: dict, timeout: float) 
 def _safe_result(fn):
     """Wrap a tool body so HTTP/infra errors come back as {success: False}
     instead of crashing the stdio MCP server."""
+    @wraps(fn)
     def wrapper(*a, **kw) -> dict[str, Any]:
         try:
             return fn(*a, **kw)
@@ -513,337 +515,173 @@ def create_sub_session_response(
     }, timeout=30.0)
 
 
-def build_server() -> FastMCP:
-    disabled_tools = _disabled_builtin_tools()
-    server = FastMCP(
-        "communicate",
-        instructions=(
-            "Team tools for Better Agent sessions: mssg is one-way and never "
-            "waits; ask waits inline by default. With mode="
-            "'continue_and_expect_inbox_back_async', ask returns immediately. "
-            "For async ask and delegate_task, the target sends the final result "
-            "with inbox(recipient_session_id=caller_session_id, message=result), "
-            "and the caller reads it later with inbox(). delegate_task "
-            "(detached handoff — offload "
-            "heavy tangential/off-topic real work so you can remain focused; "
-            "not for reviews; auto-routing may run session search and has a "
-            "cost; set target_session_id only when you already know the target "
-            "to bypass routing), run_mode='fork' runs an "
-            "isolated branch from existing session context for reviews/checks; "
-            "do not use fork for brand-new sessions), create_session (standalone "
-            "session; orchestration_mode='team' is for complex tasks that need "
-            "their own coordinator), create_sub_session (hidden native "
-            "sub-session; send work to it later with mssg or ask), and "
-            "stop_turn (stops only a running turn created by this caller), "
-            "create_worker (team worker, may require approval), inbox "
-            "(private per-session mail: anyone sends, only the recipient reads), and chat/create_chat/"
-            "delete_chat (a shared team chat room: every session reads the same chat; "
-            "chat returns only messages newer than your last-read position). Leave provider/"
-            "model/reasoning/runner selectors unprovided unless a specific different "
-            "provider or model is truly required."
-        ),
+def chat_response(
+    chat_id: str,
+    message: str = "",
+    history_mode: str = "",
+) -> dict[str, Any]:
+    return chat_store.post_and_read(
+        chat_id=chat_id,
+        reader_id=_env_required("BETTER_CLAUDE_MSSG_SENDER_SESSION_ID"),
+        message=message,
+        history_mode=history_mode,
     )
 
-    if "mssg" not in disabled_tools:
-        @server.tool(description=MSSG_DESCRIPTION)
-        def mssg(
-            message: str,
-            target_session_id: str = "",
-            target_worker_id: str = "",
-            target_worker_pool: str = "",
-            pool_affinity_key: str = "",
-            provider_id: str = "",
-            model: str = "",
-            reasoning_effort: str = "",
-            runner: str = "",
-            collapse_key: str = "",
-            collapse_policy: str = "",
-        ) -> dict[str, Any]:
-            return _safe_result(mssg_response)(
-                message,
-                target_session_id,
-                target_worker_id,
-                target_worker_pool,
-                pool_affinity_key,
-                provider_id,
-                model,
-                reasoning_effort,
-                runner,
-                collapse_key,
-                collapse_policy,
-            )
 
-    if "stop_turn" not in disabled_tools:
-        @server.tool(description=STOP_TURN_DESCRIPTION)
-        def stop_turn(target_session_id: str) -> dict[str, Any]:
-            return _safe_result(stop_turn_response)(target_session_id)
+def inbox_response(
+    recipient_session_id: str = "",
+    message: str = "",
+) -> dict[str, Any]:
+    return inbox_store.post_or_read(
+        caller_session_id=_env_required("BETTER_CLAUDE_MSSG_SENDER_SESSION_ID"),
+        recipient_session_id=recipient_session_id,
+        message=message,
+    )
 
-    if "list_available_provider_models" not in disabled_tools:
-        @server.tool(description=LIST_AVAILABLE_PROVIDER_MODELS_DESCRIPTION)
-        def list_available_provider_models(
-            provider: str = "",
-            model: str = "",
-            reasoning_effort: str = "",
-            runner: str = "",
-        ) -> dict[str, Any]:
-            return _safe_result(available_provider_models_response)(
-                provider=provider,
-                model=model,
-                reasoning_effort=reasoning_effort,
-                runner=runner,
-            )
 
-    if "chat" not in disabled_tools:
-        @server.tool(description=CHAT_DESCRIPTION)
-        def chat(
-            chat_id: str,
-            message: str = "",
-            history_mode: str = "",
-        ) -> dict[str, Any]:
-            return _safe_result(lambda: chat_store.post_and_read(
-                chat_id=chat_id,
-                reader_id=_env_required("BETTER_CLAUDE_MSSG_SENDER_SESSION_ID"),
-                message=message,
-                history_mode=history_mode,
-            ))()
+def read_inbox_history_response(
+    limit: int = 50,
+    before_seq: int | None = None,
+) -> dict[str, Any]:
+    return inbox_store.read_history(
+        recipient_session_id=_env_required("BETTER_CLAUDE_MSSG_SENDER_SESSION_ID"),
+        limit=limit,
+        before_seq=before_seq,
+    )
 
-    if "inbox" not in disabled_tools:
-        @server.tool(description=INBOX_DESCRIPTION)
-        def inbox(
-            recipient_session_id: str = "",
-            message: str = "",
-        ) -> dict[str, Any]:
-            return _safe_result(lambda: inbox_store.post_or_read(
-                caller_session_id=_env_required("BETTER_CLAUDE_MSSG_SENDER_SESSION_ID"),
-                recipient_session_id=recipient_session_id,
-                message=message,
-            ))()
 
-    if "read_inbox_history" not in disabled_tools:
-        @server.tool(description=READ_INBOX_HISTORY_DESCRIPTION)
-        def read_inbox_history(
-            limit: int = 50,
-            before_seq: int | None = None,
-        ) -> dict[str, Any]:
-            return _safe_result(lambda: inbox_store.read_history(
-                recipient_session_id=_env_required("BETTER_CLAUDE_MSSG_SENDER_SESSION_ID"),
-                limit=limit,
-                before_seq=before_seq,
-            ))()
+def read_chat_history_response(
+    chat_id: str,
+    limit: int = 50,
+    before_seq: int | None = None,
+) -> dict[str, Any]:
+    return chat_store.read_history(chat_id=chat_id, limit=limit, before_seq=before_seq)
 
-    if "read_chat_history" not in disabled_tools:
-        @server.tool(description=(
-            "Read shared chat history without changing your unread cursor."
-        ))
-        def read_chat_history(
-            chat_id: str,
-            limit: int = 50,
-            before_seq: int | None = None,
-        ) -> dict[str, Any]:
-            return _safe_result(lambda: chat_store.read_history(
-                chat_id=chat_id,
-                limit=limit,
-                before_seq=before_seq,
-            ))()
 
-    if "create_chat" not in disabled_tools:
-        @server.tool(description=CREATE_CHAT_DESCRIPTION)
-        def create_chat(
-            chat_id: str,
-            name: str = "",
-            new_readers_see_history: bool = True,
-            sender_policy: str = "",
-            sender_ids: list[str] | None = None,
-        ) -> dict[str, Any]:
-            return _safe_result(lambda: chat_store.create_chat(
-                chat_id=chat_id,
-                created_by=_env_required("BETTER_CLAUDE_MSSG_SENDER_SESSION_ID"),
-                name=name,
-                new_readers_see_history=new_readers_see_history,
-                sender_policy=sender_policy,
-                sender_ids=sender_ids,
-            ))()
+def create_chat_response(
+    chat_id: str,
+    name: str = "",
+    new_readers_see_history: bool = True,
+    sender_policy: str = "",
+    sender_ids: list[str] | None = None,
+) -> dict[str, Any]:
+    return chat_store.create_chat(
+        chat_id=chat_id,
+        created_by=_env_required("BETTER_CLAUDE_MSSG_SENDER_SESSION_ID"),
+        name=name,
+        new_readers_see_history=new_readers_see_history,
+        sender_policy=sender_policy,
+        sender_ids=sender_ids,
+    )
 
-    if "set_chat_sender_policy" not in disabled_tools:
-        @server.tool(description=SET_CHAT_SENDER_POLICY_DESCRIPTION)
-        def set_chat_sender_policy(
-            chat_id: str,
-            sender_policy: str,
-            sender_ids: list[str] | None = None,
-        ) -> dict[str, Any]:
-            return _safe_result(lambda: chat_store.set_sender_policy(
-                chat_id=chat_id,
-                owner_id=_env_required("BETTER_CLAUDE_MSSG_SENDER_SESSION_ID"),
-                sender_policy=sender_policy,
-                sender_ids=sender_ids,
-            ))()
 
-    if "delete_chat" not in disabled_tools:
-        @server.tool(description=DELETE_CHAT_DESCRIPTION)
-        def delete_chat(chat_id: str) -> dict[str, Any]:
-            return _safe_result(lambda: chat_store.delete_chat(chat_id))()
+def set_chat_sender_policy_response(
+    chat_id: str,
+    sender_policy: str,
+    sender_ids: list[str] | None = None,
+) -> dict[str, Any]:
+    return chat_store.set_sender_policy(
+        chat_id=chat_id,
+        owner_id=_env_required("BETTER_CLAUDE_MSSG_SENDER_SESSION_ID"),
+        sender_policy=sender_policy,
+        sender_ids=sender_ids,
+    )
 
-    if "delegate_task" not in disabled_tools:
-        @server.tool(description=DELEGATE_TASK_DESCRIPTION)
-        def delegate_task(
-            task: str,
-            target_session_id: str = "",
-            provider_id: str = "",
-            model: str = "",
-            reasoning_effort: str = "",
-            runner: str = "",
-            sub_session: bool = True,
-            cwd: str = "",
-            folder_id: str = "",
-            tag_ids: list[str] | None = None,
-        ) -> dict[str, Any]:
-            return _safe_result(delegate_task_response)(
-                task,
-                target_session_id,
-                provider_id,
-                model,
-                reasoning_effort,
-                runner,
-                sub_session,
-                cwd,
-                folder_id,
-                tag_ids,
-            )
 
-    if "create_session" not in disabled_tools:
-        @server.tool(description=CREATE_SESSION_DESCRIPTION)
-        def create_session(
-            name: str,
-            orchestration_mode: str = "native",
-            node_id: str = "",
-            provider_id: str = "",
-            model: str = "",
-            reasoning_effort: str = "",
-            runner: str = "",
-            cwd: str = "",
-            folder_id: str = "",
-            tag_ids: list[str] | None = None,
-            mcp_servers: list[str] | None = None,
-        ) -> dict[str, Any]:
-            return _safe_result(create_session_response)(
-                name,
-                orchestration_mode,
-                node_id,
-                provider_id,
-                model,
-                reasoning_effort,
-                runner,
-                cwd,
-                folder_id,
-                tag_ids,
-                mcp_servers,
-            )
+def delete_chat_response(chat_id: str) -> dict[str, Any]:
+    return chat_store.delete_chat(chat_id)
 
-    if "create_sub_session" not in disabled_tools:
-        @server.tool(description=CREATE_SUB_SESSION_DESCRIPTION)
-        def create_sub_session(
-            description: str = "",
-            node_id: str = "",
-            provider_id: str = "",
-            model: str = "",
-            reasoning_effort: str = "",
-            runner: str = "",
-            cwd: str = "",
-            folder_id: str = "",
-            tag_ids: list[str] | None = None,
-            mcp_servers: list[str] | None = None,
-        ) -> dict[str, Any]:
-            return _safe_result(create_sub_session_response)(
-                description,
-                node_id,
-                provider_id,
-                model,
-                reasoning_effort,
-                runner,
-                cwd,
-                folder_id,
-                tag_ids,
-                mcp_servers,
-            )
 
-    if "ask" not in disabled_tools:
-        @server.tool(description=ASK_DESCRIPTION)
-        def ask(
-            message: str,
-            target_session_id: str = "",
-            target_worker_id: str = "",
-            target_worker_pool: str = "",
-            pool_affinity_key: str = "",
-            run_mode: str = "direct",
-            worker_description: str = "",
-            worker_registry_cwd: str = "",
-            ephemeral: bool = False,
-            provider_id: str = "",
-            model: str = "",
-            reasoning_effort: str = "",
-            runner: str = "",
-            mode: str = DEFAULT_ASK_MODE,
-        ) -> dict[str, Any]:
-            return _safe_result(ask_response)(
-                message,
-                target_session_id,
-                target_worker_id,
-                target_worker_pool,
-                pool_affinity_key,
-                run_mode,
-                worker_description,
-                worker_registry_cwd,
-                ephemeral,
-                provider_id,
-                model,
-                reasoning_effort,
-                runner,
-                mode,
-            )
+def create_sub_session_surface_response(
+    description: str = "",
+    node_id: str = "",
+    provider_id: str = "",
+    model: str = "",
+    reasoning_effort: str = "",
+    runner: str = "",
+    cwd: str = "",
+    folder_id: str = "",
+    tag_ids: list[str] | None = None,
+    mcp_servers: list[str] | None = None,
+) -> dict[str, Any]:
+    return create_sub_session_response(
+        description,
+        node_id,
+        provider_id,
+        model,
+        reasoning_effort,
+        runner,
+        cwd,
+        folder_id,
+        tag_ids,
+        mcp_servers,
+    )
 
-    @server.tool(description=CREATE_WORKER_DESCRIPTION)
-    def create_worker(
-        worker_description: str,
-        justification: str,
-        orchestration_mode: str,
-        node_id: str = "",
-        cwd: str = "",
-        folder_id: str = "",
-        tag_ids: list[str] | None = None,
-    ) -> dict[str, Any]:
-        return _safe_result(create_worker_response)(
-            worker_description, justification, orchestration_mode, node_id, cwd,
-            folder_id, tag_ids,
+
+_INSTRUCTIONS = (
+    "Team tools for Better Agent sessions. mssg is one-way; ask waits inline by default. "
+    "Async ask and delegate_task return through Inbox. Use fork mode for isolated reviews, "
+    "create_session for standalone sessions, and create_sub_session for hidden helpers."
+)
+
+
+def _specs() -> tuple[OperationSpec, ...]:
+    disabled = _disabled_builtin_tools()
+    candidates = (
+        ("mssg", mssg_response, MSSG_DESCRIPTION),
+        ("stop_turn", stop_turn_response, STOP_TURN_DESCRIPTION),
+        (
+            "list_available_provider_models",
+            available_provider_models_response,
+            LIST_AVAILABLE_PROVIDER_MODELS_DESCRIPTION,
+        ),
+        ("chat", chat_response, CHAT_DESCRIPTION),
+        ("inbox", inbox_response, INBOX_DESCRIPTION),
+        ("read_inbox_history", read_inbox_history_response, READ_INBOX_HISTORY_DESCRIPTION),
+        ("read_chat_history", read_chat_history_response, "Read shared chat history."),
+        ("create_chat", create_chat_response, CREATE_CHAT_DESCRIPTION),
+        (
+            "set_chat_sender_policy",
+            set_chat_sender_policy_response,
+            SET_CHAT_SENDER_POLICY_DESCRIPTION,
+        ),
+        ("delete_chat", delete_chat_response, DELETE_CHAT_DESCRIPTION),
+        ("delegate_task", delegate_task_response, DELEGATE_TASK_DESCRIPTION),
+        ("create_session", create_session_response, CREATE_SESSION_DESCRIPTION),
+        (
+            "create_sub_session",
+            create_sub_session_surface_response,
+            CREATE_SUB_SESSION_DESCRIPTION,
+        ),
+        ("ask", ask_response, ASK_DESCRIPTION),
+        ("ensure_named_worker", ensure_named_worker_response, ENSURE_NAMED_WORKER_DESCRIPTION),
+    )
+    specs = [
+        OperationSpec(
+            name,
+            _safe_result(handler),
+            description,
+            operation=f"runtime_communication_{name}",
         )
+        for name, handler, description in candidates
+        if name not in disabled
+    ]
+    specs.append(
+        OperationSpec(
+            "create_worker",
+            _safe_result(create_worker_response),
+            CREATE_WORKER_DESCRIPTION,
+            operation="runtime_communication_create_worker",
+        )
+    )
+    return tuple(specs)
 
-    if "ensure_named_worker" not in disabled_tools:
-        @server.tool(description=ENSURE_NAMED_WORKER_DESCRIPTION)
-        def ensure_named_worker(
-            name: str,
-            orchestration_mode: str,
-            cwd: str = "",
-            provision_prompt: str = "",
-            description: str = "",
-            provider_id: str = "",
-            model: str = "",
-            reasoning_effort: str = "",
-            runner: str = "",
-            node_id: str = "",
-            folder_id: str = "",
-            tag_ids: list[str] | None = None,
-        ) -> dict[str, Any]:
-            return _safe_result(ensure_named_worker_response)(
-                name, orchestration_mode, cwd, provision_prompt, description,
-                provider_id, model, reasoning_effort, runner, node_id, folder_id,
-                tag_ids,
-            )
 
-    return server
-
+def build_server():
+    return build_mcp_server("communicate", _specs(), instructions=_INSTRUCTIONS)
 
 def main() -> int:
-    build_server().run("stdio")
-    return 0
+    return run_mcp_or_cli("communicate", _specs(), instructions=_INSTRUCTIONS)
 
 
 if __name__ == "__main__":

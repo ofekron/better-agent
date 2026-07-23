@@ -10,9 +10,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from mcp.server.fastmcp import FastMCP
-
 from better_agent_sdk import Client
+from better_agent_sdk.surfaces import OperationSpec, build_mcp_server, run_mcp_or_cli
 
 _TIMEOUT = 30.0
 
@@ -35,6 +34,14 @@ def switch_model_response(
     provider_id: str = "",
     reasoning_effort: str = "",
 ) -> dict[str, Any]:
+    """Switch THIS session's reasoning effort. Persists and takes effect on
+    the next turn, which runs in a fresh provider subprocess under the same
+    session. `reasoning_effort` must be set.
+
+    Switching `model` or `provider_id` from an agent is NOT currently
+    supported and is rejected — ask the user to switch those from the
+    session settings instead.
+    """
     # Switching model/provider from an agent is currently disabled — core
     # rejects it (409) since resuming the session's existing provider sid
     # after a model/provider change can permanently pin a stale provider's
@@ -68,6 +75,20 @@ def switch_model_response(
 
 
 def continue_in_fresh_context_response(prompt: str, when: str = "next_turn") -> dict[str, Any]:
+    """Request a continuation: start a FRESH provider subprocess under the
+    SAME session (chained to the prior one) and run `prompt` in it. Use this
+    when the context window is filling up and you want to shed history while
+    keeping the same session. Provide the prompt the fresh subprocess should
+    continue with (gather any needed prior context yourself via your tools
+    first).
+
+    `when`:
+    - "next_turn" (default): let the current turn finish naturally, then run
+      the continuation. Non-disruptive.
+    - "now": abort the current run immediately and start the continuation
+      right away. Use when the current response is going off-track or
+      burning tokens you don't need.
+    """
     prompt = str(prompt or "").strip()
     when = str(when or "next_turn").strip()
     if not prompt:
@@ -80,47 +101,27 @@ def continue_in_fresh_context_response(prompt: str, when: str = "next_turn") -> 
         return {"success": False, "error": str(exc)}
 
 
-def build_server() -> FastMCP:
-    server = FastMCP("better-agent-session-control")
+def _specs() -> tuple[OperationSpec, ...]:
+    return (
+        OperationSpec(
+            "switch_model",
+            switch_model_response,
+            operation="runtime_session_control_switch_model",
+        ),
+        OperationSpec(
+            "continue_in_fresh_context",
+            continue_in_fresh_context_response,
+            operation="runtime_session_control_continue_in_fresh_context",
+        ),
+    )
 
-    @server.tool()
-    def switch_model(
-        model: str = "",
-        provider_id: str = "",
-        reasoning_effort: str = "",
-    ) -> dict[str, Any]:
-        """Switch THIS session's reasoning effort. Persists and takes effect on
-        the next turn, which runs in a fresh provider subprocess under the same
-        session. `reasoning_effort` must be set.
 
-        Switching `model` or `provider_id` from an agent is NOT currently
-        supported and is rejected — ask the user to switch those from the
-        session settings instead."""
-        return switch_model_response(model, provider_id, reasoning_effort)
-
-    @server.tool()
-    def continue_in_fresh_context(prompt: str, when: str = "next_turn") -> dict[str, Any]:
-        """Request a continuation: start a FRESH provider subprocess under the
-        SAME session (chained to the prior one) and run `prompt` in it. Use this
-        when the context window is filling up and you want to shed history while
-        keeping the same session. Provide the prompt the fresh subprocess should
-        continue with (gather any needed prior context yourself via your tools
-        first).
-
-        `when`:
-        - "next_turn" (default): let the current turn finish naturally, then run
-          the continuation. Non-disruptive.
-        - "now": abort the current run immediately and start the continuation
-          right away. Use when the current response is going off-track or
-          burning tokens you don't need."""
-        return continue_in_fresh_context_response(prompt, when)
-
-    return server
+def build_server():
+    return build_mcp_server("better-agent-session-control", _specs())
 
 
 def main() -> int:
-    build_server().run("stdio")
-    return 0
+    return run_mcp_or_cli("better-agent-session-control", _specs())
 
 
 if __name__ == "__main__":

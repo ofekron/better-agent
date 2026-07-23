@@ -92,29 +92,6 @@ from user_interaction_tool_contracts import (
     REQUEST_USER_APPROVAL_SCHEMA as _REQUEST_USER_APPROVAL_SCHEMA,
 )
 
-# internal_token mtime-cache. The in-process MCP server callbacks
-# capture `internal_token` in a closure at spawn time — risky once a
-# runner outlives a token rotation: captured closures would keep using
-# the stale value and start 403-ing.
-#
-# `_load_internal_token()` re-reads `ba_home()/internal_token` per
-# MCP call but caches on mtime so steady-state cost is one stat() per
-# call, not one read(). Closures fall back to their captured value if
-# the file read fails (e.g. unset BETTER_CLAUDE_HOME, fs error).
-_token_cache: dict = {"token": None, "mtime": 0.0}
-def _load_internal_token() -> Optional[str]:
-    try:
-        from paths import ba_home as _ba_home
-        path = _ba_home() / "internal_token"
-        st = path.stat()
-        if _token_cache["mtime"] != st.st_mtime:
-            _token_cache["token"] = path.read_text(encoding="utf-8").strip()
-            _token_cache["mtime"] = st.st_mtime
-        return _token_cache["token"]
-    except OSError:
-        return None
-    except Exception:
-        return None
 from i18n import t
 from continuation import normalize_context_overflow_error
 from provider_run_config import write_skill_tree
@@ -1214,8 +1191,6 @@ def _post_loopback_sync(
     body = json.dumps(payload).encode("utf-8")
     deadline = time.monotonic() + timeout
     backoff = 1.0
-    tried_live_token_after_forbidden = False
-
     def _request_once(token: str) -> dict:
         req = urllib.request.Request(
             url=backend_url.rstrip("/") + url_path,
@@ -1242,23 +1217,7 @@ def _post_loopback_sync(
             return _request_once(internal_token)
         except urllib.error.HTTPError as e:
             _mark_runner_activity()
-            live_token = _load_internal_token()
-            if (
-                e.code == 403
-                and live_token
-                and live_token != internal_token
-                and not tried_live_token_after_forbidden
-            ):
-                tried_live_token_after_forbidden = True
-                try:
-                    _mark_runner_activity()
-                    return _request_once(live_token)
-                except urllib.error.HTTPError:
-                    _mark_runner_activity()
-                    raise e
-            if e.code != 403:
-                raise_loopback_http_error(e)
-            raise
+            raise_loopback_http_error(e)
         except (urllib.error.URLError, http.client.RemoteDisconnected) as e:
             _mark_runner_activity()
             recovered = recover() if recover is not None else None
@@ -3844,6 +3803,8 @@ def main(run_dir: Path) -> int:
 
     try:
         inputs = json.loads((run_dir / "input.json").read_text(encoding="utf-8"))
+        from runner_operation_host import hydrate_runner_inputs
+        inputs = hydrate_runner_inputs(inputs, run_dir)
     except Exception as e:
         _fail(run_dir, t("runner.failed_read_input", e=str(e)))
         return 1

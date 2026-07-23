@@ -5199,6 +5199,7 @@ class Coordinator:
         stopped_at: Optional[str],
         trace_id: Optional[str],
         error_text: Optional[str] = None,
+        error_meta: Optional[dict] = None,
         interrupted_by_msg_id: Optional[str] = None,
     ) -> None:
         """Seal the persisted user/assistant pair at turn end. All writes
@@ -5218,6 +5219,7 @@ class Coordinator:
             if error_text:
                 session_manager.mark_user_error(
                     app_session_id, user_msg["id"], error_text,
+                    meta=error_meta,
                 )
                 if assistant_msg is not None:
                     session_manager.remove_assistant_msg(

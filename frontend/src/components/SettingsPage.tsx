@@ -504,6 +504,7 @@ export function SettingsPage({
   const [firstRunDone, setFirstRunDone] = useState(true);
   const [networkBindAddress, setNetworkBindAddress] = useState<NetworkBindAddress>("127.0.0.1");
   const [mobileEnabled, setMobileEnabled] = useState(false);
+  const [integrationsEnabled, setIntegrationsEnabled] = useState(false);
   const [view, setView] = useState<View>({ kind: "list" });
   const [section, setSection] = useState<SettingsSection>("providers");
   const [busy, setBusy] = useState(false);
@@ -617,10 +618,15 @@ export function SettingsPage({
     try {
       const r = await fetch(`${API}/api/installation-profile`);
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      const profile = (await r.json()) as { mobile_enabled?: boolean };
+      const profile = (await r.json()) as {
+        mobile_enabled?: boolean;
+        integrations_enabled?: boolean;
+      };
       setMobileEnabled(profile.mobile_enabled === true);
+      setIntegrationsEnabled(profile.integrations_enabled === true);
     } catch {
       setMobileEnabled(false);
+      setIntegrationsEnabled(false);
     }
   };
 
@@ -640,10 +646,14 @@ export function SettingsPage({
   }, []);
 
   useEffect(() => {
-    if ((!teamEnabled && section === "delegation") || (!credentialBrokerEnabled && section === "passwords")) {
+    if (
+      (!teamEnabled && section === "delegation")
+      || (!credentialBrokerEnabled && section === "passwords")
+      || (!integrationsEnabled && section === "extensions")
+    ) {
       setSection("providers");
     }
-  }, [credentialBrokerEnabled, section, teamEnabled]);
+  }, [credentialBrokerEnabled, integrationsEnabled, section, teamEnabled]);
 
   const activeId = state?.default_provider_id ?? null;
   const providers = state?.providers ?? [];
@@ -662,6 +672,7 @@ export function SettingsPage({
           onAdd={() => setView({ kind: "wizard-templates" })}
           onMobile={() => setView({ kind: "mobile" })}
           mobileEnabled={mobileEnabled}
+          integrationsEnabled={integrationsEnabled}
           onEdit={(p) => setView({ kind: "edit", providerId: p.id })}
           onOpenProviderConfigSync={onOpenProviderConfigSync}
           setupStatuses={setupStatuses}
@@ -888,6 +899,7 @@ interface ProvidersListProps {
   onAdd: () => void;
   onMobile: () => void;
   mobileEnabled: boolean;
+  integrationsEnabled: boolean;
   onEdit: (p: Provider) => void;
   onActivate: (p: Provider) => void;
   onSuspend: (p: Provider, suspended: boolean) => void;
@@ -2195,6 +2207,7 @@ function ProvidersList({
   onAdd,
   onMobile,
   mobileEnabled,
+  integrationsEnabled,
   onEdit,
   onActivate,
   onSuspend,
@@ -2245,7 +2258,7 @@ function ProvidersList({
     { id: "internalLlm", label: t("settings.internalLlmTitle") },
     { id: "sessions", label: t("settings.sessionsTitle") },
     { id: "voice", label: t("settings.voiceTitle") },
-    { id: "extensions", label: t("settings.extensionsTitle") },
+    ...(integrationsEnabled ? [{ id: "extensions" as const, label: t("settings.extensionsTitle") }] : []),
     ...(credentialBrokerEnabled ? [{ id: "passwords" as const, label: t("settings.passwordManager") }] : []),
     ...(isNative ? [{ id: "server" as const, label: t("settings.serverTitle") }] : []),
     ...extensionSettingsModules.map((item) => ({
@@ -2352,7 +2365,9 @@ function ProvidersList({
           <span>{sections.find((item) => item.id === section)?.label}</span>
         </div>
         <div className="settings-page-actions">
-          <ExtensionQuickButtons context={hookActionContext} variant="topbar" placement="settings" />
+          {integrationsEnabled && (
+            <ExtensionQuickButtons context={hookActionContext} variant="topbar" placement="settings" />
+          )}
           {onRefreshApp && (
             <button
               type="button"
@@ -2391,7 +2406,7 @@ function ProvidersList({
           {body}
           {section === "providers" && (
             <div className="settings-page-provider-actions">
-              {onOpenProviderConfigSync && (
+              {integrationsEnabled && onOpenProviderConfigSync && (
                 <button
                   type="button"
                   className="btn-secondary"
@@ -2507,6 +2522,7 @@ function ProvidersSettingsSection({
   | "onClose"
   | "onMobile"
   | "mobileEnabled"
+  | "integrationsEnabled"
   | "teamEnabled"
   | "section"
   | "onSectionChange"

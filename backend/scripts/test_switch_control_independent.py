@@ -45,11 +45,24 @@ try:
     dev = make_checkout(Path(HOME) / "custom-dev-checkout")
     main = make_checkout(Path(HOME) / "app-main")
     preview = make_checkout(Path(HOME) / "preview-checkout")
-    write_json(Path(HOME) / "switch_lines.json", {"dev": dev, "main": main, "preview": preview})
+    parallel = make_checkout(Path(HOME) / "parallel-checkout")
+    write_json(
+        Path(HOME) / "switch_lines.json",
+        {
+            "dev": dev,
+            "main": main,
+            "preview": preview,
+            "parallel": {"checkout": parallel, "backend_port": 28921},
+        },
+    )
     pointer.set_active(main, "seed")
     pointer.confirm_healthy(main, "seed")
     assert switch_control.state(main)["lines"]["preview"] == preview
     assert switch_control.state(main)["lines"]["dev"] == dev
+    parallel_result = switch_control.submit(main, "parallel", "parallel-1")
+    assert parallel_result["status"] == "succeeded"
+    assert parallel_result["target_url"] == "http://127.0.0.1:28921"
+    assert pointer.read()["active"] == main, "parallel port switch must not mutate launcher state"
     assert conventional_dev != dev
 
     reservation = switch_control.reserve(main, "dev", "reservation-owner")

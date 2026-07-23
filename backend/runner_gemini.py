@@ -134,8 +134,8 @@ def _with_communicate_mcp(inputs: dict, provider_run_config: dict) -> dict:
         or get_env("BETTER_CLAUDE_BACKEND_URL")
         or "http://localhost:8000"
     ).strip()
-    internal_token = str(inputs.get("internal_token") or "").strip()
-    if not sender_session_id or not backend_url or not internal_token:
+    runtime_broker = get_env("BETTER_CLAUDE_RUNTIME_BROKER").strip()
+    if not sender_session_id or not runtime_broker:
         return provider_run_config
     disabled_tools = [
         str(item).strip()
@@ -165,7 +165,7 @@ def _with_communicate_mcp(inputs: dict, provider_run_config: dict) -> dict:
         "args": args,
         "env": dual_env_many({
             "BETTER_CLAUDE_BACKEND_URL": backend_url,
-            "BETTER_CLAUDE_INTERNAL_TOKEN": internal_token,
+            "BETTER_CLAUDE_RUNTIME_BROKER": runtime_broker,
             "BETTER_CLAUDE_MSSG_SENDER_SESSION_ID": sender_session_id,
             # ask(run_mode='fork') + create_worker need these to build the
             # delegation / worker-creation payload. The manager session id is
@@ -1133,6 +1133,8 @@ def main(run_dir: Path) -> int:
 
     try:
         inputs = json.loads((run_dir / "input.json").read_text(encoding="utf-8"))
+        from runner_operation_host import hydrate_runner_inputs
+        inputs = hydrate_runner_inputs(inputs, run_dir)
     except Exception as e:
         _fail(run_dir, f"failed to read input.json: {e}")
         return 1

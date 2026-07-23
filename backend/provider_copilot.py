@@ -341,7 +341,7 @@ class CopilotProvider(GeminiProvider):
             "source": source or "",
             "app_session_id": app_session_id,
             "backend_url": backend_url or "",
-            "internal_token": internal_token or "",
+            "internal_token": "",
             "provider_id": self.id,
             "config_dir": self.record.get("config_dir", ""),
             "browser_harness_enabled": bool(browser_harness_enabled),
@@ -384,6 +384,7 @@ class CopilotProvider(GeminiProvider):
             env.update(build_better_agent_run_env(
                 backend_url=backend_url,
                 internal_token=internal_token,
+                run_id=run_id,
                 app_session_id=app_session_id,
                 cwd=cwd,
                 model=model,

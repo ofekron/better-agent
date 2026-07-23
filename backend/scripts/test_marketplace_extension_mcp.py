@@ -16,6 +16,7 @@ import _test_home
 _test_home.isolate("ba-test-")
 os.environ["BETTER_AGENT_SKIP_EXTENSION_DEPENDENCY_INSTALL"] = "1"
 os.environ["BETTER_CLAUDE_TEST_AUTH_BYPASS"] = "1"
+os.environ["BETTER_AGENT_RUNTIME_BROKER"] = "unix:/tmp/better-agent-test.sock"
 
 dist_dir = ROOT.parent / "frontend" / "dist"
 created_dist = not dist_dir.exists()
@@ -25,6 +26,10 @@ if created_dist:
 
 import builtin_mcp_config  # noqa: E402
 import extension_store  # noqa: E402
+import installation_profile  # noqa: E402
+
+installation_profile.integrations_enabled = lambda: True
+installation_profile.allows = lambda _capability: True
 
 
 def check(condition: bool, message: str) -> None:
@@ -72,19 +77,14 @@ def test_marketplace_extension_is_seeded_and_exposed_as_runtime_mcp() -> None:
         config["env"].get("BETTER_AGENT_EXTENSION_ID") == extension_store.MARKETPLACE_EXTENSION_ID,
         "marketplace MCP receives its extension id",
     )
-    # Identity is token-derived: the marketplace MCP receives its OWN minted
-    # per-extension token (never the global token), so the backend derives its
-    # identity from the secret instead of a spoofable header.
-    import extension_token_registry
-
-    minted = extension_token_registry.mint(extension_store.MARKETPLACE_EXTENSION_ID)
     check(
-        config["env"].get("BETTER_AGENT_INTERNAL_TOKEN") == minted,
-        "marketplace MCP receives its per-extension internal token",
+        config["env"].get("BETTER_AGENT_RUNTIME_BROKER")
+        == "unix:/tmp/better-agent-test.sock",
+        "marketplace MCP receives the scoped runtime broker",
     )
     check(
-        config["env"].get("BETTER_AGENT_INTERNAL_TOKEN") != "token",
-        "marketplace MCP does not receive the global internal token",
+        "BETTER_AGENT_INTERNAL_TOKEN" not in config["env"],
+        "marketplace MCP receives no bearer token",
     )
 
 

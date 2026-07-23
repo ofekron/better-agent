@@ -7,7 +7,9 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import venv
 import zipfile
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
@@ -29,11 +31,46 @@ from daemonhost.jsonio import read_json, write_json
 from daemonhost.paths import registry_path, state_path
 import extension_jobs
 import installation_profile
+import provider_setup
 import session_manager
 
 
 def _reset_config_cache() -> None:
     config_store._state_cache = None
+
+
+def _stage_installation_profile(*, mode: str, provider: str) -> dict:
+    command = provider_setup.installer_for(provider).command
+    executable = str((Path(_HOME) / command).absolute())
+    profile = installation_profile.new_active_profile(
+        mode=mode,
+        provider=provider,
+        provider_identity={
+            "command": command,
+            "launcher_path": executable,
+            "launcher_sha256": "0" * 64,
+            "target_path": executable,
+            "target_sha256": "0" * 64,
+            "size": 0,
+            "mtime_ns": 0,
+        },
+    )
+    return installation_profile.stage_activation(profile)
+
+
+def _ack_profile_for_dependency_tests() -> None:
+    profile = installation_profile.require_active()
+    receipt = {
+        "schema_version": installation_profile.RECEIPT_SCHEMA_VERSION,
+        "generation": profile["generation"],
+        "profile_sha256": installation_profile._canonical_hash(profile),
+        "provider_selection_sha256": "0" * 64,
+        **installation_profile._active_environment_receipt(),
+    }
+    (Path(_HOME) / "installation-activation.json").write_text(
+        json.dumps(receipt),
+        encoding="utf-8",
+    )
 
 
 def _write_probe_wheel(root: Path) -> Path:
@@ -62,16 +99,19 @@ def _write_probe_wheel(root: Path) -> Path:
 
 
 def test_profile_selection_acknowledgement() -> None:
-    installation_profile.save(mode=installation_profile.DESKTOP_UI_ONLY, provider="codex")
+    _stage_installation_profile(mode=installation_profile.DESKTOP_UI_ONLY, provider="codex")
     assert installation_profile.selection_pending()
-    installation_profile.mark_selection_applied()
-    assert not installation_profile.selection_pending()
-    installation_profile.save(mode=installation_profile.DESKTOP_UI_ONLY, provider="codex")
+    try:
+        installation_profile.mark_selection_applied()
+    except installation_profile.InstallationProfileError:
+        pass
+    else:
+        raise AssertionError("selection receipt must require the applied provider config")
     assert installation_profile.selection_pending()
 
 
 def test_selected_provider_is_the_only_active_provider() -> None:
-    installation_profile.save(mode=installation_profile.DEFAULT, provider="codex")
+    _stage_installation_profile(mode=installation_profile.DEFAULT, provider="codex")
     config_path = Path(_HOME) / "config.json"
     config_path.write_text(
         json.dumps(
@@ -112,14 +152,14 @@ def test_selected_provider_is_the_only_active_provider() -> None:
 
 
 def test_runtime_plan_uses_pending_selection_then_active_config() -> None:
-    installation_profile.save(
+    _stage_installation_profile(
         mode=installation_profile.DESKTOP_UI_ONLY,
         provider="codex",
     )
     pending = dependency_plan.resolve_plan()
     assert pending["requirements"] == ("requirements.txt",)
 
-    installation_profile.mark_selection_applied()
+    _ack_profile_for_dependency_tests()
     config_path = Path(_HOME) / "config.json"
     config_path.write_text(
         json.dumps(
@@ -146,8 +186,8 @@ def test_runtime_plan_uses_pending_selection_then_active_config() -> None:
 
 
 def test_unknown_active_provider_requirement_fails_closed() -> None:
-    installation_profile.save(mode=installation_profile.DEFAULT, provider="codex")
-    installation_profile.mark_selection_applied()
+    _stage_installation_profile(mode=installation_profile.DEFAULT, provider="codex")
+    _ack_profile_for_dependency_tests()
     config_path = Path(_HOME) / "config.json"
     config_path.write_text(
         json.dumps(
@@ -175,8 +215,8 @@ def test_unknown_active_provider_requirement_fails_closed() -> None:
 
 
 def test_suspended_provider_requirement_is_included() -> None:
-    installation_profile.save(mode=installation_profile.DEFAULT, provider="codex")
-    installation_profile.mark_selection_applied()
+    _stage_installation_profile(mode=installation_profile.DEFAULT, provider="codex")
+    _ack_profile_for_dependency_tests()
     config_path = Path(_HOME) / "config.json"
     config_path.write_text(
         json.dumps(
@@ -210,8 +250,8 @@ def test_suspended_provider_requirement_is_included() -> None:
 
 
 def test_unknown_suspended_provider_requirement_fails_closed() -> None:
-    installation_profile.save(mode=installation_profile.DEFAULT, provider="codex")
-    installation_profile.mark_selection_applied()
+    _stage_installation_profile(mode=installation_profile.DEFAULT, provider="codex")
+    _ack_profile_for_dependency_tests()
     state = {
         "default_provider_id": "codex-id",
         "providers": [
@@ -243,8 +283,8 @@ def test_unknown_suspended_provider_requirement_fails_closed() -> None:
 
 
 def test_provider_mutation_rejects_missing_runtime_before_persist() -> None:
-    installation_profile.save(mode=installation_profile.DEFAULT, provider="codex")
-    installation_profile.mark_selection_applied()
+    _stage_installation_profile(mode=installation_profile.DEFAULT, provider="codex")
+    _ack_profile_for_dependency_tests()
     config_path = Path(_HOME) / "config.json"
     config_path.unlink(missing_ok=True)
     _reset_config_cache()
@@ -269,8 +309,8 @@ def test_provider_mutation_rejects_missing_runtime_before_persist() -> None:
 
 
 def test_provider_plan_transition_requires_activated_candidate() -> None:
-    installation_profile.save(mode=installation_profile.DEFAULT, provider="codex")
-    installation_profile.mark_selection_applied()
+    _stage_installation_profile(mode=installation_profile.DEFAULT, provider="codex")
+    _ack_profile_for_dependency_tests()
     current = {
         "default_provider_id": "codex-id",
         "providers": [
@@ -314,19 +354,20 @@ def test_provider_plan_transition_requires_activated_candidate() -> None:
 
 
 def test_provider_activation_mutations_reject_missing_runtime() -> None:
-    installation_profile.save(mode=installation_profile.DEFAULT, provider="codex")
-    installation_profile.mark_selection_applied()
+    _stage_installation_profile(mode=installation_profile.DEFAULT, provider="codex")
+    _ack_profile_for_dependency_tests()
     config_path = Path(_HOME) / "config.json"
     config_path.unlink(missing_ok=True)
     _reset_config_cache()
-    suspended = config_store.add_provider(
-        {
-            "name": "Claude",
-            "kind": "claude",
-            "mode": "subscription",
-            "suspended": True,
-        }
-    )
+    with patch.object(dependency_plan, "assert_state_transition_supported"):
+        suspended = config_store.add_provider(
+            {
+                "name": "Claude",
+                "kind": "claude",
+                "mode": "subscription",
+                "suspended": True,
+            }
+        )
     active_id = config_store.list_providers()["default_provider_id"]
 
     with patch.object(dependency_plan, "_module_available", return_value=False):
@@ -456,7 +497,11 @@ def test_rejected_provider_transitions_do_not_touch_credentials() -> None:
 
     for mutation in _credential_mutations():
         with (
-            patch.object(config_store, "_read_api_key", side_effect=lambda pid: credentials.get(pid, "")),
+            patch.object(
+                config_store,
+                "_read_api_key_authoritative",
+                side_effect=lambda pid: credentials.get(pid, ""),
+            ),
             patch.object(config_store, "_write_api_key", side_effect=write_credential) as write,
             patch.object(dependency_plan, "assert_provider_supported"),
             patch.object(dependency_plan, "assert_state_supported"),
@@ -490,7 +535,11 @@ def test_failed_provider_persist_rolls_back_credentials() -> None:
 
     for mutation in _credential_mutations():
         with (
-            patch.object(config_store, "_read_api_key", side_effect=lambda pid: credentials.get(pid, "")),
+            patch.object(
+                config_store,
+                "_read_api_key_authoritative",
+                side_effect=lambda pid: credentials.get(pid, ""),
+            ),
             patch.object(config_store, "_write_api_key", side_effect=write_credential),
             patch.object(dependency_plan, "assert_provider_supported"),
             patch.object(dependency_plan, "assert_state_supported"),
@@ -505,6 +554,68 @@ def test_failed_provider_persist_rolls_back_credentials() -> None:
                 raise AssertionError("failed provider save must abort")
         assert credentials == {"api-id": "old-secret"}
         assert config_path.read_text(encoding="utf-8") == before_config
+
+
+def test_credential_transaction_requires_authoritative_snapshot() -> None:
+    with (
+        patch.object(
+            config_store.credential_session_client,
+            "available",
+            return_value=True,
+        ),
+        patch.object(
+            config_store.credential_session_client,
+            "request",
+            return_value={"status": "blocked"},
+        ),
+        patch.object(config_store, "_write_api_key") as write,
+    ):
+        try:
+            with config_store._credential_transaction(
+                [("api-id", "new-secret")]
+            ):
+                pass
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("blocked credential reads must fail closed")
+    write.assert_not_called()
+
+
+def test_credential_write_failure_rolls_back_attempted_mutation() -> None:
+    credentials = {"api-id": "old-secret"}
+    calls = 0
+
+    def write_credential(provider_id: str, value: str) -> None:
+        nonlocal calls
+        calls += 1
+        credentials[provider_id] = value
+        if calls == 1:
+            raise RuntimeError("verification failed after write")
+
+    with (
+        patch.object(
+            config_store,
+            "_read_api_key_authoritative",
+            return_value="old-secret",
+        ),
+        patch.object(
+            config_store,
+            "_write_api_key",
+            side_effect=write_credential,
+        ),
+    ):
+        try:
+            with config_store._credential_transaction(
+                [("api-id", "new-secret")]
+            ):
+                pass
+        except RuntimeError as exc:
+            assert str(exc) == "verification failed after write"
+        else:
+            raise AssertionError("failed credential write must abort")
+    assert calls == 2
+    assert credentials == {"api-id": "old-secret"}
 
 
 def test_failed_dependency_stage_preserves_active_environment() -> None:
@@ -549,7 +660,7 @@ def test_failed_dependency_stage_preserves_active_environment() -> None:
 
 
 def test_selection_failure_restores_previous_pointer() -> None:
-    installation_profile.save(mode=installation_profile.DEFAULT, provider="codex")
+    _stage_installation_profile(mode=installation_profile.DEFAULT, provider="codex")
     with tempfile.TemporaryDirectory(prefix="ba-dependency-selection-") as tmp:
         root = Path(tmp)
         venv_root = root / ".venvs"
@@ -594,13 +705,192 @@ def test_selection_failure_restores_previous_pointer() -> None:
 
 
 def test_pending_selection_does_not_write_activation_stdout() -> None:
-    with patch.object(
-        dependency_plan.subprocess,
-        "run",
-        return_value=subprocess.CompletedProcess([], 0),
-    ) as run:
+    with (
+        patch.object(
+            installation_profile,
+            "selection_pending",
+            return_value=True,
+        ),
+        patch.object(
+            dependency_plan.subprocess,
+            "run",
+            return_value=subprocess.CompletedProcess([], 0),
+        ) as run,
+    ):
         dependency_plan._apply_pending_selection(Path(sys.executable))
     assert run.call_args.kwargs["stdout"] is subprocess.DEVNULL
+
+
+def test_activation_stdout_is_one_path_in_isolated_process() -> None:
+    code = """
+import pathlib
+import sys
+
+root = pathlib.Path(sys.argv[1])
+temporary = pathlib.Path(sys.argv[2])
+sys.path.insert(0, str(root / "backend"))
+import dependency_plan
+
+selection = temporary / "selection.py"
+selection.write_text("print('selection-noise')\\n", encoding="utf-8")
+environment = temporary / "env"
+plan = {"hash": "plan", "requirements": (), "probes": ()}
+dependency_plan.__file__ = str(selection)
+dependency_plan.ACTIVE_POINTER = temporary / ".active-venv"
+dependency_plan.VENV_ROOT = temporary / ".venvs"
+dependency_plan.resolve_plan = lambda: plan
+dependency_plan._resolve_or_build_environment = lambda _uv, _plan: environment
+dependency_plan._python_in = lambda _env: pathlib.Path(sys.executable)
+dependency_plan._write_pointer = lambda _env: None
+dependency_plan.installation_profile.selection_pending = lambda: True
+sys.argv = ["dependency_plan.py", "activate", "--uv", "uv"]
+raise SystemExit(dependency_plan.main())
+"""
+    with tempfile.TemporaryDirectory(prefix="ba-activation-stdout-") as tmp:
+        result = subprocess.run(
+            [sys.executable, "-c", code, str(ROOT), tmp],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        assert result.stdout == f"{Path(tmp) / 'env'}\n"
+        assert "selection-noise" not in result.stdout
+
+
+def test_activation_lock_serializes_processes() -> None:
+    code = """
+import pathlib
+import sys
+
+root = pathlib.Path(sys.argv[1])
+temporary = pathlib.Path(sys.argv[2])
+sys.path.insert(0, str(root / "backend"))
+import dependency_plan
+
+dependency_plan.VENV_ROOT = temporary / ".venvs"
+print("ready", flush=True)
+with dependency_plan.activation_lock():
+    (temporary / "acquired").write_text("yes", encoding="utf-8")
+"""
+    with tempfile.TemporaryDirectory(prefix="ba-activation-lock-") as tmp:
+        temporary = Path(tmp)
+        with patch.object(
+            dependency_plan,
+            "VENV_ROOT",
+            temporary / ".venvs",
+        ):
+            with dependency_plan.activation_lock():
+                process = subprocess.Popen(
+                    [sys.executable, "-c", code, str(ROOT), tmp],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+                try:
+                    assert process.stdout is not None
+                    assert process.stdout.readline().strip() == "ready"
+                    try:
+                        process.wait(timeout=0.2)
+                    except subprocess.TimeoutExpired:
+                        pass
+                    else:
+                        raise AssertionError(
+                            "contending activation process bypassed the lock"
+                        )
+                except BaseException:
+                    process.kill()
+                    process.wait()
+                    raise
+            process.wait(timeout=5)
+            if process.returncode != 0:
+                assert process.stderr is not None
+                raise AssertionError(process.stderr.read())
+        assert (temporary / "acquired").read_text(encoding="utf-8") == "yes"
+
+
+def test_activation_lock_routes_windows_to_kernel_mutex() -> None:
+    calls: list[Path] = []
+
+    @contextmanager
+    def fake_mutex(path: Path):
+        calls.append(path)
+        yield
+
+    with tempfile.TemporaryDirectory(prefix="ba-windows-lock-") as tmp:
+        with (
+            patch.object(dependency_plan, "VENV_ROOT", Path(tmp) / ".venvs"),
+            patch.object(dependency_plan.os, "name", "nt"),
+            patch.object(
+                dependency_plan,
+                "_windows_activation_mutex",
+                side_effect=fake_mutex,
+            ),
+        ):
+            with dependency_plan.activation_lock():
+                pass
+    assert calls == [Path(tmp) / ".dependency-plan.lock"]
+
+
+def test_activation_rechecks_plan_before_pointer_swap() -> None:
+    with tempfile.TemporaryDirectory(prefix="ba-plan-recheck-") as tmp:
+        backend = Path(tmp)
+        venv_root = backend / ".venvs"
+        pointer = backend / ".active-venv"
+        candidate = venv_root / "old-plan" / "candidate"
+        pointer.write_text(".venvs/existing", encoding="utf-8")
+        old_plan = {"hash": "old-plan", "requirements": (), "probes": ()}
+        new_plan = {"hash": "new-plan", "requirements": (), "probes": ()}
+        with (
+            patch.object(dependency_plan, "VENV_ROOT", venv_root),
+            patch.object(dependency_plan, "ACTIVE_POINTER", pointer),
+            patch.object(
+                dependency_plan,
+                "resolve_plan",
+                side_effect=(old_plan, new_plan),
+            ),
+            patch.object(
+                dependency_plan,
+                "_resolve_or_build_environment",
+                return_value=candidate,
+            ),
+            patch.object(
+                installation_profile,
+                "selection_pending",
+                return_value=False,
+            ),
+        ):
+            try:
+                dependency_plan.activate("uv")
+            except dependency_plan.DependencyPlanError:
+                pass
+            else:
+                raise AssertionError("changed activation plan must fail closed")
+        assert pointer.read_text(encoding="utf-8") == ".venvs/existing"
+
+
+def test_environment_marker_fails_closed() -> None:
+    with tempfile.TemporaryDirectory(prefix="ba-plan-marker-") as tmp:
+        env_dir = Path(tmp) / "env"
+        python = dependency_plan._python_in(env_dir)
+        python.parent.mkdir(parents=True)
+        shutil.copy2(sys.executable, python)
+        marker = env_dir / dependency_plan.PLAN_MARKER
+        plan = {"hash": "expected", "requirements": (), "probes": ("json",)}
+        invalid_values = (
+            None,
+            "{",
+            json.dumps({"schema_version": 1, "hash": "wrong"}),
+        )
+        for value in invalid_values:
+            marker.unlink(missing_ok=True)
+            if value is not None:
+                marker.write_text(value, encoding="utf-8")
+            try:
+                dependency_plan._assert_environment(env_dir, plan)
+            except dependency_plan.DependencyPlanError:
+                pass
+            else:
+                raise AssertionError("invalid environment marker must fail closed")
 
 
 def test_relocated_environment_runs_and_repairs_missing_probe() -> None:
@@ -675,9 +965,12 @@ def test_target_checkout_rejects_stale_dependency_environment() -> None:
     with tempfile.TemporaryDirectory(prefix="ba-target-dependency-") as tmp:
         backend = Path(tmp)
         env_dir = backend / ".venvs" / "candidate"
-        python = env_dir / "bin" / "python"
-        python.parent.mkdir(parents=True)
-        python.symlink_to(Path(sys.executable))
+        if os.name == "nt":
+            venv.EnvBuilder(with_pip=False).create(env_dir)
+        else:
+            python = dependency_plan._python_in(env_dir)
+            python.parent.mkdir(parents=True)
+            python.symlink_to(Path(sys.executable))
         (backend / ".active-venv").write_text(
             ".venvs/candidate",
             encoding="utf-8",
@@ -727,7 +1020,7 @@ def test_desktop_profile_excludes_native_dependencies() -> None:
 
 
 def test_ui_only_rejects_team_session_creation() -> None:
-    installation_profile.save(
+    _stage_installation_profile(
         mode=installation_profile.DESKTOP_UI_ONLY,
         provider="codex",
     )
@@ -744,7 +1037,7 @@ def test_ui_only_rejects_team_session_creation() -> None:
 
 
 def test_ui_only_ignores_stale_supervisor_registry() -> None:
-    installation_profile.save(
+    _stage_installation_profile(
         mode=installation_profile.DESKTOP_UI_ONLY,
         provider="codex",
     )
@@ -771,7 +1064,7 @@ def test_ui_only_ignores_stale_supervisor_registry() -> None:
 
 
 def test_ui_only_quiesces_durable_jobs() -> None:
-    installation_profile.save(
+    _stage_installation_profile(
         mode=installation_profile.DESKTOP_UI_ONLY,
         provider="codex",
     )
@@ -779,12 +1072,12 @@ def test_ui_only_quiesces_durable_jobs() -> None:
     asyncio.run(extension_jobs.quiesce_for_ui_only())
     record = extension_jobs.read_record("example", "work", "job-1")
     assert record is not None
-    assert record["status"] == "failed"
+    assert record["status"] == "cancelled"
     assert record["error"] == "cancelled by UI-only installation mode"
 
 
 def test_ui_only_cleanup_failure_is_not_ignored() -> None:
-    installation_profile.save(
+    _stage_installation_profile(
         mode=installation_profile.DESKTOP_UI_ONLY,
         provider="codex",
     )
@@ -812,9 +1105,16 @@ if __name__ == "__main__":
     test_provider_activation_mutations_reject_missing_runtime()
     test_rejected_provider_transitions_do_not_touch_credentials()
     test_failed_provider_persist_rolls_back_credentials()
+    test_credential_transaction_requires_authoritative_snapshot()
+    test_credential_write_failure_rolls_back_attempted_mutation()
     test_failed_dependency_stage_preserves_active_environment()
     test_selection_failure_restores_previous_pointer()
     test_pending_selection_does_not_write_activation_stdout()
+    test_activation_stdout_is_one_path_in_isolated_process()
+    test_activation_lock_serializes_processes()
+    test_activation_lock_routes_windows_to_kernel_mutex()
+    test_activation_rechecks_plan_before_pointer_swap()
+    test_environment_marker_fails_closed()
     test_relocated_environment_runs_and_repairs_missing_probe()
     test_target_checkout_rejects_stale_dependency_environment()
     test_desktop_profile_excludes_native_dependencies()

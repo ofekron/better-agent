@@ -18,9 +18,11 @@ Runtime profile is the formal name for a provider/model/reasoning-effort selecti
 - `backend/assistant_ui.py`: Assistant extension substrate; provisions the visible `Assistant` session and hidden `Assistant Monitor` session that sync through the extension board/store.
 - `backend/extension_context_audit.py`: non-blocking, cache-backed provisioned-session audit of installed extension harness contributions; injected as dynamic runtime context when a fresh cached audit exists.
 - `backend/tailscale_https.py`: Tailscale status/health helper for preferring verified `https://*.ts.net` external URLs with local fallback.
+- `backend/operation_catalog.py`, `backend/runtime_operation_api.py`, and `sdk/better_agent_sdk/surfaces.py`: authoritative operation catalog, scoped runtime admission, and generated MCP/CLI surfaces for maintained agent operations.
+- `backend/runner_operation_host.py` and `backend/operation_cli.py`: per-run secret-isolating operation broker and cross-platform generated CLI entrypoint.
 - `frontend/`: React UI, session/workspace views, settings, i18n, hooks, and UI tests.
 - `extensions/`: bundled Better Agent extensions and their backend/MCP surfaces.
-- `switch_control_daemon/line_switch_runtime/`: canonical durable line-switch transaction engine, installed as a last-good supervisor daemon so switching survives backend and active-line failures; `daemonhost/` exposes launcher-compatible adapters.
+- `switch_control_daemon/line_switch_runtime/`: bundled switch-control adapter for in-app line metadata, navigation, and legacy pointer switches. The standalone line owner/launcher is the separate `/Users/ofekron/ba-switch` repo.
 - `provider-config-sync/`: source checkout for provider capability/config synchronization across Codex, Claude, and Gemini. Better Agent runtime/build consumers use pinned artifacts under `vendor/provider-config-sync/`, never source-path injection.
 - Private extensions are installed packages discovered through persisted manifests. Public core must not import or probe the nested `better-agent-private` source tree.
 - Root instruction files: `AGENTS.md`, `CLAUDE.md`, and `GEMINI.md` hold provider-facing repo instructions.

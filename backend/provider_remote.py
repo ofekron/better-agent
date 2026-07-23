@@ -278,7 +278,6 @@ class RemoteProviderProxy(Provider):
             "setting_sources": setting_sources,
             "disallowed_tools": disallowed_tools,
             "backend_url": backend_url,
-            "internal_token": internal_token,
             "supervised": supervised,
             "supervisor_agent_session_id": supervisor_agent_session_id,
             "is_worker": is_worker,

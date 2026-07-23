@@ -7,8 +7,8 @@ import urllib.error
 import urllib.request
 from typing import Any
 
+from better_agent_sdk.surfaces import OperationSpec, build_mcp_server, run_mcp_or_cli
 from env_compat import require_env
-from mcp.server.fastmcp import FastMCP
 
 
 def _env_required(name: str) -> str:
@@ -156,62 +156,33 @@ def start_file_discussion_response(
         return {"success": False, "error": str(exc)}
 
 
-def build_server() -> FastMCP:
-    server = FastMCP(
-        "ui",
-        instructions=(
-            "Communicate with the user from an active Better Agent session. "
-            "Open files in the UI, ask bounded questions, or request explicit approval."
-        ),
-    )
+_INSTRUCTIONS = (
+    "Communicate with the user from an active Better Agent session. "
+    "Open files in the UI, ask bounded questions, or request explicit approval."
+)
 
-    @server.tool()
-    def open_file_panel(
-        mode: str,
-        path: str,
-        start_line: int | None = None,
-        end_line: int | None = None,
-        selected_start: int | None = None,
-        selected_end: int | None = None,
-    ) -> dict[str, Any]:
-        return open_file_panel_response(
-            mode,
-            path,
-            start_line,
-            end_line,
-            selected_start,
-            selected_end,
-        )
 
-    @server.tool()
-    def request_user_input(
-        questions: list[dict[str, Any]],
-        timeout_seconds: float | None = None,
-    ) -> dict[str, Any]:
-        return request_user_input_response(questions, timeout_seconds)
-
-    @server.tool()
-    def request_user_approval(
-        prompt: str,
-        timeout_seconds: float | None = None,
-    ) -> dict[str, Any]:
-        return request_user_approval_response(prompt, timeout_seconds)
-
+def _specs() -> tuple[OperationSpec, ...]:
+    specs = [
+        OperationSpec("open_file_panel", open_file_panel_response, operation="runtime_ui_open_file_panel"),
+        OperationSpec("request_user_input", request_user_input_response, operation="runtime_ui_request_user_input"),
+        OperationSpec("request_user_approval", request_user_approval_response, operation="runtime_ui_request_user_approval"),
+    ]
     if os.environ.get("BETTER_CLAUDE_FILE_EDITING") == "1":
-        @server.tool()
-        def start_file_discussion(
-            file_path: str,
-            line: int,
-            title: str = "",
-        ) -> dict[str, Any]:
-            return start_file_discussion_response(file_path, line, title)
+        specs.append(OperationSpec("start_file_discussion", start_file_discussion_response, operation="runtime_ui_start_file_discussion"))
+    return tuple(specs)
 
-    return server
+
+def build_server():
+    return build_mcp_server(
+        "ui",
+        _specs(),
+        instructions=_INSTRUCTIONS,
+    )
 
 
 def main() -> int:
-    build_server().run("stdio")
-    return 0
+    return run_mcp_or_cli("ui", _specs(), instructions=_INSTRUCTIONS)
 
 
 if __name__ == "__main__":

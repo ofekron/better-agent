@@ -5,6 +5,7 @@ import json
 import os
 import sys
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -19,6 +20,7 @@ import builtin_mcp_config
 import capability_contexts
 import extension_applied_config
 import extension_store
+import installation_admission
 import installation_profile
 import provider_setup
 import runner_codex
@@ -26,59 +28,222 @@ import runner_gemini
 import runtime_skills
 
 
-def _with_home() -> tempfile.TemporaryDirectory:
-    tmp = tempfile.TemporaryDirectory()
-    os.environ["BETTER_AGENT_HOME"] = tmp.name
-    return tmp
+@contextmanager
+def _with_home():
+    previous_home = os.environ.get("BETTER_AGENT_HOME")
+    previous_backend = installation_profile.BACKEND_ROOT
+    with tempfile.TemporaryDirectory(prefix="ba-install-modes-") as tmp:
+        root = Path(tmp)
+        os.environ["BETTER_AGENT_HOME"] = tmp
+        installation_profile.BACKEND_ROOT = root / "backend"
+        try:
+            yield root
+        finally:
+            installation_profile.BACKEND_ROOT = previous_backend
+            if previous_home is None:
+                os.environ.pop("BETTER_AGENT_HOME", None)
+            else:
+                os.environ["BETTER_AGENT_HOME"] = previous_home
 
 
-def test_profile_defaults_and_strict_round_trip() -> None:
-    with _with_home():
-        assert installation_profile.load() == {
+def _provider_identity(root: Path, provider: str) -> dict:
+    command = provider_setup.installer_for(provider).command
+    suffix = ".cmd" if os.name == "nt" else ""
+    launcher = root / f"{command}{suffix}"
+    launcher.write_bytes(b"@echo off\r\nexit /b 0\r\n" if suffix else b"#!/bin/sh\nexit 0\n")
+    launcher.chmod(0o700)
+    return provider_setup.executable_identity(str(launcher.absolute()))
+
+
+def _activate(root: Path, mode: str, provider: str = "codex") -> dict:
+    backend = installation_profile.BACKEND_ROOT
+    environment = backend / ".venvs" / "test"
+    environment.mkdir(parents=True, exist_ok=True)
+    (environment / ".dependency-plan.json").write_text(
+        json.dumps({"schema_version": 1, "hash": f"{mode}-{provider}"}),
+        encoding="utf-8",
+    )
+    backend.mkdir(parents=True, exist_ok=True)
+    (backend / ".active-venv").write_text(".venvs/test", encoding="utf-8")
+    provider_id = f"{provider}-id"
+    (root / "config.json").write_text(
+        json.dumps({
+            "default_provider_id": provider_id,
+            "providers": [
+                {
+                    "id": provider_id,
+                    "kind": provider,
+                    "suspended": False,
+                }
+            ],
+        }),
+        encoding="utf-8",
+    )
+    profile = installation_profile.new_active_profile(
+        mode=mode,
+        provider=provider,
+        provider_identity=_provider_identity(root, provider),
+    )
+    installation_profile.stage_activation(profile)
+    installation_profile.mark_selection_applied()
+    assert not installation_profile.selection_pending()
+    return profile
+
+
+def test_missing_legacy_malformed_and_interrupted_profiles_require_setup() -> None:
+    legacy_profiles = [
+        {
+            "schema_version": 2,
+            "mode": "desktop-ui-only",
+            "provider": "codex",
+        },
+        {
             "schema_version": 2,
             "mode": "default",
-            "provider": None,
-        }
+            "provider": "codex",
+        },
+    ]
+    with _with_home() as root:
+        profile_path = root / "installation.json"
+
+        assert installation_profile.load()["status"] == "setup_required"
+        assert installation_profile.capabilities()["setup_required"] is True
+
+        for value in legacy_profiles:
+            profile_path.write_text(json.dumps(value), encoding="utf-8")
+            assert installation_profile.load()["status"] == "setup_required"
+            assert not installation_profile.provider_conversations_enabled()
+
+        for raw in ("{", "[]", json.dumps({"schema_version": 3})):
+            profile_path.write_text(raw, encoding="utf-8")
+            assert installation_profile.load()["status"] == "setup_required"
+            assert not installation_profile.integrations_enabled()
+
+        profile_path.unlink()
+        (root / ".installation.json.interrupted.tmp").write_text(
+            json.dumps(legacy_profiles[1]),
+            encoding="utf-8",
+        )
+        assert installation_profile.load()["status"] == "setup_required"
+
+
+def test_activation_receipt_binds_profile_environment_and_selection() -> None:
+    with _with_home() as root:
+        profile = _activate(root, installation_profile.DEFAULT)
         assert installation_profile.capabilities() == {
+            "status": "active",
+            "setup_required": False,
             "mode": "default",
+            "provider_conversations_enabled": True,
             "mobile_enabled": True,
             "integrations_enabled": True,
         }
-        saved = installation_profile.save(mode="desktop-ui-only", provider="codex")
-        assert saved["mode"] == "desktop-ui-only"
-        assert saved["provider"] == "codex"
-        assert not installation_profile.integrations_enabled()
-        assert not installation_profile.mobile_enabled()
 
-        installation_profile.save(mode="mobile-desktop-ui-only", provider="codex")
-        assert not installation_profile.integrations_enabled()
-        assert installation_profile.mobile_enabled()
+        receipt_path = root / "installation-activation.json"
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        receipt["generation"] = "different"
+        receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+        assert installation_profile.capabilities()["setup_required"] is True
 
-        installation_profile.save(mode="default", provider="codex")
-        assert installation_profile.integrations_enabled()
-        assert installation_profile.mobile_enabled()
+        installation_profile.stage_activation(profile)
+        assert installation_profile.capabilities()["setup_required"] is True
 
-        profile_path = Path(os.environ["BETTER_AGENT_HOME"]) / "installation.json"
-        profile_path.write_text(json.dumps({**saved, "mode": "unknown"}), encoding="utf-8")
-        try:
-            installation_profile.load()
-        except installation_profile.InstallationProfileError:
-            pass
-        else:
-            raise AssertionError("invalid persisted installation mode must fail closed")
 
-        profile_path.write_text(json.dumps({**saved, "schema_version": 1}), encoding="utf-8")
-        try:
-            installation_profile.load()
-        except installation_profile.InstallationProfileError:
-            pass
-        else:
-            raise AssertionError("obsolete installation profile schema must fail closed")
+async def _admit(
+    path: str,
+    *,
+    scope_type: str = "http",
+) -> tuple[bool, list[dict]]:
+    called = False
+    sent: list[dict] = []
+
+    async def app(_scope, _receive, _send):
+        nonlocal called
+        called = True
+
+    async def receive():
+        return {"type": f"{scope_type}.request"}
+
+    async def send(message):
+        sent.append(message)
+
+    middleware = installation_admission.InstallationAdmissionMiddleware(app)
+    await middleware(
+        {"type": scope_type, "path": path, "method": "GET"},
+        receive,
+        send,
+    )
+    return called, sent
+
+
+def test_authoritative_admission_rejects_before_side_effects() -> None:
+    async def run() -> None:
+        with _with_home():
+            called, messages = await _admit("/api/sessions")
+            assert not called
+            assert messages[0]["status"] == 503
+
+            called, _ = await _admit("/api/installation-profile")
+            assert called
+            called, _ = await _admit("/assets/index.js")
+            assert called
+
+            for prefix in installation_admission._INTEGRATION_PREFIXES:
+                called, messages = await _admit(f"{prefix}/probe")
+                assert not called, prefix
+                assert messages[0]["status"] == 404
+            called, messages = await _admit(
+                "/api/internal/sessions/example/capabilities"
+            )
+            assert not called
+            assert messages[0]["status"] == 404
+
+            for prefix in installation_admission._MOBILE_PREFIXES:
+                called, messages = await _admit(f"{prefix}/probe")
+                assert not called, prefix
+                assert messages[0]["status"] == 404
+
+            called, messages = await _admit("/ws/chat", scope_type="websocket")
+            assert not called
+            assert messages == [{
+                "type": "websocket.close",
+                "code": 1008,
+                "reason": "installation capability unavailable",
+            }]
+
+    asyncio.run(run())
+
+
+def test_mode_matrix_uses_one_policy_for_discovery_and_authorization() -> None:
+    async def run() -> None:
+        cases = (
+            (installation_profile.DESKTOP_UI_ONLY, True, False, False),
+            (installation_profile.MOBILE_DESKTOP_UI_ONLY, True, True, False),
+            (installation_profile.DEFAULT, True, True, True),
+        )
+        for mode, conversations, mobile, integrations in cases:
+            with _with_home() as root:
+                _activate(root, mode)
+                discovery = installation_profile.capabilities()
+                assert discovery["provider_conversations_enabled"] is conversations
+                assert discovery["mobile_enabled"] is mobile
+                assert discovery["integrations_enabled"] is integrations
+
+                called, _ = await _admit("/api/sessions")
+                assert called is conversations
+                called, _ = await _admit("/api/mobile/status")
+                assert called is mobile
+                called, _ = await _admit("/api/extensions")
+                assert called is integrations
+                called, _ = await _admit("/ws/chat", scope_type="websocket")
+                assert called is conversations
+
+    asyncio.run(run())
 
 
 def test_ui_only_suppresses_better_agent_injections() -> None:
-    with _with_home():
-        installation_profile.save(mode="default", provider="claude")
+    with _with_home() as root:
+        _activate(root, installation_profile.DESKTOP_UI_ONLY, "claude")
         active_data = {
             "extensions": {
                 "example": {
@@ -88,10 +253,6 @@ def test_ui_only_suppresses_better_agent_injections() -> None:
                 }
             }
         }
-        assert len(extension_store._active_records_from_data(active_data)) == 1
-        default_frontend_key = extension_store.frontend_entrypoints_cache_key()
-
-        installation_profile.save(mode="desktop-ui-only", provider="claude")
         provider_config = {"mcp_servers": {"user-owned": {"command": "user-mcp"}}}
         inputs = {
             "app_session_id": "session",
@@ -106,7 +267,6 @@ def test_ui_only_suppresses_better_agent_injections() -> None:
         assert runtime_skills.runtime_skill_contexts(str(ROOT)) == []
         assert not runtime_skills.has_runtime_skills(str(ROOT))
         assert extension_store._active_records_from_data(active_data) == []
-        assert extension_store.frontend_entrypoints_cache_key() != default_frontend_key
         assert runner_gemini._with_communicate_mcp(inputs, provider_config) == provider_config
         dynamic_tools, handlers = runner_codex._build_dynamic_tool_set(
             mode="native",
@@ -146,17 +306,6 @@ def test_ui_only_suppresses_better_agent_injections() -> None:
             extension_applied_config.reconcile_all()
         clear_markers.assert_called_once_with("example")
 
-        installation_profile.save(mode="default", provider="claude")
-        assert len(extension_store._active_records_from_data(active_data)) == 1
-        assert builtin_mcp_config.with_builtin_mcp_servers(
-            {"bare_config": True}, provider_config
-        ) == provider_config
-
-        installation_profile.save(mode="mobile-desktop-ui-only", provider="claude")
-        assert builtin_mcp_config.with_builtin_mcp_servers(inputs, provider_config) == provider_config
-        assert runtime_skills.runtime_skill_contexts(str(ROOT)) == []
-        assert extension_store._active_records_from_data(active_data) == []
-
 
 def test_provider_install_skips_cli_that_is_already_available() -> None:
     async def run() -> None:
@@ -176,42 +325,39 @@ def test_provider_install_skips_cli_that_is_already_available() -> None:
     asyncio.run(run())
 
 
-def test_platform_installers_are_exactly_named() -> None:
+def test_platform_installers_share_transactional_activation() -> None:
     python_installer = ROOT / "scripts" / "install.py"
     installation_guide = ROOT / "INSTALL.md"
     windows_installer = ROOT / "scripts" / "install-windows.ps1"
     macos_installer = ROOT / "scripts" / "install-macos.sh"
-    assert python_installer.is_file()
-    assert installation_guide.is_file()
-    assert not (ROOT / "scripts" / "install-agent.md").exists()
-    assert macos_installer.is_file()
-    assert windows_installer.is_file()
-    assert not (ROOT / "scripts" / "bootstrap-macos.sh").exists()
-    assert not (ROOT / "scripts" / "bootstrap-windows.ps1").exists()
     python_source = python_installer.read_text(encoding="utf-8")
     agent_source = installation_guide.read_text(encoding="utf-8")
     windows_source = windows_installer.read_text(encoding="utf-8")
     macos_source = macos_installer.read_text(encoding="utf-8")
-    assert "installation_profile.DESKTOP_UI_ONLY" in python_source
-    assert "installation_profile.MOBILE_DESKTOP_UI_ONLY" in python_source
-    assert "installation_profile.DEFAULT" in python_source
+
+    assert python_installer.is_file()
+    assert installation_guide.is_file()
+    assert macos_installer.is_file()
+    assert windows_installer.is_file()
     for mode in installation_profile.MODES:
         assert mode in agent_source
         assert mode in windows_source
-    assert "ask the user" in agent_source.lower()
-    assert "Do not infer a choice" in agent_source
-    assert "install-macos.sh --mode <mode> --provider <provider> --yes" in agent_source
-    assert "install-windows.ps1 -Mode <mode> -Provider <provider> -Yes" in agent_source
-    assert "provider_setup.supported_provider_kinds()" in agent_source
-    assert "dependency_plan.py\" activate" in macos_source
+    assert "dependency_plan.activation_lock()" in python_source
+    assert "verified_provider_identity" in python_source
+    assert "prepare_installation" in python_source
+    assert "activate_prepared_installation" in python_source
+    assert "dependency_plan.py\" active" in macos_source
+    assert "dependency_plan.py\") active" in windows_source
     assert "install-bagent.sh" in macos_source
-    assert "dependency_plan.py" in windows_source
     assert "bagent.cmd" in windows_source
 
 
 if __name__ == "__main__":
-    test_profile_defaults_and_strict_round_trip()
+    test_missing_legacy_malformed_and_interrupted_profiles_require_setup()
+    test_activation_receipt_binds_profile_environment_and_selection()
+    test_authoritative_admission_rejects_before_side_effects()
+    test_mode_matrix_uses_one_policy_for_discovery_and_authorization()
     test_ui_only_suppresses_better_agent_injections()
     test_provider_install_skips_cli_that_is_already_available()
-    test_platform_installers_are_exactly_named()
+    test_platform_installers_share_transactional_activation()
     print("installation mode tests passed")

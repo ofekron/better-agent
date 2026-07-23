@@ -28,7 +28,7 @@ brew install git python uv node
 
 python3 "$(dirname "$0")/install.py" "$@"
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-ACTIVE_ENV="$(python3 "$REPO/backend/dependency_plan.py" activate --uv "$(command -v uv)")"
+ACTIVE_ENV="$(python3 "$REPO/backend/dependency_plan.py" active)"
 BETTER_AGENT_BACKEND_PYTHON="$ACTIVE_ENV/bin/python" \
   "$REPO/scripts/install-bagent.sh"
 

@@ -2,13 +2,9 @@
 
 INVARIANT — Trust boundary: the bearer credential a node presents is
 its PER-NODE secret (argon2-verified against `node_registry_store` on
-primary). There is no shared token. Primary's per-worker
-`internal_token` is shipped to nodes inside `spawn_run` payloads (so
-the spawned worker on the node can call back into primary's
-`/api/internal/*` endpoints — ask-fork, delegate, etc.). A compromised
-node therefore = primary
-compromised. Trust model is LAN/VPN — no further mitigations layered
-in v1.
+primary). There is no shared token. Spawned workers receive only a
+node-local one-time runtime bootstrap; maintained operation calls are
+relayed to primary under the authenticated node identity.
 
 Topology: ALL nodes dial primary (NAT-friendly). Each node holds exactly
 one persistent WS to primary. Multiplexing is by `run_id` for run-scoped
@@ -81,7 +77,6 @@ class SpawnRun(TypedDict, total=False):
     setting_sources: Optional[list[str]]
     disallowed_tools: Optional[list[str]]
     backend_url: Optional[str]       # what URL the spawned worker should call back to
-    internal_token: Optional[str]    # primary's internal_token (so worker can authenticate)
     supervised: bool
     supervisor_agent_session_id: Optional[str]
     browser_harness_enabled: bool

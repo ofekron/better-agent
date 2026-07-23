@@ -104,8 +104,11 @@ async def handle_spawn_run(node_client, msg: dict) -> None:
             source=msg.get("source"),
             disallowed_tools=msg.get("disallowed_tools"),
             setting_sources=msg.get("setting_sources"),
-            backend_url=msg.get("backend_url"),
-            internal_token=msg.get("internal_token"),
+            backend_url=get_env(
+                "BETTER_CLAUDE_BACKEND_URL",
+                "http://localhost:8000",
+            ),
+            internal_token=__import__("node_runtime_auth").token(),
             fork=bool(msg.get("fork")),
             supervised=bool(msg.get("supervised")),
             supervisor_agent_session_id=msg.get("supervisor_agent_session_id"),

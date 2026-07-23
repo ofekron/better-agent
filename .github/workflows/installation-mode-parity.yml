@@ -1,0 +1,46 @@
+name: Installation mode parity
+
+on:
+  push:
+    branches:
+      - dev
+  pull_request:
+
+jobs:
+  installation-mode-matrix:
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - macos-14
+          - windows-2022
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install focused runtime dependencies
+        run: >-
+          python -m pip install
+          -r backend/requirements.txt
+          -r backend/requirements-claude.txt
+          -r backend/requirements-mobile.txt
+      - name: Run installation mode matrix
+        run: python backend/scripts/test_installation_modes.py
+      - name: Run transactional setup matrix
+        run: python backend/scripts/test_installation_setup_transaction.py
+      - name: Run executable identity matrix
+        run: python backend/scripts/test_provider_executable_identity.py
+      - name: Parse macOS installer
+        if: runner.os == 'macOS'
+        run: bash -n scripts/install-macos.sh
+      - name: Parse Windows installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: >-
+          [void][scriptblock]::Create(
+            [System.IO.File]::ReadAllText(
+              (Resolve-Path scripts/install-windows.ps1)
+            )
+          )

@@ -47,6 +47,7 @@ config_store.apply_provider_config_env_vars()
 from provider import default_provider, load_all_providers  # noqa: E402
 from topology import load_topology  # noqa: E402
 import node_identity  # noqa: E402
+import node_runtime_auth  # noqa: E402
 from node_client import NodeClient, set_singleton  # noqa: E402
 
 
@@ -135,15 +136,14 @@ async def healthz() -> dict:
 # ============================================================================
 # Reverse-proxy canonical-state internal endpoints → primary
 # ----------------------------------------------------------------------------
-# Workers running on the node HTTP-loopback to their BETTER_CLAUDE_BACKEND_URL,
-# which we set to the node's localhost so worker MCP servers (file_editor etc.)
-# work without needing WAN paths. For the MCP calls that need canonical state
-# on primary — ask(fork)'s fork engine (/api/internal/ask-fork) and the
-# delegate_task router (/api/internal/delegate-task) — the node forwards to
-# primary, preserving the worker's internal_token (which primary minted and
-# shipped to the node in spawn_run).
+# Workers call the node's HTTP loopback with an in-memory node-local token.
+# The node replaces it with its per-node credential before forwarding the
+# narrow canonical-state routes to primary.
 # ============================================================================
 async def _proxy_to_primary(request: Request, path: str) -> Response:
+    local_token = str(request.headers.get("X-Internal-Token") or "")
+    if not node_runtime_auth.verify(local_token):
+        return Response(status_code=403)
     topology = load_topology()
     primary_addr = topology.primary.address.rstrip("/")
     # Convert ws:// → http:// for the HTTP forward.
@@ -155,8 +155,11 @@ async def _proxy_to_primary(request: Request, path: str) -> Response:
 
     headers = {
         k: v for k, v in request.headers.items()
-        if k.lower() not in ("host", "content-length")
+        if k.lower() not in ("host", "content-length", "x-internal-token", "authorization")
     }
+    identity = node_identity.load_or_create()
+    headers["Authorization"] = f"Bearer {identity.secret}"
+    headers["X-Better-Agent-Node-ID"] = identity.node_id
     body = await request.body()
 
     async with httpx.AsyncClient(timeout=None) as client:
@@ -181,3 +184,8 @@ async def proxy_ask_fork(request: Request) -> Response:
 @app.api_route("/api/internal/delegate-task", methods=["POST"])
 async def proxy_delegate_task(request: Request) -> Response:
     return await _proxy_to_primary(request, "/api/internal/delegate-task")
+
+
+@app.api_route("/api/internal/runtime-operations", methods=["POST"])
+async def proxy_runtime_operations(request: Request) -> Response:
+    return await _proxy_to_primary(request, "/api/node/runtime-operations")

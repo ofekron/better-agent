@@ -453,7 +453,8 @@ class GeminiProvider(Provider):
             "disallowed_tools": disallowed_tools or [],
             "setting_sources": setting_sources or [],
             "backend_url": backend_url or "",
-            "internal_token": internal_token or "",
+            "internal_token": "",
+            "provider_id": self.id,
             "fork": bool(fork),
             "supervised": bool(supervised),
             "supervisor_agent_session_id": supervisor_agent_session_id,
@@ -498,6 +499,7 @@ class GeminiProvider(Provider):
             env.update(build_better_agent_run_env(
                 backend_url=backend_url,
                 internal_token=internal_token,
+                run_id=run_id,
                 app_session_id=app_session_id,
                 cwd=cwd,
                 model=model,
