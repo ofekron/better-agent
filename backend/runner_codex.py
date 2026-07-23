@@ -39,7 +39,10 @@ import re
 from i18n import t
 from builtin_mcp_config import native_mcp_runtime_env, with_builtin_mcp_servers
 from capability_contexts import prepend_capability_context
-from continuation import normalize_context_overflow_error
+from continuation import (
+    PROVIDER_CAPABILITIES_CHANGED_ERROR,
+    normalize_context_overflow_error,
+)
 from codex_normalize import (
     _codex_primary_assistant_text,
     _codex_terminal_state,
@@ -185,12 +188,61 @@ def _codex_config_overrides(
     run_dir: Path,
     provider_run_config: dict,
 ) -> list[str]:
-    overrides: list[str] = []
+    del run_dir
     mcp_servers = provider_run_config.get("mcp_servers") or {}
-    if mcp_servers:
-        overrides.append(f"mcp_servers={toml_literal(mcp_servers)}")
+    if not mcp_servers:
+        return []
+    return [f"mcp_servers={toml_literal(mcp_servers)}"]
 
-    return overrides
+
+def _canonical_dynamic_tools(tools: object) -> Optional[frozenset[str]]:
+    if not isinstance(tools, list):
+        return None
+    names: set[str] = set()
+    contracts: set[str] = set()
+    for tool in tools:
+        if not isinstance(tool, dict):
+            return None
+        name = str(tool.get("name") or "").strip()
+        if not name or name in names:
+            return None
+        names.add(name)
+        try:
+            contracts.add(json.dumps(tool, sort_keys=True, separators=(",", ":")))
+        except (TypeError, ValueError):
+            return None
+    return frozenset(contracts)
+
+
+def _dynamic_tools_from_rollout(path: Path) -> Optional[frozenset[str]]:
+    try:
+        with path.open(encoding="utf-8") as stream:
+            for line in stream:
+                row = json.loads(line)
+                if not isinstance(row, dict):
+                    return None
+                if row.get("type") != "session_meta":
+                    continue
+                payload = row.get("payload")
+                if not isinstance(payload, dict):
+                    return None
+                return _canonical_dynamic_tools(payload.get("dynamic_tools"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return None
+
+
+def _dynamic_tool_set_changed(
+    rollout_path: Optional[Path],
+    dynamic_tools: Optional[list[dict]],
+) -> bool:
+    if rollout_path is None:
+        return True
+    persisted_tools = _dynamic_tools_from_rollout(rollout_path)
+    desired_tools = _canonical_dynamic_tools(dynamic_tools or [])
+    if persisted_tools is None or desired_tools is None:
+        return True
+    return persisted_tools != desired_tools
 
 
 def _materialize_codex_run_home(
@@ -2924,6 +2976,9 @@ async def _run(run_dir: Path, inputs: dict) -> int:
     initial_rollout_path = resolve_rollout_path(session_id or "")
     if session_id and initial_rollout_path is None:
         initial_rollout_path = await resolve_rollout_path_polled(session_id, timeout=5.0)
+    if session_id and _dynamic_tool_set_changed(initial_rollout_path, dynamic_tools):
+        _fail(run_dir, PROVIDER_CAPABILITIES_CHANGED_ERROR)
+        return 1
     initial_byte_offset = _file_size(initial_rollout_path)
 
     state: dict = {

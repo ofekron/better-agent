@@ -46,7 +46,10 @@ from datetime import datetime, timedelta, timezone
 from functools import partial
 from typing import Awaitable, Callable, Literal, Optional
 
-from continuation import is_context_overflow_error
+from continuation import (
+    PROVIDER_CAPABILITIES_CHANGED_ERROR,
+    is_context_overflow_error,
+)
 from continuation_flow import start_continuation_for
 from event_bus import BusEvent, bus
 from event_shape import (
@@ -3028,6 +3031,26 @@ class TurnManager:
                  for e in attempt_events if e["type"] == "error"),
                 None,
             ) or complete_data.get("error")
+
+            if (
+                not success
+                and error == PROVIDER_CAPABILITIES_CHANGED_ERROR
+            ):
+                old_provider_sid = new_sid or current_session_id
+                chain_depth = await _start_context_continuation(
+                    old_provider_sid,
+                    reason=PROVIDER_CAPABILITIES_CHANGED_ERROR,
+                )
+                logger.info(
+                    "continuation: provider capabilities changed for %s "
+                    "(provider=%s chain depth %d, old sid %s)",
+                    app_session_id[:8],
+                    provider_kind or "unknown",
+                    chain_depth,
+                    (old_provider_sid or "none")[:8],
+                )
+                self._pop_run_id(app_session_id, run_id)
+                continue
 
             # ── Context-window overflow → continuation ────────────────
             # When context_strategy is "continuation" and the provider hits
