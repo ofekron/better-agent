@@ -161,6 +161,28 @@ def assert_active() -> None:
         )
 
 
+def verified_active_env(backend_dir: Path) -> Path:
+    env_dir = active_env(backend_dir)
+    python = _python_in(env_dir)
+    planner = backend_dir / Path(__file__).name
+    if not planner.is_file():
+        raise DependencyPlanError("target checkout has no dependency planner")
+    try:
+        subprocess.run(
+            [str(python), str(planner), "assert-active"],
+            cwd=backend_dir,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise DependencyPlanError(
+            "target checkout dependency environment is stale"
+        ) from exc
+    return env_dir
+
+
 def _module_available(module: str) -> bool:
     import importlib.util
 
@@ -287,7 +309,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "command",
-        choices=("activate", "active", "plan", "apply-selection"),
+        choices=("activate", "active", "plan", "apply-selection", "assert-active"),
     )
     parser.add_argument("--uv")
     args = parser.parse_args()
@@ -302,6 +324,9 @@ def main() -> int:
             value = config_store.apply_installation_profile_selection()
         elif args.command == "active":
             value = str(active_env())
+        elif args.command == "assert-active":
+            assert_active()
+            value = "active"
         else:
             value = resolve_plan()
         if isinstance(value, dict):
