@@ -601,6 +601,8 @@ def bind_ask_delivery() -> None:
     bus.unsubscribe("ask_delivery_journal_receipt")
     bus.unsubscribe("ask_delivery_turn_complete")
     bus.unsubscribe("ask_delivery_turn_stopped")
+    bus.unsubscribe("ask_delivery_target_turn_done")
+    bus.unsubscribe("ask_delivery_target_turn_failed")
     bus.subscribe(
         EVENT_JOURNAL_WRITTEN,
         ask_delivery.on_journal_written,
@@ -618,6 +620,18 @@ def bind_ask_delivery() -> None:
         ask_delivery.on_caller_terminal,
         priority=30,
         name="ask_delivery_turn_stopped",
+    )
+    bus.subscribe(
+        "user_message_done",
+        ask_delivery.on_target_turn_terminal,
+        priority=30,
+        name="ask_delivery_target_turn_done",
+    )
+    bus.subscribe(
+        "user_message_failed",
+        ask_delivery.on_target_turn_terminal,
+        priority=30,
+        name="ask_delivery_target_turn_failed",
     )
 
 

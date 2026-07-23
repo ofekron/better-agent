@@ -206,3 +206,57 @@ async def on_caller_terminal(event: Any) -> None:
     if payload.get("reason") == "worker_inner":
         return
     await mark_caller_terminal(event.sid)
+
+
+async def on_target_turn_terminal(event: Any) -> None:
+    """Write the ask result the moment the TARGET session's turn ends,
+    independent of whether the caller's own `_ask_team_message_wait`
+    coroutine is still alive to observe it live. Mirrors the fork/
+    delegate_task path (`_delegation.py`'s `_with_ask_delivery`), where the
+    callee side always writes the result — the plain-`ask` flow previously
+    had no equivalent, so a caller whose own turn completed while its ask
+    was still outstanding (`ask_delivery.mark_caller_terminal`) could never
+    get a `fallback_message` to deliver and hung until the 24h timeout."""
+    payload = event.payload if isinstance(event.payload, dict) else {}
+    lifecycle_msg_id = str(payload.get("lifecycle_msg_id") or event.msg_id or "").strip()
+    if not lifecycle_msg_id:
+        return
+    ask_id = await asyncio.to_thread(ask_status_store.find_ask_id_by_lifecycle, lifecycle_msg_id)
+    if not ask_id:
+        return
+    status = await asyncio.to_thread(ask_status_store.read_status, ask_id)
+    if not status or status.get("result") is not None:
+        return
+    if str(status.get("target_session_id") or "") != str(event.sid or ""):
+        return
+    from orchestrator import get_active_coordinator
+
+    coordinator = get_active_coordinator()
+    if coordinator is None:
+        return
+    target_session_id = str(event.sid or "")
+    if event.type == "user_message_done":
+        # Match the live path exactly (orchestrator.py's wait_callback):
+        # `user_message_done` is success regardless of `payload["success"]`,
+        # which can be False for a sub-turn-recorded failure that didn't
+        # raise the overall turn. Branching on that field here would make
+        # this writer disagree with the live path on the identical event.
+        result: dict[str, Any] = {"success": True}
+        response = await asyncio.to_thread(
+            coordinator._team_message_turn_response,
+            target_session_id=target_session_id,
+            lifecycle_msg_id=lifecycle_msg_id,
+        )
+    else:
+        result = {
+            "success": False,
+            "error": payload.get("error") or payload.get("reason") or "target turn failed",
+        }
+        response = {}
+    full = {
+        **result,
+        "target_session_id": target_session_id,
+        "queued_id": str(status.get("queue_item_id") or ""),
+        **response,
+    }
+    await ask_status_store.write_status_async(ask_id, result=full)
