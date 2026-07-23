@@ -40,8 +40,18 @@ def _resolve_args(args: argparse.Namespace) -> tuple[str, str]:
     mode = args.mode or _choose(
         "How deeply should Better Agent integrate?",
         [
-            ("ui-only", "UI only — no Better Agent extensions, skills, MCPs, or agent additions"),
-            ("default", "Default — Better Agent's standard integrations"),
+            (
+                installation_profile.DESKTOP_UI_ONLY,
+                "Desktop UI only — no mobile app or Better Agent integrations",
+            ),
+            (
+                installation_profile.MOBILE_DESKTOP_UI_ONLY,
+                "Mobile + Desktop UI only — no Better Agent extensions, skills, MCPs, or agent additions",
+            ),
+            (
+                installation_profile.DEFAULT,
+                "Default — Better Agent's standard integrations plus mobile and desktop UI",
+            ),
         ],
     )
     providers = [

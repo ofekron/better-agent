@@ -6,8 +6,11 @@ from typing import Any
 from json_store import write_json
 from paths import ba_home
 
-SCHEMA_VERSION = 1
-MODES = frozenset({"default", "ui-only"})
+SCHEMA_VERSION = 2
+DESKTOP_UI_ONLY = "desktop-ui-only"
+MOBILE_DESKTOP_UI_ONLY = "mobile-desktop-ui-only"
+DEFAULT = "default"
+MODES = frozenset({DESKTOP_UI_ONLY, MOBILE_DESKTOP_UI_ONLY, DEFAULT})
 
 
 class InstallationProfileError(ValueError):
@@ -19,7 +22,7 @@ def _path():
 
 
 def _default() -> dict[str, Any]:
-    return {"schema_version": SCHEMA_VERSION, "mode": "default", "provider": None}
+    return {"schema_version": SCHEMA_VERSION, "mode": DEFAULT, "provider": None}
 
 
 def _validate(value: Any) -> dict[str, Any]:
@@ -66,5 +69,18 @@ def save(*, mode: str, provider: str) -> dict[str, Any]:
     return profile
 
 
+def capabilities() -> dict[str, Any]:
+    mode = load()["mode"]
+    return {
+        "mode": mode,
+        "mobile_enabled": mode != DESKTOP_UI_ONLY,
+        "integrations_enabled": mode == DEFAULT,
+    }
+
+
 def integrations_enabled() -> bool:
-    return load()["mode"] == "default"
+    return capabilities()["integrations_enabled"]
+
+
+def mobile_enabled() -> bool:
+    return capabilities()["mobile_enabled"]

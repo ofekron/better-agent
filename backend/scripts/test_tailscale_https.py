@@ -19,6 +19,7 @@ _TMP_HOME = _test_home.isolate("bc-test-tailscale-https-")
 from fastapi.testclient import TestClient  # noqa: E402
 
 import auth  # noqa: E402
+import installation_profile  # noqa: E402
 import main  # noqa: E402
 import tailscale_https  # noqa: E402
 
@@ -407,6 +408,17 @@ def test_status_endpoints_prefer_reachable_tailscale_https() -> None:
         tailscale_https.better_agent_is_reachable = original_reachable  # type: ignore[assignment]
 
 
+def test_desktop_only_rejects_native_mobile_endpoints() -> None:
+    client = _client()
+    installation_profile.save(mode=installation_profile.DESKTOP_UI_ONLY, provider="codex")
+    assert client.get("/api/installation-profile").json()["mobile_enabled"] is False
+    assert client.get("/api/mobile/status").status_code == 404
+
+    installation_profile.save(mode=installation_profile.MOBILE_DESKTOP_UI_ONLY, provider="codex")
+    assert client.get("/api/installation-profile").json()["mobile_enabled"] is True
+    assert client.get("/api/mobile/status").status_code == 200
+
+
 def test_status_endpoints_fall_back_to_local_url() -> None:
     original_lan_ip = main._lan_ip
     original_url = tailscale_https.current_tailscale_https_url
@@ -480,6 +492,7 @@ def main_run() -> int:
         test_preferred_external_url_uses_serve_when_it_makes_tailscale_reachable,
         test_preferred_external_url_falls_back_when_serve_conflicts,
         test_status_endpoints_prefer_reachable_tailscale_https,
+        test_desktop_only_rejects_native_mobile_endpoints,
         test_status_endpoints_fall_back_to_local_url,
         test_desktop_status_can_use_loopback_https,
     ):
