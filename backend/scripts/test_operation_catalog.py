@@ -49,7 +49,28 @@ def _principal(operation: str) -> RuntimePrincipal:
     )
 
 
+def _assert_generated_runtime_files_excluded() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        (root / "AGENTS.md").touch()
+        backend = root / "backend"
+        backend.mkdir()
+        (backend / "source.py").write_text("VALUE = 1\n", encoding="utf-8")
+        (backend / "requirements.txt").write_text("", encoding="utf-8")
+        generated = backend / ".venvs" / "runtime" / ".stage"
+        generated.mkdir(parents=True)
+        transient = generated / "activate_this.py"
+        transient.write_text("VALUE = 1\n", encoding="utf-8")
+
+        first = operation_catalog._artifact_digest(root)
+        transient.write_text("VALUE = 2\n", encoding="utf-8")
+        transient.unlink()
+
+        assert operation_catalog._artifact_digest(root) == first
+
+
 def main() -> None:
+    _assert_generated_runtime_files_excluded()
     state_root = Path(tempfile.mkdtemp(prefix="better-agent-catalog-state-"))
     with tempfile.TemporaryDirectory() as raw:
         os.environ["BETTER_AGENT_HOME"] = str(state_root)
