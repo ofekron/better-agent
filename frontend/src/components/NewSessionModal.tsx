@@ -933,8 +933,8 @@ export function NewSessionModal({
 
   return (
     <>
-    <div className="modal-overlay" onClick={creating ? undefined : onClose}>
-      <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+    <div className="modal-overlay ns-session-overlay" onClick={creating ? undefined : onClose}>
+      <div className="modal-content ns-session-modal" onClick={(e) => e.stopPropagation()}>
         <div className="modal-header">
           <h2>{t("newSession.title")}</h2>
           <button className="modal-close" onClick={creating ? undefined : onClose} disabled={creating}>
@@ -1109,7 +1109,6 @@ export function NewSessionModal({
             {sessionExtensionOptions.map((option) => renderExtensionOption(option))}
             <div className="ns-modal-section-title">{t("newSession.preset")}</div>
             <select
-              className="ns-modal-preset-select"
               value={preset}
               onChange={(e) => setPreset(e.target.value)}
               title={t("newSession.presetHint")}
