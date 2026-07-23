@@ -176,6 +176,32 @@ export function isGlobalUnfilteredFetch(f: SessionListFilters): boolean {
   );
 }
 
+/** Which locally-held sessions a REPLACE page must PRESERVE rather than
+ * evict. A replace page is a point-in-time backend snapshot taken when the
+ * fetch was dispatched. The ONLY replace fetch that ever applies is the
+ * newest-dispatched one (older in-flight replace fetches are discarded by
+ * the `requestSeq !== current` guard on resolve), so a page can be stale
+ * only relative to local inserts that happened AFTER that fetch was
+ * dispatched. Preserve a `prev` session absent from the page when it is an
+ * unacknowledged offline session, or when it was inserted locally after the
+ * fetch's dispatch watermark (`insertGenById[id] > dispatchInsertGen`).
+ * Everything else absent from the page is a genuine backend removal and is
+ * evicted. This closes the race where a new server-confirmed session
+ * (e.g. one whose first prompt failed, so no turn-complete refetch re-adds
+ * it) is dropped from the sidebar by an in-flight pre-creation list fetch. */
+export function preservedLocalSessionsForReplace(
+  prev: Session[],
+  pageIds: Set<string>,
+  opts: { dispatchInsertGen: number; insertGenById: Map<string, number> },
+): Session[] {
+  return prev.filter((s) => {
+    if (pageIds.has(s.id)) return false;
+    if (s.offline_pending) return true;
+    const gen = opts.insertGenById.get(s.id);
+    return gen !== undefined && gen > opts.dispatchInsertGen;
+  });
+}
+
 function sameSessionListFilters(
   a: SessionListFilters,
   b: SessionListFilters,
@@ -955,6 +981,11 @@ export function useSession(authStatus?: string) {
   const sessionsNextOffsetRef = useRef(0);
   const sessionsLoadingPageRef = useRef(false);
   const sessionListRequestSeqRef = useRef(0);
+  // Monotonic watermark for local structural inserts into the session
+  // list. A replace page dispatched before an insert must not evict that
+  // insert — see preservedLocalSessionsForReplace.
+  const sessionInsertGenRef = useRef(0);
+  const sessionInsertGenByIdRef = useRef<Map<string, number>>(new Map());
   const sessionListFiltersReadyRef = useRef(false);
   const currentSessionRef = useRef<Session | null>(null);
   currentSessionRef.current = currentSession;
@@ -970,6 +1001,14 @@ export function useSession(authStatus?: string) {
     const searchActive = Boolean(f.search?.trim());
     const rankOf = f.statusSort && !searchActive ? statusRankForRow : undefined;
     return sortSessionsForList(list, folderView, sortBy, rankOf);
+  }, []);
+
+  // Stamp a session as locally inserted at the current generation so an
+  // older in-flight replace fetch (dispatched before this insert) cannot
+  // evict it. Bumps the monotonic generation and records it per-id.
+  const markSessionInserted = useCallback((id: string) => {
+    sessionInsertGenRef.current += 1;
+    sessionInsertGenByIdRef.current.set(id, sessionInsertGenRef.current);
   }, []);
 
   const applySessionPatchEverywhere = useCallback((
@@ -1094,7 +1133,7 @@ export function useSession(authStatus?: string) {
   }, [currentSession, rememberSessionTree, wsTargetSessionId]);
 
   const mergeSessionPage = useCallback(
-    (prev: Session[], page: Session[], replace: boolean) => {
+    (prev: Session[], page: Session[], replace: boolean, dispatchInsertGen: number) => {
       // Pure sort/merge ONLY. Do NOT mutate `sessionRegistry` here — this
       // runs as a `setSessions` updater, which React executes during its
       // render pass. Mutating an external store that `useSyncExternalStore`
@@ -1103,10 +1142,15 @@ export function useSession(authStatus?: string) {
       // seeding happens in `fetchSessionPage`, outside the updater.
       if (replace) {
         const backendIds = new Set(page.map((s) => s.id));
-        const pendingOffline = prev.filter(
-          (s) => s.offline_pending && !backendIds.has(s.id),
-        );
-        return sortForList([...pendingOffline, ...page]);
+        // Preserve unacknowledged offline sessions AND sessions inserted
+        // locally after this fetch was dispatched (server-confirmed rows a
+        // pre-creation snapshot can't know about). See
+        // preservedLocalSessionsForReplace.
+        const preserved = preservedLocalSessionsForReplace(prev, backendIds, {
+          dispatchInsertGen,
+          insertGenById: sessionInsertGenByIdRef.current,
+        });
+        return sortForList([...preserved, ...page]);
       }
       const existingIds = new Set(prev.map((s) => s.id));
       return sortForList(
@@ -1126,6 +1170,9 @@ export function useSession(authStatus?: string) {
     ) => {
       if (sessionsLoadingPageRef.current && !replace) return;
       const requestSeq = ++sessionListRequestSeqRef.current;
+      // Snapshot the insert watermark at DISPATCH time: rows inserted
+      // after this are newer than this page and must survive its replace.
+      const dispatchInsertGen = sessionInsertGenRef.current;
       sessionsLoadingPageRef.current = true;
       if (!replace) setSessionsLoadingMore(true);
       // Silent background refreshes (status-churn refetch) must not flash
@@ -1193,7 +1240,12 @@ export function useSession(authStatus?: string) {
           // project switch never wipes background projects' aggregates.
           sessionRegistry.seedFromRows(page);
         }
-        setSessions((prev) => mergeSessionPage(prev, page, replace));
+        if (replace) {
+          // A session present in a backend page is acknowledged — drop its
+          // local-insert protection so the watermark map stays bounded.
+          for (const row of page) sessionInsertGenByIdRef.current.delete(row.id);
+        }
+        setSessions((prev) => mergeSessionPage(prev, page, replace, dispatchInsertGen));
         sessionsNextOffsetRef.current = offset + rawPage.length;
         setSessionsHasMore(Boolean(data.has_more));
       } catch {
@@ -1373,6 +1425,7 @@ export function useSession(authStatus?: string) {
         // case `appendSessionIfNew` already inserted it. Without this
         // check the sidebar shows the new session twice.
         if (canLocallyInsertIntoSessionList(session, listFilters)) {
+          markSessionInserted(session.id);
           setSessions((prev) =>
             sortForList(
               prev.some((s) => s.id === session.id)
@@ -1390,10 +1443,11 @@ export function useSession(authStatus?: string) {
         completeOp("session:create");
       }
     },
-    [sortForList]
+    [sortForList, markSessionInserted]
   );
 
   const addOfflineSession = useCallback((session: Session, select: boolean) => {
+    markSessionInserted(session.id);
     setSessions((prev) =>
       prev.some((s) => s.id === session.id)
         ? prev
@@ -1404,15 +1458,16 @@ export function useSession(authStatus?: string) {
     selectInFlightIdRef.current = null;
     setCurrentSession(session);
     setWsTargetSessionId(null);
-  }, [sortForList]);
+  }, [sortForList, markSessionInserted]);
 
   const restoreOfflineSession = useCallback((session: Session) => {
+    markSessionInserted(session.id);
     setSessions((prev) =>
       prev.some((s) => s.id === session.id)
         ? prev
         : sortForList([session, ...prev]),
     );
-  }, [sortForList]);
+  }, [sortForList, markSessionInserted]);
 
   const forkSession = useCallback(
     async (parentId: string, name?: string) => {
@@ -1746,6 +1801,7 @@ export function useSession(authStatus?: string) {
 
   const removeSessionLocally = useCallback((id: string) => {
     forgetSessionTree(id);
+    sessionInsertGenByIdRef.current.delete(id);
     setSessions((prev) => {
       if (!prev.some((s) => s.id === id)) return prev;
       return prev.filter((s) => s.id !== id);
@@ -2634,11 +2690,12 @@ export function useSession(authStatus?: string) {
       refetchLoadedSpan();
       return;
     }
+    markSessionInserted(session.id);
     setSessions((prev) => {
       if (prev.some((s) => s.id === session.id)) return prev;
       return sortForList([session, ...prev]);
     });
-  }, [refetchLoadedSpan, sortForList]);
+  }, [refetchLoadedSpan, sortForList, markSessionInserted]);
 
   const dropSessionIfPresent = useCallback((id: string) => {
     removeSessionLocally(id);
