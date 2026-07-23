@@ -60,17 +60,20 @@ def _stage_installation_profile(*, mode: str, provider: str) -> dict:
 
 def _ack_profile_for_dependency_tests() -> None:
     profile = installation_profile.require_active()
-    receipt = {
-        "schema_version": installation_profile.RECEIPT_SCHEMA_VERSION,
-        "generation": profile["generation"],
-        "profile_sha256": installation_profile._canonical_hash(profile),
-        "provider_selection_sha256": "0" * 64,
-        **installation_profile._active_environment_receipt(),
-    }
-    (Path(_HOME) / "installation-activation.json").write_text(
-        json.dumps(receipt),
+    provider = profile["provider"]
+    provider_id = f"{provider}-id"
+    (Path(_HOME) / "config.json").write_text(
+        json.dumps({
+            "default_provider_id": provider_id,
+            "providers": [{
+                "id": provider_id,
+                "kind": provider,
+                "suspended": False,
+            }],
+        }),
         encoding="utf-8",
     )
+    installation_profile.mark_selection_applied()
 
 
 def _write_probe_wheel(root: Path) -> Path:
@@ -154,30 +157,15 @@ def test_selected_provider_is_the_only_active_provider() -> None:
 def test_runtime_plan_uses_pending_selection_then_active_config() -> None:
     _stage_installation_profile(
         mode=installation_profile.DESKTOP_UI_ONLY,
-        provider="codex",
+        provider="claude",
     )
     pending = dependency_plan.resolve_plan()
-    assert pending["requirements"] == ("requirements.txt",)
+    assert pending["requirements"] == (
+        "requirements.txt",
+        "requirements-claude.txt",
+    )
 
     _ack_profile_for_dependency_tests()
-    config_path = Path(_HOME) / "config.json"
-    config_path.write_text(
-        json.dumps(
-            {
-                "default_provider_id": "claude-id",
-                "providers": [
-                    {
-                        "id": "claude-id",
-                        "name": "Claude",
-                        "kind": "claude",
-                        "mode": "subscription",
-                        "suspended": False,
-                    }
-                ],
-            }
-        ),
-        encoding="utf-8",
-    )
     active = dependency_plan.resolve_plan()
     assert active["requirements"] == (
         "requirements.txt",
@@ -188,26 +176,18 @@ def test_runtime_plan_uses_pending_selection_then_active_config() -> None:
 def test_unknown_active_provider_requirement_fails_closed() -> None:
     _stage_installation_profile(mode=installation_profile.DEFAULT, provider="codex")
     _ack_profile_for_dependency_tests()
-    config_path = Path(_HOME) / "config.json"
-    config_path.write_text(
-        json.dumps(
-            {
-                "default_provider_id": "unknown-id",
-                "providers": [
-                    {
-                        "id": "unknown-id",
-                        "name": "Unknown",
-                        "kind": "unknown",
-                        "mode": "subscription",
-                        "suspended": False,
-                    }
-                ],
-            }
-        ),
-        encoding="utf-8",
-    )
+    state = {
+        "default_provider_id": "unknown-id",
+        "providers": [{
+            "id": "unknown-id",
+            "name": "Unknown",
+            "kind": "unknown",
+            "mode": "subscription",
+            "suspended": False,
+        }],
+    }
     try:
-        dependency_plan.resolve_plan()
+        dependency_plan.resolve_plan(state)
     except dependency_plan.DependencyPlanError:
         pass
     else:
@@ -217,29 +197,23 @@ def test_unknown_active_provider_requirement_fails_closed() -> None:
 def test_suspended_provider_requirement_is_included() -> None:
     _stage_installation_profile(mode=installation_profile.DEFAULT, provider="codex")
     _ack_profile_for_dependency_tests()
-    config_path = Path(_HOME) / "config.json"
-    config_path.write_text(
-        json.dumps(
+    state = {
+        "default_provider_id": "codex-id",
+        "providers": [
             {
-                "default_provider_id": "codex-id",
-                "providers": [
-                    {
-                        "id": "codex-id",
-                        "kind": "codex",
-                        "suspended": False,
-                    },
-                    {
-                        "id": "claude-id",
-                        "kind": "claude",
-                        "suspended": True,
-                    },
-                ],
-            }
-        ),
-        encoding="utf-8",
-    )
+                "id": "codex-id",
+                "kind": "codex",
+                "suspended": False,
+            },
+            {
+                "id": "claude-id",
+                "kind": "claude",
+                "suspended": True,
+            },
+        ],
+    }
 
-    plan = dependency_plan.resolve_plan()
+    plan = dependency_plan.resolve_plan(state)
 
     assert plan["provider_kinds"] == ("claude", "codex")
     assert plan["requirements"] == (
@@ -267,11 +241,8 @@ def test_unknown_suspended_provider_requirement_fails_closed() -> None:
             },
         ],
     }
-    config_path = Path(_HOME) / "config.json"
-    config_path.write_text(json.dumps(state), encoding="utf-8")
-
     for operation in (
-        dependency_plan.resolve_plan,
+        lambda: dependency_plan.resolve_plan(state),
         lambda: dependency_plan.assert_state_supported(state),
     ):
         try:
