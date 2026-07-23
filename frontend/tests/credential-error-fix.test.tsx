@@ -40,6 +40,20 @@ describe("in-chat credential error fix", () => {
     expect(screen.getByRole("button", { name: "Fix credential access" })).toBeTruthy();
   });
 
+  it("does not duplicate the missing notice when retry confirms missing", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(() =>
+      response({ credential_status: "missing", has_api_key: false }),
+    );
+    render(
+      <CredentialErrorFix meta={{ ...META, credential_status: "missing" }} />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Fix credential access" }));
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Fix credential access" })).toBeTruthy(),
+    );
+    expect(screen.getAllByText(/No API key is stored/)).toHaveLength(1);
+  });
+
   it("reports restored access after an available result", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(() =>
       response({ credential_status: "available", has_api_key: true }),
