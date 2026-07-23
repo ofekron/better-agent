@@ -10410,38 +10410,90 @@ button.run-badge-clickable:focus-visible {
   overflow-wrap: anywhere;
 }
 
-/* New-session modal */
+/* New-session modal — "launch manifest": sections hang on a hairline
+   spine; the section being edited lights its node via :focus-within. */
+
+.ns-session-overlay {
+  animation: ns-overlay-in 200ms ease;
+}
+
+.ns-session-modal {
+  width: min(520px, 92vw);
+  animation: ns-modal-in 240ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+@keyframes ns-overlay-in {
+  from { opacity: 0; }
+}
+
+@keyframes ns-modal-in {
+  from { opacity: 0; transform: translateY(10px) scale(0.985); }
+}
 
 .ns-modal-section {
+  position: relative;
   display: flex;
   flex-direction: column;
   gap: 8px;
+  padding-inline-start: 14px;
+  border-inline-start: 1px solid var(--border);
+  transition: border-color 180ms ease;
+}
+
+.ns-modal-section::before {
+  content: "";
+  position: absolute;
+  inset-inline-start: -3.5px;
+  top: 4px;
+  width: 6px;
+  height: 6px;
+  background: var(--border);
+  transition: background 180ms ease, box-shadow 180ms ease;
+}
+
+.ns-modal-section:focus-within {
+  border-inline-start-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+}
+
+.ns-modal-section:focus-within::before {
+  background: var(--accent);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--accent) 60%, transparent);
 }
 
 .ns-modal-section-title {
-  font-size: calc(11px * var(--app-font-scale));
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: calc(10.5px * var(--app-font-scale));
   font-weight: 600;
-  color: var(--text-secondary);
+  color: var(--text-muted);
   text-transform: uppercase;
-  letter-spacing: 0.5px;
+  letter-spacing: 1.2px;
+  transition: color 180ms ease;
+}
+
+.ns-modal-section:focus-within .ns-modal-section-title {
+  color: var(--text-secondary);
 }
 
 .ns-modal-orch-buttons {
   display: flex;
-  gap: 6px;
+  gap: 4px;
+  padding: 3px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: 8px;
 }
 
 .ns-modal-orch-btn {
   flex: 1;
-  padding: 8px 10px;
-  border: 1px solid var(--border);
+  padding: 7px 10px;
+  border: none;
   border-radius: 6px;
-  background: var(--bg-tertiary);
+  background: transparent;
   color: var(--text-secondary);
   font-size: calc(12px * var(--app-font-scale));
   font-weight: 500;
   cursor: pointer;
-  transition: all 0.15s;
+  transition: background 180ms ease, color 180ms ease, box-shadow 180ms ease;
 }
 
 .ns-modal-orch-btn:hover {
@@ -10451,8 +10503,8 @@ button.run-badge-clickable:focus-visible {
 
 .ns-modal-orch-btn.active {
   background: var(--accent-dim);
-  border-color: var(--accent);
   color: var(--text-primary);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 55%, transparent);
 }
 
 .ns-modal-row {
@@ -10464,27 +10516,114 @@ button.run-badge-clickable:focus-visible {
 .ns-modal-row label {
   font-size: calc(12px * var(--app-font-scale));
   color: var(--text-secondary);
-  min-width: 60px;
+  min-width: 72px;
 }
 
-.ns-modal-row select,
-.ns-modal-row input[type="text"] {
+.ns-session-modal select {
   flex: 1;
-  padding: 6px 8px;
-  background: var(--bg-tertiary);
+  width: 100%;
+  min-width: 0;
+  appearance: none;
+  padding-block: 7px;
+  padding-inline: 10px 30px;
+  background: var(--bg-tertiary)
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%238b949e' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E")
+    no-repeat right 10px center;
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: 7px;
   color: var(--text-primary);
   font-size: calc(13px * var(--app-font-scale));
+  cursor: pointer;
+  transition: border-color 160ms ease, box-shadow 160ms ease;
+}
+
+[dir="rtl"] .ns-session-modal select {
+  background-position: left 10px center;
+}
+
+.ns-modal-row input[type="text"] {
+  flex: 1;
+  padding: 7px 10px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  color: var(--text-primary);
+  font-size: calc(13px * var(--app-font-scale));
+  transition: border-color 160ms ease, box-shadow 160ms ease;
 }
 
 .ns-modal-row input[type="text"]::placeholder {
   color: var(--text-tertiary);
 }
 
-.ns-modal-row input[type="text"]:focus {
+.ns-session-modal select:hover,
+.ns-modal-row input[type="text"]:hover,
+.ns-folder-trigger:hover {
+  border-color: var(--text-muted);
+}
+
+.ns-session-modal select:focus,
+.ns-modal-row input[type="text"]:focus,
+.ns-folder-trigger:focus {
   outline: none;
   border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+}
+
+.ns-folder-trigger {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 10px;
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  font-size: calc(13px * var(--app-font-scale));
+  text-align: start;
+  cursor: pointer;
+  transition: border-color 160ms ease, box-shadow 160ms ease;
+}
+
+.ns-folder-trigger-label {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ns-session-modal input[type="checkbox"] {
+  accent-color: var(--accent);
+}
+
+@media (max-width: 480px) {
+  .ns-modal-row {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 4px;
+  }
+
+  .ns-modal-row label {
+    min-width: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ns-session-overlay,
+  .ns-session-modal {
+    animation: none;
+  }
+
+  .ns-modal-section,
+  .ns-modal-section::before,
+  .ns-modal-section-title,
+  .ns-session-modal select,
+  .ns-modal-row input[type="text"],
+  .ns-folder-trigger,
+  .ns-modal-orch-btn {
+    transition: none;
+  }
 }
 
 /* File picker tree in NewSessionModal */
@@ -18668,10 +18807,18 @@ button.progress-inflight {
   line-height: 1.5;
   resize: vertical;
   outline: none;
+  transition: border-color 160ms ease, box-shadow 160ms ease;
 }
 
 .ns-investigation-textarea:focus {
   border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ns-investigation-textarea {
+    transition: none;
+  }
 }
 
 /* =================================================================
