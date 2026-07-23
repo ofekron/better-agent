@@ -149,10 +149,26 @@ def main() -> None:
         )
         try:
             first.verify_artifacts()
-        except RuntimeError as exc:
+        except operation_catalog.OperationArtifactError as exc:
             assert descriptor.key in str(exc)
         else:
             raise AssertionError("artifact tampering was accepted")
+        # Disk drift never blocks the already-imported in-process handler:
+        # invoke stays on the registration-time code.
+        assert asyncio.run(
+            ScopedRuntimeClient(operation_authority.issue(principal), first).invoke(
+                descriptor.key,
+                {"value": "ok"},
+            )
+        ) == {"value": "ok"}
+        # The recovery boundary stays fail-closed: pinning a generation whose
+        # artifact drifted must refuse.
+        try:
+            manager.pin(first.generation)
+        except operation_catalog.OperationArtifactError:
+            assert manager.pin_count(first.generation) == 0
+        else:
+            raise AssertionError("pin accepted a drifted artifact")
         operation_authority.restore_validator(PrincipalKind.AGENT_RUN, previous_validator)
     shutil.rmtree(state_root)
     print("operation catalog tests passed")

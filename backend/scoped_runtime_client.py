@@ -39,7 +39,10 @@ class ScopedRuntimeClient:
             value = payload.get(field)
             if f"{field}:{value}" not in principal.permitted_resources:
                 raise PermissionError(f"principal is not authorized for {field}")
-        self._catalog.verify_artifacts()
+        # No disk artifact verification here: the handler is an already-imported
+        # in-process callable, so disk drift cannot change what executes in this
+        # process. Cross-process integrity is enforced at the recovery
+        # boundaries — pin() on durable admission and restore_pins() at startup.
         with operation_authority.bind(principal):
             response = await self._catalog.client.run(operation, payload)
         return response.root

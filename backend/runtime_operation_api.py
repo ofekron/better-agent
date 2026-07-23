@@ -81,13 +81,16 @@ async def handle(raw: dict[str, Any]) -> dict[str, Any]:
             }
         if not request.request_id:
             raise ValueError("durable operation request_id is required")
-        response = operation_requests.admit(
-            client=client,
-            operation=request.operation,
-            payload=payload,
-            idempotency_key=request.request_id,
-            deadline_at=request.deadline_at,
-        )
+        try:
+            response = operation_requests.admit(
+                client=client,
+                operation=request.operation,
+                payload=payload,
+                idempotency_key=request.request_id,
+                deadline_at=request.deadline_at,
+            )
+        except operation_catalog.OperationArtifactError as exc:
+            return {"success": False, "error": str(exc)}
         if response.get("ready") is False:
             task = extension_jobs.get_active(
                 "operation-runtime",
