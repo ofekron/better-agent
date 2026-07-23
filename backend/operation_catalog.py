@@ -22,6 +22,10 @@ _ARTIFACT_DIGEST_CACHE: dict[str, tuple[str, str]] = {}
 _GENERATED_ARTIFACT_PATH_PARTS = frozenset({".venv", ".venvs", "__pycache__", "node_modules"})
 
 
+class OperationArtifactError(RuntimeError):
+    """An operation artifact on disk no longer matches its published digest."""
+
+
 class SideEffectClass(str, Enum):
     READ = "read"
     MUTATION = "mutation"
@@ -134,7 +138,10 @@ class PublishedCatalog:
                 actual = _artifact_digest(Path(descriptor.artifact_root))
                 verified[descriptor.artifact_root] = actual
             if actual != descriptor.artifact_digest:
-                raise RuntimeError(f"operation artifact changed: {descriptor.key}")
+                raise OperationArtifactError(
+                    f"operation artifact changed on disk since catalog publish: "
+                    f"{descriptor.key}; restart the backend to load current code"
+                )
 
 
 class _CatalogExecutor:
@@ -178,7 +185,7 @@ class CatalogBuilder:
             policy=policy or OperationPolicy.compatibility(),
             artifact_root=str(artifact_root),
             artifact_identity=artifact_identity,
-            artifact_digest=_artifact_digest(artifact_root, use_cache=True),
+            artifact_digest=_artifact_digest(artifact_root),
             handler_identity=f"{handler.__module__}:{handler.__qualname__}",
         )
         self._descriptors[key] = descriptor
@@ -235,7 +242,6 @@ class CatalogManager:
     ) -> OperationDescriptor:
         with self._lock:
             if self._current is not None:
-                _invalidate_handler_artifact(handler)
                 self._builder = CatalogBuilder(self._current.descriptors)
                 self._current = None
             return self._builder.register_capability(
@@ -258,7 +264,6 @@ class CatalogManager:
         recovery_handler: RecoveryHandler | None = None,
     ) -> OperationDescriptor:
         with self._lock:
-            _invalidate_handler_artifact(handler)
             descriptors = dict(self.current().descriptors)
             descriptors.pop(operation_key(capability, action), None)
             self._builder = CatalogBuilder(descriptors)
@@ -383,12 +388,6 @@ def _handler_artifact_path(handler: Handler) -> Path:
     return path
 
 
-def _invalidate_handler_artifact(handler: Handler) -> None:
-    path = _handler_artifact_path(handler)
-    root, _identity = _artifact_root(path, handler)
-    _ARTIFACT_DIGEST_CACHE.pop(str(root), None)
-
-
 def _artifact_root(path: Path, handler: Handler) -> tuple[Path, str]:
     for parent in (path.parent, *path.parents):
         if (
@@ -403,10 +402,12 @@ def _artifact_root(path: Path, handler: Handler) -> tuple[Path, str]:
     return path.parent, f"python-package:{package}"
 
 
-def _artifact_digest(root: Path, *, use_cache: bool = False) -> str:
+def _artifact_digest(root: Path) -> str:
+    """Content digest of the artifact root, memoized on file stat state.
+
+    The cache is trusted only while every file's (path, size, mtime_ns) state
+    is unchanged; any stat drift forces a full content re-hash."""
     cache_key = str(root)
-    if use_cache and cache_key in _ARTIFACT_DIGEST_CACHE:
-        return _ARTIFACT_DIGEST_CACHE[cache_key][1]
     digest = hashlib.sha256()
     try:
         files = _artifact_files(root)
@@ -430,8 +431,7 @@ def _artifact_digest(root: Path, *, use_cache: bool = False) -> str:
             content_digest = hashlib.sha256(path.read_bytes()).digest()
             digest.update(content_digest)
         value = digest.hexdigest()
-        if use_cache:
-            _ARTIFACT_DIGEST_CACHE[cache_key] = (state, value)
+        _ARTIFACT_DIGEST_CACHE[cache_key] = (state, value)
         return value
     except OSError as exc:
         raise RuntimeError(f"cannot read operation artifact: {root}") from exc
