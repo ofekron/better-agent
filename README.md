@@ -91,14 +91,14 @@ See [EXTENSIONS.md](EXTENSIONS.md) to build private or marketplace extensions.
 
 **Supported hosts:** macOS, Linux, and Windows. Authentication uses the native OS credential store. The macOS desktop build is verified; a Windows installer is provided but has not yet been validated on a real Windows host.
 
-On a fresh machine, start with the platform bootstrap:
+On a fresh machine, start with the platform installer:
 
 ```bash
 # macOS
-./scripts/bootstrap-macos.sh
+./scripts/install-macos.sh
 
 # Windows PowerShell
-powershell -ExecutionPolicy Bypass -File scripts\bootstrap-windows.ps1
+powershell -ExecutionPolicy Bypass -File scripts\install-windows.ps1
 ```
 
 Then run `./run.sh`. The backend defaults to port `18765`; set `BETTER_AGENT_BACKEND_PORT` to override it. On first launch, choose local-only or trusted-LAN access and create credentials stored by your OS.

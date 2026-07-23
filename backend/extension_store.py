@@ -36,6 +36,7 @@ import extension_applied_config
 from provider_config_sync_backend.api import KNOWN_PROVIDER_KINDS
 import extension_instructions
 import extension_mcp
+import installation_profile
 
 STORE_SCHEMA_VERSION = 2
 MANIFEST_KIND = "better-agent-extension"
@@ -81,7 +82,7 @@ _ENABLED_CACHE_LOCK = threading.Lock()
 # other store caches) so _clear_projection_cache can reference it.
 _GET_EXTENSION_CACHE: dict[str, tuple[StoreFingerprint, dict[str, Any] | None]] = {}
 _GET_EXTENSION_CACHE_LOCK = threading.Lock()
-_BUILTIN_FEATURE_CACHE: dict[str, tuple[StoreFingerprint, bool]] = {}
+_BUILTIN_FEATURE_CACHE: dict[str, tuple[tuple[Any, ...], bool]] = {}
 _BUILTIN_FEATURE_CACHE_LOCK = threading.Lock()
 _STORE_FINGERPRINT_CACHE: tuple[float, StoreFingerprint] | None = None
 _STORE_FINGERPRINT_CACHE_LOCK = threading.Lock()
@@ -3339,6 +3340,8 @@ def _required_artifact_update_needed(extension_id: str, record: dict[str, Any]) 
 
 
 def _ensure_public_extensions(data: dict[str, Any]) -> bool:
+    if not installation_profile.integrations_enabled():
+        return False
     changed = False
     # Resolve bundled public extensions from the configured catalog checkout
     # or this public repository.
@@ -3408,7 +3411,7 @@ def is_builtin_feature_enabled(extension_id: str) -> bool:
 def is_builtin_feature_enabled_cached(extension_id: str | None) -> bool:
     if not extension_id:
         return False
-    fingerprint = store_fingerprint()
+    fingerprint = (store_fingerprint(), installation_profile.integrations_enabled())
     with _BUILTIN_FEATURE_CACHE_LOCK:
         cached = _BUILTIN_FEATURE_CACHE.get(extension_id)
         if cached is not None and cached[0] == fingerprint:
@@ -3467,7 +3470,11 @@ def runtime_not_ready_message(extension_id: str) -> str | None:
 
 
 def _record_active(record: dict[str, Any]) -> bool:
-    return record.get("enabled") is True and _entitlement_active(record.get("entitlement") or {})
+    return (
+        installation_profile.integrations_enabled()
+        and record.get("enabled") is True
+        and _entitlement_active(record.get("entitlement") or {})
+    )
 
 
 def runtime_package_root_for_record(record: dict[str, Any]) -> Path | None:
@@ -5016,6 +5023,8 @@ def runtime_skill_entries() -> list[dict[str, str]]:
 
 
 def _active_records_from_data(data: dict[str, Any]) -> list[dict[str, Any]]:
+    if not installation_profile.integrations_enabled():
+        return []
     return sorted(
         (
             record
@@ -5120,10 +5129,8 @@ def uninstall(extension_id: str, *, required_source_type: str = "") -> None:
 def team_definition_sources() -> list[dict[str, Any]]:
     sources: list[dict[str, Any]] = []
     for record in list_extensions():
-        if not record.get("enabled"):
-            continue
-        entitlement = record.get("entitlement") or {}
-        if not _entitlement_active(entitlement):
+        extension_id = str((record.get("manifest") or {}).get("id") or "")
+        if not is_extension_active(extension_id):
             continue
         manifest = record["manifest"]
         definitions = manifest.get("entrypoints", {}).get("team_definitions") or []
@@ -5776,14 +5783,19 @@ def frontend_entrypoints() -> list[dict[str, Any]]:
 def _frontend_entrypoints_cached_for_current_files() -> list[dict[str, Any]] | None:
     fingerprint = store_fingerprint()
     settings_fp = extension_settings_fingerprint()
+    integrations_enabled = installation_profile.integrations_enabled()
     for key, value in _projection_cache_items("frontend_entrypoints"):
-        if key == (fingerprint, settings_fp):
+        if key == (fingerprint, settings_fp, integrations_enabled):
             return value
     return None
 
 
 def frontend_entrypoints_cache_key() -> tuple[Any, ...]:
-    return (store_fingerprint(), extension_settings_fingerprint())
+    return (
+        store_fingerprint(),
+        extension_settings_fingerprint(),
+        installation_profile.integrations_enabled(),
+    )
 
 
 def _frontend_asset_version(record: dict[str, Any]) -> str:
@@ -5792,9 +5804,7 @@ def _frontend_asset_version(record: dict[str, Any]) -> str:
 
 def resolve_frontend_asset(extension_id: str, asset_path: str) -> Path:
     record = get_extension(extension_id)
-    if not record:
-        raise ExtensionError("Extension is not installed")
-    if record.get("enabled") is not True or not _entitlement_active(record.get("entitlement") or {}):
+    if not record or not is_extension_active(extension_id):
         raise ExtensionError("Extension is not installed")
     frontend_path = str(record["manifest"].get("entrypoints", {}).get("frontend") or "")
     if not frontend_path:
@@ -5997,7 +6007,11 @@ def ui_hooks() -> dict[str, list[dict[str, Any]]]:
 
 
 def ui_hooks_cache_key() -> tuple[Any, ...]:
-    return (store_fingerprint(), _file_fingerprint(_ui_settings_path()))
+    return (
+        store_fingerprint(),
+        _file_fingerprint(_ui_settings_path()),
+        installation_profile.integrations_enabled(),
+    )
 
 
 # ── extension settings + per-MCP-server enable/disable ───────────────

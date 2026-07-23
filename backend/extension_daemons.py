@@ -77,7 +77,7 @@ def publish_registry() -> dict[str, Any]:
         if spec.get("lifecycle") != "supervisor":
             continue
         desired_keys.setdefault(extension_id, set()).add(key)
-        if not record.get("enabled"):
+        if not extension_store.is_extension_active(extension_id):
             entries.pop(key, None)
             continue
         source_root = extension_store.runtime_package_root(extension_id)
@@ -113,7 +113,10 @@ def publish_registry() -> dict[str, Any]:
 def reconcile_backend_daemons() -> None:
     desired: dict[str, dict[str, Any]] = {}
     for extension_id, record, spec in _declared_daemons():
-        if spec.get("lifecycle") != "backend" or not record.get("enabled"):
+        if (
+            spec.get("lifecycle") != "backend"
+            or not extension_store.is_extension_active(extension_id)
+        ):
             continue
         if not extension_store.is_extension_runtime_ready(extension_id):
             continue

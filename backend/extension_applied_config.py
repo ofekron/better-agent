@@ -19,12 +19,12 @@ from typing import Any
 def _tag_rules_from_record(record: dict) -> list[dict]:
     """Flat ``file_ref_resolver`` rule dicts for one record. Empty when the
     record is disabled. Stamps ``_extension_id`` for marker purge attribution."""
-    if not record.get("enabled"):
+    import extension_store
+
+    extension_id = str((record.get("manifest") or {}).get("id") or "")
+    if not extension_id or not extension_store.is_extension_active(extension_id):
         return []
     manifest = record.get("manifest") or {}
-    extension_id = manifest.get("id", "")
-    if not extension_id:
-        return []
     applied = (manifest.get("entrypoints") or {}).get("applied_config") or {}
     rules: list[dict] = []
     for rule in applied.get("tag_rules") or []:
@@ -52,8 +52,7 @@ def _tag_rules_from_record(record: dict) -> list[dict]:
 def _all_enabled_records() -> list[dict]:
     import extension_store
 
-    data = extension_store._load()
-    return list(data["extensions"].values())
+    return extension_store._active_records()
 
 
 def _rebuild_registry() -> None:
@@ -82,6 +81,14 @@ def reconcile(record: dict) -> None:
 def reconcile_all() -> None:
     """Rebuild the global registry from all enabled records. Startup entry."""
     _rebuild_registry()
+    import extension_store
+    from session_manager import manager
+
+    data = extension_store._load()
+    for record in data["extensions"].values():
+        extension_id = str((record.get("manifest") or {}).get("id") or "")
+        if extension_id and not extension_store.is_extension_active(extension_id):
+            manager.clear_markers_for_extension(extension_id)
 
 
 def clear_for_uninstall(record: dict) -> None:

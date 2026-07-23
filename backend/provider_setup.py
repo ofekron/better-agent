@@ -389,6 +389,22 @@ async def start_install(kind: str, broadcast: BroadcastFn) -> dict[str, Any]:
     return _snapshot(run)
 
 
+async def install_if_missing(kind: str, broadcast: BroadcastFn) -> dict[str, Any]:
+    status = await provider_setup_status(kind, wait_for_cold=True)
+    if bool((status.get("verify") or {}).get("ok")):
+        return {
+            "kind": kind,
+            "state": "already_installed",
+            "installed": True,
+            "lines": [],
+        }
+    await start_install(kind, broadcast)
+    task = _INSTALL_TASKS.get(kind)
+    if task is not None:
+        await task
+    return _snapshot(_INSTALL_RUNS[kind])
+
+
 async def _run_install(
     installer: ProviderInstaller,
     run: dict[str, Any],

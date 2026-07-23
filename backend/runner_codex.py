@@ -1681,6 +1681,9 @@ def _build_dynamic_tool_set(
     disabled_builtin_tools: set[str],
     existing_tool_names: set[str],
 ) -> tuple[list[dict], dict[str, Any]]:
+    import installation_profile
+    if not installation_profile.integrations_enabled():
+        return [], {}
     dynamic_tools: list[dict] = []
     tool_handlers: dict[str, Any] = {}
     if mode == "manager" and team_orchestration_enabled:

@@ -5,6 +5,8 @@ import threading
 from pathlib import Path
 from typing import Optional
 
+import installation_profile
+
 MAX_SKILLS = 50
 CLAUDE_RUNTIME_SKILLS_PLUGIN_NAME = "better-agent-runtime-skills"
 _DISCOVERY_CACHE_LOCK = threading.Lock()
@@ -13,7 +15,7 @@ _DISCOVERY_CACHE_MAX = 32
 
 
 def runtime_skill_contexts(cwd: str, *, bare_config: bool = False) -> list[dict]:
-    if bare_config:
+    if bare_config or not installation_profile.integrations_enabled():
         return []
 
     skills = _discover_skills(cwd)
@@ -46,13 +48,13 @@ def runtime_skill_contexts(cwd: str, *, bare_config: bool = False) -> list[dict]
 
 
 def has_runtime_skills(cwd: str, *, bare_config: bool = False) -> bool:
-    if bare_config:
+    if bare_config or not installation_profile.integrations_enabled():
         return False
     return bool(_discover_skills(cwd))
 
 
 def materialize_runtime_skills(root: Path, cwd: str, *, bare_config: bool = False) -> int:
-    if bare_config:
+    if bare_config or not installation_profile.integrations_enabled():
         return 0
 
     count = 0
