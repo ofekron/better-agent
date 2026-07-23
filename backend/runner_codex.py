@@ -107,6 +107,18 @@ from runtime_skills import materialize_runtime_skills
 from proc_control import process_control as _process_control
 from stream_limits import SUBPROCESS_LINE_LIMIT_BYTES
 
+_CODEX_HOME_OVERLAY_SKIP = {
+    ".bash_login",
+    ".bash_profile",
+    ".bashrc",
+    ".profile",
+    ".zlogin",
+    ".zlogout",
+    ".zprofile",
+    ".zshenv",
+    ".zshrc",
+}
+
 APP_SERVER_REQUEST_TIMEOUT_S = 45.0
 DELEGATE_HTTP_TIMEOUT_S = 24 * 60 * 60
 
@@ -255,7 +267,11 @@ def _materialize_codex_run_home(
 ) -> dict[str, str]:
     real_home = Path.home()
     overlay_home = run_dir / "codex-home"
-    symlink_home_overlay(real_home, overlay_home, skip={".codex", ".agents"})
+    symlink_home_overlay(
+        real_home,
+        overlay_home,
+        skip={".codex", ".agents", *_CODEX_HOME_OVERLAY_SKIP},
+    )
     symlink_home_overlay(real_home / ".agents", overlay_home / ".agents", skip={"skills"})
 
     real_codex_home = Path(os.environ.get("CODEX_HOME") or real_home / ".codex").expanduser()

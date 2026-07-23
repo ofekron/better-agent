@@ -67,6 +67,21 @@ def t_global_runtime_skill_context_includes_get_requirements() -> None:
     check(str(TMP_HOME / ".agents" / "skills" / "local-runtime-test-skill" / "SKILL.md") in content, "runtime skill list includes file path")
 
 
+def t_runtime_skill_context_can_use_run_home_paths() -> None:
+    content = runtime_skills.runtime_skill_contexts(
+        str(TMP_HOME),
+        display_root="$HOME/.agents/skills",
+    )[0]["content"]
+    check(
+        "$HOME/.agents/skills/local-runtime-test-skill/SKILL.md" in content,
+        "runtime skill paths can resolve inside the run home",
+    )
+    check(
+        str(TMP_HOME / ".agents" / "skills" / "local-runtime-test-skill" / "SKILL.md") not in content,
+        "runtime skill run-home paths do not expose source paths",
+    )
+
+
 def t_multiline_description_is_not_truncated() -> None:
     write_raw_skill(
         TMP_HOME / ".agents" / "skills",
@@ -213,6 +228,7 @@ def t_dynamic_audit_context_follows_runtime_skills() -> None:
 def main() -> None:
     try:
         t_global_runtime_skill_context_includes_get_requirements()
+        t_runtime_skill_context_can_use_run_home_paths()
         t_multiline_description_is_not_truncated()
         t_long_description_is_not_clipped()
         t_project_skill_context_is_included_after_global()

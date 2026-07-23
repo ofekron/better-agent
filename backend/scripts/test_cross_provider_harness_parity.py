@@ -56,6 +56,7 @@ import provider_manifest  # noqa: E402
 import runner  # noqa: E402
 import runner_codex  # noqa: E402
 import runtime_skills  # noqa: E402
+import turn_manager  # noqa: E402
 
 # The three first-class CLI providers this map covers.
 PROVIDERS = ("claude", "codex", "gemini")
@@ -302,6 +303,14 @@ def test_runtime_skill_contexts_deterministic_and_bare_empty():
     )
 
 
+def test_runtime_skill_display_root_matches_overlay_home_providers():
+    assert turn_manager._runtime_skill_display_root("codex") == "$HOME/.agents/skills"
+    assert turn_manager._runtime_skill_display_root("fugu") == "$HOME/.agents/skills"
+    assert turn_manager._runtime_skill_display_root("agy") == "$HOME/.agents/skills"
+    assert turn_manager._runtime_skill_display_root("claude") == ""
+    assert turn_manager._runtime_skill_display_root("gemini") == ""
+
+
 # ---------------------------------------------------------------------------
 # S7 — Capability contexts: shared build reaches every provider.
 # ---------------------------------------------------------------------------
@@ -438,6 +447,7 @@ def main() -> int:
     test_builtin_mcp_capabilities_server_identical_across_providers()
     test_runtime_skill_contexts_is_provider_agnostic()
     test_runtime_skill_contexts_deterministic_and_bare_empty()
+    test_runtime_skill_display_root_matches_overlay_home_providers()
     test_provider_capability_contexts_is_kind_dispatched_not_forked()
     test_disabled_builtin_extensions_normalizer_is_kind_agnostic()
     test_builtin_harness_instructions_default_to_native_exposed()

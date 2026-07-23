@@ -189,6 +189,12 @@ def _provider_capability_contexts(
     return provider_capability_contexts(contexts, provider_kind)
 
 
+def _runtime_skill_display_root(provider_kind: str) -> str:
+    if provider_kind in {"codex", "fugu", "agy"}:
+        return "$HOME/.agents/skills"
+    return ""
+
+
 def _stamp_agent_type(mode: str, event_dict: dict) -> dict:
     """Stamp the orchestration mode on agent_message events.
 
@@ -2315,6 +2321,7 @@ class TurnManager:
             cwd,
             bare_config=bool((_session_rec or {}).get("bare_config")),
             disabled=(_session_rec or {}).get("disabled_runtime_skills"),
+            display_root=_runtime_skill_display_root(provider_kind),
         )
         dynamic_capability_contexts = await _to_turn_dispatch_thread(
             extension_audit_context,
@@ -2487,6 +2494,8 @@ class TurnManager:
                 runtime_skill_contexts,
                 cwd,
                 bare_config=bool(_session_rec.get("bare_config")),
+                disabled=_session_rec.get("disabled_runtime_skills"),
+                display_root=_runtime_skill_display_root(provider_kind),
             )
             dynamic_capability_contexts = await _to_turn_dispatch_thread(
                 extension_audit_context,
