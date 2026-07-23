@@ -193,7 +193,7 @@ fi
 
 bootstrap_hint() {
   if [ "$(uname -s)" = "Darwin" ]; then
-    echo "Run ./scripts/bootstrap-macos.sh, then run ./run.sh again." >&2
+    echo "Run ./scripts/install-macos.sh, then run ./run.sh again." >&2
     return 0
   fi
   echo "Install the missing prerequisites listed above, then run ./run.sh again." >&2

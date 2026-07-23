@@ -1,40 +1,17 @@
 param(
-    [switch]$Yes,
-    [switch]$WithClaude,
-    [switch]$WithCodex
+    [ValidateSet("default", "ui-only")][string]$Mode,
+    [string]$Provider,
+    [switch]$Yes
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-function Confirm-Bootstrap {
-    if ($Yes) {
-        return
-    }
-    Write-Host "This installs with winget: Git, Python, uv, Node.js."
-    if ($WithClaude) {
-        Write-Host "It also installs Claude Code CLI globally with npm."
-    }
-    if ($WithCodex) {
-        Write-Host "It also installs Codex CLI globally with npm."
-    }
-    $answer = Read-Host "Continue? [y/N]"
-    if ($answer -notin @("y", "Y", "yes", "YES")) {
-        Write-Host "Aborted."
-        exit 1
-    }
+if ($env:OS -ne "Windows_NT") {
+    throw "install-windows.ps1 only supports Windows."
 }
-
-function Require-Windows {
-    if ($env:OS -ne "Windows_NT") {
-        throw "bootstrap-windows.ps1 only supports Windows."
-    }
-}
-
-function Require-Winget {
-    if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
-        throw "winget is required. Install App Installer from Microsoft Store, then re-run this script."
-    }
+if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
+    throw "winget is required. Install App Installer from Microsoft Store, then re-run this script."
 }
 
 function Update-ProcessPath {
@@ -46,25 +23,26 @@ function Update-ProcessPath {
 function Install-WingetPackage {
     param(
         [Parameter(Mandatory = $true)][string]$Id,
-        [Parameter(Mandatory = $true)][string]$Command
+        [Parameter(Mandatory = $true)][string]$Command,
+        [string[]]$TestArgs = @("--version")
     )
-
+    $commandReady = $false
     if (Get-Command $Command -ErrorAction SilentlyContinue) {
+        & $Command @TestArgs *> $null
+        $commandReady = $LASTEXITCODE -eq 0
+    }
+    if ($commandReady) {
         Write-Host "$Command already installed."
         return
     }
-
     Write-Host "Installing $Id..."
     winget install --id $Id --exact --silent --accept-package-agreements --accept-source-agreements
     Update-ProcessPath
-    if (-not (Get-Command $Command -ErrorAction SilentlyContinue)) {
+    & $Command @TestArgs *> $null
+    if ($LASTEXITCODE -ne 0) {
         throw "$Command was not found on PATH after installing $Id. Open a new PowerShell and re-run this script."
     }
 }
-
-Require-Windows
-Require-Winget
-Confirm-Bootstrap
 
 Install-WingetPackage -Id "Git.Git" -Command "git"
 Install-WingetPackage -Id "Python.Python.3.13" -Command "python"
@@ -78,11 +56,13 @@ if (-not (Get-Command npm -ErrorAction SilentlyContinue)) {
     throw "npm was not found on PATH after installing Node.js. Open a new PowerShell and re-run this script."
 }
 
-if ($WithClaude) {
-    npm install -g "@anthropic-ai/claude-code"
-}
-if ($WithCodex) {
-    npm install -g "@openai/codex"
+$installerArgs = @("$PSScriptRoot\install.py")
+if ($Mode) { $installerArgs += @("--mode", $Mode) }
+if ($Provider) { $installerArgs += @("--provider", $Provider) }
+if ($Yes) { $installerArgs += "--yes" }
+& python @installerArgs
+if ($LASTEXITCODE -ne 0) {
+    throw "Better Agent installation configuration failed."
 }
 
 git --version
@@ -91,4 +71,4 @@ uv --version
 node --version
 npm --version
 
-Write-Host "Base Windows prerequisites installed. Run ./run.sh from Git Bash next."
+Write-Host "Installation configured. Run ./run.sh from Git Bash next."

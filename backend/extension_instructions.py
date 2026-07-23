@@ -155,7 +155,9 @@ def reconcile_blocks(record: dict) -> None:
     owner = _owner(extension_id)
     providers = _configured_providers()
     project_roots = _local_project_paths()
-    enabled = bool(record.get("enabled"))
+    import extension_store
+
+    enabled = extension_store.is_extension_active(extension_id)
 
     install_path = None
     state = None

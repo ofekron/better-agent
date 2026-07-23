@@ -22,23 +22,24 @@ that is mandatory.
 On an empty Mac after cloning the repo, run:
 
 ```bash
-./scripts/bootstrap-macos.sh
+./scripts/install-macos.sh
 ```
 
 If `git` itself is missing, run `xcode-select --install` first, then clone and
-run the bootstrap script. To install a provider CLI too, add
-`--with-claude` or `--with-codex`.
+run the installation script. It asks for the integration mode and provider,
+then installs the provider CLI only when it is missing.
 
 On an empty Windows machine after cloning the repo, run from PowerShell:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts\bootstrap-windows.ps1
+powershell -ExecutionPolicy Bypass -File scripts\install-windows.ps1
 ```
 
 If `git` itself is missing, install it first with
 `winget install --id Git.Git --exact`, open a new PowerShell, then clone and run
-the bootstrap script. To install a provider CLI too, add `-WithClaude` or
-`-WithCodex`. Run `./run.sh` from Git Bash after bootstrap.
+the installation script. It asks for the integration mode and provider, then
+installs the provider CLI only when it is missing. Run `./run.sh` from Git Bash
+after installation.
 
 | Tool | Why | Install |
 | --- | --- | --- |

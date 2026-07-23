@@ -2293,7 +2293,13 @@ async def _run(run_dir: Path, inputs: dict) -> int:
     # Capability-management tools ride the same backend channel and are stripped
     # from bare (TestApe-isolated) sessions, matching runner.py / the stdio
     # capabilities MCP injected for the CLI providers.
-    capabilities_enabled = interactive and not bool(inputs.get("bare_config"))
+    import installation_profile
+    integrations_enabled = installation_profile.integrations_enabled()
+    capabilities_enabled = (
+        integrations_enabled
+        and interactive
+        and not bool(inputs.get("bare_config"))
+    )
     # Feature flags mirror _build_loopback_tool_handlers' registration conditions
     # so the model only sees schemas for tools that actually have a handler
     # wired (ask/mssg/delegate/create_*/file-panel). Team-manager requires
@@ -2312,7 +2318,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
     except Exception:
         team_orchestration_enabled = False
         coordination_enabled = False
-    open_file_panel_enabled = bool(inputs.get("open_file_panel_enabled"))
+    open_file_panel_enabled = integrations_enabled and bool(inputs.get("open_file_panel_enabled"))
     file_editing_mode = inputs.get("working_mode") == "file_editing"
     tool_schemas = _tool_schemas_for_run(
         inputs=inputs,

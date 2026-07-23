@@ -4,6 +4,7 @@ import re
 from typing import Any, Optional
 
 from prompt_templates import render_prompt
+import installation_profile
 
 MAX_CAPABILITY_CONTEXTS = 20
 MAX_CAPABILITY_OUTPUTS = 20
@@ -75,6 +76,8 @@ def provider_capability_contexts(
     contexts: Optional[list[dict]],
     provider_kind: str,
 ) -> list[dict]:
+    if not installation_profile.integrations_enabled():
+        return []
     selected: list[dict] = []
     for item in contexts or []:
         if not isinstance(item, dict):
@@ -106,6 +109,8 @@ def provider_capability_contexts(
 
 
 def render_capability_context(contexts: Optional[list[dict]]) -> str:
+    if not installation_profile.integrations_enabled():
+        return ""
     blocks: list[str] = []
     for item in contexts or []:
         if not isinstance(item, dict):
@@ -136,6 +141,8 @@ def prompt_heading_for_source(source: Any) -> str:
 
 
 def prepend_capability_context(prompt: str, inputs: dict) -> str:
+    if not installation_profile.integrations_enabled():
+        return prompt
     context = render_capability_context(inputs.get("capability_contexts") or [])
     if not context:
         return prompt

@@ -27,7 +27,10 @@ def check(label: str, cond: bool) -> None:
 
 async def main() -> int:
     kinds = provider_setup.supported_provider_kinds()
-    check("supported subscription providers are installable", kinds == ["agy", "claude", "codex", "copilot"])
+    check(
+        "supported providers are installable",
+        kinds == ["agy", "amp", "claude", "codex", "copilot", "opencode", "pi", "qwen"],
+    )
 
     for kind in kinds:
         installer = provider_setup.installer_for(kind)

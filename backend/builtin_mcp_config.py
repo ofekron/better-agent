@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any
 
 import extension_store
+import installation_profile
 from env_compat import dual_env_many, get_env
 
 
@@ -36,6 +37,8 @@ def _capabilities_server_config(env: dict[str, str]) -> dict[str, Any]:
 
 
 def with_builtin_mcp_servers(inputs: dict, provider_run_config: dict) -> dict:
+    if not installation_profile.integrations_enabled():
+        return provider_run_config
     config = {
         **provider_run_config,
         "mcp_servers": dict(provider_run_config.get("mcp_servers") or {}),

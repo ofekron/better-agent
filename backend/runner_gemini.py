@@ -120,6 +120,9 @@ def _load_json_object(path: Path) -> dict:
 
 
 def _with_communicate_mcp(inputs: dict, provider_run_config: dict) -> dict:
+    import installation_profile
+    if not installation_profile.integrations_enabled():
+        return provider_run_config
     sender_session_id = str(
         inputs.get("mssg_sender_session_id") or inputs.get("app_session_id") or ""
     ).strip()

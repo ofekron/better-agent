@@ -3189,11 +3189,13 @@ async def _run(run_dir: Path, inputs: dict) -> int:
         inputs.get("mssg_sender_session_id") or app_session_id
     )
 
-    team_orchestration_enabled = extension_store.is_extension_runtime_ready(
+    import installation_profile
+    integrations_enabled = installation_profile.integrations_enabled()
+    team_orchestration_enabled = integrations_enabled and extension_store.is_extension_runtime_ready(
         extension_store.extension_id_for_role('team-orchestration')
     )
 
-    if mssg_sender_session_id and backend_url and internal_token:
+    if integrations_enabled and mssg_sender_session_id and backend_url and internal_token:
         communicate_tools = []
         if "mssg" not in disabled_builtin_tools:
             communicate_tools.append(_build_mssg_tool(
@@ -3260,7 +3262,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
     # just team. delegate (detached off-topic handoff) + create_session (spin
     # up a fresh standalone session to hand work off to). Gated only on loopback
     # credentials; the sender is the calling session itself.
-    if app_session_id and backend_url and internal_token:
+    if integrations_enabled and app_session_id and backend_url and internal_token:
         handoff_tools = []
         if "delegate_task" not in disabled_builtin_tools:
             handoff_tools.append(_build_delegate_task_tool(
@@ -3297,7 +3299,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
     # Capability management — let the model scope its own session (load/release/
     # list scoped capabilities). Internal, non-bare sessions only; bare sessions
     # are deliberately capability-stripped.
-    if app_session_id and backend_url and internal_token and not _bare:
+    if integrations_enabled and app_session_id and backend_url and internal_token and not _bare:
         mcp_servers["capabilities"] = create_sdk_mcp_server(
             name="capabilities",
             version="1.0.0",
@@ -3344,8 +3346,8 @@ async def _run(run_dir: Path, inputs: dict) -> int:
     # scheduler). They DO get the credential broker — a bare device worker
     # needs it to fetch login secrets — wired off the bare signal instead
     # of the user-facing one.
-    _user_facing_extras = open_file_panel_enabled and not _bare
-    _cred_enabled = open_file_panel_enabled or _bare
+    _user_facing_extras = integrations_enabled and open_file_panel_enabled and not _bare
+    _cred_enabled = integrations_enabled and (open_file_panel_enabled or _bare)
 
     if (_user_facing_extras or _cred_enabled) and not backend_url:
         backend_url = get_env("BETTER_CLAUDE_BACKEND_URL", "http://localhost:8000")
