@@ -152,6 +152,30 @@ def test_activation_receipt_binds_profile_environment_and_selection() -> None:
         assert installation_profile.capabilities()["setup_required"] is True
 
 
+def test_provider_selection_drift_disables_all_runtime_capabilities() -> None:
+    with _with_home() as root:
+        _activate(root, installation_profile.DEFAULT, provider="codex")
+        config_path = root / "config.json"
+        state = json.loads(config_path.read_text(encoding="utf-8"))
+        state["providers"][0]["suspended"] = True
+        state["providers"].append({
+            "id": "claude-id",
+            "kind": "claude",
+            "suspended": False,
+        })
+        state["default_provider_id"] = "claude-id"
+        config_path.write_text(json.dumps(state), encoding="utf-8")
+
+        assert installation_profile.capabilities() == {
+            "status": "setup_required",
+            "setup_required": True,
+            "mode": None,
+            "provider_conversations_enabled": False,
+            "mobile_enabled": False,
+            "integrations_enabled": False,
+        }
+
+
 async def _admit(
     path: str,
     *,
@@ -361,6 +385,7 @@ def test_platform_installers_share_transactional_activation() -> None:
 if __name__ == "__main__":
     test_missing_legacy_malformed_and_interrupted_profiles_require_setup()
     test_activation_receipt_binds_profile_environment_and_selection()
+    test_provider_selection_drift_disables_all_runtime_capabilities()
     test_authoritative_admission_rejects_before_side_effects()
     test_mode_matrix_uses_one_policy_for_discovery_and_authorization()
     test_ui_only_suppresses_better_agent_injections()
