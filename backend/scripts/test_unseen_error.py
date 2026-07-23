@@ -228,6 +228,23 @@ def test_exception_path_error_with_no_surviving_assistant_msg() -> None:
     print(f"{PASS} exception_path_error_with_no_surviving_assistant_msg")
 
 
+def test_user_error_text_without_status_surfaces_latest_error() -> None:
+    sid = _mk_session()
+    session_manager.append_user_msg(sid, {
+        "id": "u1",
+        "role": "user",
+        "content": "go",
+        "errorText": "provider credential failed",
+    })
+    session_manager.flush_pending_persists()
+
+    summary = next(s for s in session_store.list_sessions() if s["id"] == sid)
+    assert summary.get("unseen_error") == "provider credential failed", (
+        f"expected user-message errorText to drive the sidebar dot, got {summary.get('unseen_error')!r}"
+    )
+    print(f"{PASS} user_error_text_without_status_surfaces_latest_error")
+
+
 def test_derived_error_uses_error_text_not_bool() -> None:
     """`current_turn_error` must project the human-readable `errorText`,
     not `str(True)`, when deriving from an assistant message's error."""
@@ -264,6 +281,7 @@ def main() -> int:
         test_derived_from_last_assistant_error()
         test_stale_flag_does_not_override_newer_success()
         test_exception_path_error_with_no_surviving_assistant_msg()
+        test_user_error_text_without_status_surfaces_latest_error()
         test_derived_error_uses_error_text_not_bool()
         test_persistence_across_reload()
         print("ALL PASSED")
