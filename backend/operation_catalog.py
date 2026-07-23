@@ -19,6 +19,7 @@ from json_store import write_json
 Handler = Callable[[BaseModel], Any | Awaitable[Any]]
 RecoveryHandler = Callable[[BaseModel, str | None, str], Any | Awaitable[Any]]
 _ARTIFACT_DIGEST_CACHE: dict[str, tuple[str, str]] = {}
+_GENERATED_ARTIFACT_PATH_PARTS = frozenset({".venv", ".venvs", "__pycache__", "node_modules"})
 
 
 class SideEffectClass(str, Enum):
@@ -451,7 +452,7 @@ def _artifact_files(root: Path) -> list[Path]:
         path
         for path in candidates
         if path.is_file()
-        and "__pycache__" not in path.parts
+        and not _GENERATED_ARTIFACT_PATH_PARTS.intersection(path.parts)
         and (
             path.suffix in {".py", ".json", ".toml", ".whl", ".tgz", ".txt"}
             or path.name in {"SOURCE_COMMIT", "SHA256SUMS"}
