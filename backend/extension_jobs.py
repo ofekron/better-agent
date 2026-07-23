@@ -155,6 +155,41 @@ def _write_record(owner: str, operation: str, job_id: str, record: dict[str, Any
     write_json(job_path(owner, operation, job_id), record)
 
 
+def list_records(owner: str, operation: str) -> list[dict[str, Any]]:
+    """List durable job records for one owner/operation, skipping unreadable
+    or corrupt files. For callers scanning a bounded, known-small job
+    namespace (e.g. fallback delivery) — not for iterating the full
+    cross-owner/operation job tree."""
+    directory = _jobs_dir(owner, operation)
+    if directory.is_symlink() or not directory.is_dir():
+        return []
+    records: list[dict[str, Any]] = []
+    for path in directory.glob("*.json"):
+        if path.is_symlink() or not path.is_file():
+            continue
+        record = read_record(owner, operation, path.stem)
+        if record is not None:
+            records.append(record)
+    return records
+
+
+def mark_delivered(owner: str, operation: str, job_id: str) -> dict[str, Any] | None:
+    """Idempotently flag a finished job's result as delivered through a
+    fallback channel (e.g. inbox), so a caller-terminal handler doesn't
+    re-deliver on a later terminal event for the same caller. No-op if the
+    job doesn't exist or hasn't reached a terminal status yet."""
+    with _RECORD_LOCK:
+        record = read_record(owner, operation, job_id)
+        if record is None or record.get("status") not in ("complete", "failed"):
+            return None
+        if record.get("delivered"):
+            return record
+        record["delivered"] = True
+        record["delivered_at"] = time.time()
+        _write_record(owner, operation, job_id, record)
+        return record
+
+
 def persist_complete(owner: str, operation: str, job_id: str, result: dict[str, Any]) -> dict[str, Any]:
     with _RECORD_LOCK:
         record = read_record(owner, operation, job_id) or {
