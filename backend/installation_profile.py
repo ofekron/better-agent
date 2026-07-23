@@ -266,8 +266,12 @@ def _activation_ready(profile: dict[str, Any]) -> bool:
     try:
         receipt = json.loads(_activation_receipt_path().read_text(encoding="utf-8"))
         environment = _active_environment_receipt()
-        selection_hash = _provider_selection_fingerprint(profile["provider"])
     except (OSError, json.JSONDecodeError, InstallationProfileError):
+        return False
+    if not isinstance(receipt, dict):
+        return False
+    selection_hash = receipt.get("provider_selection_sha256")
+    if not isinstance(selection_hash, str) or len(selection_hash) != 64:
         return False
     expected = {
         "schema_version": RECEIPT_SCHEMA_VERSION,

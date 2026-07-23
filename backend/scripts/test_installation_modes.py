@@ -19,6 +19,7 @@ if str(SDK) not in sys.path:
 
 os.environ["BETTER_AGENT_TEST_MODE"] = "1"
 
+import _test_installation
 import builtin_mcp_config
 import capability_contexts
 import extension_applied_config
@@ -49,48 +50,8 @@ def _with_home():
                 os.environ["BETTER_AGENT_HOME"] = previous_home
 
 
-def _provider_identity(root: Path, provider: str) -> dict:
-    command = provider_setup.installer_for(provider).command
-    suffix = ".cmd" if os.name == "nt" else ""
-    launcher = root / f"{command}{suffix}"
-    launcher.write_bytes(b"@echo off\r\nexit /b 0\r\n" if suffix else b"#!/bin/sh\nexit 0\n")
-    launcher.chmod(0o700)
-    return provider_setup.executable_identity(str(launcher.absolute()))
-
-
 def _activate(root: Path, mode: str, provider: str = "codex") -> dict:
-    backend = installation_profile.BACKEND_ROOT
-    environment = backend / ".venvs" / "test"
-    environment.mkdir(parents=True, exist_ok=True)
-    (environment / ".dependency-plan.json").write_text(
-        json.dumps({"schema_version": 1, "hash": f"{mode}-{provider}"}),
-        encoding="utf-8",
-    )
-    backend.mkdir(parents=True, exist_ok=True)
-    (backend / ".active-venv").write_text(".venvs/test", encoding="utf-8")
-    provider_id = f"{provider}-id"
-    (root / "config.json").write_text(
-        json.dumps({
-            "default_provider_id": provider_id,
-            "providers": [
-                {
-                    "id": provider_id,
-                    "kind": provider,
-                    "suspended": False,
-                }
-            ],
-        }),
-        encoding="utf-8",
-    )
-    profile = installation_profile.new_active_profile(
-        mode=mode,
-        provider=provider,
-        provider_identity=_provider_identity(root, provider),
-    )
-    installation_profile.stage_activation(profile)
-    installation_profile.mark_selection_applied()
-    assert not installation_profile.selection_pending()
-    return profile
+    return _test_installation.activate(root, mode=mode, provider=provider)
 
 
 def test_missing_legacy_malformed_and_interrupted_profiles_require_setup() -> None:
@@ -143,18 +104,47 @@ def test_activation_receipt_binds_profile_environment_and_selection() -> None:
         }
 
         receipt_path = root / "installation-activation.json"
-        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
-        receipt["generation"] = "different"
-        receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+        original = receipt_path.read_text(encoding="utf-8")
+        receipt = json.loads(original)
+
+        stripped = {
+            key: value
+            for key, value in receipt.items()
+            if key != "provider_selection_sha256"
+        }
+        receipt_path.write_text(json.dumps(stripped), encoding="utf-8")
+        assert installation_profile.capabilities()["setup_required"] is True
+
+        receipt_path.write_text(
+            json.dumps({**receipt, "provider_selection_sha256": "not-a-hash"}),
+            encoding="utf-8",
+        )
+        assert installation_profile.capabilities()["setup_required"] is True
+
+        receipt_path.write_text(original, encoding="utf-8")
+        assert installation_profile.capabilities()["setup_required"] is False
+
+        receipt_path.write_text(
+            json.dumps({**receipt, "generation": "different"}),
+            encoding="utf-8",
+        )
         assert installation_profile.capabilities()["setup_required"] is True
 
         installation_profile.stage_activation(profile)
         assert installation_profile.capabilities()["setup_required"] is True
 
 
-def test_provider_selection_drift_disables_all_runtime_capabilities() -> None:
+def test_provider_config_changes_do_not_invalidate_activation() -> None:
     with _with_home() as root:
         _activate(root, installation_profile.DEFAULT, provider="codex")
+        active = {
+            "status": "active",
+            "setup_required": False,
+            "mode": "default",
+            "provider_conversations_enabled": True,
+            "mobile_enabled": True,
+            "integrations_enabled": True,
+        }
         config_path = root / "config.json"
         state = json.loads(config_path.read_text(encoding="utf-8"))
         state["providers"][0]["suspended"] = True
@@ -166,14 +156,8 @@ def test_provider_selection_drift_disables_all_runtime_capabilities() -> None:
         state["default_provider_id"] = "claude-id"
         config_path.write_text(json.dumps(state), encoding="utf-8")
 
-        assert installation_profile.capabilities() == {
-            "status": "setup_required",
-            "setup_required": True,
-            "mode": None,
-            "provider_conversations_enabled": False,
-            "mobile_enabled": False,
-            "integrations_enabled": False,
-        }
+        assert installation_profile.capabilities() == active
+        assert not installation_profile.selection_pending()
 
 
 async def _admit(
@@ -385,7 +369,7 @@ def test_platform_installers_share_transactional_activation() -> None:
 if __name__ == "__main__":
     test_missing_legacy_malformed_and_interrupted_profiles_require_setup()
     test_activation_receipt_binds_profile_environment_and_selection()
-    test_provider_selection_drift_disables_all_runtime_capabilities()
+    test_provider_config_changes_do_not_invalidate_activation()
     test_authoritative_admission_rejects_before_side_effects()
     test_mode_matrix_uses_one_policy_for_discovery_and_authorization()
     test_ui_only_suppresses_better_agent_injections()
