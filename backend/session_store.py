@@ -781,11 +781,9 @@ def current_turn_error(session: dict) -> Optional[str]:
     The latest message (any role) is authoritative:
     - assistant: its `errorText`/`error` fields (set by
       `set_assistant_error` / `set_msg_retrying_until`).
-    - user: its `errorText` when `status == "error"` — this is the
-      shape left behind when `_finalize_turn_messages` hits its
-      exception path and calls `remove_assistant_msg`, so the failed
-      turn has no assistant message at all and the user message is
-      the only durable record of the failure.
+    - user: its `errorText` — this is the durable shape for failures
+      that leave no assistant message, so the user message is the only
+      record of the failed turn.
 
     Only falls back to the `unseen_error` flag when there is no
     message history yet to derive from."""
@@ -797,10 +795,8 @@ def current_turn_error(session: dict) -> Optional[str]:
             text = msg.get("errorText")
             return str(text) if text else "error"
         if role == "user":
-            if msg.get("status") != "error":
-                return None
             text = msg.get("errorText")
-            return str(text) if text else "error"
+            return str(text) if text else None
     error = session.get("unseen_error")
     return str(error) if error else None
 
