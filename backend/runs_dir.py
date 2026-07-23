@@ -71,6 +71,10 @@ def runs_root() -> Path:
     return ba_home() / "runs"
 
 
+def _ensure_runs_root(root: Path) -> None:
+    root.mkdir(parents=True, exist_ok=True)
+
+
 def run_state_ledger_path(root: Optional[Path] = None) -> Path:
     return (root or runs_root()) / _RUN_STATE_LEDGER_NAME
 
@@ -917,60 +921,56 @@ def ensure_run_state_ledger_backfilled(root: Optional[Path] = None) -> bool:
     with _RUN_STATE_LEDGER_BACKFILL_LOCK:
         if _run_state_ledger_backfill_current(root):
             return False
-        try:
-            root_resolved = root.resolve()
-            ledger = run_state_ledger_path(root)
-            existing = _run_state_ledger_keys(ledger)
-            rows: list[dict] = []
-            now = time.time()
-            with os.scandir(root) as entries:
-                for entry in entries:
-                    if not entry.is_dir(follow_symlinks=False):
-                        continue
-                    state_path = Path(entry.path) / "state.json"
-                    if state_path.name != "state.json":
-                        continue
-                    try:
-                        state_path.resolve().relative_to(root_resolved)
-                        data = json.loads(state_path.read_text(encoding="utf-8"))
-                    except Exception:
-                        continue
-                    session_id = data.get("session_id") if isinstance(data, dict) else None
-                    jsonl_path = data.get("jsonl_path") if isinstance(data, dict) else None
-                    if not session_id or not jsonl_path:
-                        continue
-                    key = (str(state_path), str(session_id), str(jsonl_path))
-                    if key in existing:
-                        continue
-                    existing.add(key)
-                    rows.append({
-                        "session_id": str(session_id),
-                        "jsonl_path": str(jsonl_path),
-                        "state_path": str(state_path),
-                        "written_at": now,
-                    })
-            ledger.parent.mkdir(parents=True, exist_ok=True)
-            if rows:
-                with ledger.open("a", encoding="utf-8") as f:
-                    for row in rows:
-                        f.write(json.dumps(row, separators=(",", ":")) + "\n")
-                        _RUN_STATE_LEDGER_SEEN.add((
-                            row["state_path"],
-                            row["session_id"],
-                            row["jsonl_path"],
-                        ))
-            write_json(
-                run_state_ledger_backfill_marker_path(root),
-                {
-                    "version": _RUN_STATE_LEDGER_BACKFILL_VERSION,
-                    "backfilled_at": now,
-                    "appended": len(rows),
-                },
-            )
-            return True
-        except Exception:
-            logger.exception("runs_dir: failed to backfill run-state ledger")
-            return False
+        _ensure_runs_root(root)
+        root_resolved = root.resolve()
+        ledger = run_state_ledger_path(root)
+        existing = _run_state_ledger_keys(ledger)
+        rows: list[dict] = []
+        now = time.time()
+        with os.scandir(root) as entries:
+            for entry in entries:
+                if not entry.is_dir(follow_symlinks=False):
+                    continue
+                state_path = Path(entry.path) / "state.json"
+                if state_path.name != "state.json":
+                    continue
+                try:
+                    state_path.resolve().relative_to(root_resolved)
+                    data = json.loads(state_path.read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+                session_id = data.get("session_id") if isinstance(data, dict) else None
+                jsonl_path = data.get("jsonl_path") if isinstance(data, dict) else None
+                if not session_id or not jsonl_path:
+                    continue
+                key = (str(state_path), str(session_id), str(jsonl_path))
+                if key in existing:
+                    continue
+                existing.add(key)
+                rows.append({
+                    "session_id": str(session_id),
+                    "jsonl_path": str(jsonl_path),
+                    "state_path": str(state_path),
+                    "written_at": now,
+                })
+        if rows:
+            with ledger.open("a", encoding="utf-8") as f:
+                for row in rows:
+                    f.write(json.dumps(row, separators=(",", ":")) + "\n")
+                    _RUN_STATE_LEDGER_SEEN.add((
+                        row["state_path"],
+                        row["session_id"],
+                        row["jsonl_path"],
+                    ))
+        write_json(
+            run_state_ledger_backfill_marker_path(root),
+            {
+                "version": _RUN_STATE_LEDGER_BACKFILL_VERSION,
+                "backfilled_at": now,
+                "appended": len(rows),
+            },
+        )
+        return True
 
 
 def append_reconciled_marker_index(
@@ -1002,54 +1002,50 @@ def ensure_reconciled_marker_index_backfilled(root: Optional[Path] = None) -> bo
     with _RECONCILED_MARKER_BACKFILL_LOCK:
         if _reconciled_marker_backfill_current(root):
             return False
-        try:
-            index = reconciled_marker_index_path(root)
-            existing = _reconciled_marker_index_keys(index)
-            rows: list[dict] = []
-            with os.scandir(root) as entries:
-                for entry in entries:
-                    if not entry.is_dir(follow_symlinks=False):
+        _ensure_runs_root(root)
+        index = reconciled_marker_index_path(root)
+        existing = _reconciled_marker_index_keys(index)
+        rows: list[dict] = []
+        with os.scandir(root) as entries:
+            for entry in entries:
+                if not entry.is_dir(follow_symlinks=False):
+                    continue
+                marker_path = Path(entry.path) / "reconciled.marker"
+                try:
+                    if marker_path.is_symlink():
                         continue
-                    marker_path = Path(entry.path) / "reconciled.marker"
-                    try:
-                        if marker_path.is_symlink():
-                            continue
-                        data = json.loads(marker_path.read_text(encoding="utf-8"))
-                    except Exception:
-                        continue
-                    provider_kind = data.get("provider_kind") if isinstance(data, dict) else None
-                    ingestion_version = data.get("ingestion_version") if isinstance(data, dict) else None
-                    if not isinstance(provider_kind, str) or not isinstance(ingestion_version, int):
-                        continue
-                    row = _reconciled_marker_index_row(
-                        marker_path,
-                        provider_kind,
-                        ingestion_version,
-                        root=root,
-                    )
-                    if row is None:
-                        continue
-                    key = _reconciled_marker_index_key(row)
-                    if key in existing:
-                        continue
-                    existing.add(key)
-                    rows.append(row)
-            index.parent.mkdir(parents=True, exist_ok=True)
-            if rows:
-                from reconciled_marker_index import for_path
-                for_path(index).append_many(rows)
-            write_json(
-                reconciled_marker_index_backfill_marker_path(root),
-                {
-                    "version": _RECONCILED_MARKER_BACKFILL_VERSION,
-                    "backfilled_at": time.time(),
-                    "appended": len(rows),
-                },
-            )
-            return True
-        except Exception:
-            logger.exception("runs_dir: failed to backfill reconciled-marker index")
-            return False
+                    data = json.loads(marker_path.read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+                provider_kind = data.get("provider_kind") if isinstance(data, dict) else None
+                ingestion_version = data.get("ingestion_version") if isinstance(data, dict) else None
+                if not isinstance(provider_kind, str) or not isinstance(ingestion_version, int):
+                    continue
+                row = _reconciled_marker_index_row(
+                    marker_path,
+                    provider_kind,
+                    ingestion_version,
+                    root=root,
+                )
+                if row is None:
+                    continue
+                key = _reconciled_marker_index_key(row)
+                if key in existing:
+                    continue
+                existing.add(key)
+                rows.append(row)
+        if rows:
+            from reconciled_marker_index import for_path
+            for_path(index).append_many(rows)
+        write_json(
+            reconciled_marker_index_backfill_marker_path(root),
+            {
+                "version": _RECONCILED_MARKER_BACKFILL_VERSION,
+                "backfilled_at": time.time(),
+                "appended": len(rows),
+            },
+        )
+        return True
 
 
 def load_reconciled_marker_index(root: Optional[Path] = None) -> dict[str, dict]:

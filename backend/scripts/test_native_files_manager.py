@@ -22,6 +22,7 @@ os.environ["CLAUDE_CONFIG_DIR"] = _CLAUDE_CFG
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import asyncio  # noqa: E402
+import json  # noqa: E402
 
 import jsonl_tailer  # noqa: E402
 import native_session_miner as nsm_mod  # noqa: E402
@@ -500,6 +501,85 @@ async def test_run_state_full_backfill_marker_dedupes_rows() -> None:
     ]
     assert len(lines) == 1, lines
     print("PASS test_run_state_full_backfill_marker_dedupes_rows")
+
+
+async def test_run_state_full_backfill_initializes_missing_root() -> None:
+    from runs_dir import (
+        ensure_run_state_ledger_backfilled,
+        run_state_ledger_backfill_marker_path,
+    )
+
+    parent = nfm_mod.Path(tempfile.mkdtemp(prefix="nfm-full-missing-parent-"))
+    root = parent / "runs"
+
+    try:
+        assert ensure_run_state_ledger_backfilled(root) is True
+        assert root.is_dir()
+        marker = json.loads(
+            run_state_ledger_backfill_marker_path(root).read_text(encoding="utf-8")
+        )
+        assert marker["appended"] == 0
+        assert ensure_run_state_ledger_backfilled(root) is False
+    finally:
+        shutil.rmtree(parent, ignore_errors=True)
+    print("PASS test_run_state_full_backfill_initializes_missing_root")
+
+
+async def test_run_state_full_backfill_propagates_scan_failure() -> None:
+    from runs_dir import ensure_run_state_ledger_backfilled
+
+    root = nfm_mod.Path(tempfile.mkdtemp(prefix="nfm-full-scan-failure-"))
+    original_scandir = runs_dir_mod.os.scandir
+
+    def fail_scandir(path):
+        if str(path) == str(root):
+            raise PermissionError("scan denied")
+        return original_scandir(path)
+
+    runs_dir_mod.os.scandir = fail_scandir  # type: ignore
+    try:
+        try:
+            ensure_run_state_ledger_backfilled(root)
+        except PermissionError:
+            pass
+        else:
+            raise AssertionError("backfill scan failure must propagate")
+    finally:
+        runs_dir_mod.os.scandir = original_scandir  # type: ignore
+        shutil.rmtree(root, ignore_errors=True)
+    print("PASS test_run_state_full_backfill_propagates_scan_failure")
+
+
+async def test_run_state_full_backfill_failure_marks_startup_task_failed() -> None:
+    from runs_dir import ensure_run_state_ledger_backfilled
+    from startup_tasks import run_task, startup_task_registry
+
+    root = nfm_mod.Path(tempfile.mkdtemp(prefix="nfm-full-task-failure-"))
+    original_scandir = runs_dir_mod.os.scandir
+
+    def fail_scandir(path):
+        if str(path) == str(root):
+            raise PermissionError("scan denied")
+        return original_scandir(path)
+
+    runs_dir_mod.os.scandir = fail_scandir  # type: ignore
+    startup_task_registry.reset()
+    try:
+        await run_task(
+            "test_run_state_ledger_backfill",
+            "Test run-state ledger backfill",
+            ensure_run_state_ledger_backfilled,
+            root,
+        )
+        tasks = startup_task_registry.list()
+        assert len(tasks) == 1, tasks
+        assert tasks[0]["state"] == "failed", tasks
+        assert tasks[0]["error"] == "scan denied", tasks
+    finally:
+        runs_dir_mod.os.scandir = original_scandir  # type: ignore
+        startup_task_registry.reset()
+        shutil.rmtree(root, ignore_errors=True)
+    print("PASS test_run_state_full_backfill_failure_marks_startup_task_failed")
 
 
 async def test_run_state_full_backfill_skips_symlink_escape() -> None:
@@ -2520,6 +2600,9 @@ if __name__ == "__main__":
     asyncio.run(test_run_state_ledger_dedupes_duplicate_rows())
     asyncio.run(test_run_state_full_backfill_finds_old_state_outside_recent_window())
     asyncio.run(test_run_state_full_backfill_marker_dedupes_rows())
+    asyncio.run(test_run_state_full_backfill_initializes_missing_root())
+    asyncio.run(test_run_state_full_backfill_propagates_scan_failure())
+    asyncio.run(test_run_state_full_backfill_failure_marks_startup_task_failed())
     asyncio.run(test_run_state_full_backfill_skips_symlink_escape())
     asyncio.run(test_run_state_full_backfill_coalesces_concurrent_marker_writes())
     asyncio.run(test_run_state_backfill_is_scheduled_at_startup())

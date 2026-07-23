@@ -202,6 +202,47 @@ def test_backfill_marker_prevents_repeated_scan() -> None:
     print("PASS backfill marker prevents repeated scan")
 
 
+def test_backfill_initializes_missing_root() -> None:
+    parent = Path(tempfile.mkdtemp(prefix="bc-reconciled-missing-parent-"))
+    root = parent / "runs"
+
+    try:
+        assert runs_dir.ensure_reconciled_marker_index_backfilled(root) is True
+        assert root.is_dir()
+        marker = json.loads(
+            runs_dir.reconciled_marker_index_backfill_marker_path(root).read_text(
+                encoding="utf-8"
+            )
+        )
+        assert marker["appended"] == 0
+        assert runs_dir.ensure_reconciled_marker_index_backfilled(root) is False
+    finally:
+        shutil.rmtree(parent, ignore_errors=True)
+    print("PASS backfill initializes missing root")
+
+
+def test_backfill_propagates_scan_failure() -> None:
+    root = _reset_runs()
+    original_scandir = runs_dir.os.scandir
+
+    def fail_scandir(path):
+        if str(path) == str(root):
+            raise PermissionError("scan denied")
+        return original_scandir(path)
+
+    runs_dir.os.scandir = fail_scandir  # type: ignore
+    try:
+        try:
+            runs_dir.ensure_reconciled_marker_index_backfilled(root)
+        except PermissionError:
+            pass
+        else:
+            raise AssertionError("backfill scan failure must propagate")
+    finally:
+        runs_dir.os.scandir = original_scandir  # type: ignore
+    print("PASS backfill propagates scan failure")
+
+
 def test_write_marker_indexes_only_runs_root_reconciled_marker() -> None:
     root = _reset_runs()
     run_dir = _run_dir(root, "run-write-marker")
@@ -278,6 +319,8 @@ def main() -> int:
         test_stale_ingestion_version_row_does_not_skip()
         test_backfill_skips_symlink_run_dir()
         test_backfill_marker_prevents_repeated_scan()
+        test_backfill_initializes_missing_root()
+        test_backfill_propagates_scan_failure()
         test_write_marker_indexes_only_runs_root_reconciled_marker()
         test_large_recovery_dispatch_repairs_index_without_quadratic_scan()
         return 0

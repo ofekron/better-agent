@@ -75,6 +75,13 @@ def test_run_sh_exports_backend_port_for_mobile_candidate_generation() -> None:
     assert 'export BA_BACKEND_PORT="$BACKEND_PORT"' in source
 
 
+def test_run_sh_does_not_prompt_for_an_unserved_frontend_port() -> None:
+    source = _run_sh()
+
+    assert "FRONTEND_PORT" not in source
+    assert 'resolve_port_conflict "$BACKEND_PORT" "backend"' in source
+
+
 def test_run_sh_checks_base_prereqs_before_startup_work() -> None:
     source = _run_sh()
 
@@ -110,5 +117,6 @@ if __name__ == "__main__":
     test_run_sh_initializes_provider_config_sync_before_frontend_build()
     test_run_sh_installs_node_dependencies_before_frontend_build()
     test_run_sh_exports_backend_port_for_mobile_candidate_generation()
+    test_run_sh_does_not_prompt_for_an_unserved_frontend_port()
     test_run_sh_checks_base_prereqs_before_startup_work()
     test_windows_bootstrap_installs_base_prereqs_with_winget()
