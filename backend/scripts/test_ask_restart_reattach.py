@@ -66,6 +66,45 @@ def test_ask_status_store_roundtrip():
     assert ask_status_store.read_status("ask_1") is None
 
 
+def test_claim_route_backfills_unclaimed_legacy_shaped_record():
+    """Regression: a record can exist under an ask_id without ever having
+    gone through claim_route (`write_status()` called directly, seeding
+    lifecycle_msg_id/target_session_id before route_kind/route_value ever
+    existed — the shape every ask predating claim_route's introduction has,
+    and the shape `_dispatch_prompt` still writes on first dispatch before
+    claim_route runs a second time on reattach). `claim_route` must treat a
+    missing `route_kind` as "not yet claimed" and backfill the route, not
+    reject it as bound to a conflicting route."""
+    ask_status_store.write_status(
+        "ask_legacy1",
+        lifecycle_msg_id="life-legacy1",
+        queue_item_id="queue-legacy1",
+        sender_session_id="sender-legacy",
+        target_session_id="target-legacy",
+    )
+    claimed = ask_status_store.claim_route(
+        "ask_legacy1",
+        sender_session_id="sender-legacy",
+        target_session_id="target-legacy",
+    )
+    assert claimed["route_kind"] == "session"
+    assert claimed["route_value"] == "target-legacy"
+    assert claimed["target_session_id"] == "target-legacy"
+    assert claimed["lifecycle_msg_id"] == "life-legacy1"
+
+    # A genuinely different sender must still be rejected as a real conflict.
+    try:
+        ask_status_store.claim_route(
+            "ask_legacy1",
+            sender_session_id="someone-else",
+            target_session_id="target-legacy",
+        )
+        raise AssertionError("expected ValueError for a real sender conflict")
+    except ValueError:
+        pass
+    ask_status_store.delete_status("ask_legacy1")
+
+
 def test_ask_returns_cached_result_without_requeue():
     """Re-attach path: a stored result short-circuits before submit_prompt,
     so a backend-restart retry does NOT re-queue a duplicate target prompt."""
