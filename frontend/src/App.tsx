@@ -1757,6 +1757,7 @@ function AppMain({
     streamingLoadPhase,
     lastResult,
     streamingAppSessionId,
+    checkConnection,
   } = useWebSocket(WS_URL, {
     currentAppSessionId: wsTargetSessionId,
     // Subscribe to every pane in the open tree. `currentAppSessionId`
@@ -1972,12 +1973,18 @@ function AppMain({
   useEffect(() => {
     if (!Capacitor.isNativePlatform()) return;
     const handle = CapApp.addListener("appStateChange", (state: AppState) => {
-      if (state.isActive) refreshSessionInventory();
+      if (!state.isActive) return;
+      refreshSessionInventory();
+      // The WS heartbeat catches a dead-but-OPEN socket within one
+      // watchdog cycle, but foregrounding after the OS suspended
+      // background networking is the single most common way this
+      // happens on mobile -- verify immediately instead of waiting.
+      checkConnection();
     });
     return () => {
       void handle.then((h) => h.remove());
     };
-  }, [refreshSessionInventory]);
+  }, [refreshSessionInventory, checkConnection]);
 
   useEffect(() => {
     if (!connected || offlineQueue.queue.length === 0) return;

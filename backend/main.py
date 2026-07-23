@@ -18538,6 +18538,17 @@ async def websocket_chat(websocket: WebSocket):
 
             msg_type = msg.get("type")
 
+            if msg_type == "ping":
+                # Application-level heartbeat reply. Neither the ASGI
+                # server nor a reverse proxy in this stack configures a WS
+                # idle timeout, so a connection killed silently by a
+                # mobile network transition (OS-suspended background
+                # sockets, WiFi<->cellular handoff, carrier NAT idle-drop)
+                # would otherwise sit open on both ends forever. The
+                # client's heartbeat watchdog (useWebSocket.ts) uses the
+                # absence of this reply to detect and repair that.
+                await _send_prepared({"type": "pong"})
+                continue
             if msg_type == "snapshot_ack":
                 await snapshot_transport.acknowledge(msg)
                 continue

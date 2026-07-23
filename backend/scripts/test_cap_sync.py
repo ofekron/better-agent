@@ -1,0 +1,88 @@
+from __future__ import annotations
+
+import json
+import subprocess
+import tempfile
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[2]
+CAP_SYNC = ROOT / "frontend" / "scripts" / "cap-sync.mjs"
+
+BASE_PACKAGE_JSON = {
+    "name": "frontend",
+    "dependencies": {"react": "^19.2.0"},
+}
+MOBILE_DEPENDENCIES = {"@capacitor/core": "^8.3.4", "@capacitor/app": "^8.1.0"}
+
+
+def _write_fixture(frontend_dir: Path) -> None:
+    (frontend_dir / "package.json").write_text(
+        f"{json.dumps(BASE_PACKAGE_JSON, indent=2)}\n"
+    )
+    (frontend_dir / "mobile-dependencies.json").write_text(
+        f"{json.dumps(MOBILE_DEPENDENCIES, indent=2)}\n"
+    )
+
+
+def _run_with_mobile_package_json(frontend_dir: Path, during_script: str) -> str:
+    script = (
+        f"import {{ withMobilePackageJson }} from {json.dumps(CAP_SYNC.as_uri())};"
+        "import { readFileSync } from 'node:fs';"
+        f"withMobilePackageJson({json.dumps(str(frontend_dir))}, () => {{{during_script}}});"
+    )
+    completed = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        cwd=frontend_dir,
+        capture_output=True,
+        text=True,
+    )
+    return completed
+
+
+def test_mobile_deps_merged_in_during_the_call() -> None:
+    # This is the failure this fixes: `cap sync` reads package.json to
+    # discover native plugins, and frontend/package.json intentionally
+    # excludes them (installation dependency isolation) -- so a bare
+    # `cap sync` sees none and strips every plugin include. The manifest
+    # must contain the mobile deps for the duration of the wrapped call.
+    with tempfile.TemporaryDirectory() as tmp:
+        frontend_dir = Path(tmp)
+        _write_fixture(frontend_dir)
+        completed = _run_with_mobile_package_json(
+            frontend_dir,
+            "console.log(readFileSync('package.json', 'utf8'));",
+        )
+        assert completed.returncode == 0, completed.stderr
+        during = json.loads(completed.stdout)
+        assert during["dependencies"]["@capacitor/core"] == "^8.3.4"
+        assert during["dependencies"]["@capacitor/app"] == "^8.1.0"
+        assert during["dependencies"]["react"] == "^19.2.0"
+
+
+def test_package_json_restored_after_success() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        frontend_dir = Path(tmp)
+        _write_fixture(frontend_dir)
+        original = (frontend_dir / "package.json").read_text()
+        completed = _run_with_mobile_package_json(frontend_dir, "")
+        assert completed.returncode == 0, completed.stderr
+        assert (frontend_dir / "package.json").read_text() == original
+
+
+def test_package_json_restored_after_failure() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        frontend_dir = Path(tmp)
+        _write_fixture(frontend_dir)
+        original = (frontend_dir / "package.json").read_text()
+        completed = _run_with_mobile_package_json(
+            frontend_dir, "throw new Error('sync failed')"
+        )
+        assert completed.returncode != 0
+        assert (frontend_dir / "package.json").read_text() == original
+
+
+if __name__ == "__main__":
+    test_mobile_deps_merged_in_during_the_call()
+    test_package_json_restored_after_success()
+    test_package_json_restored_after_failure()
+    print("cap-sync tests passed")

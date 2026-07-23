@@ -23,6 +23,17 @@ import {
   webSocketTrafficLog,
 } from "../lib/webSocketTrafficLog";
 
+// Application-level liveness check. Neither the ASGI server nor any
+// reverse proxy in this stack configures a WS idle timeout, and a mobile
+// network transition (OS suspends background sockets, WiFi<->cellular
+// handoff, carrier NAT idle-drop) can kill the underlying TCP connection
+// without either end ever seeing a close/error frame -- `readyState` then
+// reports OPEN forever while nothing arrives. A ping/pong heartbeat is the
+// only way to detect that from JS; the interval and timeout below tolerate
+// one missed round trip before treating the connection as dead.
+const HEARTBEAT_INTERVAL_MS = 15_000;
+const HEARTBEAT_TIMEOUT_MS = 35_000;
+
 export interface ImagePayload {
   data: string;
   media_type: string;
@@ -404,6 +415,9 @@ interface UseWebSocketOptions {
 
 interface UseWebSocketReturn {
   connected: boolean;
+  /** Verifies the socket immediately instead of waiting for the next
+   * heartbeat cycle -- see the checkConnection definition below. */
+  checkConnection: () => void;
   sendMessage: (
     prompt: string,
     model: string,
@@ -627,6 +641,8 @@ export function useWebSocket(
   const wsRef = useRef<WebSocket | null>(null);
   const snapshotTransportRef = useRef(new SnapshotTransport());
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const lastPongAtRef = useRef(Date.now());
+  const heartbeatIntervalRef = useRef<ReturnType<typeof setInterval> | undefined>(undefined);
   // Mirror isStreaming into a ref so onmessage can gate the "loose
   // event" path without re-subscribing on every streaming transition.
   const isStreamingRef = useRef(false);
@@ -660,10 +676,26 @@ export function useWebSocket(
     ws.onopen = () => {
       setConnected(true);
       snapshotTransportRef.current.resume((frame) => sendWebSocketFrame(ws, frame));
+      lastPongAtRef.current = Date.now();
+      heartbeatIntervalRef.current = setInterval(() => {
+        if (Date.now() - lastPongAtRef.current > HEARTBEAT_TIMEOUT_MS) {
+          // No pong for two heartbeats straight: the connection is a
+          // zombie (readyState still OPEN, nothing actually arriving).
+          // Force a close so the existing onclose->reconnect path fires
+          // -- do not invent a second reconnection code path.
+          ws.close();
+          return;
+        }
+        sendWebSocketFrame(ws, { type: "ping" });
+      }, HEARTBEAT_INTERVAL_MS);
     };
 
     ws.onclose = (ev) => {
       webSocketTrafficLog.flush("connection_closed");
+      if (heartbeatIntervalRef.current !== undefined) {
+        clearInterval(heartbeatIntervalRef.current);
+        heartbeatIntervalRef.current = undefined;
+      }
       setConnected(false);
       setIsStreaming(false);
       setIsStopping(false);
@@ -705,6 +737,10 @@ export function useWebSocket(
         }
         const event: WSEvent = JSON.parse(e.data);
         eventType = event.type;
+        if (event.type === "pong") {
+          lastPongAtRef.current = Date.now();
+          return;
+        }
         if (!routingVerifiedSnapshot && snapshotTransportRef.current.handle(
           event,
           (frame) => sendWebSocketFrame(ws, frame),
@@ -1523,6 +1559,10 @@ export function useWebSocket(
     connect();
     return () => {
       clearTimeout(reconnectTimer.current);
+      if (heartbeatIntervalRef.current !== undefined) {
+        clearInterval(heartbeatIntervalRef.current);
+        heartbeatIntervalRef.current = undefined;
+      }
       const ws = wsRef.current;
       wsRef.current = null;
       if (!ws) return;
@@ -1534,6 +1574,25 @@ export function useWebSocket(
       webSocketTrafficLog.flush("unmounted");
       snapshotTransportRef.current.clear();
     };
+  }, [connect]);
+
+  // Exposed so a resume/foreground event (Capacitor appStateChange, tab
+  // visibility) can verify the socket immediately instead of waiting for
+  // the next heartbeat cycle. A stalled-but-OPEN socket can't be told
+  // apart from a healthy one synchronously, so this forces a close and
+  // lets the existing onclose->reconnect path repair it; an already
+  // closed/closing socket reconnects right away instead of waiting out
+  // the fixed retry delay.
+  const checkConnection = useCallback(() => {
+    const ws = wsRef.current;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.close();
+      return;
+    }
+    if (!ws || ws.readyState === WebSocket.CLOSED) {
+      clearTimeout(reconnectTimer.current);
+      connect();
+    }
   }, [connect]);
 
   // Subscribe / unsubscribe lifecycle. When the user switches to a new
@@ -1766,6 +1825,7 @@ export function useWebSocket(
 
   return {
     connected,
+    checkConnection,
     sendMessage,
     stopStreaming,
     sendPromoteQueued,

@@ -10,6 +10,7 @@ import {
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { readMobileDependencies } from "./mobile-dependencies.mjs";
 
 const frontend = dirname(dirname(fileURLToPath(import.meta.url)));
 const repository = dirname(frontend);
@@ -45,10 +46,10 @@ function install(profile) {
       readFileSync(join(frontend, "package.json"), "utf8"),
     );
     if (profile === "mobile") {
-      const mobile = JSON.parse(
-        readFileSync(join(frontend, "mobile-dependencies.json"), "utf8"),
-      );
-      manifest.dependencies = { ...manifest.dependencies, ...mobile };
+      manifest.dependencies = {
+        ...manifest.dependencies,
+        ...readMobileDependencies(frontend),
+      };
     }
     const lock = JSON.parse(
       readFileSync(
