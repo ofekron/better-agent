@@ -118,6 +118,7 @@ source_root.mkdir(parents=True)
 # top-level "id" here once masked a startup KeyError in publish_registry).
 records["test.daemons"] = {
     "enabled": True,
+    "entitlement": {"status": "not_required"},
     "manifest": extension_store.validate_manifest(_manifest([DAEMON])),
     "_root": source_root,
 }
@@ -139,6 +140,7 @@ smoke = extension_store._run_extension_smoke_test(
 assert smoke["status"] == "passed"
 records[extension_store.BUILTIN_SWITCH_CONTROL_EXTENSION_ID] = {
     "enabled": True,
+    "entitlement": {"status": "not_required"},
     "manifest": validated_switch_manifest,
     "_root": BACKEND.parent / "extensions" / "switch-control",
 }
@@ -187,7 +189,12 @@ assert key not in extension_daemons.publish_registry(), "uninstall must remove t
 
 # Foreign entries (unknown writer) with a live record are preserved by merge.
 write_json(registry_path(), {"daemons": {"other.ext:d": {"extension_id": "other.ext", "lifecycle": "supervisor"}}})
-records["other.ext"] = {"enabled": True, "manifest": {"id": "other.ext", "entrypoints": {}}, "_root": None}
+records["other.ext"] = {
+    "enabled": True,
+    "entitlement": {"status": "not_required"},
+    "manifest": {"id": "other.ext", "entrypoints": {}},
+    "_root": None,
+}
 assert "other.ext:d" in extension_daemons.publish_registry()
 
 print("OK test_extension_daemons_surface")

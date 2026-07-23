@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +23,7 @@ BASE_REQUIREMENTS = "requirements.txt"
 MOBILE_REQUIREMENTS = "requirements-mobile.txt"
 ACTIVE_POINTER = BACKEND / ".active-venv"
 VENV_ROOT = BACKEND / ".venvs"
+PLAN_MARKER = ".dependency-plan.json"
 BASE_PROBES = ("argon2", "fastapi", "uvicorn")
 
 
@@ -133,7 +135,8 @@ def _write_pointer(env_dir: Path) -> None:
         Path(temporary).unlink(missing_ok=True)
 
 
-def active_env(backend_dir: Path = BACKEND) -> Path:
+def active_env(backend_dir: Path | None = None) -> Path:
+    backend_dir = BACKEND if backend_dir is None else backend_dir
     pointer = backend_dir / ACTIVE_POINTER.name
     venv_root = backend_dir / VENV_ROOT.name
     try:
@@ -155,10 +158,7 @@ def active_env(backend_dir: Path = BACKEND) -> Path:
 
 def assert_active() -> None:
     plan = resolve_plan()
-    if active_env().name != plan["hash"]:
-        raise DependencyPlanError(
-            "provider runtime dependencies changed; restart Better Agent to activate them"
-        )
+    _assert_environment(active_env(), plan)
 
 
 def verified_active_env(backend_dir: Path) -> Path:
@@ -187,6 +187,34 @@ def _module_available(module: str) -> bool:
     import importlib.util
 
     return importlib.util.find_spec(module) is not None
+
+
+def _probe_environment(env_dir: Path, probes: tuple[str, ...]) -> None:
+    try:
+        subprocess.run(
+            [
+                str(_python_in(env_dir)),
+                "-c",
+                ";".join(f"import {name}" for name in probes),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise DependencyPlanError(
+            "backend dependency environment is missing required runtime modules"
+        ) from exc
+
+
+def _assert_environment(env_dir: Path, plan: dict[str, Any]) -> None:
+    marker = _read_object(env_dir / PLAN_MARKER)
+    if marker != {"schema_version": 1, "hash": plan["hash"]}:
+        raise DependencyPlanError(
+            "provider runtime dependencies changed; restart Better Agent to activate them"
+        )
+    _probe_environment(env_dir, tuple(plan["probes"]))
 
 
 def assert_provider_supported(provider: dict[str, Any]) -> None:
@@ -222,11 +250,13 @@ def assert_state_transition_supported(state: dict[str, Any]) -> None:
     candidate_plan = resolve_plan(state)
     if current_plan["hash"] == candidate_plan["hash"]:
         return
-    if active_env().name != candidate_plan["hash"]:
+    try:
+        _assert_environment(active_env(), candidate_plan)
+    except DependencyPlanError as exc:
         raise DependencyPlanError(
             "provider runtime dependency plan changed; rerun the installer "
             "before changing active providers"
-        )
+        ) from exc
 
 
 def _apply_pending_selection(python: Path) -> None:
@@ -236,6 +266,7 @@ def _apply_pending_selection(python: Path) -> None:
         [str(python), str(Path(__file__).resolve()), "apply-selection"],
         cwd=BACKEND,
         check=True,
+        stdout=subprocess.DEVNULL,
     )
 
 
@@ -258,37 +289,48 @@ def _restore_pointer(value: str | None) -> None:
         Path(temporary).unlink(missing_ok=True)
 
 
+def _build_environment(uv: str, plan: dict[str, Any]) -> Path:
+    plan_root = VENV_ROOT / str(plan["hash"])
+    build_id = uuid.uuid4().hex
+    stage = plan_root / f".stage-{build_id}"
+    env_dir = plan_root / build_id
+    plan_root.mkdir(parents=True, exist_ok=True)
+    try:
+        subprocess.run(
+            [uv, "venv", "--relocatable", str(stage)],
+            check=True,
+            stdout=sys.stderr,
+        )
+        command = [uv, "pip", "install", "--python", str(_python_in(stage))]
+        for name in plan["requirements"]:
+            command.extend(["-r", str(BACKEND / name)])
+        subprocess.run(command, cwd=BACKEND, check=True, stdout=sys.stderr)
+        _probe_environment(stage, tuple(plan["probes"]))
+        (stage / PLAN_MARKER).write_text(
+            json.dumps({"schema_version": 1, "hash": plan["hash"]}),
+            encoding="utf-8",
+        )
+        os.replace(stage, env_dir)
+        _assert_environment(env_dir, plan)
+        return env_dir
+    except Exception:
+        shutil.rmtree(stage, ignore_errors=True)
+        raise
+
+
+def _resolve_or_build_environment(uv: str, plan: dict[str, Any]) -> Path:
+    try:
+        env_dir = active_env()
+        _assert_environment(env_dir, plan)
+        return env_dir
+    except DependencyPlanError:
+        return _build_environment(uv, plan)
+
+
 def activate(uv: str) -> Path:
     plan = resolve_plan()
-    env_dir = VENV_ROOT / str(plan["hash"])
+    env_dir = _resolve_or_build_environment(uv, plan)
     python = _python_in(env_dir)
-    if not python.is_file():
-        stage = VENV_ROOT / f".{plan['hash']}.{os.getpid()}.stage"
-        shutil.rmtree(stage, ignore_errors=True)
-        VENV_ROOT.mkdir(parents=True, exist_ok=True)
-        try:
-            subprocess.run([uv, "venv", str(stage)], check=True)
-            command = [uv, "pip", "install", "--python", str(_python_in(stage))]
-            for name in plan["requirements"]:
-                command.extend(["-r", str(BACKEND / name)])
-            subprocess.run(command, cwd=BACKEND, check=True)
-            subprocess.run(
-                [
-                    str(_python_in(stage)),
-                    "-c",
-                    ";".join(f"import {name}" for name in plan["probes"]),
-                ],
-                check=True,
-            )
-            try:
-                os.replace(stage, env_dir)
-            except OSError:
-                if not python.is_file():
-                    raise
-                shutil.rmtree(stage, ignore_errors=True)
-        except Exception:
-            shutil.rmtree(stage, ignore_errors=True)
-            raise
     if installation_profile.selection_pending():
         try:
             previous_pointer = ACTIVE_POINTER.read_text(encoding="utf-8")

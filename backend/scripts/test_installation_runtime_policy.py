@@ -3,9 +3,11 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
+import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
@@ -32,6 +34,31 @@ import session_manager
 
 def _reset_config_cache() -> None:
     config_store._state_cache = None
+
+
+def _write_probe_wheel(root: Path) -> Path:
+    wheel = root / "runtime_probe-1.0-py3-none-any.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr("runtime_probe/__init__.py", "")
+        archive.writestr(
+            "runtime_probe/cli.py",
+            "def main():\n    print('probe-ok')\n",
+        )
+        archive.writestr(
+            "runtime_probe-1.0.dist-info/METADATA",
+            "Metadata-Version: 2.1\nName: runtime-probe\nVersion: 1.0\n",
+        )
+        archive.writestr(
+            "runtime_probe-1.0.dist-info/WHEEL",
+            "Wheel-Version: 1.0\nGenerator: Better Agent test\n"
+            "Root-Is-Purelib: true\nTag: py3-none-any\n",
+        )
+        archive.writestr(
+            "runtime_probe-1.0.dist-info/entry_points.txt",
+            "[console_scripts]\nruntime-probe = runtime_probe.cli:main\n",
+        )
+        archive.writestr("runtime_probe-1.0.dist-info/RECORD", "")
+    return wheel
 
 
 def test_profile_selection_acknowledgement() -> None:
@@ -200,7 +227,6 @@ def test_provider_plan_transition_requires_activated_candidate() -> None:
         json.dumps(current),
         encoding="utf-8",
     )
-    candidate_hash = dependency_plan.resolve_plan(candidate)["hash"]
     with patch.object(
         dependency_plan,
         "active_env",
@@ -214,8 +240,7 @@ def test_provider_plan_transition_requires_activated_candidate() -> None:
             raise AssertionError("inactive candidate plan must fail closed")
     with patch.object(
         dependency_plan,
-        "active_env",
-        return_value=Path("/tmp") / candidate_hash,
+        "_assert_environment",
     ):
         dependency_plan.assert_state_transition_supported(candidate)
 
@@ -277,6 +302,143 @@ def test_provider_activation_mutations_reject_missing_runtime() -> None:
     assert persisted["default_provider_id"] != suspended["id"]
 
 
+def _write_credential_test_state() -> Path:
+    config_path = Path(_HOME) / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "default_provider_id": "codex-id",
+                "providers": [
+                    {
+                        "id": "codex-id",
+                        "name": "Codex",
+                        "kind": "codex",
+                        "mode": "subscription",
+                        "suspended": False,
+                    },
+                    {
+                        "id": "api-id",
+                        "name": "Claude API",
+                        "kind": "claude",
+                        "mode": "api_key",
+                        "suspended": True,
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    _reset_config_cache()
+    return config_path
+
+
+def _credential_mutations() -> tuple:
+    return (
+        lambda: config_store.add_provider(
+            {
+                "name": "New API",
+                "kind": "claude",
+                "mode": "api_key",
+                "api_key": "new-secret",
+                "suspended": True,
+            }
+        ),
+        lambda: config_store.update_provider(
+            "api-id",
+            {"api_key": "new-secret"},
+        ),
+        lambda: config_store.delete_provider("api-id"),
+        lambda: config_store.import_provider_sync_state(
+            {
+                "default_provider_id": "codex-id",
+                "providers": [
+                    {
+                        "id": "codex-id",
+                        "name": "Codex",
+                        "kind": "codex",
+                        "mode": "subscription",
+                        "suspended": False,
+                    },
+                    {
+                        "id": "api-id",
+                        "name": "Claude API",
+                        "kind": "claude",
+                        "mode": "api_key",
+                        "suspended": False,
+                    },
+                ],
+                "provider_api_keys": [
+                    {"provider_id": "api-id", "api_key": "new-secret"}
+                ],
+            }
+        ),
+    )
+
+
+def test_rejected_provider_transitions_do_not_touch_credentials() -> None:
+    config_path = _write_credential_test_state()
+    before_config = config_path.read_text(encoding="utf-8")
+    credentials = {"api-id": "old-secret"}
+
+    def write_credential(provider_id: str, value: str) -> None:
+        if value:
+            credentials[provider_id] = value
+        else:
+            credentials.pop(provider_id, None)
+
+    for mutation in _credential_mutations():
+        with (
+            patch.object(config_store, "_read_api_key", side_effect=lambda pid: credentials.get(pid, "")),
+            patch.object(config_store, "_write_api_key", side_effect=write_credential) as write,
+            patch.object(dependency_plan, "assert_provider_supported"),
+            patch.object(dependency_plan, "assert_state_supported"),
+            patch.object(
+                config_store,
+                "_validate_state_for_save",
+                side_effect=dependency_plan.DependencyPlanError("rejected"),
+            ),
+        ):
+            try:
+                mutation()
+            except dependency_plan.DependencyPlanError:
+                pass
+            else:
+                raise AssertionError("provider transition must be rejected")
+        assert write.call_count == 0
+        assert credentials == {"api-id": "old-secret"}
+        assert config_path.read_text(encoding="utf-8") == before_config
+
+
+def test_failed_provider_persist_rolls_back_credentials() -> None:
+    config_path = _write_credential_test_state()
+    before_config = config_path.read_text(encoding="utf-8")
+    credentials = {"api-id": "old-secret"}
+
+    def write_credential(provider_id: str, value: str) -> None:
+        if value:
+            credentials[provider_id] = value
+        else:
+            credentials.pop(provider_id, None)
+
+    for mutation in _credential_mutations():
+        with (
+            patch.object(config_store, "_read_api_key", side_effect=lambda pid: credentials.get(pid, "")),
+            patch.object(config_store, "_write_api_key", side_effect=write_credential),
+            patch.object(dependency_plan, "assert_provider_supported"),
+            patch.object(dependency_plan, "assert_state_supported"),
+            patch.object(config_store, "_validate_state_for_save"),
+            patch.object(config_store, "_save_state", side_effect=OSError("disk failed")),
+        ):
+            try:
+                mutation()
+            except OSError:
+                pass
+            else:
+                raise AssertionError("failed provider save must abort")
+        assert credentials == {"api-id": "old-secret"}
+        assert config_path.read_text(encoding="utf-8") == before_config
+
+
 def test_failed_dependency_stage_preserves_active_environment() -> None:
     with tempfile.TemporaryDirectory(prefix="ba-dependency-stage-") as tmp:
         root = Path(tmp)
@@ -294,7 +456,7 @@ def test_failed_dependency_stage_preserves_active_environment() -> None:
 
         def failed_install(command, **_kwargs):
             if command[1] == "venv":
-                stage_python = Path(command[2]) / "bin" / "python"
+                stage_python = Path(command[3]) / "bin" / "python"
                 stage_python.parent.mkdir(parents=True)
                 stage_python.write_text("", encoding="utf-8")
                 return subprocess.CompletedProcess(command, 0)
@@ -315,7 +477,7 @@ def test_failed_dependency_stage_preserves_active_environment() -> None:
 
         assert pointer.read_text(encoding="utf-8") == ".venvs/old"
         assert old_python.is_file()
-        assert not (venv_root / "new").exists()
+        assert not any((venv_root / "new").iterdir())
 
 
 def test_selection_failure_restores_previous_pointer() -> None:
@@ -341,6 +503,11 @@ def test_selection_failure_restores_previous_pointer() -> None:
             patch.object(dependency_plan, "VENV_ROOT", venv_root),
             patch.object(dependency_plan, "ACTIVE_POINTER", pointer),
             patch.object(dependency_plan, "resolve_plan", return_value=plan),
+            patch.object(
+                dependency_plan,
+                "_resolve_or_build_environment",
+                return_value=python.parent.parent,
+            ),
             patch.object(dependency_plan, "_write_pointer", side_effect=write_candidate),
             patch.object(
                 dependency_plan,
@@ -356,6 +523,84 @@ def test_selection_failure_restores_previous_pointer() -> None:
                 raise AssertionError("failed config commit must abort activation")
 
         assert pointer.read_text(encoding="utf-8") == ".venvs/old"
+
+
+def test_pending_selection_does_not_write_activation_stdout() -> None:
+    with patch.object(
+        dependency_plan.subprocess,
+        "run",
+        return_value=subprocess.CompletedProcess([], 0),
+    ) as run:
+        dependency_plan._apply_pending_selection(Path(sys.executable))
+    assert run.call_args.kwargs["stdout"] is subprocess.DEVNULL
+
+
+def test_relocated_environment_runs_and_repairs_missing_probe() -> None:
+    uv = shutil.which("uv")
+    assert uv is not None
+    with tempfile.TemporaryDirectory(prefix="ba-relocatable-venv-") as tmp:
+        backend = Path(tmp) / "backend"
+        venv_root = backend / ".venvs"
+        pointer = backend / ".active-venv"
+        backend.mkdir()
+        wheel = _write_probe_wheel(backend)
+        (backend / "requirements.txt").write_text(
+            f"{wheel.as_uri()}\n",
+            encoding="utf-8",
+        )
+        plan = {
+            "hash": "probe-plan",
+            "requirements": ("requirements.txt",),
+            "probes": ("runtime_probe",),
+        }
+        with (
+            patch.object(dependency_plan, "BACKEND", backend),
+            patch.object(dependency_plan, "VENV_ROOT", venv_root),
+            patch.object(dependency_plan, "ACTIVE_POINTER", pointer),
+            patch.object(dependency_plan, "resolve_plan", return_value=plan),
+            patch.object(
+                installation_profile,
+                "selection_pending",
+                return_value=False,
+            ),
+        ):
+            first = dependency_plan.activate(uv)
+            script = (
+                first / "Scripts" / "runtime-probe.exe"
+                if os.name == "nt"
+                else first / "bin" / "runtime-probe"
+            )
+            result = subprocess.run(
+                [str(script)],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            assert result.stdout.strip() == "probe-ok"
+
+            package_dir = subprocess.run(
+                [
+                    str(dependency_plan._python_in(first)),
+                    "-c",
+                    "import pathlib,runtime_probe;"
+                    "print(pathlib.Path(runtime_probe.__file__).parent)",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            shutil.rmtree(package_dir)
+            try:
+                dependency_plan.assert_active()
+            except dependency_plan.DependencyPlanError:
+                pass
+            else:
+                raise AssertionError("active environment missing a probe must fail")
+
+            repaired = dependency_plan.activate(uv)
+            assert repaired != first
+            assert first.exists()
+            dependency_plan.assert_active()
 
 
 def test_target_checkout_rejects_stale_dependency_environment() -> None:
@@ -408,6 +653,9 @@ def test_desktop_profile_excludes_native_dependencies() -> None:
     ) in run_source
     assert 'npm_project_hash "$project_dir" "${dependency_files[@]}"' in run_source
     assert "package-lock.mobile.json" in installer_source
+    node_source = (ROOT / "run_node.sh").read_text(encoding="utf-8")
+    assert 'exec "$PY" -m uvicorn main_node:app' in node_source
+    assert 'bin/uvicorn' not in node_source
 
 
 def test_ui_only_rejects_team_session_creation() -> None:
@@ -492,8 +740,12 @@ if __name__ == "__main__":
     test_provider_mutation_rejects_missing_runtime_before_persist()
     test_provider_plan_transition_requires_activated_candidate()
     test_provider_activation_mutations_reject_missing_runtime()
+    test_rejected_provider_transitions_do_not_touch_credentials()
+    test_failed_provider_persist_rolls_back_credentials()
     test_failed_dependency_stage_preserves_active_environment()
     test_selection_failure_restores_previous_pointer()
+    test_pending_selection_does_not_write_activation_stdout()
+    test_relocated_environment_runs_and_repairs_missing_probe()
     test_target_checkout_rejects_stale_dependency_environment()
     test_desktop_profile_excludes_native_dependencies()
     test_ui_only_rejects_team_session_creation()
