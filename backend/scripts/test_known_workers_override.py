@@ -18,6 +18,7 @@ from orchs.manager import bootstrap
 from orchs.manager import _delegation
 import cli as cli_module
 import delegation_status_store
+from sync_wait_graph import SyncWaitGraph
 
 
 def teardown_module():
@@ -427,6 +428,7 @@ def test_worker_pid_stamp_emits_run_state(monkeypatch):
     class Coordinator:
         def __init__(self):
             self.turn_manager = TurnManager()
+            self.sync_wait_graph = SyncWaitGraph()
             self.internal_token = "token"
             self.provider = Provider()
 
@@ -546,6 +548,7 @@ def test_run_delegation_locked_salvages_durable_complete_without_queue_terminal(
     class Coordinator:
         def __init__(self):
             self.turn_manager = TurnManager()
+            self.sync_wait_graph = SyncWaitGraph()
             self.internal_token = "token"
             self.provider = Provider()
 
@@ -678,6 +681,7 @@ def test_ephemeral_delegate_fork_is_removed_after_completion(monkeypatch):
 
     class Provider:
         KIND = "claude"
+        id = "provider"
         record = {"name": "Claude"}
 
         def __init__(self):
@@ -717,6 +721,7 @@ def test_ephemeral_delegate_fork_is_removed_after_completion(monkeypatch):
     class Coordinator:
         def __init__(self):
             self.turn_manager = TurnManager()
+            self.sync_wait_graph = SyncWaitGraph()
             self.internal_token = "token"
             self.provider = Provider()
 

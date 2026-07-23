@@ -32,6 +32,21 @@ def teardown_module():
     shutil.rmtree(_TMP_HOME, ignore_errors=True)
 
 
+def _write_route_status(
+    ask_id: str,
+    *,
+    sender_session_id: str,
+    target_session_id: str,
+    **fields,
+) -> None:
+    ask_status_store.claim_route(
+        ask_id,
+        sender_session_id=sender_session_id,
+        target_session_id=target_session_id,
+    )
+    ask_status_store.write_status(ask_id, **fields)
+
+
 def test_ask_status_store_roundtrip():
     assert ask_status_store.read_status("ask_1") is None
     ask_status_store.write_status(
@@ -46,7 +61,7 @@ def test_ask_status_store_roundtrip():
     ask_status_store.write_status("ask_1", result={"success": True})
     status = ask_status_store.read_status("ask_1")
     assert status["lifecycle_msg_id"] == "life-1"
-    assert status["result"] == {"success": True}
+    assert status["result"] == {"success": True, "ask_id": "ask_1"}
     ask_status_store.delete_status("ask_1")
     assert ask_status_store.read_status("ask_1") is None
 
@@ -61,7 +76,12 @@ def test_ask_returns_cached_result_without_requeue():
         "response_message_id": "m-1",
         "assistant_content": "done already",
     }
-    ask_status_store.write_status("ask_restart1", result=cached)
+    _write_route_status(
+        "ask_restart1",
+        sender_session_id="sender-sess",
+        target_session_id="target-sess",
+        result=cached,
+    )
 
     coordinator = Coordinator()
     submit_calls: list[tuple] = []
@@ -157,7 +177,7 @@ def test_reattach_uses_async_terminal_scan(monkeypatch):
     sender = session_manager.create(name="sender async terminal", cwd="/repo", orchestration_mode="native")
     target = session_manager.create(name="target async terminal", cwd="/repo", orchestration_mode="native")
     lifecycle_msg_id = "life-async-terminal"
-    ask_status_store.write_status(
+    _write_route_status(
         "ask_async_terminal",
         lifecycle_msg_id=lifecycle_msg_id,
         queue_item_id="queued-async-terminal",
@@ -303,7 +323,7 @@ def test_reattach_returns_completed_target_message_without_terminal_event(monkey
     sender = session_manager.create(name="sender", cwd="/repo", orchestration_mode="native")
     target = session_manager.create(name="target", cwd="/repo", orchestration_mode="native")
     lifecycle_msg_id = "life-recovered-success"
-    ask_status_store.write_status(
+    _write_route_status(
         "ask_recovered_success",
         lifecycle_msg_id=lifecycle_msg_id,
         queue_item_id="queued-recovered-success",
@@ -358,7 +378,7 @@ def test_reattach_ignores_unfinished_target_message_without_terminal_event(monke
     sender = session_manager.create(name="sender unfinished", cwd="/repo", orchestration_mode="native")
     target = session_manager.create(name="target unfinished", cwd="/repo", orchestration_mode="native")
     lifecycle_msg_id = "life-recovered-unfinished"
-    ask_status_store.write_status(
+    _write_route_status(
         "ask_recovered_unfinished",
         lifecycle_msg_id=lifecycle_msg_id,
         queue_item_id="queued-recovered-unfinished",
@@ -533,7 +553,7 @@ def test_reattach_redispatches_when_original_dispatch_never_landed():
     # Simulate the crash landing exactly between the status write and the
     # durable queue write: status carries all three reattach fields, but
     # the target session's queued_prompts/messages are untouched.
-    ask_status_store.write_status(
+    _write_route_status(
         "ask_never_landed",
         lifecycle_msg_id=lifecycle_msg_id,
         queue_item_id=queue_item_id,
@@ -587,7 +607,7 @@ def test_reattach_does_not_redispatch_when_already_durably_queued(monkeypatch):
     target = session_manager.create(name="target already-queued", cwd="/repo", orchestration_mode="native")
     lifecycle_msg_id = "life-already-queued"
     queue_item_id = "queued-already-queued"
-    ask_status_store.write_status(
+    _write_route_status(
         "ask_already_queued",
         lifecycle_msg_id=lifecycle_msg_id,
         queue_item_id=queue_item_id,
@@ -636,7 +656,7 @@ def test_reattach_does_not_redispatch_when_turn_already_started(monkeypatch):
     target = session_manager.create(name="target already-started", cwd="/repo", orchestration_mode="native")
     lifecycle_msg_id = "life-already-started"
     queue_item_id = "queued-already-started"
-    ask_status_store.write_status(
+    _write_route_status(
         "ask_already_started",
         lifecycle_msg_id=lifecycle_msg_id,
         queue_item_id=queue_item_id,
@@ -691,7 +711,7 @@ def test_reattach_does_not_redispatch_while_genuinely_in_flight_same_process(mon
     target = session_manager.create(name="target in-flight", cwd="/repo", orchestration_mode="native")
     lifecycle_msg_id = "life-in-flight"
     queue_item_id = "queued-in-flight"
-    ask_status_store.write_status(
+    _write_route_status(
         "ask_in_flight",
         lifecycle_msg_id=lifecycle_msg_id,
         queue_item_id=queue_item_id,

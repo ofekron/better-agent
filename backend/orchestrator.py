@@ -60,6 +60,7 @@ from trace_collector import (
     merge_token_usages,
 )
 from session_manager import manager as session_manager
+from sync_wait_graph import SyncWaitGraph
 # user_msg_lifecycle emits routed through UserPromptManager — no
 # direct import needed here. handle_prompt calls
 # `self.user_prompt_manager.emit_user_msg_done/_failed`.
@@ -72,6 +73,16 @@ from ws_serialization import dumps_ws_json
 from global_events import GLOBAL_EVENT_TYPES, validate_global_event
 
 logger = logging.getLogger(__name__)
+
+
+class _AskCallGate:
+    __slots__ = ("lock", "users")
+
+    def __init__(self) -> None:
+        self.lock = asyncio.Lock()
+        self.users = 0
+
+
 _TOKEN_AUTH_EXECUTOR = BoundedAsyncExecutor(
     name="auth.internal_token",
     max_workers=2,
@@ -499,6 +510,8 @@ class Coordinator:
         # concurrent reattach attempts for the same ask never both
         # redispatch. Popped after use — see ask_team_message.
         self._ask_reattach_locks: dict[str, asyncio.Lock] = {}
+        self._ask_call_gates: dict[str, _AskCallGate] = {}
+        self.sync_wait_graph = SyncWaitGraph()
         # Per-session set of prompt IDs cancelled while still queued.
         # The processor checks this before starting a dequeued prompt.
         self._cancelled_ids: dict[str, set[str]] = {}
@@ -2498,6 +2511,117 @@ class Coordinator:
         model_task_key: str = "delegation_ask",
         target_selector: Optional[dict] = None,
     ) -> dict:
+        if not ask_id:
+            return await self._ask_team_message_claimed(
+                sender_session_id=sender_session_id,
+                target_session_id=target_session_id,
+                message=message,
+                ask_id=ask_id,
+                timeout_s=timeout_s,
+                provider_id=provider_id,
+                model=model,
+                reasoning_effort=reasoning_effort,
+                runner=runner,
+                model_task_key=model_task_key,
+                target_selector=target_selector,
+            )
+
+        import ask_status_store
+
+        await asyncio.to_thread(
+            ask_status_store.claim_route,
+            ask_id,
+            sender_session_id=sender_session_id,
+            target_session_id=target_session_id,
+            target_selector=target_selector,
+        )
+        gate = self._ask_call_gates.get(ask_id)
+        if gate is None:
+            gate = _AskCallGate()
+            self._ask_call_gates[ask_id] = gate
+        gate.users += 1
+        try:
+            async with gate.lock:
+                return await self._ask_team_message_claimed(
+                    sender_session_id=sender_session_id,
+                    target_session_id=target_session_id,
+                    message=message,
+                    ask_id=ask_id,
+                    timeout_s=timeout_s,
+                    provider_id=provider_id,
+                    model=model,
+                    reasoning_effort=reasoning_effort,
+                    runner=runner,
+                    model_task_key=model_task_key,
+                    target_selector=target_selector,
+                )
+        finally:
+            gate.users -= 1
+            if gate.users == 0 and self._ask_call_gates.get(ask_id) is gate:
+                self._ask_call_gates.pop(ask_id, None)
+
+    async def _ask_team_message_claimed(
+        self,
+        *,
+        sender_session_id: str,
+        target_session_id: str,
+        message: str,
+        ask_id: str,
+        timeout_s: float,
+        provider_id: str,
+        model: str,
+        reasoning_effort: str,
+        runner: str,
+        model_task_key: str,
+        target_selector: Optional[dict],
+    ) -> dict:
+        import ask_status_store
+
+        existing = (
+            await asyncio.to_thread(
+                ask_status_store.claim_route,
+                ask_id,
+                sender_session_id=sender_session_id,
+                target_session_id=target_session_id,
+                target_selector=target_selector,
+            )
+            if ask_id
+            else None
+        )
+        if existing and existing.get("result") is not None:
+            return existing["result"]
+        with self.sync_wait_graph.waiting(sender_session_id, target_session_id):
+            return await self._ask_team_message_wait(
+                sender_session_id=sender_session_id,
+                target_session_id=target_session_id,
+                message=message,
+                ask_id=ask_id,
+                timeout_s=timeout_s,
+                provider_id=provider_id,
+                model=model,
+                reasoning_effort=reasoning_effort,
+                runner=runner,
+                model_task_key=model_task_key,
+                target_selector=target_selector,
+                existing=existing,
+            )
+
+    async def _ask_team_message_wait(
+        self,
+        *,
+        sender_session_id: str,
+        target_session_id: str,
+        message: str,
+        ask_id: str,
+        timeout_s: float,
+        provider_id: str,
+        model: str,
+        reasoning_effort: str,
+        runner: str,
+        model_task_key: str,
+        target_selector: Optional[dict],
+        existing: Optional[dict],
+    ) -> dict:
         import uuid
         import ask_status_store
         import team_messaging
@@ -2507,9 +2631,6 @@ class Coordinator:
         # retry re-find this call after a backend restart. If a result is
         # already stored, return it. If a (still-waiting) correlation is
         # stored, reuse its ids and do NOT re-queue a duplicate prompt.
-        existing = ask_status_store.read_status(ask_id) if ask_id else None
-        if existing and existing.get("result") is not None:
-            return existing["result"]
         reattach = bool(
             existing
             and existing.get("lifecycle_msg_id")

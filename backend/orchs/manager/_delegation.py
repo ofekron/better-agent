@@ -48,6 +48,7 @@ from communication_modes import append_ask_response_contract, normalize_ask_mode
 from session_manager import manager as session_manager
 import ask_delivery
 import delegation_status_store
+from sync_wait_graph import CircularSyncWaitError
 
 if TYPE_CHECKING:
     from orchestrator import Coordinator
@@ -905,7 +906,61 @@ async def run_delegation(
             pass
 
 
+async def _run_with_sync_wait(
+    coordinator: "Coordinator",
+    caller_session_id: str,
+    target_session_id: str,
+    operation: Callable[[], Awaitable[dict]],
+) -> dict:
+    with coordinator.sync_wait_graph.waiting(
+        caller_session_id,
+        target_session_id,
+    ):
+        return await operation()
+
+
+def _with_sync_wait(fn):
+    signature = inspect.signature(fn)
+
+    @functools.wraps(fn)
+    async def wrapped(*args, **kwargs):
+        bound = signature.bind(*args, **kwargs)
+        bound.apply_defaults()
+        coordinator = bound.arguments["coordinator"]
+        delegation_id = str(bound.arguments["delegation_id"] or "")
+
+        async def operation() -> dict:
+            return await fn(*bound.args, **bound.kwargs)
+
+        try:
+            return await _run_with_sync_wait(
+                coordinator,
+                bound.arguments["app_session_id"],
+                bound.arguments["worker_agent_session_id"],
+                operation,
+            )
+        except CircularSyncWaitError as exc:
+            result = delegate_error_payload(
+                bound.arguments["worker_agent_session_id"],
+                bound.arguments["worker_description"],
+                str(exc),
+            )
+            await delegation_status_store.write_status_async(
+                delegation_id,
+                status="complete",
+                result=result,
+            )
+            await bound.arguments["ws_callback"]({
+                "type": "worker_complete",
+                "data": {"delegation_id": delegation_id, **result},
+            })
+            return result
+
+    return wrapped
+
+
 @perf.timed_fn("delegate.run_locked")
+@_with_sync_wait
 async def run_delegation_locked(
     coordinator: "Coordinator",
     *,

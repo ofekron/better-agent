@@ -161,6 +161,59 @@ def read_status(ask_id: str) -> dict[str, Any] | None:
         return _read_status_unlocked(ask_id)
 
 
+def claim_route(
+    ask_id: str,
+    *,
+    sender_session_id: str,
+    target_session_id: str,
+    target_selector: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    sender = str(sender_session_id or "").strip()
+    target = str(target_session_id or "").strip()
+    selector = target_selector if isinstance(target_selector, dict) else {}
+    route_kind = str(selector.get("kind") or "session").strip()
+    route_value = str(selector.get("value") or target).strip()
+    route_affinity_key = str(selector.get("pool_affinity_key") or "").strip()
+    if not sender or route_kind not in {"session", "worker", "pool"} or not route_value:
+        raise ValueError("ask route requires a valid sender and target selector")
+    if route_kind != "pool" and not target:
+        raise ValueError("ask route requires a concrete target session id")
+    with _locked(ask_id):
+        path = status_path(ask_id)
+        current = _read_status_unlocked(ask_id)
+        if current is not None:
+            if (
+                current.get("sender_session_id") != sender
+                or current.get("route_kind") != route_kind
+                or current.get("route_value") != route_value
+                or current.get("route_affinity_key", "") != route_affinity_key
+            ):
+                raise ValueError("ask_id is already bound to a different route")
+            current_target = str(current.get("target_session_id") or "")
+            if route_kind != "pool" and current_target != target:
+                raise ValueError("ask_id is already bound to a different route")
+            if (
+                route_kind == "pool"
+                and target
+                and current_target != target
+            ):
+                if current.get("lifecycle_msg_id") or current.get("result") is not None:
+                    raise ValueError("ask_id is already bound to a different target")
+                current["target_session_id"] = target
+                atomic_write_json(path, current)
+            return current
+        claimed = {
+            "sender_session_id": sender,
+            "route_kind": route_kind,
+            "route_value": route_value,
+            "route_affinity_key": route_affinity_key,
+        }
+        if target:
+            claimed["target_session_id"] = target
+        atomic_write_json(path, claimed)
+        return claimed
+
+
 def list_statuses() -> list[tuple[str, dict[str, Any]]]:
     root = bc_home() / "ask-status"
     if root.is_symlink():

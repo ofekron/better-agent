@@ -38,6 +38,7 @@ from event_bus import bus
 import session_search
 import user_prefs
 from session_manager import manager as session_manager
+from sync_wait_graph import CircularSyncWaitError
 
 logger = logging.getLogger(__name__)
 
@@ -173,6 +174,30 @@ async def _run_turn(
     return {"text": _msg_text(m) if m else "", "turn_id": (m or {}).get("id", "")}
 
 
+def _coordinator_for_wait_graph():
+    from main import coordinator
+
+    return coordinator
+
+
+async def _run_turn_with_sync_wait(
+    caller_sid: str,
+    run_sid: str,
+    prompt: str,
+    **kwargs,
+) -> dict:
+    if not caller_sid:
+        return await _run_turn(run_sid, prompt, **kwargs)
+    try:
+        with _coordinator_for_wait_graph().sync_wait_graph.waiting(
+            caller_sid,
+            run_sid,
+        ):
+            return await _run_turn(run_sid, prompt, **kwargs)
+    except CircularSyncWaitError as exc:
+        return {"error": str(exc)}
+
+
 def _resolve_bridge_run_config(
     *,
     caller: dict,
@@ -270,7 +295,8 @@ async def _run(
             return {"error": "target_busy"}
         run_sid = target_sid
 
-    final = await _run_turn(
+    final = await _run_turn_with_sync_wait(
+        caller_sid,
         run_sid,
         prompt,
         display_prompt=display_prompt,
@@ -327,7 +353,8 @@ async def _run_new(
         user_initiated=True,
     )
     run_sid = sess["id"]
-    final = await _run_turn(
+    final = await _run_turn_with_sync_wait(
+        caller_sid,
         run_sid,
         prompt,
         display_prompt=display_prompt,
