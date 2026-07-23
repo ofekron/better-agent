@@ -268,16 +268,21 @@ def _activation_ready(profile: dict[str, Any]) -> bool:
         environment = _active_environment_receipt()
     except (OSError, json.JSONDecodeError, InstallationProfileError):
         return False
+    selection_hash = receipt.get("provider_selection_sha256")
+    if not isinstance(selection_hash, str) or len(selection_hash) != 64:
+        return False
+    try:
+        int(selection_hash, 16)
+    except ValueError:
+        return False
     expected = {
         "schema_version": RECEIPT_SCHEMA_VERSION,
         "generation": profile["generation"],
         "profile_sha256": _canonical_hash(profile),
-        "provider_selection_sha256": receipt.get("provider_selection_sha256"),
+        "provider_selection_sha256": selection_hash,
         **environment,
     }
-    if receipt != expected:
-        return False
-    return isinstance(receipt.get("provider_selection_sha256"), str)
+    return receipt == expected
 
 
 def selection_pending() -> bool:

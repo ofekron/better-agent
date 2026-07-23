@@ -11,8 +11,11 @@ from unittest.mock import AsyncMock, patch
 
 ROOT = Path(__file__).resolve().parents[2]
 BACKEND = ROOT / "backend"
+SDK = ROOT / "sdk"
 if str(BACKEND) not in sys.path:
     sys.path.insert(0, str(BACKEND))
+if str(SDK) not in sys.path:
+    sys.path.insert(0, str(SDK))
 
 os.environ["BETTER_AGENT_TEST_MODE"] = "1"
 
@@ -187,6 +190,9 @@ def test_authoritative_admission_rejects_before_side_effects() -> None:
             assert called
             called, _ = await _admit("/assets/index.js")
             assert called
+            called, messages = await _admit("/api/provider-setup/install")
+            assert not called
+            assert messages[0]["status"] == 503
 
             for prefix in installation_admission._INTEGRATION_PREFIXES:
                 called, messages = await _admit(f"{prefix}/probe")

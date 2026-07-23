@@ -73,15 +73,11 @@ def _assert_configure_failure_preserves_profile(
         os.environ["BETTER_AGENT_HOME"] = tmp
         before = _write_existing_profile(root)
 
-        prepare = (
-            AsyncMock()
-            if False
-            else patch.object(
-                dependency_plan,
-                "prepare_installation",
-                side_effect=prepare_error,
-                return_value=root / "env",
-            )
+        prepare = patch.object(
+            dependency_plan,
+            "prepare_installation",
+            side_effect=prepare_error,
+            return_value=root / "env",
         )
         activate = patch.object(
             dependency_plan,

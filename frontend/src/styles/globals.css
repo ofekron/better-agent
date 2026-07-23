@@ -739,113 +739,9 @@ body {
   margin-top: 3px;
 }
 
-/* ---- New Session Modal ---- */
-
-.ns-modal-section {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.ns-modal-section-title {
-  font-size: calc(11px * var(--app-font-scale));
-  text-transform: uppercase;
-  letter-spacing: 0.8px;
-  color: var(--text-muted);
-  font-weight: 600;
-}
-
-.ns-modal-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.ns-modal-row label {
-  font-size: calc(12px * var(--app-font-scale));
-  color: var(--text-secondary);
-  min-width: 60px;
-}
-
-.ns-modal-row select,
-.ns-modal-row input[type="text"] {
-  flex: 1;
-  padding: 6px 8px;
-  background: var(--bg-tertiary);
-  color: var(--text-primary);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  font-size: calc(13px * var(--app-font-scale));
-}
-
-.ns-modal-row select:focus,
-.ns-modal-row input[type="text"]:focus {
-  outline: none;
-  border-color: var(--accent);
-}
-
-.ns-modal-row input[type="text"]::placeholder {
-  color: var(--text-tertiary);
-}
-
-.ns-folder-trigger {
-  flex: 1;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 8px;
-  background: var(--bg-tertiary);
-  color: var(--text-primary);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  font-size: calc(13px * var(--app-font-scale));
-  text-align: left;
-  cursor: pointer;
-}
-.ns-folder-trigger:focus {
-  outline: none;
-  border-color: var(--accent);
-}
-.ns-folder-trigger-label {
-  flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.ns-modal-orch-buttons {
-  display: flex;
-  gap: 6px;
-}
-
-.ns-modal-orch-btn {
-  flex: 1;
-  padding: 8px 10px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--bg-tertiary);
-  transition: border-color 180ms ease, background 180ms ease, opacity 180ms ease;
-  color: var(--text-secondary);
-  font-size: calc(12px * var(--app-font-scale));
-  cursor: pointer;
-  transition: all 0.15s;
-  text-align: center;
-}
-
 .provider-row.credential-blocked {
   border-color: rgba(210, 153, 34, 0.7);
   background: color-mix(in srgb, var(--bg-tertiary) 78%, rgba(210, 153, 34, 0.22));
-}
-
-.ns-modal-orch-btn:hover {
-  border-color: var(--accent-dim);
-  color: var(--text-primary);
-}
-
-.ns-modal-orch-btn.active {
-  border-color: var(--accent);
-  background: rgba(123, 104, 238, 0.15);
-  color: var(--accent);
 }
 
 /* ======================================= */
@@ -9837,17 +9733,42 @@ button.run-badge-clickable:focus-visible {
   color: var(--text-secondary);
   font-size: calc(13px * var(--app-font-scale));
   cursor: pointer;
+  animation: settings-nav-enter 180ms ease-out both;
+  transition:
+    background-color 160ms ease,
+    border-color 160ms ease,
+    color 160ms ease,
+    transform 160ms ease;
 }
 
 .settings-page-nav button:hover {
   background: var(--bg-hover);
   color: var(--text-primary);
+  transform: translateY(-1px);
 }
 
 .settings-page-nav button.active {
   border-color: var(--accent);
   background: var(--accent-dim);
   color: var(--text-primary);
+}
+
+@keyframes settings-nav-enter {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .settings-page-nav button {
+    animation: none;
+    transition: none;
+  }
 }
 
 .settings-page-content {
