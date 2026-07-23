@@ -21,11 +21,12 @@ jobs:
         with:
           python-version: "3.13"
       - name: Install focused runtime dependencies
+        working-directory: backend
         run: >-
           python -m pip install
-          -r backend/requirements.txt
-          -r backend/requirements-claude.txt
-          -r backend/requirements-mobile.txt
+          -r requirements.txt
+          -r requirements-claude.txt
+          -r requirements-mobile.txt
       - name: Run installation mode matrix
         run: python backend/scripts/test_installation_modes.py
       - name: Run transactional setup matrix
