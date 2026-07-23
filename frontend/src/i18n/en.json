@@ -983,6 +983,7 @@
   "app.offlineQueued_1": "Offline — 1 action queued",
   "app.offlineQueued_other": "Offline — {{count}} actions queued",
   "app.offlinePersistFailed": "Storage is full — queued actions can't be saved offline and may be lost if you reload. Free up space or get back online soon.",
+  "app.installationSetupRequired": "Installation setup is required — run the installer to enable providers and sessions.",
   "backendUnavailable.title": "Cannot reach Better Agent",
   "backendUnavailable.subtitle": "The backend is unavailable or rejected this browser origin.",
   "backendUnavailable.retry": "Retry",

@@ -956,6 +956,7 @@
   "app.offlineQueued_1": "לא מקוון — פעולה אחת בתור",
   "app.offlineQueued_other": "לא מקוון — {{count}} פעולות בתור",
   "app.offlinePersistFailed": "האחסון מלא — לא ניתן לשמור פעולות בתור במצב לא מקוון והן עלולות לאבד אם תרענן. פנה מקום או חזור להתחבר בקרוב.",
+  "app.installationSetupRequired": "נדרשת השלמת התקנה — הריצו את תוכנית ההתקנה כדי להפעיל ספקים וסשנים.",
   "backendUnavailable.title": "לא ניתן להגיע אל Better Agent",
   "backendUnavailable.subtitle": "השרת אינו זמין או דחה את מקור הדפדפן הזה.",
   "backendUnavailable.retry": "נסה שוב",

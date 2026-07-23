@@ -945,6 +945,7 @@
   "app.offlineQueued_1": "Hors ligne — 1 action en file d'attente",
   "app.offlineQueued_other": "Hors ligne — {{count}} actions en file d'attente",
   "app.offlinePersistFailed": "Le stockage est plein — les actions en file ne peuvent pas être enregistrées hors ligne et pourraient être perdues si vous rechargez. Libérez de l'espace ou reconnectez-vous bientôt.",
+  "app.installationSetupRequired": "La configuration de l'installation est requise — exécutez l'installateur pour activer les fournisseurs et les sessions.",
   "backendUnavailable.title": "Better Agent est inaccessible",
   "backendUnavailable.subtitle": "Le backend est indisponible ou a rejeté l'origine de ce navigateur.",
   "backendUnavailable.retry": "Réessayer",

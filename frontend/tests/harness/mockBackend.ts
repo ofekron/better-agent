@@ -11,6 +11,15 @@ import type {
 } from "../../src/types";
 import type { ProjectSuggestion } from "../../src/components/ProjectSuggestionModal";
 
+export interface InstallationProfileState {
+  status: string;
+  setup_required: boolean;
+  mode: string | null;
+  provider_conversations_enabled: boolean;
+  mobile_enabled: boolean;
+  integrations_enabled: boolean;
+}
+
 export interface BackendState {
   sessions: Session[];
   projects: Project[];
@@ -22,6 +31,7 @@ export interface BackendState {
   models: { id: string; name: string }[];
   providers: Provider[];
   default_provider_id: string | null;
+  installationProfile: InstallationProfileState;
   config: Record<string, unknown>;
   capabilitySources: unknown[];
   projectSuggestion: ProjectSuggestion | null;
@@ -120,6 +130,7 @@ function emptyState(): BackendState {
       reasoning_effort_options: [],
       default_reasoning_effort: "",
       has_api_key: true,
+      suspended: false,
       supports_fork: true,
       supports_manager_mode: true,
       supports_rewind: true,
@@ -128,6 +139,14 @@ function emptyState(): BackendState {
       supports_reasoning_effort: false,
     }],
     default_provider_id: "codex",
+    installationProfile: {
+      status: "active",
+      setup_required: false,
+      mode: "default",
+      provider_conversations_enabled: true,
+      mobile_enabled: true,
+      integrations_enabled: true,
+    },
     config: { default_model: "claude-sonnet-4-6" },
     capabilitySources: [],
     projectSuggestion: null,
@@ -1109,7 +1128,11 @@ export class MockBackend {
       ].filter((model): model is string => typeof model === "string" && model.length > 0);
       return { models: Array.from(new Set(models)) };
     }
+    if (method === "GET" && path === "/api/installation-profile") {
+      return this.state.installationProfile;
+    }
     if (method === "GET" && path === "/api/providers") {
+      if (this.state.installationProfile.setup_required) return setupGate();
       return {
         default_provider_id: this.state.default_provider_id,
         providers: this.state.providers,
@@ -1145,6 +1168,12 @@ function jsonResponse(data: unknown, status: number = 200): Response {
       headers: { "Content-Type": "application/json" },
     });
   }
+  if (data && typeof data === "object" && (data as { __setupGate?: true }).__setupGate) {
+    return new Response(JSON.stringify({ detail: "installation setup is required" }), {
+      status: 503,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
   return new Response(JSON.stringify(data ?? null), {
     status,
     headers: { "Content-Type": "application/json" },
@@ -1162,4 +1191,8 @@ function findNodeInTree(root: Session, id: string): Session | null {
 
 function notFound(): { __notFound: true } {
   return { __notFound: true };
+}
+
+function setupGate(): { __setupGate: true } {
+  return { __setupGate: true };
 }

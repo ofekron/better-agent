@@ -945,6 +945,7 @@
   "app.offlineQueued_1": "离线 — 1 个操作已排队",
   "app.offlineQueued_other": "离线 — {{count}} 个操作已排队",
   "app.offlinePersistFailed": "存储空间已满 — 排队的操作无法离线保存，重新加载后可能丢失。请释放空间或尽快重新联网。",
+  "app.installationSetupRequired": "需要完成安装设置 — 请运行安装程序以启用提供商和会话。",
   "backendUnavailable.title": "无法连接到 Better Agent",
   "backendUnavailable.subtitle": "后端不可用，或拒绝了此浏览器来源。",
   "backendUnavailable.retry": "重试",

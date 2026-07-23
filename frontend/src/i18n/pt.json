@@ -945,6 +945,7 @@
   "app.offlineQueued_1": "Offline — 1 ação na fila",
   "app.offlineQueued_other": "Offline — {{count}} ações na fila",
   "app.offlinePersistFailed": "Armazenamento cheio — as ações na fila não podem ser salvas offline e podem ser perdidas se você recarregar. Libere espaço ou volte a ficar online em breve.",
+  "app.installationSetupRequired": "É necessário concluir a instalação — execute o instalador para habilitar provedores e sessões.",
   "backendUnavailable.title": "Não é possível acessar o Better Agent",
   "backendUnavailable.subtitle": "O backend está indisponível ou rejeitou a origem deste navegador.",
   "backendUnavailable.retry": "Tentar novamente",

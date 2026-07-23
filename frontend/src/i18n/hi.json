@@ -945,6 +945,7 @@
   "app.offlineQueued_1": "ऑफ़लाइन — 1 क्रिया कतार में",
   "app.offlineQueued_other": "ऑफ़लाइन — {{count}} क्रियाएँ कतार में",
   "app.offlinePersistFailed": "स्टोरेज भरा है — कतारबद्ध क्रियाएँ ऑफ़लाइन सहेजी नहीं जा सकतीं और पुनः लोड करने पर खो सकती हैं। जगह खाली करें या जल्द ही ऑनलाइन लौटें।",
+  "app.installationSetupRequired": "इंस्टॉलेशन सेटअप आवश्यक है — प्रदाताओं और सत्रों को सक्षम करने के लिए इंस्टॉलर चलाएँ।",
   "backendUnavailable.title": "Better Agent तक नहीं पहुंचा जा सकता",
   "backendUnavailable.subtitle": "बैकएंड उपलब्ध नहीं है या इस ब्राउज़र मूल को अस्वीकार कर दिया गया।",
   "backendUnavailable.retry": "फिर कोशिश करें",
