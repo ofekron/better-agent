@@ -33,7 +33,7 @@ import session_store
 logger = logging.getLogger(__name__)
 
 _UUID_KEY = "uuid"
-_EVENT_SUMMARIES_VERSION = 5
+_EVENT_SUMMARIES_VERSION = 6
 _MAX_OPEN_APPEND_HANDLES = 64
 # Stable-storage fsync cadence for the background flusher. `fh.flush()`
 # (kernel page-cache visibility — what cross-process tailers and readers
@@ -130,6 +130,14 @@ class EventIngester:
         self._summaries_cache: dict[
             str, tuple[int, dict[str, dict], dict[int, str]]
         ] = {}
+        # Per-root worker-row byte index: delegation_id -> [(byte_start,
+        # byte_end), ...] of every `worker_event` journal row, in journal
+        # order, regardless of msg_id stamping. Folded in the SAME pass
+        # as the summaries (`_update_summary_line`) so it shares their
+        # byte high-water and incremental append semantics. Offsets only
+        # — rows are read from disk on demand (`worker_event_rows`), so
+        # the resident cost is ~16 bytes per worker row.
+        self._worker_rows: dict[str, dict[str, list[tuple[int, int]]]] = {}
         # Per-root full-scan cache for read_events(after_seq=0):
         # (file_size, all_entries_list). Multiple callers (hydrate, todos,
         # reconcile) share one cached scan.
@@ -341,10 +349,12 @@ class EventIngester:
         summaries = sidecar.get("summaries")
         resolutions = sidecar.get("resolutions")
         seq_offsets = sidecar.get("seq_offsets")
+        worker_rows = sidecar.get("worker_rows")
         if (
             not isinstance(summaries, dict)
             or not isinstance(resolutions, dict)
             or not self._valid_seq_offsets(seq_offsets, signature[1])
+            or not self._valid_worker_rows(worker_rows, signature[1])
         ):
             return None
         clean_resolutions: dict[int, str] = {}
@@ -360,7 +370,28 @@ class EventIngester:
         self._seq[root_id] = len(clean_offsets)
         self._next_offset[root_id] = signature[1]
         self._summaries_cache[root_id] = (signature[1], summaries, clean_resolutions)
+        self._worker_rows[root_id] = {
+            delegation_id: [(int(span[0]), int(span[1])) for span in spans]
+            for delegation_id, spans in worker_rows.items()
+        }
         return summaries, clean_resolutions
+
+    @staticmethod
+    def _valid_worker_rows(value: Any, file_size: int) -> bool:
+        if not isinstance(value, dict):
+            return False
+        for delegation_id, spans in value.items():
+            if not isinstance(delegation_id, str) or not isinstance(spans, list):
+                return False
+            for span in spans:
+                if (
+                    not isinstance(span, list)
+                    or len(span) != 2
+                    or not all(isinstance(b, int) and not isinstance(b, bool) for b in span)
+                    or not (0 <= span[0] < span[1] <= file_size)
+                ):
+                    return False
+        return True
 
     @staticmethod
     def _valid_seq_offsets(value: Any, file_size: int) -> bool:
@@ -406,6 +437,12 @@ class EventIngester:
             "tail": tail,
             "summaries": summaries,
             "resolutions": {str(k): v for k, v in resolutions.items()},
+            "worker_rows": {
+                delegation_id: [list(span) for span in spans]
+                for delegation_id, spans in (
+                    self._worker_rows.get(root_id) or {}
+                ).items()
+            },
             "seq_offsets": seq_offsets,
         }
         try:
@@ -1255,6 +1292,7 @@ class EventIngester:
         resolved_root_event_seqs: set[int] = set()
         summaries: dict[str, dict] = {}
         resolutions: dict[int, str] = {}
+        self._worker_rows[root_id] = {}
         parsed_lines = len(entries)
         for idx, entry in enumerate(entries):
             self._update_summary_line(
@@ -2048,6 +2086,55 @@ class EventIngester:
             self._latest_render_uid_by_sid.setdefault(root_id, {})[sid_filter] = latest
         return latest[1] if latest else None
 
+    def worker_event_rows(
+        self,
+        root_id: str,
+        delegation_ids: set[str],
+        *,
+        sid_filter: Optional[str] = None,
+    ) -> dict[str, list[dict]]:
+        """Return the parsed `worker_event` journal rows for each
+        requested delegation_id, in journal order, read via the
+        incremental byte index — never a full-journal scan once the
+        summaries state is warm. Rows are filtered by `sid_filter`
+        (the owning node's sid) when given."""
+        path = self._events_path(root_id)
+        if not path.exists() or not delegation_ids:
+            return {}
+        with self._summaries_state(root_id, path):
+            index = self._worker_rows.get(root_id) or {}
+            spans_by_delegation = {
+                delegation_id: list(index.get(delegation_id) or ())
+                for delegation_id in delegation_ids
+                if index.get(delegation_id)
+            }
+        if not spans_by_delegation:
+            return {}
+        # Committed journal bytes are immutable (class docstring), so
+        # reading outside the lock is safe.
+        out: dict[str, list[dict]] = {}
+        with open(path, "rb") as f:
+            for delegation_id, spans in spans_by_delegation.items():
+                rows: list[dict] = []
+                for byte_start, byte_end in spans:
+                    f.seek(byte_start)
+                    raw = f.read(byte_end - byte_start)
+                    # A span may trail into skipped blank/invalid lines;
+                    # the row itself is always the first line.
+                    line = raw.split(b"\n", 1)[0]
+                    try:
+                        row = json.loads(line.decode("utf-8", errors="replace"))
+                    except json.JSONDecodeError:
+                        continue
+                    if not isinstance(row, dict):
+                        continue
+                    if sid_filter and row.get("sid") != sid_filter:
+                        continue
+                    rows.append(row)
+                if rows:
+                    out[delegation_id] = rows
+        return out
+
     def ownership_resolutions(self, root_id: str) -> dict[int, str]:
         """Return the {orphan journal seq -> resolved msg_id} map.
 
@@ -2215,6 +2302,13 @@ class EventIngester:
         append so the two paths can never drift."""
         etype = entry.get("type")
         seq = entry.get("seq")
+        if etype == "worker_event":
+            data = entry.get("data")
+            delegation_id = data.get("delegation_id") if isinstance(data, dict) else None
+            if isinstance(delegation_id, str) and delegation_id:
+                self._worker_rows.setdefault(root_id, {}).setdefault(
+                    delegation_id, [],
+                ).append((line_start, line_end))
         if etype == "event_ownership_resolved":
             data = entry.get("data") or {}
             ev_seq = data.get("event_seq")
@@ -2337,6 +2431,7 @@ class EventIngester:
         where `_ensure_open` has not run. Caller holds lock."""
         out: dict[str, dict] = {}
         resolutions: dict[int, str] = {}
+        self._worker_rows[root_id] = {}
         file_size = path.stat().st_size
         cached = self._full_scan_cache.get(root_id)
         offsets = self._seq_offsets.get(root_id)
@@ -2405,6 +2500,7 @@ class EventIngester:
                 self._seq_offsets.pop(root_id, None)
                 self._next_offset.pop(root_id, None)
                 self._summaries_cache.pop(root_id, None)
+                self._worker_rows.pop(root_id, None)
                 self._full_scan_cache.pop(root_id, None)
                 self._root_events_cache.pop(root_id, None)
                 self._root_events_version.pop(root_id, None)

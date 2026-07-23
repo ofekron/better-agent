@@ -907,7 +907,9 @@ def _accepts_gzip(accept_encoding: str) -> bool:
     return wildcard_quality is not None and wildcard_quality > 0
 
 
-def _sessions_list_response(content: bytes, accept_encoding: str) -> Response:
+def _json_response_maybe_gzip(
+    content: bytes, accept_encoding: str, *, perf_prefix: str = "sessions.list",
+) -> Response:
     if len(content) < 1024:
         return Response(content=content, media_type="application/json")
     if not _accepts_gzip(accept_encoding):
@@ -916,10 +918,10 @@ def _sessions_list_response(content: bytes, accept_encoding: str) -> Response:
             media_type="application/json",
             headers={"Vary": "Accept-Encoding"},
         )
-    with perf.timed("sessions.list.response_gzip"):
+    with perf.timed(f"{perf_prefix}.response_gzip"):
         compressed = gzip.compress(content, compresslevel=4, mtime=0)
-    perf.record_count("sessions.list.response_gzip.input_bytes", len(content))
-    perf.record_count("sessions.list.response_gzip.output_bytes", len(compressed))
+    perf.record_count(f"{perf_prefix}.response_gzip.input_bytes", len(content))
+    perf.record_count(f"{perf_prefix}.response_gzip.output_bytes", len(compressed))
     return Response(
         content=compressed,
         media_type="application/json",
@@ -928,27 +930,6 @@ def _sessions_list_response(content: bytes, accept_encoding: str) -> Response:
             "Vary": "Accept-Encoding",
         },
     )
-
-
-def _json_bytes_response(value: dict) -> Response:
-    content = json.dumps(
-        value,
-        ensure_ascii=False,
-        allow_nan=False,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    return Response(content=content, media_type="application/json")
-
-
-async def _json_bytes_response_async(value: dict) -> Response:
-    content = await asyncio.to_thread(
-        json.dumps,
-        value,
-        ensure_ascii=False,
-        allow_nan=False,
-        separators=(",", ":"),
-    )
-    return Response(content=content.encode("utf-8"), media_type="application/json")
 
 
 def _sessions_list_response_maybe_cache(
@@ -960,7 +941,7 @@ def _sessions_list_response_maybe_cache(
 ) -> Response:
     if cache_response:
         return _sessions_list_cache_put(cache_key, value, accept_encoding)
-    return _sessions_list_response(
+    return _json_response_maybe_gzip(
         json.dumps(
             value,
             ensure_ascii=False,
@@ -984,41 +965,15 @@ def _sessions_snapshot_payload(value: dict) -> dict:
     }
 
 
-def _session_detail_cache_get(key: tuple) -> Response | None:
+def _session_detail_cache_get(key: tuple) -> bytes | None:
     content = _session_detail_response_cache.get(key)
     if content is None:
         return None
     _session_detail_response_cache.move_to_end(key)
-    return Response(content=content, media_type="application/json")
+    return content
 
 
-def _session_detail_cache_has(key: tuple) -> bool:
-    return key in _session_detail_response_cache
-
-
-def _session_detail_cache_put(key: tuple, value: dict) -> Response:
-    while len(_session_detail_response_cache) >= _SESSION_DETAIL_RESPONSE_CACHE_MAX:
-        old_key, _ = _session_detail_response_cache.popitem(last=False)
-        old_simple = _session_detail_simple_cache_key_from_full(old_key)
-        if (
-            old_simple is not None
-            and _session_detail_response_cache_latest.get(old_simple) == old_key
-        ):
-            _session_detail_response_cache_latest.pop(old_simple, None)
-    content = json.dumps(
-        value,
-        ensure_ascii=False,
-        allow_nan=False,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    _session_detail_response_cache[key] = content
-    simple_key = _session_detail_simple_cache_key_from_full(key)
-    if simple_key is not None:
-        _session_detail_response_cache_latest[simple_key] = key
-    return Response(content=content, media_type="application/json")
-
-
-async def _session_detail_cache_put_async(key: tuple, value: dict) -> Response:
+async def _session_detail_cache_put_async(key: tuple, value: dict) -> bytes:
     content_text = await asyncio.to_thread(
         json.dumps,
         value,
@@ -1039,7 +994,7 @@ async def _session_detail_cache_put_async(key: tuple, value: dict) -> Response:
     simple_key = _session_detail_simple_cache_key_from_full(key)
     if simple_key is not None:
         _session_detail_response_cache_latest[simple_key] = key
-    return Response(content=content, media_type="application/json")
+    return content
 
 
 def _session_detail_simple_cache_key_from_full(
@@ -1075,7 +1030,7 @@ def _sessions_list_cache_get(key: tuple, accept_encoding: str) -> Response | Non
     if cached[2] != _sessions_list_transient_state_version():
         _sessions_list_response_cache.pop(key, None)
         return None
-    return _sessions_list_response(cached[1], accept_encoding)
+    return _json_response_maybe_gzip(cached[1], accept_encoding)
 
 
 def _sessions_list_cache_put(
@@ -1100,7 +1055,7 @@ def _sessions_list_cache_put(
         content,
         _sessions_list_transient_state_version(),
     )
-    return _sessions_list_response(content, accept_encoding)
+    return _json_response_maybe_gzip(content, accept_encoding)
 
 
 def _session_summaries_cache_get(
@@ -1113,7 +1068,7 @@ def _session_summaries_cache_get(
     if time.monotonic() - cached[0] > _SESSIONS_LIST_RESPONSE_TTL_SECONDS:
         _session_summaries_response_cache.pop(key, None)
         return None
-    return _sessions_list_response(cached[1], accept_encoding)
+    return _json_response_maybe_gzip(cached[1], accept_encoding)
 
 
 def _session_summaries_cache_put(
@@ -1138,7 +1093,7 @@ def _session_summaries_cache_put(
         content,
         0,
     )
-    return _sessions_list_response(content, accept_encoding)
+    return _json_response_maybe_gzip(content, accept_encoding)
 
 
 def _sessions_list_cache_version(search_query: str, search_fields: set[str]) -> tuple[int, int | None] | int:
@@ -7485,7 +7440,7 @@ async def get_sessions(
                         None,
                     )
                 _schedule_session_event_meta_warm(page)
-                return _sessions_list_response(
+                return _json_response_maybe_gzip(
                     json.dumps(
                         {
                             "sessions": page,
@@ -7739,7 +7694,7 @@ async def get_sessions(
         "status_sort": effective_status_sort,
     })
     if deferred_sidebar_projection:
-        return _sessions_list_response(
+        return _json_response_maybe_gzip(
             json.dumps(
                 response_payload,
                 ensure_ascii=False,
@@ -9057,6 +9012,7 @@ async def post_chat_message(chat_id: str, body: dict = Body(default={})):
 
 @app.get("/api/sessions/{session_id}")
 async def get_session(
+    request: Request,
     session_id: str,
     msg_limit: int = Query(default=50, ge=1, le=200),
     exchange_count: Optional[int] = Query(default=None, ge=1, le=100),
@@ -9099,6 +9055,7 @@ async def get_session(
             cache_key = cached_full_key
         else:
             _session_detail_response_cache_latest.pop(simple_cache_key, None)
+    accept_encoding = request.headers.get("accept-encoding", "")
     if cache_key is not None:
         cached = _session_detail_cache_get(cache_key)
         if cached is not None:
@@ -9106,7 +9063,12 @@ async def get_session(
             if cache_key[3] and isinstance(root_id, str):
                 await asyncio.to_thread(_session_reconcile_snapshot_and_schedule, root_id)
             perf.record("sessions.detail.response_cache.hit", 1.0)
-            return cached
+            return await asyncio.to_thread(
+                _json_response_maybe_gzip,
+                cached,
+                accept_encoding,
+                perf_prefix="sessions.detail",
+            )
     perf.record("sessions.detail.response_cache.miss", 1.0)
 
     worker_start = time.perf_counter()
@@ -9128,8 +9090,21 @@ async def get_session(
     else:
         tree.pop("_detail_response_cache_key_parts", None)
     if cache_key is not None:
-        return await _session_detail_cache_put_async(cache_key, tree)
-    return await _json_bytes_response_async(tree)
+        content = await _session_detail_cache_put_async(cache_key, tree)
+    else:
+        content = (await asyncio.to_thread(
+            json.dumps,
+            tree,
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+        )).encode("utf-8")
+    return await asyncio.to_thread(
+        _json_response_maybe_gzip,
+        content,
+        accept_encoding,
+        perf_prefix="sessions.detail",
+    )
 
 
 @app.get("/api/sessions/{session_id}/messages")
