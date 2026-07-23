@@ -15046,6 +15046,11 @@ async def _ask_wait_and_grab_last_assistant_mssg_in_turn(
 ) -> dict[str, Any]:
     target_worker_pool = str(body.get("target_worker_pool") or "").strip()
     pool_affinity_key = _api_optional_pool_affinity_key(body.get("pool_affinity_key"))
+    pool_target_selector = {
+        "kind": "pool",
+        "value": target_worker_pool,
+        "pool_affinity_key": pool_affinity_key,
+    }
     has_exact_target = (
         str(body.get("target_session_id") or "").strip()
         or str(body.get("target_worker_id") or "").strip()
@@ -15053,6 +15058,15 @@ async def _ask_wait_and_grab_last_assistant_mssg_in_turn(
     if target_worker_pool and not has_exact_target:
         ask_id = str(body.get("ask_id") or "")
         if ask_id:
+            import ask_status_store
+
+            await asyncio.to_thread(
+                ask_status_store.claim_route,
+                ask_id,
+                sender_session_id=sender_session_id,
+                target_session_id="",
+                target_selector=pool_target_selector,
+            )
             status = await _pool_ask_status(ask_id)
             if isinstance(status, dict):
                 if isinstance(status.get("result"), dict):
@@ -15069,6 +15083,15 @@ async def _ask_wait_and_grab_last_assistant_mssg_in_turn(
         )
         if not target:
             ask_id = ask_id or f"ask_{uuid.uuid4().hex[:10]}"
+            import ask_status_store
+
+            await asyncio.to_thread(
+                ask_status_store.claim_route,
+                ask_id,
+                sender_session_id=sender_session_id,
+                target_session_id="",
+                target_selector=pool_target_selector,
+            )
             queued = await _enqueue_worker_pool_message(
                 tag=target_worker_pool,
                 sender_session_id=sender_session_id,
@@ -15082,8 +15105,6 @@ async def _ask_wait_and_grab_last_assistant_mssg_in_turn(
                 wait_for_ask_response=True,
                 ask_id=ask_id,
             )
-            import ask_status_store
-
             await ask_status_store.write_status_async(
                 ask_id,
                 pool_queue_item_id=str(((queued or {}).get("item") or {}).get("id") or ""),
