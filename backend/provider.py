@@ -369,6 +369,7 @@ def build_better_agent_run_env(
     *,
     backend_url: str | None,
     internal_token: str | None,
+    run_id: str = "",
     app_session_id: str,
     cwd: str,
     model: str | None,
@@ -377,14 +378,36 @@ def build_better_agent_run_env(
     user_facing: bool,
     disabled_builtin_extensions: list[str] | None,
 ) -> dict[str, str]:
+    from operation_cli import install_launcher
+    from sdk_pythonpath import sdk_pythonpath
+
     state_home = str(ba_home())
+    operation_bin = install_launcher()
+    existing_path = os.environ.get("PATH", "")
     env = {
         "BETTER_AGENT_HOME": state_home,
         "BETTER_CLAUDE_HOME": state_home,
+        "BETTER_AGENT_OPERATION_CLI": "better-agent-cli",
+        "PATH": str(operation_bin) + (os.pathsep + existing_path if existing_path else ""),
     }
+    if run_id:
+        from runtime_bootstrap import issue
+
+        env.update(dual_env_many({
+            "BETTER_CLAUDE_RUNTIME_BOOTSTRAP": issue(str(internal_token or "")),
+        }))
+    pythonpath = sdk_pythonpath(
+        Path(__file__).resolve().parents[1], os.environ.get("PYTHONPATH", "")
+    )
+    if pythonpath:
+        env["PYTHONPATH"] = pythonpath
+    if os.name == "nt":
+        pathext = os.environ.get("PATHEXT", "")
+        entries = [entry.upper() for entry in pathext.split(os.pathsep) if entry]
+        if ".CMD" not in entries:
+            env["PATHEXT"] = pathext + (os.pathsep if pathext else "") + ".CMD"
     env.update(dual_env_many({
         "BETTER_CLAUDE_BACKEND_URL": str(backend_url or ""),
-        "BETTER_CLAUDE_INTERNAL_TOKEN": str(internal_token or ""),
         "BETTER_CLAUDE_APP_SESSION_ID": str(app_session_id or ""),
         "BETTER_CLAUDE_CWD": str(cwd or ""),
         "BETTER_CLAUDE_MODEL": str(model or ""),
@@ -415,7 +438,29 @@ class ProviderSuspendedError(RuntimeError):
 
 
 class ProviderCredentialError(RuntimeError):
-    """Raised before spawn when provider credentials are not authoritative."""
+    """Raised before spawn when provider credentials are not authoritative.
+
+    Carries structured fields so turn-failure surfacing can render a
+    credential-specific error (with an in-session fix action) instead of
+    a generic failure."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        provider_id: str,
+        credential_status: str,
+    ) -> None:
+        super().__init__(message)
+        self.provider_id = provider_id
+        self.credential_status = credential_status
+
+    def error_meta(self) -> dict:
+        return {
+            "kind": "provider_credential",
+            "provider_id": self.provider_id,
+            "credential_status": self.credential_status,
+        }
 
 
 class Provider(ABC):
@@ -537,19 +582,29 @@ class Provider(ABC):
         if is_ollama_base_url(str(record.get("base_url") or "")) and record.get("api_key"):
             return
         if record.get("_credential_authoritative") is not True:
+            try:
+                status = config_store.provider_credential_status(self.id)
+            except (EOFError, OSError, RuntimeError):
+                status = "blocked"
             raise ProviderCredentialError(
-                f"provider {self.id} credential is not supervisor-authoritative"
+                f"provider {self.id} credential is not supervisor-authoritative",
+                provider_id=self.id,
+                credential_status=status,
             )
         try:
             status = config_store.provider_credential_status(self.id)
         except (EOFError, OSError, RuntimeError):
             raise ProviderCredentialError(
-                f"provider {self.id} credential authority is unavailable"
+                f"provider {self.id} credential authority is unavailable",
+                provider_id=self.id,
+                credential_status="blocked",
             ) from None
         if status == "available" and record.get("api_key"):
             return
         raise ProviderCredentialError(
-            f"provider {self.id} credential is {status}; cannot start provider process"
+            f"provider {self.id} credential is {status}; cannot start provider process",
+            provider_id=self.id,
+            credential_status=status,
         )
 
     # ------------------------------------------------------------------

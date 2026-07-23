@@ -6423,6 +6423,7 @@ class SessionManager:
 
     def mark_user_error(
         self, sid: str, msg_id: str, text: str,
+        *, meta: Optional[dict] = None,
     ) -> Optional[dict]:
         def _do(s: dict) -> None:
             m = _find_message(s, msg_id)
@@ -6430,12 +6431,17 @@ class SessionManager:
                 return
             m["status"] = "error"
             m["errorText"] = text
+            if meta:
+                m["errorMeta"] = meta
+            else:
+                m.pop("errorMeta", None)
         def _enrich(s: dict) -> dict:
             m = _find_message(s, msg_id)
             return {"msg": copy.deepcopy(m) if m is not None else None}
         return self._run(
             sid, _do,
-            {"kind": "user_msg_marked_error", "msg_id": msg_id, "text": text},
+            {"kind": "user_msg_marked_error", "msg_id": msg_id, "text": text,
+             **({"meta": meta} if meta else {})},
             enrich=_enrich,
         )
 

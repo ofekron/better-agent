@@ -1130,5 +1130,11 @@
   "settings.sessionCreationDepthCap": "セッションの最大ネスト深度",
   "settings.sessionCreationDepthCapHint": "ルートセッション配下でサブセッションやフォークがネストできる深さ。",
   "settings.sessionMaxLiveDescendants": "ルートあたりの最大稼働サブセッション数",
-  "settings.sessionMaxLiveDescendantsHint": "1つのルートセッション配下で同時に実行できるサブセッションの上限。"
+  "settings.sessionMaxLiveDescendantsHint": "1つのルートセッション配下で同時に実行できるサブセッションの上限。",
+  "credentialError.notice": "このプロバイダーのAPIキーにアクセスできませんでした。",
+  "credentialError.fix": "資格情報アクセスを修復",
+  "credentialError.checking": "資格情報アクセスを要求中 — システムのキーチェーン確認が表示されたら許可してください…",
+  "credentialError.fixed": "アクセスが回復しました — メッセージをもう一度送信してください。",
+  "credentialError.stillBlocked": "アクセスはまだブロックされています — キーチェーン確認を許可してから再試行してください。",
+  "credentialError.missing": "このプロバイダーのAPIキーが保存されていません — 設定で追加してください。"
 }

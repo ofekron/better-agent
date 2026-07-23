@@ -5,9 +5,8 @@ import time
 import uuid
 from typing import Any
 
-from mcp.server.fastmcp import FastMCP
-
 from better_agent_sdk import Client
+from better_agent_sdk.surfaces import OperationSpec, build_mcp_server, run_mcp_or_cli
 
 # Match core's per-endpoint budgets: session_search runs up to 15 min (+30s
 # headroom so this client never preempts the search budget); delegate can drive
@@ -93,6 +92,15 @@ def search_sessions_response(
     reasoning_effort: str = "",
     node_id: str = "",
 ) -> dict[str, Any]:
+    """Find which of the user's OTHER sessions are relevant to a query, ranked
+    by relevance. Discovery only — returns session ids/metadata to act on with
+    delegate_to_session or propose_sessions.
+
+    Optional exact-match filters narrow the candidate set (empty / unset =
+    no constraint): `provider_id` (e.g. "claude", "openai"), `model`
+    (e.g. "claude-sonnet-4-5"), `reasoning_effort`, `node_id`. Use these
+    to scope a search to sessions run on a specific provider/model.
+    """
     query = (query or "").strip()
     if not query:
         return {"results": [], "error": "empty_query"}
@@ -141,6 +149,11 @@ def delegate_to_session_response(
     model: str = "",
     reasoning_effort: str = "",
 ) -> dict[str, Any]:
+    """Run a prompt against ANY user-chosen session (fork / continue / new) and
+    WAIT for its result, returned inline. The cross-session, user-driven
+    counterpart to delegate_task — unlike delegate_task (detached, team-routed),
+    this blocks and returns the answer.
+    """
     try:
         return SessionBridgeClient().invoke_durable(
             "delegate",
@@ -168,6 +181,10 @@ def propose_sessions_response(
     reasoning: str = "",
     proposed_project_path: str = "",
 ) -> dict[str, Any]:
+    """Present sessions you chose to the user as an inline picker so they decide
+    which to act on. Use after search_sessions when the choice should be the
+    user's, not yours.
+    """
     client = SessionBridgeClient()
     try:
         return client.invoke(
@@ -184,82 +201,32 @@ def propose_sessions_response(
         return {"success": False, "error": str(exc)}
 
 
-def build_server() -> FastMCP:
-    server = FastMCP("better-agent-session-bridge")
+def _specs() -> tuple[OperationSpec, ...]:
+    return (
+        OperationSpec(
+            "search_sessions",
+            search_sessions_response,
+            operation="runtime_session_bridge_search_sessions",
+        ),
+        OperationSpec(
+            "delegate_to_session",
+            delegate_to_session_response,
+            operation="runtime_session_bridge_delegate_to_session",
+        ),
+        OperationSpec(
+            "propose_sessions",
+            propose_sessions_response,
+            operation="runtime_session_bridge_propose_sessions",
+        ),
+    )
 
-    @server.tool()
-    def search_sessions(
-        query: str,
-        limit: int = 5,
-        provider_id: str = "",
-        model: str = "",
-        reasoning_effort: str = "",
-        node_id: str = "",
-    ) -> dict[str, Any]:
-        """Find which of the user's OTHER sessions are relevant to a query, ranked
-        by relevance. Discovery only — returns session ids/metadata to act on with
-        delegate_to_session or propose_sessions.
 
-        Optional exact-match filters narrow the candidate set (empty / unset =
-        no constraint): `provider_id` (e.g. "claude", "openai"), `model`
-        (e.g. "claude-sonnet-4-5"), `reasoning_effort`, `node_id`. Use these
-        to scope a search to sessions run on a specific provider/model."""
-        return search_sessions_response(
-            query,
-            limit,
-            provider_id=provider_id,
-            model=model,
-            reasoning_effort=reasoning_effort,
-            node_id=node_id,
-        )
-
-    @server.tool()
-    def delegate_to_session(
-        prompt: str,
-        run_mode: str,
-        approval: str,
-        session_id: str = "",
-        display_prompt: str = "",
-        source: str = "",
-        client_id: str = "",
-        provider_id: str = "",
-        model: str = "",
-        reasoning_effort: str = "",
-    ) -> dict[str, Any]:
-        """Run a prompt against ANY user-chosen session (fork / continue / new) and
-        WAIT for its result, returned inline. The cross-session, user-driven
-        counterpart to delegate_task — unlike delegate_task (detached, team-routed),
-        this blocks and returns the answer."""
-        return delegate_to_session_response(
-            prompt,
-            run_mode,
-            approval,
-            session_id,
-            display_prompt,
-            source,
-            client_id,
-            provider_id,
-            model,
-            reasoning_effort,
-        )
-
-    @server.tool()
-    def propose_sessions(
-        session_ids: list[str],
-        reasoning: str = "",
-        proposed_project_path: str = "",
-    ) -> dict[str, Any]:
-        """Present sessions you chose to the user as an inline picker so they decide
-        which to act on. Use after search_sessions when the choice should be the
-        user's, not yours."""
-        return propose_sessions_response(session_ids, reasoning, proposed_project_path)
-
-    return server
+def build_server():
+    return build_mcp_server("better-agent-session-bridge", _specs())
 
 
 def main() -> int:
-    build_server().run("stdio")
-    return 0
+    return run_mcp_or_cli("better-agent-session-bridge", _specs())
 
 
 if __name__ == "__main__":

@@ -453,7 +453,7 @@ stop_child_process() {
 }
 
 credential_backend_control() {
-  PYTHONPATH="$DIR:$DIR/backend:$DIR/desktop" "$PY" \
+  PYTHONPATH="$DIR:$DIR/backend:$DIR/desktop:$DIR/sdk" "$PY" \
     -m desktop.browser_backend_control --control "$CREDENTIAL_BACKEND_CONTROL" "$@"
 }
 
@@ -469,7 +469,7 @@ start_credential_backend_supervisor() {
       --launcher-root "$DIR" \
       --controller-pid "$$" &
   else
-    PYTHONPATH="$DIR:$DIR/backend:$DIR/desktop" "$PY" \
+    PYTHONPATH="$DIR:$DIR/backend:$DIR/desktop:$DIR/sdk" "$PY" \
       -m desktop.browser_backend_supervisor \
       --control "$CREDENTIAL_BACKEND_CONTROL" \
       --launcher-root "$DIR" \

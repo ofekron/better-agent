@@ -1134,5 +1134,11 @@
   "settings.sessionCreationDepthCap": "Profondità massima di annidamento delle sessioni",
   "settings.sessionCreationDepthCapHint": "Quanto in profondità sotto-sessioni e fork possono annidarsi sotto una sessione radice.",
   "settings.sessionMaxLiveDescendants": "Sotto-sessioni attive max per radice",
-  "settings.sessionMaxLiveDescendantsHint": "Numero massimo di sotto-sessioni in esecuzione contemporanea sotto una sessione radice."
+  "settings.sessionMaxLiveDescendantsHint": "Numero massimo di sotto-sessioni in esecuzione contemporanea sotto una sessione radice.",
+  "credentialError.notice": "Impossibile accedere alla chiave API di questo provider.",
+  "credentialError.fix": "Ripristina accesso alle credenziali",
+  "credentialError.checking": "Richiesta di accesso alle credenziali — approva l'avviso del portachiavi di sistema se compare…",
+  "credentialError.fixed": "Accesso ripristinato — invia di nuovo il messaggio.",
+  "credentialError.stillBlocked": "Accesso ancora bloccato — approva l'avviso del portachiavi di sistema e riprova.",
+  "credentialError.missing": "Nessuna chiave API salvata per questo provider — aggiungila nelle Impostazioni."
 }

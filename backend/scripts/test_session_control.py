@@ -20,6 +20,7 @@ TMP_HOME = Path(tempfile.mkdtemp(prefix="bc-test-session-control-"))
 import _test_home  # noqa: E402
 _test_home.isolate("ba-test-")
 os.environ["BETTER_CLAUDE_TEST_AUTH_BYPASS"] = "1"
+os.environ["BETTER_AGENT_RUNTIME_BROKER"] = "unix:/tmp/better-agent-test.sock"
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -27,7 +28,11 @@ sys.path.insert(0, str(ROOT))
 import continuation  # noqa: E402
 import config_store  # noqa: E402
 import extension_store  # noqa: E402
+import installation_profile  # noqa: E402
 import session_manager  # noqa: E402
+
+installation_profile.integrations_enabled = lambda: True
+installation_profile.allows = lambda _capability: True
 
 FAILURES: list[str] = []
 
@@ -71,7 +76,7 @@ def test_session_control_extension_validates_and_injects() -> None:
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     validated = extension_store.validate_manifest(manifest)
     check(validated["surfaces"] == ["runtime_mcp"], "runtime_mcp surface only")
-    # Install the public package snapshot, then confirm native-launcher injection.
+    # Install the public package snapshot, then confirm runtime MCP injection.
     data = extension_store._load()  # type: ignore[attr-defined]
     extension_store._ensure_public_extensions(data)  # type: ignore[attr-defined]
     extension_store._save(data)  # type: ignore[attr-defined]
@@ -84,9 +89,24 @@ def test_session_control_extension_validates_and_injects() -> None:
         "open_file_panel_enabled": True, "backend_url": "http://localhost:8000",
         "internal_token": "tok",
     }
-    nv = extension_store.native_mcp_launcher_server_configs(inputs, user_facing=True, bare=False)
+    nv = extension_store.runtime_mcp_server_configs(
+        inputs,
+        user_facing=True,
+        bare=False,
+    )
     check("better-agent-session-control" in nv, "injected for native session")
-    excluded = extension_store.native_mcp_launcher_server_configs(
+    if "better-agent-session-control" in nv:
+        env = nv["better-agent-session-control"]["env"]
+        check(
+            env.get("BETTER_AGENT_RUNTIME_BROKER")
+            == "unix:/tmp/better-agent-test.sock",
+            "session-control receives the scoped runtime broker",
+        )
+        check(
+            "BETTER_AGENT_INTERNAL_TOKEN" not in env,
+            "session-control receives no bearer token",
+        )
+    excluded = extension_store.runtime_mcp_server_configs(
         {**inputs, "working_mode": "search_worker"}, user_facing=True, bare=False,
     )
     check("better-agent-session-control" not in excluded, "excluded for search_worker")

@@ -1133,5 +1133,11 @@
   "settings.sessionCreationDepthCap": "الحد الأقصى لعمق تداخل الجلسات",
   "settings.sessionCreationDepthCapHint": "مدى عمق تداخل الجلسات الفرعية والتفرعات تحت الجلسة الجذرية.",
   "settings.sessionMaxLiveDescendants": "الحد الأقصى للجلسات الفرعية النشطة لكل جذر",
-  "settings.sessionMaxLiveDescendantsHint": "أقصى عدد من الجلسات الفرعية العاملة معًا تحت جلسة جذرية واحدة."
+  "settings.sessionMaxLiveDescendantsHint": "أقصى عدد من الجلسات الفرعية العاملة معًا تحت جلسة جذرية واحدة.",
+  "credentialError.notice": "تعذّر الوصول إلى مفتاح API الخاص بهذا المزوّد.",
+  "credentialError.fix": "إصلاح الوصول إلى بيانات الاعتماد",
+  "credentialError.checking": "جارٍ طلب الوصول إلى بيانات الاعتماد — وافق على مطالبة سلسلة مفاتيح النظام إذا ظهرت…",
+  "credentialError.fixed": "تمت استعادة الوصول — أعد إرسال الرسالة.",
+  "credentialError.stillBlocked": "لا يزال الوصول محظورًا — وافق على مطالبة سلسلة المفاتيح ثم حاول مجددًا.",
+  "credentialError.missing": "لا يوجد مفتاح API محفوظ لهذا المزوّد — أضفه من الإعدادات."
 }

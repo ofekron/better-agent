@@ -21,6 +21,7 @@ _HERE = os.path.abspath(os.path.dirname(SPEC))          # noqa: F821 (SPEC: PyIn
 _REPO = os.path.dirname(_HERE)
 _BACKEND = os.path.join(_REPO, "backend")
 _DESKTOP = os.path.join(_REPO, "desktop")
+_SDK = os.path.join(_REPO, "sdk")
 
 # Single source of truth for the app version (desktop/_version.py).
 sys.path.insert(0, _DESKTOP)
@@ -94,7 +95,7 @@ hiddenimports += [
 
 a = Analysis(                                            # noqa: F821
     [os.path.join(_DESKTOP, "app_main.py")],
-    pathex=[_BACKEND, _DESKTOP, _REPO],
+    pathex=[_BACKEND, _DESKTOP, _SDK, _REPO],
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,

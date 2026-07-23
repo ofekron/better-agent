@@ -147,27 +147,6 @@ def _is_zai_base_url(base_url: str) -> bool:
     return host == "api.z.ai" or host.endswith(".z.ai")
 
 
-# Detached runners can outlive backend restarts/token rotations. Prefer the
-# spawn-time token for normal requests, but on a 403 retry once with the current
-# disk token. mtime caching keeps steady-state loopback calls cheap.
-_token_cache: dict = {"token": None, "mtime": 0.0}
-
-
-def _load_internal_token() -> Optional[str]:
-    try:
-        from paths import ba_home as _ba_home
-        path = _ba_home() / "internal_token"
-        st = path.stat()
-        if _token_cache["mtime"] != st.st_mtime:
-            _token_cache["token"] = path.read_text(encoding="utf-8").strip()
-            _token_cache["mtime"] = st.st_mtime
-        return _token_cache["token"]
-    except OSError:
-        return None
-    except Exception:
-        return None
-
-
 # --------------------------------------------------------------------------
 # small utils
 # --------------------------------------------------------------------------
@@ -1565,8 +1544,6 @@ def _post_loopback_sync(
     body = json.dumps(payload).encode("utf-8")
     deadline = time.monotonic() + timeout_s
     backoff = 1.0
-    tried_live_token_after_forbidden = False
-
     def _request_once(token: str) -> dict:
         req = urllib.request.Request(
             backend_url.rstrip("/") + url_path,
@@ -1589,21 +1566,7 @@ def _post_loopback_sync(
         try:
             return _request_once(internal_token)
         except urllib.error.HTTPError as e:
-            live_token = _load_internal_token()
-            if (
-                e.code == 403
-                and live_token
-                and live_token != internal_token
-                and not tried_live_token_after_forbidden
-            ):
-                tried_live_token_after_forbidden = True
-                try:
-                    return _request_once(live_token)
-                except urllib.error.HTTPError:
-                    raise e
-            if e.code != 403:
-                raise_loopback_http_error(e)
-            raise
+            raise_loopback_http_error(e)
         except (
             urllib.error.URLError,
             http.client.RemoteDisconnected,
@@ -2968,6 +2931,8 @@ def main(run_dir: Path) -> int:
     (run_dir / "pid").write_text(str(os.getpid()), encoding="utf-8")
     try:
         inputs = json.loads((run_dir / "input.json").read_text(encoding="utf-8"))
+        from runner_operation_host import hydrate_runner_inputs
+        inputs = hydrate_runner_inputs(inputs, run_dir)
     except Exception as e:
         _fail(run_dir, f"failed to read input.json: {e}")
         return 1

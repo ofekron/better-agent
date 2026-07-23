@@ -9,6 +9,7 @@ This entrypoint inspects argv:
   - `--open-file-panel-mcp` present → run the stdio file-panel MCP server.
   - `--open-config-panel-mcp` present → run the stdio config-panel MCP server.
   - `--extension-mcp` present → run an installed extension MCP launcher.
+  - `--operation-cli` present → run the generated operation CLI dispatcher.
   - otherwise            → start the uvicorn server.
 
 In a dev checkout the backend is launched via `run.sh`/`uvicorn` and the
@@ -52,6 +53,8 @@ def _dispatch(argv: list[str]) -> tuple[str, Optional[str], Optional[Path]]:
         return ("open_config_panel_mcp", None, None)
     if "--extension-mcp" in argv:
         return ("extension_mcp", None, None)
+    if "--operation-cli" in argv:
+        return ("operation_cli", None, None)
     if "--serve-node" in argv:
         return ("node_server", None, None)
     if "--run-dir" not in argv:
@@ -86,6 +89,11 @@ def _main(argv: Optional[list[str]] = None) -> int:
         from extension_mcp_launcher import main as extension_mcp_main
         index = (sys.argv[1:] if argv is None else argv).index("--extension-mcp")
         return extension_mcp_main((sys.argv[1:] if argv is None else argv)[index + 1:])
+    if mode == "operation_cli":
+        from operation_cli import main as operation_cli_main
+        values = sys.argv[1:] if argv is None else argv
+        index = values.index("--operation-cli")
+        return operation_cli_main(values[index + 1:])
     if mode == "runner":
         # Runner module per kind comes from the canonical manifest; "runner"
         # is the default Claude runner. (codex + fugu both resolve to

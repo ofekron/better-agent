@@ -1134,5 +1134,11 @@
   "settings.sessionCreationDepthCap": "Profondeur maximale d'imbrication des sessions",
   "settings.sessionCreationDepthCapHint": "Profondeur maximale d'imbrication des sous-sessions et forks sous une session racine.",
   "settings.sessionMaxLiveDescendants": "Sous-sessions actives max par racine",
-  "settings.sessionMaxLiveDescendantsHint": "Nombre maximal de sous-sessions s'exécutant simultanément sous une même session racine."
+  "settings.sessionMaxLiveDescendantsHint": "Nombre maximal de sous-sessions s'exécutant simultanément sous une même session racine.",
+  "credentialError.notice": "Impossible d'accéder à la clé API de ce fournisseur.",
+  "credentialError.fix": "Réparer l'accès aux identifiants",
+  "credentialError.checking": "Demande d'accès aux identifiants — validez l'invite du trousseau système si elle apparaît…",
+  "credentialError.fixed": "Accès rétabli — renvoyez le message.",
+  "credentialError.stillBlocked": "Accès toujours bloqué — validez l'invite du trousseau système puis réessayez.",
+  "credentialError.missing": "Aucune clé API enregistrée pour ce fournisseur — ajoutez-la dans les Réglages."
 }

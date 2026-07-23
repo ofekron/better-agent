@@ -12,6 +12,7 @@ from pathlib import Path
 
 import _test_home
 _TMP_HOME = _test_home.isolate("bc-test-provider-run-config-")
+os.environ["BETTER_AGENT_RUNTIME_BROKER"] = "unix:/tmp/better-agent-test.sock"
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _BACKEND = os.path.dirname(_HERE)

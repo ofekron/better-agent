@@ -193,6 +193,56 @@ def installer_for(kind: str) -> ProviderInstaller:
     return installer
 
 
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def executable_identity(launcher_path: str) -> dict[str, Any]:
+    launcher = Path(launcher_path)
+    if not launcher.is_absolute() or not launcher.is_file():
+        raise ValueError("provider executable launcher is unavailable")
+    target = launcher.resolve(strict=True)
+    if not target.is_file():
+        raise ValueError("provider executable target is unavailable")
+    stat = target.stat()
+    return {
+        "command": launcher.stem if launcher.suffix.lower() in (".cmd", ".exe", ".bat") else launcher.name,
+        "launcher_path": str(launcher),
+        "launcher_sha256": _file_sha256(launcher),
+        "target_path": str(target),
+        "target_sha256": _file_sha256(target),
+        "size": stat.st_size,
+        "mtime_ns": stat.st_mtime_ns,
+    }
+
+
+async def verified_provider_identity(kind: str) -> dict[str, Any] | None:
+    installer = installer_for(kind)
+    launcher = resolve_cli_binary(
+        installer.command,
+        respect_installation_profile=False,
+    )
+    if not launcher:
+        return None
+    before = executable_identity(str(Path(launcher).absolute()))
+    if before["command"] != installer.command:
+        raise RuntimeError("provider executable identity does not match selected provider")
+    result = await _run_argv(
+        (before["launcher_path"], *installer.verify_argv[1:]),
+        timeout=10,
+    )
+    after = executable_identity(before["launcher_path"])
+    if before != after:
+        raise RuntimeError("provider executable changed during verification")
+    if not result["ok"]:
+        return None
+    return after
+
+
 async def provider_setup_status(kind: str, *, wait_for_cold: bool = False) -> dict[str, Any]:
     if not _SETUP_ACCEPTING:
         raise RuntimeError("provider setup is shutting down")
@@ -473,7 +523,7 @@ async def _run_install(
 
 
 async def _check_argv(argv: tuple[str, ...]) -> dict[str, Any]:
-    if not resolve_cli_binary(argv[0]):
+    if not resolve_cli_binary(argv[0], respect_installation_profile=False):
         return {"ok": False, "stdout": "", "stderr": f"{argv[0]} not found", "returncode": 127}
     return await _run_argv(argv, timeout=10)
 
@@ -484,7 +534,10 @@ async def _run_argv(argv: tuple[str, ...], timeout: int) -> dict[str, Any]:
     # must degrade to "not available", never raise and 500 the caller
     # (e.g. provider-setup/status) — that was a Windows-only crash because
     # create_subprocess_exec can't launch a bare CLI name there.
-    resolved = resolve_cli_binary(argv[0]) or argv[0]
+    resolved = (
+        resolve_cli_binary(argv[0], respect_installation_profile=False)
+        or argv[0]
+    )
     try:
         proc = await asyncio.create_subprocess_exec(
             resolved, *argv[1:],
@@ -530,7 +583,10 @@ async def _run_argv_streaming(
     """Run `argv` streaming stdout/stderr line-by-line through `on_line`.
     Returns {ok, returncode, stderr?}. `on_line` is awaited per line so it
     can broadcast to WS clients."""
-    resolved = resolve_cli_binary(argv[0]) or argv[0]
+    resolved = (
+        resolve_cli_binary(argv[0], respect_installation_profile=False)
+        or argv[0]
+    )
     try:
         proc = await asyncio.create_subprocess_exec(
             resolved, *argv[1:],

@@ -4,6 +4,7 @@ One frozen binary, three roles, chosen by argv:
   - `--run-dir <dir>`  → run a worker runner (delegates to `app_entry`).
   - `--serve`          → run the FastAPI backend server (via `app_entry`).
   - `--serve-node`     → run the worker-node backend (via `app_entry`).
+  - `--operation-cli`  → run the generated operation CLI dispatcher.
   - (no args)          → run the desktop shell — what double-clicking the
                          `.app` does.
 
@@ -63,7 +64,12 @@ except Exception:
 def _role(argv: list[str]) -> str:
     """Classify the invocation. `--run-dir` or `--serve` → 'backend'
     (server/runner, both handled by `app_entry`); otherwise → 'shell'."""
-    if "--run-dir" in argv or "--serve" in argv or "--serve-node" in argv:
+    if (
+        "--run-dir" in argv
+        or "--serve" in argv
+        or "--serve-node" in argv
+        or "--operation-cli" in argv
+    ):
         return "backend"
     return "shell"
 

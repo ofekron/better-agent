@@ -1136,5 +1136,11 @@
   "settings.sessionCreationDepthCap": "Макс. глубина вложенности сессий",
   "settings.sessionCreationDepthCapHint": "Насколько глубоко под-сессии и форки могут вкладываться под корневую сессию.",
   "settings.sessionMaxLiveDescendants": "Макс. активных под-сессий на корень",
-  "settings.sessionMaxLiveDescendantsHint": "Максимум одновременно работающих под-сессий под одной корневой сессией."
+  "settings.sessionMaxLiveDescendantsHint": "Максимум одновременно работающих под-сессий под одной корневой сессией.",
+  "credentialError.notice": "Не удалось получить доступ к API-ключу этого провайдера.",
+  "credentialError.fix": "Восстановить доступ к учётным данным",
+  "credentialError.checking": "Запрос доступа к учётным данным — подтвердите запрос системной связки ключей, если он появится…",
+  "credentialError.fixed": "Доступ восстановлен — отправьте сообщение ещё раз.",
+  "credentialError.stillBlocked": "Доступ по-прежнему заблокирован — подтвердите запрос связки ключей и попробуйте снова.",
+  "credentialError.missing": "Для этого провайдера не сохранён API-ключ — добавьте его в настройках."
 }

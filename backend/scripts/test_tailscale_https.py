@@ -21,7 +21,39 @@ from fastapi.testclient import TestClient  # noqa: E402
 import auth  # noqa: E402
 import installation_profile  # noqa: E402
 import main  # noqa: E402
+import provider_setup  # noqa: E402
 import tailscale_https  # noqa: E402
+
+
+def _activate_installation_mode(mode: str) -> None:
+    provider = "codex"
+    command = provider_setup.installer_for(provider).command
+    suffix = ".cmd" if sys.platform == "win32" else ""
+    launcher = Path(_TMP_HOME) / f"{command}{suffix}"
+    launcher.write_bytes(b"@echo off\r\nexit /b 0\r\n" if suffix else b"#!/bin/sh\nexit 0\n")
+    launcher.chmod(0o700)
+    provider_id = "codex-id"
+    (Path(_TMP_HOME) / "config.json").write_text(
+        json.dumps({
+            "default_provider_id": provider_id,
+            "providers": [{
+                "id": provider_id,
+                "kind": provider,
+                "suspended": False,
+            }],
+        }),
+        encoding="utf-8",
+    )
+    profile = installation_profile.new_active_profile(
+        mode=mode,
+        provider=provider,
+        provider_identity=provider_setup.executable_identity(str(launcher.absolute())),
+    )
+    installation_profile.stage_activation(profile)
+    installation_profile.mark_selection_applied()
+
+
+_activate_installation_mode(installation_profile.DEFAULT)
 
 
 def _status(dns_name: str = "mac.tailnet.ts.net.") -> dict:
@@ -410,13 +442,14 @@ def test_status_endpoints_prefer_reachable_tailscale_https() -> None:
 
 def test_desktop_only_rejects_native_mobile_endpoints() -> None:
     client = _client()
-    installation_profile.save(mode=installation_profile.DESKTOP_UI_ONLY, provider="codex")
+    _activate_installation_mode(installation_profile.DESKTOP_UI_ONLY)
     assert client.get("/api/installation-profile").json()["mobile_enabled"] is False
     assert client.get("/api/mobile/status").status_code == 404
 
-    installation_profile.save(mode=installation_profile.MOBILE_DESKTOP_UI_ONLY, provider="codex")
+    _activate_installation_mode(installation_profile.MOBILE_DESKTOP_UI_ONLY)
     assert client.get("/api/installation-profile").json()["mobile_enabled"] is True
     assert client.get("/api/mobile/status").status_code == 200
+    _activate_installation_mode(installation_profile.DEFAULT)
 
 
 def test_status_endpoints_fall_back_to_local_url() -> None:

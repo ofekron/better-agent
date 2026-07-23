@@ -1,11 +1,23 @@
 from __future__ import annotations
 
 from pathlib import Path
+import os
 from typing import Any
 
 import extension_store
 import installation_profile
 from env_compat import dual_env_many, get_env
+
+
+def _with_sdk_pythonpath(env: dict[str, str]) -> dict[str, str]:
+    sdk = Path(__file__).resolve().parents[1] / "sdk"
+    if not sdk.is_dir():
+        return env
+    existing = os.environ.get("PYTHONPATH", "")
+    return {
+        **env,
+        "PYTHONPATH": str(sdk) + (os.pathsep + existing if existing else ""),
+    }
 
 
 def _open_file_panel_server_config(env: dict[str, str]) -> dict[str, Any]:
@@ -51,7 +63,7 @@ def with_builtin_mcp_servers(inputs: dict, provider_run_config: dict) -> dict:
         or get_env("BETTER_CLAUDE_BACKEND_URL")
         or "http://localhost:8000"
     ).strip()
-    internal_token = str(inputs.get("internal_token") or "").strip()
+    runtime_broker = get_env("BETTER_CLAUDE_RUNTIME_BROKER").strip()
     cwd = str(inputs.get("cwd") or "")
     model = str(inputs.get("model") or "")
     provider_id = str(inputs.get("provider_id") or "").strip()
@@ -59,16 +71,16 @@ def with_builtin_mcp_servers(inputs: dict, provider_run_config: dict) -> dict:
     bare = bool(inputs.get("bare_config"))
     user_facing = bool(inputs.get("open_file_panel_enabled")) and not bare
 
-    base_env = dual_env_many({
+    base_env = _with_sdk_pythonpath(dual_env_many({
         "BETTER_CLAUDE_BACKEND_URL": backend_url,
-        "BETTER_CLAUDE_INTERNAL_TOKEN": internal_token,
+        "BETTER_CLAUDE_RUNTIME_BROKER": runtime_broker,
         "BETTER_CLAUDE_APP_SESSION_ID": app_session_id,
         "BETTER_CLAUDE_CWD": cwd,
         "BETTER_CLAUDE_MODEL": model,
         "BETTER_CLAUDE_PROVIDER_ID": provider_id,
         "BETTER_CLAUDE_FILE_EDITING": "1" if inputs.get("working_mode") == "file_editing" else "0",
-    })
-    if user_facing and app_session_id and backend_url and internal_token:
+    }))
+    if user_facing and app_session_id and runtime_broker:
         import provider_manifest
         _spec = provider_manifest.spec_for(provider_kind)
         if _spec is None or _spec.hosts_ui_mcp:
@@ -79,13 +91,13 @@ def with_builtin_mcp_servers(inputs: dict, provider_run_config: dict) -> dict:
     # list scoped capabilities). Internal, non-bare sessions only; bare sessions
     # are deliberately capability-stripped. Independent of user_facing so
     # headless/worker turns can self-scope too (matches runner.py's Claude path).
-    if app_session_id and backend_url and internal_token and not bare:
-        cap_env = dual_env_many({
+    if app_session_id and runtime_broker and not bare:
+        cap_env = _with_sdk_pythonpath(dual_env_many({
             "BETTER_CLAUDE_BACKEND_URL": backend_url,
-            "BETTER_CLAUDE_INTERNAL_TOKEN": internal_token,
+            "BETTER_CLAUDE_RUNTIME_BROKER": runtime_broker,
             "BETTER_CLAUDE_APP_SESSION_ID": app_session_id,
             "BETTER_CLAUDE_BARE_CONFIG": "0",
-        })
+        }))
         servers["capabilities"] = _capabilities_server_config(cap_env)
 
     for name, server_config in extension_store.runtime_mcp_server_configs(
@@ -118,7 +130,7 @@ def native_mcp_runtime_env(inputs: dict) -> dict[str, str]:
         or get_env("BETTER_CLAUDE_BACKEND_URL")
         or "http://localhost:8000"
     ).strip()
-    internal_token = str(inputs.get("internal_token") or "").strip()
+    runtime_broker = get_env("BETTER_CLAUDE_RUNTIME_BROKER").strip()
     cwd = str(inputs.get("cwd") or "")
     model = str(inputs.get("model") or "")
     provider_id = str(inputs.get("provider_id") or "").strip()
@@ -132,7 +144,7 @@ def native_mcp_runtime_env(inputs: dict) -> dict[str, str]:
     ]
     return dual_env_many({
         "BETTER_CLAUDE_BACKEND_URL": backend_url,
-        "BETTER_CLAUDE_INTERNAL_TOKEN": internal_token,
+        "BETTER_CLAUDE_RUNTIME_BROKER": runtime_broker,
         "BETTER_CLAUDE_APP_SESSION_ID": app_session_id,
         "BETTER_CLAUDE_CWD": cwd,
         "BETTER_CLAUDE_MODEL": model,

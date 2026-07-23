@@ -1205,5 +1205,11 @@
   "settings.sessionCreationDepthCap": "Max session nesting depth",
   "settings.sessionCreationDepthCapHint": "How deep sub-sessions and forks may nest under a root session.",
   "settings.sessionMaxLiveDescendants": "Max live sub-sessions per root",
-  "settings.sessionMaxLiveDescendantsHint": "Maximum concurrently running sub-sessions under one root session."
+  "settings.sessionMaxLiveDescendantsHint": "Maximum concurrently running sub-sessions under one root session.",
+  "credentialError.notice": "This provider's API key couldn't be accessed.",
+  "credentialError.fix": "Fix credential access",
+  "credentialError.checking": "Requesting credential access — approve the system keychain prompt if it appears…",
+  "credentialError.fixed": "Credential access restored — send the message again.",
+  "credentialError.stillBlocked": "Access is still blocked — approve the system keychain prompt and try again.",
+  "credentialError.missing": "No API key is stored for this provider — add one in Settings."
 }

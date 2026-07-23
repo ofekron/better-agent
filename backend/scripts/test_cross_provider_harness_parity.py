@@ -43,12 +43,14 @@ import _test_home
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 _test_home.isolate("bc_xprovider_harness_")
+os.environ["BETTER_AGENT_RUNTIME_BROKER"] = "unix:/tmp/better-agent-test.sock"
 
 import builtin_mcp_config  # noqa: E402
 import capability_contexts  # noqa: E402
 import communicate_mcp  # noqa: E402
 import extension_run_policy  # noqa: E402
 import extension_store  # noqa: E402
+import installation_profile  # noqa: E402
 import orchestration_tool_schemas as ots  # noqa: E402
 import permission  # noqa: E402
 import provider  # noqa: E402
@@ -57,6 +59,8 @@ import runner  # noqa: E402
 import runner_codex  # noqa: E402
 import runtime_skills  # noqa: E402
 import turn_manager  # noqa: E402
+
+installation_profile.integrations_enabled = lambda: True
 
 # The three first-class CLI providers this map covers.
 PROVIDERS = ("claude", "codex", "gemini")

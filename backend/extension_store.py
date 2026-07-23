@@ -138,6 +138,13 @@ _MCP_REPLACEMENT_CORE_ROLES = {
     "credential-broker": "credential-broker",
 }
 MARKETPLACE_EXTENSION_ID = "ofek-dev.marketplace"
+_BROKERED_MCP_EXTENSION_IDS = frozenset({
+    BUILTIN_COORDINATION_EXTENSION_ID,
+    BUILTIN_PROVIDER_CONFIG_SYNC_EXTENSION_ID,
+    BUILTIN_SESSION_BRIDGE_EXTENSION_ID,
+    BUILTIN_SESSION_CONTROL_EXTENSION_ID,
+    MARKETPLACE_EXTENSION_ID,
+})
 REQUIRED_EXTENSION_IDS = {MARKETPLACE_EXTENSION_ID}
 PUBLIC_EXTENSION_LIST_HIDDEN_IDS = frozenset()
 _OBSOLETE_EXTENSION_IDS = {
@@ -5365,6 +5372,7 @@ def _runtime_mcp_server_config_for_item(
     internal_token = ""
     base_env = dual_env_many({
         "BETTER_CLAUDE_BACKEND_URL": backend_url,
+        "BETTER_CLAUDE_RUNTIME_BROKER": get_env("BETTER_CLAUDE_RUNTIME_BROKER"),
         "BETTER_CLAUDE_APP_SESSION_ID": str(inputs.get("app_session_id") or ""),
         "BETTER_CLAUDE_CWD": str(inputs.get("cwd") or ""),
         "BETTER_CLAUDE_MODEL": str(inputs.get("model") or ""),
@@ -5378,7 +5386,11 @@ def _runtime_mcp_server_config_for_item(
     ambient_launch = item.get("ambient_native") is True and not str(
         inputs.get("app_session_id") or ""
     ).strip()
-    if needs_identity_token(record) and not ambient_launch:
+    if (
+        needs_identity_token(record)
+        and not ambient_launch
+        and manifest["id"] not in _BROKERED_MCP_EXTENSION_IDS
+    ):
         # Per-extension token: identity is derived from this secret, never
         # from a self-asserted X-Extension-Id header. The global token from
         # `inputs` is intentionally ignored here.
@@ -5404,7 +5416,10 @@ def _runtime_mcp_server_config_for_item(
         **dict(item.get("env") or {}),
         **dual_env_many({"BETTER_CLAUDE_EXTENSION_ID": manifest["id"]}),
     }
-    if manifest["id"] == BUILTIN_PROVIDER_CONFIG_SYNC_EXTENSION_ID:
+    if (
+        manifest["id"] == BUILTIN_PROVIDER_CONFIG_SYNC_EXTENSION_ID
+        and internal_token
+    ):
         from provider_config_sync_api import provider_config_sync_mcp_env
         env.update(provider_config_sync_mcp_env(
             backend_url=backend_url,
@@ -5489,14 +5504,23 @@ def _mcp_item_available_for_inputs(
         or "http://localhost:8000"
     ).strip()
     internal_token = str(inputs.get("internal_token") or "").strip()
+    runtime_broker = get_env("BETTER_CLAUDE_RUNTIME_BROKER").strip()
     launcher_can_mint_token = (
         bool(inputs.get("extension_mcp_launcher_context"))
         and bool(str(inputs.get("app_session_id") or "").strip())
         and bool(explicit_backend_url)
     )
+    brokered = (
+        manifest["id"] in _BROKERED_MCP_EXTENSION_IDS
+        and bool(runtime_broker)
+    )
     if (
         item.get("requires_backend_auth")
-        and not ((backend_url and internal_token) or launcher_can_mint_token)
+        and not (
+            (backend_url and internal_token)
+            or brokered
+            or launcher_can_mint_token
+        )
     ):
         return False
     predicate = item.get("predicate")

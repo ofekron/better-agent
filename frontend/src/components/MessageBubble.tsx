@@ -2911,14 +2911,86 @@ const AssistantMessage = memo(function AssistantMessage({
   );
 });
 
+/** In-chat fix action for turns that failed on provider credential access.
+ * Fires the provider credential retry (which may pop the OS keychain
+ * prompt) and truthfully reflects the backend-returned status. */
+export function CredentialErrorFix({ meta }: { meta: NonNullable<ChatMessage["errorMeta"]> }) {
+  const { t } = useTranslation();
+  const [state, setState] = useState<
+    "idle" | "checking" | "available" | "missing" | "blocked" | "failed"
+  >("idle");
+  if (!meta.provider_id) return null;
+  const fix = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    setState("checking");
+    try {
+      const r = await fetch(
+        `${API}/api/providers/${encodeURIComponent(meta.provider_id!)}/credential/retry`,
+        { method: "POST" },
+      );
+      if (!r.ok) throw new Error(await r.text());
+      const body = await r.json();
+      setState(
+        body.credential_status === "available"
+          ? "available"
+          : body.credential_status === "missing"
+            ? "missing"
+            : "blocked",
+      );
+    } catch {
+      setState("failed");
+    }
+  };
+  return (
+    <motion.div
+      className="credential-error-fix"
+      data-testid="credential-error-fix"
+      initial={{ opacity: 0, y: -4 }}
+      animate={{ opacity: 1, y: 0 }}
+      onClick={(e) => e.stopPropagation()}
+    >
+      <span className="credential-fix-notice">
+        {meta.credential_status === "missing"
+          ? t("credentialError.missing")
+          : t("credentialError.notice")}
+      </span>
+      {state === "checking" ? (
+        <span className="credential-fix-progress" role="status" aria-live="polite">
+          <span className="load-phase-spinner" aria-hidden="true" />
+          {t("credentialError.checking")}
+        </span>
+      ) : state === "available" ? (
+        <span className="credential-fix-result credential-fix-ok" role="status">
+          {t("credentialError.fixed")}
+        </span>
+      ) : (
+        <>
+          {state !== "idle" && (
+            <span className="credential-fix-result" role="status">
+              {state === "missing"
+                ? t("credentialError.missing")
+                : t("credentialError.stillBlocked")}
+            </span>
+          )}
+          <button className="status-retry-btn" onClick={fix}>
+            {t("credentialError.fix")}
+          </button>
+        </>
+      )}
+    </motion.div>
+  );
+}
+
 /** Status indicator for pending user messages */
 function MessageStatus({
   status,
   errorText,
+  errorMeta,
   onRetry,
 }: {
   status: ChatMessage["status"];
   errorText?: string;
+  errorMeta?: ChatMessage["errorMeta"];
   onRetry?: () => void;
 }) {
   const [errorExpanded, setErrorExpanded] = useState(false);
@@ -2962,6 +3034,9 @@ function MessageStatus({
             </button>
           )}
         </div>
+        {errorMeta?.kind === "provider_credential" && (
+          <CredentialErrorFix meta={errorMeta} />
+        )}
         {errorExpanded && errorText && (
           <pre className="error-block-body">{errorText}</pre>
         )}
@@ -3640,6 +3715,7 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
                     : initiatorMessage.status
                 }
                 errorText={initiatorMessage.errorText}
+                errorMeta={initiatorMessage.errorMeta}
                 onRetry={onRetry ? () => onRetry(initiatorMessage) : undefined}
               />
               {(() => {
@@ -3721,6 +3797,7 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
             <MessageStatus
               status="error"
               errorText={initiatorMessage.errorText}
+              errorMeta={initiatorMessage.errorMeta}
               onRetry={onRetry ? () => onRetry(initiatorMessage) : undefined}
             />
           )}
@@ -3770,6 +3847,7 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
             <MessageStatus
               status="error"
               errorText={initiatorMessage.errorText}
+              errorMeta={initiatorMessage.errorMeta}
               onRetry={onRetry ? () => onRetry(initiatorMessage) : undefined}
             />
           )}
@@ -4089,6 +4167,7 @@ export function MessageBubble({ message, sessionId, userDisplayName, onFileClick
           <MessageStatus
             status={message.status ?? (message.isStreaming && (runs.length > 0 || !message.stopped_at) ? "running" : undefined)}
             errorText={message.errorText}
+            errorMeta={message.errorMeta}
           />
           {(() => {
             const t = fmtTime(message.timestamp);

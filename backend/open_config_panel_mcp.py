@@ -6,9 +6,9 @@ import urllib.error
 import urllib.request
 from typing import Any
 
+from better_agent_sdk.surfaces import OperationSpec, build_mcp_server, run_mcp_or_cli
 from env_compat import get_env_stripped, require_env
 from loopback_http import loopback_urlopen
-from mcp.server.fastmcp import FastMCP
 
 
 def _env_required(name: str) -> str:
@@ -59,33 +59,31 @@ def open_config_panel_response(
         return {"success": False, "error": str(exc)}
 
 
-def build_server() -> FastMCP:
-    server = FastMCP(
-        "open-config-panel",
-        instructions=(
-            "Embed a provider-config-sync capability panel inline in the "
-            "Better Agent chat. Pass a `capability_id` (discoverable via the "
-            "provider-config-sync `list_provider_config_capabilities` tool) "
-            "and optionally `scope` ('global' | 'project', default 'project') "
-            "and `cwd`. The user gets the same editor as the configs page, "
-            "plus a button to pop it into the right side panel."
+_INSTRUCTIONS = (
+    "Embed a provider-config-sync capability panel inline in the Better Agent chat."
+)
+
+
+def _specs() -> tuple[OperationSpec, ...]:
+    return (
+        OperationSpec(
+            "open_config_panel",
+            open_config_panel_response,
+            operation="runtime_ui_open_config_panel",
         ),
     )
 
-    @server.tool()
-    def open_config_panel(
-        capability_id: str,
-        scope: str = "project",
-        cwd: str | None = None,
-    ) -> dict[str, Any]:
-        return open_config_panel_response(capability_id, scope, cwd)
 
-    return server
+def build_server():
+    return build_mcp_server(
+        "open-config-panel",
+        _specs(),
+        instructions=_INSTRUCTIONS,
+    )
 
 
 def main() -> int:
-    build_server().run("stdio")
-    return 0
+    return run_mcp_or_cli("open-config-panel", _specs(), instructions=_INSTRUCTIONS)
 
 
 if __name__ == "__main__":

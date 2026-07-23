@@ -10,11 +10,15 @@ import _test_home
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 _test_home.isolate("bc-test-loopback-tool-parity-")
+os.environ["BETTER_AGENT_RUNTIME_BROKER"] = "unix:/tmp/better-agent-test.sock"
 
 import runner  # noqa: E402
 import runner_codex  # noqa: E402
 import runner_gemini  # noqa: E402
+import installation_profile  # noqa: E402
 from runs_dir import BACKGROUND_WORK_TOOLS, TIMER_TOOLS  # noqa: E402
+
+installation_profile.integrations_enabled = lambda: True
 
 
 def _tool_name(tool) -> str:
@@ -330,7 +334,8 @@ def test_gemini_native_non_user_injects_communicate_mcp() -> None:
     env = communicate["env"]
     assert "communicate_mcp.py" in " ".join(communicate["args"])
     assert env["BETTER_CLAUDE_BACKEND_URL"] == "http://127.0.0.1:8000"
-    assert env["BETTER_CLAUDE_INTERNAL_TOKEN"] == "tok"
+    assert env["BETTER_CLAUDE_RUNTIME_BROKER"] == "unix:/tmp/better-agent-test.sock"
+    assert "BETTER_CLAUDE_INTERNAL_TOKEN" not in env
     assert env["BETTER_CLAUDE_MSSG_SENDER_SESSION_ID"] == "sender-1"
     assert env["BETTER_CLAUDE_DISABLED_BUILTIN_TOOLS"] == ""
 

@@ -20,14 +20,21 @@ import json
 import sys
 import urllib.error
 import urllib.request
+from functools import wraps
 from typing import Any
 
+from better_agent_sdk.surfaces import OperationSpec, build_mcp_server, run_mcp_or_cli
 from env_compat import get_env, require_env
 from loopback_http import loopback_urlopen
-from mcp.server.fastmcp import FastMCP
 
 
 _TIMEOUT = 30.0
+_INSTRUCTIONS = (
+    "Better Agent runtime-capability management for this session. "
+    "list_capabilities shows the scoped capabilities loadable here and which are active; "
+    "load_capability(capability_id) makes a capability's MCP + skill available on the next "
+    "turn; release_capability(capability_id) removes it."
+)
 
 
 def _post_capabilities(payload: dict) -> dict[str, Any]:
@@ -55,6 +62,7 @@ def _safe_result(fn):
     """Wrap a tool body so HTTP/infra errors come back as {success: False}
     instead of crashing the stdio MCP server (mirrors communicate_mcp)."""
 
+    @wraps(fn)
     def wrapper(*a, **kw) -> dict[str, Any]:
         try:
             return fn(*a, **kw)
@@ -85,48 +93,35 @@ def release_capability_response(capability_id: str) -> dict[str, Any]:
     return _post_capabilities({"action": "release", "capability_id": capability_id})
 
 
-def build_server() -> FastMCP:
-    server = FastMCP(
-        "capabilities",
-        instructions=(
-            "Better Agent runtime-capability management for this session. "
-            "list_capabilities shows the scoped capabilities loadable here and "
-            "which are active; load_capability(capability_id) makes a "
-            "capability's MCP + skill available on the next turn; "
-            "release_capability(capability_id) removes it. Use the full "
-            "capability id, e.g. 'ofek.testape:testape'."
+def _specs() -> tuple[OperationSpec, ...]:
+    return (
+        OperationSpec(
+            "list_capabilities",
+            _safe_result(list_capabilities_response),
+            "List the scoped capabilities loadable in this session and which are currently active.",
+            operation="runtime_capabilities_list",
+        ),
+        OperationSpec(
+            "load_capability",
+            _safe_result(load_capability_response),
+            "Load a scoped capability into this session.",
+            operation="runtime_capabilities_load",
+        ),
+        OperationSpec(
+            "release_capability",
+            _safe_result(release_capability_response),
+            "Release a previously loaded capability from this session.",
+            operation="runtime_capabilities_release",
         ),
     )
 
-    @server.tool(
-        description=(
-            "List the scoped capabilities loadable in this session and which "
-            "are currently active."
-        )
-    )
-    def list_capabilities() -> dict[str, Any]:
-        return _safe_result(list_capabilities_response)()
 
-    @server.tool(
-        description=(
-            "Load a scoped capability into this session. Its MCP + skill "
-            "become available on the next turn. Pass the full capability id "
-            "(e.g. 'ofek.testape:testape')."
-        )
+def build_server():
+    return build_mcp_server(
+        "capabilities",
+        _specs(),
+        instructions=_INSTRUCTIONS,
     )
-    def load_capability(capability_id: str) -> dict[str, Any]:
-        return _safe_result(load_capability_response)(capability_id)
-
-    @server.tool(
-        description=(
-            "Release a previously loaded capability from this session. Pass "
-            "the full capability id (e.g. 'ofek.testape:testape')."
-        )
-    )
-    def release_capability(capability_id: str) -> dict[str, Any]:
-        return _safe_result(release_capability_response)(capability_id)
-
-    return server
 
 
 def _enabled() -> bool:
@@ -143,8 +138,11 @@ def _enabled() -> bool:
 
 
 def main() -> int:
-    build_server().run("stdio")
-    return 0
+    return run_mcp_or_cli(
+        "capabilities",
+        _specs(),
+        instructions=_INSTRUCTIONS,
+    )
 
 
 if __name__ == "__main__":

@@ -1843,12 +1843,23 @@ import provider_config_sync_api  # noqa: E402
 app.include_router(provider_config_sync_api.router)
 import capability_api  # noqa: E402
 app.include_router(capability_api.router)
+import runtime_operation_api  # noqa: E402
 import extension_api  # noqa: E402
 app.include_router(extension_api.router)
 import extension_storage_api  # noqa: E402
 app.include_router(extension_storage_api.router)
 import testape_api  # noqa: E402
 app.include_router(testape_api.router)
+
+
+@app.post("/api/internal/runtime-operations")
+async def internal_runtime_operations(
+    body: dict,
+    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+):
+    if not _internal_authority_is_valid():
+        raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
+    return await runtime_operation_api.handle(body)
 
 
 def _builtin_extension_enabled(extension_id: str) -> bool:
@@ -2054,6 +2065,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+from installation_admission import InstallationAdmissionMiddleware  # noqa: E402
+app.add_middleware(InstallationAdmissionMiddleware)
 
 # SessionManager change events fan out as global session metadata WS frames.
 from session_ws_broadcaster import SessionWSBroadcaster  # noqa: E402
@@ -12419,6 +12433,9 @@ async def _housekeeping_task() -> None:
     except Exception:
         logger.exception("housekeeping: pending_node_registrations.prune_old failed")
 
+    if not installation_profile.integrations_enabled():
+        return
+
     # 4. Best-effort extension auto-update for refreshable install sources.
     try:
         result = await _run_maintenance_phase(
@@ -12851,7 +12868,10 @@ def _start_extension_update_checker() -> None:
     frontend badge reflects marketplace/git state without polling. Pushes
     `extension_updates_changed` only when the available set changes."""
     global _extension_update_checker_task
-    if os.environ.get("BETTER_AGENT_TEST_MODE"):
+    if (
+        os.environ.get("BETTER_AGENT_TEST_MODE")
+        or not installation_profile.integrations_enabled()
+    ):
         return
 
     async def _loop() -> None:
@@ -12898,7 +12918,10 @@ async def on_startup():
             extension_session_ownership.owned_session_ids
         ):
             await coordinator.cancel_session(session_id)
-    if not os.environ.get("BETTER_AGENT_TEST_MODE"):
+    if (
+        not os.environ.get("BETTER_AGENT_TEST_MODE")
+        and installation_profile.integrations_enabled()
+    ):
         _fire_and_forget(asyncio.to_thread(session_store.start_root_change_owner))
     from provider import reopen_provider_tasks
     reopen_provider_tasks()
@@ -12961,6 +12984,9 @@ async def on_startup():
     # GET /api/sessions and GET /api/projects read via
     # is_running_cached / monitoring_state_cached.
     coordinator.turn_manager.start_background_tick()
+    if installation_profile.integrations_enabled():
+        import operation_requests
+        _fire_and_forget(operation_requests.recover())
 
     # Auto-restart-on-idle: when the user enables the pref, fire a
     # supervisor restart every time the system goes idle after work, so
@@ -13066,10 +13092,11 @@ async def on_startup():
                 logger.exception("extension readiness projection refresh failed")
             await asyncio.sleep(2.0)
 
-    asyncio.create_task(
-        _extension_readiness_refresher(),
-        name="extension-readiness-refresher",
-    )
+    if installation_profile.integrations_enabled():
+        asyncio.create_task(
+            _extension_readiness_refresher(),
+            name="extension-readiness-refresher",
+        )
 
     # Reset the heartbeat right before arming the watchdog: the module-level
     # init at import time is long stale by on_startup (heavy imports), which
@@ -13172,26 +13199,28 @@ async def on_startup():
         )
 
         # Provider-neutral overlay recovery may proceed beside the core scan.
-        asyncio.create_task(
-            run_task(
-                "adv_sync_overlay_recovery",
-                "startup_tasks.adv_sync_overlay_recovery",
-                recover_running_overlays_on_startup,
-            ),
-            name="startup-adv-sync-recovery",
-        )
+        if installation_profile.integrations_enabled():
+            asyncio.create_task(
+                run_task(
+                    "adv_sync_overlay_recovery",
+                    "startup_tasks.adv_sync_overlay_recovery",
+                    recover_running_overlays_on_startup,
+                ),
+                name="startup-adv-sync-recovery",
+            )
 
         # Do not let unrelated maintenance compete with or precede recovery.
         await recovery_task
 
-        asyncio.create_task(
-            run_task(
-                "requirements_projection_prewarm",
-                "startup_tasks.requirements_projection_prewarm",
-                requirement_prewarm.ensure_requirements_projection_ready,
-            ),
-            name="requirements-projection-prewarm",
-        )
+        if installation_profile.integrations_enabled():
+            asyncio.create_task(
+                run_task(
+                    "requirements_projection_prewarm",
+                    "startup_tasks.requirements_projection_prewarm",
+                    requirement_prewarm.ensure_requirements_projection_ready,
+                ),
+                name="requirements-projection-prewarm",
+            )
 
         await run_composite_task(
             "housekeeping",
@@ -13206,31 +13235,32 @@ async def on_startup():
                 include_hidden=True,
             )
 
-        await run_task(
-            "extension_reconciliation",
-            "startup_tasks.extension_reconciliation",
-            _reconcile_managed_extensions,
-        )
-        import extension_package_loader
-        try:
-            await asyncio.to_thread(
-                extension_package_loader.ensure_package_importable,
-                extension_store.extension_id_for_role("requirements"),
-                "requirement_analysis",
+        if installation_profile.integrations_enabled():
+            await run_task(
+                "extension_reconciliation",
+                "startup_tasks.extension_reconciliation",
+                _reconcile_managed_extensions,
             )
-            from requirement_analysis.session_tags import bind_event_loop as bind_requirement_tags_loop
-        except (extension_package_loader.ExtensionPackageUnavailable, ModuleNotFoundError):
-            pass
-        else:
-            bind_requirement_tags_loop(loop)
-        asyncio.create_task(
-            run_task(
-                "requirements_processor_prewarm",
-                "startup_tasks.requirements_processor_prewarm",
-                _prewarm_requirements_processor,
-            ),
-            name="requirements-processor-prewarm",
-        )
+            import extension_package_loader
+            try:
+                await asyncio.to_thread(
+                    extension_package_loader.ensure_package_importable,
+                    extension_store.extension_id_for_role("requirements"),
+                    "requirement_analysis",
+                )
+                from requirement_analysis.session_tags import bind_event_loop as bind_requirement_tags_loop
+            except (extension_package_loader.ExtensionPackageUnavailable, ModuleNotFoundError):
+                pass
+            else:
+                bind_requirement_tags_loop(loop)
+            asyncio.create_task(
+                run_task(
+                    "requirements_processor_prewarm",
+                    "startup_tasks.requirements_processor_prewarm",
+                    _prewarm_requirements_processor,
+                ),
+                name="requirements-processor-prewarm",
+            )
 
         from runs_dir import ensure_run_state_ledger_backfilled
         asyncio.create_task(

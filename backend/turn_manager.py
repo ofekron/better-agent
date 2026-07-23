@@ -64,7 +64,7 @@ from runtime_skills import runtime_skill_contexts
 from i18n import t
 import llm_call_log
 import perf
-from provider import StreamEvent
+from provider import ProviderCredentialError, StreamEvent
 from runs_dir import pid_alive as _pid_alive, runs_root, salvage_complete_payload
 from session_manager import manager as session_manager
 from trace_collector import TraceCollector, extract_provider_result_token_usage
@@ -2108,7 +2108,13 @@ class TurnManager:
 
         except Exception as e:
             logger.exception("turn failed for session %s", app_session_id)
-            error_text = f"{type(e).__name__}: {e}\n\n{traceback.format_exc()}"
+            error_meta = (
+                e.error_meta() if isinstance(e, ProviderCredentialError) else None
+            )
+            error_text = (
+                str(e) if error_meta
+                else f"{type(e).__name__}: {e}\n\n{traceback.format_exc()}"
+            )
             try:
                 trace.finalize()
                 await _to_turn_dispatch_thread(trace.save)
@@ -2125,6 +2131,7 @@ class TurnManager:
                     stopped_at=None,
                     trace_id=trace.trace_id,
                     error_text=error_text,
+                    error_meta=error_meta,
                 )
             except Exception:
                 logger.exception("Failed to persist user message during error handling")

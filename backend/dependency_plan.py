@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +32,60 @@ class DependencyPlanError(RuntimeError):
     pass
 
 
+@contextmanager
+def _windows_activation_mutex(path: Path):
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateMutexW.argtypes = (
+        wintypes.LPVOID,
+        wintypes.BOOL,
+        wintypes.LPCWSTR,
+    )
+    kernel32.CreateMutexW.restype = wintypes.HANDLE
+    kernel32.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+    kernel32.WaitForSingleObject.restype = wintypes.DWORD
+    kernel32.ReleaseMutex.argtypes = (wintypes.HANDLE,)
+    kernel32.ReleaseMutex.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    name = "Local\\BetterAgentDependencyPlan-" + hashlib.sha256(
+        str(path.resolve()).casefold().encode()
+    ).hexdigest()
+    handle = kernel32.CreateMutexW(None, False, name)
+    if not handle:
+        raise OSError(ctypes.get_last_error(), "CreateMutexW failed")
+    wait_result = kernel32.WaitForSingleObject(handle, 0xFFFFFFFF)
+    if wait_result not in (0, 0x80):
+        error = ctypes.get_last_error()
+        kernel32.CloseHandle(handle)
+        raise OSError(error, "WaitForSingleObject failed")
+    try:
+        yield
+    finally:
+        kernel32.ReleaseMutex(handle)
+        kernel32.CloseHandle(handle)
+
+
+@contextmanager
+def activation_lock():
+    VENV_ROOT.mkdir(parents=True, exist_ok=True)
+    path = VENV_ROOT.parent / ".dependency-plan.lock"
+    if os.name == "nt":
+        with _windows_activation_mutex(path):
+            yield
+        return
+    with open(path, "a+b") as handle:
+        import fcntl
+
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
 def _read_object(path: Path) -> dict:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
@@ -43,16 +98,25 @@ def _read_object(path: Path) -> dict:
     return value
 
 
-def _installation_mode() -> str:
-    return str(installation_profile.load()["mode"])
+def _installation_mode(profile: dict[str, Any] | None = None) -> str:
+    selected = installation_profile.load() if profile is None else profile
+    mode = selected.get("mode")
+    return str(mode) if mode in installation_profile.MODES else "setup-required"
 
 
-def _provider_kinds(state: dict[str, Any] | None = None) -> tuple[str, ...]:
+def _provider_kinds(
+    state: dict[str, Any] | None = None,
+    profile: dict[str, Any] | None = None,
+) -> tuple[str, ...]:
     if state is None:
-        profile = installation_profile.load()
-        selected = profile.get("provider")
-        if selected and installation_profile.selection_pending():
+        selected_profile = installation_profile.load() if profile is None else profile
+        selected = selected_profile.get("provider")
+        if selected and (
+            profile is not None or installation_profile.selection_pending()
+        ):
             return (str(selected),)
+        if selected_profile.get("status") != "active":
+            return ()
         config = _read_object(bc_home() / "config.json")
     else:
         selected = None
@@ -74,12 +138,16 @@ def _provider_kinds(state: dict[str, Any] | None = None) -> tuple[str, ...]:
     return tuple(sorted(kinds))
 
 
-def resolve_plan(state: dict[str, Any] | None = None) -> dict:
-    mode = _installation_mode()
-    kinds = _provider_kinds(state)
+def resolve_plan(
+    state: dict[str, Any] | None = None,
+    *,
+    profile: dict[str, Any] | None = None,
+) -> dict:
+    mode = _installation_mode(profile)
+    kinds = _provider_kinds(state, profile)
     requirements = [BASE_REQUIREMENTS]
     probes = list(BASE_PROBES)
-    if mode != "desktop-ui-only":
+    if mode not in ("setup-required", "desktop-ui-only"):
         requirements.append(MOBILE_REQUIREMENTS)
         probes.append("firebase_admin")
     for kind in kinds:
@@ -325,24 +393,64 @@ def _resolve_or_build_environment(uv: str, plan: dict[str, Any]) -> Path:
         return _build_environment(uv, plan)
 
 
-def activate(uv: str) -> Path:
-    plan = resolve_plan()
+def prepare_installation(uv: str, profile: dict[str, Any]) -> Path:
+    plan = resolve_plan(profile=profile)
     env_dir = _resolve_or_build_environment(uv, plan)
-    python = _python_in(env_dir)
-    if installation_profile.selection_pending():
-        try:
-            previous_pointer = ACTIVE_POINTER.read_text(encoding="utf-8")
-        except FileNotFoundError:
-            previous_pointer = None
-        _write_pointer(env_dir)
-        try:
-            _apply_pending_selection(python)
-        except Exception:
-            _restore_pointer(previous_pointer)
-            raise
-    else:
-        _write_pointer(env_dir)
+    latest_plan = resolve_plan(profile=profile)
+    if latest_plan["hash"] != plan["hash"]:
+        raise DependencyPlanError(
+            "dependency plan changed during installation; rerun the installer"
+        )
+    _assert_environment(env_dir, plan)
     return env_dir
+
+
+def activate_prepared_installation(
+    env_dir: Path,
+    profile: dict[str, Any],
+) -> Path:
+    plan = resolve_plan(profile=profile)
+    _assert_environment(env_dir, plan)
+    try:
+        previous_pointer = ACTIVE_POINTER.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        previous_pointer = None
+    installation_profile.stage_activation(profile)
+    _write_pointer(env_dir)
+    try:
+        _apply_pending_selection(_python_in(env_dir))
+    except BaseException:
+        _restore_pointer(previous_pointer)
+        raise
+    if installation_profile.selection_pending():
+        raise DependencyPlanError("installation activation receipt was not committed")
+    return env_dir
+
+
+def activate(uv: str) -> Path:
+    with activation_lock():
+        plan = resolve_plan()
+        env_dir = _resolve_or_build_environment(uv, plan)
+        latest_plan = resolve_plan()
+        if latest_plan["hash"] != plan["hash"]:
+            raise DependencyPlanError(
+                "dependency plan changed during activation; rerun the installer"
+            )
+        python = _python_in(env_dir)
+        if installation_profile.selection_pending():
+            try:
+                previous_pointer = ACTIVE_POINTER.read_text(encoding="utf-8")
+            except FileNotFoundError:
+                previous_pointer = None
+            _write_pointer(env_dir)
+            try:
+                _apply_pending_selection(python)
+            except Exception:
+                _restore_pointer(previous_pointer)
+                raise
+        else:
+            _write_pointer(env_dir)
+        return env_dir
 
 
 def main() -> int:

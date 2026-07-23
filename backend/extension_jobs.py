@@ -17,15 +17,18 @@ logger = logging.getLogger("uvicorn")
 
 Runner = Callable[..., Awaitable[dict[str, Any]]]
 JobKey = tuple[str, str, str]
+TerminalListener = Callable[[dict[str, Any]], None]
 
 RESULT_TTL_SECONDS = 1800.0
 DISK_RETENTION_SECONDS = 24 * 3600.0
 _DISK_SWEEP_INTERVAL_SECONDS = 300.0
+_TERMINAL_STATUSES = frozenset({"complete", "failed", "cancelled", "expired"})
 
 _JOBS: dict[JobKey, asyncio.Task] = {}
 _COMPLETED_AT: dict[JobKey, float] = {}
 _LAST_DISK_SWEEP: dict[tuple[str, str], float] = {}
 _RECORD_LOCK = threading.Lock()
+_TERMINAL_LISTENERS: list[TerminalListener] = []
 _RESERVED_RECORD_KEYS = {
     "id",
     "owner",
@@ -158,8 +161,58 @@ def read_record(owner: str, operation: str, job_id: str) -> dict[str, Any] | Non
     return data if isinstance(data, dict) else None
 
 
+def read_record_strict(
+    owner: str,
+    operation: str,
+    job_id: str,
+) -> dict[str, Any] | None:
+    path = job_path(owner, operation, job_id)
+    if path.is_symlink():
+        raise RuntimeError(f"extension job record must not be a symlink: {job_id}")
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise RuntimeError(f"cannot read extension job record: {job_id}") from exc
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"extension job record is corrupt: {job_id}") from exc
+    if not isinstance(data, dict):
+        raise RuntimeError(f"extension job record is invalid: {job_id}")
+    expected = _key(owner, operation, job_id)
+    actual = (
+        str(data.get("owner") or ""),
+        str(data.get("operation") or ""),
+        str(data.get("id") or ""),
+    )
+    if actual != expected:
+        raise RuntimeError(f"extension job record identity mismatch: {job_id}")
+    return data
+
+
 def _write_record(owner: str, operation: str, job_id: str, record: dict[str, Any]) -> None:
     write_json(job_path(owner, operation, job_id), record)
+
+
+def register_terminal_listener(listener: TerminalListener) -> None:
+    if listener not in _TERMINAL_LISTENERS:
+        _TERMINAL_LISTENERS.append(listener)
+
+
+def _notify_terminal(record: dict[str, Any]) -> None:
+    projection = dict(record)
+    for listener in tuple(_TERMINAL_LISTENERS):
+        try:
+            listener(projection)
+        except Exception:
+            logger.exception(
+                "extension_job_terminal_listener_failed owner=%s operation=%s id=%s",
+                record.get("owner"),
+                record.get("operation"),
+                record.get("id"),
+            )
 
 
 def list_records(owner: str, operation: str) -> list[dict[str, Any]]:
@@ -180,14 +233,47 @@ def list_records(owner: str, operation: str) -> list[dict[str, Any]]:
     return records
 
 
+def list_owner_records(owner: str) -> list[dict[str, Any]]:
+    safe_owner = _safe_id(owner)
+    root = bc_home() / "extension_jobs" / safe_owner
+    if root.is_symlink() or not root.is_dir():
+        return []
+    records: list[dict[str, Any]] = []
+    for operation_dir in root.iterdir():
+        if operation_dir.is_symlink() or not operation_dir.is_dir():
+            continue
+        records.extend(list_records(safe_owner, operation_dir.name))
+    return records
+
+
+def list_owner_records_strict(owner: str) -> list[dict[str, Any]]:
+    safe_owner = _safe_id(owner)
+    root = bc_home() / "extension_jobs" / safe_owner
+    if root.is_symlink():
+        raise RuntimeError(f"extension job owner directory must not be a symlink: {safe_owner}")
+    if not root.is_dir():
+        return []
+    records: list[dict[str, Any]] = []
+    for operation_dir in root.iterdir():
+        if operation_dir.is_symlink() or not operation_dir.is_dir():
+            raise RuntimeError(f"extension job operation directory is invalid: {operation_dir.name}")
+        for path in operation_dir.glob("*.json"):
+            if path.is_symlink() or not path.is_file():
+                raise RuntimeError(f"extension job record is invalid: {path.name}")
+            record = read_record_strict(safe_owner, operation_dir.name, path.stem)
+            if record is not None:
+                records.append(record)
+    return records
+
+
 def mark_delivered(owner: str, operation: str, job_id: str) -> dict[str, Any] | None:
     """Idempotently flag a finished job's result as delivered through a
     fallback channel (e.g. inbox), so a caller-terminal handler doesn't
     re-deliver on a later terminal event for the same caller. No-op if the
     job doesn't exist or hasn't reached a terminal status yet."""
     with _RECORD_LOCK:
-        record = read_record(owner, operation, job_id)
-        if record is None or record.get("status") not in ("complete", "failed"):
+        record = read_record_strict(owner, operation, job_id)
+        if record is None or record.get("status") not in _TERMINAL_STATUSES:
             return None
         if record.get("delivered"):
             return record
@@ -199,17 +285,66 @@ def mark_delivered(owner: str, operation: str, job_id: str) -> dict[str, Any] | 
 
 def persist_complete(owner: str, operation: str, job_id: str, result: dict[str, Any]) -> dict[str, Any]:
     with _RECORD_LOCK:
-        record = read_record(owner, operation, job_id) or {
+        record = read_record_strict(owner, operation, job_id) or {
             "id": job_id,
             "owner": owner,
             "operation": operation,
         }
-        if record.get("status") in ("complete", "failed"):
+        if record.get("status") in _TERMINAL_STATUSES:
             return response_from_record(record)
         now = time.time()
         _finish_progress(record, now)
         record.update(status="complete", result=result, completed_at=now)
         _write_record(owner, operation, job_id, record)
+    _notify_terminal(record)
+    return response_from_record(record)
+
+
+def persist_failed(
+    owner: str,
+    operation: str,
+    job_id: str,
+    error: str,
+    *,
+    cancelled: bool = False,
+) -> dict[str, Any]:
+    with _RECORD_LOCK:
+        record = read_record_strict(owner, operation, job_id) or {
+            "id": job_id,
+            "owner": owner,
+            "operation": operation,
+        }
+        if record.get("status") in _TERMINAL_STATUSES:
+            return response_from_record(record)
+        now = time.time()
+        _finish_progress(record, now)
+        record.update(
+            status="cancelled" if cancelled else "failed",
+            error=error,
+            completed_at=now,
+        )
+        _write_record(owner, operation, job_id, record)
+    _notify_terminal(record)
+    return response_from_record(record)
+
+
+def persist_expired(
+    owner: str,
+    operation: str,
+    job_id: str,
+    error: str = "operation deadline expired",
+) -> dict[str, Any]:
+    with _RECORD_LOCK:
+        record = read_record_strict(owner, operation, job_id)
+        if record is None:
+            raise KeyError(f"unknown extension job: {job_id}")
+        if record.get("status") in _TERMINAL_STATUSES:
+            return response_from_record(record)
+        now = time.time()
+        _finish_progress(record, now)
+        record.update(status="expired", error=error, completed_at=now)
+        _write_record(owner, operation, job_id, record)
+    _notify_terminal(record)
     return response_from_record(record)
 
 
@@ -218,20 +353,38 @@ def persist_running(owner: str, operation: str, job_id: str, **fields: Any) -> d
     if reserved:
         raise ValueError(f"extension job running update uses reserved keys: {sorted(reserved)}")
     with _RECORD_LOCK:
-        record = read_record(owner, operation, job_id) or {
+        record = read_record_strict(owner, operation, job_id) or {
             "id": job_id,
             "owner": owner,
             "operation": operation,
             "status": "running",
             "created_at": time.time(),
         }
-        if record.get("status") in ("complete", "failed"):
+        if record.get("status") in _TERMINAL_STATUSES or record.get("status") == "cancel_requested":
             return response_from_record(record)
         record.update(fields)
         record["status"] = "running"
         record["updated_at"] = time.time()
         _write_record(owner, operation, job_id, record)
     return response_from_record(record)
+
+
+def persist_owner_receipt(
+    owner: str,
+    operation: str,
+    job_id: str,
+    receipt: str,
+) -> dict[str, Any]:
+    receipt = str(receipt or "").strip()
+    if not receipt:
+        raise ValueError("owner receipt is required")
+    return persist_running(
+        owner,
+        operation,
+        job_id,
+        owner_receipt=receipt,
+        owner_receipt_at=time.time(),
+    )
 
 
 def persist_phase(
@@ -246,14 +399,14 @@ def persist_phase(
     if reserved:
         raise ValueError(f"extension job phase update uses reserved keys: {sorted(reserved)}")
     with _RECORD_LOCK:
-        record = read_record(owner, operation, job_id) or {
+        record = read_record_strict(owner, operation, job_id) or {
             "id": job_id,
             "owner": owner,
             "operation": operation,
             "status": "running",
             "created_at": time.time(),
         }
-        if record.get("status") in ("complete", "failed"):
+        if record.get("status") in _TERMINAL_STATUSES or record.get("status") == "cancel_requested":
             return response_from_record(record)
         now = time.time()
         _transition_progress(record, phase, message, now)
@@ -291,6 +444,29 @@ def response_from_record(record: dict[str, Any]) -> dict[str, Any]:
         if progress is not None:
             response["progress"] = progress
         return response
+    if status in ("cancelled", "expired"):
+        response = {
+            "success": False,
+            "id": job_id,
+            "status": status,
+            "ready": True,
+            "error": str(record.get("error") or status),
+        }
+        progress = _response_progress(record)
+        if progress is not None:
+            response["progress"] = progress
+        return response
+    if status == "cancel_requested":
+        response = {
+            "success": True,
+            "id": job_id,
+            "status": "cancel_requested",
+            "ready": False,
+        }
+        progress = _response_progress(record)
+        if progress is not None:
+            response["progress"] = progress
+        return response
     response = {"success": True, "id": job_id, "status": "running", "ready": False}
     for key in _RUNNING_RESPONSE_KEYS:
         if key in record:
@@ -302,23 +478,27 @@ def response_from_record(record: dict[str, Any]) -> dict[str, Any]:
 
 
 def _persist_outcome(owner: str, operation: str, job_id: str, task: asyncio.Task) -> None:
+    transitioned = False
     try:
         with _RECORD_LOCK:
-            record = read_record(owner, operation, job_id) or {}
-            if record.get("status") in ("complete", "failed"):
+            record = read_record_strict(owner, operation, job_id) or {}
+            if record.get("status") in _TERMINAL_STATUSES:
                 return
             now = time.time()
             record["completed_at"] = now
             _finish_progress(record, now)
             if task.cancelled():
-                record.update(status="failed", error="cancelled")
+                record.update(status="cancelled", error="cancelled")
             elif task.exception() is not None:
                 record.update(status="failed", error=str(task.exception()))
             else:
                 record.update(status="complete", result=task.result())
             _write_record(owner, operation, job_id, record)
+            transitioned = True
     except (OSError, TypeError, ValueError):
         logger.warning("extension_job_persist_failed owner=%s operation=%s id=%s", owner, operation, job_id)
+    if transitioned:
+        _notify_terminal(record)
 
 
 def _register(owner: str, operation: str, job_id: str, payload: dict[str, Any], runner: Runner) -> asyncio.Task:
@@ -379,7 +559,7 @@ def get_or_fire_idempotent(
     _ensure_admitted()
     key = _key(owner, operation, job_id)
     with _RECORD_LOCK:
-        record = read_record(owner, operation, job_id)
+        record = read_record_strict(owner, operation, job_id)
         if record is not None:
             if (
                 record.get("payload_digest") != payload_digest
@@ -416,11 +596,11 @@ def get_or_resume(owner: str, operation: str, job_id: str, runner: Runner) -> as
     if task is not None:
         return task
     with _RECORD_LOCK:
-        record = read_record(owner, operation, job_id)
+        record = read_record_strict(owner, operation, job_id)
         if record is None:
             return None
         status = record.get("status")
-        if status in ("complete", "failed"):
+        if status in _TERMINAL_STATUSES or status == "cancel_requested":
             return response_from_record(record)
         payload = record.get("payload")
         if not isinstance(payload, dict):
@@ -439,6 +619,20 @@ def get_or_resume(owner: str, operation: str, job_id: str, runner: Runner) -> as
 
 def get_active(owner: str, operation: str, job_id: str) -> asyncio.Task | None:
     return _JOBS.get(_key(owner, operation, job_id))
+
+
+def request_cancel(owner: str, operation: str, job_id: str) -> dict[str, Any]:
+    with _RECORD_LOCK:
+        record = read_record_strict(owner, operation, job_id)
+        if record is None:
+            raise KeyError(f"unknown extension job: {job_id}")
+        if record.get("status") in _TERMINAL_STATUSES:
+            return response_from_record(record)
+        if record.get("status") != "cancel_requested":
+            record["status"] = "cancel_requested"
+            record["cancel_requested_at"] = time.time()
+            _write_record(owner, operation, job_id, record)
+    return response_from_record(record)
 
 
 def has_active_jobs(owner: str | None = None, operation: str | None = None) -> bool:
@@ -471,16 +665,20 @@ async def quiesce_for_ui_only() -> None:
             record = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             raise RuntimeError(f"cannot quiesce extension job record: {path.name}") from exc
-        if not isinstance(record, dict) or record.get("status") != "running":
+        if (
+            not isinstance(record, dict)
+            or record.get("status") not in ("running", "cancel_requested")
+        ):
             continue
         now = time.time()
         _finish_progress(record, now)
         record.update(
-            status="failed",
+            status="cancelled",
             error="cancelled by UI-only installation mode",
             completed_at=now,
         )
         write_json(path, record)
+        _notify_terminal(record)
 
 
 def cleanup(owner: str | None = None, operation: str | None = None) -> None:
