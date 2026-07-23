@@ -105,6 +105,41 @@ def test_ask_returns_cached_result_without_requeue():
     ask_status_store.delete_status("ask_restart1")
 
 
+def test_terminal_event_for_lifecycle_scans_sub_session_under_root_dir():
+    """Regression: a sub-session's events live under its ROOT's events.jsonl
+    directory (sessions/<root_id>/events.jsonl), tagged with the sub-
+    session's own sid — not under a directory named after the sub-session
+    itself. `terminal_event_for_lifecycle` previously built the path from
+    `app_session_id` instead of its resolved root_id, so restart-reattach
+    could never find a completed sub-session's terminal event — exactly
+    the shape every `create_sub_session` + `ask` target has."""
+    from session_manager import manager as session_manager
+
+    root = session_manager.create(name="root", cwd="/repo", orchestration_mode="native")
+    sub = session_manager.create_sub_session(
+        parent_session_id=root["id"], name="hidden reviewer", cwd="/repo",
+    )
+    assert sub["id"] != root["id"]
+    root_id = session_manager._root_id_for(sub["id"])
+    assert root_id == root["id"]
+
+    events_path = paths.ba_home() / "sessions" / root_id / "events.jsonl"
+    events_path.parent.mkdir(parents=True, exist_ok=True)
+    events_path.write_text(
+        json.dumps({
+            "type": "user_message_done",
+            "sid": sub["id"],
+            "msg_id": "life-sub",
+            "data": {"lifecycle_msg_id": "life-sub", "success": True},
+        }) + "\n",
+        encoding="utf-8",
+    )
+
+    terminal = user_msg_lifecycle.terminal_event_for_lifecycle(sub["id"], "life-sub")
+    assert terminal is not None
+    assert terminal["type"] == "user_message_done"
+
+
 def test_terminal_event_for_lifecycle_scans_events_jsonl():
     """The durable completion signal used when the target turn finished during
     the restart window before the result was persisted."""
