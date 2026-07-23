@@ -33,6 +33,8 @@ from turn_helpers import (
 from session_manager import manager as session_manager
 from ingestion_versions import current_ingestion_version, marker_matches_current, write_marker
 from redigest_backup import RecoveryRootLease, RedigestBackup
+from continuation import PROVIDER_CAPABILITIES_CHANGED_ERROR
+from continuation_flow import start_continuation_for
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +66,15 @@ def shutdown_recovery_lease_executor() -> None:
 _DEFAULT_RECOVERY_INTEGRATION_PARALLELISM = 8
 _MAX_RECOVERY_INTEGRATION_PARALLELISM = 32
 _RECOVERY_INTEGRATION_PARALLELISM_ENV = "BETTER_AGENT_RECOVERY_INTEGRATION_PARALLELISM"
+
+
+def _is_provider_capability_change(run_id: str) -> bool:
+    payload = _salvage_complete_payload(run_id)
+    return bool(
+        payload
+        and not payload.get("success")
+        and payload.get("error") == PROVIDER_CAPABILITIES_CHANGED_ERROR
+    )
 
 
 def _recovery_integration_parallelism(group_count: int) -> int:
@@ -1538,8 +1549,11 @@ async def _integrate_one_locked(
     # `_is_consistent` counts jsonl lines — sync FS I/O, keep it off
     # the event loop.
     last_asst_initial = _last_assistant(sess)
+    target_asst_initial = _recovery_target_assistant(sess, recovering_msg_id)
     target_is_latest = bool(
-        last_asst_initial and last_asst_initial.get("id") == recovering_msg_id
+        last_asst_initial
+        and target_asst_initial
+        and last_asst_initial.get("id") == target_asst_initial.get("id")
     )
     if (
         not target_is_latest
@@ -1550,6 +1564,27 @@ async def _integrate_one_locked(
             run_id,
             desc,
             "target no longer latest",
+            summary=summary,
+        )
+        return
+    if has_complete and _is_provider_capability_change(run_id):
+        if target_asst_initial is None:
+            return
+        await _retry_recovered_run(
+            coordinator=coordinator,
+            provider=provider,
+            desc=desc,
+            run_dir=_runs_root() / run_id,
+            app_sid=app_sid,
+            persist_sid=persist_sid,
+            msg_id=target_asst_initial["id"],
+            recovering_msg_id=recovering_msg_id,
+            fresh_continuation_reason=PROVIDER_CAPABILITIES_CHANGED_ERROR,
+        )
+        await _mark_reconciled_terminal_async(
+            run_id,
+            desc,
+            "provider capability continuation started",
             summary=summary,
         )
         return
@@ -1864,6 +1899,15 @@ def _last_assistant(sess: dict) -> Optional[dict]:
         if m.get("role") == "assistant":
             return m
     return None
+
+
+def _recovery_target_assistant(
+    sess: dict,
+    recovering_msg_id: Optional[str],
+) -> Optional[dict]:
+    if recovering_msg_id is not None:
+        return _assistant_by_id(sess, recovering_msg_id)
+    return _last_assistant(sess)
 
 
 async def _emit_recovered_user_message_terminal(
@@ -2512,9 +2556,10 @@ async def _retry_recovered_run(
     persist_sid: str,
     msg_id: str,
     recovering_msg_id: Optional[str],
+    fresh_continuation_reason: Optional[str] = None,
 ) -> None:
-    """Spawn a fresh runner with --resume for a recovered run that
-    failed with a retriable error (rate-limit or transient)."""
+    """Restart a recovered turn, resuming transient failures or starting a
+    context-linked provider thread when its capability set changed."""
     logger.info("retry for recovered run %s", desc.get("run_id"))
 
     # Read original inputs so we can respawn with the same params.
@@ -2524,26 +2569,38 @@ async def _retry_recovered_run(
     except Exception:
         inp = {}
 
-    # Show the retry pill to any connected client.
-    retry_at = (datetime.now() + timedelta(seconds=5)).isoformat()
-    session_manager.set_msg_retrying_until(persist_sid, msg_id, retry_at)
-
-    # Increment transient attempt counter so the next recovery pass
-    # knows how many attempts have been used.
-    fresh = session_manager.get(persist_sid) or {}
-    last_asst = _assistant_by_id(fresh, msg_id)
-    prior = int((last_asst or {}).get("transient_attempt") or 0)
-    session_manager.set_msg_transient_attempt(persist_sid, msg_id, prior + 1)
-
-    await asyncio.sleep(5)
-
-    session_manager.set_msg_retrying_until(persist_sid, msg_id, None)
+    if fresh_continuation_reason is None:
+        retry_at = (datetime.now() + timedelta(seconds=5)).isoformat()
+        session_manager.set_msg_retrying_until(persist_sid, msg_id, retry_at)
+        fresh = session_manager.get(persist_sid) or {}
+        last_asst = _assistant_by_id(fresh, msg_id)
+        prior = int((last_asst or {}).get("transient_attempt") or 0)
+        session_manager.set_msg_transient_attempt(persist_sid, msg_id, prior + 1)
+        await asyncio.sleep(5)
+        session_manager.set_msg_retrying_until(persist_sid, msg_id, None)
 
     # Re-read session to pick up the resume sid (set by
     # _integrate_one's replay or the prior run's session_discovered).
     fresh_sess = session_manager.get(persist_sid) or {}
     mode = desc.get("mode") or "native"
-    resume_sid = fresh_sess.get("agent_session_id") or desc.get("session_id")
+    if fresh_continuation_reason is not None:
+        resume_sid = desc.get("session_id")
+    else:
+        resume_sid = fresh_sess.get("agent_session_id") or desc.get("session_id")
+    prompt = inp.get("prompt", "")
+    continuation_chain = inp.get("continuation_chain")
+    if fresh_continuation_reason is not None:
+        continuation = await asyncio.to_thread(
+            start_continuation_for,
+            session_manager=session_manager,
+            app_session_id=persist_sid,
+            prompt=prompt,
+            old_provider_sid=resume_sid,
+            reason=fresh_continuation_reason,
+        )
+        prompt = continuation.prompt
+        continuation_chain = continuation.continuation_chain
+        resume_sid = None
 
     new_run_id = str(uuid.uuid4())
     new_queue: asyncio.Queue = asyncio.Queue()
@@ -2559,7 +2616,7 @@ async def _retry_recovered_run(
     await asyncio.to_thread(
         provider.start_run,
         run_id=new_run_id,
-        prompt=inp.get("prompt", ""),
+        prompt=prompt,
         images=inp.get("images"),
         cwd=inp.get("cwd", ""),
         loop=recovery_loop,
@@ -2582,6 +2639,7 @@ async def _retry_recovered_run(
         open_file_panel_enabled=inp.get("open_file_panel_enabled", False),
         provider_run_config=inp.get("provider_run_config"),
         capability_contexts=inp.get("capability_contexts"),
+        continuation_chain=continuation_chain,
         target_message_id=msg_id,
         turn_run_id=inp.get("turn_run_id"),
     )
@@ -2647,11 +2705,7 @@ def _recovery_target_snapshot(
     sess = session_manager.get(persist_sid)
     if sess is None:
         return None, None, None
-    last_asst = (
-        _assistant_by_id(sess, recovering_msg_id)
-        if recovering_msg_id is not None
-        else _last_assistant(sess)
-    )
+    last_asst = _recovery_target_assistant(sess, recovering_msg_id)
     msg_id = last_asst.get("id") if isinstance(last_asst, dict) else None
     return sess, last_asst, msg_id
 
@@ -2704,6 +2758,27 @@ async def _finalize_when_done(
                 run_id,
             )
         else:
+            if not cancelled and _is_provider_capability_change(run_id):
+                provider._cleanup_run(run_id)
+                coordinator.turn_manager.run_state_remove(app_sid, run_id)
+                await _retry_recovered_run(
+                    coordinator=coordinator,
+                    provider=provider,
+                    desc=desc,
+                    run_dir=run_dir,
+                    app_sid=app_sid,
+                    persist_sid=persist_sid,
+                    msg_id=msg_id,
+                    recovering_msg_id=recovering_msg_id,
+                    fresh_continuation_reason=PROVIDER_CAPABILITIES_CHANGED_ERROR,
+                )
+                await asyncio.to_thread(
+                    _mark_reconciled_terminal,
+                    run_id,
+                    desc,
+                    "provider capability continuation started",
+                )
+                return
             # Replay + completion-state are pushed to a worker thread
             # as one block — splitting them would let another finalizer
             # (running concurrently for a sibling run) replay on the
