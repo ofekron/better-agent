@@ -4725,6 +4725,18 @@ class Coordinator:
                 orchestration_mode, app_session_id, stored_mode,
             )
         mode = stored_mode
+        if mode != "native" or session.get("supervisor_enabled") is True:
+            import installation_profile
+            try:
+                installation_profile.assert_orchestration_mode_allowed("team")
+            except installation_profile.InstallationProfileError:
+                await ws_callback({
+                    "type": "error",
+                    "data": {
+                        "error": "Team and supervisor orchestration are unavailable in UI-only installation modes."
+                    },
+                })
+                return
 
         # The session record is likewise the source of truth for cwd
         # (CLAUDE.md state-ownership rule). A stale frontend value
@@ -5022,6 +5034,8 @@ class Coordinator:
         provision_prompt: Optional[str] = None,
         provisioned_tool_profile: str = "",
     ) -> Optional[str]:
+        import installation_profile
+        installation_profile.assert_orchestration_mode_allowed("team")
         from orchs.manager._approval import init_target_agent_session as _impl
         return await _impl(
             self,

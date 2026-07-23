@@ -19,6 +19,7 @@ Two responsibilities, matching the two lifecycles:
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import threading
@@ -62,6 +63,11 @@ def _declared_daemons() -> list[tuple[str, dict[str, Any], dict[str, Any]]]:
 
 
 def publish_registry() -> dict[str, Any]:
+    import installation_profile
+
+    if not installation_profile.integrations_enabled():
+        write_json(registry_path(), {"daemons": {}})
+        return {}
     existing = read_json(registry_path()).get("daemons")
     entries: dict[str, Any] = dict(existing) if isinstance(existing, dict) else {}
     declared = _declared_daemons()
@@ -112,8 +118,12 @@ def publish_registry() -> dict[str, Any]:
 
 def reconcile_backend_daemons() -> None:
     desired: dict[str, dict[str, Any]] = {}
+    import installation_profile
+    integrations_enabled = installation_profile.integrations_enabled()
     for extension_id, record, spec in _declared_daemons():
         if (
+            not integrations_enabled
+            or
             spec.get("lifecycle") != "backend"
             or not extension_store.is_extension_active(extension_id)
         ):
@@ -182,3 +192,23 @@ def daemons_projection() -> dict[str, Any]:
         "supervisor_state": read_json(state_path()),
         "backend_daemons": backend_status,
     }
+
+
+def ui_only_quiescent() -> bool:
+    registry = read_json(registry_path()).get("daemons")
+    supervisor = read_json(state_path()).get("daemons")
+    with _lock:
+        backend_running = any(proc.poll() is None for proc in _backend_procs.values())
+    supervisor_running = False
+    for value in supervisor.values() if isinstance(supervisor, dict) else ():
+        if not isinstance(value, dict) or not isinstance(value.get("pid"), int):
+            continue
+        try:
+            os.kill(value["pid"], 0)
+        except ProcessLookupError:
+            continue
+        except PermissionError:
+            pass
+        supervisor_running = True
+        break
+    return not registry and not backend_running and not supervisor_running

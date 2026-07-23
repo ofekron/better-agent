@@ -16,5 +16,10 @@ echo Opening browser...
 start "" "chrome.exe" "http://127.0.0.1:8000" 2>nul || start "" "http://127.0.0.1:8000"
 
 echo Starting Better Agent backend on http://127.0.0.1:8000 ...
-".venv\Scripts\uvicorn.exe" main:app --host 127.0.0.1 --port 8000 --no-proxy-headers
+for /f "delims=" %%i in ('py dependency_plan.py activate --uv uv') do set "ACTIVE_ENV=%%i"
+if not defined ACTIVE_ENV (
+  echo Backend dependency activation failed.
+  exit /b 1
+)
+"%ACTIVE_ENV%\Scripts\python.exe" -m uvicorn main:app --host 127.0.0.1 --port 8000 --no-proxy-headers
 pause

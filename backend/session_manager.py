@@ -350,6 +350,13 @@ def _validate_orchestration_mode_against_provider(
     """
     if orchestration_mode not in ("team", "manager"):
         return
+    import installation_profile
+    try:
+        installation_profile.assert_orchestration_mode_allowed(orchestration_mode)
+    except installation_profile.InstallationProfileError as exc:
+        raise IncompatibleOrchestrationMode(
+            str(exc)
+        ) from exc
     try:
         import config_store
         kind: Optional[str] = None
@@ -7106,6 +7113,14 @@ class SessionManager:
     def set_supervisor_enabled(
         self, sid: str, value: bool, *, custom_prompt: str = None,
     ) -> Optional[dict]:
+        if value:
+            import installation_profile
+            try:
+                installation_profile.assert_orchestration_mode_allowed("team")
+            except installation_profile.InstallationProfileError as exc:
+                raise IncompatibleOrchestrationMode(
+                    str(exc)
+                ) from exc
         def _do(s: dict) -> None:
             s["supervisor_enabled"] = value
             if custom_prompt is not None:

@@ -34,9 +34,11 @@ import re
 import threading
 import traceback
 import uuid
+from functools import wraps
 from typing import Optional
 
 import credential_session_client
+import dependency_plan
 import runtime_profile
 
 from json_store import read_json, write_json
@@ -57,6 +59,16 @@ logger = logging.getLogger(__name__)
 
 _state_cache_lock = threading.RLock()
 _state_cache: tuple[tuple[int, int], dict] | None = None
+_provider_mutation_lock = threading.RLock()
+
+
+def _serialized_provider_mutation(function):
+    @wraps(function)
+    def wrapped(*args, **kwargs):
+        with _provider_mutation_lock:
+            return function(*args, **kwargs)
+
+    return wrapped
 
 
 def _config_path():
@@ -306,43 +318,78 @@ def _clean_runner(kind: str, value: object) -> str:
     return provider_manifest.default_runner_for(kind)
 
 
-def _seed_default_state() -> dict:
-    """Fresh-install default providers, with Claude active."""
-    claude_pid = str(uuid.uuid4())
-    codex_pid = str(uuid.uuid4())
+def _new_provider_record(kind: str) -> dict:
+    import provider_manifest
+
+    spec = provider_manifest.spec_for(kind)
+    if spec is None or spec.virtual:
+        raise ValueError(f"unsupported provider kind: {kind}")
+    provider_id = str(uuid.uuid4())
+    default_models = {"claude": "opus", "codex": "gpt-5.5"}
     return {
-        "default_provider_id": claude_pid,
-        "providers": [
-            {
-                "id": claude_pid,
-                "name": "Claude",
-                "kind": "claude",
-                "mode": "subscription",
-                "base_url": "",
-                "config_dir": "",
-                "custom_models": [],
-                "default_model": "opus",
-                "default_reasoning_effort": DEFAULT_REASONING_EFFORT,
-                "runner": _clean_runner("claude", ""),
-                "default_permission": default_permission_for_kind("claude"),
-                "suspended": False,
-            },
-            {
-                "id": codex_pid,
-                "name": "Codex",
-                "kind": "codex",
-                "mode": "subscription",
-                "base_url": "",
-                "config_dir": "",
-                "custom_models": [],
-                "default_model": "gpt-5.5",
-                "default_reasoning_effort": DEFAULT_REASONING_EFFORT,
-                "runner": _clean_runner("codex", ""),
-                "default_permission": default_permission_for_kind("codex"),
-                "suspended": False,
-            },
-        ],
+        "id": provider_id,
+        "name": kind.replace("-", " ").title(),
+        "kind": kind,
+        "mode": "subscription",
+        "base_url": "",
+        "config_dir": "",
+        "custom_models": [],
+        "default_model": default_models.get(kind, ""),
+        "default_reasoning_effort": DEFAULT_REASONING_EFFORT,
+        "runner": _clean_runner(kind, ""),
+        "default_permission": default_permission_for_kind(kind),
+        "suspended": False,
     }
+
+
+def _seed_default_state() -> dict:
+    """Seed the installer selection, or the legacy defaults without a profile."""
+    import installation_profile
+
+    kind = installation_profile.load().get("provider")
+    if not kind:
+        claude = _new_provider_record("claude")
+        codex = _new_provider_record("codex")
+        return {
+            "default_provider_id": claude["id"],
+            "providers": [claude, codex],
+        }
+    provider = _new_provider_record(str(kind))
+    return {
+        "default_provider_id": provider["id"],
+        "providers": [provider],
+    }
+
+
+@_serialized_provider_mutation
+def apply_installation_profile_selection() -> dict:
+    """Make a pending installer selection the only active provider."""
+    import installation_profile
+
+    kind = installation_profile.load().get("provider")
+    if not kind:
+        installation_profile.mark_selection_applied()
+        return list_provider_ui_state()
+    state = _load_state()
+    target = next(
+        (
+            provider
+            for provider in state.get("providers", [])
+            if provider.get("kind") == kind
+        ),
+        None,
+    )
+    if target is None:
+        target = _new_provider_record(kind)
+        state["providers"].append(target)
+    for provider in state.get("providers", []):
+        provider["suspended"] = provider is not target
+    target["suspended"] = False
+    state["default_provider_id"] = target["id"]
+    _save_state(state)
+    installation_profile.mark_selection_applied()
+    apply_provider_config_env_vars()
+    return list_provider_ui_state()
 
 
 def _migrate_flat_to_providers(flat: dict) -> dict:
@@ -602,6 +649,8 @@ def _log_removed_providers(new_providers: list) -> None:
 
 def _save_state(state: dict) -> None:
     global _state_cache
+    dependency_plan.assert_state_transition_supported(state)
+    dependency_plan.assert_state_supported(state)
     new_providers = state.get("providers", [])
     _log_removed_providers(new_providers)
     payload = {
@@ -1229,6 +1278,7 @@ def _import_provider_sync_api_keys(payload: dict, providers: list[dict]) -> int:
     return len(normalized)
 
 
+@_serialized_provider_mutation
 def import_provider_sync_state(payload: dict) -> dict:
     if not isinstance(payload, dict):
         raise ValueError("provider sync payload must be an object")
@@ -1240,6 +1290,7 @@ def import_provider_sync_state(payload: dict) -> dict:
         for provider in providers
         if isinstance(provider, dict)
     ]
+    dependency_plan.assert_state_supported({"providers": clean_providers})
     imported_api_key_count = _import_provider_sync_api_keys(payload, clean_providers)
     state = _load_state()
     next_state = dict(state)
@@ -1361,6 +1412,7 @@ def get_allowed_sinks(provider_id: str) -> list[str]:
     return []
 
 
+@_serialized_provider_mutation
 def add_provider(payload: dict) -> dict:
     """Create a new provider. Body fields: name, kind, mode, base_url, config_dir,
     default_model, api_key (only persisted in keychain if mode=='api_key').
@@ -1400,6 +1452,7 @@ def add_provider(payload: dict) -> dict:
     provider["default_reasoning_effort"] = clean_default_reasoning_effort_for_provider(
         provider, payload.get("default_reasoning_effort")
     )
+    dependency_plan.assert_provider_supported(provider)
     if mode == "api_key":
         api_key = payload.get("api_key", "")
         if api_key and api_key != KEEP_SENTINEL:
@@ -1409,6 +1462,7 @@ def add_provider(payload: dict) -> dict:
     return _provider_ui_state(provider)
 
 
+@_serialized_provider_mutation
 def update_provider(provider_id: str, payload: dict) -> Optional[dict]:
     """Patch fields on an existing provider. `api_key=KEEP_SENTINEL` preserves
     the existing keychain entry. Pass empty string to clear it."""
@@ -1486,6 +1540,7 @@ def update_provider(provider_id: str, payload: dict) -> Optional[dict]:
         target["allowed_sinks"] = _clean_allowed_sinks(payload["allowed_sinks"])
     if "capabilities" in payload:
         target["capabilities"] = _clean_capabilities(payload["capabilities"])
+    dependency_plan.assert_provider_supported(target)
     if "api_key" in payload:
         new_key = payload["api_key"]
         if new_key != KEEP_SENTINEL:
@@ -1512,6 +1567,7 @@ def provider_record_version(provider_id: str) -> Optional[int]:
     return None
 
 
+@_serialized_provider_mutation
 def delete_provider(provider_id: str) -> tuple[bool, str]:
     """Returns (deleted, reason). Refuses to delete the active provider —
     the UI should activate another first."""
@@ -1527,6 +1583,7 @@ def delete_provider(provider_id: str) -> tuple[bool, str]:
     return True, "ok"
 
 
+@_serialized_provider_mutation
 def set_default_provider(provider_id: str) -> Optional[dict]:
     state = _load_state()
     target = next((p for p in state.get("providers", []) if p.get("id") == provider_id), None)
@@ -1540,6 +1597,7 @@ def set_default_provider(provider_id: str) -> Optional[dict]:
     return list_provider_ui_state()
 
 
+@_serialized_provider_mutation
 def set_provider_suspended(provider_id: str, suspended: bool) -> Optional[dict]:
     state = _load_state()
     target: Optional[dict] = None

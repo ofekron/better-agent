@@ -27,6 +27,10 @@ brew update
 brew install git python uv node
 
 python3 "$(dirname "$0")/install.py" "$@"
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
+ACTIVE_ENV="$(python3 "$REPO/backend/dependency_plan.py" activate --uv "$(command -v uv)")"
+BETTER_AGENT_BACKEND_PYTHON="$ACTIVE_ENV/bin/python" \
+  "$REPO/scripts/install-bagent.sh"
 
 git --version
 python3 --version
@@ -34,4 +38,4 @@ uv --version
 node --version
 npm --version
 
-echo "Installation configured. Run ./run.sh next."
+echo "Installation complete. Run ./run.sh next."

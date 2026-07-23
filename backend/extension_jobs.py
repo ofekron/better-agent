@@ -49,6 +49,13 @@ _RUNNING_RESPONSE_KEYS = (
 )
 
 
+def _ensure_admitted() -> None:
+    import installation_profile
+
+    if not installation_profile.integrations_enabled():
+        raise RuntimeError("extension jobs are unavailable in UI-only installation modes")
+
+
 def _transition_progress(record: dict[str, Any], phase: str, message: str, now: float) -> None:
     progress = record.get("progress")
     if not isinstance(progress, dict):
@@ -315,6 +322,7 @@ def _persist_outcome(owner: str, operation: str, job_id: str, task: asyncio.Task
 
 
 def _register(owner: str, operation: str, job_id: str, payload: dict[str, Any], runner: Runner) -> asyncio.Task:
+    _ensure_admitted()
     key = _key(owner, operation, job_id)
     task = asyncio.get_running_loop().create_task(runner(payload, request_id=job_id))
 
@@ -336,6 +344,7 @@ def fire(
     *,
     metadata: dict[str, Any] | None = None,
 ) -> asyncio.Task:
+    _ensure_admitted()
     record = {
         "id": job_id,
         "owner": owner,
@@ -367,6 +376,7 @@ def get_or_fire_idempotent(
     caller_extension: str,
     metadata: dict[str, Any] | None = None,
 ) -> asyncio.Task | dict[str, Any]:
+    _ensure_admitted()
     key = _key(owner, operation, job_id)
     with _RECORD_LOCK:
         record = read_record(owner, operation, job_id)
@@ -400,6 +410,7 @@ def get_or_fire_idempotent(
 
 
 def get_or_resume(owner: str, operation: str, job_id: str, runner: Runner) -> asyncio.Task | dict[str, Any] | None:
+    _ensure_admitted()
     key = _key(owner, operation, job_id)
     task = _JOBS.get(key)
     if task is not None:
@@ -440,6 +451,36 @@ def has_active_jobs(owner: str | None = None, operation: str | None = None) -> b
             continue
         return True
     return False
+
+
+async def quiesce_for_ui_only() -> None:
+    import installation_profile
+
+    if installation_profile.integrations_enabled():
+        return
+    active = [task for task in _JOBS.values() if not task.done()]
+    for task in active:
+        task.cancel()
+    if active:
+        await asyncio.gather(*active, return_exceptions=True)
+    root = bc_home() / "extension_jobs"
+    if not root.is_dir():
+        return
+    for path in root.glob("*/*/*.json"):
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"cannot quiesce extension job record: {path.name}") from exc
+        if not isinstance(record, dict) or record.get("status") != "running":
+            continue
+        now = time.time()
+        _finish_progress(record, now)
+        record.update(
+            status="failed",
+            error="cancelled by UI-only installation mode",
+            completed_at=now,
+        )
+        write_json(path, record)
 
 
 def cleanup(owner: str | None = None, operation: str | None = None) -> None:

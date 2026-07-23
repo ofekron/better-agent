@@ -123,7 +123,7 @@ BACKEND_LOG="$BA_HOME/backend-run.log"
 KC_SVC="better-agent"
 KC_LEGACY_SVC="better-claude"
 export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"
-PY="$DIR/backend/.venv/bin/python"
+PY=""
 CREDENTIAL_AUTHORITY="$DIR/desktop/dist/BetterAgentCredentialAuthority/BetterAgentCredentialAuthority"
 DEFAULT_BACKEND_PORT=18765
 BACKEND_PORT="${BETTER_AGENT_BACKEND_PORT:-${BETTER_CLAUDE_BACKEND_PORT:-$DEFAULT_BACKEND_PORT}}"
@@ -695,16 +695,23 @@ NODE
 sync_npm_project_deps() {
   local project_dir="$1"
   local label="$2"
+  local install_mode="$3"
+  local dependency_files=(package.json package-lock.json)
+  local lock_file="package-lock.json"
   local stamp="$project_dir/node_modules/.better-agent-deps.stamp"
   local current=""
   local stamped=""
 
-  if [ ! -f "$project_dir/package-lock.json" ]; then
-    echo "$label package-lock.json is missing; cannot install reproducibly." >&2
+  if [ "$install_mode" = "mobile" ]; then
+    dependency_files=(package.json mobile-dependencies.json package-lock.mobile.json)
+    lock_file="package-lock.mobile.json"
+  fi
+  if [ ! -f "$project_dir/$lock_file" ]; then
+    echo "$label dependency lock is missing; cannot install reproducibly." >&2
     exit 1
   fi
 
-  current="$(npm_project_hash "$project_dir" package.json package-lock.json)"
+  current="$(npm_project_hash "$project_dir" "${dependency_files[@]}"):$install_mode"
   if [ -f "$stamp" ]; then
     stamped="$(cat "$stamp" 2>/dev/null || true)"
   fi
@@ -714,46 +721,54 @@ sync_npm_project_deps() {
   fi
 
   echo "Installing $label npm deps..."
-  (cd "$project_dir" && npm ci)
+  if [ "$install_mode" = "mobile" ]; then
+    (cd "$project_dir" && npm run install:mobile-deps)
+  elif [ "$install_mode" = "desktop" ]; then
+    (cd "$project_dir" && npm run install:desktop-deps)
+  else
+    (cd "$project_dir" && npm ci)
+  fi
   printf '%s' "$current" > "$stamp"
 }
 
 ensure_provider_config_sync_submodule
-sync_npm_project_deps "$DIR/provider-config-sync" "provider-config-sync"
-sync_npm_project_deps "$DIR/frontend" "frontend"
+BOOTSTRAP_PYTHON="$(command -v python3 || command -v python || true)"
+if [ -z "$BOOTSTRAP_PYTHON" ]; then
+  echo "Python is required to resolve installation dependencies." >&2
+  exit 1
+fi
+if PYTHONPATH="$DIR/backend" "$BOOTSTRAP_PYTHON" -c \
+  'import installation_profile; raise SystemExit(0 if installation_profile.mobile_enabled() else 1)'; then
+  FRONTEND_NPM_MODE="mobile"
+else
+  FRONTEND_NPM_MODE="desktop"
+fi
+sync_npm_project_deps "$DIR/provider-config-sync" "provider-config-sync" "full"
+sync_npm_project_deps "$DIR/frontend" "frontend" "$FRONTEND_NPM_MODE"
 
 # --- Sync backend dependencies before anything that imports them ----
 # Idempotent; cheap when deps are cached. Required so the argon2 import
 # in the keychain-bootstrap block below works on a fresh checkout.
 sync_backend_deps() {
-  local req="$DIR/backend/requirements.txt"
-  local stamp="$DIR/backend/.venv/.requirements.stamp"
-  local current=""
-  local stamped=""
-
-  # Create the venv on a fresh checkout — `uv pip install` won't make one.
-  [ -x "$PY" ] || "$UV" venv "$DIR/backend/.venv"
-
-  current="$("$PY" - "$req" <<'PY'
-import hashlib
-import sys
-from pathlib import Path
-
-path = Path(sys.argv[1])
-print(hashlib.sha256(path.read_bytes()).hexdigest())
-PY
-)"
-  if [ -f "$stamp" ]; then
-    stamped="$(cat "$stamp" 2>/dev/null || true)"
+  local bootstrap_python=""
+  local active_env=""
+  bootstrap_python="$BOOTSTRAP_PYTHON"
+  if [ -z "$bootstrap_python" ]; then
+    echo "Python is required to resolve backend dependencies." >&2
+    exit 1
   fi
-  if [ "$stamped" = "$current" ]; then
-    echo "Backend deps unchanged — skipping sync."
-    return 0
+  echo "Activating backend dependency plan..."
+  active_env="$("$bootstrap_python" "$DIR/backend/dependency_plan.py" activate --uv "$UV")"
+  if [ "$(uname -s)" = "MINGW64_NT" ] || [ "$(uname -s)" = "MSYS_NT" ]; then
+    PY="$active_env/Scripts/python.exe"
+  else
+    PY="$active_env/bin/python"
   fi
-
-  echo "Syncing backend deps..."
-  (cd "$DIR/backend" && "$UV" pip install -q --python "$PY" -r requirements.txt)
-  printf '%s' "$current" > "$stamp"
+  if [ ! -x "$PY" ]; then
+    echo "Activated backend environment is not runnable." >&2
+    exit 1
+  fi
+  export BETTER_AGENT_BACKEND_PYTHON="$PY"
 }
 sync_backend_deps
 
@@ -959,8 +974,8 @@ wait_for_backend() {
       BACKEND_PID=""
       return 1
     fi
-    if curl -fsS "http://127.0.0.1:$BACKEND_PORT/healthz" >/dev/null 2>&1; then
-      echo "Backend is healthy."
+    if curl -fsS "http://127.0.0.1:$BACKEND_PORT/readyz" >/dev/null 2>&1; then
+      echo "Backend is ready."
       url="$(app_url)"
       echo "Better Agent is ready: $url"
       open_first_run_browser "$url"
@@ -969,7 +984,7 @@ wait_for_backend() {
     attempts=$((attempts + 1))
     sleep 0.25
   done
-  echo "Backend did not become healthy within 60 seconds."
+  echo "Backend did not become ready within 60 seconds."
   credential_backend_control signal --signal TERM >/dev/null 2>&1 || true
   BACKEND_PID=""
   return 1
@@ -999,16 +1014,43 @@ wait_for_backend_exit() {
 
 PENDING_REFRESH_ID=""
 INITIAL_FRONTEND_BUILD_STARTED=0
-# Platform daemon host: supervises supervisor-lifecycle extension daemons so
-# they outlive backend restarts. Runs the launcher checkout's code (fixed
-# point) and reads its desired set from ba_home()/daemons/registry.json.
-PYTHONPATH="$DIR" "$PY" -m daemonhost &
-DAEMON_HOST_PID=$!
+
+installation_mode() {
+  PYTHONPATH="$DIR/backend" "$PY" -c \
+    'import installation_profile; print(installation_profile.load()["mode"])'
+}
+
+prepare_daemon_host_for_backend() {
+  local installation_mode=""
+  installation_mode="$(installation_mode)"
+  if [ "$installation_mode" = "default" ]; then
+    return
+  fi
+  stop_child_process "daemon host" "$DAEMON_HOST_PID"
+  DAEMON_HOST_PID=""
+  kill_matching_processes \
+    "Better Agent extension daemon host" \
+    "$DIR.*-m daemonhost"
+}
+
+start_daemon_host_after_backend_ready() {
+  local installation_mode=""
+  installation_mode="$(installation_mode)"
+  if [ "$installation_mode" != "default" ] || tracked_child_is_running "$DAEMON_HOST_PID"; then
+    return
+  fi
+  PYTHONPATH="$DIR" "$PY" -m daemonhost &
+  DAEMON_HOST_PID=$!
+}
+
+prepare_daemon_host_for_backend
 # shellcheck source=scripts/switch_launch.sh
 source "$DIR/scripts/switch_launch.sh"
 if [ "${BETTER_AGENT_RUN_SH_TEST_NORMAL_EXIT_CLEANUP:-0}" = "1" ]; then
   (sleep 30 & wait) &
   FRONTEND_BUILD_PID=$!
+  (sleep 30 & wait) &
+  DAEMON_HOST_PID=$!
   ZAI_STARTUP_CHECK_PID="$("$PY" - <<'PY'
 import subprocess
 
@@ -1069,6 +1111,7 @@ else
     fi
     INITIAL_FRONTEND_BUILD_STARTED=1
 
+    prepare_daemon_host_for_backend
     start_backend
     # Capture health without aborting under `set -e` so line-switch recovery runs.
     if wait_for_backend; then
@@ -1090,6 +1133,7 @@ else
     fi
     PYTHONPATH="$DIR" "$PY" -m daemonhost.pointer confirm-healthy \
       --running-dir "$ACTIVE_DIR" --request-id "$SWITCH_REQUEST_ID" 2>/dev/null || true
+    start_daemon_host_after_backend_ready
 
     if [ -n "$PENDING_REFRESH_ID" ]; then
       start_frontend_build "$PENDING_REFRESH_ID"

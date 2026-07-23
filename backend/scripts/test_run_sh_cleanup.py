@@ -51,13 +51,10 @@ def main() -> int:
     deps_end = text.index("# --- Install the `bagent` CLI command", deps_start)
     deps_source = text[deps_start:deps_end]
     check(
-        "backend dependency sync is fingerprint-skipped",
-        'local stamp="$DIR/backend/.venv/.requirements.stamp"' in deps_source
-        and "hashlib.sha256(path.read_bytes()).hexdigest()" in deps_source
-        and 'if [ "$stamped" = "$current" ]; then' in deps_source
-        and 'echo "Backend deps unchanged — skipping sync."' in deps_source
-        and '(cd "$DIR/backend" && "$UV" pip install -q --python "$PY" -r requirements.txt)' in deps_source
-        and "printf '%s' \"$current\" > \"$stamp\"" in deps_source,
+        "backend dependencies activate through the atomic plan",
+        '"$DIR/backend/dependency_plan.py" activate --uv "$UV"' in deps_source
+        and 'export BETTER_AGENT_BACKEND_PYTHON="$PY"' in deps_source
+        and ".requirements.stamp" not in deps_source,
         failures,
     )
     check(

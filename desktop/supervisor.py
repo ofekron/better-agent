@@ -5,7 +5,7 @@ in-process: `/api/admin/restart` makes the backend terminate itself, and
 an in-process backend would take the GUI down with it.
 
 `BackendSupervisor` owns: spawning the backend with the user's real PATH
-(see `shell_env.capture_login_path`), waiting for `/healthz`, deciding
+(see `shell_env.capture_login_path`), waiting for `/readyz`, deciding
 restart-vs-quit from the `restart_requested` flag file, and stopping the
 backend with the signal the close-dialog chose.
 """
@@ -221,9 +221,12 @@ def kill_backend_lock_holder(*, timeout: float = 5.0) -> bool:
 
 
 def _checkout_python(checkout: Path) -> Path:
+    from dependency_plan import active_env
+
+    env_dir = active_env(checkout / "backend")
     for path in (
-        checkout / "backend" / ".venv" / "bin" / "python",
-        checkout / "backend" / ".venv" / "Scripts" / "python.exe",
+        env_dir / "bin" / "python",
+        env_dir / "Scripts" / "python.exe",
     ):
         if path.is_file():
             return path
@@ -403,6 +406,11 @@ class BackendSupervisor:
                 continue
             self.port = resolution["port"]
             self.health_url = self._health_url()
+        if self.role == "primary":
+            import installation_profile
+
+            if not installation_profile.integrations_enabled():
+                self._stop_daemon_host()
         self._set_port_env()
         try:
             self._proc = self._spawn_backend()
@@ -410,7 +418,7 @@ class BackendSupervisor:
             self._close_credential_session()
             self._credential_broker.clear()
             raise
-        if self.role == "primary":
+        if self.role == "primary" and installation_profile.integrations_enabled():
             self._start_daemon_host()
 
     def _start_daemon_host(self) -> None:
@@ -441,7 +449,7 @@ class BackendSupervisor:
             thread.join(timeout=35)
 
     def wait_healthy(self, timeout: float = 30.0) -> bool:
-        """Poll `/healthz` until the backend answers, the process dies, or
+        """Poll `/readyz` until the backend answers, the process dies, or
         `timeout` elapses."""
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
@@ -533,7 +541,7 @@ class BackendSupervisor:
         return self.wait_healthy()
 
     def _health_url(self) -> str:
-        return f"http://127.0.0.1:{self.port}/healthz"
+        return f"http://127.0.0.1:{self.port}/readyz"
 
     def _set_port_env(self) -> None:
         legacy_key = "BETTER_CLAUDE_NODE_PORT" if self.role == "node" else "BETTER_CLAUDE_BACKEND_PORT"

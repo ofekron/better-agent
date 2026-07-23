@@ -60,6 +60,11 @@ def is_owner(session_id: str, extension_id: str) -> bool:
     return bool(session_id) and owner(session_id) == extension_id
 
 
+def owned_session_ids() -> tuple[str, ...]:
+    with _lock:
+        return tuple(_load())
+
+
 def disown(session_id: str) -> None:
     with _lock:
         data = _load()

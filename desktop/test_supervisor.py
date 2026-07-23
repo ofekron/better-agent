@@ -38,13 +38,28 @@ PASS = "\x1b[32mPASS\x1b[0m"
 FAIL = "\x1b[31mFAIL\x1b[0m"
 
 
+def _source_checkout(name: str, *, interpreter: Path | None = None) -> tuple[Path, Path]:
+    root = Path(_TMP_HOME) / name
+    python = root / "backend" / ".venvs" / "test" / "bin" / "python"
+    python.parent.mkdir(parents=True, exist_ok=True)
+    if interpreter is None:
+        python.write_text("", encoding="utf-8")
+    else:
+        python.symlink_to(interpreter)
+    (root / "backend" / ".active-venv").write_text(".venvs/test", encoding="utf-8")
+    (root / "backend" / "app_entry.py").write_text("", encoding="utf-8")
+    (root / "backend" / "main.py").write_text("", encoding="utf-8")
+    return root, python
+
+
 def test_backend_argv_dev() -> bool:
     """Dev (not frozen): argv runs `backend/app_entry.py --serve` on the
     current interpreter."""
-    argv = backend_argv()
+    checkout, python = _source_checkout("argv-dev", interpreter=Path(sys.executable))
+    argv = backend_argv(checkout=checkout)
     expected_tail = ["app_entry.py", "--serve"]
-    if argv[0] != sys.executable:
-        print(f"  argv[0] expected {sys.executable}, got {argv[0]}")
+    if Path(argv[0]).resolve() != python.resolve():
+        print(f"  argv[0] expected {python}, got {argv[0]}")
         return False
     if Path(argv[1]).name != "app_entry.py" or argv[2] != "--serve":
         print(f"  expected ...{expected_tail}, got {argv}")
@@ -56,9 +71,10 @@ def test_backend_argv_dev() -> bool:
 
 
 def test_backend_argv_dev_node() -> bool:
-    argv = backend_argv("node")
-    if argv[0] != sys.executable:
-        print(f"  argv[0] expected {sys.executable}, got {argv[0]}")
+    checkout, python = _source_checkout("argv-node", interpreter=Path(sys.executable))
+    argv = backend_argv("node", checkout=checkout)
+    if Path(argv[0]).resolve() != python.resolve():
+        print(f"  argv[0] expected {python}, got {argv[0]}")
         return False
     if Path(argv[1]).name != "app_entry.py" or argv[2] != "--serve-node":
         print(f"  expected app_entry.py --serve-node, got {argv}")
@@ -217,7 +233,7 @@ def test_start_uses_prompt_handler_alternate_port() -> bool:
         if sup.port != alternate_port:
             print(f"  expected alternate port {alternate_port}, got {sup.port}")
             return False
-        if sup.health_url != f"http://127.0.0.1:{alternate_port}/healthz":
+        if sup.health_url != f"http://127.0.0.1:{alternate_port}/readyz":
             print(f"  health_url did not update: {sup.health_url}")
             return False
         if sup._env.get("BETTER_CLAUDE_BACKEND_PORT") != str(alternate_port):
@@ -363,18 +379,14 @@ def test_restart_aborts_when_port_held() -> bool:
 
 
 def test_backend_argv_uses_target_checkout_interpreter() -> bool:
-    root = Path(_TMP_HOME) / "target-checkout"
-    posix_python = root / "backend" / ".venv" / "bin" / "python"
+    root, posix_python = _source_checkout("target-checkout")
     app_entry = root / "backend" / "app_entry.py"
-    posix_python.parent.mkdir(parents=True)
-    posix_python.write_text("", encoding="utf-8")
-    app_entry.write_text("", encoding="utf-8")
     argv = backend_argv(checkout=root)
     if argv[:2] != [str(posix_python.resolve()), str(app_entry.resolve())]:
         print(f"  target POSIX argv mismatch: {argv}")
         return False
     posix_python.unlink()
-    windows_python = root / "backend" / ".venv" / "Scripts" / "python.exe"
+    windows_python = root / "backend" / ".venvs" / "test" / "Scripts" / "python.exe"
     windows_python.parent.mkdir(parents=True)
     windows_python.write_text("", encoding="utf-8")
     argv = backend_argv(checkout=root)
@@ -393,6 +405,9 @@ def test_packaged_restart_preserves_denial_and_rotates_channel() -> bool:
     real_get = provider_credentials.oskeychain.native_get
     real_popen = supervisor_module.subprocess.Popen
     sup = BackendSupervisor()
+    checkout, _ = _source_checkout("packaged-restart")
+    (checkout / "frontend" / "dist").mkdir(parents=True)
+    sup._resolved_checkout = lambda: checkout
 
     def denied_get(service: str, account: str, **kwargs):
         nonlocal reads
@@ -444,10 +459,7 @@ def test_source_switch_rejects_missing_frontend() -> bool:
     from daemonhost import pointer
 
     root = Path(_TMP_HOME) / "missing-dist-checkout"
-    python = root / "backend" / ".venv" / "bin" / "python"
-    python.parent.mkdir(parents=True)
-    python.write_text("", encoding="utf-8")
-    (root / "backend" / "main.py").write_text("", encoding="utf-8")
+    root, _ = _source_checkout("missing-dist-checkout")
     pointer.set_active(str(root), "missing-dist")
     sup = BackendSupervisor()
     try:

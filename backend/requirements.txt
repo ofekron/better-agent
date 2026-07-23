@@ -8,7 +8,6 @@ PyYAML>=6.0.0
 keyring>=25.0.0
 argon2-cffi>=23.1.0
 itsdangerous>=2.1.2
-claude-agent-sdk>=0.1.58
 tufup>=0.10.0
 model2vec>=0.3.0
 numpy>=1.26.0
@@ -16,5 +15,4 @@ scipy>=1.13.0
 onnxruntime>=1.18.0
 tokenizers>=0.19.0
 huggingface-hub>=0.24.0
-firebase-admin>=6.5.0
 ../vendor/provider-config-sync/0.1.0/better_agent_provider_config_sync_backend-0.1.0-py3-none-any.whl

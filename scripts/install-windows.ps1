@@ -65,10 +65,33 @@ if ($LASTEXITCODE -ne 0) {
     throw "Better Agent installation configuration failed."
 }
 
+$Repo = Split-Path -Parent $PSScriptRoot
+$Backend = Join-Path $Repo "backend"
+$ActiveEnv = (& python (Join-Path $Backend "dependency_plan.py") activate --uv (Get-Command uv).Source).Trim()
+if ($LASTEXITCODE -ne 0 -or -not $ActiveEnv) {
+    throw "Better Agent backend dependency activation failed."
+}
+$BinDir = Join-Path $env:LOCALAPPDATA "BetterAgent\bin"
+New-Item -ItemType Directory -Force -Path $BinDir *> $null
+$BagentPath = Join-Path $BinDir "bagent.cmd"
+$BackendPython = Join-Path $ActiveEnv "Scripts\python.exe"
+$CliPath = Join-Path $Backend "cli.py"
+Set-Content -Path $BagentPath -Encoding Ascii -Value "@echo off`r`n`"$BackendPython`" `"$CliPath`" %*"
+$UserPath = [Environment]::GetEnvironmentVariable("Path", "User")
+$UserEntries = @($UserPath -split ";" | Where-Object { $_ })
+if ($BinDir -notin $UserEntries) {
+    [Environment]::SetEnvironmentVariable(
+        "Path",
+        (($UserEntries + $BinDir) -join ";"),
+        "User"
+    )
+    Update-ProcessPath
+}
+
 git --version
 python --version
 uv --version
 node --version
 npm --version
 
-Write-Host "Installation configured. Run ./run.sh from Git Bash next."
+Write-Host "Installation complete. Run run_windows.bat next."

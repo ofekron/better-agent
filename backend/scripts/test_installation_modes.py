@@ -180,16 +180,18 @@ def test_platform_installers_are_exactly_named() -> None:
     python_installer = ROOT / "scripts" / "install.py"
     installation_guide = ROOT / "INSTALL.md"
     windows_installer = ROOT / "scripts" / "install-windows.ps1"
+    macos_installer = ROOT / "scripts" / "install-macos.sh"
     assert python_installer.is_file()
     assert installation_guide.is_file()
     assert not (ROOT / "scripts" / "install-agent.md").exists()
-    assert (ROOT / "scripts" / "install-macos.sh").is_file()
+    assert macos_installer.is_file()
     assert windows_installer.is_file()
     assert not (ROOT / "scripts" / "bootstrap-macos.sh").exists()
     assert not (ROOT / "scripts" / "bootstrap-windows.ps1").exists()
     python_source = python_installer.read_text(encoding="utf-8")
     agent_source = installation_guide.read_text(encoding="utf-8")
     windows_source = windows_installer.read_text(encoding="utf-8")
+    macos_source = macos_installer.read_text(encoding="utf-8")
     assert "installation_profile.DESKTOP_UI_ONLY" in python_source
     assert "installation_profile.MOBILE_DESKTOP_UI_ONLY" in python_source
     assert "installation_profile.DEFAULT" in python_source
@@ -201,6 +203,10 @@ def test_platform_installers_are_exactly_named() -> None:
     assert "install-macos.sh --mode <mode> --provider <provider> --yes" in agent_source
     assert "install-windows.ps1 -Mode <mode> -Provider <provider> -Yes" in agent_source
     assert "provider_setup.supported_provider_kinds()" in agent_source
+    assert "dependency_plan.py\" activate" in macos_source
+    assert "install-bagent.sh" in macos_source
+    assert "dependency_plan.py" in windows_source
+    assert "bagent.cmd" in windows_source
 
 
 if __name__ == "__main__":
