@@ -5139,7 +5139,7 @@ class SessionManager:
                 batch_ctx = self._batches.get(rid)
                 if batch_ctx is None:
                     self._persist_root(rid, bump=True)
-                change = {"kind": "queued_prompts_updated"}
+                change = {"kind": "queued_prompts_updated", "queued_prompts": list(q)}
                 if not (batch_ctx and batch_ctx.get("_phantom")):
                     self._fire(sid, change)
                 result["session"] = sess
