@@ -34,6 +34,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from turn_helpers import _is_transient_error  # noqa: E402
 from turn_manager import TurnManager  # noqa: E402
 import turn_manager as turn_manager_mod  # noqa: E402
+from continuation import PROVIDER_CAPABILITIES_CHANGED_ERROR  # noqa: E402
 from session_manager import manager as session_manager  # noqa: E402
 import session_store  # noqa: E402
 import user_prefs  # noqa: E402
@@ -693,6 +694,57 @@ def test_forced_context_overflow_retries_as_fresh_continuation() -> None:
     check("result success", result.get("success") is True)
 
 
+def test_capability_change_retries_as_fresh_continuation() -> None:
+    print("T7c provider capability drift starts fresh continuation")
+    session = session_manager.create(name="capability-drift", cwd="/tmp", model="gpt")
+    sid = session["id"]
+    provider = _RetryProvider([
+        {
+            "success": False,
+            "session_id": "old-provider",
+            "error": PROVIDER_CAPABILITIES_CHANGED_ERROR,
+            "token_usage": None,
+        },
+        {
+            "success": True,
+            "session_id": "fresh-provider",
+            "token_usage": {"input_tokens": 1},
+        },
+    ])
+    c = _StubCoordinator()
+    c.provider_for_session = lambda _sid: provider
+    c.user_prompt_manager = _UPM()
+    tm = TurnManager(c)
+
+    async def _ws(_event):
+        pass
+
+    async def _go() -> dict:
+        return await tm._drive_cli_run(
+            prompt="continue with inbox",
+            cwd="/tmp",
+            model="gpt",
+            session_id="old-provider",
+            ws_callback=_ws,
+            app_session_id=sid,
+            cancel_event=asyncio.Event(),
+            session_id_field="agent_session_id",
+            mode="native",
+            turn_run_id="turn-capability-drift",
+        )
+
+    result = asyncio.run(_go())
+    fresh = session_manager.get(sid) or {}
+    check("provider retried once", len(provider.prompts) == 2)
+    check("retry starts a fresh provider thread", provider.session_ids == ["old-provider", None])
+    check("old provider sid persisted in chain", fresh.get("continuation_chain") == ["old-provider"])
+    check(
+        "retry prompt explains capability change",
+        "Available provider capabilities changed" in provider.prompts[1],
+    )
+    check("capability-change continuation succeeds", result.get("success") is True)
+
+
 def test_context_continuation_start_runs_off_loop() -> None:
     print("T7c continuation start runs off loop")
     user_prefs.set_context_strategy("continuation")
@@ -1001,6 +1053,7 @@ def main() -> int:
     test_rate_limit_wait_uses_reset_or_one_minute_fallback()
     test_rate_limit_wait_can_continue_immediately()
     test_forced_context_overflow_retries_as_fresh_continuation()
+    test_capability_change_retries_as_fresh_continuation()
     test_context_continuation_start_runs_off_loop()
     test_codex_context_fill_preempts_native_compaction()
     test_codex_context_usage_persists_then_preempts_next_turn()

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import asyncio
+import json
 import tempfile
 from pathlib import Path
 import sys
@@ -29,7 +30,11 @@ class _FakeAppServerProcess:
 
     async def request(self, method: str, params: dict) -> dict:
         self.requests.append((method, params))
-        if method in ("thread/resume", "thread/fork") and "dynamicTools" in params:
+        resumed_names = {
+            str(tool.get("name") or "")
+            for tool in params.get("dynamicTools") or []
+        }
+        if method in ("thread/resume", "thread/fork") and "request_user_input" in resumed_names:
             raise RuntimeError("request_user_input already registered")
         if method in ("thread/start", "thread/resume", "thread/fork"):
             return {"thread": {"id": "thread-1"}}
@@ -141,6 +146,40 @@ async def test_app_server_start_registers_dynamic_tools() -> None:
     assert start["config"]["mcpServers"]["server-x"]["command"] == "echo"
 
 
+def test_dynamic_tool_set_change_uses_persisted_rollout() -> None:
+    desired = [
+        {"name": "mssg", "description": "Send", "inputSchema": {"type": "object"}},
+        {"name": "inbox", "description": "Read", "inputSchema": {"type": "object"}},
+    ]
+    with tempfile.TemporaryDirectory() as tmp:
+        rollout = Path(tmp) / "rollout.jsonl"
+        rollout.write_text(
+            json.dumps({
+                "type": "session_meta",
+                "payload": {"dynamic_tools": desired[:1]},
+            }) + "\n",
+            encoding="utf-8",
+        )
+        changed = runner_codex._dynamic_tool_set_changed(rollout, desired)
+        unchanged = runner_codex._dynamic_tool_set_changed(rollout, desired[:1])
+        same_name_changed_schema = [desired[0] | {"inputSchema": {"type": "string"}}]
+        schema_changed = runner_codex._dynamic_tool_set_changed(
+            rollout,
+            same_name_changed_schema,
+        )
+        rollout.write_text(
+            '{"type":"session_meta","payload":{"dynamic_tools":[{"name":"mssg"},null]}}\n',
+            encoding="utf-8",
+        )
+        malformed = runner_codex._dynamic_tool_set_changed(rollout, desired)
+
+    assert changed is True
+    assert unchanged is False
+    assert schema_changed is True
+    assert runner_codex._dynamic_tool_set_changed(None, desired) is True
+    assert malformed is True
+
+
 async def test_app_server_passes_config_overrides_before_subcommand() -> None:
     _clients, argv = await _record_start_app_server(
         session_id=None,
@@ -233,4 +272,5 @@ if __name__ == "__main__":
     asyncio.run(test_app_server_fork_receives_capability_config())
     asyncio.run(test_app_server_start_registers_dynamic_tools())
     asyncio.run(test_app_server_passes_config_overrides_before_subcommand())
+    test_dynamic_tool_set_change_uses_persisted_rollout()
     test_codex_config_overrides_preserve_mcp_tool_timeout()

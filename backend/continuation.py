@@ -8,6 +8,7 @@ from runs_dir import iter_run_dirs
 from session_store import session_file_path
 
 CONTEXT_OVERFLOW_ERROR = "context_window_exceeded"
+PROVIDER_CAPABILITIES_CHANGED_ERROR = "provider_capabilities_changed"
 
 _OVERFLOW_MARKERS = (
     "context_window_exceeded",
@@ -69,6 +70,8 @@ def build_continuation_prompt(
     )
     if reason == "selector_changed":
         context_message = "Session provider or model changed"
+    elif reason == PROVIDER_CAPABILITIES_CHANGED_ERROR:
+        context_message = "Available provider capabilities changed"
     elif reason == "agent_requested":
         context_message = "The agent requested a fresh context window"
     elif reason == "moved_project":

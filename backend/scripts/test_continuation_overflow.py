@@ -57,6 +57,7 @@ def test_continuation_prompt_renders_all_reasons() -> None:
         "selector_changed",
         "agent_requested",
         "moved_project",
+        "provider_capabilities_changed",
     )
     for reason in reasons:
         prompt = build_continuation_prompt(
