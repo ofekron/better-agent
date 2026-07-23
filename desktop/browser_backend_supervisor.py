@@ -96,6 +96,23 @@ def _arm_controller_death(controller_pid: int, on_death: Any) -> None:
     raise RuntimeError("controller death monitoring is unavailable")
 
 
+def backend_launch_env(base_env: dict[str, str], checkout: Path, port: int) -> dict[str, str]:
+    """Env for the spawned uvicorn backend: checkout/port wiring plus the
+    checkout's sdk/ on PYTHONPATH (the backend imports better_agent_sdk)."""
+    from sdk_pythonpath import apply_sdk_pythonpath
+
+    env = {
+        **base_env,
+        "BETTER_AGENT_ACTIVE_CHECKOUT": str(checkout),
+        "BETTER_AGENT_BACKEND_PORT": str(port),
+        "BETTER_AGENT_BACKEND_URL": f"http://127.0.0.1:{port}",
+        "BETTER_CLAUDE_BACKEND_PORT": str(port),
+        "BETTER_CLAUDE_BACKEND_URL": f"http://127.0.0.1:{port}",
+        "BA_BACKEND_PORT": str(port),
+    }
+    return apply_sdk_pythonpath(env, checkout)
+
+
 class BrowserBackendSupervisor:
     def __init__(self, launcher_root: Path, base_env: dict[str, str]) -> None:
         self._launcher_root = launcher_root.resolve()
@@ -164,14 +181,8 @@ class BrowserBackendSupervisor:
             session = self._broker.open_session()
             session.start()
             env = {
-                **self._base_env,
+                **backend_launch_env(self._base_env, checkout, port),
                 **session.backend_env(),
-                "BETTER_AGENT_ACTIVE_CHECKOUT": str(checkout),
-                "BETTER_AGENT_BACKEND_PORT": str(port),
-                "BETTER_AGENT_BACKEND_URL": f"http://127.0.0.1:{port}",
-                "BETTER_CLAUDE_BACKEND_PORT": str(port),
-                "BETTER_CLAUDE_BACKEND_URL": f"http://127.0.0.1:{port}",
-                "BA_BACKEND_PORT": str(port),
             }
             command = [
                 str(python),
