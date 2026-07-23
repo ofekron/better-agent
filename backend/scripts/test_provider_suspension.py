@@ -5,10 +5,15 @@ import sys
 from pathlib import Path
 
 import _test_home
-_test_home.isolate("bc-test-provider-suspension-")
+_HOME = _test_home.isolate("bc-test-provider-suspension-")
 os.environ["BETTER_CLAUDE_TEST_AUTH_BYPASS"] = "1"
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(_ROOT / "backend"))
+sys.path.insert(0, str(_ROOT / "sdk"))
+
+import _test_installation  # noqa: E402
+_test_installation.activate(Path(_HOME))
 
 from starlette.testclient import TestClient  # noqa: E402
 
