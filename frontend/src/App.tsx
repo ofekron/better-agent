@@ -90,6 +90,7 @@ import {
 import { UpdatePopup } from "./components/UpdatePopup";
 import { useDesktopInstallOffer } from "./hooks/useDesktopInstallOffer";
 import { useNativeAppUpdate } from "./hooks/useNativeAppUpdate";
+import { useAuthGate } from "./hooks/useAuthGate";
 import { Setup } from "./components/Setup";
 import { DownloadRedirect } from "./components/DownloadRedirect";
 import { ServerSetup } from "./components/ServerSetup";
@@ -448,23 +449,12 @@ export default function App() {
   // unauthenticated; bounce to it again on WS-1008 close. The auth
   // check is mounted ABOVE the adv-sync branch so a drill-down
   // window opened by an unauth user lands on the login screen too.
-  const [authStatus, setAuthStatus] = useState<
-    "loading" | "anon" | "authed" | "setup" | "unreachable"
-  >("loading");
-  const [authProbeError, setAuthProbeError] = useState<string>("");
-  const [authedUser, setAuthedUser] = useState<{ username: string } | null>(
-    null
-  );
-  useEffect(() => {
-    const onAuthUserChanged = (event: Event) => {
-      const username = (event as CustomEvent).detail?.username;
-      if (typeof username === "string" && username.trim()) {
-        setAuthedUser({ username });
-      }
-    };
-    window.addEventListener("auth_user_changed", onAuthUserChanged);
-    return () => window.removeEventListener("auth_user_changed", onAuthUserChanged);
-  }, []);
+  const {
+    status: authStatus,
+    error: authProbeError,
+    user: authedUser,
+    checkAuth,
+  } = useAuthGate(API);
   // Native-only: prompt when the backend has a newer APK staged.
   const { update: nativeUpdate, dismiss: dismissNativeUpdate } =
     useNativeAppUpdate();
@@ -475,73 +465,6 @@ export default function App() {
       if (typeof window === "undefined") return null;
       return donationRedirectFromLocation();
     });
-
-  const checkAuth = useCallback(async (retryCount = 0) => {
-    try {
-      const r = await fetch(`${API}/api/auth/me`, { credentials: "include" });
-      if (r.status === 200) {
-        setAuthedUser(await r.json());
-        setAuthProbeError("");
-        setAuthStatus("authed");
-      } else {
-        if (r.status !== 401) {
-          setAuthedUser(null);
-          setAuthProbeError(
-            r.status === 403
-              ? "Backend rejected this browser origin."
-              : `Backend auth probe failed with status ${r.status}.`
-          );
-          setAuthStatus("unreachable");
-          return;
-        }
-        // Unauthenticated. On a fresh install (no credentials yet) the
-        // backend reports needs_setup — show the first-run <Setup />
-        // screen instead of <Login />.
-        try {
-          const s = await fetch(`${API}/api/auth/needs_setup`, {
-            credentials: "include",
-          });
-          if (s.ok && (await s.json()).needs_setup) {
-            setAuthedUser(null);
-            setAuthProbeError("");
-            setAuthStatus("setup");
-            return;
-          }
-          if (!s.ok) {
-            setAuthedUser(null);
-            setAuthProbeError(
-              s.status === 403
-                ? "Backend rejected this browser origin."
-                : `Backend setup probe failed with status ${s.status}.`
-            );
-            setAuthStatus("unreachable");
-            return;
-          }
-        } catch {
-          setAuthedUser(null);
-          setAuthProbeError("Could not reach the backend.");
-          setAuthStatus("unreachable");
-          return;
-        }
-        setAuthedUser(null);
-        setAuthProbeError("");
-        setAuthStatus("anon");
-      }
-    } catch (e) {
-      if (retryCount < 3) {
-        // Linear backoff: 1s, 2s, 3s
-        setTimeout(() => checkAuth(retryCount + 1), (retryCount + 1) * 1000);
-      } else {
-        setAuthedUser(null);
-        setAuthProbeError("Could not reach the backend.");
-        setAuthStatus("unreachable");
-      }
-    }
-  }, []);
-
-  useEffect(() => {
-    checkAuth();
-  }, [checkAuth]);
 
   // Push registration requires an authenticated request, so it's gated on
   // authStatus rather than fired unconditionally at boot (main.tsx runs
@@ -588,7 +511,6 @@ export default function App() {
   // a callback through the whole tree.
   useEffect(() => {
     const onAuthFail = () => {
-      setAuthedUser(null);
       // Re-evaluate rather than hard-forcing "anon". On a fresh install
       // the correct unauthenticated screen is <Setup/>, not <Login/>, and
       // during the initial "loading" render AppMain briefly mounts and its
