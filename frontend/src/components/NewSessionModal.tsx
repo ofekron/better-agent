@@ -45,6 +45,7 @@ import {
   effortsForRuntime,
   effortsForRunner,
   runnerForProvider,
+  runnerLabelKey,
   type ModelRuntimeProfile,
 } from "./modelPicker";
 
@@ -426,7 +427,7 @@ function RuntimeProfilePicker({
             }}
           >
             {selectedProvider.runner_options.map((runner) => (
-              <option key={runner} value={runner}>{t(`setup.runner.${runner}`)}</option>
+              <option key={runner} value={runner}>{t(runnerLabelKey(selectedProvider.kind, runner))}</option>
             ))}
           </select>
         </div>

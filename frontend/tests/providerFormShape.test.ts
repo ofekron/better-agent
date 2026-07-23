@@ -8,6 +8,7 @@ import {
 } from "../src/components/providerFormShape";
 
 const settingsPageSource = readFileSync("src/components/SettingsPage.tsx", "utf8");
+const modelPickerSource = readFileSync("src/components/modelPicker.ts", "utf8");
 
 describe("modesForKind", () => {
   it("restricts openai and gemini to api_key", () => {
@@ -69,7 +70,8 @@ describe("Fugu runner selector wiring", () => {
   });
 
   it("routes Better Agent runner form behavior through openai semantics", () => {
-    expect(settingsPageSource).toContain('runner === "better_agent_runner" ? "openai" : kind');
+    expect(modelPickerSource).toContain('runner === "better_agent_runner" ? "openai"');
+    expect(settingsPageSource).toContain('runtimeKindForRunner(kind, runner)');
     expect(settingsPageSource).toContain('setMode("api_key")');
     expect(settingsPageSource).toContain('SAKANA_FUGU_API_BASE_URL');
   });

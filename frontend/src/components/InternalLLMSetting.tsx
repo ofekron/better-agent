@@ -4,7 +4,7 @@ import { Select } from "./Select";
 import { API } from "../api";
 import { trackPromise } from "../progress/store";
 import type { Provider } from "../types";
-import { effortsForRunner, runnerForProvider } from "./modelPicker";
+import { effortsForRunner, runnerForProvider, runnerLabelKey } from "./modelPicker";
 
 /** Per-task runtime profile assignment for the
  * backend's internal LLM calls (requirement analysis, config-sync review,
@@ -151,7 +151,7 @@ export function InternalLLMSetting({ tasks: taskOverride, showHint = true, exten
                     { value: INHERIT, label: t("settings.internalLlmInherit") },
                     ...provider.runner_options.map((value) => ({
                       value,
-                      label: t(`setup.runner.${value}`),
+                      label: t(runnerLabelKey(provider.kind, value)),
                     })),
                   ]}
                 />
