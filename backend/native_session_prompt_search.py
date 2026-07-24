@@ -302,6 +302,34 @@ def _windsurf_candidates(allowed: set[str]) -> list[NativeCandidate]:
     return candidates
 
 
+_SID_GLOB_EXTS = {"claude": "jsonl", "codex": "jsonl", "gemini": "jsonl", "windsurf": "pb"}
+
+
+def _candidates_for_sids(sids: frozenset[str]) -> list[NativeCandidate]:
+    """Resolve candidates directly by sid via filename glob — no full-corpus
+    discovery or content parse. Relies on sid == path.stem, which holds for
+    every format except ``pi`` (whose authoritative sid can live inside the
+    file, see :func:`_pi_meta`) and ``runs`` (sid comes from ``state.json``,
+    not the constant ``session_events.jsonl`` filename) — those two tags are
+    not resolvable this way and are simply not found by this path; a caller
+    wanting to scope to a specific pi/runs session must go through the full
+    :func:`_matched_candidates` discovery instead."""
+    if not sids:
+        return []
+    found: dict[str, NativeCandidate] = {}
+    for root, tag in _native_roots():
+        ext = _SID_GLOB_EXTS.get(tag)
+        if not ext:
+            continue
+        for sid in sids:
+            if sid in found:
+                continue
+            for match in root.rglob(f"{sid}.{ext}"):
+                found[sid] = _candidate_from_match(match, tag)
+                break
+    return list(found.values())
+
+
 def _matched_candidates(tokens: list[str], allowed: set[str]) -> list[NativeCandidate]:
     """Match-first candidate resolution.
 
@@ -486,6 +514,7 @@ def _search_elements(
     record_kind: str,
     source: str,
     cwds: tuple[str, ...] | list[str] = (),
+    sids: tuple[str, ...] | list[str] | None = None,
     categories: tuple[str, ...] | list[str] | None = None,
     kinds: tuple[str, ...] | list[str] | None = None,
     max_matches: int | None = 20,
@@ -501,13 +530,29 @@ def _search_elements(
     both ``None`` to grep everything). ``record_kind`` / ``source`` label the
     records so consumers can tell scopes apart. Whole-word matching, token-overlap
     ranking, cwd filter, ``is_noise``, dedup, and oldest-first presentation are
-    shared by all callers."""
+    shared by all callers.
+
+    ``sids``, when given, scopes discovery to exactly those session ids via a
+    cheap filename-based lookup (see :func:`_candidates_for_sids`) instead of
+    the full cwd-filtered corpus walk — this is what makes single-session
+    search fast enough for a large/active project directory. Omit it (the
+    default) for the original all-sessions-in-scope behavior. ``pi``/``runs``
+    sessions cannot be looked up this way (see that function's docstring) and
+    are silently absent from a ``sids``-scoped search."""
     tokens = _query_tokens(query)
     if not tokens:
         return []
     patterns = _token_patterns(tokens)
     allowed = {c for c in cwds if isinstance(c, str) and c.strip()}
-    candidates = _matched_candidates(tokens, allowed)
+    wanted_sids = frozenset(s for s in (sids or ()) if isinstance(s, str) and s.strip())
+    if wanted_sids:
+        allowed_encoded = {encode_cwd(c) for c in allowed}
+        candidates = [
+            c for c in _candidates_for_sids(wanted_sids)
+            if _cwd_ok(c.cwd, allowed, allowed_encoded)
+        ]
+    else:
+        candidates = _matched_candidates(tokens, allowed)
     if not candidates:
         return []
 
@@ -559,6 +604,7 @@ def search_in_native_session_transcript(
     *,
     query: str,
     cwds: tuple[str, ...] | list[str] = (),
+    sids: tuple[str, ...] | list[str] | None = None,
     categories: tuple[str, ...] | list[str] | None = None,
     kinds: tuple[str, ...] | list[str] | None = None,
     max_matches: int | None = 20,
@@ -574,13 +620,18 @@ def search_in_native_session_transcript(
     callers can group/filter results without re-parsing. Narrow the scope with
     ``categories`` (e.g. ``("shell", "file_edit")`` for only actions) or
     ``kinds`` (e.g. ``("tool_call",)``). ``cwds`` restricts to working dirs.
-    A match scores at least one query token as a whole word; the score is the
-    count of distinct tokens hit."""
+    ``sids``, when given, scopes the search to exactly those session ids via a
+    cheap filename lookup instead of a full cwd-filtered corpus walk — use this
+    for single-session search; omit it (default) to search every session in
+    scope. ``pi``/``runs`` sessions are not resolvable via ``sids`` (see
+    :func:`_candidates_for_sids`). A match scores at least one query token as a
+    whole word; the score is the count of distinct tokens hit."""
     return _search_elements(
         query=query,
         record_kind="native_session_element",
         source="native_transcript",
         cwds=cwds,
+        sids=sids,
         categories=categories,
         kinds=kinds,
         max_matches=max_matches,

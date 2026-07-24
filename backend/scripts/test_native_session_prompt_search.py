@@ -504,6 +504,61 @@ def test_generalized_search_greps_tool_calls_and_results() -> bool:
     return ok
 
 
+def test_sids_scopes_to_exactly_one_session() -> bool:
+    """``sids`` resolves candidates via filename lookup, bypassing
+    ``_matched_candidates`` (and therefore rg/token discovery) entirely —
+    only the requested session's own content is returned, from a project
+    directory containing multiple sessions with distinct content, including
+    a tool_result-only match (proving no category/kind exclusion applies)."""
+    _reset_candidates()
+    projects = _SCRATCH / "claude-projects-sids"
+    cwd = "/Users/test/sids-proj"
+    session_dir = projects / encode_cwd(cwd)
+    session_dir.mkdir(parents=True, exist_ok=True)
+
+    wanted_sid = "wanted-0000-0000-0000-000000000001"
+    other_sid = "other-0000-0000-0000-000000000002"
+    (session_dir / f"{wanted_sid}.jsonl").write_text(
+        "\n".join([
+            json.dumps({
+                "type": "user", "uuid": "u1", "timestamp": "2024-01-01T00:00:00Z",
+                "message": {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "t1", "content": "kranzelbeep tool output"},
+                ]},
+            }),
+        ]) + "\n",
+        encoding="utf-8",
+    )
+    (session_dir / f"{other_sid}.jsonl").write_text(
+        json.dumps({
+            "type": "user", "uuid": "u2", "timestamp": "2024-01-01T00:00:00Z",
+            "message": {"role": "user", "content": "kranzelbeep from the wrong session"},
+        }) + "\n",
+        encoding="utf-8",
+    )
+
+    _disable_rg()
+    orig = _isolate_native_roots(claude=[projects])
+    try:
+        scoped = nsp.search_in_native_session_transcript(query="kranzelbeep", sids=(wanted_sid,))
+        unscoped = nsp.search_in_native_session_transcript(query="kranzelbeep")
+    finally:
+        _restore_native_roots(orig)
+        _restore_rg()
+
+    scoped_sids = {r["sid"] for r in scoped}
+    scoped_kinds = {r["element_kind"] for r in scoped}
+    unscoped_sids = {r["sid"] for r in unscoped}
+    ok = (
+        scoped_sids == {wanted_sid}
+        and "tool_result" in scoped_kinds
+        and unscoped_sids == {wanted_sid, other_sid}
+    )
+    print(f"{OK if ok else FAIL} sids scopes to exactly one session incl. tool_result "
+          f"(scoped_sids={scoped_sids}, scoped_kinds={scoped_kinds}, unscoped_sids={unscoped_sids})")
+    return ok
+
+
 def test_wiring_fails_closed_on_processor_error() -> bool:
     orig_prepare = requirement_context.prepare_requirements_local_read_context
     orig_proc = requirement_context._run_requirements_processor
@@ -562,6 +617,7 @@ def main_run() -> int:
         test_codex_and_gemini_native_transcripts_found,
         test_categorizer_maps_elements_to_categories,
         test_generalized_search_greps_tool_calls_and_results,
+        test_sids_scopes_to_exactly_one_session,
         test_rg_filter_narrows_to_files_containing_needle,
         test_index_fast_path_serves_query_with_rg_disabled,
         test_wiring_fails_closed_on_processor_error,
