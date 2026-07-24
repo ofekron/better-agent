@@ -1140,7 +1140,7 @@ export function Chat({
   // Jump buttons stay hidden until the user actually scrolls, then fade
   // out again after 5s of scroll inactivity (debounced, not throttled —
   // every scroll event pushes the hide back out).
-  const JUMP_BUTTONS_HIDE_DELAY_MS = 5000;
+  const JUMP_BUTTONS_HIDE_DELAY_MS = 2000;
   const [jumpButtonsVisible, setJumpButtonsVisible] = useState(false);
   const jumpButtonsHideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {

@@ -2818,21 +2818,12 @@ body {
   gap: 8px;
   z-index: 5;
   pointer-events: none;
-  opacity: 0;
-  transform: translateY(4px);
-  /* Fade in fast on scroll, fade out slowly so the disappearance itself
-     reads as intentional rather than a flicker. */
-  transition: opacity 0.35s ease, transform 0.35s ease;
-}
-
-.chat-jump-buttons--visible {
-  opacity: 1;
-  transform: translateY(0);
 }
 
 .chat-jump-btn {
-  /* Only clickable while the group is faded in — an invisible button
-     must not silently swallow clicks. */
+  /* Only clickable while faded in — an invisible button must not
+     silently swallow clicks. Each button (not the wrapper) owns its own
+     opacity/transform so the two can stagger independently. */
   pointer-events: none;
   width: 34px;
   height: 34px;
@@ -2845,15 +2836,35 @@ body {
   justify-content: center;
   cursor: pointer;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
-  transition: opacity 0.15s ease, color 0.15s ease, transform 0.15s ease;
+  opacity: 0;
+  /* Resting (hidden) state owns the transition used when fading OUT:
+     a settling ease-out, slower than the entrance so the disappearance
+     reads as deliberate rather than a flicker. Per-property because
+     `color`/`transform` on hover shouldn't inherit this timing. */
+  transition: opacity 0.28s cubic-bezier(0.4, 0, 0.6, 1),
+    transform 0.28s cubic-bezier(0.4, 0, 0.6, 1), color 0.15s ease;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .chat-jump-btn {
+    transform: translateY(6px) scale(0.86);
+  }
+  .chat-jump-buttons--visible .chat-jump-btn:nth-child(2) {
+    transition-delay: 0.05s;
+  }
 }
 
 .chat-jump-buttons--visible .chat-jump-btn {
   pointer-events: auto;
+  opacity: 1;
+  transform: none;
+  /* Entrance: a quick spring overshoot — the tactile "pop" that makes
+     appearing on scroll read as a deliberate response, not a fade. */
+  transition: opacity 0.2s cubic-bezier(0.34, 1.56, 0.64, 1),
+    transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1), color 0.15s ease;
 }
 
 .chat-jump-btn:hover:not(:disabled) {
-  opacity: 1;
   color: var(--text-primary);
   transform: translateY(-1px);
 }
