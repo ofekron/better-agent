@@ -301,20 +301,42 @@ def upsert_profile(payload: dict[str, Any], profile_id: str | None = None) -> di
         return copy.deepcopy(profile)
 
 
+def _id_from_name(value: object) -> str:
+    text = str(value or "harness profile").strip().lower()
+    clean = re.sub(r"[^a-z0-9_.-]+", "-", text).strip(".-")
+    clean = re.sub(r"[-_.]{2,}", "-", clean)
+    if len(clean) < 3:
+        clean = "harness-profile"
+    return clean[:76]
+
+
+def _unique_id_from_name(value: object, *, existing_ids: set[str]) -> str:
+    base = _id_from_name(value)
+    if base not in existing_ids:
+        return base
+    for suffix in range(2, 1000):
+        candidate = f"{base}-{suffix}"[:80]
+        if candidate not in existing_ids:
+            return candidate
+    raise HarnessProfileError("Could not derive a unique harness profile id from name")
+
+
 def create_profile(payload: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise HarnessProfileError("Harness profile payload must be an object")
-    profile_id = _clean_id(payload.get("id") or None, required=False)
-    if not profile_id:
-        raise HarnessProfileError("id is required")
-    clean_payload = {
-        "id": profile_id,
-        "name": payload.get("name"),
-        "description": payload.get("description"),
-        "source": payload.get("source"),
-        "overrides": {},
-    }
-    return upsert_profile(clean_payload, profile_id)
+    with _LOCK:
+        profile_id = _clean_id(payload.get("id") or None, required=False)
+        if not profile_id:
+            existing_ids = set(_load()["profiles"].keys()) | {DEFAULT_PROFILE_ID}
+            profile_id = _unique_id_from_name(payload.get("name"), existing_ids=existing_ids)
+        clean_payload = {
+            "id": profile_id,
+            "name": payload.get("name"),
+            "description": payload.get("description"),
+            "source": payload.get("source"),
+            "overrides": {},
+        }
+        return upsert_profile(clean_payload, profile_id)
 
 
 def _get_at_path(tree: dict[str, Any], path: list[str]) -> Any:

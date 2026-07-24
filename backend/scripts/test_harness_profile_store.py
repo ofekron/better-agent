@@ -31,6 +31,26 @@ def test_create_profile_has_empty_overrides() -> None:
     assert loaded == profile
 
 
+def test_create_profile_derives_id_from_name_when_id_omitted() -> None:
+    # Regression: the frontend's "create profile" form only sends {name}
+    # (matching normal create-by-name UX, no id field to fill in). Every
+    # existing test before this one always supplied an explicit id, which
+    # is why create_profile requiring id and never deriving one from name
+    # went unnoticed and broke every real "create new profile" click with
+    # a 400 "id is required".
+    profile = harness_profile_store.create_profile({"name": "My Client Demo Profile"})
+    assert profile["id"] == "my-client-demo-profile"
+    assert profile["name"] == "My Client Demo Profile"
+    assert profile["overrides"] == {}
+
+
+def test_create_profile_disambiguates_id_collision_from_same_name() -> None:
+    first = harness_profile_store.create_profile({"name": "Duplicate Name"})
+    second = harness_profile_store.create_profile({"name": "Duplicate Name"})
+    assert first["id"] != second["id"]
+    assert second["id"] == "duplicate-name-2"
+
+
 def test_create_profile_ignores_client_sent_overrides() -> None:
     profile = harness_profile_store.create_profile({
         "id": "sneaky.harness",
@@ -163,6 +183,8 @@ def test_stale_revision_rejected() -> None:
 def main() -> int:
     try:
         test_create_profile_has_empty_overrides()
+        test_create_profile_derives_id_from_name_when_id_omitted()
+        test_create_profile_disambiguates_id_collision_from_same_name()
         test_create_profile_ignores_client_sent_overrides()
         test_overrides_delta_add_remove_roundtrip()
         test_default_is_not_a_stored_profile()
