@@ -116,6 +116,8 @@
   "chat.sessionLoadRetry": "पुनः प्रयास करें",
   "chat.loadOlderMessages": "पुराने संदेश लोड करें",
   "chat.rootEvents": "असंलग्नक ईवेंट",
+  "chat.jumpToTop": "पहली बारी पर जाएं",
+  "chat.jumpToBottom": "अंतिम बारी पर जाएं",
   "input.placeholderDisabled": "आरंभ करने के लिए एक सत्र चुनें या बनाएँ...",
   "input.placeholderActive": "एक संदेश भेजें... (भेजने के लिए Enter, नई पंक्ति के लिए Shift+Enter)",
   "input.attachTitle": "संलग्न करें",

@@ -985,6 +985,34 @@ export function Chat({
     scrollLoadHandler();
   }, [scrollLoadHandler]);
 
+  // Jump-to-top: when older pages remain, keep requesting them (the
+  // "load older" pipeline prepends and preserves scroll offset) until the
+  // backend reports no more history, then snap to the true first turn.
+  const [jumpingToTop, setJumpingToTop] = useState(false);
+  const jumpToTop = useCallback(() => setJumpingToTop(true), []);
+  useEffect(() => {
+    if (!jumpingToTop) return;
+    if (loadingOlder) return;
+    if (loadOlderError) {
+      setJumpingToTop(false);
+      return;
+    }
+    if (canLoadOlderMessages) {
+      triggerChatLoadOlder();
+      return;
+    }
+    const el = scrollRef.current;
+    if (el) el.scrollTo({ top: 0, behavior: "smooth" });
+    setStickToBottom(false);
+    setJumpingToTop(false);
+  }, [jumpingToTop, loadingOlder, loadOlderError, canLoadOlderMessages, triggerChatLoadOlder, scrollRef]);
+
+  const jumpToBottom = useCallback(() => {
+    const el = scrollRef.current;
+    if (el) el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+    setStickToBottom(true);
+  }, [scrollRef]);
+
   const handleRewindConfirm = useCallback(() => {
     if (!rewindTarget || !session) return;
     const msg = rewindTarget.message;
@@ -1295,6 +1323,7 @@ export function Chat({
         </div>
       )}
 
+      <div className="chat-messages-wrapper">
       <motion.div
         layoutScroll
         className="chat-messages"
@@ -1497,6 +1526,34 @@ export function Chat({
           />
         ))}
       </motion.div>
+
+      {displayTurnGroups.length > 0 && (
+        <div className="chat-jump-buttons">
+          <button
+            type="button"
+            className="chat-jump-btn"
+            onClick={jumpToTop}
+            disabled={jumpingToTop}
+            aria-busy={jumpingToTop}
+            title={t("chat.jumpToTop")}
+            aria-label={t("chat.jumpToTop")}
+          >
+            <Icon name="arrow-up" size={16} />
+          </button>
+          {!stickToBottom && (
+            <button
+              type="button"
+              className="chat-jump-btn"
+              onClick={jumpToBottom}
+              title={t("chat.jumpToBottom")}
+              aria-label={t("chat.jumpToBottom")}
+            >
+              <Icon name="arrow-down" size={16} />
+            </button>
+          )}
+        </div>
+      )}
+      </div>
 
       <SessionBackgroundStrip key={session?.id ?? "none"} sessionId={session?.id} />
 

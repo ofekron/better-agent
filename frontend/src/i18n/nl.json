@@ -116,6 +116,8 @@
   "chat.sessionLoadRetry": "Opnieuw proberen",
   "chat.loadOlderMessages": "Oudere berichten laden",
   "chat.rootEvents": "Niet-gekoppelde gebeurtenissen",
+  "chat.jumpToTop": "Naar eerste beurt springen",
+  "chat.jumpToBottom": "Naar laatste beurt springen",
   "input.placeholderDisabled": "Selecteer of maak een sessie om te beginnen...",
   "input.placeholderActive": "Stuur een bericht... (Enter om te versturen, Shift+Enter voor een nieuwe regel)",
   "input.attachTitle": "Bijlage",

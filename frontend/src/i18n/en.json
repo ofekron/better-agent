@@ -117,6 +117,8 @@
   "chat.sessionLoadRetry": "Retry",
   "chat.loadOlderMessages": "Load older messages",
   "chat.rootEvents": "Unattached events",
+  "chat.jumpToTop": "Jump to first turn",
+  "chat.jumpToBottom": "Jump to latest turn",
   "input.placeholderDisabled": "Select or create a session to start...",
   "input.placeholderActive": "Send a message... (Enter to send, Shift+Enter for newline)",
   "input.attachTitle": "Attach",

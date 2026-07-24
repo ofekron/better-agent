@@ -116,6 +116,8 @@
   "chat.sessionLoadRetry": "Erneut versuchen",
   "chat.loadOlderMessages": "Ältere Nachrichten laden",
   "chat.rootEvents": "Angeheftete Ereignisse",
+  "chat.jumpToTop": "Zum ersten Turn springen",
+  "chat.jumpToBottom": "Zum letzten Turn springen",
   "input.placeholderDisabled": "Sitzung auswählen oder erstellen, um zu beginnen...",
   "input.placeholderActive": "Nachricht senden... (Enter zum Senden, Shift+Enter für Zeilenumbruch)",
   "input.attachTitle": "Anhängen",

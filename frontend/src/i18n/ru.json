@@ -116,6 +116,8 @@
   "chat.sessionLoadRetry": "Повторить",
   "chat.loadOlderMessages": "Загрузить старые сообщения",
   "chat.rootEvents": "Непривязанные события",
+  "chat.jumpToTop": "Перейти к первому ходу",
+  "chat.jumpToBottom": "Перейти к последнему ходу",
   "input.placeholderDisabled": "Выберите или создайте сессию, чтобы начать...",
   "input.placeholderActive": "Отправьте сообщение... (Enter для отправки, Shift+Enter для новой строки)",
   "input.attachTitle": "Прикрепить",

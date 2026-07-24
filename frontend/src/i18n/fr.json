@@ -116,6 +116,8 @@
   "chat.sessionLoadRetry": "Réessayer",
   "chat.loadOlderMessages": "Charger les messages plus anciens",
   "chat.rootEvents": "Événements non rattachés",
+  "chat.jumpToTop": "Aller au premier tour",
+  "chat.jumpToBottom": "Aller au dernier tour",
   "input.placeholderDisabled": "Sélectionnez ou créez une session pour commencer...",
   "input.placeholderActive": "Envoyez un message... (Entrée pour envoyer, Maj+Entrée pour un saut de ligne)",
   "input.attachTitle": "Joindre",

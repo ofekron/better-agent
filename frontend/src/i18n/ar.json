@@ -116,6 +116,8 @@
   "chat.sessionLoadRetry": "إعادة المحاولة",
   "chat.loadOlderMessages": "تحميل الرسائل الأقدم",
   "chat.rootEvents": "أحداث غير ملحقة",
+  "chat.jumpToTop": "الانتقال إلى أول محادثة",
+  "chat.jumpToBottom": "الانتقال إلى آخر محادثة",
   "input.placeholderDisabled": "اختر أو أنشئ جلسة للبدء...",
   "input.placeholderActive": "أرسل رسالة... (Enter للإرسال، Shift+Enter لسطر جديد)",
   "input.attachTitle": "إرفاق",

@@ -2791,6 +2791,13 @@ body {
   position: relative;
 }
 
+.chat-messages-wrapper {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
 .chat-messages {
   flex: 1;
   overflow-y: auto;
@@ -2800,6 +2807,46 @@ body {
      reload the SPA or scroll the page chrome when the user is just
      reading chat history. */
   overscroll-behavior: contain;
+}
+
+.chat-jump-buttons {
+  position: absolute;
+  bottom: 16px;
+  inset-inline-end: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  z-index: 5;
+  pointer-events: none;
+}
+
+.chat-jump-btn {
+  pointer-events: auto;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+  opacity: 0.85;
+  transition: opacity 0.15s ease, color 0.15s ease, transform 0.15s ease;
+}
+
+.chat-jump-btn:hover:not(:disabled) {
+  opacity: 1;
+  color: var(--text-primary);
+  transform: translateY(-1px);
+}
+
+.chat-jump-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+  transform: none;
 }
 .chat-messages:focus-visible {
   outline: 2px solid var(--accent, #7b68ee);
@@ -17799,6 +17846,15 @@ button.progress-inflight {
   /* Reduce chat padding so event content isn't pushed off-screen left. */
   .chat-messages {
     padding: 12px 8px;
+  }
+  /* Larger touch targets for the jump-to-top/bottom buttons on phones. */
+  .chat-jump-btn {
+    width: 40px;
+    height: 40px;
+  }
+  .chat-jump-buttons {
+    bottom: 10px;
+    inset-inline-end: 10px;
   }
   .turn-group-children {
     margin-inline-start: 4px;

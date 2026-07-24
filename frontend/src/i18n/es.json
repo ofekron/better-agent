@@ -116,6 +116,8 @@
   "chat.sessionLoadRetry": "Reintentar",
   "chat.loadOlderMessages": "Cargar mensajes anteriores",
   "chat.rootEvents": "Eventos sin adjuntar",
+  "chat.jumpToTop": "Ir al primer turno",
+  "chat.jumpToBottom": "Ir al último turno",
   "input.placeholderDisabled": "Selecciona o crea una sesión para empezar...",
   "input.placeholderActive": "Envía un mensaje... (Enter para enviar, Shift+Enter para salto de línea)",
   "input.attachTitle": "Adjuntar",

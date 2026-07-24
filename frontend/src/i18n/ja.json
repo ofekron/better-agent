@@ -116,6 +116,8 @@
   "chat.sessionLoadRetry": "再試行",
   "chat.loadOlderMessages": "過去のメッセージを読み込む",
   "chat.rootEvents": "未所属のイベント",
+  "chat.jumpToTop": "最初のターンへ移動",
+  "chat.jumpToBottom": "最新のターンへ移動",
   "input.placeholderDisabled": "開始するにはセッションを選択または作成してください...",
   "input.placeholderActive": "メッセージを送信...（Enter で送信、Shift+Enter で改行）",
   "input.attachTitle": "添付",

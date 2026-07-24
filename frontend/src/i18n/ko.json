@@ -116,6 +116,8 @@
   "chat.sessionLoadRetry": "다시 시도",
   "chat.loadOlderMessages": "이전 메시지 불러오기",
   "chat.rootEvents": "연결되지 않은 이벤트",
+  "chat.jumpToTop": "첫 번째 턴으로 이동",
+  "chat.jumpToBottom": "최신 턴으로 이동",
   "input.placeholderDisabled": "시작하려면 세션을 선택하거나 만드세요...",
   "input.placeholderActive": "메시지를 보내세요... (Enter로 전송, Shift+Enter로 줄바꿈)",
   "input.attachTitle": "첨부",

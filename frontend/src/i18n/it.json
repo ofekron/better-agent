@@ -116,6 +116,8 @@
   "chat.sessionLoadRetry": "Riprova",
   "chat.loadOlderMessages": "Carica messaggi precedenti",
   "chat.rootEvents": "Eventi non collegati",
+  "chat.jumpToTop": "Vai al primo turno",
+  "chat.jumpToBottom": "Vai all'ultimo turno",
   "input.placeholderDisabled": "Seleziona o crea una sessione per iniziare...",
   "input.placeholderActive": "Invia un messaggio... (Invio per inviare, Shift+Invio per nuova riga)",
   "input.attachTitle": "Allega",

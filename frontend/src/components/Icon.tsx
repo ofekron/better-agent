@@ -41,6 +41,7 @@ export type IconName =
   | "film"
   | "star"
   | "arrow-up"
+  | "arrow-down"
   | "home"
   | "server"
   | "more-vertical"
@@ -113,6 +114,7 @@ const PATHS: Record<IconName, string> = {
   star:
     "M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01z",
   "arrow-up": "m5 12 7-7 7 7M12 19V5",
+  "arrow-down": "m19 12-7 7-7-7M12 5v14",
   home: "m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2zM9 22V12h6v10",
   server: "M2 3h20v6H2zM2 15h20v6H2zM6 6h.01M6 18h.01",
   "more-vertical": "M12 5v.01M12 12v.01M12 19v.01",

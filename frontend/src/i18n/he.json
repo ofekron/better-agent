@@ -115,6 +115,8 @@
   "chat.sessionLoadRetry": "נסה שוב",
   "chat.loadOlderMessages": "טען הודעות ישנות",
   "chat.rootEvents": "אירועים לא משויכים",
+  "chat.jumpToTop": "עבור לתור הראשון",
+  "chat.jumpToBottom": "עבור לתור האחרון",
   "input.placeholderDisabled": "בחרו או צרו סשן כדי להתחיל...",
   "input.placeholderActive": "שלחו הודעה... (Enter לשליחה, Shift+Enter לשורה חדשה)",
   "input.attachTitle": "צרף",
