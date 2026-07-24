@@ -642,6 +642,31 @@ class Client:
     ) -> dict[str, Any]:
         return self.broadcast_session_event(event_type, data, session_id=session_id)
 
+    def notify_toast(
+        self,
+        message: str,
+        *,
+        session_id: str = "",
+        level: str = "info",
+        data: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Show a fire-and-forget toast in the target session's UI.
+
+        Thin wrapper over :meth:`broadcast_session_event` with a fixed
+        ``event_type`` (``"extension_toast"``) so every extension emits the
+        same shape and the frontend has exactly one event type to render,
+        instead of each extension inventing its own ad-hoc event name.
+        ``level`` is one of ``"info"``/``"success"``/``"warning"``/``"error"``
+        (frontend styling hint only, not enforced here). ``session_id``
+        defaults to ``self.app_session_id`` like every other per-session
+        call — the caller MUST supply a real session id it has a legitimate
+        reason to target; there is no session-less/global toast (the
+        backend requires a non-empty ``session_id`` on every broadcast)."""
+        payload = {"message": message, "level": level, **(data or {})}
+        return self.broadcast_session_event(
+            "extension_toast", payload, session_id=session_id
+        )
+
     # ── task/routine outputs ─────────────────────────────────────────
     def publish_task_output(
         self,

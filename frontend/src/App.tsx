@@ -1255,6 +1255,26 @@ function AppMain({
     [],
   );
 
+  // Ephemeral extension-notice toast (Client.notify_toast), same single-slot
+  // / 10s-auto-dismiss pattern as prToast — one generic renderer every
+  // extension shares instead of each inventing its own toast UI.
+  const [extensionToast, setExtensionToast] = useState<{
+    message: string;
+    level?: string;
+    at: number;
+  } | null>(null);
+  useEffect(() => {
+    if (!extensionToast) return;
+    const t = setTimeout(() => setExtensionToast(null), 10000);
+    return () => clearTimeout(t);
+  }, [extensionToast]);
+  const handleExtensionToast = useCallback(
+    (info: { sessionId?: string; message: string; level?: string }) => {
+      setExtensionToast({ message: info.message, level: info.level, at: Date.now() });
+    },
+    [],
+  );
+
   // Supervisor prompt modal — shown when enabling supervisor so the user
   // can edit the per-turn custom prompt before activation.
   const [supervisorPromptModalOpen, setSupervisorPromptModalOpen] = useState(false);
@@ -1867,6 +1887,7 @@ function AppMain({
     },
     onSupervisorEvent: handleSupervisorEvent,
     onPrLink: handlePrLink,
+    onExtensionToast: handleExtensionToast,
     onPromptQueued: (data) => {
       logPromptSend("app_prompt_queued", {
         app_session_id: data.app_session_id,
@@ -7797,7 +7818,7 @@ function AppMain({
             </>
           );
         })()}
-        {(backgroundUserInteractions.length > 0 || prToast) ? (
+        {(backgroundUserInteractions.length > 0 || prToast || extensionToast) ? (
           <aside
             className="chat-toast-stack"
             aria-label={t("userRequest.regionLabel")}
@@ -7840,6 +7861,21 @@ function AppMain({
                 <button
                   className="pr-toast-close"
                   onClick={() => setPrToast(null)}
+                  aria-label={t("userRequest.dismiss")}
+                >
+                  ×
+                </button>
+              </div>
+            ) : null}
+            {extensionToast ? (
+              <div
+                className={`extension-toast extension-toast-${extensionToast.level ?? "info"}`}
+                role="status"
+              >
+                <span className="extension-toast-message">{extensionToast.message}</span>
+                <button
+                  className="extension-toast-close"
+                  onClick={() => setExtensionToast(null)}
                   aria-label={t("userRequest.dismiss")}
                 >
                   ×

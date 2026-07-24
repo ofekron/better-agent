@@ -320,6 +320,14 @@ interface UseWebSocketOptions {
     prUrl: string;
     prRepository?: string;
   }) => void;
+  /** A fire-and-forget notice pushed by an extension via
+   * Client.notify_toast — one generic event type every extension shares,
+   * instead of each inventing its own. Fired only on the LIVE push. */
+  onExtensionToast?: (info: {
+    sessionId?: string;
+    message: string;
+    level?: string;
+  }) => void;
   /** Backend ack that a prompt was queued (not sent immediately
    * because another turn was running). */
   onPromptQueued?: (data: {
@@ -497,6 +505,7 @@ export function useWebSocket(
   const onProjectMappingsChangedRef = useRef(options.onProjectMappingsChanged);
   const onSupervisorEventRef = useRef(options.onSupervisorEvent);
   const onPrLinkRef = useRef(options.onPrLink);
+  const onExtensionToastRef = useRef(options.onExtensionToast);
   const onPromptQueuedRef = useRef(options.onPromptQueued);
   const onTurnStartedRef = useRef(options.onTurnStarted);
   const onQueueConsumedRef = useRef(options.onQueueConsumed);
@@ -554,6 +563,7 @@ export function useWebSocket(
     onProjectMappingsChangedRef.current = options.onProjectMappingsChanged;
     onSupervisorEventRef.current = options.onSupervisorEvent;
     onPrLinkRef.current = options.onPrLink;
+    onExtensionToastRef.current = options.onExtensionToast;
     onPromptQueuedRef.current = options.onPromptQueued;
     onTurnStartedRef.current = options.onTurnStarted;
     onQueueConsumedRef.current = options.onQueueConsumed;
@@ -910,6 +920,24 @@ export function useWebSocket(
               d.root_id,
               typeof d.snapshot_refresh_id === "string",
             );
+          }
+          return;
+        }
+
+        // Generic extension notice (Client.notify_toast). One shared event
+        // type for every extension, ephemeral, LIVE push only.
+        if (event.type === "extension_toast") {
+          const d = event.data as {
+            app_session_id?: string;
+            message?: string;
+            level?: string;
+          };
+          if (typeof d.message === "string" && d.message) {
+            onExtensionToastRef.current?.({
+              sessionId: d.app_session_id,
+              message: d.message,
+              level: d.level,
+            });
           }
           return;
         }

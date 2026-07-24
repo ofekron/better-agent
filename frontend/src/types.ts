@@ -255,7 +255,10 @@ export type WSEventType =
   // Application-level heartbeat reply (see useWebSocket's ping/pong
   // watchdog). Detects a TCP connection killed silently -- common on
   // mobile network transitions -- where readyState stays OPEN forever.
-  | "pong";
+  | "pong"
+  // Fire-and-forget notice pushed by an extension via Client.notify_toast.
+  // One shared event type for every extension's toast, LIVE push only.
+  | "extension_toast";
 
 export interface WSEvent {
   type: WSEventType;

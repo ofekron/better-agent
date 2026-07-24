@@ -16100,7 +16100,8 @@ html[dir="rtl"] .user-request-toast::before {
 @media (prefers-reduced-motion: reduce) {
   .user-request-toast,
   .user-request-toast__response,
-  .pr-toast {
+  .pr-toast,
+  .extension-toast {
     animation: none;
   }
 }
@@ -16145,6 +16146,43 @@ html[dir="rtl"] .user-request-toast::before {
   opacity: 0.6;
 }
 .pr-toast-close:hover { opacity: 1; }
+
+.extension-toast {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 10px 14px;
+  border-radius: 10px;
+  background: #1c2430;
+  border: 1px solid #39536d;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+  color: #dce6f2;
+  font-size: calc(13px * var(--app-font-scale));
+  animation: pr-toast-in 0.18s ease-out;
+}
+.extension-toast-success { border-color: #2f6b4a; background: #172a1f; }
+.extension-toast-warning { border-color: #7a5a1f; background: #2b2113; }
+.extension-toast-error { border-color: #7a3535; background: #2b1717; }
+.extension-toast-message {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.extension-toast-close {
+  flex-shrink: 0;
+  background: transparent;
+  border: none;
+  color: inherit;
+  font-size: calc(18px * var(--app-font-scale));
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 2px;
+  opacity: 0.6;
+}
+.extension-toast-close:hover { opacity: 1; }
 
 /* ─────────────────────────────────────────────────────────────────────
  * Startup-tasks banner — non-blocking indicator for backend background
