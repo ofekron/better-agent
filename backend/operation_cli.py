@@ -67,7 +67,7 @@ def available_configs() -> dict[str, dict[str, Any]]:
         "model": get_env("BETTER_CLAUDE_MODEL"),
         "provider_id": get_env("BETTER_CLAUDE_PROVIDER_ID"),
         "bare_config": get_env("BETTER_CLAUDE_BARE_CONFIG") == "1",
-        "open_file_panel_enabled": get_env("BETTER_CLAUDE_USER_FACING") == "1",
+        "user_facing": get_env("BETTER_CLAUDE_USER_FACING") == "1",
         "active_capability_ids": [
             item
             for item in get_env("BETTER_CLAUDE_ACTIVE_CAPABILITY_IDS").split(",")
@@ -81,7 +81,7 @@ def available_configs() -> dict[str, dict[str, Any]]:
     }
     extension_configs = extension_store.runtime_mcp_server_configs(
         inputs,
-        user_facing=bool(inputs["open_file_panel_enabled"]),
+        user_facing=bool(inputs["user_facing"]),
         bare=bool(inputs["bare_config"]),
     )
     configs.update(

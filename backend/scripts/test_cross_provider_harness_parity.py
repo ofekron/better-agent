@@ -231,7 +231,7 @@ def _make_inputs(provider_kind: str, **over) -> dict:
         provider_id="pid",
         provider_kind=provider_kind,
         bare_config=False,
-        open_file_panel_enabled=True,
+        user_facing=True,
         working_mode="file_editing",
     )
     base.update(over)

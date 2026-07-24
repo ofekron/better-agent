@@ -2763,7 +2763,7 @@ class TurnManager:
                     supervisor_agent_session_id=supervisor_agent_session_id,
                     worker_agent_session_id=worker_agent_session_id,
                     browser_harness_enabled=bt_enabled,
-                    open_file_panel_enabled=user_initiated,
+                    user_facing=user_initiated,
                     working_mode=(_session_rec or {}).get("working_mode"),
                     continuation_chain=_session_rec_chain or None,
                     disallowed_tools=disallowed_tools,

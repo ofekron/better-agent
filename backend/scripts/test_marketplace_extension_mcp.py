@@ -66,7 +66,7 @@ def test_marketplace_extension_is_seeded_and_exposed_as_runtime_mcp() -> None:
             "app_session_id": "session-1",
             "backend_url": "http://localhost:8000",
             "internal_token": "token",
-            "open_file_panel_enabled": True,
+            "user_facing": True,
         },
         {},
     )["mcp_servers"]

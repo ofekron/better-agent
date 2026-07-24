@@ -46,7 +46,7 @@ def test_delegate_task_schema_is_shared_by_runner_providers() -> None:
             loopback_enabled=True,
             team_manager_enabled=False,
             team_orchestration_enabled=False,
-            open_file_panel_enabled=False,
+            user_facing=False,
             file_editing_mode=False,
             coordination_enabled=False,
         )

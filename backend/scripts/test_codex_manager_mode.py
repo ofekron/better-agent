@@ -101,7 +101,7 @@ def test_native_loopback_registers_mssg_tool(failures: list[str]) -> None:
         mssg_sender_session_id="sender-1",
         cwd="/tmp",
         model="model-1",
-        open_file_panel_enabled=False,
+        user_facing=False,
         request_user_input_enabled=False,
         file_editing_mode=False,
         team_orchestration_enabled=True,

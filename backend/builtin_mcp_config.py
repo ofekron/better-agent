@@ -71,7 +71,7 @@ def with_builtin_mcp_servers(inputs: dict, provider_run_config: dict) -> dict:
     provider_id = str(inputs.get("provider_id") or "").strip()
     provider_kind = str(inputs.get("provider_kind") or "").strip().lower()
     bare = bool(inputs.get("bare_config"))
-    user_facing = bool(inputs.get("open_file_panel_enabled")) and not bare
+    user_facing = bool(inputs.get("user_facing")) and not bare
 
     base_env = _with_sdk_pythonpath(dual_env_many({
         "BETTER_CLAUDE_BACKEND_URL": backend_url,
@@ -138,7 +138,7 @@ def native_mcp_runtime_env(inputs: dict) -> dict[str, str]:
     provider_id = str(inputs.get("provider_id") or "").strip()
     provisioned_tool_profile = str(inputs.get("provisioned_tool_profile") or "").strip()
     bare = bool(inputs.get("bare_config"))
-    user_facing = bool(inputs.get("open_file_panel_enabled")) and not bare
+    user_facing = bool(inputs.get("user_facing")) and not bare
     disabled_extensions = [
         str(item).strip()
         for item in inputs.get("disabled_builtin_extensions") or []

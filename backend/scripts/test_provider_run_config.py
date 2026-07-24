@@ -1007,7 +1007,7 @@ def t_codex_request_user_input_uses_better_agent_dynamic_tool() -> None:
         mssg_sender_session_id="",
         cwd="/tmp/project",
         model="model-1",
-        open_file_panel_enabled=True,
+        user_facing=True,
         request_user_input_enabled=True,
         file_editing_mode=False,
         team_orchestration_enabled=False,
@@ -1031,7 +1031,7 @@ def t_codex_request_user_input_uses_better_agent_dynamic_tool() -> None:
         mssg_sender_session_id="",
         cwd="/tmp/project",
         model="model-1",
-        open_file_panel_enabled=True,
+        user_facing=True,
         request_user_input_enabled=False,
         file_editing_mode=False,
         team_orchestration_enabled=False,
@@ -1144,7 +1144,7 @@ def t_builtin_user_facing_mcp_servers_injected() -> None:
         "provider_config_sync_review",
     )
     config = builtin_mcp_config.with_builtin_mcp_servers({
-        "open_file_panel_enabled": True,
+        "user_facing": True,
         "browser_harness_enabled": True,
         "app_session_id": "bc-sid",
         "backend_url": "http://127.0.0.1:8000",
@@ -1190,7 +1190,7 @@ def t_codex_user_facing_mcp_servers_skip_open_file_panel_mcp() -> None:
     _install_core_mcp_gate_extensions()
     config = builtin_mcp_config.with_builtin_mcp_servers({
         "provider_kind": "codex",
-        "open_file_panel_enabled": True,
+        "user_facing": True,
         "app_session_id": "bc-sid",
         "backend_url": "http://127.0.0.1:8000",
         "internal_token": "secret",
@@ -1209,7 +1209,7 @@ def t_builtin_manager_mcp_servers_exclude_session_bridge() -> None:
     _install_core_mcp_gate_extensions()
     _configure_internal_llm_defaults("default_session", "requirement_analysis")
     config = builtin_mcp_config.with_builtin_mcp_servers({
-        "open_file_panel_enabled": True,
+        "user_facing": True,
         "app_session_id": "bc-sid",
         "backend_url": "http://127.0.0.1:8000",
         "internal_token": "secret",
@@ -1238,7 +1238,7 @@ def t_builtin_mcp_servers_are_extension_owned() -> None:
     # only covers path-map builtins).
     extension_store.set_enabled(_FIXTURE_REQUIREMENTS_EXTENSION_ID, False)
     config = builtin_mcp_config.with_builtin_mcp_servers({
-        "open_file_panel_enabled": True,
+        "user_facing": True,
         "app_session_id": "bc-sid",
         "backend_url": "http://127.0.0.1:8000",
         "internal_token": "secret",
@@ -1304,7 +1304,7 @@ def t_installed_extension_can_replace_reserved_builtin_mcp_name() -> None:
     }
     _save_runtime_extension_record(data, _FIXTURE_PROJECT_STRUCTURE_EXTENSION_ID)
     config = builtin_mcp_config.with_builtin_mcp_servers({
-        "open_file_panel_enabled": True,
+        "user_facing": True,
         "app_session_id": "bc-sid",
         "backend_url": "http://127.0.0.1:8000",
         "internal_token": "secret",
@@ -1374,7 +1374,7 @@ def t_installed_extension_mcp_servers_are_injected() -> None:
     }
     _save_runtime_extension_record(data, "ofek.runtime")
     config = builtin_mcp_config.with_builtin_mcp_servers({
-        "open_file_panel_enabled": True,
+        "user_facing": True,
         "app_session_id": "bc-sid",
         "backend_url": "http://127.0.0.1:8000",
         "internal_token": "secret",
@@ -1397,7 +1397,7 @@ def t_runtime_mcp_servers_reload_after_backend_restart_simulation() -> None:
         "provider_config_sync_review",
     )
     inputs = {
-        "open_file_panel_enabled": True,
+        "user_facing": True,
         "browser_harness_enabled": True,
         "app_session_id": "restart-sid",
         "backend_url": "http://127.0.0.1:8000",
@@ -1431,7 +1431,7 @@ def t_session_bound_mcp_is_not_available_to_ambient_native_tools() -> None:
     _install_requirements_extension_record(replaces_builtin=True)
     _configure_internal_llm_defaults("requirement_analysis")
     inputs = {
-        "open_file_panel_enabled": True,
+        "user_facing": True,
         "app_session_id": "native-restart-sid",
         "backend_url": "http://127.0.0.1:8000",
         "internal_token": "secret",
@@ -1518,7 +1518,7 @@ def t_builtin_mcp_registry_applies_to_all_provider_runners() -> None:
     for provider_name in ("codex", "gemini"):
         _install_core_mcp_gate_extensions()
         config = builtin_mcp_config.with_builtin_mcp_servers({
-            "open_file_panel_enabled": True,
+            "user_facing": True,
             "app_session_id": f"{provider_name}-sid",
             "backend_url": "http://127.0.0.1:8000",
             "internal_token": "secret",
@@ -1534,7 +1534,7 @@ def t_requirements_mcp_uses_private_extension() -> None:
     _install_requirements_extension_record()
     _configure_internal_llm_defaults("requirement_analysis")
     config = builtin_mcp_config.with_builtin_mcp_servers({
-        "open_file_panel_enabled": True,
+        "user_facing": True,
         "app_session_id": "normal-sid",
         "backend_url": "http://127.0.0.1:8000",
         "internal_token": "secret",
@@ -1549,7 +1549,7 @@ def t_better_agent_runner_uses_extension_mcp_configs() -> None:
     _install_requirements_extension_record()
     _configure_internal_llm_defaults("requirement_analysis")
     inputs = {
-        "open_file_panel_enabled": True,
+        "user_facing": True,
         "app_session_id": "ba-sid",
         "backend_url": "http://127.0.0.1:8000",
         "internal_token": "secret",
@@ -1566,7 +1566,7 @@ def t_better_agent_runner_uses_extension_mcp_configs() -> None:
         "Better Agent runner gets requirements through private extension",
     )
     headless = dict(inputs)
-    headless["open_file_panel_enabled"] = False
+    headless["user_facing"] = False
     check(
         "better-agent-requirements" in runner_better_agent._extension_mcp_server_configs_for_run(
             headless, user_facing=False, bare=False,
@@ -1594,7 +1594,7 @@ def t_requirements_mcp_stays_on_better_agent_runtime() -> None:
     _install_requirements_extension_record(replaces_builtin=True)
     _configure_internal_llm_defaults("requirement_analysis")
     inputs = {
-        "open_file_panel_enabled": True,
+        "user_facing": True,
         "app_session_id": "bc-sid",
         "backend_url": "http://127.0.0.1:8000",
         "internal_token": "secret",
@@ -1620,7 +1620,7 @@ def t_requirements_mcp_stays_on_better_agent_runtime() -> None:
         "runtime requirements MCP is omitted without backend auth",
     )
     headless = dict(inputs)
-    headless["open_file_panel_enabled"] = False
+    headless["user_facing"] = False
     check(
         "get-requirements" in builtin_mcp_config.with_builtin_mcp_servers(headless, {})["mcp_servers"],
         "runtime requirements MCP is kept for authenticated headless runs",
@@ -1645,7 +1645,7 @@ def t_requirements_processor_profile_marks_requirements_mcp_env() -> None:
     _install_requirements_extension_record(replaces_builtin=True)
     _configure_internal_llm_defaults("requirement_analysis")
     inputs = {
-        "open_file_panel_enabled": False,
+        "user_facing": False,
         "app_session_id": "processor-sid",
         "backend_url": "http://127.0.0.1:8000",
         "internal_token": "secret",
@@ -1685,7 +1685,7 @@ def t_requirements_processor_profile_marks_requirements_mcp_env() -> None:
 def t_bare_testape_mcp_stays_on_better_agent_runtime() -> None:
     _install_testape_extension_record()
     inputs = {
-        "open_file_panel_enabled": False,
+        "user_facing": False,
         "app_session_id": "testape-bare-sid",
         "backend_url": "http://127.0.0.1:8000",
         "internal_token": "secret",
@@ -1710,7 +1710,7 @@ def t_bare_testape_mcp_stays_on_better_agent_runtime() -> None:
 def t_bare_mcp_availability_matrix() -> None:
     _install_bare_matrix_extension_record()
     inputs = {
-        "open_file_panel_enabled": False,
+        "user_facing": False,
         "app_session_id": "bare-matrix-sid",
         "backend_url": "http://127.0.0.1:8000",
         "internal_token": "secret",
@@ -1772,7 +1772,7 @@ def t_request_user_approval_contract_has_provider_parity() -> None:
         mssg_sender_session_id="",
         cwd="/tmp/project",
         model="model-1",
-        open_file_panel_enabled=True,
+        user_facing=True,
         request_user_input_enabled=True,
         file_editing_mode=False,
         team_orchestration_enabled=False,
@@ -1790,7 +1790,7 @@ def t_request_user_approval_contract_has_provider_parity() -> None:
         loopback_enabled=True,
         team_manager_enabled=False,
         team_orchestration_enabled=False,
-        open_file_panel_enabled=True,
+        user_facing=True,
         file_editing_mode=False,
         coordination_enabled=False,
     )
@@ -1804,8 +1804,8 @@ def t_provider_sources_persist_open_file_panel_flag() -> None:
     codex_src = (Path(_BACKEND) / "provider_codex.py").read_text(encoding="utf-8")
     gemini_src = (Path(_BACKEND) / "provider_gemini.py").read_text(encoding="utf-8")
     check(
-        '"open_file_panel_enabled": bool(open_file_panel_enabled)' in codex_src,
-        "Codex provider persists open_file_panel_enabled into runner input",
+        '"user_facing": bool(user_facing)' in codex_src,
+        "Codex provider persists user_facing into runner input",
     )
     check(
         '"request_user_input_enabled": request_user_input_enabled' in codex_src,
@@ -1816,8 +1816,8 @@ def t_provider_sources_persist_open_file_panel_flag() -> None:
         "Codex provider persists provider_kind into runner input",
     )
     check(
-        '"open_file_panel_enabled": bool(open_file_panel_enabled)' in gemini_src,
-        "Gemini provider persists open_file_panel_enabled into runner input",
+        '"user_facing": bool(user_facing)' in gemini_src,
+        "Gemini provider persists user_facing into runner input",
     )
     check(
         '"browser_harness_enabled": bool(browser_harness_enabled)' in codex_src,

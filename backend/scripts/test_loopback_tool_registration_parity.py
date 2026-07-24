@@ -85,7 +85,7 @@ def test_claude_native_non_user_registers_loopback_tools() -> None:
             "fork": False,
             "supervised": False,
             "browser_harness_enabled": False,
-            "open_file_panel_enabled": False,
+            "user_facing": False,
             "bare_config": False,
         }))
     finally:
@@ -227,7 +227,7 @@ def test_claude_bare_native_bridges_extension_mcp_tools() -> None:
             "fork": False,
             "supervised": False,
             "browser_harness_enabled": False,
-            "open_file_panel_enabled": False,
+            "user_facing": False,
             "bare_config": True,
         }))
         call_result = asyncio.run(captured_tools["testape"][0].handler({"task": "check", "repo_path": "/repo"}))
@@ -300,7 +300,7 @@ def test_codex_native_non_user_registers_loopback_tools() -> None:
         mssg_sender_session_id="sender-1",
         cwd="/tmp",
         model="gpt",
-        open_file_panel_enabled=False,
+        user_facing=False,
         request_user_input_enabled=False,
         file_editing_mode=False,
         team_orchestration_enabled=True,

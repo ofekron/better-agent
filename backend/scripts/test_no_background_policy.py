@@ -78,7 +78,7 @@ def _payload_disallowed(provider, disallowed_tools) -> list[str]:
         internal_token="t", fork=False, supervised=False,
         supervisor_agent_session_id=None, worker_agent_session_id=None,
         mssg_sender_session_id=None, is_worker=False,
-        browser_harness_enabled=False, open_file_panel_enabled=False,
+        browser_harness_enabled=False, user_facing=False,
         continuation_chain=None, provider_run_config=None,
         capability_contexts=None, target_message_id=None, turn_run_id=None,
         disabled_builtin_extensions=None, provisioned_tool_profile="",

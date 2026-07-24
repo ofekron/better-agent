@@ -359,7 +359,7 @@ def test_ensure_named_worker_schema_requires_team_orchestration() -> None:
         loopback_enabled=True,
         team_manager_enabled=False,
         team_orchestration_enabled=False,
-        open_file_panel_enabled=False,
+        user_facing=False,
         file_editing_mode=False,
         coordination_enabled=False,
     )
@@ -374,7 +374,7 @@ def test_ensure_named_worker_schema_requires_team_orchestration() -> None:
         loopback_enabled=True,
         team_manager_enabled=False,
         team_orchestration_enabled=True,
-        open_file_panel_enabled=False,
+        user_facing=False,
         file_editing_mode=False,
         coordination_enabled=False,
     )

@@ -116,7 +116,7 @@ async def handle_spawn_run(node_client, msg: dict) -> None:
             mssg_sender_session_id=msg.get("mssg_sender_session_id"),
             is_worker=bool(msg.get("is_worker")),
             browser_harness_enabled=bool(msg.get("browser_harness_enabled")),
-            open_file_panel_enabled=bool(msg.get("open_file_panel_enabled")),
+            user_facing=bool(msg.get("user_facing")),
             extra_env=msg.get("extra_env"),
             provider_run_config=msg.get("provider_run_config"),
             capability_contexts=msg.get("capability_contexts"),

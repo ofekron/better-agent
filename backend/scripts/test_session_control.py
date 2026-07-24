@@ -86,7 +86,7 @@ def test_session_control_extension_validates_and_injects() -> None:
     check(rec is not None and rec.get("enabled"), "session-control auto-installs enabled")
     inputs = {
         "mode": "native", "app_session_id": "s1", "working_mode": "native",
-        "open_file_panel_enabled": True, "backend_url": "http://localhost:8000",
+        "user_facing": True, "backend_url": "http://localhost:8000",
         "internal_token": "tok",
     }
     nv = extension_store.runtime_mcp_server_configs(

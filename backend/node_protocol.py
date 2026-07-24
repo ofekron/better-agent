@@ -80,7 +80,7 @@ class SpawnRun(TypedDict, total=False):
     supervised: bool
     supervisor_agent_session_id: Optional[str]
     browser_harness_enabled: bool
-    open_file_panel_enabled: bool
+    user_facing: bool
     extra_env: Optional[dict[str, str]]
     provisioned_tool_profile: str
     disabled_builtin_extensions: Optional[list[str]]

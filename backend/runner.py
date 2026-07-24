@@ -3308,15 +3308,15 @@ async def _run(run_dir: Path, inputs: dict) -> int:
     # supervisor/verdict turns never set this flag, so the agent can
     # only point the user at code from a turn the user actually
     # initiated. Mode-agnostic, like browser-harness.
-    open_file_panel_enabled = inputs.get("open_file_panel_enabled", False)
+    user_facing = inputs.get("user_facing", False)
     file_editing_mode = inputs.get("working_mode") == "file_editing"
     # Bare (TestApe-isolated) sessions are headless: they get NONE of the
     # user-facing extras (open-file-panel, cross-session bridge, durable
     # scheduler). They DO get the credential broker — a bare device worker
     # needs it to fetch login secrets — wired off the bare signal instead
     # of the user-facing one.
-    _user_facing_extras = integrations_enabled and open_file_panel_enabled and not _bare
-    _cred_enabled = integrations_enabled and (open_file_panel_enabled or _bare)
+    _user_facing_extras = integrations_enabled and user_facing and not _bare
+    _cred_enabled = integrations_enabled and (user_facing or _bare)
 
     if (_user_facing_extras or _cred_enabled) and not backend_url:
         backend_url = get_env("BETTER_CLAUDE_BACKEND_URL", "http://localhost:8000")

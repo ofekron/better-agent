@@ -1711,7 +1711,7 @@ def _build_dynamic_tool_set(
     mssg_sender_session_id: str,
     cwd: str,
     model: Optional[str],
-    open_file_panel_enabled: bool,
+    user_facing: bool,
     request_user_input_enabled: bool,
     file_editing_mode: bool,
     team_orchestration_enabled: bool,
@@ -1739,10 +1739,10 @@ def _build_dynamic_tool_set(
             ),
             existing_tool_names=existing_tool_names,
         )
-    if open_file_panel_enabled or request_user_input_enabled:
+    if user_facing or request_user_input_enabled:
         if not app_session_id or not backend_url or not internal_token:
             raise RuntimeError("UI loopback tools require app_session_id, backend_url, and internal_token")
-    if open_file_panel_enabled:
+    if user_facing:
         _add_dynamic_tool(
             dynamic_tools,
             tool_handlers,
@@ -1777,7 +1777,7 @@ def _build_dynamic_tool_set(
             ),
             existing_tool_names=existing_tool_names,
         )
-    if open_file_panel_enabled:
+    if user_facing:
         if file_editing_mode:
             _add_dynamic_tool(
                 dynamic_tools,
@@ -2929,7 +2929,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
         extension_store.extension_id_for_role('team-orchestration')
     )
     existing_tool_names = _codex_existing_tool_names(provider_run_config)
-    open_file_panel_enabled = bool(inputs.get("open_file_panel_enabled"))
+    user_facing = bool(inputs.get("user_facing"))
     request_user_input_enabled = bool(inputs.get("request_user_input_enabled"))
     file_editing_mode = inputs.get("working_mode") == "file_editing"
     try:
@@ -2941,7 +2941,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
             mssg_sender_session_id=mssg_sender_session_id,
             cwd=cwd,
             model=model,
-            open_file_panel_enabled=open_file_panel_enabled,
+            user_facing=user_facing,
             request_user_input_enabled=request_user_input_enabled,
             file_editing_mode=file_editing_mode,
             team_orchestration_enabled=team_orchestration_enabled,

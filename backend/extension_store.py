@@ -5274,7 +5274,7 @@ def _mcp_server_configs_for_delivery(
 ) -> dict[str, dict[str, Any]]:
     resolved_inputs = {
         **inputs,
-        "open_file_panel_enabled": bool(user_facing),
+        "user_facing": bool(user_facing),
         "bare_config": bool(bare),
     }
     disabled_extension_ids = _disabled_runtime_extension_ids(inputs)
@@ -5352,7 +5352,7 @@ def _native_mcp_launcher_env(inputs: dict[str, Any]) -> dict[str, str]:
         "BETTER_CLAUDE_WORKING_MODE": str(inputs.get("working_mode") or ""),
         "BETTER_CLAUDE_BARE_CONFIG": "1" if inputs.get("bare_config") else "0",
         "BETTER_CLAUDE_USER_FACING": "1"
-        if bool(inputs.get("open_file_panel_enabled")) and not bool(inputs.get("bare_config"))
+        if bool(inputs.get("user_facing")) and not bool(inputs.get("bare_config"))
         else "0",
         "BETTER_CLAUDE_DISABLED_BUILTIN_EXTENSIONS": ",".join(disabled_extensions),
         "BETTER_CLAUDE_ACTIVE_CAPABILITY_IDS": ",".join(active_capability_ids),
@@ -5536,7 +5536,7 @@ def _mcp_item_available_for_inputs(
     if not session_opted_in and not is_mcp_server_enabled(manifest["id"], item["name"], record=record):
         return False
     bare = bool(inputs.get("bare_config"))
-    user_facing = bool(inputs.get("open_file_panel_enabled")) and not bare
+    user_facing = bool(inputs.get("user_facing")) and not bare
     if item.get("user_facing") and not user_facing and not (bare and item.get("bare_allowed")):
         return False
     if bare and not item.get("bare_allowed"):

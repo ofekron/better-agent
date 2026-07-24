@@ -53,11 +53,11 @@ def main() -> int:
     check("runner reads bare_config", '_bare = bool(inputs.get("bare_config", False))' in runner)
     check(
         "user-facing extras OFF for bare",
-        "_user_facing_extras = open_file_panel_enabled and not _bare" in runner,
+        "_user_facing_extras = user_facing and not _bare" in runner,
     )
     check(
         "credential broker enabled for bare (workers need it)",
-        "_cred_enabled = open_file_panel_enabled or _bare" in runner,
+        "_cred_enabled = user_facing or _bare" in runner,
     )
     check(
         "session-bridge gated behind _user_facing_extras",

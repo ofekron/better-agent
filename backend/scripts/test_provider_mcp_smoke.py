@@ -81,7 +81,7 @@ async def _run_provider_smoke(provider_name: str, provider_cls, main, session_st
         backend_url=f"http://127.0.0.1:{port}",
         internal_token=main.coordinator.internal_token,
         browser_harness_enabled=False,
-        open_file_panel_enabled=True,
+        user_facing=True,
         provider_run_config={},
         capability_contexts=[],
         setting_sources=[],

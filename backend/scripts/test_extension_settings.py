@@ -391,7 +391,7 @@ def test_mcp_toggle_filters_builtin_injection() -> None:
         "internal_token": "tok",
         "cwd": "/tmp",
         "mode": "native",
-        "open_file_panel_enabled": True,
+        "user_facing": True,
     }
     provider = config_store.list_providers()["providers"][0]
     assignments = config_store.get_internal_llm_assignments()

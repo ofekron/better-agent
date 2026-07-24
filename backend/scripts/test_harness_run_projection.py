@@ -90,7 +90,7 @@ def test_provider_bare_gate_reads_profile_snapshot() -> None:
         source = (BACKEND / filename).read_text(encoding="utf-8")
         assert '(resolved_harness_run_config or {}).get("bare_config")' in source, filename
         assert '"bare_config": _bare' in source, filename
-        assert "user_facing=bool(open_file_panel_enabled) and not _bare" in source or filename == "provider_claude.py", filename
+        assert "user_facing=bool(user_facing) and not _bare" in source or filename == "provider_claude.py", filename
 
 
 def test_selected_extension_skills_become_run_local_skills(tmp_root: Path | None = None) -> None:

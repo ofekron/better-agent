@@ -452,7 +452,7 @@ class CodexProvider(Provider):
         mssg_sender_session_id: Optional[str] = None,
         is_worker: bool = False,
         browser_harness_enabled: bool = False,
-        open_file_panel_enabled: bool = False,
+        user_facing: bool = False,
         working_mode: Optional[str] = None,
         extra_env: Optional[dict[str, str]] = None,
         continuation_chain: Optional[list[str]] = None,
@@ -501,7 +501,7 @@ class CodexProvider(Provider):
             (resolved_harness_run_config or {}).get("bare_config")
         )
         request_user_input_enabled = (
-            bool(open_file_panel_enabled)
+            bool(user_facing)
             and not _bare
             and not bool(worker_agent_session_id)
             and not bool(supervisor_agent_session_id)
@@ -539,7 +539,7 @@ class CodexProvider(Provider):
             "worker_agent_session_id": worker_agent_session_id,
             "mssg_sender_session_id": mssg_sender_session_id,
             "browser_harness_enabled": bool(browser_harness_enabled),
-            "open_file_panel_enabled": bool(open_file_panel_enabled),
+            "user_facing": bool(user_facing),
             "request_user_input_enabled": request_user_input_enabled,
             "bare_config": _bare,
             "working_mode": _sess_rec.get("working_mode"),
@@ -585,7 +585,7 @@ class CodexProvider(Provider):
                 model=model,
                 provider_id=self.id,
                 bare_config=_bare,
-                user_facing=bool(open_file_panel_enabled) and not _bare,
+                user_facing=bool(user_facing) and not _bare,
                 disabled_builtin_extensions=input_payload["disabled_builtin_extensions"],
             ))
             popen = subprocess.Popen(

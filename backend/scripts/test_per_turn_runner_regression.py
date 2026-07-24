@@ -41,7 +41,7 @@ payload = {
     "fork": False,
     "supervised": False,
     "browser_harness_enabled": False,
-    "open_file_panel_enabled": False,
+    "user_facing": False,
 }
 (RUN_DIR / "input.json").write_text(json.dumps(payload))
 

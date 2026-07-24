@@ -272,7 +272,7 @@ def test_ui_only_suppresses_better_agent_injections() -> None:
             "app_session_id": "session",
             "backend_url": "http://127.0.0.1:8000",
             "internal_token": "token",
-            "open_file_panel_enabled": True,
+            "user_facing": True,
             "capability_contexts": [{"name": "BA", "content": "injected"}],
         }
 
@@ -290,7 +290,7 @@ def test_ui_only_suppresses_better_agent_injections() -> None:
             mssg_sender_session_id="session",
             cwd=str(ROOT),
             model=None,
-            open_file_panel_enabled=True,
+            user_facing=True,
             request_user_input_enabled=True,
             file_editing_mode=True,
             team_orchestration_enabled=True,

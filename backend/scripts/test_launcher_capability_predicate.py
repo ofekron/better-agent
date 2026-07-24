@@ -190,7 +190,7 @@ def test_launcher_context_allows_scoped_token_mint_without_global_token() -> Non
         "app_session_id": "sid-1",
         "internal_token": "",
         "bare_config": False,
-        "open_file_panel_enabled": True,
+        "user_facing": True,
     }
     check(
         not extension_store._mcp_item_available_for_inputs(record, item, base_inputs),

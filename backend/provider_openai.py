@@ -233,7 +233,7 @@ class OpenAIProvider(Provider):
         mssg_sender_session_id: Optional[str] = None,
         is_worker: bool = False,
         browser_harness_enabled: bool = False,
-        open_file_panel_enabled: bool = False,
+        user_facing: bool = False,
         working_mode: Optional[str] = None,
         extra_env: Optional[dict[str, str]] = None,
         continuation_chain: Optional[list[str]] = None,
@@ -326,7 +326,7 @@ class OpenAIProvider(Provider):
             "worker_agent_session_id": worker_agent_session_id,
             "mssg_sender_session_id": mssg_sender_session_id,
             "browser_harness_enabled": bool(browser_harness_enabled),
-            "open_file_panel_enabled": bool(open_file_panel_enabled),
+            "user_facing": bool(user_facing),
             "bare_config": _bare,
             "working_mode": _sess_rec.get("working_mode"),
             "worker_working_mode": (_worker_sess_rec or {}).get("working_mode"),
@@ -371,7 +371,7 @@ class OpenAIProvider(Provider):
                 model=model,
                 provider_id=self.id,
                 bare_config=_bare,
-                user_facing=bool(open_file_panel_enabled) and not _bare,
+                user_facing=bool(user_facing) and not _bare,
                 disabled_builtin_extensions=input_payload["disabled_builtin_extensions"],
             ))
             popen = provider_runtime.popen_runner(

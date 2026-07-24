@@ -359,7 +359,7 @@ def _install_extension(extension_id: str, server_name: str) -> None:
 
 def _run_inputs(backend: _FakeBackend) -> dict[str, Any]:
     return {
-        "open_file_panel_enabled": True,
+        "user_facing": True,
         "app_session_id": "restart-survival-sid",
         "backend_url": backend.url,
         "internal_token": "run-token",

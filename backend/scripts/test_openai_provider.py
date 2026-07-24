@@ -955,7 +955,7 @@ def test_live_turn_against_endpoint():
                   "internal_token": "", "fork": False, "supervised": False,
                   "supervisor_agent_session_id": None, "worker_agent_session_id": None,
                   "mssg_sender_session_id": None, "browser_harness_enabled": False,
-                  "open_file_panel_enabled": False, "bare_config": False,
+                  "user_facing": False, "bare_config": False,
                   "working_mode": None, "worker_working_mode": None,
                   "context_strategy": "", "continuation_chain": [],
                   "provider_run_config": {}, "capability_contexts": [],

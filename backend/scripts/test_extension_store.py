@@ -838,7 +838,7 @@ def test_extension_store_save_preserves_concurrent_marketplace_mcp_records() -> 
             "cwd": "/tmp/project",
             "model": "model",
             "bare_config": False,
-            "open_file_panel_enabled": True,
+            "user_facing": True,
             "disabled_builtin_extensions": [],
         },
         {},

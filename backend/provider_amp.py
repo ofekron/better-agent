@@ -141,7 +141,7 @@ class AmpProvider(GeminiProvider):
         mssg_sender_session_id: Optional[str] = None,
         is_worker: bool = False,
         browser_harness_enabled: bool = False,
-        open_file_panel_enabled: bool = False,
+        user_facing: bool = False,
         working_mode: Optional[str] = None,
         extra_env: Optional[dict[str, str]] = None,
         continuation_chain: Optional[list[str]] = None,
@@ -209,7 +209,7 @@ class AmpProvider(GeminiProvider):
             "internal_token": "",
             "provider_id": self.id,
             "browser_harness_enabled": bool(browser_harness_enabled),
-            "open_file_panel_enabled": bool(open_file_panel_enabled),
+            "user_facing": bool(user_facing),
             "worker_agent_session_id": worker_agent_session_id,
             "bare_config": _bare,
             "working_mode": session_record.get("working_mode"),
@@ -255,7 +255,7 @@ class AmpProvider(GeminiProvider):
                 model=model,
                 provider_id=self.id,
                 bare_config=_bare,
-                user_facing=bool(open_file_panel_enabled) and not _bare,
+                user_facing=bool(user_facing) and not _bare,
                 disabled_builtin_extensions=input_payload["disabled_builtin_extensions"],
             ))
             popen = provider_runtime.popen_runner(

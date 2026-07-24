@@ -1346,7 +1346,7 @@ def _tool_schemas_for_run(
     loopback_enabled: bool,
     team_manager_enabled: bool,
     team_orchestration_enabled: bool,
-    open_file_panel_enabled: bool,
+    user_facing: bool,
     file_editing_mode: bool,
     coordination_enabled: bool,
 ) -> list[dict]:
@@ -1395,7 +1395,7 @@ def _tool_schemas_for_run(
             schemas.append(_function_tool_schema(
                 "create_sub_session", _CREATE_SUB_SESSION_DESCRIPTION, _CREATE_SUB_SESSION_INPUT_SCHEMA,
             ))
-        if open_file_panel_enabled:
+        if user_facing:
             schemas.append(_function_tool_schema(
                 "open_file_panel", _OPEN_FILE_PANEL_DESCRIPTION, _OPEN_FILE_PANEL_INPUT_SCHEMA,
             ))
@@ -2148,7 +2148,7 @@ def _build_loopback_tool_handlers(
         handlers["create_session"] = create_session
     if "create_sub_session" not in disabled:
         handlers["create_sub_session"] = create_sub_session
-    if bool(inputs.get("open_file_panel_enabled")):
+    if bool(inputs.get("user_facing")):
         handlers["open_file_panel"] = open_file_panel
         handlers["request_user_input"] = request_user_input
         handlers["request_user_approval"] = request_user_approval
@@ -2286,7 +2286,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
     except Exception:
         team_orchestration_enabled = False
         coordination_enabled = False
-    open_file_panel_enabled = integrations_enabled and bool(inputs.get("open_file_panel_enabled"))
+    user_facing = integrations_enabled and bool(inputs.get("user_facing"))
     file_editing_mode = inputs.get("working_mode") == "file_editing"
     tool_schemas = _tool_schemas_for_run(
         inputs=inputs,
@@ -2294,13 +2294,13 @@ async def _run(run_dir: Path, inputs: dict) -> int:
         loopback_enabled=loopback_enabled,
         team_manager_enabled=team_manager_enabled,
         team_orchestration_enabled=team_orchestration_enabled,
-        open_file_panel_enabled=open_file_panel_enabled,
+        user_facing=user_facing,
         file_editing_mode=file_editing_mode,
         coordination_enabled=coordination_enabled,
     )
     extension_mcp_schemas, extension_mcp_handlers = await _extension_mcp_tools_for_run(
         inputs,
-        user_facing=bool(open_file_panel_enabled and app_session_id),
+        user_facing=bool(user_facing and app_session_id),
         bare=bool(inputs.get("bare_config")),
         used_names=_schema_tool_names(tool_schemas),
     )
