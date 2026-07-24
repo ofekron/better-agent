@@ -1535,6 +1535,9 @@ class TurnManager:
         queue_item_id: Optional[str] = None,
         team_message: Optional[dict] = None,
         capability_contexts: Optional[list[dict]] = None,
+        harness_profile_id: Optional[str] = None,
+        harness_profile_revision: Optional[str] = None,
+        resolved_harness_run_config: Optional[dict] = None,
         file_discussion_id: Optional[str] = None,
     ) -> None:
         """Behavior-identical to `Coordinator._run_turn` (today
@@ -1819,6 +1822,9 @@ class TurnManager:
                 disallowed_tools=disallowed_tools,
                 disabled_builtin_extensions=disabled_builtin_extensions,
                 capability_contexts=capability_contexts,
+                harness_profile_id=harness_profile_id,
+                harness_profile_revision=harness_profile_revision,
+                resolved_harness_run_config=resolved_harness_run_config,
             )
 
             if cancel_event.is_set():
@@ -2518,6 +2524,7 @@ class TurnManager:
             nonlocal _session_rec_chain, provider_run_config
             nonlocal session_capability_contexts, runtime_capability_contexts
             nonlocal run_capability_contexts, model
+            nonlocal resolved_harness_run_config
             _session_rec = await _to_turn_dispatch_thread(
                 session_manager.get,
                 primary_session_id or app_session_id,

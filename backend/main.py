@@ -1552,7 +1552,6 @@ import coordination
 import project_update_store
 import project_structure_edit_session
 import virtual_session_prompt_handlers
-import extension_instructions
 import extension_store
 import harness_profile_resolver
 import harness_profile_store
@@ -3962,7 +3961,12 @@ def _harness_profile_selection(body: dict) -> tuple[str, str]:
         if revision:
             raise HTTPException(status_code=400, detail="harness_profile_revision requires harness_profile_id")
         return "", ""
-    profile = harness_profile_store.get_profile(profile_id, revision or None)
+    try:
+        profile = harness_profile_store.get_profile(profile_id, revision or None)
+    except harness_profile_store.HarnessProfileError:
+        # "default" is a synthesized profile, never a stored one — same
+        # 404 an unknown stored id would get.
+        profile = None
     if not profile:
         raise HTTPException(status_code=404, detail="harness profile not found")
     try:
@@ -3974,101 +3978,6 @@ def _harness_profile_selection(body: dict) -> tuple[str, str]:
     except harness_profile_resolver.HarnessProfileResolutionError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return profile_id, profile["revision"]
-
-
-def _harness_profile_id_from_name(value: object) -> str:
-    text = str(value or "current personal harness").strip().lower()
-    clean = re.sub(r"[^a-z0-9_.-]+", "-", text).strip(".-")
-    clean = re.sub(r"[-_.]{2,}", "-", clean)
-    if len(clean) < 3:
-        clean = "current-personal-harness"
-    return clean[:80]
-
-
-def _package_current_harness_profile_payload(body: dict) -> dict[str, Any]:
-    name = str(body.get("name") or "Current personal harness").strip()
-    profile_id = str(body.get("id") or "").strip() or _harness_profile_id_from_name(name)
-    payload: dict[str, Any] = {
-        "id": profile_id,
-        "name": name,
-        "description": str(body.get("description") or "Packaged from the currently active extension harness.").strip(),
-        "base_mode": str(body.get("base_mode") or "bare").strip(),
-        "source": "package-current",
-        "extension_instances": [],
-        "extension_setting_overlays": {},
-        "secret_refs": {},
-        "instruction_sources": [],
-    }
-    for record in extension_store.list_extensions(include_hidden=True):
-        manifest = record.get("manifest") or {}
-        extension_id = str(manifest.get("id") or "").strip()
-        if not extension_id or not extension_store.is_extension_runtime_ready(extension_id):
-            continue
-        instance = {
-            "extension_id": extension_id,
-            "extension_revision": harness_profile_resolver._extension_revision(record),
-            "surfaces": [],
-            "mcp_servers": [
-                item["name"]
-                for item in extension_store.extension_mcp_servers(extension_id)
-                if item.get("enabled")
-            ],
-            "skills": [
-                item["name"]
-                for item in extension_store.extension_runtime_skills(extension_id)
-                if item.get("enabled")
-            ],
-            "instruction_names": [],
-        }
-        instruction_sources: list[dict[str, str]] = []
-        instruction_state = extension_instructions.normalize_state(record)
-        if instruction_state.get("global"):
-            for item in extension_instructions.instruction_items_from_entrypoints(manifest.get("entrypoints") or {}) or []:
-                if not isinstance(item, dict) or not item.get("name"):
-                    continue
-                instruction_name = str(item["name"])
-                instance["instruction_names"].append(instruction_name)
-                instruction_sources.append({
-                    "kind": "extension",
-                    "extension_id": extension_id,
-                    "name": instruction_name,
-                })
-        user_instructions = extension_store.get_user_instructions(extension_id).strip()
-        if user_instructions:
-            instruction_sources.append({
-                "kind": "inline",
-                "name": f"{extension_id} user instructions",
-                "content": user_instructions,
-            })
-        if instruction_sources:
-            instance["surfaces"].append("instructions")
-            payload["instruction_sources"].extend(instruction_sources)
-        if instance["skills"]:
-            instance["surfaces"].append("skills")
-        if instance["mcp_servers"]:
-            instance["surfaces"].append("mcp")
-        settings = extension_store.get_extension_settings(extension_id)
-        overlays: dict[str, Any] = {}
-        secret_refs: list[str] = []
-        for item in settings.get("schema") or []:
-            if not isinstance(item, dict) or not item.get("key"):
-                continue
-            key = str(item["key"])
-            if item.get("type") == "secret":
-                if (settings.get("secret_present") or {}).get(key):
-                    secret_refs.append(f"extension-setting:{extension_id}:{key}")
-                continue
-            overlays[key] = {
-                "value": copy.deepcopy((settings.get("values") or {}).get(key)),
-                "schema_hash": harness_profile_resolver._setting_schema_hash(record, key),
-            }
-        if overlays:
-            payload["extension_setting_overlays"][extension_id] = overlays
-        if secret_refs:
-            payload["secret_refs"][extension_id] = secret_refs
-        if instance["surfaces"] or overlays or secret_refs:
-            payload["extension_instances"].append(instance)
-    return payload
 
 
 def _extension_settings_harness_inputs(extension_id: str, body: dict) -> dict[str, Any] | None:
@@ -4096,17 +4005,101 @@ def _extension_settings_harness_inputs(extension_id: str, body: dict) -> dict[st
 
 async def _broadcast_harness_profiles_changed() -> None:
     try:
-        await coordinator.broadcast_global(
-            "harness_profiles_changed",
-            {"profiles": harness_profile_store.list_profiles()},
-        )
+        await coordinator.broadcast_global("harness_profiles_changed", {})
     except Exception:
         logger.exception("failed to broadcast harness profile change")
 
 
+_PROFILE_INSTANCE_FIELD_KEYS = (
+    "mcp_servers", "skills", "instruction_names", "setting_overlays", "headless",
+)
+
+
+def _resolved_override_response(entry: dict[str, Any]) -> dict[str, Any]:
+    """API-facing {resolved, override} shape for a resolver {resolved, override} entry."""
+    return {"resolved": entry["resolved"], "override": entry["override"]}
+
+
+def _profile_instance_fields_response(fields: dict[str, Any]) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for key in _PROFILE_INSTANCE_FIELD_KEYS:
+        entry = fields.get(key)
+        if entry is None:
+            continue
+        if key == "setting_overlays":
+            out[key] = {
+                overlay_key: _resolved_override_response(overlay)
+                for overlay_key, overlay in (entry or {}).items()
+            }
+        else:
+            out[key] = _resolved_override_response(entry)
+    return out
+
+
+def _profile_response_from_resolved(resolved: dict[str, Any]) -> dict[str, Any]:
+    fields = {
+        "extension_instances": {
+            extension_id: _profile_instance_fields_response(instance_fields)
+            for extension_id, instance_fields in (resolved.get("extension_instances") or {}).items()
+        },
+        "disabled_builtin_tools": _resolved_override_response(resolved["disabled_builtin_tools"]),
+        "disabled_builtin_extensions": _resolved_override_response(resolved["disabled_builtin_extensions"]),
+        "instruction_sources": {
+            name: _resolved_override_response(entry)
+            for name, entry in (resolved.get("instruction_sources") or {}).items()
+        },
+    }
+    return {
+        "id": resolved["id"],
+        "name": resolved.get("name"),
+        "description": resolved.get("description"),
+        "revision": resolved.get("revision"),
+        "created_at": resolved.get("created_at"),
+        "updated_at": resolved.get("updated_at"),
+        "fields": fields,
+        "mcp_overrides": resolved.get("mcp_overrides") or {},
+        "skill_overrides": resolved.get("skill_overrides") or {},
+        "native_harness_overrides": resolved.get("native_harness_overrides") or {},
+        "provider_run_config_overlay": resolved.get("provider_run_config_overlay") or {},
+    }
+
+
+def _profile_response(profile: dict[str, Any], default: dict[str, Any] | None = None) -> dict[str, Any]:
+    resolved = harness_profile_resolver.resolve_profile(profile["id"], profile.get("revision"), default=default)
+    return _profile_response_from_resolved(resolved)
+
+
+def _default_profile_response(default: dict[str, Any] | None = None) -> dict[str, Any]:
+    resolved = harness_profile_resolver.resolve_profile(harness_profile_store.DEFAULT_PROFILE_ID, default=default)
+    response = _profile_response_from_resolved(resolved)
+    response["id"] = "default"
+    response["name"] = "Default"
+    response["description"] = "The live harness state before any profile override is applied."
+    return response
+
+
 @app.get("/api/harness-profiles")
 async def list_harness_profiles():
-    return {"profiles": await asyncio.to_thread(harness_profile_store.list_profiles)}
+    stored = await asyncio.to_thread(harness_profile_store.list_profiles)
+    default = await asyncio.to_thread(harness_profile_resolver.compute_default_profile)
+    default_response, *profile_responses = await asyncio.gather(
+        asyncio.to_thread(_default_profile_response, default),
+        *[asyncio.to_thread(_profile_response, profile, default) for profile in stored],
+    )
+    return {"profiles": [default_response, *profile_responses]}
+
+
+@app.get("/api/harness-profiles/{profile_id}")
+async def get_harness_profile(profile_id: str):
+    if profile_id == harness_profile_store.DEFAULT_PROFILE_ID:
+        return await asyncio.to_thread(_default_profile_response)
+    try:
+        profile = await asyncio.to_thread(harness_profile_store.get_profile, profile_id)
+    except harness_profile_store.HarnessProfileError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not profile:
+        raise HTTPException(status_code=404, detail="harness profile not found")
+    return await asyncio.to_thread(_profile_response, profile)
 
 
 @app.post("/api/harness-profiles")
@@ -4114,36 +4107,31 @@ async def create_harness_profile(body: dict = Body(default={})):
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="request body must be an object")
     try:
-        profile = await asyncio.to_thread(harness_profile_store.upsert_profile, body, body.get("id"))
+        profile = await asyncio.to_thread(harness_profile_store.create_profile, body)
     except harness_profile_store.HarnessProfileError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     await _broadcast_harness_profiles_changed()
-    return profile
+    return await asyncio.to_thread(_profile_response, profile)
 
 
-@app.post("/api/harness-profiles/package-current")
-async def package_current_harness_profile(body: dict = Body(default={})):
+@app.patch("/api/harness-profiles/{profile_id}/overrides")
+async def patch_harness_profile_overrides(profile_id: str, body: dict = Body(default={})):
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="request body must be an object")
+    ops = body.get("ops")
+    if not isinstance(ops, list):
+        raise HTTPException(status_code=400, detail="ops must be a list")
     try:
-        payload = await asyncio.to_thread(_package_current_harness_profile_payload, body)
-        profile = await asyncio.to_thread(harness_profile_store.upsert_profile, payload, payload["id"])
-    except (harness_profile_store.HarnessProfileError, extension_store.ExtensionError) as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    await _broadcast_harness_profiles_changed()
-    return profile
-
-
-@app.put("/api/harness-profiles/{profile_id}")
-async def update_harness_profile(profile_id: str, body: dict = Body(default={})):
-    if not isinstance(body, dict):
-        raise HTTPException(status_code=400, detail="request body must be an object")
-    try:
-        profile = await asyncio.to_thread(harness_profile_store.upsert_profile, body, profile_id)
+        profile = await asyncio.to_thread(
+            harness_profile_store.apply_override_patch,
+            profile_id,
+            ops,
+            body.get("revision") or None,
+        )
     except harness_profile_store.HarnessProfileError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     await _broadcast_harness_profiles_changed()
-    return profile
+    return await asyncio.to_thread(_profile_response, profile)
 
 
 @app.delete("/api/harness-profiles/{profile_id}")
@@ -4155,7 +4143,7 @@ async def delete_harness_profile(profile_id: str, revision: str = ""):
             revision or None,
         )
     except harness_profile_store.HarnessProfileError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not deleted:
         raise HTTPException(status_code=404, detail="harness profile not found")
     await _broadcast_harness_profiles_changed()
@@ -4180,6 +4168,38 @@ async def update_session_harness_profile(session_id: str, body: dict = Body(defa
         "harness_profile_id": session.get("harness_profile_id") or "",
         "harness_profile_revision": session.get("harness_profile_revision") or "",
     }
+
+
+@app.get("/api/harness/default/disabled-builtin-tools")
+async def get_global_disabled_builtin_tools():
+    return {"disabled_builtin_tools": await asyncio.to_thread(config_store.get_disabled_builtin_tools)}
+
+
+@app.put("/api/harness/default/disabled-builtin-tools")
+async def set_global_disabled_builtin_tools(body: dict = Body(default={})):
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="request body must be an object")
+    tools = body.get("disabled_builtin_tools")
+    if not isinstance(tools, list):
+        raise HTTPException(status_code=400, detail="disabled_builtin_tools must be a list")
+    updated = await asyncio.to_thread(config_store.set_disabled_builtin_tools, tools)
+    await coordinator.broadcast_global("extensions_changed", {})
+    return {"disabled_builtin_tools": updated}
+
+
+@app.get("/api/harness/default/disabled-builtin-extensions")
+async def get_global_disabled_builtin_extensions():
+    return {"disabled_builtin_extensions": await asyncio.to_thread(config_store.get_disabled_builtin_extensions)}
+
+
+@app.put("/api/harness/default/disabled-builtin-extensions")
+async def set_global_disabled_builtin_extensions(body: dict = Body(default={})):
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="request body must be an object")
+    extension_ids = _api_disabled_builtin_extensions(body.get("disabled_builtin_extensions"))
+    updated = await asyncio.to_thread(config_store.set_disabled_builtin_extensions, extension_ids)
+    await coordinator.broadcast_global("extensions_changed", {})
+    return {"disabled_builtin_extensions": updated}
 
 
 @app.post("/api/internal/sessions/{sid}/capabilities")
@@ -9638,6 +9658,27 @@ async def create_session(body: Any = Body(default=None)):
     if not isinstance(raw_file_edit_enabled, bool):
         raise HTTPException(status_code=400, detail="file_edit_enabled must be a boolean")
     file_edit_enabled = raw_file_edit_enabled or bool(file_edit_path)
+    # File Edit and Browser Harness are folded into the harness-profile
+    # extension_instances view (Default synthesis + any selected profile's
+    # overrides) rather than standalone request params.
+    try:
+        _harness_snapshot = await asyncio.to_thread(
+            harness_profile_resolver.resolve_profile,
+            harness_profile_id or harness_profile_store.DEFAULT_PROFILE_ID,
+            harness_profile_revision or None,
+        )
+    except harness_profile_resolver.HarnessProfileResolutionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _harness_instances = _harness_snapshot.get("extension_instances") or {}
+    _harness_disabled_extensions = set(
+        _harness_snapshot.get("disabled_builtin_extensions", {}).get("resolved") or []
+    )
+    _file_edit_gate_open = (
+        extension_store.BUILTIN_FILE_EDIT_EXTENSION_ID in _harness_instances
+        and extension_store.BUILTIN_FILE_EDIT_EXTENSION_ID not in _harness_disabled_extensions
+    )
+    if file_edit_enabled and not _file_edit_gate_open:
+        raise HTTPException(status_code=403, detail="File Edit is disabled for this harness")
     if file_edit_enabled:
         try:
             if file_edit_path:
@@ -9703,11 +9744,18 @@ async def create_session(body: Any = Body(default=None)):
         logger.info("create_session %s mode=file_editing(persistent)", result["session_id"][:8])
         await _apply_initial_session_folder(session.get("id"), requested_folder_id)
         return session
-    browser_harness_enabled = (
-        body.get("browser_harness_enabled", True)
-        and _builtin_extension_runtime_ready(
-            extension_store.extension_id_for_role('browser-harness')
-        )
+    _browser_harness_id = extension_store.extension_id_for_role("browser-harness")
+    _browser_harness_instance = _harness_instances.get(_browser_harness_id) if _browser_harness_id else None
+    _browser_harness_gate_open = bool(
+        _browser_harness_id and _browser_harness_id not in _harness_disabled_extensions
+    )
+    browser_harness_enabled = bool(
+        _browser_harness_gate_open
+        and _browser_harness_instance
+        and _browser_harness_instance["mcp_servers"]["resolved"]
+    )
+    browser_harness_headless = bool(
+        (_browser_harness_instance or {}).get("headless", {}).get("resolved", False)
     )
     session = await asyncio.to_thread(
         session_manager.create,
@@ -9721,7 +9769,7 @@ async def create_session(body: Any = Body(default=None)):
         reasoning_effort=requested_effort,
         permission=requested_permission or None,
         browser_harness_enabled=browser_harness_enabled,
-        browser_harness_headless=body.get("browser_harness_headless", True),
+        browser_harness_headless=browser_harness_headless,
         node_id=node_id,
         worker_creation_policy=worker_creation_policy,
         bare_config=bare_config,

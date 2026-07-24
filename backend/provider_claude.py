@@ -434,6 +434,7 @@ class ClaudeProvider(Provider):
             provider_run_config=provider_run_config,
             capability_contexts=capability_contexts,
             target_message_id=target_message_id,
+            resolved_harness_run_config=resolved_harness_run_config,
             turn_run_id=turn_run_id,
             disabled_builtin_extensions=disabled_builtin_extensions,
             provisioned_tool_profile=provisioned_tool_profile,
@@ -538,6 +539,7 @@ class ClaudeProvider(Provider):
         turn_run_id: Optional[str],
         disabled_builtin_extensions: Optional[list[str]],
         provisioned_tool_profile: str,
+        resolved_harness_run_config: Optional[dict] = None,
     ) -> tuple[dict, bool, str, str]:
         """Single source for the runner's input.json payload.
         Returns `(payload, bare, mode, resolved_backend_url)`
@@ -687,6 +689,7 @@ class ClaudeProvider(Provider):
         turn_run_id: Optional[str],
         disabled_builtin_extensions: Optional[list[str]],
         provisioned_tool_profile: str,
+        resolved_harness_run_config: Optional[dict] = None,
     ) -> None:
         """Post-gate spawn body: write input.json, create containment,
         Popen the runner, register RunState, schedule bootstrap."""
@@ -724,6 +727,7 @@ class ClaudeProvider(Provider):
                 turn_run_id=turn_run_id,
                 disabled_builtin_extensions=disabled_builtin_extensions,
                 provisioned_tool_profile=provisioned_tool_profile,
+                resolved_harness_run_config=resolved_harness_run_config,
             )
         )
         (run_dir / "input.json").write_text(json.dumps(input_payload), encoding="utf-8")

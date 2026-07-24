@@ -4,7 +4,6 @@ import { API } from "../api";
 import { eventBus } from "../lib/eventBus";
 import { trackedFetch } from "../progress/store";
 import type { HarnessProfile } from "../types";
-import Icon from "./Icon";
 
 interface Props {
   value?: string;
@@ -14,10 +13,9 @@ interface Props {
 }
 
 const loadOp = "harnessProfiles:list";
-const packageOp = "harnessProfiles:packageCurrent";
 
 export function HarnessProfileSelector({
-  value = "",
+  value = "default",
   disabled = false,
   className = "session-model-picker-field",
   onChange,
@@ -25,7 +23,6 @@ export function HarnessProfileSelector({
   const { t } = useTranslation();
   const [profiles, setProfiles] = useState<HarnessProfile[]>([]);
   const [error, setError] = useState("");
-  const [packaging, setPackaging] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -51,37 +48,12 @@ export function HarnessProfileSelector({
     };
   }, []);
 
-  const selectedRevision = useMemo(
-    () => profiles.find((profile) => profile.id === value)?.revision ?? "",
-    [profiles, value],
-  );
+  const effectiveValue = value || "default";
 
-  const packageCurrent = () => {
-    setPackaging(true);
-    setError("");
-    trackedFetch(packageOp, `${API}/api/harness-profiles/package-current`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({}),
-    })
-      .then((response) => {
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        return response.json() as Promise<HarnessProfile>;
-      })
-      .then((profile) => {
-        setProfiles((current) => {
-          const next = current.filter((item) => item.id !== profile.id);
-          next.push(profile);
-          return next.sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
-        });
-        onChange(profile.id, profile.revision);
-        setError("");
-      })
-      .catch((err) => {
-        setError(err instanceof Error ? err.message : String(err));
-      })
-      .finally(() => setPackaging(false));
-  };
+  const selectedRevision = useMemo(
+    () => profiles.find((profile) => profile.id === effectiveValue)?.revision ?? "",
+    [profiles, effectiveValue],
+  );
 
   return (
     <div className={className}>
@@ -89,35 +61,26 @@ export function HarnessProfileSelector({
       <div className="harness-profile-selector-row">
         <select
           aria-label={t("harnessProfile.label", "Harness profile")}
-          value={value}
-          disabled={disabled || packaging}
+          value={effectiveValue}
+          disabled={disabled}
           onChange={(event) => {
             const profileId = event.target.value;
             const profile = profiles.find((item) => item.id === profileId);
             onChange(profileId, profile?.revision ?? "");
           }}
         >
-          <option value="">{t("harnessProfile.inherit", "Current harness")}</option>
+          {profiles.length === 0 ? (
+            <option value="default">{t("harnessProfile.defaultOptionLabel")}</option>
+          ) : null}
           {profiles.map((profile) => (
             <option key={profile.id} value={profile.id}>
-              {profile.name}
-              {profile.base_mode === "bare" ? ` - ${t("harnessProfile.bare", "Bare")}` : ""}
+              {profile.id === "default" ? t("harnessProfile.defaultOptionLabel") : profile.name}
             </option>
           ))}
         </select>
-        <button
-          type="button"
-          className="harness-profile-package-button"
-          disabled={disabled || packaging}
-          onClick={packageCurrent}
-          title={t("harnessProfile.packageCurrent", "Package current harness")}
-          aria-label={t("harnessProfile.packageCurrent", "Package current harness")}
-        >
-          {packaging ? "…" : <Icon name="folder-plus" size={14} />}
-        </button>
       </div>
       {error ? <span className="session-selector-error" title={error}>!</span> : null}
-      {value && selectedRevision ? (
+      {effectiveValue !== "default" && selectedRevision ? (
         <span className="harness-profile-revision">{selectedRevision}</span>
       ) : null}
     </div>

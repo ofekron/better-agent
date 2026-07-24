@@ -17,6 +17,7 @@ import { logPromptSend } from "../lib/promptSendLog";
 import { SnapshotTransport } from "../lib/snapshotTransport";
 import { SNAPSHOT_BINARY_SUBPROTOCOL } from "../lib/snapshotBinary";
 import { logFailure, logTiming } from "../lib/frontendLogger";
+import { wireHarnessProfileId } from "../lib/harnessProfile";
 import {
   sendWebSocketFrame,
   webSocketDataBytes,
@@ -1743,8 +1744,8 @@ export function useWebSocket(
           send_mode: sendMode || undefined,
           send_target: sendTarget || undefined,
           capability_contexts: capabilityContexts && capabilityContexts.length > 0 ? capabilityContexts : undefined,
-          harness_profile_id: harnessProfileId || undefined,
-          harness_profile_revision: harnessProfileId ? harnessProfileRevision || undefined : undefined,
+          harness_profile_id: wireHarnessProfileId(harnessProfileId),
+          harness_profile_revision: wireHarnessProfileId(harnessProfileId) ? harnessProfileRevision || undefined : undefined,
         });
       } catch (error) {
         logPromptSend("ws_send_throw", {

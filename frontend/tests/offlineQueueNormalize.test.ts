@@ -18,8 +18,6 @@ function createEntry(id: string): OfflineQueueEntry {
       cwd: "/tmp",
       orchestration_mode: "native",
       provider_id: "p",
-      browser_harness_enabled: false,
-      browser_harness_headless: true,
       node_id: "primary",
       created_at: "t",
       updated_at: "t",

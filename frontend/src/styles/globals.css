@@ -9846,6 +9846,27 @@ button.run-badge-clickable:focus-visible {
   color: var(--text-primary);
 }
 
+.settings-page-nav-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.settings-page-nav-group + .settings-page-nav-group {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.settings-page-nav-group-header {
+  padding: 4px 12px 2px;
+  font-size: calc(11px * var(--app-font-scale));
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
+
 @keyframes settings-nav-enter {
   from {
     opacity: 0;
@@ -9875,6 +9896,209 @@ button.run-badge-clickable:focus-visible {
   border: 1px solid var(--border);
   border-radius: 6px;
   background: var(--bg-secondary);
+}
+
+.harness-settings-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.harness-settings-editor-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 12px;
+}
+
+.harness-settings-profile-select {
+  min-width: 220px;
+}
+
+.harness-settings-create-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.harness-settings-create-row input {
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-size: calc(13px * var(--app-font-scale));
+}
+
+.harness-settings-editor-error {
+  padding: 8px 10px;
+  border: 1px solid var(--danger, #e5484d);
+  border-radius: 6px;
+  color: var(--danger, #e5484d);
+  font-size: calc(12px * var(--app-font-scale));
+  animation: modalFadeIn 0.15s ease-out;
+}
+
+.harness-settings-editor-body {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.harness-extension-block {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-primary);
+  animation: modalFadeIn 0.15s ease-out;
+}
+
+.harness-extension-block-title {
+  font-weight: 600;
+  font-size: calc(13px * var(--app-font-scale));
+  color: var(--text-primary);
+}
+
+.harness-field-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 0;
+  border-top: 1px solid var(--border);
+}
+
+.harness-field-row:first-of-type {
+  border-top: none;
+}
+
+.harness-field-row-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  justify-content: space-between;
+}
+
+.harness-field-row-label {
+  font-size: calc(12.5px * var(--app-font-scale));
+  color: var(--text-secondary);
+}
+
+.harness-field-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: calc(11px * var(--app-font-scale));
+  transition: background-color 160ms ease, color 160ms ease;
+}
+
+.harness-field-badge.inherited {
+  background: var(--bg-tertiary);
+  color: var(--text-muted);
+}
+
+.harness-field-badge.overridden {
+  background: var(--accent-dim);
+  color: var(--accent);
+}
+
+.harness-field-reset {
+  border: none;
+  background: transparent;
+  color: inherit;
+  text-decoration: underline;
+  font-size: calc(11px * var(--app-font-scale));
+  cursor: pointer;
+  padding: 0;
+}
+
+.harness-field-resolved-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.harness-field-chip {
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  font-size: calc(11.5px * var(--app-font-scale));
+}
+
+.harness-field-empty {
+  color: var(--text-muted);
+  font-size: calc(11.5px * var(--app-font-scale));
+}
+
+.harness-delta-editor {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.harness-delta-input {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: calc(11px * var(--app-font-scale));
+  color: var(--text-muted);
+}
+
+.harness-delta-input input {
+  padding: 5px 7px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-size: calc(12.5px * var(--app-font-scale));
+  min-width: 220px;
+}
+
+.harness-field-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: calc(12.5px * var(--app-font-scale));
+  color: var(--text-secondary);
+}
+
+.harness-setting-overlay-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 0;
+}
+
+.harness-setting-overlay-key {
+  font-size: calc(12px * var(--app-font-scale));
+  color: var(--text-secondary);
+  min-width: 140px;
+}
+
+.harness-instruction-source-kind {
+  font-size: calc(11.5px * var(--app-font-scale));
+  color: var(--text-muted);
+}
+
+@media (max-width: 720px) {
+  .harness-settings-editor-toolbar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .harness-delta-editor {
+    flex-direction: column;
+  }
+
+  .harness-delta-input input {
+    min-width: 0;
+    width: 100%;
+  }
 }
 
 .settings-page-content > .language-setting,
@@ -10971,6 +11195,14 @@ button.run-badge-clickable:focus-visible {
 .setup-field-hint {
   font-size: calc(11px * var(--app-font-scale));
   color: var(--text-muted);
+}
+
+.ns-modal-hint {
+  display: block;
+  margin-top: 4px;
+  font-size: calc(11px * var(--app-font-scale));
+  color: var(--text-muted);
+  animation: modalFadeIn 0.15s ease-out;
 }
 
 .setup-cancel-btn {

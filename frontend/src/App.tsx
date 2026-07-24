@@ -2275,9 +2275,7 @@ function AppMain({
                 model: queued.model,
                 cwd: queued.cwd,
                 orchestrationMode: queued.orchestration_mode,
-                browserHarnessEnabled: queued.browser_harness_enabled,
                 providerId: queued.provider_id,
-                browserHarnessHeadless: queued.browser_harness_headless,
                 nodeId: queued.node_id,
                 reasoningEffort: queued.reasoning_effort,
                 runner: queued.runner,
@@ -5189,9 +5187,7 @@ function AppMain({
       model: nextModel,
       cwd: nextCwd,
       orchestrationMode: nextMode,
-      browserHarnessEnabled: currentSession?.browser_harness_enabled ?? true,
       providerId: nextProviderId,
-      browserHarnessHeadless: currentSession?.browser_harness_headless ?? true,
       nodeId: currentSession?.node_id ?? "primary",
       reasoningEffort: currentSession?.reasoning_effort || provider?.last_reasoning_effort || provider?.default_reasoning_effort || undefined,
       runner: currentSession?.runner || provider?.runner,
@@ -5613,8 +5609,6 @@ function AppMain({
         provider_id: config.main.providerId,
         harness_profile_id: config.harnessProfileId || "",
         harness_profile_revision: config.harnessProfileRevision || "",
-        browser_harness_enabled: config.browserHarnessEnabled,
-        browser_harness_headless: config.browserHarnessHeadless,
         node_id: config.nodeId,
         created_at: now,
         updated_at: now,
@@ -5734,9 +5728,7 @@ function AppMain({
             model: config.main.model,
             cwd: config.cwd,
             orchestrationMode: config.orchestrationMode,
-            browserHarnessEnabled: config.browserHarnessEnabled,
             providerId: config.main.providerId,
-            browserHarnessHeadless: config.browserHarnessHeadless,
             nodeId: config.nodeId,
             reasoningEffort: config.main.reasoningEffort,
             runner: config.main.runner,
@@ -5778,9 +5770,7 @@ function AppMain({
           model: config.main.model,
           cwd: config.cwd,
           orchestrationMode: config.orchestrationMode,
-          browserHarnessEnabled: config.browserHarnessEnabled,
           providerId: config.main.providerId,
-          browserHarnessHeadless: config.browserHarnessHeadless,
           fileEditEnabled: true,
           fileEditPath: config.fileEditPath,
           nodeId: config.nodeId,
@@ -8219,7 +8209,6 @@ function AppMain({
             capabilityPickerClient={providerConfigSyncClient}
             teamEnabled={builtinExtensions.team}
             machineNodesEnabled={builtinExtensions.machineNodes}
-            browserHarnessEnabled={builtinExtensions.browserHarness}
             allowOfflineCreate={!connected}
           />
         </Suspense>

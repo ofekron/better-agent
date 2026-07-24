@@ -1,4 +1,5 @@
 import type { Permission, Provider, ReasoningEffort, Session } from "../types";
+import { wireHarnessProfileId } from "../lib/harnessProfile";
 
 export type SelectorUpdates = Partial<
   Pick<Session, "provider_id" | "model" | "reasoning_effort" | "runner" | "permission" | "harness_profile_id" | "harness_profile_revision">
@@ -99,8 +100,9 @@ export function changedUpdates(session: Session, draft: SelectorDraft): Selector
     draft.harness_profile_id !== (session.harness_profile_id || "")
     || draft.harness_profile_revision !== (session.harness_profile_revision || "")
   ) {
-    updates.harness_profile_id = draft.harness_profile_id;
-    updates.harness_profile_revision = draft.harness_profile_revision;
+    const wireProfileId = wireHarnessProfileId(draft.harness_profile_id);
+    updates.harness_profile_id = wireProfileId ?? "";
+    updates.harness_profile_revision = wireProfileId ? draft.harness_profile_revision : "";
   }
   return updates;
 }

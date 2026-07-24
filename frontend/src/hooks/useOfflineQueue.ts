@@ -38,8 +38,6 @@ export interface OfflineCreateSessionEntry {
     | "cwd"
     | "orchestration_mode"
     | "provider_id"
-    | "browser_harness_enabled"
-    | "browser_harness_headless"
     | "node_id"
     | "created_at"
     | "updated_at"

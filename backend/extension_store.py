@@ -126,6 +126,7 @@ BUILTIN_SESSION_CONTROL_EXTENSION_ID = "ofek-dev.session-control"
 BUILTIN_COORDINATION_EXTENSION_ID = "ofek-dev.coordination"
 BUILTIN_PROVIDER_CONFIG_SYNC_EXTENSION_ID = "ofek-dev.provider-config-sync"
 BUILTIN_TODOS_EXTENSION_ID = "ofek-dev.todos"
+BUILTIN_FILE_EDIT_EXTENSION_ID = "ofek-dev.file-edit"
 BUILTIN_HARNESS_INSTRUCTIONS_EXTENSION_ID = "better-agent.harness-for-better-agent"
 BUILTIN_USER_ATTENTION_EXTENSION_ID = "ofek-dev.user-attention"
 BUILTIN_SWITCH_CONTROL_EXTENSION_ID = "ofek-dev.switch-control"
@@ -159,6 +160,7 @@ _PUBLIC_EXTENSION_PATHS = {
     BUILTIN_COORDINATION_EXTENSION_ID: "extensions/coordination",
     BUILTIN_PROVIDER_CONFIG_SYNC_EXTENSION_ID: "extensions/provider-config-sync",
     BUILTIN_TODOS_EXTENSION_ID: "extensions/todos",
+    BUILTIN_FILE_EDIT_EXTENSION_ID: "extensions/file-edit",
     BUILTIN_HARNESS_INSTRUCTIONS_EXTENSION_ID: "extensions/harness-instructions",
     BUILTIN_USER_ATTENTION_EXTENSION_ID: "extensions/user-attention",
     BUILTIN_SWITCH_CONTROL_EXTENSION_ID: "extensions/switch-control",
@@ -171,6 +173,7 @@ _EXTENSION_DISPLAY_NAMES = {
     BUILTIN_COORDINATION_EXTENSION_ID: "Coordination",
     BUILTIN_PROVIDER_CONFIG_SYNC_EXTENSION_ID: "Provider Config Sync",
     BUILTIN_TODOS_EXTENSION_ID: "Todos",
+    BUILTIN_FILE_EDIT_EXTENSION_ID: "File Edit",
     BUILTIN_HARNESS_INSTRUCTIONS_EXTENSION_ID: "Harness instructions",
     BUILTIN_USER_ATTENTION_EXTENSION_ID: "User attention",
     BUILTIN_SWITCH_CONTROL_EXTENSION_ID: "Line Switch",

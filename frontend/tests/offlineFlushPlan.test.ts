@@ -39,8 +39,6 @@ const create = (sessionId: string, clientId: string): OfflineCreateSessionEntry 
     cwd: "/tmp/project",
     orchestration_mode: "native",
     provider_id: "claude",
-    browser_harness_enabled: false,
-    browser_harness_headless: true,
     node_id: "primary",
     created_at: "t",
     updated_at: "t",

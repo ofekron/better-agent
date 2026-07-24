@@ -269,40 +269,6 @@ describe("NewSessionModal offline provider cache", () => {
     );
   });
 
-  it("creates through browser-harness extension options", async () => {
-    cacheProviders([provider], provider.id);
-    cacheProviderModels(provider.id, ["cached-default"]);
-    vi.spyOn(globalThis, "fetch").mockRejectedValue(new TypeError("offline"));
-    const onCreate = vi.fn<(config: SessionConfig) => void>();
-
-    const { container, getByLabelText } = render(
-      <NewSessionModal
-        open
-        onClose={() => {}}
-        onCreate={onCreate}
-        defaultCwd="/tmp/project"
-        projects={[]}
-        capabilityPickerClient={capabilityPickerClient}
-      />,
-    );
-
-    await waitFor(() => {
-      expect(container.querySelector(`option[value="${provider.id}"]`)).toBeTruthy();
-    });
-
-    fireEvent.click(getByLabelText("orchestration.browserHarnessHeadless"));
-    fireEvent.click(container.querySelector(".modal-footer .btn-primary")!);
-
-    expect(onCreate).toHaveBeenCalledWith(
-      expect.objectContaining({
-        browserHarnessEnabled: true,
-        browserHarnessHeadless: false,
-      }),
-      undefined,
-      "send-and-open",
-    );
-  });
-
   it("creates file edit sessions without selecting a file in the modal", async () => {
     cacheProviders([provider], provider.id);
     cacheProviderModels(provider.id, ["cached-default"]);
@@ -420,17 +386,16 @@ describe("NewSessionModal offline provider cache", () => {
             extensionId: "ofek-dev.first",
             label: "First extension",
             defaultValue: false,
-            applyToSessionConfig: (value) => ({ browserHarnessEnabled: value }),
+            applyToSessionConfig: (value) => ({ preset: value ? "first" : "" }),
           },
           {
             id: "enabled",
             extensionId: "ofek-dev.second",
             label: "Second extension",
             defaultValue: false,
-            applyToSessionConfig: (value) => ({ browserHarnessHeadless: value }),
+            applyToSessionConfig: (value) => ({ fileEditEnabled: value }),
           },
         ]}
-        browserHarnessEnabled={false}
       />,
     );
 
@@ -443,8 +408,8 @@ describe("NewSessionModal offline provider cache", () => {
 
     expect(onCreate).toHaveBeenCalledWith(
       expect.objectContaining({
-        browserHarnessEnabled: false,
-        browserHarnessHeadless: true,
+        preset: "",
+        fileEditEnabled: true,
       }),
       undefined,
       "send-and-open",
