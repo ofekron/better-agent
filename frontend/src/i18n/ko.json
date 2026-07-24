@@ -1176,6 +1176,7 @@
   "harnessProfile.label": "하네스 프로필",
   "settings.generalTab": "일반 설정",
   "settings.harnessTab": "하네스 설정",
+  "settings.backToList": "설정",
   "settings.harnessProfilesSection": "하네스 프로필",
   "harnessProfile.overrideBadge": "재정의됨",
   "harnessProfile.inheritedBadge": "Default에서 상속됨",

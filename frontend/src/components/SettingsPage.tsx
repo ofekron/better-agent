@@ -2238,6 +2238,16 @@ function ProvidersList({
   onNetworkBindChange,
 }: ProvidersListProps) {
   const { t } = useTranslation();
+  // Mobile only: whether the section list or the selected section's content
+  // is the visible pane. No-op on desktop, where both panes render together.
+  const [mobileNavOpen, setMobileNavOpen] = useState(true);
+  const handleSectionSelect = useCallback(
+    (id: SettingsSection) => {
+      onSectionChange(id);
+      setMobileNavOpen(false);
+    },
+    [onSectionChange],
+  );
   const extensionSettingsModules = useExtensionFrontendModules("settings");
   const extensionSettingsBySection = useMemo(() => {
     const items = new Map<SettingsSection, ExtensionFrontendModule>();
@@ -2395,7 +2405,7 @@ function ProvidersList({
           </button>
         </div>
       </div>
-      <div className="settings-page-layout">
+      <div className={`settings-page-layout${mobileNavOpen ? "" : " settings-page-layout--mobile-detail"}`}>
         <nav className="settings-page-nav" aria-label={t("settings.title")}>
           {(["general", "harness"] as const).map((group) => {
             const groupSections = sections.filter((item) => item.group === group);
@@ -2411,9 +2421,10 @@ function ProvidersList({
                     type="button"
                     className={item.id === section ? "active" : ""}
                     aria-current={item.id === section ? "page" : undefined}
-                    onClick={() => onSectionChange(item.id)}
+                    onClick={() => handleSectionSelect(item.id)}
                   >
-                    {item.label}
+                    <span className="settings-page-nav-button-label">{item.label}</span>
+                    <Icon name="chevron-right" size={14} className="settings-page-nav-button-chevron" />
                   </button>
                 ))}
               </div>
@@ -2421,6 +2432,14 @@ function ProvidersList({
           })}
         </nav>
         <div className="settings-page-content">
+          <button
+            type="button"
+            className="settings-page-content-back"
+            onClick={() => setMobileNavOpen(true)}
+          >
+            <Icon name="chevron-left" size={14} />
+            {t("settings.backToList")}
+          </button>
           {body}
           {section === "providers" && (
             <div className="settings-page-provider-actions">

@@ -9844,6 +9844,10 @@ button.run-badge-clickable:focus-visible {
 
 .settings-page-nav button {
   width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
   text-align: left;
   padding: 11px 12px;
   border: 1px solid transparent;
@@ -9870,6 +9874,22 @@ button.run-badge-clickable:focus-visible {
   border-color: var(--accent);
   background: var(--accent-dim);
   color: var(--text-primary);
+}
+
+.settings-page-nav-button-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-page-nav-button-chevron {
+  flex: none;
+  opacity: 0.45;
+}
+
+.settings-page-content-back {
+  display: none;
 }
 
 .settings-page-nav-group {
@@ -17997,12 +18017,16 @@ button.progress-inflight {
     grid-column: 1 / -1;
   }
 
+  /* Master-detail: only one pane is visible at a time. The section list
+     (.settings-page-nav) is the default pane; picking a section swaps in
+     .settings-page-layout--mobile-detail, which swaps the visible pane to
+     .settings-page-content. Both panes fill the same area so there's no
+     squeezed dual-pane layout fighting for height. */
   .settings-page-layout {
     flex: 1;
     min-height: 0;
-    grid-template-columns: 1fr;
-    grid-template-rows: auto minmax(0, 1fr);
-    gap: 8px;
+    display: block;
+    position: relative;
     padding:
       8px
       calc(10px + env(safe-area-inset-right, 0px))
@@ -18012,35 +18036,98 @@ button.progress-inflight {
   }
 
   .settings-page-nav {
-    display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-    gap: 6px;
-    overflow: visible;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    overflow-y: auto;
     min-height: auto;
-    padding: 6px;
+    padding: 2px 0 12px;
+    border: none;
+    background: transparent;
+    -webkit-overflow-scrolling: touch;
   }
 
-  .settings-page-nav button {
-    width: 100%;
-    min-width: 0;
-    min-height: 38px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    text-align: center;
+  .settings-page-layout--mobile-detail .settings-page-nav {
+    display: none;
+  }
+
+  .settings-page-nav-group {
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    overflow: hidden;
+    background: var(--bg-secondary);
+  }
+
+  .settings-page-nav-group + .settings-page-nav-group {
+    margin-top: 0;
+    padding-top: 0;
+    border-top: none;
+  }
+
+  .settings-page-nav-group-header {
+    padding: 10px 14px 6px;
+  }
+
+  .settings-page-nav-group button {
+    min-height: 46px;
+    border-radius: 0;
+    border: none;
+    border-bottom: 1px solid var(--border);
+    text-align: left;
     white-space: normal;
-    line-height: 1.15;
-    padding: 7px 6px;
-    border-radius: 6px;
-    font-size: calc(11px * var(--app-font-scale));
+    line-height: 1.2;
+    padding: 12px 14px;
+    font-size: calc(14px * var(--app-font-scale));
+  }
+
+  .settings-page-nav-group button:last-child {
+    border-bottom: none;
+  }
+
+  .settings-page-nav-button-label {
+    white-space: normal;
+    overflow: visible;
+    text-overflow: clip;
+  }
+
+  .settings-page-nav-group button:hover,
+  .settings-page-nav-group button:active {
+    transform: none;
+  }
+
+  .settings-page-nav-group button.active {
+    border-color: transparent;
   }
 
   .settings-page-content {
+    display: none;
+    height: 100%;
+    flex-direction: column;
     min-height: 0;
-    padding: 10px;
-    border-radius: 6px;
+    padding: 10px 12px;
+    border-radius: 10px;
     overflow-x: hidden;
     -webkit-overflow-scrolling: touch;
+  }
+
+  .settings-page-layout--mobile-detail .settings-page-content {
+    display: flex;
+  }
+
+  .settings-page-content-back {
+    display: flex;
+    align-self: flex-start;
+    align-items: center;
+    gap: 2px;
+    margin: -4px 0 4px -6px;
+    padding: 8px 8px 8px 4px;
+    border: none;
+    background: transparent;
+    color: var(--accent);
+    font-size: calc(14px * var(--app-font-scale));
+    font-weight: 600;
+    cursor: pointer;
   }
 
   .settings-page-content > .language-setting,

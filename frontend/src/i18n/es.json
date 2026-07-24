@@ -1176,6 +1176,7 @@
   "harnessProfile.label": "Perfil de harness",
   "settings.generalTab": "Configuración general",
   "settings.harnessTab": "Configuración del harness",
+  "settings.backToList": "Ajustes",
   "settings.harnessProfilesSection": "Perfiles de harness",
   "harnessProfile.overrideBadge": "Sobrescrito",
   "harnessProfile.inheritedBadge": "Heredado de Default",

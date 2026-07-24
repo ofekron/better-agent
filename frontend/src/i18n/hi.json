@@ -1177,6 +1177,7 @@
   "harnessProfile.label": "हार्नेस प्रोफ़ाइल",
   "settings.generalTab": "सामान्य सेटिंग्स",
   "settings.harnessTab": "हार्नेस सेटिंग्स",
+  "settings.backToList": "सेटिंग्स",
   "settings.harnessProfilesSection": "हार्नेस प्रोफ़ाइलें",
   "harnessProfile.overrideBadge": "ओवरराइड किया गया",
   "harnessProfile.inheritedBadge": "Default से इनहेरिट किया गया",

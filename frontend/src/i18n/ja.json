@@ -1173,6 +1173,7 @@
   "harnessProfile.label": "ハーネスプロファイル",
   "settings.generalTab": "一般設定",
   "settings.harnessTab": "ハーネス設定",
+  "settings.backToList": "設定",
   "settings.harnessProfilesSection": "ハーネスプロファイル",
   "harnessProfile.overrideBadge": "上書き済み",
   "harnessProfile.inheritedBadge": "デフォルトから継承",

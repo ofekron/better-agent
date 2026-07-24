@@ -1176,6 +1176,7 @@
   "harnessProfile.label": "ملف تعريف الحزمة",
   "settings.generalTab": "الإعدادات العامة",
   "settings.harnessTab": "إعدادات الـ harness",
+  "settings.backToList": "الإعدادات",
   "settings.harnessProfilesSection": "ملفات تعريف الـ harness",
   "harnessProfile.overrideBadge": "مُتجاوَز",
   "harnessProfile.inheritedBadge": "موروث من Default",

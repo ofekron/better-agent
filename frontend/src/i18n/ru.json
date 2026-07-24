@@ -1179,6 +1179,7 @@
   "harnessProfile.label": "Профиль harness",
   "settings.generalTab": "Общие настройки",
   "settings.harnessTab": "Настройки harness",
+  "settings.backToList": "Настройки",
   "settings.harnessProfilesSection": "Профили harness",
   "harnessProfile.overrideBadge": "Переопределено",
   "harnessProfile.inheritedBadge": "Унаследовано от Default",

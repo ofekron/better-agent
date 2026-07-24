@@ -1220,6 +1220,7 @@
   "harnessProfile.label": "פרופיל harness",
   "settings.generalTab": "הגדרות כלליות",
   "settings.harnessTab": "הגדרות harness",
+  "settings.backToList": "הגדרות",
   "settings.harnessProfilesSection": "פרופילי harness",
   "harnessProfile.overrideBadge": "נדרס",
   "harnessProfile.inheritedBadge": "עובר בירושה מ-Default",

@@ -1173,6 +1173,7 @@
   "harnessProfile.label": "Harness-profiel",
   "settings.generalTab": "Algemene instellingen",
   "settings.harnessTab": "Harness-instellingen",
+  "settings.backToList": "Instellingen",
   "settings.harnessProfilesSection": "Harness-profielen",
   "harnessProfile.overrideBadge": "Overschreven",
   "harnessProfile.inheritedBadge": "Overgenomen van Default",

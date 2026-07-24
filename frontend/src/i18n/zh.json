@@ -1177,6 +1177,7 @@
   "harnessProfile.label": "Harness 配置文件",
   "settings.generalTab": "常规设置",
   "settings.harnessTab": "Harness 设置",
+  "settings.backToList": "设置",
   "settings.harnessProfilesSection": "Harness 配置文件",
   "harnessProfile.overrideBadge": "已覆盖",
   "harnessProfile.inheritedBadge": "继承自 Default",
