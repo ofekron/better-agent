@@ -241,7 +241,7 @@ const TEMPLATES: Template[] = [
       mode: "subscription",
       base_url: "",
       config_dir: "",
-      default_model: "claude-opus-4-8[1m]",
+      default_model: "claude-opus-5[1m]",
       default_reasoning_effort: "medium",
     },
   },
@@ -3507,7 +3507,7 @@ function ProviderForm({
                 type="text"
                 value={defaultModel}
                 onChange={(e) => setDefaultModel(e.target.value)}
-                placeholder="sonnet, glm-4.6, claude-opus-4-8[1m], …"
+                placeholder="sonnet, glm-4.6, claude-opus-5[1m], …"
                 spellCheck={false}
               />
               {mode === "edit" && modelOptions !== null && (
