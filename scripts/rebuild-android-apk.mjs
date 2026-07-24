@@ -115,7 +115,13 @@ const VERSION_NAME = shortSha ? `build-${shortSha}` : `build-${VERSION_CODE}`;
 
 log(`APK-relevant changes detected — rebuilding debug APK (v${VERSION_NAME}, code ${VERSION_CODE})…`);
 try {
-  execSync("npx vite build", { cwd: FRONTEND, env, stdio: "inherit" });
+  // --mode mobile is required: vite.config.ts aliases @capacitor/* to
+  // src/platform/web/* no-op shims (isNativePlatform() => false) unless
+  // mode is exactly "mobile". Without this flag the APK ships a bundle
+  // that can never detect it's native or receive real plugin events
+  // (e.g. the deep-link server-URL handoff), regardless of what's
+  // registered in the native Android project.
+  execSync("npx vite build --mode mobile", { cwd: FRONTEND, env, stdio: "inherit" });
   // cap sync discovers native plugins from frontend/package.json's
   // dependencies, which intentionally excludes Capacitor mobile packages
   // (see cap-sync.mjs) — a bare call here strips every native plugin

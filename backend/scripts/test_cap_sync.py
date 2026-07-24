@@ -119,9 +119,29 @@ def test_rebuild_android_apk_wraps_cap_sync_in_mobile_package_json() -> None:
         )
 
 
+def test_rebuild_android_apk_builds_vite_in_mobile_mode() -> None:
+    # vite.config.ts aliases every @capacitor/* import to a no-op web shim
+    # (isNativePlatform() => false, empty plugin implementations) unless
+    # built with `--mode mobile`. rebuild-android-apk.mjs previously ran a
+    # bare `npx vite build`, so the shipped Android bundle always got the
+    # web shims -- the app could never detect it was native or receive
+    # real plugin events (e.g. the deep-link server-URL handoff), no
+    # matter what was registered in the native Android project.
+    source = REBUILD_ANDROID_APK.read_text()
+    vite_build_calls = [
+        m.group(0) for m in re.finditer(r'execSync\(\s*"npx vite build[^"]*"', source)
+    ]
+    assert vite_build_calls, "expected an `npx vite build` invocation in the file"
+    for call in vite_build_calls:
+        assert "--mode mobile" in call, (
+            f"vite build call must pass --mode mobile, got: {call!r}"
+        )
+
+
 if __name__ == "__main__":
     test_mobile_deps_merged_in_during_the_call()
     test_package_json_restored_after_success()
     test_package_json_restored_after_failure()
     test_rebuild_android_apk_wraps_cap_sync_in_mobile_package_json()
+    test_rebuild_android_apk_builds_vite_in_mobile_mode()
     print("cap-sync tests passed")
