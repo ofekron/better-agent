@@ -243,6 +243,49 @@ describe("harness smoke", () => {
     h.unmount();
   });
 
+  it("error terminal drops a streaming assistant placeholder instead of leaving 'No output'", async () => {
+    const session = makeSession({
+      messages: [
+        makeUserMsg({ id: "u1", content: "do work", seq: 0 }),
+        // In-flight assistant placeholder (streaming, no content yet).
+        makeAssistantMsg({ id: "live-1", isStreaming: true, content: "", events: [] }),
+      ],
+    });
+    const h = await renderApp({ seed: { sessions: [session] } });
+    await h.selectSession(session.id);
+    await h.flush();
+
+    expect(
+      h.toJSON().chat.messages.find((m) => m.role === "assistant"),
+    ).toBeDefined();
+
+    // Backend exception path: it marks the USER message errored
+    // (mark_user_error) and REMOVES the persisted assistant message,
+    // then emits `error` with NO client_id and NO messages_delta. The
+    // frontend must mirror that: surface the failure on the prompt
+    // bubble and drop the orphan placeholder (no phantom "No output").
+    h.emit({
+      type: "error",
+      data: { app_session_id: session.id, error: "kaboom" },
+    });
+    await h.flush();
+
+    const view = h.toJSON();
+    // The failure is surfaced in-chat on the prompt bubble…
+    expect(h.raw.container.textContent).toMatch(/kaboom/);
+    const failed = view.chat.messages.find(
+      (m) => m.role === "user" && m.status === "error",
+    );
+    expect(failed).toBeDefined();
+    // …and no phantom "No output" assistant turn is left behind.
+    expect(h.raw.container.textContent).not.toMatch(/No output/);
+    expect(
+      view.chat.messages.find((m) => m.role === "assistant"),
+    ).toBeUndefined();
+
+    h.unmount();
+  });
+
   it("correlated send error keeps the failed prompt visible and clears retry backlog", async () => {
     const session = makeSession();
     const h = await renderApp({ seed: { sessions: [session] } });

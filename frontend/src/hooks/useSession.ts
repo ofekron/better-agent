@@ -692,6 +692,74 @@ export function mergeIncomingMessagesForNode(
   return merged;
 }
 
+/** Pure reducer for turn-terminal WS frames (turn_complete /
+ * turn_stopped / error) over a node's message list.
+ *
+ * - Normal terminal: flip `isStreaming` off on the in-flight assistant
+ *   and stamp `stopped_at` / `interrupted_by_msg_id`.
+ * - Error terminal (`errorText !== undefined`): the backend's exception
+ *   path in `_finalize_turn_messages` marks the USER message errored
+ *   (`mark_user_error`) AND removes the persisted assistant message,
+ *   then emits the `error` frame with NO `client_id` and NO
+ *   `messages_delta`. Mirror that here: stamp the turn's initiating user
+ *   message with the failure (so the error card renders in-chat instead
+ *   of vanishing) and drop the orphaned streaming placeholder (which
+ *   would otherwise linger as an empty "No output" bubble that hides
+ *   the failure). Any later `messages_delta` / replay re-adds the
+ *   canonical message, and the stamped user error matches the persisted
+ *   `mark_user_error`, so reload stays consistent.
+ *
+ * Returns the SAME `msgs` reference when nothing changed. */
+export function finalizeTerminalAssistant(
+  msgs: ChatMessage[],
+  opts: {
+    stoppedAt?: string;
+    interruptedByMsgId?: string | null;
+    errorText?: string;
+  },
+): ChatMessage[] {
+  const lastIdx = msgs.length - 1;
+  const last = msgs[lastIdx];
+  if (!last || last.role !== "assistant" || !last.isStreaming) return msgs;
+  if (opts.errorText !== undefined) {
+    // Find the user message that initiated this failed turn (the most
+    // recent user message preceding the in-flight assistant).
+    let userIdx = -1;
+    for (let i = lastIdx - 1; i >= 0; i--) {
+      if (msgs[i].role === "user") {
+        userIdx = i;
+        break;
+      }
+    }
+    const withoutPlaceholder = msgs.slice(0, lastIdx);
+    if (userIdx === -1) return withoutPlaceholder;
+    const userMsg = withoutPlaceholder[userIdx];
+    // A send-level error (client_id present) already marked this via
+    // onPromptSendError — don't clobber a richer existing error.
+    if (userMsg.status === "error" && userMsg.errorText) {
+      return withoutPlaceholder;
+    }
+    const stamped: ChatMessage = {
+      ...userMsg,
+      status: "error",
+      errorText: opts.errorText,
+    };
+    return [
+      ...withoutPlaceholder.slice(0, userIdx),
+      stamped,
+      ...withoutPlaceholder.slice(userIdx + 1),
+    ];
+  }
+  const updated: ChatMessage = {
+    ...last,
+    isStreaming: false,
+    isDetached: false,
+    ...(opts.stoppedAt ? { stopped_at: opts.stoppedAt } : {}),
+    ...(opts.interruptedByMsgId ? { interrupted_by_msg_id: opts.interruptedByMsgId } : {}),
+  };
+  return [...msgs.slice(0, lastIdx), updated];
+}
+
 /** Pure reducer for one live WS turn-event over a node's message list.
  *
  * Routes the event onto the in-flight assistant (via
@@ -2145,30 +2213,28 @@ export function useSession(authStatus?: string) {
    * stamps `stopped_at` so the "Running…" indicator disappears
    * immediately without waiting for a REST refetch. */
   const markTurnTerminal = useCallback(
-    (sessionId: string, stoppedAt?: string, interruptedByMsgId?: string | null) => {
+    (
+      sessionId: string,
+      stoppedAt?: string,
+      interruptedByMsgId?: string | null,
+      errorText?: string,
+    ) => {
       console.debug(
-        "[stale-dbg] markTurnTerminal %s stoppedAt=%s interruptedBy=%s",
+        "[stale-dbg] markTurnTerminal %s stoppedAt=%s interruptedBy=%s error=%s",
         sessionId.slice(0, 8), stoppedAt ?? "none", interruptedByMsgId ?? "none",
+        errorText !== undefined ? "yes" : "no",
       );
       setCurrentSession((prev) => {
         if (!prev) return prev;
         return updateNodeById(prev, sessionId, (node) => {
           const msgs = node.messages || [];
-          const lastIdx = msgs.length - 1;
-          const last = msgs[lastIdx];
-          if (!last || last.role !== "assistant" || !last.isStreaming)
-            return node;
-          const updated: ChatMessage = {
-            ...last,
-            isStreaming: false,
-            isDetached: false,
-            ...(stoppedAt ? { stopped_at: stoppedAt } : {}),
-            ...(interruptedByMsgId ? { interrupted_by_msg_id: interruptedByMsgId } : {}),
-          };
-          return {
-            ...node,
-            messages: [...msgs.slice(0, lastIdx), updated],
-          };
+          const nextMessages = finalizeTerminalAssistant(msgs, {
+            stoppedAt,
+            interruptedByMsgId,
+            errorText,
+          });
+          if (nextMessages === msgs) return node;
+          return { ...node, messages: nextMessages };
         });
       });
     },

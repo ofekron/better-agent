@@ -990,7 +990,7 @@ async def test_run_index_uses_ledger_cache_without_state_scan() -> None:
     from runs_dir import _append_run_state_ledger, runs_root
 
     nsm_mod._RUN_INDEX = None
-    nsm_mod._RUN_INDEX_MTIME = 0.0
+    nsm_mod._RUN_INDEX_MTIME_NS = 0
     runs_dir_mod._RUN_STATE_LEDGER_CACHE.clear()
     root = runs_root()
     for index in range(3):
@@ -1008,7 +1008,7 @@ async def test_run_index_uses_ledger_cache_without_state_scan() -> None:
         _append_run_state_ledger(state_path, data)
     assert runs_dir_mod.run_dirs_by_app_session(root)["RUN-INDEX-APP-2"] == root / "run-index-ledger-2"
     nsm_mod._RUN_INDEX = None
-    nsm_mod._RUN_INDEX_MTIME = 0.0
+    nsm_mod._RUN_INDEX_MTIME_NS = 0
     original_read_text = runs_dir_mod.Path.read_text
 
     def fail_state_read(path, *args, **kwargs):  # type: ignore[no-untyped-def]
@@ -1032,7 +1032,7 @@ async def test_run_index_append_extends_ledger_cache_without_state_scan() -> Non
     from runs_dir import _append_run_state_ledger, runs_root
 
     nsm_mod._RUN_INDEX = None
-    nsm_mod._RUN_INDEX_MTIME = 0.0
+    nsm_mod._RUN_INDEX_MTIME_NS = 0
     runs_dir_mod._RUN_STATE_LEDGER_CACHE.clear()
     root = runs_root()
     run_a = root / "run-index-append-a"
@@ -1047,7 +1047,7 @@ async def test_run_index_append_extends_ledger_cache_without_state_scan() -> Non
     _append_run_state_ledger(state_a, data_a)
     assert nsm_mod._run_index()["RUN-INDEX-APPEND-A"] == run_a
     nsm_mod._RUN_INDEX = None
-    nsm_mod._RUN_INDEX_MTIME = 0.0
+    nsm_mod._RUN_INDEX_MTIME_NS = 0
     run_b = root / "run-index-append-b"
     run_b.mkdir(parents=True, exist_ok=True)
     state_b = run_b / "state.json"
@@ -1082,7 +1082,7 @@ async def test_run_index_cache_rebuild_uses_latest_written_at_for_duplicate_app(
     import uuid
 
     nsm_mod._RUN_INDEX = None
-    nsm_mod._RUN_INDEX_MTIME = 0.0
+    nsm_mod._RUN_INDEX_MTIME_NS = 0
     runs_dir_mod._RUN_STATE_LEDGER_CACHE.clear()
     root = runs_root()
     suffix = uuid.uuid4().hex
@@ -1108,7 +1108,7 @@ async def test_run_index_cache_rebuild_uses_latest_written_at_for_duplicate_app(
     index = runs_dir_mod.run_dirs_by_app_session(root)
     assert index[app_sid] == newer
     nsm_mod._RUN_INDEX = None
-    nsm_mod._RUN_INDEX_MTIME = 0.0
+    nsm_mod._RUN_INDEX_MTIME_NS = 0
     assert nsm_mod._run_index()[app_sid] == newer
     print("PASS test_run_index_cache_rebuild_uses_latest_written_at_for_duplicate_app")
 
@@ -1118,7 +1118,7 @@ async def test_run_index_app_backfill_orders_duplicate_app_by_state_mtime() -> N
     import uuid
 
     nsm_mod._RUN_INDEX = None
-    nsm_mod._RUN_INDEX_MTIME = 0.0
+    nsm_mod._RUN_INDEX_MTIME_NS = 0
     runs_dir_mod._RUN_STATE_LEDGER_CACHE.clear()
     root = runs_root()
     suffix = uuid.uuid4().hex

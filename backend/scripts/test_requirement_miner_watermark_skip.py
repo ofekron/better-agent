@@ -23,11 +23,11 @@ def test_ba_session_miner_skips_unchanged_snapshot_before_json_parse(tmp_path: P
         json.dumps({"id": "s1", "cwd": "/repo", "messages": []}),
         encoding="utf-8",
     )
-    current_mtime = max(
-        session_miner._mtime(session_path),
-        session_miner._mtime(sessions / "s1" / "events.jsonl"),
+    current_fp = (
+        *session_miner._mtime(session_path),
+        *session_miner._mtime(sessions / "s1" / "events.jsonl"),
     )
-    miner = session_miner.SessionMiner({"s1.json": {"mtime": current_mtime}}, root=sessions)
+    miner = session_miner.SessionMiner({"s1.json": {"fp": current_fp}}, root=sessions)
 
     with mock.patch.object(session_miner.json, "loads", side_effect=AssertionError("parsed unchanged session")):
         assert list(miner) == []
@@ -43,7 +43,7 @@ def test_ba_session_miner_parses_changed_snapshot(tmp_path: Path) -> None:
         json.dumps({"id": "s1", "cwd": "/repo", "messages": []}),
         encoding="utf-8",
     )
-    miner = session_miner.SessionMiner({"s1.json": {"mtime": 0.0}}, root=sessions)
+    miner = session_miner.SessionMiner({}, root=sessions)
 
     visits = list(miner)
 
@@ -78,7 +78,7 @@ def _native_candidate(tmp_path: Path, mtime: float = 10.0) -> native_session_min
 
 def test_native_miner_skips_unchanged_candidate_before_parse(tmp_path: Path) -> None:
     candidate = _native_candidate(tmp_path)
-    miner = _NativeTestMiner({"native:s1": {"mtime": candidate.mtime}}, candidate)
+    miner = _NativeTestMiner({"native:s1": {"fp": candidate.mtime}}, candidate)
 
     with mock.patch.object(candidate, "parse", side_effect=AssertionError("parsed unchanged native transcript")):
         assert list(miner) == []
@@ -95,7 +95,7 @@ def test_native_miner_parses_changed_candidate(tmp_path: Path) -> None:
         messages=[],
         events_by_msg_id={},
     )
-    miner = _NativeTestMiner({"native:s1": {"mtime": 0.0}}, candidate)
+    miner = _NativeTestMiner({}, candidate)
 
     with mock.patch.object(candidate, "parse", return_value=visit) as parse:
         visits = list(miner)

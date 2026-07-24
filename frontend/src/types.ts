@@ -540,7 +540,26 @@ export interface UserApprovalRequest extends UserInteractionRequestBase {
   prompt: string;
 }
 
-export type UserInteractionRequest = UserInputRequest | UserApprovalRequest;
+export type MemoryType = "user" | "feedback" | "project" | "reference";
+export type MemoryScopeType = "global" | "project" | "folder";
+
+export interface MemoryProposal {
+  action: "add" | "edit";
+  name: string;
+  description: string;
+  type: MemoryType;
+  content: string;
+  scope_type: MemoryScopeType;
+  scope_path: string;
+  target_slug?: string;
+}
+
+export interface MemoryProposalRequest extends UserInteractionRequestBase {
+  kind: "memory";
+  memory_proposal: MemoryProposal;
+}
+
+export type UserInteractionRequest = UserInputRequest | UserApprovalRequest | MemoryProposalRequest;
 
 export interface WorkerPanel {
   delegation_id: string;

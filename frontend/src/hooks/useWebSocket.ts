@@ -180,11 +180,15 @@ interface UseWebSocketOptions {
   /** Turn ended (complete, stopped, or error). Gives the session layer
    * a chance to flip `isStreaming` on the in-flight assistant message
    * and stamp `stopped_at` so the "Running…" indicator vanishes
-   * immediately without waiting for REST. */
+   * immediately without waiting for REST. When `errorText` is present
+   * (the `error` frame), the backend's exception path already removed
+   * the persisted assistant message, so the caller drops the live
+   * streaming placeholder rather than leaving a phantom "No output". */
   onTurnTerminal?: (
     appSessionId: string,
     stoppedAt?: string,
-    interruptedByMsgId?: string | null
+    interruptedByMsgId?: string | null,
+    errorText?: string,
   ) => void;
   /** Backend lost the turn (shutdown/restart) but the detached runner
    * keeps the CLI alive. Caller stamps `isDetached` on the in-flight
@@ -1168,7 +1172,7 @@ export function useWebSocket(
           if (sid && d?.client_id) {
             onPromptSendErrorRef.current?.(sid, d.client_id, errorText);
           }
-          if (sid) onTurnTerminalRef.current?.(sid);
+          if (sid) onTurnTerminalRef.current?.(sid, undefined, undefined, errorText);
         }
 
         if (event.type === "rewind_complete") {

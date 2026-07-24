@@ -91,47 +91,62 @@ def _events_path(root: Path, sid: str) -> Path:
     return root / sid / "events.jsonl"
 
 
-def _mtime(path: Path) -> float:
+def _mtime(path: Path) -> tuple[int, int]:
+    """(mtime_ns, size) identity fingerprint for a file.
+
+    Plain `st_mtime` has 1-second resolution: two writes landing in the same
+    wall-clock second collapse to an identical value, so a source that
+    changed twice within one second looked "unchanged" on the second write
+    and was silently skipped until a later-second write finally bumped the
+    watermark. Nanosecond mtime + size closes that gap.
+    """
     try:
-        return path.stat().st_mtime
+        st = path.stat()
+        return (st.st_mtime_ns, st.st_size)
     except OSError:
-        return 0.0
+        return (0, 0)
 
 
 class SessionMinerBase(ABC):
     """Source-agnostic miner driver.
 
     Subclasses implement :meth:`_iter_sources`, yielding one ``(key, visit,
-    mtime)`` triple per candidate source (the base applies the delta filter, so
+    fp)`` triple per candidate source (the base applies the delta filter, so
     yield every candidate — changed or not). ``key`` is the stable watermark
-    identifier (e.g. the session-json filename); ``mtime`` is the freshness
+    identifier (e.g. the session-json filename); ``fp`` is the freshness
     fingerprint (the base stores it and uses it to skip unchanged sources).
 
-    ``state`` maps ``key -> {"mtime": float}``; persisting ``state`` between
-    runs makes every pass delta-only. ``scanned_count`` is the total source
-    files examined (changed or not).
+    ``state`` maps ``key -> {"fp": fingerprint}``; persisting ``state``
+    between runs makes every pass delta-only. ``scanned_count`` is the total
+    source files examined (changed or not).
     """
 
     def __init__(self, state: dict, *, root: Path | None = None) -> None:
         self._state = state
         self._root = root or sessions_dir()
         self._custom_root = root is not None
-        self._pending_watermarks: dict[str, float] = {}
+        self._pending_watermarks: dict[str, object] = {}
         self.scanned_count = 0
 
     @abstractmethod
-    def _iter_sources(self) -> Iterable[tuple[str, SessionVisit, float]]:
-        """Yield ``(key, visit, mtime)`` for every candidate source."""
+    def _iter_sources(self) -> Iterable[tuple[str, SessionVisit, object]]:
+        """Yield ``(key, visit, fp)`` for every candidate source."""
 
-    def source_changed(self, key: str, current_mtime: float) -> bool:
-        return current_mtime > self._state.get(key, {}).get("mtime", 0.0)
+    def source_changed(self, key: str, current_fp: object) -> bool:
+        # Equality, not `>`: a `>` watermark can only ever move forward, so a
+        # source whose fingerprint moves backward (mtime rolled back by a
+        # restore, or any other non-monotonic write) would be seen as
+        # "unchanged" forever. Equality also correctly treats "identical
+        # fingerprint" as unchanged regardless of fingerprint shape (float
+        # mtime for native-miner subclasses, (mtime_ns, size) tuple here).
+        return current_fp != self._state.get(key, {}).get("fp")
 
     def __iter__(self) -> Iterable[SessionVisit]:
-        for key, visit, current_mtime in self._iter_sources():
+        for key, visit, current_fp in self._iter_sources():
             self.scanned_count += 1
-            if not self.source_changed(key, current_mtime):
+            if not self.source_changed(key, current_fp):
                 continue
-            self._pending_watermarks[key] = current_mtime
+            self._pending_watermarks[key] = current_fp
             yield visit
 
     def mine(self, consumers: list[SessionConsumer]) -> dict[str, int]:
@@ -150,14 +165,14 @@ class SessionMinerBase(ABC):
         return counts
 
     def apply_watermarks(self) -> None:
-        """Write the per-source mtimes recorded during the last iteration.
+        """Write the per-source fingerprints recorded during the last iteration.
 
         Called automatically by :meth:`mine`; callers that drive ``visit``
         across multiple sources manually (e.g. a dual native + BA pass) call
         this once per source after iterating, then persist ``state``.
         """
-        for key, mtime in self._pending_watermarks.items():
-            self._state[key] = {"mtime": mtime}
+        for key, fp in self._pending_watermarks.items():
+            self._state[key] = {"fp": fp}
 
 
 class SessionMiner(SessionMinerBase):
@@ -166,7 +181,8 @@ class SessionMiner(SessionMinerBase):
     Iterates ``sessions/*.json`` (skipping ``.summary.json``) and yields one
     :class:`SessionVisit` per session changed since the stored watermark, with
     messages from the session snapshot and events from the sibling
-    ``events.jsonl``. ``state`` maps ``<session.json name> -> {"mtime": float}``.
+    ``events.jsonl``. ``state`` maps
+    ``<session.json name> -> {"fp": (mtime_ns, size, mtime_ns, size)}``.
     """
 
     def _session_json_files(self) -> Iterable[Path]:
@@ -177,17 +193,20 @@ class SessionMiner(SessionMinerBase):
         import session_store
         return session_store._session_json_files()
 
-    def _iter_sources(self) -> Iterable[tuple[str, SessionVisit, float]]:
+    def _iter_sources(self) -> Iterable[tuple[str, SessionVisit, tuple]]:
         for session_json in self._session_json_files():
             if session_json.name.endswith(".summary.json"):
                 continue
             sid = session_json.stem
             key = session_json.name
-            current_mtime = max(
-                _mtime(session_json),
-                _mtime(_events_path(session_json.parent, sid)),
-            )
-            if not self.source_changed(key, current_mtime):
+            # Concatenate both files' fingerprints rather than taking their
+            # max: max() picks whichever file's (mtime_ns, size) tuple sorts
+            # higher, so a change to the *other* file that happens to sort
+            # lower (e.g. events.jsonl truncated/rewritten smaller) would be
+            # silently invisible to the watermark. Concatenation changes
+            # whenever either file changes, unconditionally.
+            current_fp = (*_mtime(session_json), *_mtime(_events_path(session_json.parent, sid)))
+            if not self.source_changed(key, current_fp):
                 self.scanned_count += 1
                 continue
             try:
@@ -203,7 +222,7 @@ class SessionMiner(SessionMinerBase):
                 messages=data.get("messages", []) if isinstance(data.get("messages"), list) else [],
                 events_by_msg_id=event_rows_by_msg_id_with_orphans(data, sid),
             )
-            yield key, visit, current_mtime
+            yield key, visit, current_fp
 
 
 def mine_registered(state: dict) -> dict[str, int]:

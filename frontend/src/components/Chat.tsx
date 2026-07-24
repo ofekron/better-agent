@@ -15,6 +15,10 @@ import type {
   UserApprovalRequest,
   UserInputRequest,
   UserInteractionRequest,
+  MemoryProposal,
+  MemoryProposalRequest,
+  MemoryType,
+  MemoryScopeType,
   ToolApproval,
   Provider,
   RunInfo,
@@ -270,6 +274,163 @@ export function UserApprovalCard({
           {submitting ? t("userApproval.submitting") : t("userApproval.approve")}
         </button>
       </div>
+    </div>
+  );
+}
+
+const MEMORY_TYPES = ["user", "feedback", "project", "reference"] as const;
+const MEMORY_SCOPE_TYPES = ["global", "project", "folder"] as const;
+
+export function MemoryProposalCard({
+  request,
+  onDone,
+}: {
+  request: MemoryProposalRequest;
+  onDone: (requestId: string) => void;
+}) {
+  const { t } = useTranslation();
+  const [fields, setFields] = useState<MemoryProposal>(() => ({ ...request.memory_proposal }));
+  const [expanded, setExpanded] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [failed, setFailed] = useState(false);
+  const canSubmit = fields.name.trim() && fields.description.trim() && fields.content.trim()
+    && (fields.scope_type === "global" || fields.scope_path.trim());
+
+  const set = <K extends keyof MemoryProposal>(key: K, value: MemoryProposal[K]) =>
+    setFields((prev) => ({ ...prev, [key]: value }));
+
+  const resolve = async (approved: boolean) => {
+    if (submitting) return;
+    if (approved && !canSubmit) return;
+    setSubmitting(true);
+    setFailed(false);
+    try {
+      const res = await fetch(`${API}/api/user-input/${encodeURIComponent(request.request_id)}/resolve`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({
+          app_session_id: request.app_session_id,
+          approved,
+          ...(approved ? { edited: fields } : {}),
+        }),
+      });
+      if (res.ok) {
+        onDone(request.request_id);
+        return;
+      }
+      setFailed(true);
+    } catch {
+      setFailed(true);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const fieldsBody = (
+    <>
+      <label className="memory-proposal-card__field">
+        <span>{t("memoryProposal.name")}</span>
+        <input
+          value={fields.name}
+          onChange={(e) => set("name", e.target.value)}
+          disabled={submitting}
+        />
+      </label>
+      <label className="memory-proposal-card__field">
+        <span>{t("memoryProposal.description")}</span>
+        <input
+          value={fields.description}
+          onChange={(e) => set("description", e.target.value)}
+          disabled={submitting}
+        />
+      </label>
+      <div className="memory-proposal-card__row">
+        <label className="memory-proposal-card__field">
+          <span>{t("memoryProposal.type")}</span>
+          <select value={fields.type} onChange={(e) => set("type", e.target.value as MemoryType)} disabled={submitting}>
+            {MEMORY_TYPES.map((type) => (
+              <option key={type} value={type}>{t(`memoryProposal.type_${type}`)}</option>
+            ))}
+          </select>
+        </label>
+        <label className="memory-proposal-card__field">
+          <span>{t("memoryProposal.scope")}</span>
+          <select
+            value={fields.scope_type}
+            onChange={(e) => set("scope_type", e.target.value as MemoryScopeType)}
+            disabled={submitting}
+          >
+            {MEMORY_SCOPE_TYPES.map((scope) => (
+              <option key={scope} value={scope}>{t(`memoryProposal.scope_${scope}`)}</option>
+            ))}
+          </select>
+        </label>
+      </div>
+      {fields.scope_type !== "global" ? (
+        <label className="memory-proposal-card__field">
+          <span>{t("memoryProposal.scopePath")}</span>
+          <input
+            value={fields.scope_path}
+            onChange={(e) => set("scope_path", e.target.value)}
+            disabled={submitting}
+            placeholder="/abs/path"
+          />
+        </label>
+      ) : null}
+      <label className="memory-proposal-card__field">
+        <span>{t("memoryProposal.content")}</span>
+        <textarea
+          className="memory-proposal-card__content"
+          value={fields.content}
+          onChange={(e) => set("content", e.target.value)}
+          disabled={submitting}
+          rows={expanded ? 18 : 4}
+        />
+      </label>
+    </>
+  );
+
+  return (
+    <div className="user-input-card memory-proposal-card" data-testid="memory-proposal-card">
+      <div className="user-input-card__title">
+        {fields.action === "edit" ? t("memoryProposal.titleEdit") : t("memoryProposal.titleAdd")}
+      </div>
+      {fieldsBody}
+      {failed ? <div className="user-approval-card__error" role="alert">{t("memoryProposal.failed")}</div> : null}
+      <div className="user-input-card__actions">
+        <button type="button" onClick={() => setExpanded(true)} disabled={submitting}>
+          {t("memoryProposal.expand")}
+        </button>
+        <button type="button" onClick={() => resolve(false)} disabled={submitting}>
+          {t("memoryProposal.reject")}
+        </button>
+        <button type="button" className="primary" onClick={() => resolve(true)} disabled={submitting || !canSubmit}>
+          {submitting ? t("memoryProposal.submitting") : t("memoryProposal.approve")}
+        </button>
+      </div>
+      {expanded ? (
+        <div className="memory-proposal-modal__overlay" onClick={() => setExpanded(false)}>
+          <div className="memory-proposal-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="memory-proposal-modal__title">
+              {fields.action === "edit" ? t("memoryProposal.titleEdit") : t("memoryProposal.titleAdd")}
+            </div>
+            {fieldsBody}
+            {failed ? <div className="user-approval-card__error" role="alert">{t("memoryProposal.failed")}</div> : null}
+            <div className="user-input-card__actions">
+              <button type="button" onClick={() => setExpanded(false)} disabled={submitting}>
+                {t("memoryProposal.collapse")}
+              </button>
+              <button type="button" onClick={() => resolve(false)} disabled={submitting}>
+                {t("memoryProposal.reject")}
+              </button>
+              <button type="button" className="primary" onClick={() => resolve(true)} disabled={submitting || !canSubmit}>
+                {submitting ? t("memoryProposal.submitting") : t("memoryProposal.approve")}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -1512,6 +1673,8 @@ export function Chat({
           >
             {request.kind === "approval" ? (
               <UserApprovalCard request={request} onDone={(requestId) => onUserInteractionDone?.(requestId)} />
+            ) : request.kind === "memory" ? (
+              <MemoryProposalCard request={request} onDone={(requestId) => onUserInteractionDone?.(requestId)} />
             ) : (
               <UserInputCard request={request} onDone={(requestId) => onUserInteractionDone?.(requestId)} />
             )}

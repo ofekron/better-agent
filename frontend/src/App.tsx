@@ -2632,7 +2632,7 @@ function AppMain({
   const [userDisplayName, setUserDisplayName] = useState<string | null>(null);
   // Open-session tabs bar prefs (backend-owned). Reflected here so the
   // tabs visibility and order chosen from Settings stay live.
-  const [sessionTabsSort, setSessionTabsSort] = useState("last_opened_at");
+  const [sessionTabsSort, setSessionTabsSort] = useState("tab_joined_at");
   const [sessionTabsVisible, setSessionTabsVisible] = useState(true);
   useEffect(() => {
     const apply = (d: {
@@ -4469,26 +4469,15 @@ function AppMain({
       const ms = typeof v === "string" && v ? Date.parse(v) : NaN;
       return Number.isNaN(ms) ? -Infinity : ms;
     };
-    const activeRecord = currentTree?.id
-      ? records.find((session) => session.id === currentTree.id)
-      : undefined;
-    const sortableRecords = activeRecord
-      ? records.filter((session) => session.id !== activeRecord.id)
-      : records;
-    const sortedRecords = sortableRecords
+    const sortedRecords = records
       .map((s, i) => ({ s, i }))
       .sort((a, b) => {
         const d = tsOf(b.s) - tsOf(a.s);
         return d !== 0 ? d : a.i - b.i; // stable: keep open-order on ties
       })
       .map((e) => e.s);
-    return [
-      ...pinnedRecords,
-      ...(activeRecord ? [activeRecord] : []),
-      ...sortedRecords,
-    ];
+    return [...pinnedRecords, ...sortedRecords];
   }, [
-    currentTree?.id,
     openSessionIds,
     openSessionJoinedAt,
     findOpenSessionRecord,

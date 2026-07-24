@@ -80,6 +80,7 @@ from requirements_query_runner import (
     run_requirements_processor_query,
     run_requirements_query,
 )
+import memory_store
 import user_input_store
 import device_token_store
 import file_panel_drafts
@@ -15558,6 +15559,69 @@ def _validate_user_approval_prompt(raw_prompt: Any) -> str:
     return prompt[:2000]
 
 
+_MEMORY_TYPES = ("user", "feedback", "project", "reference")
+_MEMORY_SCOPE_TYPES = ("global", "project", "folder")
+_MEMORY_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,79}$")
+
+
+def _validate_memory_proposal(raw: Any) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        raise HTTPException(status_code=400, detail="memory_proposal must be an object")
+    action = str(raw.get("action") or "add").strip()
+    if action not in ("add", "edit"):
+        raise HTTPException(status_code=400, detail="memory_proposal.action must be add or edit")
+    name = str(raw.get("name") or "").strip().lower()
+    if not _MEMORY_NAME_RE.match(name):
+        raise HTTPException(
+            status_code=400,
+            detail="memory_proposal.name must be lowercase kebab-case, 1-80 chars",
+        )
+    description = str(raw.get("description") or "").strip()
+    if not description:
+        raise HTTPException(status_code=400, detail="memory_proposal.description is required")
+    mem_type = str(raw.get("type") or "").strip()
+    if mem_type not in _MEMORY_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"memory_proposal.type must be one of {', '.join(_MEMORY_TYPES)}",
+        )
+    content = str(raw.get("content") or "").strip()
+    if not content:
+        raise HTTPException(status_code=400, detail="memory_proposal.content is required")
+    scope_type = str(raw.get("scope_type") or "").strip()
+    if scope_type not in _MEMORY_SCOPE_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"memory_proposal.scope_type must be one of {', '.join(_MEMORY_SCOPE_TYPES)}",
+        )
+    scope_path = str(raw.get("scope_path") or "").strip()
+    if scope_type in ("project", "folder") and not scope_path:
+        raise HTTPException(
+            status_code=400,
+            detail="memory_proposal.scope_path is required for project/folder scope",
+        )
+    if scope_type == "global":
+        scope_path = ""
+    proposal = {
+        "action": action,
+        "name": name[:80],
+        "description": description[:300],
+        "type": mem_type,
+        "content": content[:8000],
+        "scope_type": scope_type,
+        "scope_path": scope_path[:1000],
+    }
+    if action == "edit":
+        target_slug = str(raw.get("target_slug") or "").strip().lower()
+        if not _MEMORY_NAME_RE.match(target_slug):
+            raise HTTPException(
+                status_code=400,
+                detail="memory_proposal.target_slug must be lowercase kebab-case, 1-80 chars",
+            )
+        proposal["target_slug"] = target_slug[:80]
+    return proposal
+
+
 async def _broadcast_user_input(event_type: str, payload: dict[str, Any]) -> None:
     app_session_id = str(payload.get("app_session_id") or "").strip()
     if not app_session_id:
@@ -15599,6 +15663,88 @@ async def get_pending_user_inputs(app_session_id: str | None = None):
     }
 
 
+@app.get("/api/memory/all")
+async def get_all_memory_scopes():
+    """Every known scope (for the settings memory browser -- unlike
+    `/api/memory/scopes`, not filtered to ancestors of a given cwd)."""
+    global_memories = await asyncio.to_thread(
+        memory_store.list_memories, scope_type="global", scope_path="",
+    )
+    known_scopes = await asyncio.to_thread(memory_store.list_scopes)
+    scoped = []
+    for scope in known_scopes:
+        memories = await asyncio.to_thread(
+            memory_store.list_memories,
+            scope_type=scope["type"],
+            scope_path=scope["path"],
+        )
+        scoped.append({"type": scope["type"], "path": scope["path"], "memories": memories})
+    return {"global": global_memories, "scopes": scoped}
+
+
+@app.get("/api/memory/scopes")
+async def get_memory_scopes(cwd: str | None = None):
+    """User-facing browse surface: every memory visible from `cwd` (global
+    plus ancestor project/folder scopes), for the settings memory editor.
+    Direct user edits/deletes below never require agent approval -- only
+    agent-initiated additions/edits go through the user-input approval gate."""
+    resolved_cwd = str(cwd or "").strip()
+    if not resolved_cwd:
+        return {"scopes": {"global": await asyncio.to_thread(
+            memory_store.list_memories, scope_type="global", scope_path="",
+        )}}
+    scopes = await asyncio.to_thread(memory_store.memories_for_cwd, resolved_cwd)
+    return {"scopes": scopes}
+
+
+@app.put("/api/memory/{scope_type}/{slug}")
+async def put_memory(scope_type: str, slug: str, body: dict):
+    # Reuses the exact same validator (and its length caps) as agent-proposed
+    # writes, so a direct user edit can't write unbounded content that an
+    # agent proposal couldn't.
+    try:
+        proposal = _validate_memory_proposal({
+            "action": "add",
+            "name": slug,
+            "description": body.get("description"),
+            "type": body.get("type"),
+            "content": body.get("content"),
+            "scope_type": scope_type,
+            "scope_path": body.get("scope_path"),
+        })
+    except HTTPException as exc:
+        raise HTTPException(status_code=400, detail=str(exc.detail))
+    try:
+        memory = await asyncio.to_thread(
+            memory_store.write_memory,
+            scope_type=proposal["scope_type"],
+            scope_path=proposal["scope_path"],
+            slug=proposal["name"],
+            description=proposal["description"],
+            mem_type=proposal["type"],
+            content=proposal["content"],
+        )
+    except memory_store.MemoryStoreError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"success": True, "memory": memory}
+
+
+@app.delete("/api/memory/{scope_type}/{slug}")
+async def delete_memory_route(scope_type: str, slug: str, scope_path: str = ""):
+    try:
+        deleted = await asyncio.to_thread(
+            memory_store.delete_memory,
+            scope_type=scope_type,
+            scope_path=scope_path,
+            slug=slug,
+        )
+    except memory_store.MemoryStoreError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    if not deleted:
+        raise HTTPException(status_code=404, detail="memory not found")
+    return {"success": True}
+
+
 @app.post("/api/user-input/{request_id}/resolve")
 async def resolve_user_input(request_id: str, body: dict):
     req = await asyncio.to_thread(user_input_store.get_request, request_id)
@@ -15621,6 +15767,13 @@ async def resolve_user_input(request_id: str, body: dict):
         response: dict[str, Any] = {"approved": approved}
         if alternative:
             response["alternative"] = alternative[:4000]
+    elif kind == "memory":
+        approved = body.get("approved")
+        if not isinstance(approved, bool):
+            raise HTTPException(status_code=400, detail="approved must be a boolean")
+        response = {"approved": approved}
+        if approved:
+            response["memory_proposal"] = _validate_memory_proposal(body.get("edited"))
     else:
         if not isinstance(body.get("answers"), dict):
             raise HTTPException(status_code=400, detail="answers object is required")
@@ -15680,14 +15833,19 @@ async def internal_request_user_input(
         return {"success": False, "error": t("error.session_not_found_retry")}
     try:
         kind = str(body.get("kind") or "input").strip()
+        memory_proposal: dict[str, Any] | None = None
         if kind == "approval":
             prompt = _validate_user_approval_prompt(body.get("prompt"))
             questions: list[dict[str, Any]] = []
         elif kind == "input":
             questions = _validate_user_input_questions(body.get("questions"))
             prompt = ""
+        elif kind == "memory":
+            memory_proposal = _validate_memory_proposal(body.get("memory_proposal"))
+            questions = []
+            prompt = ""
         else:
-            raise HTTPException(status_code=400, detail="kind must be input or approval")
+            raise HTTPException(status_code=400, detail="kind must be input, approval, or memory")
     except HTTPException as exc:
         return {"success": False, "error": str(exc.detail)}
     raw_timeout = body.get("timeout_seconds")
@@ -15706,6 +15864,7 @@ async def internal_request_user_input(
         questions=questions,
         prompt=prompt,
         timeout_seconds=timeout_seconds,
+        memory_proposal=memory_proposal,
     )
     if created:
         await _broadcast_user_input("user_input_requested", public_req)
@@ -15726,7 +15885,7 @@ async def internal_request_user_input(
             "success": True,
             "request_id": completed["request_id"],
         }
-        if completed.get("kind") == "approval":
+        if completed.get("kind") in ("approval", "memory"):
             result.update(completed.get("response") or {})
         else:
             result["answers"] = completed.get("response") or {}
@@ -15742,9 +15901,75 @@ async def internal_request_user_input(
         "request_id": completed.get("request_id"),
         "status": completed.get("status"),
     }
-    if completed.get("kind") == "approval":
+    if completed.get("kind") in ("approval", "memory"):
         result["approved"] = False
     return result
+
+
+@app.post("/api/internal/memory/write")
+async def internal_memory_write(
+    body: dict,
+    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+):
+    """Persist an already-approved memory proposal. Called by the memory
+    extension's MCP server after the user approves (and possibly edits) a
+    `propose_memory_add`/`propose_memory_edit` pending request -- never
+    called directly by an agent without going through that approval gate."""
+    if not _internal_authority_is_valid():
+        raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
+    try:
+        proposal = _validate_memory_proposal(body.get("memory_proposal"))
+    except HTTPException as exc:
+        return {"success": False, "error": str(exc.detail)}
+    try:
+        memory = await asyncio.to_thread(
+            memory_store.write_memory,
+            scope_type=proposal["scope_type"],
+            scope_path=proposal["scope_path"],
+            slug=proposal.get("target_slug") or proposal["name"],
+            description=proposal["description"],
+            mem_type=proposal["type"],
+            content=proposal["content"],
+        )
+    except memory_store.MemoryStoreError as exc:
+        return {"success": False, "error": str(exc)}
+    return {"success": True, "memory": memory}
+
+
+@app.post("/api/internal/memory/list")
+async def internal_memory_list(
+    body: dict,
+    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+):
+    if not _internal_authority_is_valid():
+        raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
+    cwd = str(body.get("cwd") or "").strip()
+    if not cwd:
+        return {"success": False, "error": "cwd is required"}
+    scopes = await asyncio.to_thread(memory_store.memories_for_cwd, cwd)
+    return {"success": True, "scopes": scopes}
+
+
+@app.post("/api/internal/memory/delete")
+async def internal_memory_delete(
+    body: dict,
+    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+):
+    if not _internal_authority_is_valid():
+        raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
+    scope_type = str(body.get("scope_type") or "").strip()
+    scope_path = str(body.get("scope_path") or "").strip()
+    slug = str(body.get("slug") or "").strip()
+    try:
+        deleted = await asyncio.to_thread(
+            memory_store.delete_memory,
+            scope_type=scope_type,
+            scope_path=scope_path,
+            slug=slug,
+        )
+    except memory_store.MemoryStoreError as exc:
+        return {"success": False, "error": str(exc)}
+    return {"success": deleted}
 
 
 @app.post("/api/internal/open-config-panel")

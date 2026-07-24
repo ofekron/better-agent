@@ -1192,6 +1192,47 @@ class Client:
             timeout=timeout_seconds or 24 * 60 * 60,
         )
 
+    def request_memory_proposal(
+        self,
+        memory_proposal: dict[str, Any],
+        *,
+        timeout_seconds: float | None = None,
+    ) -> dict[str, Any]:
+        """Ask the user to approve (and optionally edit) a memory addition/edit.
+
+        Blocks until the user resolves the pending request in the chat UI.
+        Returns `{success, approved, memory_proposal?}` -- `memory_proposal`
+        (present only when approved) is the user's possibly-edited version and
+        is what must be passed to `write_memory`, never the original proposal.
+        """
+        return self._post(
+            "/api/internal/user-input/request",
+            {
+                "app_session_id": self.app_session_id,
+                "kind": "memory",
+                "memory_proposal": memory_proposal,
+                "timeout_seconds": timeout_seconds,
+            },
+            timeout=timeout_seconds or 24 * 60 * 60,
+        )
+
+    def write_memory(self, memory_proposal: dict[str, Any]) -> dict[str, Any]:
+        """Persist an already-approved memory proposal. Only call this with
+        the `memory_proposal` returned by an approved `request_memory_proposal`
+        -- never with the agent's original, unapproved proposal."""
+        return self._post(
+            "/api/internal/memory/write",
+            {"memory_proposal": memory_proposal},
+            timeout=15.0,
+        )
+
+    def list_memories(self, cwd: str) -> dict[str, Any]:
+        return self._post(
+            "/api/internal/memory/list",
+            {"cwd": cwd},
+            timeout=15.0,
+        )
+
     def get_internal_llm(self) -> dict[str, Any]:
         """Read the internal-LLM task→model assignments (app settings)."""
         return self._get("/api/settings/internal-llm", timeout=10.0)

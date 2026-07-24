@@ -12363,6 +12363,17 @@ button.run-badge-clickable:focus-visible {
   color: var(--text-primary);
 }
 
+/* Extended (multi-line) collapsed prompt preview — consistent with the
+   full-length last-assistant-block preview shown below it. */
+.message-box-collapsed-body.turn-collapsed-prompt {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 4;
+  white-space: pre-wrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .collapse-ellipsis {
   text-align: start;
   color: var(--text-muted);
@@ -14226,7 +14237,72 @@ pre .inline-tag-highlight {
   color: var(--danger, #e5484d);
   font-size: calc(11px * var(--app-font-scale));
 }
+.memory-proposal-card {
+  border-inline-start: 3px solid var(--accent, #7b68ee);
+}
+.memory-proposal-card__field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+.memory-proposal-card__field span {
+  font-size: calc(11px * var(--app-font-scale));
+  font-weight: 600;
+  color: var(--text-muted, #888);
+}
+.memory-proposal-card__field input,
+.memory-proposal-card__field select,
+.memory-proposal-card__content {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 7px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-input, #1a1a1a);
+  color: var(--text);
+  font-size: calc(12px * var(--app-font-scale));
+}
+.memory-proposal-card__content {
+  resize: vertical;
+  font-family: var(--font-mono, monospace);
+}
+.memory-proposal-card__row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+.memory-proposal-modal__overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  padding: 24px;
+}
+.memory-proposal-modal {
+  width: min(720px, 100%);
+  max-height: min(85vh, 820px);
+  overflow-y: auto;
+  background: var(--bg-secondary, #1a1a1a);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.memory-proposal-modal__title {
+  font-size: calc(14px * var(--app-font-scale));
+  font-weight: 700;
+  color: var(--text);
+}
 @media (max-width: 520px) {
+  .memory-proposal-card__row {
+    grid-template-columns: 1fr;
+  }
   .user-input-card {
     margin-inline: 8px;
   }

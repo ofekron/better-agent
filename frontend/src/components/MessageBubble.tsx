@@ -197,6 +197,11 @@ function firstLineSummary(text: string, max = 80): string {
   return "";
 }
 
+/** Trimmed full text for an extended (multi-line, CSS-clamped) collapsed preview. */
+function extendedSummary(text: string): string {
+  return text.trim();
+}
+
 function TeamMessageFrom({ message }: { message: ChatMessage }) {
   const { t } = useTranslation();
   const senderSessionId = message.team_message?.metadata?.sender_session_id?.trim();
@@ -3652,10 +3657,10 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
         {initiatorBodyCollapsed && (
           <button
             type="button"
-            className="message-box-collapsed-body"
+            className="message-box-collapsed-body turn-collapsed-prompt"
             onClick={() => setPromptCollapsed(false)}
           >
-            {firstLineSummary(rawInitiatorContent)}
+            {extendedSummary(rawInitiatorContent)}
           </button>
         )}
         {!initiatorBodyCollapsed && (() => {

@@ -42,11 +42,20 @@ export function runtimeKindLabelKey(kind: string): string {
   return `runtimeKind.${kind || "claude"}`;
 }
 
-/** i18n key for the engine a (providerKind, runner) pair actually runs on. */
+/** i18n key for the engine a (providerKind, runner) pair actually runs on.
+ *  Display-only override: Fugu's `native` runner drives the plain `codex`
+ *  binary (see `provider_manifest.py`'s `fugu.runner_module="runner_codex"`),
+ *  so it's labeled "Codex" here even though `runtimeKindForRunner` keeps
+ *  resolving to `fugu` for capability/permission/provider-class lookups,
+ *  which are genuinely Fugu-specific (its own reasoning-effort options,
+ *  `FuguProvider` class). */
 export function runnerLabelKey(
   providerKind: string,
   runner: Provider["runner"] | string | null | undefined,
 ): string {
+  if (providerKind === "fugu" && runner !== "better_agent_runner") {
+    return runtimeKindLabelKey("codex");
+  }
   return runtimeKindLabelKey(runtimeKindForRunner(providerKind, runner));
 }
 

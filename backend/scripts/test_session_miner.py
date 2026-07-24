@@ -63,9 +63,13 @@ def test_changed_session_yields_visit() -> None:
 
 
 def test_unchanged_session_is_delta_skipped() -> None:
-    state = {"sess-b.json": {"mtime": 2000.0}}
-    path = _write_session("sess-b", cwd="/tmp/b", messages=[])
-    _touch(path, 2000.0)
+    state: dict = {}
+    _write_session("sess-b", cwd="/tmp/b", messages=[])
+    first_miner = SessionMiner(state)
+    first_pass_sids = {v.sid for v in first_miner}
+    first_miner.apply_watermarks()  # .mine() does this automatically; direct iteration does not
+    assert "sess-b" in first_pass_sids  # sanity: first pass records the watermark
+    assert "sess-b.json" in state
 
     miner = SessionMiner(state)
     sids = {v.sid for v in miner}
@@ -73,6 +77,38 @@ def test_unchanged_session_is_delta_skipped() -> None:
     assert "sess-b" not in sids  # watermark covers it
     assert miner.scanned_count >= 1  # counted even when skipped
     print(f"{PASS} unchanged session is delta-skipped but still counted")
+
+
+def test_same_second_rewrite_is_still_detected() -> None:
+    """Regression for a stale-watermark bug: a session file rewritten with
+    the exact same st_mtime_ns (worst case of a same-wall-clock-second write,
+    pinned here to remove timing flakiness) must still be picked up because
+    its size changed. Before the (mtime_ns, size) fingerprint fix, the
+    watermark was a plain `st_mtime` float compared with `>`, so a rewrite
+    landing in the same second (mtime unchanged or not strictly greater)
+    was silently skipped until the file was touched again in a later second.
+    """
+    state: dict = {}
+    path = _write_session("sess-race", cwd="/tmp/race", messages=[{"role": "user", "content": "v1"}])
+    first_miner = SessionMiner(state)
+    first = {v.sid: v for v in first_miner}
+    first_miner.apply_watermarks()  # .mine() does this automatically; direct iteration does not
+    assert first["sess-race"].messages == [{"role": "user", "content": "v1"}]
+
+    frozen_ns = path.stat().st_mtime_ns
+    path.write_text(
+        json.dumps({
+            "id": "sess-race", "cwd": "/tmp/race",
+            "messages": [{"role": "user", "content": "v2-longer-payload"}],
+        }),
+        encoding="utf-8",
+    )
+    os.utime(path, ns=(frozen_ns, frozen_ns))  # pin mtime_ns identical to the first write
+
+    second = {v.sid: v for v in SessionMiner(state)}
+    assert "sess-race" in second, "rewrite with identical mtime_ns but different size must be detected"
+    assert second["sess-race"].messages == [{"role": "user", "content": "v2-longer-payload"}]
+    print(f"{PASS} same-mtime_ns rewrite with changed size is still detected as a change")
 
 
 def test_summary_and_unparseable_skipped() -> None:
@@ -217,6 +253,7 @@ def test_failed_visit_does_not_advance_watermark() -> None:
 def main() -> int:
     test_changed_session_yields_visit()
     test_unchanged_session_is_delta_skipped()
+    test_same_second_rewrite_is_still_detected()
     test_summary_and_unparseable_skipped()
     test_mine_drives_consumer_lifecycle_one_pass()
     test_mine_registered_runs_all_registered_consumers()

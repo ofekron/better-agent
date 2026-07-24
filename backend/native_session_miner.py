@@ -103,24 +103,37 @@ def _provider_kind(data: dict) -> str:
 
 
 # Codex/Gemini run-dir index: {app_session_id -> run_dir}. Built on demand and
-# refreshed when the runs dir mtime changes, so a long-lived process does not
-# rescan thousands of run dirs every mining pass.
+# refreshed when the runs dir mtime_ns changes, so a long-lived process does
+# not rescan thousands of run dirs every mining pass.
 _RUN_INDEX: dict[str, Path] | None = None
-_RUN_INDEX_MTIME: float = 0.0
+_RUN_INDEX_MTIME_NS: int = 0
 
 
 def _runs_root() -> Path:
     return bc_home() / _RUNS_DIR_NAME
 
 
+def _runs_root_mtime_ns(root: Path) -> int:
+    # mtime_ns, not plain st_mtime: a run dir created/removed within the
+    # same wall-clock second as the last index build would leave st_mtime
+    # unchanged, so the stale index would keep being served until the
+    # directory was touched again in a later second. Unlike a regular file
+    # (see session_miner._mtime), a directory's mtime is itself defined by
+    # POSIX to change on every entry add/remove/rename, and its st_size is
+    # filesystem-dependent bookkeeping that does not reliably grow with
+    # entry count (observed unchanged on APFS after adding a subdirectory)
+    # — so mtime_ns alone is the correct fingerprint here, no size pairing.
+    return root.stat().st_mtime_ns
+
+
 def _run_index() -> dict[str, Path]:
-    global _RUN_INDEX, _RUN_INDEX_MTIME
+    global _RUN_INDEX, _RUN_INDEX_MTIME_NS
     root = _runs_root()
     try:
-        root_mtime = root.stat().st_mtime
+        root_mtime_ns = _runs_root_mtime_ns(root)
     except OSError:
         return {}
-    if _RUN_INDEX is not None and root_mtime == _RUN_INDEX_MTIME:
+    if _RUN_INDEX is not None and root_mtime_ns == _RUN_INDEX_MTIME_NS:
         return _RUN_INDEX
     try:
         from runs_dir import run_dirs_by_app_session
@@ -129,7 +142,7 @@ def _run_index() -> dict[str, Path]:
         index = {}
     if index:
         _RUN_INDEX = index
-        _RUN_INDEX_MTIME = root_mtime
+        _RUN_INDEX_MTIME_NS = root_mtime_ns
         return index
     index = {}
     for state_path in root.glob("*/state.json"):
@@ -141,7 +154,7 @@ def _run_index() -> dict[str, Path]:
         if isinstance(aid, str) and aid:
             index[aid] = state_path.parent
     _RUN_INDEX = index
-    _RUN_INDEX_MTIME = root_mtime
+    _RUN_INDEX_MTIME_NS = root_mtime_ns
     return index
 
 

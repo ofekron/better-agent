@@ -148,6 +148,8 @@ def _public(req: dict[str, Any]) -> dict[str, Any]:
     }
     if req["kind"] == "approval":
         public["prompt"] = req["prompt"]
+    elif req["kind"] == "memory":
+        public["memory_proposal"] = req.get("memory_proposal")
     else:
         public["questions"] = req["questions"]
     return public
@@ -160,6 +162,7 @@ def _pending_equivalent_locked(
     kind: str,
     questions: list[dict[str, Any]],
     prompt: str,
+    memory_proposal: dict[str, Any] | None,
 ) -> dict[str, Any] | None:
     for req in data.get("requests", {}).values():
         if (
@@ -169,6 +172,7 @@ def _pending_equivalent_locked(
             and req.get("kind") == kind
             and req.get("questions") == questions
             and req.get("prompt") == prompt
+            and req.get("memory_proposal") == memory_proposal
         ):
             return req
     return None
@@ -181,6 +185,7 @@ def _new_request(
     questions: list[dict[str, Any]],
     prompt: str,
     timeout_seconds: float | None,
+    memory_proposal: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     now = _now()
     return {
@@ -189,6 +194,7 @@ def _new_request(
         "kind": kind,
         "questions": questions,
         "prompt": prompt,
+        "memory_proposal": memory_proposal,
         "status": "pending",
         "response": {},
         "created_at": now,
@@ -204,6 +210,7 @@ def create_request(
     questions: list[dict[str, Any]],
     prompt: str = "",
     timeout_seconds: float | None,
+    memory_proposal: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     req = _new_request(
         app_session_id=app_session_id,
@@ -211,6 +218,7 @@ def create_request(
         questions=questions,
         prompt=prompt,
         timeout_seconds=timeout_seconds,
+        memory_proposal=memory_proposal,
     )
     with _LOCK:
         data = _read_locked()
@@ -230,6 +238,7 @@ def create_or_get_pending_request(
     questions: list[dict[str, Any]],
     prompt: str = "",
     timeout_seconds: float | None,
+    memory_proposal: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], bool]:
     with _LOCK:
         data = _read_locked()
@@ -240,6 +249,7 @@ def create_or_get_pending_request(
             kind=kind,
             questions=questions,
             prompt=prompt,
+            memory_proposal=memory_proposal,
         )
         if existing is not None:
             return _public(existing), False
@@ -249,6 +259,7 @@ def create_or_get_pending_request(
             questions=questions,
             prompt=prompt,
             timeout_seconds=timeout_seconds,
+            memory_proposal=memory_proposal,
         )
         data["requests"][req["request_id"]] = req
         _write_locked(data)
