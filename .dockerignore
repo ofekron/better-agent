@@ -1,0 +1,41 @@
+# Used by tests/install-smoke/Dockerfile's `COPY . /repo`. Keeps the
+# clean-room install smoke test's build context to source only — the
+# private nested repo, submodule sources, venvs, and node_modules are
+# either huge, not needed by scripts/install.py, or both.
+.git/
+.github/
+.gitlab/
+.idea/
+.vscode/
+.DS_Store
+
+better-agent-private/
+provider-config-sync/
+testape/
+desktop/
+docs/
+
+node_modules/
+frontend/node_modules/
+provider-config-sync/node_modules/
+frontend/dist/
+frontend/releases/
+
+backend/.venvs/
+backend/.active-venv
+backend/.dependency-plan.lock
+backend/__pycache__/
+**/__pycache__/
+**/*.pyc
+
+.better-claude/
+.better-agent/
+.routine-outputs/
+.routine-reports/
+.pytest_cache/
+.cache_ggshield/
+.cocoindex_code/
+
+*.apk
+*.log
+test-results/

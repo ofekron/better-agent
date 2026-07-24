@@ -47,3 +47,15 @@ jobs:
               (Resolve-Path scripts/install-windows.ps1)
             )
           )
+
+  install-smoke:
+    # Clean-room execution of scripts/install.py in a from-scratch Linux
+    # container — see tests/install-smoke/Dockerfile for exact scope. This
+    # complements, and does not replace, the macOS/Windows syntax checks
+    # above: those two only run natively on their own OS and cover the
+    # brew/xcode-select/winget bootstrap steps this job cannot reach.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run clean-room install smoke test
+        run: ./scripts/test-install.sh
