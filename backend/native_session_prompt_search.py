@@ -302,22 +302,42 @@ def _windsurf_candidates(allowed: set[str]) -> list[NativeCandidate]:
     return candidates
 
 
-_SID_GLOB_EXTS = {"claude": "jsonl", "codex": "jsonl", "gemini": "jsonl", "windsurf": "pb"}
+_SID_GLOB_EXTS = {"claude": "jsonl", "codex": "jsonl", "gemini": "jsonl", "pi": "jsonl", "windsurf": "pb"}
+
+
+def _pi_candidate_by_content_sid(root: Path, sid: str) -> NativeCandidate | None:
+    """Fallback for a pi session whose authoritative id (inside the file, see
+    :func:`_pi_meta`) doesn't match its filename stem. Reads only up to the
+    first ``session``/user-``message`` record per file (``_pi_meta`` stops
+    there), not a full parse — cheap relative to a full-corpus element parse,
+    though still O(files in the pi root) since pi has no id-in-filename
+    convention to glob against."""
+    for path in root.rglob("*.jsonl"):
+        found_sid, cwd, _created, _title = _pi_meta(path)
+        if found_sid == sid:
+            return NativeCandidate(key=f"pi-rg:{path.name}", sid=sid, cwd=cwd,
+                                   data={}, transcript=path, mtime=_mtime(path), format="pi")
+    return None
 
 
 def _candidates_for_sids(sids: frozenset[str]) -> list[NativeCandidate]:
-    """Resolve candidates directly by sid via filename glob — no full-corpus
-    discovery or content parse. Relies on sid == path.stem, which holds for
-    every format except ``pi`` (whose authoritative sid can live inside the
-    file, see :func:`_pi_meta`) and ``runs`` (sid comes from ``state.json``,
-    not the constant ``session_events.jsonl`` filename) — those two tags are
-    not resolvable this way and are simply not found by this path; a caller
-    wanting to scope to a specific pi/runs session must go through the full
-    :func:`_matched_candidates` discovery instead."""
+    """Resolve candidates directly by sid — no full-corpus discovery. Every
+    format except ``runs`` (sid comes from ``state.json``, not the constant
+    ``session_events.jsonl`` filename — not resolvable this way; a caller
+    wanting to scope to a specific runs session must go through the full
+    :func:`_matched_candidates` discovery instead) is covered:
+
+    - claude/codex/gemini/windsurf: filename glob, since sid == path.stem.
+    - pi: filename glob first (covers the common case where the filename
+      already matches the authoritative id), then :func:`_pi_candidate_by_content_sid`
+      for any sid the glob missed (its true id lives inside the file)."""
     if not sids:
         return []
     found: dict[str, NativeCandidate] = {}
+    pi_roots: list[Path] = []
     for root, tag in _native_roots():
+        if tag == "pi":
+            pi_roots.append(root)
         ext = _SID_GLOB_EXTS.get(tag)
         if not ext:
             continue
@@ -326,6 +346,17 @@ def _candidates_for_sids(sids: frozenset[str]) -> list[NativeCandidate]:
                 continue
             for match in root.rglob(f"{sid}.{ext}"):
                 found[sid] = _candidate_from_match(match, tag)
+                break
+
+    remaining = [sid for sid in sids if sid not in found]
+    if remaining and pi_roots:
+        for root in pi_roots:
+            for sid in list(remaining):
+                candidate = _pi_candidate_by_content_sid(root, sid)
+                if candidate is not None:
+                    found[sid] = candidate
+                    remaining.remove(sid)
+            if not remaining:
                 break
     return list(found.values())
 
@@ -533,12 +564,13 @@ def _search_elements(
     shared by all callers.
 
     ``sids``, when given, scopes discovery to exactly those session ids via a
-    cheap filename-based lookup (see :func:`_candidates_for_sids`) instead of
-    the full cwd-filtered corpus walk — this is what makes single-session
-    search fast enough for a large/active project directory. Omit it (the
-    default) for the original all-sessions-in-scope behavior. ``pi``/``runs``
-    sessions cannot be looked up this way (see that function's docstring) and
-    are silently absent from a ``sids``-scoped search."""
+    cheap lookup (see :func:`_candidates_for_sids`) instead of the full
+    cwd-filtered corpus walk — this is what makes single-session search fast
+    enough for a large/active project directory. Omit it (the default) for
+    the original all-sessions-in-scope behavior. ``runs`` sessions cannot be
+    looked up this way (see that function's docstring) and are silently
+    absent from a ``sids``-scoped search; every other format (claude, codex,
+    gemini, pi, windsurf) is covered."""
     tokens = _query_tokens(query)
     if not tokens:
         return []
@@ -621,10 +653,11 @@ def search_in_native_session_transcript(
     ``categories`` (e.g. ``("shell", "file_edit")`` for only actions) or
     ``kinds`` (e.g. ``("tool_call",)``). ``cwds`` restricts to working dirs.
     ``sids``, when given, scopes the search to exactly those session ids via a
-    cheap filename lookup instead of a full cwd-filtered corpus walk — use this
-    for single-session search; omit it (default) to search every session in
-    scope. ``pi``/``runs`` sessions are not resolvable via ``sids`` (see
-    :func:`_candidates_for_sids`). A match scores at least one query token as a
+    cheap lookup instead of a full cwd-filtered corpus walk — use this for
+    single-session search; omit it (default) to search every session in
+    scope. Covers claude, codex, gemini, pi, and windsurf; ``runs`` sessions
+    are not resolvable via ``sids`` (see :func:`_candidates_for_sids`). A
+    match scores at least one query token as a
     whole word; the score is the count of distinct tokens hit."""
     return _search_elements(
         query=query,

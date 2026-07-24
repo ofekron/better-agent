@@ -126,23 +126,27 @@ def _restore_rg() -> None:
 
 
 def _isolate_native_roots(*, claude: list[Path] | None = None, codex: Path | None = None,
-                          gemini: Path | None = None, runs: Path | None = None):
+                          gemini: Path | None = None, runs: Path | None = None,
+                          pi: Path | None = None):
     """Point every native-root helper in native_session_miner at temp dirs so
     filesystem-walk tests neither scan the real home (~/.claude*, ~/.codex,
-    ~/.gemini — tens of thousands of files) nor read real data. Returns the
-    original callables for restoration."""
+    ~/.gemini, ~/.pi — tens of thousands of files) nor read real data. Returns
+    the original callables for restoration."""
     import native_session_miner as M
-    orig = (M._claude_projects_roots, M._codex_sessions_root, M._gemini_chats_root, M._runs_root)
+    orig = (M._claude_projects_roots, M._codex_sessions_root, M._gemini_chats_root,
+            M._runs_root, M._pi_sessions_root)
     M._claude_projects_roots = lambda: list(claude or [])
     M._codex_sessions_root = lambda: codex or _SCRATCH / "no-codex"
     M._gemini_chats_root = lambda: gemini or _SCRATCH / "no-gemini"
     M._runs_root = lambda: runs or _SCRATCH / "no-runs"
+    M._pi_sessions_root = lambda: pi or _SCRATCH / "no-pi"
     return orig
 
 
 def _restore_native_roots(orig) -> None:
     import native_session_miner as M
-    (M._claude_projects_roots, M._codex_sessions_root, M._gemini_chats_root, M._runs_root) = orig
+    (M._claude_projects_roots, M._codex_sessions_root, M._gemini_chats_root,
+     M._runs_root, M._pi_sessions_root) = orig
 
 
 def test_whole_word_match_not_substring() -> bool:
@@ -559,6 +563,58 @@ def test_sids_scopes_to_exactly_one_session() -> bool:
     return ok
 
 
+def test_sids_covers_pi_via_filename_and_content_fallback() -> bool:
+    """pi sessions are covered by sids two ways: the fast filename glob when
+    the filename already matches the true id, and _pi_candidate_by_content_sid
+    when it doesn't (the true id then only lives inside the file, per
+    _pi_meta) — both must resolve to the requested session's own content."""
+    _reset_candidates()
+    pi_root = _SCRATCH / "pi-sessions"
+    pi_root.mkdir(parents=True, exist_ok=True)
+
+    # Filename already matches the true id (the common case).
+    filename_match_sid = "pi-filename-match-0001"
+    (pi_root / f"{filename_match_sid}.jsonl").write_text(
+        "\n".join([
+            json.dumps({"type": "session", "id": filename_match_sid, "cwd": "/proj-a",
+                        "timestamp": "2024-01-01T00:00:00Z"}),
+            json.dumps({"type": "message", "message": {"role": "user",
+                        "content": "kranzelbeep from filename-matched pi session"}}),
+        ]) + "\n",
+        encoding="utf-8",
+    )
+
+    # Filename does NOT match the true id — only discoverable via content.
+    true_sid = "pi-true-id-0002"
+    (pi_root / "some-other-filename.jsonl").write_text(
+        "\n".join([
+            json.dumps({"type": "session", "id": true_sid, "cwd": "/proj-b",
+                        "timestamp": "2024-01-01T00:00:00Z"}),
+            json.dumps({"type": "message", "message": {"role": "user",
+                        "content": "kranzelbeep from content-only pi session"}}),
+        ]) + "\n",
+        encoding="utf-8",
+    )
+
+    _disable_rg()
+    orig = _isolate_native_roots(claude=[], pi=pi_root)
+    try:
+        by_filename = nsp.search_in_native_session_transcript(
+            query="kranzelbeep", sids=(filename_match_sid,))
+        by_content = nsp.search_in_native_session_transcript(
+            query="kranzelbeep", sids=(true_sid,))
+    finally:
+        _restore_native_roots(orig)
+        _restore_rg()
+
+    filename_sids = {r["sid"] for r in by_filename}
+    content_sids = {r["sid"] for r in by_content}
+    ok = filename_sids == {filename_match_sid} and content_sids == {true_sid}
+    print(f"{OK if ok else FAIL} sids covers pi via filename match and content fallback "
+          f"(filename_sids={filename_sids}, content_sids={content_sids})")
+    return ok
+
+
 def test_wiring_fails_closed_on_processor_error() -> bool:
     orig_prepare = requirement_context.prepare_requirements_local_read_context
     orig_proc = requirement_context._run_requirements_processor
@@ -618,6 +674,7 @@ def main_run() -> int:
         test_categorizer_maps_elements_to_categories,
         test_generalized_search_greps_tool_calls_and_results,
         test_sids_scopes_to_exactly_one_session,
+        test_sids_covers_pi_via_filename_and_content_fallback,
         test_rg_filter_narrows_to_files_containing_needle,
         test_index_fast_path_serves_query_with_rg_disabled,
         test_wiring_fails_closed_on_processor_error,
