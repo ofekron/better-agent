@@ -15,6 +15,7 @@ import { execFileSync, execSync } from "node:child_process";
 import { copyFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { withMobilePackageJson } from "../frontend/scripts/cap-sync.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, "..");
@@ -115,7 +116,14 @@ const VERSION_NAME = shortSha ? `build-${shortSha}` : `build-${VERSION_CODE}`;
 log(`APK-relevant changes detected — rebuilding debug APK (v${VERSION_NAME}, code ${VERSION_CODE})…`);
 try {
   execSync("npx vite build", { cwd: FRONTEND, env, stdio: "inherit" });
-  execSync("npx cap sync android", { cwd: FRONTEND, env, stdio: "inherit" });
+  // cap sync discovers native plugins from frontend/package.json's
+  // dependencies, which intentionally excludes Capacitor mobile packages
+  // (see cap-sync.mjs) — a bare call here strips every native plugin
+  // include (e.g. @capacitor/app, which backs the deep-link server-URL
+  // handoff) from the generated Android project.
+  withMobilePackageJson(FRONTEND, () => {
+    execSync("npx cap sync android", { cwd: FRONTEND, env, stdio: "inherit" });
+  });
   execSync(
     `./gradlew assembleDebug --no-daemon -PbcVersionCode=${VERSION_CODE} -PbcVersionName=${VERSION_NAME}`,
     { cwd: ANDROID, env, stdio: "inherit" },

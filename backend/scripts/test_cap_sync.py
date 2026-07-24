@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 CAP_SYNC = ROOT / "frontend" / "scripts" / "cap-sync.mjs"
+REBUILD_ANDROID_APK = ROOT / "scripts" / "rebuild-android-apk.mjs"
 
 BASE_PACKAGE_JSON = {
     "name": "frontend",
@@ -81,8 +83,45 @@ def test_package_json_restored_after_failure() -> None:
         assert (frontend_dir / "package.json").read_text() == original
 
 
+def test_rebuild_android_apk_wraps_cap_sync_in_mobile_package_json() -> None:
+    # The APK actually shipped to mobile devices is built by
+    # rebuild-android-apk.mjs (via the pre-commit hook), not by running
+    # cap-sync.mjs directly. That script previously called `npx cap sync
+    # android` bare, silently stripping every native plugin include (e.g.
+    # @capacitor/app, which backs the deep-link server-URL handoff on
+    # first launch) from the generated Android project, breaking mobile
+    # login. Lock that its cap sync call is nested inside a
+    # withMobilePackageJson(...) block, not called bare.
+    source = REBUILD_ANDROID_APK.read_text()
+    assert "cap-sync.mjs" in source, (
+        "rebuild-android-apk.mjs must import the withMobilePackageJson wrapper"
+    )
+
+    # Every `cap sync android` invocation in the file must fall lexically
+    # inside a withMobilePackageJson(FRONTEND, () => { ... }); block -- a
+    # bare call anywhere in the file reintroduces the plugin-stripping bug.
+    wrapped_blocks = [
+        m.span()
+        for m in re.finditer(
+            r"withMobilePackageJson\(FRONTEND,\s*\(\)\s*=>\s*\{.*?\}\s*\);",
+            source,
+            re.DOTALL,
+        )
+    ]
+    assert wrapped_blocks, "no withMobilePackageJson(FRONTEND, ...) block found"
+
+    cap_sync_calls = [m.start() for m in re.finditer(r"cap sync android", source)]
+    assert cap_sync_calls, "expected a `cap sync android` invocation in the file"
+    for call_pos in cap_sync_calls:
+        assert any(start <= call_pos <= end for start, end in wrapped_blocks), (
+            "found a `cap sync android` invocation outside any "
+            "withMobilePackageJson(FRONTEND, ...) block"
+        )
+
+
 if __name__ == "__main__":
     test_mobile_deps_merged_in_during_the_call()
     test_package_json_restored_after_success()
     test_package_json_restored_after_failure()
+    test_rebuild_android_apk_wraps_cap_sync_in_mobile_package_json()
     print("cap-sync tests passed")
