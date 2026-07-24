@@ -377,7 +377,16 @@ def resolve_for_session(
     turn_capability_contexts: list[dict] | None = None,
 ) -> dict[str, Any] | None:
     session = session or {}
-    selected_id = str(profile_id or session.get("harness_profile_id") or "").strip()
+    # No explicit profile on the call or the session means "use the default
+    # profile", same as `create_session`'s own `harness_profile_id or
+    # DEFAULT_PROFILE_ID` substitution -- not "no profile resolution at all".
+    # Returning None here (as before) makes every turn's
+    # `resolved_harness_run_config` collapse to `{}`, which empties
+    # `launcher_projection.extension_mcp_servers` and drops every extension's
+    # MCP servers from every session, harness-profile-selected or not.
+    selected_id = str(
+        profile_id or session.get("harness_profile_id") or harness_profile_store.DEFAULT_PROFILE_ID
+    ).strip()
     if not selected_id:
         return None
     selected_revision = str(revision or session.get("harness_profile_revision") or "").strip()

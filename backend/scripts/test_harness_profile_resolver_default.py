@@ -179,12 +179,47 @@ def test_default_headless_reflects_extension_setting_write() -> None:
     assert after["extension_instances"][_FIXTURE_BROWSER_HARNESS_EXTENSION_ID]["headless"] is True
 
 
+def test_resolve_for_session_falls_back_to_default_profile() -> None:
+    """A session/turn with no explicit harness_profile_id (the case for every
+    session created before profile selection existed, and the overwhelming
+    majority today) must still resolve a snapshot -- via the Default profile
+    -- not collapse `resolved_harness_run_config` to `{}`. Regression test
+    for the bug where `resolve_for_session` returned None whenever no
+    profile was explicitly selected, which zeroed
+    `launcher_projection.extension_mcp_servers` for every ordinary session
+    and dropped every extension's MCP servers from every turn."""
+    snapshot = harness_profile_resolver.resolve_for_session({})
+    assert snapshot is not None, (
+        "resolve_for_session must fall back to the Default profile, not return None, "
+        "when no harness_profile_id is set on the call or the session"
+    )
+    assert snapshot["profile_id"] == harness_profile_store.DEFAULT_PROFILE_ID
+    launcher_projection = snapshot["launcher_projection"]
+    assert isinstance(launcher_projection.get("extension_mcp_servers"), dict)
+
+    # A session record that also has no harness_profile_id (the persisted
+    # field default) must resolve the same way.
+    snapshot_from_session = harness_profile_resolver.resolve_for_session(
+        {"harness_profile_id": "", "harness_profile_revision": ""}
+    )
+    assert snapshot_from_session is not None
+    assert snapshot_from_session["profile_id"] == harness_profile_store.DEFAULT_PROFILE_ID
+
+    # An explicit profile_id still takes priority over the fallback.
+    harness_profile_store.create_profile({"id": "explicit.profile", "name": "Explicit"})
+    explicit_snapshot = harness_profile_resolver.resolve_for_session(
+        {}, profile_id="explicit.profile",
+    )
+    assert explicit_snapshot["profile_id"] == "explicit.profile"
+
+
 def main() -> int:
     test_zero_override_profile_resolves_identically_to_default()
     test_overridden_field_stays_pinned_across_default_change()
     test_unoverridden_field_tracks_default_live()
     test_clearing_override_reverts_to_tracking_default()
     test_default_headless_reflects_extension_setting_write()
+    test_resolve_for_session_falls_back_to_default_profile()
     print("PASS harness profile resolver default synthesis")
     return 0
 
