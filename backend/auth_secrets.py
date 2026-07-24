@@ -20,12 +20,22 @@ Three accounts live under the `better-agent` service, with legacy
 Calls fail loud (RuntimeError) if any entry is missing or the
 keychain is locked. The intended remediation is shown in the
 exception message.
+
+HEADLESS CONTAINER MODE — set BETTER_AGENT_HEADLESS_AUTH=1 to source
+credentials from env vars / mounted files instead of an OS keychain.
+There is no D-Bus session or Secret Service daemon in a minimal Linux
+container, so the python `keyring` package's Linux backend (used below
+for non-macOS desktops) has nothing to talk to. This mode is an
+explicit opt-in, not an automatic fallback when keyring errors: a real
+Linux desktop with a working keyring must keep using it unchanged.
+See `docker/README.md` for the operator-facing contract.
 """
 
+import os
 import secrets
 import subprocess
-from concurrent.futures import ThreadPoolExecutor
 import sys
+from concurrent.futures import ThreadPoolExecutor
 
 import oskeychain
 from keychain_names import LEGACY_SERVICE, PRIMARY_SERVICE, auth_services, service_names
@@ -33,6 +43,66 @@ from keychain_names import LEGACY_SERVICE, PRIMARY_SERVICE, auth_services, servi
 _SERVICE = PRIMARY_SERVICE
 _LEGACY_SERVICE = LEGACY_SERVICE
 _KC_TIMEOUT = 5  # seconds — fail loud rather than hang on a locked keychain
+
+_HEADLESS_ENV_VAR = "BETTER_AGENT_HEADLESS_AUTH"
+_HEADLESS_USERNAME_VAR = "BETTER_AGENT_USERNAME"
+_HEADLESS_PASSWORD_HASH_FILE_VAR = "BETTER_AGENT_PASSWORD_HASH_FILE"
+_HEADLESS_SESSION_SECRET_FILE_VAR = "BETTER_AGENT_SESSION_SECRET_FILE"
+_headless_ephemeral_session_secret: str | None = None
+
+
+def headless_mode_enabled() -> bool:
+    return os.environ.get(_HEADLESS_ENV_VAR, "") == "1"
+
+
+def _read_secret_file(env_var: str) -> str:
+    path = os.environ.get(env_var, "")
+    if not path:
+        raise RuntimeError(
+            f"{_HEADLESS_ENV_VAR}=1 but {env_var} is unset. Set it to the path of a "
+            f"mounted secret file, then restart the backend."
+        )
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            value = handle.read().strip()
+    except OSError as exc:
+        raise RuntimeError(
+            f"{env_var} points to {path!r}, which could not be read: {exc}. "
+            f"Check the file exists and is mounted into the container."
+        ) from exc
+    if not value:
+        raise RuntimeError(f"{env_var} points to {path!r}, which is empty.")
+    return value
+
+
+def _headless_get_username() -> str:
+    username = os.environ.get(_HEADLESS_USERNAME_VAR, "")
+    if not username:
+        raise RuntimeError(
+            f"{_HEADLESS_ENV_VAR}=1 but {_HEADLESS_USERNAME_VAR} is unset. "
+            f"Set it, then restart the backend."
+        )
+    return username
+
+
+def _headless_get_password_hash() -> str:
+    return _read_secret_file(_HEADLESS_PASSWORD_HASH_FILE_VAR)
+
+
+def _headless_get_session_secret() -> str:
+    global _headless_ephemeral_session_secret
+    if os.environ.get(_HEADLESS_SESSION_SECRET_FILE_VAR, ""):
+        return _read_secret_file(_HEADLESS_SESSION_SECRET_FILE_VAR)
+    if _headless_ephemeral_session_secret is None:
+        print(
+            f"auth_secrets: {_HEADLESS_SESSION_SECRET_FILE_VAR} not set — generating an "
+            f"ephemeral session secret for this process. Every restart invalidates existing "
+            f"sessions. Set {_HEADLESS_SESSION_SECRET_FILE_VAR} to a mounted secret file "
+            f"for sessions that survive a restart.",
+            file=sys.stderr,
+        )
+        _headless_ephemeral_session_secret = secrets.token_hex(32)
+    return _headless_ephemeral_session_secret
 
 
 def _services() -> tuple[str, ...]:
@@ -91,14 +161,20 @@ def _kc(account: str) -> str:
 
 
 def get_username() -> str:
+    if headless_mode_enabled():
+        return _headless_get_username()
     return _kc("username")
 
 
 def get_password_hash() -> str:
+    if headless_mode_enabled():
+        return _headless_get_password_hash()
     return _kc("password_hash")
 
 
 def get_session_secret() -> str:
+    if headless_mode_enabled():
+        return _headless_get_session_secret()
     return _kc("session_secret")
 
 
@@ -147,6 +223,12 @@ def _account_exists(account: str) -> bool:
 def needs_bootstrap() -> bool:
     """True when any of the three credential entries is missing — the
     desktop app must run first-run setup before starting the backend."""
+    if headless_mode_enabled():
+        # Headless credentials are operator-supplied at container start,
+        # not written through first-run setup. Missing/invalid config
+        # raises loud (via get_username/get_password_hash) rather than
+        # silently falling into the interactive bootstrap UI.
+        return False
     return not all(
         _account_exists(a)
         for a in ("username", "password_hash", "session_secret")
@@ -165,9 +247,20 @@ def make_password_hash(password: str) -> str:
     return argon2.PasswordHasher().hash(password)
 
 
+def _reject_headless_write() -> None:
+    if headless_mode_enabled():
+        raise RuntimeError(
+            f"{_HEADLESS_ENV_VAR}=1: credentials are supplied by the container's "
+            f"env vars / mounted secret files and cannot be changed at runtime. "
+            f"Update {_HEADLESS_USERNAME_VAR} / {_HEADLESS_PASSWORD_HASH_FILE_VAR} "
+            f"and restart the container instead."
+        )
+
+
 def write_credentials(username: str, password: str) -> None:
     """First-run bootstrap: store username, the argon2 password hash, and
     a freshly minted 32-byte session secret in the keychain."""
+    _reject_headless_write()
     if not username or not password:
         raise ValueError("username and password must both be non-empty")
     _kc_set("username", username)
@@ -176,6 +269,7 @@ def write_credentials(username: str, password: str) -> None:
 
 
 def write_login_credentials(username: str, password: str) -> None:
+    _reject_headless_write()
     if not username or not password:
         raise ValueError("username and password must both be non-empty")
     _kc_set("username", username)
