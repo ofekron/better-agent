@@ -58,6 +58,7 @@ from event_shape import (
     is_synthetic_event as _is_synthetic_event,
 )
 from capability_contexts import provider_capability_contexts
+import harness_profile_resolver
 from extension_context_audit import runtime_context as extension_audit_context
 from extension_store import user_instruction_contexts as extension_user_instruction_contexts
 from runtime_skills import runtime_skill_contexts
@@ -1534,6 +1535,9 @@ class TurnManager:
         queue_item_id: Optional[str] = None,
         team_message: Optional[dict] = None,
         capability_contexts: Optional[list[dict]] = None,
+        harness_profile_id: Optional[str] = None,
+        harness_profile_revision: Optional[str] = None,
+        resolved_harness_run_config: Optional[dict] = None,
         file_discussion_id: Optional[str] = None,
     ) -> None:
         """Behavior-identical to `Coordinator._run_turn` (today
@@ -1818,6 +1822,9 @@ class TurnManager:
                 disallowed_tools=disallowed_tools,
                 disabled_builtin_extensions=disabled_builtin_extensions,
                 capability_contexts=capability_contexts,
+                harness_profile_id=harness_profile_id,
+                harness_profile_revision=harness_profile_revision,
+                resolved_harness_run_config=resolved_harness_run_config,
             )
 
             if cancel_event.is_set():
@@ -2277,6 +2284,9 @@ class TurnManager:
         disallowed_tools: Optional[list[str]] = None,
         disabled_builtin_extensions: Optional[list[str]] = None,
         capability_contexts: Optional[list[dict]] = None,
+        harness_profile_id: Optional[str] = None,
+        harness_profile_revision: Optional[str] = None,
+        resolved_harness_run_config: Optional[dict] = None,
     ) -> dict:
         loop = asyncio.get_running_loop()
 
@@ -2311,7 +2321,34 @@ class TurnManager:
         current_session_id = session_id
         # Read continuation_chain from session for the provider → runner.
         _session_rec_chain = (_session_rec or {}).get("continuation_chain") or []
-        raw_provider_run_config = (_session_rec or {}).get("provider_run_config")
+        if resolved_harness_run_config is None:
+            try:
+                resolved_harness_run_config = await _to_turn_dispatch_thread(
+                    harness_profile_resolver.resolve_for_session,
+                    _session_rec,
+                    profile_id=harness_profile_id,
+                    revision=harness_profile_revision,
+                    turn_capability_contexts=capability_contexts,
+                )
+            except harness_profile_resolver.HarnessProfileResolutionError:
+                raise
+        if isinstance(resolved_harness_run_config, dict) and "raw_capability_contexts" not in resolved_harness_run_config:
+            resolved_harness_run_config = {
+                **resolved_harness_run_config,
+                "raw_capability_contexts": resolved_harness_run_config.get("capability_contexts") or [],
+            }
+        harness_bare = (
+            bool(resolved_harness_run_config.get("bare_config"))
+            if isinstance(resolved_harness_run_config, dict)
+            else bool((_session_rec or {}).get("bare_config"))
+        )
+        if harness_bare:
+            run_setting_sources = []
+        raw_provider_run_config = (
+            (resolved_harness_run_config or {}).get("provider_run_config")
+            if isinstance(resolved_harness_run_config, dict)
+            else (_session_rec or {}).get("provider_run_config")
+        )
         provider_run_config = dict(raw_provider_run_config) if isinstance(raw_provider_run_config, dict) else {}
         if fork:
             try:
@@ -2326,29 +2363,35 @@ class TurnManager:
         runtime_capability_contexts = await _to_turn_dispatch_thread(
             runtime_skill_contexts,
             cwd,
-            bare_config=bool((_session_rec or {}).get("bare_config")),
+            bare_config=harness_bare,
             disabled=(_session_rec or {}).get("disabled_runtime_skills"),
             display_root=_runtime_skill_display_root(provider_kind),
         )
         dynamic_capability_contexts = await _to_turn_dispatch_thread(
             extension_audit_context,
             cwd,
-            bare_config=bool((_session_rec or {}).get("bare_config")),
+            bare_config=harness_bare,
         )
         extension_instruction_contexts = await _to_turn_dispatch_thread(
             extension_user_instruction_contexts,
-            bare_config=bool((_session_rec or {}).get("bare_config")),
+            bare_config=harness_bare,
         )
-        run_capability_contexts = _provider_capability_contexts(
-            [*session_capability_contexts, *(capability_contexts or [])],
-            provider_kind,
-        )
+        if isinstance(resolved_harness_run_config, dict):
+            selected_contexts = resolved_harness_run_config.get("raw_capability_contexts") or []
+        else:
+            selected_contexts = [*session_capability_contexts, *(capability_contexts or [])]
+        run_capability_contexts = _provider_capability_contexts(selected_contexts, provider_kind)
         run_capability_contexts = [
             *runtime_capability_contexts,
             *dynamic_capability_contexts,
             *extension_instruction_contexts,
             *run_capability_contexts,
         ]
+        if isinstance(resolved_harness_run_config, dict):
+            resolved_harness_run_config = {
+                **resolved_harness_run_config,
+                "capability_contexts": run_capability_contexts,
+            }
         transient_attempt = 0
         rate_limit_attempt = 0
         moved_project_wrap_done = False
@@ -2481,6 +2524,7 @@ class TurnManager:
             nonlocal _session_rec_chain, provider_run_config
             nonlocal session_capability_contexts, runtime_capability_contexts
             nonlocal run_capability_contexts, model
+            nonlocal resolved_harness_run_config
             _session_rec = await _to_turn_dispatch_thread(
                 session_manager.get,
                 primary_session_id or app_session_id,
@@ -2496,33 +2540,49 @@ class TurnManager:
             provider_kind = getattr(provider, "KIND", "")
             _session_rec_chain = _session_rec.get("continuation_chain") or []
             provider_run_config = _session_rec.get("provider_run_config") or None
+            if isinstance(resolved_harness_run_config, dict):
+                provider_run_config = resolved_harness_run_config.get("provider_run_config") or {}
             session_capability_contexts = _session_rec.get("capability_contexts") or []
+            harness_bare_refresh = (
+                bool(resolved_harness_run_config.get("bare_config"))
+                if isinstance(resolved_harness_run_config, dict)
+                else bool(_session_rec.get("bare_config"))
+            )
+            if harness_bare_refresh:
+                provider_run_config = dict(provider_run_config or {})
             runtime_capability_contexts = await _to_turn_dispatch_thread(
                 runtime_skill_contexts,
                 cwd,
-                bare_config=bool(_session_rec.get("bare_config")),
+                bare_config=harness_bare_refresh,
                 disabled=_session_rec.get("disabled_runtime_skills"),
                 display_root=_runtime_skill_display_root(provider_kind),
             )
             dynamic_capability_contexts = await _to_turn_dispatch_thread(
                 extension_audit_context,
                 cwd,
-                bare_config=bool(_session_rec.get("bare_config")),
+                bare_config=harness_bare_refresh,
             )
             extension_instruction_contexts = await _to_turn_dispatch_thread(
                 extension_user_instruction_contexts,
-                bare_config=bool(_session_rec.get("bare_config")),
+                bare_config=harness_bare_refresh,
             )
-            run_capability_contexts = _provider_capability_contexts(
-                [*session_capability_contexts, *(capability_contexts or [])],
-                provider_kind,
+            selected_contexts = (
+                resolved_harness_run_config.get("raw_capability_contexts") or []
+                if isinstance(resolved_harness_run_config, dict)
+                else [*session_capability_contexts, *(capability_contexts or [])]
             )
+            run_capability_contexts = _provider_capability_contexts(selected_contexts, provider_kind)
             run_capability_contexts = [
                 *runtime_capability_contexts,
                 *dynamic_capability_contexts,
                 *extension_instruction_contexts,
                 *run_capability_contexts,
             ]
+            if isinstance(resolved_harness_run_config, dict):
+                resolved_harness_run_config = {
+                    **resolved_harness_run_config,
+                    "capability_contexts": run_capability_contexts,
+                }
 
         async def _stamp_run_meta() -> None:
             """Re-stamp `run_meta` on the in-flight assistant message from
@@ -2710,6 +2770,7 @@ class TurnManager:
                     disabled_builtin_extensions=disabled_builtin_extensions,
                     provider_run_config=provider_run_config,
                     capability_contexts=run_capability_contexts,
+                    resolved_harness_run_config=resolved_harness_run_config,
                     target_message_id=target_message_id,
                         turn_run_id=turn_run_id,
                     )

@@ -4248,6 +4248,8 @@ class SessionManager:
         disabled_builtin_tools: Optional[list[str]] = None,
         disabled_runtime_skills: Optional[list[str]] = None,
         preset: Optional[str] = None,
+        harness_profile_id: Optional[str] = None,
+        harness_profile_revision: Optional[str] = None,
         storage_scope: Optional[dict] = None,
         id: Optional[str] = None,
         created_at: Optional[str] = None,
@@ -4294,6 +4296,8 @@ class SessionManager:
             extra_mcp_servers=extra_mcp_servers,
             disabled_builtin_tools=exclusions["disabled_builtin_tools"],
             disabled_runtime_skills=exclusions["disabled_runtime_skills"],
+            harness_profile_id=harness_profile_id,
+            harness_profile_revision=harness_profile_revision,
             storage_scope=storage_scope,
             id=id,
             created_at=created_at,
@@ -4811,6 +4815,29 @@ class SessionManager:
             },
         )
 
+    def set_harness_profile(
+        self,
+        sid: str,
+        profile_id: str,
+        revision: str,
+    ) -> Optional[dict]:
+        clean_profile_id = str(profile_id or "").strip()
+        clean_revision = str(revision or "").strip()
+
+        def _do(s: dict) -> None:
+            s["harness_profile_id"] = clean_profile_id
+            s["harness_profile_revision"] = clean_revision
+
+        return self._run(
+            sid,
+            _do,
+            {
+                "kind": "harness_profile_set",
+                "harness_profile_id": clean_profile_id,
+                "harness_profile_revision": clean_revision,
+            },
+        )
+
     def set_disallowed_tools(
         self,
         sid: str,
@@ -4871,6 +4898,8 @@ class SessionManager:
         permission: Optional[dict] = None,
         cwd: Optional[str] = None,
         provider_id: Optional[str] = None,
+        harness_profile_id: Optional[str] = None,
+        harness_profile_revision: Optional[str] = None,
         client_id: Optional[str] = None,
     ) -> Optional[dict]:
         """Patch mutable per-session selectors.
@@ -4946,6 +4975,9 @@ class SessionManager:
                 s["cwd"] = cwd
             if provider_id is not None:
                 s["provider_id"] = provider_id
+            if harness_profile_id is not None:
+                s["harness_profile_id"] = str(harness_profile_id or "").strip()
+                s["harness_profile_revision"] = str(harness_profile_revision or "").strip()
         return self._run(
             sid, _do,
             {
@@ -4956,6 +4988,8 @@ class SessionManager:
                 "permission": permission,
                 "cwd": cwd,
                 "provider_id": provider_id,
+                "harness_profile_id": harness_profile_id,
+                "harness_profile_revision": harness_profile_revision,
                 "client_id": client_id,
             },
         )

@@ -634,6 +634,8 @@ export class MockBackend {
         provider_id: providerId,
         reasoning_effort: b.reasoning_effort || "",
         permission: b.permission || {},
+        harness_profile_id: b.harness_profile_id || "",
+        harness_profile_revision: b.harness_profile_revision || "",
         cwd: b.cwd || "",
         orchestration_mode: b.orchestration_mode || "manager",
         created_at: new Date().toISOString(),
@@ -769,6 +771,10 @@ export class MockBackend {
           if (b.reasoning_effort !== undefined)
             session.reasoning_effort = b.reasoning_effort;
           if (b.permission !== undefined) session.permission = b.permission;
+          if (b.harness_profile_id !== undefined)
+            session.harness_profile_id = b.harness_profile_id;
+          if (b.harness_profile_revision !== undefined)
+            session.harness_profile_revision = b.harness_profile_revision;
           if (b.cwd) session.cwd = b.cwd;
           if (b.orchestration_mode)
             session.orchestration_mode = b.orchestration_mode;

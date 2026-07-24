@@ -32,6 +32,7 @@ import { AppearanceSetting } from "./AppearanceSetting";
 import { UserDisplayNameSetting } from "./UserDisplayNameSetting";
 import { AuthCredentialsSetting } from "./AuthCredentialsSetting";
 import { PasswordManagerSetting } from "./PasswordManagerSetting";
+import { HarnessSettingsEditor } from "./HarnessSettingsEditor";
 import {
   downloadUrl as desktopDownloadUrl,
   platformLabel as desktopPlatformLabel,
@@ -109,6 +110,7 @@ type SettingsSection =
   | "sessions"
   | "voice"
   | "extensions"
+  | "harnessProfiles"
   | "passwords"
   | "server"
   | `extension:${string}`;
@@ -2246,25 +2248,28 @@ function ProvidersList({
   }, [extensionSettingsModules]);
   const extensionSettingsSection = extensionSettingsBySection.get(section);
   const isNative = Capacitor.isNativePlatform();
-  const sections: { id: SettingsSection; label: string }[] = [
-    { id: "providers", label: t("setup.providersTitle") },
-    { id: "account", label: t("settings.accountTitle") },
-    { id: "language", label: t("language.label") },
-    { id: "appearance", label: t("settings.appearanceTitle") },
-    { id: "desktop", label: t("settings.desktopTitle") },
-    { id: "recovery", label: t("settings.recoveryTitle") },
-    { id: "shortcuts", label: t("settings.shortcutsTitle") },
-    ...(teamEnabled ? [{ id: "delegation" as const, label: t("settings.delegationTitle") }] : []),
-    { id: "context", label: t("settings.contextTitle") },
-    { id: "internalLlm", label: t("settings.internalLlmTitle") },
-    { id: "sessions", label: t("settings.sessionsTitle") },
-    { id: "voice", label: t("settings.voiceTitle") },
-    ...(integrationsEnabled ? [{ id: "extensions" as const, label: t("settings.extensionsTitle") }] : []),
-    ...(credentialBrokerEnabled ? [{ id: "passwords" as const, label: t("settings.passwordManager") }] : []),
-    ...(isNative ? [{ id: "server" as const, label: t("settings.serverTitle") }] : []),
+  type SettingsGroup = "general" | "harness";
+  const sections: { id: SettingsSection; label: string; group: SettingsGroup }[] = [
+    { id: "providers", label: t("setup.providersTitle"), group: "general" },
+    { id: "account", label: t("settings.accountTitle"), group: "general" },
+    { id: "language", label: t("language.label"), group: "general" },
+    { id: "appearance", label: t("settings.appearanceTitle"), group: "general" },
+    { id: "desktop", label: t("settings.desktopTitle"), group: "general" },
+    { id: "recovery", label: t("settings.recoveryTitle"), group: "general" },
+    { id: "shortcuts", label: t("settings.shortcutsTitle"), group: "general" },
+    ...(teamEnabled ? [{ id: "delegation" as const, label: t("settings.delegationTitle"), group: "general" as const }] : []),
+    { id: "context", label: t("settings.contextTitle"), group: "general" },
+    { id: "internalLlm", label: t("settings.internalLlmTitle"), group: "general" },
+    { id: "sessions", label: t("settings.sessionsTitle"), group: "general" },
+    { id: "voice", label: t("settings.voiceTitle"), group: "general" },
+    ...(credentialBrokerEnabled ? [{ id: "passwords" as const, label: t("settings.passwordManager"), group: "general" as const }] : []),
+    ...(isNative ? [{ id: "server" as const, label: t("settings.serverTitle"), group: "general" as const }] : []),
+    ...(integrationsEnabled ? [{ id: "extensions" as const, label: t("settings.extensionsTitle"), group: "harness" as const }] : []),
+    { id: "harnessProfiles", label: t("settings.harnessProfilesSection"), group: "harness" },
     ...extensionSettingsModules.map((item) => ({
       id: `extension:${item.extension_id}:${item.id}` as const,
       label: item.label,
+      group: "general" as const,
     })),
   ];
   useEffect(() => {
@@ -2352,6 +2357,7 @@ function ProvidersList({
       )}
       {section === "voice" && <VoiceSettings />}
       {section === "extensions" && <ExtensionUiSettingsSection />}
+      {section === "harnessProfiles" && <HarnessSettingsEditor />}
       {section === "passwords" && credentialBrokerEnabled && <PasswordManagerSetting />}
       {section === "server" && isNative && <ServerSetting />}
       {extensionSettingsSection && <ExtensionModuleSlot module={extensionSettingsSection} />}
@@ -2391,17 +2397,28 @@ function ProvidersList({
       </div>
       <div className="settings-page-layout">
         <nav className="settings-page-nav" aria-label={t("settings.title")}>
-          {sections.map((item) => (
-            <button
-              key={item.id}
-              type="button"
-              className={item.id === section ? "active" : ""}
-              aria-current={item.id === section ? "page" : undefined}
-              onClick={() => onSectionChange(item.id)}
-            >
-              {item.label}
-            </button>
-          ))}
+          {(["general", "harness"] as const).map((group) => {
+            const groupSections = sections.filter((item) => item.group === group);
+            if (groupSections.length === 0) return null;
+            return (
+              <div className="settings-page-nav-group" key={group}>
+                <div className="settings-page-nav-group-header">
+                  {group === "general" ? t("settings.generalTab") : t("settings.harnessTab")}
+                </div>
+                {groupSections.map((item) => (
+                  <button
+                    key={item.id}
+                    type="button"
+                    className={item.id === section ? "active" : ""}
+                    aria-current={item.id === section ? "page" : undefined}
+                    onClick={() => onSectionChange(item.id)}
+                  >
+                    {item.label}
+                  </button>
+                ))}
+              </div>
+            );
+          })}
         </nav>
         <div className="settings-page-content">
           {body}

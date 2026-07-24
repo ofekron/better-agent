@@ -2116,6 +2116,8 @@ function AppMain({
     cwd: string;
     orchestrationMode: OrchestrationMode;
     capabilityContexts: CapabilityContext[];
+    harnessProfileId?: string;
+    harnessProfileRevision?: string;
   };
   type PendingInitialPrompt = InitialPromptPayload & { clientId: string };
 
@@ -2140,6 +2142,8 @@ function AppMain({
         orchestrationMode: initial.orchestrationMode,
         sendMode: "queue",
         capabilityContexts: initial.capabilityContexts,
+        harnessProfileId: initial.harnessProfileId,
+        harnessProfileRevision: initial.harnessProfileRevision,
         deferUntilTargetReady,
       });
       if (!queued) return null;
@@ -2183,6 +2187,8 @@ function AppMain({
         undefined,
         pending.files.length > 0 ? pending.files : undefined,
         pending.capabilityContexts,
+        pending.harnessProfileId,
+        pending.harnessProfileRevision,
       );
       if (sent) return true;
       offlineDispatchedRef.current.delete(pending.clientId);
@@ -2269,15 +2275,15 @@ function AppMain({
                 model: queued.model,
                 cwd: queued.cwd,
                 orchestrationMode: queued.orchestration_mode,
-                browserHarnessEnabled: queued.browser_harness_enabled,
                 providerId: queued.provider_id,
-                browserHarnessHeadless: queued.browser_harness_headless,
                 nodeId: queued.node_id,
                 reasoningEffort: queued.reasoning_effort,
                 runner: queued.runner,
                 permission: queued.permission,
                 clientSessionId: queued.id,
                 capabilityContexts: entry.capabilityContexts,
+                harnessProfileId: queued.harness_profile_id || undefined,
+                harnessProfileRevision: queued.harness_profile_revision || undefined,
                 folderId: queued.folder_id,
               });
               if (queued.draft_input || queued.draft_images?.length) {
@@ -2346,6 +2352,8 @@ function AppMain({
                 undefined,
                 offlineFiles,
                 entry.capabilityContexts,
+                entry.harnessProfileId,
+                entry.harnessProfileRevision,
               );
               if (!sent) {
                 logPromptSend("offline_flush_ws_not_open", {
@@ -2388,6 +2396,8 @@ function AppMain({
             entry.sendTarget,
             offlineFiles,
             entry.capabilityContexts,
+            entry.harnessProfileId,
+            entry.harnessProfileRevision,
           );
           if (!sent) {
             logPromptSend("offline_flush_ws_not_open", {
@@ -4936,6 +4946,8 @@ function AppMain({
         currentSession?.supervisor_enabled ? sendTarget : undefined,
         filePayloads.length > 0 ? filePayloads : undefined,
         capabilityContexts,
+        currentSession?.harness_profile_id,
+        currentSession?.harness_profile_revision,
       );
 
       // Gap 1: WS not open — keep the durable localStorage action for
@@ -5135,6 +5147,10 @@ function AppMain({
         clientIdForMsg,
         "alter",
         currentSession.supervisor_enabled ? sendTarget : undefined,
+        undefined,
+        undefined,
+        currentSession.harness_profile_id,
+        currentSession.harness_profile_revision,
       );
       if (!sent) {
         setPendingForSession(sessionId, (prev) =>
@@ -5160,12 +5176,12 @@ function AppMain({
       model: nextModel,
       cwd: nextCwd,
       orchestrationMode: nextMode,
-      browserHarnessEnabled: currentSession?.browser_harness_enabled ?? true,
       providerId: nextProviderId,
-      browserHarnessHeadless: currentSession?.browser_harness_headless ?? true,
       nodeId: currentSession?.node_id ?? "primary",
       reasoningEffort: currentSession?.reasoning_effort || provider?.last_reasoning_effort || provider?.default_reasoning_effort || undefined,
       runner: currentSession?.runner || provider?.runner,
+      harnessProfileId: currentSession?.harness_profile_id || undefined,
+      harnessProfileRevision: currentSession?.harness_profile_revision || undefined,
     });
     if (session?.id) {
       navigateToCreatedSession(session);
@@ -5249,7 +5265,13 @@ function AppMain({
         sessionId,
         images.length > 0 ? images : undefined,
         currentSession?.orchestration_mode ?? undefined,
-        newPendingMsg.id // client_id — backend echoes on user_msg
+        newPendingMsg.id,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        currentSession.harness_profile_id,
+        currentSession.harness_profile_revision,
       );
 
       if (!sent) {
@@ -5574,8 +5596,8 @@ function AppMain({
         cwd: config.cwd,
         orchestration_mode: config.orchestrationMode,
         provider_id: config.main.providerId,
-        browser_harness_enabled: config.browserHarnessEnabled,
-        browser_harness_headless: config.browserHarnessHeadless,
+        harness_profile_id: config.harnessProfileId || "",
+        harness_profile_revision: config.harnessProfileRevision || "",
         node_id: config.nodeId,
         created_at: now,
         updated_at: now,
@@ -5601,6 +5623,8 @@ function AppMain({
         images: shouldSend && images.length ? images : undefined,
         files: shouldSend && files.length ? files : undefined,
         capabilityContexts: config.capabilityContexts,
+        harnessProfileId: config.harnessProfileId || undefined,
+        harnessProfileRevision: config.harnessProfileRevision || undefined,
       });
       if (!offlineQueued) return false;
       addOfflineSession(localSession, action === "send-and-open");
@@ -5666,6 +5690,8 @@ function AppMain({
             cwd: config.cwd,
             orchestrationMode: config.orchestrationMode,
             capabilityContexts: config.capabilityContexts,
+            harnessProfileId: config.harnessProfileId || undefined,
+            harnessProfileRevision: config.harnessProfileRevision || undefined,
           };
           const durablePending = persistInitialPromptForSession(
             pending,
@@ -5691,14 +5717,14 @@ function AppMain({
             model: config.main.model,
             cwd: config.cwd,
             orchestrationMode: config.orchestrationMode,
-            browserHarnessEnabled: config.browserHarnessEnabled,
             providerId: config.main.providerId,
-            browserHarnessHeadless: config.browserHarnessHeadless,
             nodeId: config.nodeId,
             reasoningEffort: config.main.reasoningEffort,
             runner: config.main.runner,
             permission: config.main.permission,
             capabilityContexts: config.capabilityContexts,
+            harnessProfileId: config.harnessProfileId || undefined,
+            harnessProfileRevision: config.harnessProfileRevision || undefined,
             folderId: config.folderId,
             preset: config.preset,
           });
@@ -5733,9 +5759,7 @@ function AppMain({
           model: config.main.model,
           cwd: config.cwd,
           orchestrationMode: config.orchestrationMode,
-          browserHarnessEnabled: config.browserHarnessEnabled,
           providerId: config.main.providerId,
-          browserHarnessHeadless: config.browserHarnessHeadless,
           fileEditEnabled: true,
           fileEditPath: config.fileEditPath,
           nodeId: config.nodeId,
@@ -5743,6 +5767,8 @@ function AppMain({
           runner: config.main.runner,
           permission: config.main.permission,
           capabilityContexts: config.capabilityContexts,
+          harnessProfileId: config.harnessProfileId || undefined,
+          harnessProfileRevision: config.harnessProfileRevision || undefined,
           folderId: config.folderId,
           preset: config.preset,
         });
@@ -6082,6 +6108,8 @@ function AppMain({
         orchestrationMode:
           (picked.orchestration_mode as OrchestrationMode) ?? "team",
         capabilityContexts: [],
+        harnessProfileId: picked.harness_profile_id || undefined,
+        harnessProfileRevision: picked.harness_profile_revision || undefined,
       }, true);
       if (!durablePending) return;
       void fetch(
@@ -7645,6 +7673,8 @@ function AppMain({
               model?: string;
               cwd?: string;
               orchestration_mode?: OrchestrationMode;
+              harness_profile_id?: string;
+              harness_profile_revision?: string;
               forks?: PromptEngineerParentNode[];
             };
             let parentRecord: PromptEngineerParentNode | null = null;
@@ -7684,7 +7714,13 @@ function AppMain({
               parentId,
               undefined,
               sendOrch,
-              clientId
+              clientId,
+              undefined,
+              undefined,
+              undefined,
+              undefined,
+              parentRecord?.harness_profile_id || fallback?.harness_profile_id,
+              parentRecord?.harness_profile_revision || fallback?.harness_profile_revision,
             );
             try {
               await progressTrackedFetch(
@@ -8162,7 +8198,6 @@ function AppMain({
             capabilityPickerClient={providerConfigSyncClient}
             teamEnabled={builtinExtensions.team}
             machineNodesEnabled={builtinExtensions.machineNodes}
-            browserHarnessEnabled={builtinExtensions.browserHarness}
             allowOfflineCreate={!connected}
           />
         </Suspense>

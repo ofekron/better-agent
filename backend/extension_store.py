@@ -37,6 +37,7 @@ from provider_config_sync_backend.api import KNOWN_PROVIDER_KINDS
 import extension_instructions
 import extension_mcp
 import installation_profile
+import harness_run_projection
 
 STORE_SCHEMA_VERSION = 2
 MANIFEST_KIND = "better-agent-extension"
@@ -125,6 +126,7 @@ BUILTIN_SESSION_CONTROL_EXTENSION_ID = "ofek-dev.session-control"
 BUILTIN_COORDINATION_EXTENSION_ID = "ofek-dev.coordination"
 BUILTIN_PROVIDER_CONFIG_SYNC_EXTENSION_ID = "ofek-dev.provider-config-sync"
 BUILTIN_TODOS_EXTENSION_ID = "ofek-dev.todos"
+BUILTIN_FILE_EDIT_EXTENSION_ID = "ofek-dev.file-edit"
 BUILTIN_HARNESS_INSTRUCTIONS_EXTENSION_ID = "better-agent.harness-for-better-agent"
 BUILTIN_USER_ATTENTION_EXTENSION_ID = "ofek-dev.user-attention"
 BUILTIN_SWITCH_CONTROL_EXTENSION_ID = "ofek-dev.switch-control"
@@ -158,6 +160,7 @@ _PUBLIC_EXTENSION_PATHS = {
     BUILTIN_COORDINATION_EXTENSION_ID: "extensions/coordination",
     BUILTIN_PROVIDER_CONFIG_SYNC_EXTENSION_ID: "extensions/provider-config-sync",
     BUILTIN_TODOS_EXTENSION_ID: "extensions/todos",
+    BUILTIN_FILE_EDIT_EXTENSION_ID: "extensions/file-edit",
     BUILTIN_HARNESS_INSTRUCTIONS_EXTENSION_ID: "extensions/harness-instructions",
     BUILTIN_USER_ATTENTION_EXTENSION_ID: "extensions/user-attention",
     BUILTIN_SWITCH_CONTROL_EXTENSION_ID: "extensions/switch-control",
@@ -170,6 +173,7 @@ _EXTENSION_DISPLAY_NAMES = {
     BUILTIN_COORDINATION_EXTENSION_ID: "Coordination",
     BUILTIN_PROVIDER_CONFIG_SYNC_EXTENSION_ID: "Provider Config Sync",
     BUILTIN_TODOS_EXTENSION_ID: "Todos",
+    BUILTIN_FILE_EDIT_EXTENSION_ID: "File Edit",
     BUILTIN_HARNESS_INSTRUCTIONS_EXTENSION_ID: "Harness instructions",
     BUILTIN_USER_ATTENTION_EXTENSION_ID: "User attention",
     BUILTIN_SWITCH_CONTROL_EXTENSION_ID: "Line Switch",
@@ -5187,6 +5191,25 @@ def _extra_mcp_server_names(inputs: dict[str, Any]) -> set[str]:
     return {name for name in (str(item or "").strip() for item in raw) if name}
 
 
+def _profile_selected_mcp_server_names(inputs: dict[str, Any], extension_id: str) -> set[str]:
+    return harness_run_projection.selected_mcp_servers(inputs, extension_id)
+
+
+def _profile_setting_overlays(inputs: dict[str, Any], extension_id: str) -> dict[str, Any]:
+    projection = harness_run_projection.launcher_projection(inputs)
+    raw = projection.get("extension_setting_overlays") if projection else None
+    if not isinstance(raw, dict):
+        return {}
+    settings = raw.get(extension_id)
+    if not isinstance(settings, dict):
+        return {}
+    out: dict[str, Any] = {}
+    for key, item in settings.items():
+        if isinstance(key, str) and isinstance(item, dict) and "value" in item:
+            out[key] = copy.deepcopy(item["value"])
+    return out
+
+
 def _disabled_runtime_extension_ids(inputs: dict[str, Any]) -> set[str]:
     raw = inputs.get("disabled_builtin_extensions")
     if not isinstance(raw, list):
@@ -5266,8 +5289,14 @@ def _mcp_server_configs_for_delivery(
         if manifest["id"] in disabled_extension_ids:
             continue
         for item in _stored_mcp_entrypoints(record):
-            if delivery == _HARNESS_DELIVERY_NATIVE and not native_harness_exposed(
-                manifest["id"], "mcp", item["name"], record=record
+            profile_selected = item["name"] in _profile_selected_mcp_server_names(
+                resolved_inputs,
+                manifest["id"],
+            )
+            if (
+                delivery == _HARNESS_DELIVERY_NATIVE
+                and not profile_selected
+                and not native_harness_exposed(manifest["id"], "mcp", item["name"], record=record)
             ):
                 continue
             server_name = item.get("replaces_builtin") or item["name"]
@@ -5328,6 +5357,11 @@ def _native_mcp_launcher_env(inputs: dict[str, Any]) -> dict[str, str]:
         "BETTER_CLAUDE_DISABLED_BUILTIN_EXTENSIONS": ",".join(disabled_extensions),
         "BETTER_CLAUDE_ACTIVE_CAPABILITY_IDS": ",".join(active_capability_ids),
         "BETTER_CLAUDE_PROVISIONED_TOOL_PROFILE": provisioned_tool_profile,
+        "BETTER_CLAUDE_HARNESS_LAUNCHER_PROJECTION": json.dumps(
+            harness_run_projection.launcher_projection(inputs),
+            separators=(",", ":"),
+            sort_keys=True,
+        ),
     })
 
 
@@ -5350,7 +5384,8 @@ def resolve_native_mcp_server_config(
             break
     if item is None:
         return None
-    if not native_harness_exposed(extension_id, "mcp", server_name, record=record):
+    profile_selected = server_name in _profile_selected_mcp_server_names(inputs, extension_id)
+    if not profile_selected and not native_harness_exposed(extension_id, "mcp", server_name, record=record):
         return None
     return _runtime_mcp_server_config_for_item(record, item, inputs)
 
@@ -5416,6 +5451,15 @@ def _runtime_mcp_server_config_for_item(
         **dict(item.get("env") or {}),
         **dual_env_many({"BETTER_CLAUDE_EXTENSION_ID": manifest["id"]}),
     }
+    setting_overlays = _profile_setting_overlays(inputs, manifest["id"])
+    if setting_overlays:
+        env.update(dual_env_many({
+            "BETTER_CLAUDE_EXTENSION_SETTING_OVERLAYS": json.dumps(
+                setting_overlays,
+                separators=(",", ":"),
+                sort_keys=True,
+            ),
+        }))
     if (
         manifest["id"] == BUILTIN_PROVIDER_CONFIG_SYNC_EXTENSION_ID
         and internal_token
@@ -6271,7 +6315,12 @@ def set_extension_setting(extension_id: str, key: str, value: Any) -> dict[str, 
     return get_extension_settings(extension_id)
 
 
-def resolve_all_settings(extension_id: str) -> dict[str, Any]:
+def resolve_all_settings(
+    extension_id: str,
+    *,
+    inputs: dict[str, Any] | None = None,
+    include_secrets: bool = True,
+) -> dict[str, Any]:
     """All declared settings with values resolved — secrets read from the
     keychain. Used by the SDK loopback so an extension's MCP server reads its
     own config without secrets ever touching the environment."""
@@ -6286,14 +6335,23 @@ def resolve_all_settings(extension_id: str) -> dict[str, Any]:
     for item in schema:
         key = item["key"]
         if item["type"] == "secret":
-            try:
-                resolved[key] = password_manager.get_service_password(
-                    _SETTING_SECRET_SERVICE, _setting_secret_account(extension_id, key)
-                )
-            except Exception:
+            if include_secrets:
+                try:
+                    resolved[key] = password_manager.get_service_password(
+                        _SETTING_SECRET_SERVICE, _setting_secret_account(extension_id, key)
+                    )
+                except Exception:
+                    resolved[key] = ""
+            else:
                 resolved[key] = ""
         else:
             resolved[key] = stored_values.get(key, item.get("default"))
+    if inputs:
+        overlays = _profile_setting_overlays(inputs, extension_id)
+        for item in schema:
+            key = item["key"]
+            if item["type"] != "secret" and key in overlays:
+                resolved[key] = copy.deepcopy(overlays[key])
     return resolved
 
 

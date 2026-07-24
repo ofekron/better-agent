@@ -374,6 +374,7 @@ class ClaudeProvider(Provider):
         provider_run_config: Optional[dict] = None,
         capability_contexts: Optional[list[dict]] = None,
         target_message_id: Optional[str] = None,
+        resolved_harness_run_config: Optional[dict] = None,
         turn_run_id: Optional[str] = None,
         disabled_builtin_extensions: Optional[list[str]] = None,
         provisioned_tool_profile: str = "",
@@ -433,6 +434,7 @@ class ClaudeProvider(Provider):
             provider_run_config=provider_run_config,
             capability_contexts=capability_contexts,
             target_message_id=target_message_id,
+            resolved_harness_run_config=resolved_harness_run_config,
             turn_run_id=turn_run_id,
             disabled_builtin_extensions=disabled_builtin_extensions,
             provisioned_tool_profile=provisioned_tool_profile,
@@ -537,6 +539,7 @@ class ClaudeProvider(Provider):
         turn_run_id: Optional[str],
         disabled_builtin_extensions: Optional[list[str]],
         provisioned_tool_profile: str,
+        resolved_harness_run_config: Optional[dict] = None,
     ) -> tuple[dict, bool, str, str]:
         """Single source for the runner's input.json payload.
         Returns `(payload, bare, mode, resolved_backend_url)`
@@ -567,7 +570,9 @@ class ClaudeProvider(Provider):
             is_worker=is_worker,
             fallback_kind=self.KIND,
         )
-        _bare = bool(_sess_rec.get("bare_config"))
+        _bare = bool(_sess_rec.get("bare_config")) or bool(
+            (resolved_harness_run_config or {}).get("bare_config")
+        )
         if _bare:
             # No user/project/local CLAUDE.md, settings, or memory.
             setting_sources = []
@@ -623,6 +628,7 @@ class ClaudeProvider(Provider):
             "continuation_chain": continuation_chain or [],
             "provider_run_config": provider_run_config or {},
             "capability_contexts": capability_contexts or [],
+            "resolved_harness_run_config": resolved_harness_run_config or {},
             "target_message_id": target_message_id,
             "turn_run_id": turn_run_id,
             "provisioned_tool_profile": str(provisioned_tool_profile or "").strip(),
@@ -683,6 +689,7 @@ class ClaudeProvider(Provider):
         turn_run_id: Optional[str],
         disabled_builtin_extensions: Optional[list[str]],
         provisioned_tool_profile: str,
+        resolved_harness_run_config: Optional[dict] = None,
     ) -> None:
         """Post-gate spawn body: write input.json, create containment,
         Popen the runner, register RunState, schedule bootstrap."""
@@ -720,6 +727,7 @@ class ClaudeProvider(Provider):
                 turn_run_id=turn_run_id,
                 disabled_builtin_extensions=disabled_builtin_extensions,
                 provisioned_tool_profile=provisioned_tool_profile,
+                resolved_harness_run_config=resolved_harness_run_config,
             )
         )
         (run_dir / "input.json").write_text(json.dumps(input_payload), encoding="utf-8")

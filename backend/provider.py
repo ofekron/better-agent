@@ -661,6 +661,7 @@ class Provider(ABC):
         provider_run_config: Optional[dict] = None,
         capability_contexts: Optional[list[dict]] = None,
         target_message_id: Optional[str] = None,
+        resolved_harness_run_config: Optional[dict] = None,
         turn_run_id: Optional[str] = None,
         disabled_builtin_extensions: Optional[list[str]] = None,
         provisioned_tool_profile: str = "",

@@ -148,6 +148,7 @@ class AmpProvider(GeminiProvider):
         provider_run_config: Optional[dict] = None,
         capability_contexts: Optional[list[dict]] = None,
         target_message_id: Optional[str] = None,
+        resolved_harness_run_config: Optional[dict] = None,
         turn_run_id: Optional[str] = None,
         disabled_builtin_extensions: Optional[list[str]] = None,
         provisioned_tool_profile: str = "",
@@ -189,6 +190,9 @@ class AmpProvider(GeminiProvider):
             is_worker=is_worker,
             fallback_kind=self.KIND,
         )
+        _bare = bool(session_record.get("bare_config")) or bool(
+            (resolved_harness_run_config or {}).get("bare_config")
+        )
         input_payload = {
             "prompt": prompt,
             "images": images or [],
@@ -207,11 +211,12 @@ class AmpProvider(GeminiProvider):
             "browser_harness_enabled": bool(browser_harness_enabled),
             "open_file_panel_enabled": bool(open_file_panel_enabled),
             "worker_agent_session_id": worker_agent_session_id,
-            "bare_config": bool(session_record.get("bare_config")),
+            "bare_config": _bare,
             "working_mode": session_record.get("working_mode"),
             "worker_working_mode": (worker_record or {}).get("working_mode"),
             "context_strategy": user_prefs.get_context_strategy(),
             "capability_contexts": capability_contexts or [],
+            "resolved_harness_run_config": resolved_harness_run_config or {},
             "target_message_id": target_message_id,
             "turn_run_id": turn_run_id,
             "provisioned_tool_profile": str(provisioned_tool_profile or "").strip(),
@@ -249,8 +254,8 @@ class AmpProvider(GeminiProvider):
                 cwd=cwd,
                 model=model,
                 provider_id=self.id,
-                bare_config=bool(session_record.get("bare_config")),
-                user_facing=bool(open_file_panel_enabled) and not bool(session_record.get("bare_config")),
+                bare_config=_bare,
+                user_facing=bool(open_file_panel_enabled) and not _bare,
                 disabled_builtin_extensions=input_payload["disabled_builtin_extensions"],
             ))
             popen = provider_runtime.popen_runner(

@@ -418,6 +418,37 @@ def test_codex_only_harness_instruction_is_provider_scoped():
 
 
 # ---------------------------------------------------------------------------
+# Harness profile reshape (Default-synthesis + sparse-override inheritance):
+# resolve_for_session's OUTPUT SHAPE must stay byte-identical for existing
+# callers regardless of the v1 -> v2 profile-store reshape.
+# ---------------------------------------------------------------------------
+def test_resolved_harness_run_config_shape_unchanged_by_profile_reshape():
+    import harness_profile_resolver
+    import harness_profile_store
+
+    harness_profile_store.create_profile({"id": "parity.reshape", "name": "Parity Reshape"})
+    snapshot = harness_profile_resolver.resolve_for_session(
+        {"harness_profile_id": "parity.reshape"},
+    )
+    assert snapshot is not None, "profile-selected session must resolve a snapshot"
+    assert isinstance(snapshot["launcher_projection"], dict)
+    assert isinstance(snapshot["disabled_builtin_tools"], list)
+    assert isinstance(snapshot["disabled_builtin_extensions"], list)
+    assert isinstance(snapshot["extension_mcp_servers"], dict)
+    assert isinstance(snapshot["extension_setting_overlays"], dict)
+    assert isinstance(snapshot["secret_refs"], dict)
+    for key in (
+        "profile_id", "profile_revision", "profile_name", "bare_config",
+        "capability_contexts", "provider_run_config", "extra_mcp_servers",
+        "active_capability_ids", "disabled_builtin_tools", "disabled_builtin_extensions",
+        "extension_revisions", "extension_mcp_servers", "extension_skills",
+        "extension_instruction_names", "extension_setting_overlays", "secret_refs",
+        "instruction_blocks", "launcher_projection",
+    ):
+        assert key in snapshot, f"resolved snapshot missing key {key}"
+
+
+# ---------------------------------------------------------------------------
 # Map integrity — surfaces stay mapped.
 # ---------------------------------------------------------------------------
 HARNESS_SURFACES = {
@@ -456,6 +487,7 @@ def main() -> int:
     test_disabled_builtin_extensions_normalizer_is_kind_agnostic()
     test_builtin_harness_instructions_default_to_native_exposed()
     test_codex_only_harness_instruction_is_provider_scoped()
+    test_resolved_harness_run_config_shape_unchanged_by_profile_reshape()
     test_every_mapped_surface_ssot_is_importable()
     print("cross-provider harness parity: OK")
     return 0

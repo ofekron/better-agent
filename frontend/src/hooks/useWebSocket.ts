@@ -17,6 +17,7 @@ import { logPromptSend } from "../lib/promptSendLog";
 import { SnapshotTransport } from "../lib/snapshotTransport";
 import { SNAPSHOT_BINARY_SUBPROTOCOL } from "../lib/snapshotBinary";
 import { logFailure, logTiming } from "../lib/frontendLogger";
+import { wireHarnessProfileId } from "../lib/harnessProfile";
 import {
   sendWebSocketFrame,
   webSocketDataBytes,
@@ -435,6 +436,8 @@ interface UseWebSocketReturn {
     sendTarget?: "worker" | "supervisor" | null,
     files?: FilePayload[],
     capabilityContexts?: CapabilityContext[],
+    harnessProfileId?: string,
+    harnessProfileRevision?: string,
   ) => boolean;
   stopStreaming: (appSessionId: string) => boolean;
   sendPromoteQueued: (
@@ -1692,6 +1695,8 @@ export function useWebSocket(
       sendTarget?: "worker" | "supervisor" | null,
       files?: FilePayload[],
       capabilityContexts?: CapabilityContext[],
+      harnessProfileId?: string,
+      harnessProfileRevision?: string,
     ) => {
       const wsState = wsRef.current?.readyState ?? -1;
       const logData = {
@@ -1704,6 +1709,7 @@ export function useWebSocket(
         image_count: images?.length ?? 0,
         file_count: files?.length ?? 0,
         capability_context_count: capabilityContexts?.length ?? 0,
+        harness_profile_id: harnessProfileId || null,
         ws_state: wsState,
         is_streaming: isStreaming,
       };
@@ -1742,6 +1748,8 @@ export function useWebSocket(
           send_mode: sendMode || undefined,
           send_target: sendTarget || undefined,
           capability_contexts: capabilityContexts && capabilityContexts.length > 0 ? capabilityContexts : undefined,
+          harness_profile_id: wireHarnessProfileId(harnessProfileId),
+          harness_profile_revision: wireHarnessProfileId(harnessProfileId) ? harnessProfileRevision || undefined : undefined,
         });
       } catch (error) {
         logPromptSend("ws_send_throw", {

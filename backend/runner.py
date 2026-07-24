@@ -52,6 +52,7 @@ from typing import Any, Awaitable, Callable, Optional
 import chat_store
 import inbox_store
 import extension_store
+import harness_run_projection
 from communication_modes import (
     ASK_MODE_CONTINUE_AND_EXPECT_INBOX_BACK_ASYNC,
     ASK_MODE_WAIT_AND_GRAB_LAST_ASSISTANT_MSSG_IN_TURN,
@@ -491,7 +492,8 @@ def _materialize_claude_skill_plugin(
     bare_config: bool,
     disabled_runtime_skills: Optional[list] = None,
 ) -> Optional[dict[str, str]]:
-    if bare_config:
+    configured_skills = provider_run_config.get("skills") or {}
+    if bare_config and not configured_skills:
         return None
     plugin_dir = run_dir / "claude-runtime-skills-plugin"
     skills_root = plugin_dir / "skills"
@@ -500,7 +502,6 @@ def _materialize_claude_skill_plugin(
         disabled=disabled_runtime_skills,
     )
 
-    configured_skills = provider_run_config.get("skills") or {}
     if configured_skills:
         write_skill_tree(skills_root, configured_skills)
         count += len(configured_skills)
@@ -3805,6 +3806,7 @@ def main(run_dir: Path) -> int:
         inputs = json.loads((run_dir / "input.json").read_text(encoding="utf-8"))
         from runner_operation_host import hydrate_runner_inputs
         inputs = hydrate_runner_inputs(inputs, run_dir)
+        inputs = harness_run_projection.apply_to_inputs(inputs)
     except Exception as e:
         _fail(run_dir, t("runner.failed_read_input", e=str(e)))
         return 1

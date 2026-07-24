@@ -1554,6 +1554,8 @@ import project_update_store
 import project_structure_edit_session
 import virtual_session_prompt_handlers
 import extension_store
+import harness_profile_resolver
+import harness_profile_store
 
 # Log directory is intentionally captured at module-load. The
 # "no module-load Path caching" rule (CLAUDE.md, A12) applies to
@@ -3953,6 +3955,254 @@ def _capabilities_snapshot(sess: dict) -> dict:
     return {"capabilities": catalog, "active_capability_ids": active}
 
 
+def _harness_profile_selection(body: dict) -> tuple[str, str]:
+    profile_id = str((body or {}).get("harness_profile_id") or "").strip()
+    revision = str((body or {}).get("harness_profile_revision") or "").strip()
+    if not profile_id:
+        if revision:
+            raise HTTPException(status_code=400, detail="harness_profile_revision requires harness_profile_id")
+        return "", ""
+    try:
+        profile = harness_profile_store.get_profile(profile_id, revision or None)
+    except harness_profile_store.HarnessProfileError:
+        # "default" is a synthesized profile, never a stored one — same
+        # 404 an unknown stored id would get.
+        profile = None
+    if not profile:
+        raise HTTPException(status_code=404, detail="harness profile not found")
+    try:
+        harness_profile_resolver.resolve_for_session(
+            {"harness_profile_id": profile_id, "harness_profile_revision": profile["revision"]},
+            profile_id=profile_id,
+            revision=profile["revision"],
+        )
+    except harness_profile_resolver.HarnessProfileResolutionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return profile_id, profile["revision"]
+
+
+def _extension_settings_harness_inputs(extension_id: str, body: dict) -> dict[str, Any] | None:
+    raw = body.get("harness_launcher_projection") if isinstance(body, dict) else None
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    try:
+        projection = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail="invalid harness launcher projection") from exc
+    if not isinstance(projection, dict):
+        raise HTTPException(status_code=400, detail="invalid harness launcher projection")
+    revisions = projection.get("extension_revisions")
+    if not isinstance(revisions, dict) or extension_id not in revisions:
+        raise HTTPException(status_code=403, detail="harness profile does not select this extension")
+    record = extension_store.get_extension(extension_id)
+    if record is None:
+        raise HTTPException(status_code=403, detail="extension not active")
+    expected = str(revisions.get(extension_id) or "")
+    actual = harness_profile_resolver._extension_revision(record)
+    if expected and actual and expected != actual:
+        raise HTTPException(status_code=409, detail="extension revision changed")
+    return {"resolved_harness_run_config": {"launcher_projection": projection, **projection}}
+
+
+async def _broadcast_harness_profiles_changed() -> None:
+    try:
+        await coordinator.broadcast_global("harness_profiles_changed", {})
+    except Exception:
+        logger.exception("failed to broadcast harness profile change")
+
+
+_PROFILE_INSTANCE_FIELD_KEYS = (
+    "mcp_servers", "skills", "instruction_names", "setting_overlays", "headless",
+)
+
+
+def _resolved_override_response(entry: dict[str, Any]) -> dict[str, Any]:
+    """API-facing {resolved, override} shape for a resolver {resolved, override} entry."""
+    return {"resolved": entry["resolved"], "override": entry["override"]}
+
+
+def _profile_instance_fields_response(fields: dict[str, Any]) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for key in _PROFILE_INSTANCE_FIELD_KEYS:
+        entry = fields.get(key)
+        if entry is None:
+            continue
+        if key == "setting_overlays":
+            out[key] = {
+                overlay_key: _resolved_override_response(overlay)
+                for overlay_key, overlay in (entry or {}).items()
+            }
+        else:
+            out[key] = _resolved_override_response(entry)
+    return out
+
+
+def _profile_response_from_resolved(resolved: dict[str, Any]) -> dict[str, Any]:
+    fields = {
+        "extension_instances": {
+            extension_id: _profile_instance_fields_response(instance_fields)
+            for extension_id, instance_fields in (resolved.get("extension_instances") or {}).items()
+        },
+        "disabled_builtin_tools": _resolved_override_response(resolved["disabled_builtin_tools"]),
+        "disabled_builtin_extensions": _resolved_override_response(resolved["disabled_builtin_extensions"]),
+        "instruction_sources": {
+            name: _resolved_override_response(entry)
+            for name, entry in (resolved.get("instruction_sources") or {}).items()
+        },
+    }
+    return {
+        "id": resolved["id"],
+        "name": resolved.get("name"),
+        "description": resolved.get("description"),
+        "revision": resolved.get("revision"),
+        "created_at": resolved.get("created_at"),
+        "updated_at": resolved.get("updated_at"),
+        "fields": fields,
+        "mcp_overrides": resolved.get("mcp_overrides") or {},
+        "skill_overrides": resolved.get("skill_overrides") or {},
+        "native_harness_overrides": resolved.get("native_harness_overrides") or {},
+        "provider_run_config_overlay": resolved.get("provider_run_config_overlay") or {},
+    }
+
+
+def _profile_response(profile: dict[str, Any], default: dict[str, Any] | None = None) -> dict[str, Any]:
+    resolved = harness_profile_resolver.resolve_profile(profile["id"], profile.get("revision"), default=default)
+    return _profile_response_from_resolved(resolved)
+
+
+def _default_profile_response(default: dict[str, Any] | None = None) -> dict[str, Any]:
+    resolved = harness_profile_resolver.resolve_profile(harness_profile_store.DEFAULT_PROFILE_ID, default=default)
+    response = _profile_response_from_resolved(resolved)
+    response["id"] = "default"
+    response["name"] = "Default"
+    response["description"] = "The live harness state before any profile override is applied."
+    return response
+
+
+@app.get("/api/harness-profiles")
+async def list_harness_profiles():
+    stored = await asyncio.to_thread(harness_profile_store.list_profiles)
+    default = await asyncio.to_thread(harness_profile_resolver.compute_default_profile)
+    default_response, *profile_responses = await asyncio.gather(
+        asyncio.to_thread(_default_profile_response, default),
+        *[asyncio.to_thread(_profile_response, profile, default) for profile in stored],
+    )
+    return {"profiles": [default_response, *profile_responses]}
+
+
+@app.get("/api/harness-profiles/{profile_id}")
+async def get_harness_profile(profile_id: str):
+    if profile_id == harness_profile_store.DEFAULT_PROFILE_ID:
+        return await asyncio.to_thread(_default_profile_response)
+    try:
+        profile = await asyncio.to_thread(harness_profile_store.get_profile, profile_id)
+    except harness_profile_store.HarnessProfileError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not profile:
+        raise HTTPException(status_code=404, detail="harness profile not found")
+    return await asyncio.to_thread(_profile_response, profile)
+
+
+@app.post("/api/harness-profiles")
+async def create_harness_profile(body: dict = Body(default={})):
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="request body must be an object")
+    try:
+        profile = await asyncio.to_thread(harness_profile_store.create_profile, body)
+    except harness_profile_store.HarnessProfileError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    await _broadcast_harness_profiles_changed()
+    return await asyncio.to_thread(_profile_response, profile)
+
+
+@app.patch("/api/harness-profiles/{profile_id}/overrides")
+async def patch_harness_profile_overrides(profile_id: str, body: dict = Body(default={})):
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="request body must be an object")
+    ops = body.get("ops")
+    if not isinstance(ops, list):
+        raise HTTPException(status_code=400, detail="ops must be a list")
+    try:
+        profile = await asyncio.to_thread(
+            harness_profile_store.apply_override_patch,
+            profile_id,
+            ops,
+            body.get("revision") or None,
+        )
+    except harness_profile_store.HarnessProfileError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    await _broadcast_harness_profiles_changed()
+    return await asyncio.to_thread(_profile_response, profile)
+
+
+@app.delete("/api/harness-profiles/{profile_id}")
+async def delete_harness_profile(profile_id: str, revision: str = ""):
+    try:
+        deleted = await asyncio.to_thread(
+            harness_profile_store.delete_profile,
+            profile_id,
+            revision or None,
+        )
+    except harness_profile_store.HarnessProfileError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not deleted:
+        raise HTTPException(status_code=404, detail="harness profile not found")
+    await _broadcast_harness_profiles_changed()
+    return {"success": True}
+
+
+@app.patch("/api/sessions/{session_id}/harness-profile")
+async def update_session_harness_profile(session_id: str, body: dict = Body(default={})):
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="request body must be an object")
+    profile_id, revision = _harness_profile_selection(body)
+    session = await asyncio.to_thread(
+        session_manager.set_harness_profile,
+        session_id,
+        profile_id,
+        revision,
+    )
+    if not session:
+        raise HTTPException(status_code=404, detail=t("error.session_not_found_retry"))
+    return {
+        "id": session_id,
+        "harness_profile_id": session.get("harness_profile_id") or "",
+        "harness_profile_revision": session.get("harness_profile_revision") or "",
+    }
+
+
+@app.get("/api/harness/default/disabled-builtin-tools")
+async def get_global_disabled_builtin_tools():
+    return {"disabled_builtin_tools": await asyncio.to_thread(config_store.get_disabled_builtin_tools)}
+
+
+@app.put("/api/harness/default/disabled-builtin-tools")
+async def set_global_disabled_builtin_tools(body: dict = Body(default={})):
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="request body must be an object")
+    tools = body.get("disabled_builtin_tools")
+    if not isinstance(tools, list):
+        raise HTTPException(status_code=400, detail="disabled_builtin_tools must be a list")
+    updated = await asyncio.to_thread(config_store.set_disabled_builtin_tools, tools)
+    await coordinator.broadcast_global("extensions_changed", {})
+    return {"disabled_builtin_tools": updated}
+
+
+@app.get("/api/harness/default/disabled-builtin-extensions")
+async def get_global_disabled_builtin_extensions():
+    return {"disabled_builtin_extensions": await asyncio.to_thread(config_store.get_disabled_builtin_extensions)}
+
+
+@app.put("/api/harness/default/disabled-builtin-extensions")
+async def set_global_disabled_builtin_extensions(body: dict = Body(default={})):
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="request body must be an object")
+    extension_ids = _api_disabled_builtin_extensions(body.get("disabled_builtin_extensions"))
+    updated = await asyncio.to_thread(config_store.set_disabled_builtin_extensions, extension_ids)
+    await coordinator.broadcast_global("extensions_changed", {})
+    return {"disabled_builtin_extensions": updated}
+
+
 @app.post("/api/internal/sessions/{sid}/capabilities")
 async def internal_session_capabilities(
     sid: str,
@@ -4243,7 +4493,10 @@ async def internal_extension_settings(
         raise HTTPException(status_code=403, detail="extension not active")
     key = str(body.get("key") or "").strip() if isinstance(body, dict) else ""
     try:
-        resolved = extension_store.resolve_all_settings(extension_id)
+        resolved = extension_store.resolve_all_settings(
+            extension_id,
+            inputs=_extension_settings_harness_inputs(extension_id, body or {}),
+        )
     except extension_store.ExtensionError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if key:
@@ -9372,6 +9625,7 @@ async def create_session(body: Any = Body(default=None)):
         requested_preset = session_presets.normalize_preset(body.get("preset"))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+    harness_profile_id, harness_profile_revision = _harness_profile_selection(body)
     requested_provider_id = body.get("provider_id")
     provider_record = await asyncio.to_thread(
         _provider_for_required_model,
@@ -9405,6 +9659,27 @@ async def create_session(body: Any = Body(default=None)):
     if not isinstance(raw_file_edit_enabled, bool):
         raise HTTPException(status_code=400, detail="file_edit_enabled must be a boolean")
     file_edit_enabled = raw_file_edit_enabled or bool(file_edit_path)
+    # File Edit and Browser Harness are folded into the harness-profile
+    # extension_instances view (Default synthesis + any selected profile's
+    # overrides) rather than standalone request params.
+    try:
+        _harness_snapshot = await asyncio.to_thread(
+            harness_profile_resolver.resolve_profile,
+            harness_profile_id or harness_profile_store.DEFAULT_PROFILE_ID,
+            harness_profile_revision or None,
+        )
+    except harness_profile_resolver.HarnessProfileResolutionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _harness_instances = _harness_snapshot.get("extension_instances") or {}
+    _harness_disabled_extensions = set(
+        _harness_snapshot.get("disabled_builtin_extensions", {}).get("resolved") or []
+    )
+    _file_edit_gate_open = (
+        extension_store.BUILTIN_FILE_EDIT_EXTENSION_ID in _harness_instances
+        and extension_store.BUILTIN_FILE_EDIT_EXTENSION_ID not in _harness_disabled_extensions
+    )
+    if file_edit_enabled and not _file_edit_gate_open:
+        raise HTTPException(status_code=403, detail="File Edit is disabled for this harness")
     if file_edit_enabled:
         try:
             if file_edit_path:
@@ -9470,11 +9745,18 @@ async def create_session(body: Any = Body(default=None)):
         logger.info("create_session %s mode=file_editing(persistent)", result["session_id"][:8])
         await _apply_initial_session_folder(session.get("id"), requested_folder_id)
         return session
-    browser_harness_enabled = (
-        body.get("browser_harness_enabled", True)
-        and _builtin_extension_runtime_ready(
-            extension_store.extension_id_for_role('browser-harness')
-        )
+    _browser_harness_id = extension_store.extension_id_for_role("browser-harness")
+    _browser_harness_instance = _harness_instances.get(_browser_harness_id) if _browser_harness_id else None
+    _browser_harness_gate_open = bool(
+        _browser_harness_id and _browser_harness_id not in _harness_disabled_extensions
+    )
+    browser_harness_enabled = bool(
+        _browser_harness_gate_open
+        and _browser_harness_instance
+        and _browser_harness_instance["mcp_servers"]["resolved"]
+    )
+    browser_harness_headless = bool(
+        (_browser_harness_instance or {}).get("headless", {}).get("resolved", False)
     )
     session = await asyncio.to_thread(
         session_manager.create,
@@ -9488,10 +9770,12 @@ async def create_session(body: Any = Body(default=None)):
         reasoning_effort=requested_effort,
         permission=requested_permission or None,
         browser_harness_enabled=browser_harness_enabled,
-        browser_harness_headless=body.get("browser_harness_headless", True),
+        browser_harness_headless=browser_harness_headless,
         node_id=node_id,
         worker_creation_policy=worker_creation_policy,
         bare_config=bare_config,
+        harness_profile_id=harness_profile_id,
+        harness_profile_revision=harness_profile_revision,
         # The UI/CLI `POST /api/sessions` is always an explicit user
         # action — the user is aware of (and owns) this session.
         user_initiated=True,
@@ -10047,6 +10331,10 @@ async def _resolve_selector_updates(session_id: str, body: dict) -> dict:
         updates["permission"] = _provider_permission(
             provider_for_permission, requested_permission, profile_runner,
         )
+    if "harness_profile_id" in body or "harness_profile_revision" in body:
+        profile_id, revision = _harness_profile_selection(body)
+        updates["harness_profile_id"] = profile_id
+        updates["harness_profile_revision"] = revision
     if "cwd" in body and isinstance(body["cwd"], str) and body["cwd"].strip():
         updates["cwd"] = body["cwd"].strip()
     if requested_provider_id or "runner" in updates or "model" in updates:
@@ -12058,6 +12346,8 @@ async def _re_enqueue_queued_prompts() -> None:
                     "disallowed_tools": qp.get("disallowed_tools"),
                     "disabled_builtin_extensions": qp.get("disabled_builtin_extensions"),
                     "capability_contexts": qp.get("capability_contexts") or [],
+                    "harness_profile_id": qp.get("harness_profile_id") or "",
+                    "harness_profile_revision": qp.get("harness_profile_revision") or "",
                     "_alter_rewind_latest": bool(qp.get("alter_rewind_latest")),
                     "collapse_key": qp.get("collapse_key") or "",
                     "collapse_policy": qp.get("collapse_policy") or "",
@@ -14319,6 +14609,7 @@ async def internal_create_session(
         capability_contexts = normalize_capability_contexts(body.get("capability_contexts"))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+    harness_profile_id, harness_profile_revision = _harness_profile_selection(body)
     sender_session_id = str(body.get("sender_session_id") or "").strip()
     sender_session = await _session_lite(sender_session_id) if sender_session_id else None
     if sender_session_id and not sender_session:
@@ -14380,6 +14671,8 @@ async def internal_create_session(
             bare_config=bare_config,
             capability_contexts=capability_contexts,
             extra_mcp_servers=extra_mcp_servers,
+            harness_profile_id=harness_profile_id,
+            harness_profile_revision=harness_profile_revision,
         )
     )
     await _apply_initial_session_organization(sess["id"], folder_id, tag_ids)
@@ -14405,6 +14698,8 @@ async def internal_create_session(
         "reasoning_effort": sess.get("reasoning_effort"),
         "bare_config": sess.get("bare_config"),
         "capability_contexts": sess.get("capability_contexts") or [],
+        "harness_profile_id": sess.get("harness_profile_id") or "",
+        "harness_profile_revision": sess.get("harness_profile_revision") or "",
     }
 
 
@@ -19155,6 +19450,11 @@ async def websocket_chat(websocket: WebSocket):
                 except ValueError as e:
                     await _send_message_error(str(e))
                     continue
+                harness_profile_id = str(msg.get("harness_profile_id") or "").strip()
+                harness_profile_revision = str(msg.get("harness_profile_revision") or "").strip()
+                if harness_profile_revision and not harness_profile_id:
+                    await _send_message_error("harness_profile_revision requires harness_profile_id")
+                    continue
 
                 # Register this WS so /api/internal/ask-fork can fan out worker events.
                 _register(app_session_id)
@@ -19498,6 +19798,8 @@ async def websocket_chat(websocket: WebSocket):
                     "disabled_builtin_extensions": disabled_builtin_extensions,
                     "known_worker_registry_cwds": known_worker_registry_cwds,
                     "capability_contexts": capability_contexts,
+                    "harness_profile_id": harness_profile_id,
+                    "harness_profile_revision": harness_profile_revision,
                     "_queued_id": item_id,
                     "_client_id_claimed": bool(_claim_cid),
                 }
@@ -19559,6 +19861,8 @@ async def websocket_chat(websocket: WebSocket):
                     "client_id": msg.get("client_id"),
                     "alter_rewind_latest": alter_rewind_latest,
                     "capability_contexts": capability_contexts,
+                    "harness_profile_id": harness_profile_id,
+                    "harness_profile_revision": harness_profile_revision,
                     "created_at": datetime.now().isoformat(),
                 }
                 try:

@@ -1,0 +1,26 @@
+{
+  "kind": "better-agent-extension",
+  "id": "ofek-dev.file-edit",
+  "name": "File Edit",
+  "version": "0.1.0",
+  "description": "Enables the standalone file-editing session mode.",
+  "surfaces": [
+    "frontend_feature"
+  ],
+  "entrypoints": {},
+  "permissions": {},
+  "marketplace": {
+    "product_id": "",
+    "subscription_required": false,
+    "entitlement_url": ""
+  },
+  "protocol": {
+    "version": 1,
+    "smoke_test": {
+      "required_paths": [
+        "better-agent-extension.json"
+      ],
+      "python_modules": []
+    }
+  }
+}

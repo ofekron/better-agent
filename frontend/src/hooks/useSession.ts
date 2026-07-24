@@ -25,6 +25,7 @@ import {
   parseOlderMessagePage,
 } from "../lib/messagePagination";
 import { SingleFlight } from "../lib/singleFlight";
+import { wireHarnessProfileId } from "../lib/harnessProfile";
 
 export { sortSessionsForList };
 
@@ -51,9 +52,7 @@ export interface CreateSessionOptions {
   model: string;
   cwd: string;
   orchestrationMode?: OrchestrationMode;
-  browserHarnessEnabled?: boolean;
   providerId?: string;
-  browserHarnessHeadless?: boolean;
   fileEditEnabled?: boolean;
   fileEditPath?: string;
   nodeId?: string;
@@ -62,6 +61,8 @@ export interface CreateSessionOptions {
   permission?: Record<string, string>;
   clientSessionId?: string;
   capabilityContexts?: CapabilityContext[];
+  harnessProfileId?: string;
+  harnessProfileRevision?: string;
   folderId?: string | null;
   preset?: string;
 }
@@ -1440,9 +1441,7 @@ export function useSession(authStatus?: string) {
         model,
         cwd,
         orchestrationMode = "team",
-        browserHarnessEnabled = true,
         providerId,
-        browserHarnessHeadless = true,
         fileEditEnabled = false,
         fileEditPath,
         nodeId = "primary",
@@ -1451,6 +1450,8 @@ export function useSession(authStatus?: string) {
         permission,
         clientSessionId,
         capabilityContexts,
+        harnessProfileId,
+        harnessProfileRevision,
         folderId,
         preset,
       } = opts;
@@ -1465,9 +1466,7 @@ export function useSession(authStatus?: string) {
             model,
             cwd,
             orchestration_mode: orchestrationMode,
-            browser_harness_enabled: browserHarnessEnabled,
             provider_id: providerId,
-            browser_harness_headless: browserHarnessHeadless,
             file_edit_enabled: fileEditEnabled,
             file_edit_path: fileEditPath,
             node_id: nodeId,
@@ -1476,6 +1475,8 @@ export function useSession(authStatus?: string) {
             permission: permission && Object.keys(permission).length > 0 ? permission : undefined,
             client_session_id: clientSessionId,
             capability_contexts: capabilityContexts && capabilityContexts.length > 0 ? capabilityContexts : undefined,
+            harness_profile_id: wireHarnessProfileId(harnessProfileId),
+            harness_profile_revision: wireHarnessProfileId(harnessProfileId) ? harnessProfileRevision || undefined : undefined,
             folder_id: folderId || undefined,
             preset: preset || undefined,
           }),

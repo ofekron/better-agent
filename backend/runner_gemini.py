@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from capability_contexts import prepend_capability_context
+import harness_run_projection
 from continuation import normalize_context_overflow_error
 from runner_guard import (
     GHOST_RETRY_BACKOFF_S,
@@ -1135,6 +1136,7 @@ def main(run_dir: Path) -> int:
         inputs = json.loads((run_dir / "input.json").read_text(encoding="utf-8"))
         from runner_operation_host import hydrate_runner_inputs
         inputs = hydrate_runner_inputs(inputs, run_dir)
+        inputs = harness_run_projection.apply_to_inputs(inputs)
     except Exception as e:
         _fail(run_dir, f"failed to read input.json: {e}")
         return 1

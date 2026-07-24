@@ -13,7 +13,6 @@ const BUILTIN_FLAG_KEYS = [
   "providerConfigSync",
   "canvas",
   "promptEngineer",
-  "browserHarness",
   "testape",
   "routines",
 ] as const;
@@ -30,7 +29,6 @@ const DEFAULT_BUILTIN_EXTENSION_FLAGS: BuiltinExtensionFlags = {
   providerConfigSync: true,
   canvas: true,
   promptEngineer: true,
-  browserHarness: true,
   testape: true,
   routines: true,
 };

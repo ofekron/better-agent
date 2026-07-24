@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import type {
   CapabilityContext,
   FileAttachment,
+  HarnessProfile,
   NodeSnapshot,
   OrchestrationMode,
   PastedImage,
@@ -26,10 +27,10 @@ import { useBackButtonDismiss } from "../hooks/useBackButtonDismiss";
 import { API, fetchSessionOrganization, createSessionFolder } from "../api";
 import { optionLabelWithQuota, summarizeProvider } from "../utils/quotaStatus";
 import { useQuotaStatus } from "../hooks/useQuotaStatus";
-import { extId } from "../extensionIds";
 import Icon from "./Icon";
 import { ComposerImagePreviews } from "./ComposerImagePreviews";
 import { NewSessionCreateButton } from "./NewSessionCreateButton";
+import { HarnessProfileSelector } from "./HarnessProfileSelector";
 import { SessionFolderPopover } from "./SessionFolderPopover";
 import type { PopoverAnchor } from "./SessionTagPopover";
 import { buildFolderPathMap } from "../sessionFolders";
@@ -63,8 +64,6 @@ interface SessionConfig {
   main: RuntimeProfile;
   worker: RuntimeProfile;
   cwd: string;
-  browserHarnessEnabled: boolean;
-  browserHarnessHeadless: boolean;
   fileEditEnabled: boolean;
   fileEditPath?: string;
   /** Multi-machine: the topology node id that will execute this
@@ -80,6 +79,8 @@ interface SessionConfig {
    * "" = full capabilities; "reviewer" strips session-reach MCP tools
    * and all runtime skills. */
   preset: string;
+  harnessProfileId: string;
+  harnessProfileRevision: string;
   /** Optional folder to file the new session into. `null` means "no
    * folder" (Unfiled) — a valid, persistable choice. Persisted across
    * opens as the last selection; re-validated against the chosen
@@ -140,7 +141,6 @@ interface Props {
   capabilityPickerClient: Pick<ProviderConfigSyncApiClient, "listCapabilityPickerSources">;
   teamEnabled?: boolean;
   machineNodesEnabled?: boolean;
-  browserHarnessEnabled?: boolean;
   allowOfflineCreate?: boolean;
   extensionOptions?: NewSessionExtensionOption[];
 }
@@ -175,9 +175,9 @@ function saveDefaults(config: SessionConfig, creationAction: NewSessionCreationA
       orchestrationMode: config.orchestrationMode,
       main: config.main,
       worker: config.worker,
-      browserHarnessEnabled: config.browserHarnessEnabled,
-      browserHarnessHeadless: config.browserHarnessHeadless,
       folderId: config.folderId,
+      harnessProfileId: config.harnessProfileId,
+      harnessProfileRevision: config.harnessProfileRevision,
       creationAction,
     }),
   );
@@ -196,19 +196,10 @@ function extensionOptionKey(option: NewSessionExtensionOption): string {
 
 function extensionOptionDefaults(
   options: NewSessionExtensionOption[],
-  saved: Partial<SessionConfig>,
 ): Record<string, NewSessionExtensionOptionValue> {
   const values: Record<string, NewSessionExtensionOptionValue> = {};
   for (const option of flattenExtensionOptions(options)) {
     const key = extensionOptionKey(option);
-    if (option.id === "browser_harness_enabled") {
-      values[key] = saved.browserHarnessEnabled ?? option.defaultValue;
-      continue;
-    }
-    if (option.id === "browser_harness_headless") {
-      values[key] = saved.browserHarnessHeadless ?? option.defaultValue;
-      continue;
-    }
     values[key] = option.defaultValue;
   }
   return values;
@@ -570,7 +561,6 @@ export function NewSessionModal({
   capabilityPickerClient,
   teamEnabled = true,
   machineNodesEnabled = true,
-  browserHarnessEnabled: browserHarnessExtensionEnabled = true,
   allowOfflineCreate = false,
   extensionOptions = EMPTY_EXTENSION_OPTIONS,
 }: Props) {
@@ -584,6 +574,13 @@ export function NewSessionModal({
   const [initialImages, setInitialImages] = useState<PastedImage[]>([]);
   const [initialFiles, setInitialFiles] = useState<FileAttachment[]>([]);
   const [capabilityContexts, setCapabilityContexts] = useState<CapabilityContext[]>([]);
+  const [harnessProfileId, setHarnessProfileId] = useState("");
+  const [harnessProfileRevision, setHarnessProfileRevision] = useState("");
+  // File Edit's availability derives purely from whether the
+  // "ofek-dev.file-edit" extension is enabled on the currently selected
+  // harness profile (Default when none is picked) — refetched whenever the
+  // profile selection changes.
+  const [fileEditExtensionEnabled, setFileEditExtensionEnabled] = useState(true);
   const [capabilityPickerOpen, setCapabilityPickerOpen] = useState(false);
   const attachmentInputRef = useRef<HTMLInputElement>(null);
   // cwd state — picker writes here, handleCreate reads from here.
@@ -614,32 +611,8 @@ export function NewSessionModal({
   const [main, setMain] = useState<RuntimeProfile>({ providerId: "", model: "", reasoningEffort: "", runner: "native", permission: {} });
   const [worker, setWorker] = useState<RuntimeProfile>({ providerId: "", model: "", reasoningEffort: "", runner: "native", permission: {} });
   const sessionExtensionOptions = useMemo<NewSessionExtensionOption[]>(
-    () => [
-      ...(
-        browserHarnessExtensionEnabled
-          ? [
-              {
-                id: "browser_harness_enabled",
-                extensionId: extId("browserHarness"),
-                label: t("orchestration.browserHarness"),
-                defaultValue: true,
-                applyToSessionConfig: (value: NewSessionExtensionOptionValue) => ({ browserHarnessEnabled: value }),
-                children: [
-                  {
-                    id: "browser_harness_headless",
-                    extensionId: extId("browserHarness"),
-                    label: t("orchestration.browserHarnessHeadless"),
-                    defaultValue: true,
-                    applyToSessionConfig: (value: NewSessionExtensionOptionValue) => ({ browserHarnessHeadless: value }),
-                  },
-                ],
-              },
-            ]
-          : []
-      ),
-      ...extensionOptions,
-    ],
-    [browserHarnessExtensionEnabled, extensionOptions, t],
+    () => [...extensionOptions],
+    [extensionOptions],
   );
   const [extensionOptionValues, setExtensionOptionValues] = useState<
     Record<string, NewSessionExtensionOptionValue>
@@ -666,11 +639,14 @@ export function NewSessionModal({
   // Reset state from localStorage defaults + fetch providers when modal opens
   useEffect(() => {
     if (!open) return;
+    const defaults = loadDefaults();
     setEditedPrompt(investigation?.prompt ?? "");
     setInitialPrompt("");
     setInitialImages(investigation?.images ?? []);
     setInitialFiles(investigation?.files ?? []);
     setCapabilityContexts([]);
+    setHarnessProfileId(defaults.harnessProfileId ?? "");
+    setHarnessProfileRevision(defaults.harnessProfileRevision ?? "");
     // Prefer the Ask flow's proposed project, else fall back to defaultCwd
     // (the project currently selected in the sidebar), else first project.
     // Re-run on every open so reopening with a new shortcut doesn't show
@@ -681,13 +657,12 @@ export function NewSessionModal({
     const initialCwd = initialProjectPath || defaultCwd || projects[0]?.path || "";
     setCwd(initialCwd);
     nodeIdTouchedRef.current = false;
-    const defaults = loadDefaults();
     setOrchestrationMode(
       teamEnabled
         ? defaults.orchestrationMode || "team"
         : "native",
     );
-    setExtensionOptionValues(extensionOptionDefaults(sessionExtensionOptions, defaults));
+    setExtensionOptionValues(extensionOptionDefaults(sessionExtensionOptions));
     setFolderId(defaults.folderId ?? null);
     // Default pick: (1) the Ask-resolved `initialNodeId` if given —
     // backend already resolved it from project_store; trust it over
@@ -721,7 +696,7 @@ export function NewSessionModal({
         setWorker(resolveRuntimeProfile(defaults.worker, list, activeId, modelsByProvider, "worker"));
       })
       .catch(() => {});
-  }, [open, browserHarnessExtensionEnabled, sessionExtensionOptions]);
+  }, [open, sessionExtensionOptions]);
 
   // Backfill `cwd` when `projects` arrives AFTER the modal opened. The
   // App-level projects list is fetched async on mount; if the user
@@ -775,6 +750,40 @@ export function NewSessionModal({
       setFolderId(null);
     }
   }, [folders, folderId]);
+
+  // File Edit is gated by whether the "ofek-dev.file-edit" extension is
+  // enabled on the currently selected harness profile (resolved GET —
+  // `default` when no profile is explicitly selected).
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    trackedFetch(
+      "harnessProfiles:fileEditCheck",
+      `${API}/api/harness-profiles/${encodeURIComponent(harnessProfileId || "default")}`,
+    )
+      .then((r) => r.json())
+      .then((profile: HarnessProfile) => {
+        if (cancelled) return;
+        const disabledExtensions = profile?.fields?.disabled_builtin_extensions?.resolved || [];
+        setFileEditExtensionEnabled(
+          Boolean(profile?.fields?.extension_instances?.["ofek-dev.file-edit"]) &&
+            !disabledExtensions.includes("ofek-dev.file-edit"),
+        );
+      })
+      .catch(() => {
+        // Can't resolve the profile (e.g. offline) — don't lock the user
+        // out of an otherwise-available feature; the backend still
+        // enforces the real gate at session-creation time.
+        if (!cancelled) setFileEditExtensionEnabled(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open, harnessProfileId]);
+
+  useEffect(() => {
+    if (!fileEditExtensionEnabled) setFileEditEnabled(false);
+  }, [fileEditExtensionEnabled]);
 
   // Capability gating: only manager-capable providers can drive the
   // persistent "manager" session in manager mode. If the user has no
@@ -858,8 +867,6 @@ export function NewSessionModal({
         main,
         worker,
         cwd: effectiveCwd,
-        browserHarnessEnabled: false,
-        browserHarnessHeadless: true,
         fileEditEnabled,
         fileEditPath: undefined,
         nodeId,
@@ -868,6 +875,8 @@ export function NewSessionModal({
         initialFiles,
         capabilityContexts,
         preset,
+        harnessProfileId,
+        harnessProfileRevision,
         folderId,
       };
       const config = applyExtensionOptionsToSessionConfig(
@@ -1120,14 +1129,30 @@ export function NewSessionModal({
           </div>
 
           <div className="ns-modal-section">
-            <label className="browser-harness-toggle">
+            <label className="browser-harness-toggle" title={!fileEditExtensionEnabled ? t("harnessProfile.fileEditDisabledHint") : undefined}>
               <input
                 type="checkbox"
                 checked={fileEditEnabled}
+                disabled={!fileEditExtensionEnabled}
                 onChange={(e) => setFileEditEnabled(e.target.checked)}
               />
               {t("newSession.fileEdit")}
             </label>
+            {!fileEditExtensionEnabled ? (
+              <span className="ns-modal-hint">{t("harnessProfile.fileEditDisabledHint")}</span>
+            ) : null}
+          </div>
+
+          <div className="ns-modal-section">
+            <HarnessProfileSelector
+              value={harnessProfileId}
+              className="ns-modal-row harness-profile-selector"
+              disabled={creating}
+              onChange={(profileId, revision) => {
+                setHarnessProfileId(profileId);
+                setHarnessProfileRevision(revision);
+              }}
+            />
           </div>
 
           {effectiveOrchestrationMode === "native" && (

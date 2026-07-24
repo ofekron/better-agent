@@ -1011,6 +1011,8 @@ export interface Session {
   runner?: ProviderRunner;
   permission?: Permission;
   provider_id?: string;
+  harness_profile_id?: string;
+  harness_profile_revision?: string;
   cwd: string;
   /** Session belongs to every project regardless of cwd (e.g. the
    * assistant singleton). Mirrors backend session_matches_project. */
@@ -1129,11 +1131,6 @@ export interface Session {
    *     manager-mode delegations. */
   kind?: "user" | "delegate_fork" | "supervisor_worker" | "adv_sync_fork";
   caller_agent_session_id?: string | null;
-  /** Whether the browser-harness MCP tool is available for this session.
-   * Checked by default on new sessions. The tool spawns a dedicated
-   * testing agent that autonomously executes high-level test descriptions. */
-  browser_harness_enabled?: boolean;
-  browser_harness_headless?: boolean;
   pinned?: boolean;
   topbar_pinned?: boolean;
   topbar_pinned_at?: string | null;
@@ -1335,6 +1332,70 @@ export interface ProvidersState {
   default_provider_id: string | null;
   providers: Provider[];
 }
+
+/** Generic resolved+override pairing for leaves where both sides share the
+ * same shape (booleans, setting-overlay values, instruction sources). */
+export interface HarnessProfileFieldView<T> {
+  resolved: T;
+  override: T | null;
+}
+
+/** Add/remove delta applied on top of Default's resolved list to produce
+ * a named profile's effective value for a list-shaped field. */
+export interface HarnessProfileDelta {
+  add: string[];
+  remove: string[];
+}
+
+/** Resolved+override pairing for list-shaped fields (mcp_servers, skills,
+ * instruction_names, disabled_builtin_tools, disabled_builtin_extensions):
+ * `resolved` is the effective plain string list; `override` (when present)
+ * is the delta the profile applies on top of Default's resolved list. */
+export interface HarnessProfileListFieldView {
+  resolved: string[];
+  override: HarnessProfileDelta | null;
+}
+
+export interface HarnessProfileExtensionInstanceView {
+  mcp_servers: HarnessProfileListFieldView;
+  skills: HarnessProfileListFieldView;
+  instruction_names: HarnessProfileListFieldView;
+  setting_overlays: Record<string, HarnessProfileFieldView<{ value: unknown; schema_hash: string }>>;
+  /** Only meaningful for the browserHarness extension id; present on all
+   * entries as a uniform shape. */
+  headless: HarnessProfileFieldView<boolean>;
+}
+
+export interface HarnessProfileInstructionSourceValue {
+  kind: string;
+  content?: string;
+  extension_id?: string;
+}
+
+export interface HarnessProfile {
+  id: string;
+  name: string;
+  description: string;
+  revision: string;
+  created_at: string;
+  updated_at: string;
+  fields: {
+    extension_instances: Record<string, HarnessProfileExtensionInstanceView>;
+    disabled_builtin_tools: HarnessProfileListFieldView;
+    disabled_builtin_extensions: HarnessProfileListFieldView;
+    instruction_sources: Record<string, HarnessProfileFieldView<HarnessProfileInstructionSourceValue>>;
+  };
+  /** Opaque pass-through fields — no per-field UI treatment. */
+  mcp_overrides: Record<string, unknown>;
+  skill_overrides: Record<string, unknown>;
+  native_harness_overrides: Record<string, unknown>;
+  provider_run_config_overlay: Record<string, unknown>;
+}
+
+/** One `PATCH /api/harness-profiles/{id}/overrides` op. */
+export type HarnessProfileOverrideOp =
+  | { path: string[]; op: "set"; value: unknown }
+  | { path: string[]; op: "clear" };
 
 export interface ProjectConfigFile {
   name: string;

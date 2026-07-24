@@ -19,6 +19,8 @@ export interface OfflinePromptEntry {
   sendMode?: SendMode | null;
   sendTarget?: "worker" | "supervisor" | null;
   capabilityContexts?: CapabilityContext[];
+  harnessProfileId?: string;
+  harnessProfileRevision?: string;
   deferUntilTargetReady?: boolean;
 }
 
@@ -36,13 +38,13 @@ export interface OfflineCreateSessionEntry {
     | "cwd"
     | "orchestration_mode"
     | "provider_id"
-    | "browser_harness_enabled"
-    | "browser_harness_headless"
     | "node_id"
     | "created_at"
     | "updated_at"
     | "messages"
     | "capability_contexts"
+    | "harness_profile_id"
+    | "harness_profile_revision"
     | "folder_id"
     | "draft_input"
     | "draft_images"
@@ -51,6 +53,8 @@ export interface OfflineCreateSessionEntry {
   images?: ImagePayload[];
   files?: FilePayload[];
   capabilityContexts?: CapabilityContext[];
+  harnessProfileId?: string;
+  harnessProfileRevision?: string;
 }
 
 export type OfflineQueueEntry = OfflinePromptEntry | OfflineCreateSessionEntry;

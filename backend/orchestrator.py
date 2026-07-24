@@ -3231,6 +3231,8 @@ class Coordinator:
                 "disallowed_tools": qp.get("disallowed_tools"),
                 "disabled_builtin_extensions": qp.get("disabled_builtin_extensions"),
                 "capability_contexts": qp.get("capability_contexts") or [],
+                "harness_profile_id": qp.get("harness_profile_id") or "",
+                "harness_profile_revision": qp.get("harness_profile_revision") or "",
                 "_alter_rewind_latest": bool(qp.get("alter_rewind_latest")),
                 "collapse_key": qp.get("collapse_key") or "",
                 "collapse_policy": qp.get("collapse_policy") or "",
@@ -4669,6 +4671,9 @@ class Coordinator:
         queue_item_id: Optional[str] = None,
         team_message: Optional[dict] = None,
         capability_contexts: Optional[list[dict]] = None,
+        harness_profile_id: Optional[str] = None,
+        harness_profile_revision: Optional[str] = None,
+        resolved_harness_run_config: Optional[dict] = None,
         file_discussion_id: Optional[str] = None,
         allow_model_override: bool = False,
     ) -> None:
@@ -4851,6 +4856,9 @@ class Coordinator:
                     source="supervisor",
                     queue_item_id=queue_item_id,
                     capability_contexts=capability_contexts,
+                    harness_profile_id=harness_profile_id,
+                    harness_profile_revision=harness_profile_revision,
+                    resolved_harness_run_config=resolved_harness_run_config,
                     file_discussion_id=file_discussion_id,
                     disallowed_tools=disallowed_tools,
                     disabled_builtin_extensions=disabled_builtin_extensions,
@@ -4933,6 +4941,9 @@ class Coordinator:
                 queue_item_id=queue_item_id,
                 team_message=team_message,
                 capability_contexts=capability_contexts,
+                harness_profile_id=harness_profile_id,
+                harness_profile_revision=harness_profile_revision,
+                resolved_harness_run_config=resolved_harness_run_config,
                 file_discussion_id=file_discussion_id,
             )
         except asyncio.CancelledError:
