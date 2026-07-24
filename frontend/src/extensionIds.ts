@@ -55,12 +55,24 @@ export function builtinIdsLoaded(): boolean {
 
 const _sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
+// Bootstrap gates first paint on this fetch (see main.tsx) — a stalled
+// mobile network must never hang render, so every attempt is bounded.
+const BUILTIN_IDS_TIMEOUT_MS = 4_000;
+
 /** One fetch attempt. Populates `_ids` and flips `_loaded` only on success,
  *  so callers can retry after a transient failure (pre-login 401, backend
  *  restart window). Returns true on success. */
 async function _attemptLoad(): Promise<boolean> {
+  const controller = new AbortController();
+  const timeout = window.setTimeout(
+    () => controller.abort(new DOMException("builtin-ids fetch timed out", "TimeoutError")),
+    BUILTIN_IDS_TIMEOUT_MS,
+  );
   try {
-    const res = await fetch(`${API}/api/extensions/builtin-ids`, { credentials: "include" });
+    const res = await fetch(`${API}/api/extensions/builtin-ids`, {
+      credentials: "include",
+      signal: controller.signal,
+    });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
     if (!data || !data.ids || typeof data.ids !== "object") throw new Error("malformed builtin-ids payload");
@@ -78,6 +90,8 @@ async function _attemptLoad(): Promise<boolean> {
     // `_loaded` false, and let the caller retry.
     console.error("assistant: failed to load builtin extension ids — private-extension UI will be unreachable", err);
     return false;
+  } finally {
+    window.clearTimeout(timeout);
   }
 }
 

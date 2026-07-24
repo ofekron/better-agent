@@ -17,6 +17,8 @@ interface BundleManifest {
   download_path: string;
 }
 
+const MANIFEST_FETCH_TIMEOUT_MS = 4_000;
+
 export async function runMobileOtaCheck(): Promise<void> {
   if (!Capacitor.isNativePlatform()) return;
 
@@ -32,9 +34,20 @@ export async function runMobileOtaCheck(): Promise<void> {
   if (!getStoredToken()) return;
 
   try {
-    const res = await fetch(`${API}/api/mobile/bundle/manifest`, {
-      credentials: "include",
-    });
+    const controller = new AbortController();
+    const timeout = window.setTimeout(
+      () => controller.abort(new DOMException("bundle manifest fetch timed out", "TimeoutError")),
+      MANIFEST_FETCH_TIMEOUT_MS,
+    );
+    let res: Response;
+    try {
+      res = await fetch(`${API}/api/mobile/bundle/manifest`, {
+        credentials: "include",
+        signal: controller.signal,
+      });
+    } finally {
+      window.clearTimeout(timeout);
+    }
     if (!res.ok) return;
     const manifest = (await res.json()) as BundleManifest;
 
