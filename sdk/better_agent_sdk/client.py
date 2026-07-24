@@ -627,10 +627,10 @@ class Client:
     ) -> dict[str, Any]:
         """Emit a per-session WebSocket event. ``source`` is pinned to this
         extension server-side; one extension cannot impersonate another."""
+        sid = session_id or self.app_session_id
         return self._post(
-            "/api/internal/broadcast-session",
+            f"/api/internal/sessions/{sid}/broadcast",
             {
-                "session_id": session_id or self.app_session_id,
                 "event_type": event_type,
                 "data": data or {},
             },

@@ -1,7 +1,7 @@
 """Regression for the lag-incident spool wedge (assistant bug-report 500s).
 
 The scoped-capabilities migration removed `internal_loopback` from the
-assistant extension, so its WS publish via POST /api/internal/broadcast-session
+assistant extension, so its WS publish via POST /api/internal/sessions/{sid}/broadcast
 started 403ing, every lag-watchdog bug-report dispatch 500'd, and the spool
 filled to _MAX_PENDING ("lag incident spool is full"). The fix is a scoped
 `session-events.broadcast` capability routed through the capability router.
@@ -9,9 +9,9 @@ These assertions lock:
   * an extension granted `session-events.broadcast` can broadcast, with the
     event source pinned to ITS extension id (no impersonation),
   * an extension without the grant is rejected fail-closed,
-  * the auth gate still denies direct /api/internal/broadcast-session access
-    to capability-token extensions lacking `internal_loopback` (the wide
-    middleware exemption stays reverted).
+  * the auth gate still denies direct /api/internal/sessions/{sid}/broadcast
+    access to capability-token extensions lacking `internal_loopback` (the
+    wide middleware exemption stays reverted).
 """
 from __future__ import annotations
 
@@ -116,9 +116,9 @@ def test_direct_broadcast_route_still_requires_internal_loopback(monkeypatch) ->
     client = TestClient(main.app)
     try:
         response = client.post(
-            "/api/internal/broadcast-session",
+            "/api/internal/sessions/s-1/broadcast",
             headers={"X-Internal-Token": token},
-            json={"session_id": "s-1", "event_type": "x", "data": {}},
+            json={"event_type": "x", "data": {}},
         )
     finally:
         client.close()
@@ -131,6 +131,7 @@ def test_direct_broadcast_is_not_a_narrow_extension_route() -> None:
 
     source = inspect.getsource(main.auth_gate)
     narrow = source[source.index("narrow_extension_routes"):source.index("if principal[0]")]
+    assert '"/api/internal/sessions/{sid}/broadcast"' not in narrow
     assert '"/api/internal/broadcast-session"' not in narrow
 
 

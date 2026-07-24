@@ -2,12 +2,12 @@
 core provisioned-sessions primitive:
 
   GET  /api/internal/provisioned-sessions/specs  — discover invocable specs
-  POST /api/internal/broadcast-session           — extension-emitted WS event
+  POST /api/internal/sessions/{sid}/broadcast    — extension-emitted WS event
   POST /api/internal/session-fields              — declared session-field reads
   POST /api/internal/project-updates/list        — project-structure-owned unseen updates for a project
   POST /api/internal/project-updates/mark-seen   — project-structure-owned mark + broadcast
 
-Locks: token gate on all; broadcast-session requires an active extension and
+Locks: token gate on all; sessions/{sid}/broadcast requires an active extension and
 pins source to it; specs lists registered specs; project-updates are callable
 only by the project-structure extension and round-trip through the store +
 broadcast the change. SDK client methods hit the right paths/payloads.
@@ -132,7 +132,7 @@ def main_test() -> int:
     keys = [s["key"] for s in r.json().get("specs", [])]
     check(r.status_code == 200 and "test-cap-spec" in keys, f"lists registered spec (got {keys})")
 
-    print("C2 broadcast-session: token + active extension + source pin")
+    print("C2 sessions/{sid}/broadcast: token + active extension + source pin")
     captured: dict = {}
     original_bs = main.coordinator.broadcast_session
 
@@ -141,42 +141,42 @@ def main_test() -> int:
 
     main.coordinator.broadcast_session = _fake_bs
     try:
-        r = CLIENT.post("/api/internal/broadcast-session", json={})
+        r = CLIENT.post("/api/internal/sessions/s1/broadcast", json={})
         check(r.status_code in (403, 422), f"no token rejected (got {r.status_code})")
         r = CLIENT.post(
-            "/api/internal/broadcast-session",
-            json={"session_id": "s1", "event_type": "ext.evt", "data": {}},
+            "/api/internal/sessions/s1/broadcast",
+            json={"event_type": "ext.evt", "data": {}},
             headers={"X-Internal-Token": TOKEN},  # no X-Extension-Id
         )
         check(r.status_code == 403, f"missing extension id -> 403 (got {r.status_code})")
         r = CLIENT.post(
-            "/api/internal/broadcast-session",
-            json={"session_id": "s1", "event_type": "ext.evt", "data": {}},
+            "/api/internal/sessions/s1/broadcast",
+            json={"event_type": "ext.evt", "data": {}},
             headers=_hdr(INACTIVE_EXT),
         )
         check(r.status_code == 403, f"inactive extension -> 403 (got {r.status_code})")
         r = CLIENT.post(
-            "/api/internal/broadcast-session",
-            json={"event_type": "ext.evt", "data": {"x": 1}},  # missing session_id
+            "/api/internal/sessions/%20/broadcast",  # blank sid path segment
+            json={"event_type": "ext.evt", "data": {"x": 1}},
             headers=_hdr(),
         )
-        check(r.status_code == 400, f"missing session_id -> 400 (got {r.status_code})")
+        check(r.status_code == 400, f"blank session_id -> 400 (got {r.status_code})")
         r = CLIENT.post(
-            "/api/internal/broadcast-session",
-            json={"session_id": "s1", "event_type": "bad\nevent", "data": {}},
+            "/api/internal/sessions/s1/broadcast",
+            json={"event_type": "bad\nevent", "data": {}},
             headers=_hdr(),
         )
         check(r.status_code == 400, f"multiline event_type -> 400 (got {r.status_code})")
         r = CLIENT.post(
-            "/api/internal/broadcast-session",
-            json={"session_id": "s1", "event_type": "ext.evt", "data": [1, 2]},
+            "/api/internal/sessions/s1/broadcast",
+            json={"event_type": "ext.evt", "data": [1, 2]},
             headers=_hdr(),
         )
         check(r.status_code == 400, f"non-object data -> 400 (got {r.status_code})")
         captured.clear()
         r = CLIENT.post(
-            "/api/internal/broadcast-session",
-            json={"session_id": "s1", "event_type": "ext.evt", "data": {"x": 1}},
+            "/api/internal/sessions/s1/broadcast",
+            json={"event_type": "ext.evt", "data": {"x": 1}},
             headers=_hdr(),
         )
         check(r.status_code == 200 and r.json().get("source") == f"extension:{ACTIVE_EXT}",
@@ -339,14 +339,14 @@ def main_test() -> int:
               f"list_provisioned_specs -> GET specs (got {captured_req['method']} {captured_req['url']})")
         c.broadcast_session_event("ext.evt", {"x": 1})
         body = json.loads(captured_req["data"])
-        check(captured_req["url"].endswith("/api/internal/broadcast-session")
-              and body == {"session_id": "s1", "event_type": "ext.evt", "data": {"x": 1}},
+        check(captured_req["url"].endswith("/api/internal/sessions/s1/broadcast")
+              and body == {"event_type": "ext.evt", "data": {"x": 1}},
               "broadcast_session_event -> right path + payload")
         c.publish_session_event("ext.pub", {"y": 2})
         body = json.loads(captured_req["data"])
-        check(captured_req["url"].endswith("/api/internal/broadcast-session")
-              and body == {"session_id": "s1", "event_type": "ext.pub", "data": {"y": 2}},
-              "publish_session_event aliases broadcast-session")
+        check(captured_req["url"].endswith("/api/internal/sessions/s1/broadcast")
+              and body == {"event_type": "ext.pub", "data": {"y": 2}},
+              "publish_session_event aliases sessions/{sid}/broadcast")
         c.storage_put("k", b"v")
         body = json.loads(captured_req["data"])
         check(captured_req["url"].endswith("/api/internal/extension-storage/put")

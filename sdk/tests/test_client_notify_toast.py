@@ -35,8 +35,7 @@ def test_notify_toast_posts_extension_toast_event() -> bool:
     client.notify_toast("compacted 42%", session_id="sid-1", level="success")
     ok = (
         len(calls) == 1
-        and calls[0][0] == "/api/internal/broadcast-session"
-        and calls[0][1]["session_id"] == "sid-1"
+        and calls[0][0] == "/api/internal/sessions/sid-1/broadcast"
         and calls[0][1]["event_type"] == "extension_toast"
         and calls[0][1]["data"] == {"message": "compacted 42%", "level": "success"}
     )
@@ -48,7 +47,7 @@ def test_notify_toast_defaults_level_and_session() -> bool:
     client, calls = _client_with_captured_post()
     client.notify_toast("hello")
     ok = (
-        calls[0][1]["session_id"] == "default-sid"
+        calls[0][0] == "/api/internal/sessions/default-sid/broadcast"
         and calls[0][1]["data"]["level"] == "info"
     )
     print(f"{OK if ok else FAIL} notify_toast defaults session_id to app_session_id, level to info (got {calls})")

@@ -4542,8 +4542,9 @@ async def internal_provisioned_specs(
     return {"specs": specs}
 
 
-@app.post("/api/internal/broadcast-session")
+@app.post("/api/internal/sessions/{sid}/broadcast")
 async def internal_broadcast_session(
+    sid: str,
     body: dict,
     x_internal_token: str = Header(..., alias="X-Internal-Token"),
 ):
@@ -4560,7 +4561,7 @@ async def internal_broadcast_session(
         raise HTTPException(status_code=403, detail="extension is not active")
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="body must be an object")
-    app_session_id = str(body.get("session_id") or body.get("app_session_id") or "").strip()
+    app_session_id = sid.strip()
     event_type = str(body.get("event_type") or "").strip()
     data = body.get("data") or {}
     if not app_session_id:
