@@ -1137,6 +1137,18 @@ export function Chat({
     el.scrollTop = el.scrollHeight;
   }, [session?.id]);
 
+  // Jump buttons stay hidden until the user actually scrolls, then fade
+  // out again after 5s of scroll inactivity (debounced, not throttled —
+  // every scroll event pushes the hide back out).
+  const JUMP_BUTTONS_HIDE_DELAY_MS = 5000;
+  const [jumpButtonsVisible, setJumpButtonsVisible] = useState(false);
+  const jumpButtonsHideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    return () => {
+      if (jumpButtonsHideTimer.current) clearTimeout(jumpButtonsHideTimer.current);
+    };
+  }, []);
+
   const handleScroll = useCallback(() => {
     const el = scrollRef.current;
     if (!el) return;
@@ -1144,6 +1156,12 @@ export function Chat({
     const isAtBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 50;
     setStickToBottom(isAtBottom);
     scrollLoadHandler();
+
+    setJumpButtonsVisible(true);
+    if (jumpButtonsHideTimer.current) clearTimeout(jumpButtonsHideTimer.current);
+    jumpButtonsHideTimer.current = setTimeout(() => {
+      setJumpButtonsVisible(false);
+    }, JUMP_BUTTONS_HIDE_DELAY_MS);
   }, [scrollLoadHandler]);
 
   // Jump-to-top: when older pages remain, keep requesting them (the
@@ -1691,10 +1709,14 @@ export function Chat({
       </motion.div>
 
       {displayTurnGroups.length > 0 && (
-        <div className="chat-jump-buttons">
+        <div
+          className={`chat-jump-buttons${jumpButtonsVisible ? " chat-jump-buttons--visible" : ""}`}
+        >
           <button
             type="button"
             className="chat-jump-btn"
+            tabIndex={jumpButtonsVisible ? 0 : -1}
+            aria-hidden={!jumpButtonsVisible}
             onClick={jumpToTop}
             disabled={jumpingToTop}
             aria-busy={jumpingToTop}
@@ -1707,6 +1729,8 @@ export function Chat({
             <button
               type="button"
               className="chat-jump-btn"
+              tabIndex={jumpButtonsVisible ? 0 : -1}
+              aria-hidden={!jumpButtonsVisible}
               onClick={jumpToBottom}
               title={t("chat.jumpToBottom")}
               aria-label={t("chat.jumpToBottom")}

@@ -2818,10 +2818,22 @@ body {
   gap: 8px;
   z-index: 5;
   pointer-events: none;
+  opacity: 0;
+  transform: translateY(4px);
+  /* Fade in fast on scroll, fade out slowly so the disappearance itself
+     reads as intentional rather than a flicker. */
+  transition: opacity 0.35s ease, transform 0.35s ease;
+}
+
+.chat-jump-buttons--visible {
+  opacity: 1;
+  transform: translateY(0);
 }
 
 .chat-jump-btn {
-  pointer-events: auto;
+  /* Only clickable while the group is faded in — an invisible button
+     must not silently swallow clicks. */
+  pointer-events: none;
   width: 34px;
   height: 34px;
   border-radius: 50%;
@@ -2833,8 +2845,11 @@ body {
   justify-content: center;
   cursor: pointer;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
-  opacity: 0.85;
   transition: opacity 0.15s ease, color 0.15s ease, transform 0.15s ease;
+}
+
+.chat-jump-buttons--visible .chat-jump-btn {
+  pointer-events: auto;
 }
 
 .chat-jump-btn:hover:not(:disabled) {
@@ -12644,12 +12659,9 @@ button.run-badge-clickable:focus-visible {
 /* Extended (multi-line) collapsed prompt preview — consistent with the
    full-length last-assistant-block preview shown below it. */
 .message-box-collapsed-body.turn-collapsed-prompt {
-  display: -webkit-box;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 4;
   white-space: pre-wrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  overflow: visible;
+  text-overflow: unset;
 }
 
 .collapse-ellipsis {
