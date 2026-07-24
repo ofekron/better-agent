@@ -2,7 +2,7 @@ import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { sessionPath } from "../hooks/useRoute";
 import type { Session, UserInteractionRequest } from "../types";
-import { UserApprovalCard, UserInputCard } from "./Chat";
+import { MemoryProposalCard, UserApprovalCard, UserInputCard } from "./Chat";
 
 interface Props {
   requests: UserInteractionRequest[];
@@ -13,7 +13,16 @@ interface Props {
 
 function requestSummary(request: UserInteractionRequest): string {
   if (request.kind === "approval") return request.prompt;
+  if (request.kind === "memory") return request.memory_proposal.description;
   return request.questions[0]?.question ?? "";
+}
+
+function requestTitleKey(request: UserInteractionRequest): string {
+  if (request.kind === "approval") return "userApproval.title";
+  if (request.kind === "memory") {
+    return request.memory_proposal.action === "add" ? "memoryProposal.titleAdd" : "memoryProposal.titleEdit";
+  }
+  return "userInput.title";
 }
 
 export function UserInteractionToastStack({
@@ -42,9 +51,7 @@ export function UserInteractionToastStack({
           <path d="M12 3a8 8 0 0 0-8 8v1.5a3 3 0 0 1-.88 2.12L2 15.74V18h20v-2.26l-1.12-1.12A3 3 0 0 1 20 12.5V11a8 8 0 0 0-8-8Zm0 19a3 3 0 0 0 2.83-2h-5.66A3 3 0 0 0 12 22Z" />
         </svg>
         <div className="user-request-toast__content">
-          <strong className="user-request-toast__title">
-            {request.kind === "approval" ? t("userApproval.title") : t("userInput.title")}
-          </strong>
+          <strong className="user-request-toast__title">{t(requestTitleKey(request))}</strong>
           <span className="user-request-toast__summary">{requestSummary(request)}</span>
           {sessionName ? <span className="user-request-toast__session">{sessionName}</span> : null}
           <div className="user-request-toast__actions">
@@ -72,6 +79,8 @@ export function UserInteractionToastStack({
           <div className="user-request-toast__response" hidden={!expanded}>
             {request.kind === "approval" ? (
               <UserApprovalCard request={request} onDone={onDismiss} />
+            ) : request.kind === "memory" ? (
+              <MemoryProposalCard request={request} onDone={onDismiss} />
             ) : (
               <UserInputCard request={request} onDone={onDismiss} />
             )}

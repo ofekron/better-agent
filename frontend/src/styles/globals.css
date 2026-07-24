@@ -3419,26 +3419,6 @@ body {
 .harness-profile-selector.ns-modal-row .harness-profile-revision {
   flex-basis: 100%;
 }
-.harness-profile-package-button {
-  width: 34px;
-  height: 34px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  background: var(--bg-primary);
-  color: var(--text-primary);
-  transition: border-color 160ms ease, background-color 160ms ease, transform 160ms ease;
-}
-.harness-profile-package-button:hover:not(:disabled) {
-  border-color: var(--accent);
-  background: var(--bg-tertiary);
-  transform: translateY(-1px);
-}
-.harness-profile-package-button:disabled {
-  opacity: 0.62;
-}
 .harness-profile-revision {
   overflow: hidden;
   color: var(--text-muted);
@@ -9948,6 +9928,7 @@ button.run-badge-clickable:focus-visible {
   display: flex;
   flex-direction: column;
   gap: 14px;
+  min-height: 0;
 }
 
 .harness-settings-editor-toolbar {
@@ -9989,6 +9970,7 @@ button.run-badge-clickable:focus-visible {
   display: flex;
   flex-direction: column;
   gap: 14px;
+  min-height: 0;
 }
 
 .harness-extension-block {
@@ -18108,6 +18090,7 @@ button.progress-inflight {
     padding: 10px 12px;
     border-radius: 10px;
     overflow-x: hidden;
+    overflow-y: auto;
     -webkit-overflow-scrolling: touch;
   }
 

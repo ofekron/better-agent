@@ -37,7 +37,10 @@ export function usePendingUserInteractions() {
   const fetchSequenceRef = useRef(0);
 
   const notify = useCallback((request: UserInteractionRequest) => {
-    void notifyUserRequest(request, t("userApproval.title"), t("userInput.title"));
+    void notifyUserRequest(request, t("userApproval.title"), t("userInput.title"), {
+      add: t("memoryProposal.titleAdd"),
+      edit: t("memoryProposal.titleEdit"),
+    });
   }, [t]);
 
   const refetch = useCallback(async (notifyNew = false) => {
