@@ -19,7 +19,23 @@ that is mandatory.
 
 ### 1.1 Prerequisites
 
-On an empty Mac after cloning the repo, run:
+**One-liner (macOS):** clones into `~/.better-agent/checkout` (or
+`$BETTER_AGENT_INSTALL_DIR`) and runs `install-macos.sh` there. Re-running does
+a `git pull --ff-only`.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ofekron/better-agent/main/scripts/bootstrap.sh | bash
+```
+
+**One-liner (Windows PowerShell):** clones into
+`%USERPROFILE%\.better-agent\checkout` and runs `install-windows.ps1` there.
+Re-running does a `git pull --ff-only`.
+
+```powershell
+irm https://raw.githubusercontent.com/ofekron/better-agent/main/scripts/bootstrap.ps1 | iex
+```
+
+**From source (macOS):** on an empty Mac after cloning the repo, run:
 
 ```bash
 ./scripts/install-macos.sh
@@ -29,7 +45,8 @@ If `git` itself is missing, run `xcode-select --install` first, then clone and
 run the installation script. It asks for the integration mode and provider,
 then installs the provider CLI only when it is missing.
 
-On an empty Windows machine after cloning the repo, run from PowerShell:
+**From source (Windows):** on an empty Windows machine after cloning the repo,
+run from PowerShell:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\install-windows.ps1
@@ -40,6 +57,11 @@ If `git` itself is missing, install it first with
 the installation script. It asks for the integration mode and provider, then
 installs the provider CLI only when it is missing. Run `./run.sh` from Git Bash
 after installation.
+
+Linux has no packaged one-liner or platform installer script yet — install
+git, Python 3.11+, `uv`, and Node.js/npm yourself, clone the repo, and run
+`./run.sh` directly (see Part 1.3). `run.sh --install-service` (Part 1.4) does
+support Linux via systemd once those prerequisites are in place.
 
 ### Agent-driven installation
 
