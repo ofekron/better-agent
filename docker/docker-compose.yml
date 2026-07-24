@@ -1,0 +1,32 @@
+# Better Agent — run via `docker compose -f docker/docker-compose.yml up -d`
+# from the repo root. See docker/README.md for the full credential setup
+# (BETTER_AGENT_USERNAME, BETTER_AGENT_PASSWORD_HASH_FILE) before first run.
+
+services:
+  better-agent:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: better-agent:local
+    ports:
+      - "${BETTER_AGENT_BACKEND_PORT:-18765}:18765"
+    environment:
+      BETTER_AGENT_BACKEND_PORT: "18765"
+      BETTER_AGENT_USERNAME: "${BETTER_AGENT_USERNAME:?set BETTER_AGENT_USERNAME in docker/.env — see docker/README.md}"
+      BETTER_AGENT_PASSWORD_HASH_FILE: /run/secrets/better_agent_password_hash
+      BETTER_AGENT_SESSION_SECRET_FILE: /run/secrets/better_agent_session_secret
+    secrets:
+      - better_agent_password_hash
+      - better_agent_session_secret
+    volumes:
+      - better-agent-data:/data
+    restart: unless-stopped
+
+secrets:
+  better_agent_password_hash:
+    file: ./secrets/password_hash
+  better_agent_session_secret:
+    file: ./secrets/session_secret
+
+volumes:
+  better-agent-data:
