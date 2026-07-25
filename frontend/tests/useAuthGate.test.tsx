@@ -138,6 +138,28 @@ describe("useAuthGate", () => {
     expect(result.current.status).toBe("authed");
   });
 
+  it("logs the suppression when it actually happens, so the decision is observable", async () => {
+    // The one field that could silently disagree with reality (it's read
+    // from a ref one render behind the live decision) — this is what's
+    // worth locking, not the log payload's shape.
+    vi.mocked(fetch).mockResolvedValueOnce(response(200, { username: "ofek" }));
+    renderHook(() => useAuthGate("https://backend.test"));
+    await flush();
+
+    vi.mocked(fetch).mockRejectedValue(new Error("network down"));
+    act(() => window.dispatchEvent(new Event("online")));
+    await act(async () => vi.advanceTimersByTimeAsync(6_100));
+    // logDurable defers its POST via setTimeout(0); flush it.
+    await act(async () => vi.advanceTimersByTimeAsync(0));
+
+    const logCalls = vi.mocked(fetch).mock.calls.filter(([url]) => String(url).includes("/api/logs/frontend"));
+    const logCall = logCalls.at(-1);
+    expect(logCall).toBeDefined();
+    const payload = JSON.parse(String(logCall?.[1]?.body));
+    expect(payload.message).toContain("check_exhausted");
+    expect(payload.message).toContain('"suppressed_unreachable":true');
+  });
+
   it("aborts in-flight work and retry timers on unmount", async () => {
     let requestSignal: AbortSignal | undefined;
     vi.mocked(fetch).mockImplementation((_input, init) => {

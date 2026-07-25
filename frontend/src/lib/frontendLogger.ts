@@ -253,7 +253,12 @@ export function memorySnapshot(): Record<string, number> {
 // crash-loop cycle reboots the app (and this heartbeat with it), so a
 // per-boot cap loses no coverage of the loop itself.
 const HEARTBEAT_INTERVAL_MS = 2_000;
-const HEARTBEAT_MAX_TICKS = 60; // 2 minutes per boot
+// 60 ticks, NOT "2 minutes wall-clock": a background/frozen page pauses the
+// interval (observed ~41 ticks logged across a 28-minute freeze-and-resume
+// in practice), so this caps foreground activity, not elapsed time since
+// boot — a single boot that's repeatedly backgrounded can log for far
+// longer than 2 minutes of wall-clock before hitting the cap.
+const HEARTBEAT_MAX_TICKS = 60;
 
 function installMemoryHeartbeat(): void {
   if (!Capacitor.isNativePlatform()) return;

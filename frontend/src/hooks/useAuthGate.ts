@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { App as CapApp, type AppState } from "@capacitor/app";
 import { Capacitor } from "@capacitor/core";
+import { logDurable } from "../lib/frontendLogger";
 
 export type AuthStatus = "loading" | "anon" | "authed" | "setup" | "unreachable";
 
@@ -116,25 +117,68 @@ export function useAuthGate(api: string): AuthGateState & { checkAuth: () => voi
   // rather than a value captured up to ~26s earlier), so this covers every
   // path to "unreachable" (exhausted retries AND a definitive non-retryable
   // probe result), not just one of them.
+  //
+  // Best-effort mirror of `state.status`, read only for the `logDurable`
+  // calls below — NOT the decision logic (that stays in the functional
+  // setState updaters, which read the live value with no stale-capture
+  // risk). A log line reading a value that's one render behind is fine;
+  // the actual suppress-vs-wipe decision must not be.
+  const lastLoggedStatusRef = useRef<AuthStatus>(state.status);
+  useEffect(() => {
+    lastLoggedStatusRef.current = state.status;
+  }, [state.status]);
 
   const checkAuth = useCallback(() => {
     activeGeneration.current?.abort();
     const generation = new AbortController();
     activeGeneration.current = generation;
+    const startedAt = Date.now();
+    let attempt = 0;
+    let lastError: unknown;
 
     void (async () => {
       for (const delay of RETRY_DELAYS_MS) {
+        attempt += 1;
         try {
           if (delay > 0) await wait(delay, generation.signal);
           const result = await probeAuth(api, generation.signal);
           if (generation.signal.aborted) return;
+          const suppressed = result.status === "unreachable" && lastLoggedStatusRef.current === "authed";
+          logDurable("auth-gate", "check_resolved", {
+            // `result.status` is the DECIDED auth state (authed/anon/setup/
+            // unreachable), not an HTTP code — every non-401 non-retryable
+            // response collapses into "unreachable" here. `result.error`
+            // (set by unreachableError()) is what actually carries the
+            // distinguishing detail: "Backend rejected this browser origin."
+            // (403) vs "Backend {scope} probe failed with status {N}."
+            probe_result: result.status,
+            probe_error: result.error || null,
+            suppressed_unreachable: suppressed,
+            attempt,
+            elapsed_ms: Date.now() - startedAt,
+          });
           setState((cur) => (result.status === "unreachable" && cur.status === "authed" ? cur : result));
           return;
-        } catch {
+        } catch (err) {
+          lastError = err;
           if (generation.signal.aborted) return;
         }
       }
       if (generation.signal.aborted) return;
+      const suppressed = lastLoggedStatusRef.current === "authed";
+      const err = lastError instanceof Error ? lastError : null;
+      logDurable("auth-gate", "check_exhausted", {
+        // Distinguishes a stalled/blackholed network (TimeoutError, from
+        // fetchWithTimeout's 5s abort) from connection-refused/DNS
+        // (TypeError: Failed to fetch) from a backend that's up but
+        // erroring (Error("Transient auth response") on a 5xx) — three
+        // different root causes that would otherwise look identical here.
+        error_name: err?.name ?? null,
+        error_message: err?.message ?? null,
+        suppressed_unreachable: suppressed,
+        attempts: RETRY_DELAYS_MS.length,
+        elapsed_ms: Date.now() - startedAt,
+      });
       setState((cur) =>
         cur.status === "authed"
           ? cur
