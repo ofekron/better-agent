@@ -37,6 +37,7 @@ import re
 import signal
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -280,6 +281,9 @@ class ClaudeProvider(Provider):
     def __init__(self, record: dict) -> None:
         super().__init__(record)
         self._runs: dict[str, RunState] = {}
+        # Wind-down gate mutexes, one per native session id.
+        self._session_start_locks: dict[str, threading.Lock] = {}
+        self._session_start_locks_guard = threading.Lock()
         # Aggregate gauge: sum of all run-queue depths for this provider
         # instance. Bounded — one entry regardless of run count. Name
         # is stashed on the instance so `provider.get_provider` can
@@ -471,37 +475,81 @@ class ClaudeProvider(Provider):
         # app_session_id — worker forks share the parent's app_session_id
         # but run their own native session. `fork=True` spawns are
         # exempt: `--fork-session` creates a NEW native session id.
+        #
+        # The check and the registration that follows it must be atomic:
+        # `start_run` runs on a multi-worker dispatch pool, so two runs
+        # released from the gate at the same instant would otherwise both
+        # read an empty blocker set and both spawn a `--resume` CLI on the
+        # same native session. Serialized per native session id, so turns
+        # on unrelated sessions never wait on each other.
         if session_id and not fork:
-            blockers = [
-                rs for rs in self._runs.values()
-                if getattr(rs, "session_id", None) == session_id
-            ]
-            if blockers:
-                logger.info(
-                    "start_run: deferring run %s behind winding-down "
-                    "run(s) %s on native session %s",
-                    run_id[:8],
-                    [b.run_id[:8] for b in blockers],
-                    session_id[:8],
-                )
-                schedule_loop_task(
-                    loop,
-                    self._start_after_release(blockers, spawn_kwargs),
-                    name=f"bridge-winddown-gate-{run_id[:8]}",
-                )
-                return
+            with self._session_start_lock(session_id):
+                blockers = [
+                    rs for rs in self._runs.values()
+                    if getattr(rs, "session_id", None) == session_id
+                ] + self.parked_runs_ahead_of(session_id, run_id)
+                if blockers:
+                    logger.info(
+                        "start_run: deferring run %s behind winding-down "
+                        "run(s) %s on native session %s",
+                        run_id[:8],
+                        [b.run_id[:8] for b in blockers],
+                        session_id[:8],
+                    )
+                    self.park_run(
+                        run_id,
+                        session_id=session_id,
+                        app_session_id=app_session_id,
+                        loop=loop,
+                    )
+                    schedule_loop_task(
+                        loop,
+                        self._start_after_release(blockers, spawn_kwargs),
+                        name=f"bridge-winddown-gate-{run_id[:8]}",
+                    )
+                    return
+                # Unpark before spawning: this run is the session's owner
+                # from here on, and `_spawn_run` registers it as a live
+                # blocker for anything queued behind it.
+                self.unpark_run(run_id)
+                self._spawn_run(**spawn_kwargs)
+            return
 
         self._spawn_run(**spawn_kwargs)
+
+    def _session_start_lock(self, session_id: str) -> threading.Lock:
+        """Per-native-session mutex guarding the wind-down gate's
+        check-then-spawn critical section.
+
+        Idle locks are dropped on the way past so a long-lived backend
+        does not accumulate one entry per native session ever seen."""
+        with self._session_start_locks_guard:
+            live_sids = {
+                getattr(rs, "session_id", None) for rs in self._runs.values()
+            } | {p.session_id for p in self._parked_runs.values()}
+            for sid, idle in list(self._session_start_locks.items()):
+                if sid == session_id or sid in live_sids:
+                    continue
+                if idle.acquire(blocking=False):
+                    idle.release()
+                    del self._session_start_locks[sid]
+            lock = self._session_start_locks.get(session_id)
+            if lock is None:
+                lock = threading.Lock()
+                self._session_start_locks[session_id] = lock
+            return lock
 
     async def _start_after_release(
         self, blockers: list, spawn_kwargs: dict,
     ) -> None:
         """Wait for every blocking run's release event (set by
-        `Provider._cleanup_run` when the runner process exits), then
+        `Provider._cleanup_run` when the runner process exits, or by
+        `unpark_run` when a parked blocker leaves the gate), then
         re-enter `start_run`. Re-entering (rather than spawning directly)
         re-checks the gate against runs that registered in the meantime.
         Purely event-driven: no polling, resolves the moment the release
         fires."""
+        run_id = spawn_kwargs.get("run_id")
         try:
             waits = [
                 blocker.released.wait()
@@ -510,9 +558,23 @@ class ClaudeProvider(Provider):
             ]
             if waits:
                 await asyncio.gather(*waits)
+            # The turn this run belongs to may have been cancelled while
+            # it sat in the gate. Spawning now would resume the native
+            # session with no turn to consume it — an orphan CLI writing
+            # into the session transcript.
+            parked = self._parked_runs.get(run_id)
+            if parked is None or parked.cancelled:
+                logger.info(
+                    "start_run: dropping parked run %s — cancelled while "
+                    "waiting on the wind-down gate",
+                    str(run_id)[:8],
+                )
+                self.unpark_run(run_id)
+                return
             from turn_manager import _to_turn_dispatch_thread
             await _to_turn_dispatch_thread(self.start_run, **spawn_kwargs)
         except Exception as e:
+            self.unpark_run(run_id)
             logger.exception(
                 "deferred start after release failed for run %s",
                 spawn_kwargs.get("run_id"),

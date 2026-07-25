@@ -463,6 +463,47 @@ class ProviderCredentialError(RuntimeError):
         }
 
 
+@dataclass
+class ParkedRun:
+    """A run accepted by `start_run` but not spawned yet because another
+    run still owns its native session (the wind-down gate).
+
+    A parked run has no process, so it must still report as *live* to
+    every liveness reader: the turn drive-loop declares a run dead when
+    the provider says it is not running, and would otherwise synthesize
+    `runner exited without delivering a complete event` for a run that
+    is merely waiting its turn.
+
+    `released` fires when the run leaves the parked state — either it
+    spawned, or it was cancelled — so runs queued behind it proceed."""
+
+    run_id: str
+    session_id: str
+    app_session_id: str
+    released: asyncio.Event
+    # Loop the `released` event belongs to. `unpark_run` runs on a turn
+    # dispatch worker thread, and `asyncio.Event.set` does not wake
+    # waiters safely from off-loop — the wakeup is bounced through it.
+    loop: asyncio.AbstractEventLoop
+    # Arrival order at the gate. A run only ever waits on runs AHEAD of
+    # it; without that ordering two parked runs each pick the other as a
+    # blocker when they re-enter the gate and deadlock.
+    seq: int
+    cancelled: bool = False
+
+    def release(self) -> None:
+        if self.released.is_set():
+            return
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+        if running is self.loop:
+            self.released.set()
+            return
+        self.loop.call_soon_threadsafe(self.released.set)
+
+
 class Provider(ABC):
     KIND: ClassVar[str]
     uses_managed_api_key: ClassVar[bool] = False
@@ -529,6 +570,8 @@ class Provider(ABC):
         self._record: dict = dict(record)
         self.defunct: bool = False
         self.suspended: bool = config_store.provider_suspended(self.id)
+        self._parked_runs: dict[str, ParkedRun] = {}
+        self._park_seq: int = 0
         self._apply_capability_overrides()
 
     # Per-provider capability overrides (record `capabilities` map) win
@@ -679,19 +722,74 @@ class Provider(ABC):
     _runs: dict[str, Any]
 
     def is_running(self, run_id: str) -> bool:
+        if run_id in self._parked_runs:
+            return True
         rs = self._runs.get(run_id)
         return rs is not None and rs.popen.poll() is None
 
     async def is_running_off_loop(self, run_id: str) -> bool:
+        if run_id in self._parked_runs:
+            return True
         rs = self._runs.get(run_id)
         if rs is None:
             return False
         return await popen_is_running_off_loop(rs.popen)
 
+    # ------------------------------------------------------------------
+    # Parked-run registry — the wind-down gate's holding area. Kept on
+    # the base provider (not the gate's own subclass) so the liveness,
+    # cancel, and blocker readers all see one registry.
+    # ------------------------------------------------------------------
+    def park_run(
+        self,
+        run_id: str,
+        *,
+        session_id: str,
+        app_session_id: str,
+        loop: asyncio.AbstractEventLoop,
+    ) -> ParkedRun:
+        """Park a run, or return its existing entry. A run that re-enters
+        the gate keeps its original arrival order — re-issuing it would
+        send it to the back of the line every round and starve it."""
+        existing = self._parked_runs.get(run_id)
+        if existing is not None:
+            return existing
+        self._park_seq += 1
+        parked = ParkedRun(
+            run_id=run_id,
+            session_id=session_id,
+            app_session_id=app_session_id,
+            released=asyncio.Event(),
+            loop=loop,
+            seq=self._park_seq,
+        )
+        self._parked_runs[run_id] = parked
+        return parked
+
+    def unpark_run(self, run_id: str) -> Optional[ParkedRun]:
+        """Drop a run from the parked registry and wake anything queued
+        behind it. Idempotent."""
+        parked = self._parked_runs.pop(run_id, None)
+        if parked is not None:
+            parked.release()
+        return parked
+
+    def parked_runs_ahead_of(
+        self, session_id: str, run_id: str,
+    ) -> list[ParkedRun]:
+        """Parked runs on `session_id` that arrived at the gate before
+        `run_id` (all of them when `run_id` is not parked yet)."""
+        own = self._parked_runs.get(run_id)
+        cutoff = own.seq if own is not None else self._park_seq + 1
+        return [
+            p for p in self._parked_runs.values()
+            if p.session_id == session_id and p.seq < cutoff
+        ]
+
     def cancel_all(self) -> int:
         """Cancel all active runs. Returns count of runs signalled."""
         count = 0
-        for rid in list(self._runs.keys()):
+        for rid in list(self._parked_runs.keys()) + list(self._runs.keys()):
             if self.cancel_run(rid):
                 count += 1
         if count:
@@ -826,6 +924,18 @@ class Provider(ABC):
     # behaviour by overriding `_post_cancel_hook`.
     # ------------------------------------------------------------------
     def cancel_run(self, run_id: str) -> bool:
+        # A parked run has no process to signal: mark it cancelled and
+        # release it so the gate drops it instead of spawning a CLI for
+        # a turn that is already over.
+        parked = self._parked_runs.get(run_id)
+        if parked is not None:
+            parked.cancelled = True
+            self.unpark_run(run_id)
+            logger.info(
+                "%s.cancel_run: dropped parked run %s",
+                type(self).__name__, run_id,
+            )
+            return True
         rs = self._runs.get(run_id)
         if rs is None:
             return False
