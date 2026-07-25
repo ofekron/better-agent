@@ -761,6 +761,17 @@ def test_codex_elements_reasoning() -> bool:
     return ok
 
 
+def test_codex_elements_event_msg_reasoning() -> bool:
+    t = _write_codex([
+        {"type": "event_msg", "timestamp": "t1",
+         "payload": {"type": "agent_reasoning", "text": "thinking"}},
+    ])
+    els = _codex_elements(t)
+    ok = len(els) == 1 and els[0].kind == "reasoning" and els[0].text == "thinking"
+    print(f"{OK if ok else FAIL} codex_elements event_msg reasoning (got {[(e.kind,e.text) for e in els]})")
+    return ok
+
+
 def test_codex_elements_function_call() -> bool:
     t = _write_codex([
         {"type": "response_item", "timestamp": "t1",
@@ -2616,6 +2627,7 @@ def main_run() -> int:
         test_codex_elements_environment_context_is_meta,
         test_codex_elements_assistant_text,
         test_codex_elements_reasoning,
+        test_codex_elements_event_msg_reasoning,
         test_codex_elements_function_call,
         test_codex_elements_custom_tool_call,
         test_codex_elements_function_call_output,

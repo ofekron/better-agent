@@ -2018,28 +2018,39 @@ def test_codex_provider_cancel_unblocks_child_join() -> bool:
 
 
 def test_codex_event_msg_agent_reasoning_renders_as_thinking() -> bool:
-    normalizer = CodexRolloutNormalizer(namespace="test")
-    events = normalizer.normalize_event({
+    # Real Codex rollouts carry the reasoning body under `text`
+    # (`delta` while streaming); an unmatched field falls through to the
+    # raw native JSON dump instead of a thinking block.
+    cases = [
+        ({"type": "agent_reasoning", "text": "Need inspect before editing."},
+         "Need inspect before editing."),
+        ({"type": "agent_reasoning_delta", "delta": "Need inspect"}, "Need inspect"),
+    ]
+    for payload, expected in cases:
+        normalizer = CodexRolloutNormalizer(namespace="test")
+        events = normalizer.normalize_event({"type": "event_msg", "payload": payload})
+        if len(events) != 1:
+            print(f"  expected one event for {payload!r}, got {events!r}")
+            return False
+        content = ((events[0].get("message") or {}).get("content") or [])
+        block = content[0] if content and isinstance(content[0], dict) else {}
+        ok = (
+            events[0].get("type") == "assistant"
+            and block.get("type") == "thinking"
+            and block.get("thinking") == expected
+            and "text" not in block
+        )
+        if not ok:
+            print(f"  bad reasoning event for {payload!r}: {events!r}")
+            return False
+    empty = CodexRolloutNormalizer(namespace="test").normalize_event({
         "type": "event_msg",
-        "payload": {
-            "type": "agent_reasoning",
-            "message": "Need inspect before editing.",
-        },
+        "payload": {"type": "agent_reasoning", "text": ""},
     })
-    if len(events) != 1:
-        print(f"  expected one event, got {events!r}")
+    if empty:
+        print(f"  empty reasoning should render nothing, got {empty!r}")
         return False
-    content = ((events[0].get("message") or {}).get("content") or [])
-    block = content[0] if content and isinstance(content[0], dict) else {}
-    ok = (
-        events[0].get("type") == "assistant"
-        and block.get("type") == "thinking"
-        and block.get("thinking") == "Need inspect before editing."
-        and "text" not in block
-    )
-    if not ok:
-        print(f"  bad reasoning event: {events!r}")
-    return ok
+    return True
 
 
 def test_codex_nonlatest_replay_bound_is_safe() -> bool:

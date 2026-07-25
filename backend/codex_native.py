@@ -12,6 +12,7 @@ from typing import Any, Callable, Optional
 from codex_normalize import (
     _attach_collab_parent_from_thread,
     _codex_agent_message_parts,
+    _codex_reasoning_text,
     _codex_terminal_state,
     _mark_final_answer,
     _normalize_agent_message,
@@ -513,12 +514,13 @@ class CodexRolloutNormalizer:
                     _normalize_event_msg_patch_apply_end(payload, self.parent_uuid)
                 )
             if payload_type in ("agent_reasoning", "agent_reasoning_delta"):
-                message = payload.get("message")
-                if isinstance(message, str) and message:
-                    return self._push_from_native(
-                        raw_event,
-                        _normalize_event_msg_reasoning(payload, self.parent_uuid, message)
-                    )
+                text = _codex_reasoning_text(payload)
+                if not text:
+                    return []
+                return self._push_from_native(
+                    raw_event,
+                    _normalize_event_msg_reasoning(payload, self.parent_uuid, text)
+                )
             if payload.get("type") == "web_search_end":
                 return self._normalize_web_search_payload(payload)
             if payload_type == "mcp_tool_call_end":

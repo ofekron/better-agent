@@ -336,7 +336,7 @@ def test_codex_rollout_event_msg_replay_keeps_stable_parent_chain() -> bool:
         {
             "type": "event_msg",
             "timestamp": "2026-01-01T00:00:01Z",
-            "payload": {"type": "agent_reasoning", "message": "checking"},
+            "payload": {"type": "agent_reasoning", "text": "checking"},
         },
     ]
     first = CodexRolloutNormalizer(namespace="thread-1")
@@ -429,7 +429,7 @@ def test_codex_rollout_digests_known_event_msg_primitives() -> bool:
             },
             "Success. Updated files.",
         ),
-        ({"type": "agent_reasoning", "message": "checking"}, "checking"),
+        ({"type": "agent_reasoning", "text": "checking"}, "checking"),
     ]
     for payload, expected in cases:
         rows = normalizer.normalize_event({"type": "event_msg", "payload": payload})
