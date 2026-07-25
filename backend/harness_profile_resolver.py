@@ -38,7 +38,10 @@ def _setting_schema_hash(record: dict[str, Any], key: str) -> str:
 def _runtime_ready_record(extension_id: str) -> dict[str, Any]:
     record = extension_store.get_extension(extension_id)
     if not record or not record.get("enabled") or not extension_store.is_extension_runtime_ready(extension_id):
-        raise HarnessProfileResolutionError(f"Harness profile requires enabled runtime-ready extension: {extension_id}")
+        reason = extension_store.runtime_not_ready_reason(extension_id) or "disabled"
+        raise HarnessProfileResolutionError(
+            f"Harness profile requires enabled runtime-ready extension: {extension_id} ({reason})"
+        )
     return record
 
 

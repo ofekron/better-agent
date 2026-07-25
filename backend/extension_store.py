@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import copy
-import errno
 from contextlib import contextmanager
 import gzip
 import io
+import logging
+import zlib
 import re
 import shutil
 import subprocess
@@ -39,6 +40,8 @@ import extension_mcp
 import native_mcp_grants
 import installation_profile
 import harness_run_projection
+
+logger = logging.getLogger(__name__)
 
 STORE_SCHEMA_VERSION = 2
 MANIFEST_KIND = "better-agent-extension"
@@ -93,6 +96,8 @@ _RECONCILED_STORE_FINGERPRINT: tuple[str, StoreFingerprint] | None = None
 _RECONCILED_STORE_LOCK = threading.Lock()
 _CORE_ROLE_OWNERS_CACHE: tuple[StoreFingerprint, MappingProxyType] | None = None
 _CORE_ROLE_OWNERS_LOCK = threading.Lock()
+_PACKAGE_PUBLISH_LOCKS: dict[str, threading.Lock] = {}
+_PACKAGE_PUBLISH_LOCK_GUARD = threading.Lock()
 _EXT_SETTINGS_LOCK = threading.RLock()
 _RESERVED_MCP_SERVER_NAMES = {
     "browser-harness",
@@ -2740,11 +2745,12 @@ def _download_artifact(url: str) -> bytes:
 
 
 def _safe_extract_tar_gz(archive_bytes: bytes, target: Path) -> None:
+    # Read the archive from memory. Any on-disk scratch copy named after the
+    # install root is shared by concurrent installs of sibling versions, which
+    # lets one writer truncate an archive another is still reading.
     target.mkdir(parents=True, exist_ok=True)
-    archive_path = target.parent / "artifact.tar.gz"
-    archive_path.write_bytes(archive_bytes)
     try:
-        with tarfile.open(archive_path, mode="r:gz") as archive:
+        with tarfile.open(fileobj=io.BytesIO(archive_bytes), mode="r:gz") as archive:
             for member in archive.getmembers():
                 if member.name.startswith("/") or ".." in Path(member.name).parts:
                     raise ExtensionError("marketplace artifact contains unsafe paths")
@@ -2754,10 +2760,8 @@ def _safe_extract_tar_gz(archive_bytes: bytes, target: Path) -> None:
                 if member.islnk() or member.issym():
                     raise ExtensionError("marketplace artifact must not contain links")
             archive.extractall(target)
-    except tarfile.TarError as exc:
+    except (tarfile.TarError, EOFError, gzip.BadGzipFile, zlib.error) as exc:
         raise ExtensionError("marketplace artifact is not a valid tar.gz") from exc
-    finally:
-        archive_path.unlink(missing_ok=True)
 
 
 def _build_package_artifact(package_dir: Path) -> bytes:
@@ -2772,48 +2776,90 @@ def _build_package_artifact(package_dir: Path) -> bytes:
                     continue
                 if not path.is_file():
                     raise ExtensionError("extension package contains unsupported filesystem entries")
+                # Snapshot the bytes and declare that exact size, so a package
+                # file rewritten mid-build cannot emit a header promising more
+                # bytes than follow and yield an unreadable archive.
+                data = path.read_bytes()
                 info = archive.gettarinfo(str(path), arcname=rel)
+                info.size = len(data)
                 info.uid = 0
                 info.gid = 0
                 info.uname = ""
                 info.gname = ""
                 info.mtime = 0
-                with path.open("rb") as fh:
-                    archive.addfile(info, fh)
+                archive.addfile(info, io.BytesIO(data))
     return buf.getvalue()
 
 
-def _rmtree_for_replace(path: Path) -> None:
-    """Remove a directory tree before extracting a fresh snapshot.
+def _package_published(target: Path) -> bool:
+    """True when ``target`` already holds a published package tree.
 
-    A concurrent install/GC pass or a dev file-watcher re-creating entries
-    mid-tree-walk surfaces as ENOTEMPTY (Errno 66 on macOS, 39 on Linux) when
-    the final ``os.rmdir`` runs. Retry a few times so a transient race does not
-    abort an otherwise-fine replace; if it still races, sweep best-effort and
-    let the subsequent tar extraction overwrite whatever remains.
+    Version directories are content-addressed, so a published tree is exactly
+    the content any install of the same sha would produce.
     """
-    for _ in range(5):
-        try:
-            shutil.rmtree(path)
-            return
-        except FileNotFoundError:
-            return
-        except OSError as exc:
-            if exc.errno != errno.ENOTEMPTY:
-                raise
-    shutil.rmtree(path, ignore_errors=True)
+    return (target / "better-agent-extension.json").is_file()
 
 
-def _install_package_artifact(package_dir: Path, target: Path) -> None:
+def _package_publish_lock(target: Path) -> threading.Lock:
+    key = str(target)
+    with _PACKAGE_PUBLISH_LOCK_GUARD:
+        return _PACKAGE_PUBLISH_LOCKS.setdefault(key, threading.Lock())
+
+
+def _publish_package_dir(staging: Path, target: Path) -> bool:
+    """Move a fully extracted staging tree onto ``target``.
+
+    Returns True when this call published the tree. Another process may hold
+    the same content-addressed path, so a lost race keeps the winner's tree and
+    returns False rather than replacing equivalent content underneath readers.
+    """
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if _package_published(target):
+        return False
     try:
         if target.is_symlink() or target.is_file():
             target.unlink()
-        elif target.is_dir():
-            _rmtree_for_replace(target)
     except FileNotFoundError:
         pass
-    target.parent.mkdir(parents=True, exist_ok=True)
-    _safe_extract_tar_gz(_build_package_artifact(package_dir), target)
+    if not target.exists():
+        os.replace(staging, target)
+        return True
+    retired = target.parent / f".retired-{uuid.uuid4().hex}"
+    try:
+        os.replace(target, retired)
+    except FileNotFoundError:
+        os.replace(staging, target)
+        return True
+    try:
+        os.replace(staging, target)
+    except OSError:
+        os.replace(retired, target)
+        raise
+    shutil.rmtree(retired, ignore_errors=True)
+    return True
+
+
+def _install_package_artifact(package_dir: Path, target: Path) -> bool:
+    """Install ``package_dir`` at ``target`` without destroying a live tree.
+
+    Live extension records point at ``target`` and readiness checks stat it, so
+    the tree is built and extracted into a private staging directory and only
+    then moved into place. A published tree is left untouched: the path is
+    content-addressed, so rebuilding it in place would be redundant work on a
+    path readers stat continuously. Returns True when this call published
+    ``target``.
+    """
+    # Serialize per target so concurrent reconcile passes cannot each build and
+    # then swap equivalent content underneath one another.
+    with _package_publish_lock(target):
+        if _package_published(target):
+            return False
+        staging = target.parent / f".staging-{uuid.uuid4().hex}"
+        try:
+            _safe_extract_tar_gz(_build_package_artifact(package_dir), staging)
+            return _publish_package_dir(staging, target)
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
 
 
 def _install_from_package_dir(
@@ -2840,12 +2886,15 @@ def _install_from_package_dir(
     previous_exists = existing is not None
     existing = existing or {}
     target = _install_root() / manifest["id"] / "versions" / commit_sha
-    _install_package_artifact(package_dir, target)
+    created = _install_package_artifact(package_dir, target)
     try:
         _install_python_requirements(target, manifest)
         smoke_test = _run_extension_smoke_test(manifest, target)
     except Exception:
-        shutil.rmtree(target, ignore_errors=True)
+        # Only discard a tree this call created. The path is content-addressed,
+        # so a pre-existing one is already referenced by a live record.
+        if created:
+            shutil.rmtree(target, ignore_errors=True)
         raise
 
     now = _now()
@@ -3224,11 +3273,12 @@ def _install_public_package_snapshot(
         raise ExtensionError("Public extension manifest id does not match install spec")
     _validate_declared_files(manifest, package_dir)
     target = _install_root() / extension_id / "versions" / package_sha
-    _install_package_artifact(package_dir, target)
+    created = _install_package_artifact(package_dir, target)
     try:
         smoke_test = _run_extension_smoke_test(manifest, target)
     except Exception:
-        shutil.rmtree(target, ignore_errors=True)
+        if created:
+            shutil.rmtree(target, ignore_errors=True)
         raise
     now = _now()
     return {
@@ -3294,11 +3344,12 @@ def _refresh_local_extension_snapshot(
 ) -> dict[str, Any]:
     _validate_declared_files(manifest, package_dir)
     target = _install_root() / extension_id / "versions" / package_sha
-    _install_package_artifact(package_dir, target)
+    created = _install_package_artifact(package_dir, target)
     try:
         smoke_test = _run_extension_smoke_test(manifest, target)
     except Exception:
-        shutil.rmtree(target, ignore_errors=True)
+        if created:
+            shutil.rmtree(target, ignore_errors=True)
         raise
     refreshed = copy.deepcopy(record)
     refreshed["manifest"] = manifest
@@ -3358,7 +3409,11 @@ def _ensure_local_extensions(data: dict[str, Any]) -> tuple[bool, list[str]]:
                 package_sha,
                 manifest,
             )
-        except (ExtensionError, OSError, json.JSONDecodeError):
+        except Exception:
+            # Isolate the failure to this extension. An exception escaping here
+            # aborts the reconcile before it writes the store, leaving every
+            # later extension unreconciled.
+            logger.exception("local extension reconcile failed for %s", extension_id)
             continue
         data["extensions"][extension_id] = refreshed
         recovered.extend(
@@ -3449,7 +3504,11 @@ def _ensure_public_extensions(data: dict[str, Any]) -> bool:
         install_error = False
         try:
             installed = _install_public_package_snapshot(extension_id, package_dir, package_sha)
-        except ExtensionError as exc:
+        except Exception as exc:
+            # Isolate the failure to this extension. An exception escaping here
+            # aborts the reconcile before it writes the store, leaving every
+            # later extension unreconciled.
+            logger.exception("public extension install failed for %s", extension_id)
             install_error = True
             installed = _placeholder_record(
                 extension_id,
