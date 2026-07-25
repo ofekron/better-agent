@@ -5311,9 +5311,132 @@ def _mcp_server_configs_for_delivery(
                 }
             else:
                 config = _runtime_mcp_server_config_for_item(record, item, resolved_inputs)
+                if delivery == _HARNESS_DELIVERY_RUNTIME and item.get("user_facing"):
+                    config = _apply_mcp_prewarm_daemon(config, server_name, resolved_inputs)
             if config:
                 configs[server_name] = config
     return configs
+
+
+def _apply_mcp_prewarm_daemon(
+    config: dict[str, Any] | None,
+    server_name: str,
+    inputs: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Swaps a user-facing runtime MCP server's real cold-spawn config
+    for the pre-warmed daemon's stub proxy, when `turn_manager` ran the
+    prewarm gate for this turn (signaled by `_mcp_prewarm_ready` being
+    present in `inputs` at all -- absent means no prewarm was attempted
+    for this call, e.g. a direct `runtime_mcp_server_configs()` caller
+    outside the turn-dispatch path, so it falls back to today's
+    cold-spawn behavior unchanged). Present-but-missing-this-server
+    means prewarm was attempted and failed -- fail closed, omit the
+    server, never fall back to a real cold-spawn for that turn.
+    """
+    if config is None:
+        return None
+    ready_map = inputs.get("_mcp_prewarm_ready")
+    if not isinstance(ready_map, dict):
+        return config
+    socket_path = ready_map.get(server_name)
+    if not socket_path:
+        return None
+    return {
+        **{k: v for k, v in config.items() if k not in ("command", "args", "env")},
+        "command": sys.executable,
+        "args": ["-m", "mcp_prewarm.stub"],
+        "env": {
+            **dual_env_many({"BETTER_CLAUDE_MCP_DAEMON_SOCKET": str(socket_path)}),
+            # The stub is a stdlib-only script but still needs `backend/`
+            # (its own package parent) on PYTHONPATH -- unlike the real
+            # cold-spawn config this replaces, whose env intentionally
+            # carries only the extension's own install/site-packages
+            # paths, never the backend dir.
+            "PYTHONPATH": str(Path(__file__).resolve().parent),
+        },
+    }
+
+
+def runtime_mcp_prewarm_targets(inputs: dict[str, Any]) -> list[dict[str, Any]]:
+    """Enumerates the user-facing runtime MCP items eligible for
+    pre-warming for this turn's `inputs` -- same gating
+    (`_mcp_item_available_for_inputs`, `user_facing`, module-based
+    entrypoint) as `_mcp_server_configs_for_delivery`'s runtime path,
+    single source of truth for which items get built each turn. Only
+    module entrypoints resolving to a module that declares
+    `build_server()` are eligible -- checked via a cheap source-text
+    scan (no import) so an extension that doesn't follow the
+    convention is silently left on the cold-spawn path instead of
+    being wrongly gated to fail-closed unavailable.
+    """
+    resolved_inputs = {
+        **inputs,
+        "user_facing": True,
+        "bare_config": False,
+        # Called from `ClaudeProvider._spawn_run`, BEFORE the runner
+        # subprocess's own `hydrate_runner_inputs` bootstrap RPC mints
+        # the real session `internal_token` -- at this point in the
+        # backend process it is always blank by construction. Only
+        # `_mcp_item_available_for_inputs`'s `requires_backend_auth`
+        # gate checks this key for truthiness; it is never read as
+        # secret material by `_runtime_mcp_server_config_for_item`
+        # (which mints its own per-extension token independently), so
+        # substituting a non-empty placeholder here just matches the
+        # non-empty value the runner is guaranteed to have moments
+        # later, instead of prematurely gating every backend-auth
+        # extension (e.g. memory) out of pre-warming.
+        "internal_token": inputs.get("internal_token") or "pending-runner-bootstrap",
+    }
+    disabled_extension_ids = _disabled_runtime_extension_ids(inputs)
+    targets: list[dict[str, Any]] = []
+    for record in _active_records():
+        if not _record_runtime_ready(record):
+            continue
+        install_root = runtime_package_root_for_record(record)
+        if install_root is None or not install_root.exists():
+            continue
+        manifest = record["manifest"]
+        if manifest["id"] in disabled_extension_ids:
+            continue
+        for item in _stored_mcp_entrypoints(record):
+            if not item.get("user_facing"):
+                continue
+            server_name = item.get("replaces_builtin") or item["name"]
+            if not _mcp_item_available_for_inputs(record, item, resolved_inputs):
+                continue
+            real_config = _runtime_mcp_server_config_for_item(record, item, resolved_inputs)
+            if not real_config:
+                continue
+            args = list(real_config.get("args") or [])
+            if real_config.get("command") != sys.executable or len(args) < 2 or args[0] != "-m":
+                continue
+            module_name = args[1]
+            if not _module_declares_build_server(module_name):
+                continue
+            targets.append({
+                "extension_id": manifest["id"],
+                "server_name": server_name,
+                "real_config": real_config,
+                "extension_record": record,
+            })
+    return targets
+
+
+def _module_declares_build_server(module_name: str) -> bool:
+    import importlib.util
+
+    try:
+        spec = importlib.util.find_spec(module_name)
+    except (ImportError, ValueError):
+        return False
+    origin = getattr(spec, "origin", None) if spec else None
+    if not origin or not os.path.isfile(origin):
+        return False
+    try:
+        source = Path(origin).read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return "def build_server(" in source
 
 
 def _native_mcp_launcher_env(inputs: dict[str, Any]) -> dict[str, str]:

@@ -102,6 +102,28 @@ from ingestion_versions import CLAUDE_INGESTION_VERSION, marker_matches_current
 
 
 _RUNNER_PATH = Path(__file__).parent / "runner.py"
+
+
+def _run_coro_blocking(coro):
+    """Runs `coro` to completion on a fresh event loop and returns its
+    result. `_spawn_run` (sync, and everything it calls -- including the
+    MCP prewarm gate's bounded wait) must never execute on the backend's
+    own asyncio event-loop thread: blocking there would freeze every
+    other session's WS/turn processing for the length of the wait.
+    `start_run`'s only two call sites (`_to_turn_dispatch_thread` and
+    `_start_after_release`'s deferred re-entry) both route through a
+    worker thread, so no running loop should ever be present here --
+    enforced instead of silently working around it, so a future call
+    site that reintroduces the event-loop-thread path fails loudly."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+    raise RuntimeError(
+        "_run_coro_blocking called with a running event loop present; "
+        "this would block the backend's event loop -- route the caller "
+        "through _to_turn_dispatch_thread instead"
+    )
 _TAIL_POLL_INTERVAL = 0.05       # seconds between empty-read polls
 # Wind-down grace: max seconds a runner may stay alive AFTER its turn
 # finalized (complete.json read) before the backend force-kills the
@@ -488,7 +510,8 @@ class ClaudeProvider(Provider):
             ]
             if waits:
                 await asyncio.gather(*waits)
-            self.start_run(**spawn_kwargs)
+            from turn_manager import _to_turn_dispatch_thread
+            await _to_turn_dispatch_thread(self.start_run, **spawn_kwargs)
         except Exception as e:
             logger.exception(
                 "deferred start after release failed for run %s",
@@ -652,6 +675,57 @@ class ClaudeProvider(Provider):
         }
         return input_payload, _bare, mode, resolved_backend_url
 
+    def _prewarm_extension_mcp_ready(
+        self, input_payload: dict[str, Any], app_session_id: str,
+    ) -> dict[str, str | None]:
+        """Concurrently ensures every user-facing runtime MCP daemon this
+        turn will need is warm, bounded above the CLI's own ~2-6s MCP
+        snapshot wait so a session's first (cold-daemon) turn still has
+        a fighting chance, while capping this turn's worst-case added
+        latency. Runs in `_spawn_run`'s own worker thread (no event loop
+        present here), same as the fully resolved `input_payload` this
+        method reads is only available at this exact point in the spawn
+        path (assembled a few lines above by `_build_input_payload`) --
+        NOT earlier in `turn_manager._drive_cli_run`, which never holds
+        the full resolved-inputs shape `extension_store` needs.
+        """
+        if input_payload.get("bare_config") or not input_payload.get("user_facing"):
+            return {}
+        from extension_store import runtime_mcp_prewarm_targets
+
+        targets = runtime_mcp_prewarm_targets(input_payload)
+        if not targets:
+            return {}
+
+        async def _one(target: dict[str, Any]) -> tuple[str, str | None]:
+            from mcp_prewarm import supervisor as mcp_prewarm_supervisor
+
+            fingerprint = mcp_prewarm_supervisor.compute_fingerprint(
+                target["real_config"], target["extension_record"],
+            )
+            try:
+                result = await mcp_prewarm_supervisor.ensure_daemon_ready(
+                    app_session_id,
+                    target["extension_id"],
+                    target["server_name"],
+                    target["real_config"],
+                    fingerprint,
+                    bound_seconds=8.0,
+                )
+            except Exception:
+                logger.exception(
+                    "mcp_prewarm: daemon-ready check raised for %s/%s",
+                    target["extension_id"], target["server_name"],
+                )
+                return target["server_name"], None
+            return target["server_name"], (result.socket_path if result.ready else None)
+
+        async def _gather() -> dict[str, str | None]:
+            pairs = await asyncio.gather(*(_one(t) for t in targets))
+            return dict(pairs)
+
+        return _run_coro_blocking(_gather())
+
     def _spawn_run(
         self,
         *,
@@ -729,6 +803,9 @@ class ClaudeProvider(Provider):
                 provisioned_tool_profile=provisioned_tool_profile,
                 resolved_harness_run_config=resolved_harness_run_config,
             )
+        )
+        input_payload["_mcp_prewarm_ready"] = self._prewarm_extension_mcp_ready(
+            input_payload, app_session_id,
         )
         (run_dir / "input.json").write_text(json.dumps(input_payload), encoding="utf-8")
 

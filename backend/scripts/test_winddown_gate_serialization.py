@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+import time
 from types import SimpleNamespace
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -126,6 +127,57 @@ async def _main() -> None:
     await _drain()
     check(stub.released.is_set(), "cleanup fired the stub's released event")
     check(spawned == ["run-after-stub"], "spawn proceeded after stub cleanup")
+
+    print("T6 deferred re-entry does not block the event loop")
+    # Regression test for a real bug: `_start_after_release` runs as a
+    # loop task, and used to call `self.start_run(...)` directly rather
+    # than via `_to_turn_dispatch_thread` -- a `_spawn_run` that blocks
+    # synchronously (as the MCP prewarm gate's bounded wait now can, up
+    # to ~8-9.5s) would freeze the entire backend event loop for every
+    # other session on that path. `_spawn_run` here does a real blocking
+    # `time.sleep`, standing in for that synchronous wait, to prove the
+    # fix actually routes it off-loop instead of just asserting it does.
+    prov, spawned = _mk_provider()
+    prov._spawn_run = (  # type: ignore[method-assign]
+        lambda **kw: (time.sleep(0.3), spawned.append(kw["run_id"]))
+    )
+    blocker = _blocker("native-sid-5")
+    prov._runs[blocker.run_id] = blocker
+    _start(prov, loop, run_id="run-heartbeat", session_id="native-sid-5")
+    await _drain()
+    prov._cleanup_run(blocker.run_id)
+
+    # Timer drift, not completion count, is what actually distinguishes
+    # "ran concurrently" from "ran but was delayed": a blocked loop still
+    # eventually fires every queued `asyncio.sleep`, just late. Compare
+    # each heartbeat's fire time against its scheduled time; a blocked
+    # loop stalls every tick queued during the 0.3s block, so max drift
+    # spikes to ~0.3s, while an unblocked loop stays within a few ms.
+    start = time.monotonic()
+    max_drift = 0.0
+
+    async def _heartbeat() -> None:
+        nonlocal max_drift
+        for i in range(1, 21):
+            await asyncio.sleep(0.01)
+            drift = (time.monotonic() - start) - (i * 0.01)
+            max_drift = max(max_drift, drift)
+
+    await asyncio.gather(_heartbeat(), _wait_for(lambda: spawned == ["run-heartbeat"]))
+    check(
+        max_drift < 0.15,
+        f"loop stayed responsive (max heartbeat drift {max_drift:.3f}s) while "
+        "the deferred blocking spawn ran off-thread",
+    )
+    check(spawned == ["run-heartbeat"], "deferred spawn still completed")
+
+
+async def _wait_for(pred, timeout: float = 2.0) -> None:
+    deadline = time.monotonic() + timeout
+    while not pred():
+        if time.monotonic() > deadline:
+            return
+        await asyncio.sleep(0.01)
 
 
 def main() -> int:

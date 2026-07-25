@@ -401,6 +401,66 @@ class CodexProvider(Provider):
         del model
         return list(self.CODEX_CONFIG_OVERRIDES)
 
+    def _prewarm_extension_mcp_ready(
+        self, input_payload: dict[str, Any], app_session_id: str,
+    ) -> dict[str, str | None]:
+        """Codex-equivalent of `ClaudeProvider._prewarm_extension_mcp_ready`
+        (see provider_claude.py). The codex CLI's Rust binary defaults
+        `startup_timeout_sec` to 10s per MCP server on a cold spawn --
+        an even wider unmitigated window than Claude's ~2-6s snapshot
+        wait -- so a user-facing turn's first (cold-daemon) MCP server
+        is just as likely to time out here. Bounded above 10s so this
+        turn's worst-case added latency (the wait below) never exceeds
+        what the CLI itself would already have blocked for once it
+        tries to spawn that server cold; 9.5s instead of Claude's 8.0s
+        because Codex's own ceiling is higher (10s vs Claude's 2-6s),
+        so the bound can afford to sit closer to it while still
+        leaving daylight before the CLI's own timeout fires.
+
+        Runs in `start_run`'s own worker thread -- `provider.start_run`
+        is only ever invoked via `turn_manager._to_turn_dispatch_thread`
+        (see turn_manager.py), never on the backend's event-loop thread,
+        so `_run_coro_blocking`'s no-running-loop assertion holds here
+        exactly as it does for Claude's `_spawn_run`.
+        """
+        if input_payload.get("bare_config") or not input_payload.get("user_facing"):
+            return {}
+        from extension_store import runtime_mcp_prewarm_targets
+
+        targets = runtime_mcp_prewarm_targets(input_payload)
+        if not targets:
+            return {}
+
+        async def _one(target: dict[str, Any]) -> tuple[str, str | None]:
+            from mcp_prewarm import supervisor as mcp_prewarm_supervisor
+
+            fingerprint = mcp_prewarm_supervisor.compute_fingerprint(
+                target["real_config"], target["extension_record"],
+            )
+            try:
+                result = await mcp_prewarm_supervisor.ensure_daemon_ready(
+                    app_session_id,
+                    target["extension_id"],
+                    target["server_name"],
+                    target["real_config"],
+                    fingerprint,
+                    bound_seconds=9.5,
+                )
+            except Exception:
+                logger.exception(
+                    "mcp_prewarm: daemon-ready check raised for %s/%s",
+                    target["extension_id"], target["server_name"],
+                )
+                return target["server_name"], None
+            return target["server_name"], (result.socket_path if result.ready else None)
+
+        async def _gather() -> dict[str, str | None]:
+            pairs = await asyncio.gather(*(_one(t) for t in targets))
+            return dict(pairs)
+
+        from provider_claude import _run_coro_blocking
+        return _run_coro_blocking(_gather())
+
     # ------------------------------------------------------------------
     # Env — minimal for Codex (subscription mode, no API keys)
     # ------------------------------------------------------------------
@@ -566,6 +626,9 @@ class CodexProvider(Provider):
                 )
             ),
         }
+        input_payload["_mcp_prewarm_ready"] = self._prewarm_extension_mcp_ready(
+            input_payload, app_session_id,
+        )
         (run_dir / "input.json").write_text(json.dumps(input_payload), encoding="utf-8")
 
         from containment import containment
