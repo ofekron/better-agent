@@ -1044,6 +1044,31 @@ async def test_ws_replay_orphan_finalize_uses_reconcile_not_huge_replay() -> boo
     return True
 
 
+async def test_reconcile_with_no_changes_does_not_emit_reconciled() -> bool:
+    """A reconcile pass that finds nothing new (the common cold-open case,
+    where the initial REST snapshot was already current) must NOT fire
+    `session_reconciled` — the frontend's `applySessionReconciled` treats
+    that event as "the tree is stale, refetch it", and an empty-changes
+    reconcile means the tree is NOT stale. Regression for the redundant
+    reload-on-open bug: before the fix, `session_reconciled` fired
+    unconditionally on every reconcile completion regardless of `changes`."""
+    loop = asyncio.get_running_loop()
+    reconciled: list[str] = []
+    # Default reconcile_fn (no reconcile_fn kwarg) returns [] — empty changes.
+    _wire_loop_and_fns(loop, reconciled_fn=lambda root_id: reconciled.append(root_id))
+    sid = _fresh_session()
+    session_manager._reconcile_dirty[sid] = True
+    task = session_manager.schedule_reconcile_if_needed(sid)
+    if task is None:
+        print("  dirty session did not schedule reconcile")
+        return False
+    await task
+    if sid in reconciled:
+        print(f"  session_reconciled emitted despite empty changes: {reconciled}")
+        return False
+    return True
+
+
 def test_ws_event_cursor_uses_server_floor() -> bool:
     sid = _fresh_session()
     event_ingester.ingest(
@@ -1228,6 +1253,7 @@ async def _amain() -> int:
         ("failing reconcile still emits finished", test_failing_reconcile_still_emits_finished),
         ("loop responsive during slow reconcile", test_loop_responsive_during_slow_reconcile),
         ("ws replay orphan finalize uses reconcile", test_ws_replay_orphan_finalize_uses_reconcile_not_huge_replay),
+        ("reconcile with no changes does not emit reconciled", test_reconcile_with_no_changes_does_not_emit_reconciled),
     ]
 
     fails = 0

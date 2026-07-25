@@ -8,11 +8,11 @@
  * The chat panel is rendered from an in-memory `currentSession` tree that
  * is seeded by REST and then mutated by a stream of WebSocket frames
  * (messages_delta, worker_event, messages_replay, reconcile, …). A large
- * amount of code exists to keep that tree convergent (see the many
- * `[stale-dbg]` logs in useSession/useWebSocket), but bugs in that merge
- * logic surface as a STALE VIEW: the panel shows messages that no longer
- * match the canonical state (missing turns, extra turns, wrong order, or
- * wrong text).
+ * amount of code exists to keep that tree convergent (see the merge
+ * reducers in useSession/useWebSocket), but bugs in that merge logic
+ * surface as a STALE VIEW: the panel shows messages that no longer match
+ * the canonical state (missing turns, extra turns, wrong order, or wrong
+ * text).
  *
  * There is already an ON-DEMAND validator that an external TestApe browser
  * adapter can invoke (frontend `extractVisibleChatPanelTree` + backend

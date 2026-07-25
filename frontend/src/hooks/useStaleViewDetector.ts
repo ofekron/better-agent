@@ -6,8 +6,7 @@
  * CANONICAL in-memory session and surfaces any mismatch the moment it
  * happens:
  *   - logs a grouped `[stale-view]` console error with the structured
- *     report (so it interleaves with the existing `[stale-dbg]` merge
- *     logs for root-causing),
+ *     report, for root-causing,
  *   - dispatches a `better-agent:stale-view` window event (so a devtools
  *     overlay / e2e test / TestApe can react),
  *   - records the last report on `window.__betterAgentStaleView` for

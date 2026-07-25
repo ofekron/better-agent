@@ -1761,28 +1761,15 @@ export function useSession(authStatus?: string) {
       // messages existed, so carryDrafts alone would lose them.
       setCurrentSession((prev) => {
         if (!prev || prev.id !== treeWithOpenedAt.id) {
-          console.info(
-            "[stale-dbg] selectSession %s: direct tree (prev=%s tree=%s)",
-            id.slice(0, 8), prev?.id?.slice(0, 8) ?? "null", treeWithOpenedAt.id.slice(0, 8),
-          );
           return treeWithOpenedAt;
         }
         if (
           treeHasStreamingAssistant(prev) &&
           treeHasStreamingAssistant(treeWithOpenedAt)
         ) {
-          console.info("[stale-dbg] selectSession %s: kept prev (streaming)", id.slice(0, 8));
           return prev;
         }
         const carried = carryDrafts(prev, treeWithOpenedAt);
-        const treeAsst = treeWithOpenedAt.messages?.filter((m: ChatMessage) => m.role === "assistant").at(-1);
-        const prevAsst = prev.messages?.filter((m: ChatMessage) => m.role === "assistant").at(-1);
-        console.info(
-          "[stale-dbg] selectSession %s: merging tree_msgs=%d prev_msgs=%d tree_last_evts=%d prev_last_evts=%d",
-          id.slice(0, 8),
-          treeWithOpenedAt.messages?.length ?? 0, prev.messages?.length ?? 0,
-          treeAsst?.events?.length ?? 0, prevAsst?.events?.length ?? 0,
-        );
         if (prev.messages?.length) {
           return addMissingMessages(carried, prev.id, prev.messages);
         }
@@ -2220,11 +2207,6 @@ export function useSession(authStatus?: string) {
       interruptedByMsgId?: string | null,
       errorText?: string,
     ) => {
-      console.debug(
-        "[stale-dbg] markTurnTerminal %s stoppedAt=%s interruptedBy=%s error=%s",
-        sessionId.slice(0, 8), stoppedAt ?? "none", interruptedByMsgId ?? "none",
-        errorText !== undefined ? "yes" : "no",
-      );
       setCurrentSession((prev) => {
         if (!prev) return prev;
         return updateNodeById(prev, sessionId, (node) => {
@@ -2924,10 +2906,16 @@ export function useSession(authStatus?: string) {
     []
   );
 
-  /** Backend reconcile completed — silently refetch the session tree
-   * if the user is currently viewing it. The initial GET may have
-   * returned stale cache; this replaces it with the reconciled state
-   * without a loading indicator or optimistic swap. */
+  /** Backend reconcile found genuine historical changes — silently
+   * refetch the session tree if the user is currently viewing it. The
+   * backend only emits this when the reconcile's `changes` list was
+   * non-empty (see `session_manager._async_reconcile_with_progress`),
+   * so a no-op reconcile (the common case on a freshly-opened session
+   * whose REST snapshot was already current) never reaches here —
+   * that's what stops the redundant refetch+re-render on every open.
+   * `authoritative=true` (snapshot-refresh recovery path) still always
+   * refetches regardless of streaming state or emit-source change
+   * detection; that path is untouched by this guarantee. */
   const applySessionReconciled = useCallback(
     (rootId: string, authoritative = false) => {
       const cur = currentSessionRef.current;
@@ -2938,31 +2926,14 @@ export function useSession(authStatus?: string) {
       const isStreaming = cur.messages?.some(
         (m) => m.role === "assistant" && m.isStreaming
       );
-      if (isStreaming && !authoritative) {
-        console.info("[stale-dbg] applySessionReconciled %s: skipped (streaming)", rootId.slice(0, 8));
-        return;
-      }
+      if (isStreaming && !authoritative) return;
       const id = cur.id;
-      const prevMsgCount = cur.messages?.length ?? 0;
-      const lastAsst = cur.messages?.filter(m => m.role === "assistant").at(-1);
-      console.info(
-        "[stale-dbg] applySessionReconciled %s: refetching (prev msgs=%d last_asst_evts=%d)",
-        rootId.slice(0, 8), prevMsgCount, lastAsst?.events?.length ?? 0,
-      );
       return fetch(`${API}/api/sessions/${id}?exchange_count=${exchangePageSize}`, {
         credentials: "include",
       })
         .then((res) => (res.ok ? res.json() : null))
         .then((tree: Session | null) => {
           if (!tree) return;
-          const treeMsgCount = tree.messages?.length ?? 0;
-          const treeAsst = tree.messages?.filter((m: ChatMessage) => m.role === "assistant").at(-1) as ChatMessage | undefined;
-          console.info(
-            "[stale-dbg] applySessionReconciled %s: REST tree msgs=%d last_asst_evts=%s last_asst_stub=%s",
-            rootId.slice(0, 8), treeMsgCount,
-            treeAsst?.events?.length ?? "none",
-            (treeAsst as unknown as Record<string, unknown>)?.stub ? JSON.stringify((treeAsst as unknown as Record<string, unknown>).stub) : "none",
-          );
           setCurrentSession((prev) => {
             if (!prev || prev.id !== tree.id) return prev;
             let carried = carryDrafts(prev, tree);

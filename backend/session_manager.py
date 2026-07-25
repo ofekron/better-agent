@@ -1033,10 +1033,16 @@ class SessionManager:
                 self._emit_stub_invalidated_fn(changes)
             except Exception:
                 logger.exception("stub_invalidated emit failed for %s", root_id)
-        # Always notify frontend that reconcile completed so it can
-        # silently refetch if the user is viewing this session — the
-        # initial GET may have returned stale cache.
-        if self._emit_reconciled_fn is not None:
+        # Notify frontend only when the reconcile actually found historical
+        # changes, so it can silently refetch the (now genuinely stale) tree
+        # if the user is viewing this session. `changes` only ever contains
+        # completed-message mutations (the in-flight streaming tail is
+        # excluded and has its own live delivery channel), so an empty
+        # `changes` means the REST snapshot the client already has is not
+        # stale — emitting here would just force a redundant refetch +
+        # re-render on every reconcile, including the common cold-open case
+        # where nothing changed.
+        if changes and self._emit_reconciled_fn is not None:
             try:
                 self._emit_reconciled_fn(root_id)
             except Exception:
