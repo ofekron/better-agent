@@ -1559,6 +1559,8 @@ import project_update_store
 import project_structure_edit_session
 import virtual_session_prompt_handlers
 import extension_store
+import harness_field_writer
+import harness_fields
 import harness_profile_resolver
 import harness_profile_store
 
@@ -4093,6 +4095,53 @@ async def list_harness_profiles():
         *[asyncio.to_thread(_profile_response, profile, default) for profile in stored],
     )
     return {"profiles": [default_response, *profile_responses]}
+
+
+@app.get("/api/harness-profiles/descriptor")
+async def get_harness_profile_descriptor():
+    """What is configurable, independent of the selected profile. The UI
+    renders one control tree from this for Default and every named profile;
+    per-profile values come from GET /api/harness-profiles/{id}."""
+    try:
+        return await asyncio.to_thread(harness_fields.descriptor)
+    except harness_fields.HarnessFieldError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def _profile_field_write_response(
+    profile_id: str, revision: str | None, writes: list[dict[str, Any]]
+) -> dict[str, Any]:
+    stored = harness_field_writer.apply_field_writes(profile_id, revision, writes)
+    # Default is a live projection of extension/config state, so it is
+    # re-read after a write-through rather than reported from the stale view.
+    if stored is None:
+        return _default_profile_response()
+    return _profile_response(stored)
+
+
+@app.patch("/api/harness-profiles/{profile_id}/fields")
+async def patch_harness_profile_fields(profile_id: str, body: dict = Body(default={})):
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="request body must be an object")
+    writes = body.get("writes")
+    if not isinstance(writes, list) or not writes:
+        raise HTTPException(status_code=400, detail="writes must be a non-empty list")
+    for write in writes:
+        if not isinstance(write, dict) or not isinstance(write.get("path"), list) or not write["path"]:
+            raise HTTPException(status_code=400, detail="each write needs a non-empty path")
+    try:
+        response = await asyncio.to_thread(
+            _profile_field_write_response, profile_id, body.get("revision") or None, writes
+        )
+    except (harness_fields.HarnessFieldError, harness_profile_store.HarnessProfileError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except extension_store.ExtensionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except harness_profile_resolver.HarnessProfileResolutionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    await coordinator.broadcast_global("extensions_changed", {})
+    await _broadcast_harness_profiles_changed()
+    return response
 
 
 @app.get("/api/harness-profiles/{profile_id}")

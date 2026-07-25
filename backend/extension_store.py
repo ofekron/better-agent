@@ -6745,7 +6745,9 @@ def _setting_schema_list(extension_id: str) -> list[dict[str, Any]]:
 
 
 def _setting_secret_account(extension_id: str, key: str) -> str:
-    return f"{extension_id}/{key}"
+    # ":" rather than "/": password_manager rejects "/" in an account, so a
+    # slash-joined account made every read of a secret-typed setting raise.
+    return f"{extension_id}:{key}"
 
 
 def get_extension_settings(extension_id: str) -> dict[str, Any]:

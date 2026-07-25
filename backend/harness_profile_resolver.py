@@ -7,6 +7,7 @@ import capability_contexts as capability_contexts_mod
 import config_store
 import extension_instructions
 import extension_store
+import harness_fields
 import harness_profile_store
 
 
@@ -26,13 +27,10 @@ def _extension_revision(record: dict[str, Any]) -> str:
 
 
 def _setting_schema_hash(record: dict[str, Any], key: str) -> str:
-    import hashlib
-    import json
-
-    for item in (record.get("manifest") or {}).get("entrypoints", {}).get("settings") or []:
-        if isinstance(item, dict) and item.get("key") == key:
-            return hashlib.sha256(json.dumps(item, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()[:16]
-    raise HarnessProfileResolutionError(f"Unknown extension setting: {record['manifest']['id']}.{key}")
+    try:
+        return harness_fields.setting_schema_hash(record, key)
+    except harness_fields.HarnessFieldError as exc:
+        raise HarnessProfileResolutionError(str(exc)) from exc
 
 
 def _runtime_ready_record(extension_id: str) -> dict[str, Any]:
@@ -129,7 +127,7 @@ def compute_default_profile() -> dict[str, Any]:
             instruction_sources[name] = {"kind": "extension", "extension_id": extension_id}
         user_instructions = extension_store.get_user_instructions(extension_id).strip()
         if user_instructions:
-            name = f"{extension_id} user instructions"
+            name = harness_fields.user_instruction_source_name(extension_id)
             instruction_sources[name] = {"kind": "inline", "content": user_instructions}
 
     return {
