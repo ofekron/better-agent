@@ -6897,13 +6897,17 @@ function AppMain({
                     </div>
                   )}
                 </div>
-                {/* Hidden natural-width copy; drives overflow detection. */}
-                <div className="sidebar-header-ghost" aria-hidden="true">
-                  {minimizeBtn}
-                  {brand}
-                  {filesBtn}
-                  {secondary}
-                  {configBtn}
+                {/* Hidden natural-width copy; drives overflow detection.
+                    The clip wrapper keeps its extra width out of the
+                    sidebar's scrollable overflow. */}
+                <div className="sidebar-header-ghost-clip" aria-hidden="true">
+                  <div className="sidebar-header-ghost">
+                    {minimizeBtn}
+                    {brand}
+                    {filesBtn}
+                    {secondary}
+                    {configBtn}
+                  </div>
                 </div>
               </div>
             );

@@ -268,6 +268,11 @@ body {
      content is shorter than the viewport, and scrolls with the rest
      when it isn't. */
   overflow-y: auto;
+  /* Vertical-only. Without an explicit overflow-x the spec computes it to
+     auto (a scrolling value on one axis forces the other off visible), so
+     any stray wide descendant turns the sidebar into a horizontal scroller.
+     Horizontal scrolling here belongs to .project-tabs alone. */
+  overflow-x: hidden;
   -webkit-overflow-scrolling: touch;
   overscroll-behavior: contain;
   flex-shrink: 0;
@@ -9452,20 +9457,32 @@ button.run-badge-clickable:focus-visible {
   flex-shrink: 0;
 }
 
-/* Hidden natural-width mirror of the full row; offsetWidth vs the
-   real row's clientWidth decides overflow. visibility:hidden also
-   drops its duplicate buttons from the tab order. */
+/* Confines the ghost to the row's box. The ghost is intentionally wider
+   than the row, and an unclipped out-of-flow box would add that width to
+   the sidebar's scrollable overflow. Must be positioned so it sits in the
+   ghost's containing-block chain, otherwise the clip does not apply.
+   It covers the whole row, so visibility:hidden (inherited by the ghost)
+   keeps it out of hit testing and the tab order instead of relying on
+   pointer-events alone. */
+.sidebar-header-ghost-clip {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+/* Natural-width mirror of the full row; offsetWidth vs the real row's
+   clientWidth decides overflow. Hidden via the clip wrapper. */
 .sidebar-header-ghost {
   position: absolute;
   top: 0;
-  left: 0;
+  inset-inline-start: 0;
   display: flex;
   align-items: center;
   gap: 8px;
   width: max-content;
   white-space: nowrap;
-  visibility: hidden;
-  pointer-events: none;
 }
 
 .sidebar-header-row .app-title {
