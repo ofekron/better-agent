@@ -2015,6 +2015,7 @@ def _validate_permissions(value: Any) -> dict[str, Any]:
         "capabilities",
         "in_process_execution",
         "daemons",
+        "internal_llm_tasks",
     }
     unknown = sorted(set(value) - allowed)
     if unknown:
@@ -2076,6 +2077,16 @@ def _validate_permissions(value: Any) -> dict[str, Any]:
         if bad:
             raise ExtensionError(
                 f"permissions.capabilities has invalid grants: {', '.join(bad)}"
+            )
+    declared_tasks = permissions.get("internal_llm_tasks")
+    if declared_tasks is not None:
+        bad = sorted(
+            item for item in declared_tasks
+            if not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", item)
+        )
+        if bad:
+            raise ExtensionError(
+                f"permissions.internal_llm_tasks has invalid task keys: {', '.join(bad)}"
             )
     return permissions
 
@@ -6941,11 +6952,30 @@ def extension_provisioned_internal_llm_tasks(record: dict[str, Any]) -> list[str
     )
 
 
+def _declared_internal_llm_tasks(manifest: dict[str, Any]) -> list[str]:
+    """Task keys an extension declares for itself via
+    ``permissions.internal_llm_tasks``. This is the structural source of truth:
+    any extension that needs an internal LLM declares its task key here and
+    automatically gets an override row in its own settings + a readiness gate,
+    defaulting to Inherit. Hardcoded maps below are the legacy fallback for
+    builtin extensions only."""
+    declared = ((manifest.get("permissions") or {}).get("internal_llm_tasks") or [])
+    tasks: list[str] = []
+    for task in declared:
+        key = str(task).strip()
+        if key and key not in tasks:
+            tasks.append(key)
+    return tasks
+
+
 def _extension_internal_llm_tasks(
     manifest: dict[str, Any],
     extension_tasks: tuple[str, ...],
 ) -> list[str]:
     tasks = list(extension_tasks)
+    for task in _declared_internal_llm_tasks(manifest):
+        if task not in tasks:
+            tasks.append(task)
     for role in manifest.get("core_roles") or []:
         for task in _CORE_ROLE_INTERNAL_LLM_TASKS.get(str(role), ()):
             if task not in tasks:
@@ -6966,6 +6996,10 @@ def all_internal_llm_task_keys() -> list[str]:
         for key in task_keys:
             if key not in keys:
                 keys.append(key)
+    for record in list_extensions():
+        for key in _declared_internal_llm_tasks(record.get("manifest") or {}):
+            if key not in keys:
+                keys.append(key)
     return keys
 
 
@@ -6979,6 +7013,8 @@ def extension_internal_llm_task_keys() -> set[str]:
         task_keys.update(keys)
     for keys in _CORE_ROLE_INTERNAL_LLM_TASKS.values():
         task_keys.update(keys)
+    for record in list_extensions():
+        task_keys.update(_declared_internal_llm_tasks(record.get("manifest") or {}))
     return task_keys
 
 
