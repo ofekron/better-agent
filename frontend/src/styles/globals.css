@@ -426,7 +426,9 @@ body {
   display: flex;
   gap: 4px;
   min-width: 0;
-  width: min(210px, 42vw);
+  /* Bounded by the sidebar, not the viewport — a vw cap ignores the
+     resized sidebar width and pushes the commit button past its edge. */
+  width: min(210px, 100%);
 }
 
 .project-git-commit-input {
