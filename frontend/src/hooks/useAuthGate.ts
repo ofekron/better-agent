@@ -103,6 +103,19 @@ export function useAuthGate(api: string): AuthGateState & { checkAuth: () => voi
     user: null,
   });
   const activeGeneration = useRef<AbortController | null>(null);
+  // Re-checks fire on every foreground/visibility/online transition (see
+  // below), not just on first mount. A transient network blip during one of
+  // those — common on mobile switching networks — must not blow away an
+  // already-working session: it would replace live chat with a full-page
+  // "unreachable" screen for a hiccup the WS layer would otherwise recover
+  // from on its own (WS auto-reconnects on its own timer; the connection
+  // indicator in the header reflects the interim state). Only a check that
+  // never had a working session to begin with should fall through to
+  // "unreachable" — enforced once, at the single point results are applied
+  // (via the functional setState below, reading the latest `cur.status`
+  // rather than a value captured up to ~26s earlier), so this covers every
+  // path to "unreachable" (exhausted retries AND a definitive non-retryable
+  // probe result), not just one of them.
 
   const checkAuth = useCallback(() => {
     activeGeneration.current?.abort();
@@ -114,19 +127,19 @@ export function useAuthGate(api: string): AuthGateState & { checkAuth: () => voi
         try {
           if (delay > 0) await wait(delay, generation.signal);
           const result = await probeAuth(api, generation.signal);
-          if (!generation.signal.aborted) setState(result);
+          if (generation.signal.aborted) return;
+          setState((cur) => (result.status === "unreachable" && cur.status === "authed" ? cur : result));
           return;
         } catch {
           if (generation.signal.aborted) return;
         }
       }
-      if (!generation.signal.aborted) {
-        setState({
-          status: "unreachable",
-          error: "Could not reach the backend.",
-          user: null,
-        });
-      }
+      if (generation.signal.aborted) return;
+      setState((cur) =>
+        cur.status === "authed"
+          ? cur
+          : { status: "unreachable", error: "Could not reach the backend.", user: null },
+      );
     })();
   }, [api]);
 

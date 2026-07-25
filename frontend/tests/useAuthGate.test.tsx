@@ -110,6 +110,34 @@ describe("useAuthGate", () => {
     expect(fetch).toHaveBeenCalledTimes(3);
   });
 
+  it("declares unreachable when a session was never established", async () => {
+    vi.mocked(fetch).mockRejectedValue(new Error("network down"));
+    const { result } = renderHook(() => useAuthGate("https://backend.test"));
+
+    await flush();
+    await act(async () => vi.advanceTimersByTimeAsync(6_100));
+
+    expect(result.current.status).toBe("unreachable");
+  });
+
+  it("keeps an already-authed session instead of wiping it on a transient re-check failure", async () => {
+    // A re-check fires on every foreground/visibility/online transition, not
+    // just first mount. A network blip during one of those (common when a
+    // phone switches networks coming back to the foreground) must not
+    // replace a live, working session with the full-page "unreachable"
+    // screen — that's a regression a user would read as "it crashed".
+    vi.mocked(fetch).mockResolvedValueOnce(response(200, { username: "ofek" }));
+    const { result } = renderHook(() => useAuthGate("https://backend.test"));
+    await flush();
+    expect(result.current.status).toBe("authed");
+
+    vi.mocked(fetch).mockRejectedValue(new Error("network down"));
+    act(() => window.dispatchEvent(new Event("online")));
+    await act(async () => vi.advanceTimersByTimeAsync(6_100));
+
+    expect(result.current.status).toBe("authed");
+  });
+
   it("aborts in-flight work and retry timers on unmount", async () => {
     let requestSignal: AbortSignal | undefined;
     vi.mocked(fetch).mockImplementation((_input, init) => {
