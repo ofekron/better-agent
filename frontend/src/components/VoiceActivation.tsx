@@ -4,6 +4,7 @@ import Icon from "./Icon";
 import {
   dispatchVoiceAction,
   parseVoiceCommand,
+  type VoiceCommandAction,
   type VoiceCommandState,
   voiceRecognitionLanguage,
 } from "../lib/voiceActivation";
@@ -13,9 +14,22 @@ import {
 } from "../lib/voiceRecognition";
 import { API } from "../api";
 
-function promptTextareaIsFocused() {
+export const CHAT_PROMPT_TESTID = "input-textarea";
+
+// Speech recognition is a single hardware-backed channel: only one mic in the
+// app may listen at a time, so claiming it disables every other instance.
+type VoiceOwner = symbol;
+let activeVoiceOwner: VoiceOwner | null = null;
+const voiceOwnerListeners = new Set<(owner: VoiceOwner | null) => void>();
+
+function claimVoiceOwner(owner: VoiceOwner | null) {
+  activeVoiceOwner = owner;
+  for (const listener of voiceOwnerListeners) listener(owner);
+}
+
+function promptTextareaIsFocused(testId: string) {
   return document.activeElement instanceof HTMLTextAreaElement
-    && document.activeElement.dataset.testid === "input-textarea";
+    && document.activeElement.dataset.testid === testId;
 }
 
 const HINT_AUTO_DISMISS_MS = 4000;
@@ -25,11 +39,20 @@ type VoiceHintKind = "info" | "error";
 
 export function VoiceActivation({
   onEnabledChange,
+  onAction = dispatchVoiceAction,
+  promptTestId = CHAT_PROMPT_TESTID,
+  className,
 }: {
   onEnabledChange?: (enabled: boolean) => void;
+  /** Sink for parsed voice actions; defaults to the global window-event dispatch. */
+  onAction?: (action: VoiceCommandAction) => void;
+  /** data-testid of the textarea whose focus enables free dictation. */
+  promptTestId?: string;
+  className?: string;
 }) {
   const { t } = useTranslation();
   const [recognizer] = useState(() => createVoiceRecognizer());
+  const [ownerId] = useState<VoiceOwner>(() => Symbol("voice-activation"));
   const [enabled, setEnabled] = useState(false);
   const [listening, setListening] = useState(false);
   const [capturingPrompt, setCapturingPrompt] = useState(false);
@@ -38,6 +61,11 @@ export function VoiceActivation({
   const commandStateRef = useRef<VoiceCommandState>({ mode: "idle", buffer: "" });
   const hintTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const closeOnBackgroundRef = useRef(true);
+  // Held in refs so a caller passing inline handlers never restarts recognition.
+  const onActionRef = useRef(onAction);
+  const promptTestIdRef = useRef(promptTestId);
+  onActionRef.current = onAction;
+  promptTestIdRef.current = promptTestId;
 
   useEffect(() => {
     fetch(`${API}/api/user-prefs`)
@@ -92,11 +120,11 @@ export function VoiceActivation({
         setCapturingPrompt(parsed.state.mode === "prompt");
         const actions = parsed.actions.length > 0
           ? parsed.actions
-          : promptTextareaIsFocused()
+          : promptTextareaIsFocused(promptTestIdRef.current)
             ? [{ type: "append-draft" as const, text: transcript.trim() }]
             : [];
         for (const action of actions) {
-          dispatchVoiceAction(action);
+          onActionRef.current(action);
         }
       },
       onListeningChange: (active) => {
@@ -156,6 +184,22 @@ export function VoiceActivation({
     onEnabledChange?.(enabled);
   }, [enabled, onEnabledChange]);
 
+  useEffect(() => {
+    if (!enabled) {
+      if (activeVoiceOwner === ownerId) claimVoiceOwner(null);
+      return;
+    }
+    const onOwnerChange = (owner: VoiceOwner | null) => {
+      if (owner !== ownerId) setEnabled(false);
+    };
+    voiceOwnerListeners.add(onOwnerChange);
+    claimVoiceOwner(ownerId);
+    return () => {
+      voiceOwnerListeners.delete(onOwnerChange);
+      if (activeVoiceOwner === ownerId) claimVoiceOwner(null);
+    };
+  }, [enabled, ownerId]);
+
   // Release native listeners/timers on unmount.
   useEffect(() => () => {
     clearHintTimer();
@@ -182,7 +226,7 @@ export function VoiceActivation({
   };
 
   return (
-    <span className="voice-activation-wrap">
+    <span className={`voice-activation-wrap${className ? ` ${className}` : ""}`}>
       <button
         type="button"
         className={`voice-activation${active ? " listening" : ""}${capturingPrompt ? " capturing" : ""}${hint && hintKind === "error" ? " error" : ""}`}

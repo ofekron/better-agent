@@ -29,6 +29,12 @@ import { optionLabelWithQuota, summarizeProvider } from "../utils/quotaStatus";
 import { useQuotaStatus } from "../hooks/useQuotaStatus";
 import Icon from "./Icon";
 import { ComposerImagePreviews } from "./ComposerImagePreviews";
+import { VoiceActivation } from "./VoiceActivation";
+import {
+  dictationDelta,
+  speakVoiceText,
+  type VoiceCommandAction,
+} from "../lib/voiceActivation";
 import { NewSessionCreateButton } from "./NewSessionCreateButton";
 import { HarnessProfileSelector } from "./HarnessProfileSelector";
 import { SessionFolderPopover } from "./SessionFolderPopover";
@@ -49,6 +55,8 @@ import {
   runnerLabelKey,
   type ModelRuntimeProfile,
 } from "./modelPicker";
+
+export const NEW_SESSION_PROMPT_TESTID = "new-session-prompt-textarea";
 
 interface RuntimeProfile {
   providerId: string;
@@ -583,6 +591,9 @@ export function NewSessionModal({
   const [fileEditExtensionEnabled, setFileEditExtensionEnabled] = useState(true);
   const [capabilityPickerOpen, setCapabilityPickerOpen] = useState(false);
   const attachmentInputRef = useRef<HTMLInputElement>(null);
+  // Prompt text as last rendered + the dictated portion already merged into it.
+  const promptRef = useRef("");
+  const dictatedRef = useRef("");
   // cwd state — picker writes here, handleCreate reads from here.
   // Initialized on open from initialProjectPath (Ask shortcut) || defaultCwd
   // || first-project fallback so the picker is never visually-vs-state
@@ -642,6 +653,7 @@ export function NewSessionModal({
     const defaults = loadDefaults();
     setEditedPrompt(investigation?.prompt ?? "");
     setInitialPrompt("");
+    dictatedRef.current = "";
     setInitialImages(investigation?.images ?? []);
     setInitialFiles(investigation?.files ?? []);
     setCapabilityContexts([]);
@@ -847,6 +859,7 @@ export function NewSessionModal({
   }, []);
 
   const promptText = investigation ? editedPrompt : initialPrompt;
+  promptRef.current = promptText;
   const promptImages = initialImages;
   const promptFiles = initialFiles;
   const folderPathMap = useMemo(() => buildFolderPathMap(folders), [folders]);
@@ -856,7 +869,7 @@ export function NewSessionModal({
   const missingProviderConfig =
     !main.providerId || (effectiveOrchestrationMode === "team" && !worker.providerId);
 
-  const handleCreate = async (action: NewSessionCreationAction) => {
+  const handleCreate = async (action: NewSessionCreationAction, promptOverride?: string) => {
     if (creatingRef.current) return;
     creatingRef.current = true;
     setCreating(true);
@@ -870,7 +883,7 @@ export function NewSessionModal({
         fileEditEnabled,
         fileEditPath: undefined,
         nodeId,
-        initialPrompt,
+        initialPrompt: promptOverride ?? initialPrompt,
         initialImages,
         initialFiles,
         capabilityContexts,
@@ -887,7 +900,7 @@ export function NewSessionModal({
       saveDefaults(config, action);
       setCreationAction(action);
       const ctx = investigation
-        ? { ...investigation, prompt: editedPrompt, images: initialImages, files: initialFiles }
+        ? { ...investigation, prompt: promptOverride ?? editedPrompt, images: initialImages, files: initialFiles }
         : undefined;
       await onCreate(config, ctx, action);
     } catch (error) {
@@ -910,6 +923,45 @@ export function NewSessionModal({
     if (files.length === 0) return;
     e.preventDefault();
     addAttachments(files);
+  };
+
+  const focusPromptTextarea = () => {
+    document
+      .querySelector<HTMLTextAreaElement>(`[data-testid="${NEW_SESSION_PROMPT_TESTID}"]`)
+      ?.focus();
+  };
+
+  const appendDictation = (text: string): string => {
+    const clean = text.trim();
+    if (!clean) return promptRef.current;
+    const next = promptRef.current ? `${promptRef.current} ${clean}` : clean;
+    promptRef.current = next;
+    dictatedRef.current = dictatedRef.current ? `${dictatedRef.current} ${clean}` : clean;
+    if (investigation) setEditedPrompt(next);
+    else setInitialPrompt(next);
+    return next;
+  };
+
+  // Voice actions land in this modal's prompt instead of the chat composer draft.
+  const handleVoiceAction = (action: VoiceCommandAction) => {
+    if (action.type === "speak") {
+      speakVoiceText(action.text);
+      return;
+    }
+    // Already creating a session here — no nested new-session command.
+    if (action.type === "new-session") return;
+    if (action.type === "open-prompt") {
+      focusPromptTextarea();
+      return;
+    }
+    if (action.type === "append-draft") {
+      appendDictation(action.text);
+      focusPromptTextarea();
+      return;
+    }
+    const next = appendDictation(dictationDelta(action.text, dictatedRef.current));
+    if (!next.trim() || creating || !(cwd || defaultCwd)) return;
+    void handleCreate("send-and-open", next);
   };
 
   const renderExtensionOption = (
@@ -981,6 +1033,7 @@ export function NewSessionModal({
             )}
             <textarea
               className="ns-investigation-textarea"
+              data-testid={NEW_SESSION_PROMPT_TESTID}
               value={promptText}
               onChange={(e) => investigation ? setEditedPrompt(e.target.value) : setInitialPrompt(e.target.value)}
               onKeyDown={handlePromptKeyDown}
@@ -998,13 +1051,19 @@ export function NewSessionModal({
                 e.target.value = "";
               }}
             />
-            <button
-              type="button"
-              className="btn-secondary ns-attach-btn"
-              onClick={() => attachmentInputRef.current?.click()}
-            >
-              <Icon name="paperclip" size={14} /> {t("input.attachTitle")}
-            </button>
+            <div className="ns-prompt-actions">
+              <button
+                type="button"
+                className="btn-secondary ns-attach-btn"
+                onClick={() => attachmentInputRef.current?.click()}
+              >
+                <Icon name="paperclip" size={14} /> {t("input.attachTitle")}
+              </button>
+              <VoiceActivation
+                onAction={handleVoiceAction}
+                promptTestId={NEW_SESSION_PROMPT_TESTID}
+              />
+            </div>
           </div>
           <div className="ns-modal-section">
             <div className="ns-modal-section-title">{t("newSession.capabilities", "Capabilities")}</div>

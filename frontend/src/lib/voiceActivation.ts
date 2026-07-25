@@ -150,6 +150,29 @@ export function parseVoiceCommand(
   return { state: IDLE_STATE, actions: [] };
 }
 
+export function speakVoiceText(text: string) {
+  const synth = window.speechSynthesis;
+  if (!synth) return;
+  synth.cancel();
+  const utterance = new SpeechSynthesisUtterance(text);
+  utterance.lang = navigator.language || "en-US";
+  synth.speak(utterance);
+}
+
+/**
+ * Reconciles the cumulative prompt buffer carried by `send-prompt` against the
+ * text a consumer already appended from prior `append-draft` actions, so a
+ * dictated prompt is never duplicated when the utterance ends with "send".
+ */
+export function dictationDelta(cumulative: string, alreadyAppended: string): string {
+  const full = cleanPromptText(cumulative);
+  const appended = cleanPromptText(alreadyAppended);
+  if (!appended) return full;
+  if (full === appended) return "";
+  if (full.startsWith(`${appended} `)) return full.slice(appended.length + 1);
+  return full;
+}
+
 export function dispatchVoiceAction(action: VoiceCommandAction) {
   if (action.type === "new-session") {
     window.dispatchEvent(new CustomEvent(VOICE_NEW_SESSION_EVENT));
@@ -171,12 +194,7 @@ export function dispatchVoiceAction(action: VoiceCommandAction) {
   }
 
   if (action.type === "speak") {
-    const synth = window.speechSynthesis;
-    if (!synth) return;
-    synth.cancel();
-    const utterance = new SpeechSynthesisUtterance(action.text);
-    utterance.lang = navigator.language || "en-US";
-    synth.speak(utterance);
+    speakVoiceText(action.text);
     return;
   }
 

@@ -19554,6 +19554,13 @@ button.progress-inflight {
   transition: border-color 160ms ease, box-shadow 160ms ease;
 }
 
+.ns-prompt-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
 .ns-investigation-textarea:focus {
   border-color: var(--accent);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
