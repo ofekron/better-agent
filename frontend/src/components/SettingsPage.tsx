@@ -1829,7 +1829,7 @@ export function ExtensionUiSettingsSection() {
                           <span className="extension-ui-settings-native-exposure-label">
                             {t("settings.extensionsRuntimeExposureOn")}
                           </span>
-                          {item.native_eligible === true ? (
+                          {item.native_eligible === true && item.kind !== "mcp" ? (
                             <label className="extension-ui-settings-native-provider">
                               <input
                                 type="checkbox"
@@ -1840,6 +1840,14 @@ export function ExtensionUiSettingsSection() {
                               />
                               {t("settings.extensionsNativeExposure")}
                             </label>
+                          ) : item.native_eligible === true && item.kind === "mcp" ? (
+                            <span className="extension-ui-settings-native-exposure-label">
+                              {t("settings.extensionsNativeExposureGrantManaged", {
+                                status: item.native_exposed === true
+                                  ? t("settings.extensionsNativeExposureGrantedYes")
+                                  : t("settings.extensionsNativeExposureGrantedNo"),
+                              })}
+                            </span>
                           ) : (
                             <span className="extension-ui-settings-native-exposure-label">
                               {t("settings.extensionsNativeExposureUnavailable")}

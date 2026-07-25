@@ -36,6 +36,7 @@ import extension_applied_config
 from provider_config_sync_backend.api import KNOWN_PROVIDER_KINDS
 import extension_instructions
 import extension_mcp
+import native_mcp_grants
 import installation_profile
 import harness_run_projection
 
@@ -1992,6 +1993,32 @@ _READABLE_SESSION_FIELDS = frozenset({
 })
 
 
+def _validate_native_mcp_permission(value: Any) -> dict[str, list[str]]:
+    """permissions.native_mcp declares, per native MCP server this extension
+    exposes (matched against entrypoints.mcp[].name), which scopes it's
+    ELIGIBLE for -- e.g. {"cards": ["global", "project"]}. This is the one
+    install-time review point (native_mcp_grants.py's docstring calls this
+    "the declaration"); actually GRANTING a scope (creating the narrower
+    record that makes a server resolve) is a separate step -- see
+    grant_native_mcp_server() -- and can never grant a scope not listed
+    here."""
+    if not isinstance(value, dict):
+        raise ExtensionError("permissions.native_mcp must be an object of server_id -> scope list")
+    validated: dict[str, list[str]] = {}
+    for server_id, scopes in value.items():
+        if not isinstance(server_id, str) or not _ID_RE.fullmatch(server_id):
+            raise ExtensionError(f"permissions.native_mcp has an invalid server id: {server_id!r}")
+        if not isinstance(scopes, list) or not scopes:
+            raise ExtensionError(f"permissions.native_mcp.{server_id} must be a non-empty list of scopes")
+        bad_scopes = sorted(set(scopes) - set(native_mcp_grants.VALID_SCOPES))
+        if bad_scopes:
+            raise ExtensionError(
+                f"permissions.native_mcp.{server_id} has invalid scopes: {', '.join(bad_scopes)}"
+            )
+        validated[server_id] = sorted(set(scopes))
+    return validated
+
+
 def _validate_permissions(value: Any) -> dict[str, Any]:
     if value is None:
         return {}
@@ -2015,6 +2042,7 @@ def _validate_permissions(value: Any) -> dict[str, Any]:
         "capabilities",
         "in_process_execution",
         "daemons",
+        "native_mcp",
         "internal_llm_tasks",
     }
     unknown = sorted(set(value) - allowed)
@@ -2028,6 +2056,9 @@ def _validate_permissions(value: Any) -> dict[str, Any]:
             ):
                 raise ExtensionError("permissions.capabilities must be a string list")
             permissions[key] = [part.strip() for part in item]
+            continue
+        if key == "native_mcp":
+            permissions[key] = _validate_native_mcp_permission(item)
             continue
         if key == "daemons":
             if item not in ("backend", "supervisor"):
@@ -5161,6 +5192,11 @@ def uninstall(extension_id: str, *, required_source_type: str = "") -> None:
     import extension_token_registry
     extension_token_registry.revoke(extension_id)
     reconcile_runtime_skills()
+    # Permanent removal, unlike disable (which leaves grants in place so
+    # re-enabling restores them without re-approval, as long as the
+    # manifest declaration hasn't changed) -- a reinstall must not silently
+    # resurrect grants against what could be a completely different package.
+    native_mcp_grants.remove_grants_for_extension(extension_id)
     reconcile_native_mcp_servers()
 
 
@@ -5305,6 +5341,11 @@ def _mcp_server_configs_for_delivery(
         "bare_config": bool(bare),
     }
     disabled_extension_ids = _disabled_runtime_extension_ids(inputs)
+    granted_native = (
+        resolve_native_mcp_servers_for_context(project_path=inputs.get("cwd"))
+        if delivery == _HARNESS_DELIVERY_NATIVE
+        else {}
+    )
     configs: dict[str, dict[str, Any]] = {}
     for record in _active_records():
         if not _record_runtime_ready(record):
@@ -5320,10 +5361,11 @@ def _mcp_server_configs_for_delivery(
                 resolved_inputs,
                 manifest["id"],
             )
+            server_id = _native_mcp_server_id(item)
             if (
                 delivery == _HARNESS_DELIVERY_NATIVE
                 and not profile_selected
-                and not native_harness_exposed(manifest["id"], "mcp", item["name"], record=record)
+                and f"{manifest['id']}:{server_id}" not in granted_native
             ):
                 continue
             server_name = item.get("replaces_builtin") or item["name"]
@@ -5547,8 +5589,11 @@ def resolve_native_mcp_server_config(
     if item is None:
         return None
     profile_selected = server_name in _profile_selected_mcp_server_names(inputs, extension_id)
-    if not profile_selected and not native_harness_exposed(extension_id, "mcp", server_name, record=record):
-        return None
+    if not profile_selected:
+        server_id = _native_mcp_server_id(item)
+        granted_native = resolve_native_mcp_servers_for_context(project_path=inputs.get("cwd"))
+        if f"{extension_id}:{server_id}" not in granted_native:
+            return None
     return _runtime_mcp_server_config_for_item(record, item, inputs)
 
 
@@ -5772,12 +5817,267 @@ def reconcile_extension_consent() -> int:
     return changed
 
 
-def reconcile_native_mcp_servers() -> int:
+def _native_mcp_server_id(item: dict[str, Any]) -> str:
+    """Canonical server_id for a native MCP entrypoint item -- the grant-store
+    identity key everywhere a grant is created, matched, or reported against.
+    Always ``replaces_builtin`` when set, else the item's own name."""
+    return str(item.get("replaces_builtin") or item.get("name") or "").strip()
+
+
+_NATIVE_MCP_PACKAGE_FINGERPRINT_CACHE: dict[str, tuple[tuple[float, int], str]] = {}
+_NATIVE_MCP_PACKAGE_FINGERPRINT_LOCK = threading.Lock()
+
+
+def _native_mcp_package_walk_targets(install_root: Path) -> list[Path] | None:
+    """Every file this fingerprint covers, symlinks resolved and verified to
+    stay inside `install_root` (fail closed -- returns None -- on any
+    escape, matching `_runtime_package_fingerprint`'s own
+    `is_relative_to` check). Includes `.venv`: vendored dependencies run in
+    the same process with the same privileges as the extension's own code,
+    so an update that swaps a package inside `.venv` and touches nothing
+    else must still invalidate the grant. Excludes `__pycache__` directories
+    outright (regenerable, Python-version-keyed bytecode, never source of
+    record) and a `.pyc`/`.pyo` ONLY when a sibling `.py` exists at the same
+    relative path (regenerable in that case) -- a package that ships
+    compiled-only modules has no `.py` sibling and that bytecode IS the
+    source of record, so it's hashed like any other file."""
+    targets: list[Path] = []
+    for path in install_root.rglob("*"):
+        if "__pycache__" in path.relative_to(install_root).parts:
+            continue
+        if path.is_symlink():
+            try:
+                resolved = path.resolve(strict=True)
+            except OSError:
+                return None
+            if not resolved.is_relative_to(install_root):
+                return None
+            if not resolved.is_file():
+                continue
+        elif not path.is_file():
+            continue
+        if path.suffix in (".pyc", ".pyo") and path.with_suffix(".py").is_file():
+            continue
+        targets.append(path)
+    return targets
+
+
+def _native_mcp_package_content_fingerprint(record: dict[str, Any]) -> str | None:
+    """SHA256 over EVERY file in the installed package tree (relative path +
+    content), not just the manifest's declared entry files -- see
+    `_native_mcp_package_walk_targets` for exactly what's included/excluded
+    and why.
+
+    Deliberately does NOT reuse `_runtime_package_fingerprint` (which only
+    hashes smoke-test-declared required_paths/python_modules): a native MCP
+    server's implementation can transitively import helper modules the
+    manifest never lists as a required smoke-test path, so an entry-file-only
+    hash would miss an update that rewrites `helpers.py` while leaving
+    `server.py` byte-identical -- the exact escalation this digest exists to
+    close. This digest gates a security decision (does an outstanding grant
+    still apply), so correctness outweighs cost -- but full content hashing
+    on every call is real cost once `.venv` is in scope, so this caches the
+    actual hash behind a CHEAP signal (max mtime + file count across exactly
+    the same walk) and only re-hashes content when that signal changes."""
+    install_root = runtime_package_root_for_record(record)
+    if install_root is None:
+        return None
+    extension_id = str((record.get("manifest") or {}).get("id") or "").strip()
+    try:
+        targets = _native_mcp_package_walk_targets(install_root)
+        if targets is None:
+            return None
+        signal = (max((p.stat().st_mtime for p in targets), default=0.0), len(targets))
+        with _NATIVE_MCP_PACKAGE_FINGERPRINT_LOCK:
+            cached = _NATIVE_MCP_PACKAGE_FINGERPRINT_CACHE.get(extension_id)
+        if cached is not None and cached[0] == signal:
+            return cached[1]
+        digest = hashlib.sha256()
+        for path in sorted(targets):
+            digest.update(str(path.relative_to(install_root)).encode("utf-8"))
+            with path.open("rb") as fh:
+                while chunk := fh.read(1024 * 1024):
+                    digest.update(chunk)
+        fingerprint = digest.hexdigest()
+    except OSError:
+        return None
+    with _NATIVE_MCP_PACKAGE_FINGERPRINT_LOCK:
+        _NATIVE_MCP_PACKAGE_FINGERPRINT_CACHE[extension_id] = (signal, fingerprint)
+    return fingerprint
+
+
+def native_mcp_declarations(
+    record: dict[str, Any],
+) -> dict[tuple[str, str], "native_mcp_grants.ServerDeclaration"]:
+    """The reviewable declarations for one extension record: every native MCP
+    server it exposes (per entrypoints.mcp, same eligibility check
+    reconcile_native_mcp_servers already applied -- ambient/native-eligible
+    items only) paired with the scopes permissions.native_mcp declares it
+    eligible for. Command/args are always the fixed launcher stub
+    (extension_mcp._launcher_command) -- extensions never control the
+    literal command; what a grant actually authorizes is "this extension_id
+    may expose a native MCP server under this server_id, at these scopes."
+
+    `package_fingerprint` is a whole-package content hash
+    (`_native_mcp_package_content_fingerprint`) rather than a manifest
+    version string, because version is metadata declared by the same party
+    the digest is meant to constrain, and there is no "re-present
+    permissions.native_mcp for review" flow on update in this codebase --
+    an artifact hash is the only input that actually measures what's
+    installed instead of trusting an assertion about it. Fails closed
+    (returns no declarations for the whole record) if the fingerprint can't
+    be computed rather than letting an unresolvable package degrade into a
+    constant in the digest.
+    """
+    manifest = record.get("manifest") or {}
+    extension_id = str(manifest.get("id") or "").strip()
+    if not extension_id:
+        return {}
+    package_fingerprint = _native_mcp_package_content_fingerprint(record)
+    if not package_fingerprint:
+        return {}
+    native_scopes = dict(declared_permissions(record).get("native_mcp") or {})
+    declarations: dict[tuple[str, str], native_mcp_grants.ServerDeclaration] = {}
+    for item in _stored_mcp_entrypoints(record):
+        if not _native_harness_eligible(record, "mcp", item.get("name", "")):
+            continue
+        server_id = _native_mcp_server_id(item)
+        item_name = str(item.get("name") or "").strip()
+        if not server_id or not item_name:
+            continue
+        scopes = native_scopes.get(server_id)
+        if not scopes:
+            continue
+        command, args = extension_mcp._launcher_command(extension_id, item_name)
+        env_keys = (extension_mcp._MARKER_EXTENSION_ID, extension_mcp._MARKER_SERVER_NAME)
+        declarations[(extension_id, server_id)] = native_mcp_grants.ServerDeclaration(
+            command=command, args=tuple(args), env_keys=env_keys, scopes=tuple(scopes),
+            package_fingerprint=package_fingerprint,
+        )
+    return declarations
+
+
+def _all_native_mcp_declarations() -> dict[tuple[str, str], "native_mcp_grants.ServerDeclaration"]:
     import config_store
 
-    _project_ambient_mcp_policy_onto_native_harness()
-    settings = _load_ext_settings()
     disabled_extension_ids = set(config_store.get_disabled_builtin_extensions())
+    declarations: dict[tuple[str, str], native_mcp_grants.ServerDeclaration] = {}
+    for record in _active_records():
+        extension_id = record["manifest"]["id"]
+        if extension_id in disabled_extension_ids or not _record_runtime_ready(record):
+            continue
+        declarations.update(native_mcp_declarations(record))
+    return declarations
+
+
+def grant_native_mcp_server(
+    extension_id: str, server_id: str, scope: str, *, project_path: str | None = None, node_id: str = "primary",
+) -> None:
+    """Create a grant -- the narrower record that actually makes a
+    manifest-declared, install-time-reviewed server resolve at the given
+    scope. Only `global` and `project` are reachable here (PR1); `session`
+    and `turn` grants are created at runtime via activate_mcp_server, a
+    separate, deliberately isolated surface (PR3), not this function.
+
+    Commit-and-fail, not transactional, by deliberate choice: the grant is
+    persisted BEFORE reconcile_native_mcp_servers() runs, so if the PCS
+    mirror step fails, the grant survives and the NEXT reconcile converges
+    it -- the grant store is the sole authority on what's active (see
+    reconcile_native_mcp_servers' own docstring: it's a PROJECTION of the
+    grant store, not a second authority), so a failed mirror must not
+    invalidate an authorized grant the store itself already accepted."""
+    if scope not in ("global", "project"):
+        raise ExtensionError(f"grant_native_mcp_server only supports global/project scope, got {scope!r}")
+    record = get_extension(extension_id)
+    if record is None:
+        raise ExtensionError("Extension not installed")
+    declaration = native_mcp_declarations(record).get((extension_id, server_id))
+    if declaration is None:
+        raise ExtensionError(
+            f"{extension_id!r} does not declare a native MCP server {server_id!r} "
+            "eligible for native exposure (check entrypoints.mcp and permissions.native_mcp)"
+        )
+    if scope not in declaration.scopes:
+        raise ExtensionError(
+            f"{extension_id!r} did not declare {server_id!r} eligible for {scope!r} scope "
+            f"(declared: {', '.join(declaration.scopes)})"
+        )
+    if scope == "project":
+        if not project_path:
+            raise ExtensionError("project_path is required for project-scope grants")
+        target = native_mcp_grants.project_target(node_id, project_path)
+        if target is None:
+            raise ExtensionError(f"could not resolve project_path {project_path!r}")
+    else:
+        target = ""
+    native_mcp_grants.add_grant(
+        extension_id=extension_id, server_id=server_id, scope=scope, target=target,
+        digest=declaration.digest(), created_at=_now(),
+    )
+    try:
+        reconcile_native_mcp_servers()
+    except Exception as exc:
+        # The grant is already persisted (commit-and-fail, see docstring) --
+        # an exception here must not read as "nothing happened". It already
+        # applies to per-turn resolution; only the out-of-BA provider-config
+        # mirror lags until the next reconcile.
+        raise ExtensionError(
+            f"grant created and active, but mirroring it to the native provider config failed "
+            f"and will retry on the next reconcile: {exc}"
+        ) from exc
+
+
+def revoke_native_mcp_server(
+    extension_id: str, server_id: str, scope: str, *, project_path: str | None = None, node_id: str = "primary",
+) -> bool:
+    if scope == "project":
+        if not project_path:
+            raise ExtensionError("project_path is required for project-scope revocation")
+        target = native_mcp_grants.project_target(node_id, project_path)
+        if target is None:
+            raise ExtensionError(f"could not resolve project_path {project_path!r}")
+    else:
+        target = ""
+    removed = native_mcp_grants.remove_grant(
+        extension_id=extension_id, server_id=server_id, scope=scope, target=target,
+    )
+    if removed:
+        reconcile_native_mcp_servers()
+    return removed
+
+
+def resolve_native_mcp_servers_for_context(
+    *, node_id: str = "primary", project_path: str | None = None,
+    session_id: str | None = None, root_id: str | None = None, turn_id: str | None = None,
+) -> dict[str, dict[str, Any]]:
+    """The single call every provider's per-turn/per-run injection point
+    (runner.py, runner_codex.py, runner_gemini.py) makes. Gathers currently
+    active/enabled extensions' declarations and resolves them against the
+    grant store for this context -- global grants always included, project
+    grants for `project_path`, session/turn grants for `session_id`/
+    `(root_id, turn_id)` once PR3 lands any (schema already supports it;
+    nothing creates them yet, so those two branches are no-ops until then)."""
+    return native_mcp_grants.resolve_native_mcp_servers(
+        active_declarations=_all_native_mcp_declarations(),
+        node_id=node_id, project_path=project_path,
+        session_id=session_id, root_id=root_id, turn_id=turn_id,
+    )
+
+
+def reconcile_native_mcp_servers() -> int:
+    """Global-scope native MCP servers are additionally mirrored into each
+    provider's real native config file (via extension_mcp.py's PCS fan-out)
+    for out-of-BA visibility -- e.g. `claude mcp list` shows them even
+    outside a BA-driven turn. The grant store (native_mcp_grants.py) is the
+    single authority for WHICH servers are active; this function is a
+    PROJECTION of that state, not a second place that decides it. Reuses
+    resolve_native_mcp_servers_for_context() (no project_path -> only global
+    grants match) instead of re-checking grant/digest here -- one predicate,
+    not a second copy that can drift."""
+    import config_store
+
+    disabled_extension_ids = set(config_store.get_disabled_builtin_extensions())
+    granted_global = resolve_native_mcp_servers_for_context()
     active_records: list[dict[str, Any]] = []
     for record in _active_records():
         extension_id = record["manifest"]["id"]
@@ -5786,9 +6086,7 @@ def reconcile_native_mcp_servers() -> int:
         native_items = [
             item
             for item in _stored_mcp_entrypoints(record)
-            if native_harness_exposed(
-                extension_id, "mcp", item["name"], settings=settings, record=record
-            )
+            if f"{extension_id}:{_native_mcp_server_id(item)}" in granted_global
         ]
         if not native_items:
             continue
@@ -5796,43 +6094,6 @@ def reconcile_native_mcp_servers() -> int:
         native_record["manifest"]["entrypoints"]["mcp"] = native_items
         active_records.append(native_record)
     return extension_mcp.reconcile_native_mcp_servers(active_records)
-
-
-def _project_ambient_mcp_policy_onto_native_harness() -> None:
-    # `ambient_mcp_policy_store` (share_all_eligible/excluded_ids) is the one
-    # user-facing input for MCP exposure to native providers — it's what the
-    # settings UI's "Native MCP sharing" panel and the ambient broker's
-    # credential grant both read. Extension-owned "mcp" items' per-item
-    # `native_harness` flag (the actual gate `resolve_native_mcp_server_config`
-    # consults) is a projection of that policy, kept in sync here on every
-    # reconcile rather than mutated directly, so a single edit in the policy
-    # store propagates without a second place to update.
-    import ambient_mcp_policy_store
-
-    settings = _load_ext_settings()
-    changed = False
-    for record in _active_records():
-        extension_id = record["manifest"]["id"]
-        for item in _stored_mcp_entrypoints(record):
-            name = item["name"]
-            if not _native_harness_eligible(record, "mcp", name):
-                continue
-            capability_id = f"extension:{extension_id}:{name}"
-            desired = ambient_mcp_policy_store.is_exposed(capability_id)
-            key = _native_harness_key("mcp", name)
-            entry = _ext_settings_entry(settings, extension_id)
-            current = key in set(entry["native_harness"])
-            if desired == current:
-                continue
-            exposed = set(entry["native_harness"])
-            if desired:
-                exposed.add(key)
-            else:
-                exposed.discard(key)
-            entry["native_harness"] = sorted(exposed)
-            changed = True
-    if changed:
-        _save_ext_settings(settings)
 
 
 def _hook_endpoints(hook_key: str) -> list[tuple[str, str]]:
@@ -6678,6 +6939,16 @@ def native_harness_exposed(
 
 
 def set_native_harness_exposed(extension_id: str, kind: str, name: str, enabled: bool) -> bool:
+    if kind == "mcp":
+        # This flag no longer has any effect on native MCP resolution --
+        # reconcile_native_mcp_servers() reads the scoped grant store
+        # (native_mcp_grants.py) exclusively now. Reject rather than
+        # silently accept-and-do-nothing, which would tell a caller
+        # {"native_exposed": true} while nothing actually changed.
+        raise ExtensionError(
+            "native exposure for kind='mcp' is now managed via "
+            "grant_native_mcp_server()/revoke_native_mcp_server(), not this flag"
+        )
     if not isinstance(enabled, bool):
         raise ExtensionError("native exposure enabled must be a boolean")
     key = _native_harness_key(kind, name)
@@ -6985,7 +7256,8 @@ def _extension_internal_llm_tasks(
 
 def all_internal_llm_task_keys() -> list[str]:
     """Every internal-LLM task key contributed by builtin extensions (public
-    and private-registry), in stable declaration order. Absent private
+    and private-registry) or declared via ``permissions.internal_llm_tasks``
+    on an installed extension, in stable declaration order. Absent private
     checkout ⇒ private tasks are simply not contributed."""
     keys: list[str] = []
     task_groups = [
@@ -7019,6 +7291,11 @@ def extension_internal_llm_task_keys() -> set[str]:
 
 
 def extension_harness_additions(record: dict[str, Any]) -> list[dict[str, Any]]:
+    """... For kind="mcp" items, `native_exposed` reports GLOBAL grant status
+    only -- this function has no project context to resolve project-scope
+    grants against, so a server granted at project scope (PR2+) reports as
+    not exposed here. Callers must not read this field as "exposed
+    anywhere"; it is specifically "exposed globally"."""
     manifest = record.get("manifest") or {}
     extension_id = str(manifest.get("id") or "")
     entrypoints = manifest.get("entrypoints") or {}
@@ -7043,16 +7320,21 @@ def extension_harness_additions(record: dict[str, Any]) -> list[dict[str, Any]]:
                 "native_eligible": True,
                 "native_exposed": native_harness_exposed(extension_id, "skill", name, record=record),
             })
+    # Reuses resolve_native_mcp_servers_for_context() (no project_path -> only
+    # global grants match) rather than re-checking grant/digest here -- one
+    # predicate, not a second copy that can drift.
+    granted_global = resolve_native_mcp_servers_for_context()
     for item in _stored_mcp_entrypoints(record):
         name = str(item.get("name") or "")
         if not name or name in _RESERVED_MCP_SERVER_NAMES:
             continue
+        server_id = _native_mcp_server_id(item)
         additions.append({
             "kind": "mcp",
             "name": name,
             "detail": "enabled" if is_mcp_server_enabled(str(manifest.get("id") or ""), name, record=record) else "disabled",
             "native_eligible": _native_harness_eligible(record, "mcp", name),
-            "native_exposed": native_harness_exposed(extension_id, "mcp", name, record=record),
+            "native_exposed": f"{extension_id}:{server_id}" in granted_global,
         })
     return additions
 

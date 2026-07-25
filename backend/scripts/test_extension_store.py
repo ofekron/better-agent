@@ -57,6 +57,7 @@ def _record_testape_internal_runtime_mcp() -> Path:
                 }
             ],
         },
+        "permissions": {"native_mcp": {"testape": ["global"]}},
         "marketplace": {},
     })
     (package / "better-agent-extension.json").write_text(json.dumps(manifest), encoding="utf-8")
@@ -732,10 +733,17 @@ def test_recorded_runtime_mcp_outside_builtin_maps_can_be_disabled_per_run() -> 
 
 def test_native_mcp_reconcile_omits_disabled_recorded_runtime_mcp() -> None:
     import config_store
+    import installation_profile
 
     _record_testape_internal_runtime_mcp()
-    extension_store.set_native_harness_exposed("ofek.testape-internal", "mcp", "testape", True)
+    extension_store.grant_native_mcp_server("ofek.testape-internal", "testape", "global")
     original_has_permission = extension_store.has_permission
+    original_integrations_enabled = installation_profile.integrations_enabled
+    # Bare test homes have no installation.json -- _record_active() gates on
+    # integrations_enabled(), which is False without one. Patch it for the
+    # whole test body: both resolve_native_mcp_server_config below and
+    # reconcile_native_mcp_servers() further down depend on _record_active.
+    installation_profile.integrations_enabled = lambda: True  # type: ignore[assignment]
     extension_store.has_permission = lambda _record, permission: permission == "internal_loopback"  # type: ignore[assignment]
     try:
         ambient_config = extension_store.resolve_native_mcp_server_config(
@@ -743,29 +751,30 @@ def test_native_mcp_reconcile_omits_disabled_recorded_runtime_mcp() -> None:
             server_name="testape",
             inputs={},
         )
+        if ambient_config is None:
+            raise AssertionError("ambient-native MCP did not resolve")
+        if any("INTERNAL_TOKEN" in key for key in ambient_config.get("env", {})):
+            raise AssertionError("ambient-native MCP received an internal token")
+        captured: list[str] = []
+        original_reconcile = extension_store.extension_mcp.reconcile_native_mcp_servers
+
+        def fake_reconcile(records):
+            captured.extend(record["manifest"]["id"] for record in records)
+            return 0
+
+        extension_store.extension_mcp.reconcile_native_mcp_servers = fake_reconcile
+        try:
+            config_store.set_disabled_builtin_extensions([])
+            extension_store.reconcile_native_mcp_servers()
+            if "ofek.testape-internal" not in captured:
+                raise AssertionError(captured)
+            captured.clear()
+            config_store.set_disabled_builtin_extensions(["ofek.testape-internal"])
+        finally:
+            extension_store.extension_mcp.reconcile_native_mcp_servers = original_reconcile
     finally:
         extension_store.has_permission = original_has_permission  # type: ignore[assignment]
-    if ambient_config is None:
-        raise AssertionError("ambient-native MCP did not resolve")
-    if any("INTERNAL_TOKEN" in key for key in ambient_config.get("env", {})):
-        raise AssertionError("ambient-native MCP received an internal token")
-    captured: list[str] = []
-    original_reconcile = extension_store.extension_mcp.reconcile_native_mcp_servers
-
-    def fake_reconcile(records):
-        captured.extend(record["manifest"]["id"] for record in records)
-        return 0
-
-    extension_store.extension_mcp.reconcile_native_mcp_servers = fake_reconcile
-    try:
-        config_store.set_disabled_builtin_extensions([])
-        extension_store.reconcile_native_mcp_servers()
-        if "ofek.testape-internal" not in captured:
-            raise AssertionError(captured)
-        captured.clear()
-        config_store.set_disabled_builtin_extensions(["ofek.testape-internal"])
-    finally:
-        extension_store.extension_mcp.reconcile_native_mcp_servers = original_reconcile
+        installation_profile.integrations_enabled = original_integrations_enabled  # type: ignore[assignment]
         config_store.set_disabled_builtin_extensions([])
 
     if "ofek.testape-internal" in captured:

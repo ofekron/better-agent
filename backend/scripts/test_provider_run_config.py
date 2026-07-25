@@ -726,7 +726,7 @@ def _install_bare_matrix_extension_record() -> None:
                     },
                 ]
             },
-            "permissions": {},
+            "permissions": {"native_mcp": {"headless-bare": ["global"]}},
             "marketplace": {},
         }),
         "enabled": True,
@@ -749,9 +749,9 @@ def _install_bare_matrix_extension_record() -> None:
         },
     }
     extension_store._save(data)  # type: ignore[attr-defined]
-    extension_store.set_native_harness_exposed(
-        extension_id, "mcp", "headless-bare", True
-    )
+    # kind="mcp" is no longer settable via set_native_harness_exposed -- native
+    # MCP exposure is granted via grant_native_mcp_server() now.
+    extension_store.grant_native_mcp_server(extension_id, "headless-bare", "global")
 
 
 def t_normalizes_unified_mcp_key() -> None:

@@ -59,9 +59,13 @@ def test_unowned_native_skill_is_never_overwritten() -> None:
 
 
 def test_pcs_failure_rolls_back_native_exposure_state() -> None:
-    record = _record("ofek.failure", mcp="search")
+    # kind="mcp" is rejected outright by set_native_harness_exposed now (see
+    # native_mcp_grants.py); this test targets the generic transactional
+    # write/rollback machinery in _set_native_harness_value, which is shared
+    # across kinds, so kind="skill" exercises the same behavior under test.
+    record = _record("ofek.failure", skill="search")
     real_get = extension_store.get_extension
-    real_reconcile = extension_store.reconcile_native_mcp_servers
+    real_reconcile = extension_store.reconcile_runtime_skills
     extension_store.get_extension = lambda extension_id: record if extension_id == "ofek.failure" else real_get(extension_id)  # type: ignore[assignment]
     calls = 0
 
@@ -75,31 +79,35 @@ def test_pcs_failure_rolls_back_native_exposure_state() -> None:
             extension_store._save_ext_settings(concurrent)
         raise OSError("PCS unavailable")
 
-    extension_store.reconcile_native_mcp_servers = fail_after_concurrent_update  # type: ignore[assignment]
+    extension_store.reconcile_runtime_skills = fail_after_concurrent_update  # type: ignore[assignment]
     try:
         try:
-            extension_store.set_native_harness_exposed("ofek.failure", "mcp", "search", True)
+            extension_store.set_native_harness_exposed("ofek.failure", "skill", "search", True)
             raise AssertionError("PCS failure was reported as success")
         except extension_store.ExtensionError:
             pass
         assert extension_store.native_harness_exposed(
-            "ofek.failure", "mcp", "search", record=record
+            "ofek.failure", "skill", "search", record=record
         ) is False
         concurrent = extension_store._load_ext_settings()
         assert concurrent["extensions"]["ofek.concurrent"]["values"]["preserved"] is True
     finally:
         extension_store.get_extension = real_get  # type: ignore[assignment]
-        extension_store.reconcile_native_mcp_servers = real_reconcile  # type: ignore[assignment]
+        extension_store.reconcile_runtime_skills = real_reconcile  # type: ignore[assignment]
 
 
 def test_concurrent_successful_exposure_updates_are_both_preserved() -> None:
+    # kind="mcp" is rejected outright by set_native_harness_exposed now (see
+    # native_mcp_grants.py); this test targets the generic transactional
+    # write/locking machinery in _set_native_harness_value, which is shared
+    # across kinds, so kind="skill" exercises the same behavior under test.
     records = {
-        "ofek.first": _record("ofek.first", mcp="first-search"),
-        "ofek.second": _record("ofek.second", mcp="second-search"),
+        "ofek.first": _record("ofek.first", skill="first-search"),
+        "ofek.second": _record("ofek.second", skill="second-search"),
     }
     real_get = extension_store.get_extension
     real_load = extension_store._load_ext_settings
-    real_reconcile = extension_store.reconcile_native_mcp_servers
+    real_reconcile = extension_store.reconcile_runtime_skills
     first_loaded = threading.Event()
     second_started = threading.Event()
     first_thread_id: int | None = None
@@ -115,7 +123,7 @@ def test_concurrent_successful_exposure_updates_are_both_preserved() -> None:
 
     extension_store.get_extension = lambda extension_id: records.get(extension_id) or real_get(extension_id)  # type: ignore[assignment]
     extension_store._load_ext_settings = coordinated_load  # type: ignore[assignment]
-    extension_store.reconcile_native_mcp_servers = lambda: 0  # type: ignore[assignment]
+    extension_store.reconcile_runtime_skills = lambda: 0  # type: ignore[assignment]
     errors: list[BaseException] = []
 
     def expose(extension_id: str, server_name: str, *, second: bool = False) -> None:
@@ -125,7 +133,7 @@ def test_concurrent_successful_exposure_updates_are_both_preserved() -> None:
                 second_started.set()
             else:
                 first_thread_id = threading.get_ident()
-            extension_store.set_native_harness_exposed(extension_id, "mcp", server_name, True)
+            extension_store.set_native_harness_exposed(extension_id, "skill", server_name, True)
         except BaseException as exc:
             errors.append(exc)
 
@@ -145,12 +153,12 @@ def test_concurrent_successful_exposure_updates_are_both_preserved() -> None:
         assert not errors
         assert transaction_lock_observations and all(transaction_lock_observations)
         settings = real_load()
-        assert settings["extensions"]["ofek.first"]["native_harness"] == ["mcp:first-search"]
-        assert settings["extensions"]["ofek.second"]["native_harness"] == ["mcp:second-search"]
+        assert settings["extensions"]["ofek.first"]["native_harness"] == ["skill:first-search"]
+        assert settings["extensions"]["ofek.second"]["native_harness"] == ["skill:second-search"]
     finally:
         extension_store.get_extension = real_get  # type: ignore[assignment]
         extension_store._load_ext_settings = real_load  # type: ignore[assignment]
-        extension_store.reconcile_native_mcp_servers = real_reconcile  # type: ignore[assignment]
+        extension_store.reconcile_runtime_skills = real_reconcile  # type: ignore[assignment]
 
 
 def test_user_owned_native_mcp_name_collision_is_rejected() -> None:

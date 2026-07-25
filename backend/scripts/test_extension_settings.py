@@ -558,7 +558,7 @@ def test_native_harness_exposure_is_per_item_and_unsafe_mcp_fails_closed() -> No
     extension_store.reconcile_native_mcp_servers = lambda: 0  # type: ignore[assignment]
     extension_store.extension_instructions.reconcile_blocks = lambda _record: None  # type: ignore[assignment]
     try:
-        for kind, name in (("instructions", "rules"), ("skill", "reviewer"), ("mcp", "local-search")):
+        for kind, name in (("instructions", "rules"), ("skill", "reviewer")):
             assert extension_store.native_harness_exposed("ofek.demo", kind, name, record=record) is False
             assert extension_store.set_native_harness_exposed("ofek.demo", kind, name, True) is True
             assert extension_store.native_harness_exposed("ofek.demo", kind, name, record=record) is True
@@ -567,13 +567,20 @@ def test_native_harness_exposure_is_per_item_and_unsafe_mcp_fails_closed() -> No
         assert additions[("instructions", "rules")]["native_exposed"] is True
         assert additions[("skill", "reviewer")]["native_exposed"] is True
         assert additions[("mcp", "local-search")]["native_eligible"] is True
+        assert additions[("mcp", "local-search")]["native_exposed"] is False
         assert additions[("mcp", "session-control")]["native_eligible"] is False
+        assert additions[("mcp", "session-control")]["native_exposed"] is False
 
-        try:
-            extension_store.set_native_harness_exposed("ofek.demo", "mcp", "session-control", True)
-            raise AssertionError("unsafe session-bound MCP was exposed ambiently")
-        except extension_store.ExtensionError:
-            pass
+        # kind="mcp" is no longer settable through this flag at all -- native
+        # MCP exposure is managed exclusively via
+        # grant_native_mcp_server()/revoke_native_mcp_server() now, regardless
+        # of eligibility, ambient-safe or not.
+        for name in ("local-search", "session-control"):
+            try:
+                extension_store.set_native_harness_exposed("ofek.demo", "mcp", name, True)
+                raise AssertionError(f"kind='mcp' exposure flag should be rejected outright ({name})")
+            except extension_store.ExtensionError:
+                pass
         try:
             extension_store.set_native_harness_exposed("ofek.demo", "skill", "reviewer", 1)  # type: ignore[arg-type]
             raise AssertionError("non-boolean native exposure was accepted")
