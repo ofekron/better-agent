@@ -180,12 +180,18 @@ are confined under the frontend directory; traversal is rejected.
 
 - `entrypoints.mcp` — one or more MCP server configs (`python` script, `args`,
   `env`). Requires `permissions.internal_loopback` to receive the internal
-  backend token.
+  backend token. An optional `description` (<=500 chars) is shown as helper
+  text under the server's toggle in Extension Settings — use it to explain
+  what the tool does, and to call out when it's an alternate route to a
+  capability another entrypoint (e.g. a sibling skill) already provides.
 
 ### Instructions / skills (`instructions`, `skills`)
 
 Inject managed instruction blocks or contribute skills. These surfaces don't
-execute code.
+execute code. Skill entries under `entrypoints.skills` also accept an
+optional `description` (<=500 chars), shown as helper text under the skill's
+toggle in Extension Settings for the same reason as the MCP `description`
+above.
 
 ### Daemons (`daemons`)
 

@@ -1228,6 +1228,17 @@ def _validate_instructions(value: Any) -> list[dict[str, Any]]:
     return items
 
 
+def _validate_entrypoint_description(value: Any, *, field: str) -> str:
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise ExtensionError(f"{field} must be a string")
+    description = value.strip()
+    if len(description) > 500:
+        raise ExtensionError(f"{field} must be at most 500 characters")
+    return description
+
+
 def _validate_skills(value: Any) -> list[dict[str, Any]]:
     if value is None:
         return []
@@ -1245,7 +1256,10 @@ def _validate_skills(value: Any) -> list[dict[str, Any]]:
             raise ExtensionError(f"entrypoints.skills contains duplicate name: {name}")
         seen.add(name)
         path = _clean_rel_path(str(item.get("path") or ""), field="entrypoints.skills.path")
-        cleaned: dict[str, Any] = {"name": name, "path": path}
+        description = _validate_entrypoint_description(
+            item.get("description"), field="entrypoints.skills.description"
+        )
+        cleaned: dict[str, Any] = {"name": name, "path": path, "description": description}
         if "default_enabled" in item:
             if not isinstance(item["default_enabled"], bool):
                 raise ExtensionError("entrypoints.skills.default_enabled must be a boolean")
@@ -1904,6 +1918,7 @@ def _validate_mcp_entrypoints(value: Any, *, extension_id: str) -> list[dict[str
         label = str(item.get("label") or "").strip()
         if label and len(label) > 80:
             raise ExtensionError("entrypoints.mcp.label must be at most 80 characters")
+        description = _validate_entrypoint_description(item.get("description"), field="entrypoints.mcp.description")
         default_enabled = item.get("default_enabled", True)
         if not isinstance(default_enabled, bool):
             raise ExtensionError("entrypoints.mcp.default_enabled must be a boolean")
@@ -1911,6 +1926,7 @@ def _validate_mcp_entrypoints(value: Any, *, extension_id: str) -> list[dict[str
             {
                 "name": name,
                 "label": label,
+                "description": description,
                 "default_enabled": default_enabled,
                 "python": python_path,
                 "module": module,
@@ -7013,6 +7029,7 @@ def extension_runtime_skills(extension_id: str) -> list[dict[str, Any]]:
     return [
         {
             "name": item["name"],
+            "description": item.get("description") or "",
             "enabled": is_runtime_skill_enabled(extension_id, item["name"], record=record),
         }
         for item in entrypoints.get("skills") or []
@@ -7034,6 +7051,7 @@ def extension_mcp_servers(extension_id: str) -> list[dict[str, Any]]:
             {
                 "name": item["name"],
                 "label": item.get("label") or item["name"],
+                "description": item.get("description") or "",
                 "user_facing": item.get("user_facing", True),
                 "enabled": is_mcp_server_enabled(extension_id, item["name"], record=record),
                 "forced_by_skills": mcp_forcing_skills(extension_id, item["name"], record=record),

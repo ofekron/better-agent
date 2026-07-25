@@ -1007,8 +1007,8 @@ interface ExtensionConfigRow {
   harnessAdditions: ExtensionHarnessAddition[];
   internalLlmTasks: string[];
   userInstructions: string;
-  mcp: Array<{ name: string; label: string; enabled: boolean; forced_by_skills?: string[] }>;
-  skills: Array<{ name: string; enabled: boolean }>;
+  mcp: Array<{ name: string; label: string; enabled: boolean; forced_by_skills?: string[]; description?: string }>;
+  skills: Array<{ name: string; enabled: boolean; description?: string }>;
   remoteServices: ExtensionRemoteService[];
   settingsSchema: SettingSpec[];
   settingsValues: Record<string, unknown>;
@@ -1947,6 +1947,9 @@ export function ExtensionUiSettingsSection() {
                           {t("settings.extensionsMcpForcedBySkill", { skills: forcedBy.join(", ") })}
                         </span>
                       )}
+                      {server.description && (
+                        <span className="extension-ui-settings-entry-description">{server.description}</span>
+                      )}
                     </label>
                   );
                 })}
@@ -1965,6 +1968,9 @@ export function ExtensionUiSettingsSection() {
                       onChange={(e) => toggleSkill(row.id, skill.name, e.target.checked)}
                     />
                     {skill.name}
+                    {skill.description && (
+                      <span className="extension-ui-settings-entry-description">{skill.description}</span>
+                    )}
                   </label>
                 ))}
               </ExtensionConfigGroup>

@@ -210,6 +210,7 @@ def _mcp_items(items: Any) -> list[dict[str, Any]]:
         out.append({
             "name": _clean(item.get("name")),
             "label": _clean(item.get("label")),
+            "purpose": _clean(item.get("description")),
             "enabled": item.get("enabled") is True,
             "user_facing": item.get("user_facing") is not False,
         })

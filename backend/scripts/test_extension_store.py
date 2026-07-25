@@ -3978,6 +3978,98 @@ def test_command_based_mcp_server() -> None:
         raise AssertionError(f"should reject mcp item {bad}")
 
 
+def test_mcp_entrypoint_description_is_validated_and_stored() -> None:
+    manifest = _validate_manifest(
+        {
+            "kind": "better-agent-extension",
+            "id": "ofek.describedmcp",
+            "name": "Described",
+            "version": "1.0.0",
+            "entrypoints": {
+                "mcp": [
+                    {
+                        "name": "described",
+                        "python": "mcp/server.py",
+                        "description": "  Alternate route to the same capability.  ",
+                    }
+                ]
+            },
+            "permissions": {},
+            "marketplace": {},
+        }
+    )
+    item = manifest["entrypoints"]["mcp"][0]
+    if item.get("description") != "Alternate route to the same capability.":
+        raise AssertionError(item)
+
+    for bad_description in (123, {"not": "a string"}, "x" * 501):
+        try:
+            _validate_manifest(
+                {
+                    "kind": "better-agent-extension",
+                    "id": "ofek.baddescmcp",
+                    "name": "BadDesc",
+                    "version": "1.0.0",
+                    "entrypoints": {
+                        "mcp": [{"name": "bad", "python": "mcp/server.py", "description": bad_description}]
+                    },
+                    "permissions": {},
+                    "marketplace": {},
+                }
+            )
+        except extension_store.ExtensionError:
+            continue
+        raise AssertionError(f"should reject mcp description {bad_description!r}")
+
+
+def test_skill_entrypoint_description_is_validated_and_stored() -> None:
+    manifest = _validate_manifest(
+        {
+            "kind": "better-agent-extension",
+            "id": "ofek.describedskill",
+            "name": "DescribedSkill",
+            "version": "1.0.0",
+            "surfaces": ["skills"],
+            "entrypoints": {
+                "skills": [
+                    {
+                        "name": "described-skill",
+                        "path": "skills/described-skill",
+                        "description": "  Fallback route when the MCP tool is disabled.  ",
+                    }
+                ]
+            },
+            "permissions": {},
+            "marketplace": {},
+        }
+    )
+    item = manifest["entrypoints"]["skills"][0]
+    if item.get("description") != "Fallback route when the MCP tool is disabled.":
+        raise AssertionError(item)
+
+    for bad_description in (123, ["not", "a", "string"], "x" * 501):
+        try:
+            _validate_manifest(
+                {
+                    "kind": "better-agent-extension",
+                    "id": "ofek.baddescskill",
+                    "name": "BadDescSkill",
+                    "version": "1.0.0",
+                    "surfaces": ["skills"],
+                    "entrypoints": {
+                        "skills": [
+                            {"name": "bad-skill", "path": "skills/bad-skill", "description": bad_description}
+                        ]
+                    },
+                    "permissions": {},
+                    "marketplace": {},
+                }
+            )
+        except extension_store.ExtensionError:
+            continue
+        raise AssertionError(f"should reject skill description {bad_description!r}")
+
+
 def test_module_based_mcp_server_config() -> None:
     package = _write_private_extension_package(
         "ofek.module-mcp",

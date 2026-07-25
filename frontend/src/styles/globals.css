@@ -6263,6 +6263,7 @@ button.run-badge-clickable:focus-visible {
 }
 .extension-ui-settings-toggle {
   display: inline-flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 6px;
   min-width: 0;
@@ -6280,6 +6281,12 @@ button.run-badge-clickable:focus-visible {
   color: var(--text-muted);
   opacity: 0.75;
   font-style: italic;
+}
+.extension-ui-settings-entry-description {
+  flex-basis: 100%;
+  font-size: calc(11px * var(--app-font-scale));
+  color: var(--text-muted);
+  opacity: 0.75;
 }
 .extension-ui-settings-select {
   display: inline-flex;
