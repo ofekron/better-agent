@@ -43,24 +43,52 @@ def _backup_path() -> Path:
     return _projects_path().with_name("projects.v1.bak.json")
 
 
-def _discover_git_remote(path: str) -> Optional[str]:
-    """Shell out to git to discover the origin remote URL."""
+def _git(path: str, *args: str) -> Optional[subprocess.CompletedProcess]:
     try:
-        result = subprocess.run(
-            ["git", "-C", path, "remote", "get-url", "origin"],
+        return subprocess.run(
+            ["git", "-C", path, *args],
             capture_output=True, text=True, timeout=5,
         )
-        if result.returncode == 0:
-            url = result.stdout.strip()
-            return url or None
     except Exception:
-        pass
-    return None
+        return None
+
+
+def probe_git_remote(path: str) -> tuple[bool, Optional[str]]:
+    """``(resolved, url)`` for a checkout's remote.
+
+    ``resolved`` is False when the checkout could not be inspected at all
+    (path missing, unreachable volume, git unavailable) — callers must keep
+    whatever they already stored rather than treat that as "no remote".
+    ``resolved`` is True with ``None`` when the directory exists but has no
+    remote, so a stored value can be cleared.
+
+    Prefers ``origin``, else the first configured remote: a repo whose remote
+    is named something else (e.g. ``github``) previously resolved to nothing
+    and kept a stale URL forever, which mis-groups projects across machines.
+    """
+    if not path or not Path(path).is_dir():
+        return (False, None)
+    listed = _git(path, "remote")
+    if listed is None:
+        return (False, None)
+    if listed.returncode != 0:
+        # The directory exists but git won't treat it as a repository.
+        return (True, None)
+    names = [name.strip() for name in listed.stdout.splitlines() if name.strip()]
+    if not names:
+        return (True, None)
+    chosen = "origin" if "origin" in names else names[0]
+    resolved = _git(path, "remote", "get-url", chosen)
+    if resolved is None:
+        return (False, None)
+    if resolved.returncode != 0:
+        return (True, None)
+    return (True, resolved.stdout.strip() or None)
 
 
 def ensure_git_remote(project_path: str) -> Optional[str]:
-    """Return the git origin remote URL for a local project."""
-    return _discover_git_remote(project_path)
+    """Return the git remote URL for a local project, or None."""
+    return probe_git_remote(project_path)[1]
 
 
 def _string_or_now(value: object) -> str:
@@ -442,13 +470,19 @@ def remove_project(path: str, *, node_id: str = "primary") -> bool:
 
 
 def backfill_git_remotes() -> int:
-    """Ensure git_remote is present in the BC-home project registry."""
+    """Re-derive git_remote for primary projects from their checkouts.
+
+    The stored value is a snapshot that goes stale when a repo renames or
+    replaces its remote, so a differing result overwrites it — including
+    clearing it when the checkout no longer has a remote. Checkouts that
+    could not be inspected are left untouched, so an offline volume never
+    erases a known remote."""
     projects = _read_file() if _projects_path().exists() else _seed_from_sessions_if_empty()
     changed = 0
     for p in projects:
         if (p.get("node_id") or "primary") == "primary":
-            remote = ensure_git_remote(p.get("path", ""))
-            if remote and p.get("git_remote") != remote:
+            resolved, remote = probe_git_remote(p.get("path", ""))
+            if resolved and p.get("git_remote") != remote:
                 p["git_remote"] = remote
                 changed += 1
     if changed:
