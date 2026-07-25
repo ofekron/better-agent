@@ -50,11 +50,24 @@ _EPHEMERAL_SECRET = _secrets.token_hex(32)
 def _load() -> tuple:
     """Read the three credential entries; return (user, hash, secret,
     bootstrapped). On a fresh install the read raises (missing entry) —
-    swallow it and report not-bootstrapped instead of crashing import."""
+    swallow it and report not-bootstrapped instead of crashing import, so
+    the cross-platform web path can serve the first-run <Setup /> screen.
+
+    Headless container mode (BETTER_AGENT_HEADLESS_AUTH=1) is the one
+    exception: there is no first-run setup screen for it — credentials
+    are operator-supplied at container start and `auth_secrets` rejects
+    writing them at runtime (see `_reject_headless_write`). Swallowing a
+    misconfigured env var / secret file there would degrade into an
+    un-completable setup screen instead of failing loud: re-raise so the
+    container crashes at import with the exact remediation message
+    instead of booting into that dead end.
+    """
     try:
         u, h, s = auth_secrets.read_all_parallel()
         return u, h, s, True
     except Exception:
+        if auth_secrets.headless_mode_enabled():
+            raise
         return None, None, None, False
 
 

@@ -27,16 +27,22 @@ var / secret files and restart the container instead.
 
 ## First run
 
-1. Generate a password hash (never store the plaintext password itself):
+1. Generate a password hash (never store the plaintext password itself).
+   Use `--out`, not shell redirection (`> file`) — redirection truncates
+   the destination the instant the shell opens it, so a mismatched
+   confirmation or Ctrl-C leaves an empty file behind; `--out` only writes
+   on success:
 
    ```bash
-   ./scripts/hash-password.py > docker/secrets/password_hash
+   ./scripts/hash-password.py --out docker/secrets/password_hash
    ```
 
-2. (Optional but recommended) generate a session secret so logins survive
-   a container restart. If you skip this, the container generates one in
-   memory on every boot and every existing session is invalidated on
-   restart:
+2. Generate a session secret so logins survive a container restart.
+   `docker-compose.yml` requires this file to exist — it is not optional
+   when using compose. (Running the image directly with `docker run`
+   instead of compose is the one path where skipping this is meaningful:
+   `auth_secrets.py` then generates a secret in memory on every boot and
+   every existing session is invalidated on restart.)
 
    ```bash
    python3 -c "import secrets; print(secrets.token_hex(32))" > docker/secrets/session_secret
@@ -51,6 +57,13 @@ var / secret files and restart the container instead.
    docker compose -f docker/docker-compose.yml --env-file docker/.env up -d --build
    ```
 
+   If `BETTER_AGENT_USERNAME`, the password hash, or the session secret is
+   missing or empty, the container **fails loud and exits** — `docker
+   compose logs` shows the exact env var or file to fix (see
+   `backend/auth_secrets.py`'s headless getters and `backend/auth.py`'s
+   `_load()`). It does not silently boot into a dead first-run setup
+   screen.
+
 5. Open `http://localhost:18765` (or your chosen port) and log in with the
    username from step 3 and the plaintext password you hashed in step 1.
 
@@ -60,6 +73,23 @@ All durable state (`BETTER_AGENT_HOME` — sessions, projects, the
 installation profile) lives on the `better-agent-data` named volume, not
 in the image. Rebuilding the image (`--build`) does not lose it;
 `docker compose down -v` does.
+
+## Runs as a non-root user
+
+The container drops from root (needed to install apt/npm/uv packages at
+build time) to a fixed non-root user (`betteragent`, uid/gid `10001`)
+before `ENTRYPOINT`. uvicorn and every provider-CLI subprocess it spawns
+run as that user. The named volume `better-agent-data` is chowned to
+`10001:10001` automatically on first use (Docker copies the image's `/data`
+ownership into a fresh named volume). If you swap the named volume for a
+bind mount to a host directory, `chown -R 10001:10001` that directory
+first — a root-owned bind mount will fail with a permission error at
+first boot instead.
+
+A `HEALTHCHECK` (`docker compose ps` / `docker inspect`) probes `/` — the
+unauthenticated SPA shell — every 10s after a 30s start period, so
+`docker compose ps` distinguishes "up and serving" from "container alive
+but the app is still resolving dependencies or crash-looping."
 
 ## What this image does NOT cover
 

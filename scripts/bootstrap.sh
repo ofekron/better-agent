@@ -21,18 +21,22 @@ set -euo pipefail
 REPO_URL="${BETTER_AGENT_REPO_URL:-https://github.com/ofekron/better-agent.git}"
 INSTALL_DIR="${BETTER_AGENT_INSTALL_DIR:-$HOME/.better-agent/checkout}"
 INSTALL_STAGING=""
+INSTALL_LOCK_DIR=""
 
 err() {
   printf 'bootstrap: %s\n' "$*" >&2
 }
 
-cleanup_install_staging() {
+cleanup_install_state() {
   if [ -n "$INSTALL_STAGING" ] && [ -e "$INSTALL_STAGING" ]; then
     rm -rf "$INSTALL_STAGING"
   fi
+  if [ -n "$INSTALL_LOCK_DIR" ] && [ -d "$INSTALL_LOCK_DIR" ]; then
+    rmdir "$INSTALL_LOCK_DIR" 2>/dev/null || true
+  fi
 }
 
-trap cleanup_install_staging EXIT HUP INT TERM
+trap cleanup_install_state EXIT HUP INT TERM
 
 require_supported_platform() {
   local uname_s
@@ -50,9 +54,15 @@ require_git() {
   fi
 }
 
-# Concurrency-safe: stage the clone next to the destination and only
-# publish via atomic rename, so two installers racing each other never
-# leave a partial checkout behind or clobber one that already published.
+# Concurrency-safe: `mkdir` on the lock dir is atomic (fails if it already
+# exists), so it's a correct mutex across two installers racing on a fresh
+# INSTALL_DIR — unlike the plain "check-then-mv" this replaced, which had a
+# TOCTOU gap: both racers can see INSTALL_DIR absent, both clone, and the
+# loser's `mv staging INSTALL_DIR` lands *inside* the winner's already-moved
+# directory instead of erroring (POSIX `mv` moves INTO an existing directory
+# rather than failing), leaving a orphaned nested
+# INSTALL_DIR/checkout.installing.<pid> that nothing cleans up. The lock
+# makes the loser wait for the winner instead of racing the same `mv`.
 sync_repo() {
   if [ -d "$INSTALL_DIR/.git" ]; then
     printf 'bootstrap: updating existing checkout at %s\n' "$INSTALL_DIR"
@@ -60,15 +70,47 @@ sync_repo() {
     return
   fi
 
+  local parent lock_dir
+  parent="$(dirname "$INSTALL_DIR")"
+  lock_dir="${INSTALL_DIR}.lock"
+  mkdir -p "$parent"
+
+  # Loop rather than fall through once on a released-but-empty lock: if the
+  # holder acquired the lock then died before publishing (clone failed,
+  # process killed) with MULTIPLE waiters parked, a single unconditional
+  # fall-through would let every waiter race the same unlocked clone+mv —
+  # exactly the TOCTOU bug this lock exists to prevent. Re-attempting mkdir
+  # means only one of them wins the retry.
+  local total_waited=0
+  while ! mkdir "$lock_dir" 2>/dev/null; do
+    printf 'bootstrap: another installer is publishing %s — waiting...\n' "$INSTALL_DIR" >&2
+    while [ -d "$lock_dir" ]; do
+      if [ -d "$INSTALL_DIR/.git" ]; then
+        printf 'bootstrap: %s was published by the other installer\n' "$INSTALL_DIR" >&2
+        return
+      fi
+      total_waited=$((total_waited + 1))
+      if [ "$total_waited" -ge 120 ]; then
+        err "timed out waiting for a concurrent installer to finish publishing ${INSTALL_DIR}"
+        exit 1
+      fi
+      sleep 1
+    done
+    if [ -d "$INSTALL_DIR/.git" ]; then
+      return
+    fi
+    # Lock released but no checkout appeared — the previous holder failed.
+    # Loop back and race for the lock ourselves instead of cloning unlocked.
+  done
+  INSTALL_LOCK_DIR="$lock_dir"
+
   if [ -e "$INSTALL_DIR" ]; then
     err "install destination exists but is not a Git checkout: ${INSTALL_DIR}. Move it aside or set BETTER_AGENT_INSTALL_DIR, then retry. No files were changed."
     exit 1
   fi
 
-  local parent staging
-  parent="$(dirname "$INSTALL_DIR")"
+  local staging
   staging="${INSTALL_DIR}.installing.$$"
-  mkdir -p "$parent"
   INSTALL_STAGING="$staging"
 
   printf 'bootstrap: cloning %s to %s\n' "$REPO_URL" "$INSTALL_DIR"
@@ -77,15 +119,13 @@ sync_repo() {
     exit 1
   fi
 
-  if [ -e "$INSTALL_DIR" ]; then
-    err "another installer published ${INSTALL_DIR} while cloning; leaving it untouched"
-    exit 1
-  fi
   if ! mv "$staging" "$INSTALL_DIR"; then
     err "could not publish completed checkout at ${INSTALL_DIR}"
     exit 1
   fi
   INSTALL_STAGING=""
+  rmdir "$INSTALL_LOCK_DIR" 2>/dev/null || true
+  INSTALL_LOCK_DIR=""
 }
 
 main() {
