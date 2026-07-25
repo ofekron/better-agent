@@ -183,7 +183,7 @@ def _finalize_like_run(*, prompt, rollout_path, byte_offset=0):
         success = True
         if rollout_usage:
             total_usage = rollout_usage
-    success, error = apply_ghost_completion_guard(
+    success, error, _ = apply_ghost_completion_guard(
         success=success,
         cancelled=False,
         error=error,
@@ -257,7 +257,7 @@ def test_parent_final_phase(tmp: Path) -> None:
         "2h: no parent-final guard exists",
         not hasattr(runner_codex, "_apply_parent_final_guard"),
     )
-    success, error = runner_codex.apply_ghost_completion_guard(
+    success, error, _ = runner_codex.apply_ghost_completion_guard(
         success=True,
         cancelled=False,
         error=None,
@@ -396,7 +396,7 @@ def test_guard_narrowness(tmp: Path) -> None:
 
     # Cancelled turn: guard must not override a cancel.
     terminal, rollout_usage, assistant_seen, _ = runner_codex._rollout_terminal_state(ghost)
-    success, error = apply_ghost_completion_guard(
+    success, error, _ = apply_ghost_completion_guard(
         success=True, cancelled=True, error=None, prompt="x",
         assistant_seen=assistant_seen, total_usage={},
         result_seen=terminal is True,

@@ -56,6 +56,7 @@ from codex_agent_tree import (
     wait_for_agent_tree_terminal as _wait_codex_agent_tree_terminal,
 )
 from runner_guard import (
+    GHOST_ERROR,
     GHOST_RETRY_BACKOFF_S,
     GHOST_RETRY_MAX,
     apply_ghost_completion_guard,
@@ -3363,7 +3364,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
         # trace of the real cause. Naming it here keeps the truthful,
         # terminal error instead of a generic retryable ghost.
         empty_turn_error = codex_rate_limits.empty_turn_error(rollout_rate_limits)
-        success, error = apply_ghost_completion_guard(
+        success, error, retry_ghost = apply_ghost_completion_guard(
             success=success,
             cancelled=cancelled,
             error=error,
@@ -3392,16 +3393,13 @@ async def _run(run_dir: Path, inputs: dict) -> int:
         # transient — retry a few times before failing the turn. A
         # diagnosed one (exhausted credits) is terminal.
         if should_retry_ghost(
-            error,
-            cancelled=cancelled,
-            attempts=_ghost_attempts,
-            diagnosed=bool(empty_turn_error),
+            retry_ghost, cancelled=cancelled, attempts=_ghost_attempts,
         ):
             _ghost_attempts += 1
             log.warning(
-                "codex ghost completion (prompt_not_executed); "
-                "retry %d/%d after %.1fs",
-                _ghost_attempts, GHOST_RETRY_MAX, GHOST_RETRY_BACKOFF_S,
+                "codex ghost completion (%s); retry %d/%d after %.1fs",
+                GHOST_ERROR, _ghost_attempts, GHOST_RETRY_MAX,
+                GHOST_RETRY_BACKOFF_S,
             )
             await _retry_sleep(GHOST_RETRY_BACKOFF_S)
             continue

@@ -131,32 +131,28 @@ def test_payload_classification() -> None:
 
 def test_guard_and_retry() -> None:
     print("\nghost guard + retry policy")
-    success, error = _guard(CREDITS_EXHAUSTED_ERROR)
+    success, error, retry_ghost = _guard(CREDITS_EXHAUSTED_ERROR)
     _check("exhausted credits fails the turn with the real cause",
            (success, error) == (False, CREDITS_EXHAUSTED_ERROR), f"got {(success, error)!r}")
-    _check("exhausted credits is terminal — no ghost retries",
-           should_retry_ghost(
-               error, cancelled=False, attempts=0, diagnosed=True) is False)
-    _check("terminality is explicit, not inferred from the error text",
-           should_retry_ghost(
-               GHOST_ERROR, cancelled=False, attempts=0, diagnosed=True) is False)
+    _check("exhausted credits is terminal — the guard marks it non-retryable",
+           retry_ghost is False)
+    _check("terminality is carried by the classification, not the error text",
+           should_retry_ghost(retry_ghost, cancelled=False, attempts=0) is False)
 
-    success, error = _guard(None)
+    success, error, retry_ghost = _guard(None)
     _check("undiagnosed empty turn is still the generic ghost",
            (success, error) == (False, GHOST_ERROR), f"got {(success, error)!r}")
     _check("undiagnosed ghost still retries",
-           should_retry_ghost(
-               error, cancelled=False, attempts=0, diagnosed=False) is True)
-    _check("other runners' call shape (no diagnosed kwarg) still retries",
-           should_retry_ghost(error, cancelled=False, attempts=0) is True)
+           should_retry_ghost(retry_ghost, cancelled=False, attempts=0) is True)
 
-    kept_success, kept_error = apply_ghost_completion_guard(
+    kept_success, kept_error, kept_retry = apply_ghost_completion_guard(
         success=True, cancelled=False, error=None, prompt="do the thing",
         assistant_seen=True, total_usage={"input_tokens": 10}, result_seen=True,
         empty_turn_error=CREDITS_EXHAUSTED_ERROR,
     )
     _check("a turn WITH output stays successful even when credits are exhausted",
-           (kept_success, kept_error) == (True, None), f"got {(kept_success, kept_error)!r}")
+           (kept_success, kept_error, kept_retry) == (True, None, False),
+           f"got {(kept_success, kept_error, kept_retry)!r}")
 
 
 def test_downstream_classification() -> None:

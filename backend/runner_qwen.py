@@ -488,7 +488,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
             log.exception("qwen runner failed")
             error = f"{type(e).__name__}: {e}"
 
-        success, error = apply_ghost_completion_guard(
+        success, error, retry_ghost = apply_ghost_completion_guard(
             success=success,
             cancelled=cancelled,
             error=error,
@@ -506,7 +506,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
             _retry_backoff = min(_retry_backoff * 2, 60.0)
             continue
 
-        if should_retry_ghost(error, cancelled=cancelled, attempts=_ghost_attempts):
+        if should_retry_ghost(retry_ghost, cancelled=cancelled, attempts=_ghost_attempts):
             _ghost_attempts += 1
             log.warning(
                 "qwen ghost completion (prompt_not_executed); retry %d/%d after %.1fs",

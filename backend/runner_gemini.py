@@ -1015,7 +1015,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
         # provider intermittently swallows an empty/failed upstream response
         # as a successful zero-usage turn, and a fresh attempt usually
         # succeeds.
-        success, error = apply_ghost_completion_guard(
+        success, error, retry_ghost = apply_ghost_completion_guard(
             success=success,
             cancelled=cancelled,
             error=error,
@@ -1039,7 +1039,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
 
         # Ghost-completion retry (bounded): prompt_not_executed is
         # transient — retry a few times before failing the turn.
-        if should_retry_ghost(error, cancelled=cancelled, attempts=_ghost_attempts):
+        if should_retry_ghost(retry_ghost, cancelled=cancelled, attempts=_ghost_attempts):
             _ghost_attempts += 1
             log.warning(
                 "gemini ghost completion (prompt_not_executed); "

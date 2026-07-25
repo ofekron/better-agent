@@ -46,10 +46,10 @@ def _check(name: str, cond: bool, detail: str = "") -> None:
     print(f"  {PASS if cond else FAIL} {name}" + (f" — {detail}" if detail and not cond else ""))
 
 
-def _ghost_guard_result(prompt: str = "do the thing") -> tuple[bool, str]:
+def _ghost_guard_result(prompt: str = "do the thing") -> tuple[bool, str, bool]:
     """Mirror a finalized ghost turn: success + result_seen, zero usage,
     no assistant output -> apply_ghost_completion_guard flips it."""
-    success, error = apply_ghost_completion_guard(
+    success, error, retry_ghost = apply_ghost_completion_guard(
         success=True,
         cancelled=False,
         error=None,
@@ -58,32 +58,39 @@ def _ghost_guard_result(prompt: str = "do the thing") -> tuple[bool, str]:
         total_usage={},
         result_seen=True,
     )
-    return success, error
+    return success, error, retry_ghost
 
 
 def test_guard_still_flags_ghost() -> None:
     """Precondition: the ghost guard still produces prompt_not_executed for
     a zero-usage empty success — retry builds on top of this."""
-    success, error = _ghost_guard_result()
+    success, error, retry_ghost = _ghost_guard_result()
     _check("1a: ghost guard returns prompt_not_executed", error == "prompt_not_executed")
     _check("1b: ghost guard flips success to False", success is False)
+    _check("1c: an undiagnosed ghost is marked retryable by the guard itself",
+           retry_ghost is True)
 
 
 def test_should_retry_bounds() -> None:
     """should_retry_ghost is True for a fresh ghost, False once the budget
-    is exhausted, and ignores non-ghost errors and cancels."""
+    is exhausted, and False for anything the guard did not mark retryable.
+    The decision reads the guard's classification, never the error text."""
     _check("2a: first ghost retries", should_retry_ghost(
-        "prompt_not_executed", cancelled=False, attempts=0) is True)
+        True, cancelled=False, attempts=0) is True)
     _check("2b: last allowed retry at attempts=MAX-1", should_retry_ghost(
-        "prompt_not_executed", cancelled=False, attempts=GHOST_RETRY_MAX - 1) is True)
+        True, cancelled=False, attempts=GHOST_RETRY_MAX - 1) is True)
     _check("2c: exhausted at attempts=MAX", should_retry_ghost(
-        "prompt_not_executed", cancelled=False, attempts=GHOST_RETRY_MAX) is False)
+        True, cancelled=False, attempts=GHOST_RETRY_MAX) is False)
     _check("2d: cancelled never retries", should_retry_ghost(
-        "prompt_not_executed", cancelled=True, attempts=0) is False)
-    _check("2e: non-ghost error never retries", should_retry_ghost(
-        "some other error", cancelled=False, attempts=0) is False)
-    _check("2f: None error never retries", should_retry_ghost(
-        None, cancelled=False, attempts=0) is False)
+        True, cancelled=True, attempts=0) is False)
+    _check("2e: a non-ghost outcome never retries", should_retry_ghost(
+        False, cancelled=False, attempts=0) is False)
+    _check("2f: a diagnosed empty turn never retries", should_retry_ghost(
+        apply_ghost_completion_guard(
+            success=True, cancelled=False, error=None, prompt="p",
+            assistant_seen=False, total_usage={}, result_seen=True,
+            empty_turn_error="diagnosed_cause",
+        ).retry_ghost, cancelled=False, attempts=0) is False)
 
 
 def _simulate_runner_loop(attempt_results: list[str]) -> dict:
@@ -101,8 +108,8 @@ def _simulate_runner_loop(attempt_results: list[str]) -> dict:
             final_success, final_error = True, None
             break
         # ghost: finalize like the runner does, then consult the helper.
-        _, final_error = _ghost_guard_result()
-        if should_retry_ghost(final_error, cancelled=False, attempts=ghost_retries):
+        _, final_error, retry_ghost = _ghost_guard_result()
+        if should_retry_ghost(retry_ghost, cancelled=False, attempts=ghost_retries):
             ghost_retries += 1
             continue
         # Budget exhausted (or non-retryable): turn fails here.

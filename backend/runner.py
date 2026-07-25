@@ -2989,7 +2989,7 @@ async def _run_one_turn(
     # "success" ResultMessage with NO assistant output — the prompt was
     # never executed by THIS run. Shared with the Codex runner so both
     # providers fail closed identically instead of binding a fake reply.
-    success, error = apply_ghost_completion_guard(
+    success, error, _ = apply_ghost_completion_guard(
         success=success,
         cancelled=cancelled,
         error=error,

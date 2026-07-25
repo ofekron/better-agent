@@ -11,7 +11,7 @@ runners cannot drift.
 from __future__ import annotations
 
 import logging
-from typing import Any, Optional
+from typing import Any, NamedTuple, Optional
 
 log = logging.getLogger(__name__)
 
@@ -27,6 +27,15 @@ GHOST_RETRY_BACKOFF_S = 3.0
 # nothing passes ``empty_turn_error`` instead, and that turn is terminal:
 # only this generic ghost is retried.
 GHOST_ERROR = "prompt_not_executed"
+
+
+class GuardResult(NamedTuple):
+    """``retry_ghost`` is decided where the failure is classified, so the
+    retry decision never has to re-read the error text — the message stays
+    free to change (translation, prefixes) without altering behavior."""
+    success: bool
+    error: Optional[str]
+    retry_ghost: bool
 
 
 def token_usage_is_zero(usage: Any) -> bool:
@@ -57,18 +66,18 @@ def apply_ghost_completion_guard(
     total_usage: Any,
     result_seen: bool,
     empty_turn_error: Optional[str] = None,
-) -> tuple[bool, Optional[str]]:
+) -> GuardResult:
     """Fail closed when a turn reports success but produced no assistant
     output for a non-empty prompt with zero token usage — a provider
     ghost completion (e.g. a second CLI spawned behind a still-live
     instance, or a Codex ``task_complete`` with ``last_agent_message``
-    null and no response items). Returns ``(success, error)``; a turn
-    already failing or cancelled is left alone.
+    null and no response items). A turn already failing or cancelled is
+    left alone.
 
     ``empty_turn_error`` is the caller's diagnosed cause for the empty
     turn (e.g. exhausted provider credits). When supplied it replaces the
-    generic ``GHOST_ERROR``, which also makes the failure terminal —
-    ``should_retry_ghost`` retries only the undiagnosed ghost."""
+    generic ``GHOST_ERROR`` and the failure is terminal: only the
+    undiagnosed ghost is worth another attempt."""
     if (
         result_seen
         and success
@@ -83,29 +92,25 @@ def apply_ghost_completion_guard(
             "output for a non-empty prompt — marking %s",
             empty_turn_error or GHOST_ERROR,
         )
-        return False, empty_turn_error or GHOST_ERROR
-    return success, error
+        return GuardResult(False, empty_turn_error or GHOST_ERROR, empty_turn_error is None)
+    return GuardResult(success, error, False)
 
 
 def should_retry_ghost(
-    error: Optional[str], *, cancelled: bool, attempts: int,
-    diagnosed: bool = False,
+    retry_ghost: bool, *, cancelled: bool, attempts: int,
 ) -> bool:
-    """True when a ``GHOST_ERROR`` ghost completion should be retried,
-    given how many ghost retries have already run. The provider
+    """True when the guard's undiagnosed ghost completion should be
+    retried, given how many ghost retries have already run. The provider
     intermittently returns an empty/failed response it logs as a
     successful zero-usage turn; a fresh attempt usually succeeds, so the
     runner retries up to ``GHOST_RETRY_MAX`` times before failing closed.
 
-    ``attempts`` is the count of ghost retries already performed (0 on the
-    first ghost). ``diagnosed`` states outright that the caller knows why
-    the turn was empty (it passed an ``empty_turn_error``, e.g. exhausted
-    credits): that failure is terminal, and saying so explicitly keeps
-    retryability independent of how the error reads. Non-ghost errors,
-    cancels, and an exhausted budget all return False."""
+    ``retry_ghost`` is ``GuardResult.retry_ghost`` — the classification
+    made where the failure was diagnosed. ``attempts`` is the count of
+    ghost retries already performed (0 on the first ghost). Cancels and an
+    exhausted budget still return False."""
     return (
-        not diagnosed
-        and error == GHOST_ERROR
+        retry_ghost
         and not cancelled
         and attempts < GHOST_RETRY_MAX
     )
