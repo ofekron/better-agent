@@ -15,13 +15,6 @@ export interface FileAttachment {
   size: number;
 }
 
-export type SessionProcessingUpdate = {
-  kind: "snapshot";
-  rootIds: string[];
-  epoch: string;
-  revision: number;
-};
-
 export type WSEventType =
   // Primary inner event: a pass-through of one claude CLI session jsonl
   // line. The backend's FileTailer no longer translates these — they
@@ -65,10 +58,6 @@ export type WSEventType =
   | "snapshot_refresh_required"
   | "snapshot_refresh_complete"
   | "snapshot_cancelled"
-  // Backend reconcile (post-restart) appended late events to a
-  // COLLAPSED historical turn — its stale stub must be replaced so an
-  // expanded turn re-fetches fresh full events.
-  | "stub_invalidated"
   // Per-event message updates (currently only fired when the lazy
   // assistant message is born — the rest of the streaming state still
   // flows via manager_event/worker_event frames that the frontend
@@ -177,10 +166,6 @@ export type WSEventType =
   | "message_ask_result_changed"
   // Which session the user chose from a turn's picker (highlighted row).
   | "message_ask_choice_changed"
-  // Async session-level processing progress (reconcile, large-replay).
-  | "session_processing_started"
-  | "session_processing_finished"
-  | "session_processing_state"
   // Backend reconcile completed (fast or slow). Initial GET may have
   // returned stale cache; frontend silently refetches the session tree.
   | "session_reconciled"
@@ -781,11 +766,6 @@ export interface ChatMessage {
    * full message via
    * `GET /api/sessions/{id}/messages/{messageId}/events`. */
   stub?: { event_count: number; last_events: WSEvent[] };
-  /** Monotonic counter bumped whenever a `stub_invalidated` WS frame
-   * replaces this message's stub. The collapse/expand component keys its
-   * fetch cache on `id:stubVersion` so a re-stubbed (already-expanded)
-   * turn busts its cached full events and re-fetches. */
-  stubVersion?: number;
 }
 
 export interface FileDiscussion {

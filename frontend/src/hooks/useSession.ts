@@ -5,7 +5,6 @@ import type {
   ProviderRunner,
   RunInfo,
   Session,
-  SessionProcessingUpdate,
   ChatMessage,
   CapabilityContext,
   WSEvent,
@@ -28,24 +27,6 @@ import { SingleFlight } from "../lib/singleFlight";
 import { wireHarnessProfileId } from "../lib/harnessProfile";
 
 export { sortSessionsForList };
-
-export type SessionProcessingState = {
-  epoch: string | null;
-  revision: number;
-  roots: Record<string, boolean>;
-};
-
-export function reduceSessionProcessing(
-  previous: SessionProcessingState,
-  update: SessionProcessingUpdate,
-): SessionProcessingState {
-  if (previous.epoch === update.epoch && update.revision < previous.revision) return previous;
-  return {
-    epoch: update.epoch,
-    revision: update.revision,
-    roots: Object.fromEntries(update.rootIds.map((rootId) => [rootId, true])),
-  };
-}
 
 export interface CreateSessionOptions {
   name: string;
@@ -1022,18 +1003,6 @@ export function useSession(authStatus?: string) {
     Record<string, RunInfo[]>
   >({});
   const runStateBySessionRef = useRef<Record<string, RunInfo[]>>({});
-  // Per-root-id reconcile-in-progress flag. Backend fires
-  // `session_processing_started/finished` ONLY when the async
-  // reconcile crosses its 0.3s threshold — fast reconciles never
-  // touch this state (no UI flash). State (not ref) so badges
-  // re-render. Keyed by root_id, NOT app_session_id, because
-  // reconcile is per-root-tree.
-  const [processingState, setProcessingState] = useState<SessionProcessingState>({
-    epoch: null,
-    revision: 0,
-    roots: {},
-  });
-  const processingByRoot = processingState.roots;
 
   // Ref mirrors so callbacks with [] deps can read fresh state without
   // re-creating themselves (selectSession in particular needs to peek
@@ -2047,43 +2016,6 @@ export function useSession(authStatus?: string) {
     [mergeReplayIntoNode, bumpLastSeq]
   );
 
-  /** Apply a `stub_invalidated` payload: a backend reconcile appended
-   * late events to a collapsed historical turn, so its stale stub (and
-   * any previously-fetched full events the bubble cached) must be
-   * dropped. Re-stub the message + empty all its event lists and bump
-   * `stubVersion` so an already-expanded bubble busts its fetch cache
-   * and re-fetches fresh. */
-  const applyStubInvalidated = useCallback(
-    (
-      sessionId: string,
-      msgId: string,
-      stub: { event_count: number; last_events: WSEvent[] }
-    ) => {
-      setCurrentSession((prev) => {
-        if (!prev || !findNode(prev, sessionId)) return prev;
-        return updateNodeById(prev, sessionId, (node) => {
-          const messages = node.messages || [];
-          const idx = messages.findIndex((m) => m.id === msgId);
-          if (idx === -1) return node;
-          const m = messages[idx];
-          const next: ChatMessage = {
-            ...m,
-            stub,
-            stubVersion: (m.stubVersion ?? 0) + 1,
-            events: [],
-            workers: m.workers
-              ? m.workers.map((w) => ({ ...w, events: [] }))
-              : m.workers,
-          };
-          const merged = [...messages];
-          merged[idx] = next;
-          return { ...node, messages: merged };
-        });
-      });
-    },
-    []
-  );
-
   /** Extract the claude event UUID from a WS event, handling both
    * agent_message, legacy manager_event, and worker_event wrappers
    * (mirrors the backend's _event_uuid in orchs/base.py). */
@@ -2895,27 +2827,10 @@ export function useSession(authStatus?: string) {
     [],
   );
 
-  /** WS handler for backend async-reconcile progress. Backend fires
-   * `session_processing_started/finished` ONLY for reconciles that
-   * cross the 0.3s threshold; fast reconciles never reach this
-   * handler, so the badge doesn't flash for sub-perceptible work. */
-  const applySessionProcessing = useCallback(
-    (update: SessionProcessingUpdate) => {
-      setProcessingState((previous) => reduceSessionProcessing(previous, update));
-    },
-    []
-  );
-
-  /** Backend reconcile found genuine historical changes — silently
-   * refetch the session tree if the user is currently viewing it. The
-   * backend only emits this when the reconcile's `changes` list was
-   * non-empty (see `session_manager._async_reconcile_with_progress`),
-   * so a no-op reconcile (the common case on a freshly-opened session
-   * whose REST snapshot was already current) never reaches here —
-   * that's what stops the redundant refetch+re-render on every open.
-   * `authoritative=true` (snapshot-refresh recovery path) still always
-   * refetches regardless of streaming state or emit-source change
-   * detection; that path is untouched by this guarantee. */
+  /** Backend reconcile completed — silently refetch the session tree
+   * if the user is currently viewing it. The initial GET may have
+   * returned stale cache; this replaces it with the reconciled state
+   * without a loading indicator or optimistic swap. */
   const applySessionReconciled = useCallback(
     (rootId: string, authoritative = false) => {
       const cur = currentSessionRef.current;
@@ -3002,7 +2917,6 @@ export function useSession(authStatus?: string) {
     addMessages,
     replaceMessages,
     applyMessagesReplay,
-    applyStubInvalidated,
     getSinceSeq,
     getEventsFromSeq,
     getEventsCursorKnown,
@@ -3036,8 +2950,6 @@ export function useSession(authStatus?: string) {
     applyMessageRunMeta,
     applyMessageAskResult,
     applyMessageAskChoice,
-    processingByRoot,
-    applySessionProcessing,
     applySessionReconciled,
     patchMessageStatus,
     appendFork,

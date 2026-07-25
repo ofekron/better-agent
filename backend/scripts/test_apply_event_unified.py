@@ -15,7 +15,8 @@ for both live ingest and disk replay:
      (one flat shape for both manager and native modes).
   6. Both modes write events to flat `msg.events` and never carry a
      `manager` scope on the msg.
-  7. REST reconcile (`_reconcile_msg_events_from_jsonl` semantics)
+  7. The fold (`hydrate_msg_events_from_jsonl` — the single events-
+     writer for both cold-load and the write-time projection drainer)
      picks up the deterministic per-msg_id slice from events.jsonl
      and applies via `apply_event(source_is_provider_stream=False)`.
   8. Shape normalization: manager_event-wrapped events land on
@@ -123,8 +124,7 @@ def test_idempotent_reapply_does_not_duplicate() -> bool:
     call before the append fires."""
     sid, msg = _mk_session("manager")
     strategy = get_strategy("manager")
-    ctx = ApplyEventCtx(manager_sid_holder={"id": None}, workers_list=[],
-                        user_msg=None, root_id=sid)
+    ctx = ApplyEventCtx(manager_sid_holder={"id": None}, user_msg=None, root_id=sid)
     ev = _manager_event("u1")
     strategy.apply_event(app_session_id=sid, msg=msg, event=ev, ctx=ctx, source_is_provider_stream=False)
     strategy.apply_event(app_session_id=sid, msg=msg, event=ev, ctx=ctx, source_is_provider_stream=False)
@@ -172,8 +172,7 @@ def test_wire_markers_skip_msg_events() -> bool:
     must remain a no-op (else REST reconcile multiplies them)."""
     sid, msg = _mk_session("manager")
     strategy = get_strategy("manager")
-    ctx = ApplyEventCtx(manager_sid_holder={"id": None}, workers_list=[],
-                        user_msg=None, root_id=sid)
+    ctx = ApplyEventCtx(manager_sid_holder={"id": None}, user_msg=None, root_id=sid)
     events = [
         {"type": "turn_start", "data": {"manager_session_id": "s1"}},
         _manager_event("u1"),
@@ -200,8 +199,7 @@ def test_live_true_writes_events_jsonl_with_msg_id() -> bool:
     without heuristic turn-grouping."""
     sid, msg = _mk_session("manager")
     strategy = get_strategy("manager")
-    ctx = ApplyEventCtx(manager_sid_holder={"id": None}, workers_list=[],
-                        user_msg=None, root_id=sid)
+    ctx = ApplyEventCtx(manager_sid_holder={"id": None}, user_msg=None, root_id=sid)
     strategy.apply_event(app_session_id=sid, msg=msg,
                          event={"type": "turn_start", "data": {"manager_session_id": "s1"}},
                          ctx=ctx, source_is_provider_stream=True)
@@ -227,8 +225,7 @@ def test_live_false_skips_events_jsonl() -> bool:
     code without double-writing the source."""
     sid, msg = _mk_session("manager")
     strategy = get_strategy("manager")
-    ctx = ApplyEventCtx(manager_sid_holder={"id": None}, workers_list=[],
-                        user_msg=None, root_id=sid)
+    ctx = ApplyEventCtx(manager_sid_holder={"id": None}, user_msg=None, root_id=sid)
     strategy.apply_event(app_session_id=sid, msg=msg, event=_manager_event("u1"),
                          ctx=ctx, source_is_provider_stream=False)
     log, _, _ = event_ingester.read_events(sid)
@@ -245,8 +242,7 @@ def test_live_true_can_skip_journal_write() -> bool:
     without recursively appending the same event back to events.jsonl."""
     sid, msg = _mk_session("manager")
     strategy = get_strategy("manager")
-    ctx = ApplyEventCtx(manager_sid_holder={"id": None}, workers_list=[],
-                        user_msg=None, root_id=sid)
+    ctx = ApplyEventCtx(manager_sid_holder={"id": None}, user_msg=None, root_id=sid)
     strategy.apply_event(app_session_id=sid, msg=msg, event=_manager_event("u1"),
                          ctx=ctx, source_is_provider_stream=True,
                          write_journal=False)
@@ -266,8 +262,7 @@ def test_manager_after_event_pins_session_id() -> bool:
     sid, msg = _mk_session("manager")
     strategy = get_strategy("manager")
     holder = {"id": None}
-    ctx = ApplyEventCtx(manager_sid_holder=holder, workers_list=[],
-                        user_msg=None, root_id=sid)
+    ctx = ApplyEventCtx(manager_sid_holder=holder, user_msg=None, root_id=sid)
     strategy.apply_event(app_session_id=sid, msg=msg,
                          event={"type": "turn_start", "data": {"manager_session_id": "sess-A"}},
                          ctx=ctx, source_is_provider_stream=False)
@@ -283,8 +278,7 @@ def test_native_has_no_manager_scope() -> bool:
     `manager` key on the scaffold."""
     sid, msg = _mk_session("native")
     strategy = get_strategy("native")
-    ctx = ApplyEventCtx(manager_sid_holder=None, workers_list=[],
-                        user_msg=None, root_id=sid)
+    ctx = ApplyEventCtx(manager_sid_holder=None, user_msg=None, root_id=sid)
     strategy.apply_event(app_session_id=sid, msg=msg, event=_manager_event("u1"),
                          ctx=ctx, source_is_provider_stream=False)
     fresh = session_manager.get(sid)
@@ -302,8 +296,7 @@ def test_shape_normalization_manager_event_unwraps() -> bool:
     sees one uniform stream regardless of path of origin."""
     sid, msg = _mk_session("native")
     strategy = get_strategy("native")
-    ctx = ApplyEventCtx(manager_sid_holder=None, workers_list=[],
-                        user_msg=None, root_id=sid)
+    ctx = ApplyEventCtx(manager_sid_holder=None, user_msg=None, root_id=sid)
     strategy.apply_event(app_session_id=sid, msg=msg, event=_manager_event("u1", "wrapped"),
                          ctx=ctx, source_is_provider_stream=False)
     strategy.apply_event(app_session_id=sid, msg=msg, event=_agent_message("u2", "raw"),
@@ -379,7 +372,7 @@ def test_user_claude_uuid_anchor_wired_from_both_shapes() -> bool:
     }
     strategy_a.apply_event(app_session_id=sid_a, msg=asst_a, event=live_user_evt,
                            ctx=ApplyEventCtx(manager_sid_holder={"id": None},
-                                             workers_list=[], user_msg=user_a_ref,
+                                             user_msg=user_a_ref,
                                              root_id=sid_a),
                            source_is_provider_stream=False)
     refreshed_a = session_manager.get(sid_a)["messages"][0]
@@ -399,8 +392,7 @@ def test_user_claude_uuid_anchor_wired_from_both_shapes() -> bool:
                  "message": {"content": "hi"}, "isSidechain": False},
     }
     strategy_b.apply_event(app_session_id=sid_b, msg=asst_b, event=raw_user_evt,
-                           ctx=ApplyEventCtx(manager_sid_holder=None, workers_list=[],
-                                             user_msg=user_b_ref, root_id=sid_b),
+                           ctx=ApplyEventCtx(manager_sid_holder=None, user_msg=user_b_ref, root_id=sid_b),
                            source_is_provider_stream=False)
     refreshed_b = session_manager.get(sid_b)["messages"][0]
     if refreshed_b.get("agent_message_uuid") != "claude-uuid-2":
@@ -417,7 +409,7 @@ def test_non_render_etypes_skip_msg_events_but_reach_events_jsonl() -> bool:
 
     Pins the leak that caused 97 REST `command_received` envelopes to
     pollute session `46bafa51…`'s assistant messages via
-    `_reconcile_msg_events_from_jsonl` orphan-bracketing. The gate
+    `hydrate_msg_events_from_jsonl` orphan-bracketing. The gate
     lives in `OrchestrationStrategy.apply_event` at the
     append/replace block on `msg.events`. The events.jsonl ingest
     tail still fires (source_is_provider_stream=True) so audit-trail visibility is
@@ -436,8 +428,7 @@ def test_non_render_etypes_skip_msg_events_but_reach_events_jsonl() -> bool:
                                        "method": "POST", "path": "/api/x"}}
         strategy.apply_event(
             app_session_id=sid, msg=msg, event=ev,
-            ctx=ApplyEventCtx(manager_sid_holder=None, workers_list=[],
-                              user_msg=None, root_id=sid),
+            ctx=ApplyEventCtx(manager_sid_holder=None, user_msg=None, root_id=sid),
             source_is_provider_stream=True,
         )
         _drain_journal(sid, 1)
@@ -459,8 +450,7 @@ def test_non_render_etypes_skip_msg_events_but_reach_events_jsonl() -> bool:
                                         "method": "GET", "path": "/api/y"}}
         strategy.apply_event(
             app_session_id=sid2, msg=msg2, event=ev2,
-            ctx=ApplyEventCtx(manager_sid_holder=None, workers_list=[],
-                              user_msg=None, root_id=sid2),
+            ctx=ApplyEventCtx(manager_sid_holder=None, user_msg=None, root_id=sid2),
             source_is_provider_stream=False,
         )
         refreshed2 = session_manager.get(sid2)
@@ -506,8 +496,7 @@ def test_same_uuid_streaming_update_dual_surface_dedup() -> bool:
                "data": {"uuid": uid, "type": "assistant",
                         "message": {"role": "assistant",
                                     "content": [{"type": "text", "text": "pong"}]}}}
-    ctx = ApplyEventCtx(manager_sid_holder=None, workers_list=[],
-                        user_msg=None, root_id=sid)
+    ctx = ApplyEventCtx(manager_sid_holder=None, user_msg=None, root_id=sid)
     strategy.apply_event(app_session_id=sid, msg=msg, event=ev_p,
                          ctx=ctx, source_is_provider_stream=True)
     strategy.apply_event(app_session_id=sid, msg=msg, event=ev_pong,
@@ -623,7 +612,7 @@ def test_reconcile_after_streaming_preserves_latest_snapshot() -> bool:
          msg.events ends with "pong", events.jsonl has 2 rows.
       2. "Backend restart": the in-memory `_seen_uuids` cache is
          dropped; events.jsonl on disk is the source of truth.
-      3. Frontend reconnect → `_reconcile_msg_events_from_jsonl`
+      3. Cold reload / fold catch-up → `hydrate_msg_events_from_jsonl`
          re-walks events.jsonl and re-applies via
          `apply_event(source_is_provider_stream=False)`.
       4. Result MUST be msg.events still carries "pong" (latest
@@ -647,8 +636,7 @@ def test_reconcile_after_streaming_preserves_latest_snapshot() -> bool:
                "data": {"uuid": uid, "type": "assistant",
                         "message": {"role": "assistant",
                                     "content": [{"type": "text", "text": "pong"}]}}}
-    ctx = ApplyEventCtx(manager_sid_holder=None, workers_list=[],
-                        user_msg=None, root_id=sid)
+    ctx = ApplyEventCtx(manager_sid_holder=None, user_msg=None, root_id=sid)
     strategy.apply_event(app_session_id=sid, msg=msg, event=ev_p,
                          ctx=ctx, source_is_provider_stream=True)
     strategy.apply_event(app_session_id=sid, msg=msg, event=ev_pong,
@@ -661,7 +649,7 @@ def test_reconcile_after_streaming_preserves_latest_snapshot() -> bool:
     event_ingester.close_all()
     # Trigger reconcile (the path the REST GET /api/sessions/{sid}
     # handler runs after every backend restart).
-    from render_tree_hydrate import reconcile_msg_events_from_jsonl as _reconcile_msg_events_from_jsonl
+    from render_tree_hydrate import hydrate_msg_events_from_jsonl as _reconcile_msg_events_from_jsonl
     # Force msg.events to look "lagging" so the reconcile path actually
     # walks events.jsonl — emulates the post-restart state where the
     # session was hydrated from disk and msg.events == disk state.
@@ -721,8 +709,7 @@ def test_reconcile_fills_partial_finalized_msg_from_orphan_tail() -> bool:
                         "message": {"role": "assistant",
                                     "content": [{"type": "tool_use",
                                                  "name": "Bash", "input": {}}]}}}
-    ctx = ApplyEventCtx(manager_sid_holder=None, workers_list=[],
-                        user_msg=None, root_id=sid)
+    ctx = ApplyEventCtx(manager_sid_holder=None, user_msg=None, root_id=sid)
     # 1. Live stream applies ONLY the Bash → cache msg + events.jsonl.
     strategy.apply_event(app_session_id=sid, msg=msg, event=ev_bash,
                          ctx=ctx, source_is_provider_stream=True)
@@ -758,7 +745,7 @@ def test_reconcile_fills_partial_finalized_msg_from_orphan_tail() -> bool:
         return False
 
     # 4. Reconcile (the REST GET path).
-    from render_tree_hydrate import reconcile_msg_events_from_jsonl as _reconcile_msg_events_from_jsonl
+    from render_tree_hydrate import hydrate_msg_events_from_jsonl as _reconcile_msg_events_from_jsonl
     tree = session_manager.get_root_tree(sid)
     _reconcile_msg_events_from_jsonl(tree)
 
@@ -791,8 +778,7 @@ def test_convergence_manager_event_and_agent_message_write_identical_jsonl() -> 
     # Live path: manager_event wrapper
     sid1, msg1 = _mk_session("native")
     strategy = get_strategy("native")
-    ctx1 = ApplyEventCtx(manager_sid_holder=None, workers_list=[],
-                         user_msg=None, root_id=sid1)
+    ctx1 = ApplyEventCtx(manager_sid_holder=None, user_msg=None, root_id=sid1)
     ev_live = _manager_event(uid, text)
     strategy.apply_event(app_session_id=sid1, msg=msg1, event=ev_live,
                          ctx=ctx1, source_is_provider_stream=True)
@@ -806,8 +792,7 @@ def test_convergence_manager_event_and_agent_message_write_identical_jsonl() -> 
 
     # Restore path: raw agent_message
     sid2, msg2 = _mk_session("native")
-    ctx2 = ApplyEventCtx(manager_sid_holder=None, workers_list=[],
-                         user_msg=None, root_id=sid2)
+    ctx2 = ApplyEventCtx(manager_sid_holder=None, user_msg=None, root_id=sid2)
     ev_restore = _agent_message(uid, text)
     strategy.apply_event(app_session_id=sid2, msg=msg2, event=ev_restore,
                          ctx=ctx2, source_is_provider_stream=True)
@@ -862,8 +847,7 @@ def test_live_path_sets_attention_marker_from_raw_tag() -> bool:
 
     sid, msg = _mk_session("native")
     strategy = get_strategy("native")
-    ctx = ApplyEventCtx(manager_sid_holder=None, workers_list=[],
-                        user_msg=None, root_id=sid)
+    ctx = ApplyEventCtx(manager_sid_holder=None, user_msg=None, root_id=sid)
 
     file_ref_resolver.set_tag_rules([{
         "tag": "ALL_TASKS__DONE",
@@ -894,8 +878,7 @@ def test_live_path_sets_attention_marker_from_raw_tag() -> bool:
 def test_worker_event_routes_to_existing_panel_owner() -> bool:
     sid, owner_msg = _mk_session("manager")
     strategy = get_strategy("manager")
-    ctx = ApplyEventCtx(manager_sid_holder={"id": None}, workers_list=[],
-                        user_msg=None, root_id=sid)
+    ctx = ApplyEventCtx(manager_sid_holder={"id": None}, user_msg=None, root_id=sid)
     delegation_id = "del-worker-owner"
 
     strategy.apply_event(
@@ -962,8 +945,7 @@ def test_worker_event_routes_to_existing_panel_owner() -> bool:
 def test_hydration_recovers_legacy_worker_event_owner() -> bool:
     sid, owner_msg = _mk_session("manager")
     strategy = get_strategy("manager")
-    ctx = ApplyEventCtx(manager_sid_holder={"id": None}, workers_list=[],
-                        user_msg=None, root_id=sid)
+    ctx = ApplyEventCtx(manager_sid_holder={"id": None}, user_msg=None, root_id=sid)
     delegation_id = "del-legacy-owner"
 
     strategy.apply_event(

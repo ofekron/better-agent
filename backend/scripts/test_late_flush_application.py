@@ -182,8 +182,6 @@ async def _scenario_linger() -> None:
     await _consume_to_complete(rs)
     check(prov._runs.get(rs.run_id) is rs, "run still registered (linger)")
 
-    session_manager.consume_reconcile_dirty(root_id)
-
     # Late flush #1: CLI writes after the turn finalized, runner lingers.
     target = _append(rs, "u2", "late-flush-linger")
     advanced = await _wait_for(lambda: rs.processed_byte >= target)
@@ -207,8 +205,6 @@ async def _scenario_linger() -> None:
           "lingering late flush ingested as orphan (msg_id=None)")
     check(u3 is not None and u3.get("msg_id") is None,
           "exit-drain late flush ingested as orphan (msg_id=None)")
-    check(session_manager.consume_reconcile_dirty(root_id),
-          "reconcile-dirty armed so a later read brackets onto the msg")
     check(rs.queue.empty(),
           "no late events stranded in the abandoned run queue")
 

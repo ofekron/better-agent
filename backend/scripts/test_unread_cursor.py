@@ -92,12 +92,12 @@ def test_append_bumps_unread() -> None:
     strategy.apply_event(
         app_session_id=sid, msg=msg,
         event=_native_event("uuid-a"),
-        ctx=ctx, source_is_provider_stream=True,
+        ctx=ctx, source_is_provider_stream=True, fires_side_effects=True,
     )
     strategy.apply_event(
         app_session_id=sid, msg=msg,
         event=_native_event("uuid-b"),
-        ctx=ctx, source_is_provider_stream=True,
+        ctx=ctx, source_is_provider_stream=True, fires_side_effects=True,
     )
 
     unread_fires = [f for f in fires if f.get("kind") == "unread_changed"]
@@ -120,7 +120,7 @@ def test_replace_does_not_bump() -> None:
     strategy.apply_event(
         app_session_id=sid, msg=msg,
         event=_native_event("uuid-streaming", text="chunk-1"),
-        ctx=ctx, source_is_provider_stream=True,
+        ctx=ctx, source_is_provider_stream=True, fires_side_effects=True,
     )
     base_count = session_manager.get_unread_count(sid)
     assert base_count == 1, f"expected 1 after first append, got {base_count}"
@@ -132,7 +132,7 @@ def test_replace_does_not_bump() -> None:
     strategy.apply_event(
         app_session_id=sid, msg=msg,
         event=_native_event("uuid-streaming", text="chunk-1-extended"),
-        ctx=ctx, source_is_provider_stream=True,
+        ctx=ctx, source_is_provider_stream=True, fires_side_effects=True,
     )
 
     unread_fires = [f for f in fires if f.get("kind") == "unread_changed"]
@@ -153,7 +153,7 @@ def test_mark_seen_zeros() -> None:
         strategy.apply_event(
             app_session_id=sid, msg=msg,
             event=_native_event(u),
-            ctx=ctx, source_is_provider_stream=True,
+            ctx=ctx, source_is_provider_stream=True, fires_side_effects=True,
         )
     # 3 events in ONE message = 1 unread message
     assert session_manager.get_unread_count(sid) == 1
@@ -175,7 +175,7 @@ def test_mark_seen_does_not_copy_session_tree() -> None:
     strategy.apply_event(
         app_session_id=sid, msg=msg,
         event=_native_event("copy-guard"),
-        ctx=ctx, source_is_provider_stream=True,
+        ctx=ctx, source_is_provider_stream=True, fires_side_effects=True,
     )
     original_deepcopy = session_manager_module.copy.deepcopy
 
@@ -201,7 +201,7 @@ def test_mark_seen_uses_journal_latest_uid() -> None:
     strategy.apply_event(
         app_session_id=sid, msg=msg,
         event=_native_event("scan-fallback"),
-        ctx=ctx, source_is_provider_stream=True,
+        ctx=ctx, source_is_provider_stream=True, fires_side_effects=True,
     )
 
     original = session_manager_module._event_uuid_safe
@@ -269,7 +269,7 @@ def test_mark_seen_avoids_full_tree_write() -> None:
     strategy.apply_event(
         app_session_id=sid, msg=msg,
         event=_native_event("sidecar-head"),
-        ctx=ctx, source_is_provider_stream=True,
+        ctx=ctx, source_is_provider_stream=True, fires_side_effects=True,
     )
 
     original_write = session_store.write_session_full
@@ -301,7 +301,7 @@ def test_seen_cursor_write_is_idempotent() -> None:
     strategy.apply_event(
         app_session_id=sid, msg=msg,
         event=_native_event("idempotent-sidecar"),
-        ctx=ctx, source_is_provider_stream=True,
+        ctx=ctx, source_is_provider_stream=True, fires_side_effects=True,
     )
     session_manager.mark_seen(sid, "idempotent-sidecar")
     seen_path = Path(_TMP_HOME) / "sessions" / f"{sid}.seen.json"
@@ -319,7 +319,7 @@ def test_mark_unread_clears_seen_sidecar() -> None:
     strategy.apply_event(
         app_session_id=sid, msg=msg,
         event=_native_event("clear-sidecar"),
-        ctx=ctx, source_is_provider_stream=True,
+        ctx=ctx, source_is_provider_stream=True, fires_side_effects=True,
     )
     session_manager.mark_seen(sid, "clear-sidecar")
     assert session_store.read_seen_cursors(sid).get(sid) == "clear-sidecar"
@@ -348,14 +348,14 @@ def test_persistence_across_reload() -> None:
         strategy.apply_event(
             app_session_id=sid, msg=msg,
             event=_native_event(u),
-            ctx=ctx, source_is_provider_stream=True,
+            ctx=ctx, source_is_provider_stream=True, fires_side_effects=True,
         )
     session_manager.mark_seen(sid, "p3")
     # Apply one more — should be unread again.
     strategy.apply_event(
         app_session_id=sid, msg=msg,
         event=_native_event("p4"),
-        ctx=ctx, source_is_provider_stream=True,
+        ctx=ctx, source_is_provider_stream=True, fires_side_effects=True,
     )
     assert session_manager.get_unread_count(sid) == 1
 

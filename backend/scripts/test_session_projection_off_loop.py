@@ -23,10 +23,10 @@ class _SlowSessionManager:
         self.started = asyncio.Event()
         self.applied: list[int] = []
         self.fail_seq: int | None = None
-        self.dirty: list[str] = []
 
     def apply_written_journal_event(
         self, _root_id, _sid, _msg_id, _event_type, _data, seq,
+        *, fold_start_watermark: int = 0,
     ) -> None:
         loop = _LOOP
         loop.call_soon_threadsafe(self.started.set)
@@ -36,8 +36,8 @@ class _SlowSessionManager:
             raise RuntimeError("induced projection failure")
         self.applied.append(seq)
 
-    def mark_reconcile_dirty(self, root_id: str) -> None:
-        self.dirty.append(root_id)
+    def get_fold_watermark(self, root_id: str) -> int:
+        return 0
 
 
 _LOOP: asyncio.AbstractEventLoop
@@ -55,6 +55,10 @@ async def _test_projection_keeps_loop_responsive() -> None:
     global _LOOP
     _LOOP = asyncio.get_running_loop()
     original = event_bus_subscribers.session_manager
+    dispatcher = event_bus_subscribers._SESSION_PROJECTION_DISPATCHER
+    original_log_error = dispatcher._mark_dirty
+    logged_errors: list[str] = []
+    dispatcher._mark_dirty = lambda root_id, _exc: logged_errors.append(root_id)
     slow = _SlowSessionManager()
     event_bus_subscribers.session_manager = slow
     stop = asyncio.Event()
@@ -85,7 +89,7 @@ async def _test_projection_keeps_loop_responsive() -> None:
         assert slow.applied == [], "projection unexpectedly acknowledged while blocked"
         slow.release.set()
         await asyncio.wait_for(
-            event_bus_subscribers._SESSION_PROJECTION_DISPATCHER.barrier("root"),
+            asyncio.to_thread(event_bus_subscribers._SESSION_PROJECTION_DISPATCHER.barrier, "root"),
             timeout=1,
         )
         assert slow.applied == [1, 2], slow.applied
@@ -103,11 +107,11 @@ async def _test_projection_keeps_loop_responsive() -> None:
             ),
         )
         await asyncio.wait_for(
-            event_bus_subscribers._SESSION_PROJECTION_DISPATCHER.barrier("root"),
+            asyncio.to_thread(event_bus_subscribers._SESSION_PROJECTION_DISPATCHER.barrier, "root"),
             timeout=1,
         )
         assert slow.applied == [1, 2], slow.applied
-        assert slow.dirty == [], slow.dirty
+        assert logged_errors == [], logged_errors
         seq = event_ingester.ingest(
             "root",
             sid="sid",
@@ -128,15 +132,16 @@ async def _test_projection_keeps_loop_responsive() -> None:
             ),
         )
         await asyncio.wait_for(
-            event_bus_subscribers._SESSION_PROJECTION_DISPATCHER.barrier("root"),
+            asyncio.to_thread(event_bus_subscribers._SESSION_PROJECTION_DISPATCHER.barrier, "root"),
             timeout=1,
         )
-        assert slow.dirty == ["root"], slow.dirty
+        assert logged_errors == ["root"], logged_errors
         stop.set()
         ticks = await beat
         assert ticks >= 3, f"event loop blocked; heartbeat ticks={ticks}"
     finally:
         event_bus_subscribers.session_manager = original
+        dispatcher._mark_dirty = original_log_error
         stop.set()
         if not beat.done():
             beat.cancel()

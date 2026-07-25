@@ -84,45 +84,6 @@ async def _provider_barriers() -> None:
     assert not ran
 
 
-async def _reconcile_barriers() -> None:
-    import session_manager as sm
-
-    manager = sm.manager
-    manager.bind_reconcile_fn(lambda _root, after_seq=0: [])
-    root = "admitted-before-submit"
-    manager.mark_reconcile_dirty(root)
-    admitted = manager.schedule_reconcile_if_needed(root)
-    assert admitted is not None
-    await sm.shutdown_reconciles()
-    assert admitted.cancelled()
-
-    rejected_root = "rejected-before-consume"
-    manager.mark_reconcile_dirty(rejected_root)
-    assert manager.schedule_reconcile_if_needed(rejected_root) is None
-    assert manager.is_reconcile_dirty(rejected_root)
-
-    sm.reopen_reconciles()
-    entered = threading.Event()
-    release = threading.Event()
-
-    def reconcile(_root: str, *, after_seq: int = 0) -> list:
-        entered.set()
-        release.wait()
-        return []
-
-    manager.bind_reconcile_fn(reconcile)
-    running_root = "running-worker"
-    manager.mark_reconcile_dirty(running_root)
-    running = manager.schedule_reconcile_if_needed(running_root)
-    assert running is not None
-    await asyncio.to_thread(entered.wait)
-    shutdown = asyncio.create_task(sm.shutdown_reconciles())
-    await asyncio.sleep(0.05)
-    assert not shutdown.done(), "shutdown must drain a running reconcile worker"
-    release.set()
-    await shutdown
-
-
 async def _provider_setup_barriers() -> None:
     import provider_setup
 
@@ -186,7 +147,6 @@ async def main() -> None:
     unhandled: list[dict] = []
     loop.set_exception_handler(lambda _loop, context: unhandled.append(context))
     await _provider_barriers()
-    await _reconcile_barriers()
     await _provider_setup_barriers()
     await asyncio.sleep(0)
     assert not unhandled, unhandled

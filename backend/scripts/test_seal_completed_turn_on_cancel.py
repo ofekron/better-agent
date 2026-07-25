@@ -82,7 +82,6 @@ def test_success_sealed_on_cancel() -> bool:
         user_msg=user_msg,
         assistant_msg=asst,
         primary_result={"success": True, "events": [], "sdk_output": "done"},
-        workers=[],
         trace_id="tr-test",
     )
     sealed = _asst(sid)
@@ -108,8 +107,7 @@ def test_no_seal_when_not_success() -> bool:
     tm._seal_completed_turn_on_cancel(
         session=session, persist_to=sid, user_msg=user_msg,
         assistant_msg=asst,
-        primary_result={"success": False, "error": "boom"},
-        workers=[], trace_id="tr",
+        primary_result={"success": False, "error": "boom"}, trace_id="tr",
     )
     if calls:
         print(f"  finalize should not run on failed result: {calls}")
@@ -133,8 +131,7 @@ def test_no_seal_when_already_terminal() -> bool:
     tm._seal_completed_turn_on_cancel(
         session=session, persist_to=sid, user_msg=user_msg,
         assistant_msg=already,
-        primary_result={"success": True, "events": [], "sdk_output": "done"},
-        workers=[], trace_id="tr",
+        primary_result={"success": True, "events": [], "sdk_output": "done"}, trace_id="tr",
     )
     if calls:
         print(f"  finalize should not re-run on already-terminal msg: {calls}")
@@ -152,8 +149,7 @@ def test_no_seal_when_assistant_msg_none() -> bool:
     tm._seal_completed_turn_on_cancel(
         session=session, persist_to=sid, user_msg=user_msg,
         assistant_msg=None,
-        primary_result={"success": True, "events": []},
-        workers=[], trace_id="tr",
+        primary_result={"success": True, "events": []}, trace_id="tr",
     )
     if calls:
         print(f"  finalize should not run when assistant_msg is None: {calls}")

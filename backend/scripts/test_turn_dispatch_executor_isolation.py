@@ -107,10 +107,7 @@ async def test_a_behavior_parity() -> bool:
 
 def test_b_dedicated_executor_identity() -> bool:
     executor = turn_manager._TURN_DISPATCH_EXECUTOR
-    is_dedicated = (
-        executor is not None
-        and executor is not turn_manager._STREAM_EVENT_APPLY_EXECUTOR
-    )
+    is_dedicated = executor is not None
     prefix_ok = getattr(executor, "_thread_name_prefix", "") == "turn-dispatch"
     sized_off_cpu = executor._max_workers == (os.cpu_count() or 4) * 4
 

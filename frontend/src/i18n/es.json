@@ -105,8 +105,6 @@
   "sidebar.sessionsTab": "Sesiones",
   "sidebar.workersTab": "Workers",
   "sidebar.routinesTab": "Rutinas",
-  "app.reconciling": "Reconciliando…",
-  "app.reconcilingTitle": "El backend está reconciliando eventos rezagados. Se muestra solo cuando >0.3s.",
   "app.supervisorBannerDismiss": "Descartar",
   "startup_tasks.banner_title": "Trabajo en segundo plano",
   "startup_tasks.dismiss": "Descartar",

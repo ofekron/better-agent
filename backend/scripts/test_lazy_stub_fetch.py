@@ -123,8 +123,7 @@ def _mk_two_turn_session() -> tuple[str, str, str]:
         asst = strategy.build_assistant_scaffold()
         session_manager.append_assistant_msg(sid, asst)
         msg = session_manager.get_ref(sid)["messages"][-1]
-        ctx = ApplyEventCtx(manager_sid_holder={"id": None}, workers_list=[],
-                            user_msg=None, root_id=sid)
+        ctx = ApplyEventCtx(manager_sid_holder={"id": None}, user_msg=None, root_id=sid)
         for u in uuids:
             strategy.apply_event(app_session_id=sid, msg=msg,
                                  event=_manager_event(u), ctx=ctx, source_is_provider_stream=True)
@@ -167,8 +166,7 @@ def _mk_two_turn_session_with_worker() -> tuple[str, str, str]:
             }]
         session_manager.append_assistant_msg(sid, asst)
         msg = session_manager.get_ref(sid)["messages"][-1]
-        ctx = ApplyEventCtx(manager_sid_holder={"id": None}, workers_list=[],
-                            user_msg=None, root_id=sid)
+        ctx = ApplyEventCtx(manager_sid_holder={"id": None}, user_msg=None, root_id=sid)
         for u in uuids:
             strategy.apply_event(app_session_id=sid, msg=msg,
                                  event=_manager_event(u), ctx=ctx, source_is_provider_stream=True)
@@ -512,8 +510,7 @@ def test_stub_summary_dedupes_streaming_uuid_updates() -> bool:
     asst = strategy.build_assistant_scaffold()
     session_manager.append_assistant_msg(sid, asst)
     msg = session_manager.get_ref(sid)["messages"][-1]
-    ctx = ApplyEventCtx(manager_sid_holder={"id": None}, workers_list=[],
-                        user_msg=None, root_id=sid)
+    ctx = ApplyEventCtx(manager_sid_holder={"id": None}, user_msg=None, root_id=sid)
     strategy.apply_event(app_session_id=sid, msg=msg,
                          event=_agent_event("same", "partial"), ctx=ctx,
                          source_is_provider_stream=True)
@@ -777,8 +774,7 @@ def test_stubbed_snapshot_does_not_deepcopy_assistant_events() -> bool:
     sid, _, asst2_id = _mk_two_turn_session()
     strategy = get_strategy("manager")
     msg = session_manager.get_ref(sid)["messages"][-1]
-    ctx = ApplyEventCtx(manager_sid_holder={"id": None}, workers_list=[],
-                        user_msg=None, root_id=sid)
+    ctx = ApplyEventCtx(manager_sid_holder={"id": None}, user_msg=None, root_id=sid)
     for idx in range(render_stub.STUB_TAIL + 10):
         strategy.apply_event(app_session_id=sid, msg=msg,
                              event=_manager_event(f"big-{idx}"), ctx=ctx,

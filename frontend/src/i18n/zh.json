@@ -105,8 +105,6 @@
   "sidebar.sessionsTab": "会话",
   "sidebar.workersTab": "Worker",
   "sidebar.routinesTab": "例程",
-  "app.reconciling": "正在对账…",
-  "app.reconcilingTitle": "后端正在对账滞后事件。仅在 >0.3s 时显示。",
   "app.supervisorBannerDismiss": "关闭",
   "startup_tasks.banner_title": "后台任务",
   "startup_tasks.dismiss": "关闭",

@@ -12,8 +12,10 @@ Three subtests:
      this does NOT happen — the tailer wrote events.jsonl only.
 
   B. Primary agent + NO streaming msg (latest assistant msg finalized)
-     → `_dispatch` ingests with `msg_id=None`, arms the
-     reconcile-dirty flag, and does NOT mutate the render tree.
+     → `_dispatch` ingests with `msg_id=None`; the write-time
+     projection fold's orphan-row arm folds it into `msg.events`
+     immediately (the msg is already finalized, so there is no
+     streaming target to wait for).
 
   C. Worker-fork tailer (agent_sid ∉ session's primary agent sids) →
      `_dispatch` writes a fork-identity backup row (sid=fork
@@ -57,6 +59,7 @@ import native_files_manager as nfm  # noqa: E402
 from native_files_manager import native_files  # noqa: E402
 from paths import ba_home  # noqa: E402
 from session_manager import manager as session_manager  # noqa: E402
+import event_bus_subscribers  # noqa: E402
 
 
 PASS = "\x1b[32mPASS\x1b[0m"
@@ -140,6 +143,29 @@ async def _drain_primary_resolution_tasks(
 
 # ─── subtests ─────────────────────────────────────────────────────
 
+async def _await_fold_watermark_advance(
+    root_id: str, watermark_before: int, *, timeout: float = 2.0,
+) -> int:
+    """Poll the write-time projection fold to completion.
+
+    `event_journal_writer.barrier_sync` only proves the row is durable on
+    disk; the drainer's `EVENT_JOURNAL_WRITTEN` subscription and its
+    per-root drain task are scheduled asynchronously (cross-thread
+    `run_coroutine_threadsafe`/`create_task`), so a single
+    `await_session_content_projection` call right after the barrier can
+    race a submission that hasn't landed on the dispatcher yet. Poll
+    until the durable fold watermark actually advances (event-driven
+    completion signal), bounded so a genuine stall still fails loudly."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        await event_bus_subscribers.await_session_content_projection(root_id)
+        current = session_manager.get_fold_watermark(root_id)
+        if current > watermark_before:
+            return current
+        await asyncio.sleep(0.01)
+    return session_manager.get_fold_watermark(root_id)
+
+
 async def test_a_primary_streaming_orphan_ingest_backup() -> bool:
     """Primary agent tailer with a streaming msg present ALSO uses
     `ingest_orphan` (per `jsonl_tailer.py:741-753`). The render tree
@@ -154,14 +180,15 @@ async def test_a_primary_streaming_orphan_ingest_backup() -> bool:
     Contract today:
       - events.jsonl gets the row (durable for WS-tailer broadcast)
       - msg.events does NOT grow (apply_event is the render writer)
-      - reconcile_dirty stays unset (streaming msg → not finalized →
-        the orphan-event signal in event_ingester.ingest no-ops)
+      - the orphan row stays BUFFERED (not folded) — the msg is still
+        streaming (not finalized), so the write-time projection fold's
+        orphan-row arm (`event_bus_subscribers._handle_orphan_row`)
+        parks it until the msg finalizes, instead of folding immediately
     """
     primary_sid = "agent-primary-A"
     sid, root_id, msg_id = _mk_session_with_streaming_msg(
         primary_agent_sid=primary_sid,
     )
-    session_manager.consume_reconcile_dirty(root_id)
 
     before = len(_msg_events(sid, msg_id))
 
@@ -174,14 +201,13 @@ async def test_a_primary_streaming_orphan_ingest_backup() -> bool:
     )
     await tailer._dispatch(_enriched("uuid-A", "subtest-A-payload"))
     # ingest_orphan journals fire-and-forget onto the per-root shard
-    # executor; drain it so the orphan row (and the no-op dirty check,
-    # which runs on the shard thread inside ingest) are visible.
+    # executor; drain it, then wait for the write-time projection fold
+    # to finish processing whatever it durably observed.
     event_journal_writer.barrier_sync(root_id)
+    await event_bus_subscribers.await_session_content_projection(root_id)
 
     after = len(_msg_events(sid, msg_id))
     unchanged = after == before
-
-    dirty = session_manager.consume_reconcile_dirty(root_id)
 
     rows = _events_jsonl_for(root_id, sid)
     orphan_row = next(
@@ -190,25 +216,29 @@ async def test_a_primary_streaming_orphan_ingest_backup() -> bool:
     )
     is_orphan = orphan_row is not None and orphan_row.get("msg_id") is None
 
-    ok = unchanged and not dirty and is_orphan
+    ok = unchanged and is_orphan
     print(f"{PASS if ok else FAIL} A: primary+streaming → render unchanged "
-          f"({unchanged}); reconcile_dirty={dirty} (must be False); "
-          f"orphan-row={is_orphan}")
+          f"({unchanged}); orphan-row={is_orphan}")
     return ok
 
 
 async def test_b_primary_no_streaming_msg_orphan_path() -> bool:
-    """Primary agent tailer with NO streaming msg → orphan ingest +
-    reconcile-dirty armed + render tree unchanged."""
+    """Primary agent tailer with NO streaming msg (finalized) → orphan
+    ingest is folded IMMEDIATELY by the write-time projection (the msg
+    is already finalized, so `_handle_orphan_row` folds it in the same
+    pass instead of buffering — see `event_bus_subscribers._fold_orphan_row`).
+    This is the surviving invariant: the fold is the only events-writer
+    and there is no separate "next read reconciles" step — the durable
+    watermark (`session_manager.get_fold_watermark`) advances past the
+    row the instant the fold applies it."""
     primary_sid = "agent-primary-B"
     sid, root_id, msg_id = _mk_session_with_streaming_msg(
         primary_agent_sid=primary_sid,
     )
     # Finalize the assistant msg so it's no longer streaming.
     session_manager.set_streaming(sid, msg_id, False)
-    # Clear any dirty flag left over from setup.
-    session_manager.consume_reconcile_dirty(root_id)
-
+    await event_bus_subscribers.await_session_content_projection(root_id)
+    watermark_before = session_manager.get_fold_watermark(root_id)
     before = len(_msg_events(sid, msg_id))
 
     tailer = OwnedClaudeJsonlTailer(
@@ -219,15 +249,14 @@ async def test_b_primary_no_streaming_msg_orphan_path() -> bool:
         start_offset=0,
     )
     await tailer._dispatch(_enriched("uuid-B", "subtest-B-payload"))
-    # Drain the fire-and-forget journal write so the orphan row is on
-    # disk and the shard thread's reconcile-dirty mark has fired before
-    # the assertions read them.
+    # Drain the fire-and-forget journal write, then wait for the
+    # write-time projection fold to apply whatever it durably observed.
     event_journal_writer.barrier_sync(root_id)
+    new_watermark = await _await_fold_watermark_advance(root_id, watermark_before)
 
     after = len(_msg_events(sid, msg_id))
-    unchanged = after == before
-
-    dirty = session_manager.consume_reconcile_dirty(root_id)
+    folded = after == before + 1
+    watermark_advanced = new_watermark > watermark_before
 
     rows = _events_jsonl_for(root_id, sid)
     orphan_row = next(
@@ -236,9 +265,10 @@ async def test_b_primary_no_streaming_msg_orphan_path() -> bool:
     )
     is_orphan = orphan_row is not None and orphan_row.get("msg_id") is None
 
-    ok = unchanged and dirty and is_orphan
-    print(f"{PASS if ok else FAIL} B: primary+no-streaming → render unchanged "
-          f"({unchanged}); reconcile_dirty={dirty}; orphan-row={is_orphan}")
+    ok = folded and watermark_advanced and is_orphan
+    print(f"{PASS if ok else FAIL} B: primary+no-streaming → folded "
+          f"immediately ({folded}); watermark_advanced={watermark_advanced}; "
+          f"orphan-row={is_orphan}")
     return ok
 
 
@@ -587,7 +617,10 @@ async def test_h_concurrent_demand_seed_appends_one_native_path_row() -> bool:
 # ─── runner ───────────────────────────────────────────────────────
 
 async def _run() -> int:
+    from event_journal import bind_event_journal_loop
+    bind_event_journal_loop(asyncio.get_running_loop())
     event_journal_writer.register(bus)
+    event_bus_subscribers.bind_session_content_projection()
     results = [
         await test_a_primary_streaming_orphan_ingest_backup(),
         await test_b_primary_no_streaming_msg_orphan_path(),

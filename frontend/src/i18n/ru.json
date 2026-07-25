@@ -105,8 +105,6 @@
   "sidebar.sessionsTab": "Сессии",
   "sidebar.workersTab": "Воркеры",
   "sidebar.routinesTab": "Рутины",
-  "app.reconciling": "Сверка…",
-  "app.reconcilingTitle": "Бэкенд сверяет отстающие события. Показывается только когда >0.3 c.",
   "app.supervisorBannerDismiss": "Скрыть",
   "startup_tasks.banner_title": "Фоновая работа",
   "startup_tasks.dismiss": "Скрыть",

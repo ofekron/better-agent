@@ -7,7 +7,6 @@ import type {
   RunInfo,
   SendMode,
   Session,
-  SessionProcessingUpdate,
   WSEvent,
 } from "../types";
 import type { InlineTag } from "../types/inlineTag";
@@ -47,59 +46,11 @@ export interface FilePayload {
   size: number;
 }
 
-type StubInvalidation = {
-  app_session_id: string;
-  msg_id: string;
-  stub: { event_count: number; last_events: WSEvent[] };
-};
-
 export type StreamingPhase = "manager" | "worker" | null;
 
 /** Fine-grained loading phase while the CLI subprocess is starting up.
  * Null once actual content starts flowing. */
 export type StreamingLoadPhase = "starting" | "connected" | null;
-
-function parseStubInvalidations(data: unknown): StubInvalidation[] {
-  const payload = data as { changes?: unknown };
-  const items = Array.isArray(payload?.changes) ? payload.changes : [data];
-  return items.filter((item): item is StubInvalidation => {
-    const row = item as StubInvalidation | null;
-    return Boolean(
-      row
-        && typeof row.app_session_id === "string"
-        && row.app_session_id.length > 0
-        && typeof row.msg_id === "string"
-        && row.msg_id.length > 0
-        && row.stub
-        && typeof row.stub.event_count === "number"
-        && Array.isArray(row.stub.last_events),
-    );
-  });
-}
-
-const PROCESSING_EPOCH = /^[0-9a-f]{32}$/;
-
-function parseProcessingVersion(data: unknown): { epoch: string; revision: number } | null {
-  const payload = data as { epoch?: unknown; revision?: unknown } | null;
-  if (typeof payload?.epoch !== "string" || !PROCESSING_EPOCH.test(payload.epoch)) return null;
-  if (typeof payload.revision !== "number"
-    || !Number.isSafeInteger(payload.revision) || payload.revision < 0) return null;
-  return { epoch: payload.epoch, revision: payload.revision };
-}
-
-function parseProcessingRootIds(data: unknown): string[] | null {
-  const rootIds = (data as { root_ids?: unknown } | null)?.root_ids;
-  if (!Array.isArray(rootIds) || rootIds.length > 4096) return null;
-  const seen = new Set<string>();
-  let totalLength = 0;
-  for (const rootId of rootIds) {
-    if (typeof rootId !== "string" || rootId.length === 0 || rootId.length > 256) return null;
-    totalLength += rootId.length;
-    if (totalLength > 1024 * 1024 || seen.has(rootId)) return null;
-    seen.add(rootId);
-  }
-  return rootIds as string[];
-}
 
 export function resolveLiveFrameSessionId(
   event: WSEvent,
@@ -137,13 +88,6 @@ interface UseWebSocketOptions {
    * every persisted message with `seq >= N` plus the live in-flight
    * assistant message if mid-stream. The caller upserts by id. */
   onMessagesReplay?: (appSessionId: string, messages: ChatMessage[]) => void;
-  /** A backend reconcile appended late events to a collapsed historical
-   * turn — replace its stale stub so an expanded turn re-fetches fresh. */
-  onStubInvalidated?: (
-    appSessionId: string,
-    msgId: string,
-    stub: { event_count: number; last_events: WSEvent[] }
-  ) => void;
   /** Per-event message updates — currently fired by the backend when
    * the lazy assistant message is born. Caller upserts by id (same
    * reducer as messages_replay). */
@@ -411,12 +355,6 @@ interface UseWebSocketOptions {
     msgId: string,
     chosenSessionId: string | null
   ) => void;
-  /** Backend's async-reconcile progress notifier. Fires only when a
-   * reconcile crosses the 0.3s threshold: `started` lands when the
-   * timer fires, `finished` when the reconcile completes (or fails).
-   * `root_id` keys the per-root tree. Caller renders a tiny
-   * "reconciling…" badge while the flag is `started`. */
-  onSessionProcessing?: (update: SessionProcessingUpdate) => void;
   /** Backend reconcile completed (fast or slow). The initial GET may
    * have returned stale cache; the frontend should silently refetch
    * if the user is viewing this root's session. */
@@ -479,7 +417,6 @@ export function useWebSocket(
   // triggering a WebSocket reconnect every time App re-renders.
   const onRewindCompleteRef = useRef(options.onRewindComplete);
   const onMessagesReplayRef = useRef(options.onMessagesReplay);
-  const onStubInvalidatedRef = useRef(options.onStubInvalidated);
   const onMessagesDeltaRef = useRef(options.onMessagesDelta);
   const onUserMessagePersistedRef = useRef(options.onUserMessagePersisted);
   const onSteerPromptPersistedRef = useRef(options.onSteerPromptPersisted);
@@ -532,13 +469,11 @@ export function useWebSocket(
   const onMessageAskChoiceChangedRef = useRef(
     options.onMessageAskChoiceChanged
   );
-  const onSessionProcessingRef = useRef(options.onSessionProcessing);
   const onSessionReconciledRef = useRef(options.onSessionReconciled);
   const clientIdRef = useRef(options.clientId);
   useEffect(() => {
     onRewindCompleteRef.current = options.onRewindComplete;
     onMessagesReplayRef.current = options.onMessagesReplay;
-    onStubInvalidatedRef.current = options.onStubInvalidated;
     onMessagesDeltaRef.current = options.onMessagesDelta;
     onUserMessagePersistedRef.current = options.onUserMessagePersisted;
     onSteerPromptPersistedRef.current = options.onSteerPromptPersisted;
@@ -576,13 +511,11 @@ export function useWebSocket(
     onMessageRunMetaChangedRef.current = options.onMessageRunMetaChanged;
     onMessageAskResultChangedRef.current = options.onMessageAskResultChanged;
     onMessageAskChoiceChangedRef.current = options.onMessageAskChoiceChanged;
-    onSessionProcessingRef.current = options.onSessionProcessing;
     onSessionReconciledRef.current = options.onSessionReconciled;
     clientIdRef.current = options.clientId;
   }, [
     options.onRewindComplete,
     options.onMessagesReplay,
-    options.onStubInvalidated,
     options.onMessagesDelta,
     options.onUserMessagePersisted,
     options.onSteerPromptPersisted,
@@ -617,7 +550,6 @@ export function useWebSocket(
     options.onMessageContinuationChanged,
     options.onMessageAskResultChanged,
     options.onMessageAskChoiceChanged,
-    options.onSessionProcessing,
     options.onSessionReconciled,
     options.clientId,
   ]);
@@ -820,20 +752,6 @@ export function useWebSocket(
           return;
         }
 
-        // A backend reconcile appended late events to a collapsed
-        // historical turn — replace its stale stub so the expanded
-        // turn re-fetches fresh full events.
-        if (event.type === "stub_invalidated") {
-          for (const d of parseStubInvalidations(event.data)) {
-            onStubInvalidatedRef.current?.(
-              d.app_session_id,
-              d.msg_id,
-              d.stub,
-            );
-          }
-          return;
-        }
-
         // Per-event message delta — currently fired when the backend
         // lazily creates the assistant message on the first inner
         // event of a turn. Same upsert semantics as messages_replay.
@@ -878,34 +796,6 @@ export function useWebSocket(
               d.app_session_id,
               d.client_id ?? null,
             );
-          }
-          return;
-        }
-
-        // Async-reconcile progress. Backend emits these ONLY for slow
-        // reconciles (>0.3s threshold) — fast reconciles produce zero
-        // events to avoid flashing the badge for sub-perceptible work.
-        // `started` fires when the 0.3s timer fires; `finished` fires
-        // when the reconcile completes (success OR failure).
-        if (
-          event.type === "session_processing_started" ||
-          event.type === "session_processing_finished"
-        ) {
-          const d = event.data as { root_id?: unknown };
-          const version = parseProcessingVersion(event.data);
-          const rootIds = parseProcessingRootIds(event.data);
-          if (typeof d.root_id === "string" && d.root_id.length > 0
-            && d.root_id.length <= 256 && version && rootIds) {
-            onSessionProcessingRef.current?.({ kind: "snapshot", rootIds, ...version });
-          }
-          return;
-        }
-
-        if (event.type === "session_processing_state") {
-          const rootIds = parseProcessingRootIds(event.data);
-          const version = parseProcessingVersion(event.data);
-          if (rootIds && version) {
-            onSessionProcessingRef.current?.({ kind: "snapshot", rootIds, ...version });
           }
           return;
         }

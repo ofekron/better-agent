@@ -30,24 +30,35 @@ def _command(root: str, row: dict) -> SessionProjectionCommand:
 
 
 class Harness:
-    def __init__(self, rows: dict[str, list[dict]], *, chunk_size: int = 128) -> None:
+    def __init__(
+        self,
+        rows: dict[str, list[dict]],
+        *,
+        chunk_size: int = 128,
+        max_active_roots: int = 16,
+        watermarks: dict[str, int] | None = None,
+    ) -> None:
         self.rows = rows
         self.applied: list[tuple[str, int]] = []
+        self.applied_watermarks: list[tuple[str, int, int]] = []
         self.dirty: list[tuple[str, BaseException]] = []
+        self._watermarks = watermarks or {}
         self.drainer = SessionProjectionDrainer(
             self.apply,
             self.read,
             lambda root, exc: self.dirty.append((root, exc)),
             shards=2,
-            max_active_roots=16,
+            max_active_roots=max_active_roots,
             chunk_size=chunk_size,
+            get_watermark=lambda root: self._watermarks.get(root, 0),
         )
 
     def read(self, root: str, after: int, limit: int) -> list[dict]:
         return [row for row in self.rows[root] if int(row["seq"]) > after][:limit]
 
-    def apply(self, root: str, row: dict) -> None:
+    def apply(self, root: str, row: dict, fold_start_watermark: int) -> None:
         self.applied.append((root, int(row["seq"])))
+        self.applied_watermarks.append((root, int(row["seq"]), fold_start_watermark))
 
 
 def test_mixed_flood_matches_baseline() -> None:
@@ -86,11 +97,11 @@ def test_target_advance_during_drain_is_not_lost() -> None:
     release = threading.Event()
     original = harness.apply
 
-    def blocked(root_id: str, row: dict) -> None:
+    def blocked(root_id: str, row: dict, watermark: int) -> None:
         if row["seq"] == 1:
             entered.set()
             assert release.wait(2)
-        original(root_id, row)
+        original(root_id, row, watermark)
 
     harness._apply_row = blocked
     harness.drainer._apply_row = blocked
@@ -112,12 +123,12 @@ def test_failure_does_not_advance_and_retry_succeeds() -> None:
     harness = Harness({root: [row]})
     failed = False
 
-    def fail_once(root_id: str, item: dict) -> None:
+    def fail_once(root_id: str, item: dict, watermark: int) -> None:
         nonlocal failed
         if not failed:
             failed = True
             raise RuntimeError("injected")
-        harness.apply(root_id, item)
+        harness.apply(root_id, item, watermark)
 
     harness.drainer._apply_row = fail_once
     try:
@@ -192,11 +203,11 @@ def test_active_drain_retains_later_coalesced_mismatch_evidence() -> None:
         release = threading.Event()
         original_apply = harness.apply
 
-        def blocked(root_id: str, row: dict) -> None:
+        def blocked(root_id: str, row: dict, watermark: int) -> None:
             if row["seq"] == 1:
                 entered.set()
                 assert release.wait(2)
-            original_apply(root_id, row)
+            original_apply(root_id, row, watermark)
 
         harness.drainer._apply_row = blocked
         try:
@@ -316,11 +327,11 @@ def test_same_shard_root_progress_and_shutdown_barrier() -> None:
     release = threading.Event()
     original = harness.apply
 
-    def blocked(root_id: str, row: dict) -> None:
+    def blocked(root_id: str, row: dict, watermark: int) -> None:
         if root_id == roots[0] and row["seq"] == 1:
             entered.set()
             assert release.wait(2)
-        original(root_id, row)
+        original(root_id, row, watermark)
 
     harness.drainer._apply_row = blocked
     harness.drainer.submit(_command(roots[0], rows[roots[0]][0]))
@@ -338,9 +349,131 @@ def test_same_shard_root_progress_and_shutdown_barrier() -> None:
     assert harness.drainer.submit(_command(roots[0], rows[roots[0]][-1])) is False
 
 
+def test_capacity_backpressure_parks_root_and_promotes_on_slot_free() -> None:
+    """Backpressure must be lossless: a root over the active-root cap is
+    parked (not dropped/dirtied), and gets drained purely because another
+    root's slot frees up — never because anything re-reads/re-queries to
+    "repair" it. The test issues no repair-triggering call at all besides
+    releasing the blocking apply calls that hold the two slots open.
+    """
+    # roots[0] and roots[1] must land on different shards (each shard is a
+    # single-worker executor) so both can genuinely run concurrently and
+    # occupy the 2 active-root slots at once; roots[2]'s shard doesn't
+    # matter since capacity is a global `_active_roots` count.
+    root0 = "cap-0"
+    root1 = next(
+        f"cap-{index}"
+        for index in range(1, 100)
+        if hash(f"cap-{index}") % 2 != hash(root0) % 2
+    )
+    roots = [root0, root1, "cap-parked"]
+    rows = {
+        root: [
+            {"seq": 1, "sid": root, "msg_id": "m", "type": "agent_message", "source": "event_bus", "data": {}},
+        ]
+        for root in roots
+    }
+    harness = Harness(rows, chunk_size=8, max_active_roots=2)
+    held = {roots[0]: threading.Event(), roots[1]: threading.Event()}
+    release = threading.Event()
+    original_apply = harness.apply
+
+    def blocked(root_id: str, row: dict, watermark: int) -> None:
+        if root_id in held:
+            held[root_id].set()
+            assert release.wait(2)
+        original_apply(root_id, row, watermark)
+
+    harness.drainer._apply_row = blocked
+    try:
+        assert harness.drainer.submit(_command(roots[0], rows[roots[0]][0])) is True
+        assert harness.drainer.submit(_command(roots[1], rows[roots[1]][0])) is True
+        assert held[roots[0]].wait(2)
+        assert held[roots[1]].wait(2)
+        # Both of the only 2 active-root slots are held open by the
+        # blocked applies above; a 3rd root must be parked, not dropped.
+        assert harness.drainer.submit(_command(roots[2], rows[roots[2]][0])) is True
+        assert harness.drainer.active_root_count() == 2
+        assert harness.drainer.parked_root_count() == 1
+        assert not harness.dirty
+        assert harness.applied == []  # nothing dropped/applied early
+        # The only thing that happens next: the held applies are released,
+        # freeing slots. No read/resubmit/repair call is issued by the test.
+        release.set()
+        for root in roots:
+            harness.drainer.barrier(root)
+        assert set(harness.applied) == {(root, 1) for root in roots}
+        assert not harness.dirty
+        assert harness.drainer.parked_root_count() == 0
+    finally:
+        release.set()
+        harness.drainer.shutdown()
+
+
+def test_fold_watermark_snapshotted_once_at_activation_not_per_row() -> None:
+    """The fold-start watermark must be captured ONCE when a root goes
+    idle -> active, not re-read for every row. Proven by mutating the
+    watermark source mid-pass (simulating something advancing it, which
+    in production only ever happens via `apply_written_journal_event`
+    after a row folds -- never mid-read here) and asserting every row in
+    THIS pass still sees the value captured at activation."""
+    root = "watermark-snapshot"
+    rows = [
+        {"seq": seq, "sid": root, "msg_id": "m", "type": "agent_message", "source": "event_bus", "data": {}}
+        for seq in range(1, 4)
+    ]
+    harness = Harness({root: rows}, chunk_size=1, watermarks={root: 0})
+    original_apply = harness.apply
+
+    def mutate_and_apply(root_id: str, row: dict, watermark: int) -> None:
+        original_apply(root_id, row, watermark)
+        # Simulate the watermark source advancing mid-pass (e.g. a
+        # concurrent process). If the drainer re-read per row instead of
+        # snapshotting once, later rows in this SAME pass would observe
+        # this mutated value.
+        harness._watermarks[root_id] = 999
+
+    harness.drainer._apply_row = mutate_and_apply
+    try:
+        for row in rows:
+            harness.drainer.submit(_command(root, row))
+        harness.drainer.barrier(root)
+        assert harness.applied == [(root, 1), (root, 2), (root, 3)]
+        assert harness.applied_watermarks == [
+            (root, 1, 0), (root, 2, 0), (root, 3, 0),
+        ]
+    finally:
+        harness.drainer.shutdown()
+
+
+def test_cold_start_catchup_judges_all_backlog_rows_against_same_watermark() -> None:
+    """A cold-start catch-up of N backlog rows (journaled while the
+    process was down) must all be judged against the SAME pre-restart
+    watermark -- not against a value that advances as earlier rows in
+    the SAME pass are folded."""
+    root = "catchup"
+    rows = [
+        {"seq": seq, "sid": root, "msg_id": "m", "type": "agent_message", "source": "event_bus", "data": {}}
+        for seq in range(1, 501)
+    ]
+    # Pre-restart watermark: the render tree had only seen seq 0 before
+    # the backend went down. All 500 backlog rows are "since the
+    # watermark" (seq > 0).
+    harness = Harness({root: rows}, watermarks={root: 0})
+    try:
+        for row in rows:
+            harness.drainer.submit(_command(root, row))
+        harness.drainer.barrier(root)
+        assert harness.applied == [(root, seq) for seq in range(1, 501)]
+        assert all(watermark == 0 for _, _, watermark in harness.applied_watermarks)
+    finally:
+        harness.drainer.shutdown()
+
+
 def main() -> int:
     tests = [
         test_mixed_flood_matches_baseline,
+        test_capacity_backpressure_parks_root_and_promotes_on_slot_free,
         test_target_advance_during_drain_is_not_lost,
         test_failure_does_not_advance_and_retry_succeeds,
         test_command_row_mismatch_both_directions_uses_journal_authority,
@@ -349,6 +482,8 @@ def main() -> int:
         test_missing_journal_gap_dirties_without_advancing_past_gap,
         test_shutdown_is_bounded_and_marks_blocked_root_dirty,
         test_same_shard_root_progress_and_shutdown_barrier,
+        test_fold_watermark_snapshotted_once_at_activation_not_per_row,
+        test_cold_start_catchup_judges_all_backlog_rows_against_same_watermark,
     ]
     for test in tests:
         test()

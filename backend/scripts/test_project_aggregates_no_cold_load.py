@@ -100,7 +100,7 @@ def _mk_session_with_events(n_events: int = 2) -> str:
                 "data": {"uuid": str(uuid.uuid4()), "type": "assistant",
                          "message": {"content": "x"}},
             },
-            ctx=ctx, source_is_provider_stream=True,
+            ctx=ctx, source_is_provider_stream=True, fires_side_effects=True,
         )
     return sid
 
@@ -110,7 +110,6 @@ def _make_cold(sid: str) -> None:
     next access cold-loads from disk (simulating a fresh backend boot)."""
     rid = session_manager._root_id_for(sid)
     session_manager._roots.pop(rid, None)
-    session_manager._reconcile_dirty.pop(rid, None)
     session_manager._unread_hydrated.discard(sid)
     session_manager._unread_counts.pop(sid, None)
 

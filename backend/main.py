@@ -1529,9 +1529,7 @@ from session_manager import manager as session_manager
 from session_manager import (
     IncompatibleOrchestrationMode,
     DelegateForkParentMissing,
-    reopen_reconciles,
     session_matches_project,
-    shutdown_reconciles,
     strip_link_marker_syntax,
 )
 from session_store import _session_path
@@ -8650,6 +8648,11 @@ def _strip_synthetic_events_from_tree(tree: dict) -> None:
                     # `orchs.base._uid_idx_for`). Pop forces a rebuild on
                     # the next apply_event.
                     m.pop("_uid_idx", None)
+                    # `_has_final` has the same validity lifetime — the
+                    # stripped synthetic events could have been the ones
+                    # carrying `final_answer=True`; invalidate so the
+                    # next read rescans instead of trusting a stale flag.
+                    m.pop("_has_final", None)
                     # Re-extract content without synthetic text. Semantics:
                     # a message left with NO assistant text blanks (it was
                     # synthetic-only); a message whose remaining real events
@@ -8694,70 +8697,6 @@ def _now_iso() -> str:
 from paths import claude_projects_root_for_session as _claude_projects_root
 
 
-# ============================================================================
-# Render-tree reconcile from events.jsonl
-# ============================================================================
-# msg.events is the canonical render shape, maintained at runtime by the
-# strategy's apply_event. If for any reason an assistant message's
-# events list lags behind events.jsonl (e.g. crash between
-# session_store.flush and the next persist), this safety net re-applies
-# any missing events deterministically — events.jsonl entries carry
-# `msg_id` so there's no heuristic turn-grouping to get wrong.
-
-def _reconcile_msg_events_from_jsonl(tree: dict, *, on_historical_change=None) -> None:
-    """Thin delegate to `render_tree_hydrate.reconcile_msg_events_from_jsonl`.
-
-    The implementation was moved out of `main.py` so both this REST/WS
-    call site AND `session_manager._load_root` can call into it without
-    creating a `main → session_manager → main` import cycle. See
-    `backend/render_tree_hydrate.py` for the full body."""
-    from render_tree_hydrate import reconcile_msg_events_from_jsonl
-    reconcile_msg_events_from_jsonl(tree, on_historical_change=on_historical_change)
-
-
-def _reconcile_root_by_id(root_id: str, *, after_seq: int = 0) -> list[dict]:
-    """Warm-path reconcile body bound via `bind_reconcile_fn`.
-
-    Delegates to the single bracketing/hydration implementation in
-    `render_tree_hydrate` (the same body cold load runs), so warm and
-    cold render trees cannot diverge. `after_seq` is the warm-reconcile
-    cursor: cold load hydrates the full stream, while reconcile projects
-    only rows appended since the last successful cursor.
-
-    Returns stub_invalidated payloads for historical msgs whose expanded
-    timeline changed. The payload remains the small current collapsed
-    stub; outside-tail changes still need the ping to bust frontend full-
-    message caches."""
-    import copy as _copy
-    from event_journal import event_journal_reader
-    from render_stub import build_stub
-    from render_tree_hydrate import reconcile_msg_events_from_jsonl
-
-    current = event_journal_reader.current_seq(root_id)
-    if current is not None and after_seq >= current:
-        return []
-
-    changes: list[dict] = []
-
-    def _on_historical_change(sid: str, msg_id: str, m: dict) -> None:
-        stub = build_stub(m)
-        changes.append({
-            "app_session_id": sid,
-            "msg_id": msg_id,
-            "stub": {
-                "event_count": stub["event_count"],
-                "last_events": _copy.deepcopy(stub["last_events"]),
-            },
-        })
-
-    session_manager.hydrate_root_prepared(
-        root_id,
-        after_seq=after_seq,
-        on_historical_change=_on_historical_change,
-    )
-    return changes
-
-
 def _fire_and_forget(coro) -> None:
     """Schedule a coroutine on the running event loop, logging any
     exception instead of silently swallowing it.  Replaces bare
@@ -8776,112 +8715,6 @@ def _fire_and_forget(coro) -> None:
             logger.exception("fire-and-forget task failed")
 
     loop.create_task(_wrapped())
-
-
-def _emit_session_processing(root_id: str, kind: str) -> None:
-    """Wrapper called by `session_manager._async_reconcile_with_progress`
-    on the event loop thread. Emits `session_processing_started` /
-    `session_processing_finished` to every connected WS so the
-    frontend can render a "reconciling…" badge for slow reconciles
-    (>0.3s)."""
-    epoch, revision, roots = session_manager.reconcile_processing_state()
-    payload = {
-        "root_id": root_id,
-        "epoch": epoch,
-        "revision": revision,
-        "root_ids": list(roots),
-    }
-    coro = coordinator.broadcast_global(f"session_processing_{kind}", payload)
-    _fire_and_forget(coro)
-
-
-def _emit_session_reconciled(root_id: str) -> None:
-    """Called by `session_manager._async_reconcile_with_progress` after
-    every reconcile completes (fast or slow). Frontend silently
-    refetches the session if the user is viewing it, replacing any
-    stale cache served by the initial GET."""
-    gen = session_manager._reconcile_gen.get(root_id, 0)
-    logger.info(
-        "_emit_session_reconciled %s: broadcasting gen=%d",
-        root_id[:8], gen,
-    )
-    coro = coordinator.broadcast_global("session_reconciled", {"root_id": root_id})
-    _fire_and_forget(coro)
-
-
-_STUB_INVALIDATED_COALESCE_SECONDS = 0.05
-_stub_invalidated_pending: list[dict] = []
-_stub_invalidated_flush_scheduled = False
-_stub_invalidated_flush_handle: asyncio.TimerHandle | None = None
-
-
-def _flush_stub_invalidated() -> None:
-    global _stub_invalidated_flush_scheduled, _stub_invalidated_flush_handle
-    _stub_invalidated_flush_scheduled = False
-    _stub_invalidated_flush_handle = None
-    if not _stub_invalidated_pending:
-        return
-    changes = list(_stub_invalidated_pending)
-    _stub_invalidated_pending.clear()
-    try:
-        coro = coordinator.broadcast_global("stub_invalidated", {"changes": changes})
-    except Exception:
-        logger.exception("stub_invalidated broadcast scheduling failed")
-        return
-    _fire_and_forget(coro)
-
-
-def _emit_stub_invalidated(changes: list[dict]) -> None:
-    """Called by `session_manager._async_reconcile_with_progress` on the
-    event-loop thread after a reconcile. Emits one batched `stub_invalidated`
-    global ping for non-latest historical msgs whose stubs went stale, so
-    any client with that turn collapsed swaps in the fresh stub (and an
-    expanded turn re-fetches). Not persisted — authoritative events live
-    in the render tree / events.jsonl."""
-    global _stub_invalidated_flush_scheduled, _stub_invalidated_flush_handle
-    if not changes:
-        return
-    _stub_invalidated_pending.extend(changes)
-    if _stub_invalidated_flush_scheduled:
-        return
-    _stub_invalidated_flush_scheduled = True
-    loop = asyncio.get_running_loop()
-    _stub_invalidated_flush_handle = loop.call_later(
-        _STUB_INVALIDATED_COALESCE_SECONDS,
-        _flush_stub_invalidated,
-    )
-
-
-async def _send_reconcile_processing_snapshot(send) -> None:
-    state = session_manager.reconcile_processing_state()
-    while True:
-        epoch, revision, roots = state
-        await send({
-            "type": "session_processing_state",
-            "data": {
-                "epoch": epoch,
-                "revision": revision,
-                "root_ids": list(roots),
-            },
-        })
-        current = session_manager.reconcile_processing_state()
-        if current == state:
-            return
-        state = current
-
-
-async def _schedule_reconcile_for_subscriber(sub_sid: str) -> None:
-    root_id = await asyncio.to_thread(session_manager._root_id_for, sub_sid)
-    if isinstance(root_id, str):
-        session_manager.schedule_reconcile_if_needed(root_id)
-
-
-def _session_reconcile_snapshot_and_schedule(root_id: str) -> tuple[bool, bool, int]:
-    dirty = session_manager.is_reconcile_dirty(root_id)
-    hydrated = root_id in session_manager._event_hydrated_roots
-    gen_after = session_manager._reconcile_gen.get(root_id, 0)
-    session_manager.schedule_reconcile_if_needed(root_id)
-    return dirty, hydrated, gen_after
 
 
 def _session_detail_snapshot_sync(
@@ -8909,7 +8742,6 @@ def _session_detail_snapshot_sync(
         perf.record("sessions.detail.event_meta", max_seq_ms)
     else:
         max_context = {}
-    gen_before = session_manager._reconcile_gen.get(root_id or "", 0) if root_id else 0
     tree_start = time.perf_counter()
     detail_cache_key = None
     if include_cache_key:
@@ -8940,28 +8772,6 @@ def _session_detail_snapshot_sync(
     perf.record("sessions.detail.strip_synthetic", strip_ms)
     root_id = tree.get("id")
     if isinstance(root_id, str):
-        if has_events:
-            reconcile_start = time.perf_counter()
-            dirty, hydrated, gen_after = _session_reconcile_snapshot_and_schedule(root_id)
-            reconcile_ms = (time.perf_counter() - reconcile_start) * 1000
-            perf.record("sessions.detail.reconcile_snapshot", reconcile_ms)
-            msg_count = len(tree.get("messages", []))
-            assistant_msgs = [m for m in tree.get("messages", []) if m.get("role") == "assistant"]
-            last_events = assistant_msgs[-1].get("events") if assistant_msgs else None
-            last_stub = assistant_msgs[-1].get("stub") if assistant_msgs else None
-            logger.info(
-                "GET session %s: dirty=%s hydrated=%s gen=%d->%d barrier=%d "
-                "msgs=%d queued=%d draft_len=%d last_asst_evts=%s "
-                "last_asst_stub=%s timings="
-                "max_seq=%.1fms barrier=%.1fms tree=%.1fms strip=%.1fms",
-                root_id[:8], dirty, hydrated, gen_before, gen_after, barrier_seq,
-                msg_count,
-                len(tree.get("queued_prompts") or []),
-                len(tree.get("draft_input") or ""),
-                len(last_events) if last_events else None,
-                last_stub.get("event_count") if last_stub else None,
-                max_seq_ms, 0.0, tree_ms, strip_ms,
-            )
         if has_events:
             max_context_start = time.perf_counter()
             tree["max_seq_by_sid"] = _session_detail_watermarks(
@@ -9314,9 +9124,6 @@ async def get_session(
     if cache_key is not None:
         cached = _session_detail_cache_get(cache_key)
         if cached is not None:
-            root_id = cache_key[1][0]
-            if cache_key[3] and isinstance(root_id, str):
-                await asyncio.to_thread(_session_reconcile_snapshot_and_schedule, root_id)
             perf.record("sessions.detail.response_cache.hit", 1.0)
             return await asyncio.to_thread(
                 _json_response_maybe_gzip,
@@ -13194,7 +13001,6 @@ async def on_startup():
     from provider import reopen_provider_tasks
     reopen_provider_tasks()
     provider_setup.reopen_provider_setup()
-    reopen_reconciles()
     reopen_ws_json_executor()
     from event_journal import event_journal_writer
     event_journal_writer.reopen()
@@ -13376,12 +13182,6 @@ async def on_startup():
     _LAG_HEARTBEAT[0] = _lag_heartbeat_snapshot()
     _start_lag_watchdog()
 
-    # Async-reconcile wiring: session_manager owns the dirty flag +
-    # single-flight task + 0.3s delayed-progress, but the reconcile
-    # body and the WS event emission live here (circular-import
-    # avoidance: reconcile pulls `orchs.get_strategy`, emit pulls
-    # `coordinator`). Bind at startup so the manager can schedule
-    # reconciles onto this loop and broadcast progress.
     session_manager.bind_loop(loop)
     # DraftStore needs the loop for its debounced flush scheduling.
     # The sm hook wiring (pin_check / on_persist / on_drop) happens in
@@ -13389,10 +13189,6 @@ async def on_startup():
     coordinator.draft_store.bind_loop(loop)
     from event_journal import bind_event_journal_loop
     bind_event_journal_loop(loop)
-    session_manager.bind_reconcile_fn(_reconcile_root_by_id)
-    session_manager.bind_processing_emitter(_emit_session_processing)
-    session_manager.bind_stub_invalidated_emitter(_emit_stub_invalidated)
-    session_manager.bind_reconciled_emitter(_emit_session_reconciled)
     # (`bind_active_run_gate` is wired at module-load time, right
     # after the coordinator is constructed — see the top of this
     # file — so the gate is in place before any route is mounted.)
@@ -13836,10 +13632,6 @@ async def on_shutdown():
         await shutdown_provider_tasks()
     except Exception:
         logger.exception("provider task shutdown failed")
-    try:
-        await shutdown_reconciles()
-    except Exception:
-        logger.exception("session reconcile shutdown failed")
     await asyncio.to_thread(shutdown_recovery_lease_executor)
     _HOT_PATH_EXECUTOR.shutdown(wait=False, cancel_futures=True)
     _SESSION_DETAIL_EXECUTOR.shutdown(wait=False, cancel_futures=True)
@@ -19138,17 +18930,14 @@ async def websocket_chat(websocket: WebSocket):
                     try:
                         # Unified projection (INV-15 / ADR-1, originally
                         # DIV-1 / OQ-15): WS replay reads the SAME
-                        # session_manager cache REST reads. Previously
-                        # this branch ran reconcile inline on the full
-                        # un-paginated tree per subscribe (≥1 per pane,
-                        # multi-pane split-view → N× redundant). The
-                        # cache is now reconciled async via
-                        # `schedule_reconcile_if_needed` (cold-load +
-                        # orphan-event triggered) — no inline reconcile
-                        # here. Cap replay at the same `msg_limit` REST
-                        # uses so cold-hop `since_seq=0` doesn't ship
-                        # the entire history; frontend upsert-by-id
-                        # makes the overlap with REST harmless.
+                        # session_manager cache REST reads. The fold
+                        # (SessionProjectionDrainer) keeps that cache
+                        # projected from events.jsonl as rows are written —
+                        # no inline reconcile here. Cap replay at the same
+                        # `msg_limit` REST uses so cold-hop `since_seq=0`
+                        # doesn't ship the entire history; frontend
+                        # upsert-by-id makes the overlap with REST
+                        # harmless.
                         asyncio.create_task(
                             asyncio.to_thread(
                                 coordinator.turn_manager.tick_running_state,
@@ -19184,12 +18973,6 @@ async def websocket_chat(websocket: WebSocket):
                             })
                             send_ms = (time.perf_counter() - send_start) * 1000
                             if logger.isEnabledFor(logging.DEBUG):
-                                sub_rid = await asyncio.to_thread(session_manager._root_id_for, sub_sid)
-                                sub_gen = session_manager._reconcile_gen.get(sub_rid, 0) if sub_rid else 0
-                                sub_dirty = await asyncio.to_thread(
-                                    session_manager.is_reconcile_dirty,
-                                    sub_rid,
-                                ) if sub_rid else False
                                 replay_asst = [
                                     m for m in replay_msgs
                                     if m.get("role") == "assistant"
@@ -19198,15 +18981,13 @@ async def websocket_chat(websocket: WebSocket):
                                 last_asst_stub = replay_asst[-1].get("stub") if replay_asst else None
                                 logger.debug(
                                     "WS replay %s: since_seq=%d next_seq=%d msgs=%d "
-                                    "inflight=%s gen=%d dirty=%s last_asst_evts=%s "
+                                    "inflight=%s last_asst_evts=%s "
                                     "last_asst_stub=%s build=%.1fms delta=%.1fms post=%.1fms send=%.1fms",
                                     sub_sid[:8],
                                     since_seq,
                                     delta["next_seq"],
                                     len(replay_msgs),
                                     in_flight is not None,
-                                    sub_gen,
-                                    sub_dirty,
                                     len(last_asst_evts) if last_asst_evts else None,
                                     last_asst_stub.get("event_count") if last_asst_stub else None,
                                     replay_build_ms,
@@ -19221,14 +19002,6 @@ async def websocket_chat(websocket: WebSocket):
                                 )
                     except Exception:
                         logger.exception("messages_replay on subscribe failed")
-                    # Reconcile catch-up is an authoritative snapshot, not
-                    # a synthetic started delta. Fast reconciles are never
-                    # visible, and reconnects replace any stale roots.
-                    try:
-                        await _schedule_reconcile_for_subscriber(sub_sid)
-                        await _send_reconcile_processing_snapshot(ws_callback)
-                    except Exception:
-                        logger.exception("processing catch-up on subscribe failed")
                     # Push current run_state snapshot so the freshly
                     # subscribed client knows what's running for this
                     # session right now (no waiting for the next

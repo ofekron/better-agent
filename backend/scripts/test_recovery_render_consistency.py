@@ -7,11 +7,12 @@ sessions that crashed mid-turn:
      onto flat `msg.agent_session_id` via `set_agent_sid_on_msg` so
      the recovered assistant message resumes the right CLI session.
 
-  B. `_reconcile_msg_events_from_jsonl` (called on every REST GET)
-     re-applied events.jsonl entries onto `msg.events` via apply_event
-     but never re-derived `msg.content`. Recovery-survivors whose
-     content was lost during the crash stayed with content='' forever
-     even though msg.events had assistant text events.
+  B. `hydrate_msg_events_from_jsonl` (the single events-writer, run
+     on cold load and by the write-time projection fold) re-applied
+     events.jsonl entries onto `msg.events` via apply_event but never
+     re-derived `msg.content`. Recovery-survivors whose content was
+     lost during the crash stayed with content='' forever even though
+     msg.events had assistant text events.
 
 Run with:
     cd backend && .venv/bin/python scripts/test_recovery_render_consistency.py
@@ -174,7 +175,7 @@ def test_reconcile_reextracts_content_from_jsonl_only_events() -> bool:
     reconcile must re-apply events to msg.events AND re-derive content
     so the bubble actually shows the assistant's text. Pre-fix,
     reconcile populated msg.events but never updated content."""
-    from main import _reconcile_msg_events_from_jsonl
+    from render_tree_hydrate import hydrate_msg_events_from_jsonl as _reconcile_msg_events_from_jsonl
     from orchs import get_strategy
 
     # Seed a native session with a finalized-but-empty assistant msg.
@@ -228,7 +229,7 @@ def test_reconcile_reextracts_content_from_jsonl_only_events() -> bool:
 
 
 def test_reconcile_repairs_empty_content_when_event_counts_match() -> bool:
-    from main import _reconcile_msg_events_from_jsonl
+    from render_tree_hydrate import hydrate_msg_events_from_jsonl as _reconcile_msg_events_from_jsonl
     from orchs import ApplyEventCtx, get_strategy
 
     app_sid, _, asst_id = _seed_session_with_streaming_assistant("native")
@@ -278,7 +279,7 @@ def test_reconcile_does_not_clobber_streaming_msg_content() -> bool:
     """Reconcile must NOT update content on a still-streaming msg —
     live content is owned by apply_event during the turn; rewriting it
     from reconcile during a REST GET would race the live writer."""
-    from main import _reconcile_msg_events_from_jsonl
+    from render_tree_hydrate import hydrate_msg_events_from_jsonl as _reconcile_msg_events_from_jsonl
 
     app_sid, _, asst_id = _seed_session_with_streaming_assistant("native")
     # Pre-set a synthetic streaming content (as if mid-turn).
@@ -323,7 +324,8 @@ def _ws_subscribe_projection(app_sid: str, since_seq: int = 0) -> list[dict]:
 
     Used by DIV-1 regression tests so an accidental refactor of either
     the WS path or this helper is caught by the test failing."""
-    from main import _reconcile_msg_events_from_jsonl, _strip_synthetic_events_from_tree
+    from render_tree_hydrate import hydrate_msg_events_from_jsonl as _reconcile_msg_events_from_jsonl
+    from main import _strip_synthetic_events_from_tree
     tree = session_manager.get_root_tree(app_sid)
     if tree is None:
         return []
@@ -344,7 +346,7 @@ def test_ws_replay_carries_orphan_events_DIV_1() -> bool:
     Before this fix, the WS subscribe handler ran a per-msg apply loop
     using `read_ws_events(msg_id_filter=msg_id)` — which only returns
     msg_id-tagged events, silently dropping orphans. After the fix, the
-    WS path uses the SAME `_reconcile_msg_events_from_jsonl` projection
+    WS path uses the SAME `hydrate_msg_events_from_jsonl` projection
     REST uses, so orphans flow through identically (INV-15 / ADR-1).
 
     This test asserts: an orphan event (msg_id=None) appears in the
@@ -394,7 +396,7 @@ def test_ws_replay_carries_orphan_events_DIV_1() -> bool:
     # Cross-check: REST projection on the SAME tree returns the same
     # asst events. If WS and REST disagree, INV-15 is broken regardless
     # of whether orphans land — the projections must be identical.
-    from main import _reconcile_msg_events_from_jsonl
+    from render_tree_hydrate import hydrate_msg_events_from_jsonl as _reconcile_msg_events_from_jsonl
     rest_tree = session_manager.get_root_tree(app_sid)
     _reconcile_msg_events_from_jsonl(rest_tree)
     rest_asst = next(
@@ -467,7 +469,7 @@ def test_reconcile_does_not_bump_updated_at() -> bool:
     activity, so it must not reorder the sidebar. Pre-fix
     `update_running_content` inside the reconcile body defaulted to
     bump=True."""
-    from main import _reconcile_msg_events_from_jsonl
+    from render_tree_hydrate import hydrate_msg_events_from_jsonl as _reconcile_msg_events_from_jsonl
 
     app_sid, _, asst_id = _seed_session_with_streaming_assistant("native")
     session_manager.set_streaming(app_sid, asst_id, False)

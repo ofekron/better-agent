@@ -8,21 +8,13 @@ the event journal). This module rebuilds the per-msg events lists from
 events.jsonl whenever the in-memory cache is cold (first access after
 backend start) or lagging (orphan-event recovery).
 
-Two entry points:
+Entry point:
 
   - `hydrate_msg_events_from_jsonl(tree)` — synchronous, called from
     `session_manager._load_root` after disk read. Populates every
     `msg.events` list inline before any reader sees the tree.
-
-  - `reconcile_msg_events_from_jsonl(tree)` — same body, exposed for
-    the async reconcile path (`session_manager._sync_reconcile`).
     Idempotent — `apply_event` dedups by event uuid, so re-running on
     an already-hydrated tree is a no-op.
-
-The body was extracted from `main.py:_reconcile_msg_events_from_jsonl`
-in commit "v8 snapshot: drop msg.events from disk" so both
-`session_manager` and `main` can call into it without a `main →
-session_manager → main` import cycle.
 """
 
 import hashlib
@@ -729,9 +721,6 @@ def hydrate_msg_events_from_jsonl(
         )
 
 
-# Alias for the async-reconcile call site — same body, idempotent.
-reconcile_msg_events_from_jsonl = hydrate_msg_events_from_jsonl
-
 
 def _merge_render_rows(strategy, msg: dict, rows: list[dict]) -> bool:
     evs = strategy._events_list(msg)
@@ -772,4 +761,13 @@ def _merge_render_rows(strategy, msg: dict, rows: list[dict]) -> bool:
     if changed:
         from render_stub import invalidate_panel_anchor_cache
         invalidate_panel_anchor_cache(msg)
+        # This bulk merge mutates `evs`/`uid_idx` directly, bypassing
+        # `apply_event` (and therefore
+        # `_refresh_message_content_from_event_projection`, the sole
+        # place that maintains `_has_final`). Invalidate so the next
+        # read rescans instead of trusting a stale flag — same
+        # bypass-invalidation rule as `set_native_events` /
+        # `_strip_synthetic_events_from_tree` (see
+        # `orchs.base._uid_idx_for`).
+        owner.pop("_has_final", None)
     return changed

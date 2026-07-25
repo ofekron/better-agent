@@ -57,7 +57,6 @@ def _finalize(sid: str, user_msg: dict, assistant_msg: dict, *, primary_result: 
         user_msg=user_msg,
         assistant_msg=assistant_msg,
         primary_result=primary_result,
-        workers=[],
         stopped_at=stopped_at,
         trace_id="trace-1",
         error_text=error_text,

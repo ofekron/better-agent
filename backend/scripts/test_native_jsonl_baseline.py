@@ -18,7 +18,8 @@ REAL native-mode claude session jsonl fixtures (not synthetic events):
 
   C3 ``frontend_offline_reconcile`` — starts from C1's final state,
      clears ``msg.events`` in place, calls
-     ``main._reconcile_msg_events_from_jsonl`` over the same root tree.
+     ``render_tree_hydrate.hydrate_msg_events_from_jsonl`` over the same
+     root tree.
      Reads the same events.jsonl C1 wrote — this models the
      "backend online, frontend offline → reconnect" scenario where the
      persisted render tree lags events.jsonl. An independent-writer
@@ -364,7 +365,6 @@ def _run_c1(fixture_path: Path) -> tuple[str, str, list[dict]]:
     enriched_events = _enrich_all(fixture_path)
     ctx = ApplyEventCtx(
         manager_sid_holder={"id": None},
-        workers_list=[],
         user_msg=user_msg,
         root_id=root_id,
         run_id=str(uuid.uuid4()),
@@ -467,7 +467,7 @@ def _run_c3(c1_sid: str, c1_asst_id: str) -> tuple[str, str]:
     from events.jsonl. Reads what C1 wrote (the scenario-2 backend-
     online/frontend-offline shape — independent writers are out of
     scope here)."""
-    from main import _reconcile_msg_events_from_jsonl
+    from render_tree_hydrate import hydrate_msg_events_from_jsonl as _reconcile_msg_events_from_jsonl
     with session_manager.batch(c1_sid):
         sess = session_manager.get(c1_sid)
         msg = next(m for m in sess["messages"] if m["id"] == c1_asst_id)

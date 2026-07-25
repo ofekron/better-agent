@@ -1156,9 +1156,17 @@ def _import_session_locked(sess: NativeSession) -> str:
     )
     root_id = created["id"]
 
-    from orchs import ApplyEventCtx, get_strategy
+    from orchs import get_strategy
     strategy = get_strategy("native")
-    failures = 0
+
+    # Stub every turn's user/assistant message pair up front, inside one
+    # batch, so their ids exist in the tree before any journal row
+    # references them (the fold looks messages up by id). Each pair's
+    # assistant message starts with an empty `events` list — the render
+    # tree is populated ONLY by the fold below, never by this function
+    # directly, so import shares the single apply_event funnel with the
+    # live and recovery paths instead of being a second writer.
+    turn_msg_ids: list[tuple[_Turn, str, str]] = []  # (turn, user_msg_id, assistant_msg_id)
     with session_manager.batch(root_id, bump_updated_at=False):
         session = session_manager.get_ref(root_id)
         if session is None:
@@ -1166,7 +1174,7 @@ def _import_session_locked(sess: NativeSession) -> str:
         messages = session.setdefault("messages", [])
         for turn in turns:
             user_msg = {
-                "id": str(__import__("uuid").uuid4()),
+                "id": str(uuid.uuid4()),
                 "role": "user",
                 "content": turn.prompt,
                 "events": [],
@@ -1177,38 +1185,74 @@ def _import_session_locked(sess: NativeSession) -> str:
             }
             assistant_msg = strategy.build_assistant_scaffold()
             assistant_msg["timestamp"] = _native_turn_activity_iso(turn) or user_msg["timestamp"]
+            # These turns already happened — never actually streaming —
+            # so the fold can safely project content on every event it
+            # applies rather than waiting on a later isStreaming=False flip.
+            assistant_msg["isStreaming"] = False
             messages.append(user_msg)
             messages.append(assistant_msg)
-            ctx = ApplyEventCtx(
-                manager_sid_holder={"id": sess.native_id},
-                workers_list=list(assistant_msg.get("workers") or []),
-                user_msg=user_msg,
-                root_id=root_id,
-            )
-            for ev in turn.events:
-                try:
-                    strategy.apply_event(
-                        app_session_id=root_id,
-                        msg=assistant_msg,
-                        event=ev,
-                        ctx=ctx,
-                        source_is_provider_stream=True,
-                    )
-                except Exception:
-                    failures += 1
-                    logger.exception(
-                        "native_import: apply_event failed for %s (uuid=%s)",
-                        sess.registry_key, _event_data(ev).get("uuid"),
-                    )
-            assistant_msg["isStreaming"] = False
-            # A turn whose every event bypassed the render tree (pure
-            # metadata) leaves an empty assistant bubble — drop the pair.
-            if not assistant_msg.get("events"):
-                messages.pop()
-                messages.pop()
+            turn_msg_ids.append((turn, user_msg["id"], assistant_msg["id"]))
         last_activity = _imported_last_user_prompt_iso(session) or _native_last_activity_iso(sess, turns)
         if last_activity:
             session["updated_at"] = last_activity
+
+    # Journal each turn's replayed events, attributed to its assistant
+    # message id. MUST NOT hold session_manager's per-root RLock while
+    # doing this — publish_event_sync waits on the journal writer, and
+    # the fold barrier waited on below acquires that same lock via
+    # apply_written_journal_event, so holding it here would deadlock.
+    from event_journal import publish_event_sync
+    failures = 0
+    for turn, _user_msg_id, assistant_msg_id in turn_msg_ids:
+        for ev in turn.events:
+            try:
+                etype, data = strategy.prepare_provider_event_for_journal(
+                    app_session_id=root_id,
+                    event=ev,
+                )
+                publish_event_sync(
+                    session_id=root_id,
+                    context_id=root_id,
+                    event_type=etype,
+                    data=data,
+                    source="native_import",
+                    message_id=assistant_msg_id,
+                )
+            except Exception:
+                failures += 1
+                logger.exception(
+                    "native_import: journal write failed for %s (uuid=%s)",
+                    sess.registry_key, _event_data(ev).get("uuid"),
+                )
+
+    # Callers (e.g. the REST import endpoint) expect the imported
+    # session's render tree to already be populated when this returns —
+    # wait for the fold to drain every row journaled above.
+    import event_bus_subscribers
+    event_bus_subscribers.await_session_content_projection_sync(root_id)
+
+    # A turn whose every event bypassed the render tree (pure metadata)
+    # left an empty assistant bubble once folded — drop those pairs now
+    # that the fold has finished populating `events` for every turn.
+    with session_manager.batch(root_id, bump_updated_at=False):
+        session = session_manager.get_ref(root_id)
+        if session is not None:
+            by_id = {
+                m.get("id"): m
+                for m in session.get("messages") or []
+                if isinstance(m, dict)
+            }
+            kept_messages = []
+            for _turn, user_msg_id, assistant_msg_id in turn_msg_ids:
+                user_msg = by_id.get(user_msg_id)
+                assistant_msg = by_id.get(assistant_msg_id)
+                if user_msg is None or assistant_msg is None:
+                    continue
+                if not assistant_msg.get("events"):
+                    continue
+                kept_messages.append(user_msg)
+                kept_messages.append(assistant_msg)
+            session["messages"] = kept_messages
 
     # Every turn collapsed to pure metadata → nothing renderable. Tear down
     # the just-created empty session rather than leave an orphan bubble.

@@ -26,7 +26,6 @@ from typing import Any, Optional
 
 from file_ref_resolver import rewrite_event_data_isolated
 from event_shape import event_uuid, frontend_event_from_journal_row
-from session_manager import manager as session_manager
 import perf
 import session_store
 
@@ -956,42 +955,6 @@ class EventIngester:
             )
         self._enqueue_search_projection(root_id, search_entry)
 
-        # Orphan-event signal: a `msg_id=None` line for a sid whose
-        # latest assistant msg is already finalized arrives AFTER the
-        # orchestrator stopped stamping events to it (see
-        # `OwnedClaudeJsonlTailer._on_line` jsonl_tailer.py:697). Without
-        # this signal, reconcile (which seq-brackets the orphan to the
-        # right preceding msg) would never run on read paths — they
-        # consult `consume_reconcile_dirty` and only spawn the async
-        # reconcile when dirty.
-        #
-        # INVARIANT — lock order: this call MUST happen OUTSIDE the
-        # per-root ingester `lock`. `apply_event` (orchs/base.py) enters
-        # this method while holding the session_manager per-root RLock
-        # (acquired by `with session_manager.batch(...)` in orchestrator
-        # / jsonl_tailer). If a concurrent ingest on a different thread
-        # held the ingester Lock here and then tried to acquire the
-        # session_manager RLock via `latest_assistant_finalized`, the
-        # two threads would form a cycle (A: RLock→Lock, B: Lock→RLock)
-        # and the asyncio loop would wedge. Releasing the ingester Lock
-        # before any session_manager call breaks the cycle — fsync
-        # already provides the happens-before for any reader; the dirty
-        # flag is idempotent and the consume/re-arm protocol in
-        # `session_manager.consume_reconcile_dirty` tolerates the late
-        # set (a flag arming after a clear shows up on the NEXT consume,
-        # which the next read path will trigger).
-        if msg_id is None and self._affects_render_projection({
-            "type": event_type,
-            "data": data,
-        }):
-            try:
-                if session_manager.latest_assistant_finalized(sid):
-                    session_manager.mark_reconcile_dirty(root_id)
-            except Exception:
-                logger.debug(
-                    "orphan-event dirty-mark failed for sid=%s",
-                    sid, exc_info=True,
-                )
         return seq
 
     def ingest_batch(
@@ -1790,17 +1753,35 @@ class EventIngester:
         else:
             projection.pop(sid, None)
 
-    def has_uid(self, root_id: str, uid: str) -> bool:
-        """Check whether a UID is already tracked for this root.
+    def would_dedupe_orphan(self, root_id: str, event_type: str, data: dict) -> bool:
+        """True iff ingesting `data` as a `msg_id=None` orphan event for
+        `root_id` right now would be silently deduped by `_ingest_impl`'s
+        own authoritative rule — i.e. this exact uid:sha256(data) hash has
+        already produced a row under ANY msg_id (mirrors
+        `_is_duplicate_event_owner`'s `msg_id is None` branch).
 
-        Lightweight O(1) check against `_seen_uids_only` — no disk I/O,
-        no lock. Used by callers that want to skip a write they know the
-        ingester would dedup anyway, without paying the executor round-trip.
-        May return False negatives after close+reopen if the new seed scan
-        hasn't run yet, but that's safe: the ingester's own dedup inside
-        `_ingest_impl` is the authoritative guard.
+        Used by `ingest_orphan` (orchs/base.py) as a pre-flight shortcut to
+        skip a write it knows the ingester would dedup anyway, without
+        paying the executor round-trip. Unlike a uid-only check, this
+        compares the full canonical hash so a same-uid event with MUTATED
+        data (e.g. a streaming update) is correctly treated as NOT a
+        duplicate — the bug `test_ingest_orphan_dedup` guards against.
+        No disk I/O beyond the same `_ref_ctx_for_root` lookup
+        `_ingest_impl` itself does; no lock.
         """
-        return uid in self._seen_uids_only.get(root_id, set())
+        cwd, assume_exists = _ref_ctx_for_root(root_id)
+        canonical_data = self._canonical_data_for_storage(
+            event_type, data, cwd, assume_exists,
+        )
+        uid = self._extract_uuid(canonical_data)
+        dedup_data = self._dedup_data_for_hash(canonical_data)
+        try:
+            payload = json.dumps(dedup_data, sort_keys=True).encode()
+            raw_hash = hashlib.sha256(payload).hexdigest()
+        except (TypeError, ValueError):
+            raw_hash = str(hash(str(dedup_data)))
+        data_hash = f"{uid}:{raw_hash}" if uid else f":{raw_hash}"
+        return bool(self._seen_event_owners.get(root_id, {}).get(data_hash))
 
     def current_seq(self, root_id: str) -> Optional[int]:
         """Return the current seq counter for a root (highest assigned seq).

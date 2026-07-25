@@ -208,6 +208,7 @@ def main() -> int:
         )
         assert session_manager.apply_written_journal_event(
             sid, sid, msg_id, "agent_message", appended_data, appended_seq,
+        fold_start_watermark=0,
         )
         live = session_manager.get_root_tree(sid)
         live_msg = next(m for m in live["messages"] if m["id"] == msg_id)

@@ -84,6 +84,7 @@ def test_streaming_appends_produce_correct_precomputed_revision_via_real_path() 
     for i in range(30):
         session_manager.apply_written_journal_event(
             sid, sid, "msg-1", "agent_message", _agent_data(f"e{i}", f"chunk {i}"), i + 1,
+        fold_start_watermark=0,
         )
     projected = [c for c in fired if c.get("kind") == "journal_event_projected"]
 
@@ -109,12 +110,14 @@ def test_same_uuid_mutation_falls_back_to_correct_full_baseline() -> bool:
 
     session_manager.apply_written_journal_event(
         sid, sid, "msg-1", "agent_message", _agent_data("e0", "v1"), 1,
+    fold_start_watermark=0,
     )
     # Same uuid, mutated text -- apply_event replaces the slot in place
     # (a new dict object), same length. Must NOT be treated as a pure
     # append; must re-establish a correct full-hash baseline.
     session_manager.apply_written_journal_event(
         sid, sid, "msg-1", "agent_message", _agent_data("e0", "v2 mutated"), 2,
+    fold_start_watermark=0,
     )
     projected = [c for c in fired if c.get("kind") == "journal_event_projected"]
 
@@ -141,12 +144,15 @@ def test_append_after_replace_resumes_incremental_folding_correctly() -> bool:
 
     session_manager.apply_written_journal_event(
         sid, sid, "msg-1", "agent_message", _agent_data("e0", "v1"), 1,
+    fold_start_watermark=0,
     )
     session_manager.apply_written_journal_event(
         sid, sid, "msg-1", "agent_message", _agent_data("e0", "v2 mutated"), 2,
+    fold_start_watermark=0,
     )
     session_manager.apply_written_journal_event(
         sid, sid, "msg-1", "agent_message", _agent_data("e1", "new event"), 3,
+    fold_start_watermark=0,
     )
     projected = [c for c in fired if c.get("kind") == "journal_event_projected"]
 
@@ -168,6 +174,7 @@ def test_append_after_revision_cache_loss_rebuilds_full_revision() -> None:
     sid = _make_session("omitted-rev-reload")
     session_manager.apply_written_journal_event(
         sid, sid, "msg-1", "agent_message", _agent_data("e0", "first"), 1,
+    fold_start_watermark=0,
     )
     msg = session_manager.get_ref(sid)["messages"][-1]
     msg.pop(PRECOMPUTED_REVISION_KEY, None)
@@ -175,6 +182,7 @@ def test_append_after_revision_cache_loss_rebuilds_full_revision() -> None:
     session_manager.add_listener(lambda s, change: fired.append(change) if s == sid else None)
     session_manager.apply_written_journal_event(
         sid, sid, "msg-1", "agent_message", _agent_data("e1", "second"), 2,
+    fold_start_watermark=0,
     )
     revision = fired[-1]["delta"]["omitted_payloads"]["events"]["revision"]
     assert revision == full_revision(session_manager.get_ref(sid)["messages"][-1]["events"])
@@ -184,6 +192,7 @@ def test_deduped_written_event_invalidates_stale_revision() -> None:
     sid = _make_session("omitted-rev-live-dedup")
     session_manager.apply_written_journal_event(
         sid, sid, "msg-1", "agent_message", _agent_data("e0", "first"), 1,
+    fold_start_watermark=0,
     )
     msg = session_manager.get_ref(sid)["messages"][-1]
     from orchs import ApplyEventCtx, get_strategy
@@ -197,12 +206,14 @@ def test_deduped_written_event_invalidates_stale_revision() -> None:
     )
     assert not session_manager.apply_written_journal_event(
         sid, sid, "msg-1", "agent_message", _agent_data("e1", "live"), 2,
+    fold_start_watermark=0,
     )
     assert PRECOMPUTED_REVISION_KEY not in msg
     fired: list[dict] = []
     session_manager.add_listener(lambda s, change: fired.append(change) if s == sid else None)
     session_manager.apply_written_journal_event(
         sid, sid, "msg-1", "agent_message", _agent_data("e2", "journal"), 3,
+    fold_start_watermark=0,
     )
     revision = fired[-1]["delta"]["omitted_payloads"]["events"]["revision"]
     assert revision == full_revision(msg["events"])
@@ -212,6 +223,7 @@ def test_revision_cache_is_not_persisted() -> None:
     sid = _make_session("omitted-rev-persist")
     session_manager.apply_written_journal_event(
         sid, sid, "msg-1", "agent_message", _agent_data("e0", "first"), 1,
+    fold_start_watermark=0,
     )
     root = session_manager.get_ref(sid)
     msg = root["messages"][-1]
@@ -233,6 +245,7 @@ def test_real_path_is_faster_than_naive_full_recompute_per_event() -> bool:
     for i in range(n):
         session_manager.apply_written_journal_event(
             sid, sid, "msg-1", "agent_message", _agent_data(f"e{i}", big_text), i + 1,
+        fold_start_watermark=0,
         )
     real_elapsed = time.perf_counter() - start
 
@@ -310,7 +323,7 @@ def test_precomputed_key_excluded_from_snapshot_stub_filters() -> bool:
         "session_manager.py",
     ).read_text(encoding="utf-8")
     occurrences = source.count(
-        'k not in ("events", "_uid_idx", '
+        'k not in ("events", "_uid_idx", "_has_final", '
         "messages_delta_compaction.PRECOMPUTED_REVISION_KEY)",
     )
     ok = occurrences >= 2

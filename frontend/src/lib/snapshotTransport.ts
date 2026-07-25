@@ -21,7 +21,7 @@ const MAX_PENDING_ENCODED_BYTES = Math.ceil(MAX_STAGED_BYTES * 4 / 3)
 const MAX_PENDING_BINARY_BYTES = MAX_STAGED_BYTES;
 const SHA256_HEX = /^[0-9a-f]{64}$/;
 const REVISION = /^[A-Za-z0-9:_-]{1,80}$/;
-const SNAPSHOT_EVENT_TYPES = new Set(["messages_replay", "stub_invalidated", "rewind_complete"]);
+const SNAPSHOT_EVENT_TYPES = new Set(["messages_replay", "rewind_complete"]);
 const UTF8_ENCODER = new TextEncoder();
 
 type SendFrame = (frame: Record<string, unknown>) => void;

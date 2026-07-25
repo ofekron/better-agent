@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextvars
 from concurrent.futures import ThreadPoolExecutor
 import importlib
 import json
@@ -150,19 +149,6 @@ def test_websocket_json_serializes_off_loop() -> None:
     assert "SerializedGlobalEvent" in orchestrator_source
     assert "_bc_serialized_json_task" in global_source
     assert "dumps_ws_json(event)" in global_source
-
-
-def test_stub_invalidated_broadcast_is_batched() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
-    flush_start = source.index("def _flush_stub_invalidated(")
-    emit_start = source.index("def _emit_stub_invalidated(", flush_start)
-    emit_end = source.index("async def _send_reconcile_processing_snapshot(", emit_start)
-    flush_source = source[flush_start:emit_start]
-    emit_source = source[emit_start:emit_end]
-    assert 'broadcast_global("stub_invalidated", {"changes": changes})' in flush_source
-    assert "_stub_invalidated_pending.extend(changes)" in emit_source
-    assert 'broadcast_global("stub_invalidated", ch)' not in flush_source + emit_source
-    assert "for ch in changes:" not in flush_source + emit_source
 
 
 def test_resolved_event_reader_keeps_unfiltered_reads_paged() -> None:
@@ -326,19 +312,24 @@ def test_jsonl_fallback_followers_poll_files_off_loop() -> None:
     assert "with open(self._path, \"rb\") as f:" not in byte_source.split("def _read_from_sync", 1)[0]
 
 
-def test_live_provider_stream_mutation_skips_cold_event_hydration() -> None:
+def test_live_provider_stream_publish_is_render_tree_mutation_free() -> None:
+    # `save_ws_callback` (turn_manager.py) is publish-only on the live
+    # path: it journals the raw provider event and bridges it to the
+    # frontend over WS, but no longer calls `apply_event` to mutate
+    # `msg.events` directly. `SessionProjectionDrainer`
+    # (event_bus_subscribers.py), subscribed to the journal-written
+    # fact, is the sole render-tree mutator going forward — see
+    # `apply_written_journal_event` / `apply_event(source_is_provider_
+    # stream=False)`.
     source = (ROOT / "turn_manager.py").read_text(encoding="utf-8")
-    assert "_STREAM_EVENT_APPLY_EXECUTOR = ThreadPoolExecutor(" in source
-    assert "thread_name_prefix=\"stream-event-apply\"" in source
-    helper_start = source.index("    def _apply_provider_stream_event_sync(")
-    helper_end = source.index("    async def _publish_provider_stream_event(", helper_start)
-    helper_source = source[helper_start:helper_end]
-    assert "session_manager.message_batch(" in helper_source
-    assert "hydrate_events=False" in helper_source
+    assert "_STREAM_EVENT_APPLY_EXECUTOR" not in source
+    assert "_apply_provider_stream_event_sync" not in source
+    assert "_apply_event_to_assistant_msg" not in source
     start = source.index("async def save_ws_callback(")
     end = source.index("            if event_dict.get(\"type\") in _BRIDGE_EVENT_TYPES:", start)
     callback_source = source[start:end]
-    assert "run_in_executor(\n                        _STREAM_EVENT_APPLY_EXECUTOR" in callback_source
+    assert "_publish_provider_stream_event(" in callback_source
+    assert "run_in_executor(" not in callback_source
     assert "session_manager.message_batch(" not in callback_source
     assert "with session_manager.batch(persist_to):" not in callback_source
 
@@ -453,7 +444,6 @@ def test_worker_panel_mutations_skip_cold_event_hydration() -> None:
     assert "self._cached(sid, hydrate_events=hydrate_events)" in run_source
 
     for name in (
-        "snapshot_workers",
         "upsert_worker_panel",
         "update_worker_panel",
         "apply_worker_panel_event",
@@ -3216,7 +3206,11 @@ def test_session_list_warms_event_meta_off_path() -> None:
     warm_source = source[warm_start:warm_end]
     assert "_warm_session_event_meta_roots(root_ids)" in warm_source
     assert "_session_detail_snapshot_sync(" not in warm_source
-    assert "schedule_reconcile_if_needed" not in warm_source
+    # Surviving invariant: the warm path never triggers a fold/hydrate
+    # scan inline (that runs off-loop, driven by the write-time
+    # projection fold — not from this warm-cache-only path).
+    assert "hydrate_root_prepared(" not in warm_source
+    assert "apply_written_journal_event(" not in warm_source
     assert "_session_event_file_fingerprint(" not in warm_source
     assert "_session_event_meta_cache_fresh(" not in warm_source
     roots_start = source.index("def _session_event_meta_roots_for_page(")
@@ -3282,7 +3276,6 @@ def test_session_detail_has_split_perf_timers() -> None:
         "sessions.detail.event_meta",
         "sessions.detail.tree",
         "sessions.detail.strip_synthetic",
-        "sessions.detail.reconcile_snapshot",
         "sessions.detail.max_context_copy",
         "sessions.detail.total",
         "sessions.detail.file_path",
@@ -3322,63 +3315,6 @@ def test_session_hot_paths_use_dedicated_executor_with_queue_wait_metrics() -> N
     assert "await asyncio.to_thread(\n                _decorate_local_sidebar_sessions" not in route_source
     assert "await asyncio.to_thread(\n            _decorate_local_sidebar_sessions" not in route_source
     assert "await _run_hot_path(\n            \"sessions.list." not in route_source
-
-
-def test_session_reconcile_uses_dedicated_executor_with_context() -> None:
-    source = (ROOT / "session_manager.py").read_text(encoding="utf-8")
-    assert "def _new_reconcile_executor()" in source
-    assert "def reopen_reconciles() -> None:" in source
-    assert "max_workers=2," in source
-    assert "thread_name_prefix=\"session-reconcile\"" in source
-    assert "async def shutdown_reconciles() -> None:" in source
-    assert "manager._reconcile_accepting = False" in source
-    reconcile_start = source.index("    async def _async_reconcile_with_progress(")
-    reconcile_end = source.index("    def _emit_processing(", reconcile_start)
-    reconcile_source = source[reconcile_start:reconcile_end]
-    assert "asyncio.to_thread(self._sync_reconcile, root_id)" not in reconcile_source
-    assert "contextvars.copy_context()" in reconcile_source
-    assert "run_in_executor(\n            _RECONCILE_EXECUTOR" in reconcile_source
-    assert "session.reconcile.queue_wait" in reconcile_source
-    assert "session.reconcile.total" in reconcile_source
-    main_source = (ROOT / "main.py").read_text(encoding="utf-8")
-    assert "shutdown_reconciles" in main_source
-    shutdown_start = main_source.index("async def on_shutdown()")
-    shutdown_end = main_source.index("# Internal Endpoints", shutdown_start)
-    shutdown_source = main_source[shutdown_start:shutdown_end]
-    assert "await shutdown_reconciles()" in shutdown_source
-
-    import session_manager as sm
-
-    observed: dict[str, object] = {}
-    marker = contextvars.ContextVar("reconcile_marker")
-
-    class _ReconcileHarness:
-        _emit_reconciled_fn = None
-        _emit_stub_invalidated_fn = None
-
-        async def _async_reconcile_with_progress(self, root_id: str) -> None:
-            return await sm.SessionManager._async_reconcile_with_progress(self, root_id)
-
-        def _sync_reconcile(self, root_id: str) -> list:
-            observed["root_id"] = root_id
-            observed["thread_name"] = threading.current_thread().name
-            observed["marker"] = marker.get(None)
-            return []
-
-        def _emit_processing(self, kind: str, root_id: str) -> None:
-            observed.setdefault("processing", []).append((kind, root_id))
-
-    async def _run() -> None:
-        token = marker.set("ctx-ok")
-        try:
-            await _ReconcileHarness()._async_reconcile_with_progress("root-x")
-        finally:
-            marker.reset(token)
-
-    asyncio.run(_run())
-    assert observed["root_id"] == "root-x"
-    assert str(observed["thread_name"]).startswith("session-reconcile")
-    assert observed["marker"] == "ctx-ok"
 
 
 def test_sidebar_decoration_cache_uses_stable_session_version_key() -> None:
@@ -3716,7 +3652,8 @@ def test_event_projections_do_not_eager_warm_detail_snapshots() -> None:
     warm_end = source.index("def _machine_nodes_enabled_cached(", warm_start)
     warm_source = source[warm_start:warm_end]
     assert "_session_detail_snapshot_sync(" not in warm_source
-    assert "session_manager.schedule_reconcile_if_needed" not in warm_source
+    # Surviving invariant: no inline fold/hydrate scan on this path.
+    assert "session_manager.hydrate_root_prepared" not in warm_source
 
 
 def test_render_hydrate_worker_fingerprint_is_batched() -> None:
@@ -4162,7 +4099,6 @@ def test_session_detail_response_bytes_are_cached() -> None:
     assert "_session_detail_cache_get(cache_key)" in route_source
     assert "_session_detail_response_cache_latest.get(simple_cache_key)" in route_source
     assert "if cached_full_key is not None:" in route_source
-    assert "_session_reconcile_snapshot_and_schedule" in route_source
     assert "include_cache_key=True" in route_source
     assert "await _session_detail_cache_put_async(cache_key, tree)" in route_source
     assert "def _session_detail_cache_put_async(" in source
@@ -4775,7 +4711,6 @@ if __name__ == "__main__":
     test_session_list_reads_user_prefs_once()
     test_session_detail_has_split_perf_timers()
     test_session_hot_paths_use_dedicated_executor_with_queue_wait_metrics()
-    test_session_reconcile_uses_dedicated_executor_with_context()
     test_sidebar_decoration_cache_uses_stable_session_version_key()
     test_provider_context_runtime_discovery_runs_off_loop()
     test_continuation_start_boundary_runs_off_loop()
@@ -4836,7 +4771,6 @@ if __name__ == "__main__":
     test_get_session_strips_synthetic_events_off_loop()
     test_session_detail_response_bytes_are_cached()
     test_stubbed_tree_cache_covers_broad_session_loads()
-    test_stub_invalidated_broadcast_is_batched()
     test_resolved_event_reader_keeps_unfiltered_reads_paged()
     test_ws_gap_fill_paginates_until_target_seq()
     test_run_recovery_finalize_session_manager_calls_are_off_loop()

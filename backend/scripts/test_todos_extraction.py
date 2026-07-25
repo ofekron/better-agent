@@ -252,12 +252,18 @@ def _apply(
     source_is_provider_stream: bool,
 ) -> None:
     ctx = ApplyEventCtx(
-        manager_sid_holder={"id": None}, workers_list=[],
-        user_msg=None, root_id=sid,
+        manager_sid_holder={"id": None}, user_msg=None, root_id=sid,
     )
     strategy.apply_event(
         app_session_id=sid, msg=msg, event=ev, ctx=ctx,
         source_is_provider_stream=source_is_provider_stream,
+        # This suite specifically pins convergence across the historical
+        # True/False axis (live vs replay), which is exactly what used to
+        # gate `session_event_extensions.apply_event(use_sdk=...)` before
+        # `fires_side_effects` (seq > fold-pass watermark) replaced it as
+        # the gate for once-per-event side effects. Mirroring it 1:1 here
+        # keeps this suite's True/False convergence invariant meaningful.
+        fires_side_effects=source_is_provider_stream,
     )
     session_event_extensions.drain_for_tests()
 

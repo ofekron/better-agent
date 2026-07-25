@@ -3,7 +3,7 @@
 When a reconcile (post-restart safety net) appends events to a completed
 assistant msg, its stub went stale and the backend must fire
 `stub_invalidated`. This pins the DETECTION inside
-`render_tree_hydrate.reconcile_msg_events_from_jsonl`: the
+`render_tree_hydrate.hydrate_msg_events_from_jsonl`: the
 `on_historical_change` callback fires for any completed msg that GAINS
 events on the pass, including the latest completed assistant turn.
 
@@ -35,7 +35,7 @@ _TMP_HOME = _test_home.isolate("bc-test-stub-inval-")
 import render_stub  # noqa: E402
 from event_ingester import event_ingester  # noqa: E402
 from orchs import ApplyEventCtx, get_strategy  # noqa: E402
-from render_tree_hydrate import reconcile_msg_events_from_jsonl  # noqa: E402
+from render_tree_hydrate import hydrate_msg_events_from_jsonl as reconcile_msg_events_from_jsonl  # noqa: E402
 from session_manager import manager as session_manager  # noqa: E402
 
 PASS = "\x1b[32mPASS\x1b[0m"
@@ -93,8 +93,7 @@ def _mk_session_latest_streaming() -> tuple[str, str, str]:
     )
     sid = sess["id"]
     strategy = get_strategy("manager")
-    ctx = ApplyEventCtx(manager_sid_holder={"id": None}, workers_list=[],
-                        user_msg=None, root_id=sid)
+    ctx = ApplyEventCtx(manager_sid_holder={"id": None}, user_msg=None, root_id=sid)
 
     # Turn 1 — finalized, 3 events.
     session_manager.append_user_msg(sid, {
@@ -126,8 +125,7 @@ def _mk_session_with_historical_events(event_count: int) -> tuple[str, str, str]
     )
     sid = sess["id"]
     strategy = get_strategy("manager")
-    ctx = ApplyEventCtx(manager_sid_holder={"id": None}, workers_list=[],
-                        user_msg=None, root_id=sid)
+    ctx = ApplyEventCtx(manager_sid_holder={"id": None}, user_msg=None, root_id=sid)
 
     session_manager.append_user_msg(sid, {
         "id": "user-q1", "role": "user", "content": "q1",
@@ -295,75 +293,6 @@ def test_completed_latest_replacement_fires_invalidation() -> bool:
     return True
 
 
-def test_emit_stub_invalidated_batches_changes() -> bool:
-    import main
-
-    calls: list[tuple[str, dict]] = []
-    original = main.coordinator.broadcast_global
-    original_delay = main._STUB_INVALIDATED_COALESCE_SECONDS
-
-    async def fake_broadcast(event_type: str, data: dict) -> None:
-        calls.append((event_type, data))
-
-    main.coordinator.broadcast_global = fake_broadcast  # type: ignore[method-assign]
-    main._STUB_INVALIDATED_COALESCE_SECONDS = 0.001
-    handle_after_flush = None
-    scheduled_after_flush = False
-    try:
-        async def _run() -> None:
-            main._emit_stub_invalidated([])
-            main._emit_stub_invalidated([
-                {"app_session_id": "s1", "msg_id": "m1", "stub": {"event_count": 1, "last_events": []}},
-            ])
-            main._emit_stub_invalidated([
-                {"app_session_id": "s1", "msg_id": "m2", "stub": {"event_count": 2, "last_events": []}},
-                {"app_session_id": "s2", "msg_id": "m3", "stub": {"event_count": 3, "last_events": []}},
-            ])
-            await asyncio.sleep(0.02)
-            main._emit_stub_invalidated([
-                {"app_session_id": "s3", "msg_id": "m4", "stub": {"event_count": 4, "last_events": []}},
-            ])
-            await asyncio.sleep(0.02)
-
-        asyncio.run(_run())
-        handle_after_flush = main._stub_invalidated_flush_handle
-        scheduled_after_flush = main._stub_invalidated_flush_scheduled
-    finally:
-        handle = main._stub_invalidated_flush_handle
-        if handle is not None:
-            handle.cancel()
-        main._stub_invalidated_pending.clear()
-        main._stub_invalidated_flush_handle = None
-        main._stub_invalidated_flush_scheduled = False
-        main.coordinator.broadcast_global = original  # type: ignore[method-assign]
-        main._STUB_INVALIDATED_COALESCE_SECONDS = original_delay
-
-    if handle_after_flush is not None:
-        print("  flush handle should be cleared after flush")
-        return False
-    if scheduled_after_flush:
-        print("  flush scheduled flag should be cleared after flush")
-        return False
-    if len(calls) != 2:
-        print(f"  expected two coalesced broadcasts, got {calls}")
-        return False
-    expected_msg_ids = [["m1", "m2", "m3"], ["m4"]]
-    for index, ((event_type, data), msg_ids) in enumerate(zip(calls, expected_msg_ids)):
-        if event_type != "stub_invalidated":
-            print(f"  wrong event type: {event_type}")
-            return False
-        changes = data.get("changes")
-        actual_msg_ids = [
-            change.get("msg_id")
-            for change in changes
-            if isinstance(change, dict)
-        ] if isinstance(changes, list) else []
-        if actual_msg_ids != msg_ids:
-            print(f"  wrong batch {index}: {data}")
-            return False
-    return True
-
-
 TESTS = [
     ("orphan bracketed onto non-latest fires stub_invalidated",
         test_orphan_on_non_latest_fires_invalidation),
@@ -375,8 +304,6 @@ TESTS = [
         test_same_uuid_replacement_outside_tail_invalidates_without_tail_bloat),
     ("completed latest replacement fires stub_invalidated",
         test_completed_latest_replacement_fires_invalidation),
-    ("stub_invalidated emitter batches reconcile changes",
-        test_emit_stub_invalidated_batches_changes),
 ]
 
 

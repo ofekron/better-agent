@@ -105,8 +105,6 @@
   "sidebar.sessionsTab": "Sitzungen",
   "sidebar.workersTab": "Worker",
   "sidebar.routinesTab": "Routinen",
-  "app.reconciling": "Abgleich läuft…",
-  "app.reconcilingTitle": "Das Backend gleicht verzögerte Ereignisse ab. Wird nur bei >0,3 s angezeigt.",
   "app.supervisorBannerDismiss": "Ausblenden",
   "startup_tasks.banner_title": "Hintergrundarbeiten",
   "startup_tasks.dismiss": "Ausblenden",

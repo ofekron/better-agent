@@ -105,8 +105,6 @@
   "sidebar.sessionsTab": "सत्र",
   "sidebar.workersTab": "वर्कर",
   "sidebar.routinesTab": "रूटीन",
-  "app.reconciling": "समाधान हो रहा है…",
-  "app.reconcilingTitle": "बैकएंड पिछड़े हुए ईवेंट समाधान कर रहा है। केवल तब दिखाया जाता है जब >0.3s हो।",
   "app.supervisorBannerDismiss": "ख़ारिज करें",
   "startup_tasks.banner_title": "पृष्ठभूमि कार्य",
   "startup_tasks.dismiss": "ख़ारिज करें",

@@ -1616,7 +1616,7 @@ def test_async_mssg_panel_watcher_ignores_other_lifecycle_events():
     assert events[-1]["data"]["success"] is True
 
 
-def test_sub_session_panel_kind_and_snapshot_dedupes_by_delegation_id():
+def test_sub_session_panel_kind_is_set_on_delegation():
     sender = session_manager.create(
         name="sender panel kind",
         cwd="/repo",
@@ -1659,29 +1659,6 @@ def test_sub_session_panel_kind_and_snapshot_dedupes_by_delegation_id():
     assert events[0]["data"]["provider_id"] == sub.get("provider_id")
     assert events[0]["data"]["model"] == sub.get("model")
     assert events[0]["data"]["reasoning_effort"] == sub.get("reasoning_effort")
-
-    assistant = {
-        "id": "assistant-panel-kind",
-        "role": "assistant",
-        "content": "",
-        "events": [],
-        "workers": [],
-        "timestamp": "2026-06-17T10:03:00",
-        "isStreaming": False,
-    }
-    session_manager.append_assistant_msg(sender["id"], assistant)
-    session_manager.snapshot_workers(sender["id"], assistant["id"], [
-        {"delegation_id": "dup", "worker_description": "first", "events": []},
-        {"delegation_id": "other", "worker_description": "other", "events": []},
-        {"delegation_id": "dup", "worker_description": "second", "events": [
-            {"type": "agent_message", "data": {"uuid": "event-dup"}},
-        ]},
-    ])
-    fresh = session_manager.get(sender["id"])
-    saved = next(m for m in fresh["messages"] if m["id"] == assistant["id"])
-    assert [worker["delegation_id"] for worker in saved["workers"]] == ["dup", "other"]
-    assert saved["workers"][0]["worker_description"] == "second"
-    assert saved["workers"][0]["events"][0]["data"]["uuid"] == "event-dup"
 
 
 def test_session_creation_panel_is_separate_from_message_turn_panel():

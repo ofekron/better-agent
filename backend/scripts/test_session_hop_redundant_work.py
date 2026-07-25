@@ -3,41 +3,25 @@
 Pins the post-fix invariants that make a session hop O(1) work in
 steady state instead of O(N-events × N-panes):
 
-  1. **Cold-cache hop schedules ONE reconcile**, not one per pane and
-     not inline. The cold-load reconcile happens once per root per
-     backend lifetime, fan-out independent.
-
-  2. **Warm-cache hop schedules ZERO reconciles**. After the cold-
-     load reconcile clears the dirty flag, subsequent
-     `schedule_reconcile_if_needed` calls return None — no JSONL
-     scan, no `_reconcile_msg_events_from_jsonl` walk.
-
-  3. **WS subscribe builds messages_replay from session_manager only,
+  1. **WS subscribe builds messages_replay from session_manager only,
      and caps the payload at 50 messages even when `since_seq=0`** —
      no full-tree deepcopy, no full-history serialization on cold
      hop.
 
-  4. **Orphan events arm the dirty flag**. An ingest with msg_id=None
-     for a sid whose latest assistant msg is finalized sets
-     reconcile_dirty=True so the next reader spawns a recovery
-     reconcile.
-
-  5. **Single-flight**: two concurrent `schedule_reconcile_if_needed`
-     calls for the same root → exactly ONE reconcile task runs.
-
-  6. **Delayed-progress 0.3s threshold**: a reconcile that finishes
-     under 0.3s emits ZERO `session_processing_*` events (no UI
-     flash). A reconcile that exceeds 0.3s emits `started` then
-     `finished`, in that order, even if the reconcile body raises.
-
-  7. **Loop-stays-responsive**: while a slow reconcile is running in
-     the threadpool, an unrelated coroutine on the event loop still
-     gets scheduled within tight latency.
-
-  8. **Subscribe stale-debug probes stay off the normal path**. Replay
+  2. **Subscribe stale-debug probes stay off the normal path**. Replay
      details are useful when DEBUG is enabled, but the normal reconnect
      path must not run extra session-manager probes or write INFO logs
      per subscribe.
+
+The single-flight-reconcile-per-cold-hop, dirty-flag, delayed-progress-
+badge, and loop-responsiveness-during-reconcile invariants this file used
+to pin were retired with the async dirty-flag reconcile subsystem: the
+write-time projection fold (`event_bus_subscribers.SessionProjectionDrainer`)
+now folds every written journal row as it lands — single-flight admission,
+capacity backpressure, and shutdown-bounded drain are pinned directly on
+the drainer in `test_session_projection_drainer.py`; orphan-fold immediacy
+(finalized vs. still-streaming) is pinned in
+`test_tailer_routes_through_apply_event.py`.
 
 Run with:
     cd backend && .venv/bin/python scripts/test_session_hop_redundant_work.py
@@ -114,146 +98,6 @@ def _fresh_session(n_finalized_assistant: int = 3) -> str:
     return sid
 
 
-def _evict_cache(root_id: str) -> None:
-    """Drop the in-memory cache for `root_id` so the next read triggers
-    `_load_root` from disk (simulating a cold backend boot)."""
-    session_manager._roots.pop(root_id, None)
-    # Don't pop _node_root_id — root_id lookup must still work.
-    # Clear dirty flag so we can observe the cold-load setter.
-    session_manager._reconcile_dirty.pop(root_id, None)
-
-
-def _wire_loop_and_fns(
-    loop: asyncio.AbstractEventLoop,
-    *,
-    reconcile_fn=None,
-    emit_fn=None,
-    reconciled_fn=None,
-) -> tuple[list, list]:
-    """Bind a fresh loop + counter wrappers. Returns
-    (reconcile_calls, emit_calls) — both lists you can inspect from
-    the test body. Defaults to a no-op reconcile and capturing emit."""
-    reconcile_calls: list[str] = []
-    emit_calls: list[tuple[str, str]] = []
-
-    def _default_reconcile(root_id: str, *, after_seq: int = 0) -> list:
-        reconcile_calls.append(root_id)
-        return []
-
-    def _default_emit(root_id: str, kind: str) -> None:
-        emit_calls.append((root_id, kind))
-
-    session_manager.bind_loop(loop)
-    session_manager.bind_reconcile_fn(reconcile_fn or _default_reconcile)
-    session_manager.bind_processing_emitter(emit_fn or _default_emit)
-    session_manager.bind_reconciled_emitter(
-        reconciled_fn or (lambda root_id: None)
-    )
-    return reconcile_calls, emit_calls
-
-
-# ─── 1. Cold-cache hop schedules ONE reconcile ─────────────────────
-
-
-async def test_cold_hop_schedules_one_reconcile() -> bool:
-    sid = _fresh_session()
-    _evict_cache(sid)
-    loop = asyncio.get_running_loop()
-    reconcile_calls, _ = _wire_loop_and_fns(loop)
-
-    # First read repopulates the cache and arms the dirty flag (per
-    # `_load_root`'s "cold load → mark dirty" rule).
-    _ = session_manager.get(sid)
-    assert session_manager._reconcile_dirty.get(sid) is True, (
-        "cold _load_root must arm the dirty flag"
-    )
-
-    task1 = session_manager.schedule_reconcile_if_needed(sid)
-    task2 = session_manager.schedule_reconcile_if_needed(sid)
-    if task1 is None:
-        print("  schedule_reconcile_if_needed returned None on cold hop")
-        return False
-    # Single-flight: second call returns the same task.
-    if task2 is not task1:
-        print("  second schedule_reconcile_if_needed should return the same task")
-        return False
-
-    await task1
-    if len(reconcile_calls) != 1:
-        print(f"  expected reconcile=1, got {len(reconcile_calls)}")
-        return False
-    if reconcile_calls[0] != sid:
-        print(f"  reconcile called for wrong root: {reconcile_calls[0]}")
-        return False
-    return True
-
-
-# ─── 2. Warm-cache hop schedules ZERO reconciles ───────────────────
-
-
-async def test_warm_hop_schedules_no_reconcile() -> bool:
-    sid = _fresh_session()
-    loop = asyncio.get_running_loop()
-    reconcile_calls, _ = _wire_loop_and_fns(loop)
-
-    # First pass: drain the cold-load reconcile.
-    _ = session_manager.get(sid)
-    task = session_manager.schedule_reconcile_if_needed(sid)
-    if task is not None:
-        await task
-    initial = len(reconcile_calls)
-
-    # Subsequent hops do nothing. Simulate 4-pane subscribe burst.
-    for _ in range(4):
-        result = session_manager.schedule_reconcile_if_needed(sid)
-        if result is not None:
-            print(f"  warm hop spawned reconcile (returned {result})")
-            return False
-    if len(reconcile_calls) != initial:
-        print(
-            f"  warm hops triggered reconcile: {initial} → {len(reconcile_calls)}"
-        )
-        return False
-    return True
-
-
-# ─── 3. Orphan-event ingest arms dirty flag ────────────────────────
-
-
-def test_orphan_event_arms_dirty() -> bool:
-    sid = _fresh_session()  # finalized assistant present
-    # Warm cache so latest_assistant_finalized can read it.
-    _ = session_manager.get(sid)
-    session_manager._reconcile_dirty[sid] = False
-
-    # Orphan-shape ingest: msg_id=None.
-    event_ingester.ingest(
-        sid, sid=sid, event_type="agent_message",
-        data={
-            "type": "assistant",
-            "uuid": str(uuid.uuid4()),
-            "message": {
-                "role": "assistant",
-                "content": [{"type": "text", "text": "orphan tail"}],
-            },
-        },
-        source="claude_tailer", msg_id=None,
-    )
-    if session_manager._reconcile_dirty.get(sid) is not True:
-        print("  orphan ingest did NOT set reconcile_dirty")
-        return False
-
-    # consume_reconcile_dirty clears it.
-    was = session_manager.consume_reconcile_dirty(sid)
-    if was is not True:
-        print(f"  consume_reconcile_dirty returned {was}, expected True")
-        return False
-    if session_manager._reconcile_dirty.get(sid) is True:
-        print("  consume failed to clear the flag")
-        return False
-    return True
-
-
 def test_non_render_orphans_do_not_invalidate_snapshot() -> bool:
     sid = _fresh_session()
     _ = session_manager.get_root_tree_stubbed(sid)
@@ -262,7 +106,6 @@ def test_non_render_orphans_do_not_invalidate_snapshot() -> bool:
         print("  expected warm _since_cache entry")
         return False
     before_key, before_snapshot = cached
-    session_manager._reconcile_dirty[sid] = False
 
     cases = [
         ("command_received", {
@@ -281,9 +124,6 @@ def test_non_render_orphans_do_not_invalidate_snapshot() -> bool:
             source="test", msg_id=None,
         )
 
-    if session_manager._reconcile_dirty.get(sid) is True:
-        print("  non-render orphan incorrectly armed reconcile_dirty")
-        return False
     if event_ingester.render_seq_for_sid(sid, sid) != 0:
         print("  non-render orphan advanced render_seq_for_sid")
         return False
@@ -458,173 +298,6 @@ def test_stamped_event_updates_warm_root_events_projection() -> bool:
         if isinstance(event, dict)
     ):
         print("  stamped event did not remove matching root orphan")
-        return False
-    return True
-
-
-# ─── 4. Single-flight under concurrent schedules ───────────────────
-
-
-async def test_single_flight_concurrent_schedules() -> bool:
-    sid = _fresh_session()
-    _evict_cache(sid)
-    loop = asyncio.get_running_loop()
-
-    # Gate the reconcile so two schedule calls land before the first
-    # completes — deterministically tests single-flight.
-    gate = threading.Event()
-    call_counter = itertools.count()
-    call_count = [0]
-
-    def _slow_reconcile(root_id: str, *, after_seq: int = 0) -> list:
-        call_count[0] = next(call_counter) + 1
-        gate.wait(timeout=2.0)
-        return []
-
-    _wire_loop_and_fns(loop, reconcile_fn=_slow_reconcile)
-    _ = session_manager.get(sid)  # arms dirty
-
-    tasks = [
-        session_manager.schedule_reconcile_if_needed(sid)
-        for _ in range(4)
-    ]
-    # All should be the same task (or None for the second+ calls when
-    # the dirty flag was already consumed and an in-flight task exists).
-    non_null = [t for t in tasks if t is not None]
-    if len(non_null) != 4:
-        print(
-            f"  expected 4 same-task returns, got "
-            f"{len([t for t in tasks if t is not None])} non-null"
-        )
-        return False
-    first = non_null[0]
-    if any(t is not first for t in non_null):
-        print("  schedule returned different tasks under concurrent calls")
-        return False
-
-    gate.set()
-    await first
-    if call_count[0] != 1:
-        print(f"  expected reconcile=1 under concurrent schedules, got {call_count[0]}")
-        return False
-    return True
-
-
-# ─── 5. Fast reconcile emits ZERO progress events ──────────────────
-
-
-async def test_fast_reconcile_no_progress_events() -> bool:
-    sid = _fresh_session()
-    _evict_cache(sid)
-    loop = asyncio.get_running_loop()
-    _, emit_calls = _wire_loop_and_fns(loop)  # no-op reconcile → instant
-    _ = session_manager.get(sid)
-
-    task = session_manager.schedule_reconcile_if_needed(sid)
-    assert task is not None
-    await task
-    if emit_calls:
-        print(f"  fast reconcile emitted progress events: {emit_calls}")
-        return False
-    return True
-
-
-# ─── 6. Slow reconcile emits started + finished, in order ──────────
-
-
-async def test_slow_reconcile_emits_started_then_finished() -> bool:
-    sid = _fresh_session()
-    _evict_cache(sid)
-    loop = asyncio.get_running_loop()
-
-    def _sleepy(root_id: str, *, after_seq: int = 0) -> list:
-        time.sleep(0.5)  # > 0.3s threshold
-        return []
-
-    _, emit_calls = _wire_loop_and_fns(loop, reconcile_fn=_sleepy)
-    _ = session_manager.get(sid)
-    task = session_manager.schedule_reconcile_if_needed(sid)
-    assert task is not None
-    await task
-    kinds = [k for (_, k) in emit_calls]
-    if kinds != ["started", "finished"]:
-        print(f"  expected ['started','finished'], got {kinds}")
-        return False
-    return True
-
-
-# ─── 7. Slow reconcile that raises still emits finished ────────────
-
-
-async def test_failing_reconcile_still_emits_finished() -> bool:
-    sid = _fresh_session()
-    _evict_cache(sid)
-    loop = asyncio.get_running_loop()
-
-    def _sleepy_fail(root_id: str, *, after_seq: int = 0) -> list:
-        time.sleep(0.4)
-        raise RuntimeError("synthetic failure")
-
-    _, emit_calls = _wire_loop_and_fns(loop, reconcile_fn=_sleepy_fail)
-    _ = session_manager.get(sid)
-    task = session_manager.schedule_reconcile_if_needed(sid)
-    assert task is not None
-    # `_sync_reconcile` swallows the exception, so the task completes
-    # cleanly. The `finally` MUST still fire `finished`.
-    await task
-    kinds = [k for (_, k) in emit_calls]
-    if kinds != ["started", "finished"]:
-        print(f"  failing reconcile emit sequence wrong: {kinds}")
-        return False
-    # In-flight registry must be cleared.
-    if sid in session_manager._in_flight_reconcile:
-        print(f"  in-flight registry not cleared after failure")
-        return False
-    return True
-
-
-# ─── 8. Loop-stays-responsive during slow reconcile ────────────────
-
-
-async def test_loop_responsive_during_slow_reconcile() -> bool:
-    sid = _fresh_session()
-    _evict_cache(sid)
-    loop = asyncio.get_running_loop()
-
-    gate = threading.Event()
-    started = threading.Event()
-
-    def _gated(root_id: str, *, after_seq: int = 0) -> list:
-        started.set()
-        gate.wait(timeout=2.0)
-        return []
-
-    _wire_loop_and_fns(loop, reconcile_fn=_gated)
-    _ = session_manager.get(sid)
-    reconcile_task = session_manager.schedule_reconcile_if_needed(sid)
-    assert reconcile_task is not None
-
-    # Wait for the threadpool worker to actually start.
-    for _ in range(100):
-        if started.is_set():
-            break
-        await asyncio.sleep(0.01)
-    if not started.is_set():
-        print("  threadpool worker never started")
-        return False
-
-    # Now measure: schedule an asyncio.sleep(0) — the loop should
-    # service it within tight latency despite the reconcile holding
-    # the threadpool slot. Pre-fix, an inline reconcile would block
-    # the loop entirely; post-fix, it's on a worker thread so the
-    # loop stays responsive.
-    t0 = time.perf_counter()
-    await asyncio.sleep(0)
-    latency_ms = (time.perf_counter() - t0) * 1000.0
-    gate.set()
-    await reconcile_task
-    if latency_ms > 50:
-        print(f"  loop latency during slow reconcile: {latency_ms:.1f}ms (>50ms)")
         return False
     return True
 
@@ -994,81 +667,6 @@ def test_ws_replay_reruns_inclusive_when_in_flight_appears() -> bool:
     return True
 
 
-async def test_ws_replay_orphan_finalize_uses_reconcile_not_huge_replay() -> bool:
-    from main import _build_messages_replay_delta  # noqa: E402
-
-    loop = asyncio.get_running_loop()
-    reconciled: list[str] = []
-
-    def _reconcile(root_id: str, *, after_seq: int = 0) -> list:
-        return [{"app_session_id": root_id, "msg_id": "orphan", "stub": {}}]
-
-    _wire_loop_and_fns(
-        loop,
-        reconcile_fn=_reconcile,
-        reconciled_fn=lambda root_id: reconciled.append(root_id),
-    )
-    sid, msg_id, seen_seq = _session_with_completed_replay_target()
-    _ = session_manager.get(sid)
-    session_manager._reconcile_dirty[sid] = False
-    event_ingester.ingest(
-        sid, sid=sid, event_type="agent_message",
-        data={
-            "type": "assistant",
-            "uuid": str(uuid.uuid4()),
-            "message": {
-                "role": "assistant",
-                "content": [{"type": "text", "text": "orphan"}],
-            },
-        },
-        source="claude_tailer", msg_id=None,
-    )
-    if session_manager._reconcile_dirty.get(sid) is not True:
-        print("  orphan did not arm reconcile dirty")
-        return False
-    delta = _build_messages_replay_delta(sid, seen_seq, limit=50)
-    if delta is None:
-        print("  replay delta unexpectedly None")
-        return False
-    if msg_id in {m.get("id") for m in delta["messages"]}:
-        print("  orphan reconnect resent completed huge message")
-        return False
-    task = session_manager.schedule_reconcile_if_needed(sid)
-    if task is None:
-        print("  dirty orphan did not schedule reconcile")
-        return False
-    await task
-    if sid not in reconciled:
-        print(f"  session_reconciled not emitted: {reconciled}")
-        return False
-    return True
-
-
-async def test_reconcile_with_no_changes_does_not_emit_reconciled() -> bool:
-    """A reconcile pass that finds nothing new (the common cold-open case,
-    where the initial REST snapshot was already current) must NOT fire
-    `session_reconciled` — the frontend's `applySessionReconciled` treats
-    that event as "the tree is stale, refetch it", and an empty-changes
-    reconcile means the tree is NOT stale. Regression for the redundant
-    reload-on-open bug: before the fix, `session_reconciled` fired
-    unconditionally on every reconcile completion regardless of `changes`."""
-    loop = asyncio.get_running_loop()
-    reconciled: list[str] = []
-    # Default reconcile_fn (no reconcile_fn kwarg) returns [] — empty changes.
-    _wire_loop_and_fns(loop, reconciled_fn=lambda root_id: reconciled.append(root_id))
-    sid = _fresh_session()
-    session_manager._reconcile_dirty[sid] = True
-    task = session_manager.schedule_reconcile_if_needed(sid)
-    if task is None:
-        print("  dirty session did not schedule reconcile")
-        return False
-    await task
-    if sid in reconciled:
-        print(f"  session_reconciled emitted despite empty changes: {reconciled}")
-        return False
-    return True
-
-
 def test_ws_event_cursor_uses_server_floor() -> bool:
     sid = _fresh_session()
     event_ingester.ingest(
@@ -1111,6 +709,10 @@ def test_ws_event_cursor_uses_server_floor() -> bool:
 
 
 def test_ws_replay_stale_debug_is_debug_gated() -> bool:
+    """The replay debug probes (which used to include a reconcile-dirty
+    peek — `session_manager.is_reconcile_dirty`/`_reconcile_gen`, retired
+    with the async dirty-flag reconcile subsystem) stay behind the DEBUG
+    gate, and no reconcile probe of any kind runs on the normal path."""
     source = Path(_BACKEND, "main.py").read_text(encoding="utf-8")
     start = source.index('await ws_callback({\n                                "type": "messages_replay"')
     end = source.index('                    except Exception:\n                        logger.exception("messages_replay on subscribe failed")', start)
@@ -1120,23 +722,20 @@ def test_ws_replay_stale_debug_is_debug_gated() -> bool:
         print("  missing DEBUG gate around stale replay probes")
         return False
     gated = replay_tail[replay_tail.index(debug_gate):]
-    for needle in (
-        "session_manager._root_id_for",
-        "session_manager.is_reconcile_dirty",
-        "logger.debug(",
-    ):
-        if needle not in gated:
-            print(f"  {needle} is not behind DEBUG gate")
-            return False
+    if "logger.debug(" not in gated:
+        print("  logger.debug( is not behind DEBUG gate")
+        return False
     normal_path = replay_tail[:replay_tail.index(debug_gate)]
     for needle in (
-        "session_manager._root_id_for",
         "session_manager.is_reconcile_dirty",
-        "logger.info(\n                                    \"WS replay",
+        "session_manager._reconcile_gen",
     ):
-        if needle in normal_path:
-            print(f"  {needle} still runs on normal replay path")
+        if needle in replay_tail:
+            print(f"  {needle} should no longer exist (reconcile subsystem retired)")
             return False
+    if 'logger.info(\n                                    "WS replay' in normal_path:
+        print("  WS replay timing log still runs on normal replay path")
+        return False
     return True
 
 
@@ -1225,7 +824,6 @@ def test_stubbed_team_tree_skips_full_event_hydration() -> bool:
 
 async def _amain() -> int:
     sync_tests = [
-        ("orphan-event arms dirty", test_orphan_event_arms_dirty),
         ("non-render orphans do not invalidate snapshot", test_non_render_orphans_do_not_invalidate_snapshot),
         ("worker_event advances render watermark", test_worker_event_advances_render_watermark),
         ("non-render orphan does not rebuild root events", test_non_render_orphan_does_not_rebuild_root_events_projection),
@@ -1244,17 +842,7 @@ async def _amain() -> int:
         ("ws replay stale debug is DEBUG-gated", test_ws_replay_stale_debug_is_debug_gated),
         ("stubbed team tree skips full event hydration", test_stubbed_team_tree_skips_full_event_hydration),
     ]
-    async_tests = [
-        ("cold hop → 1 reconcile", test_cold_hop_schedules_one_reconcile),
-        ("warm hop → 0 reconciles", test_warm_hop_schedules_no_reconcile),
-        ("single-flight under concurrent schedules", test_single_flight_concurrent_schedules),
-        ("fast reconcile → no progress events", test_fast_reconcile_no_progress_events),
-        ("slow reconcile → started+finished", test_slow_reconcile_emits_started_then_finished),
-        ("failing reconcile still emits finished", test_failing_reconcile_still_emits_finished),
-        ("loop responsive during slow reconcile", test_loop_responsive_during_slow_reconcile),
-        ("ws replay orphan finalize uses reconcile", test_ws_replay_orphan_finalize_uses_reconcile_not_huge_replay),
-        ("reconcile with no changes does not emit reconciled", test_reconcile_with_no_changes_does_not_emit_reconciled),
-    ]
+    async_tests: list[tuple[str, object]] = []
 
     fails = 0
     for name, fn in sync_tests:

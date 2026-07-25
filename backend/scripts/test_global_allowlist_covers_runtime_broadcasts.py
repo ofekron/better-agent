@@ -73,17 +73,7 @@ SCANNED_FILES = [
 # the call's local scope alone. Each entry registers the explicit set
 # of expansions the developer has audited. Adding a new f-string
 # broadcast REQUIRES adding to this map.
-FSTRING_EXPANSIONS: dict[str, list[str]] = {
-    # `coordinator.broadcast_global(f"session_processing_{kind}", ...)`
-    # `kind` is bound in `_emit_processing(kind, root_id)` at
-    # session_manager.py:486-492; the only call sites at
-    # session_manager.py:484 and :490 pass literal "started" and
-    # "finished".
-    "main.py:_emit_session_processing f'session_processing_{kind}'": [
-        "session_processing_started",
-        "session_processing_finished",
-    ],
-}
+FSTRING_EXPANSIONS: dict[str, list[str]] = {}
 
 # Non-literal first-arg call sites that have been audited and confirmed
 # to only produce allowlisted types in practice. Adding a new entry

@@ -2302,8 +2302,11 @@ class Coordinator:
         await_save: bool = True,
     ) -> Optional[dict]:
         turn_save = self.turn_manager.get_turn_save_callback(sender_session_id)
-        panels = self.turn_manager.current_turn_workers.get(sender_session_id)
-        if turn_save is None or panels is None:
+        # Presence-only guard: is a turn currently in flight for the
+        # sender? Panel data itself lives in `msg["workers"]`, owned by
+        # the fold once the `worker_start` fact below is journaled.
+        turn_in_flight = self.turn_manager.current_turn_workers.get(sender_session_id)
+        if turn_save is None or turn_in_flight is None:
             return None
         delegation_id = f"{run_mode}_{queue_item_id}"
         description = target.get("name") or target_session_id
@@ -2332,7 +2335,6 @@ class Coordinator:
             "run_mode": run_mode,
             "token_usage": None,
         }
-        panels.append(panel)
         worker_start = {"type": "worker_start", "data": {
             "delegation_id": delegation_id,
             "worker_session_id": target_session_id,
@@ -2374,8 +2376,9 @@ class Coordinator:
         target_session: dict,
     ) -> Optional[dict]:
         turn_save = self.turn_manager.get_turn_save_callback(sender_session_id)
-        panels = self.turn_manager.current_turn_workers.get(sender_session_id)
-        if turn_save is None or panels is None:
+        # Presence-only guard — see `_start_team_message_panel`.
+        turn_in_flight = self.turn_manager.current_turn_workers.get(sender_session_id)
+        if turn_save is None or turn_in_flight is None:
             return None
         target_session_id = str(target_session.get("id") or "")
         if not target_session_id:
@@ -2408,7 +2411,6 @@ class Coordinator:
             "run_mode": "created",
             "token_usage": None,
         }
-        panels.append(panel)
         await turn_save({"type": "worker_start", "data": {
             "delegation_id": delegation_id,
             "worker_session_id": target_session_id,
@@ -5206,7 +5208,6 @@ class Coordinator:
         user_msg: dict,
         assistant_msg: Optional[dict],
         primary_result: dict,
-        workers: list[dict],
         stopped_at: Optional[str],
         trace_id: Optional[str],
         error_text: Optional[str] = None,
@@ -5216,12 +5217,21 @@ class Coordinator:
         """Seal the persisted user/assistant pair at turn end. All writes
         coalesce into a single disk persist via SessionManager's batch.
 
-        On success / cancel: fills in the final events, content, workers,
+        On success / cancel: fills in the final events, content,
         manager session id, stop marker and trace id on the assistant
-        message. With lazy creation, `assistant_msg` may be None — in
-        that case we skip assistant finalization unless the run produced
-        non-empty output via `sdk_output` (in which case we create a
-        fresh assistant_msg here and persist it).
+        message. `msg["workers"]` is NOT written here — it is owned
+        exclusively by the fold (`session_manager.upsert_worker_panel` /
+        `update_worker_panel`, driven by journaled `worker_start` /
+        `worker_complete` / `worker_event` facts), so callers that need
+        the finalized worker panels must await the fold barrier
+        BEFORE calling this (this method runs under
+        `session_manager.batch(...)`, which holds the per-root RLock —
+        awaiting the fold barrier here would deadlock with the
+        drainer's own lock acquisition). With lazy creation,
+        `assistant_msg` may be None — in that case we skip assistant
+        finalization unless the run produced non-empty output via
+        `sdk_output` (in which case we create a fresh assistant_msg
+        here and persist it).
 
         On error: mark user_msg error; remove assistant_msg if one was
         created; else leave the user message standing alone.
@@ -5378,7 +5388,6 @@ class Coordinator:
                 assistant_msg=assistant_msg,
                 primary_result=primary_result,
             )
-            session_manager.snapshot_workers(app_session_id, msg_id, workers)
             if primary_result.get("success") and not stopped_at and not assistant_failed:
                 completed_at = datetime.now().isoformat()
                 assistant_msg["completed_at"] = completed_at
@@ -5404,7 +5413,10 @@ class Coordinator:
             primary_tu = extract_provider_result_token_usage(primary_result) or {}
             combined = merge_token_usages([
                 primary_tu,
-                *[w.get("token_usage") or {} for w in workers],
+                *[
+                    w.get("token_usage") or {}
+                    for w in (assistant_msg.get("workers") or [])
+                ],
             ]) or {}
             session_manager.add_session_token_usage(
                 app_session_id, combined,

@@ -75,10 +75,17 @@ def _live_agent_message(uuid: str, text: str) -> dict:
 
 def _apply(sid: str, msg: dict, event: dict) -> None:
     strategy = get_strategy("manager")
-    ctx = ApplyEventCtx(manager_sid_holder={"id": None}, workers_list=[],
-                        user_msg=None, root_id=sid)
+    ctx = ApplyEventCtx(manager_sid_holder={"id": None}, user_msg=None, root_id=sid)
+    # Marker detection (and the other once-per-event side effects) are
+    # gated on `fires_side_effects`, not `source_is_provider_stream` —
+    # see `orchs.base.OrchestrationStrategy.apply_event`. This helper
+    # simulates a genuinely-new event landing for the first time, so
+    # `fires_side_effects=True` mirrors what
+    # `session_manager.apply_written_journal_event` would compute
+    # (seq > fold-pass-start watermark) for a fresh event.
     strategy.apply_event(app_session_id=sid, msg=msg, event=event,
-                         ctx=ctx, source_is_provider_stream=True)
+                         ctx=ctx, source_is_provider_stream=True,
+                         fires_side_effects=True)
 
 
 def main() -> int:

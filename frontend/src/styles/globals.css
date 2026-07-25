@@ -9499,23 +9499,6 @@ button.run-badge-clickable:focus-visible {
   font-size: calc(18px * var(--app-font-scale));
 }
 
-.reconciling-chip {
-  font-size: calc(11px * var(--app-font-scale));
-  padding: 2px 8px;
-  border-radius: 10px;
-  background: var(--bg-hover);
-  color: var(--text-muted);
-  margin-inline-start: 8px;
-  white-space: nowrap;
-  cursor: help;
-  animation: reconciling-chip-pulse 1.4s ease-in-out infinite;
-}
-
-@keyframes reconciling-chip-pulse {
-  0%, 100% { opacity: 0.6; }
-  50% { opacity: 1; }
-}
-
 .setup-btn {
   background: none;
   border: none;

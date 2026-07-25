@@ -4883,6 +4883,7 @@ def _strip_volatile_from_tree(root: dict) -> dict:
     isstreaming: list[tuple[dict, bool]] = []
     events_lists: list[tuple[dict, list]] = []
     uid_idxs: list[tuple[dict, dict]] = []
+    has_finals: list[tuple[dict, bool]] = []
     omitted_revisions: list[tuple[dict, str]] = []
     panel_anchor_caches: list[tuple[dict, dict]] = []
     drafts: list[tuple[dict, dict]] = []
@@ -4901,6 +4902,13 @@ def _strip_volatile_from_tree(root: dict) -> dict:
         idx = owner.pop("_uid_idx", None)
         if isinstance(idx, dict):
             uid_idxs.append((owner, idx))
+    def _pop_has_final(owner: dict) -> None:
+        # Same volatile-cache lifetime as `_uid_idx` (see
+        # `orchs.base._uid_idx_for`) — strip before disk write, restore
+        # after, never persisted.
+        has_final = owner.pop("_has_final", None)
+        if has_final is not None:
+            has_finals.append((owner, has_final))
     def _pop_omitted_revision(owner: dict) -> None:
         value = owner.pop(messages_delta_compaction.PRECOMPUTED_REVISION_KEY, None)
         if isinstance(value, str):
@@ -4944,6 +4952,7 @@ def _strip_volatile_from_tree(root: dict) -> dict:
                 del m["isStreaming"]
             _pop_events(m)
             _pop_uid_idx(m)
+            _pop_has_final(m)
             _pop_omitted_revision(m)
             _pop_panel_anchor_cache(m)
             workers = m.get("workers")
@@ -4953,12 +4962,14 @@ def _strip_volatile_from_tree(root: dict) -> dict:
                         continue
                     _pop_events(w)
                     _pop_uid_idx(w)
+                    _pop_has_final(w)
         for f in node.get("forks", []) or []:
             stack.append(f)
     return {
         "isstreaming": isstreaming,
         "events_lists": events_lists,
         "uid_idxs": uid_idxs,
+        "has_finals": has_finals,
         "omitted_revisions": omitted_revisions,
         "panel_anchor_caches": panel_anchor_caches,
         "drafts": drafts,
@@ -4977,6 +4988,8 @@ def _restore_volatile_to_tree(popped: dict) -> None:
         owner["events"] = ev
     for owner, idx in popped.get("uid_idxs", []):
         owner["_uid_idx"] = idx
+    for owner, has_final in popped.get("has_finals", []):
+        owner["_has_final"] = has_final
     for owner, value in popped.get("omitted_revisions", []):
         owner[messages_delta_compaction.PRECOMPUTED_REVISION_KEY] = value
     for owner, cache in popped.get("panel_anchor_caches", []):

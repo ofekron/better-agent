@@ -63,7 +63,6 @@ def _finalize(
             "error": "cancelled",
             "sdk_output": "",
         },
-        workers=[],
         stopped_at="2026-06-15T00:00:00",
         trace_id="trace-1",
         interrupted_by_msg_id=interrupted_by_msg_id,
@@ -94,7 +93,6 @@ def _finalize_with_provider_usage() -> dict:
                 "total_tokens": 12,
             },
         },
-        workers=[],
         stopped_at=None,
         trace_id="trace-token",
     )
@@ -114,7 +112,6 @@ def _finalize_success_assistant() -> dict:
             "events": [],
             "sdk_output": "done",
         },
-        workers=[],
         stopped_at=None,
         trace_id="trace-completed",
     )
@@ -134,7 +131,6 @@ def _finalize_success_with_error_content() -> dict:
             "events": [],
             "sdk_output": "API Error: quota exhausted",
         },
-        workers=[],
         stopped_at=None,
         trace_id="trace-error-content",
     )

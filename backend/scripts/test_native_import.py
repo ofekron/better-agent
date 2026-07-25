@@ -15,9 +15,11 @@ Run with:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import sys
+import threading
 import uuid
 from pathlib import Path
 
@@ -31,8 +33,25 @@ if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
 import config_store  # noqa: E402
+import event_bus_subscribers  # noqa: E402
 import native_import  # noqa: E402
+from event_journal import bind_event_journal_loop  # noqa: E402
 from session_manager import manager as session_manager  # noqa: E402
+
+# native_import journals replayed events and relies on the
+# SessionProjectionDrainer fold (bound to the default event bus by
+# `register_default_subscribers`, which only runs from main.py's real
+# startup) to project them into `msg.events` — mirror that startup step
+# here so import_session's render tree is populated like it is in the
+# running backend. `EventJournalWriter._schedule_written` schedules its
+# ack coroutine onto the bound loop via `run_coroutine_threadsafe`, so
+# that loop must actually be running (main.py's is, via uvicorn) — spin
+# a dedicated background loop thread for the lifetime of this process,
+# same pattern as `scripts/test_event_journal_sync_publish.py`.
+_BUS_LOOP = asyncio.new_event_loop()
+threading.Thread(target=_BUS_LOOP.run_forever, daemon=True).start()
+bind_event_journal_loop(_BUS_LOOP)
+event_bus_subscribers.register_default_subscribers()
 
 CLAUDE_CONFIG_DIR = Path(_TMP_HOME) / "claude-home"
 

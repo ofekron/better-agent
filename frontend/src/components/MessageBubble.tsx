@@ -2610,7 +2610,7 @@ const AssistantMessage = memo(function AssistantMessage({
   }, [onLazyFetchedMessage]);
 
   const omittedEvents = message.omitted_payloads?.events;
-  const fetchKey = `${message.id}:${message.stubVersion ?? 0}:${omittedEvents?.revision ?? ""}`;
+  const fetchKey = `${message.id}:${omittedEvents?.revision ?? ""}`;
   const cachedFetched =
     lazyFetchedMessage?.key === fetchKey
       ? lazyFetchedMessage.message

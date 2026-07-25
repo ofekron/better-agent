@@ -104,8 +104,6 @@
   "sidebar.sessionsTab": "שיחות",
   "sidebar.workersTab": "Workerים",
   "sidebar.routinesTab": "שגרות",
-  "app.reconciling": "מסנכרן…",
-  "app.reconcilingTitle": "השרת מסנכרן אירועים מאוחרים (>0.3 שניות).",
   "app.supervisorBannerDismiss": "סגור",
   "startup_tasks.banner_title": "עבודה ברקע",
   "startup_tasks.dismiss": "סגור",

@@ -1117,11 +1117,21 @@ def _apply_recovered_stream_event_sync(
     persist_sid: str,
     run_id: str,
     mode: str,
-    claude_sid: Optional[str],
     target_message_id: Optional[str],
     event: dict,
     owner_token=None,
 ) -> None:
+    """Journal a recovered live-queue provider event; the
+    `SessionProjectionDrainer` fold (`session_manager.apply_written_journal_event`)
+    is the sole render-tree mutator once the row lands in events.jsonl.
+
+    This is the recovery-side counterpart of `TurnManager.save_ws_callback`
+    /  `_publish_provider_stream_event`: after a restart, the live provider
+    stream is re-attached and fed through this queue instead of the
+    original `ws_callback`, but it must journal-only just like the live
+    path — never mutate the render tree directly, which would make this
+    a second writer of `msg.events` racing the fold.
+    """
     if owner_token is not None:
         accepted, _ = session_manager.run_if_owner(
             owner_token,
@@ -1129,7 +1139,6 @@ def _apply_recovered_stream_event_sync(
                 persist_sid=persist_sid,
                 run_id=run_id,
                 mode=mode,
-                claude_sid=claude_sid,
                 target_message_id=target_message_id,
                 event=event,
             ),
@@ -1149,30 +1158,31 @@ def _apply_recovered_stream_event_sync(
     if event_type in {"complete", "error"}:
         return
 
-    with session_manager.batch(persist_sid, bump_updated_at=False):
-        sess = session_manager.get_ref(persist_sid)
-        if sess is None:
-            return
-        msg = _assistant_by_id(sess, target_message_id)
-        if msg is None:
-            return
-        manager_sid_holder = {"id": claude_sid or sess.get("agent_session_id")}
-        user_msg = _last_user_before(sess, msg)
-        from orchs import ApplyEventCtx, get_strategy
-        ctx = ApplyEventCtx(
-            manager_sid_holder=manager_sid_holder,
-            workers_list=list(msg.get("workers") or []),
-            user_msg=user_msg,
-            root_id=session_manager._root_id_for(persist_sid),
-            run_id=run_id,
-        )
-        get_strategy(mode).apply_event(
-            app_session_id=persist_sid,
-            msg=msg,
-            event=event,
-            ctx=ctx,
-            source_is_provider_stream=True,
-        )
+    sess = session_manager.get_ref(persist_sid)
+    if sess is None:
+        return
+    if _assistant_by_id(sess, target_message_id) is None:
+        return
+    root_id = session_manager._root_id_for(persist_sid)
+    if not root_id:
+        return
+
+    from event_journal import publish_event_sync
+    from orchs import get_strategy
+    strategy = get_strategy(mode)
+    etype, norm_data = strategy.prepare_provider_event_for_journal(
+        app_session_id=persist_sid,
+        event=event,
+    )
+    publish_event_sync(
+        session_id=root_id,
+        context_id=persist_sid,
+        event_type=etype,
+        data=norm_data,
+        source="provider_stream_recovery",
+        run_id=run_id,
+        message_id=target_message_id,
+    )
 
 
 async def _drain_recovered_live_queue(
@@ -1212,7 +1222,6 @@ async def _drain_recovered_live_queue(
                 persist_sid=persist_sid,
                 run_id=run_id,
                 mode=desc.get("mode") or "native",
-                claude_sid=desc.get("session_id"),
                 target_message_id=recovering_msg_id,
                 event=event,
                 owner_token=owner_token,
@@ -2385,7 +2394,6 @@ def _replay_and_apply(
         preceding_user = _last_user_before(sess, last_asst)
         ctx = ApplyEventCtx(
             manager_sid_holder={"id": claude_sid},
-            workers_list=list(last_asst.get("workers") or []),
             user_msg=preceding_user,
             root_id=session_manager._root_id_for(persist_sid),
             run_id=run_id,
@@ -2405,6 +2413,14 @@ def _replay_and_apply(
                     event=ev,
                     ctx=ctx,
                     source_is_provider_stream=True,
+                    # This replay is the FIRST time these crash-recovered
+                    # events reach the render tree (they never went through
+                    # the journal-drain fold) — unconditionally "since the
+                    # watermark", so the once-per-event lifecycle side
+                    # effects (markers, unread, provenance, etc.) must fire
+                    # here exactly as they did before `fires_side_effects`
+                    # replaced the `source_is_provider_stream` gate for them.
+                    fires_side_effects=True,
                 )
             except Exception:
                 failures += 1

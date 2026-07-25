@@ -104,45 +104,6 @@ def _append_late_events_via_apply(
     return late_events
 
 
-def _with_reconcile_probe(sid: str, changes: list[dict], new_cursor: int) -> bool:
-    from event_journal import event_journal_reader
-
-    original_fn = session_manager._reconcile_fn
-    original_current_seq = event_journal_reader.current_seq
-    original_cursor = session_manager._reconcile_cursor.get(sid)
-    original_gen = session_manager._reconcile_gen.get(sid)
-    calls = []
-    try:
-        session_manager._reconcile_cursor[sid] = 0
-        session_manager._reconcile_gen[sid] = 7
-
-        def _probe(root_id: str, *, after_seq: int = 0) -> list[dict]:
-            calls.append((root_id, after_seq))
-            return changes
-
-        session_manager._reconcile_fn = _probe
-        event_journal_reader.current_seq = lambda root_id: new_cursor
-        session_manager._sync_reconcile(sid)
-        return (
-            calls == [(sid, 0)]
-            and session_manager._reconcile_cursor.get(sid) == new_cursor
-            and session_manager._reconcile_gen.get(sid) == (
-                8 if changes else 7
-            )
-        )
-    finally:
-        session_manager._reconcile_fn = original_fn
-        event_journal_reader.current_seq = original_current_seq
-        if original_cursor is None:
-            session_manager._reconcile_cursor.pop(sid, None)
-        else:
-            session_manager._reconcile_cursor[sid] = original_cursor
-        if original_gen is None:
-            session_manager._reconcile_gen.pop(sid, None)
-        else:
-            session_manager._reconcile_gen[sid] = original_gen
-
-
 def _run() -> bool:
     results: list[tuple[str, bool, str]] = []
 
@@ -217,19 +178,18 @@ def _run() -> bool:
         f"missing {all_uuids - set(uuids2)}",
     ))
 
-    ok = _with_reconcile_probe(sid, [], 100)
-    results.append((
-        "no-op reconcile advances cursor without cache-gen bump",
-        ok,
-        "cursor-only reconcile invalidated snapshots",
-    ))
-
-    ok = _with_reconcile_probe(sid, [{"app_session_id": sid}], 101)
-    results.append((
-        "changed reconcile bumps cache generation",
-        ok,
-        "projection changes did not invalidate snapshots",
-    ))
+    # Note: this test drives events through the LIVE ingest path
+    # (`strategy.apply_event(source_is_provider_stream=True)`), which
+    # mutates msg.events directly and does NOT go through the write-time
+    # projection fold — so `get_fold_watermark` (the former
+    # `_reconcile_gen` cache-key component) legitimately stays at 0
+    # throughout this scenario, exactly as `_reconcile_gen` did before
+    # this refactor (its only writer was the reconcile/fold path, never
+    # the live-ingest path). Steps 1-3 above already prove the cache
+    # correctly invalidates via the render-seq component for this
+    # scenario; the watermark component only matters for the write-time-
+    # fold scenario, which `test_tailer_routes_through_apply_event.py`
+    # and `test_session_projection_drainer.py` cover directly.
 
     # Report
     passed = sum(1 for _, ok, _ in results if ok)

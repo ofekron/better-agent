@@ -54,8 +54,6 @@ def _reset(pin_predicate=None) -> None:
     mgr._node_root_id = {}
     mgr._root_locks = {}
     mgr._batches = {}
-    mgr._in_flight_reconcile = {}
-    mgr._reconcile_dirty = {}
     mgr._draft_dirty = set()
     mgr._draft_gen = {}
     mgr._last_broadcast_running = {}
@@ -147,26 +145,13 @@ def test_local_pin_signal_blocks_eviction() -> bool:
     _reset(pin_predicate=lambda rid, sids: False)
     rids = _fill(cap + 1)
     oldest = rids[0]
-    mgr._in_flight_reconcile[oldest] = object()   # in-flight reconcile = pin
+    mgr._batches[oldest] = {"bump_updated_at": False}   # active batch = pin
     mgr._enforce_root_cap(keep_rid="__none__")
     if oldest not in mgr._roots:
-        print("  root with in-flight reconcile was evicted")
+        print("  root with an active batch was evicted")
         return False
     if rids[1] in mgr._roots:
         print("  expected next-oldest to be evicted instead")
-        return False
-    return True
-
-
-def test_consumed_reconcile_dirty_does_not_pin() -> bool:
-    cap = mgr._roots_max
-    _reset(pin_predicate=lambda rid, sids: False)
-    rids = _fill(cap + 1)
-    oldest = rids[0]
-    mgr._reconcile_dirty[oldest] = False
-    mgr._enforce_root_cap(keep_rid="__none__")
-    if oldest in mgr._roots:
-        print("  consumed reconcile-dirty marker permanently pinned root")
         return False
     return True
 
@@ -280,10 +265,8 @@ TESTS = [
      test_lru_recency_protects_accessed_root),
     ("pinned roots are never evicted", test_pinned_never_evicted),
     ("cap is soft when everything is pinned", test_all_pinned_cap_is_soft),
-    ("local pin signal (in-flight reconcile) blocks eviction",
+    ("local pin signal (active batch) blocks eviction",
      test_local_pin_signal_blocks_eviction),
-    ("consumed reconcile-dirty marker does not pin",
-     test_consumed_reconcile_dirty_does_not_pin),
     ("fail-closed when pin predicate is unbound",
      test_fail_closed_when_predicate_unbound),
     ("a busy per-root lock is skipped", test_busy_lock_skipped),

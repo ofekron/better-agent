@@ -23,6 +23,7 @@ import json
 import logging
 import threading
 import time
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Callable
@@ -64,16 +65,23 @@ class _ProjectionRootState:
     target: int
     queued_at: float
     active: bool = False
+    parked: bool = False
     expected_applicability: dict[int, bool] | None = None
+    # Durable fold watermark snapshotted ONCE when this root transitions
+    # idle → active (see `SessionProjectionDrainer._activate_locked`), not
+    # re-read per row. Every row folded in this pass compares its seq
+    # against this SAME value, so a cold-start catch-up of N backlog rows
+    # judges all N against the one pre-restart watermark (all fire), while
+    # a live steady-state single-row pass judges that one row against the
+    # watermark from just before it (fires, then the watermark advances
+    # past it — idempotent on any later re-fold).
+    fold_start_watermark: int = 0
 
 
 def _projection_command_is_applicable(command: SessionProjectionCommand) -> bool:
     return (
         command.event_type == "event_ownership_resolved"
-        or (
-            command.source != "provider_stream"
-            and command.event_type in RENDER_EVENT_TYPES
-        )
+        or command.event_type in RENDER_EVENT_TYPES
     )
 
 
@@ -82,22 +90,29 @@ class SessionProjectionDrainer:
 
     def __init__(
         self,
-        apply_row: Callable[[str, dict], None],
+        apply_row: Callable[[str, dict, int], None],
         read_rows: Callable[[str, int, int], list[dict]],
         mark_dirty: Callable[[str, BaseException], None],
         *,
         shards: int,
         max_active_roots: int,
         chunk_size: int,
+        get_watermark: Callable[[str], int] = lambda _root_id: 0,
     ) -> None:
         self._apply_row = apply_row
         self._read_rows = read_rows
         self._mark_dirty = mark_dirty
+        self._get_watermark = get_watermark
         self._max_active_roots = max_active_roots
         self._chunk_size = chunk_size
         self._lock = threading.Condition(threading.RLock())
         self._states: dict[str, _ProjectionRootState] = {}
         self._active_roots = 0
+        # Roots whose target cursor advanced past the current capacity limit.
+        # They are never dropped: `_promote_parked_locked` pops one every time
+        # a slot frees, so backpressure delays a root's drain but never loses
+        # it (no read/query is involved in that hand-off, only this deque).
+        self._parked_roots: deque[str] = deque()
         self._accepting = True
         self._executors = tuple(
             ThreadPoolExecutor(
@@ -108,6 +123,7 @@ class SessionProjectionDrainer:
         )
         perf.register_queue("session_projection.active_roots", self.active_root_count)
         perf.register_queue("session_projection.pending_rows", self.pending_row_count)
+        perf.register_queue("session_projection.parked_roots", self.parked_root_count)
 
     def submit(self, command: SessionProjectionCommand) -> bool:
         with self._lock:
@@ -163,20 +179,36 @@ class SessionProjectionDrainer:
             perf.record_count("session_projection.highwater", state.target)
             if state.active:
                 return True
+            if state.parked:
+                # Already queued for a slot; state.target is already the
+                # highwater above, so the parked entry will fold to it once
+                # promoted — no need to enqueue a second time.
+                return True
             if self._active_roots >= self._max_active_roots:
-                self._mark_dirty(
-                    command.root_id,
-                    RuntimeError(
-                        "session projection active-root capacity is full",
-                    ),
-                )
-                perf.record_count("session_projection.errors")
-                return False
-            state.active = True
-            state.queued_at = time.perf_counter()
-            self._active_roots += 1
-            self._executor(command.root_id).submit(self._drain_chunk, command.root_id)
+                state.parked = True
+                self._parked_roots.append(command.root_id)
+                perf.record_count("session_projection.parked")
+                return True
+            self._activate_locked(command.root_id, state)
             return True
+
+    def _activate_locked(
+        self, root_id: str, state: _ProjectionRootState,
+    ) -> None:
+        """Flip a root's state to active and snapshot the fold watermark
+        for the fold pass this activation starts. Must hold `self._lock`.
+
+        Snapshotting HERE (once per idle→active transition) rather than
+        per-row is what makes a cold-start catch-up of N backlog rows
+        judge all N against the SAME pre-restart watermark — re-reading
+        per row would compare later rows against an already-advanced
+        value and they'd never fire their side effects.
+        """
+        state.active = True
+        state.queued_at = time.perf_counter()
+        state.fold_start_watermark = self._get_watermark(root_id)
+        self._active_roots += 1
+        self._executor(root_id).submit(self._drain_chunk, root_id)
 
     def _executor(self, root_id: str) -> ThreadPoolExecutor:
         return self._executors[self._shard(root_id)]
@@ -190,6 +222,12 @@ class SessionProjectionDrainer:
             after_seq = state.cursor
             target = state.target
             queued_at = state.queued_at
+            # Snapshotted once at activation (`_activate_locked`), fixed
+            # for this entire pass — including across chunk-boundary
+            # resubmissions below (a >chunk_size backlog spans multiple
+            # `_drain_chunk` invocations but stays one fold pass; the
+            # watermark must NOT be re-read on each resubmission).
+            fold_start_watermark = state.fold_start_watermark
         perf.record(
             "session_projection.age",
             (time.perf_counter() - queued_at) * 1000.0,
@@ -236,7 +274,7 @@ class SessionProjectionDrainer:
                         ),
                     )
                 if row_applicable:
-                    self._apply_row(root_id, row)
+                    self._apply_row(root_id, row, fold_start_watermark)
                     perf.record_count("session_projection.applied")
                 else:
                     perf.record_count("session_projection.skipped")
@@ -256,19 +294,49 @@ class SessionProjectionDrainer:
                     return
                 state.active = False
                 self._active_roots -= 1
+                self._promote_parked_locked()
                 self._lock.notify_all()
         except Exception as exc:
             with self._lock:
                 state = self._states[root_id]
                 state.active = False
                 self._active_roots -= 1
+                # Deliberately do NOT re-park this root on exception: the
+                # failure may be a permanent condition (e.g. a durable
+                # journal gap that will never fill in — see
+                # test_missing_journal_gap_dirties_without_advancing_past_gap).
+                # Re-parking unconditionally here would busy-retry that
+                # permanent case forever on one shard's thread. Instead:
+                # the freed slot is still handed to any OTHER root already
+                # waiting in `_parked_roots` (a real slot-free event), and
+                # THIS root resumes normally the next time a genuinely new
+                # row is submitted for it (`submit()` sees `state.active`
+                # is False and drains again from `state.cursor`) — i.e. the
+                # ordinary push-driven path, no polling involved.
+                self._promote_parked_locked()
                 self._lock.notify_all()
             self._report_dirty(root_id, exc)
+
+    def _promote_parked_locked(self) -> None:
+        """Activate parked roots into freed slots. Must hold `self._lock`.
+
+        O(1) per promotion: one `deque.popleft` and dict lookups, no scan.
+        """
+        while self._parked_roots and self._active_roots < self._max_active_roots:
+            root_id = self._parked_roots.popleft()
+            state = self._states.get(root_id)
+            if state is None or not state.parked:
+                continue
+            state.parked = False
+            self._activate_locked(root_id, state)
 
     def barrier(self, root_id: str) -> None:
         with self._lock:
             self._lock.wait_for(
-                lambda: not (self._states.get(root_id) and self._states[root_id].active),
+                lambda: not (
+                    self._states.get(root_id)
+                    and (self._states[root_id].active or self._states[root_id].parked)
+                ),
             )
 
     def shutdown(self, *, wait: bool = True, timeout_s: float = 5.0) -> None:
@@ -285,8 +353,9 @@ class SessionProjectionDrainer:
                     active = [
                         root_id
                         for root_id, state in self._states.items()
-                        if state.active
+                        if state.active or state.parked
                     ]
+                    self._parked_roots.clear()
                 else:
                     active = []
             else:
@@ -300,10 +369,15 @@ class SessionProjectionDrainer:
             executor.shutdown(wait=wait and drained, cancel_futures=not drained)
         perf.unregister_queue("session_projection.active_roots")
         perf.unregister_queue("session_projection.pending_rows")
+        perf.unregister_queue("session_projection.parked_roots")
 
     def active_root_count(self) -> int:
         with self._lock:
             return self._active_roots
+
+    def parked_root_count(self) -> int:
+        with self._lock:
+            return len(self._parked_roots)
 
     def is_accepting(self) -> bool:
         with self._lock:
@@ -330,10 +404,7 @@ class SessionProjectionDrainer:
 def _projection_row_is_applicable(row: dict) -> bool:
     return (
         row.get("type") == "event_ownership_resolved"
-        or (
-            row.get("source") != "provider_stream"
-            and row.get("type") in RENDER_EVENT_TYPES
-        )
+        or row.get("type") in RENDER_EVENT_TYPES
     )
 
 
@@ -389,11 +460,81 @@ async def _persist_to_event_journal(event: BusEvent) -> None:
     ))
 
 
-def _apply_session_projection_row(root_id: str, row: dict) -> None:
+# Orphan rows (msg_id=None) arrive for externally-driven sessions (native
+# terminal sessions Better Agent didn't spawn, which never fire a BA
+# `turn_complete` fact) whenever the row lands after this fold pass's view
+# of the render tree. If the sid's latest assistant message is already
+# finalized there is no in-flight message it could race with, so the row
+# folds immediately; otherwise it's buffered here until finalization is
+# observed, then flushed in order. Transient, in-memory only — like
+# `session_manager._recovering_msg_ids` — a crash loses the buffer, but the
+# fold just re-buffers/re-checks any not-yet-applied orphan rows the same
+# way on the next boot. Keyed by (root_id, sid) since one root can have
+# multiple sids (forks).
+_ORPHAN_ROW_LOCK = threading.Lock()
+_PENDING_ORPHAN_ROWS: dict[tuple[str, str], list[dict]] = {}
+
+
+def _fold_orphan_row(root_id: str, sid: str, row: dict, fold_start_watermark: int) -> None:
+    """Fold one orphan row onto the sid's latest (now-finalized) assistant
+    message. Attention-marker detection does NOT run here: the raw
+    pre-strip text a marker tag lives in never survives to the persisted
+    journal row (`event_ingester`'s canonical-storage rewrite strips
+    `<TAG>` wrappers at write time for every source) — for orphan rows
+    that detection instead runs in `orchs.base.ingest_orphan`, on the raw
+    event, before it ever reaches the ingester."""
+    msg_id = session_manager.latest_assistant_msg_id(sid)
+    if not msg_id:
+        return
+    event_type = str(row.get("type") or "unknown")
+    data = row.get("data")
+    data = data if isinstance(data, dict) else {}
+    session_manager.apply_written_journal_event(
+        root_id, sid, msg_id, event_type, data, int(row.get("seq") or 0),
+        fold_start_watermark=fold_start_watermark,
+    )
+
+
+def _handle_orphan_row(root_id: str, sid: str, row: dict, fold_start_watermark: int) -> None:
+    if session_manager.latest_assistant_finalized(sid):
+        _fold_orphan_row(root_id, sid, row, fold_start_watermark)
+        return
+    with _ORPHAN_ROW_LOCK:
+        _PENDING_ORPHAN_ROWS.setdefault((root_id, sid), []).append(row)
+
+
+def _flush_pending_orphan_rows(root_id: str, sid: str, fold_start_watermark: int) -> None:
+    """Push-driven: called right after every non-orphan row folds for this
+    root/sid, so a buffered orphan is applied the instant the fold that
+    finalizes the in-flight assistant message lands — no polling.
+
+    A buffered orphan may end up flushed in a LATER fold pass than the one
+    that read it off disk; `fold_start_watermark` here is whatever pass is
+    CURRENTLY applying it (the caller's), which is correct — the
+    seq-vs-watermark comparison is about when the row is actually folded
+    into the render tree, not when it was read off disk."""
+    key = (root_id, sid)
+    with _ORPHAN_ROW_LOCK:
+        rows = _PENDING_ORPHAN_ROWS.get(key)
+        if not rows:
+            return
+        if not session_manager.latest_assistant_finalized(sid):
+            return
+        del _PENDING_ORPHAN_ROWS[key]
+    for buffered_row in rows:
+        _fold_orphan_row(root_id, sid, buffered_row, fold_start_watermark)
+
+
+def _apply_session_projection_row(root_id: str, row: dict, fold_start_watermark: int) -> None:
     event_type = str(row.get("type") or "unknown")
     sid = str(row.get("sid") or root_id)
     msg_id = str(row.get("msg_id") or "")
     seq = int(row.get("seq") or 0)
+    # Flush BEFORE processing this row too: a buffered orphan always has a
+    # lower seq than whatever's being folded now, so if finalization was
+    # already observed on an earlier row this pass, the buffered orphan
+    # must land before this row's own content to preserve seq order.
+    _flush_pending_orphan_rows(root_id, sid, fold_start_watermark)
     if event_type == "event_ownership_resolved":
         session_manager.apply_journal_ownership_resolution(
             root_id,
@@ -401,6 +542,10 @@ def _apply_session_projection_row(root_id: str, row: dict) -> None:
             msg_id,
             seq,
         )
+        _flush_pending_orphan_rows(root_id, sid, fold_start_watermark)
+        return
+    if not msg_id:
+        _handle_orphan_row(root_id, sid, row, fold_start_watermark)
         return
     data = row.get("data")
     session_manager.apply_written_journal_event(
@@ -410,7 +555,9 @@ def _apply_session_projection_row(root_id: str, row: dict) -> None:
         event_type,
         data if isinstance(data, dict) else {},
         seq,
+        fold_start_watermark=fold_start_watermark,
     )
+    _flush_pending_orphan_rows(root_id, sid, fold_start_watermark)
 
 
 def _read_session_projection_rows(
@@ -427,18 +574,28 @@ def _read_session_projection_rows(
     return rows
 
 
-def _mark_session_projection_dirty(root_id: str, _exc: BaseException) -> None:
-    session_manager.mark_reconcile_dirty(root_id)
+def _log_session_projection_error(root_id: str, exc: BaseException) -> None:
+    """Surface a stuck/failed projection root. Nothing re-reads this signal
+    to trigger a repair — the fold is the only writer and it is already
+    driven directly off durable journal writes (event-driven, not polled),
+    so there is no "next read" to arm a retry for. Visibility only: the
+    root self-heals on its next cold reload (full re-fold from
+    events.jsonl), or an operator can act on the logged root_id."""
+    logger.error(
+        "session projection error root=%s: %r", root_id[:8], exc,
+    )
+    perf.record_count("session_projection.dirty_roots")
 
 
 def _new_session_projection_dispatcher() -> SessionProjectionDrainer:
     return SessionProjectionDrainer(
         _apply_session_projection_row,
         _read_session_projection_rows,
-        _mark_session_projection_dirty,
+        _log_session_projection_error,
         shards=_SESSION_PROJECTION_SHARDS,
         max_active_roots=_SESSION_PROJECTION_MAX_PENDING,
         chunk_size=_SESSION_PROJECTION_DRAIN_CHUNK,
+        get_watermark=session_manager.get_fold_watermark,
     )
 
 
@@ -446,16 +603,20 @@ _SESSION_PROJECTION_DISPATCHER = _new_session_projection_dispatcher()
 
 
 async def _refresh_session_content_projection(event: BusEvent) -> None:
-    """Enqueue an ordered projection after its journal row is durable."""
-    if not event.msg_id:
-        return
+    """Enqueue an ordered projection after its journal row is durable.
+
+    `event.msg_id` is empty for orphan rows (msg_id=None events from
+    externally-driven sessions) — those still need to reach the drainer
+    so `_apply_session_projection_row`'s orphan-fold arm runs on them in
+    seq order, so this no longer skips them.
+    """
     payload = event.payload
     if payload.get("appended") is False or int(payload.get("seq") or 0) <= 0:
         return
     command = SessionProjectionCommand(
         root_id=str(event.root_id),
         sid=str(event.sid),
-        msg_id=str(event.msg_id),
+        msg_id=str(event.msg_id or ""),
         event_type=str(payload.get("event_type") or "unknown"),
         source=str(payload.get("source") or ""),
         seq=int(payload.get("seq") or 0),
@@ -470,6 +631,14 @@ def shutdown_session_content_projection() -> None:
 
 async def await_session_content_projection(root_id: str) -> None:
     await asyncio.to_thread(_SESSION_PROJECTION_DISPATCHER.barrier, root_id)
+
+
+def await_session_content_projection_sync(root_id: str) -> None:
+    """Blocking counterpart of `await_session_content_projection` for
+    callers with no running event loop (e.g. `native_import.py`'s
+    background import thread). Blocks until every journal row queued
+    for `root_id` has been folded into the render tree."""
+    _SESSION_PROJECTION_DISPATCHER.barrier(root_id)
 
 
 async def _refresh_session_search_projection(event: BusEvent) -> None:

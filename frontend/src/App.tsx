@@ -804,7 +804,6 @@ function AppMain({
     addMessages,
     replaceMessages,
     applyMessagesReplay,
-    applyStubInvalidated,
     getSinceSeq,
     getEventsFromSeq,
     getEventsCursorKnown,
@@ -837,8 +836,6 @@ function AppMain({
     applyMessageRunMeta,
     applyMessageAskResult,
     applyMessageAskChoice,
-    processingByRoot,
-    applySessionProcessing,
     applySessionReconciled,
     patchMessageStatus,
     appendFork,
@@ -1790,7 +1787,6 @@ function AppMain({
     ),
     onRewindComplete: replaceMessages,
     onMessagesReplay: applyMessagesReplay,
-    onStubInvalidated: applyStubInvalidated,
     onMessagesDelta: applyMessagesReplay, // same upsert reducer
     onUserMessagePersisted: handleUserMessagePersisted,
     onSteerPromptPersisted: handleSteerPromptPersisted,
@@ -1807,7 +1803,6 @@ function AppMain({
     onMessageRunMetaChanged: applyMessageRunMeta,
     onMessageAskResultChanged: applyMessageAskResult,
     onMessageAskChoiceChanged: applyMessageAskChoice,
-    onSessionProcessing: applySessionProcessing,
     onSessionReconciled: applySessionReconciled,
     getSinceSeq,
     getEventsFromSeq,
@@ -6786,11 +6781,6 @@ function AppMain({
                 <h1 className="app-title">{t("app.title")}</h1>
               </div>
             );
-            const chip = Object.keys(processingByRoot).length > 0 && (
-              <span className="reconciling-chip" title={t("app.reconcilingTitle")}>
-                {t("app.reconciling")}
-              </span>
-            );
             const filesBtn = cwd && (
               <button
                 className="setup-btn"
@@ -6881,7 +6871,6 @@ function AppMain({
               <div className="sidebar-header-row" ref={headerRowRef}>
                 {minimizeBtn}
                 {brand}
-                {chip}
                 <div className="header-actions">
                   {filesBtn}
                   {!headerOverflow && secondary}
@@ -6912,7 +6901,6 @@ function AppMain({
                 <div className="sidebar-header-ghost" aria-hidden="true">
                   {minimizeBtn}
                   {brand}
-                  {chip}
                   {filesBtn}
                   {secondary}
                   {configBtn}

@@ -50,14 +50,6 @@ from reasoning_effort import normalize_reasoning_effort
 
 logger = logging.getLogger(__name__)
 _NEGATIVE_NODE_ROOT_TTL_SECONDS = 5.0
-def _new_reconcile_executor() -> ThreadPoolExecutor:
-    return ThreadPoolExecutor(
-        max_workers=2,
-        thread_name_prefix="session-reconcile",
-    )
-
-
-_RECONCILE_EXECUTOR = _new_reconcile_executor()
 _QUEUE_PROJECTION_EXECUTOR = ThreadPoolExecutor(
     max_workers=1,
     thread_name_prefix="queue-projection-submit",
@@ -106,34 +98,6 @@ def _jsonish_byte_size(value: Any) -> int:
     if isinstance(value, list):
         return sum(_jsonish_byte_size(item) for item in value)
     return len(str(value).encode("utf-8", errors="replace"))
-
-
-async def shutdown_reconciles() -> None:
-    started = time.perf_counter()
-    manager._reconcile_accepting = False
-    tasks = tuple(manager._in_flight_reconcile.values())
-    for task in tasks:
-        task.cancel()
-    results = await asyncio.gather(*tasks, return_exceptions=True) if tasks else []
-    await asyncio.to_thread(
-        _RECONCILE_EXECUTOR.shutdown,
-        wait=True,
-        cancel_futures=True,
-    )
-    perf.record("shutdown.session_reconcile", (time.perf_counter() - started) * 1000)
-    perf.record_count("shutdown.session_reconcile.cancelled", len(tasks))
-    perf.record_count(
-        "shutdown.session_reconcile.failed",
-        sum(isinstance(result, Exception) for result in results),
-    )
-
-
-def reopen_reconciles() -> None:
-    global _RECONCILE_EXECUTOR
-    if manager._reconcile_accepting:
-        return
-    _RECONCILE_EXECUTOR = _new_reconcile_executor()
-    manager._reconcile_accepting = True
 
 
 def begin_queue_projection_shutdown() -> None:
@@ -399,9 +363,9 @@ class SessionManager:
         # OrderedDict for LRU: `move_to_end` marks recency on access,
         # `_enforce_root_cap` evicts the oldest UNPINNED roots beyond
         # `_roots_max`. Pinned roots (active turn / open WS subscriber /
-        # live tailer / in-flight reconcile / batch / dirty draft /
-        # pending persist) are always retained — the cap is enforced only
-        # against evictable roots, so active sessions are never starved.
+        # live tailer / batch / dirty draft / pending persist) are always
+        # retained — the cap is enforced only against evictable roots, so
+        # active sessions are never starved.
         self._roots: "collections.OrderedDict[str, dict]" = (
             collections.OrderedDict()
         )
@@ -443,29 +407,9 @@ class SessionManager:
         # same-thread re-entrancy guard so hydration's `get_ref` can't
         # recurse the load cycle (see `_load_root`).
         self._loading_roots: dict[str, int] = {}
-        # ── Async reconcile coordination ────────────────────────────
-        # Per-root dirty flag. Set by `event_ingester.ingest` when an
-        # orphan event (msg_id=None for a finalized assistant msg) lands
-        # on disk; consumed by readers via `consume_reconcile_dirty`.
-        self._reconcile_dirty: dict[str, bool] = {}
-        # Per-root single-flight task tracker. Mutated ONLY on the event
-        # loop thread (add via schedule_*, remove via done_callback).
-        self._in_flight_reconcile: dict[str, asyncio.Task] = {}
-        self._visible_reconcile_roots: set[str] = set()
-        self._visible_reconcile_epoch = uuid.uuid4().hex
-        self._visible_reconcile_revision = 0
-        self._reconcile_accepting = True
         # Bound at startup so cross-thread callers can schedule onto the
         # right loop.
         self._loop: Optional[asyncio.AbstractEventLoop] = None
-        # Injected at startup: reconcile + emit can't live here without
-        # circular imports (reconcile pulls from `orchs` which pulls
-        # from session_manager; processing-event emit pulls from
-        # coordinator).
-        self._reconcile_fn: Optional[Callable[..., list]] = None
-        self._emit_processing_fn: Optional[Callable[[str, str], None]] = None
-        self._emit_stub_invalidated_fn: Optional[Callable[[list], None]] = None
-        self._emit_reconciled_fn: Optional[Callable[[str], None]] = None
         # Injected by the Coordinator at startup (turn liveness lives in
         # turn_manager; importing it here would be circular). Backs the
         # live-descendants lineage cap; when absent the descendant cap is
@@ -518,11 +462,6 @@ class SessionManager:
         ] = collections.OrderedDict()
         self._todo_projection_cache_max = 64
         self._queued_prompt_counts_by_sid: dict[str, int] = {}
-        # Per-root generation counter bumped after each reconcile.
-        self._reconcile_gen: dict[str, int] = {}
-        # Per-root seq cursor: highest seq that reconcile has processed.
-        # Reconcile only reads events after this cursor — no full scan.
-        self._reconcile_cursor: dict[str, int] = {}
         # Transient per-process marker for assistant messages currently
         # being reconciled by run_recovery. Lives in memory only — a
         # crash mid-recovery has no on-disk residue, and the next boot
@@ -684,35 +623,9 @@ class SessionManager:
             except Exception:
                 logger.exception("session listener raised: %s", change.get("kind"))
 
-    # ── Async reconcile coordination ───────────────────────────────
-    # The cost-shaping rule: reconcile of events.jsonl → render-tree
-    # is potentially O(N) (full file scan + per-event apply). It is
-    # NEVER allowed to run inline on REST/WS read paths. Readers call
-    # `schedule_reconcile_if_needed`, which is idempotent + single-
-    # flight + delayed-progress (no UI events under 0.3s; emits
-    # `session_processing_started/finished` for slow reconciles).
-    #
-    # Lock ordering invariant: `_async_reconcile_with_progress`
-    # acquires `_lock_for_root(rid)` around BOTH `{emit started}` and
-    # `{emit finished}`. WS subscribe's catch-up `{check in-flight;
-    # emit started}` runs under the SAME lock. This serializes the
-    # catch-up emit against the timer-driven emits, closing the
-    # "subscriber observes in-flight=True then finished fires before
-    # catch-up started → stuck badge" race.
-
     def bind_loop(self, loop: asyncio.AbstractEventLoop) -> None:
-        """Capture the event loop so cross-thread `mark_reconcile_dirty`
-        can schedule onto it. Call once at backend startup."""
+        """Capture the event loop. Call once at backend startup."""
         self._loop = loop
-
-    def bind_reconcile_fn(self, fn: Callable[..., list]) -> None:
-        """Wire the sync reconcile (defined in `main.py` to dodge a
-        circular import: reconcile imports `orchs.get_strategy`, orchs
-        imports session_manager). `fn(root_id, after_seq=cursor)` runs
-        the incremental reconcile + zombie-reap against the live cached
-        root. Invoked inside an `asyncio.to_thread` worker — MUST NOT
-        hold this manager's per-root lock for the whole scan."""
-        self._reconcile_fn = fn
 
     def bind_pin_predicate(
         self, fn: Callable[[str, set], bool],
@@ -722,32 +635,6 @@ class SessionManager:
         eviction calls it so it never drops a root the orchestrator still
         references. Call once at startup."""
         self._pin_predicate = fn
-
-    def bind_processing_emitter(
-        self, fn: Callable[[str, str], None],
-    ) -> None:
-        """Wire the WS event emitter. `fn(root_id, kind)` where kind ∈
-        {'started','finished'}. Runs on the event loop thread."""
-        self._emit_processing_fn = fn
-
-    def bind_stub_invalidated_emitter(
-        self, fn: Callable[[list], None],
-    ) -> None:
-        """Wire the `stub_invalidated` emitter. `fn(changes)` where each
-        change is `{app_session_id, msg_id, stub}` for a non-latest
-        historical msg whose stub went stale during reconcile. Runs on
-        the event loop thread (the reconcile body runs in a worker)."""
-        self._emit_stub_invalidated_fn = fn
-
-    def bind_reconciled_emitter(
-        self, fn: Callable[[str], None],
-    ) -> None:
-        """Wire the `session_reconciled` emitter. `fn(root_id)` fires
-        on the event loop thread after every reconcile completes (fast
-        or slow). The frontend uses it to silently refetch the session
-        if the user is viewing it, so stale cache served on the initial
-        GET is replaced with the reconciled state."""
-        self._emit_reconciled_fn = fn
 
     def bind_active_run_gate(self, fn: Callable[[str], bool]) -> None:
         """Inject `coordinator.has_active_runs` so `set_selectors` can
@@ -859,77 +746,24 @@ class SessionManager:
                     self._last_broadcast_monitoring[sid] = state
                 self._fire(sid, {"kind": "monitoring_changed", "value": state})
 
-    def mark_reconcile_dirty(self, root_id: str) -> None:
-        """Signal that the in-memory cache may lag events.jsonl for
-        `root_id` (e.g. orphan event landed for a finalized msg).
-        Acquires this manager's per-root lock so the set happens-before
-        any subsequent `consume_reconcile_dirty` under the same lock.
-        Safe to call from any thread."""
-        with self._lock_for_root(root_id):
-            already = self._reconcile_dirty.get(root_id, False)
-            self._reconcile_dirty[root_id] = True
-            if not already:
-                logger.info(
-                    "reconcile-dirty armed: root=%s (hydrated=%s)",
-                    root_id[:8], root_id in self._event_hydrated_roots,
-                )
-
-    def is_reconcile_dirty(self, root_id: str) -> bool:
-        """Read-only peek at the dirty flag. Does NOT clear it.
-        Used for diagnostic logging on read paths."""
-        with self._lock_for_root(root_id):
-            return self._reconcile_dirty.get(root_id, False)
-
-    def consume_reconcile_dirty(self, root_id: str) -> bool:
-        """Atomic read-and-clear of the dirty flag. Returns prior value.
-        Race safety: if `mark_reconcile_dirty` fires AFTER this clears
-        but BEFORE the subsequent reconcile reads events.jsonl, the
-        flag re-arms and the NEXT consume picks up the just-added
-        event. No orphan event is silently dropped."""
-        with self._lock_for_root(root_id):
-            was_dirty = self._reconcile_dirty.get(root_id, False)
-            self._reconcile_dirty[root_id] = False
-            return was_dirty
-
-    def is_reconcile_in_flight(self, root_id: str) -> bool:
-        """True iff a reconcile task is currently scheduled or
-        running. Used by WS subscribe to send catch-up
-        `session_processing_started` to a freshly-joined client."""
-        t = self._in_flight_reconcile.get(root_id)
-        return t is not None and not t.done()
-
-    def reconcile_processing_state(self) -> tuple[str, int, tuple[str, ...]]:
-        return (
-            self._visible_reconcile_epoch,
-            self._visible_reconcile_revision,
-            tuple(sorted(self._visible_reconcile_roots)),
-        )
-
-    def _set_reconcile_processing(self, root_id: str, active: bool) -> None:
-        if (root_id in self._visible_reconcile_roots) == active:
-            return
-        if active:
-            self._visible_reconcile_roots.add(root_id)
-        else:
-            self._visible_reconcile_roots.discard(root_id)
-        self._visible_reconcile_revision += 1
-
     def latest_assistant_finalized(self, sid: str) -> bool:
         """True iff `sid` has an assistant message AND the most recent
-        one is finalized (not streaming). Used by `event_ingester.ingest`
-        to detect orphan events (msg_id=None landing after the
-        orchestrator already finalized the turn) and arm the dirty flag.
-        Returns False if no assistant msg exists OR the sid is unknown.
+        one is finalized (not streaming). Used by the session-projection
+        drainer's orphan-row fold arm (`event_bus_subscribers._handle_
+        orphan_row`) to decide whether a msg_id=None row can be folded
+        immediately or must be buffered until the in-flight assistant
+        message finalizes. Returns False if no assistant msg exists OR
+        the sid is unknown.
 
         Thin load (`hydrate_events=False`): this reads only message
         `role`/`isStreaming`, which come from the on-disk snapshot —
         event hydration populates `msg.events`, not the messages list,
         so the answer is identical without it. Avoiding hydration here
-        matters because `event_ingester.ingest` calls this on the
-        per-root shard thread for every orphan event, and a cold-load
-        hydration scans the full events.jsonl (~seconds on the largest
-        roots), stalling the shard and indirectly blocking the asyncio
-        loop on queued writes for that root."""
+        matters because the drainer calls this on its per-root shard
+        thread for every orphan row, and a cold-load hydration scans the
+        full events.jsonl (~seconds on the largest roots), stalling the
+        shard and indirectly blocking the asyncio loop on queued writes
+        for that root."""
         rid = self._root_id_for(sid)
         if rid is None:
             return False
@@ -942,179 +776,25 @@ class SessionManager:
                     return not m.get("isStreaming")
             return False
 
-    def schedule_reconcile_if_needed(
-        self, root_id: str,
-    ) -> Optional[asyncio.Task]:
-        """Spawn the async reconcile task, idempotent.
-
-        Returns the existing in-flight task if one is already running.
-        Otherwise: if `consume_reconcile_dirty` returns True (cold-
-        load _load_root arms the flag, and `mark_reconcile_dirty`
-        arms it for orphan events), spawns a new task. Else returns
-        None (no work needed).
-
-        Caller MUST run on the event loop thread (single-flight dict
-        mutation is loop-only)."""
-        if self._reconcile_fn is None:
+    def latest_assistant_msg_id(self, sid: str) -> Optional[str]:
+        """The id of `sid`'s latest assistant message, whatever its
+        streaming state; None if no assistant msg exists or the sid is
+        unknown. Same thin-load semantics as `latest_assistant_finalized`
+        (see its docstring). Used by the orphan-row fold arm to resolve
+        which message a msg_id=None row brackets onto, once
+        `latest_assistant_finalized` has confirmed folding is safe."""
+        rid = self._root_id_for(sid)
+        if rid is None:
             return None
-        if not self._reconcile_accepting:
-            perf.record_count("shutdown.session_reconcile.rejected", 1)
-            return None
-        existing = self._in_flight_reconcile.get(root_id)
-        if existing is not None and not existing.done():
-            return existing
-        if not self.consume_reconcile_dirty(root_id):
-            return None
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            loop = self._loop
-            if loop is None or loop.is_closed():
+        with self._lock_for_root(rid):
+            sess = self._cached(sid, hydrate_events=False)
+            if sess is None:
                 return None
-        task = loop.create_task(self._async_reconcile_with_progress(root_id))
-        self._in_flight_reconcile[root_id] = task
-        task.add_done_callback(
-            lambda _t, rid=root_id: self._in_flight_reconcile.pop(rid, None),
-        )
-        return task
-
-    async def _async_reconcile_with_progress(self, root_id: str) -> None:
-        """Run `_sync_reconcile` in a threadpool worker. Emits
-        `session_processing_started` ONLY if reconcile takes >0.3s
-        (avoids UI flash for fast cases); always emits the matching
-        `finished` if `started` was emitted, even on exception."""
-        queued_at = time.perf_counter()
-        ctx = contextvars.copy_context()
-        loop = asyncio.get_running_loop()
-
-        def _run():
-            perf.record(
-                "session.reconcile.queue_wait",
-                (time.perf_counter() - queued_at) * 1000,
-            )
-            return ctx.run(self._sync_reconcile, root_id)
-
-        inner = loop.run_in_executor(
-            _RECONCILE_EXECUTOR,
-            _run,
-        )
-        reconcile_start = time.perf_counter()
-        started_emitted = False
-        changes: list = []
-        try:
-            try:
-                # `shield` so `wait_for`'s timeout cancels the WAIT, not
-                # the inner reconcile (which keeps running into the
-                # outer `await inner` below).
-                changes = await asyncio.wait_for(
-                    asyncio.shield(inner), timeout=0.3,
-                ) or []
-            except asyncio.TimeoutError:
-                started_emitted = True
-                self._set_reconcile_processing(root_id, True)
-                self._emit_processing("started", root_id)
-                changes = await inner or []
-        finally:
-            perf.record(
-                "session.reconcile.total",
-                (time.perf_counter() - reconcile_start) * 1000,
-            )
-            if started_emitted:
-                self._set_reconcile_processing(root_id, False)
-                self._emit_processing("finished", root_id)
-        logger.info(
-            "reconcile completed: root=%s changes=%d started_emitted=%s",
-            root_id[:8], len(changes), started_emitted,
-        )
-        # Emit stub-invalidations on the loop thread (reconcile ran in a
-        # worker). Outside the lock — these are fire-and-forget pings.
-        if changes and self._emit_stub_invalidated_fn is not None:
-            try:
-                self._emit_stub_invalidated_fn(changes)
-            except Exception:
-                logger.exception("stub_invalidated emit failed for %s", root_id)
-        # Notify frontend only when the reconcile actually found historical
-        # changes, so it can silently refetch the (now genuinely stale) tree
-        # if the user is viewing this session. `changes` only ever contains
-        # completed-message mutations (the in-flight streaming tail is
-        # excluded and has its own live delivery channel), so an empty
-        # `changes` means the REST snapshot the client already has is not
-        # stale — emitting here would just force a redundant refetch +
-        # re-render on every reconcile, including the common cold-open case
-        # where nothing changed.
-        if changes and self._emit_reconciled_fn is not None:
-            try:
-                self._emit_reconciled_fn(root_id)
-            except Exception:
-                logger.exception("session_reconciled emit failed for %s", root_id)
-
-    def _emit_processing(self, kind: str, root_id: str) -> None:
-        if self._emit_processing_fn is None:
-            return
-        try:
-            self._emit_processing_fn(root_id, kind)
-        except Exception:
-            logger.exception("processing emit failed: %s %s", kind, root_id)
-
-    def _sync_reconcile(self, root_id: str) -> list:
-        """Threadpool entrypoint for the injected reconcile. Passes the
-        reconcile cursor so the reconcile body only reads events after
-        the last processed seq — no full scan."""
-        if self._reconcile_fn is None:
-            return []
-        cursor = self._reconcile_cursor.get(root_id, 0)
-        gen_before = self._reconcile_gen.get(root_id, 0)
-        start = time.perf_counter()
-        try:
-            changes = self._reconcile_fn(root_id, after_seq=cursor) or []
-        except Exception:
-            logger.exception("sync reconcile failed for %s", root_id)
-            return []
-        reconcile_ms = (time.perf_counter() - start) * 1000
-        # Advance cursor to the current high-water mark.
-        from event_journal import event_journal_reader
-        cursor_start = time.perf_counter()
-        new_cursor = event_journal_reader.current_seq(root_id)
-        cursor_ms = (time.perf_counter() - cursor_start) * 1000
-        if new_cursor is not None:
-            self._reconcile_cursor[root_id] = new_cursor
-        cursor_advanced = new_cursor is not None and new_cursor > cursor
-        changed = cursor_advanced and bool(changes)
-        if changed:
-            self._reconcile_gen[root_id] = gen_before + 1
-        logger.info(
-            "_sync_reconcile %s: cursor=%d->%s gen=%d->%d changes=%d "
-            "advanced=%s bumped=%s reconcile=%.1fms cursor=%.1fms",
-            root_id[:8], cursor, new_cursor, gen_before,
-            self._reconcile_gen.get(root_id, 0), len(changes),
-            cursor_advanced, changed, reconcile_ms, cursor_ms,
-        )
-        return changes
-
-    def reconcile_through(self, root_id: str, required_seq: int) -> None:
-        """Synchronously project durable journal facts through a writer barrier."""
-        from event_journal import event_journal_reader
-
-        if self._reconcile_fn is None:
-            raise RuntimeError("session reconcile function is not bound")
-        event_journal_reader.read_through(root_id, required_seq)
-        cursor = self._reconcile_cursor.get(root_id, 0)
-        gen_before = self._reconcile_gen.get(root_id, 0)
-        changes = self._reconcile_fn(root_id, after_seq=cursor) or []
-        new_cursor = event_journal_reader.current_seq(root_id)
-        if new_cursor is not None:
-            self._reconcile_cursor[root_id] = new_cursor
-        cursor_advanced = new_cursor is not None and new_cursor > cursor
-        changed = cursor_advanced and bool(changes)
-        if changed:
-            self._reconcile_gen[root_id] = gen_before + 1
-        logger.info(
-            "reconcile_through %s: cursor=%d->%s gen=%d->%d required_seq=%d "
-            "changes=%d advanced=%s bumped=%s",
-            root_id[:8], cursor, new_cursor, gen_before,
-            self._reconcile_gen.get(root_id, 0), required_seq, len(changes),
-            cursor_advanced, changed,
-        )
+            for m in reversed(sess.get("messages") or []):
+                if m.get("role") == "assistant":
+                    msg_id = m.get("id")
+                    return msg_id if isinstance(msg_id, str) and msg_id else None
+            return None
 
     def apply_journal_ownership_resolution(
         self,
@@ -1175,6 +855,12 @@ class SessionManager:
                 ),
             )
             msg.pop("_uid_idx", None)
+            # `_has_final` is NOT invalidated here: a reorder changes
+            # which INDEX a uuid sits at, never which uuids exist or
+            # their data, so whether ANY event carries
+            # `final_answer=True` is unaffected — the flag (set by
+            # `apply_event` -> `_refresh_message_content_from_event_
+            # projection` in the loop above) stays correct as-is.
             # A reorder can leave len(events) unchanged, which would
             # otherwise look like "nothing happened" to
             # apply_written_journal_event's before_len+1 pure-append
@@ -1195,6 +881,25 @@ class SessionManager:
                 })
             return changed
 
+    def get_fold_watermark(self, root_id: str) -> int:
+        """Read the durable fold watermark (`last_applied_seq`) for a root.
+
+        0 if the root isn't resident yet — a not-yet-hydrated root has
+        applied nothing, so every row folded for it is "since the
+        watermark" by construction (correct: a session touched for the
+        first time in this process has no prior state to compare against).
+
+        Callers snapshot this ONCE per fold pass (see
+        `SessionProjectionDrainer`'s activation-time capture) — never
+        re-read it per row, or a multi-row backlog would compare later
+        rows against an already-advanced value and never fire their side
+        effects.
+        """
+        rid = self._root_id_for(root_id) or root_id
+        with self._lock_for_root(rid):
+            root = self._roots.get(rid)
+            return int(root.get("last_applied_seq") or 0) if root else 0
+
     def apply_written_journal_event(
         self,
         root_id: str,
@@ -1203,8 +908,20 @@ class SessionManager:
         event_type: str,
         data: dict,
         seq: int,
+        *,
+        fold_start_watermark: int,
     ) -> bool:
-        """Project one written journal render event into the live tree."""
+        """Project one written journal render event into the live tree.
+
+        `fold_start_watermark` is the durable watermark that was in effect
+        when the CURRENT fold pass began (captured once by the caller, not
+        re-read per row — see `get_fold_watermark`). `seq > fold_start_
+        watermark` gates the "once per event" lifecycle side effects in
+        `apply_event` (see `orchs.base.OrchestrationStrategy.apply_event`
+        docstring for the exactly-once-by-construction argument). This is
+        DELIBERATELY True for backlog rows folded during startup catch-up
+        (journaled while the backend was down) — not a bug.
+        """
         from event_shape import project_content_snapshot
         from orchs import ApplyEventCtx, get_strategy
 
@@ -1223,52 +940,39 @@ class SessionManager:
                 return False
             node_sid = str(node.get("id") or event_sid)
             strategy = get_strategy(node.get("orchestration_mode") or "team")
-            before_events = strategy._events_list(msg)
-            event_uuid = _event_uuid_safe({"type": event_type, "data": data})
-            before_len = len(before_events)
-            before_event = None
-            if event_uuid:
-                uid_idx = msg.get("_uid_idx")
-                before_idx = uid_idx.get(event_uuid) if isinstance(uid_idx, dict) else None
-                if before_idx is None:
-                    for idx, event in enumerate(before_events):
-                        if _event_uuid_safe(event) == event_uuid:
-                            before_idx = idx
-                            break
-                if isinstance(before_idx, int) and 0 <= before_idx < before_len:
-                    before_event = _copy_jsonish(before_events[before_idx])
-            else:
-                before_event = _copy_jsonish(before_events)
+            before_len = len(strategy._events_list(msg))
             ctx = ApplyEventCtx(root_id=root_id)
-            strategy.apply_event(
+            # `apply_event`'s return value IS the changed/unchanged verdict —
+            # no eager live-apply writer exists any more to have already
+            # applied this row, so every row folded here is either a
+            # genuine first-time mutation or a true dedup-by-uid no-op
+            # (idempotent replay racing a live-drained row). A before/after
+            # deepcopy-compare of `msg.events` was pure waste on top of
+            # that: `apply_event` already knows, from its own dedup path,
+            # whether it touched anything.
+            changed = strategy.apply_event(
                 app_session_id=node_sid,
                 msg=msg,
                 event={"type": event_type, "data": data},
                 ctx=ctx,
                 source_is_provider_stream=False,
                 write_journal=False,
+                fires_side_effects=seq > fold_start_watermark,
             )
+            # Advance the durable fold watermark past this row. Monotonic
+            # max (never regresses on an out-of-order or re-applied seq).
+            # This is the ONLY thing that determines "already applied" for
+            # the NEXT fold pass's `fires_side_effects` gate — it must
+            # advance per-row (unlike `fold_start_watermark`, which is
+            # fixed for the whole pass) so a row folded twice in the same
+            # process lifetime fires its side effects at most once.
+            if seq > int(root.get("last_applied_seq") or 0):
+                root["last_applied_seq"] = seq
             after_events = strategy._events_list(msg)
             if not msg.get("isStreaming"):
                 content = project_content_snapshot(after_events, msg.get("content"))
                 if content != (msg.get("content") or ""):
                     msg["content"] = content
-            if event_uuid:
-                uid_idx = msg.get("_uid_idx")
-                after_idx = uid_idx.get(event_uuid) if isinstance(uid_idx, dict) else None
-                if after_idx is None:
-                    for idx, event in enumerate(after_events):
-                        if _event_uuid_safe(event) == event_uuid:
-                            after_idx = idx
-                            break
-                after_event = (
-                    after_events[after_idx]
-                    if isinstance(after_idx, int) and 0 <= after_idx < len(after_events)
-                    else None
-                )
-                changed = before_len != len(after_events) or before_event != after_event
-            else:
-                changed = before_event != after_events
             if changed:
                 # Precompute the omitted-events revision HERE, where
                 # before_len/after_events are the live, identity-stable
@@ -1356,11 +1060,6 @@ class SessionManager:
         self._root_locks.clear()
         self._batches.clear()
         self._loading_roots.clear()
-        self._reconcile_dirty.clear()
-        self._in_flight_reconcile.clear()
-        self._visible_reconcile_roots.clear()
-        self._visible_reconcile_epoch = uuid.uuid4().hex
-        self._visible_reconcile_revision = 0
         self._since_cache.clear()
         self._since_cache_bytes.clear()
         self._since_cache_total_bytes = 0
@@ -1369,8 +1068,6 @@ class SessionManager:
         self._tree_stub_attached_cache.clear()
         self._todo_projection_cache.clear()
         self._queued_prompt_counts_by_sid.clear()
-        self._reconcile_gen.clear()
-        self._reconcile_cursor.clear()
         self._recovering_msg_ids.clear()
         self._last_broadcast_running.clear()
         self._last_broadcast_monitoring.clear()
@@ -1585,13 +1282,7 @@ class SessionManager:
         self, any_sid: str, *, hydrate_events: bool = True,
     ) -> Optional[dict]:
         """Resolve `any_sid` to its root and ensure the root tree is in
-        cache. Returns the cached root reference.
-
-        On cold cache miss, the disk-loaded tree may lag events.jsonl
-        (orphan events written after the prior backend's orchestrator
-        finalized a turn but before the next read). We arm the dirty
-        flag so the first `schedule_reconcile_if_needed` call from
-        any reader spawns the async recovery reconcile."""
+        cache. Returns the cached root reference."""
         rid = self._root_id_for(any_sid)
         if rid is None:
             return None
@@ -1641,24 +1332,6 @@ class SessionManager:
                     self._roots.move_to_end(rid)   # LRU: mark most-recently-used
                 except KeyError:
                     pass
-                batch_ctx = self._batches.get(rid)
-                hydrating = bool(batch_ctx and batch_ctx.get("_phantom"))
-                if (
-                    hydrate_events
-                    and rid not in self._event_hydrated_roots
-                    and not hydrating
-                ):
-                    self._reconcile_dirty[rid] = True
-                elif (
-                    hydrate_events
-                    and rid in self._event_hydrated_roots
-                    and self._reconcile_dirty.get(rid)
-                ):
-                    logger.debug(
-                        "_load_root: skipping hydration on dirty root=%s "
-                        "(orphan events not yet applied to in-memory root)",
-                        rid[:8],
-                    )
                 return cached
         self._event_hydrated_roots.discard(rid)
         # Drain any pending tail-flush for this root BEFORE reading
@@ -1735,10 +1408,6 @@ class SessionManager:
             pass
         self._index_root(root)
         self._enforce_root_cap(keep_rid=rid)
-        if not hydrate_events:
-            self._reconcile_dirty[rid] = True
-            return root
-        self._reconcile_dirty[rid] = True
         return root
 
     # ── LRU eviction ───────────────────────────────────────────────
@@ -1801,8 +1470,6 @@ class SessionManager:
         as pinned, so doubt never evicts live state."""
         if (
             rid in self._batches
-            or rid in self._in_flight_reconcile
-            or self._reconcile_dirty.get(rid, False)
             or rid in _persist_pending
         ):
             return True
@@ -1844,18 +1511,14 @@ class SessionManager:
 
         Closing the ingester is safe ONLY because eviction runs solely
         when `_is_pinned(rid, ...)` is False — no active turn, no live
-        tailer, no in-flight/dirty reconcile — so no writer is in flight.
-        A stray late ingest (e.g. an owned tailer mid-teardown) re-seeds
-        from disk via `_ensure_open`, which REBUILDS `_seq_offsets`
-        (event_ingester.py:193) — so no duplicate events.jsonl row; and
-        `_reconcile_dirty`/`_reconcile_cursor` survive (below) so a late
-        orphan still triggers a delta reconcile. close() takes only the
-        ingester lock, AFTER this method's SM per-root lock — the
-        documented safe order (never ingester→SM).
+        tailer — so no writer is in flight. A stray late ingest (e.g. an
+        owned tailer mid-teardown) re-seeds from disk via `_ensure_open`,
+        which REBUILDS `_seq_offsets` (event_ingester.py:193) — so no
+        duplicate events.jsonl row. close() takes only the ingester lock,
+        AFTER this method's SM per-root lock — the documented safe order
+        (never ingester→SM).
 
         Deliberately LEAVES:
-          • `_reconcile_dirty` / `_reconcile_cursor` — a pending reconcile
-            for this root must survive (it cold-reloads on next access);
           • `_root_locks[rid]` — a future load re-creates the same lock
             identity; popping it risks a lock-identity race.
         Caller MUST hold `_lock_for_root(rid)`."""
@@ -2038,8 +1701,6 @@ class SessionManager:
             logger.exception("prepared hydration failed for %s", rid)
             return False
         finally:
-            if not success:
-                self._reconcile_dirty[rid] = True
             with self._cache_guard:
                 self._hydration_in_flight.discard(rid)
                 condition.notify_all()
@@ -2606,6 +2267,7 @@ class SessionManager:
             # invariant matters more than the minor walk cost.
             popped: list[tuple[dict, list]] = []
             popped_idx: list[tuple[dict, dict]] = []
+            popped_has_final: list[tuple[dict, bool]] = []
             popped_anchor_cache: list[tuple[dict, dict]] = []
             stack = [s]
             while stack:
@@ -2618,6 +2280,9 @@ class SessionManager:
                     idx = m.pop("_uid_idx", None)
                     if isinstance(idx, dict):
                         popped_idx.append((m, idx))
+                    has_final = m.pop("_has_final", None)
+                    if has_final is not None:
+                        popped_has_final.append((m, has_final))
                     anchor_cache = m.pop("_panel_anchor_cache", None)
                     if isinstance(anchor_cache, dict):
                         popped_anchor_cache.append((m, anchor_cache))
@@ -2631,6 +2296,9 @@ class SessionManager:
                         widx = w.pop("_uid_idx", None)
                         if isinstance(widx, dict):
                             popped_idx.append((w, widx))
+                        w_has_final = w.pop("_has_final", None)
+                        if w_has_final is not None:
+                            popped_has_final.append((w, w_has_final))
                 for f in node.get("forks") or []:
                     stack.append(f)
             try:
@@ -2640,6 +2308,8 @@ class SessionManager:
                     owner["events"] = ev
                 for owner, idx in popped_idx:
                     owner["_uid_idx"] = idx
+                for owner, has_final in popped_has_final:
+                    owner["_has_final"] = has_final
                 for owner, anchor_cache in popped_anchor_cache:
                     owner["_panel_anchor_cache"] = anchor_cache
             self._stamp_recovering_tree(out)
@@ -2978,13 +2648,13 @@ class SessionManager:
         """Get or compute the LRU-cached stubbed snapshot for one node.
         Caller MUST hold the per-root lock.
 
-        Cache key is (next_seq, render_event_max_seq, reconcile_gen) so
+        Cache key is (next_seq, render_event_max_seq, fold_watermark) so
         UI/audit rows in events.jsonl do not force message snapshot
-        rebuilds, while async reconcile projection still invalidates stale
-        pre-reconcile snapshots."""
+        rebuilds, while the fold projection still invalidates stale
+        pre-fold snapshots."""
         from event_ingester import event_ingester
         cur_seq = node.get("next_seq") or 0
-        gen = self._reconcile_gen.get(rid, 0)
+        gen = self.get_fold_watermark(rid)
         cached = self._since_cache.get(node_sid)
         event_max_seq: int | None = None
         seq_ms = 0.0
@@ -3050,7 +2720,7 @@ class SessionManager:
 
         cur_seq = int(node.get("next_seq") or 0)
         render_seq = event_ingester.render_seq_for_sid(rid, node_sid)
-        gen = int(self._reconcile_gen.get(rid, 0))
+        gen = self.get_fold_watermark(rid)
         recovering_key = tuple(sorted(self._recovering_msg_ids))
         cache_key = (
             node_sid,
@@ -3110,7 +2780,7 @@ class SessionManager:
                     bool(node.get("is_running")),
                     bool(node.get("right_panel_open")),
                     int(render_seq_by_sid.get(node_sid, 0)),
-                    int(self._reconcile_gen.get(rid, 0)),
+                    self.get_fold_watermark(rid),
                 ))
             for child in node.get("forks") or []:
                 if isinstance(child, dict):
@@ -3336,7 +3006,7 @@ class SessionManager:
         def _copy_assistant_for_snapshot(m: dict, *, is_streaming: bool) -> dict:
             out = {
                 k: v for k, v in m.items()
-                if k not in ("events", "_uid_idx", messages_delta_compaction.PRECOMPUTED_REVISION_KEY)
+                if k not in ("events", "_uid_idx", "_has_final", messages_delta_compaction.PRECOMPUTED_REVISION_KEY)
             }
             out["events"] = []
             workers = []
@@ -3345,7 +3015,7 @@ class SessionManager:
                     continue
                 wc = {
                     k: v for k, v in worker.items()
-                    if k not in ("events", "_uid_idx")
+                    if k not in ("events", "_uid_idx", "_has_final")
                 }
                 wc["events"] = (
                     copy.deepcopy(worker.get("events") or [])
@@ -3488,7 +3158,7 @@ class SessionManager:
             if m.get("role") == "assistant":
                 out = {
                     k: v for k, v in m.items()
-                    if k not in ("events", "_uid_idx", messages_delta_compaction.PRECOMPUTED_REVISION_KEY)
+                    if k not in ("events", "_uid_idx", "_has_final", messages_delta_compaction.PRECOMPUTED_REVISION_KEY)
                 }
                 out["events"] = []
                 workers = []
@@ -3497,7 +3167,7 @@ class SessionManager:
                         continue
                     wc = {
                         k: v for k, v in worker.items()
-                        if k not in ("events", "_uid_idx")
+                        if k not in ("events", "_uid_idx", "_has_final")
                     }
                     wc["events"] = (
                         copy.deepcopy(worker.get("events") or [])
@@ -5480,33 +5150,6 @@ class SessionManager:
             {"kind": "agent_sid_on_msg_set", "msg_id": msg_id, "agent_sid": agent_sid},
         )
 
-    def snapshot_workers(
-        self, sid: str, msg_id: str, workers_list: Iterable[dict],
-    ) -> Optional[dict]:
-        snap: list[dict] = []
-        by_delegation: dict[str, dict] = {}
-        for worker in workers_list:
-            delegation_id = str(worker.get("delegation_id") or "")
-            if not delegation_id:
-                snap.append(worker)
-                continue
-            existing = by_delegation.get(delegation_id)
-            if existing is None:
-                by_delegation[delegation_id] = worker
-                snap.append(worker)
-                continue
-            existing.update(worker)
-        def _do(s: dict) -> None:
-            m = _find_message(s, msg_id)
-            if m is None:
-                return
-            m["workers"] = snap
-        return self._run(
-            sid, _do,
-            {"kind": "workers_snapshot", "msg_id": msg_id, "workers": snap},
-            hydrate_events=False,
-        )
-
     def upsert_worker_panel(
         self, sid: str, msg_id: str, panel: dict, *, reset_events: bool = False,
     ) -> Optional[dict]:
@@ -5530,6 +5173,7 @@ class SessionManager:
             if reset_events:
                 existing["events"] = []
                 existing.pop("_uid_idx", None)
+                existing.pop("_has_final", None)
                 from render_stub import invalidate_panel_anchor_cache
                 invalidate_panel_anchor_cache(existing)
             elif events and not panel.get("events"):
@@ -6395,6 +6039,11 @@ class SessionManager:
             # uuids, which the lazy len-check inside `_uid_idx_for`
             # WON'T catch). Next apply_event call rebuilds.
             m.pop("_uid_idx", None)
+            # `_has_final` has the same validity lifetime as `_uid_idx`
+            # (see orchs.base._uid_idx_for) — the new events list may or
+            # may not carry a final marker; invalidate so the next read
+            # rescans instead of trusting a stale flag.
+            m.pop("_has_final", None)
         return self._run(
             sid, _do,
             {"kind": "native_events_set", "msg_id": msg_id, "events": events},

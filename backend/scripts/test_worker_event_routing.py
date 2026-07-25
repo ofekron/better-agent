@@ -270,7 +270,7 @@ def test_e_live_false_skips_ingest_and_rewrite() -> bool:
 
 def test_g_reconcile_roundtrip_rehydrates_panel_events() -> bool:
     """Round-trip: live worker_event writes events.jsonl row;
-    `_reconcile_msg_events_from_jsonl` re-reads it and re-applies via
+    `hydrate_msg_events_from_jsonl` re-reads it and re-applies via
     `apply_event(source_is_provider_stream=False)` → must land back in panel.events. Locks
     the CLAUDE.md convergence invariant for worker_event events.
 
@@ -305,10 +305,9 @@ def test_g_reconcile_roundtrip_rehydrates_panel_events() -> bool:
     # Finalize the msg so reconcile's "skip streaming" guard doesn't
     # bail (reconcile only re-applies events for FINALIZED msgs).
     session_manager.set_streaming(sid, msg_id, False)
-    session_manager.mark_reconcile_dirty(root_id)
 
-    # Run reconcile against the root tree.
-    from main import _reconcile_msg_events_from_jsonl
+    # Run the fold against the root tree.
+    from render_tree_hydrate import hydrate_msg_events_from_jsonl as _reconcile_msg_events_from_jsonl
     tree = session_manager.get_root_tree(sid) or session_manager.get(sid)
     _reconcile_msg_events_from_jsonl(tree)
 
@@ -332,7 +331,6 @@ def test_g_reconcile_roundtrip_rehydrates_panel_events() -> bool:
         {"kind": "test_drop_panel"},
     )
     session_manager.set_streaming(sid2, msg_id2, False)
-    session_manager.mark_reconcile_dirty(root_id2)
 
     tree2 = session_manager.get_root_tree(sid2) or session_manager.get(sid2)
     _reconcile_msg_events_from_jsonl(tree2)
@@ -451,13 +449,11 @@ def test_i_worker_event_does_not_need_snapshot_workers() -> bool:
     root_id = session_manager._root_id_for(sid)
     msg_id = scaffold["id"]
 
-    # Mirror production wiring: workers_list shares panel refs with
-    # m["workers"]. `get_ref` returns the live cache (no deepcopy) so
-    # `msg` is the exact dict the strategy will mutate.
-    workers_list = [panel]
+    # `get_ref` returns the live cache (no deepcopy) so `msg` is the
+    # exact dict the strategy will mutate.
     sess_ref = session_manager.get_ref(sid) or {}
     msg = next(m for m in sess_ref["messages"] if m.get("id") == msg_id)
-    ctx = ApplyEventCtx(root_id=root_id, workers_list=workers_list)
+    ctx = ApplyEventCtx(root_id=root_id)
     strategy.apply_event(
         app_session_id=sid, msg=msg,
         event=_worker_event("del_I", "uuid-I", "with-snapshot"),

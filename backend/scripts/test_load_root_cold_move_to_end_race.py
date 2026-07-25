@@ -49,8 +49,6 @@ def _reset() -> None:
     mgr._node_root_id = {}
     mgr._root_locks = {}
     mgr._batches = {}
-    mgr._in_flight_reconcile = {}
-    mgr._reconcile_dirty = {}
     mgr._draft_dirty = set()
     mgr._draft_gen = {}
     mgr._last_broadcast_running = {}

@@ -270,16 +270,20 @@ def latest_assistant_id(msgs: list) -> Optional[str]:
 
 
 def _empty_event_lists(msg: dict) -> None:
-    """Empty every events list on a msg + drop the uid indexes."""
+    """Empty every events list on a msg + drop the uid indexes and the
+    cached final-answer flag (same volatile-cache lifetime as
+    `_uid_idx` — see `orchs.base._uid_idx_for`)."""
     if isinstance(msg.get("events"), list):
         msg["events"] = []
     msg.pop("_uid_idx", None)
+    msg.pop("_has_final", None)
     invalidate_panel_anchor_cache(msg)
     for w in msg.get("workers") or []:
         if isinstance(w, dict):
             if isinstance(w.get("events"), list):
                 w["events"] = []
             w.pop("_uid_idx", None)
+            w.pop("_has_final", None)
 
 
 def stub_message_inplace(msg: dict, *, tail: int = STUB_TAIL) -> dict:

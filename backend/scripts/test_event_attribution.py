@@ -6,11 +6,11 @@
    stamping, not via the journal writer's ownership inference, and not
    via cold-load hydrate. The rows stay durable in events.jsonl.
 
-2. test_warm_reconcile_brackets_by_journal_seq — the warm reconcile
-   path (`main._reconcile_root_by_id`, bound as the reconcile body for
-   `session_manager._sync_reconcile` / `reconcile_through`) must
-   bracket orphan rows by their journal seq within the owning sid, not
-   pile every orphan onto the last finalized message root-wide.
+2. test_warm_reconcile_brackets_by_journal_seq — the fold
+   (`session_manager.hydrate_root_prepared`, backed by
+   `render_tree_hydrate.hydrate_msg_events_from_jsonl`) must bracket
+   orphan rows by their journal seq within the owning sid, not pile
+   every orphan onto the last finalized message root-wide.
 
 Run with:
     cd backend && .venv/bin/python scripts/test_event_attribution.py
@@ -232,8 +232,7 @@ async def test_warm_reconcile_brackets_by_journal_seq() -> bool:
     _publish("m2-e2", "b2", message_id=m2)   # seq 6
     event_journal_writer.barrier_sync(root_id)
 
-    from main import _reconcile_root_by_id
-    _reconcile_root_by_id(root_id, after_seq=0)
+    session_manager.hydrate_root_prepared(root_id, after_seq=0)
 
     m1_uuids = _msg_event_uuids(sid, m1)
     m2_uuids = _msg_event_uuids(sid, m2)

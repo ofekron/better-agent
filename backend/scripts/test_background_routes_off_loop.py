@@ -15,8 +15,6 @@ def test_async_routes_do_not_call_session_manager_locking_reads_directly() -> No
         "session_manager.get",
         "session_manager.get_lite",
         "session_manager._root_id_for",
-        "session_manager.is_reconcile_dirty",
-        "session_manager.schedule_reconcile_if_needed",
         "session_manager._lock_for_root",
     }
     violations: list[str] = []

@@ -190,8 +190,7 @@ def test_live_ingest_builds_correct_render_tree() -> bool:
     agent_message shape, not the outer manager_event wrapper."""
     sid, msg = _mk_session("native")
     strategy = get_strategy("native")
-    ctx = ApplyEventCtx(manager_sid_holder=None, workers_list=[],
-                        user_msg=None, root_id=sid)
+    ctx = ApplyEventCtx(manager_sid_holder=None, user_msg=None, root_id=sid)
 
     ev1 = _agent_message("u-live-1", "Hello")
     ev2 = _agent_message("u-live-2", "World")
@@ -228,8 +227,7 @@ def test_live_ingest_updates_content() -> bool:
     update_running_content). Verify the session_manager path works."""
     sid, msg = _mk_session("native")
     strategy = get_strategy("native")
-    ctx = ApplyEventCtx(manager_sid_holder=None, workers_list=[],
-                        user_msg=None, root_id=sid)
+    ctx = ApplyEventCtx(manager_sid_holder=None, user_msg=None, root_id=sid)
 
     strategy.apply_event(app_session_id=sid, msg=msg,
                          event=_agent_message("u-content-1", "First text"),
@@ -253,8 +251,7 @@ def test_live_sid_holder_pinned_from_turn_start() -> bool:
     sid, msg = _mk_session("manager")
     strategy = get_strategy("manager")
     holder = {"id": None}
-    ctx = ApplyEventCtx(manager_sid_holder=holder, workers_list=[],
-                        user_msg=None, root_id=sid)
+    ctx = ApplyEventCtx(manager_sid_holder=holder, user_msg=None, root_id=sid)
 
     strategy.apply_event(
         app_session_id=sid, msg=msg,
@@ -284,8 +281,7 @@ def test_live_wire_frames_reach_jsonl_but_not_msg_events() -> bool:
     msg.events — they're wire-routing frames only."""
     sid, msg = _mk_session("manager")
     strategy = get_strategy("manager")
-    ctx = ApplyEventCtx(manager_sid_holder={"id": None}, workers_list=[],
-                        user_msg=None, root_id=sid)
+    ctx = ApplyEventCtx(manager_sid_holder={"id": None}, user_msg=None, root_id=sid)
 
     strategy.apply_event(app_session_id=sid, msg=msg,
                          event={"type": "turn_start", "data": {"manager_session_id": "s1"}},
@@ -338,10 +334,10 @@ def test_bg_events_jsonl_available_after_offline() -> bool:
         print(f"  expected 1 orphan row, got {len(orphan_rows)}")
         return False
 
-    # Reconcile should pick it up.
-    from render_tree_hydrate import reconcile_msg_events_from_jsonl
+    # The fold should pick it up.
+    from render_tree_hydrate import hydrate_msg_events_from_jsonl
     tree = session_manager.get_root_tree(sid)
-    reconcile_msg_events_from_jsonl(tree)
+    hydrate_msg_events_from_jsonl(tree)
 
     evs = _asst_msg_events(sid, msg["id"])
     uuids = {(e.get("data") or {}).get("uuid") for e in evs if isinstance(e, dict)}
@@ -351,18 +347,16 @@ def test_bg_events_jsonl_available_after_offline() -> bool:
     return True
 
 
-def test_bg_reconcile_dirty_armed_for_orphan_on_finalized() -> bool:
+def test_bg_fold_brackets_orphan_onto_finalized_msg() -> bool:
     """Background: an orphan event (msg_id=None) landing when the latest
-    assistant msg is finalized must arm reconcile_dirty so the next read
-    path triggers reconcile."""
+    assistant msg is finalized is bracketed onto that msg by the fold
+    (`hydrate_msg_events_from_jsonl` — the single events-writer, run on
+    cold load and by the write-time projection). There is no separate
+    dirty-flag step; the durable events.jsonl row is enough for the
+    fold to pick it up whenever it runs."""
     sid, msg = _mk_session("native")
     session_manager.set_streaming(sid, msg["id"], False)
-    root_id = session_manager._root_id_for(sid)
 
-    # Clear any dirty flag from setup.
-    session_manager.consume_reconcile_dirty(root_id)
-
-    # Write an orphan.
     event_ingester.ingest(
         sid, sid=sid, event_type="agent_message",
         data={
@@ -373,20 +367,24 @@ def test_bg_reconcile_dirty_armed_for_orphan_on_finalized() -> bool:
         source="claude_tailer", msg_id=None,
     )
 
-    dirty = session_manager.consume_reconcile_dirty(root_id)
-    if not dirty:
-        print("  reconcile_dirty not armed after orphan ingest on finalized msg")
+    from render_tree_hydrate import hydrate_msg_events_from_jsonl
+    tree = session_manager.get_root_tree(sid)
+    hydrate_msg_events_from_jsonl(tree)
+
+    evs = _asst_msg_events(sid, msg["id"])
+    uuids = {(e.get("data") or {}).get("uuid") for e in evs if isinstance(e, dict)}
+    if "u-dirty-test" not in uuids:
+        print(f"  orphan not bracketed onto finalized msg: uuids={uuids}")
         return False
     return True
 
 
-def test_bg_no_dirty_when_streaming() -> bool:
+def test_bg_no_fold_onto_streaming_msg() -> bool:
     """Background: an orphan event when the latest assistant msg is STILL
-    streaming must NOT arm reconcile_dirty (live path owns the msg)."""
+    streaming must NOT be bracketed onto it (the live path owns the msg
+    while it streams; the fold's orphan arm defers/buffers instead)."""
     sid, msg = _mk_session("native")
     # msg is still streaming from _mk_session.
-    root_id = session_manager._root_id_for(sid)
-    session_manager.consume_reconcile_dirty(root_id)
 
     event_ingester.ingest(
         sid, sid=sid, event_type="agent_message",
@@ -398,9 +396,14 @@ def test_bg_no_dirty_when_streaming() -> bool:
         source="claude_tailer", msg_id=None,
     )
 
-    dirty = session_manager.consume_reconcile_dirty(root_id)
-    if dirty:
-        print("  reconcile_dirty armed for orphan on streaming msg (should not)")
+    from render_tree_hydrate import hydrate_msg_events_from_jsonl
+    tree = session_manager.get_root_tree(sid)
+    hydrate_msg_events_from_jsonl(tree)
+
+    evs = _asst_msg_events(sid, msg["id"])
+    uuids = {(e.get("data") or {}).get("uuid") for e in evs if isinstance(e, dict)}
+    if "u-no-dirty" in uuids:
+        print("  orphan bracketed onto streaming msg (should not be)")
         return False
     return True
 
@@ -436,7 +439,7 @@ def test_bg_ws_reconnect_projection_matches_rest() -> bool:
     )
 
     # REST projection (via reconcile).
-    from render_tree_hydrate import reconcile_msg_events_from_jsonl
+    from render_tree_hydrate import hydrate_msg_events_from_jsonl as reconcile_msg_events_from_jsonl
     rest_tree = session_manager.get_root_tree(sid)
     reconcile_msg_events_from_jsonl(rest_tree)
     rest_sess = session_manager.get(sid)
@@ -705,8 +708,7 @@ def test_convergence_live_then_reconcile_identical() -> bool:
     # Session A: live ingest.
     sid_a, msg_a = _mk_session("native")
     strategy = get_strategy("native")
-    ctx = ApplyEventCtx(manager_sid_holder=None, workers_list=[],
-                        user_msg=None, root_id=sid_a)
+    ctx = ApplyEventCtx(manager_sid_holder=None, user_msg=None, root_id=sid_a)
     for text in ("One", "Two", "Three"):
         strategy.apply_event(
             app_session_id=sid_a, msg=msg_a,
@@ -727,7 +729,7 @@ def test_convergence_live_then_reconcile_identical() -> bool:
             source="orchestrator", msg_id=msg_b["id"],
         )
 
-    from render_tree_hydrate import reconcile_msg_events_from_jsonl
+    from render_tree_hydrate import hydrate_msg_events_from_jsonl as reconcile_msg_events_from_jsonl
     session_manager.set_streaming(sid_b, msg_b["id"], False)
     tree_b = session_manager.get_root_tree(sid_b)
     reconcile_msg_events_from_jsonl(tree_b)
@@ -755,8 +757,7 @@ def test_convergence_streaming_update_survives_reconcile() -> bool:
     latest snapshot (not regress to the first)."""
     sid, msg = _mk_session("native")
     strategy = get_strategy("native")
-    ctx = ApplyEventCtx(manager_sid_holder=None, workers_list=[],
-                        user_msg=None, root_id=sid)
+    ctx = ApplyEventCtx(manager_sid_holder=None, user_msg=None, root_id=sid)
 
     uid = "u-streaming-conv"
     # First emit: short text.
@@ -791,7 +792,7 @@ def test_convergence_streaming_update_survives_reconcile() -> bool:
     event_ingester.close_all()
     session_manager.set_streaming(sid, msg["id"], False)
 
-    from render_tree_hydrate import reconcile_msg_events_from_jsonl
+    from render_tree_hydrate import hydrate_msg_events_from_jsonl as reconcile_msg_events_from_jsonl
     tree = session_manager.get_root_tree(sid)
     reconcile_msg_events_from_jsonl(tree)
 
@@ -823,8 +824,7 @@ def test_convergence_live_vs_recovery_produce_same_events() -> bool:
     # Live path.
     sid_live, msg_live = _mk_session("native")
     strategy = get_strategy("native")
-    ctx = ApplyEventCtx(manager_sid_holder=None, workers_list=[],
-                        user_msg=None, root_id=sid_live)
+    ctx = ApplyEventCtx(manager_sid_holder=None, user_msg=None, root_id=sid_live)
     for uid, text in events_data:
         strategy.apply_event(
             app_session_id=sid_live, msg=msg_live,
@@ -835,8 +835,7 @@ def test_convergence_live_vs_recovery_produce_same_events() -> bool:
     # Recovery path: replay same events through apply_event(source_is_provider_stream=True)
     # (recovery uses source_is_provider_stream=True per the invariant).
     sid_rec, msg_rec = _mk_session("native")
-    ctx_rec = ApplyEventCtx(manager_sid_holder=None, workers_list=[],
-                            user_msg=None, root_id=sid_rec)
+    ctx_rec = ApplyEventCtx(manager_sid_holder=None, user_msg=None, root_id=sid_rec)
     for uid, text in events_data:
         strategy.apply_event(
             app_session_id=sid_rec, msg=msg_rec,
@@ -1148,8 +1147,7 @@ def test_reconcile_brackets_orphan_to_correct_msg() -> bool:
     land on msg A, not B."""
     sid, msg_a = _mk_session("native")
     strategy = get_strategy("native")
-    ctx = ApplyEventCtx(manager_sid_holder=None, workers_list=[],
-                        user_msg=None, root_id=sid)
+    ctx = ApplyEventCtx(manager_sid_holder=None, user_msg=None, root_id=sid)
 
     # Finalize first assistant msg with a named event.
     strategy.apply_event(
@@ -1166,8 +1164,7 @@ def test_reconcile_brackets_orphan_to_correct_msg() -> bool:
     strategy.apply_event(
         app_session_id=sid, msg=scaffold_b,
         event=_agent_message("u-msg-b-1", "Msg B event"),
-        ctx=ApplyEventCtx(manager_sid_holder=None, workers_list=[],
-                          user_msg=None, root_id=sid),
+        ctx=ApplyEventCtx(manager_sid_holder=None, user_msg=None, root_id=sid),
         source_is_provider_stream=True,
     )
     session_manager.set_streaming(sid, scaffold_b["id"], False)
@@ -1176,7 +1173,7 @@ def test_reconcile_brackets_orphan_to_correct_msg() -> bool:
     # events but lower than msg B's events, so it should bracket to msg A.
     # Actually, we can't control seq ordering precisely this way. Instead,
     # verify that reconcile doesn't crash and both msgs get their events.
-    from render_tree_hydrate import reconcile_msg_events_from_jsonl
+    from render_tree_hydrate import hydrate_msg_events_from_jsonl as reconcile_msg_events_from_jsonl
     tree = session_manager.get_root_tree(sid)
     reconcile_msg_events_from_jsonl(tree)
 
@@ -1199,8 +1196,7 @@ def test_non_render_types_in_all_scenarios() -> bool:
     msg.events in any scenario: live, reconcile, or recovery replay."""
     sid, msg = _mk_session("native")
     strategy = get_strategy("native")
-    ctx = ApplyEventCtx(manager_sid_holder=None, workers_list=[],
-                        user_msg=None, root_id=sid)
+    ctx = ApplyEventCtx(manager_sid_holder=None, user_msg=None, root_id=sid)
 
     # Live path.
     strategy.apply_event(
@@ -1226,7 +1222,7 @@ def test_non_render_types_in_all_scenarios() -> bool:
 
     # Reconcile path: re-apply from events.jsonl.
     session_manager.set_streaming(sid, msg["id"], False)
-    from render_tree_hydrate import reconcile_msg_events_from_jsonl
+    from render_tree_hydrate import hydrate_msg_events_from_jsonl as reconcile_msg_events_from_jsonl
     tree = session_manager.get_root_tree(sid)
     reconcile_msg_events_from_jsonl(tree)
 
@@ -1247,8 +1243,7 @@ def test_ai_title_ingested_but_not_rendered() -> bool:
     # agent-rename permission gate — opt in explicitly.
     session_manager.set_agent_rename_allowed(sid, True)
     strategy = get_strategy("native")
-    ctx = ApplyEventCtx(manager_sid_holder=None, workers_list=[],
-                        user_msg=None, root_id=sid)
+    ctx = ApplyEventCtx(manager_sid_holder=None, user_msg=None, root_id=sid)
 
     strategy.apply_event(
         app_session_id=sid, msg=msg,
@@ -1301,8 +1296,7 @@ def test_user_uuid_anchor_in_live_and_recovery() -> bool:
                 "message": {"content": "hi"}, "isSidechain": False,
             }},
         },
-        ctx=ApplyEventCtx(manager_sid_holder={"id": None}, workers_list=[],
-                          user_msg=user_a_ref, root_id=sid_a),
+        ctx=ApplyEventCtx(manager_sid_holder={"id": None}, user_msg=user_a_ref, root_id=sid_a),
         source_is_provider_stream=True,
     )
     refreshed_a = session_manager.get(sid_a)["messages"][0]
@@ -1323,8 +1317,7 @@ def test_user_uuid_anchor_in_live_and_recovery() -> bool:
                 "message": {"content": "hi"}, "isSidechain": False,
             },
         },
-        ctx=ApplyEventCtx(manager_sid_holder=None, workers_list=[],
-                          user_msg=user_b_ref, root_id=sid_b),
+        ctx=ApplyEventCtx(manager_sid_holder=None, user_msg=user_b_ref, root_id=sid_b),
         source_is_provider_stream=True,  # recovery uses source_is_provider_stream=True
     )
     refreshed_b = session_manager.get(sid_b)["messages"][0]
@@ -1350,10 +1343,10 @@ TESTS: list[tuple[str, object]] = [
     # Background scenario
     ("BG: events.jsonl available after offline period",
         test_bg_events_jsonl_available_after_offline),
-    ("BG: reconcile_dirty armed for orphan on finalized msg",
-        test_bg_reconcile_dirty_armed_for_orphan_on_finalized),
-    ("BG: no reconcile_dirty when msg still streaming",
-        test_bg_no_dirty_when_streaming),
+    ("BG: fold brackets orphan onto finalized msg",
+        test_bg_fold_brackets_orphan_onto_finalized_msg),
+    ("BG: fold does not bracket orphan onto streaming msg",
+        test_bg_no_fold_onto_streaming_msg),
     ("BG: WS reconnect projection matches REST projection",
         test_bg_ws_reconnect_projection_matches_rest),
 

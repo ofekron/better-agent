@@ -8,18 +8,24 @@ strategy.method(). (`supervisor` is NOT a mode — it's the
 orchs/supervisor/.)
 
 `apply_event` is the SINGLE delta-applier for the session render tree.
-The same method runs for live ingest (events streaming from a running
-claude subprocess) and for restore (events replayed from disk after a
-backend restart or dead-orphan recovery). The `source_is_provider_stream`
-flag gates side-effects that only make sense when the event comes from
-the provider's CLI stream (SDK callback or crash-recovery replay):
+Every call today is a FOLD: `session_manager.apply_written_journal_event`
+projects a durably-written journal row into the render tree, called by
+`SessionProjectionDrainer` (event_bus_subscribers.py). There is no
+separate eager live-apply path anymore.
 
-  - source_is_provider_stream=True  → rewrite file refs and fire live-only
-                 lifecycle/provenance/unread side effects. Live SDK
-                 callbacks write events.jsonl before calling apply_event;
-                 recovery/orphan paths may still request a journal write.
-  - source_is_provider_stream=False → render-tree only; events.jsonl is
-                 the SOURCE during replay, no double-write.
+Two independent flags gate two independent concerns:
+
+  - `source_is_provider_stream` gates file-ref-rewrite bookkeeping that
+    only applies when apply_event itself is the one writing raw
+    provider data (always False for the fold path, since events.jsonl
+    already holds the rewritten data by the time the fold reads it back).
+  - `fires_side_effects` gates the "once per event" lifecycle side effects
+    (attention markers, `<SESSION_NAME>` rename, bump_unread,
+    session_event_extensions, provenance, user-message-received). The
+    caller computes this as `row.seq > <the watermark in effect when this
+    fold pass started>` — see `apply_event`'s docstring for why this fires
+    exactly once by construction, and fires (deliberately) for backlog
+    rows folded during startup catch-up.
 
 apply_event is idempotent on event uuid — re-applying an event that's
 already in the msg's events list is a no-op. This makes replay safe.
@@ -63,13 +69,17 @@ class ApplyEventCtx:
 
     Holds state that lives across many apply_event calls within one
     turn: the mutable manager_sid_holder (so turn_start/complete
-    frames can pin the discovered claude sid), the workers_list
-    accumulator (so worker_complete frames can snapshot accurately),
-    and the preceding user_msg (so manager_event with a user claude
-    entry can wire the rewind anchor).
+    frames can pin the discovered claude sid), and the preceding
+    user_msg (so manager_event with a user claude entry can wire the
+    rewind anchor).
+
+    `msg["workers"]` itself is NOT mirrored here — `worker_start` /
+    `worker_complete` / `worker_event` write directly into it via
+    `session_manager.upsert_worker_panel` / `update_worker_panel` /
+    `apply_worker_panel_event`, which is the single writer of that
+    state (the fold, both live and replayed).
     """
     manager_sid_holder: Optional[dict] = None
-    workers_list: Optional[list] = None
     user_msg: Optional[dict] = None
     root_id: Optional[str] = None
     run_id: Optional[str] = None
@@ -221,7 +231,7 @@ def _unwrap_typed_worker_envelope(event: dict) -> dict:
 class OrchestrationStrategy(ABC):
 
     # Event types that land on msg.events (the narrow render tree).
-    # DO NOT extend without auditing `_reconcile_msg_events_from_jsonl`.
+    # DO NOT extend without auditing `hydrate_msg_events_from_jsonl`.
     # `manager_event` kept for backward compat with pre-migration events.jsonl rows.
     _RENDER_TREE_ETYPES = ("agent_message", "manager_event", "model_switched", "steer_prompt", "lifecycle_notice")
 
@@ -862,15 +872,33 @@ class OrchestrationStrategy(ABC):
                 None,
             )
             return
-        # Pre-flight UUID check: skip events already known to the
+        # Attention markers MUST be detected here, on RAW text, before this
+        # event ever reaches the ingester: `_ingest_impl`'s canonical-storage
+        # rewrite strips the `<TAG>` wrapper out of the persisted row for
+        # EVERY source (live or orphan) — the raw signal never survives to
+        # events.jsonl, so a later fold reading the row back can never
+        # recover it. Orphan rows never pass through `apply_event`'s
+        # `source_is_provider_stream=True` branch (the other place this
+        # detection runs), so without this, natively-imported/externally-
+        # driven sessions' attention markers would never fire at all.
+        if etype in self._RENDER_TREE_ETYPES:
+            from file_ref_resolver import detect_markers
+            raw_text = _agent_message_text(data)
+            for ext_id, marker in detect_markers(raw_text):
+                if ext_id:
+                    session_manager.set_marker(app_session_id, ext_id, marker)
+                if marker.get("tag") == _ALL_TASKS_DONE_MARKER_TAG:
+                    _complete_current_work_items(app_session_id)
+        # Pre-flight dedup check: skip events already known to the
         # ingester.  This catches the case where the OwnedClaudeJsonlTailer
         # restarts after root eviction with a stale offset and re-reads
-        # events that were already live-ingested.  The ingester's own
-        # uid:sha256 dedup inside `_ingest_impl` is the authoritative
-        # guard; this check is a cheaper O(1) shortcut that avoids the
-        # executor round-trip for known duplicates.
-        uid = event_ingester._extract_uuid(data)
-        if uid and event_ingester.has_uid(ctx.root_id, uid):
+        # events that were already live-ingested.  Mirrors the ingester's
+        # own uid:sha256(data) dedup rule (not uid-only — a same-uid event
+        # with mutated data, e.g. a streaming update, is NOT a duplicate)
+        # as a shortcut that avoids the executor round-trip for known
+        # duplicates; `_ingest_impl`'s own dedup remains the authoritative
+        # guard.
+        if event_ingester.would_dedupe_orphan(ctx.root_id, etype, data):
             return
         self._publish_provider_event(
             source_is_provider_stream,
@@ -886,24 +914,46 @@ class OrchestrationStrategy(ABC):
     def _refresh_message_content_from_event_projection(self, msg: dict, event: dict) -> None:
         from event_shape import (
             extract_output_text,
+            has_final_answer_event,
             project_content_snapshot,
             strip_synthetic_events,
         )
-
-        from event_shape import has_final_answer_event
 
         # Final-marked events must project from the FULL event list so
         # multiple finals concatenate with origin labels, and later
         # non-final text can never clobber a final-marked snapshot.
         # Finality is derived from the durable event data each time —
         # no per-message latch, so live/replay/reconcile stay convergent.
+        owner = self._events_owner(msg)
         data = event.get("data") if isinstance(event.get("data"), dict) else {}
-        if data.get("final_answer") is not True:
+        is_final = data.get("final_answer") is True
+        if is_final:
+            # Monotonic: streaming providers emit cumulative text per
+            # stable uuid and the final snapshot is always the LAST
+            # emission for that uuid (see the "last snapshot wins"
+            # invariant above `has_assistant_text`) — no later
+            # append/replace can un-mark a uuid that already carried
+            # final_answer=True. So this cache only ever needs to be
+            # OR'd to True, never recomputed back to False.
+            owner["_has_final"] = True
+
+        # `_has_final` mirrors `_uid_idx`: lazily built on first need,
+        # cached on the events-list owner, invalidated by any mutator
+        # that bypasses apply_event (see call sites of `owner.pop
+        # ("_has_final", None)`). Without it, every single event
+        # append/replace re-scanned the FULL event list for a final
+        # marker, making ingestion of a message with N events O(N^2).
+        if not is_final:
             content = extract_output_text(strip_synthetic_events([event]))
-            if content and not has_final_answer_event(self._events_list(msg)):
-                msg["content"] = content
-                msg["_content_dirty"] = False
-                return
+            if content:
+                has_final = owner.get("_has_final")
+                if has_final is None:
+                    has_final = has_final_answer_event(self._events_list(msg))
+                    owner["_has_final"] = has_final
+                if not has_final:
+                    msg["content"] = content
+                    msg["_content_dirty"] = False
+                    return
         events = self._events_list(msg)
         if events:
             projected = project_content_snapshot(events, msg.get("content"))
@@ -925,23 +975,54 @@ class OrchestrationStrategy(ABC):
         source_is_provider_stream: Optional[bool] = None,
         write_journal: Optional[bool] = None,
         live: Optional[bool] = None,
-    ) -> None:
+        fires_side_effects: bool = False,
+    ) -> bool:
         """Apply one session event to the render tree.
+
+        Returns whether this call actually mutated `msg.events` (a
+        genuine append or an in-place data replace for a mutated
+        uuid). `False` covers every case where the render tree ended
+        up byte-identical to how it started: non-render-tree etypes
+        (metadata, worker_start/complete/event, turn_start/complete —
+        none of these touch `msg.events`), and idempotent re-applies
+        of an already-present uuid with unchanged data (replay,
+        reconcile catch-up racing a live-drained row). Callers use
+        this instead of a before/after deepcopy-compare (see
+        `session_manager.apply_written_journal_event`).
 
         Idempotent on event uuid: re-applying an already-present event
         is a no-op. Shared work for every mode: dedup, append to events
         list, wire user_claude_uuid from manager_event with a user
         claude entry, capture manager sid from turn_start/complete,
-        snapshot workers. Mode-specific work runs in `_after_event`.
+        write worker panels (`worker_start`/`worker_complete`/
+        `worker_event`). Mode-specific work runs in `_after_event`.
 
-        `source_is_provider_stream=True` enables live-only side effects.
         `write_journal=True` also writes to events.jsonl; live SDK callbacks
         publish first and then call this with `write_journal=False`.
-        `source_is_provider_stream=False` skips live side effects because
-        events.jsonl is the source during replay. All publish_event_sync calls here MUST use
+        `source_is_provider_stream=False` skips file-ref-rewrite side effects
+        because events.jsonl is the source during replay (every apply_event
+        call today is a fold, so this is always False in practice).
+
+        `fires_side_effects=True` gates the "once per event" lifecycle side
+        effects (attention markers, `<SESSION_NAME>` rename, bump_unread,
+        session_event_extensions, provenance, user-message-received). The
+        caller (`session_manager.apply_written_journal_event`) computes this
+        as `row.seq > <the fold-pass's starting watermark>`. This fires
+        EXACTLY ONCE by construction: after a row folds, the watermark
+        advances past its seq, so a later re-fold of the same row compares
+        against an already-advanced watermark and no longer fires. Rows
+        folded during startup catch-up (journaled while the backend was
+        down) have seq > the OLD pre-restart watermark, so they DO fire —
+        this is DELIBERATE (matches today's crash-recovery semantics: the
+        user should be notified about work that happened while offline),
+        not a bug to "fix".
+
+        All publish_event_sync calls here MUST use
         timeout=0 because apply_event runs inside session_manager.batch() which
-        holds the per-root RLock; the executor thread's event_ingester.ingest calls
-        mark_reconcile_dirty which also acquires that lock — blocking would deadlock.
+        holds the per-root RLock; the executor thread's event_ingester.ingest
+        can re-enter session_manager (e.g. `latest_assistant_finalized` for
+        orphan-row bracketing) which acquires that same lock — blocking would
+        deadlock.
         """
         if source_is_provider_stream is None:
             if live is None:
@@ -960,7 +1041,7 @@ class OrchestrationStrategy(ABC):
 
         msg_id = msg.get("id")
         if not msg_id:
-            return
+            return False
 
         event = _unwrap_typed_worker_envelope(event)
         etype = event.get("type")
@@ -988,11 +1069,13 @@ class OrchestrationStrategy(ABC):
         # Attention markers MUST be detected on RAW assistant text, BEFORE
         # the file-ref/tag rewrite below strips the `<TAG>` wrapper out of
         # norm_data. Captured here, applied once the event lands on the
-        # render tree. Live path only — replay re-detection is idempotent
-        # via set_marker's change-gate, but markers are a live signal.
+        # render tree. Gated on `fires_side_effects` (seq > fold-pass-start
+        # watermark) — set_marker's own change-gate makes re-detection safe,
+        # but the gate keeps this a once-per-event signal instead of
+        # re-broadcasting on every reconcile/replay re-fold.
         attention_markers: list[tuple[str, dict]] = []
         session_name_tag: Optional[str] = None
-        if source_is_provider_stream and etype in self._RENDER_TREE_ETYPES:
+        if fires_side_effects and etype in self._RENDER_TREE_ETYPES:
             import file_ref_resolver
             raw_text = _agent_message_text(norm_data)
             attention_markers = file_ref_resolver.detect_markers(raw_text)
@@ -1011,7 +1094,7 @@ class OrchestrationStrategy(ABC):
                 app_session_id,
                 msg_id,
             )
-            return
+            return False
 
         if etype == "worker_start":
             delegation_id = data.get("delegation_id")
@@ -1036,17 +1119,6 @@ class OrchestrationStrategy(ABC):
                     "run_mode": data.get("run_mode"),
                     "token_usage": data.get("token_usage"),
                 }
-                if ctx.workers_list is not None:
-                    ctx_panel = next((
-                        p for p in ctx.workers_list
-                        if p.get("delegation_id") == delegation_id
-                    ), None)
-                    if ctx_panel is None:
-                        ctx.workers_list.append(panel)
-                    elif reset_events:
-                        ctx_panel.update(panel)
-                        ctx_panel["events"] = []
-                        ctx_panel.pop("_uid_idx", None)
                 session_manager.upsert_worker_panel(
                     app_session_id, msg_id, panel, reset_events=reset_events,
                 )
@@ -1059,7 +1131,7 @@ class OrchestrationStrategy(ABC):
                 msg_id=msg_id,
                 log_label="apply_event: worker_start ingest failed",
             )
-            return
+            return False
 
         if etype == "worker_complete":
             delegation_id = data.get("delegation_id")
@@ -1080,14 +1152,6 @@ class OrchestrationStrategy(ABC):
                     str(delegation_id),
                     {k: v for k, v in fields.items() if v is not None},
                 )
-                if ctx.workers_list is not None:
-                    panel = next(
-                        (p for p in ctx.workers_list
-                         if p.get("delegation_id") == delegation_id),
-                        None,
-                    )
-                    if panel is not None:
-                        panel.update({k: v for k, v in fields.items() if v is not None})
             self._publish_provider_event(
                 write_journal,
                 ctx,
@@ -1097,7 +1161,7 @@ class OrchestrationStrategy(ABC):
                 msg_id=msg_id,
                 log_label="apply_event: worker_complete ingest failed",
             )
-            return
+            return False
 
         # `worker_event` frames wrap a worker's inner agent_message under
         # `data.event`. They MUST route to the matching panel's events
@@ -1111,7 +1175,7 @@ class OrchestrationStrategy(ABC):
                 source_is_provider_stream=source_is_provider_stream,
                 write_journal=write_journal,
             )
-            return
+            return False
 
         # Rewrite file refs BEFORE appending to the session JSON so the
         # persisted events carry bcfile: links.  The ingester also rewrites
@@ -1150,7 +1214,7 @@ class OrchestrationStrategy(ABC):
         # they MUST NOT land on msg.events.
         #
         # The gate also closes the reconcile orphan-bracketing leak:
-        # `_reconcile_msg_events_from_jsonl` brackets every orphan
+        # `hydrate_msg_events_from_jsonl` brackets every orphan
         # (msg_id=None) onto the nearest assistant msg by seq window
         # and re-calls `apply_event(source_is_provider_stream=False)`.
         # Without the gate, any orphan with a `data.uuid` would land on
@@ -1159,6 +1223,12 @@ class OrchestrationStrategy(ABC):
         # belongs on msg.events once.
         # UPDATE: if the event content changed, we replace the existing
         # entry to support streaming updates (e.g. Gemini).
+        # Whether THIS call mutated `msg.events` — the direct
+        # replacement for the old before/after deepcopy-compare in
+        # `session_manager.apply_written_journal_event`. Stays False
+        # for every non-render-tree etype (never touches `evs` below)
+        # and for an idempotent re-apply of already-present data.
+        changed = False
         ev_uuid = _event_uuid(event)
         evs = self._events_list(msg)
         if ev_uuid and etype in self._RENDER_TREE_ETYPES:
@@ -1183,7 +1253,7 @@ class OrchestrationStrategy(ABC):
                     # tree and events.jsonl. Early-return is safe here
                     # because `event_ingester.ingest`'s `uid:sha256(data)`
                     # dedup would no-op too — we just skip the call.
-                    return
+                    return False
                 # Mutated data (Gemini streaming, in-place updates,
                 # or any provider re-emitting same uuid). Replace in
                 # msg.events, then FALL THROUGH to the events.jsonl
@@ -1195,7 +1265,7 @@ class OrchestrationStrategy(ABC):
                 # `uid:sha256(data)` (APPEND on mutation). If we
                 # early-returned here, events.jsonl would only ever
                 # hold the FIRST snapshot of a streaming uuid. After
-                # a backend restart, `_reconcile_msg_events_from_jsonl`
+                # a backend restart, `hydrate_msg_events_from_jsonl`
                 # would re-apply that stale FIRST snapshot against
                 # the (correctly-persisted-via-_replace_event) LATEST
                 # in msg.events, REGRESSING the render tree to the
@@ -1211,6 +1281,7 @@ class OrchestrationStrategy(ABC):
                 self._replace_event(app_session_id, msg_id, normalized, ev_uuid)
                 evs[existing_idx] = normalized
                 self._refresh_message_content_from_event_projection(msg, normalized)
+                changed = True
                 # uid_idx[ev_uuid] unchanged — same uuid, same index.
                 # Fall through to side-effect blocks + ingest tail.
             else:
@@ -1224,15 +1295,17 @@ class OrchestrationStrategy(ABC):
                 # Gemini streaming would otherwise increment unread on
                 # every cumulative-text snapshot.
                 #
-                # `source_is_provider_stream` gate: the replay path
-                # (`_reconcile_msg_events_from_jsonl`,
-                # `run_recovery._apply_integration_sync`) re-applies
-                # events already on disk. Bumping there would (a) fire
-                # one `broadcast_global` per re-applied event = unbounded
-                # WS spam on every cold session load, and (b) double-count
-                # — `_count_unread_from_disk` on lazy hydration already
-                # walks the same `msg.events` we'd be re-bumping. Live
-                # is the only path with a genuinely-new event.
+                # `fires_side_effects` gate (seq > fold-pass-start
+                # watermark): a re-fold of an already-applied row (replay,
+                # reconcile catch-up on rows already seen) compares against
+                # an already-advanced watermark and does not bump again.
+                # Bumping unconditionally here would (a) fire one
+                # `broadcast_global` per re-applied event = unbounded WS
+                # spam on every cold session load, and (b) double-count —
+                # `_count_unread_from_disk` on lazy hydration already walks
+                # the same `msg.events` we'd be re-bumping. Only rows whose
+                # seq is newly past the watermark (a genuinely new event,
+                # live or backlog-since-last-watermark) bump.
                 self._append_event(app_session_id, msg_id, normalized)
                 # Replay path may have left the mirror in sync via
                 # the mutator; track whether THIS call mutates `evs`
@@ -1243,7 +1316,8 @@ class OrchestrationStrategy(ABC):
                     uid_idx[ev_uuid] = len(evs)
                     evs.append(normalized)
                 self._refresh_message_content_from_event_projection(msg, normalized)
-                if source_is_provider_stream:
+                changed = True
+                if fires_side_effects:
                     session_manager.bump_unread(app_session_id, msg_id)
 
             # Set attention markers detected on the raw assistant text
@@ -1267,19 +1341,19 @@ class OrchestrationStrategy(ABC):
             session_event_extensions.apply_event(
                 app_session_id,
                 normalized,
-                use_sdk=source_is_provider_stream,
+                use_sdk=fires_side_effects,
             )
 
             # ── Provenance hook (what ran + WHY) ──────────────────
             # Append-only log of tool invocations + the reasoning that
-            # preceded them. The `source_is_provider_stream` gate only skips the reconcile path
-            # (events.jsonl re-read); crash-recovery replay IS live=True
-            # (run_recovery.py), so idempotency CANNOT rely on this flag —
-            # provenance_store dedups by tool_use id with a dedup set
+            # preceded them. Gated on `fires_side_effects` (seq > fold-pass-
+            # start watermark) rather than a raw live/replay flag —
+            # provenance_store ALSO dedups by tool_use id with a dedup set
             # hydrated from disk on first touch, so a recovered turn does
-            # not double-write. Worker_event already early-returned above,
-            # so worker tool calls don't land here.
-            if source_is_provider_stream:
+            # not double-write even if this gate ever admitted a re-fold.
+            # Worker_event already early-returned above, so worker tool
+            # calls don't land here.
+            if fires_side_effects:
                 session_manager.apply_provenance_from_event(
                     app_session_id,
                     normalized,
@@ -1319,16 +1393,11 @@ class OrchestrationStrategy(ABC):
                         ctx.user_msg["id"],
                         nd["uuid"],
                     )
-                    if source_is_provider_stream:
+                    if fires_side_effects:
                         self._fire_user_msg_received_if_pending(
                             app_session_id=app_session_id,
                             agent_user_uuid=nd["uuid"],
                         )
-
-        if ctx.workers_list is not None:
-            session_manager.snapshot_workers(
-                app_session_id, msg_id, ctx.workers_list,
-            )
 
         self._after_event(
             app_session_id=app_session_id,
@@ -1347,6 +1416,8 @@ class OrchestrationStrategy(ABC):
             msg_id=msg_id,
             log_label="apply_event: event_ingester.ingest failed",
         )
+
+        return changed
 
     @abstractmethod
     def finalize_turn(

@@ -92,11 +92,8 @@ async def _duplicate_ack_is_not_projected_twice() -> None:
         sid, {"id": "msg-dup", "role": "assistant", "content": "", "events": []},
     )
     indexed: list[dict] = []
-    dirty: list[str] = []
     original_index = session_search_projection.note_event_written
-    original_dirty = session_manager.mark_reconcile_dirty
     session_search_projection.note_event_written = lambda _root_id, entry: indexed.append(entry)
-    session_manager.mark_reconcile_dirty = lambda root_id: dirty.append(root_id)
     try:
         data = _agent_data("same-uid", "one durable event")
         first = await publish_event(
@@ -124,11 +121,9 @@ async def _duplicate_ack_is_not_projected_twice() -> None:
         assert len(rows) == 1
         assert len(msg.get("events") or []) == 1
         assert len(indexed) == 1
-        assert dirty == []
         assert subscriber_failures == []
     finally:
         session_search_projection.note_event_written = original_index
-        session_manager.mark_reconcile_dirty = original_dirty
         writer.close()
 
 
@@ -245,6 +240,7 @@ async def _run() -> bool:
             str(payload.get("event_type") or "unknown"),
             payload.get("data") if isinstance(payload.get("data"), dict) else {},
             int(payload.get("seq") or 0),
+            fold_start_watermark=0,
         )
 
     bus.subscribe(EVENT_JOURNAL_WRITTEN, _record_ack, name="ack_recorder")
@@ -461,17 +457,22 @@ async def _run() -> bool:
         "message replay recovers provider_stream row before live apply",
         str(replay_live_msg),
     ) and ok
-    with session_manager.batch(sid):
-        TurnManager._apply_event_to_assistant_msg(
-            None,
-            sid,
-            live_event,
-            live_msg,
-            {},
-            [],
-            run_id="run-live",
-            write_journal=False,
-        )
+    # `TurnManager._apply_event_to_assistant_msg` (the eager live-apply
+    # path) no longer exists -- every application of an event is a FOLD
+    # through `session_manager.apply_written_journal_event`, exactly as
+    # the drainer's `_apply_session_projection_row` calls it. Mirror that
+    # call directly here (`fold_start_watermark=0` since this is the
+    # row's first-ever fold in this test, so it's "since the watermark"
+    # regardless of the literal watermark value).
+    session_manager.apply_written_journal_event(
+        sid,
+        sid,
+        "msg-live",
+        live_event["type"],
+        live_event["data"],
+        int(provider_rows[0].get("seq") or 0),
+        fold_start_watermark=0,
+    )
     live_rows_after_apply, live_total_after_apply, _ = (
         event_journal_reader.read_events(sid, limit=20)
     )

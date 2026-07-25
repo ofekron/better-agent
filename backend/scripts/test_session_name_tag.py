@@ -94,6 +94,7 @@ def test_apply_event_renames_without_allowed_flag() -> bool:
         ctx=ctx,
         source_is_provider_stream=True,
         write_journal=False,
+        fires_side_effects=True,
     )
     sess = session_manager.get_lite(sid) or {}
     if sess.get("name") != "✏️ Rework parser":
@@ -110,6 +111,7 @@ def test_apply_event_renames_without_allowed_flag() -> bool:
         ctx=ctx,
         source_is_provider_stream=True,
         write_journal=False,
+        fires_side_effects=True,
     )
     sess = session_manager.get_lite(sid) or {}
     return sess.get("name") == "✏️ Rework parser"

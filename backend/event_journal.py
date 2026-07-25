@@ -564,27 +564,6 @@ class EventJournalWriter:
             future.cancel()
             raise TimeoutError("timed out reconciling event journal ownership")
 
-    async def prepare_read(self, root_id: str) -> int:
-        """Single-thread-hop consolidation of barrier + reconcile_through.
-
-        Runs cursor + session_manager.reconcile_through sequentially on the
-        per-root shard thread. Returns the barrier seq.
-
-        Ownership reconciliation is NOT included here — it already runs on
-        every write (_append_event calls _resolve_pending_events), so the
-        read path only needs to ensure writes are durable (cursor/barrier)
-        and projected into the cache (reconcile_through).
-        """
-        from session_manager import manager as session_manager
-
-        def _run() -> int:
-            barrier_seq = int(event_ingester.cursor(root_id))
-            session_manager.reconcile_through(root_id, barrier_seq)
-            return barrier_seq
-
-        future = self._executor.submit(root_id, _run)
-        return int(await asyncio.wrap_future(future))
-
     def _reconcile_ownership(self, root_id: str) -> int:
         self._ensure_ownership_hydrated(root_id)
         return self._resolve_pending_events(root_id)

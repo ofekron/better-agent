@@ -226,8 +226,7 @@ def _partial_live_then_recovery(fixture_name: str, cut_ratio: float = 0.5) -> bo
     asst_id = asst["id"]
     root = session_manager._root_id_for(sid)
     strategy = get_strategy("native")
-    ctx = ApplyEventCtx(manager_sid_holder={"id": None}, workers_list=[],
-                        user_msg=user_msg, root_id=root,
+    ctx = ApplyEventCtx(manager_sid_holder={"id": None}, user_msg=user_msg, root_id=root,
                         run_id=str(_uuid.uuid4()))
 
     # Phase A: partial live ingest (first `cut` events).

@@ -7,9 +7,8 @@ terminal path: success-complete, cancel-stopped, error, recovery-
 finalize, and worker-inner.
 
 Coordinator (in `orchestrator.py`) delegates its core turn methods
-(`run_turn`, `_drive_cli_run`, `cancel_turn`,
-`_apply_event_to_assistant_msg`) through `self._ensure_tm()` which
-returns this TurnManager instance.
+(`run_turn`, `_drive_cli_run`, `cancel_turn`) through `self._ensure_tm()`
+which returns this TurnManager instance.
 
 Shared helpers (`_TRANSIENT_*`, `_is_rate_limit_attempt`,
 `_is_transient_error`, `_is_stale_session_error`, `_append_todo_reminder`)
@@ -23,12 +22,17 @@ public hook on TurnManager.
 
 Convergence-invariant contract: TurnManager owns turn LIFECYCLE
 (framing, bus emits, retry/reuse, queue-drain). It does NOT own
-render-tree mutation — `_apply_event_to_assistant_msg` is a thin
-adapter that funnels through `OrchestrationStrategy.apply_event` in
-`orchs/base.py`, the single mutation chokepoint shared with
+render-tree mutation and does not mutate `msg.events` on the live
+path — `save_ws_callback` only journals the raw provider event
+(`_publish_provider_stream_event`) and bridges it straight to the
+frontend over WS. `SessionProjectionDrainer`
+(`event_bus_subscribers.py`), subscribed to `EVENT_JOURNAL_WRITTEN`,
+folds the just-written journal row through
+`session_manager.apply_written_journal_event` ->
+`OrchestrationStrategy.apply_event(source_is_provider_stream=False)` —
+the single render-tree mutation chokepoint also used by
 `run_recovery._replay_and_apply`. The three live/offline/restore
-ingestion paths still converge through that same funnel by
-construction.
+ingestion paths converge through that same funnel by construction.
 """
 
 import asyncio
@@ -82,11 +86,6 @@ from turn_helpers import (
 from user_msg_lifecycle import emit_sent
 
 logger = logging.getLogger(__name__)
-
-_STREAM_EVENT_APPLY_EXECUTOR = ThreadPoolExecutor(
-    max_workers=2,
-    thread_name_prefix="stream-event-apply",
-)
 
 # `_drive_cli_run` (and its immediate caller, `run_turn`) dispatch every
 # active turn for every active session through a chain of ~20 synchronous
@@ -1410,70 +1409,6 @@ class TurnManager:
                 app_session_id, run_id,
             )
 
-    # ======================================================================
-    # Render-tree mutation adapter — pure dispatch into the convergence
-    # funnel (`OrchestrationStrategy.apply_event` in orchs/base.py).
-    # Lives here so the save_ws_callback closure inside run_turn can
-    # reach it cheaply; the funnel itself is unchanged.
-    # ======================================================================
-    def _apply_event_to_assistant_msg(
-        self,
-        app_session_id: str,
-        event_dict: dict,
-        assistant_msg: dict,
-        manager_sid_holder: dict,
-        workers_list: list[dict],
-        user_msg: Optional[dict] = None,
-        run_id: Optional[str] = None,
-        write_journal: Optional[bool] = None,
-    ) -> None:
-        from orchs import ApplyEventCtx, get_strategy
-        root_id = session_manager._root_id_for(app_session_id)
-        ctx = ApplyEventCtx(
-            manager_sid_holder=manager_sid_holder,
-            workers_list=workers_list,
-            user_msg=user_msg,
-            root_id=root_id,
-            run_id=run_id,
-        )
-        get_strategy("native").apply_event(
-            app_session_id=app_session_id,
-            msg=assistant_msg,
-            event=event_dict,
-            ctx=ctx,
-            source_is_provider_stream=True,
-            write_journal=write_journal,
-        )
-
-    def _apply_provider_stream_event_sync(
-        self,
-        *,
-        app_session_id: str,
-        persist_to: str,
-        msg_id: str,
-        event_dict: dict,
-        manager_sid_holder: dict,
-        workers_list: list[dict],
-        user_msg: Optional[dict],
-        run_id: str,
-    ) -> dict:
-        with session_manager.message_batch(
-            persist_to,
-            msg_id,
-            hydrate_events=False,
-        ) as (_node, live_msg):
-            self._apply_event_to_assistant_msg(
-                app_session_id,
-                event_dict,
-                live_msg,
-                manager_sid_holder,
-                workers_list,
-                user_msg=user_msg,
-                run_id=run_id,
-                write_journal=False,
-            )
-            return live_msg
-
     async def _publish_provider_stream_event(
         self,
         *,
@@ -1501,6 +1436,22 @@ class TurnManager:
             message_id=assistant_msg.get("id"),
             run_id=run_id,
         )
+
+    async def _await_worker_panel_fold(self, app_session_id: str) -> None:
+        """Wait for the drainer to fold every `worker_start` /
+        `worker_complete` / `worker_event` fact journaled during this
+        turn into `msg["workers"]` before reading it for `workers_used`.
+
+        MUST be called BEFORE `_finalize_turn_messages` /
+        `_seal_completed_turn_on_cancel` — those run inside
+        `session_manager.batch(...)`, which holds the per-root RLock,
+        and the drainer's own `apply_written_journal_event` acquires
+        that same lock, so awaiting the barrier from inside would
+        deadlock.
+        """
+        import event_bus_subscribers
+        root_id = session_manager._root_id_for(app_session_id) or app_session_id
+        await event_bus_subscribers.await_session_content_projection(root_id)
 
     # ======================================================================
     # The primary turn.
@@ -1610,8 +1561,13 @@ class TurnManager:
         foreign_run_ids = list(self.active_run_ids.get(app_session_id) or [])
         self.active_run_ids.setdefault(app_session_id, [])
 
+        # Presence of this key (not its contents) is the "a turn is
+        # in flight for this session" guard read by
+        # `Coordinator._start_team_message_panel` /
+        # `emit_session_created_panel`. The list itself is no longer
+        # populated — worker panel data lives exclusively in
+        # `msg["workers"]`, owned by the fold.
         self.current_turn_workers[app_session_id] = []
-        workers_list = self.current_turn_workers[app_session_id]
 
         self._evict_stale_runs(app_session_id, mode)
         creator = self._team_message_creator(team_message)
@@ -1653,24 +1609,13 @@ class TurnManager:
                         assistant_msg=msg,
                         run_id=turn_run_id,
                     )
-                    msg_id = msg.get("id")
-                    loop = asyncio.get_running_loop()
-                    live_msg = await loop.run_in_executor(
-                        _STREAM_EVENT_APPLY_EXECUTOR,
-                        partial(
-                            self._apply_provider_stream_event_sync,
-                            app_session_id=app_session_id,
-                            persist_to=persist_to,
-                            msg_id=msg_id,
-                            event_dict=event_dict,
-                            manager_sid_holder=manager_sid_holder,
-                            workers_list=workers_list,
-                            user_msg=user_msg,
-                            run_id=turn_run_id,
-                        ),
-                    )
-                    if live_msg is not msg:
-                        assistant_msg_holder[0] = live_msg
+                    # Render-tree mutation is NOT performed here anymore.
+                    # `_publish_provider_stream_event` above durably
+                    # journals the raw event; `SessionProjectionDrainer`
+                    # (event_bus_subscribers.py), subscribed to the
+                    # journal-written fact, folds it into `msg.events` via
+                    # `apply_written_journal_event`. This callback is
+                    # publish-only for tree-affecting state.
                 if self.run_state_record_activity(
                     app_session_id,
                     turn_run_id,
@@ -1968,16 +1913,19 @@ class TurnManager:
             trace.finalize()
             await _to_turn_dispatch_thread(trace.save)
 
-            workers = list(workers_list)
-            workers_used = [w["worker_session_id"] for w in workers]
+            await self._await_worker_panel_fold(persist_to)
             finalized_msg = assistant_msg_holder[0]
+            workers_used = [
+                w["worker_session_id"]
+                for w in ((finalized_msg or {}).get("workers") or [])
+                if w.get("worker_session_id")
+            ]
             self._c._finalize_turn_messages(
                 session=session,
                 app_session_id=persist_to,
                 user_msg=user_msg,
                 assistant_msg=finalized_msg,
                 primary_result=primary_result,
-                workers=workers,
                 stopped_at=None,
                 trace_id=trace.trace_id,
             )
@@ -2023,9 +1971,13 @@ class TurnManager:
             trace.finalize()
             await _to_turn_dispatch_thread(trace.save)
 
-            workers = list(workers_list)
-            workers_used = [w["worker_session_id"] for w in workers]
+            await self._await_worker_panel_fold(persist_to)
             finalized_msg = assistant_msg_holder[0]
+            workers_used = [
+                w["worker_session_id"]
+                for w in ((finalized_msg or {}).get("workers") or [])
+                if w.get("worker_session_id")
+            ]
             interrupted_by = self._interrupted_by_msg_id.pop(app_session_id, None)
             self._c._finalize_turn_messages(
                 session=session,
@@ -2033,7 +1985,6 @@ class TurnManager:
                 user_msg=user_msg,
                 assistant_msg=finalized_msg,
                 primary_result=primary_result,
-                workers=workers,
                 stopped_at=datetime.now().isoformat(),
                 trace_id=trace.trace_id,
                 interrupted_by_msg_id=interrupted_by,
@@ -2081,13 +2032,13 @@ class TurnManager:
             # never restarts, the message stays a blank non-terminal
             # bubble forever.
             try:
+                await self._await_worker_panel_fold(persist_to)
                 self._seal_completed_turn_on_cancel(
                     session=session,
                     persist_to=persist_to,
                     user_msg=user_msg,
                     assistant_msg=assistant_msg_holder[0],
                     primary_result=primary_result,
-                    workers=list(workers_list),
                     trace_id=trace.trace_id,
                 )
             except Exception:
@@ -2134,7 +2085,6 @@ class TurnManager:
                     user_msg=user_msg,
                     assistant_msg=assistant_msg_holder[0],
                     primary_result=primary_result,
-                    workers=list(workers_list),
                     stopped_at=None,
                     trace_id=trace.trace_id,
                     error_text=error_text,
@@ -2213,7 +2163,6 @@ class TurnManager:
         user_msg: dict,
         assistant_msg: Optional[dict],
         primary_result: dict,
-        workers: list,
         trace_id: Optional[str],
     ) -> None:
         """Seal a successful turn's assistant message when its task is
@@ -2249,7 +2198,6 @@ class TurnManager:
             user_msg=user_msg,
             assistant_msg=finalized_msg,
             primary_result=primary_result,
-            workers=workers,
             stopped_at=None,
             trace_id=trace_id,
         )

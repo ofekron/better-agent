@@ -30,13 +30,14 @@ class _BlockedProjection:
 
     def apply_written_journal_event(
         self, _root_id, _sid, _msg_id, _event_type, _data, seq,
+        *, fold_start_watermark: int = 0,
     ) -> None:
         self.started.set()
         self.release.wait()
         self.applied.append(seq)
 
-    def mark_reconcile_dirty(self, _root_id: str) -> None:
-        raise AssertionError("projection unexpectedly failed")
+    def get_fold_watermark(self, _root_id: str) -> int:
+        return 0
 
 
 async def _main() -> None:
