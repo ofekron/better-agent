@@ -352,6 +352,9 @@ body {
 
 .project-git-status {
   display: flex;
+  /* Branch info, last-result chip and the commit controls stack instead
+     of running past the sidebar edge once the sidebar is dragged narrow. */
+  flex-wrap: wrap;
   align-items: center;
   justify-content: flex-end;
   flex: 0 1 auto;

@@ -63,7 +63,9 @@ describe("sidebar never scrolls horizontally", () => {
   });
 
   it("wraps the project git actions rather than overflowing them", () => {
-    expect(ruleBody(".project-git-actions")).toContain("flex-wrap: wrap");
+    for (const row of [".project-git-status", ".project-git-actions"]) {
+      expect(ruleBody(row), row).toContain("flex-wrap: wrap");
+    }
     // A viewport-relative cap ignores the resized sidebar width.
     const commitRow = ruleBody(".project-git-commit-row");
     expect(commitRow).toContain("width: min(210px, 100%)");
