@@ -342,14 +342,17 @@ class CodexRolloutNormalizer:
         # discarding the real time. The normalizer re-stamps every event
         # it emits with the source line's timestamp at this single chokepoint.
         self._line_timestamp: Optional[str] = None
-        # Assistant text emitted this turn, keyed by exact text. Codex streams
-        # every assistant utterance via `event_msg.agent_message` (including
-        # intermediate commentary) and re-emits only the finalized answer as a
-        # `response_item.message` (role=assistant). First-wins dedup keeps each
-        # utterance exactly once across the two sources, so the finalized echo
-        # doesn't double up with the streamed copy. Scoped per turn so identical
-        # short text in different turns ("Compact task completed") survives.
-        self._seen_turn_assistant_texts: set[str] = set()
+        # Rendered bodies emitted this turn, keyed by (kind, exact text). Codex
+        # emits each utterance twice: assistant text streams via
+        # `event_msg.agent_message` and is re-emitted as
+        # `response_item.message` (role=assistant); reasoning streams via
+        # `event_msg.agent_reasoning` and is re-emitted verbatim as
+        # `response_item.reasoning`'s summary whenever reasoning summaries are
+        # on. First-wins dedup keeps each body exactly once across the two
+        # sources, so the finalized echo doesn't double up with the streamed
+        # copy. Scoped per turn so identical short text in different turns
+        # ("Compact task completed") survives.
+        self._seen_turn_texts: set[tuple[str, str]] = set()
         self._pending_context_compacted_uuid: Optional[str] = None
         # Last seen model context window/fill, captured from event_msg.token_count.
         # Not rendered as a card; surfaced to the caller so the existing
@@ -376,10 +379,11 @@ class CodexRolloutNormalizer:
                 return block.get("text") or ""
         return ""
 
-    def _claim_assistant_text(self, text: str) -> bool:
-        if not text or text in self._seen_turn_assistant_texts:
+    def _claim_turn_text(self, kind: str, text: str) -> bool:
+        key = (kind, text)
+        if not text or key in self._seen_turn_texts:
             return False
-        self._seen_turn_assistant_texts.add(text)
+        self._seen_turn_texts.add(key)
         return True
 
     def _push(self, event: Optional[dict]) -> list[dict]:
@@ -414,7 +418,7 @@ class CodexRolloutNormalizer:
         self._line_timestamp = raw_event.get("timestamp")
 
         if event_type == "compacted":
-            self._seen_turn_assistant_texts.clear()
+            self._seen_turn_texts.clear()
             rows = self._normalize_compacted_event(
                 raw_event,
                 uuid_override=self._pending_context_compacted_uuid,
@@ -422,10 +426,10 @@ class CodexRolloutNormalizer:
             self._pending_context_compacted_uuid = None
             return rows
         if event_type == "session_meta":
-            self._seen_turn_assistant_texts.clear()
+            self._seen_turn_texts.clear()
             return []
         if event_type == "turn_context":
-            self._seen_turn_assistant_texts.clear()
+            self._seen_turn_texts.clear()
             # Turn context (turn id, cwd, date, timezone, model, effort,
             # approval policy, sandbox) is operational metadata, not rendered
             # chat context.
@@ -472,7 +476,7 @@ class CodexRolloutNormalizer:
                 text = payload.get("message")
                 if not isinstance(text, str) or not text:
                     return []
-                if not self._claim_assistant_text(text):
+                if not self._claim_turn_text("assistant", text):
                     return []
                 normalized = _normalize_event_msg_text(payload, self.parent_uuid, text)
                 if payload.get("phase") == "final_answer":
@@ -515,7 +519,7 @@ class CodexRolloutNormalizer:
                 )
             if payload_type in ("agent_reasoning", "agent_reasoning_delta"):
                 text = _codex_reasoning_text(payload)
-                if not text:
+                if not self._claim_turn_text("reasoning", text):
                     return []
                 return self._push_from_native(
                     raw_event,
@@ -634,7 +638,7 @@ class CodexRolloutNormalizer:
                 return []
             event = self._attach_subagent_notification_to_agent(event)
             text = self._assistant_text(event)
-            if text and not self._claim_assistant_text(text):
+            if text and not self._claim_turn_text("assistant", text):
                 # Finalized assistant answer already streamed this turn as an
                 # event_msg.agent_message; drop the echo. Messages without
                 # assistant text (e.g. subagent notifications) pass through.
@@ -643,6 +647,10 @@ class CodexRolloutNormalizer:
                 _mark_final_answer(event)
             return self._push(event)
         if payload_type == "reasoning":
+            # The summary repeats verbatim what event_msg.agent_reasoning
+            # already streamed this turn; drop the finalized echo.
+            if not self._claim_turn_text("reasoning", _codex_reasoning_text(payload)):
+                return []
             return self._push(_normalize_response_item_event(payload, self.parent_uuid))
         if payload_type == "agent_message":
             return self._normalize_response_agent_message(payload)

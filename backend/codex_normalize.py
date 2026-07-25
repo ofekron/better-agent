@@ -86,15 +86,12 @@ def _codex_reasoning_text(payload: dict) -> str:
     """Reasoning text lives under `summary`/`content` for
     `response_item.reasoning`, and under `text` (`delta` while streaming) for
     `event_msg.agent_reasoning`."""
-    for key in ("summary", "content"):
+    for key in ("summary", "content", "text", "delta"):
         text = _codex_text_content(payload.get(key))
         if text:
             return text
-    for key in ("text", "delta"):
-        value = payload.get(key)
-        if isinstance(value, str) and value:
-            return value
     return ""
+
 
 def _new_uuid() -> str:
     return str(uuid.uuid4())

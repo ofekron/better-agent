@@ -2053,6 +2053,49 @@ def test_codex_event_msg_agent_reasoning_renders_as_thinking() -> bool:
     return True
 
 
+def test_codex_reasoning_streamed_and_finalized_render_once() -> bool:
+    # With reasoning summaries enabled Codex emits the same body twice:
+    # streamed as event_msg.agent_reasoning, then re-emitted verbatim as
+    # response_item.reasoning's summary. Only the streamed copy renders.
+    body = "**Waiting for requirements**\n\nI need to wait for the requirements."
+    normalizer = CodexRolloutNormalizer(namespace="test")
+    rows = normalizer.normalize_event({
+        "type": "event_msg",
+        "payload": {"type": "agent_reasoning", "text": body},
+    })
+    rows += normalizer.normalize_event({
+        "type": "response_item",
+        "payload": {"type": "reasoning", "id": "rs_1", "summary": [{"text": body}]},
+    })
+    thinking = [
+        block.get("thinking")
+        for row in rows
+        for block in ((row.get("message") or {}).get("content") or [])
+        if isinstance(block, dict) and block.get("type") == "thinking"
+    ]
+    if thinking != [body]:
+        print(f"  expected one thinking card, got {thinking!r} from {rows!r}")
+        return False
+    # A different body in the same turn still renders.
+    other = normalizer.normalize_event({
+        "type": "event_msg",
+        "payload": {"type": "agent_reasoning", "text": "**Second thought**"},
+    })
+    if len(other) != 1:
+        print(f"  distinct reasoning should render, got {other!r}")
+        return False
+    # The claim is per turn: the next turn re-renders identical text.
+    normalizer.normalize_event({"type": "turn_context", "payload": {}})
+    again = normalizer.normalize_event({
+        "type": "event_msg",
+        "payload": {"type": "agent_reasoning", "text": body},
+    })
+    if len(again) != 1:
+        print(f"  reasoning should re-render in a new turn, got {again!r}")
+        return False
+    return True
+
+
 def test_codex_nonlatest_replay_bound_is_safe() -> bool:
     first_id = str(uuid.uuid4())
     second_id = str(uuid.uuid4())
@@ -2252,6 +2295,7 @@ TESTS = [
     ("codex provider cancel unblocks child join", test_codex_provider_cancel_unblocks_child_join),
     ("codex provider recovers nested child sources from processed history", test_codex_provider_recovers_nested_child_sources_from_processed_history),
     ("codex event_msg.agent_reasoning renders as thinking", test_codex_event_msg_agent_reasoning_renders_as_thinking),
+    ("codex streamed and finalized reasoning render once", test_codex_reasoning_streamed_and_finalized_render_once),
 ]
 
 
