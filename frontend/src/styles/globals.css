@@ -9917,34 +9917,126 @@ button.run-badge-clickable:focus-visible {
 .harness-settings-editor {
   display: flex;
   flex-direction: column;
-  gap: 14px;
   min-height: 0;
 }
 
-.harness-settings-editor-toolbar {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: flex-end;
-  gap: 12px;
+.harness-settings-layout {
+  display: grid;
+  grid-template-columns: minmax(180px, 220px) minmax(0, 1fr);
+  gap: 16px;
+  min-height: 0;
 }
 
-.harness-settings-profile-select {
-  min-width: 220px;
+.harness-profile-rail {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-inline-end: 12px;
+  border-inline-end: 1px solid var(--border);
+}
+
+.harness-profile-rail-item {
+  text-align: start;
+  padding: 7px 10px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: calc(12.5px * var(--app-font-scale));
+  cursor: pointer;
+  transition: background-color 160ms ease, color 160ms ease, border-color 160ms ease;
+}
+
+.harness-profile-rail-item:hover:not(:disabled) {
+  background: var(--bg-tertiary);
+}
+
+.harness-profile-rail-item.is-selected {
+  background: var(--accent-dim);
+  border-color: var(--accent);
+  color: var(--accent);
+  font-weight: 600;
 }
 
 .harness-settings-create-row {
   display: flex;
   gap: 6px;
   align-items: center;
+  margin-top: 10px;
+  flex-wrap: wrap;
 }
 
 .harness-settings-create-row input {
+  flex: 1 1 120px;
+  min-width: 0;
   padding: 6px 8px;
   border: 1px solid var(--border);
   border-radius: 6px;
   background: var(--bg-primary);
   color: var(--text-primary);
   font-size: calc(13px * var(--app-font-scale));
+}
+
+.harness-settings-pane {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+  min-height: 0;
+}
+
+.harness-settings-header {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.harness-settings-header-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-weight: 600;
+  font-size: calc(15px * var(--app-font-scale));
+  color: var(--text-primary);
+}
+
+.harness-settings-saving {
+  font-size: calc(11px * var(--app-font-scale));
+  color: var(--text-muted);
+  animation: modalFadeIn 160ms ease-out;
+}
+
+.harness-settings-header-hint {
+  margin: 0;
+  font-size: calc(12px * var(--app-font-scale));
+  color: var(--text-muted);
+}
+
+.harness-settings-header-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.harness-settings-search {
+  flex: 1 1 180px;
+  min-width: 0;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-size: calc(12.5px * var(--app-font-scale));
+}
+
+.harness-diff-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: calc(12px * var(--app-font-scale));
+  color: var(--text-secondary);
+  white-space: nowrap;
 }
 
 .harness-settings-editor-error {
@@ -9966,7 +10058,7 @@ button.run-badge-clickable:focus-visible {
 .harness-extension-block {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 8px;
   padding: 12px;
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -9975,33 +10067,117 @@ button.run-badge-clickable:focus-visible {
 }
 
 .harness-extension-block-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
   font-weight: 600;
   font-size: calc(13px * var(--app-font-scale));
   color: var(--text-primary);
 }
 
-.harness-field-row {
+.harness-extension-unavailable {
+  font-weight: 400;
+  font-size: calc(11px * var(--app-font-scale));
+  color: var(--text-muted);
+}
+
+.harness-group {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  padding: 8px 0;
+  gap: 2px;
+  padding-top: 8px;
   border-top: 1px solid var(--border);
 }
 
-.harness-field-row:first-of-type {
+.harness-group:first-of-type {
   border-top: none;
 }
 
-.harness-field-row-header {
+.harness-group-title {
   display: flex;
   align-items: center;
   gap: 8px;
-  justify-content: space-between;
+  font-size: calc(11.5px * var(--app-font-scale));
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+  margin-bottom: 4px;
 }
 
-.harness-field-row-label {
+.harness-item-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 5px 8px;
+  border-radius: 6px;
+  border-inline-start: 2px dashed transparent;
+  transition: background-color 160ms ease, border-color 160ms ease;
+}
+
+/* Inherited controls read as the effective value but visibly not owned by
+   this profile; an overridden one is marked as this profile's own. */
+.harness-item-row.is-overridden {
+  border-inline-start-color: var(--accent);
+  background: var(--accent-dim);
+}
+
+.harness-item-row.is-block {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.harness-item-row-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.harness-item-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+
+.harness-item-label {
   font-size: calc(12.5px * var(--app-font-scale));
-  color: var(--text-secondary);
+  color: var(--text-primary);
+}
+
+.harness-item-description {
+  font-size: calc(11.5px * var(--app-font-scale));
+  color: var(--text-muted);
+}
+
+.harness-item-locked {
+  font-size: calc(11px * var(--app-font-scale));
+  color: var(--warning, #d29922);
+}
+
+.harness-setting-input {
+  padding: 5px 7px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-size: calc(12.5px * var(--app-font-scale));
+  min-width: 180px;
+  max-width: 100%;
+}
+
+.harness-instructions-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 7px 9px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-size: calc(12.5px * var(--app-font-scale));
+  resize: vertical;
 }
 
 .harness-field-badge {
@@ -10011,6 +10187,7 @@ button.run-badge-clickable:focus-visible {
   padding: 2px 8px;
   border-radius: 999px;
   font-size: calc(11px * var(--app-font-scale));
+  white-space: nowrap;
   transition: background-color 160ms ease, color 160ms ease;
 }
 
@@ -10024,6 +10201,11 @@ button.run-badge-clickable:focus-visible {
   color: var(--accent);
 }
 
+.harness-field-badge.global {
+  background: var(--bg-tertiary);
+  color: var(--warning, #d29922);
+}
+
 .harness-field-reset {
   border: none;
   background: transparent;
@@ -10034,86 +10216,42 @@ button.run-badge-clickable:focus-visible {
   padding: 0;
 }
 
-.harness-field-resolved-chips {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-
-.harness-field-chip {
-  padding: 2px 8px;
-  border-radius: 999px;
-  background: var(--bg-tertiary);
-  color: var(--text-secondary);
-  font-size: calc(11.5px * var(--app-font-scale));
-}
-
-.harness-field-empty {
-  color: var(--text-muted);
-  font-size: calc(11.5px * var(--app-font-scale));
-}
-
-.harness-delta-editor {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px;
-}
-
-.harness-delta-input {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  font-size: calc(11px * var(--app-font-scale));
-  color: var(--text-muted);
-}
-
-.harness-delta-input input {
-  padding: 5px 7px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--bg-primary);
-  color: var(--text-primary);
-  font-size: calc(12.5px * var(--app-font-scale));
-  min-width: 220px;
-}
-
-.harness-field-checkbox {
-  display: flex;
+.harness-global-confirm {
+  display: inline-flex;
   align-items: center;
-  gap: 6px;
-  font-size: calc(12.5px * var(--app-font-scale));
-  color: var(--text-secondary);
-}
-
-.harness-setting-overlay-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 4px 0;
-}
-
-.harness-setting-overlay-key {
-  font-size: calc(12px * var(--app-font-scale));
-  color: var(--text-secondary);
-  min-width: 140px;
-}
-
-.harness-instruction-source-kind {
+  gap: 8px;
+  flex-wrap: wrap;
   font-size: calc(11.5px * var(--app-font-scale));
-  color: var(--text-muted);
+  color: var(--text-secondary);
+  animation: modalFadeIn 160ms ease-out;
 }
 
-@media (max-width: 720px) {
-  .harness-settings-editor-toolbar {
-    flex-direction: column;
-    align-items: stretch;
+@media (max-width: 900px) {
+  .harness-settings-layout {
+    grid-template-columns: minmax(0, 1fr);
   }
 
-  .harness-delta-editor {
-    flex-direction: column;
+  .harness-profile-rail {
+    flex-direction: row;
+    flex-wrap: wrap;
+    padding-inline-end: 0;
+    padding-bottom: 10px;
+    border-inline-end: none;
+    border-bottom: 1px solid var(--border);
   }
 
-  .harness-delta-input input {
+  .harness-settings-create-row {
+    margin-top: 0;
+    flex: 1 1 100%;
+  }
+}
+
+@media (max-width: 560px) {
+  .harness-item-row {
+    align-items: flex-start;
+  }
+
+  .harness-setting-input {
     min-width: 0;
     width: 100%;
   }

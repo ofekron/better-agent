@@ -136,7 +136,6 @@ def test_global_scoped_groups_are_not_profile_overridable() -> None:
         harness_fields.GROUP_NATIVE_EXPOSURE,
         harness_fields.GROUP_UI_SURFACES,
         harness_fields.GROUP_FRONTEND_MODULES,
-        harness_fields.GROUP_EXTENSION_ENABLED,
     ):
         assert harness_fields.scope_for(
             ["extension_instances", FIXTURE_ID, group, "anything"]

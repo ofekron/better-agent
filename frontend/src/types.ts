@@ -1375,10 +1375,6 @@ export interface HarnessProfile {
   provider_run_config_overlay: Record<string, unknown>;
 }
 
-/** One `PATCH /api/harness-profiles/{id}/overrides` op. */
-export type HarnessProfileOverrideOp =
-  | { path: string[]; op: "set"; value: unknown }
-  | { path: string[]; op: "clear" };
 
 export interface ProjectConfigFile {
   name: string;

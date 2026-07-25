@@ -28,6 +28,23 @@ def _toggled(current: list[str], name: str, present: bool) -> list[str]:
     return entries
 
 
+def _override_path(path: list[str]) -> list[str]:
+    """Where a field's override is stored.
+
+    Most fields store under their own path; item toggles store one delta for
+    the whole leaf, and user instructions store as an inline instruction
+    source keyed by extension.
+    """
+    if path[0] != "extension_instances":
+        return [path[0]]
+    group = path[2]
+    if group == harness_fields.GROUP_USER_INSTRUCTIONS:
+        return ["instruction_sources", harness_fields.user_instruction_source_name(path[1])]
+    if group == harness_fields.GROUP_SETTINGS:
+        return ["extension_instances", path[1], group, path[3]]
+    return ["extension_instances", path[1], group]
+
+
 def apply_field_writes(
     profile_id: str, revision: str | None, writes: list[dict[str, Any]]
 ) -> dict[str, Any] | None:
@@ -50,7 +67,16 @@ def apply_field_writes(
     for write in writes:
         path = [str(part) for part in (write.get("path") or [])]
         value = write.get("value")
-        if is_default or harness_fields.scope_for(path) == harness_fields.SCOPE_GLOBAL:
+        scope = harness_fields.scope_for(path)
+        if write.get("clear"):
+            # Clearing means "inherit Default again", which only exists on a
+            # named profile's own override — Default has nothing above it and
+            # a global field has one value for everyone.
+            if is_default or scope == harness_fields.SCOPE_GLOBAL:
+                raise HarnessFieldError("Only a named profile's own overrides can be cleared")
+            ops.append({"path": _override_path(path), "op": "clear"})
+            continue
+        if is_default or scope == harness_fields.SCOPE_GLOBAL:
             harness_fields.write_default(path, value)
             continue
 

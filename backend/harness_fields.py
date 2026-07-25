@@ -51,7 +51,6 @@ GROUP_NATIVE_EXPOSURE = "native_exposure"
 GROUP_FRONTEND_MODULES = "frontend_modules"
 GROUP_UI_SURFACES = "ui_surfaces"
 GROUP_PERMISSIONS = "permissions"
-GROUP_EXTENSION_ENABLED = "extension_enabled"
 
 # Top-level (non per-extension) groups.
 GROUP_DISABLED_BUILTIN_TOOLS = "disabled_builtin_tools"
@@ -286,19 +285,9 @@ def _permissions_group(record: dict[str, Any]) -> dict[str, Any]:
     return _group(GROUP_PERMISSIONS, scope=SCOPE_GLOBAL, control=CONTROL_ITEM_TOGGLES, items=items)
 
 
-def _extension_enabled_group(record: dict[str, Any]) -> dict[str, Any]:
-    return _group(
-        GROUP_EXTENSION_ENABLED,
-        scope=SCOPE_GLOBAL,
-        control=CONTROL_TEXT,
-        value=bool(record.get("enabled")),
-    )
-
-
 def _extension_descriptor(record: dict[str, Any], extension_id: str) -> dict[str, Any]:
     manifest = record.get("manifest") or {}
     groups = [
-        _extension_enabled_group(record),
         _mcp_group(extension_id),
         _skills_group(extension_id),
         _instructions_group(record),
@@ -477,10 +466,6 @@ def write_default(path: list[str], value: Any) -> None:
     if group == GROUP_PERMISSIONS:
         extension_store.set_permission_grant(extension_id, leaf, _require_bool(value, path))
         return
-    if group == GROUP_EXTENSION_ENABLED:
-        extension_store.set_enabled(extension_id, _require_bool(value, path))
-        return
-
     raise HarnessFieldError(f"Unknown harness field group: {group}")
 
 
