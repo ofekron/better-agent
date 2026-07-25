@@ -751,15 +751,31 @@ class TurnManager:
             app_session_id, f"remove:{run_id[:8]}:found={len(removed)}",
         )
 
+    def _entry_owned_by_live_turn(self, sid: str, entry: dict) -> bool:
+        """True while the turn coroutine still owns this run entry.
+
+        Between attempts (continuation, rate-limit or transient retry) the
+        provider subprocess is already gone while the turn is very much
+        alive. Pid liveness alone would report the run as finished, which
+        blanks the UI's running indication mid-turn. `cancel_events`
+        membership (`has_active_turn`) is the authoritative in-flight
+        signal, set before the entry is added and popped in `run_turn`'s
+        finally.
+        """
+        return (
+            entry.get("run_id") in (self.active_run_ids.get(sid) or ())
+            and self.has_active_turn(sid)
+        )
+
     def is_running(self, sid: str) -> bool:
         runs = self._run_state.get(sid)
         if not runs:
             return False
         for r in runs:
             pid = r.get("pid")
-            if pid is None:
+            if pid is None or _pid_alive(pid):
                 return True
-            if _pid_alive(pid):
+            if self._entry_owned_by_live_turn(sid, r):
                 return True
         return False
 
@@ -827,12 +843,23 @@ class TurnManager:
                 continue
             if _pid_alive(pid):
                 alive.append(r)
-            else:
-                logger.warning(
-                    "_prune_dead_entries: pid %s dead for run %s on session %s — dropping",
-                    pid, (run_id or "?")[:8], sid[:8],
-                )
-                dropped.append(r)
+                continue
+            # A dead pid on a run the live turn coroutine still owns is the
+            # between-attempts gap (the provider subprocess exited; the
+            # retry/continuation handler has not resumed yet), not an
+            # orphan. Dropping it blanks `is_running` mid-turn and the entry
+            # is never restored — the next attempt's `run_state_set_pid`
+            # finds no match and silently no-ops. This pruner is orphan GC
+            # for crashed/detached runs; while a turn is in flight its
+            # coroutine is the source of truth.
+            if self._entry_owned_by_live_turn(sid, r):
+                alive.append(r)
+                continue
+            logger.warning(
+                "_prune_dead_entries: pid %s dead for run %s on session %s — dropping",
+                pid, (run_id or "?")[:8], sid[:8],
+            )
+            dropped.append(r)
         if len(alive) == len(runs):
             return False
         if alive:
@@ -1227,7 +1254,10 @@ class TurnManager:
     ) -> None:
         runs = self._run_state.get(app_session_id)
         if not runs:
-            logger.debug(
+            # Same invariant violation as the no-match branch below: the
+            # whole session key is gone because its last entry was dropped
+            # underneath the live turn.
+            logger.warning(
                 "RUNSTATE_DBG[set_pid_noop:%s] sid=%s pid=%s — no entries",
                 run_id[:8], app_session_id[:8], pid,
             )
@@ -1240,7 +1270,12 @@ class TurnManager:
                     app_session_id, f"set_pid:{run_id[:8]}:{pid}",
                 )
                 return
-        logger.debug(
+        # The turn coroutine owns this entry for the whole turn, so a
+        # missing run_id here means something dropped it underneath us —
+        # the run goes invisible (no badge, `is_running` False) for the
+        # rest of the turn. Loud on purpose: it is an invariant violation,
+        # not a benign race.
+        logger.warning(
             "RUNSTATE_DBG[set_pid_nomatch:%s] sid=%s pid=%s — run_id absent",
             run_id[:8], app_session_id[:8], pid,
         )
@@ -1264,6 +1299,21 @@ class TurnManager:
                 r["retrying"] = True
                 self._dbg_runstate(app_session_id, f"retrying:{run_id[:8]}")
                 return
+
+    async def run_state_begin_retry(
+        self, app_session_id: str, run_id: str,
+    ) -> None:
+        """Single entry point for every between-attempts transition.
+
+        The previous attempt's subprocess is gone, so the entry must drop
+        its stale pid and declare itself retrying — that keeps the run
+        visible as in-flight (badge stays up, `is_running` stays True) and
+        is what the pidless branch of `_prune_dead_entries` keys off. Every
+        retry/continuation path routes through here so none can diverge.
+        """
+        self.run_state_clear_pid(app_session_id, run_id)
+        self.run_state_mark_retrying(app_session_id, run_id)
+        await self.emit_run_state(app_session_id)
 
     def _run_state_set_target(
         self, app_session_id: str, run_id: str, target_message_id: str,
@@ -3076,6 +3126,7 @@ class TurnManager:
                     (old_provider_sid or "none")[:8],
                 )
                 self._pop_run_id(app_session_id, run_id)
+                await self.run_state_begin_retry(app_session_id, turn_run_id)
                 continue
 
             # ── Context-window overflow → continuation ────────────────
@@ -3101,6 +3152,7 @@ class TurnManager:
                     )
 
                     self._pop_run_id(app_session_id, run_id)
+                    await self.run_state_begin_retry(app_session_id, turn_run_id)
                     continue  # Retry loop → fresh start_run with no session_id
 
             if (not success
@@ -3117,9 +3169,7 @@ class TurnManager:
                         app_session_id, assistant_msg_id, retry_at,
                         error_text=error or "Rate limit exceeded",
                     )
-                self.run_state_clear_pid(app_session_id, turn_run_id)
-                self.run_state_mark_retrying(app_session_id, turn_run_id)
-                await self.emit_run_state(app_session_id)
+                await self.run_state_begin_retry(app_session_id, turn_run_id)
                 try:
                     await asyncio.wait_for(cancel_event.wait(), timeout=wait_s)
                     if assistant_msg_id:
@@ -3190,9 +3240,7 @@ class TurnManager:
                         session_manager.set_msg_transient_attempt(
                             app_session_id, assistant_msg_id, transient_attempt,
                         )
-                    self.run_state_clear_pid(app_session_id, turn_run_id)
-                    self.run_state_mark_retrying(app_session_id, turn_run_id)
-                    await self.emit_run_state(app_session_id)
+                    await self.run_state_begin_retry(app_session_id, turn_run_id)
                     try:
                         await asyncio.wait_for(
                             cancel_event.wait(), timeout=wait_s,
