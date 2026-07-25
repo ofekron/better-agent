@@ -10,7 +10,9 @@ const app = fs.readFileSync(path.resolve(__dirname, "../src/App.tsx"), "utf8");
 
 function ruleBody(selector: string): string {
   const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const match = css.match(new RegExp(`${escaped}\\s*\\{([^}]*)\\}`));
+  // Tolerates grouped selectors (".a,\n.b {"); the lookahead stops
+  // ".machine-tab" from matching ".machine-tabs".
+  const match = css.match(new RegExp(`${escaped}(?![\\w-])[^{}]*\\{([^}]*)\\}`));
   expect(match, `missing CSS rule for ${selector}`).not.toBeNull();
   return match![1];
 }
@@ -48,6 +50,20 @@ describe("sidebar never scrolls horizontally", () => {
     // Physical left would anchor to the wrong edge in RTL.
     expect(ghost).not.toMatch(/(^|[;{\s])left\s*:/);
     expect(ghost).toContain("inset-inline-start: 0");
+  });
+
+  it("keeps sidebar tab strips reachable instead of clipped", () => {
+    // The sidebar no longer scrolls sideways, so a strip that cannot fit
+    // must scroll itself or its tabs become unreachable.
+    for (const strip of [".project-tabs", ".machine-tabs"]) {
+      expect(ruleBody(strip), strip).toContain("overflow-x: auto");
+    }
+    expect(ruleBody(".machine-tab")).toContain("flex-shrink: 0");
+    expect(ruleBody(".machine-tab-label")).toContain("white-space: nowrap");
+  });
+
+  it("wraps the project git actions rather than overflowing them", () => {
+    expect(ruleBody(".project-git-actions")).toContain("flex-wrap: wrap");
   });
 
   it("renders the ghost inside the clip wrapper", () => {

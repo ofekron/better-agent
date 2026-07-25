@@ -416,6 +416,7 @@ body {
 
 .project-git-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 4px;
   align-items: center;
   min-width: 0;
@@ -18937,17 +18938,10 @@ button.progress-inflight {
 }
 
 /* Machine selector — shown when multiple nodes exist. */
-.machine-tabs {
-  display: flex;
-  gap: 0;
-  padding: 0;
-  /* Section break before the PROJECTS group below (absent when only
-     one group renders — no machine tabs, no extra gap). */
-  margin: 0 0 12px;
-}
 .machine-tab {
   display: inline-flex;
   align-items: center;
+  flex-shrink: 0;
   gap: 5px;
   padding: 4px 0;
   padding-inline-end: 12px;
@@ -18981,10 +18975,15 @@ button.progress-inflight {
 .machine-tab-label {
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
   max-width: 100px;
 }
 
-.project-tabs {
+/* Tab strips own their horizontal scrolling. The sidebar itself never
+   scrolls sideways, so a strip that can't fit must scroll here or its
+   tabs become unreachable at narrow sidebar widths. */
+.project-tabs,
+.machine-tabs {
   display: flex;
   gap: 0;
   overflow-x: auto;
@@ -18993,18 +18992,28 @@ button.progress-inflight {
   padding: 0;
   margin: 0;
 }
-.project-tabs::-webkit-scrollbar {
+.project-tabs::-webkit-scrollbar,
+.machine-tabs::-webkit-scrollbar {
   height: 6px;
 }
-.project-tabs::-webkit-scrollbar-thumb {
+.project-tabs::-webkit-scrollbar-thumb,
+.machine-tabs::-webkit-scrollbar-thumb {
   background: var(--bg-hover);
   border-radius: 3px;
 }
-.project-tabs::-webkit-scrollbar-thumb:hover {
+.project-tabs::-webkit-scrollbar-thumb:hover,
+.machine-tabs::-webkit-scrollbar-thumb:hover {
   background: var(--text-muted);
 }
-.project-tabs::-webkit-scrollbar-track {
+.project-tabs::-webkit-scrollbar-track,
+.machine-tabs::-webkit-scrollbar-track {
   background: transparent;
+}
+
+/* Section break before the PROJECTS group below (absent when only one
+   group renders — no machine tabs, no extra gap). */
+.machine-tabs {
+  margin-block-end: 12px;
 }
 
 /* Each tab is a wrapper holding the select button + a config (gear)
