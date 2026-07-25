@@ -15875,6 +15875,11 @@ def _validate_memory_proposal(raw: Any) -> dict[str, Any]:
     description = str(raw.get("description") or "").strip()
     if not description:
         raise HTTPException(status_code=400, detail="memory_proposal.description is required")
+    if "\n" in description or "\r" in description:
+        # Frontmatter is one field per line; an embedded newline (e.g.
+        # "ok\n---\nHACKED: yes") terminates the YAML block early and lets
+        # the rest of the description masquerade as frontmatter/content.
+        raise HTTPException(status_code=400, detail="memory_proposal.description must be a single line")
     mem_type = str(raw.get("type") or "").strip()
     if mem_type not in _MEMORY_TYPES:
         raise HTTPException(
@@ -15891,6 +15896,8 @@ def _validate_memory_proposal(raw: Any) -> dict[str, Any]:
             detail=f"memory_proposal.scope_type must be one of {', '.join(_MEMORY_SCOPE_TYPES)}",
         )
     scope_path = str(raw.get("scope_path") or "").strip()
+    if "\n" in scope_path or "\r" in scope_path:
+        raise HTTPException(status_code=400, detail="memory_proposal.scope_path must be a single line")
     if scope_type in ("project", "folder") and not scope_path:
         raise HTTPException(
             status_code=400,

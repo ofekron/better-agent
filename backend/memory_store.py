@@ -172,6 +172,12 @@ def write_memory(
         raise MemoryStoreError(f"type must be one of {_MEMORY_TYPES}")
     if not description.strip():
         raise MemoryStoreError("description is required")
+    if "\n" in description or "\r" in description:
+        # A newline lets the description terminate the frontmatter block
+        # early (e.g. "ok\n---\nHACKED: yes"), corrupting metadata parsing.
+        raise MemoryStoreError("description must be a single line")
+    if "\n" in scope_path or "\r" in scope_path:
+        raise MemoryStoreError("scope_path must be a single line")
     if not content.strip():
         raise MemoryStoreError("content is required")
     directory = scope_dir(scope_type, scope_path)

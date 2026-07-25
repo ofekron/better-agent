@@ -108,6 +108,31 @@ def test_rejects_invalid_slug() -> bool:
     return False
 
 
+def test_rejects_newline_in_description() -> bool:
+    try:
+        memory_store.write_memory(
+            scope_type="global", scope_path="", slug="frontmatter-injection",
+            description="ok\n---\nHACKED: yes", mem_type="user", content="c",
+        )
+    except memory_store.MemoryStoreError:
+        pass
+    else:
+        return False
+    # Confirm nothing was written and the index wasn't touched.
+    return memory_store.read_memory(scope_type="global", scope_path="", slug="frontmatter-injection") is None
+
+
+def test_rejects_newline_in_scope_path() -> bool:
+    try:
+        memory_store.write_memory(
+            scope_type="project", scope_path="/tmp/x\n---\nHACKED: yes", slug="frontmatter-injection-2",
+            description="d", mem_type="user", content="c",
+        )
+    except memory_store.MemoryStoreError:
+        return True
+    return False
+
+
 def test_edit_preserves_created_at() -> bool:
     first = memory_store.write_memory(
         scope_type="global", scope_path="", slug="edit-me",
@@ -130,6 +155,8 @@ TESTS = [
     ("project scope isolated from global", test_project_scope_isolated_from_global),
     ("memories_for_cwd merges ancestor scopes only", test_memories_for_cwd_merges_ancestors),
     ("invalid slug is rejected", test_rejects_invalid_slug),
+    ("newline in description is rejected (frontmatter injection)", test_rejects_newline_in_description),
+    ("newline in scope_path is rejected", test_rejects_newline_in_scope_path),
     ("edit preserves created_at, updates content", test_edit_preserves_created_at),
 ]
 

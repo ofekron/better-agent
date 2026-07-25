@@ -171,6 +171,16 @@ def test_invalid_proposal_is_rejected(client: TestClient) -> bool:
     return res.status_code == 200 and data.get("success") is False and "type" in (data.get("error") or "")
 
 
+def test_newline_in_description_rejected_via_put(client: TestClient) -> bool:
+    res = client.put(
+        "/api/memory/global/newline-injection-attempt",
+        json={"scope_path": "", "description": "ok\n---\nHACKED: yes", "type": "user", "content": "c"},
+    )
+    if res.status_code != 400:
+        return False
+    return memory_store.read_memory(scope_type="global", scope_path="", slug="newline-injection-attempt") is None
+
+
 def test_direct_user_edit_and_delete(client: TestClient) -> bool:
     memory_store.write_memory(
         scope_type="global", scope_path="", slug="browser-edit-target",
@@ -199,6 +209,7 @@ def run() -> int:
         ("create + approve writes memory with user edits", lambda: test_create_and_approve_writes_memory(client)),
         ("reject does not write memory", lambda: test_reject_does_not_write_memory(client)),
         ("invalid proposal is rejected", lambda: test_invalid_proposal_is_rejected(client)),
+        ("newline in description rejected via PUT", lambda: test_newline_in_description_rejected_via_put(client)),
         ("direct user edit and delete via /api/memory", lambda: test_direct_user_edit_and_delete(client)),
     ]
     failures: list[str] = []
