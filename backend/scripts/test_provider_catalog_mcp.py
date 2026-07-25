@@ -58,14 +58,25 @@ def test_fuzzy_provider_model_effort_and_runner_filters() -> None:
 
     model_result = available_provider_models_response(model="turbo")
     assert _names(model_result) == {"Router Lab"}
-    assert model_result["providers"][0]["models"] == ["custom-turbo-model"]
+    matched_models = {
+        profile["model"]
+        for runtime_profile in model_result["providers"][0]["runtime_profiles"]
+        for profile in runtime_profile["model_profiles"]
+    }
+    assert matched_models == {"custom-turbo-model"}
 
     effort_result = available_provider_models_response(
         provider="codx",
         reasoning_effort="xhig",
     )
     assert _names(effort_result) == {"Codex"}
-    assert "xhigh" in effort_result["providers"][0]["reasoning_efforts"]
+    matched_efforts = {
+        effort
+        for runtime_profile in effort_result["providers"][0]["runtime_profiles"]
+        for profile in runtime_profile["model_profiles"]
+        for effort in profile["reasoning_efforts"]
+    }
+    assert "xhigh" in matched_efforts
 
     runner_result = available_provider_models_response(
         provider="ruter",
@@ -73,7 +84,9 @@ def test_fuzzy_provider_model_effort_and_runner_filters() -> None:
     )
     assert _names(runner_result) == {"Router Lab"}
     assert runner_result["providers"][0]["runner"] == "better_agent_runner"
-    assert runner_result["providers"][0]["runners"] == ["better_agent_runner"]
+    assert [
+        profile["runner"] for profile in runner_result["providers"][0]["runtime_profiles"]
+    ] == ["better_agent_runner"]
     assert runner_result["filters"]["runner"] == "better agent"
 
     config_store.add_provider({

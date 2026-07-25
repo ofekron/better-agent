@@ -68,12 +68,11 @@ def available_provider_models_response(
         if model_query and not matched_models:
             continue
         runtime_profiles = []
-        matched_efforts: list[str] = []
+        has_matched_effort = False
         for selected_runner in supported_runners:
             if not _fuzzy_matches(runner_query, [selected_runner]):
                 continue
             model_profiles = []
-            profile_efforts: list[str] = []
             for selected_model in matched_models:
                 model_efforts = _matching_values(
                     list(runtime_profile.reasoning_efforts(
@@ -87,34 +86,24 @@ def available_provider_models_response(
                     "model": selected_model,
                     "reasoning_efforts": model_efforts,
                 })
-                for effort in model_efforts:
-                    if effort not in profile_efforts:
-                        profile_efforts.append(effort)
+                has_matched_effort = has_matched_effort or bool(model_efforts)
             if not model_profiles:
                 continue
             runtime_profiles.append({
                 "runner": selected_runner,
-                "models": [profile["model"] for profile in model_profiles],
-                "reasoning_efforts": profile_efforts,
                 "model_profiles": model_profiles,
             })
-            for effort in profile_efforts:
-                if effort not in matched_efforts:
-                    matched_efforts.append(effort)
-        if effort_query and not matched_efforts:
+        if effort_query and not has_matched_effort:
             continue
         providers.append({
             "provider_id": provider_id,
             "name": record.get("name", ""),
             "kind": record.get("kind", ""),
             "runner": record.get("runner", ""),
-            "runners": list(supported_runners),
             "runtime_profiles": runtime_profiles,
             "is_default": provider_id == state.get("default_provider_id"),
             "default_model": record.get("default_model", ""),
             "default_reasoning_effort": record.get("default_reasoning_effort", ""),
-            "models": matched_models,
-            "reasoning_efforts": matched_efforts,
         })
     return {
         "success": True,
