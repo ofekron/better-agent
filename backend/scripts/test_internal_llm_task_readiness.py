@@ -39,7 +39,10 @@ def _requirements_record() -> dict:
     install_root = TMP_HOME / "req-install"
     (install_root / "requirement_analysis").mkdir(parents=True, exist_ok=True)
     return {
-        "manifest": {"id": es.extension_id_for_role('requirements')},
+        "manifest": {
+            "id": es.extension_id_for_role('requirements'),
+            "core_roles": ["requirements"],
+        },
         "source": {"install_path": str(install_root)},
     }
 
@@ -115,7 +118,10 @@ def run() -> None:
         es.extension_internal_llm_tasks(provider_config_record) == ["provider_config_sync_review"],
         "provider-config-sync extension owns provider_config_sync_review task",
     )
-    team_record = {"manifest": {"id": es.extension_id_for_role('team-orchestration')}}
+    team_record = {"manifest": {
+        "id": es.extension_id_for_role('team-orchestration'),
+        "core_roles": ["team-orchestration"],
+    }}
     check(
         es.extension_internal_llm_tasks(team_record)
         == ["delegation_task", "delegation_message", "delegation_ask"],
@@ -178,16 +184,22 @@ def run() -> None:
         provider for provider in state.get("providers", [])
         if provider.get("id") == default_provider_id
     )
-    options = config_store.reasoning_effort_options_for_provider(default_raw)
+    import runtime_profile  # noqa: E402
+    # Source options the same way resolve_internal_llm does (runner+model aware),
+    # not the kind-only config_store helper, so the chosen effort is one the
+    # resolver will actually preserve.
+    resolved_runner = runtime_profile.resolve_runner(default_raw, "")
+    resolved_model = default_raw.get("default_model") or ""
+    options = runtime_profile.reasoning_efforts(default_raw, resolved_runner, model=resolved_model)
     chosen_effort = options[0] if options else "xhigh"
     config_store.set_internal_llm_assignments({
-        "assistant": {
+        "default_session": {
             "provider_id": default_provider_id,
             "model": "",
             "reasoning_effort": chosen_effort,
         }
     })
-    reasoning = config_store.resolve_internal_llm("assistant")
+    reasoning = config_store.resolve_internal_llm("default_session")
     expected_effort = chosen_effort if chosen_effort in options else ""
     check(
         reasoning.get("reasoning_effort") == expected_effort,
