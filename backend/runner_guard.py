@@ -23,6 +23,11 @@ log = logging.getLogger(__name__)
 GHOST_RETRY_MAX = 2
 GHOST_RETRY_BACKOFF_S = 3.0
 
+# The undiagnosed empty turn. A caller that knows WHY the turn produced
+# nothing passes ``empty_turn_error`` instead, and that turn is terminal:
+# only this generic ghost is retried.
+GHOST_ERROR = "prompt_not_executed"
+
 
 def token_usage_is_zero(usage: Any) -> bool:
     """True when a normalized token-usage dict carries no tokens at all
@@ -51,13 +56,19 @@ def apply_ghost_completion_guard(
     assistant_seen: bool,
     total_usage: Any,
     result_seen: bool,
+    empty_turn_error: Optional[str] = None,
 ) -> tuple[bool, Optional[str]]:
     """Fail closed when a turn reports success but produced no assistant
     output for a non-empty prompt with zero token usage — a provider
     ghost completion (e.g. a second CLI spawned behind a still-live
     instance, or a Codex ``task_complete`` with ``last_agent_message``
     null and no response items). Returns ``(success, error)``; a turn
-    already failing or cancelled is left alone."""
+    already failing or cancelled is left alone.
+
+    ``empty_turn_error`` is the caller's diagnosed cause for the empty
+    turn (e.g. exhausted provider credits). When supplied it replaces the
+    generic ``GHOST_ERROR``, which also makes the failure terminal —
+    ``should_retry_ghost`` retries only the undiagnosed ghost."""
     if (
         result_seen
         and success
@@ -69,26 +80,32 @@ def apply_ghost_completion_guard(
     ):
         log.warning(
             "ghost completion: zero-usage success with no assistant "
-            "output for a non-empty prompt — marking prompt_not_executed",
+            "output for a non-empty prompt — marking %s",
+            empty_turn_error or GHOST_ERROR,
         )
-        return False, "prompt_not_executed"
+        return False, empty_turn_error or GHOST_ERROR
     return success, error
 
 
 def should_retry_ghost(
     error: Optional[str], *, cancelled: bool, attempts: int,
+    diagnosed: bool = False,
 ) -> bool:
-    """True when a ``prompt_not_executed`` ghost completion should be
-    retried, given how many ghost retries have already run. The provider
+    """True when a ``GHOST_ERROR`` ghost completion should be retried,
+    given how many ghost retries have already run. The provider
     intermittently returns an empty/failed response it logs as a
     successful zero-usage turn; a fresh attempt usually succeeds, so the
     runner retries up to ``GHOST_RETRY_MAX`` times before failing closed.
 
     ``attempts`` is the count of ghost retries already performed (0 on the
-    first ghost). Non-ghost errors, cancels, and an exhausted budget all
-    return False."""
+    first ghost). ``diagnosed`` states outright that the caller knows why
+    the turn was empty (it passed an ``empty_turn_error``, e.g. exhausted
+    credits): that failure is terminal, and saying so explicitly keeps
+    retryability independent of how the error reads. Non-ghost errors,
+    cancels, and an exhausted budget all return False."""
     return (
-        error == "prompt_not_executed"
+        not diagnosed
+        and error == GHOST_ERROR
         and not cancelled
         and attempts < GHOST_RETRY_MAX
     )

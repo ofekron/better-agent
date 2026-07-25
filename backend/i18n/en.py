@@ -110,6 +110,7 @@ TRANSLATIONS: dict[str, str] = {
     "runner.mssg_non_json": "mssg: non-json response: {e}: {raw}",
     "runner.open_file_panel_non_json": "open-file-panel: non-json response: {e}: {raw}",
     "runner.cancelled": "cancelled",
+    "runner.codex_credits_exhausted": "the Codex account has no credits left (balance 0), so the turn was rejected before it ran",
     "runner.failed_read_input": "failed to read input.json: {e}",
 
     # --- Orchestrator ---

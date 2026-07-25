@@ -108,6 +108,7 @@ TRANSLATIONS: dict[str, str] = {
     "runner.delegate_general_error": "שגיאת האצלה: {e}",
     "runner.delegate_non_json": "האצלה: תגובה לא-JSON: {e}: {raw}",
     "runner.cancelled": "בוטל",
+    "runner.codex_credits_exhausted": "לחשבון ה-Codex לא נותרו קרדיטים (יתרה 0), ולכן התור נדחה לפני שרץ",
     "runner.failed_read_input": "נכשל לקרוא input.json: {e}",
     "runner.mssg_non_json": "mssg: תגובה שאינה JSON: {e}: {raw}",
     "runner.open_file_panel_non_json": "open-file-panel: תגובה שאינה JSON: {e}: {raw}",
