@@ -25,8 +25,10 @@ def test_create_profile_has_empty_overrides() -> None:
         "name": "Personal Harness",
         "description": "hand-tuned overrides",
     })
-    assert profile["schema_version"] == 2
+    assert profile["schema_version"] == 3
     assert profile["overrides"] == {}
+    assert profile["base_profile_id"] is None
+    assert profile["default_model"] is None
     loaded = harness_profile_store.get_profile("personal.harness")
     assert loaded == profile
 
@@ -180,6 +182,84 @@ def test_stale_revision_rejected() -> None:
         raise AssertionError("stale revision patch was accepted")
 
 
+def test_set_profile_meta_roundtrip() -> None:
+    harness_profile_store.create_profile({"id": "meta.base", "name": "Meta Base"})
+    child = harness_profile_store.create_profile({"id": "meta.child", "name": "Meta Child"})
+    updated = harness_profile_store.set_profile_meta(
+        "meta.child",
+        {
+            "base_profile_id": "meta.base",
+            "default_provider_id": "codex",
+            "default_model": "gpt-5.5",
+            "default_reasoning_effort": "high",
+        },
+        revision=child["revision"],
+    )
+    assert updated["base_profile_id"] == "meta.base"
+    assert updated["default_provider_id"] == "codex"
+    assert updated["default_model"] == "gpt-5.5"
+    assert updated["default_reasoning_effort"] == "high"
+    loaded = harness_profile_store.get_profile("meta.child")
+    assert loaded["base_profile_id"] == "meta.base"
+
+
+def test_set_profile_meta_rejects_unknown_field() -> None:
+    harness_profile_store.create_profile({"id": "meta.unknown", "name": "Meta Unknown"})
+    try:
+        harness_profile_store.set_profile_meta("meta.unknown", {"bogus": "x"})
+    except harness_profile_store.HarnessProfileError:
+        pass
+    else:
+        raise AssertionError("unknown meta field was accepted")
+
+
+def test_base_self_reference_rejected() -> None:
+    harness_profile_store.create_profile({"id": "cycle.self", "name": "Cycle Self"})
+    try:
+        harness_profile_store.set_profile_meta("cycle.self", {"base_profile_id": "cycle.self"})
+    except harness_profile_store.HarnessProfileError as exc:
+        assert "itself" in str(exc) or "cycle" in str(exc)
+    else:
+        raise AssertionError("A->A base self-reference was accepted")
+
+
+def test_indirect_base_cycle_rejected_at_save() -> None:
+    harness_profile_store.create_profile({"id": "cycle.a", "name": "Cycle A"})
+    harness_profile_store.create_profile({"id": "cycle.b", "name": "Cycle B"})
+    # B bases on A (fine), then setting A's base to B would close A->B->A.
+    harness_profile_store.set_profile_meta("cycle.b", {"base_profile_id": "cycle.a"})
+    try:
+        harness_profile_store.set_profile_meta("cycle.a", {"base_profile_id": "cycle.b"})
+    except harness_profile_store.HarnessProfileError as exc:
+        assert "cycle" in str(exc)
+    else:
+        raise AssertionError("A->B->A base cycle was accepted at save time")
+
+
+def test_base_missing_profile_rejected() -> None:
+    harness_profile_store.create_profile({"id": "base.missing", "name": "Base Missing"})
+    try:
+        harness_profile_store.set_profile_meta("base.missing", {"base_profile_id": "does-not-exist"})
+    except harness_profile_store.HarnessProfileError as exc:
+        assert "not found" in str(exc)
+    else:
+        raise AssertionError("base pointing at a missing profile was accepted")
+
+
+def test_base_bad_revision_rejected() -> None:
+    harness_profile_store.create_profile({"id": "base.rev.target", "name": "Rev Target"})
+    harness_profile_store.create_profile({"id": "base.rev.child", "name": "Rev Child"})
+    try:
+        harness_profile_store.set_profile_meta(
+            "base.rev.child",
+            {"base_profile_id": "base.rev.target", "base_profile_revision": "deadbeefdeadbeef"},
+        )
+    except harness_profile_store.HarnessProfileError as exc:
+        assert "revision unavailable" in str(exc)
+    else:
+        raise AssertionError("base pinned to a nonexistent revision was accepted")
+
+
 def main() -> int:
     try:
         test_create_profile_has_empty_overrides()
@@ -194,6 +274,12 @@ def main() -> int:
         test_empty_set_delta_stays_overridden_unlike_clear()
         test_rejects_invalid_delta_shape()
         test_stale_revision_rejected()
+        test_set_profile_meta_roundtrip()
+        test_set_profile_meta_rejects_unknown_field()
+        test_base_self_reference_rejected()
+        test_indirect_base_cycle_rejected_at_save()
+        test_base_missing_profile_rejected()
+        test_base_bad_revision_rejected()
     finally:
         shutil.rmtree(TMP_HOME, ignore_errors=True)
     print("PASS harness profile store")

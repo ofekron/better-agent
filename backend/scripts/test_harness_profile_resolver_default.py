@@ -213,6 +213,93 @@ def test_resolve_for_session_falls_back_to_default_profile() -> None:
     assert explicit_snapshot["profile_id"] == "explicit.profile"
 
 
+def test_multi_level_base_chain_applies_deltas_in_order() -> None:
+    config_store.set_disabled_builtin_tools(["ask"])
+    for pid, name in (("chain.a", "A"), ("chain.b", "B"), ("chain.c", "C")):
+        harness_profile_store.create_profile({"id": pid, "name": name})
+    # A over Default adds mssg; B over A adds delegate_task; C over B removes ask.
+    harness_profile_store.apply_override_patch(
+        "chain.a", [{"path": ["disabled_builtin_tools"], "op": "set", "value": {"add": ["mssg"], "remove": []}}]
+    )
+    harness_profile_store.set_profile_meta("chain.b", {"base_profile_id": "chain.a"})
+    harness_profile_store.apply_override_patch(
+        "chain.b", [{"path": ["disabled_builtin_tools"], "op": "set", "value": {"add": ["delegate_task"], "remove": []}}]
+    )
+    harness_profile_store.set_profile_meta("chain.c", {"base_profile_id": "chain.b"})
+    harness_profile_store.apply_override_patch(
+        "chain.c", [{"path": ["disabled_builtin_tools"], "op": "set", "value": {"add": [], "remove": ["ask"]}}]
+    )
+
+    resolved_a = harness_profile_resolver.resolve_profile("chain.a")
+    resolved_b = harness_profile_resolver.resolve_profile("chain.b")
+    resolved_c = harness_profile_resolver.resolve_profile("chain.c")
+    assert set(resolved_a["disabled_builtin_tools"]["resolved"]) == {"ask", "mssg"}
+    assert set(resolved_b["disabled_builtin_tools"]["resolved"]) == {"ask", "mssg", "delegate_task"}
+    # C inherits A's mssg and B's delegate_task through the chain, and removes ask.
+    assert set(resolved_c["disabled_builtin_tools"]["resolved"]) == {"mssg", "delegate_task"}
+    assert resolved_c["base_profile_id"] == "chain.b"
+
+
+def test_resolve_time_cycle_detected() -> None:
+    harness_profile_store.create_profile({"id": "rcyc.a", "name": "RCyc A"})
+    harness_profile_store.create_profile({"id": "rcyc.b", "name": "RCyc B"})
+    harness_profile_store.set_profile_meta("rcyc.b", {"base_profile_id": "rcyc.a"})
+    # Force a cycle directly in the store, bypassing the save-time guard, to
+    # prove resolve_profile also fails closed on a cyclic chain.
+    data = harness_profile_store._load()  # type: ignore[attr-defined]
+    data["profiles"]["rcyc.a"]["base_profile_id"] = "rcyc.b"
+    harness_profile_store._save(data)  # type: ignore[attr-defined]
+    try:
+        harness_profile_resolver.resolve_profile("rcyc.a")
+    except harness_profile_resolver.HarnessProfileResolutionError as exc:
+        assert "cycle" in str(exc)
+    else:
+        raise AssertionError("resolve_profile did not detect the base cycle")
+
+
+def test_pin_inherited_from_grandparent_when_child_pins_none() -> None:
+    for pid, name in (("pin.g", "G"), ("pin.p", "P"), ("pin.c", "C")):
+        harness_profile_store.create_profile({"id": pid, "name": name})
+    harness_profile_store.set_profile_meta(
+        "pin.g", {"default_provider_id": "codex", "default_model": "gpt-5.5", "default_reasoning_effort": "high"}
+    )
+    harness_profile_store.set_profile_meta("pin.p", {"base_profile_id": "pin.g"})
+    harness_profile_store.set_profile_meta("pin.c", {"base_profile_id": "pin.p"})
+    pins = harness_profile_resolver.profile_selector_defaults("pin.c")
+    assert pins == {"provider_id": "codex", "model": "gpt-5.5", "reasoning_effort": "high"}
+
+
+def test_own_pin_overrides_inherited_pin() -> None:
+    harness_profile_store.create_profile({"id": "pin.base2", "name": "Base2"})
+    harness_profile_store.create_profile({"id": "pin.own", "name": "Own"})
+    harness_profile_store.set_profile_meta(
+        "pin.base2", {"default_provider_id": "codex", "default_model": "gpt-5.5"}
+    )
+    harness_profile_store.set_profile_meta(
+        "pin.own", {"base_profile_id": "pin.base2", "default_model": "gpt-5.5-mini"}
+    )
+    pins = harness_profile_resolver.profile_selector_defaults("pin.own")
+    # provider inherited from base; model is the child's own pin.
+    assert pins == {"provider_id": "codex", "model": "gpt-5.5-mini", "reasoning_effort": None}
+
+
+def test_merge_selector_defaults_explicit_wins_only_where_present() -> None:
+    harness_profile_store.create_profile({"id": "merge.p", "name": "Merge"})
+    harness_profile_store.set_profile_meta(
+        "merge.p", {"default_provider_id": "codex", "default_model": "gpt-5.5", "default_reasoning_effort": "high"}
+    )
+    # Caller supplies model explicitly; omits provider/effort -> pins fill those only.
+    merged = harness_profile_resolver.merge_selector_defaults(
+        {"provider_id": None, "model": "claude-opus-4-8", "reasoning_effort": None}, "merge.p"
+    )
+    assert merged == {"provider_id": "codex", "model": "claude-opus-4-8", "reasoning_effort": "high"}
+    # No profile -> identity, pins never consulted.
+    none_merged = harness_profile_resolver.merge_selector_defaults(
+        {"provider_id": None, "model": None, "reasoning_effort": None}, ""
+    )
+    assert none_merged == {"provider_id": None, "model": None, "reasoning_effort": None}
+
+
 def main() -> int:
     test_zero_override_profile_resolves_identically_to_default()
     test_overridden_field_stays_pinned_across_default_change()
@@ -220,6 +307,11 @@ def main() -> int:
     test_clearing_override_reverts_to_tracking_default()
     test_default_headless_reflects_extension_setting_write()
     test_resolve_for_session_falls_back_to_default_profile()
+    test_multi_level_base_chain_applies_deltas_in_order()
+    test_resolve_time_cycle_detected()
+    test_pin_inherited_from_grandparent_when_child_pins_none()
+    test_own_pin_overrides_inherited_pin()
+    test_merge_selector_defaults_explicit_wins_only_where_present()
     print("PASS harness profile resolver default synthesis")
     return 0
 

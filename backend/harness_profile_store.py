@@ -16,10 +16,15 @@ from paths import ba_home
 # with a Default-synthesis + sparse-override inheritance model: a stored
 # profile only carries the deltas it explicitly overrides; everything else
 # inherits live Default state at resolve time (see harness_profile_resolver).
-SCHEMA_VERSION = 2
+# v3 adds optional profile-to-profile inheritance (base_profile_id) and
+# optional provider/model/reasoning-effort pins consulted as a
+# session-creation fallback. Schema migrations are not supported: a store on
+# an older version is refused at load (wipe harness_profiles.json to reset).
+SCHEMA_VERSION = 3
 MAX_NAME_CHARS = 120
 MAX_DESCRIPTION_CHARS = 1_000
 MAX_INLINE_INSTRUCTION_CHARS = 80_000
+MAX_SELECTOR_CHARS = 200
 _ID_RE = re.compile(r"^[a-z0-9][a-z0-9_.-]{2,79}$")
 _LOCK = threading.RLock()
 DEFAULT_PROFILE_ID = "default"
@@ -251,9 +256,18 @@ def _normalized_payload(profile_id: str, payload: dict[str, Any], *, existing: d
         "provider_run_config_overlay": _string_map(payload.get("provider_run_config_overlay"), "provider_run_config_overlay"),
         "capability_contexts": copy.deepcopy(payload.get("capability_contexts") or []),
         "secret_refs": _normalize_secret_refs(payload.get("secret_refs")),
+        "base_profile_id": _clean_id(payload.get("base_profile_id"), required=False) or None,
+        "base_profile_revision": _clean_text(payload.get("base_profile_revision"), "base_profile_revision", 64) or None,
+        "default_provider_id": _clean_text(payload.get("default_provider_id"), "default_provider_id", MAX_SELECTOR_CHARS) or None,
+        "default_model": _clean_text(payload.get("default_model"), "default_model", MAX_SELECTOR_CHARS) or None,
+        "default_reasoning_effort": _clean_text(payload.get("default_reasoning_effort"), "default_reasoning_effort", 40) or None,
         "created_at": (existing or {}).get("created_at") or now,
         "updated_at": now,
     }
+    if profile["base_profile_revision"] and not profile["base_profile_id"]:
+        raise HarnessProfileError("base_profile_revision requires base_profile_id")
+    if profile["base_profile_id"] == profile_id:
+        raise HarnessProfileError("a harness profile cannot base on itself")
     profile["revision"] = _revision(profile)
     return profile
 
@@ -264,6 +278,104 @@ def _revision(profile: dict[str, Any]) -> str:
     data.pop("updated_at", None)
     digest = hashlib.sha256(json.dumps(data, sort_keys=True, separators=(",", ":")).encode("utf-8"))
     return digest.hexdigest()[:16]
+
+
+def _input_payload_from_profile(profile: dict[str, Any]) -> dict[str, Any]:
+    """Reconstruct the mutable normalize-input shape from a stored profile so
+    a partial edit re-runs the same normalization instead of hand-copying
+    every field at each write site."""
+    return {
+        "id": profile.get("id"),
+        "name": profile.get("name"),
+        "description": profile.get("description"),
+        "source": profile.get("source"),
+        "overrides": profile.get("overrides"),
+        "mcp_overrides": profile.get("mcp_overrides"),
+        "skill_overrides": profile.get("skill_overrides"),
+        "native_harness_overrides": profile.get("native_harness_overrides"),
+        "provider_run_config_overlay": profile.get("provider_run_config_overlay"),
+        "capability_contexts": profile.get("capability_contexts"),
+        "secret_refs": profile.get("secret_refs"),
+        "base_profile_id": profile.get("base_profile_id"),
+        "base_profile_revision": profile.get("base_profile_revision"),
+        "default_provider_id": profile.get("default_provider_id"),
+        "default_model": profile.get("default_model"),
+        "default_reasoning_effort": profile.get("default_reasoning_effort"),
+    }
+
+
+def _assert_base_chain_ok(profile_id: str, profile: dict[str, Any], profiles: dict[str, Any]) -> None:
+    """Reject a base chain that cycles, names a missing profile, or pins a
+    base revision that is not the base's current revision. Runs at every save
+    so an author is stopped at the edit, not at some later resolve.
+
+    `profile` is the not-yet-persisted record for `profile_id`; the walk seeds
+    from its base so a fresh A->A / A->B->A cycle is caught even though the new
+    base pointer is not in `profiles` yet.
+    """
+    base_id = profile.get("base_profile_id")
+    if not base_id:
+        return
+    chain = [profile_id]
+    current_id = base_id
+    current_rev = profile.get("base_profile_revision")
+    while current_id and current_id != DEFAULT_PROFILE_ID:
+        if current_id in chain:
+            raise HarnessProfileError(
+                "harness profile base chain cycle: " + " -> ".join(chain + [current_id])
+            )
+        chain.append(current_id)
+        base = profiles.get(current_id)
+        if not base:
+            raise HarnessProfileError(f"harness profile base not found: {current_id}")
+        if current_rev and base.get("revision") != current_rev:
+            raise HarnessProfileError(f"harness profile base revision unavailable: {current_id}@{current_rev}")
+        current_id = base.get("base_profile_id")
+        current_rev = base.get("base_profile_revision")
+
+
+def _commit_profile(data: dict[str, Any], profile_id: str, profile: dict[str, Any]) -> dict[str, Any]:
+    """Single write choke point: validate the base chain against current
+    store state, persist, and return a copy."""
+    _assert_base_chain_ok(profile_id, profile, data["profiles"])
+    data["profiles"][profile_id] = profile
+    _save(data)
+    return copy.deepcopy(profile)
+
+
+_META_FIELDS = (
+    "base_profile_id",
+    "base_profile_revision",
+    "default_provider_id",
+    "default_model",
+    "default_reasoning_effort",
+)
+
+
+def set_profile_meta(profile_id: str, patch: dict[str, Any], revision: str | None = None) -> dict[str, Any]:
+    """Typed setter for a profile's scalar meta fields (base pointer + the
+    provider/model/reasoning-effort pins). Only keys present in `patch` are
+    changed; the base chain is re-validated before the write."""
+    if not isinstance(patch, dict):
+        raise HarnessProfileError("meta patch must be an object")
+    unknown = set(patch) - set(_META_FIELDS)
+    if unknown:
+        raise HarnessProfileError(f"unknown meta fields: {sorted(unknown)}")
+    with _LOCK:
+        data = _load()
+        clean_id = _clean_id(profile_id)
+        if clean_id == DEFAULT_PROFILE_ID:
+            raise HarnessProfileError("the default profile is not a stored profile")
+        existing = data["profiles"].get(clean_id)
+        if not existing:
+            raise HarnessProfileError("harness profile not found")
+        if revision and existing.get("revision") != revision:
+            raise HarnessProfileError("Harness profile changed; reload before editing")
+        payload = _input_payload_from_profile(existing)
+        for key, value in patch.items():
+            payload[key] = value
+        profile = _normalized_payload(clean_id, payload, existing=existing)
+        return _commit_profile(data, clean_id, profile)
 
 
 def list_profiles() -> list[dict[str, Any]]:
@@ -296,9 +408,7 @@ def upsert_profile(payload: dict[str, Any], profile_id: str | None = None) -> di
             raise HarnessProfileError("the default profile is not a stored profile")
         existing = data["profiles"].get(clean_id)
         profile = _normalized_payload(clean_id, payload, existing=existing)
-        data["profiles"][clean_id] = profile
-        _save(data)
-        return copy.deepcopy(profile)
+        return _commit_profile(data, clean_id, profile)
 
 
 def _id_from_name(value: object) -> str:
@@ -418,23 +528,10 @@ def apply_override_patch(profile_id: str, ops: list[dict[str, Any]], revision: s
                 _set_at_path(overrides, path, copy.deepcopy(op.get("value")))
             else:
                 raise HarnessProfileError("op.op must be set or clear")
-        payload = {
-            "id": clean_id,
-            "name": existing.get("name"),
-            "description": existing.get("description"),
-            "source": existing.get("source"),
-            "overrides": overrides,
-            "mcp_overrides": existing.get("mcp_overrides"),
-            "skill_overrides": existing.get("skill_overrides"),
-            "native_harness_overrides": existing.get("native_harness_overrides"),
-            "provider_run_config_overlay": existing.get("provider_run_config_overlay"),
-            "capability_contexts": existing.get("capability_contexts"),
-            "secret_refs": existing.get("secret_refs"),
-        }
+        payload = _input_payload_from_profile(existing)
+        payload["overrides"] = overrides
         profile = _normalized_payload(clean_id, payload, existing=existing)
-        data["profiles"][clean_id] = profile
-        _save(data)
-        return copy.deepcopy(profile)
+        return _commit_profile(data, clean_id, profile)
 
 
 def delete_profile(profile_id: str, revision: str | None = None) -> bool:

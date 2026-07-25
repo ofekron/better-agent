@@ -190,15 +190,56 @@ def _apply_extension_instance_override(
     # extension settings are secret-typed and currently populated).
     fields["secret_refs"] = _field(list(default_instance.get("secret_refs") or []), None)
 
-    # extension_revision is override-only (a drift pin); Default never pins
-    # a revision since it always tracks live extension state.
-    pinned = override.get("extension_revision") if "extension_revision" in override else None
+    # extension_revision is a drift pin: this profile's own pin wins, else the
+    # base carries it forward (so a child inherits a base's pin), else unset.
+    # Live Default never pins — it always tracks live extension state.
+    if "extension_revision" in override:
+        pinned = override.get("extension_revision")
+    else:
+        pinned = default_instance.get("extension_revision")
     fields["extension_revision"] = _field(pinned, pinned)
     return fields
 
 
+def _resolved_to_default_shape(resolved: dict[str, Any]) -> dict[str, Any]:
+    """Flatten a fully-resolved profile's per-field {resolved, ...} snapshot
+    back to the plain compute_default_profile() shape, so it can serve as the
+    base a derived profile applies its own sparse deltas on top of. Reuses the
+    exact leaves `_apply_extension_instance_override`/`_apply_delta` read."""
+    extension_instances: dict[str, Any] = {}
+    for extension_id, fields in resolved["extension_instances"].items():
+        instance: dict[str, Any] = {
+            "mcp_servers": list(fields["mcp_servers"]["resolved"]),
+            "skills": list(fields["skills"]["resolved"]),
+            "instruction_names": list(fields["instruction_names"]["resolved"]),
+            "setting_overlays": {
+                key: copy.deepcopy(entry["resolved"])
+                for key, entry in (fields.get("setting_overlays") or {}).items()
+            },
+            "headless": bool(fields.get("headless", {}).get("resolved", False)),
+            "secret_refs": list(fields.get("secret_refs", {}).get("resolved") or []),
+        }
+        pinned = fields.get("extension_revision", {}).get("resolved")
+        if pinned:
+            instance["extension_revision"] = pinned
+        extension_instances[extension_id] = instance
+    return {
+        "id": resolved["id"],
+        "extension_instances": extension_instances,
+        "disabled_builtin_tools": list(resolved["disabled_builtin_tools"]["resolved"]),
+        "disabled_builtin_extensions": list(resolved["disabled_builtin_extensions"]["resolved"]),
+        "instruction_sources": {
+            name: copy.deepcopy(entry["resolved"])
+            for name, entry in resolved["instruction_sources"].items()
+        },
+    }
+
+
 def resolve_profile(
-    profile_id: str, revision: str | None = None, default: dict[str, Any] | None = None
+    profile_id: str,
+    revision: str | None = None,
+    default: dict[str, Any] | None = None,
+    _chain: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     """Top-level entry point for the API layer (main.py's harness-profile
     endpoints). Returns a serializable per-field {resolved, override,
@@ -207,21 +248,45 @@ def resolve_profile(
     `default` lets a caller resolving many profiles in one request (e.g.
     `list_harness_profiles`) pass in an already-computed Default synthesis
     instead of triggering a fresh `compute_default_profile()` per profile.
+
+    A profile with `base_profile_id` resolves that base first (recursively) and
+    applies its own deltas on top of the base's resolved state; without one the
+    base is the live Default synthesis. `_chain` guards against a base cycle at
+    resolve time (the store also rejects one at save time).
     """
     if default is None:
         default = compute_default_profile()
+    if profile_id != harness_profile_store.DEFAULT_PROFILE_ID and profile_id in _chain:
+        raise HarnessProfileResolutionError(
+            "harness profile base chain cycle: " + " -> ".join(_chain + (profile_id,))
+        )
+    base_pins = {"default_provider_id": None, "default_model": None, "default_reasoning_effort": None}
     if profile_id == harness_profile_store.DEFAULT_PROFILE_ID:
         stored: dict[str, Any] | None = None
         overrides: dict[str, Any] = {}
+        base_shape = default
     else:
         stored = harness_profile_store.get_profile(profile_id, revision)
         if not stored:
             raise HarnessProfileResolutionError("Harness profile is missing or its pinned revision is unavailable")
         overrides = stored.get("overrides") or {}
+        base_profile_id = stored.get("base_profile_id")
+        if base_profile_id:
+            base_resolved = resolve_profile(
+                base_profile_id,
+                stored.get("base_profile_revision"),
+                default=default,
+                _chain=_chain + (profile_id,),
+            )
+            base_shape = _resolved_to_default_shape(base_resolved)
+            for key in base_pins:
+                base_pins[key] = base_resolved.get(key)
+        else:
+            base_shape = default
 
     override_instances = overrides.get("extension_instances") or {}
     extension_instances: dict[str, Any] = {}
-    for extension_id, default_instance in default["extension_instances"].items():
+    for extension_id, default_instance in base_shape["extension_instances"].items():
         extension_instances[extension_id] = _apply_extension_instance_override(
             default_instance, override_instances.get(extension_id)
         )
@@ -236,15 +301,15 @@ def resolve_profile(
     # referencing its id in an override.
 
     disabled_tools, tools_overridden = _apply_delta(
-        default["disabled_builtin_tools"], overrides.get("disabled_builtin_tools")
+        base_shape["disabled_builtin_tools"], overrides.get("disabled_builtin_tools")
     )
     disabled_extensions, extensions_overridden = _apply_delta(
-        default["disabled_builtin_extensions"], overrides.get("disabled_builtin_extensions")
+        base_shape["disabled_builtin_extensions"], overrides.get("disabled_builtin_extensions")
     )
 
     instruction_sources: dict[str, Any] = {}
     override_sources = overrides.get("instruction_sources") or {}
-    for name, default_source in default["instruction_sources"].items():
+    for name, default_source in base_shape["instruction_sources"].items():
         if name in override_sources:
             instruction_sources[name] = _field(override_sources[name], override_sources[name])
         else:
@@ -260,6 +325,12 @@ def resolve_profile(
         "description": (stored or {}).get("description"),
         "created_at": (stored or {}).get("created_at"),
         "updated_at": (stored or {}).get("updated_at"),
+        "base_profile_id": (stored or {}).get("base_profile_id"),
+        "base_profile_revision": (stored or {}).get("base_profile_revision"),
+        # Effective pins: this profile's own pin wins, else the base chain's.
+        "default_provider_id": (stored or {}).get("default_provider_id") or base_pins["default_provider_id"],
+        "default_model": (stored or {}).get("default_model") or base_pins["default_model"],
+        "default_reasoning_effort": (stored or {}).get("default_reasoning_effort") or base_pins["default_reasoning_effort"],
         "extension_instances": extension_instances,
         "disabled_builtin_tools": _field(disabled_tools, overrides.get("disabled_builtin_tools") if tools_overridden else None),
         "disabled_builtin_extensions": _field(
@@ -273,6 +344,32 @@ def resolve_profile(
         "secret_refs": copy.deepcopy((stored or {}).get("secret_refs") or {}),
         "capability_contexts": copy.deepcopy((stored or {}).get("capability_contexts") or []),
     }
+
+
+def profile_selector_defaults(profile_id: str | None, revision: str | None = None) -> dict[str, str | None]:
+    """The effective provider/model/reasoning-effort pins for a profile
+    (inherited from its base chain when the profile itself pins none). Returns
+    all-None for the Default profile or no profile — Default carries no pin."""
+    empty = {"provider_id": None, "model": None, "reasoning_effort": None}
+    selected = str(profile_id or "").strip()
+    if not selected or selected == harness_profile_store.DEFAULT_PROFILE_ID:
+        return empty
+    resolved = resolve_profile(selected, str(revision or "").strip() or None)
+    return {
+        "provider_id": resolved.get("default_provider_id"),
+        "model": resolved.get("default_model"),
+        "reasoning_effort": resolved.get("default_reasoning_effort"),
+    }
+
+
+def merge_selector_defaults(
+    explicit: dict[str, Any], profile_id: str | None, revision: str | None = None
+) -> dict[str, str | None]:
+    """Fill provider/model/reasoning_effort from a profile's pins ONLY where
+    the caller omitted them (value is None). Explicit caller values always win;
+    with no profile or no pin this is an identity over `explicit`."""
+    pins = profile_selector_defaults(profile_id, revision)
+    return {key: (explicit.get(key) if explicit.get(key) is not None else pins[key]) for key in pins}
 
 
 def _instruction_blocks(

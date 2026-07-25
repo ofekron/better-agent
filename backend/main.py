@@ -9490,19 +9490,32 @@ async def create_session(body: Any = Body(default=None)):
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     harness_profile_id, harness_profile_revision = _harness_profile_selection(body)
-    requested_provider_id = body.get("provider_id")
+    # A harness profile may pin provider/model/reasoning-effort defaults used
+    # ONLY for whichever the caller omitted; explicit body values always win.
+    profile_selectors = harness_profile_resolver.merge_selector_defaults(
+        {
+            "provider_id": body.get("provider_id") or None,
+            "model": str(body.get("model") or "").strip() or None,
+            "reasoning_effort": body.get("reasoning_effort"),
+        },
+        harness_profile_id,
+        harness_profile_revision,
+    )
+    requested_provider_id = profile_selectors["provider_id"]
     provider_record = await asyncio.to_thread(
         _provider_for_required_model,
         requested_provider_id,
     )
-    model = _required_model_from_body_or_provider(body, provider_record)
+    model = _required_model_from_body_or_provider(
+        {**body, "model": profile_selectors["model"] or ""}, provider_record
+    )
     requested_runner = _provider_runner(
         requested_provider_id, body.get("runner"),
     )
     requested_effort = await asyncio.to_thread(
         _provider_reasoning_effort,
         requested_provider_id,
-        _api_reasoning_effort(body.get("reasoning_effort")),
+        _api_reasoning_effort(profile_selectors["reasoning_effort"]),
         requested_runner,
         model,
     )
@@ -14459,12 +14472,23 @@ async def internal_create_session(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     harness_profile_id, harness_profile_revision = _harness_profile_selection(body)
+    # Profile provider/model/effort pins fill in whatever the caller omitted,
+    # outranking sender-session inheritance but never an explicit body value.
+    profile_selectors = harness_profile_resolver.merge_selector_defaults(
+        {
+            "provider_id": str(body.get("provider_id") or "").strip() or None,
+            "model": str(body.get("model") or "").strip() or None,
+            "reasoning_effort": body.get("reasoning_effort"),
+        },
+        harness_profile_id,
+        harness_profile_revision,
+    )
     sender_session_id = str(body.get("sender_session_id") or "").strip()
     sender_session = await _session_lite(sender_session_id) if sender_session_id else None
     if sender_session_id and not sender_session:
         raise HTTPException(status_code=400, detail="sender_session_id does not exist")
     requested_provider_id = await _resolve_provider_id_ref(
-        str(body.get("provider_id") or "").strip(),
+        str(profile_selectors["provider_id"] or "").strip(),
     )
     provider_id = requested_provider_id
     if not provider_id and sender_session:
@@ -14477,7 +14501,7 @@ async def internal_create_session(
         if provider_id == sender_session.get("provider_id"):
             runner_input = sender_session.get("runner")
     runner = _provider_runner(provider_id, runner_input)
-    requested_model = str(body.get("model") or "").strip()
+    requested_model = str(profile_selectors["model"] or "").strip()
     model = ""
     if requested_model:
         model = requested_model
@@ -14491,7 +14515,7 @@ async def internal_create_session(
         model = await asyncio.to_thread(_required_model_from_body_or_provider, {}, provider)
     if requested_model or requested_provider_id:
         await asyncio.to_thread(_validate_provider_model, provider_id, model)
-    requested_effort = body.get("reasoning_effort")
+    requested_effort = profile_selectors["reasoning_effort"]
     reasoning_effort: object = requested_effort
     if (reasoning_effort is None or not str(reasoning_effort).strip()) and sender_session:
         reasoning_effort = str(sender_session.get("reasoning_effort") or "").strip()
