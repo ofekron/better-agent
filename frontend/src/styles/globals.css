@@ -16086,6 +16086,11 @@ pre .inline-tag-highlight {
   overflow-y: auto;
   overscroll-behavior: contain;
   padding: 2px;
+  transition: max-height 0.22s cubic-bezier(0.2, 0.78, 0.28, 1);
+}
+/* An expanded request needs the full chat height; the card scrolls internally. */
+.chat-toast-stack:has(.user-request-toast[data-expanded="true"]) {
+  max-height: calc(100dvh - 120px);
 }
 html[dir="rtl"] .chat-toast-stack {
   right: auto;
@@ -16117,6 +16122,10 @@ html[dir="rtl"] .chat-toast-stack {
     width: auto;
     max-height: min(54vh, 440px);
   }
+  .chat-toast-stack:has(.user-request-toast[data-expanded="true"]),
+  .user-request-toast[data-expanded="true"] {
+    max-height: calc(100dvh - 128px - env(safe-area-inset-bottom, 0px));
+  }
 }
 .user-request-toast {
   position: relative;
@@ -16133,6 +16142,13 @@ html[dir="rtl"] .chat-toast-stack {
   box-shadow: 0 12px 34px rgba(0, 0, 0, 0.48);
   color: #edf6ff;
   animation: user-request-toast-in 0.24s cubic-bezier(0.2, 0.78, 0.28, 1);
+}
+/* Cap the expanded card to the available chat height and let its single grid
+   row shrink, so the response panel becomes the scroll region. */
+.user-request-toast[data-expanded="true"] {
+  align-items: stretch;
+  grid-template-rows: minmax(0, 1fr);
+  max-height: calc(100dvh - 120px);
 }
 .user-request-toast::before {
   content: "";
@@ -16170,6 +16186,7 @@ html[dir="rtl"] .user-request-toast::before {
 .user-request-toast__content {
   display: flex;
   min-width: 0;
+  min-height: 0;
   flex-direction: column;
   gap: 4px;
 }
@@ -16246,6 +16263,10 @@ html[dir="rtl"] .user-request-toast::before {
 }
 .user-request-toast__response {
   margin-top: 4px;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
   animation: user-request-response-in 0.22s cubic-bezier(0.2, 0.78, 0.28, 1);
   transform-origin: top center;
 }

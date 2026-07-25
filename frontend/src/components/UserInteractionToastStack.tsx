@@ -44,6 +44,7 @@ export function UserInteractionToastStack({
         data-testid="user-request-toast"
         data-session-id={request.app_session_id}
         data-kind={request.kind}
+        data-expanded={expanded ? "true" : "false"}
         key={request.request_id}
         role="status"
       >
