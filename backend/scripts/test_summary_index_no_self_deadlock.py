@@ -150,7 +150,7 @@ def _run() -> bool:
         "id": parent_sid, "name": parent_sid, "cwd": CWD,
         "working_mode": None, "working_mode_meta": None,
         "pending_eng_session_id": None, "updated_at": "2026-01-01T00:00:00",
-        "last_seen_event_uid": None, "fork_count": 0, "fork_ids": [],
+        "last_seen_event_uid": None, "fork_count": 0, "all_fork_ids": [],
     })
     _write_full(_v8_record(
         child_sid,
@@ -162,7 +162,7 @@ def _run() -> bool:
         "id": pass1_parent_sid, "name": pass1_parent_sid, "cwd": CWD,
         "working_mode": None, "working_mode_meta": None,
         "pending_eng_session_id": None, "updated_at": "2026-01-01T00:00:00",
-        "last_seen_event_uid": None, "fork_count": 0, "fork_ids": [],
+        "last_seen_event_uid": None, "fork_count": 0, "all_fork_ids": [],
     })
     _write_full(_v8_record(
         pass1_child_sid,
@@ -174,7 +174,7 @@ def _run() -> bool:
         "working_mode": "prompt_engineering",
         "working_mode_meta": {"parent_session_id": pass1_parent_sid},
         "pending_eng_session_id": None, "updated_at": "2026-01-01T00:00:00",
-        "last_seen_event_uid": None, "fork_count": 0, "fork_ids": [],
+        "last_seen_event_uid": None, "fork_count": 0, "all_fork_ids": [],
     })
 
     # --- Check 1: the blocking first build must NOT self-deadlock. ---

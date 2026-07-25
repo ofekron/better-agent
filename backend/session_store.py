@@ -260,7 +260,7 @@ _fork_index: dict[str, str] = {}
 _root_forks: dict[str, set[str]] = {}
 FileSignature = tuple[int, int, int, int, int]
 DirFingerprint = tuple[int, int, int, int, int]
-_FORK_INDEX_SIDECAR_SCHEMA_VERSION = 3
+_FORK_INDEX_SIDECAR_SCHEMA_VERSION = 4
 _root_index_signatures: dict[str, FileSignature] = {}
 _index_loaded = False
 _index_lock = threading.Lock()
@@ -636,7 +636,7 @@ def _copy_jsonish(value):
     if isinstance(value, list):
         return [_copy_jsonish(v) for v in value]
     return value
-_SUMMARY_INDEX_CACHE_VERSION = 2
+_SUMMARY_INDEX_CACHE_VERSION = 3
 # Single-flights the one-time summary-index build. Held ONLY by
 # `_ensure_summary_index` and acquired by nothing else, so it can never be
 # the inner lock of a cycle. The build runs under THIS lock — never under
@@ -836,12 +836,21 @@ def _build_summary_for_root(
     Mirrors the per-root block in the old `_build_session_list`."""
     cwd = root.get("cwd", "")
     import session_organization_store
+    # `fork_count` is the sidebar-visible count (user forks only), while
+    # `all_fork_ids` is the COMPLETE fork set the fork index resolves ids
+    # against — sub-sessions, delegate forks and adv-sync forks included.
+    # Readers trust it as complete for the root revision the summary is
+    # stamped with, so it may reach disk ONLY through `_write_summary_file`,
+    # which publishes it only for a caller that vouched for that revision.
     user_fork_ids: list[str] = []
+    all_fork_ids: list[str] = []
     for fork in _walk_forks(root):
+        fork_id = fork.get("id")
+        if not fork_id:
+            continue
+        all_fork_ids.append(fork_id)
         if fork.get("kind", "user") == "user":
-            fork_id = fork.get("id")
-            if fork_id:
-                user_fork_ids.append(fork_id)
+            user_fork_ids.append(fork_id)
     _msgs = root.get("messages", [])
     _user_msg_count = sum(1 for msg in _msgs if msg.get("role") == "user")
     _last_msg_ts = _msgs[-1].get("timestamp", "") if _msgs else ""
@@ -895,7 +904,7 @@ def _build_summary_for_root(
         "fork_point_seq": None,
         "fork_closed": False,
         "fork_count": len(user_fork_ids),
-        "fork_ids": user_fork_ids,
+        "all_fork_ids": all_fork_ids,
         "supervisor_enabled": root.get("supervisor_enabled", False),
         "supervisor_custom_prompt": root.get("supervisor_custom_prompt", ""),
         "continuation_chain": root.get("continuation_chain", []),
@@ -1700,6 +1709,7 @@ def _write_summary_file(
     *,
     root_mtime_ns: int | None = None,
     expected_root_signature: FileSignature | None = None,
+    fork_set_signature: FileSignature | None = None,
 ) -> None:
     root_path = _root_file_path(root_id)
     if not root_path.exists():
@@ -1723,6 +1733,21 @@ def _write_summary_file(
     try:
         with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
             payload = dict(summary)
+            # Only a caller that vouched for the root revision its fork set
+            # came from may publish it. A partial writer (marker,
+            # last-opened, seen-cursor) carries whatever set its in-memory
+            # summary happened to hold, and stamping the current signature
+            # onto it would republish a stale set as authoritative. Dropping
+            # the field makes readers fall back to a root scan instead.
+            # `expected_root_signature` already implies the match (mismatch
+            # returned above); `fork_set_signature` vouches for the field
+            # alone and lets the rest of the summary land either way.
+            vouched = expected_root_signature is not None or (
+                fork_set_signature is not None
+                and fork_set_signature == current_root_signature
+            )
+            if not vouched:
+                payload.pop("all_fork_ids", None)
             if current_root_signature is not None:
                 payload["_root_file_signature"] = list(current_root_signature)
             json.dump(payload, f)
@@ -1997,8 +2022,8 @@ def _sanitize_summary(summary: dict) -> tuple[dict, bool]:
     if "workers" in cleaned:
         cleaned.pop("workers", None)
         changed = True
-    if "fork_ids" not in cleaned and int(cleaned.get("fork_count") or 0) == 0:
-        cleaned["fork_ids"] = []
+    if "fork_ids" in cleaned:
+        cleaned.pop("fork_ids", None)
         changed = True
     return cleaned, changed
 
@@ -2125,7 +2150,10 @@ def _do_build_summary_index_unsafe() -> None:
     # Trees migrated in Pass 2 that need a persist — written AFTER the
     # locks release so the next start hits the Pass-1 fast path.
     dirty_trees: list[dict] = []
-    stale_summaries: list[tuple[str, dict]] = []
+    # (sid, summary, root_signature) — the signature is None for a summary
+    # repaired in place, which makes `_write_summary_file` drop the fork set
+    # it could not vouch for.
+    stale_summaries: list[tuple[str, dict, Optional[FileSignature]]] = []
     eng_by_parent: dict[str, str] = {}
 
     # Pass 1: load from summary files where available + fresh
@@ -2147,6 +2175,11 @@ def _do_build_summary_index_unsafe() -> None:
                     if summary.get("id") == sid and "last_seen_event_uid" in summary:
                         if not _summary_has_current_projections(summary):
                             continue
+                        # Captured before sanitize strips it: this is the
+                        # root revision the on-disk fork set was built from,
+                        # and it is what lets a repaired summary republish
+                        # that set instead of dropping it.
+                        published_signature = _signature_from_summary(summary)
                         summary, cleaned = _sanitize_summary(summary)
                         seen_cursors = read_seen_cursors(sid) if sid in seen_cursor_ids else {}
                         if sid in seen_cursors:
@@ -2160,10 +2193,7 @@ def _do_build_summary_index_unsafe() -> None:
                             pid = meta.get("parent_session_id")
                             if pid:
                                 eng_by_parent[pid] = sid
-                        needs_fork_backfill = (
-                            "fork_ids" not in summary
-                            and int(summary.get("fork_count") or 0) > 0
-                        )
+                        needs_fork_backfill = "all_fork_ids" not in summary
                         if not needs_fork_backfill:
                             with _summary_index_lock:
                                 existing = _summary_index.get(sid)
@@ -2174,7 +2204,9 @@ def _do_build_summary_index_unsafe() -> None:
                                 if _summary_metadata_changed(existing, summary):
                                     _summary_metadata_version += 1
                             if cleaned:
-                                stale_summaries.append((sid, summary))
+                                stale_summaries.append(
+                                    (sid, summary, published_signature),
+                                )
                             published = True
             except (json.JSONDecodeError, KeyError, ValueError, OSError):
                 pass
@@ -2188,6 +2220,10 @@ def _do_build_summary_index_unsafe() -> None:
     for sid in missing_ids:
         fpath = full_files[sid]
         try:
+            # Captured BEFORE the read so a concurrent root write makes the
+            # write-back below fail closed instead of stamping a fresh
+            # signature onto a fork set derived from the older revision.
+            root_signature = _session_file_signature(fpath)
             raw = json.loads(fpath.read_text(encoding="utf-8"))
             if not isinstance(raw, dict) or "id" not in raw:
                 continue
@@ -2209,7 +2245,7 @@ def _do_build_summary_index_unsafe() -> None:
                     _summary_order_version += 1
                 if _summary_metadata_changed(existing, summary):
                     _summary_metadata_version += 1
-            stale_summaries.append((data["id"], summary))
+            stale_summaries.append((data["id"], summary, root_signature))
         except (json.JSONDecodeError, KeyError, ValueError, OSError):
             continue
         if provider_ctx["dirty"][0]:
@@ -2239,14 +2275,24 @@ def _do_build_summary_index_unsafe() -> None:
 
     # Phase 3: persist migrated trees outside both locks (write_session_full
     # → _upsert_summary takes _summary_index_lock cleanly here). Best-effort.
+    # A migrated tree's write moves its root signature, which would strand the
+    # fork set captured before the migration. The persisted tree IS the one
+    # the summary was built from, so its post-write signature vouches for it.
+    rewritten_signatures: dict[str, Optional[FileSignature]] = {}
     for tree in dirty_trees:
         try:
-            write_session_full(tree, bump_updated_at=False)
+            rewritten_signatures[tree["id"]] = write_session_full(
+                tree, bump_updated_at=False,
+            )
         except Exception:
             pass
-    for sid, summary in stale_summaries:
+    for sid, summary, root_signature in stale_summaries:
         try:
-            _write_summary_file(sid, summary)
+            _write_summary_file(
+                sid,
+                summary,
+                fork_set_signature=rewritten_signatures.get(sid, root_signature),
+            )
         except Exception:
             pass
     if not dirty_trees and not stale_summaries:
@@ -2532,37 +2578,18 @@ def _fork_index_path() -> Path:
     return _sessions_dir() / ".fork-index.json"
 
 
+def _signature_from_summary(summary: dict) -> Optional[FileSignature]:
+    """The root revision a summary was built from, as stamped by
+    `_write_summary_file`. None when the stamp is absent or malformed."""
+    raw = summary.get("_root_file_signature")
+    if not isinstance(raw, list) or len(raw) != 5:
+        return None
+    return tuple(raw)
+
+
 def _summary_matches_root_identity(summary: dict, path: Path) -> bool:
     signature = _session_file_signature(path)
-    raw = summary.get("_root_file_signature")
-    return (
-        signature is not None
-        and isinstance(raw, list)
-        and len(raw) == 5
-        and tuple(raw) == signature
-    )
-
-
-def _session_json_files_requiring_fork_scan() -> Iterator[Path]:
-    for p in _session_json_files():
-        sp = p.with_name(f"{p.stem}.summary.json")
-        try:
-            if sp.stat().st_mtime_ns >= p.stat().st_mtime_ns:
-                summary = json.loads(sp.read_text(encoding="utf-8"))
-                if (
-                    summary.get("id") != p.stem
-                    or not _summary_matches_root_identity(summary, p)
-                ):
-                    yield p
-                    continue
-                fork_ids = summary.get("fork_ids")
-                if isinstance(fork_ids, list):
-                    continue
-                if int(summary.get("fork_count") or 0) == 0:
-                    continue
-        except (json.JSONDecodeError, OSError, TypeError, ValueError):
-            pass
-        yield p
+    return signature is not None and _signature_from_summary(summary) == signature
 
 
 def _dir_fingerprint() -> DirFingerprint:
@@ -2668,7 +2695,7 @@ def _build_index_snapshot(
             ):
                 remaining_scan_paths.append(path)
                 continue
-            fork_ids = summary.get("fork_ids")
+            fork_ids = summary.get("all_fork_ids")
             if isinstance(fork_ids, list):
                 current = {
                     fork_id
@@ -2678,9 +2705,6 @@ def _build_index_snapshot(
                 for fork_id in current:
                     fork_index[fork_id] = path.stem
                 root_forks[path.stem] = current
-                continue
-            if int(summary.get("fork_count") or 0) == 0:
-                root_forks[path.stem] = set()
                 continue
         except (json.JSONDecodeError, OSError, TypeError, ValueError):
             pass
@@ -2719,7 +2743,7 @@ def _fork_index_entry_from_summary_or_root(
                 summary.get("id") == path.stem
                 and _summary_matches_root_identity(summary, path)
             ):
-                fork_ids = summary.get("fork_ids")
+                fork_ids = summary.get("all_fork_ids")
                 if isinstance(fork_ids, list):
                     return (
                         path.stem,
@@ -2730,8 +2754,6 @@ def _fork_index_entry_from_summary_or_root(
                         },
                         file_signature,
                     )
-                if int(summary.get("fork_count") or 0) == 0:
-                    return path.stem, set(), file_signature
     except (json.JSONDecodeError, OSError, TypeError, ValueError):
         pass
     try:
@@ -2937,15 +2959,13 @@ def _fork_ids_from_fresh_summary(path: Path) -> Optional[set[str]]:
             or not _summary_matches_root_identity(summary, path)
         ):
             return None
-        fork_ids = summary.get("fork_ids")
+        fork_ids = summary.get("all_fork_ids")
         if isinstance(fork_ids, list):
             return {
                 fork_id
                 for fork_id in fork_ids
                 if isinstance(fork_id, str) and fork_id
             }
-        if int(summary.get("fork_count") or 0) == 0:
-            return set()
     except (json.JSONDecodeError, OSError, TypeError, ValueError):
         return None
     return None
@@ -5015,7 +5035,7 @@ def write_session_full(
     bump_updated_at: bool = True,
     preserve_projection_fields: bool = False,
     already_persistable: bool = False,
-) -> None:
+) -> Optional[FileSignature]:
     """Write the whole ROOT tree to disk. Caller MUST pass a root dict
     (the top-level record), not an embedded fork — embedded fork writes
     happen by mutating the in-memory root and calling this function on
@@ -5119,6 +5139,11 @@ def write_session_full(
         _abandon_root_change(root_change)
         raise
     _complete_root_change(root_change)
+    # The signature of the bytes THIS call wrote. A caller that also
+    # publishes a projection of `root` vouches with this, never with a
+    # fresh stat — a concurrent writer landing after the write would
+    # otherwise hand back its revision for someone else's tree.
+    return file_signature
 
 
 def list_sessions() -> list[dict]:

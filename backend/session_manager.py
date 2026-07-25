@@ -2486,23 +2486,15 @@ class SessionManager:
             return out
 
     def exists(self, sid: str) -> bool:
-        rid = self._node_root_id.get(sid)
-        if rid is not None:
-            root = self._roots.get(rid)
-            if root is not None:
-                return session_store._find_in_tree(root, sid) is not None
-        rid = session_store._loaded_root_id_for(sid)
-        if rid is not None:
-            self._node_root_id[sid] = rid
-            return True
-        if session_store.session_file_fingerprint(sid) is not None:
-            self._node_root_id[sid] = sid
-            self._node_root_missing_until.pop(sid, None)
-            return True
-        rid = session_store._resolve_root_id(sid)
+        """Existence answers MUST come from the same resolution ladder
+        `get_lite` uses, including its negative caching — otherwise the
+        two disagree about the same sid for the negative TTL window."""
+        rid = self._root_id_for(sid)
         if rid is None:
             return False
-        self._node_root_id[sid] = rid
+        root = self._roots.get(rid)
+        if root is not None:
+            return session_store._find_in_tree(root, sid) is not None
         return True
 
     def get_field(self, sid: str, field: str) -> Any:

@@ -76,7 +76,7 @@ def _write_summary(
     sid: str,
     fork_count: int,
     *,
-    fork_ids: list[str] | None = None,
+    all_fork_ids: list[str] | None = None,
     stale: bool = False,
 ) -> None:
     sessions_dir = Path(_TMP_HOME) / "sessions"
@@ -89,7 +89,7 @@ def _write_summary(
             "id": sid,
             "updated_at": "2026-06-22T00:00:00+00:00",
             "fork_count": fork_count,
-            "fork_ids": fork_ids if fork_ids is not None else [],
+            "all_fork_ids": all_fork_ids if all_fork_ids is not None else [],
             "last_seen_event_uid": None,
             "current_todos": [],
             "current_tasks": [],
@@ -231,7 +231,7 @@ def test_fresh_fork_summary_builds_index_without_root_parse() -> bool:
         "fork_point_seq": 0,
     }
     _write(_record("target-root", forks=[fork]))
-    _write_summary("target-root", 1, fork_ids=["child-fork"])
+    _write_summary("target-root", 1, all_fork_ids=["child-fork"])
 
     original_loads = session_store.json.loads
     parsed_roots: list[str] = []
@@ -264,7 +264,7 @@ def test_fork_index_sidecar_builds_index_without_root_or_summary_parse() -> bool
         "fork_point_seq": 0,
     }
     _write(_record("target-root", forks=[fork]))
-    _write_summary("target-root", 1, fork_ids=["child-fork"])
+    _write_summary("target-root", 1, all_fork_ids=["child-fork"])
 
     first = session_store._resolve_root_id("child-fork")
     session_store._fork_index.clear()
@@ -304,7 +304,7 @@ def test_index_sidecar_write_happens_outside_index_lock() -> bool:
         "fork_point_seq": 0,
     }
     _write(_record("target-root", forks=[fork]))
-    _write_summary("target-root", 1, fork_ids=["child-fork"])
+    _write_summary("target-root", 1, all_fork_ids=["child-fork"])
 
     original_write = session_store._write_index_sidecar
     lock_states: list[bool] = []
@@ -339,7 +339,7 @@ def test_fork_index_scan_avoids_path_glob() -> bool:
         "fork_point_seq": 0,
     }
     _write(_record("target-root", forks=[fork]))
-    _write_summary("target-root", 1, fork_ids=["child-fork"])
+    _write_summary("target-root", 1, all_fork_ids=["child-fork"])
 
     original_glob = Path.glob
     calls = 0
@@ -679,7 +679,7 @@ def test_external_fork_write_reconciles_before_sidecar_publish() -> bool:
         "fork_point_seq": 0,
     }
     _write(_record("target-root", forks=[fork]))
-    _write_summary("target-root", 1, fork_ids=["external-fork"])
+    _write_summary("target-root", 1, all_fork_ids=["external-fork"])
     session_store.project_external_root_change("target-root")
     session_store._persist_index_sidecar_if_loaded()
     session_store._index_sidecar_write_queue.join()
@@ -719,7 +719,7 @@ def test_preserved_mtime_size_topology_rewrite_invalidates_sidecar() -> bool:
     old_root = _record("target-root", forks=[old_fork])
     try:
         _write(old_root)
-        _write_summary("target-root", 1, fork_ids=["old-fork-id"])
+        _write_summary("target-root", 1, all_fork_ids=["old-fork-id"])
         session_store._ensure_index()
         session_store._index_sidecar_write_queue.join()
 
@@ -858,7 +858,7 @@ def test_loaded_fork_metadata_write_skips_fork_index_sidecar() -> bool:
     }
     root = _record("target-root", forks=[fork])
     _write(root)
-    _write_summary("target-root", 1, fork_ids=["child-fork"])
+    _write_summary("target-root", 1, all_fork_ids=["child-fork"])
     session_store._ensure_index()
     session_store._index_sidecar_write_queue.join()
     sidecar = Path(_TMP_HOME) / "sessions" / ".fork-index.json"
@@ -908,7 +908,7 @@ def test_write_session_full_updates_unloaded_fork_index_sidecar() -> bool:
     }
     root = _record("target-root", forks=[fork])
     _write(root)
-    _write_summary("target-root", 1, fork_ids=["child-fork"])
+    _write_summary("target-root", 1, all_fork_ids=["child-fork"])
 
     first = session_store._resolve_root_id("child-fork")
     session_store._fork_index.clear()
@@ -949,25 +949,56 @@ def test_write_session_full_updates_unloaded_fork_index_sidecar() -> bool:
     return ok
 
 
-def test_legacy_fork_summary_backfills_fork_ids() -> bool:
+def test_legacy_summary_backfills_all_fork_ids() -> bool:
+    """A summary written before the complete-fork-set field existed carries
+    only the kind-filtered `fork_ids`. It must be rebuilt from the root, not
+    trusted — otherwise every non-user fork stays unresolvable."""
     _reset_home()
     fork = {
         **_record("child-fork"),
         "parent_session_id": "target-root",
         "fork_point_seq": 0,
+        "kind": "sub_session",
     }
     _write(_record("target-root", forks=[fork]))
-    _write_summary("target-root", 1, fork_ids=None)
+    _write_summary("target-root", 0)
     summary_path = Path(_TMP_HOME) / "sessions" / "target-root.summary.json"
     legacy = json.loads(summary_path.read_text(encoding="utf-8"))
-    legacy.pop("fork_ids", None)
+    legacy.pop("all_fork_ids", None)
+    legacy["fork_ids"] = []
     summary_path.write_text(json.dumps(legacy), encoding="utf-8")
 
     session_store._ensure_summary_index(blocking=True)
 
     summary = json.loads(summary_path.read_text(encoding="utf-8"))
-    ok = summary.get("fork_ids") == ["child-fork"]
-    print(f"{PASS if ok else FAIL} legacy fork summary backfills fork_ids")
+    ok = summary.get("all_fork_ids") == ["child-fork"] and "fork_ids" not in summary
+    print(
+        f"{PASS if ok else FAIL} legacy summary backfills all_fork_ids"
+        f"{'' if ok else f' summary={summary!r}'}"
+    )
+    return ok
+
+
+def test_sub_session_fork_resolves_through_summary() -> bool:
+    """The fork index resolves ids for EVERY fork kind. `fork_count` counts
+    user forks only, so a root whose sole child is a sub-session reports
+    zero — that must not be read as "this root has no forks"."""
+    _reset_home()
+    fork = {
+        **_record("hidden-sub"),
+        "parent_session_id": "target-root",
+        "fork_point_seq": 0,
+        "kind": "sub_session",
+    }
+    _write(_record("target-root", forks=[fork]))
+    _write_summary("target-root", 0, all_fork_ids=["hidden-sub"])
+
+    resolved = session_store._resolve_root_id("hidden-sub")
+    ok = resolved == "target-root"
+    print(
+        f"{PASS if ok else FAIL} sub-session fork resolves through summary"
+        f"{'' if ok else f' resolved={resolved!r}'}"
+    )
     return ok
 
 
@@ -1077,7 +1108,8 @@ def main() -> int:
             test_loaded_fork_metadata_write_skips_fork_index_sidecar(),
             test_write_session_full_skips_fork_index_sidecar_for_metadata_only_write(),
             test_write_session_full_updates_unloaded_fork_index_sidecar(),
-            test_legacy_fork_summary_backfills_fork_ids(),
+            test_legacy_summary_backfills_all_fork_ids(),
+            test_sub_session_fork_resolves_through_summary(),
             test_stale_zero_fork_summary_still_scans_root(),
             test_summary_build_refreshes_stale_summary_file(),
             test_root_change_projection_accepts_only_vanished_upsert(),
