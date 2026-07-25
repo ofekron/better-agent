@@ -89,13 +89,6 @@ def run() -> None:
     finally:
         config_store._read_api_key = orig_read_api_key  # type: ignore[attr-defined]
 
-    # The assistant extension's board analyzer resolves from a dedicated
-    # `assistant` internal-LLM task (its own settings row), registered as a
-    # known task and ready on Inherit via the same default-provider fallback.
-    check(
-        "assistant" in config_store.internal_llm_tasks(),
-        "assistant is a registered internal-LLM task",
-    )
     for task in (
         "delegation_task",
         "delegation_message",
@@ -133,14 +126,9 @@ def run() -> None:
         es.extension_internal_llm_tasks(bridge_record) == ["delegation_session_bridge"],
         "session bridge extension owns cross-session delegation task",
     )
-    assistant_resolved = config_store.resolve_internal_llm("assistant")
     check(
-        bool(assistant_resolved.get("provider_id")) and bool(assistant_resolved.get("model")),
-        "assistant task resolves to a concrete provider + model on Inherit",
-    )
-    check(
-        es._internal_llm_task_ready("assistant") is True,
-        "assistant task is ready via default-provider fallback",
+        "assistant" not in config_store.internal_llm_tasks(),
+        "assistant task is not registered (board analyzer tier deleted)",
     )
     api_provider = config_store.add_provider({
         "name": "api-key-assigned",
