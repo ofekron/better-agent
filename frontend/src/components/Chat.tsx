@@ -566,8 +566,15 @@ function turnGroupRenderKey(group: TurnGroupData): string {
 }
 
 function modelSwitchEvents(message?: ChatMessage): WSEvent[] {
-  const events = message?.events?.filter((event) => event.type === "model_switched") ?? [];
-  return events.length > 0 ? events : EMPTY_MODEL_SWITCH_EVENTS;
+  // Completed assistant messages ship stubbed on reload (`events: []` with
+  // the preview in `stub.last_events`), so a model-switch badge that shows
+  // live would disappear on reload unless we also consult the stub tail.
+  const fromEvents = message?.events?.filter((event) => event.type === "model_switched") ?? [];
+  if (fromEvents.length > 0) return fromEvents;
+  const fromStub = (message?.stub?.last_events ?? []).filter(
+    (event) => event.type === "model_switched",
+  );
+  return fromStub.length > 0 ? fromStub : EMPTY_MODEL_SWITCH_EVENTS;
 }
 
 interface Props {

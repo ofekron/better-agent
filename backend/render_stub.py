@@ -33,7 +33,14 @@ _NON_RENDER_TYPES = frozenset({
 
 STUB_TAIL = 25
 _PANEL_ANCHOR_CACHE = "_panel_anchor_cache"
-_STUB_ALWAYS_INCLUDE_TYPES = frozenset({"steer_prompt"})
+# Boundary markers that must survive stubbing so the frontend can render
+# them without expanding the message. `steer_prompt` marks a mid-turn
+# steering insertion; `model_switched` marks a provider/model change at a
+# turn boundary. Both are rare and carry turn-delimiter semantics — the
+# 25-event tail of a long turn would otherwise push them out of the
+# collapsed preview, making the badge vanish on reload (when completed
+# messages ship stubbed with `events: []`).
+_STUB_ALWAYS_INCLUDE_TYPES = frozenset({"steer_prompt", "model_switched"})
 
 
 def primary_events(msg: dict) -> list:
