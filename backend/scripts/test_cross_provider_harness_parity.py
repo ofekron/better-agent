@@ -478,6 +478,8 @@ def main() -> int:
     test_run_env_is_kind_agnostic_and_deterministic()
     test_delegate_task_schema_is_shared_by_runner_providers()
     test_gemini_delegate_task_params_match_shared_schema()
+    test_stop_turn_schema_is_shared_across_providers()
+    test_provider_catalog_schema_is_shared_across_providers()
     test_builtin_mcp_reserved_servers_parity()
     test_builtin_mcp_capabilities_server_identical_across_providers()
     test_runtime_skill_contexts_is_provider_agnostic()
