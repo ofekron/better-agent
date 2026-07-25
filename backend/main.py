@@ -742,7 +742,13 @@ def _record_model_switched_event(
         "msg_id": msg_id,
     }
     event = {"type": "model_switched", "data": data}
-    session_manager.append_native_event(session_id, msg_id, event)
+    # Journal FIRST: events.jsonl is the durable source the render tree is
+    # rebuilt from on reload, while `append_native_event` only mutates the
+    # in-memory tree (session.json strips events). Writing the render tree
+    # first and the journal second leaves the badge live-visible but
+    # journal-absent if the process dies between them — so it vanishes on
+    # reload. Journal-first fails closed: on publish failure the live tree
+    # never gets an event it can't recover.
     from event_journal import publish_event_sync
     publish_event_sync(
         session_id=root_id,
@@ -753,6 +759,7 @@ def _record_model_switched_event(
         message_id=msg_id,
         timeout=30,
     )
+    session_manager.append_native_event(session_id, msg_id, event)
 
 
 def _session_event_file_fingerprint(root_id: str) -> tuple[int, int]:

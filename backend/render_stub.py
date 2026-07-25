@@ -41,6 +41,9 @@ _PANEL_ANCHOR_CACHE = "_panel_anchor_cache"
 # collapsed preview, making the badge vanish on reload (when completed
 # messages ship stubbed with `events: []`).
 _STUB_ALWAYS_INCLUDE_TYPES = frozenset({"steer_prompt", "model_switched"})
+# Upper bound on how many pinned boundary markers a single collapsed preview
+# retains. Realistic turns carry 0–2; the cap only bounds pathological growth.
+_STUB_PINNED_CAP = 8
 
 
 def primary_events(msg: dict) -> list:
@@ -223,12 +226,16 @@ def renderable_count(msg: dict) -> int:
 def stub_preview_events(rendered: list, tail: int) -> list:
     tail_events = rendered[-tail:] if tail > 0 else []
     tail_ids = {id(e) for e in tail_events}
+    # Boundary markers are pinned so a collapsed preview still shows them
+    # regardless of tail position. Cap the pinned set (most-recent K) so a
+    # pathological message with many pinned events can't grow the preview
+    # without bound; the full list remains available via expand.
     pinned = [
         e for e in rendered
         if isinstance(e, dict)
         and e.get("type") in _STUB_ALWAYS_INCLUDE_TYPES
         and id(e) not in tail_ids
-    ]
+    ][-_STUB_PINNED_CAP:]
     return pinned + tail_events
 
 

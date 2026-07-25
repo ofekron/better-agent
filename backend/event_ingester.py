@@ -32,7 +32,13 @@ import session_store
 logger = logging.getLogger(__name__)
 
 _UUID_KEY = "uuid"
-_EVENT_SUMMARIES_VERSION = 6
+# Bump when the derivation of a summary's `last_events` changes so existing
+# sidecars (which cache the pre-computed preview verbatim) are invalidated
+# and rebuilt. v7: `model_switched` pinned into the preview by
+# `render_stub._STUB_ALWAYS_INCLUDE_TYPES` — without this bump every
+# pre-existing session keeps its stale unpinned preview forever (the
+# incremental path only folds NEW events, never re-prunes old ones).
+_EVENT_SUMMARIES_VERSION = 7
 _MAX_OPEN_APPEND_HANDLES = 64
 # Stable-storage fsync cadence for the background flusher. `fh.flush()`
 # (kernel page-cache visibility — what cross-process tailers and readers
