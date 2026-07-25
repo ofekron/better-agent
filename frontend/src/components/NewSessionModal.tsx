@@ -1065,32 +1065,35 @@ export function NewSessionModal({
               />
             </div>
           </div>
-          <div className="ns-modal-section">
-            <div className="ns-modal-section-title">{t("newSession.capabilities", "Capabilities")}</div>
-            <button
-              type="button"
-              className="btn-secondary ns-attach-btn"
-              onClick={() => setCapabilityPickerOpen(true)}
-            >
-              <Icon name="sparkles" size={14} /> {t("newSession.addCapability", "Add capability")}
-            </button>
-            {capabilityContexts.length > 0 && (
-              <div className="capability-context-list">
-                {capabilityContexts.map((capability) => (
-                  <span key={capability.source_id} className="capability-context-chip">
-                    {capability.name}
-                    <button
-                      type="button"
-                      onClick={() => setCapabilityContexts((prev) => prev.filter((item) => item.source_id !== capability.source_id))}
-                      aria-label={`Remove ${capability.name}`}
-                    >
-                      ×
-                    </button>
-                  </span>
-                ))}
-              </div>
-            )}
-          </div>
+          {effectiveOrchestrationMode === "native" && (
+            <RuntimeProfilePicker
+              label={t("newSession.sessionRuntimeProfile")}
+              role="main"
+              providers={activeProviders}
+              value={main}
+              onChange={setMain}
+            />
+          )}
+
+          {effectiveOrchestrationMode === "team" && (
+            <>
+              <RuntimeProfilePicker
+                label={t("newSession.managerRuntimeProfile")}
+                role="main"
+                providers={managerCapableProviders}
+                value={main}
+                onChange={setMain}
+              />
+              <RuntimeProfilePicker
+                label={t("newSession.workerRuntimeProfile")}
+                role="worker"
+                providers={activeProviders}
+                value={worker}
+                onChange={setWorker}
+              />
+            </>
+          )}
+
           <div className="ns-modal-section">
             <div className="ns-modal-section-title">{t("newSession.project")}</div>
             <div className="ns-modal-row">
@@ -1214,34 +1217,32 @@ export function NewSessionModal({
             />
           </div>
 
-          {effectiveOrchestrationMode === "native" && (
-            <RuntimeProfilePicker
-              label={t("newSession.sessionRuntimeProfile")}
-              role="main"
-              providers={activeProviders}
-              value={main}
-              onChange={setMain}
-            />
-          )}
-
-          {effectiveOrchestrationMode === "team" && (
-            <>
-              <RuntimeProfilePicker
-                label={t("newSession.managerRuntimeProfile")}
-                role="main"
-                providers={managerCapableProviders}
-                value={main}
-                onChange={setMain}
-              />
-              <RuntimeProfilePicker
-                label={t("newSession.workerRuntimeProfile")}
-                role="worker"
-                providers={activeProviders}
-                value={worker}
-                onChange={setWorker}
-              />
-            </>
-          )}
+          <div className="ns-modal-section">
+            <div className="ns-modal-section-title">{t("newSession.capabilities", "Capabilities")}</div>
+            <button
+              type="button"
+              className="btn-secondary ns-attach-btn"
+              onClick={() => setCapabilityPickerOpen(true)}
+            >
+              <Icon name="sparkles" size={14} /> {t("newSession.addCapability", "Add capability")}
+            </button>
+            {capabilityContexts.length > 0 && (
+              <div className="capability-context-list">
+                {capabilityContexts.map((capability) => (
+                  <span key={capability.source_id} className="capability-context-chip">
+                    {capability.name}
+                    <button
+                      type="button"
+                      onClick={() => setCapabilityContexts((prev) => prev.filter((item) => item.source_id !== capability.source_id))}
+                      aria-label={`Remove ${capability.name}`}
+                    >
+                      ×
+                    </button>
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
 
           {showPicker && (
             <MachineNodePicker
