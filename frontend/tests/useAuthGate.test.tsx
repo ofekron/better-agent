@@ -37,6 +37,13 @@ async function flush() {
   });
 }
 
+// checkAuth also logs each terminal outcome via a real fetch to
+// /api/logs/frontend (see useAuthGate.ts) — exclude those from assertions
+// that count auth-probe calls specifically.
+function authFetchCallCount(): number {
+  return vi.mocked(fetch).mock.calls.filter(([url]) => !String(url).includes("/api/logs/frontend")).length;
+}
+
 describe("useAuthGate", () => {
   beforeEach(() => {
     vi.useFakeTimers();
@@ -83,7 +90,7 @@ describe("useAuthGate", () => {
     await act(async () => vi.advanceTimersByTimeAsync(1_000));
 
     expect(result.current.status).toBe("setup");
-    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(authFetchCallCount()).toBe(3);
   });
 
   it("starts a fresh generation when connectivity or visibility returns", async () => {
@@ -107,7 +114,7 @@ describe("useAuthGate", () => {
     await flush();
 
     expect(result.current.status).toBe("authed");
-    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(authFetchCallCount()).toBe(3);
   });
 
   it("declares unreachable when a session was never established", async () => {
@@ -149,8 +156,6 @@ describe("useAuthGate", () => {
     vi.mocked(fetch).mockRejectedValue(new Error("network down"));
     act(() => window.dispatchEvent(new Event("online")));
     await act(async () => vi.advanceTimersByTimeAsync(6_100));
-    // logDurable defers its POST via setTimeout(0); flush it.
-    await act(async () => vi.advanceTimersByTimeAsync(0));
 
     const logCalls = vi.mocked(fetch).mock.calls.filter(([url]) => String(url).includes("/api/logs/frontend"));
     const logCall = logCalls.at(-1);
@@ -213,11 +218,11 @@ describe("useAuthGate", () => {
 
     act(() => onAppStateChange?.({ isActive: false }));
     await flush();
-    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(authFetchCallCount()).toBe(1);
 
     act(() => onAppStateChange?.({ isActive: true }));
     await flush();
-    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(authFetchCallCount()).toBe(2);
 
     rendered.unmount();
     await flush();

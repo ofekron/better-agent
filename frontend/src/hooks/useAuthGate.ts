@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { App as CapApp, type AppState } from "@capacitor/app";
 import { Capacitor } from "@capacitor/core";
-import { logDurable } from "../lib/frontendLogger";
+import { logDurableImmediate } from "../lib/frontendLogger";
 
 export type AuthStatus = "loading" | "anon" | "authed" | "setup" | "unreachable";
 
@@ -118,7 +118,7 @@ export function useAuthGate(api: string): AuthGateState & { checkAuth: () => voi
   // path to "unreachable" (exhausted retries AND a definitive non-retryable
   // probe result), not just one of them.
   //
-  // Best-effort mirror of `state.status`, read only for the `logDurable`
+  // Best-effort mirror of `state.status`, read only for the `logDurableImmediate`
   // calls below — NOT the decision logic (that stays in the functional
   // setState updaters, which read the live value with no stale-capture
   // risk). A log line reading a value that's one render behind is fine;
@@ -144,7 +144,11 @@ export function useAuthGate(api: string): AuthGateState & { checkAuth: () => voi
           const result = await probeAuth(api, generation.signal);
           if (generation.signal.aborted) return;
           const suppressed = result.status === "unreachable" && lastLoggedStatusRef.current === "authed";
-          logDurable("auth-gate", "check_resolved", {
+          // Immediate, not logDurable: a boot that resolves this and then
+          // tears down (reload/backgrounded/killed) within the same tick as
+          // logDurable's deferred setTimeout(0) send would lose the line
+          // entirely — this is precisely the moment under investigation.
+          logDurableImmediate("auth-gate", "check_resolved", {
             // `result.status` is the DECIDED auth state (authed/anon/setup/
             // unreachable), not an HTTP code — every non-401 non-retryable
             // response collapses into "unreachable" here. `result.error`
@@ -167,7 +171,7 @@ export function useAuthGate(api: string): AuthGateState & { checkAuth: () => voi
       if (generation.signal.aborted) return;
       const suppressed = lastLoggedStatusRef.current === "authed";
       const err = lastError instanceof Error ? lastError : null;
-      logDurable("auth-gate", "check_exhausted", {
+      logDurableImmediate("auth-gate", "check_exhausted", {
         // Distinguishes a stalled/blackholed network (TimeoutError, from
         // fetchWithTimeout's 5s abort) from connection-refused/DNS
         // (TypeError: Failed to fetch) from a backend that's up but
