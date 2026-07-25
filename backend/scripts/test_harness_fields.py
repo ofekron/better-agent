@@ -245,6 +245,72 @@ def test_two_toggles_on_one_leaf_compose_in_a_single_request() -> None:
     assert skills["resolved"] == ["fixture-skill"]
 
 
+def test_descriptor_exposes_profile_meta_fields() -> None:
+    descriptor = harness_fields.descriptor()
+    meta = descriptor["profile_meta"]
+    assert meta["id"] == harness_fields.GROUP_PROFILE_META
+    names = {field["name"] for field in meta["fields"]}
+    assert names == set(harness_fields.PROFILE_META_FIELDS)
+
+
+def test_profile_meta_write_routes_to_set_profile_meta() -> None:
+    harness_profile_store.create_profile({"id": "meta.base.a", "name": "Meta Base A"})
+    harness_profile_store.create_profile({"id": "meta.child.a", "name": "Meta Child A"})
+    harness_field_writer.apply_field_writes(
+        "meta.child.a",
+        None,
+        [
+            {"path": [harness_fields.GROUP_PROFILE_META, "base_profile_id"], "value": "meta.base.a"},
+            {"path": [harness_fields.GROUP_PROFILE_META, "default_provider_id"], "value": "codex"},
+            {"path": [harness_fields.GROUP_PROFILE_META, "default_model"], "value": "gpt-5.5"},
+        ],
+    )
+    stored = harness_profile_store.get_profile("meta.child.a")
+    assert stored["base_profile_id"] == "meta.base.a"
+    assert stored["default_provider_id"] == "codex"
+    assert stored["default_model"] == "gpt-5.5"
+    # An empty value clears the pin back to unset.
+    harness_field_writer.apply_field_writes(
+        "meta.child.a",
+        None,
+        [{"path": [harness_fields.GROUP_PROFILE_META, "default_model"], "value": ""}],
+    )
+    assert harness_profile_store.get_profile("meta.child.a")["default_model"] is None
+
+
+def test_profile_meta_write_rejected_on_default() -> None:
+    try:
+        harness_field_writer.apply_field_writes(
+            "default",
+            None,
+            [{"path": [harness_fields.GROUP_PROFILE_META, "base_profile_id"], "value": "meta.base.a"}],
+        )
+    except harness_fields.HarnessFieldError:
+        pass
+    else:
+        raise AssertionError("profile-meta write on Default was accepted")
+
+
+def test_profile_meta_cycle_rejected_through_write_route() -> None:
+    harness_profile_store.create_profile({"id": "meta.cyc.a", "name": "Cyc A"})
+    harness_profile_store.create_profile({"id": "meta.cyc.b", "name": "Cyc B"})
+    harness_field_writer.apply_field_writes(
+        "meta.cyc.b",
+        None,
+        [{"path": [harness_fields.GROUP_PROFILE_META, "base_profile_id"], "value": "meta.cyc.a"}],
+    )
+    try:
+        harness_field_writer.apply_field_writes(
+            "meta.cyc.a",
+            None,
+            [{"path": [harness_fields.GROUP_PROFILE_META, "base_profile_id"], "value": "meta.cyc.b"}],
+        )
+    except harness_profile_store.HarnessProfileError as exc:
+        assert "cycle" in str(exc)
+    else:
+        raise AssertionError("A->B->A cycle accepted through the /fields write route")
+
+
 def main() -> int:
     _install_fixture_extension()
     assert extension_store.is_extension_runtime_ready(FIXTURE_ID)
@@ -258,6 +324,10 @@ def main() -> int:
     test_named_profile_global_field_write_still_writes_through()
     test_user_instructions_override_lands_on_the_default_source_key()
     test_two_toggles_on_one_leaf_compose_in_a_single_request()
+    test_descriptor_exposes_profile_meta_fields()
+    test_profile_meta_write_routes_to_set_profile_meta()
+    test_profile_meta_write_rejected_on_default()
+    test_profile_meta_cycle_rejected_through_write_route()
     print("PASS harness field registry + write routing")
     return 0
 

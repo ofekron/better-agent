@@ -55,6 +55,9 @@ def apply_field_writes(
     resolved = harness_profile_resolver.resolve_profile(profile_id, revision, default=default)
 
     ops: list[dict[str, Any]] = []
+    # Scalar profile-meta fields (base pointer + provider/model/effort pins)
+    # collected across this request and applied via the typed store setter.
+    meta_writes: dict[str, Any] = {}
     # Working copies of the absolute resolved lists, mutated across the
     # writes in one request so two toggles on the same leaf compose.
     lists: dict[tuple[str, ...], list[str]] = {}
@@ -67,6 +70,15 @@ def apply_field_writes(
     for write in writes:
         path = [str(part) for part in (write.get("path") or [])]
         value = write.get("value")
+        if path and path[0] == harness_fields.GROUP_PROFILE_META:
+            # Not a delta over Default and absent from the Default profile, so
+            # it routes to set_profile_meta rather than scope_for/override ops.
+            if is_default:
+                raise HarnessFieldError("The Default profile has no base or pins to set")
+            if len(path) != 2 or path[1] not in harness_fields.PROFILE_META_FIELDS:
+                raise HarnessFieldError(f"Unknown profile-meta field: {'.'.join(path)}")
+            meta_writes[path[1]] = None if write.get("clear") else value
+            continue
         scope = harness_fields.scope_for(path)
         if write.get("clear"):
             # Clearing means "inherit Default again", which only exists on a
@@ -141,6 +153,14 @@ def apply_field_writes(
 
     if is_default:
         return None
+    result: dict[str, Any] | None = None
     if ops:
-        return harness_profile_store.apply_override_patch(profile_id, ops, revision)
+        result = harness_profile_store.apply_override_patch(profile_id, ops, revision)
+    if meta_writes:
+        # Chain off the just-written revision so an override + meta write in
+        # one request don't collide on the optimistic-concurrency check.
+        meta_revision = result.get("revision") if result else revision
+        result = harness_profile_store.set_profile_meta(profile_id, meta_writes, meta_revision)
+    if result is not None:
+        return result
     return harness_profile_store.get_profile(profile_id)

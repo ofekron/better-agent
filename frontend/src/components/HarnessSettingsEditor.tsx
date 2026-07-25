@@ -5,6 +5,7 @@ import { eventBus } from "../lib/eventBus";
 import { trackedFetch } from "../progress/store";
 import type { HarnessProfile } from "../types";
 import { HarnessGroup } from "./harness/HarnessGroup";
+import { HarnessProfileMeta } from "./harness/HarnessProfileMeta";
 import {
   REVISION_MISMATCH,
   createProfile,
@@ -274,6 +275,14 @@ export function HarnessSettingsEditor() {
 
           {profile && descriptor && (
             <div className="harness-settings-editor-body">
+              {!isDefault && descriptor.profile_meta && (
+                <HarnessProfileMeta
+                  profile={profile}
+                  profiles={profiles}
+                  disabled={disabled}
+                  onWrite={(write) => applyWrites([write])}
+                />
+              )}
               {visibleExtensions.map((extension) => (
                 <article key={extension.id} className="harness-extension-block">
                   <div className="harness-extension-block-title">

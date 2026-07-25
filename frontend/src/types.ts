@@ -1373,6 +1373,13 @@ export interface HarnessProfile {
   skill_overrides: Record<string, unknown>;
   native_harness_overrides: Record<string, unknown>;
   provider_run_config_overlay: Record<string, unknown>;
+  /** Profile-meta: this profile's OWN base pointer and provider/model/effort
+   * pins (null when unset; the Default profile has none). */
+  base_profile_id?: string | null;
+  base_profile_revision?: string | null;
+  default_provider_id?: string | null;
+  default_model?: string | null;
+  default_reasoning_effort?: string | null;
 }
 
 

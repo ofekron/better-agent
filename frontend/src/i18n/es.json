@@ -1196,5 +1196,14 @@
   "harnessProfile.group.ui_surfaces": "Superficies de interfaz",
   "harnessProfile.group.permissions": "Permisos",
   "harnessProfile.group.disabled_builtin_tools": "Herramientas integradas",
+  "harnessProfile.group.profile_meta": "Base & session defaults",
+  "harnessProfile.baseProfileLabel": "Base profile",
+  "harnessProfile.baseProfileHint": "Inherit this profile's resolved config, then apply this profile's overrides on top. Defaults to the live Default.",
+  "harnessProfile.baseProfileNone": "Default (live)",
+  "harnessProfile.defaultProviderLabel": "Default provider",
+  "harnessProfile.defaultModelLabel": "Default model",
+  "harnessProfile.defaultReasoningEffortLabel": "Default reasoning effort",
+  "harnessProfile.pinHint": "Used only when a session is created with this profile and the caller doesn't specify one.",
+  "harnessProfile.pinNone": "— none —",
   "harnessProfile.group.disabled_builtin_extensions": "Extensiones integradas"
 }

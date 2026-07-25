@@ -50,10 +50,19 @@ export interface HarnessDescriptorExtension {
   groups: HarnessDescriptorGroup[];
 }
 
+/** Scalar profile-meta fields (base pointer + provider/model/effort pins) —
+ * not deltas over Default, rendered by a dedicated widget. */
+export interface HarnessProfileMetaDescriptor {
+  id: string;
+  scope: HarnessScope;
+  fields: { name: string; kind: string }[];
+}
+
 export interface HarnessDescriptor {
   extensions: HarnessDescriptorExtension[];
   builtin_tools: HarnessDescriptorGroup;
   builtin_extensions: HarnessDescriptorGroup;
+  profile_meta?: HarnessProfileMetaDescriptor;
 }
 
 /** One field write. `clear` reverts a named profile's override back to

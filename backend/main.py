@@ -4072,9 +4072,21 @@ def _profile_response_from_resolved(resolved: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _with_profile_meta(response: dict[str, Any], stored: dict[str, Any] | None) -> dict[str, Any]:
+    """Attach the profile's OWN base pointer + pins (what THIS profile sets,
+    for the editor). The Default profile has no stored record, so all null."""
+    stored = stored or {}
+    response["base_profile_id"] = stored.get("base_profile_id")
+    response["base_profile_revision"] = stored.get("base_profile_revision")
+    response["default_provider_id"] = stored.get("default_provider_id")
+    response["default_model"] = stored.get("default_model")
+    response["default_reasoning_effort"] = stored.get("default_reasoning_effort")
+    return response
+
+
 def _profile_response(profile: dict[str, Any], default: dict[str, Any] | None = None) -> dict[str, Any]:
     resolved = harness_profile_resolver.resolve_profile(profile["id"], profile.get("revision"), default=default)
-    return _profile_response_from_resolved(resolved)
+    return _with_profile_meta(_profile_response_from_resolved(resolved), profile)
 
 
 def _default_profile_response(default: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -4083,7 +4095,7 @@ def _default_profile_response(default: dict[str, Any] | None = None) -> dict[str
     response["id"] = "default"
     response["name"] = "Default"
     response["description"] = "The live harness state before any profile override is applied."
-    return response
+    return _with_profile_meta(response, None)
 
 
 @app.get("/api/harness-profiles")
