@@ -1,3 +1,5 @@
+import { Capacitor } from "@capacitor/core";
+import { App as CapApp } from "@capacitor/app";
 import { API } from "../api";
 
 type FrontendLogLevel = "debug" | "info" | "warn" | "error";
@@ -180,6 +182,7 @@ export function installFrontendLogger(): void {
   });
 
   installMainThreadBlockLogger();
+  installLifecycleLogger();
 
   const nativeConsoleError = console.error.bind(console);
   console.error = (...args: unknown[]) => {
@@ -211,6 +214,93 @@ export function installFrontendLogger(): void {
       stack,
     );
   };
+}
+
+// Android WebView LMK/OOM kills reclaim the process by total RSS (native +
+// graphics + DOM + bitmaps included), not by the V8 JS heap alone. A low
+// used_js_heap_bytes/js_heap_limit_bytes ratio does NOT rule out a memory
+// kill — it only rules out JS-heap pressure specifically. Read these
+// alongside the kill, never as a standalone exoneration.
+interface ChromeMemoryInfo {
+  usedJSHeapSize: number;
+  totalJSHeapSize: number;
+  jsHeapSizeLimit: number;
+}
+
+/** Chromium-only (`performance.memory`), present on Android WebView; absent
+ *  elsewhere. Best-effort snapshot for post-hoc crash-loop forensics — never
+ *  gate behavior on it. */
+export function memorySnapshot(): Record<string, number> {
+  const memory = (performance as Performance & { memory?: ChromeMemoryInfo }).memory;
+  if (!memory) return {};
+  return {
+    used_js_heap_bytes: memory.usedJSHeapSize,
+    total_js_heap_bytes: memory.totalJSHeapSize,
+    js_heap_limit_bytes: memory.jsHeapSizeLimit,
+  };
+}
+
+// Temporary diagnostic for the Android crash-loop investigation: a renderer
+// process kill (the leading hypothesis) fires none of visibilitychange /
+// pagehide / appStateChange — the process is gone before any handler can
+// run. Observed cycles are alive only ~5s, shorter than the existing 15s
+// websocket-traffic summary cadence, so without a tighter heartbeat a kill
+// leaves zero memory samples. Remove once the crash-loop cause is found.
+//
+// Bounded to HEARTBEAT_MAX_TICKS: an unbounded interval would be a
+// permanent per-boot network+allocation beacon, which risks perturbing the
+// very memory/resource pressure this is trying to measure. Every observed
+// crash-loop cycle reboots the app (and this heartbeat with it), so a
+// per-boot cap loses no coverage of the loop itself.
+const HEARTBEAT_INTERVAL_MS = 2_000;
+const HEARTBEAT_MAX_TICKS = 60; // 2 minutes per boot
+
+function installMemoryHeartbeat(): void {
+  if (!Capacitor.isNativePlatform()) return;
+  if (!("memory" in performance)) return;
+  let ticks = 0;
+  const intervalId = window.setInterval(() => {
+    logDurable("lifecycle", "memory_heartbeat", memorySnapshot());
+    ticks += 1;
+    if (ticks >= HEARTBEAT_MAX_TICKS) window.clearInterval(intervalId);
+  }, HEARTBEAT_INTERVAL_MS);
+}
+
+/** Diagnostics for the Android boot-crash-loop pattern: repeated fast
+ *  connect/disconnect cycles with no in-app error or reload-trigger code to
+ *  explain them (suspected native WebView process kill outside this app's
+ *  visibility). None of these events can themselves prevent the crash —
+ *  they only ensure the NEXT occurrence leaves a trail in frontend.log. */
+function installLifecycleLogger(): void {
+  document.addEventListener("visibilitychange", () => {
+    logDurableImmediate("lifecycle", "visibility_change", {
+      visibility_state: document.visibilityState,
+      ...memorySnapshot(),
+    });
+  });
+
+  // Fires synchronously right before the page is torn down (nav, tab
+  // close, OS reclaim) — the last chance to get a log out before state
+  // is gone, hence the immediate (non-debounced) send.
+  window.addEventListener("pagehide", (event) => {
+    logDurableImmediate("lifecycle", "pagehide", {
+      persisted: event.persisted,
+      ...memorySnapshot(),
+    });
+  });
+
+  if (Capacitor.isNativePlatform()) {
+    CapApp.addListener("appStateChange", (state) => {
+      logDurableImmediate("lifecycle", "app_state_change", {
+        is_active: state.isActive,
+        ...memorySnapshot(),
+      });
+    }).catch(() => {
+      // Logging must never affect the UI path being observed.
+    });
+  }
+
+  installMemoryHeartbeat();
 }
 
 function installMainThreadBlockLogger(): void {

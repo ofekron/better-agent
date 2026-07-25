@@ -2,6 +2,18 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+const capacitorMocks = vi.hoisted(() => ({
+  isNativePlatform: vi.fn(() => false),
+  addListener: vi.fn(() => Promise.resolve({ remove: () => {} })),
+}));
+
+vi.mock("@capacitor/core", () => ({
+  Capacitor: { isNativePlatform: capacitorMocks.isNativePlatform },
+}));
+vi.mock("@capacitor/app", () => ({
+  App: { addListener: capacitorMocks.addListener },
+}));
+
 const originalConsole = {
   debug: console.debug,
   info: console.info,
@@ -17,6 +29,9 @@ function flushLoggerTransport(): Promise<void> {
 beforeEach(() => {
   vi.resetModules();
   vi.stubGlobal("fetch", vi.fn(() => Promise.resolve({ ok: true })));
+  capacitorMocks.isNativePlatform.mockReturnValue(false);
+  capacitorMocks.addListener.mockReset();
+  capacitorMocks.addListener.mockImplementation(() => Promise.resolve({ remove: () => {} }));
   console.debug = vi.fn();
   console.info = vi.fn();
   console.log = vi.fn();
@@ -30,6 +45,10 @@ afterEach(() => {
   console.log = originalConsole.log;
   console.warn = originalConsole.warn;
   console.error = originalConsole.error;
+  Object.defineProperty(document, "visibilityState", {
+    value: "visible",
+    configurable: true,
+  });
   vi.unstubAllGlobals();
 });
 
@@ -183,6 +202,123 @@ describe("frontend logger", () => {
     expect(fetch).toHaveBeenCalledTimes(1);
     const init = vi.mocked(fetch).mock.calls[0][1];
     expect(init?.keepalive).toBe(true);
+  });
+
+  it("logs visibilitychange and pagehide immediately, for post-hoc crash-loop forensics", async () => {
+    // installFrontendLogger's DOM listeners (window/document.addEventListener)
+    // accumulate across tests in this file — vi.resetModules() gives each
+    // test a fresh module instance, but the real jsdom window/document
+    // persist, so every prior test's listener is still attached. Assert on
+    // the delta and the LAST call, matching this file's established
+    // convention (see "durably forwards..." above), not an absolute count.
+    const { installFrontendLogger } = await import("../src/lib/frontendLogger");
+
+    installFrontendLogger();
+    Object.defineProperty(document, "visibilityState", {
+      value: "hidden",
+      configurable: true,
+    });
+    const beforeVisibility = vi.mocked(fetch).mock.calls.length;
+    document.dispatchEvent(new Event("visibilitychange"));
+
+    expect(vi.mocked(fetch).mock.calls.length).toBeGreaterThan(beforeVisibility);
+    let payload = JSON.parse(String(vi.mocked(fetch).mock.calls.at(-1)?.[1]?.body));
+    expect(payload.source).toBe("lifecycle");
+    expect(payload.message).toContain("visibility_change");
+    expect(payload.message).toContain('"visibility_state":"hidden"');
+
+    const beforePagehide = vi.mocked(fetch).mock.calls.length;
+    window.dispatchEvent(new Event("pagehide"));
+    expect(vi.mocked(fetch).mock.calls.length).toBeGreaterThan(beforePagehide);
+    payload = JSON.parse(String(vi.mocked(fetch).mock.calls.at(-1)?.[1]?.body));
+    expect(payload.source).toBe("lifecycle");
+    expect(payload.message).toContain("pagehide");
+  });
+
+  it("logs Capacitor appStateChange transitions on native only", async () => {
+    capacitorMocks.isNativePlatform.mockReturnValue(true);
+    const { installFrontendLogger } = await import("../src/lib/frontendLogger");
+
+    installFrontendLogger();
+    expect(capacitorMocks.addListener).toHaveBeenCalledWith("appStateChange", expect.any(Function));
+    const handler = capacitorMocks.addListener.mock.calls.find(
+      ([event]) => event === "appStateChange",
+    )?.[1];
+
+    const before = vi.mocked(fetch).mock.calls.length;
+    handler?.({ isActive: false });
+
+    expect(vi.mocked(fetch).mock.calls.length).toBeGreaterThan(before);
+    const payload = JSON.parse(String(vi.mocked(fetch).mock.calls.at(-1)?.[1]?.body));
+    expect(payload.source).toBe("lifecycle");
+    expect(payload.message).toContain("app_state_change");
+    expect(payload.message).toContain('"is_active":false');
+  });
+
+  it("does not register appStateChange on the web (non-native)", async () => {
+    capacitorMocks.isNativePlatform.mockReturnValue(false);
+    const { installFrontendLogger } = await import("../src/lib/frontendLogger");
+
+    installFrontendLogger();
+
+    expect(capacitorMocks.addListener).not.toHaveBeenCalled();
+  });
+
+  it("heartbeats memory on native so an abrupt process kill still leaves a trail", async () => {
+    // A renderer process kill (the leading crash-loop hypothesis) fires none
+    // of visibilitychange/pagehide/appStateChange — the process is gone
+    // before any handler runs. The heartbeat is the only sample source that
+    // survives that case.
+    capacitorMocks.isNativePlatform.mockReturnValue(true);
+    Object.defineProperty(performance, "memory", {
+      value: { usedJSHeapSize: 111, totalJSHeapSize: 222, jsHeapSizeLimit: 333 },
+      configurable: true,
+    });
+    vi.useFakeTimers();
+    try {
+      const { installFrontendLogger } = await import("../src/lib/frontendLogger");
+      installFrontendLogger();
+
+      const before = vi.mocked(fetch).mock.calls.length;
+      await vi.advanceTimersByTimeAsync(2_100);
+
+      expect(vi.mocked(fetch).mock.calls.length).toBeGreaterThan(before);
+      const payload = JSON.parse(String(vi.mocked(fetch).mock.calls.at(-1)?.[1]?.body));
+      expect(payload.source).toBe("lifecycle");
+      expect(payload.message).toContain("memory_heartbeat");
+      expect(payload.message).toContain('"used_js_heap_bytes":111');
+    } finally {
+      vi.useRealTimers();
+      // @ts-expect-error test-only cleanup of a non-standard perf field
+      delete performance.memory;
+    }
+  });
+
+  it("stops the memory heartbeat after its per-boot tick cap", async () => {
+    // An unbounded interval would be a permanent per-boot network+allocation
+    // beacon that could itself perturb the memory pressure under
+    // investigation — it must stop on its own after a bounded window.
+    capacitorMocks.isNativePlatform.mockReturnValue(true);
+    Object.defineProperty(performance, "memory", {
+      value: { usedJSHeapSize: 1, totalJSHeapSize: 2, jsHeapSizeLimit: 3 },
+      configurable: true,
+    });
+    vi.useFakeTimers();
+    try {
+      const { installFrontendLogger } = await import("../src/lib/frontendLogger");
+      installFrontendLogger();
+
+      // 60 ticks at 2s = the documented 2-minute cap.
+      await vi.advanceTimersByTimeAsync(60 * 2_000 + 100);
+      const atCap = vi.mocked(fetch).mock.calls.length;
+
+      await vi.advanceTimersByTimeAsync(10 * 2_000);
+      expect(vi.mocked(fetch).mock.calls.length).toBe(atCap);
+    } finally {
+      vi.useRealTimers();
+      // @ts-expect-error test-only cleanup of a non-standard perf field
+      delete performance.memory;
+    }
   });
 
   it("logs async failures with redaction and duration", async () => {

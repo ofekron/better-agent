@@ -6,7 +6,7 @@ import { ErrorBoundary } from './components/ErrorBoundary'
 import { cleanupRestoredModalSentinel, getModalStackSize } from './hooks/useBackButtonDismiss'
 import { installBearerAuthInterceptor } from './bearerAuth'
 import { clearHardRefreshMarker } from './lib/hardRefresh'
-import { installFrontendLogger, logFailure, logTiming } from './lib/frontendLogger'
+import { installFrontendLogger, logFailure, logTiming, memorySnapshot } from './lib/frontendLogger'
 import { runMobileOtaCheck } from './lib/mobileUpdater'
 import { applyNativeServerConfigUrl } from './mobileServerHandoff'
 import { ScreenWakeLock } from './components/ScreenWakeLock'
@@ -48,7 +48,7 @@ const bootStartedAt = performance.now()
 loadBuiltinExtensionIds().catch((error) => {
   logFailure('boot', 'builtin_extension_ids_failed', error)
 }).finally(() => {
-  logTiming('boot', 'pre_render_ready', bootStartedAt, {}, 100)
+  logTiming('boot', 'pre_render_ready', bootStartedAt, memorySnapshot(), 100)
   createRoot(document.getElementById('root')!).render(
     <StrictMode>
       <ErrorBoundary>
