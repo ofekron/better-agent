@@ -110,8 +110,10 @@ describe("SessionSelectorControls picker interactions", () => {
         return Promise.resolve(
           new Response(
             JSON.stringify({
+              // Keyed by provider id (providerQuotaKey prefers id over
+              // "<kind>::<config_dir>"), matching the extension's response.
               providers: {
-                "claude::": {
+                claude: {
                   provider: "claude",
                   label: "Claude",
                   supported: true,

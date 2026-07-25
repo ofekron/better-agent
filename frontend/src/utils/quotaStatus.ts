@@ -25,6 +25,12 @@ export interface QuotaProviderStatus {
    * transient fetch failure (the error field carries the failure code). */
   stale?: boolean;
   stale_seconds?: number;
+  /** Set when no reading exists yet and the backend is still fetching one.
+   * Distinct from "no quota": the UI must show progress, not an empty
+   * state, and re-poll rather than wait for the next interval tick. */
+  loading?: boolean;
+  /** Set when a refresh is in flight behind an already-served reading. */
+  refreshing?: boolean;
   /** Set on unsupported providers with a specific cause (e.g. Antigravity's
    * credentials_unavailable). */
   reason?: string;
@@ -58,6 +64,26 @@ export type QuotaLabelTranslator = (
 // Thresholds match the usage-gauge so every surface colors consistently.
 const WARN_USED = 70;
 const CRITICAL_USED = 90;
+
+/** Backend failure/unsupported codes the UI can phrase in plain language.
+ * Unknown codes (http_429, exception names) fall through to the raw code —
+ * showing the real cause beats inventing a generic one. */
+const REASON_KEYS: Record<string, string> = {
+  no_credentials: "not signed in",
+  credentials_expired: "sign-in expired",
+  credentials_unavailable: "credentials not readable",
+  usage_endpoint_unavailable: "provider exposes no usage API",
+  usage_endpoint_rate_limited: "provider rate-limited the usage API",
+  no_project: "no Cloud project on this account",
+  cooldown: "cooling down after rate limit",
+  extension_unreachable: "usage service unreachable",
+};
+
+export function quotaReasonText(code: string, t: QuotaLabelTranslator): string {
+  const fallback = REASON_KEYS[code];
+  if (!fallback) return code;
+  return t(`quota.reason.${code}`, { defaultValue: fallback });
+}
 
 export function quotaLevel(usedPercent: number): QuotaLevel {
   if (usedPercent >= CRITICAL_USED) return "critical";

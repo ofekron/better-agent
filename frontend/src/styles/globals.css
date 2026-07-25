@@ -11723,6 +11723,60 @@ button.run-badge-clickable:focus-visible {
   font-size: calc(11px * var(--app-font-scale));
 }
 
+/* Pending read: indeterminate by design — the backend cannot know how long
+   an upstream usage endpoint will take, so no fake determinate progress. */
+.quota-loading {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+  color: var(--text-muted);
+  font-size: calc(11px * var(--app-font-scale));
+  animation: quota-fade-in 220ms ease both;
+}
+
+.quota-spinner {
+  width: 9px;
+  height: 9px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  border: 1.5px solid var(--border-color, currentColor);
+  border-top-color: transparent;
+  animation: quota-spin 900ms linear infinite;
+}
+
+.quota-unavailable {
+  animation: quota-fade-in 220ms ease both;
+}
+
+@keyframes quota-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes quota-fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(-2px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .quota-spinner {
+    animation-duration: 2.4s;
+  }
+
+  .quota-loading,
+  .quota-unavailable {
+    animation: none;
+  }
+}
+
 .provider-row-actions {
   display: flex;
   gap: 6px;

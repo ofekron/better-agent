@@ -13,7 +13,8 @@ vi.mock("react-i18next", () => ({
       return String(options?.defaultValue ?? key)
         .replace("{{remaining}}", String(options?.remaining ?? ""))
         .replace("{{window}}", String(options?.window ?? ""))
-        .replace("{{error}}", String(options?.error ?? ""));
+        .replace("{{error}}", String(options?.error ?? ""))
+        .replace("{{reason}}", String(options?.reason ?? ""));
     },
   }),
 }));
@@ -47,12 +48,42 @@ describe("QuotaIndicator", () => {
 
   it.each([
     undefined,
-    { provider: "agy", label: "Antigravity", supported: false, windows: [] },
-    { provider: "claude", label: "Claude", supported: true, error: "no_credentials", windows: [] },
     { provider: "codex", label: "Codex", supported: true, windows: [] },
-  ])("keeps a provider without usable quota data explicit", (status) => {
+  ])("reports genuinely absent usage as such", (status) => {
     render(<QuotaIndicator status={status} />);
     expect(screen.getByText("No usage yet")).toBeTruthy();
+  });
+
+  // A provider that CANNOT be read is not the same as one with no usage:
+  // collapsing both into "No usage yet" hid the actionable cause.
+  it.each([
+    [
+      { provider: "agy", label: "Antigravity", supported: false, reason: "credentials_unavailable", windows: [] },
+      "credentials not readable",
+    ],
+    [
+      { provider: "claude", label: "Claude", supported: true, error: "no_credentials", windows: [] },
+      "not signed in",
+    ],
+    [
+      { provider: "claude", label: "Claude", supported: true, error: "http_418", windows: [] },
+      "http_418",
+    ],
+  ])("names why quota is unavailable", (status, expected) => {
+    const { container } = render(<QuotaIndicator status={status} />);
+    expect(container.querySelector(".quota-unavailable")).not.toBeNull();
+    expect(container.textContent).toContain(expected);
+    expect(screen.queryByText("No usage yet")).toBeNull();
+  });
+
+  it("shows an explicit pending state while a first reading is fetched", () => {
+    const { container } = render(
+      <QuotaIndicator
+        status={{ provider: "claude", label: "Claude", supported: true, loading: true, windows: [] }}
+      />,
+    );
+    expect(container.querySelector(".quota-loading")).not.toBeNull();
+    expect(screen.queryByText("No usage yet")).toBeNull();
   });
 
   it("keeps all stale windows visible", () => {
