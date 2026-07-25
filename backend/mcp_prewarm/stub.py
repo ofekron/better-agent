@@ -19,13 +19,33 @@ import socket
 import sys
 import threading
 
+from mcp_prewarm import tcp_transport  # stdlib-only import, see tcp_transport.py
+
 _SOCKET_ENV_PRIMARY = "BETTER_AGENT_MCP_DAEMON_SOCKET"
 _SOCKET_ENV_LEGACY = "BETTER_CLAUDE_MCP_DAEMON_SOCKET"
+_ADDR_ENV_PRIMARY = "BETTER_AGENT_MCP_DAEMON_ADDR"
+_ADDR_ENV_LEGACY = "BETTER_CLAUDE_MCP_DAEMON_ADDR"
+_SECRET_ENV_PRIMARY = "BETTER_AGENT_MCP_DAEMON_CONNECT_SECRET"
+_SECRET_ENV_LEGACY = "BETTER_CLAUDE_MCP_DAEMON_CONNECT_SECRET"
 _CHUNK = 65536
 
 
 def _resolve_socket_path() -> str:
     return os.environ.get(_SOCKET_ENV_PRIMARY) or os.environ.get(_SOCKET_ENV_LEGACY) or ""
+
+
+def _resolve_tcp_addr() -> tuple[str, int] | None:
+    addr = os.environ.get(_ADDR_ENV_PRIMARY) or os.environ.get(_ADDR_ENV_LEGACY) or ""
+    if not addr:
+        return None
+    host, _, port = addr.rpartition(":")
+    if not host or not port.isdigit():
+        return None
+    return host, int(port)
+
+
+def _resolve_connect_secret() -> str:
+    return os.environ.get(_SECRET_ENV_PRIMARY) or os.environ.get(_SECRET_ENV_LEGACY) or ""
 
 
 def _pump_stdin_to_socket(sock: socket.socket, errors: list) -> None:
@@ -60,17 +80,44 @@ def _pump_socket_to_stdout(sock: socket.socket, errors: list) -> None:
         errors.append(True)
 
 
-def main() -> int:
+def _connect() -> socket.socket | None:
+    """Unix domain socket (macOS/Linux) or loopback TCP + secret frame
+    (Windows, or forced by env for testing) -- whichever env the caller
+    populated. Only one of the two is ever set for a given turn (see
+    `extension_store._apply_mcp_prewarm_daemon`), so presence of the
+    socket-path env picks the unix branch."""
     socket_path = _resolve_socket_path()
-    if not socket_path:
-        print("mcp_prewarm stub: no daemon socket path in env", file=sys.stderr)
-        return 1
+    if socket_path:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            sock.connect(socket_path)
+        except OSError as exc:
+            print(f"mcp_prewarm stub: connect failed: {exc}", file=sys.stderr)
+            return None
+        return sock
 
-    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    try:
-        sock.connect(socket_path)
-    except OSError as exc:
-        print(f"mcp_prewarm stub: connect failed: {exc}", file=sys.stderr)
+    tcp_addr = _resolve_tcp_addr()
+    if tcp_addr:
+        connect_secret = _resolve_connect_secret()
+        if not connect_secret:
+            print("mcp_prewarm stub: no daemon connect secret in env", file=sys.stderr)
+            return None
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            sock.connect(tcp_addr)
+            sock.sendall(tcp_transport.encode_secret_frame(connect_secret))
+        except OSError as exc:
+            print(f"mcp_prewarm stub: connect failed: {exc}", file=sys.stderr)
+            return None
+        return sock
+
+    print("mcp_prewarm stub: no daemon socket path in env", file=sys.stderr)
+    return None
+
+
+def main() -> int:
+    sock = _connect()
+    if sock is None:
         return 1
 
     errors: list = []

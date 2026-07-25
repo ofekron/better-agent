@@ -36,6 +36,7 @@ import mcp.types as types
 from mcp.shared.message import SessionMessage
 
 from mcp_prewarm import paths as mp_paths
+from mcp_prewarm import tcp_transport
 from runtime_broker import _require_posix_peer
 
 _LINE_MAX_BYTES = 32 * 1024 * 1024
@@ -80,7 +81,28 @@ async def _pump_connection(stream: Any, mcp_server: Any, init_options: Any, acti
     except PermissionError:
         await stream.aclose()
         return
+    await _pump_connection_core(stream, mcp_server, init_options, activity)
 
+
+async def _pump_tcp_connection(
+    stream: Any, mcp_server: Any, init_options: Any, activity: _Activity, connect_secret: str,
+) -> None:
+    # Loopback TCP has no unix-socket-style peer-uid check available, so
+    # the first bytes on every accepted connection MUST be the shared
+    # secret; anything else (wrong secret, EOF, garbage) closes the
+    # connection immediately with no proxying and no error detail leaked.
+    try:
+        received = await tcp_transport.read_secret_frame(stream.receive)
+    except (ConnectionError, ValueError, anyio.EndOfStream):
+        await stream.aclose()
+        return
+    if not tcp_transport.secrets_match(connect_secret, received):
+        await stream.aclose()
+        return
+    await _pump_connection_core(stream, mcp_server, init_options, activity)
+
+
+async def _pump_connection_core(stream: Any, mcp_server: Any, init_options: Any, activity: _Activity) -> None:
     activity.touch()
     activity.connections += 1
     read_stream_writer, read_stream = anyio.create_memory_object_stream(0)
@@ -180,20 +202,9 @@ async def _serve(config: dict[str, Any]) -> None:
     mcp_server = fastmcp._mcp_server
     init_options = mcp_server.create_initialization_options()
 
-    socket_path = Path(config["socket_path"])
     state_path = Path(config["state_path"])
     activity = _Activity()
-
-    listener = await anyio.create_unix_listener(path=socket_path)
-    os.chmod(socket_path, 0o600)
-
-    _write_state(state_path, {
-        "pid": os.getpid(),
-        "socket_path": str(socket_path),
-        "fingerprint": config["fingerprint"],
-        "ready": True,
-        "started_at": time.time(),
-    })
+    transport = config.get("transport", "unix")
 
     async with anyio.create_task_group() as tg:
         tg.start_soon(
@@ -201,13 +212,71 @@ async def _serve(config: dict[str, Any]) -> None:
             config["session_id"],
         )
 
-        async def _accept_loop() -> None:
-            async with listener:
-                while True:
-                    stream = await listener.accept()
-                    tg.start_soon(_pump_connection, stream, mcp_server, init_options, activity)
+        if transport == "tcp":
+            await _serve_tcp(config, state_path, mcp_server, init_options, activity, tg)
+        else:
+            await _serve_unix(config, state_path, mcp_server, init_options, activity, tg)
 
-        tg.start_soon(_accept_loop)
+
+async def _serve_unix(
+    config: dict[str, Any], state_path: Path, mcp_server: Any, init_options: Any,
+    activity: _Activity, tg: Any,
+) -> None:
+    socket_path = Path(config["socket_path"])
+    listener = await anyio.create_unix_listener(path=socket_path)
+    os.chmod(socket_path, 0o600)
+
+    _write_state(state_path, {
+        "pid": os.getpid(),
+        "transport": "unix",
+        "socket_path": str(socket_path),
+        "fingerprint": config["fingerprint"],
+        "ready": True,
+        "started_at": time.time(),
+    })
+
+    async def _accept_loop() -> None:
+        async with listener:
+            while True:
+                stream = await listener.accept()
+                tg.start_soon(_pump_connection, stream, mcp_server, init_options, activity)
+
+    tg.start_soon(_accept_loop)
+
+
+async def _serve_tcp(
+    config: dict[str, Any], state_path: Path, mcp_server: Any, init_options: Any,
+    activity: _Activity, tg: Any,
+) -> None:
+    # Ephemeral port (0) avoids port collisions across concurrently
+    # spawned daemons -- there is no natural per-target port to pick,
+    # unlike the unix-socket path where the on-disk path already
+    # encodes (session, extension, server).
+    multi_listener = await anyio.create_tcp_listener(local_host="127.0.0.1", local_port=0)
+    listener = multi_listener.listeners[0]
+    host, port = listener.extra(SocketAttribute.local_address)
+    connect_secret = tcp_transport.generate_connect_secret()
+
+    _write_state(state_path, {
+        "pid": os.getpid(),
+        "transport": "tcp",
+        "host": host,
+        "port": port,
+        "connect_secret": connect_secret,
+        "fingerprint": config["fingerprint"],
+        "ready": True,
+        "started_at": time.time(),
+    })
+
+    async def _accept_loop() -> None:
+        async with listener:
+            while True:
+                stream = await listener.accept()
+                tg.start_soon(
+                    _pump_tcp_connection, stream, mcp_server, init_options, activity, connect_secret,
+                )
+
+    tg.start_soon(_accept_loop)
 
 
 def main() -> int:

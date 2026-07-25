@@ -50,7 +50,30 @@ def _reap_tracked() -> None:
 @dataclass
 class DaemonReadyResult:
     ready: bool
+    transport: str = "unix"
     socket_path: str | None = None
+    host: str | None = None
+    port: int | None = None
+    connect_secret: str | None = None
+
+    def ready_map_value(self) -> str | dict[str, Any] | None:
+        """Single source of truth for the shape callers (both
+        providers, via `_prewarm_extension_mcp_ready`) put into the
+        per-turn `_mcp_prewarm_ready` map. Unix stays a bare socket-path
+        string (unchanged, zero secrets in the stub's env); tcp becomes
+        a small dict `extension_store._apply_mcp_prewarm_daemon`
+        detects by type, since a loopback port alone carries no peer
+        isolation and needs the connect secret delivered too."""
+        if not self.ready:
+            return None
+        if self.transport == "tcp":
+            return {
+                "transport": "tcp",
+                "host": self.host,
+                "port": self.port,
+                "connect_secret": self.connect_secret,
+            }
+        return self.socket_path
 
 
 def compute_fingerprint(real_config: dict[str, Any], extension_record: dict[str, Any]) -> str:
@@ -123,12 +146,18 @@ def _terminate(pid: int) -> None:
         pass
 
 
-def _cleanup_files(*paths: Path) -> None:
+def _cleanup_files(*paths: Path | None) -> None:
     for path in paths:
+        if path is None:
+            continue
         try:
             path.unlink()
         except FileNotFoundError:
             pass
+
+
+def default_transport() -> str:
+    return "tcp" if os.name == "nt" else "unix"
 
 
 def _spawn(
@@ -139,20 +168,23 @@ def _spawn(
     real_config: dict[str, Any],
     fingerprint: str,
     idle_timeout_seconds: float,
-    socket_file: Path,
+    transport: str,
+    socket_file: Path | None,
     state_file: Path,
 ) -> subprocess.Popen:
     spawn_config = {
         "command": real_config.get("command"),
         "args": list(real_config.get("args") or []),
-        "socket_path": str(socket_file),
         "state_path": str(state_file),
         "fingerprint": fingerprint,
         "idle_timeout_seconds": idle_timeout_seconds,
         "session_id": session_id,
         "extension_id": extension_id,
         "server_name": server_name,
+        "transport": transport,
     }
+    if transport == "unix":
+        spawn_config["socket_path"] = str(socket_file)
     spawn_config_file = mp_paths.spawn_config_path(session_id, extension_id, server_name)
     tmp_path = spawn_config_file.with_suffix(".json.tmp")
     tmp_path.write_text(json.dumps(spawn_config), encoding="utf-8")
@@ -191,6 +223,28 @@ def _spawn(
     return popen
 
 
+def _state_ready(
+    state: dict[str, Any] | None, fingerprint: str, transport: str, socket_file: Path | None,
+) -> bool:
+    if not (state and state.get("ready") and state.get("fingerprint") == fingerprint):
+        return False
+    if transport == "unix":
+        return bool(socket_file) and socket_file.exists()
+    return bool(state.get("host")) and bool(state.get("port")) and bool(state.get("connect_secret"))
+
+
+def _result_from_state(state: dict[str, Any], transport: str, socket_file: Path | None) -> DaemonReadyResult:
+    if transport == "tcp":
+        return DaemonReadyResult(
+            ready=True,
+            transport="tcp",
+            host=state.get("host"),
+            port=state.get("port"),
+            connect_secret=state.get("connect_secret"),
+        )
+    return DaemonReadyResult(ready=True, transport="unix", socket_path=str(socket_file))
+
+
 async def ensure_daemon_ready(
     session_id: str,
     extension_id: str,
@@ -200,19 +254,21 @@ async def ensure_daemon_ready(
     *,
     bound_seconds: float,
     idle_timeout_seconds: float = 20 * 60.0,
+    transport: str | None = None,
 ) -> DaemonReadyResult:
-    socket_file = mp_paths.socket_path(session_id, extension_id, server_name)
+    # `transport` is None in every real call site -- it auto-detects from
+    # `os.name`. Tests pass "tcp" explicitly to exercise the Windows code
+    # path for real on macOS/Linux, without needing `sys.platform` to
+    # actually be "win32".
+    transport = transport or default_transport()
+    socket_file = (
+        mp_paths.socket_path(session_id, extension_id, server_name) if transport == "unix" else None
+    )
     state_file = mp_paths.state_path(session_id, extension_id, server_name)
 
     state = _read_state(state_file)
-    if (
-        state
-        and state.get("ready")
-        and state.get("fingerprint") == fingerprint
-        and _pid_alive(state.get("pid"))
-        and socket_file.exists()
-    ):
-        return DaemonReadyResult(ready=True, socket_path=str(socket_file))
+    if _state_ready(state, fingerprint, transport, socket_file) and _pid_alive(state.get("pid")):
+        return _result_from_state(state, transport, socket_file)
 
     if state and state.get("pid") and _pid_alive(state.get("pid")):
         _terminate(int(state["pid"]))
@@ -225,6 +281,7 @@ async def ensure_daemon_ready(
             real_config=real_config,
             fingerprint=fingerprint,
             idle_timeout_seconds=idle_timeout_seconds,
+            transport=transport,
             socket_file=socket_file,
             state_file=state_file,
         )
@@ -233,22 +290,17 @@ async def ensure_daemon_ready(
             "mcp_prewarm: failed to spawn daemon for %s/%s/%s",
             session_id, extension_id, server_name,
         )
-        return DaemonReadyResult(ready=False)
+        return DaemonReadyResult(ready=False, transport=transport)
 
     deadline = time.monotonic() + bound_seconds
     while time.monotonic() < deadline:
         state = _read_state(state_file)
-        if (
-            state
-            and state.get("ready")
-            and state.get("fingerprint") == fingerprint
-            and socket_file.exists()
-        ):
-            return DaemonReadyResult(ready=True, socket_path=str(socket_file))
+        if _state_ready(state, fingerprint, transport, socket_file):
+            return _result_from_state(state, transport, socket_file)
         if popen.poll() is not None:
             # Died before writing ready state -- fail closed, never fall
             # back to a real cold-spawn command for this turn.
-            return DaemonReadyResult(ready=False)
+            return DaemonReadyResult(ready=False, transport=transport)
         await asyncio.sleep(_POLL_INTERVAL_SECONDS)
     # Bound expired without readiness -- fail closed immediately rather
     # than blocking the caller through `_terminate`'s stop-grace wait;
@@ -258,4 +310,4 @@ async def ensure_daemon_ready(
         os.kill(popen.pid, signal.SIGTERM)
     except ProcessLookupError:
         pass
-    return DaemonReadyResult(ready=False)
+    return DaemonReadyResult(ready=False, transport=transport)

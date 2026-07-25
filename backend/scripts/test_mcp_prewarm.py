@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import os
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -29,6 +30,7 @@ _TMP_HOME = Path(_test_home.isolate("ba-mcp-prewarm-"))
 
 from mcp_prewarm import paths as mp_paths  # noqa: E402
 from mcp_prewarm import supervisor  # noqa: E402
+from mcp_prewarm import tcp_transport  # noqa: E402
 import extension_store  # noqa: E402
 
 FAILURES: list[str] = []
@@ -120,6 +122,70 @@ async def test_supervisor_lifecycle() -> None:
     check(not supervisor._pid_alive(idle_pid), "daemon self-exits after idle timeout with zero connections")
 
 
+_INITIALIZE_REQUEST = (
+    b'{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05",'
+    b'"capabilities":{},"clientInfo":{"name":"test","version":"0"}}}\n'
+)
+
+
+async def test_tcp_daemon_secret_gate() -> None:
+    """Forces the Windows transport directly via `transport="tcp"` so the
+    real listener/secret-gate/proxy-loop code path is exercised for real
+    on this macOS/Linux test host, without needing `sys.platform` to
+    actually be "win32". Proves both halves of the security boundary:
+    a correct secret gets real MCP proxying, a wrong or missing secret
+    gets the connection closed with zero bytes proxied."""
+    session_id = "sess-tcp-gate"
+    ext_id = "fixture-ext-tcp"
+    server_name = "fixture-server-tcp"
+    real_config = _fixture_real_config()
+
+    result = await supervisor.ensure_daemon_ready(
+        session_id, ext_id, server_name, real_config, "fp-tcp-1", bound_seconds=8.0, transport="tcp",
+    )
+    check(result.ready, "tcp-transport daemon becomes ready")
+    check(result.transport == "tcp", "ready result reports tcp transport")
+    check(
+        bool(result.host) and bool(result.port) and bool(result.connect_secret),
+        "tcp ready result carries host/port/connect_secret",
+    )
+
+    good_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    good_sock.settimeout(5)
+    try:
+        good_sock.connect((result.host, result.port))
+        good_sock.sendall(tcp_transport.encode_secret_frame(result.connect_secret))
+        good_sock.sendall(_INITIALIZE_REQUEST)
+        response = good_sock.recv(65536)
+    finally:
+        good_sock.close()
+    check(
+        b'"id":1' in response and b'"result"' in response,
+        "correct secret gets real MCP proxying (initialize responds)",
+    )
+
+    bad_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    bad_sock.settimeout(5)
+    try:
+        bad_sock.connect((result.host, result.port))
+        bad_sock.sendall(tcp_transport.encode_secret_frame("wrong-secret-value"))
+        bad_sock.sendall(_INITIALIZE_REQUEST)
+        bad_response = bad_sock.recv(65536)
+    finally:
+        bad_sock.close()
+    check(bad_response == b"", "wrong secret closes the connection without proxying any bytes")
+
+    garbage_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    garbage_sock.settimeout(5)
+    try:
+        garbage_sock.connect((result.host, result.port))
+        garbage_sock.sendall(b"not a length-prefixed secret frame at all")
+        garbage_response = garbage_sock.recv(65536)
+    finally:
+        garbage_sock.close()
+    check(garbage_response == b"", "malformed/missing secret frame closes the connection without proxying")
+
+
 def _run_stub(env_overrides: dict[str, str]) -> subprocess.Popen:
     env = {**os.environ, "PYTHONPATH": str(ROOT), **env_overrides}
     return subprocess.Popen(
@@ -176,6 +242,94 @@ def test_stub_forwarding() -> None:
     check(bad_returncode != 0, "stub exits non-zero when it cannot connect to the daemon socket")
 
 
+def test_stub_tcp_forwarding() -> None:
+    """Windows code path for the stub: connects over TCP, sends the
+    secret frame first, then behaves as the exact same transparent pipe
+    proven above for the unix path."""
+    import socketserver
+    import threading
+
+    connect_secret = "test-connect-secret-value"
+    received_frames: list[bytes] = []
+
+    class _SecretGatedEcho(socketserver.BaseRequestHandler):
+        def handle(self) -> None:
+            received = _read_length_prefixed_frame_sync(self.request)
+            received_frames.append(received)
+            if not tcp_transport.secrets_match(connect_secret, received):
+                return
+            while True:
+                data = self.request.recv(65536)
+                if not data:
+                    break
+                self.request.sendall(data)
+
+    def _read_length_prefixed_frame_sync(sock: socket.socket) -> bytes:
+        # Deliberately an independent, from-scratch re-implementation of
+        # the 4-byte-length-prefix framing (not a call into
+        # `tcp_transport`) -- this is the test acting as a foreign/hostile
+        # server peer verifying what the stub actually puts on the wire,
+        # not re-checking the implementation against itself.
+        import struct
+
+        header = b""
+        while len(header) < 4:
+            chunk = sock.recv(4 - len(header))
+            if not chunk:
+                return b""
+            header += chunk
+        (length,) = struct.unpack("!I", header)
+        payload = b""
+        while len(payload) < length:
+            chunk = sock.recv(length - len(payload))
+            if not chunk:
+                break
+            payload += chunk
+        return payload
+
+    server = socketserver.TCPServer(("127.0.0.1", 0), _SecretGatedEcho)
+    host, port = server.server_address
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        proc = _run_stub({
+            "BETTER_CLAUDE_MCP_DAEMON_ADDR": f"{host}:{port}",
+            "BETTER_CLAUDE_MCP_DAEMON_CONNECT_SECRET": connect_secret,
+        })
+        try:
+            payload = b"hello mcp prewarm tcp stub\n"
+            proc.stdin.write(payload)
+            proc.stdin.flush()
+            echoed = proc.stdout.read(len(payload))
+            check(echoed == payload, "tcp stub forwards stdin bytes to the daemon and back to stdout unchanged")
+        finally:
+            proc.stdin.close()
+            returncode = proc.wait(timeout=5)
+            check(returncode == 0, "tcp stub exits 0 on clean EOF")
+    finally:
+        server.shutdown()
+        server.server_close()
+    check(
+        len(received_frames) == 1 and received_frames[0] == connect_secret.encode("utf-8"),
+        "tcp stub sends the connect secret as the first framed message before any payload bytes",
+    )
+
+    # error path: nothing listening at the given address -> stub exits non-zero
+    bad_proc = _run_stub({
+        "BETTER_CLAUDE_MCP_DAEMON_ADDR": "127.0.0.1:1",
+        "BETTER_CLAUDE_MCP_DAEMON_CONNECT_SECRET": connect_secret,
+    })
+    bad_proc.stdin.close()
+    bad_returncode = bad_proc.wait(timeout=5)
+    check(bad_returncode != 0, "tcp stub exits non-zero when it cannot connect to the daemon address")
+
+    # error path: address set but no secret -> stub refuses to connect at all
+    nosecret_proc = _run_stub({"BETTER_CLAUDE_MCP_DAEMON_ADDR": f"{host}:{port}"})
+    nosecret_proc.stdin.close()
+    nosecret_returncode = nosecret_proc.wait(timeout=5)
+    check(nosecret_returncode != 0, "tcp stub exits non-zero when no connect secret is available in env")
+
+
 async def test_readiness_gate_fail_closed() -> None:
     session_id = "sess-fail-closed"
     ext_id = "fixture-ext-slow"
@@ -214,6 +368,30 @@ async def test_readiness_gate_fail_closed() -> None:
         and substituted["command"] == sys.executable
         and substituted["args"] == ["-m", "mcp_prewarm.stub"],
         "extension_store substitutes the stub command when a ready socket is present",
+    )
+
+    # Windows/tcp shape: `DaemonReadyResult.ready_map_value()` produces a
+    # dict instead of a bare path -- extension_store detects it by type
+    # and wires the addr/secret env vars instead of the socket-path env var.
+    tcp_ready_result = supervisor.DaemonReadyResult(
+        ready=True, transport="tcp", host="127.0.0.1", port=54321, connect_secret="s3cr3t",
+    )
+    tcp_ready_map = {"_mcp_prewarm_ready": {server_name: tcp_ready_result.ready_map_value()}}
+    tcp_substituted = extension_store._apply_mcp_prewarm_daemon(real_server_config, server_name, tcp_ready_map)
+    check(
+        tcp_substituted is not None
+        and tcp_substituted["command"] == sys.executable
+        and tcp_substituted["args"] == ["-m", "mcp_prewarm.stub"],
+        "extension_store substitutes the stub command for a ready tcp-transport daemon",
+    )
+    tcp_env = tcp_substituted["env"] if tcp_substituted else {}
+    check(
+        tcp_env.get("BETTER_CLAUDE_MCP_DAEMON_ADDR") == "127.0.0.1:54321"
+        and tcp_env.get("BETTER_AGENT_MCP_DAEMON_ADDR") == "127.0.0.1:54321"
+        and tcp_env.get("BETTER_CLAUDE_MCP_DAEMON_CONNECT_SECRET") == "s3cr3t"
+        and tcp_env.get("BETTER_AGENT_MCP_DAEMON_CONNECT_SECRET") == "s3cr3t"
+        and "BETTER_CLAUDE_MCP_DAEMON_SOCKET" not in tcp_env,
+        "tcp-transport substitution wires addr+secret env vars (both dual_env_many aliases), not a socket path",
     )
 
 
@@ -322,6 +500,8 @@ def _cleanup_all_sessions() -> None:
 async def main_async() -> None:
     await test_supervisor_lifecycle()
     test_stub_forwarding()
+    await test_tcp_daemon_secret_gate()
+    test_stub_tcp_forwarding()
     await test_readiness_gate_fail_closed()
     await test_concurrent_latency_win()
     await test_codex_provider_prewarm_wiring()

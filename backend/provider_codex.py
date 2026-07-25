@@ -403,7 +403,7 @@ class CodexProvider(Provider):
 
     def _prewarm_extension_mcp_ready(
         self, input_payload: dict[str, Any], app_session_id: str,
-    ) -> dict[str, str | None]:
+    ) -> dict[str, str | dict[str, Any] | None]:
         """Codex-equivalent of `ClaudeProvider._prewarm_extension_mcp_ready`
         (see provider_claude.py). The codex CLI's Rust binary defaults
         `startup_timeout_sec` to 10s per MCP server on a cold spawn --
@@ -431,7 +431,7 @@ class CodexProvider(Provider):
         if not targets:
             return {}
 
-        async def _one(target: dict[str, Any]) -> tuple[str, str | None]:
+        async def _one(target: dict[str, Any]) -> tuple[str, str | dict[str, Any] | None]:
             from mcp_prewarm import supervisor as mcp_prewarm_supervisor
 
             fingerprint = mcp_prewarm_supervisor.compute_fingerprint(
@@ -452,9 +452,9 @@ class CodexProvider(Provider):
                     target["extension_id"], target["server_name"],
                 )
                 return target["server_name"], None
-            return target["server_name"], (result.socket_path if result.ready else None)
+            return target["server_name"], result.ready_map_value()
 
-        async def _gather() -> dict[str, str | None]:
+        async def _gather() -> dict[str, str | dict[str, Any] | None]:
             pairs = await asyncio.gather(*(_one(t) for t in targets))
             return dict(pairs)
 

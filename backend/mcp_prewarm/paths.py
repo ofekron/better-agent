@@ -2,7 +2,17 @@
 
 One unix socket per (session_id, extension_id, server_name) -- never
 shared across sessions, so a daemon's lifetime and secrets are scoped
-to exactly the session that spawned it.
+to exactly the session that spawned it. On Windows there is no unix
+socket; `daemon_process.py`/`supervisor.py` use loopback TCP plus a
+per-daemon-instance connect secret instead (see `tcp_transport.py`).
+`os.chmod`/`Path.chmod` on Windows only toggles the read-only
+attribute -- it does NOT restrict which local users/processes can
+read a file the way POSIX mode bits do. This directory layout (and
+the 0700/0600 modes below) is therefore a real access-control boundary
+on macOS/Linux, but on Windows it is best-effort only; Windows ACLs
+that would actually lock the directory down are out of scope for this
+first pass. The TCP connect secret in `state.json` is the real
+isolation boundary on Windows, not these directory permissions.
 """
 
 from __future__ import annotations

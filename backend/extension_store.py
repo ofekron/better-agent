@@ -5354,15 +5354,27 @@ def _apply_mcp_prewarm_daemon(
     ready_map = inputs.get("_mcp_prewarm_ready")
     if not isinstance(ready_map, dict):
         return config
-    socket_path = ready_map.get(server_name)
-    if not socket_path:
+    ready_value = ready_map.get(server_name)
+    if not ready_value:
         return None
+    # `ready_value` is either a bare unix socket-path string (macOS/Linux
+    # -- unchanged shape, zero secrets in the stub's env since directory
+    # permissions already isolate the socket) or a small dict describing
+    # the Windows TCP+secret transport (`supervisor.DaemonReadyResult.
+    # ready_map_value`'s single source of truth for this shape).
+    if isinstance(ready_value, dict):
+        connect_env = dual_env_many({
+            "BETTER_CLAUDE_MCP_DAEMON_ADDR": f"{ready_value['host']}:{ready_value['port']}",
+            "BETTER_CLAUDE_MCP_DAEMON_CONNECT_SECRET": ready_value["connect_secret"],
+        })
+    else:
+        connect_env = dual_env_many({"BETTER_CLAUDE_MCP_DAEMON_SOCKET": str(ready_value)})
     return {
         **{k: v for k, v in config.items() if k not in ("command", "args", "env")},
         "command": sys.executable,
         "args": ["-m", "mcp_prewarm.stub"],
         "env": {
-            **dual_env_many({"BETTER_CLAUDE_MCP_DAEMON_SOCKET": str(socket_path)}),
+            **connect_env,
             # The stub is a stdlib-only script but still needs `backend/`
             # (its own package parent) on PYTHONPATH -- unlike the real
             # cold-spawn config this replaces, whose env intentionally
