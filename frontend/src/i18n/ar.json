@@ -225,6 +225,7 @@
   "setup.logIn": "تسجيل الدخول",
   "setup.signingIn": "جارٍ تسجيل الدخول…",
   "setup.logOut": "تسجيل الخروج",
+  "setup.cancelLogin": "إلغاء",
   "setup.signingOut": "جارٍ تسجيل الخروج…",
   "setup.retryLogin": "إعادة محاولة تسجيل الدخول",
   "setup.editButton": "تعديل",

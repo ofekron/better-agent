@@ -225,6 +225,7 @@
   "setup.logIn": "लॉग इन",
   "setup.signingIn": "लॉग इन हो रहा है…",
   "setup.logOut": "लॉग आउट",
+  "setup.cancelLogin": "रद्द करें",
   "setup.signingOut": "लॉग आउट हो रहा है…",
   "setup.retryLogin": "लॉगिन पुनः प्रयास करें",
   "setup.editButton": "संपादित करें",

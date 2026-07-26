@@ -225,6 +225,7 @@
   "setup.logIn": "Войти",
   "setup.signingIn": "Вход…",
   "setup.logOut": "Выйти",
+  "setup.cancelLogin": "Отмена",
   "setup.signingOut": "Выход…",
   "setup.retryLogin": "Повторить вход",
   "setup.editButton": "Изменить",

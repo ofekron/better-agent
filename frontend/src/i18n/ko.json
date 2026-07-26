@@ -225,6 +225,7 @@
   "setup.logIn": "로그인",
   "setup.signingIn": "로그인 중…",
   "setup.logOut": "로그아웃",
+  "setup.cancelLogin": "취소",
   "setup.signingOut": "로그아웃 중…",
   "setup.retryLogin": "로그인 재시도",
   "setup.editButton": "편집",

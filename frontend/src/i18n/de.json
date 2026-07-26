@@ -225,6 +225,7 @@
   "setup.logIn": "Anmelden",
   "setup.signingIn": "Anmeldung läuft…",
   "setup.logOut": "Abmelden",
+  "setup.cancelLogin": "Abbrechen",
   "setup.signingOut": "Abmeldung läuft…",
   "setup.retryLogin": "Anmeldung wiederholen",
   "setup.editButton": "Bearbeiten",

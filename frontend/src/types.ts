@@ -1292,7 +1292,7 @@ export interface Provider {
   /** OAuth login/logout flow state for subscription claude/codex records.
    * Surfaced from the backend in-memory auth registry; the settings UI
    * renders Log in / Log out from this. Desktop-only flow. */
-  login_state?: { status: string; message?: string };
+  login_state?: { status: string; message?: string; authenticated?: boolean | null };
   /** Whether this provider can branch a session via the CLI's
    * fork-session primitive. Drives UI gating for Fork, Fork-and-send,
    * Adversarial Sync, Prompt-Engineer refine.

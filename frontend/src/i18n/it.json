@@ -225,6 +225,7 @@
   "setup.logIn": "Accedi",
   "setup.signingIn": "Accesso in corso…",
   "setup.logOut": "Esci",
+  "setup.cancelLogin": "Annulla",
   "setup.signingOut": "Disconnessione…",
   "setup.retryLogin": "Riprova accesso",
   "setup.editButton": "Modifica",

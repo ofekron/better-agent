@@ -225,6 +225,7 @@
   "setup.logIn": "Se connecter",
   "setup.signingIn": "Connexion…",
   "setup.logOut": "Se déconnecter",
+  "setup.cancelLogin": "Annuler",
   "setup.signingOut": "Déconnexion…",
   "setup.retryLogin": "Réessayer la connexion",
   "setup.editButton": "Modifier",

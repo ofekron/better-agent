@@ -224,6 +224,7 @@
   "setup.logIn": "התחברות",
   "setup.signingIn": "מתחבר…",
   "setup.logOut": "התנתקות",
+  "setup.cancelLogin": "ביטול",
   "setup.signingOut": "מתנתק…",
   "setup.retryLogin": "נסה שוב להתחבר",
   "setup.editButton": "ערוך",

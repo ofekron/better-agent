@@ -225,6 +225,7 @@
   "setup.logIn": "Iniciar sesión",
   "setup.signingIn": "Iniciando sesión…",
   "setup.logOut": "Cerrar sesión",
+  "setup.cancelLogin": "Cancelar",
   "setup.signingOut": "Cerrando sesión…",
   "setup.retryLogin": "Reintentar inicio de sesión",
   "setup.editButton": "Editar",

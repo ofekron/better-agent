@@ -235,6 +235,7 @@
   "setup.logIn": "Log in",
   "setup.signingIn": "Signing in…",
   "setup.logOut": "Log out",
+  "setup.cancelLogin": "Cancel",
   "setup.signingOut": "Signing out…",
   "setup.retryLogin": "Retry login",
   "setup.editButton": "Edit",

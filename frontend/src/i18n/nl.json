@@ -225,6 +225,7 @@
   "setup.logIn": "Inloggen",
   "setup.signingIn": "Inloggen…",
   "setup.logOut": "Uitloggen",
+  "setup.cancelLogin": "Annuleren",
   "setup.signingOut": "Uitloggen…",
   "setup.retryLogin": "Opnieuw inloggen",
   "setup.editButton": "Bewerken",

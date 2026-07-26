@@ -2285,7 +2285,7 @@ def _with_login_states(state: dict) -> dict:
     providers = state.get("providers")
     if not isinstance(providers, list):
         return state
-    state["providers"] = [provider_auth.detach_login_state(p) for p in providers]
+    state["providers"] = [provider_auth.attach_login_state(p) for p in providers]
     return state
 
 
@@ -2740,6 +2740,10 @@ async def get_providers():
         last_effort = last_efforts.get(record.get("id"))
         if last_effort and last_effort in (record.get("reasoning_effort_options") or []):
             record["last_reasoning_effort"] = last_effort
+        # Lazily resolve the durable auth-status for subscription providers
+        # whose cached value is missing (e.g. right after a restart) so the
+        # UI can show Log out for an account signed in via the CLI.
+        provider_auth.maybe_schedule_refresh(record.get("id") or "", _broadcast_provider_changed)
     return state
 
 
@@ -2816,48 +2820,75 @@ async def retry_provider_credential(provider_id: str):
     return {"credential_status": status, "has_api_key": status == "available"}
 
 
+def _is_loopback_request(request: Request) -> bool:
+    """Server-side desktop/loopback gate for OAuth login/logout. The CLI
+    opens a browser and binds a localhost callback, so the user's browser
+    must share the backend's machine; a remote authenticated client must
+    not trigger a server-side browser spawn or wipe credentials."""
+    client = request.client
+    host = (client.host if client else "").lower()
+    return host in ("127.0.0.1", "::1", "localhost")
+
+
 @app.post("/api/providers/{provider_id}/login")
-async def login_provider(provider_id: str):
+async def login_provider(request: Request, provider_id: str):
     """Spawn the provider's own OAuth login against this record's isolated
-    credential dir (desktop-only — the CLI opens the OS browser). Returns
-    immediately; state transitions arrive via `provider_changed`."""
+    credential dir (desktop/loopback only — the CLI opens the OS browser).
+    Returns immediately; state transitions arrive via `provider_changed`."""
+    if not _is_loopback_request(request):
+        raise HTTPException(status_code=403, detail="OAuth login is available only from a loopback session.")
     provider = await asyncio.to_thread(config_store.get_provider, provider_id)
     if provider is None:
         raise HTTPException(status_code=404, detail=t("error.provider_not_found"))
     if not provider_auth.supports_auth(provider):
         raise HTTPException(status_code=409, detail="Provider does not support OAuth login.")
     result = await provider_auth.start_login(provider_id, _broadcast_provider_changed)
-    if result.get("error") == "busy":
-        raise HTTPException(status_code=409, detail="A login is already in progress.")
-    if result.get("error") == "binary_missing":
-        raise HTTPException(status_code=409, detail="Provider CLI not found.")
-    if not result.get("ok"):
-        raise HTTPException(status_code=400, detail="Login could not start.")
-    await _broadcast_provider_changed()
-    return {"login_state": result.get("state")}
+    return _provider_auth_result_response(result)
+
+
+@app.post("/api/providers/{provider_id}/login/cancel")
+async def cancel_provider_login(request: Request, provider_id: str):
+    if not _is_loopback_request(request):
+        raise HTTPException(status_code=403, detail="OAuth login is available only from a loopback session.")
+    killed = provider_auth.cancel(provider_id)
+    return {"cancelled": killed}
 
 
 @app.post("/api/providers/{provider_id}/logout")
-async def logout_provider(provider_id: str):
+async def logout_provider(request: Request, provider_id: str):
+    if not _is_loopback_request(request):
+        raise HTTPException(status_code=403, detail="OAuth logout is available only from a loopback session.")
     provider = await asyncio.to_thread(config_store.get_provider, provider_id)
     if provider is None:
         raise HTTPException(status_code=404, detail=t("error.provider_not_found"))
     if not provider_auth.supports_auth(provider):
         raise HTTPException(status_code=409, detail="Provider does not support OAuth login.")
     result = await provider_auth.start_logout(provider_id, _broadcast_provider_changed)
-    if result.get("error") == "busy":
+    return _provider_auth_result_response(result)
+
+
+def _provider_auth_result_response(result: dict):
+    """`_start` already broadcasts on every state change, so the route does
+    not rebroadcast — it only maps spawn errors to HTTP statuses."""
+    error = result.get("error")
+    if error == "busy":
         raise HTTPException(status_code=409, detail="A login/logout is already in progress.")
-    if result.get("error") == "binary_missing":
+    if error == "binary_missing":
         raise HTTPException(status_code=409, detail="Provider CLI not found.")
+    if error == "spawn_failed":
+        raise HTTPException(status_code=409, detail="Login could not start (transport unavailable).")
     if not result.get("ok"):
-        raise HTTPException(status_code=400, detail="Logout could not start.")
-    await _broadcast_provider_changed()
+        raise HTTPException(status_code=400, detail="Login could not start.")
     return {"login_state": result.get("state")}
 
 
 @app.delete("/api/providers/{provider_id}")
 async def remove_provider(provider_id: str):
     deleted, reason = await asyncio.to_thread(config_store.delete_provider, provider_id)
+    if deleted:
+        # Drop transient auth state so a deleted record leaves no
+        # in-flight/registry entry (and none survives id reuse).
+        provider_auth.clear_state(provider_id)
     if not deleted:
         if reason == "missing":
             raise HTTPException(status_code=404, detail=t("error.provider_not_found"))
@@ -13820,6 +13851,9 @@ async def on_shutdown():
             pass
     await lag_incident_queue.stop()
     await marketplace_bridge_api.stop()
+    # Kill any in-flight OAuth login/logout subprocesses so a `claude auth
+    # login` / `codex login` is never orphaned by a backend restart.
+    provider_auth.shutdown_all()
     await extension_api.shutdown_hot_path_executors()
     from orchestrator import shutdown_auth_executor
     await shutdown_auth_executor()

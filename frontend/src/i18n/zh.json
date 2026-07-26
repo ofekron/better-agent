@@ -225,6 +225,7 @@
   "setup.logIn": "登录",
   "setup.signingIn": "登录中…",
   "setup.logOut": "退出登录",
+  "setup.cancelLogin": "取消",
   "setup.signingOut": "退出中…",
   "setup.retryLogin": "重试登录",
   "setup.editButton": "编辑",

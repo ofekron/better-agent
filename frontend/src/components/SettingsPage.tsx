@@ -1721,19 +1721,38 @@ function ProvidersSettingsSection({
   // machine with the backend. Loopback access is the accurate signal.
   const loginEnabled =
     typeof window !== "undefined" &&
-    ["localhost", "127.0.0.1", "::1"].includes(window.location.hostname);
+    ["localhost", "127.0.0.1", "[::1]"].includes(window.location.hostname);
   const [loginPendingId, setLoginPendingId] = useState<string | null>(null);
+  const [loginError, setLoginError] = useState<{ id: string; message: string } | null>(null);
   const runLoginAction = useCallback(
     async (p: Provider, action: "login" | "logout") => {
       setLoginPendingId(p.id);
+      setLoginError(null);
       try {
-        await fetch(`${API}/api/providers/${p.id}/${action}`, { method: "POST" });
+        const r = await fetch(`${API}/api/providers/${p.id}/${action}`, { method: "POST" });
+        if (!r.ok) {
+          let message = `${action} failed`;
+          try {
+            const body = await r.json();
+            if (body?.detail) message = String(body.detail);
+          } catch {
+            /* keep default */
+          }
+          setLoginError({ id: p.id, message });
+        }
       } finally {
         setLoginPendingId(null);
       }
     },
     [],
   );
+  const cancelLoginAction = useCallback(async (p: Provider) => {
+    try {
+      await fetch(`${API}/api/providers/${p.id}/login/cancel`, { method: "POST" });
+    } catch {
+      /* best-effort cancel */
+    }
+  }, []);
   return (
     <>
       {!firstRunDone && (
@@ -1779,12 +1798,14 @@ function ProvidersSettingsSection({
           const credentialStatus = p.credential_status || (p.has_api_key ? "available" : "unknown");
           const loginState = p.login_state;
           const loginStatus = loginState?.status ?? "idle";
+          const authenticated = loginState?.authenticated === true;
           const loginActionRunning =
             loginStatus === "login_running" ||
             loginStatus === "logout_running" ||
             loginPendingId === p.id;
           const loginSupported =
             loginEnabled && p.mode === "subscription" && (p.kind === "claude" || p.kind === "codex");
+          const loginErrorMessage = loginError?.id === p.id ? loginError.message : null;
           return (
             <div key={p.id} className={`provider-row ${isActive ? "active" : ""} ${isSuspended ? "suspended" : ""} credential-${credentialStatus}`}>
               <div className="provider-row-main" onClick={() => onEdit(p)}>
@@ -1842,7 +1863,7 @@ function ProvidersSettingsSection({
                 )}
                 {loginSupported && (
                   <>
-                    {loginStatus === "login_success" ? (
+                    {authenticated && loginStatus !== "login_running" ? (
                       <button
                         type="button"
                         className="btn-secondary provider-login-action"
@@ -1857,11 +1878,11 @@ function ProvidersSettingsSection({
                       <button
                         type="button"
                         className={`provider-login-action ${
-                          loginStatus === "login_failed" ? "btn-warning" : "btn-secondary"
+                          loginStatus === "login_failed" || loginErrorMessage ? "btn-warning" : "btn-secondary"
                         }`}
                         disabled={busy || loginActionRunning}
                         onClick={() => runLoginAction(p, "login")}
-                        title={loginStatus === "login_failed" ? loginState?.message : undefined}
+                        title={loginErrorMessage || (loginStatus === "login_failed" ? loginState?.message : undefined)}
                       >
                         {loginActionRunning && (
                           <span className="retrying-spinner" aria-hidden="true" />
@@ -1871,6 +1892,16 @@ function ProvidersSettingsSection({
                           : loginStatus === "login_failed"
                             ? t('setup.retryLogin')
                             : t('setup.logIn')}
+                      </button>
+                    )}
+                    {loginActionRunning && (
+                      <button
+                        type="button"
+                        className="btn-secondary provider-login-cancel"
+                        onClick={() => cancelLoginAction(p)}
+                        title={t('setup.cancelLogin')}
+                      >
+                        {t('setup.cancelLogin')}
                       </button>
                     )}
                   </>

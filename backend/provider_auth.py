@@ -6,23 +6,25 @@ CLI with the record's isolated credential env (`CLAUDE_CONFIG_DIR` for
 claude, `CODEX_HOME` for codex) — the same SSOT
 (`config_store.provider_credential_env`) the spawn path uses.
 
-Desktop-only by design: the CLI opens the OS browser and binds a
+Desktop/loopback-only by design: the CLI opens the OS browser and binds a
 localhost OAuth callback, so the user's browser must share the machine
-with the backend. The frontend gates the button on a loopback/desktop
-session; this module does not second-guess that.
-
-Security: the spawned argv is a fixed kind->suffix mapping, never built
-from caller input, so there is no command-injection surface. The
-credential env is injected per-spawn only, never into `os.environ`.
+with the backend. The frontend gates the button on a loopback session;
+the routes additionally enforce a server-side loopback check so a remote
+authenticated client cannot trigger a server-side browser spawn or wipe
+credentials. Security: the spawned argv is a fixed kind->suffix mapping,
+never built from caller input, so there is no command-injection surface;
+the credential env is injected per-spawn only, never into `os.environ`.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
 import os
+import time
 from typing import Awaitable, Callable, Optional
 
 import config_store
+from paths import user_home
 
 logger = logging.getLogger(__name__)
 
@@ -40,20 +42,37 @@ _AUTH_COMMANDS: dict[str, dict[str, list[str]]] = {
     },
 }
 
-# States surfaced to the UI via the provider's `login_state` field.
+_BINARY_NAME: dict[str, str] = {"claude": "claude", "codex": "codex"}
+
+# In-flight flow states (transient; live only in `_states`).
 STATE_IDLE = "idle"
 STATE_LOGIN_RUNNING = "login_running"
 STATE_LOGIN_SUCCESS = "login_success"
 STATE_LOGIN_FAILED = "login_failed"
 STATE_LOGOUT_RUNNING = "logout_running"
+STATE_LOGOUT_FAILED = "logout_failed"
 STATE_LOGGED_OUT = "logged_out"
 
-# In-memory registry (per backend process). Not persisted: a restart
-# loses transient login progress, which is correct — the credentials
-# themselves live in each record's config_dir, not here.
+_RUNNING_STATES = (STATE_LOGIN_RUNNING, STATE_LOGOUT_RUNNING)
+
+# Upper bound on a single OAuth flow. The browser exchange legitimately
+# takes a while, but a flow left hanging (closed tab, dropped callback)
+# must not wedge the record busy forever or orphan the subprocess.
+LOGIN_TIMEOUT_SECONDS = 300.0
+_STATUS_TIMEOUT_SECONDS = 20.0
+# How long a cached authoritative auth-status is trusted. Invalidated
+# immediately on login/logout completion.
+_AUTH_CACHE_TTL_SECONDS = 120.0
+
+# Transient per-process registries. `_states` tracks in-flight progress
+# only; the durable "is this account logged in" truth is the provider's
+# own status subcommand, cached in `_auth_cache`.
 _states: dict[str, dict] = {}
 _locks: dict[str, asyncio.Lock] = {}
 _procs: dict[str, asyncio.subprocess.Process] = {}
+_tasks: set = set()
+_auth_cache: dict[str, tuple[float, Optional[bool]]] = {}
+_pending_refresh: set[str] = set()
 
 BroadcastFn = Callable[[], Awaitable[None]]
 
@@ -67,11 +86,6 @@ def supports_auth(provider: dict) -> bool:
     return (provider.get("kind") or "claude") in _AUTH_COMMANDS
 
 
-def login_state(provider_id: str) -> dict:
-    """Snapshot of the record's auth-flow state for UI rendering."""
-    return dict(_states.get(provider_id, {"status": STATE_IDLE, "message": ""}))
-
-
 def _lock_for(provider_id: str) -> asyncio.Lock:
     return _locks.setdefault(provider_id, asyncio.Lock())
 
@@ -80,12 +94,61 @@ def _set_state(provider_id: str, status: str, message: str = "") -> None:
     _states[provider_id] = {"status": status, "message": message}
 
 
+def clear_state(provider_id: str) -> None:
+    """Drop all transient state for a record (called on provider delete)."""
+    _states.pop(provider_id, None)
+    _auth_cache.pop(provider_id, None)
+    _locks.pop(provider_id, None)
+
+
+def _cached_auth(provider_id: str) -> Optional[bool]:
+    entry = _auth_cache.get(provider_id)
+    if not entry:
+        return None
+    ts, value = entry
+    if time.monotonic() - ts > _AUTH_CACHE_TTL_SECONDS:
+        return None
+    return value
+
+
+def _invalidate_auth(provider_id: str) -> None:
+    _auth_cache.pop(provider_id, None)
+
+
+def login_state(provider_id: str) -> dict:
+    """Snapshot of the record's in-flight auth-flow state + the cached
+    durable auth-status, for UI serialization. Cheap: no subprocess."""
+    return {
+        "status": _states.get(provider_id, {}).get("status", STATE_IDLE),
+        "message": _states.get(provider_id, {}).get("message", ""),
+        "authenticated": _cached_auth(provider_id),
+    }
+
+
+def attach_login_state(record: dict) -> dict:
+    """Attach the record's auth state for UI serialization. Called from
+    the provider list/broadcast path in main.py."""
+    if not supports_auth(record):
+        return record
+    record = dict(record)
+    record["login_state"] = login_state(record.get("id") or "")
+    return record
+
+
 def _build_env(provider: dict) -> dict[str, str]:
-    """Env for the login/logout subprocess. Mirrors the provider's
-    `build_env` isolation but skips `require_runtime_credential` — the
-    whole point is to run before any credential exists. The credential
-    dir override comes from the shared SSOT."""
+    """Env for the login/logout/status subprocess. Mirrors the provider's
+    `build_env` isolation + transport finalization but skips
+    `require_runtime_credential` — the whole point is to run before any
+    credential exists. Routes through the shared transport finalizer so a
+    login is subject to the same proxy/CA interposition (and fail-closed
+    on misconfig) as every other provider spawn."""
+    from provider_transport import apply_provider_transport, ProviderTransportError
+
     env = os.environ.copy()
+    # `HOME` is spoofable; pin it from the passwd db exactly like the
+    # canonical claude builder so login writes to the same home later
+    # sessions read.
+    env["HOME"] = str(user_home())
     # Clear cross-provider credential env so it can't leak another
     # account into this login.
     for var in (
@@ -101,36 +164,56 @@ def _build_env(provider: dict) -> dict[str, str]:
     cred = config_store.provider_credential_env(provider)
     if cred:
         env[cred[0]] = cred[1]
+    try:
+        env = apply_provider_transport(
+            env,
+            provider_id=provider.get("id") or "",
+            provider_kind=provider.get("kind") or "claude",
+            provider_mode=provider.get("mode") or "subscription",
+        )
+    except ProviderTransportError:
+        # Fail closed: a misconfigured transport means the OAuth exchange
+        # can't reach the provider correctly; surface as a login error
+        # rather than proceeding unproxied.
+        raise
     return env
 
 
 def _resolve_binary(kind: str) -> Optional[str]:
     from cli_paths import resolve_cli_binary
 
-    return resolve_cli_binary({"claude": "claude", "codex": "codex"}[kind])
+    return resolve_cli_binary(_BINARY_NAME[kind])
 
 
-async def _run_status(provider: dict) -> bool:
-    """Authoritative logged-in check via the provider's own status
-    subcommand. Returns True on a 0-exit (authenticated). Any failure
-    (binary missing, non-zero, timeout) is treated as not-logged-in."""
+async def _spawn(provider: dict, suffix_key: str) -> Optional[asyncio.subprocess.Process]:
     kind = provider.get("kind") or "claude"
     binary = _resolve_binary(kind)
     if not binary:
-        return False
-    cmd = [binary, *_AUTH_COMMANDS[kind]["status"]]
+        return None
+    cmd = [binary, *_AUTH_COMMANDS[kind][suffix_key]]
+    return await asyncio.create_subprocess_exec(
+        *cmd,
+        stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        env=_build_env(provider),
+    )
+
+
+async def _status_authenticated(provider: dict) -> bool:
+    """Authoritative logged-in check via the provider's own status
+    subcommand. Returns True on a 0-exit (authenticated). Any failure
+    (binary missing, non-zero, timeout) is treated as not-logged-in."""
     try:
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=_build_env(provider),
-        )
+        proc = await _spawn(provider, "status")
     except FileNotFoundError:
         return False
+    except Exception:
+        return False
+    if proc is None:
+        return False
     try:
-        await asyncio.wait_for(proc.wait(), timeout=20)
+        await asyncio.wait_for(proc.communicate(), timeout=_STATUS_TIMEOUT_SECONDS)
     except asyncio.TimeoutError:
         try:
             proc.kill()
@@ -140,21 +223,85 @@ async def _run_status(provider: dict) -> bool:
     return proc.returncode == 0
 
 
+async def refresh_auth_status(provider_id: str, broadcast: BroadcastFn) -> None:
+    """Recompute and cache the authoritative auth-status for a record,
+    then broadcast so the UI reflects the durable truth (not just
+    in-flight progress). Called after login/logout and at backend boot."""
+    provider = config_store.get_provider(provider_id)
+    if provider is None or not supports_auth(provider):
+        return
+    try:
+        authenticated = await _status_authenticated(provider)
+    except Exception as exc:
+        logger.warning("provider_auth status check failed for %s: %s", provider_id, exc)
+        authenticated = False
+    _auth_cache[provider_id] = (time.monotonic(), authenticated)
+    await broadcast()
+
+
+def maybe_schedule_refresh(provider_id: str, broadcast: BroadcastFn) -> None:
+    """Lazily refresh the durable auth-status for a record the first time
+    the UI observes it without a cached value (e.g. right after a backend
+    restart). Debounced per-record so a single status subprocess runs at
+    most once until it resolves."""
+    if provider_id in _pending_refresh:
+        return
+    if _cached_auth(provider_id) is not None:
+        return
+    if not supports_auth(config_store.get_provider(provider_id) or {}):
+        return
+    _pending_refresh.add(provider_id)
+
+    async def _run() -> None:
+        try:
+            await refresh_auth_status(provider_id, broadcast)
+        finally:
+            _pending_refresh.discard(provider_id)
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        _pending_refresh.discard(provider_id)
+        return
+    task = loop.create_task(_run(), name=f"provider_auth:status:{provider_id}")
+    _tasks.add(task)
+    task.add_done_callback(_tasks.discard)
+
+
+def _forget_proc(provider_id: str, proc: asyncio.subprocess.Process) -> None:
+    if _procs.get(provider_id) is proc:
+        _procs.pop(provider_id, None)
+
+
 async def _monitor(
     provider_id: str,
-    provider: dict,
     action: str,
     proc: asyncio.subprocess.Process,
     broadcast: BroadcastFn,
 ) -> None:
-    """Await a login/logout subprocess, classify the outcome via the
-    provider's status subcommand, and broadcast the final state."""
-    kind = provider.get("kind") or "claude"
+    """Await a login/logout subprocess with a bounded timeout, classify
+    the outcome, and broadcast. Any exception (crash, timeout, transport
+    error) resolves to a failed state so the record can never wedge busy."""
     try:
-        stdout, stderr = await proc.communicate()
-        exit_code = proc.returncode
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(), timeout=LOGIN_TIMEOUT_SECONDS
+            )
+            exit_code = proc.returncode
+        except asyncio.TimeoutError:
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+            _set_state(provider_id, STATE_LOGIN_FAILED, "login timed out")
+            await broadcast()
+            return
+    except Exception as exc:
+        _set_state(provider_id, STATE_LOGIN_FAILED, f"login error: {exc}")
+        await broadcast()
+        return
     finally:
-        _procs.pop(provider_id, None)
+        _forget_proc(provider_id, proc)
 
     tail = ""
     for stream in (stderr, stdout):
@@ -167,40 +314,31 @@ async def _monitor(
                 break
 
     if action == "logout":
-        # logout has no separate status; trust the exit code.
         if exit_code == 0:
             _set_state(provider_id, STATE_LOGGED_OUT)
         else:
-            _set_state(provider_id, STATE_LOGIN_FAILED, tail or "logout failed")
-        await broadcast()
+            _set_state(provider_id, STATE_LOGOUT_FAILED, tail or "logout failed")
+        _invalidate_auth(provider_id)
+        await refresh_auth_status(provider_id, broadcast)
         return
 
     # login: confirm authoritatively rather than trusting exit code alone,
     # since a browser-closed-midflow can still exit 0 on some providers.
     authenticated = False
     if exit_code == 0:
-        # Re-fetch the record so a concurrent config edit is reflected.
-        fresh = config_store.get_provider(provider_id) or provider
-        try:
-            authenticated = await _run_status(fresh)
-        except Exception as exc:
-            logger.warning("provider_auth status check failed for %s: %s", provider_id, exc)
+        fresh = config_store.get_provider(provider_id) or {}
+        if supports_auth(fresh):
+            try:
+                authenticated = await _status_authenticated(fresh)
+            except Exception as exc:
+                logger.warning("provider_auth status check failed for %s: %s", provider_id, exc)
+    _invalidate_auth(provider_id)
+    _auth_cache[provider_id] = (time.monotonic(), authenticated)
     if authenticated:
         _set_state(provider_id, STATE_LOGIN_SUCCESS)
     else:
-        _set_state(
-            provider_id,
-            STATE_LOGIN_FAILED,
-            tail or f"{kind} login did not complete",
-        )
+        _set_state(provider_id, STATE_LOGIN_FAILED, tail or "login did not complete")
     await broadcast()
-
-
-def _is_running(provider_id: str) -> bool:
-    return _states.get(provider_id, {}).get("status") in (
-        STATE_LOGIN_RUNNING,
-        STATE_LOGOUT_RUNNING,
-    )
 
 
 async def _start(
@@ -214,42 +352,40 @@ async def _start(
         return {"ok": False, "error": "not_found"}
     if not supports_auth(provider):
         return {"ok": False, "error": "unsupported"}
-    kind = provider.get("kind") or "claude"
 
-    lock = _lock_for(provider_id)
-    async with lock:
+    async with _lock_for(provider_id):
         # State-based guard: the lock serializes the start critical section,
-        # and this check blocks a second spawn while a prior flow's
-        # subprocess is still running (the lock is NOT held for the flow's
-        # lifetime — only state is).
-        if _is_running(provider_id):
+        # and this check blocks a second spawn while a prior flow is still
+        # running. `_set_state(running)` below happens inside the same
+        # locked section with no await between, so the check-then-set is
+        # atomic against concurrent callers.
+        if _states.get(provider_id, {}).get("status") in _RUNNING_STATES:
             return {"ok": False, "error": "busy"}
-        binary = _resolve_binary(kind)
-        if not binary:
-            _set_state(provider_id, STATE_LOGIN_FAILED, f"{kind} CLI not found")
+        try:
+            proc = await _spawn(provider, action)
+        except FileNotFoundError:
+            _set_state(provider_id, STATE_LOGIN_FAILED, "provider CLI not found")
             await broadcast()
             return {"ok": False, "error": "binary_missing"}
-        cmd = [binary, *_AUTH_COMMANDS[kind][action]]
-        _set_state(provider_id, running_state)
-        await broadcast()
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdin=asyncio.subprocess.DEVNULL,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                env=_build_env(provider),
-            )
-        except FileNotFoundError:
-            _set_state(provider_id, STATE_LOGIN_FAILED, f"{kind} CLI not found")
+        except Exception as exc:
+            # Includes transport-misconfig (fail closed) and spawn errors.
+            _set_state(provider_id, STATE_LOGIN_FAILED, f"login could not start: {exc}")
+            await broadcast()
+            return {"ok": False, "error": "spawn_failed"}
+        if proc is None:
+            _set_state(provider_id, STATE_LOGIN_FAILED, "provider CLI not found")
             await broadcast()
             return {"ok": False, "error": "binary_missing"}
         _procs[provider_id] = proc
-        # Keep a strong reference so the monitor isn't GC'd mid-flow.
-        asyncio.create_task(
-            _monitor(provider_id, provider, action, proc, broadcast),
+        _set_state(provider_id, running_state)
+        task = asyncio.create_task(
+            _monitor(provider_id, action, proc, broadcast),
             name=f"provider_auth:{action}:{provider_id}",
         )
+        # Strong reference so the monitor task is not GC'd mid-flow.
+        _tasks.add(task)
+        task.add_done_callback(_tasks.discard)
+    await broadcast()
     return {"ok": True, "state": login_state(provider_id)}
 
 
@@ -261,11 +397,26 @@ async def start_logout(provider_id: str, broadcast: BroadcastFn) -> dict:
     return await _start(provider_id, "logout", STATE_LOGOUT_RUNNING, broadcast)
 
 
-def detach_login_state(record: dict) -> dict:
-    """Attach the record's auth-flow state for UI serialization. Called
-    from the provider list/broadcast path in main.py."""
-    if not supports_auth(record):
-        return record
-    record = dict(record)
-    record["login_state"] = login_state(record.get("id") or "")
-    return record
+def cancel(provider_id: str) -> bool:
+    """Kill an in-flight login/logout subprocess for a record. Returns
+    True if a process was killed."""
+    proc = _procs.get(provider_id)
+    if proc is None or proc.returncode is not None:
+        return False
+    try:
+        proc.kill()
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def shutdown_all() -> None:
+    """Kill every in-flight auth subprocess. Called at backend shutdown
+    so no `claude auth login` / `codex login` is orphaned."""
+    for proc in list(_procs.values()):
+        if proc.returncode is None:
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+    _procs.clear()
