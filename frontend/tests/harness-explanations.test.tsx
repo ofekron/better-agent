@@ -52,10 +52,30 @@ describe("harness control explanations", () => {
   it("explains what an individual permission grants", () => {
     renderGroup(
       group({
-        items: [{ name: "filesystem", label: "filesystem", description: "optional", default_enabled: false }],
+        items: [{ name: "filesystem", label: "filesystem", description: "", detail: "optional", default_enabled: false }],
       }),
     );
     expect(screen.getByText(/Read and write files on your machine/i)).toBeTruthy();
+    expect(screen.getByText("optional")).toBeTruthy();
+  });
+
+  it("prefers the extension's own description over a built-in hint", () => {
+    renderGroup(
+      group({
+        id: "skills",
+        scope: "profile",
+        items: [
+          {
+            name: "deploy",
+            label: "deploy",
+            description: "Commit the intended working-tree changes and push the current branch.",
+            detail: "",
+            default_enabled: true,
+          },
+        ],
+      }),
+    );
+    expect(screen.getByText(/Commit the intended working-tree changes/i)).toBeTruthy();
   });
 
   it("gives UI surfaces a readable name instead of the raw key", () => {
@@ -69,15 +89,25 @@ describe("harness control explanations", () => {
     expect(screen.queryByText("quick_button")).toBeNull();
   });
 
-  it("leaves extension-authored items to their own descriptor text", () => {
+  it("shows an MCP server's own description as its caption", () => {
     const { container } = renderGroup(
       group({
         id: "mcp_servers",
         scope: "profile",
-        items: [{ name: "boards", label: "boards", description: "Board tools", default_enabled: true }],
+        items: [{ name: "boards", label: "boards", description: "Board tools", detail: "", default_enabled: true }],
       }),
     );
-    expect(screen.getByText("Board tools")).toBeTruthy();
+    expect(container.querySelector(".harness-item-hint")?.textContent).toBe("Board tools");
+  });
+
+  it("renders no caption when the extension describes nothing", () => {
+    const { container } = renderGroup(
+      group({
+        id: "mcp_servers",
+        scope: "profile",
+        items: [{ name: "boards", label: "boards", description: "", detail: "", default_enabled: true }],
+      }),
+    );
     expect(container.querySelector(".harness-item-hint")).toBeNull();
   });
 });

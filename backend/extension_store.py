@@ -34,6 +34,7 @@ from json_store import read_json, write_json
 from paths import ba_home
 import password_manager
 import extension_applied_config
+import extension_descriptions
 from provider_config_sync_backend.api import KNOWN_PROVIDER_KINDS
 import extension_instructions
 import extension_mcp
@@ -5460,16 +5461,18 @@ def _apply_mcp_prewarm_daemon(
     present in `inputs` at all -- absent means no prewarm was attempted
     for this call, e.g. a direct `runtime_mcp_server_configs()` caller
     outside the turn-dispatch path, so it falls back to today's
-    cold-spawn behavior unchanged). Present-but-missing-this-server
-    means prewarm was attempted and failed -- fail closed, omit the
-    server, never fall back to a real cold-spawn for that turn.
+    cold-spawn behavior unchanged). A server absent from a ready map was
+    not prewarmed and keeps its cold-spawn config. An explicit false/None
+    entry means prewarm failed and the server is omitted for that turn.
     """
     if config is None:
         return None
     ready_map = inputs.get("_mcp_prewarm_ready")
     if not isinstance(ready_map, dict):
         return config
-    ready_value = ready_map.get(server_name)
+    if server_name not in ready_map:
+        return config
+    ready_value = ready_map[server_name]
     if not ready_value:
         return None
     # `ready_value` is either a bare unix socket-path string (macOS/Linux
@@ -7420,10 +7423,11 @@ def extension_runtime_skills(extension_id: str) -> list[dict[str, Any]]:
     if record is None:
         raise ExtensionError("Extension not installed")
     entrypoints = record["manifest"].get("entrypoints", {})
+    root = runtime_package_root_for_record(record)
     return [
         {
             "name": item["name"],
-            "description": item.get("description") or "",
+            "description": extension_descriptions.skill_description(root, item),
             "enabled": is_runtime_skill_enabled(extension_id, item["name"], record=record),
         }
         for item in entrypoints.get("skills") or []

@@ -98,7 +98,9 @@ function ToggleRow({
   const locked = (item.locked_by ?? []).length > 0;
   const labelKey = itemLabelKey(group.id, item.name);
   const hintKey = itemHintKey(group.id, item.name);
-  const hint = hintKey ? t(hintKey, { defaultValue: "" }) : "";
+  // The extension's own words win; the built-in hint covers the fixed
+  // vocabularies (permissions, UI surfaces) that no extension describes.
+  const caption = item.description || (hintKey ? t(hintKey, { defaultValue: "" }) : "");
 
   return (
     <div className={`harness-item-row ${state.overridden ? "is-overridden" : ""}`}>
@@ -113,7 +115,7 @@ function ToggleRow({
           {labelKey ? t(labelKey, { defaultValue: item.label }) : item.label}
         </span>
       </label>
-      {item.description && <span className="harness-item-description">{item.description}</span>}
+      {item.detail && <span className="harness-item-detail">{item.detail}</span>}
       {locked && (
         <span className="harness-item-locked">
           {t("harnessProfile.lockedBy", { holders: (item.locked_by ?? []).join(", ") })}
@@ -144,7 +146,7 @@ function ToggleRow({
           </button>
         </span>
       )}
-      {hint && <p className="harness-item-hint">{hint}</p>}
+      {caption && <p className="harness-item-hint">{caption}</p>}
     </div>
   );
 }
@@ -223,7 +225,6 @@ function SettingRow({
           }}
         />
       )}
-      {item.description && <span className="harness-item-description">{item.description}</span>}
       {!isDefault && (
         <StateBadge
           overridden={state.overridden}
@@ -231,6 +232,7 @@ function SettingRow({
           onReset={() => onWrite({ path, clear: true })}
         />
       )}
+      {item.description && <p className="harness-item-hint">{item.description}</p>}
     </div>
   );
 }
@@ -311,7 +313,7 @@ export function HarnessGroup(props: GroupProps) {
           />
           <span className="harness-item-label">{t("harnessProfile.injectInstructions")}</span>
         </label>
-        <span className="harness-item-description">
+        <span className="harness-item-detail">
           {group.items.map((item) => item.label).join(", ")}
         </span>
       </div>

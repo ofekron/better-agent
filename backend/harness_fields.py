@@ -21,6 +21,7 @@ import json
 from typing import Any
 
 import config_store
+import extension_descriptions
 import extension_instructions
 import extension_store
 
@@ -128,6 +129,7 @@ def _mcp_group(extension_id: str) -> dict[str, Any]:
             "name": server["name"],
             "label": server.get("label") or server["name"],
             "description": server.get("description") or "",
+            "detail": "",
             "default_enabled": bool(server.get("enabled")),
             # A server an enabled skill depends on cannot be turned off
             # without first disabling that skill — surface the reason rather
@@ -143,6 +145,7 @@ def _skills_group(extension_id: str) -> dict[str, Any]:
             "name": skill["name"],
             "label": skill["name"],
             "description": skill.get("description") or "",
+            "detail": "",
             "default_enabled": bool(skill.get("enabled")),
             "locked_by": [],
         }
@@ -155,11 +158,13 @@ def _instructions_group(record: dict[str, Any]) -> dict[str, Any]:
     entrypoints = (record.get("manifest") or {}).get("entrypoints") or {}
     state = extension_instructions.normalize_state(record)
     enabled = bool(state.get("global"))
+    root = extension_store.runtime_package_root_for_record(record)
     items = [
         {
             "name": str(item["name"]),
             "label": str(item["name"]),
-            "description": "project" if item.get("level") == "project" else "global",
+            "description": extension_descriptions.instruction_description(root, item),
+            "detail": "project" if item.get("level") == "project" else "global",
             # Default injects either all of an extension's sections or none —
             # the store's toggle is extension-level. Named profiles select
             # per section, so per-item default state mirrors the extension flag.
@@ -198,6 +203,7 @@ def _settings_group(extension_id: str) -> dict[str, Any]:
             "name": key,
             "label": spec.get("label") or key,
             "description": spec.get("description") or "",
+            "detail": "",
             "type": spec.get("type"),
             "enum": list(spec.get("enum") or []),
             # Secrets live in the OS keychain and are never profile-scoped:
@@ -233,7 +239,8 @@ def _native_exposure_group(record: dict[str, Any]) -> dict[str, Any]:
         items.append({
             "name": f"{kind}:{name}",
             "label": name,
-            "description": kind,
+            "description": "",
+            "detail": kind,
             "default_enabled": bool(addition.get("native_exposed")),
             "locked_by": [],
         })
@@ -245,7 +252,8 @@ def _frontend_modules_group(extension_id: str) -> dict[str, Any]:
         {
             "name": f"{module['slot']}:{module['id']}",
             "label": module.get("label") or module["id"],
-            "description": module["slot"],
+            "description": "",
+            "detail": module["slot"],
             "default_enabled": bool(module.get("enabled")),
             "locked_by": [],
         }
@@ -266,6 +274,7 @@ def _ui_surfaces_group(extension_id: str, record: dict[str, Any]) -> dict[str, A
             "name": key,
             "label": key,
             "description": "",
+            "detail": "",
             "default_enabled": bool(ui.get(f"{key}_enabled", True)),
             "locked_by": [],
         }
@@ -285,7 +294,8 @@ def _permissions_group(record: dict[str, Any]) -> dict[str, Any]:
         items.append({
             "name": permission,
             "label": permission,
-            "description": "optional" if is_optional else "required",
+            "description": "",
+            "detail": "optional" if is_optional else "required",
             "default_enabled": bool(grants.get(permission)) if is_optional else True,
             # Required permissions are part of the install contract; only
             # optional ones are user-togglable, and never profile-scoped.
@@ -366,6 +376,7 @@ def descriptor() -> dict[str, Any]:
                     "name": tool,
                     "label": tool,
                     "description": "",
+                    "detail": "",
                     # The toggle reads as "tool is available"; the stored
                     # field is the inverse (disabled list).
                     "default_enabled": tool not in config_store.get_disabled_builtin_tools(),
@@ -383,6 +394,7 @@ def descriptor() -> dict[str, Any]:
                     "name": extension_id,
                     "label": extension_id,
                     "description": "",
+                    "detail": "",
                     "default_enabled": extension_id not in config_store.get_disabled_builtin_extensions(),
                     "locked_by": [],
                 }

@@ -12,7 +12,13 @@ export type HarnessControl = "item_toggles" | "settings" | "text" | "instruction
 export interface HarnessDescriptorItem {
   name: string;
   label: string;
+  /** What the item does, in the extension's own words — from its manifest or
+   * from the artifact it ships (a skill's SKILL.md, an instruction block's
+   * opening paragraph). Empty when the extension declares nothing. */
   description: string;
+  /** Short classification chip (instruction level, native kind, module slot,
+   * required/optional) — a label, never an explanation. */
+  detail?: string;
   /** Live global state — what Default resolves to for this item. */
   default_enabled?: boolean;
   /** Non-empty when the item can't be toggled, naming what holds it. */

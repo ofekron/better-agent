@@ -112,7 +112,7 @@ export function HarnessProfileMeta({ profile, profiles, disabled, onWrite }: Pro
             <option key={item.id} value={item.id}>{item.name}</option>
           ))}
         </select>
-        <span className="harness-item-description">{t("harnessProfile.baseProfileHint")}</span>
+        <p className="harness-item-hint">{t("harnessProfile.baseProfileHint")}</p>
       </div>
 
       <div className="harness-item-row">
@@ -128,7 +128,7 @@ export function HarnessProfileMeta({ profile, profiles, disabled, onWrite }: Pro
             <option key={item.id} value={item.id}>{item.name}</option>
           ))}
         </select>
-        <span className="harness-item-description">{t("harnessProfile.pinHint")}</span>
+        <p className="harness-item-hint">{t("harnessProfile.pinHint")}</p>
       </div>
 
       <div className="harness-item-row">

@@ -10165,9 +10165,10 @@ button.run-badge-clickable:focus-visible {
   color: var(--text-secondary);
 }
 
-/* Per-item explanation for the fixed vocabularies (permissions, UI surfaces)
-   whose names carry no meaning on their own. Full-width inside the wrapping
-   row so it reads as a caption under the control. */
+/* What an individual control does — the extension's own description for its
+   skills, MCP servers and instruction blocks, or the built-in explanation for
+   the fixed vocabularies (permissions, UI surfaces). Full-width inside the
+   wrapping row so it reads as a caption under the control. */
 .harness-item-hint {
   flex-basis: 100%;
   margin: 0;
@@ -10219,7 +10220,9 @@ button.run-badge-clickable:focus-visible {
   color: var(--text-primary);
 }
 
-.harness-item-description {
+/* Short classification chip next to a control (instruction level, native
+   kind, module slot, required/optional) — not an explanation. */
+.harness-item-detail {
   font-size: calc(11.5px * var(--app-font-scale));
   color: var(--text-muted);
 }

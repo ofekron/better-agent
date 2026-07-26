@@ -283,6 +283,12 @@ def _cwd_chain(cwd: Path) -> list[Path]:
         current = current.parent
 
 
+def read_skill_description(skill_md: Path) -> str:
+    """Frontmatter `description` of a SKILL.md — the text the agent matches a
+    task against, and the one authoritative statement of what the skill does."""
+    return _read_description(skill_md)
+
+
 def _read_description(skill_md: Path) -> str:
     try:
         text = skill_md.read_text(encoding="utf-8", errors="replace")
