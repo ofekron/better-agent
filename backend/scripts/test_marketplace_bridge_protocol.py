@@ -636,6 +636,64 @@ def test_protocol_transport_binds_origin_and_strips_signature_fields() -> None:
             os.environ["BETTER_AGENT_MARKETPLACE_BASE_URL"] = original_origin
 
 
+def test_protocol_transport_rejects_invalid_response_value_types() -> None:
+    transport = marketplace_service.marketplace_protocol_transport
+    original_request_sync = transport._request_sync
+    try:
+        for invalid_revision in ("not-an-integer", 2):
+            transport._request_sync = (
+                lambda *_args, **_kwargs: {"revision": invalid_revision}
+            )
+            try:
+                transport.request(
+                    "projection",
+                    {"device_id": f"badvc_{'1' * 32}"},
+                    access_token="core-token",
+                    body={
+                        "protocol_hash": PROTOCOL_HASH,
+                        "revision": 1,
+                        "extensions": [],
+                        "challenge": f"bachal_{'A' * 43}",
+                        "signature": "B" * 86,
+                    },
+                )
+            except HTTPException as exc:
+                check(
+                    exc.status_code == 502,
+                    "core protocol transport rejects invalid projection acknowledgements",
+                )
+            else:
+                raise AssertionError(
+                    "core protocol transport accepted an invalid projection revision"
+                )
+    finally:
+        transport._request_sync = original_request_sync
+
+
+def test_pending_pair_recovery_schedules_retry() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        store = MarketplaceStateStore(Path(directory) / "state.json")
+        pair_id = f"pair_{'1' * 32}"
+        state = empty_state()
+        state["pending_pairs"][pair_id] = {
+            "token_account": f"marketplace-pair-token:{pair_id}",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        state["intents"][pair_id] = {
+            "intent_id": pair_id,
+            "action": "pair",
+            "status": "pending",
+            "device_label": "Test device",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        store.write(state)
+        bridge = MarketplaceBridge(store=store)
+        check(
+            asyncio.run(bridge._needs_reconciliation()),
+            "pending pair recovery schedules another retry",
+        )
+
+
 def test_marketplace_auth_service_is_home_scoped() -> None:
     original_home = os.environ.get("BETTER_AGENT_HOME")
     try:
@@ -666,4 +724,6 @@ if __name__ == "__main__":
     test_rest_ws_contract_and_extension_capability_boundary()
     test_protocol_mutation_transport_bypasses_extension_backend()
     test_protocol_transport_binds_origin_and_strips_signature_fields()
+    test_protocol_transport_rejects_invalid_response_value_types()
+    test_pending_pair_recovery_schedules_retry()
     test_marketplace_auth_service_is_home_scoped()

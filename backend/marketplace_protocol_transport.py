@@ -21,6 +21,84 @@ _PATH_IDENTIFIER_KINDS = {
 }
 
 
+def _is_string(value: object) -> bool:
+    return isinstance(value, str)
+
+
+def _is_non_empty_string(value: object) -> bool:
+    return isinstance(value, str) and bool(value)
+
+
+def _is_revision(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _is_challenge_batch(value: object) -> bool:
+    return (
+        isinstance(value, list)
+        and 1 <= len(value) <= PROTOCOL["bounds"]["challenge_batch_max"]
+        and all(
+            isinstance(challenge, str)
+            and PATTERNS["challenge"].fullmatch(challenge)
+            for challenge in value
+        )
+    )
+
+
+_RESPONSE_VALUE_VALIDATORS = {
+    "pair_context": {
+        "site_label": _is_string,
+        "account_label": _is_string,
+        "server_origin": _is_non_empty_string,
+        "protocol_hash": _is_non_empty_string,
+    },
+    "pair_redeem": {
+        "device_id": _is_non_empty_string,
+        "server_origin": _is_non_empty_string,
+        "protocol_hash": _is_non_empty_string,
+    },
+    "pair_reject": {"outcome": _is_non_empty_string},
+    "device_challenges": {
+        "challenges": _is_challenge_batch,
+        "expires_at": _is_non_empty_string,
+    },
+    "catalog_snapshot": {
+        "catalog": lambda value: isinstance(value, dict),
+        "signature": _is_non_empty_string,
+    },
+    "action_metadata": {
+        field: _is_non_empty_string
+        for field in PROTOCOL["http"]["action_metadata"]["response"]
+    },
+    "lease": {
+        "action": lambda value: value is None or isinstance(value, dict),
+    },
+    "fence": {
+        "terminal_capability": _is_non_empty_string,
+        "reconcile_deadline": _is_non_empty_string,
+    },
+    "reject": {
+        "outcome": _is_non_empty_string,
+        "result_code": _is_non_empty_string,
+    },
+    "terminal_ack": {
+        "outcome": _is_non_empty_string,
+        "result_code": _is_non_empty_string,
+    },
+    "projection": {"revision": _is_revision},
+    "revoke": {
+        "device_id": _is_non_empty_string,
+        "revoked": lambda value: isinstance(value, bool),
+    },
+}
+
+if set(_RESPONSE_VALUE_VALIDATORS) != set(PROTOCOL["http"]) or any(
+    set(_RESPONSE_VALUE_VALIDATORS[operation]) != set(spec["response"])
+    for operation, spec in PROTOCOL["http"].items()
+):
+    raise RuntimeError("Marketplace response validators do not match the protocol")
+
+
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, request, file_pointer, code, message, headers, new_url):
         return None
@@ -176,5 +254,16 @@ def request(
         raise HTTPException(
             status_code=502,
             detail="Marketplace protocol response has an invalid shape",
+        )
+    if not all(
+        validator(result[field])
+        for field, validator in _RESPONSE_VALUE_VALIDATORS[operation].items()
+    ) or (
+        operation == "projection"
+        and result["revision"] != body["revision"]
+    ):
+        raise HTTPException(
+            status_code=502,
+            detail="Marketplace protocol response has invalid values",
         )
     return result

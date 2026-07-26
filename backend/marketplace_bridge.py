@@ -1330,6 +1330,10 @@ class MarketplaceBridge:
         return bool(
             state["receipts"]
             or any(
+                state["intents"].get(intent_id, {}).get("status") == "pending"
+                for intent_id in state["pending_pairs"]
+            )
+            or any(
                 intent.get("rejection_pending")
                 for intent in state["intents"].values()
             )
