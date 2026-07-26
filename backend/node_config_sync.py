@@ -163,6 +163,7 @@ async def _push_surface(surface: _Surface, node_ids: list[str]) -> None:
     for node_id in node_ids:
         try:
             await _call_rpc(node_id, surface, state)
+            logger.info("node config sync of %s to node %s ok", surface.name, node_id)
         except Exception:
             logger.exception(
                 "node config sync of %s to node %s failed", surface.name, node_id
@@ -195,6 +196,11 @@ async def on_node_state(node_id: str, state: str) -> None:
         logger.exception("node config sync could not snapshot nodes for %s", node_id)
         return
     if node_id not in _connected_worker_ids(nodes):
+        logger.warning(
+            "node config sync skipped for %s: not a connected worker in the snapshot",
+            node_id,
+        )
         return
+    logger.info("node config sync: projecting all surfaces onto %s", node_id)
     for surface in SURFACES:
         await _push_surface(surface, [node_id])
