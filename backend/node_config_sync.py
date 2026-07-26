@@ -33,6 +33,10 @@ from typing import Any, Callable
 logger = logging.getLogger(__name__)
 
 _SYNC_RPC_TIMEOUT_S = 180.0
+# Applying an extension payload installs every package's dependencies on the
+# node. On a fresh node that is tens of pip installs, which routinely outruns
+# the default timeout — and a timeout there leaves the node half-populated.
+_EXTENSION_SYNC_RPC_TIMEOUT_S = 1800.0
 
 
 @dataclass(frozen=True)
@@ -41,6 +45,7 @@ class _Surface:
     rpc: str
     param: str
     export: Callable[[], dict[str, Any]]
+    timeout_s: float = _SYNC_RPC_TIMEOUT_S
 
 
 def _export_extensions() -> dict[str, Any]:
@@ -63,7 +68,13 @@ def _export_harness() -> dict[str, Any]:
 
 
 SURFACES: tuple[_Surface, ...] = (
-    _Surface("extensions", "sync_extension_config", "extension_state", _export_extensions),
+    _Surface(
+        "extensions",
+        "sync_extension_config",
+        "extension_state",
+        _export_extensions,
+        _EXTENSION_SYNC_RPC_TIMEOUT_S,
+    ),
     _Surface("providers", "sync_provider_config", "provider_state", _export_providers),
     _Surface("harness", "sync_harness_profile", "harness_state", _export_harness),
 )
@@ -117,7 +128,7 @@ async def _call_rpc(node_id: str, surface: _Surface, state: dict[str, Any]) -> N
         node_id,
         surface.rpc,
         {surface.param: state},
-        timeout=_SYNC_RPC_TIMEOUT_S,
+        timeout=surface.timeout_s,
         version_ready_required=True,
     )
 

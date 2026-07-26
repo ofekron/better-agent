@@ -16,6 +16,9 @@ if _BACKEND not in sys.path:
 
 import node_config_sync  # noqa: E402
 
+# Captured before any _Recorder swaps SURFACES out for fakes.
+_REAL_SURFACES = node_config_sync.SURFACES
+
 
 class _Recorder:
     """Swaps the real surfaces for fakes and records exports/pushes."""
@@ -207,6 +210,14 @@ def test_connect_listener_binds_the_loop_itself() -> None:
     asyncio.run(scenario())
 
 
+def test_extension_surface_gets_a_longer_rpc_timeout() -> None:
+    """Applying extensions installs packages on the node; the default RPC
+    timeout expired mid-install and left the node half-populated."""
+    by_name = {s.name: s for s in _REAL_SURFACES}
+    if by_name["extensions"].timeout_s <= by_name["providers"].timeout_s:
+        raise AssertionError("extension sync must allow more time than a config push")
+
+
 def test_unknown_surface_is_rejected() -> None:
     rec = _Recorder([_worker("w1")])
     rec.install()
@@ -226,5 +237,6 @@ if __name__ == "__main__":
     test_notify_from_worker_thread_reaches_the_bound_loop()
     test_bind_loop_off_loop_never_raises()
     test_connect_listener_binds_the_loop_itself()
+    test_extension_surface_gets_a_longer_rpc_timeout()
     test_unknown_surface_is_rejected()
     print("node_config_sync tests passed")
