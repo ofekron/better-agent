@@ -175,34 +175,6 @@ def builtin_servers_for(kind: str, *, user_facing: bool = True) -> frozenset[str
     return frozenset(servers)
 
 
-def _extension_servers(kind: str) -> frozenset[str]:
-    """MCP servers contributed by active extensions for a run of `kind`.
-
-    Empty until the backend's startup reconcile has installed the bundled
-    extensions, which is why the live cases read this through
-    `LiveBackend.assembled_servers` rather than at import time.
-    """
-    import extension_store
-    import provider_manifest
-
-    spec = provider_manifest.spec_for(kind)
-    if spec is None:
-        return frozenset()
-    inputs = _probe_inputs(kind)
-    with _probe_runtime_broker():
-        names = set(
-            extension_store.runtime_mcp_server_configs(
-                inputs, user_facing=True, bare=False
-            )
-        )
-        names |= set(
-            extension_store.native_mcp_launcher_server_configs(
-                inputs, user_facing=True, bare=False
-            )
-        )
-    return frozenset(names)
-
-
 def supports_communicate(kind: str) -> bool:
     """True when the kind exposes the communicate tool set at all — as an MCP
     server or as per-turn dynamic tools."""
@@ -231,6 +203,40 @@ class Skip(Exception):
     """Raised by a case when its precondition is absent (CLI not installed,
     catalog empty). Reported separately from a failure — a missing vendor is
     not a broken vendor."""
+
+
+@dataclass(frozen=True)
+class TurnResult:
+    """One completed turn: the runner's `complete` payload and every event the
+    provider emitted, which is what read-only tools are asserted against."""
+
+    complete: dict
+    events: list
+
+
+# Runner errors that mean the vendor account cannot serve the turn — an
+# exhausted or unauthorized account is an environment condition, not a broken
+# MCP server, so these skip instead of failing the suite.
+_ENVIRONMENT_ERROR_MARKERS = (
+    "quota reached",
+    "quota exceeded",
+    "rate limit",
+    "resets in",
+    "upgrade your subscription",
+    "not authenticated",
+    "unauthorized",
+    "invalid api key",
+    "credit balance",
+)
+
+
+def _raise_for_runner_error(vendor: "Vendor", error: str, run_dir) -> None:
+    lowered = error.lower()
+    if any(marker in lowered for marker in _ENVIRONMENT_ERROR_MARKERS):
+        raise Skip(f"{vendor.kind} account cannot serve this turn: {error}")
+    raise AssertionError(
+        f"{vendor.kind}: runner error {error!r} run_dir={run_dir}"
+    )
 
 
 @dataclass(frozen=True)
@@ -338,17 +344,6 @@ class LiveBackend:
         if self._thread is not None:
             self._thread.join(timeout=15.0)
 
-    def assembled_servers(self, kind: str) -> frozenset[str]:
-        """Servers a run of `kind` gets from THIS running backend.
-
-        `builtin_servers_for` answers the same question from static wiring;
-        this answers it after startup has reconciled the extension store, so
-        bundled-extension servers are visible too.
-        """
-        return builtin_servers_for(kind) | frozenset(
-            _extension_servers(kind)
-        )
-
     def provider_id(self, vendor: Vendor) -> str:
         """A persisted provider record per kind — model validation and
         credential routing both read it, so a bare dict will not do."""
@@ -433,6 +428,7 @@ class LiveBackend:
         run_dir = instance._runs[run_id].run_dir
 
         seen: list[str] = []
+        events: list[Any] = []
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline:
             remaining = max(0.1, deadline - time.monotonic())
@@ -441,14 +437,13 @@ class LiveBackend:
             except asyncio.TimeoutError:
                 continue
             seen.append(event.type)
+            events.append(event)
             if event.type == "complete":
                 complete = dict(event.data or {})
-                if complete.get("error"):
-                    raise AssertionError(
-                        f"{vendor.kind}: runner error {complete['error']!r} "
-                        f"run_dir={run_dir}"
-                    )
-                return complete
+                error = str(complete.get("error") or "")
+                if error:
+                    _raise_for_runner_error(vendor, error, run_dir)
+                return TurnResult(complete=complete, events=events)
 
         # An agent that blew the deadline is still running, and some CLIs are
         # spawned with a multi-hour print timeout. Leaving it alive would burn
@@ -460,32 +455,69 @@ class LiveBackend:
         )
 
 
-def tool_calls(sid: str, names: Iterable[str]) -> list[dict]:
-    """Persisted tool_use events on a session whose name matches `names`.
+def tool_calls(events: Iterable[Any], names: Iterable[str]) -> list[dict]:
+    """tool_use blocks in a turn's event stream whose name matches `names`.
 
-    For read-only tools that write no store, the persisted tool_use /
-    tool_result pair on the assistant message is the backend-owned proof the
-    tool ran. Matching is suffix-based because providers namespace MCP tools
-    differently (`mcp__ui__open_file_panel`, `ui__open_file_panel`, ...).
+    Reads the provider's own event stream rather than the persisted render
+    tree: this harness drives `Provider.start_run` directly, so nothing goes
+    through the orchestrator that would populate `session.messages`. The stream
+    is the same data the orchestrator would project, taken one step earlier.
+
+    Matching is suffix-based because providers namespace MCP tools differently
+    (`mcp__ui__open_file_panel`, `ui__open_file_panel`, ...).
     """
-    from session_manager import manager as session_manager
-
     wanted = tuple(names)
     found: list[dict] = []
-    ref = session_manager.get_ref(sid) or {}
-    for message in ref.get("messages") or []:
-        for event in message.get("events") or []:
-            data = event.get("data") if isinstance(event, dict) else None
-            if not isinstance(data, dict):
+    for event in events:
+        data = getattr(event, "data", None)
+        if not isinstance(data, dict):
+            continue
+        for block in _content_blocks(data):
+            name = str(block.get("name") or "")
+            if not name:
                 continue
-            for block in _content_blocks(data):
-                name = str(block.get("name") or "")
-                if not name:
-                    continue
-                bare = name.rsplit("__", 1)[-1]
-                if bare in wanted or name in wanted:
-                    found.append(block)
+            if name in wanted or name.rsplit("__", 1)[-1] in wanted:
+                found.append(block)
     return found
+
+
+def tool_prompt(server: str, tool: str, instruction: str) -> str:
+    """The standard instruction for making an agent call one built-in tool.
+
+    Providers may present built-in MCP tools as DEFERRED tools: the schema is
+    not in the initial tool list and the agent has to look it up (`ToolSearch`
+    or the provider's equivalent) before it can call anything. Without this
+    hint an agent burns the turn searching and never places the call, which
+    reads as "the server is broken" when it is not.
+    """
+    return (
+        "This is an automated integration test of Better Agent tool injection. "
+        f"Call the MCP tool named {tool} from the {server!r} server exactly "
+        f"once. {instruction} "
+        f"If that tool is not in your available tools yet, first look it up "
+        f"(for example with ToolSearch for '{tool}' or '{server}'), then call "
+        "it. Do not call any other tool for any other purpose. When the tool "
+        "has returned, reply with the single word: done"
+    )
+
+
+def observed_tools(events: Iterable[Any]) -> list[str]:
+    """Every tool name the turn emitted, in order.
+
+    Attached to tool-call assertion failures so the report distinguishes "the
+    server was missing" from "the model called something else" without a
+    re-run.
+    """
+    names: list[str] = []
+    for event in events:
+        data = getattr(event, "data", None)
+        if not isinstance(data, dict):
+            continue
+        for block in _content_blocks(data):
+            name = str(block.get("name") or "")
+            if name:
+                names.append(name)
+    return names
 
 
 def _content_blocks(data: dict) -> list[dict]:

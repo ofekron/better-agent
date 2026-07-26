@@ -15,7 +15,7 @@ from __future__ import annotations
 import contextlib
 
 import _live_agent
-from _live_agent import Case, require_cli
+from _live_agent import Case, require_cli, tool_prompt
 
 SERVER = "capabilities"
 VENDORS = _live_agent.vendors_for_server(SERVER)
@@ -49,20 +49,13 @@ def _seeded_capability():
 
 
 def _load_prompt(capability_id: str) -> str:
-    return (
-        "This is an automated integration test. Using the 'capabilities' MCP "
-        "server, call list_capabilities once, then call load_capability once "
-        f"with id={capability_id!r}. Do not release it. Do not call any other "
-        "tool. Then reply with the single word: done"
+    return tool_prompt(
+        SERVER, "load_capability", f"Use id={capability_id!r}. Do not release it."
     )
 
 
 def _release_prompt(capability_id: str) -> str:
-    return (
-        "This is an automated integration test. Using the 'capabilities' MCP "
-        f"server, call release_capability once with id={capability_id!r}. Do "
-        "not call any other tool. Then reply with the single word: done"
-    )
+    return tool_prompt(SERVER, "release_capability", f"Use id={capability_id!r}.")
 
 
 async def _load_and_release(vendor, backend, cwd):

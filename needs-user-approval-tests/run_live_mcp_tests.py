@@ -51,8 +51,16 @@ CASE_MODULES = (
     "test_config_panel_mcp",
     "test_capabilities_mcp",
     "test_communicate_mcp",
-    "test_bundled_mcp",
 )
+
+# Bundled-extension MCP servers (coordination, session-bridge, marketplace,
+# session-control) are deliberately NOT covered here. Whether they reach a run
+# depends on the backend's async extension reconcile completing first, which
+# this harness cannot deterministically establish — probing it produced a
+# different answer on consecutive runs. A flaky case that spends real quota is
+# worse than none. Those servers keep their deterministic coverage in
+# backend/scripts (test_coordination_lock_ops, test_session_bridge_*,
+# test_marketplace_extension_mcp, test_session_control).
 
 
 def _selector(name: str) -> set[str] | None:
@@ -144,16 +152,16 @@ async def _run(home: Path) -> int:
                 await case.run(case.vendor, backend, cwd)
             except _live_agent.Skip as skip:
                 skipped.append((case.name, str(skip)))
-                print(f"SKIP {case.name}: {skip}")
+                print(f"SKIP {case.name}: {skip}", flush=True)
             except KeyboardInterrupt:
                 raise
             except BaseException:  # noqa: BLE001 — one case must never abort a paid run
                 failed.append((case.name, traceback.format_exc()))
-                print(f"FAIL {case.name}")
+                print(f"FAIL {case.name}", flush=True)
             else:
                 elapsed = time.monotonic() - started
                 passed.append(case.name)
-                print(f"PASS {case.name} ({elapsed:.1f}s)")
+                print(f"PASS {case.name} ({elapsed:.1f}s)", flush=True)
     finally:
         backend.stop()
 

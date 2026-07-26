@@ -22,19 +22,17 @@ import urllib.error
 import urllib.request
 
 import _live_agent
-from _live_agent import Case, require_cli
+from _live_agent import Case, require_cli, tool_prompt
 
 SERVER = "ui"
 VENDORS = _live_agent.vendors_for_server(SERVER)
 
 
 def _panel_prompt(path: str) -> str:
-    return (
-        "This is an automated integration test of Better Agent tool injection. "
-        "Call the MCP tool named open_file_panel from the 'ui' server exactly "
-        f"once, with mode='panel', path={path!r}, start_line=1, end_line=1. "
-        "Do not call any other tool. After the tool returns, reply with the "
-        "single word: done"
+    return tool_prompt(
+        SERVER,
+        "open_file_panel",
+        f"Use mode='panel', path={path!r}, start_line=1, end_line=1.",
     )
 
 
@@ -176,20 +174,19 @@ async def _ask_case(vendor, backend, cwd, *, tool: str, prompt: str):
 
 
 def _input_prompt() -> str:
-    return (
-        "This is an automated integration test. Call the MCP tool named "
-        "request_user_input from the 'ui' server exactly once, asking the "
-        "single question 'favourite colour?'. Wait for the answer, then reply "
-        "with the single word: done"
+    return tool_prompt(
+        SERVER,
+        "request_user_input",
+        "Ask the single question 'favourite colour?' and wait for the answer.",
     )
 
 
 def _approval_prompt() -> str:
-    return (
-        "This is an automated integration test. Call the MCP tool named "
-        "request_user_approval from the 'ui' server exactly once, requesting "
-        "approval for the action 'run the integration probe'. Wait for the "
-        "decision, then reply with the single word: done"
+    return tool_prompt(
+        SERVER,
+        "request_user_approval",
+        "Request approval for the action 'run the integration probe' and wait "
+        "for the decision.",
     )
 
 

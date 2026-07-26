@@ -8,7 +8,7 @@ JSON written by the ingestion funnel, not model prose.
 from __future__ import annotations
 
 import _live_agent
-from _live_agent import Case, require_cli, tool_calls
+from _live_agent import Case, observed_tools, require_cli, tool_calls, tool_prompt
 
 SERVER = "open-config-panel"
 TOOL = "open_config_panel"
@@ -16,25 +16,19 @@ VENDORS = _live_agent.vendors_for_server(SERVER)
 
 
 def _prompt() -> str:
-    return (
-        "This is an automated integration test of Better Agent tool injection. "
-        "Call the MCP tool named open_config_panel from the 'open-config-panel' "
-        "server exactly once. Do not call any other tool. After the tool "
-        "returns, reply with the single word: done"
-    )
+    return tool_prompt(SERVER, TOOL, "It takes no required arguments.")
 
 
 async def _open_config_panel(vendor, backend, cwd):
     require_cli(vendor)
 
     sid = backend.new_session(vendor, f"config-panel/{vendor.kind}", str(cwd))
-    await backend.run_turn(vendor, sid=sid, prompt=_prompt(), cwd=str(cwd))
+    turn = await backend.run_turn(vendor, sid=sid, prompt=_prompt(), cwd=str(cwd))
 
-    calls = tool_calls(sid, [TOOL])
-    if not calls:
+    if not tool_calls(turn.events, [TOOL]):
         raise AssertionError(
-            f"no persisted {TOOL} tool_use block on session {sid} — the tool was "
-            "never invoked or the event never reached the render tree"
+            f"the turn emitted no {TOOL} tool_use block; the agent called "
+            f"{observed_tools(turn.events)}"
         )
 
 

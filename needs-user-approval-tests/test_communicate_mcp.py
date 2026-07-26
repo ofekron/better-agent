@@ -22,18 +22,18 @@ would multiply the cost of this suite without testing more of the MCP layer.
 from __future__ import annotations
 
 import _live_agent
-from _live_agent import Case, require_cli
+from _live_agent import Case, require_cli, tool_prompt
 
 SERVER = "communicate"
 VENDORS = _live_agent.vendors_for_server(SERVER)
 
 
 def _chat_prompt(chat_id: str, message: str) -> str:
-    return (
-        "This is an automated integration test. Call create_chat once with "
-        f"chat_id={chat_id!r}, then call chat once with chat_id={chat_id!r} and "
-        f"message={message!r}. Do not call any other tool. Then reply with the "
-        "single word: done"
+    return tool_prompt(
+        SERVER,
+        "chat",
+        f"First call create_chat with chat_id={chat_id!r}, then call chat with "
+        f"chat_id={chat_id!r} and message={message!r}.",
     )
 
 
@@ -58,11 +58,10 @@ async def _chat(vendor, backend, cwd):
 
 
 def _inbox_prompt(recipient_sid: str, message: str) -> str:
-    return (
-        "This is an automated integration test. Call the inbox tool exactly "
-        f"once with recipient_session_id={recipient_sid!r} and "
-        f"message={message!r}. Do not call any other tool. Then reply with the "
-        "single word: done"
+    return tool_prompt(
+        SERVER,
+        "inbox",
+        f"Use recipient_session_id={recipient_sid!r} and message={message!r}.",
     )
 
 
@@ -93,10 +92,10 @@ async def _inbox(vendor, backend, cwd):
 
 
 def _mssg_prompt(target_sid: str, message: str) -> str:
-    return (
-        "This is an automated integration test. Call the mssg tool exactly once "
-        f"with target_session_id={target_sid!r} and message={message!r}. Do not "
-        "call any other tool. Then reply with the single word: done"
+    return tool_prompt(
+        SERVER,
+        "mssg",
+        f"Use target_session_id={target_sid!r} and message={message!r}.",
     )
 
 
