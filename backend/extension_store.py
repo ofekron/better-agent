@@ -5678,6 +5678,13 @@ def _mcp_server_configs_for_delivery(
         if delivery == _HARNESS_DELIVERY_NATIVE
         else {}
     )
+    # A resolved harness profile decides which extension MCP servers this run
+    # may offer, and a deselected server is dropped from the projection
+    # entirely. Enforce that only when the projection governs at least one
+    # extension: a run resolved before any extension was runtime-ready
+    # carries an empty projection, and reading that as "nothing selected"
+    # would strip every server from an otherwise ordinary turn.
+    enforce_profile_selection = bool(harness_run_projection.selected_extension_ids(inputs))
     configs: dict[str, dict[str, Any]] = {}
     for record in _active_records():
         if not _record_runtime_ready(record):
@@ -5694,6 +5701,8 @@ def _mcp_server_configs_for_delivery(
                 manifest["id"],
             )
             server_id = _native_mcp_server_id(item)
+            if enforce_profile_selection and not profile_selected:
+                continue
             if (
                 delivery == _HARNESS_DELIVERY_NATIVE
                 and not profile_selected
