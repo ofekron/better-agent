@@ -2852,7 +2852,7 @@ async def login_provider(request: Request, provider_id: str):
 async def cancel_provider_login(request: Request, provider_id: str):
     if not _is_loopback_request(request):
         raise HTTPException(status_code=403, detail="OAuth login is available only from a loopback session.")
-    killed = provider_auth.cancel(provider_id)
+    killed = await provider_auth.cancel(provider_id)
     return {"cancelled": killed}
 
 
@@ -4173,6 +4173,7 @@ def _extension_settings_harness_inputs(extension_id: str, body: dict) -> dict[st
 
 
 async def _broadcast_harness_profiles_changed() -> None:
+    harness_profile_resolver.invalidate_cache()
     try:
         await coordinator.broadcast_global("harness_profiles_changed", {})
     except Exception:
@@ -4417,6 +4418,7 @@ async def set_global_disabled_builtin_tools(body: dict = Body(default={})):
     if not isinstance(tools, list):
         raise HTTPException(status_code=400, detail="disabled_builtin_tools must be a list")
     updated = await asyncio.to_thread(config_store.set_disabled_builtin_tools, tools)
+    harness_profile_resolver.invalidate_cache()
     await coordinator.broadcast_global("extensions_changed", {})
     return {"disabled_builtin_tools": updated}
 
@@ -4432,6 +4434,7 @@ async def set_global_disabled_builtin_extensions(body: dict = Body(default={})):
         raise HTTPException(status_code=400, detail="request body must be an object")
     extension_ids = _api_disabled_builtin_extensions(body.get("disabled_builtin_extensions"))
     updated = await asyncio.to_thread(config_store.set_disabled_builtin_extensions, extension_ids)
+    harness_profile_resolver.invalidate_cache()
     await coordinator.broadcast_global("extensions_changed", {})
     return {"disabled_builtin_extensions": updated}
 

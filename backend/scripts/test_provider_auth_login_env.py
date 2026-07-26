@@ -296,21 +296,21 @@ def test_attach_login_state_adds_state_for_supported_records():
 
 
 def test_cancel_kills_tracked_proc_and_clears_busy():
-    """cancel() kills the in-flight process tree bound to the record, and
-    is a no-op for an already-finished or unknown record."""
+    """cancel() kills the in-flight process tree bound to the record and
+    confirms death; no-op for an already-finished or unknown record."""
     claude = _add_provider("claude", str(HOME / ".claude-cancel"))
     provider_auth._procs.clear()
-    # In-flight: returncode None -> killed.
+    # In-flight: returncode None -> killed + confirmed via wait().
     in_flight = _FakeProc()
     in_flight.returncode = None
     provider_auth._procs[claude["id"]] = in_flight
-    assert provider_auth.cancel(claude["id"]) is True
+    assert _drain(provider_auth.cancel(claude["id"])) is True
     # Already finished (returncode set) -> no-op.
     provider_auth._procs[claude["id"]] = _FakeProc(returncode=0)
-    assert provider_auth.cancel(claude["id"]) is False
+    assert _drain(provider_auth.cancel(claude["id"])) is False
     # Unknown record -> no-op.
     provider_auth._procs.pop(claude["id"], None)
-    assert provider_auth.cancel(claude["id"]) is False
+    assert _drain(provider_auth.cancel(claude["id"])) is False
 
 
 def test_shutdown_all_kills_tracked_procs():
@@ -321,7 +321,7 @@ def test_shutdown_all_kills_tracked_procs():
     p = _FakeProc()
     p.returncode = None
     provider_auth._procs[claude["id"]] = p
-    provider_auth._write_marker(claude["id"], p, "claude")
+    provider_auth._write_marker(claude["id"], p)
     provider_auth.shutdown_all()
     assert provider_auth._procs == {}
 

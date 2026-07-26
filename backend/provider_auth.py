@@ -64,6 +64,7 @@ _RUNNING_STATES = (STATE_LOGIN_RUNNING, STATE_LOGOUT_RUNNING)
 # must not wedge the record busy forever or orphan the subprocess.
 LOGIN_TIMEOUT_SECONDS = 300.0
 _STATUS_TIMEOUT_SECONDS = 20.0
+_CANCEL_CONFIRM_SECONDS = 2.0
 # How long a cached authoritative auth-status is trusted. Invalidated
 # immediately on login/logout completion.
 _AUTH_CACHE_TTL_SECONDS = 120.0
@@ -231,7 +232,7 @@ def _marker_path(provider_id: str) -> Optional[Path]:
     return _markers_dir() / f"{provider_id}.json"
 
 
-def _write_marker(provider_id: str, proc: asyncio.subprocess.Process, kind: str) -> None:
+def _write_marker(provider_id: str, proc: asyncio.subprocess.Process) -> None:
     path = _marker_path(provider_id)
     if path is None:
         return
@@ -249,7 +250,6 @@ def _write_marker(provider_id: str, proc: asyncio.subprocess.Process, kind: str)
                 {
                     "pid": proc.pid,
                     "provider_id": provider_id,
-                    "kind": kind,
                     "create_time": create_time,
                 }
             ),
@@ -498,7 +498,6 @@ async def _start(
         return {"ok": False, "error": "not_found"}
     if not supports_auth(provider):
         return {"ok": False, "error": "unsupported"}
-    kind = provider.get("kind") or "claude"
 
     async with _lock_for(provider_id):
         # State-based guard: the lock serializes the start critical section,
@@ -524,7 +523,7 @@ async def _start(
             await broadcast()
             return {"ok": False, "error": "binary_missing"}
         _procs[provider_id] = proc
-        _write_marker(provider_id, proc, kind)
+        _write_marker(provider_id, proc)
         _set_state(provider_id, running_state)
         task = asyncio.create_task(
             _monitor(provider_id, action, proc, broadcast),
@@ -545,14 +544,23 @@ async def start_logout(provider_id: str, broadcast: BroadcastFn) -> dict:
     return await _start(provider_id, "logout", STATE_LOGOUT_RUNNING, broadcast)
 
 
-def cancel(provider_id: str) -> bool:
-    """Kill an in-flight login/logout subprocess tree for a record. The
-    monitor's finally clears the marker; returns True if a tree was killed."""
+async def cancel(provider_id: str) -> bool:
+    """Kill an in-flight login/logout subprocess tree for a record and
+    confirm it died. Returns True only after the process has actually
+    exited (reaped), so the caller cannot mistake "signal sent" for "port
+    freed". The monitor's finally clears the marker regardless."""
     proc = _procs.get(provider_id)
     if proc is None or proc.returncode is not None:
         return False
     _kill_proc(proc)
-    return True
+    try:
+        # wait() reaps the (now-signalled) process, clearing any zombie that
+        # would otherwise keep a callback port-looking-alive. Bounded so a
+        # stubborn process can't block the cancel request.
+        await asyncio.wait_for(proc.wait(), timeout=_CANCEL_CONFIRM_SECONDS)
+        return True
+    except asyncio.TimeoutError:
+        return False
 
 
 def shutdown_all() -> None:
