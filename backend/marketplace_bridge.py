@@ -14,30 +14,16 @@ from marketplace_bridge_store import MarketplaceStateStore
 from marketplace_device_identity import MarketplaceDeviceIdentity
 from marketplace_protocol import (
     ALLOWED_ACTIONS,
-    FORBIDDEN_ACTION_FIELDS,
     PATTERNS,
     PROTOCOL,
     PROTOCOL_HASH,
     canonical_hash,
     require_hash,
     require_identifier,
+    validate_leased_action,
 )
 
 _ACTIVE_INTENT_STATES = frozenset({"awaiting_confirmation", "committing"})
-_DISPLAY_FIELDS = frozenset({"extension_name", "publisher_name", "permission_delta"})
-_ACTION_FIELDS = frozenset(
-    {
-        "action_id",
-        "action_type",
-        "extension_id",
-        "expected_version",
-        "snapshot_id",
-        "publisher_fingerprint",
-        "permission_hash",
-        "lease_capability",
-        *_DISPLAY_FIELDS,
-    }
-)
 
 
 class MarketplaceBridgeError(ValueError):
@@ -153,6 +139,12 @@ class MarketplaceBridge:
             key=lambda item: (item["created_at"], item["intent_id"]),
         )
         for intent in ordered_intents:
+            if (
+                intent["action"] != "pair"
+                and intent["status"] == "awaiting_confirmation"
+                and not intent["lease_capability_ready"]
+            ):
+                continue
             intents.append(
                 {
                     key: deepcopy(value)
@@ -434,77 +426,23 @@ class MarketplaceBridge:
     def _validate_action(self, raw: object) -> dict | None:
         if raw is None:
             return None
-        if not isinstance(raw, dict) or not set(raw) <= _ACTION_FIELDS:
-            raise MarketplaceBridgeError("Marketplace action has an invalid shape")
-        if FORBIDDEN_ACTION_FIELDS & set(raw):
-            raise MarketplaceBridgeError("Marketplace action contains forbidden fields")
-        action_id = require_identifier("action", raw.get("action_id"))
-        action = str(raw.get("action_type") or "")
-        if action not in ALLOWED_ACTIONS:
-            raise MarketplaceBridgeError("Marketplace action is not allowed")
-        extension_id = require_identifier("extension", raw.get("extension_id"))
-        snapshot_id = require_identifier("snapshot", raw.get("snapshot_id"))
-        lease_capability = _bounded_text(
-            raw.get("lease_capability"),
-            "lease_capability",
-        )
-        expected_version = _bounded_text(
-            raw.get("expected_version", ""),
-            "expected_version",
-            required=action in {"install", "update"},
-            maximum=128,
-        )
-        if action not in {"install", "update"} and expected_version:
-            raise MarketplaceBridgeError(
-                "Marketplace action has an unexpected target version"
-            )
-        publisher_fingerprint = str(raw.get("publisher_fingerprint") or "")
-        permission_hash = str(raw.get("permission_hash") or "")
-        if action in {"install", "update"}:
-            publisher_fingerprint = require_hash(
-                publisher_fingerprint,
-                "publisher_fingerprint",
-            )
-            permission_hash = require_hash(permission_hash, "permission_hash")
-        elif publisher_fingerprint or permission_hash:
-            raise MarketplaceBridgeError(
-                "Marketplace action has unexpected target hashes"
-            )
-        permission_delta = raw.get("permission_delta", [])
-        if (
-            not isinstance(permission_delta, list)
-            or len(permission_delta) > PROTOCOL["bounds"]["permission_count_max"]
-        ):
-            raise MarketplaceBridgeError("Marketplace permission delta is invalid")
-        extension = {
-            "id": extension_id,
-            "name": _bounded_text(
-                raw.get("extension_name", extension_id),
-                "extension_name",
-            ),
-            "version": expected_version,
-            "publisher": _bounded_text(
-                raw.get("publisher_name", ""),
-                "publisher_name",
-                required=False,
-            ),
-            "permission_delta": [
-                _bounded_text(value, "permission") for value in permission_delta
-            ],
-        }
-        approved_target = {
-            "snapshot_id": snapshot_id,
-            "publisher_fingerprint": publisher_fingerprint,
-            "permission_hash": permission_hash,
-        }
+        try:
+            leased = validate_leased_action(raw)
+        except ValueError as exc:
+            raise MarketplaceBridgeError(str(exc)) from exc
+        action_id = leased["action_id"]
+        action = leased["action_type"]
+        extension = leased["extension"]
+        expected_version = leased["target_version"]
+        catalog_snapshot_sha256 = leased["catalog_snapshot_sha256"]
         envelope = {
             "action_id": action_id,
             "action_type": action,
-            "extension_id": extension_id,
-            "expected_version": expected_version,
-            **approved_target,
+            "extension_id": extension["id"],
+            "target_version": expected_version,
+            "catalog_snapshot_sha256": catalog_snapshot_sha256,
         }
-        precondition = self._extension_state(extension_id)
+        precondition = self._extension_state(extension["id"])
         if action == "install" and precondition["exists"]:
             raise MarketplaceBridgeError(
                 "Marketplace install target is already installed"
@@ -522,11 +460,18 @@ class MarketplaceBridge:
             "action": action,
             "status": "awaiting_confirmation",
             "extension": extension,
-            "lease_capability": lease_capability,
+            "lease_capability": leased["lease_capability"],
+            "lease_capability_account": "",
+            "lease_capability_ready": False,
+            "lease_cleanup_pending": False,
+            "lease_expires_at": leased["lease_expires_at"],
+            "target_version": expected_version,
+            "catalog_snapshot_sha256": catalog_snapshot_sha256,
             "envelope_digest": canonical_hash(envelope),
-            "approved_target": approved_target,
             "precondition": precondition,
             "desired": desired,
+            "rejection_pending": False,
+            "error": "",
             "created_at": _now(),
         }
 
@@ -556,76 +501,32 @@ class MarketplaceBridge:
             "enabled": bool(precondition.get("enabled")),
         }
 
-    async def _resolve_catalog(
-        self,
-        state: dict,
-        intent: dict,
-    ) -> tuple[dict, str, int, dict]:
-        target = intent["approved_target"]
-        extension_id = intent["extension"]["id"]
-        response = await marketplace_service.protocol_catalog_snapshot(
-            target["snapshot_id"],
-            extension_id,
-        )
-        verified = await asyncio.to_thread(
-            extension_store.verify_marketplace_catalog_snapshot,
-            catalog=response.get("catalog"),
-            signature=str(response.get("signature") or ""),
-            snapshot_id=target["snapshot_id"],
-            extension_id=extension_id,
-            expected_version=intent["extension"]["version"],
-            publisher_fingerprint=target["publisher_fingerprint"],
-            permission_hash=target["permission_hash"],
-            minimum_sequence=state["catalog_sequences"].get("default-v1", 0),
-        )
-        return (
-            verified["metadata"],
-            verified["key_id"],
-            verified["sequence"],
-            {
-                "catalog": deepcopy(response.get("catalog")),
-                "signature": str(response.get("signature") or ""),
-            },
-        )
-
     async def _resolve_action_metadata(
         self,
-        state: dict,
         intent: dict,
         receipt: dict,
     ) -> dict:
-        target = intent["approved_target"]
-        proof = receipt["verified_catalog"]
-        verified_result = await asyncio.to_thread(
-            extension_store.verify_marketplace_catalog_snapshot,
-            catalog=proof["catalog"],
-            signature=proof["signature"],
-            snapshot_id=target["snapshot_id"],
-            extension_id=intent["extension"]["id"],
-            expected_version=intent["extension"]["version"],
-            publisher_fingerprint=target["publisher_fingerprint"],
-            permission_hash=target["permission_hash"],
-            minimum_sequence=0,
-            allow_expired=True,
+        terminal_capability = await asyncio.to_thread(
+            self._identity.get_secret,
+            receipt["terminal_capability_account"],
         )
-        verified = verified_result["metadata"]
+        if terminal_capability is None:
+            raise MarketplaceBridgeError(
+                "Marketplace terminal capability is unavailable"
+            )
         action_id = intent["intent_id"]
-        metadata = await marketplace_service.protocol_action_metadata(action_id)
+        metadata = await marketplace_service.protocol_action_metadata(
+            action_id,
+            terminal_capability,
+        )
         expected = {
             "extension_id": intent["extension"]["id"],
-            "version": intent["extension"]["version"],
-            "artifact_sha256": verified.get("artifact_sha256"),
-            "signature": verified.get("signature")
-            or verified.get("artifact_signature"),
-            "signature_alg": "ed25519",
-            "catalog_snapshot_sha256": target["snapshot_id"].rsplit(":", 1)[-1],
+            "version": receipt["expected_version"],
+            "catalog_snapshot_sha256": receipt["catalog_snapshot_sha256"],
         }
         actual = {
             "extension_id": metadata.get("extension_id"),
             "version": metadata.get("version"),
-            "artifact_sha256": metadata.get("artifact_sha256"),
-            "signature": metadata.get("signature"),
-            "signature_alg": metadata.get("signature_alg"),
             "catalog_snapshot_sha256": metadata.get("catalog_snapshot_sha256"),
         }
         if actual != expected:
@@ -647,20 +548,16 @@ class MarketplaceBridge:
                 or not device["paired"]
             ):
                 raise MarketplaceBridgeError("Marketplace device is unavailable")
+            if (
+                not intent["lease_capability_ready"]
+                or intent["lease_cleanup_pending"]
+                or datetime.fromisoformat(
+                    intent["lease_expires_at"].replace("Z", "+00:00")
+                )
+                <= datetime.now(timezone.utc)
+            ):
+                raise MarketplaceBridgeError("Marketplace action lease is unavailable")
             epoch = device["epoch"]
-        catalog_key = ""
-        catalog_sequence = 0
-        verified_catalog = {"catalog": {}, "signature": ""}
-        if intent["action"] in {"install", "update"}:
-            (
-                _,
-                catalog_key,
-                catalog_sequence,
-                verified_catalog,
-            ) = await self._resolve_catalog(
-                state,
-                intent,
-            )
         async with self._mutation_lock:
             state = await self._read()
             current_device = state["device"]
@@ -675,11 +572,6 @@ class MarketplaceBridge:
                 raise MarketplaceBridgeError(
                     "Marketplace device changed while preparing action"
                 )
-            if catalog_key:
-                state["catalog_sequences"][catalog_key] = max(
-                    state["catalog_sequences"].get(catalog_key, 0),
-                    catalog_sequence,
-                )
             receipt_revision = state["revision"] + 1
             state["receipts"][intent_id] = {
                 "action_id": intent_id,
@@ -690,9 +582,8 @@ class MarketplaceBridge:
                 "receipt_revision": receipt_revision,
                 "action": intent["action"],
                 "extension_id": intent["extension"]["id"],
-                "expected_version": intent["extension"]["version"],
-                "approved_target": deepcopy(intent["approved_target"]),
-                "verified_catalog": verified_catalog,
+                "expected_version": intent["target_version"],
+                "catalog_snapshot_sha256": intent["catalog_snapshot_sha256"],
                 "precondition": deepcopy(intent["precondition"]),
                 "desired": deepcopy(intent["desired"]),
                 "phase": "fence_pending",
@@ -735,13 +626,22 @@ class MarketplaceBridge:
                 intent is None
                 or intent["status"] != "committing"
                 or not device_matches_receipt
+                or not intent["lease_capability_ready"]
+                or intent["lease_cleanup_pending"]
             ):
                 raise MarketplaceBridgeError(
                     "Marketplace device changed while fencing action"
                 )
+            lease_capability_account = intent["lease_capability_account"]
+        lease_capability = await asyncio.to_thread(
+            self._identity.get_secret,
+            lease_capability_account,
+        )
+        if lease_capability is None:
+            raise MarketplaceBridgeError("Marketplace lease capability is unavailable")
         fence_body = {
             "protocol_hash": PROTOCOL_HASH,
-            "lease_capability": intent["lease_capability"],
+            "lease_capability": lease_capability,
         }
         _, signed = await self._signed_operation(
             state,
@@ -783,7 +683,12 @@ class MarketplaceBridge:
             current_receipt["phase"] = "fenced"
             current_receipt["terminal_capability_account"] = capability_account
             current_receipt["reconcile_deadline"] = reconcile_deadline
+            current_intent = state["intents"].get(intent_id)
+            if current_intent is not None:
+                current_intent["lease_capability_ready"] = False
+                current_intent["lease_cleanup_pending"] = True
             state = await self._write(state)
+        state = await self._cleanup_lease_capability(intent_id)
         await self._notify(state)
 
     async def _execute_receipt(
@@ -799,10 +704,16 @@ class MarketplaceBridge:
             if metadata is None:
                 intent = state["intents"][receipt["intent_id"]]
                 metadata = await self._resolve_action_metadata(
-                    state,
                     intent,
                     receipt,
                 )
+        if datetime.fromisoformat(
+            receipt["reconcile_deadline"].replace("Z", "+00:00")
+        ) <= datetime.now(timezone.utc):
+            raise MarketplaceBridgeError(
+                "Marketplace terminal capability is expired"
+            )
+        if action in {"install", "update"}:
             if action == "install":
                 await marketplace_service.install_exact(
                     extension_id,
@@ -878,7 +789,12 @@ class MarketplaceBridge:
                     self._extension_state,
                     receipt["extension_id"],
                 )
-                if actual == receipt["desired"]:
+                deadline_expired = datetime.fromisoformat(
+                    receipt["reconcile_deadline"].replace("Z", "+00:00")
+                ) <= datetime.now(timezone.utc)
+                if deadline_expired:
+                    outcome = result_code = "failed_unknown"
+                elif actual == receipt["desired"]:
                     outcome, result_code = "succeeded", "ok"
                 elif actual == receipt["precondition"]:
                     outcome, result_code = "failed", "local_mutation_failed"
@@ -892,7 +808,14 @@ class MarketplaceBridge:
                     current = await self._write(current)
                 await self._notify(current)
             else:
-                outcome, result_code = "succeeded", "ok"
+                deadline_expired = datetime.fromisoformat(
+                    receipt["reconcile_deadline"].replace("Z", "+00:00")
+                ) <= datetime.now(timezone.utc)
+                outcome, result_code = (
+                    ("failed_unknown", "failed_unknown")
+                    if deadline_expired
+                    else ("succeeded", "ok")
+                )
                 async with self._mutation_lock:
                     current = await self._read()
                     current_receipt = current["receipts"].get(action_id)
@@ -915,6 +838,11 @@ class MarketplaceBridge:
             receipt = state["receipts"].get(action_id)
             if receipt is None:
                 return
+            deadline_expired = datetime.fromisoformat(
+                receipt["reconcile_deadline"].replace("Z", "+00:00")
+            ) <= datetime.now(timezone.utc)
+            if deadline_expired:
+                outcome = result_code = "failed_unknown"
             terminal_result = {
                 "outcome": outcome,
                 "result_code": result_code,
@@ -922,6 +850,7 @@ class MarketplaceBridge:
             if (
                 receipt["terminal_result"] is not None
                 and receipt["terminal_result"] != terminal_result
+                and not deadline_expired
             ):
                 receipt["ack_status"] = "conflict"
                 state = await self._write(state)
@@ -979,6 +908,21 @@ class MarketplaceBridge:
         except Exception as exc:
             if getattr(exc, "status_code", None) != 409:
                 raise
+            current_state = await self._read()
+            current_receipt = current_state["receipts"].get(action_id)
+            if (
+                outcome != "failed_unknown"
+                and current_receipt is not None
+                and datetime.fromisoformat(
+                    current_receipt["reconcile_deadline"].replace("Z", "+00:00")
+                ) <= datetime.now(timezone.utc)
+            ):
+                await self._finalize_receipt(
+                    action_id,
+                    "failed_unknown",
+                    "failed_unknown",
+                )
+                return
             async with self._mutation_lock:
                 state = await self._read()
                 current = state["receipts"].get(action_id)
@@ -991,6 +935,21 @@ class MarketplaceBridge:
             response.get("outcome") != outcome
             or response.get("result_code") != result_code
         ):
+            current_state = await self._read()
+            current_receipt = current_state["receipts"].get(action_id)
+            if (
+                outcome != "failed_unknown"
+                and current_receipt is not None
+                and datetime.fromisoformat(
+                    current_receipt["reconcile_deadline"].replace("Z", "+00:00")
+                ) <= datetime.now(timezone.utc)
+            ):
+                await self._finalize_receipt(
+                    action_id,
+                    "failed_unknown",
+                    "failed_unknown",
+                )
+                return
             async with self._mutation_lock:
                 state = await self._read()
                 current = state["receipts"].get(action_id)
@@ -1015,6 +974,185 @@ class MarketplaceBridge:
         await self._notify(state)
         self._wake.set()
 
+    async def _cleanup_lease_capability(self, action_id: str) -> dict:
+        async with self._mutation_lock:
+            state = await self._read()
+            intent = state["intents"].get(action_id)
+            if intent is None or not intent["lease_capability_account"]:
+                return state
+            account = intent["lease_capability_account"]
+            intent["lease_capability_ready"] = False
+            intent["lease_cleanup_pending"] = True
+            state = await self._write(state)
+        await asyncio.to_thread(self._identity.delete_secret, account)
+        async with self._mutation_lock:
+            state = await self._read()
+            intent = state["intents"].get(action_id)
+            if (
+                intent is not None
+                and intent["lease_cleanup_pending"]
+                and intent["lease_capability_account"] == account
+            ):
+                intent["lease_capability_account"] = ""
+                intent["lease_cleanup_pending"] = False
+                state = await self._write(state)
+        return state
+
+    async def _reconcile_lease_capability_journals(self) -> None:
+        state = await self._read()
+        for action_id, intent in list(state["intents"].items()):
+            account = intent.get("lease_capability_account")
+            if not account:
+                continue
+            if intent["lease_cleanup_pending"]:
+                state = await self._cleanup_lease_capability(action_id)
+                await self._notify(state)
+                continue
+            receipt = state["receipts"].get(action_id)
+            cleanup_ready = intent["lease_capability_ready"] and (
+                receipt is not None and receipt["phase"] != "fence_pending"
+                or intent["status"] == "rejected"
+                and not intent["rejection_pending"]
+            )
+            if cleanup_ready:
+                state = await self._cleanup_lease_capability(action_id)
+                await self._notify(state)
+                continue
+            if intent["lease_capability_ready"]:
+                continue
+            await asyncio.to_thread(self._identity.delete_secret, account)
+            async with self._mutation_lock:
+                state = await self._read()
+                current = state["intents"].get(action_id)
+                if (
+                    current is not None
+                    and not current["lease_capability_ready"]
+                    and not current["lease_cleanup_pending"]
+                    and current["lease_capability_account"] == account
+                    and action_id not in state["receipts"]
+                ):
+                    state["intents"].pop(action_id)
+                    state = await self._write(state)
+            await self._notify(state)
+
+    async def _stage_leased_action(self, intent: dict, device_epoch: int) -> None:
+        lease_capability = intent.pop("lease_capability")
+        action_id = intent["intent_id"]
+        account = self._identity.lease_capability_account(action_id)
+        async with self._mutation_lock:
+            state = await self._read()
+            device = state["device"]
+            if (
+                not isinstance(device, dict)
+                or device["epoch"] != device_epoch
+                or device["revoked"]
+                or not device["paired"]
+            ):
+                return
+            tombstone = state["tombstones"].get(action_id)
+            if tombstone is not None:
+                if tombstone["envelope_digest"] != intent["envelope_digest"]:
+                    raise MarketplaceBridgeError(
+                        "Marketplace action id conflicts with tombstone"
+                    )
+                raise MarketplaceBridgeError(
+                    "Marketplace server re-leased a terminal action"
+                )
+            existing = state["intents"].get(action_id)
+            if (
+                existing is not None
+                and existing["envelope_digest"] != intent["envelope_digest"]
+            ):
+                raise MarketplaceBridgeError(
+                    "Marketplace action id has a conflicting envelope"
+                )
+            renew_rejection = bool(
+                existing is not None
+                and existing["status"] == "rejected"
+                and existing["rejection_pending"]
+            )
+            if existing is not None and not renew_rejection:
+                raise MarketplaceBridgeError(
+                    "Marketplace server re-leased an active action"
+                )
+            if renew_rejection and existing["lease_cleanup_pending"]:
+                raise MarketplaceBridgeError(
+                    "Marketplace lease capability cleanup is pending"
+                )
+            if not renew_rejection:
+                intent["lease_capability_account"] = account
+                state["intents"][action_id] = intent
+                await self._write(state)
+        if renew_rejection:
+            stored_account = await asyncio.to_thread(
+                self._identity.store_lease_capability,
+                action_id,
+                lease_capability,
+            )
+            if stored_account != account:
+                raise MarketplaceBridgeError(
+                    "Marketplace lease capability account changed"
+                )
+            async with self._mutation_lock:
+                state = await self._read()
+                current = state["intents"].get(action_id)
+                if (
+                    current is None
+                    or current["envelope_digest"] != intent["envelope_digest"]
+                    or current["status"] != "rejected"
+                    or not current["rejection_pending"]
+                ):
+                    raise MarketplaceBridgeError(
+                        "Marketplace rejection changed during lease renewal"
+                    )
+                current["lease_capability_account"] = account
+                current["lease_capability_ready"] = True
+                current["lease_cleanup_pending"] = False
+                current["lease_expires_at"] = intent["lease_expires_at"]
+                current["extension"] = intent["extension"]
+                state = await self._write(state)
+            await self._notify(state)
+            await self._flush_rejection(action_id)
+            return
+        try:
+            stored_account = await asyncio.to_thread(
+                self._identity.store_lease_capability,
+                action_id,
+                lease_capability,
+            )
+            if stored_account != account:
+                raise MarketplaceBridgeError(
+                    "Marketplace lease capability account changed"
+                )
+        except Exception:
+            await asyncio.to_thread(self._identity.delete_secret, account)
+            async with self._mutation_lock:
+                state = await self._read()
+                current = state["intents"].get(action_id)
+                if (
+                    current is not None
+                    and current["envelope_digest"] == intent["envelope_digest"]
+                    and not current["lease_capability_ready"]
+                ):
+                    state["intents"].pop(action_id)
+                    await self._write(state)
+            raise
+        async with self._mutation_lock:
+            state = await self._read()
+            current = state["intents"].get(action_id)
+            if (
+                current is None
+                or current["envelope_digest"] != intent["envelope_digest"]
+                or current["lease_capability_account"] != account
+                or current["lease_cleanup_pending"]
+            ):
+                raise MarketplaceBridgeError(
+                    "Marketplace action changed during lease persistence"
+                )
+            current["lease_capability_ready"] = True
+            state = await self._write(state)
+        await self._notify(state)
+
     async def _flush_rejection(self, action_id: str) -> None:
         async with self._mutation_lock:
             state = await self._read()
@@ -1027,14 +1165,30 @@ class MarketplaceBridge:
                 or (device["revoked"] and not device["revocation_pending"])
             ):
                 return
+            if (
+                not intent["lease_capability_ready"]
+                or intent["lease_cleanup_pending"]
+                or datetime.fromisoformat(
+                    intent["lease_expires_at"].replace("Z", "+00:00")
+                )
+                <= datetime.now(timezone.utc)
+            ):
+                return
             epoch = device["epoch"]
+            lease_capability_account = intent["lease_capability_account"]
+        lease_capability = await asyncio.to_thread(
+            self._identity.get_secret,
+            lease_capability_account,
+        )
+        if lease_capability is None:
+            raise MarketplaceBridgeError("Marketplace lease capability is unavailable")
         _, signed = await self._signed_operation(
             state,
             "ack",
             {"device_id": device["device_id"], "action_id": action_id},
             {
                 "protocol_hash": PROTOCOL_HASH,
-                "capability": intent["lease_capability"],
+                "capability": lease_capability,
                 "outcome": "rejected",
                 "result_code": "user_rejected",
             },
@@ -1060,7 +1214,10 @@ class MarketplaceBridge:
                 and current is not None
             ):
                 current["rejection_pending"] = False
+                current["lease_capability_ready"] = False
+                current["lease_cleanup_pending"] = True
                 state = await self._write(state)
+        state = await self._cleanup_lease_capability(action_id)
         await self._notify(state)
 
     async def _publish_projection(self) -> None:
@@ -1113,6 +1270,7 @@ class MarketplaceBridge:
 
     async def revoke(self, device_id: str) -> dict:
         require_identifier("device", device_id)
+        cancelled_action_ids: list[str] = []
         async with self._mutation_lock:
             state = await self._read()
             device = state["device"]
@@ -1124,16 +1282,24 @@ class MarketplaceBridge:
                 device["revoked"] = True
                 device["revocation_pending"] = True
                 state["connection_state"] = "unpaired"
-                for intent in state["intents"].values():
-                    if intent["status"] == "awaiting_confirmation":
+                for intent_id, intent in state["intents"].items():
+                    if (
+                        intent["action"] != "pair"
+                        and intent["status"] == "awaiting_confirmation"
+                    ):
                         intent["status"] = "cancelled"
+                        cancelled_action_ids.append(intent_id)
                 state = await self._write(state)
         await self._notify(state)
+        for action_id in cancelled_action_ids:
+            state = await self._cleanup_lease_capability(action_id)
+            await self._notify(state)
         self._wake.set()
         await self._reconcile_revocation()
         return self.snapshot()
 
     async def _reconcile_revocation(self) -> None:
+        await self._abandon_expired_rejections_for_revocation()
         async with self._mutation_lock:
             state = await self._read()
             device = deepcopy(state["device"])
@@ -1185,6 +1351,37 @@ class MarketplaceBridge:
         await self._maybe_delete_revoked_key(state)
         await self._notify(state)
 
+    async def _abandon_expired_rejections_for_revocation(self) -> None:
+        expired_action_ids: list[str] = []
+        async with self._mutation_lock:
+            state = await self._read()
+            device = state["device"]
+            if (
+                not isinstance(device, dict)
+                or not device["revoked"]
+                or not device["revocation_pending"]
+            ):
+                return
+            now = datetime.now(timezone.utc)
+            for action_id, intent in state["intents"].items():
+                if (
+                    intent.get("rejection_pending")
+                    and datetime.fromisoformat(
+                        intent["lease_expires_at"].replace("Z", "+00:00")
+                    )
+                    <= now
+                ):
+                    intent["rejection_pending"] = False
+                    if intent["lease_capability_account"]:
+                        intent["lease_capability_ready"] = False
+                        intent["lease_cleanup_pending"] = True
+                        expired_action_ids.append(action_id)
+            if expired_action_ids:
+                state = await self._write(state)
+        for action_id in expired_action_ids:
+            state = await self._cleanup_lease_capability(action_id)
+            await self._notify(state)
+
     async def _maybe_delete_revoked_key(self, state: dict) -> None:
         device = state["device"]
         if (
@@ -1235,27 +1432,13 @@ class MarketplaceBridge:
             ):
                 return
             state["connection_state"] = "connected"
-            if action is not None:
-                tombstone = state["tombstones"].get(action["intent_id"])
-                if tombstone is not None:
-                    if tombstone["envelope_digest"] != action["envelope_digest"]:
-                        raise MarketplaceBridgeError(
-                            "Marketplace action id conflicts with tombstone"
-                        )
-                    return
-                existing = state["intents"].get(action["intent_id"])
-                if (
-                    existing is not None
-                    and existing["envelope_digest"] != action["envelope_digest"]
-                ):
-                    raise MarketplaceBridgeError(
-                        "Marketplace action id has a conflicting envelope"
-                    )
-                state["intents"][action["intent_id"]] = action
             state = await self._write(state)
         await self._notify(state)
+        if action is not None:
+            await self._stage_leased_action(action, epoch)
 
     async def _reconcile(self) -> None:
+        await self._reconcile_lease_capability_journals()
         state = await self._read()
         for intent_id, pending in list(state["pending_pairs"].items()):
             if state["intents"].get(intent_id, {}).get("status") == "pending":
@@ -1360,6 +1543,14 @@ class MarketplaceBridge:
             )
             or any(
                 intent.get("rejection_pending")
+                for intent in state["intents"].values()
+            )
+            or any(
+                intent.get("lease_capability_account")
+                and (
+                    not intent.get("lease_capability_ready")
+                    or intent.get("lease_cleanup_pending")
+                )
                 for intent in state["intents"].values()
             )
             or (

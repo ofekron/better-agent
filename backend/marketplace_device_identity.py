@@ -16,6 +16,7 @@ from marketplace_protocol import PROTOCOL, PROTOCOL_HASH, canonical_hash, requir
 
 _PRIVATE_KEY_ACCOUNT = "marketplace-device-ed25519-v1"
 _PAIR_TOKEN_PREFIX = "marketplace-pair-token:"
+_LEASE_CAPABILITY_PREFIX = "marketplace-lease-capability:"
 _TERMINAL_CAPABILITY_PREFIX = "marketplace-terminal-capability:"
 _SIGNED_OPERATIONS = frozenset({"lease", "fence", "ack", "projection", "revoke"})
 _PATH_PARAMETER_PATTERN = re.compile(r"\{([a-z_]+)\}")
@@ -132,6 +133,14 @@ class MarketplaceDeviceIdentity:
 
     def delete_secret(self, account: str) -> None:
         oskeychain.delete(_service_name(), account)
+
+    def lease_capability_account(self, action_id: str) -> str:
+        return f"{_LEASE_CAPABILITY_PREFIX}{require_identifier('action', action_id)}"
+
+    def store_lease_capability(self, action_id: str, capability: str) -> str:
+        account = self.lease_capability_account(action_id)
+        oskeychain.store(_service_name(), account, capability)
+        return account
 
     def store_terminal_capability(self, action_id: str, capability: str) -> str:
         account = f"{_TERMINAL_CAPABILITY_PREFIX}{require_identifier('action', action_id)}"

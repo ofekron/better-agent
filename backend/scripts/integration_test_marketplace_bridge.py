@@ -139,15 +139,19 @@ async def run() -> None:
                 "action": {
                     "action_id": "baact_" + "b" * 32,
                     "action_type": "install",
-                    "extension_id": "ofek-dev.adv",
-                    "expected_version": "1.2.3",
-                    "snapshot_id": "default-v1:1:" + "a" * 64,
-                    "publisher_fingerprint": "b" * 64,
-                    "permission_hash": "c" * 64,
                     "lease_capability": "lease-capability",
-                    "extension_name": "Adversarial Review",
-                    "publisher_name": "Singular Labs",
-                    "permission_delta": ["filesystem"],
+                    "lease_expires_at": (
+                        datetime.now(timezone.utc) + timedelta(minutes=5)
+                    ).isoformat(),
+                    "target_version": "1.2.3",
+                    "catalog_snapshot_sha256": "a" * 64,
+                    "extension": {
+                        "id": "ofek-dev.adv",
+                        "name": "Adversarial Review",
+                        "version": "1.2.3",
+                        "publisher": "Singular Labs",
+                        "permission_delta": ["filesystem"],
+                    },
                 }
             }
 
@@ -213,8 +217,12 @@ async def run() -> None:
             "signature": "artifact-signature",
         }
 
-        async def action_metadata(action_id: str) -> dict:
+        async def action_metadata(
+            action_id: str,
+            terminal_capability: str,
+        ) -> dict:
             assert action_id == "baact_" + "b" * 32
+            assert terminal_capability == "terminal-capability"
             return {
                 **verified_metadata,
                 "signature_alg": "ed25519",
@@ -225,36 +233,44 @@ async def run() -> None:
         marketplace_bridge.marketplace_service.protocol_action_metadata = action_metadata
         state = service._store.read()
         intent = state["intents"]["baact_" + "b" * 32]
-        receipt = {"verified_catalog": {"catalog": {}, "signature": "test"}}
-        original_verify = (
-            marketplace_bridge.extension_store.verify_marketplace_catalog_snapshot
+        terminal_account = service._identity.store_terminal_capability(
+            "baact_" + "b" * 32,
+            "terminal-capability",
         )
+        receipt = {
+            "terminal_capability_account": terminal_account,
+            "expected_version": "1.2.3",
+            "catalog_snapshot_sha256": "a" * 64,
+        }
         try:
-            marketplace_bridge.extension_store.verify_marketplace_catalog_snapshot = (
-                lambda **_kwargs: {"metadata": verified_metadata}
-            )
-            resolved = await service._resolve_action_metadata(state, intent, receipt)
+            resolved = await service._resolve_action_metadata(intent, receipt)
             assert resolved["artifact_url"].startswith("https://")
 
-            async def mismatched_metadata(action_id: str) -> dict:
-                return {**await action_metadata(action_id), "version": "9.9.9"}
+            async def mismatched_metadata(
+                action_id: str,
+                terminal_capability: str,
+            ) -> dict:
+                return {
+                    **await action_metadata(action_id, terminal_capability),
+                    "version": "9.9.9",
+                }
 
             marketplace_bridge.marketplace_service.protocol_action_metadata = (
                 mismatched_metadata
             )
             try:
-                await service._resolve_action_metadata(state, intent, receipt)
+                await service._resolve_action_metadata(intent, receipt)
             except marketplace_bridge.MarketplaceBridgeError:
                 pass
             else:
                 raise AssertionError("mismatched action metadata was accepted")
         finally:
-            marketplace_bridge.extension_store.verify_marketplace_catalog_snapshot = (
-                original_verify
+            marketplace_bridge.marketplace_service.protocol_action_metadata = (
+                action_metadata
             )
 
         persisted = (
-            root / "marketplace" / "intent-receipts-v1.json"
+            root / "marketplace" / "intent-receipts-v2.json"
         ).read_text(encoding="utf-8")
         assert pair_token not in persisted
         assert "private_key" not in persisted

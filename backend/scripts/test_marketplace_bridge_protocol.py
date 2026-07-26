@@ -88,6 +88,24 @@ def test_protocol_artifact_is_canonical() -> None:
         {"artifact_url", "artifact_sha256", "command", "arguments"} <= forbidden,
         "protocol forbids coordinates and generic commands",
     )
+    check(
+        PROTOCOL["http"]["action_metadata"]["request"]
+        == ["protocol_hash", "terminal_capability"],
+        "action metadata requires the terminal capability",
+    )
+    check(
+        set(PROTOCOL["leased_action"]["required"])
+        == {
+            "action_id",
+            "action_type",
+            "lease_capability",
+            "lease_expires_at",
+            "target_version",
+            "catalog_snapshot_sha256",
+            "extension",
+        },
+        "leased action schema is exact and expiry-bound",
+    )
 
 
 def test_device_signer_enforces_exact_operation_shape() -> None:
@@ -161,7 +179,7 @@ def test_store_is_durable_private_and_fail_closed() -> None:
         else:
             raise AssertionError("state store accepted an unknown field")
         invalid = store.read()
-        invalid["schema_version"] = 2
+        invalid["schema_version"] = 999
         try:
             store.write(invalid)
         except MarketplaceStateError:
@@ -175,16 +193,32 @@ def _install_action() -> dict:
     return {
         "action_id": action_id,
         "action_type": "install",
-        "extension_id": "ofek.test",
-        "expected_version": "1.2.3",
-        "snapshot_id": f"default-v1:7:{'3' * 64}",
-        "publisher_fingerprint": "4" * 64,
-        "permission_hash": "5" * 64,
         "lease_capability": "lease-secret",
-        "extension_name": "Test",
-        "publisher_name": "Ofek",
-        "permission_delta": ["network"],
+        "lease_expires_at": (
+            datetime.now(timezone.utc) + timedelta(minutes=5)
+        ).isoformat(),
+        "target_version": "1.2.3",
+        "catalog_snapshot_sha256": "3" * 64,
+        "extension": {
+            "id": "ofek.test",
+            "name": "Test",
+            "version": "1.2.3",
+            "publisher": "Ofek",
+            "permission_delta": ["network"],
+        },
     }
+
+
+def _persistable_intent(bridge: MarketplaceBridge, action: dict) -> dict:
+    intent = bridge._validate_action(action)
+    if intent is None:
+        raise AssertionError("expected leased action")
+    intent.pop("lease_capability")
+    intent["lease_capability_account"] = (
+        f"marketplace-lease-capability:{action['action_id']}"
+    )
+    intent["lease_capability_ready"] = True
+    return intent
 
 
 def test_action_versions_and_public_intent_projection_are_exact() -> None:
@@ -203,10 +237,13 @@ def test_action_versions_and_public_intent_projection_are_exact() -> None:
         action = {
             "action_id": f"baact_{action_digit * 32}",
             "action_type": action_type,
-            "extension_id": "ofek.test",
-            "snapshot_id": f"default-v1:7:{'3' * 64}",
             "lease_capability": "lease-secret",
-            "expected_version": "9.9.9",
+            "lease_expires_at": (
+                datetime.now(timezone.utc) + timedelta(minutes=5)
+            ).isoformat(),
+            "target_version": "9.9.9",
+            "catalog_snapshot_sha256": "3" * 64,
+            "extension": {"id": "ofek.test", "name": "Test"},
         }
         try:
             bridge._validate_action(action)
@@ -216,16 +253,20 @@ def test_action_versions_and_public_intent_projection_are_exact() -> None:
             raise AssertionError(
                 f"Marketplace {action_type} accepted a target version"
             )
-        action["expected_version"] = ""
+        action["target_version"] = ""
         check(
             bridge._validate_action(action) is not None,
             f"Marketplace {action_type} accepts an empty target version",
         )
-        action.pop("expected_version")
-        check(
-            bridge._validate_action(action) is not None,
-            f"Marketplace {action_type} accepts an absent target version",
-        )
+        action.pop("target_version")
+        try:
+            bridge._validate_action(action)
+        except MarketplaceBridgeError:
+            pass
+        else:
+            raise AssertionError(
+                f"Marketplace {action_type} accepted an absent target version"
+            )
 
     with tempfile.TemporaryDirectory() as directory:
         store = MarketplaceStateStore(Path(directory) / "state.json")
@@ -241,13 +282,10 @@ def test_action_versions_and_public_intent_projection_are_exact() -> None:
             "device_label": "Test device",
             "created_at": created_at.isoformat(),
         }
-        state["intents"][f"baact_{'2' * 32}"] = {
-            "intent_id": f"baact_{'2' * 32}",
-            "action": "install",
-            "status": "awaiting_confirmation",
-            "extension": {"id": "ofek.test", "name": "Test"},
-            "created_at": (created_at + timedelta(seconds=1)).isoformat(),
-        }
+        action = _install_action()
+        intent = _persistable_intent(MarketplaceBridge(), action)
+        intent["created_at"] = (created_at + timedelta(seconds=1)).isoformat()
+        state["intents"][action["action_id"]] = intent
         store.write(state)
         intents = MarketplaceBridge(store=store).snapshot()["intents"]
         check(
@@ -263,7 +301,8 @@ def test_action_versions_and_public_intent_projection_are_exact() -> None:
             "pair projection exposes only protocol fields",
         )
         check(
-            set(intents[1]) == {"intent_id", "action", "status", "extension"},
+            set(intents[1])
+            == {"intent_id", "action", "status", "extension", "error"},
             "action projection exposes only protocol fields",
         )
 
@@ -274,7 +313,7 @@ def test_store_rejects_secret_account_substitution() -> None:
         action = _install_action()
         bridge = MarketplaceBridge(store=store)
         bridge._extension_state = lambda _extension_id: {"exists": False}
-        intent = bridge._validate_action(action)
+        intent = _persistable_intent(bridge, action)
         state = empty_state()
         state["intents"][action["action_id"]] = intent
         state["receipts"][action["action_id"]] = {
@@ -287,8 +326,7 @@ def test_store_rejects_secret_account_substitution() -> None:
             "action": "install",
             "extension_id": "ofek.test",
             "expected_version": "1.2.3",
-            "approved_target": intent["approved_target"],
-            "verified_catalog": {"catalog": {}, "signature": ""},
+            "catalog_snapshot_sha256": intent["catalog_snapshot_sha256"],
             "precondition": {"exists": False},
             "desired": intent["desired"],
             "phase": "fenced",
@@ -315,60 +353,196 @@ def test_store_rejects_secret_account_substitution() -> None:
             raise AssertionError("state store accepted a substituted secret account")
 
 
-def test_verified_catalog_proof_survives_expiry() -> None:
-    private_key = Ed25519PrivateKey.generate()
-    public_key = base64.b64encode(
-        private_key.public_key().public_bytes_raw()
-    ).decode()
-    extension_id = "ofek.test"
-    publisher_fingerprint = "4" * 64
-    permission_hash = "5" * 64
-    catalog = {
-        "key_id": "default-v1",
-        "sequence": 7,
-        "issued_at": (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat(),
-        "expires_at": (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat(),
-        "extensions": {
-            extension_id: {
-                "extension_id": extension_id,
-                "version": "1.2.3",
-                "publisher_fingerprint": publisher_fingerprint,
-                "permission_hash": permission_hash,
-            }
-        },
+def test_action_metadata_uses_terminal_capability_and_exact_binding() -> None:
+    action = _install_action()
+    bridge = MarketplaceBridge()
+    bridge._extension_state = lambda _extension_id: {"exists": False}
+    intent = _persistable_intent(bridge, action)
+    account = f"marketplace-terminal-capability:{action['action_id']}"
+
+    class Identity:
+        def get_secret(self, requested_account: str) -> str | None:
+            check(
+                requested_account == account,
+                "metadata reads the deterministic terminal capability account",
+            )
+            return "terminal-secret"
+
+    bridge._identity = Identity()
+    receipt = {
+        "terminal_capability_account": account,
+        "expected_version": "1.2.3",
+        "catalog_snapshot_sha256": "3" * 64,
     }
-    canonical = json.dumps(
-        catalog,
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=False,
-        allow_nan=False,
-    ).encode()
-    snapshot_id = f"default-v1:7:{hashlib.sha256(canonical).hexdigest()}"
-    signature = base64.b64encode(private_key.sign(canonical)).decode()
-    original_key = os.environ.get("BETTER_AGENT_MARKETPLACE_PUBLIC_KEY")
-    os.environ["BETTER_AGENT_MARKETPLACE_PUBLIC_KEY"] = public_key
+    calls: list[tuple[str, str]] = []
+    original_metadata = marketplace_service.protocol_action_metadata
+
+    async def metadata(action_id: str, capability: str) -> dict:
+        calls.append((action_id, capability))
+        return {
+            "extension_id": "ofek.test",
+            "version": "1.2.3",
+            "catalog_snapshot_sha256": "3" * 64,
+            "artifact_url": "https://marketplace.test/artifact",
+            "artifact_sha256": "4" * 64,
+            "signature": "signature",
+            "signature_alg": "ed25519",
+        }
+
+    marketplace_service.protocol_action_metadata = metadata
     try:
-        verified = extension_store.verify_marketplace_catalog_snapshot(
-            catalog=catalog,
-            signature=signature,
-            snapshot_id=snapshot_id,
-            extension_id=extension_id,
-            expected_version="1.2.3",
-            publisher_fingerprint=publisher_fingerprint,
-            permission_hash=permission_hash,
-            minimum_sequence=0,
-            allow_expired=True,
+        resolved = asyncio.run(bridge._resolve_action_metadata(intent, receipt))
+        check(
+            calls == [(action["action_id"], "terminal-secret")],
+            "metadata request is authorized only by the device-bound terminal capability",
         )
-    finally:
-        if original_key is None:
-            os.environ.pop("BETTER_AGENT_MARKETPLACE_PUBLIC_KEY", None)
+        check(
+            resolved["artifact_url"] == "https://marketplace.test/artifact",
+            "exactly bound metadata is accepted",
+        )
+        receipt["catalog_snapshot_sha256"] = "5" * 64
+        try:
+            asyncio.run(bridge._resolve_action_metadata(intent, receipt))
+        except MarketplaceBridgeError:
+            pass
         else:
-            os.environ["BETTER_AGENT_MARKETPLACE_PUBLIC_KEY"] = original_key
-    check(
-        verified["metadata"]["extension_id"] == extension_id,
-        "persisted signed catalog remains verifiable after approval-time expiry",
+            raise AssertionError("mismatched catalog metadata was accepted")
+    finally:
+        marketplace_service.protocol_action_metadata = original_metadata
+
+
+def test_expired_terminal_deadline_blocks_every_mutation() -> None:
+    bridge = MarketplaceBridge()
+    mutations: list[str] = []
+    original_set_enabled = extension_store.set_enabled
+    extension_store.set_enabled = (
+        lambda *_args, **_kwargs: mutations.append("enable")
     )
+    receipt = {
+        "action": "enable",
+        "extension_id": "ofek.test",
+        "reconcile_deadline": (
+            datetime.now(timezone.utc) - timedelta(seconds=1)
+        ).isoformat(),
+    }
+    try:
+        try:
+            asyncio.run(bridge._execute_receipt({}, receipt))
+        except MarketplaceBridgeError:
+            pass
+        else:
+            raise AssertionError("expired terminal deadline allowed a mutation")
+    finally:
+        extension_store.set_enabled = original_set_enabled
+    check(
+        mutations == [],
+        "terminal expiry is checked immediately before every mutation type",
+    )
+    with tempfile.TemporaryDirectory() as directory:
+        store = MarketplaceStateStore(Path(directory) / "state.json")
+        action = _install_action()
+
+        class Identity:
+            def get_secret(self, _account: str) -> str:
+                return "terminal-secret"
+
+            def delete_secret(self, _account: str) -> None:
+                return None
+
+        bridge = MarketplaceBridge(store=store, identity=Identity())
+        bridge._extension_state = lambda _extension_id: {"exists": False}
+        intent = _persistable_intent(bridge, action)
+        intent["status"] = "committing"
+        intent["lease_capability_account"] = ""
+        intent["lease_capability_ready"] = False
+        expires_at = (
+            datetime.now(timezone.utc) + timedelta(minutes=1)
+        ).isoformat()
+        device_id = f"badvc_{'1' * 32}"
+        state = empty_state()
+        state["device"] = {
+            "device_id": device_id,
+            "public_key": "A" * 43,
+            "label": "Test device",
+            "paired": True,
+            "revoked": False,
+            "revocation_pending": False,
+            "epoch": 1,
+            "server_origin": "https://ofek-dev.com/api/marketplace",
+        }
+        state["intents"][action["action_id"]] = intent
+        state["receipts"][action["action_id"]] = {
+            "action_id": action["action_id"],
+            "intent_id": action["action_id"],
+            "device_id": device_id,
+            "device_epoch": 1,
+            "envelope_digest": intent["envelope_digest"],
+            "receipt_revision": 1,
+            "action": "install",
+            "extension_id": "ofek.test",
+            "expected_version": "1.2.3",
+            "catalog_snapshot_sha256": "3" * 64,
+            "precondition": {"exists": False},
+            "desired": intent["desired"],
+            "phase": "fenced",
+            "terminal_capability_account": (
+                f"marketplace-terminal-capability:{action['action_id']}"
+            ),
+            "terminal_result": None,
+            "ack_status": "pending",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "reconcile_deadline": expires_at,
+        }
+        store.write(state)
+        acknowledgements: list[dict] = []
+
+        async def sign(
+            _state: dict,
+            _operation: str,
+            _params: dict,
+            body: dict,
+            **_options,
+        ) -> tuple[str, dict]:
+            return "/ack", body
+
+        async def ack(_device_id: str, _action_id: str, body: dict) -> dict:
+            acknowledgements.append(body)
+            if len(acknowledgements) == 1:
+                expired = store.read()
+                expired["receipts"][action["action_id"]][
+                    "reconcile_deadline"
+                ] = (
+                    datetime.now(timezone.utc) - timedelta(seconds=1)
+                ).isoformat()
+                store.write(expired)
+                raise HTTPException(status_code=409)
+            return {
+                "outcome": body["outcome"],
+                "result_code": body["result_code"],
+            }
+
+        original_ack = marketplace_service.protocol_ack
+        bridge._signed_operation = sign
+        marketplace_service.protocol_ack = ack
+        try:
+            asyncio.run(
+                bridge._finalize_receipt(
+                    action["action_id"],
+                    "succeeded",
+                    "ok",
+                )
+            )
+        finally:
+            marketplace_service.protocol_ack = original_ack
+        check(
+            acknowledgements[0]["outcome"] == "succeeded"
+            and acknowledgements[1]["outcome"] == "failed_unknown"
+            and store.read()["tombstones"][action["action_id"]][
+                "terminal_result"
+            ]["outcome"]
+            == "failed_unknown",
+            "acknowledgement expiry race converges to failed_unknown",
+        )
 
 
 def test_action_envelope_excludes_coordinates_and_snapshot_excludes_secrets() -> None:
@@ -385,10 +559,8 @@ def test_action_envelope_excludes_coordinates_and_snapshot_excludes_secrets() ->
                     "action_id": action["action_id"],
                     "action_type": "install",
                     "extension_id": "ofek.test",
-                    "expected_version": "1.2.3",
-                    "snapshot_id": action["snapshot_id"],
-                    "publisher_fingerprint": "4" * 64,
-                    "permission_hash": "5" * 64,
+                    "target_version": "1.2.3",
+                    "catalog_snapshot_sha256": "3" * 64,
                 }
             ),
             "action digest binds only the typed approved envelope",
@@ -401,6 +573,11 @@ def test_action_envelope_excludes_coordinates_and_snapshot_excludes_secrets() ->
             pass
         else:
             raise AssertionError("action accepted an artifact coordinate")
+        intent.pop("lease_capability")
+        intent["lease_capability_account"] = (
+            f"marketplace-lease-capability:{action['action_id']}"
+        )
+        intent["lease_capability_ready"] = True
         state = empty_state()
         state["intents"][action["action_id"]] = intent
         store.write(state)
@@ -410,11 +587,167 @@ def test_action_envelope_excludes_coordinates_and_snapshot_excludes_secrets() ->
         check("envelope_digest" not in serialized, "snapshot excludes receipt digest")
 
 
+def test_lease_keychain_journal_recovers_and_releases() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        store = MarketplaceStateStore(Path(directory) / "state.json")
+
+        class Identity:
+            def __init__(self) -> None:
+                self.secrets: dict[str, str] = {}
+
+            def lease_capability_account(self, action_id: str) -> str:
+                return f"marketplace-lease-capability:{action_id}"
+
+            def store_lease_capability(
+                self,
+                action_id: str,
+                capability: str,
+            ) -> str:
+                account = self.lease_capability_account(action_id)
+                self.secrets[account] = capability
+                return account
+
+            def get_secret(self, account: str) -> str | None:
+                return self.secrets.get(account)
+
+            def delete_secret(self, account: str) -> None:
+                self.secrets.pop(account, None)
+
+        identity = Identity()
+        bridge = MarketplaceBridge(store=store, identity=identity)
+        bridge._extension_state = lambda _extension_id: {"exists": False}
+        state = empty_state()
+        state["device"] = {
+            "device_id": f"badvc_{'1' * 32}",
+            "public_key": "A" * 43,
+            "label": "Test device",
+            "paired": True,
+            "revoked": False,
+            "revocation_pending": False,
+            "epoch": 1,
+            "server_origin": "https://ofek-dev.com/api/marketplace",
+        }
+        state["connection_state"] = "connected"
+        store.write(state)
+
+        action = _install_action()
+        asyncio.run(bridge._stage_leased_action(bridge._validate_action(action), 1))
+        persisted = store.read()["intents"][action["action_id"]]
+        account = persisted["lease_capability_account"]
+        check(
+            persisted["lease_capability_ready"]
+            and identity.secrets[account] == "lease-secret"
+            and "lease-secret" not in store.path.read_text(encoding="utf-8"),
+            "lease capability commits through a keychain-backed journal",
+        )
+
+        rejected = store.read()
+        rejected_intent = rejected["intents"][action["action_id"]]
+        rejected_intent["status"] = "rejected"
+        rejected_intent["rejection_pending"] = True
+        store.write(rejected)
+        renewed = _install_action()
+        renewed["lease_capability"] = "renewed-secret"
+        renewed["lease_expires_at"] = (
+            datetime.now(timezone.utc) + timedelta(minutes=10)
+        ).isoformat()
+        flushed: list[str] = []
+
+        async def flush(action_id: str) -> None:
+            flushed.append(action_id)
+
+        bridge._flush_rejection = flush
+        asyncio.run(
+            bridge._stage_leased_action(bridge._validate_action(renewed), 1)
+        )
+        refreshed = store.read()["intents"][action["action_id"]]
+        check(
+            identity.secrets[account] == "renewed-secret"
+            and refreshed["lease_expires_at"] == renewed["lease_expires_at"]
+            and flushed == [action["action_id"]],
+            "same-digest re-lease refreshes rejection capability and expiry",
+        )
+
+        conflicting = _install_action()
+        conflicting["catalog_snapshot_sha256"] = "9" * 64
+        try:
+            asyncio.run(
+                bridge._stage_leased_action(
+                    bridge._validate_action(conflicting),
+                    1,
+                )
+            )
+        except MarketplaceBridgeError:
+            pass
+        else:
+            raise AssertionError("conflicting action digest was re-leased")
+
+        cleanup = store.read()
+        cleanup["intents"][action["action_id"]]["rejection_pending"] = False
+        store.write(cleanup)
+        asyncio.run(bridge._reconcile_lease_capability_journals())
+        cleaned = store.read()["intents"][action["action_id"]]
+        check(
+            cleaned["lease_capability_account"] == ""
+            and account not in identity.secrets,
+            "post-ack crash reconciliation deletes the lease capability",
+        )
+
+        interrupted = _install_action()
+        interrupted["action_id"] = f"baact_{'9' * 32}"
+        interrupted_intent = bridge._validate_action(interrupted)
+        interrupted_intent.pop("lease_capability")
+        interrupted_account = identity.lease_capability_account(
+            interrupted["action_id"]
+        )
+        interrupted_intent["lease_capability_account"] = interrupted_account
+        marker = store.read()
+        marker["intents"][interrupted["action_id"]] = interrupted_intent
+        store.write(marker)
+        identity.secrets[interrupted_account] = "partial-secret"
+        asyncio.run(bridge._reconcile_lease_capability_journals())
+        check(
+            interrupted["action_id"] not in store.read()["intents"]
+            and interrupted_account not in identity.secrets,
+            "pre-commit crash reconciliation removes partial lease state",
+        )
+
+        revoking = store.read()
+        revoking["device"]["paired"] = False
+        revoking["device"]["revoked"] = True
+        revoking["device"]["revocation_pending"] = True
+        revoking["device"]["epoch"] += 1
+        expired = _persistable_intent(bridge, _install_action())
+        expired["status"] = "rejected"
+        expired["rejection_pending"] = True
+        expired["lease_expires_at"] = (
+            datetime.now(timezone.utc) - timedelta(seconds=1)
+        ).isoformat()
+        revoking["intents"][action["action_id"]] = expired
+        identity.secrets[expired["lease_capability_account"]] = "expired-secret"
+        store.write(revoking)
+        asyncio.run(bridge._abandon_expired_rejections_for_revocation())
+        abandoned = store.read()["intents"][action["action_id"]]
+        check(
+            not abandoned["rejection_pending"]
+            and abandoned["lease_capability_account"] == "",
+            "revocation abandons only an expired unsendable rejection lease",
+        )
+
+
 def test_fence_commit_is_recoverable_after_response_loss() -> None:
     with tempfile.TemporaryDirectory() as directory:
         store = MarketplaceStateStore(Path(directory) / "state.json")
 
         class Identity:
+            def get_secret(self, account: str) -> str | None:
+                if account.startswith("marketplace-lease-capability:"):
+                    return "lease-secret"
+                return None
+
+            def delete_secret(self, _account: str) -> None:
+                return None
+
             def store_terminal_capability(self, action_id: str, capability: str) -> str:
                 check(capability == "terminal-secret", "terminal secret stays in core")
                 return f"marketplace-terminal-capability:{action_id}"
@@ -422,7 +755,7 @@ def test_fence_commit_is_recoverable_after_response_loss() -> None:
         bridge = MarketplaceBridge(store=store, identity=Identity())
         bridge._extension_state = lambda _extension_id: {"exists": False}
         action = _install_action()
-        intent = bridge._validate_action(action)
+        intent = _persistable_intent(bridge, action)
         state = empty_state()
         state["device"] = {
             "device_id": f"badvc_{'1' * 32}",
@@ -437,12 +770,6 @@ def test_fence_commit_is_recoverable_after_response_loss() -> None:
         state["connection_state"] = "connected"
         state["intents"][action["action_id"]] = intent
         store.write(state)
-
-        async def resolve_catalog(
-            _state: dict,
-            _intent: dict,
-        ) -> tuple[dict, str, int, dict]:
-            return {}, "default-v1", 7, {"catalog": {}, "signature": ""}
 
         async def sign(
             _state: dict,
@@ -467,7 +794,6 @@ def test_fence_commit_is_recoverable_after_response_loss() -> None:
                 ).isoformat(),
             }
 
-        bridge._resolve_catalog = resolve_catalog
         bridge._signed_operation = sign
         marketplace_service.protocol_fence = fence
         try:
@@ -518,9 +844,17 @@ def test_signed_ack_owns_terminal_and_rejection_recovery() -> None:
     with tempfile.TemporaryDirectory() as directory:
         store = MarketplaceStateStore(Path(directory) / "state.json")
         action = _install_action()
-        bridge = MarketplaceBridge(store=store)
+
+        class LeaseIdentity:
+            def get_secret(self, _account: str) -> str:
+                return "lease-secret"
+
+            def delete_secret(self, _account: str) -> None:
+                return None
+
+        bridge = MarketplaceBridge(store=store, identity=LeaseIdentity())
         bridge._extension_state = lambda _extension_id: {"exists": False}
-        intent = bridge._validate_action(action)
+        intent = _persistable_intent(bridge, action)
         device_id = f"badvc_{'1' * 32}"
         state = empty_state()
         state["device"] = {
@@ -605,8 +939,9 @@ def test_signed_ack_owns_terminal_and_rejection_recovery() -> None:
                 "action": "install",
                 "extension_id": "ofek.test",
                 "expected_version": "1.2.3",
-                "approved_target": pending_intent["approved_target"],
-                "verified_catalog": {"catalog": {}, "signature": ""},
+                "catalog_snapshot_sha256": pending_intent[
+                    "catalog_snapshot_sha256"
+                ],
                 "precondition": {"exists": False},
                 "desired": pending_intent["desired"],
                 "phase": "fenced",
@@ -1003,6 +1338,33 @@ def test_protocol_transport_rejects_invalid_response_value_types() -> None:
                 raise AssertionError(
                     "core protocol transport accepted an invalid projection revision"
                 )
+        transport._request_sync = lambda *_args, **_kwargs: {
+            "action": {
+                **_install_action(),
+                "lease_expires_at": (
+                    datetime.now(timezone.utc) - timedelta(seconds=1)
+                ).isoformat(),
+            }
+        }
+        try:
+            transport.request(
+                "lease",
+                {"device_id": f"badvc_{'1' * 32}"},
+                access_token="core-token",
+                body={
+                    "protocol_hash": PROTOCOL_HASH,
+                    "wait_seconds": 30,
+                    "challenge": f"bachal_{'A' * 43}",
+                    "signature": "B" * 86,
+                },
+            )
+        except HTTPException as exc:
+            check(
+                exc.status_code == 502,
+                "core transport rejects an expired leased action",
+            )
+        else:
+            raise AssertionError("core transport accepted an expired leased action")
     finally:
         transport._request_sync = original_request_sync
 
@@ -1056,8 +1418,10 @@ if __name__ == "__main__":
     test_store_is_durable_private_and_fail_closed()
     test_action_versions_and_public_intent_projection_are_exact()
     test_store_rejects_secret_account_substitution()
-    test_verified_catalog_proof_survives_expiry()
+    test_action_metadata_uses_terminal_capability_and_exact_binding()
+    test_expired_terminal_deadline_blocks_every_mutation()
     test_action_envelope_excludes_coordinates_and_snapshot_excludes_secrets()
+    test_lease_keychain_journal_recovers_and_releases()
     test_fence_commit_is_recoverable_after_response_loss()
     test_signed_ack_owns_terminal_and_rejection_recovery()
     test_rest_ws_contract_and_extension_capability_boundary()

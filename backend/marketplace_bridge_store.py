@@ -8,10 +8,16 @@ from pathlib import Path
 from typing import Callable, TypeVar
 
 import json_store
-from marketplace_protocol import PATTERNS, PROTOCOL, PROTOCOL_HASH
+from marketplace_protocol import (
+    ALLOWED_ACTIONS,
+    PATTERNS,
+    PROTOCOL,
+    PROTOCOL_HASH,
+    canonical_hash,
+)
 from paths import bc_home
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 CONNECTION_STATES = frozenset({"unpaired", "connecting", "connected", "offline"})
 INTENT_STATES = frozenset(
     {
@@ -29,7 +35,7 @@ class MarketplaceStateError(ValueError):
 
 
 def _state_path() -> Path:
-    return bc_home() / "marketplace" / "intent-receipts-v1.json"
+    return bc_home() / "marketplace" / "intent-receipts-v2.json"
 
 
 def empty_state() -> dict:
@@ -43,7 +49,6 @@ def empty_state() -> dict:
         "intents": {},
         "receipts": {},
         "tombstones": {},
-        "catalog_sequences": {},
         "projection_revision": 0,
     }
 
@@ -97,12 +102,124 @@ def _validate_intent(intent_id: str, intent: object) -> None:
     if action == PAIR_ACTION:
         if not PATTERNS["pair_intent"].fullmatch(intent_id):
             raise MarketplaceStateError("Marketplace pair intent id is invalid")
-    elif not PATTERNS["action"].fullmatch(intent_id):
-        raise MarketplaceStateError("Marketplace action id is invalid")
+    else:
+        if not PATTERNS["action"].fullmatch(intent_id):
+            raise MarketplaceStateError("Marketplace action id is invalid")
+        _validate_action_intent(intent_id, intent)
     if intent.get("status") not in INTENT_STATES:
         raise MarketplaceStateError("Marketplace intent state is invalid")
     if not isinstance(intent.get("created_at"), str):
         raise MarketplaceStateError("Marketplace intent timestamp is invalid")
+
+
+def _validate_action_intent(intent_id: str, intent: dict) -> None:
+    _require_keys(
+        intent,
+        {
+            "intent_id",
+            "action",
+            "status",
+            "extension",
+            "lease_capability_account",
+            "lease_capability_ready",
+            "lease_cleanup_pending",
+            "lease_expires_at",
+            "target_version",
+            "catalog_snapshot_sha256",
+            "envelope_digest",
+            "precondition",
+            "desired",
+            "rejection_pending",
+            "error",
+            "created_at",
+        },
+        "Marketplace action intent",
+    )
+    extension = intent["extension"]
+    if not isinstance(extension, dict) or set(extension) != {
+        "id",
+        "name",
+        "version",
+        "publisher",
+        "permission_delta",
+    }:
+        raise MarketplaceStateError("Marketplace action extension is invalid")
+    if not PATTERNS["extension"].fullmatch(str(extension["id"])):
+        raise MarketplaceStateError("Marketplace action extension id is invalid")
+    if not all(
+        isinstance(extension[field], str)
+        for field in ("name", "version", "publisher")
+    ) or not extension["name"]:
+        raise MarketplaceStateError("Marketplace action extension is invalid")
+    if (
+        any(
+            len(extension[field]) > PROTOCOL["bounds"]["display_text_max"]
+            or any(ord(character) < 32 for character in extension[field])
+            for field in ("name", "publisher")
+        )
+        or len(extension["version"]) > 128
+        or not isinstance(extension["permission_delta"], list)
+        or len(extension["permission_delta"])
+        > PROTOCOL["bounds"]["permission_count_max"]
+        or not all(
+            isinstance(permission, str)
+            and permission
+            and len(permission) <= PROTOCOL["bounds"]["display_text_max"]
+            and not any(ord(character) < 32 for character in permission)
+            for permission in extension["permission_delta"]
+        )
+    ):
+        raise MarketplaceStateError("Marketplace action permissions are invalid")
+    action = intent["action"]
+    target_version = intent["target_version"]
+    if (
+        action not in ALLOWED_ACTIONS
+        or not isinstance(target_version, str)
+        or len(target_version) > 128
+        or action in {"install", "update"}
+        and (not target_version or extension["version"] != target_version)
+        or action not in {"install", "update"}
+        and target_version
+    ):
+        raise MarketplaceStateError("Marketplace action target version is invalid")
+    expected_account = f"marketplace-lease-capability:{intent_id}"
+    account = intent["lease_capability_account"]
+    ready = intent["lease_capability_ready"]
+    cleanup_pending = intent["lease_cleanup_pending"]
+    if (
+        not isinstance(ready, bool)
+        or not isinstance(cleanup_pending, bool)
+        or account not in {"", expected_account}
+        or ready and (not account or cleanup_pending)
+        or cleanup_pending and not account
+        or not account and (ready or cleanup_pending)
+    ):
+        raise MarketplaceStateError("Marketplace lease capability journal is invalid")
+    _validate_timestamp(
+        intent["lease_expires_at"],
+        "lease expires_at",
+        allow_empty=False,
+    )
+    for field in ("catalog_snapshot_sha256", "envelope_digest"):
+        if not PATTERNS["sha256"].fullmatch(str(intent[field])):
+            raise MarketplaceStateError(f"Marketplace action {field} is invalid")
+    expected_digest = canonical_hash(
+        {
+            "action_id": intent_id,
+            "action_type": action,
+            "extension_id": extension["id"],
+            "target_version": target_version,
+            "catalog_snapshot_sha256": intent["catalog_snapshot_sha256"],
+        }
+    )
+    if intent["envelope_digest"] != expected_digest:
+        raise MarketplaceStateError("Marketplace action digest is invalid")
+    _validate_extension_state(intent["precondition"], "precondition")
+    _validate_extension_state(intent["desired"], "desired")
+    if not isinstance(intent["rejection_pending"], bool) or not isinstance(
+        intent["error"], str
+    ):
+        raise MarketplaceStateError("Marketplace action recovery state is invalid")
 
 
 def _validate_receipt(action_id: str, receipt: object) -> None:
@@ -120,8 +237,7 @@ def _validate_receipt(action_id: str, receipt: object) -> None:
         "action",
         "extension_id",
         "expected_version",
-        "approved_target",
-        "verified_catalog",
+        "catalog_snapshot_sha256",
         "precondition",
         "desired",
         "phase",
@@ -151,26 +267,10 @@ def _validate_receipt(action_id: str, receipt: object) -> None:
         raise MarketplaceStateError("Marketplace receipt extension id is invalid")
     if not isinstance(receipt["expected_version"], str):
         raise MarketplaceStateError("Marketplace receipt version is invalid")
-    target = receipt["approved_target"]
-    if not isinstance(target, dict) or set(target) != {
-        "snapshot_id",
-        "publisher_fingerprint",
-        "permission_hash",
-    }:
-        raise MarketplaceStateError("Marketplace receipt target is invalid")
-    if not PATTERNS["snapshot"].fullmatch(str(target["snapshot_id"])):
-        raise MarketplaceStateError("Marketplace receipt snapshot is invalid")
-    for field in ("publisher_fingerprint", "permission_hash"):
-        value = target[field]
-        if value and not PATTERNS["sha256"].fullmatch(str(value)):
-            raise MarketplaceStateError(f"Marketplace receipt {field} is invalid")
-    proof = receipt["verified_catalog"]
-    if not isinstance(proof, dict) or set(proof) != {"catalog", "signature"}:
-        raise MarketplaceStateError("Marketplace verified catalog is invalid")
-    if not isinstance(proof["catalog"], dict) or not isinstance(
-        proof["signature"], str
+    if not PATTERNS["sha256"].fullmatch(
+        str(receipt["catalog_snapshot_sha256"])
     ):
-        raise MarketplaceStateError("Marketplace verified catalog is invalid")
+        raise MarketplaceStateError("Marketplace receipt catalog snapshot is invalid")
     _validate_extension_state(receipt["precondition"], "precondition")
     _validate_extension_state(receipt["desired"], "desired")
     if receipt["phase"] not in {
@@ -275,7 +375,6 @@ def validate_state(state: object) -> dict:
         "intents",
         "receipts",
         "tombstones",
-        "catalog_sequences",
     ):
         if not isinstance(state[field], dict):
             raise MarketplaceStateError(f"Marketplace {field} is invalid")
@@ -317,14 +416,6 @@ def validate_state(state: object) -> dict:
             "tombstone created_at",
             allow_empty=False,
         )
-    for key_id, sequence in state["catalog_sequences"].items():
-        if (
-            not isinstance(key_id, str)
-            or not 1 <= len(key_id) <= 80
-            or not isinstance(sequence, int)
-            or sequence < 0
-        ):
-            raise MarketplaceStateError("Marketplace catalog sequence is invalid")
     return state
 
 

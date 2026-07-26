@@ -104,6 +104,11 @@
     "command",
     "arguments"
   ],
+  "leased_action": {
+    "required": ["action_id", "action_type", "lease_capability", "lease_expires_at", "target_version", "catalog_snapshot_sha256", "extension"],
+    "extension_required": ["id", "name"],
+    "extension_optional": ["version", "publisher", "permission_delta"]
+  },
   "signatures": {
     "algorithm": "Ed25519",
     "body_hash": "sha256(canonical_json(body_without_signature))",
@@ -169,7 +174,7 @@
     "action_metadata": {
       "method": "POST",
       "path": "/protocol/v1/actions/{action_id}/metadata",
-      "request": [],
+      "request": ["protocol_hash", "terminal_capability"],
       "response": ["extension_id", "version", "artifact_url", "artifact_sha256", "signature", "signature_alg", "catalog_snapshot_sha256"]
     },
     "lease": {

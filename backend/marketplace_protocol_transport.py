@@ -9,7 +9,7 @@ from urllib.parse import quote, urlparse
 
 from fastapi import HTTPException
 
-from marketplace_protocol import PATTERNS, PROTOCOL
+from marketplace_protocol import PATTERNS, PROTOCOL, validate_leased_action
 
 _MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 _SIGNED_OPERATIONS = frozenset({"lease", "fence", "ack", "projection", "revoke"})
@@ -45,6 +45,16 @@ def _is_challenge_batch(value: object) -> bool:
     )
 
 
+def _is_leased_action(value: object) -> bool:
+    if value is None:
+        return True
+    try:
+        validate_leased_action(value)
+    except ValueError:
+        return False
+    return True
+
+
 _RESPONSE_VALUE_VALIDATORS = {
     "pair_context": {
         "site_label": _is_string,
@@ -73,7 +83,7 @@ _RESPONSE_VALUE_VALIDATORS = {
         for field in PROTOCOL["http"]["action_metadata"]["response"]
     },
     "lease": {
-        "action": lambda value: value is None or isinstance(value, dict),
+        "action": _is_leased_action,
     },
     "fence": {
         "terminal_capability": _is_non_empty_string,

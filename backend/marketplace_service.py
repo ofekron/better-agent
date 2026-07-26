@@ -241,18 +241,6 @@ async def protocol_projection(device_id: str, body: dict) -> dict:
     )
 
 
-async def protocol_catalog_snapshot(snapshot_id: str, extension_id: str) -> dict:
-    return await _protocol_request(
-        "catalog_snapshot",
-        {},
-        {
-            "protocol_hash": PROTOCOL_HASH,
-            "snapshot_id": snapshot_id,
-            "extension_id": extension_id,
-        },
-    )
-
-
 async def protocol_revoke(device_id: str, body: dict) -> dict:
     return await _protocol_request(
         "revoke",
@@ -261,9 +249,15 @@ async def protocol_revoke(device_id: str, body: dict) -> dict:
     )
 
 
-async def protocol_action_metadata(action_id: str) -> dict:
+async def protocol_action_metadata(
+    action_id: str,
+    terminal_capability: str,
+) -> dict:
     return await _protocol_request(
         "action_metadata",
         {"action_id": action_id},
-        {},
+        {
+            "protocol_hash": PROTOCOL_HASH,
+            "terminal_capability": terminal_capability,
+        },
     )
