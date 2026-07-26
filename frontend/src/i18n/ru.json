@@ -577,6 +577,7 @@
   "session.searchField.first_prompt": "Первый промпт",
   "session.folder": "Папка",
   "session.unfiled": "Без папки",
+  "session.pinnedGroup": "Закреплённые",
   "session.tags": "Теги",
   "session.advancedFilterPanel": "Фильтры",
   "session.folderViewOn": "Просмотр по папкам — нажмите для плоского списка",

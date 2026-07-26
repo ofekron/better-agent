@@ -571,6 +571,7 @@
   "session.searchField.first_prompt": "最初のプロンプト",
   "session.folder": "フォルダー",
   "session.unfiled": "未分類",
+  "session.pinnedGroup": "ピン留め",
   "session.tags": "タグ",
   "session.advancedFilterPanel": "フィルター",
   "session.folderViewOn": "フォルダービュー — クリックでフラットリスト",

@@ -571,6 +571,7 @@
   "session.searchField.first_prompt": "Erster Prompt",
   "session.folder": "Ordner",
   "session.unfiled": "Nicht zugeordnet",
+  "session.pinnedGroup": "Angeheftet",
   "session.tags": "Tags",
   "session.advancedFilterPanel": "Filter",
   "session.folderViewOn": "Ordneransicht — Klick für flache Liste",

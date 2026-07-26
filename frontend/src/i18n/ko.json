@@ -575,6 +575,7 @@
   "session.searchField.first_prompt": "첫 프롬프트",
   "session.folder": "폴더",
   "session.unfiled": "분류 안 됨",
+  "session.pinnedGroup": "고정됨",
   "session.tags": "태그",
   "session.advancedFilterPanel": "필터",
   "session.folderViewOn": "폴더 보기 — 클릭하면 평면 목록으로",

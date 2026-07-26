@@ -575,6 +575,7 @@
   "session.searchField.first_prompt": "Primeiro prompt",
   "session.folder": "Pasta",
   "session.unfiled": "Sem pasta",
+  "session.pinnedGroup": "Fixadas",
   "session.tags": "Marcadores",
   "session.advancedFilterPanel": "Filtros",
   "session.folderViewOn": "Visão de pasta — clique para lista plana",

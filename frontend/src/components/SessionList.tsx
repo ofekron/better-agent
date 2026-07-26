@@ -27,7 +27,12 @@ import { useLocalStorage } from "../hooks/useLocalStorage";
 import { eventBus } from "../lib/eventBus";
 import { markSessionUnread } from "../lib/sessionRegistry";
 import { sessionMessageCount } from "src/lib/sessionMessageCount";
-import { SESSION_SORT_LABEL, sessionSortValue, timeAgo } from "../lib/sessionSort";
+import {
+  SESSION_SORT_LABEL,
+  partitionPinnedSessions,
+  sessionSortValue,
+  timeAgo,
+} from "../lib/sessionSort";
 import { buildFolderPathMap, sortFolders } from "../sessionFolders";
 import { todoProgress } from "./TodosPanel";
 import { sessionLinkMarker } from "../utils/linkifyFilePaths";
@@ -104,6 +109,8 @@ type SessionSelectHandler = (id: string, session?: Session) => void;
 // Empty children map for the pinned selected-session anchor, which
 // renders as a single row without its sub-session sub-tree.
 const EMPTY_CHILDREN: Map<string, Session[]> = new Map();
+/** Stable empty list so a collapsed group doesn't churn memo identities. */
+const EMPTY_SESSIONS: Session[] = [];
 
 function orchestrationLabel(t: (key: string) => string, mode?: string): string {
   if (mode === "virtual") return "Virtual";
@@ -294,6 +301,15 @@ function buildFolderRenderTree(
       .filter((node) => node.sessions.length > 0 || node.children.length > 0);
 
   return { folderRoots: prune(allRoots), unfiledSessions };
+}
+
+/** Sessions in a folder subtree, so a collapsed heading still says how
+ * many rows it hides. */
+function countFolderSessions(node: FolderRenderNode): number {
+  return (
+    node.sessions.length +
+    node.children.reduce((sum, child) => sum + countFolderSessions(child), 0)
+  );
 }
 
 function flattenFolderSessions(
@@ -1500,6 +1516,7 @@ function FolderSection({
         />
         <Icon name="folder" size={12} />
         <span>{node.folder.name}</span>
+        <span className="session-group-count">{countFolderSessions(node)}</span>
       </button>
       {!collapsed && node.sessions.map((s) => (
         <SessionNode
@@ -2495,20 +2512,42 @@ export function SessionList({
     },
     [setCollapsedFolders],
   );
+  // Pinned sessions form their own collapsible top-level group, so they are
+  // hoisted out of the folder tree and the flat list to render exactly once.
+  const [pinnedCollapsed, setPinnedCollapsed] = useLocalStorage<boolean>(
+    "better-agent-pinned-group-collapsed",
+    false,
+  );
+  const { pinned: pinnedSessions, unpinned: unpinnedRoots } = useMemo(
+    () => partitionPinnedSessions(roots),
+    [roots],
+  );
+  const visiblePinned = pinnedCollapsed ? EMPTY_SESSIONS : pinnedSessions;
   const { folderRoots, unfiledSessions } = useMemo(
-    () => buildFolderRenderTree(folders, roots),
-    [folders, roots],
+    () => buildFolderRenderTree(folders, unpinnedRoots),
+    [folders, unpinnedRoots],
   );
   const sortedRoots = useMemo(
     () => [
+      ...visiblePinned,
       ...flattenFolderSessions(folderRoots, collapsedFolderIds),
       ...unfiledSessions,
     ],
-    [folderRoots, collapsedFolderIds, unfiledSessions],
+    [visiblePinned, folderRoots, collapsedFolderIds, unfiledSessions],
   );
+  const flatRoots = useMemo(
+    () => [...visiblePinned, ...unpinnedRoots],
+    [visiblePinned, unpinnedRoots],
+  );
+  // Folders render unless explicitly disabled. `undefined` (pref not yet
+  // loaded) defaults to showing folders, matching the backend pref default.
+  const showFolders = folderViewEnabled !== false;
+  // The one order the user actually sees — drives keyboard navigation,
+  // bulk selection, and the scroll-to-top heuristic.
+  const renderedOrder = showFolders ? sortedRoots : flatRoots;
   const visibleSelectionIds = useMemo(
-    () => (folderViewEnabled !== false ? sortedRoots : roots).map((session) => session.id),
-    [folderViewEnabled, sortedRoots, roots],
+    () => renderedOrder.map((session) => session.id),
+    [renderedOrder],
   );
   const selectedSessions = useMemo(() => {
     const byId = new Map(filtered.map((session) => [session.id, session]));
@@ -2573,17 +2612,17 @@ export function SessionList({
   // do NOT auto-set it — the highlight only appears after the first
   // ArrowDown/Up key press.
   useEffect(() => {
-    if (sortedRoots.length === 0) {
+    if (renderedOrder.length === 0) {
       if (highlightedSessionId !== null) setHighlightedSessionId(null);
       return;
     }
     if (
       highlightedSessionId &&
-      !sortedRoots.some((s) => s.id === highlightedSessionId)
+      !renderedOrder.some((s) => s.id === highlightedSessionId)
     ) {
       setHighlightedSessionId(null);
     }
-  }, [sortedRoots, highlightedSessionId]);
+  }, [renderedOrder, highlightedSessionId]);
 
   // Keep the highlighted row in view as ArrowUp/Down moves through
   // the list. Pure cosmetic — DOM lookup by data-session-id is the
@@ -2600,24 +2639,24 @@ export function SessionList({
 
   // Shared arrow-key handler for both search inputs. Wires up the
   // command-palette pattern: ↑/↓ move the highlight through
-  // `sortedRoots`; Enter activates `onSelect`. In AI mode WITHOUT a
+  // `renderedOrder`; Enter activates `onSelect`. In AI mode WITHOUT a
   // returned result we let Enter fall through to the search submit;
   // once a result exists Enter selects the highlighted match.
   const handleSearchKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === "ArrowDown" || e.key === "ArrowUp") {
-      if (sortedRoots.length === 0) return;
+      if (renderedOrder.length === 0) return;
       e.preventDefault();
       const idx = highlightedSessionId
-        ? sortedRoots.findIndex((s) => s.id === highlightedSessionId)
+        ? renderedOrder.findIndex((s) => s.id === highlightedSessionId)
         : -1;
       const delta = e.key === "ArrowDown" ? 1 : -1;
       const nextIdx =
         idx < 0
           ? e.key === "ArrowDown"
             ? 0
-            : sortedRoots.length - 1
-          : (idx + delta + sortedRoots.length) % sortedRoots.length;
-      setHighlightedSessionId(sortedRoots[nextIdx].id);
+            : renderedOrder.length - 1
+          : (idx + delta + renderedOrder.length) % renderedOrder.length;
+      setHighlightedSessionId(renderedOrder[nextIdx].id);
       return;
     }
     if (e.key === "Enter") {
@@ -2625,7 +2664,7 @@ export function SessionList({
       // AI search is run explicitly via the ✨ button, not Enter.
       if (!highlightedSessionId) return;
       e.preventDefault();
-      const highlighted = sortedRoots.find((s) => s.id === highlightedSessionId);
+      const highlighted = renderedOrder.find((s) => s.id === highlightedSessionId);
       onSelect(highlightedSessionId, highlighted);
       return;
     }
@@ -2642,17 +2681,12 @@ export function SessionList({
     [setCopiedId],
   );
 
-  // Folders render unless explicitly disabled. `undefined` (pref not yet
-  // loaded) defaults to showing folders, matching the backend pref default.
-  const showFolders = folderViewEnabled !== false;
-
   // Scroll the list back to the top when a NEW session becomes the
   // first row (e.g. a freshly created session prepended to the list).
   // Keyed off the actually-rendered order — `roots` in flat view, the
   // flattened folder tree in folder view — so it matches what the user
   // sees. Only fires when the topmost id changed to one that wasn't
   // present before, so reordering existing sessions never yanks scroll.
-  const renderedOrder = showFolders ? sortedRoots : roots;
   useEffect(() => {
     const firstId = renderedOrder[0]?.id ?? null;
     const prevFirst = prevFirstIdRef.current;
@@ -3329,6 +3363,29 @@ export function SessionList({
             <span>{t("session.newFolder")}</span>
           </div>
         )}
+        {pinnedSessions.length > 0 && (
+          <div
+            className="session-folder-section session-pinned-section"
+            data-testid="session-pinned-section"
+          >
+            <button
+              type="button"
+              className="session-folder-heading"
+              onClick={() => setPinnedCollapsed((v) => !v)}
+              aria-expanded={!pinnedCollapsed}
+            >
+              <Icon
+                name={pinnedCollapsed ? "chevron-right" : "chevron-down"}
+                size={12}
+                className="session-folder-chevron"
+              />
+              <Icon name="pin" size={12} />
+              <span>{t("session.pinnedGroup")}</span>
+              <span className="session-group-count">{pinnedSessions.length}</span>
+            </button>
+            {visiblePinned.map((s) => renderNode(s, 0, showFolders))}
+          </div>
+        )}
         {showFolders && folderRoots.map((node) => (
           <FolderSection
             key={node.folder.id}
@@ -3395,7 +3452,7 @@ export function SessionList({
             <span>{t("session.unfiled")}</span>
           </div>
         )}
-        {(showFolders ? unfiledSessions : roots).map((s) =>
+        {(showFolders ? unfiledSessions : unpinnedRoots).map((s) =>
           renderNode(s, 0, showFolders),
         )}
         {searching && sessions.length === 0 && (

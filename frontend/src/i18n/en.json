@@ -598,6 +598,7 @@
   "session.searchField.first_prompt": "First prompt",
   "session.folder": "Folder",
   "session.unfiled": "Unfiled",
+  "session.pinnedGroup": "Pinned",
   "session.tags": "Tags",
   "session.selectSession": "Select session",
   "session.selectedCount": "{{count}} selected",

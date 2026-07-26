@@ -1196,6 +1196,26 @@ body {
   transition: transform 0.12s ease;
 }
 
+/* Count of rows a group holds — keeps a collapsed heading honest about
+ * what it is hiding. */
+.session-group-count {
+  margin-inline-start: auto;
+  flex-shrink: 0;
+  padding: 0 6px;
+  min-width: 18px;
+  text-align: center;
+  color: var(--text-muted);
+  background: var(--bg-hover);
+  border-radius: 9px;
+  font-size: calc(9px * var(--app-font-scale));
+  line-height: 16px;
+  letter-spacing: 0;
+}
+
+.session-pinned-section .session-folder-heading {
+  color: var(--accent);
+}
+
 .session-unfiled-heading {
   margin-top: 4px;
 }

@@ -575,6 +575,7 @@
   "session.searchField.first_prompt": "Premier prompt",
   "session.folder": "Dossier",
   "session.unfiled": "Non classées",
+  "session.pinnedGroup": "Épinglées",
   "session.tags": "Étiquettes",
   "session.advancedFilterPanel": "Filtres",
   "session.folderViewOn": "Vue par dossier — cliquez pour une liste à plat",

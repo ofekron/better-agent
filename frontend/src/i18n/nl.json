@@ -571,6 +571,7 @@
   "session.searchField.first_prompt": "Eerste prompt",
   "session.folder": "Map",
   "session.unfiled": "Niet ingedeeld",
+  "session.pinnedGroup": "Vastgezet",
   "session.tags": "Tags",
   "session.advancedFilterPanel": "Filters",
   "session.folderViewOn": "Mapweergave — klik voor platte lijst",

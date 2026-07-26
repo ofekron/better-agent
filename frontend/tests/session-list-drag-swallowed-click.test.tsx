@@ -77,7 +77,10 @@ describe("session row drag-swallowed click fallback", () => {
     fireEvent.dragStart(row, { clientX: 10, clientY: 10, dataTransfer });
     fireEvent.dragEnd(row, { clientX: 14, clientY: 12, dataTransfer });
     expect(onSelect).toHaveBeenCalledTimes(1);
-    expect(onSelect).toHaveBeenCalledWith("s1");
+    expect(onSelect).toHaveBeenCalledWith(
+      "s1",
+      expect.objectContaining({ id: "s1" }),
+    );
   });
 
   it("does not select when the drag crossed the agent-board threshold", () => {

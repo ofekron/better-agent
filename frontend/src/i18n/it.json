@@ -575,6 +575,7 @@
   "session.searchField.first_prompt": "Primo prompt",
   "session.folder": "Cartella",
   "session.unfiled": "Non archiviata",
+  "session.pinnedGroup": "Fissate",
   "session.tags": "Tag",
   "session.advancedFilterPanel": "Filtri",
   "session.folderViewOn": "Vista cartelle — clicca per elenco piatto",

@@ -575,6 +575,7 @@
   "session.searchField.first_prompt": "أول طلب",
   "session.folder": "المجلد",
   "session.unfiled": "غير مُصنَّف",
+  "session.pinnedGroup": "مثبَّتة",
   "session.tags": "الوسوم",
   "session.advancedFilterPanel": "المرشّحات",
   "session.folderViewOn": "عرض المجلدات — انقر لقائمة مسطّحة",

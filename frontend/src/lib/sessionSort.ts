@@ -72,6 +72,22 @@ export function sortSessionsForList(
     .map(({ session }) => session);
 }
 
+/** Split sidebar sessions into the pinned group and the rest, preserving
+ * the incoming order within each side. Pinned sessions are hoisted out of
+ * their folders so they render once, in the top-level Pinned group. */
+export function partitionPinnedSessions(sessions: Session[]): {
+  pinned: Session[];
+  unpinned: Session[];
+} {
+  const pinned: Session[] = [];
+  const unpinned: Session[] = [];
+  for (const session of sessions) {
+    if (session.pinned) pinned.push(session);
+    else unpinned.push(session);
+  }
+  return { pinned, unpinned };
+}
+
 /** Compact relative time ("3m ago", "2d ago", or a date for older). */
 export function timeAgo(t: (key: string) => string, iso?: string): string {
   if (!iso) return "";

@@ -575,6 +575,7 @@
   "session.searchField.first_prompt": "首条 prompt",
   "session.folder": "文件夹",
   "session.unfiled": "未归类",
+  "session.pinnedGroup": "已置顶",
   "session.tags": "标签",
   "session.advancedFilterPanel": "筛选",
   "session.folderViewOn": "文件夹视图 — 点击查看扁平列表",
