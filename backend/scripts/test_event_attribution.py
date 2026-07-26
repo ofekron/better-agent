@@ -298,9 +298,68 @@ def test_normal_bracketing_unchanged() -> bool:
     return True
 
 
+def test_parent_uuid_chain_owns_orphans_over_timestamp_guess() -> None:
+    """Orphan rows inherit ownership along a non-sidechain parentUuid chain.
+
+    Without this rung a backfilled row carrying no message_id, causal key or
+    turn key falls to timestamp bucketing, which assigns "the turn that
+    started last before this row's ts". When the native session emits turns
+    between two Better Agent turns, or a stale queued turn flushes after a
+    new run started, that lands the row on an unrelated turn.
+
+    A real typed user prompt must NOT inherit: its parentUuid points at the
+    previous turn's last assistant row, so inheriting would glue every new
+    turn onto the message before it. Continuation rows that merely look like
+    "user" (tool_result, isMeta, tag-only) must still inherit.
+    """
+    from event_journal import Event, EventJournalWriter
+
+    writer = EventJournalWriter()
+    root, sid = "root-chain", "sid-chain"
+    writer._event_messages[(root, "parent-row")] = "msg-A"
+
+    def owner(payload: dict) -> object:
+        return writer._resolve_render_message_id(
+            Event(root_id=root, sid=sid, event_type="assistant_msg",
+                  data=payload, source="claude_tailer")
+        )
+
+    def user_row(uuid: str, content: list, **extra) -> dict:
+        return {"uuid": uuid, "parentUuid": "parent-row", "type": "user",
+                "message": {"content": content}, **extra}
+
+    cases = [
+        ("non-sidechain child inherits", "msg-A", {
+            "uuid": "c1", "parentUuid": "parent-row", "type": "assistant",
+            "message": {"content": [{"type": "text", "text": "hi"}]}}),
+        ("sidechain child still inherits", "msg-A", {
+            "uuid": "c2", "parentUuid": "parent-row", "isSidechain": True,
+            "type": "assistant", "message": {"content": []}}),
+        ("real user prompt does NOT inherit", None,
+         user_row("c3", [{"type": "text", "text": "next question"}])),
+        ("tool_result user inherits", "msg-A",
+         user_row("c4", [{"type": "tool_result", "tool_use_id": "t1"}])),
+        ("isMeta user inherits", "msg-A",
+         user_row("c5", [{"type": "text", "text": "x"}], isMeta=True)),
+        ("tag-only user inherits", "msg-A",
+         user_row("c6", [{"type": "text", "text": "<system-reminder>x"}])),
+        ("unknown parent falls through", None, {
+            "uuid": "c7", "parentUuid": "not-seen", "type": "assistant",
+            "message": {"content": []}}),
+    ]
+    for label, expected, payload in cases:
+        got = owner(payload)
+        if got != expected:
+            print(f"  {label}: expected {expected!r}, got {got!r}")
+            return False
+    print("PASS  parentUuid chain owns orphans over timestamp guess")
+    return True
+
+
 async def _run() -> int:
     event_journal_writer.register(bus)
     results = [
+        test_parent_uuid_chain_owns_orphans_over_timestamp_guess(),
         await test_fork_rows_never_graft_on_parent(),
         await test_legacy_claude_tailer_rows_still_render(),
         await test_warm_reconcile_brackets_by_journal_seq(),

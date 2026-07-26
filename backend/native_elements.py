@@ -187,6 +187,17 @@ def _user_text(content: object) -> str | None:
     return joined if _is_real_user_prompt(joined) else None
 
 
+def is_real_user_prompt_content(content: object) -> bool:
+    """True when a native user message's content is a real typed prompt.
+
+    Public seam over the transcript parser's own notion of a prompt, so
+    callers outside this module (event attribution) classify user rows the
+    same way the parser does instead of reinventing the tag/tool_result
+    rules.
+    """
+    return _user_text(content) is not None
+
+
 def _assistant_text(content: object) -> str:
     if isinstance(content, str):
         return content

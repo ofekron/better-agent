@@ -785,10 +785,56 @@ class EventJournalWriter:
         message_id = self._message_id_for_turn(event)
         if message_id:
             return message_id
+        owner = self._owner_for_parent_uuid(event)
+        if owner:
+            return owner
         source_ts = self._source_ts(event.data)
         if source_ts is not None:
             return self._message_id_for_source_ts(event.root_id, event.sid, source_ts)
         return None
+
+    def _owner_for_parent_uuid(self, event: Event) -> Optional[str]:
+        """Inherit ownership along a non-sidechain ``parentUuid`` chain.
+
+        Backfilled/orphan transcript rows carry no message_id, causal key or
+        turn key, so without this rung they fall straight to timestamp
+        bucketing — "the turn that started last before this row's ts". That
+        is wrong whenever the native session emits turns between two Better
+        Agent turns, or a stale queued turn flushes after a new run started:
+        the row lands on a turn it has nothing to do with. The parent chain
+        follows the transcript's own structure instead.
+
+        Sidechain rows already resolve earlier via `_causal_keys`. Rows whose
+        parent is not yet known fall through to the timestamp rung rather
+        than failing closed, so this can only ever replace a guess with a
+        fact. In-file-order ingestion resolves parents before children, so
+        the lookup is populated by the time a child arrives.
+        """
+        payload = self._provider_payload(event.data)
+        parent_uuid = payload.get("parentUuid")
+        if not isinstance(parent_uuid, str) or not parent_uuid:
+            return None
+        if payload.get("isSidechain") is True:
+            return None
+        if self._starts_a_new_turn(payload):
+            return None
+        return self._event_messages.get((event.root_id, parent_uuid))
+
+    @staticmethod
+    def _starts_a_new_turn(payload: dict) -> bool:
+        """True for a real typed user prompt, which must NOT inherit.
+
+        A prompt's ``parentUuid`` points at the PREVIOUS turn's last
+        assistant row, so inheriting would glue every new turn onto the
+        message before it.
+        """
+        if payload.get("type") != "user" or payload.get("isMeta"):
+            return False
+        message = payload.get("message")
+        content = message.get("content") if isinstance(message, dict) else None
+        import native_elements
+
+        return native_elements.is_real_user_prompt_content(content)
 
     def _turn_started_message_id(self, event: Event) -> Optional[str]:
         message_id = event.message_id or event.data.get("message_id")
