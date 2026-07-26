@@ -294,7 +294,10 @@ async def _monitor(
             except ProcessLookupError:
                 pass
             _set_state(provider_id, STATE_LOGIN_FAILED, "login timed out")
-            await broadcast()
+            # The exchange may have completed server-side before the kill;
+            # recompute the durable auth-status rather than trusting the
+            # pre-login cache value (mirrors the logout path).
+            await refresh_auth_status(provider_id, broadcast)
             return
     except Exception as exc:
         _set_state(provider_id, STATE_LOGIN_FAILED, f"login error: {exc}")

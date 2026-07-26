@@ -2824,10 +2824,12 @@ def _is_loopback_request(request: Request) -> bool:
     """Server-side desktop/loopback gate for OAuth login/logout. The CLI
     opens a browser and binds a localhost callback, so the user's browser
     must share the backend's machine; a remote authenticated client must
-    not trigger a server-side browser spawn or wipe credentials."""
-    client = request.client
-    host = (client.host if client else "").lower()
-    return host in ("127.0.0.1", "::1", "localhost")
+    not trigger a server-side browser spawn or wipe credentials.
+
+    Delegates to the canonical loopback check in auth_routes (handles the
+    full 127.0.0.0/8, ::1, and IPv4-mapped IPv6 forms) rather than a
+    divergent local set."""
+    return auth_routes._is_loopback_request(request)
 
 
 @app.post("/api/providers/{provider_id}/login")
