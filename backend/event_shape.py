@@ -56,6 +56,12 @@ def frontend_event_from_journal_row(
     event_type = row.get("type")
     if event_type not in RENDER_EVENT_TYPES:
         return None
+    # CLI sidecar metadata is dropped by the client at flatten time, so
+    # shipping it only costs bandwidth. Legacy journals still hold GB of
+    # these rows; filtering here keeps every consumer (WS catch-up,
+    # replay, message-copy hydration) from re-reading them.
+    if is_metadata_event(row):
+        return None
     data = row.get("data", {})
     if event_type == "manager_event" and isinstance(data, dict):
         inner = data.get("event")

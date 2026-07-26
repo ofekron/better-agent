@@ -45,6 +45,9 @@ if _BACKEND not in sys.path:
 import _test_home
 _TMP_HOME = _test_home.isolate("bc-test-apply-event-")
 
+import _test_installation  # noqa: E402
+_test_installation.activate(Path(_TMP_HOME))
+
 from event_ingester import event_ingester  # noqa: E402
 from event_shape import frontend_events_from_journal_rows  # noqa: E402
 from event_journal import event_journal_writer  # noqa: E402
@@ -993,6 +996,55 @@ def test_hydration_recovers_legacy_worker_event_owner() -> bool:
     return ok
 
 
+def test_frontend_projection_drops_metadata_rows() -> bool:
+    """Legacy journals hold GB of CLI sidecar metadata rows that the
+    client discards at flatten time. The journal→frontend converter must
+    drop them so replay/catch-up never ships them, in EVERY envelope the
+    journal stores them under: bare, manager_event, and worker_event.
+    Real assistant content in the same envelopes must survive."""
+    def meta(mtype: str) -> dict:
+        return {"type": "agent_message", "data": {"type": mtype, "uuid": f"u-{mtype}"}}
+
+    real = {
+        "type": "agent_message",
+        "data": {
+            "type": "assistant",
+            "uuid": "u-real",
+            "message": {"content": [{"type": "text", "text": "hi"}]},
+        },
+    }
+
+    rows = [
+        meta("ai-title"),
+        meta("queue-operation"),
+        {"type": "manager_event", "data": {"event": meta("last-prompt")}},
+        {"type": "worker_event",
+         "data": {"delegation_id": "d1", "event": meta("file-history-snapshot")}},
+        {"type": "worker_event",
+         "data": {"delegation_id": "d1", "event": meta("mode")}},
+        real,
+    ]
+
+    projected = frontend_events_from_journal_rows(rows)
+    if len(projected) != 1:
+        print(f"  expected only the assistant row to survive, got {len(projected)}: "
+              f"{[(e.get('type'), (e.get('data') or {}).get('type')) for e in projected]}")
+        return False
+    if (projected[0].get("data") or {}).get("uuid") != "u-real":
+        print(f"  wrong row survived: {projected[0]!r}")
+        return False
+
+    # A worker_event carrying real assistant content must still project.
+    worker_real = {
+        "type": "worker_event",
+        "data": {"delegation_id": "d1", "event": real},
+    }
+    if len(frontend_events_from_journal_rows([worker_real])) != 1:
+        print("  worker_event with real content was wrongly dropped")
+        return False
+    return True
+
+
 TESTS = [
     ("idempotent re-apply does not duplicate", test_idempotent_reapply_does_not_duplicate),
     ("idempotent re-apply repairs empty content", test_idempotent_reapply_repairs_empty_content),
@@ -1022,6 +1074,8 @@ TESTS = [
         test_worker_event_routes_to_existing_panel_owner),
     ("hydration recovers legacy worker_event owner",
         test_hydration_recovers_legacy_worker_event_owner),
+    ("journal→frontend projection drops CLI sidecar metadata",
+        test_frontend_projection_drops_metadata_rows),
 ]
 
 

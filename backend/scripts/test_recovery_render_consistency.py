@@ -39,6 +39,9 @@ if _BACKEND not in sys.path:
 import _test_home
 _TMP_HOME = _test_home.isolate("bc-test-recovery-render-")
 
+import _test_installation  # noqa: E402
+_test_installation.activate(Path(_TMP_HOME))
+
 from session_manager import manager as session_manager  # noqa: E402
 from event_ingester import event_ingester  # noqa: E402
 from provider import default_provider  # noqa: E402
