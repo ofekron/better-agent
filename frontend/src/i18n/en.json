@@ -1319,6 +1319,7 @@
   "harnessProfile.groupHint.ui_surfaces": "Where this extension shows up in the app. Turning a surface off only hides the entry point — the extension keeps working.",
   "harnessProfile.groupHint.permissions": "What this extension is allowed to reach on your machine. Required permissions come with the install; optional ones are yours to grant, and anything you leave off is denied.",
   "harnessProfile.groupHint.disabled_builtin_tools": "Better Agent's own built-in agent tools. Turn one off and the agent cannot use it in sessions using this profile.",
+  "harnessProfile.groupHint.disabled_builtin_extensions": "Better Agent's built-in extensions. Turn one off and its tools, skills and instructions are withheld from sessions using this profile.",
   "harnessProfile.itemLabel.ui_surfaces.quick_button": "Quick button",
   "harnessProfile.itemLabel.ui_surfaces.page": "Page",
   "harnessProfile.itemHint.ui_surfaces.quick_button": "Show this extension's button in the session and settings views.",

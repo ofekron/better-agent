@@ -1247,6 +1247,7 @@
   "harnessProfile.groupHint.ui_surfaces": "أين تظهر هذه الإضافة في التطبيق. تعطيل أي سطح يُخفي نقطة الدخول فقط — وتستمر الإضافة في العمل.",
   "harnessProfile.groupHint.permissions": "ما يُسمح لهذه الإضافة بالوصول إليه على جهازك. الأذونات المطلوبة تأتي مع التثبيت؛ أما الاختيارية فأنت من يمنحها، وكل ما تتركه معطّلًا يُرفض.",
   "harnessProfile.groupHint.disabled_builtin_tools": "أدوات الوكيل المدمجة في Better Agent. عند تعطيل إحداها لن يتمكن الوكيل من استخدامها في الجلسات التي تستخدم هذا الملف الشخصي.",
+  "harnessProfile.groupHint.disabled_builtin_extensions": "الإضافات المدمجة في Better Agent. عند تعطيل إحداها تُحجب أدواتها ومهاراتها وتعليماتها عن الجلسات التي تستخدم هذا الملف الشخصي.",
   "harnessProfile.itemLabel.ui_surfaces.quick_button": "زر سريع",
   "harnessProfile.itemLabel.ui_surfaces.page": "صفحة",
   "harnessProfile.itemHint.ui_surfaces.quick_button": "إظهار زر هذه الإضافة في عرضَي الجلسة والإعدادات.",

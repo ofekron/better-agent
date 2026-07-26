@@ -1247,6 +1247,7 @@
   "harnessProfile.groupHint.ui_surfaces": "이 확장이 앱에서 노출되는 위치입니다. 표면을 꺼도 진입점만 숨겨질 뿐 확장은 계속 동작합니다.",
   "harnessProfile.groupHint.permissions": "이 확장이 내 컴퓨터에서 접근할 수 있는 범위입니다. 필수 권한은 설치와 함께 부여되고, 선택 권한은 직접 허용하며, 켜지 않은 항목은 거부됩니다.",
   "harnessProfile.groupHint.disabled_builtin_tools": "Better Agent 자체의 기본 제공 에이전트 도구입니다. 끄면 이 프로필을 사용하는 세션에서 에이전트가 사용할 수 없습니다.",
+  "harnessProfile.groupHint.disabled_builtin_extensions": "Better Agent의 기본 제공 확장입니다. 끄면 이 프로필을 사용하는 세션에서 해당 도구, 스킬, 지침이 제외됩니다.",
   "harnessProfile.itemLabel.ui_surfaces.quick_button": "빠른 버튼",
   "harnessProfile.itemLabel.ui_surfaces.page": "페이지",
   "harnessProfile.itemHint.ui_surfaces.quick_button": "이 확장의 버튼을 세션 화면과 설정 화면에 표시합니다.",

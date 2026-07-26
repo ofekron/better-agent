@@ -1248,6 +1248,7 @@
   "harnessProfile.groupHint.ui_surfaces": "Dove questa estensione compare nell'app. Disattivare una superficie nasconde solo il punto di accesso: l'estensione continua a funzionare.",
   "harnessProfile.groupHint.permissions": "Ciò a cui questa estensione può accedere sul tuo computer. Le autorizzazioni obbligatorie arrivano con l'installazione; quelle facoltative le concedi tu, e tutto ciò che lasci disattivato viene negato.",
   "harnessProfile.groupHint.disabled_builtin_tools": "Gli strumenti agente integrati di Better Agent. Se ne disattivi uno, l'agente non può usarlo nelle sessioni che usano questo profilo.",
+  "harnessProfile.groupHint.disabled_builtin_extensions": "Le estensioni integrate di Better Agent. Se ne disattivi una, i suoi strumenti, skill e istruzioni vengono esclusi dalle sessioni che usano questo profilo.",
   "harnessProfile.itemLabel.ui_surfaces.quick_button": "Pulsante rapido",
   "harnessProfile.itemLabel.ui_surfaces.page": "Pagina",
   "harnessProfile.itemHint.ui_surfaces.quick_button": "Mostra il pulsante di questa estensione nelle viste sessione e impostazioni.",

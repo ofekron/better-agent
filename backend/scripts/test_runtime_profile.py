@@ -2,11 +2,18 @@ from __future__ import annotations
 
 import os
 import sys
+from pathlib import Path
 
 import _test_home
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-_test_home.isolate("bc-test-runtime-profile-")
+_TMP_HOME = _test_home.isolate("bc-test-runtime-profile-")
+
+import _test_installation  # noqa: E402
+
+# session_manager.create runs behind the installation gate, so the isolated
+# home needs an activated installation before any session is created.
+_test_installation.activate(Path(_TMP_HOME))
 
 import provider  # noqa: E402
 import runtime_profile  # noqa: E402
@@ -82,6 +89,9 @@ def test_internal_profile_and_session_persist_runner() -> None:
         "runner": "native",
         "default_model": "gemini-2.5-flash",
     })
+    # The installation fixture seeds its own provider as the default; the
+    # assertions below read the resolved default, so point it at gemini.
+    config_store.set_default_provider(gemini["id"])
     config_store.set_internal_llm_assignments({
         "default_session": {
             "provider_id": gemini["id"],

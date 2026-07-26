@@ -1247,6 +1247,7 @@
   "harnessProfile.groupHint.ui_surfaces": "Dónde aparece esta extensión en la aplicación. Desactivar una superficie solo oculta el punto de entrada: la extensión sigue funcionando.",
   "harnessProfile.groupHint.permissions": "A qué puede acceder esta extensión en tu equipo. Los permisos obligatorios vienen con la instalación; los opcionales los concedes tú, y todo lo que dejes sin activar se deniega.",
   "harnessProfile.groupHint.disabled_builtin_tools": "Las herramientas de agente integradas de Better Agent. Si desactivas una, el agente no puede usarla en las sesiones que usan este perfil.",
+  "harnessProfile.groupHint.disabled_builtin_extensions": "Las extensiones integradas de Better Agent. Si desactivas una, sus herramientas, habilidades e instrucciones se retiran de las sesiones que usan este perfil.",
   "harnessProfile.itemLabel.ui_surfaces.quick_button": "Botón rápido",
   "harnessProfile.itemLabel.ui_surfaces.page": "Página",
   "harnessProfile.itemHint.ui_surfaces.quick_button": "Mostrar el botón de esta extensión en las vistas de sesión y de ajustes.",

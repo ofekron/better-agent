@@ -1244,6 +1244,7 @@
   "harnessProfile.groupHint.ui_surfaces": "Waar deze extensie in de app verschijnt. Een oppervlak uitzetten verbergt alleen het startpunt — de extensie blijft werken.",
   "harnessProfile.groupHint.permissions": "Waar deze extensie op je machine bij mag. Vereiste rechten horen bij de installatie; optionele rechten geef jij, en alles wat je uit laat staan wordt geweigerd.",
   "harnessProfile.groupHint.disabled_builtin_tools": "De eigen ingebouwde agenttools van Better Agent. Zet je er een uit, dan kan de agent die niet gebruiken in sessies met dit profiel.",
+  "harnessProfile.groupHint.disabled_builtin_extensions": "De ingebouwde extensies van Better Agent. Zet je er een uit, dan blijven de bijbehorende tools, skills en instructies weg uit sessies met dit profiel.",
   "harnessProfile.itemLabel.ui_surfaces.quick_button": "Snelknop",
   "harnessProfile.itemLabel.ui_surfaces.page": "Pagina",
   "harnessProfile.itemHint.ui_surfaces.quick_button": "Toon de knop van deze extensie in de sessie- en instellingenweergave.",

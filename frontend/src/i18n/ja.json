@@ -1244,6 +1244,7 @@
   "harnessProfile.groupHint.ui_surfaces": "この拡張機能がアプリ内で表示される場所です。サーフェスをオフにしても入口が隠れるだけで、拡張機能は動作し続けます。",
   "harnessProfile.groupHint.permissions": "この拡張機能がマシン上でアクセスできる範囲です。必須の権限はインストール時に付与され、任意の権限はあなたが許可します。オフのままのものは拒否されます。",
   "harnessProfile.groupHint.disabled_builtin_tools": "Better Agent 自身の組み込みエージェントツールです。オフにすると、このプロファイルを使うセッションでエージェントは使用できません。",
+  "harnessProfile.groupHint.disabled_builtin_extensions": "Better Agent の組み込み拡張機能です。オフにすると、このプロファイルを使うセッションからそのツール・スキル・指示が外れます。",
   "harnessProfile.itemLabel.ui_surfaces.quick_button": "クイックボタン",
   "harnessProfile.itemLabel.ui_surfaces.page": "ページ",
   "harnessProfile.itemHint.ui_surfaces.quick_button": "この拡張機能のボタンをセッション画面と設定画面に表示します。",

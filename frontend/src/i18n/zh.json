@@ -1248,6 +1248,7 @@
   "harnessProfile.groupHint.ui_surfaces": "此扩展在应用中的出现位置。关闭某个区域只是隐藏入口，扩展仍会继续工作。",
   "harnessProfile.groupHint.permissions": "此扩展在你机器上可访问的范围。必需权限随安装一并授予；可选权限由你决定，未开启的一律拒绝。",
   "harnessProfile.groupHint.disabled_builtin_tools": "Better Agent 自带的内置智能体工具。关闭后，使用该配置文件的会话中智能体无法使用它。",
+  "harnessProfile.groupHint.disabled_builtin_extensions": "Better Agent 的内置扩展。关闭后，其工具、技能和指令不会进入使用该配置文件的会话。",
   "harnessProfile.itemLabel.ui_surfaces.quick_button": "快捷按钮",
   "harnessProfile.itemLabel.ui_surfaces.page": "页面",
   "harnessProfile.itemHint.ui_surfaces.quick_button": "在会话视图和设置视图中显示此扩展的按钮。",

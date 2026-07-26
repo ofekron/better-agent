@@ -1291,6 +1291,7 @@
   "harnessProfile.groupHint.ui_surfaces": "היכן ההרחבה הזו מופיעה באפליקציה. כיבוי משטח רק מסתיר את נקודת הכניסה — ההרחבה ממשיכה לפעול.",
   "harnessProfile.groupHint.permissions": "למה ההרחבה הזו רשאית לגשת במחשב שלך. הרשאות נדרשות מגיעות עם ההתקנה; הרשאות אופציונליות נתונות לשיקולך, וכל מה שתשאיר כבוי — נדחה.",
   "harnessProfile.groupHint.disabled_builtin_tools": "כלי הסוכן המובנים של Better Agent. כיבוי אחד מהם ימנע מהסוכן להשתמש בו בסשנים שמשתמשים בפרופיל הזה.",
+  "harnessProfile.groupHint.disabled_builtin_extensions": "ההרחבות המובנות של Better Agent. כיבוי אחת מהן ימנע את הכלים, הכישורים וההנחיות שלה מסשנים שמשתמשים בפרופיל הזה.",
   "harnessProfile.itemLabel.ui_surfaces.quick_button": "כפתור מהיר",
   "harnessProfile.itemLabel.ui_surfaces.page": "עמוד",
   "harnessProfile.itemHint.ui_surfaces.quick_button": "הצג את הכפתור של ההרחבה הזו בתצוגות הסשן וההגדרות.",

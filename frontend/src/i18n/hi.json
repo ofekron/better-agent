@@ -1248,6 +1248,7 @@
   "harnessProfile.groupHint.ui_surfaces": "यह एक्सटेंशन ऐप में कहाँ दिखता है। किसी सतह को बंद करने से केवल प्रवेश बिंदु छिपता है — एक्सटेंशन काम करता रहता है।",
   "harnessProfile.groupHint.permissions": "यह एक्सटेंशन आपकी मशीन पर किन चीज़ों तक पहुँच सकता है। आवश्यक अनुमतियाँ इंस्टॉल के साथ आती हैं; वैकल्पिक अनुमतियाँ आप देते हैं, और जो आप बंद छोड़ते हैं वह अस्वीकृत रहती है।",
   "harnessProfile.groupHint.disabled_builtin_tools": "Better Agent के अपने अंतर्निहित एजेंट उपकरण। किसी एक को बंद करने पर एजेंट इस प्रोफ़ाइल वाले सत्रों में उसका उपयोग नहीं कर सकता।",
+  "harnessProfile.groupHint.disabled_builtin_extensions": "Better Agent के अंतर्निहित एक्सटेंशन। किसी एक को बंद करने पर उसके उपकरण, कौशल और निर्देश इस प्रोफ़ाइल वाले सत्रों को नहीं मिलते।",
   "harnessProfile.itemLabel.ui_surfaces.quick_button": "त्वरित बटन",
   "harnessProfile.itemLabel.ui_surfaces.page": "पेज",
   "harnessProfile.itemHint.ui_surfaces.quick_button": "इस एक्सटेंशन का बटन सत्र और सेटिंग्स दृश्यों में दिखाएँ।",

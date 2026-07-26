@@ -1250,6 +1250,7 @@
   "harnessProfile.groupHint.ui_surfaces": "Где это расширение появляется в приложении. Отключение поверхности лишь скрывает точку входа — расширение продолжает работать.",
   "harnessProfile.groupHint.permissions": "К чему на вашем компьютере разрешён доступ этому расширению. Обязательные разрешения приходят вместе с установкой, необязательные выдаёте вы, а всё, что вы оставили выключенным, запрещено.",
   "harnessProfile.groupHint.disabled_builtin_tools": "Собственные встроенные инструменты агента Better Agent. Отключите один — и агент не сможет им пользоваться в сессиях с этим профилем.",
+  "harnessProfile.groupHint.disabled_builtin_extensions": "Встроенные расширения Better Agent. Отключите одно — и его инструменты, навыки и инструкции не попадут в сессии с этим профилем.",
   "harnessProfile.itemLabel.ui_surfaces.quick_button": "Быстрая кнопка",
   "harnessProfile.itemLabel.ui_surfaces.page": "Страница",
   "harnessProfile.itemHint.ui_surfaces.quick_button": "Показывать кнопку этого расширения в представлениях сессии и настроек.",
