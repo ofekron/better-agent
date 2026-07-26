@@ -13,12 +13,18 @@ os.environ["BETTER_CLAUDE_TEST_AUTH_BYPASS"] = "1"
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+# Extensions are only active under an activated installation, and a core role
+# has no owner until its extension is active. Activate before importing main.
+import _test_installation  # noqa: E402
+_test_installation.activate(Path(_TMP_HOME))
+
 from starlette.testclient import TestClient  # noqa: E402
 
 import config_store  # noqa: E402
 import extension_store  # noqa: E402
 import main  # noqa: E402
 import models as models_mod  # noqa: E402
+import runtime_profile  # noqa: E402
 import orchs.manager._approval as approval  # noqa: E402
 from session_manager import manager as session_manager  # noqa: E402
 
@@ -31,7 +37,13 @@ def _post(client: TestClient, body: dict):
     )
 
 
-def _install_gate_extension(extension_id: str) -> None:
+def _install_gate_extension(role: str) -> str:
+    """Install and enable a fixture extension that OWNS `role`.
+
+    The manifest must declare `core_roles` for extension_id_for_role(role) to
+    resolve, and extensions install disabled — only active ones own a role.
+    """
+    extension_id = f"test-fixture-{role}"
     package = Path(_TMP_HOME) / "private-fixtures" / extension_id
     if package.exists():
         shutil.rmtree(package)
@@ -43,6 +55,7 @@ def _install_gate_extension(extension_id: str) -> None:
         "version": "1.0.0",
         "description": extension_id,
         "surfaces": ["backend_feature"],
+        "core_roles": [role],
         "entrypoints": {},
         "permissions": {},
         "marketplace": {},
@@ -61,6 +74,10 @@ def _install_gate_extension(extension_id: str) -> None:
         },
         persist=True,
     )
+    extension_store.set_enabled(extension_id, True)
+    owner = extension_store.extension_id_for_role(role)
+    assert owner == extension_id, f"role {role!r} resolved to {owner!r}"
+    return extension_id
 
 
 def _configure_internal_llm_defaults(*tasks: str) -> None:
@@ -75,9 +92,33 @@ def _configure_internal_llm_defaults(*tasks: str) -> None:
     config_store.set_internal_llm_assignments(assignments)
 
 
+def _seed_default_provider(model: str) -> None:
+    """The installation fixture writes a bare provider with no selectors.
+
+    Sessions store a concrete reasoning_effort, so the provider needs a real
+    default for inheritance assertions to compare against.
+    """
+    default = config_store.get_default_provider() or {}
+    payload: dict = {}
+    if not default.get("name"):
+        payload["name"] = "Default Test Provider"
+    if not default.get("default_model"):
+        payload["default_model"] = model
+        payload["custom_models"] = [model]
+    efforts = runtime_profile.reasoning_efforts(default)
+    if not efforts:
+        efforts = ("low", "medium", "high", "xhigh")
+        payload["reasoning_effort_options"] = list(efforts)
+    if not default.get("default_reasoning_effort"):
+        payload["default_reasoning_effort"] = efforts[0]
+    if payload:
+        config_store.update_provider(default["id"], payload)
+
+
 def main_test() -> int:
+    _seed_default_provider("default-provider-model")
     _configure_internal_llm_defaults("default_session")
-    _install_gate_extension(extension_store.extension_id_for_role('team-orchestration'))
+    _install_gate_extension('team-orchestration')
     client = TestClient(main.app, client=("127.0.0.1", 50000))
     provider = config_store.get_default_provider()
     provider_id = provider["id"]

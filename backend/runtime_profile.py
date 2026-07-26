@@ -104,12 +104,16 @@ def fit_reasoning_effort(
 
     The inherited value describes the sender's provider, so anything the target
     does not expose falls back to the target's default and then to its first
-    option. Providers exposing no efforts resolve to "".
+    option. Providers exposing no efforts resolve to "". An empty inherited
+    value already means "no effort chosen" and is preserved as-is rather than
+    promoted to a concrete one.
     """
     record = provider_record or {}
-    options = reasoning_efforts(record, runner, model=model)
     candidate = str(effort or "").strip()
-    if candidate and candidate in options:
+    if not candidate:
+        return ""
+    options = reasoning_efforts(record, runner, model=model)
+    if candidate in options:
         return candidate
     default_effort = str(record.get("default_reasoning_effort") or "").strip()
     if default_effort in options:
