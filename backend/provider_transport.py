@@ -102,9 +102,12 @@ def _merge_no_proxy(env: dict[str, str]) -> None:
 def _request_payload(
     env: dict[str, str],
     *,
+    extension_id: str,
     provider_id: str,
     provider_kind: str,
     provider_mode: str,
+    session_id: str,
+    resolved_harness_run_config: dict | None,
 ) -> bytes:
     spec = spec_for(provider_kind)
     gateway_env = spec.transport_gateway_env if spec else None
@@ -122,12 +125,27 @@ def _request_payload(
             or parsed.fragment
         ):
             raise ProviderTransportError("provider upstream base URL is unsafe to disclose")
+    raw_overlays = (
+        (resolved_harness_run_config or {}).get("extension_setting_overlays") or {}
+        if isinstance(resolved_harness_run_config, dict)
+        else {}
+    )
+    extension_overlays = (
+        raw_overlays.get(extension_id) if isinstance(raw_overlays, dict) else {}
+    )
+    extension_settings = {
+        key: item["value"]
+        for key, item in (extension_overlays or {}).items()
+        if isinstance(key, str) and isinstance(item, dict) and "value" in item
+    }
     return json.dumps(
         {
             "version": CONTRACT_VERSION,
             "provider_id": provider_id,
             "provider_kind": provider_kind,
             "provider_mode": provider_mode,
+            "session_id": str(session_id or ""),
+            "extension_settings": extension_settings,
             "gateway_env": gateway_env or "",
             "upstream_base_url": upstream,
         },
@@ -141,6 +159,8 @@ def apply_provider_transport(
     provider_id: str,
     provider_kind: str,
     provider_mode: str,
+    session_id: str = "",
+    resolved_harness_run_config: dict | None = None,
 ) -> dict[str, str]:
     hooks = extension_store.provider_transport_hooks()
     if not hooks:
@@ -153,9 +173,12 @@ def apply_provider_transport(
         path,
         body_bytes=_request_payload(
             env,
+            extension_id=extension_id,
             provider_id=provider_id,
             provider_kind=provider_kind,
             provider_mode=provider_mode,
+            session_id=session_id,
+            resolved_harness_run_config=resolved_harness_run_config,
         ),
     )
     if status != 200:

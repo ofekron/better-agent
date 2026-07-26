@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import os
 import sys
@@ -107,7 +108,39 @@ def test_active_hook_failure_is_strict():
     raise AssertionError("active transport hook failed open")
 
 
-def test_each_local_provider_executes_transport_finalizer():
+def test_profile_settings_and_session_reach_transport_extension():
+    captured = {}
+
+    def invoke(*args, **kwargs):
+        captured.update(json.loads(kwargs["body_bytes"]))
+        return response()
+
+    with (
+        patch.object(provider_transport.extension_store, "provider_transport_hooks", return_value=[("x", "/transport")]),
+        patch.object(provider_transport, "invoke_extension_backend_sync", side_effect=invoke),
+    ):
+        provider_transport.apply_provider_transport(
+            {},
+            provider_id="p",
+            provider_kind="claude",
+            provider_mode="subscription",
+            session_id="session-1",
+            resolved_harness_run_config={
+                "extension_setting_overlays": {
+                    "x": {
+                        "zeroing_enabled": {
+                            "value": True,
+                            "schema_hash": "ignored-by-transport",
+                        },
+                    },
+                },
+            },
+        )
+    assert captured["session_id"] == "session-1"
+    assert captured["extension_settings"] == {"zeroing_enabled": True}
+
+
+def test_each_local_provider_executes_run_transport_finalizer():
     with (
         patch.object(provider.Provider, "require_runtime_credential", return_value=None),
         patch.object(provider_transport.extension_store, "provider_transport_hooks", return_value=[("x", "/transport")]),
@@ -127,11 +160,20 @@ def test_each_local_provider_executes_transport_finalizer():
                 "api_key": "",
                 "base_url": "",
             }
-            env = instance.build_env()
+            env = instance.finalize_run_env(
+                instance.build_env(),
+                app_session_id="session-1",
+                resolved_harness_run_config={},
+            )
             assert env["HTTPS_PROXY"] == "http://127.0.0.1:18888", spec.kind
             assert env["SSL_CERT_FILE"].startswith(TEST_HOME), spec.kind
             if spec.transport_gateway_env:
                 assert env[spec.transport_gateway_env].startswith("http://127.0.0.1:18889/"), spec.kind
+            assert any(
+                "finalize_run_env(" in inspect.getsource(base)
+                for base in provider_class.__mro__
+                if inspect.isclass(base) and base.__module__.startswith("provider_")
+            ), spec.kind
 
 
 if __name__ == "__main__":
@@ -141,5 +183,6 @@ if __name__ == "__main__":
     test_rejects_multiple_hooks()
     test_no_hook_preserves_environment()
     test_active_hook_failure_is_strict()
-    test_each_local_provider_executes_transport_finalizer()
+    test_profile_settings_and_session_reach_transport_extension()
+    test_each_local_provider_executes_run_transport_finalizer()
     print("provider transport tests passed")

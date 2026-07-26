@@ -661,6 +661,15 @@ class Provider(ABC):
     def build_env(self) -> dict[str, str]: ...
 
     def finalize_env(self, env: dict[str, str]) -> dict[str, str]:
+        return env
+
+    def finalize_run_env(
+        self,
+        env: dict[str, str],
+        *,
+        app_session_id: str,
+        resolved_harness_run_config: Optional[dict],
+    ) -> dict[str, str]:
         from provider_transport import apply_provider_transport
 
         return apply_provider_transport(
@@ -668,6 +677,8 @@ class Provider(ABC):
             provider_id=self.id,
             provider_kind=str(self.record.get("kind") or self.KIND),
             provider_mode=str(self.record.get("mode") or ""),
+            session_id=app_session_id,
+            resolved_harness_run_config=resolved_harness_run_config,
         )
 
     # ------------------------------------------------------------------

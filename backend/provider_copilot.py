@@ -383,7 +383,11 @@ class CopilotProvider(GeminiProvider):
         stdout_fp = (run_dir / "stdout.log").open("ab")
         stderr_fp = (run_dir / "stderr.log").open("ab")
         try:
-            env = self.build_env()
+            env = self.finalize_run_env(
+                self.build_env(),
+                app_session_id=app_session_id,
+                resolved_harness_run_config=resolved_harness_run_config,
+            )
             if extra_env:
                 env.update(extra_env)
             env.update(build_better_agent_run_env(
