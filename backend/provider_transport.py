@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import tempfile
 import threading
 from pathlib import Path
@@ -26,20 +27,31 @@ _CA_ENV_KEYS = (
     "NODE_EXTRA_CA_CERTS",
 )
 _LOCK = threading.Lock()
+_PROXY_TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 
 
 class ProviderTransportError(RuntimeError):
     pass
 
 
-def _loopback_http_url(value: Any, field: str, *, allow_path: bool) -> str:
+def _loopback_http_url(
+    value: Any,
+    field: str,
+    *,
+    allow_path: bool,
+    allow_proxy_token: bool = False,
+) -> str:
     raw = str(value or "").strip()
     parsed = urlsplit(raw)
+    username = parsed.username
     if (
         parsed.scheme != "http"
         or parsed.hostname not in _LOOPBACK_HOSTS
-        or parsed.username is not None
         or parsed.password is not None
+        or (
+            username is not None
+            and (not allow_proxy_token or _PROXY_TOKEN_RE.fullmatch(username) is None)
+        )
         or parsed.query
         or parsed.fragment
         or (not allow_path and parsed.path not in {"", "/"})
@@ -193,7 +205,10 @@ def apply_provider_transport(
         return env
 
     proxy_url = _loopback_http_url(
-        payload.get("forward_proxy_url"), "forward_proxy_url", allow_path=False
+        payload.get("forward_proxy_url"),
+        "forward_proxy_url",
+        allow_path=False,
+        allow_proxy_token=True,
     )
     ca_path = _ca_path(payload.get("ca_certificate_pem"), payload.get("ca_sha256"))
     result = dict(env)

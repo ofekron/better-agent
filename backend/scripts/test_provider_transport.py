@@ -76,6 +76,43 @@ def test_rejects_non_loopback_proxy():
     raise AssertionError("non-loopback proxy was accepted")
 
 
+def test_accepts_bounded_proxy_session_token():
+    with (
+        patch.object(provider_transport.extension_store, "provider_transport_hooks", return_value=[("x", "/transport")]),
+        patch.object(
+            provider_transport,
+            "invoke_extension_backend_sync",
+            return_value=response(forward_proxy_url="http://session_token-1@127.0.0.1:18888"),
+        ),
+    ):
+        env = provider_transport.apply_provider_transport(
+            {}, provider_id="p", provider_kind="gemini", provider_mode=""
+        )
+    assert env["HTTPS_PROXY"] == "http://session_token-1@127.0.0.1:18888"
+
+
+def test_rejects_proxy_password_or_unbounded_username():
+    for proxy_url in (
+        "http://token:password@127.0.0.1:18888",
+        f"http://{'a' * 129}@127.0.0.1:18888",
+    ):
+        with (
+            patch.object(provider_transport.extension_store, "provider_transport_hooks", return_value=[("x", "/transport")]),
+            patch.object(
+                provider_transport,
+                "invoke_extension_backend_sync",
+                return_value=response(forward_proxy_url=proxy_url),
+            ),
+        ):
+            try:
+                provider_transport.apply_provider_transport(
+                    {}, provider_id="p", provider_kind="gemini", provider_mode=""
+                )
+            except provider_transport.ProviderTransportError:
+                continue
+        raise AssertionError(f"unsafe proxy credentials were accepted: {proxy_url}")
+
+
 def test_rejects_multiple_hooks():
     with patch.object(provider_transport.extension_store, "provider_transport_hooks", return_value=[("a", "/x"), ("b", "/y")]):
         try:
@@ -180,6 +217,8 @@ if __name__ == "__main__":
     test_claude_gateway_and_forward_proxy()
     test_non_gateway_provider_uses_forward_proxy_only()
     test_rejects_non_loopback_proxy()
+    test_accepts_bounded_proxy_session_token()
+    test_rejects_proxy_password_or_unbounded_username()
     test_rejects_multiple_hooks()
     test_no_hook_preserves_environment()
     test_active_hook_failure_is_strict()
