@@ -1517,13 +1517,19 @@ def _register_git() -> None:
 
 def _register_session_events() -> None:
     # Scoped WS broadcast for capability-token extensions: identity comes from
-    # the request-bound principal inside internal_broadcast_session, so the
-    # event source stays pinned to the calling extension.
+    # the request-bound principal inside the shared broadcast service.
+    async def broadcast(payload: BaseModel) -> Any:
+        import main
+
+        values = payload.model_dump()
+        session_id = values.pop("session_id")
+        return await main._broadcast_session_for_internal_authority(session_id, values)
+
     register(
         "session-events",
         "broadcast",
         _SessionEventsBroadcastPayload,
-        _main_action("internal_broadcast_session"),
+        broadcast,
     )
 
 
