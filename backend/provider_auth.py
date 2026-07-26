@@ -208,68 +208,133 @@ async def _spawn(provider: dict, suffix_key: str) -> Optional[asyncio.subprocess
 
 
 def _kill_proc(proc: asyncio.subprocess.Process) -> None:
-    """Kill the whole process tree rooted at the spawned CLI (SSOT)."""
-    try:
-        process_control().force_kill(proc.pid)
-    except Exception:
-        try:
-            proc.kill()
-        except ProcessLookupError:
-            pass
-        except Exception:
-            logger.exception("provider_auth: fallback kill failed")
+    """Kill the whole process tree rooted at the spawned CLI (SSOT).
+    process_control.force_kill already swallows ProcessLookupError /
+    PermissionError / OSError on both platforms, so it does not raise."""
+    process_control().force_kill(proc.pid)
 
 
 def _markers_dir() -> Path:
     return ba_home() / "provider_auth"
 
 
-def _marker_path(provider_id: str) -> Path:
+# Provider ids are uuid4, but an imported record can carry an arbitrary id;
+# refuse anything that isn't a safe filename component so a crafted id
+# ("../x") can't escape the markers dir.
+_SAFE_ID = __import__("re").compile(r"^[A-Za-z0-9_-]{1,128}$")
+
+
+def _marker_path(provider_id: str) -> Optional[Path]:
+    if not _SAFE_ID.match(provider_id or ""):
+        return None
     return _markers_dir() / f"{provider_id}.json"
 
 
-def _write_marker(provider_id: str, proc: asyncio.subprocess.Process) -> None:
+def _write_marker(provider_id: str, proc: asyncio.subprocess.Process, kind: str) -> None:
+    path = _marker_path(provider_id)
+    if path is None:
+        return
     try:
-        _markers_dir().mkdir(parents=True, exist_ok=True)
-        _marker_path(provider_id).write_text(
-            json.dumps({"pid": proc.pid, "provider_id": provider_id}),
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # Atomic: a crash mid-write leaves the old file (or none), never a
+        # truncated marker that masks an orphan.
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(
+            json.dumps({"pid": proc.pid, "provider_id": provider_id, "kind": kind}),
             encoding="utf-8",
         )
+        os.replace(tmp, path)
     except Exception:
         logger.warning("provider_auth: failed to write pid marker for %s", provider_id)
 
 
 def _clear_marker(provider_id: str) -> None:
+    path = _marker_path(provider_id)
+    if path is None:
+        return
     try:
-        _marker_path(provider_id).unlink(missing_ok=True)
+        path.unlink(missing_ok=True)
     except Exception:
         pass
 
 
+def _proc_is_expected_cli(pid: int, kind: str) -> bool:
+    """True ONLY if the live process at ``pid`` is the provider's own CLI
+    (claude/codex). Fail-closed: any uncertainty -> False, so a recycled
+    PID (after a reboot, PIDs restart low) is never mistaken for our
+    orphan. Cross-platform, dependency-free (ps -o args= / tasklist)."""
+    expected = _BINARY_NAME.get(kind or "", "")
+    if not expected or pid <= 0:
+        return False
+    import subprocess
+
+    try:
+        if os.name == "nt":
+            out = subprocess.run(
+                ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
+                capture_output=True, text=True, timeout=5,
+            ).stdout.lower()
+            return expected.lower() in out
+        args = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "args="],
+            capture_output=True, text=True, timeout=5,
+        ).stdout
+        return expected in args
+    except Exception:
+        return False
+
+
 def reap_orphaned_logins() -> None:
-    """Kill any OAuth login/logout subprocess that outlived a backend crash.
-    A marker per in-flight flow is written at spawn; if the backend died
-    mid-flow the marker survives and the orphaned CLI (still holding a
-    localhost callback port) is force-killed here so nothing is left open."""
+    """Force-kill any OAuth login/logout CLI that outlived a backend crash,
+    then unlink its marker. Safe-by-construction:
+
+    - a marker for a record currently in `_procs` is a live, intentional
+      flow -> left untouched (not an orphan);
+    - a marker whose pid is gone -> unlinked, no kill;
+    - a marker whose pid is alive but is NOT the expected claude/codex CLI
+      (PID was reused by an unrelated process after a reboot) -> unlinked,
+      NO kill. Killing would SIGKILL that process's whole group.
+
+    Only a live pid that IS our own CLI is reaped."""
     d = _markers_dir()
     if not d.is_dir():
         return
+    pc = process_control()
     for marker in d.glob("*.json"):
         try:
             data = json.loads(marker.read_text(encoding="utf-8"))
             pid = int(data.get("pid") or 0)
+            kind = str(data.get("kind") or "")
+            provider_id = str(data.get("provider_id") or "")
         except Exception:
-            pid = 0
-        if pid and process_control().pid_alive(pid):
-            try:
-                process_control().force_kill(pid)
-                logger.info("provider_auth: reaped orphaned login pid=%d", pid)
-            except Exception:
-                logger.warning("provider_auth: failed to reap orphan pid=%d", pid)
+            pid, kind, provider_id = 0, "", ""
+        # Live, intentional flow (startup race) — leave it alone.
+        if provider_id and provider_id in _procs:
+            continue
+        if not pid or not pc.pid_alive(pid):
+            _safe_unlink(marker)
+            continue
+        if not _proc_is_expected_cli(pid, kind):
+            # PID reuse / unrelated process — must not kill. Drop the marker.
+            logger.warning(
+                "provider_auth: skipping reap pid=%d (not the expected %s CLI); "
+                "clearing stale marker", pid, kind or "?",
+            )
+            _safe_unlink(marker)
+            continue
         try:
-            marker.unlink(missing_ok=True)
+            pc.force_kill(pid)
+            logger.info("provider_auth: reaped orphaned login pid=%d kind=%s", pid, kind)
         except Exception:
-            pass
+            logger.warning("provider_auth: failed to reap orphan pid=%d", pid)
+        _safe_unlink(marker)
+
+
+def _safe_unlink(path: Path) -> None:
+    try:
+        path.unlink(missing_ok=True)
+    except Exception:
+        pass
 
 
 async def _status_authenticated(provider: dict) -> bool:
@@ -425,6 +490,7 @@ async def _start(
         return {"ok": False, "error": "not_found"}
     if not supports_auth(provider):
         return {"ok": False, "error": "unsupported"}
+    kind = provider.get("kind") or "claude"
 
     async with _lock_for(provider_id):
         # State-based guard: the lock serializes the start critical section,
@@ -450,7 +516,7 @@ async def _start(
             await broadcast()
             return {"ok": False, "error": "binary_missing"}
         _procs[provider_id] = proc
-        _write_marker(provider_id, proc)
+        _write_marker(provider_id, proc, kind)
         _set_state(provider_id, running_state)
         task = asyncio.create_task(
             _monitor(provider_id, action, proc, broadcast),
@@ -483,9 +549,14 @@ def cancel(provider_id: str) -> bool:
 
 def shutdown_all() -> None:
     """Kill every in-flight auth subprocess tree. Called at backend shutdown
-    so no `claude auth login` / `codex login` (or its helpers) is orphaned."""
-    for provider_id, proc in list(_procs.items()):
+    so no `claude auth login` / `codex login` (or its helpers) is orphaned.
+
+    Markers are deliberately NOT cleared here: a kill whose signal didn't
+    fully take (permission, race) must leave the marker so the next
+    startup's reap (identity-checked) gets another chance — otherwise the
+    orphan becomes permanently invisible. Normal monitor completion and
+    reap clear markers; a clean restart resolves any leftover as dead-pid."""
+    for _provider_id, proc in list(_procs.items()):
         if proc.returncode is None:
             _kill_proc(proc)
-        _clear_marker(provider_id)
     _procs.clear()

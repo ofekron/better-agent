@@ -313,45 +313,103 @@ def test_cancel_kills_tracked_proc_and_clears_busy():
     assert provider_auth.cancel(claude["id"]) is False
 
 
-def test_shutdown_all_kills_tracked_procs_and_clears_markers():
+def test_shutdown_all_kills_tracked_procs():
+    """shutdown_all force-kills every in-flight tree. Markers are NOT cleared
+    here (a kill that didn't fully take stays reapable at next startup)."""
     claude = _add_provider("claude", str(HOME / ".claude-shutdown"))
     provider_auth._procs.clear()
     p = _FakeProc()
     p.returncode = None
     provider_auth._procs[claude["id"]] = p
-    provider_auth._write_marker(claude["id"], p)
-    assert provider_auth._marker_path(claude["id"]).exists()
+    provider_auth._write_marker(claude["id"], p, "claude")
     provider_auth.shutdown_all()
     assert provider_auth._procs == {}
-    assert not provider_auth._marker_path(claude["id"]).exists()
 
 
-def test_reap_orphaned_logins_kills_stale_marker_pid():
-    """A backend crash leaves an orphaned login CLI; startup reaping must
-    force-kill it via the surviving pid marker."""
+def _spawn_sleep_orphan():
     import subprocess
-    from proc_control import process_control
-
-    provider_id = "orphan-test-record"
     # Detach like the real spawn (start_new_session) so force_kill's killpg
     # reaches ONLY this orphan's group, not the test's own.
-    orphan = subprocess.Popen(["sleep", "30"], start_new_session=True)
+    return subprocess.Popen(["sleep", "30"], start_new_session=True)
+
+
+def test_reap_kills_orphan_when_identity_confirmed():
+    """When the marker pid IS the expected CLI, reap force-kills it."""
+    from proc_control import process_control
+
+    provider_id = "orphan-confirmed"
+    orphan = _spawn_sleep_orphan()
+    original_identity = provider_auth._proc_is_expected_cli
+    provider_auth._proc_is_expected_cli = lambda pid, kind: True  # simulate our CLI
     try:
-        assert process_control().pid_alive(orphan.pid)
-        provider_auth._write_marker(provider_id, type("P", (), {"pid": orphan.pid})())
-        provider_auth._procs.clear()  # simulate lost in-memory handle (crash)
+        provider_auth._write_marker(provider_id, type("P", (), {"pid": orphan.pid})(), "claude")
+        provider_auth._procs.clear()
         provider_auth.reap_orphaned_logins()
-        # Reap force-kills the whole group; the orphan leader dies with a
-        # signal returncode once reaped by wait() (pid_alive keeps a zombie
-        # looking alive until the parent reaps it).
         orphan.wait(timeout=3)
         assert orphan.returncode is not None and orphan.returncode < 0, (
-            f"orphan was not reaped (rc={orphan.returncode})"
+            f"orphan not reaped (rc={orphan.returncode})"
         )
         assert not provider_auth._marker_path(provider_id).exists()
     finally:
+        provider_auth._proc_is_expected_cli = original_identity
         if process_control().pid_alive(orphan.pid):
             process_control().force_kill(orphan.pid)
+        try:
+            orphan.wait(timeout=2)
+        except Exception:
+            pass
+
+
+def test_reap_spares_unrelated_process():
+    """Regression for the PID-reuse safety hole: a marker whose live pid is
+    NOT the expected claude/codex CLI must NEVER be killed, only unlinked."""
+    from proc_control import process_control
+
+    provider_id = "orphan-pid-reuse"
+    orphan = _spawn_sleep_orphan()
+    try:
+        provider_auth._write_marker(provider_id, type("P", (), {"pid": orphan.pid})(), "claude")
+        provider_auth._procs.clear()
+        provider_auth.reap_orphaned_logins()
+        # The sleep is NOT a claude CLI -> spared.
+        assert process_control().pid_alive(orphan.pid), "unrelated process was wrongly killed"
+        assert not provider_auth._marker_path(provider_id).exists()
+    finally:
+        process_control().force_kill(orphan.pid)
+        try:
+            orphan.wait(timeout=2)
+        except Exception:
+            pass
+
+
+def test_reap_clears_dead_pid_marker():
+    """A marker whose pid is already gone is just unlinked, no kill attempt."""
+    provider_id = "orphan-dead"
+    provider_auth._write_marker(provider_id, type("P", (), {"pid": 999999})(), "claude")
+    provider_auth._procs.clear()
+    provider_auth.reap_orphaned_logins()
+    assert not provider_auth._marker_path(provider_id).exists()
+
+
+def test_reap_skips_live_in_procs_flow():
+    """A marker for a record currently in _procs is a live flow, not an
+    orphan — reap must leave both the process and the marker alone."""
+    from proc_control import process_control
+
+    provider_id = "orphan-live"
+    orphan = _spawn_sleep_orphan()
+    original_identity = provider_auth._proc_is_expected_cli
+    provider_auth._proc_is_expected_cli = lambda pid, kind: True
+    try:
+        provider_auth._write_marker(provider_id, type("P", (), {"pid": orphan.pid})(), "claude")
+        provider_auth._procs[provider_id] = type("P", (), {"pid": orphan.pid, "returncode": None})()
+        provider_auth.reap_orphaned_logins()
+        assert process_control().pid_alive(orphan.pid), "live flow was wrongly reaped"
+        assert provider_auth._marker_path(provider_id).exists(), "live flow marker was wrongly cleared"
+    finally:
+        provider_auth._proc_is_expected_cli = original_identity
+        provider_auth._procs.pop(provider_id, None)
+        process_control().force_kill(orphan.pid)
         try:
             orphan.wait(timeout=2)
         except Exception:
