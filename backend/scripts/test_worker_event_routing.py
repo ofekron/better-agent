@@ -854,8 +854,12 @@ def test_o_inner_metadata_never_journaled_or_paneled() -> bool:
     meta_panel = _panel_events(sid, msg_id, "del_O")
     meta_mgr = _mgr_events(sid, msg_id)
     rows_after_meta = len(_events_jsonl_for(root_id, sid))
+    # Guard against a vacuous pass: driving the cases off the production
+    # constant means an emptied/renamed set would send zero events and
+    # still satisfy "nothing was written".
     o1_ok = (
-        len(meta_panel) == 0
+        len(NON_RENDER_AGENT_DATA_TYPES) >= 7
+        and len(meta_panel) == 0
         and len(meta_mgr) == 0
         and rows_after_meta == rows_before
     )
