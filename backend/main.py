@@ -13259,6 +13259,9 @@ async def on_startup():
     scheduled, not awaited inline.
     """
     acquire_backend_instance_lock()
+    # Kill any OAuth login/logout CLI that outlived a prior backend crash
+    # so no `claude auth login` / `codex login` is left holding a callback port.
+    _fire_and_forget(asyncio.to_thread(provider_auth.reap_orphaned_logins))
     provider_runtime_enabled = installation_profile.provider_conversations_enabled()
     if not installation_profile.integrations_enabled():
         await extension_jobs.quiesce_for_ui_only()

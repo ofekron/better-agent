@@ -18,13 +18,16 @@ the credential env is injected per-spawn only, never into `os.environ`.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import time
+from pathlib import Path
 from typing import Awaitable, Callable, Optional
 
 import config_store
-from paths import user_home
+from paths import ba_home, user_home
+from proc_control import process_control
 
 logger = logging.getLogger(__name__)
 
@@ -191,13 +194,82 @@ async def _spawn(provider: dict, suffix_key: str) -> Optional[asyncio.subprocess
     if not binary:
         return None
     cmd = [binary, *_AUTH_COMMANDS[kind][suffix_key]]
+    # Detach as its own process-group root (SSOT) so a later force_kill
+    # reaches the CLI and every helper it spawned (browser launchers, etc.)
+    # as a unit — the same tree-kill model runners use.
     return await asyncio.create_subprocess_exec(
         *cmd,
         stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         env=_build_env(provider),
+        **process_control().detach_spawn_kwargs(),
     )
+
+
+def _kill_proc(proc: asyncio.subprocess.Process) -> None:
+    """Kill the whole process tree rooted at the spawned CLI (SSOT)."""
+    try:
+        process_control().force_kill(proc.pid)
+    except Exception:
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+        except Exception:
+            logger.exception("provider_auth: fallback kill failed")
+
+
+def _markers_dir() -> Path:
+    return ba_home() / "provider_auth"
+
+
+def _marker_path(provider_id: str) -> Path:
+    return _markers_dir() / f"{provider_id}.json"
+
+
+def _write_marker(provider_id: str, proc: asyncio.subprocess.Process) -> None:
+    try:
+        _markers_dir().mkdir(parents=True, exist_ok=True)
+        _marker_path(provider_id).write_text(
+            json.dumps({"pid": proc.pid, "provider_id": provider_id}),
+            encoding="utf-8",
+        )
+    except Exception:
+        logger.warning("provider_auth: failed to write pid marker for %s", provider_id)
+
+
+def _clear_marker(provider_id: str) -> None:
+    try:
+        _marker_path(provider_id).unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
+def reap_orphaned_logins() -> None:
+    """Kill any OAuth login/logout subprocess that outlived a backend crash.
+    A marker per in-flight flow is written at spawn; if the backend died
+    mid-flow the marker survives and the orphaned CLI (still holding a
+    localhost callback port) is force-killed here so nothing is left open."""
+    d = _markers_dir()
+    if not d.is_dir():
+        return
+    for marker in d.glob("*.json"):
+        try:
+            data = json.loads(marker.read_text(encoding="utf-8"))
+            pid = int(data.get("pid") or 0)
+        except Exception:
+            pid = 0
+        if pid and process_control().pid_alive(pid):
+            try:
+                process_control().force_kill(pid)
+                logger.info("provider_auth: reaped orphaned login pid=%d", pid)
+            except Exception:
+                logger.warning("provider_auth: failed to reap orphan pid=%d", pid)
+        try:
+            marker.unlink(missing_ok=True)
+        except Exception:
+            pass
 
 
 async def _status_authenticated(provider: dict) -> bool:
@@ -289,10 +361,7 @@ async def _monitor(
             )
             exit_code = proc.returncode
         except asyncio.TimeoutError:
-            try:
-                proc.kill()
-            except ProcessLookupError:
-                pass
+            _kill_proc(proc)
             _set_state(provider_id, STATE_LOGIN_FAILED, "login timed out")
             # The exchange may have completed server-side before the kill;
             # recompute the durable auth-status rather than trusting the
@@ -305,6 +374,7 @@ async def _monitor(
         return
     finally:
         _forget_proc(provider_id, proc)
+        _clear_marker(provider_id)
 
     tail = ""
     for stream in (stderr, stdout):
@@ -380,6 +450,7 @@ async def _start(
             await broadcast()
             return {"ok": False, "error": "binary_missing"}
         _procs[provider_id] = proc
+        _write_marker(provider_id, proc)
         _set_state(provider_id, running_state)
         task = asyncio.create_task(
             _monitor(provider_id, action, proc, broadcast),
@@ -401,25 +472,20 @@ async def start_logout(provider_id: str, broadcast: BroadcastFn) -> dict:
 
 
 def cancel(provider_id: str) -> bool:
-    """Kill an in-flight login/logout subprocess for a record. Returns
-    True if a process was killed."""
+    """Kill an in-flight login/logout subprocess tree for a record. The
+    monitor's finally clears the marker; returns True if a tree was killed."""
     proc = _procs.get(provider_id)
     if proc is None or proc.returncode is not None:
         return False
-    try:
-        proc.kill()
-    except ProcessLookupError:
-        return False
+    _kill_proc(proc)
     return True
 
 
 def shutdown_all() -> None:
-    """Kill every in-flight auth subprocess. Called at backend shutdown
-    so no `claude auth login` / `codex login` is orphaned."""
-    for proc in list(_procs.values()):
+    """Kill every in-flight auth subprocess tree. Called at backend shutdown
+    so no `claude auth login` / `codex login` (or its helpers) is orphaned."""
+    for provider_id, proc in list(_procs.items()):
         if proc.returncode is None:
-            try:
-                proc.kill()
-            except ProcessLookupError:
-                pass
+            _kill_proc(proc)
+        _clear_marker(provider_id)
     _procs.clear()

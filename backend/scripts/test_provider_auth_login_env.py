@@ -27,6 +27,7 @@ import os
 import shutil
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -127,8 +128,9 @@ def test_build_env_isolates_credential_dir_and_pins_home():
 
 
 class _FakeProc:
-    def __init__(self, returncode=0, stdout=b"", stderr=b"", raises=None):
+    def __init__(self, returncode=0, stdout=b"", stderr=b"", raises=None, pid=123456):
         self.returncode = returncode
+        self.pid = pid
         self._stdout = stdout
         self._stderr = stderr
         self._raises = raises
@@ -291,6 +293,69 @@ def test_attach_login_state_adds_state_for_supported_records():
     assert "login_state" in detached
     assert detached["login_state"]["status"] == provider_auth.STATE_IDLE
     assert detached["login_state"]["authenticated"] is None
+
+
+def test_cancel_kills_tracked_proc_and_clears_busy():
+    """cancel() kills the in-flight process tree bound to the record, and
+    is a no-op for an already-finished or unknown record."""
+    claude = _add_provider("claude", str(HOME / ".claude-cancel"))
+    provider_auth._procs.clear()
+    # In-flight: returncode None -> killed.
+    in_flight = _FakeProc()
+    in_flight.returncode = None
+    provider_auth._procs[claude["id"]] = in_flight
+    assert provider_auth.cancel(claude["id"]) is True
+    # Already finished (returncode set) -> no-op.
+    provider_auth._procs[claude["id"]] = _FakeProc(returncode=0)
+    assert provider_auth.cancel(claude["id"]) is False
+    # Unknown record -> no-op.
+    provider_auth._procs.pop(claude["id"], None)
+    assert provider_auth.cancel(claude["id"]) is False
+
+
+def test_shutdown_all_kills_tracked_procs_and_clears_markers():
+    claude = _add_provider("claude", str(HOME / ".claude-shutdown"))
+    provider_auth._procs.clear()
+    p = _FakeProc()
+    p.returncode = None
+    provider_auth._procs[claude["id"]] = p
+    provider_auth._write_marker(claude["id"], p)
+    assert provider_auth._marker_path(claude["id"]).exists()
+    provider_auth.shutdown_all()
+    assert provider_auth._procs == {}
+    assert not provider_auth._marker_path(claude["id"]).exists()
+
+
+def test_reap_orphaned_logins_kills_stale_marker_pid():
+    """A backend crash leaves an orphaned login CLI; startup reaping must
+    force-kill it via the surviving pid marker."""
+    import subprocess
+    from proc_control import process_control
+
+    provider_id = "orphan-test-record"
+    # Detach like the real spawn (start_new_session) so force_kill's killpg
+    # reaches ONLY this orphan's group, not the test's own.
+    orphan = subprocess.Popen(["sleep", "30"], start_new_session=True)
+    try:
+        assert process_control().pid_alive(orphan.pid)
+        provider_auth._write_marker(provider_id, type("P", (), {"pid": orphan.pid})())
+        provider_auth._procs.clear()  # simulate lost in-memory handle (crash)
+        provider_auth.reap_orphaned_logins()
+        # Reap force-kills the whole group; the orphan leader dies with a
+        # signal returncode once reaped by wait() (pid_alive keeps a zombie
+        # looking alive until the parent reaps it).
+        orphan.wait(timeout=3)
+        assert orphan.returncode is not None and orphan.returncode < 0, (
+            f"orphan was not reaped (rc={orphan.returncode})"
+        )
+        assert not provider_auth._marker_path(provider_id).exists()
+    finally:
+        if process_control().pid_alive(orphan.pid):
+            process_control().force_kill(orphan.pid)
+        try:
+            orphan.wait(timeout=2)
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":
