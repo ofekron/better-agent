@@ -3581,6 +3581,9 @@ function AppMain({
 
 
   const [sessionToDelete, setSessionToDelete] = useState<string | null>(null);
+  const [queuedCancelPending, setQueuedCancelPending] = useState<
+    { queuedId?: string; count: number; preview: string } | null
+  >(null);
   const [detailsSessionId, setDetailsSessionId] = useState<string | null>(null);
 
   const handleDeleteSession = useCallback((id: string) => {
@@ -5434,7 +5437,7 @@ function AppMain({
     handlePromoteQueued("interrupt", undefined, queuedIds);
   }, [handlePromoteQueued]);
 
-  const handleCancelQueued = useCallback((queuedId?: string) => {
+  const performCancelQueued = useCallback((queuedId?: string) => {
     if (!currentSession) return;
     const sent = sendCancelQueued(currentSession.id, queuedId);
     if (!sent) return;
@@ -5450,6 +5453,29 @@ function AppMain({
       clearPendingQueueDrafts(currentSession.id);
     }
   }, [currentSession, persistedQueuedPrompts, sendCancelQueued, setQueuedForSession, clearPendingQueueDrafts]);
+
+  // Cancelling a queued prompt permanently discards user-authored text that
+  // exists nowhere else, so it is gated behind an explicit confirmation.
+  const handleCancelQueued = useCallback((queuedId?: string) => {
+    if (!currentSession) return;
+    const base = currentSession.id in queuedBySession
+      ? queuedBySession[currentSession.id] ?? []
+      : persistedQueuedPrompts;
+    const banners = visibleQueuedPromptBanners(base);
+    if (banners.length === 0) return;
+    const target = queuedId ? banners.find((item) => item.id === queuedId) ?? null : null;
+    setQueuedCancelPending({
+      ...(queuedId ? { queuedId } : {}),
+      count: queuedId ? 1 : banners.length,
+      preview: (target ?? banners[0]).preview.slice(0, 140),
+    });
+  }, [currentSession, queuedBySession, persistedQueuedPrompts]);
+
+  const confirmCancelQueued = useCallback(() => {
+    if (!queuedCancelPending) return;
+    performCancelQueued(queuedCancelPending.queuedId);
+    setQueuedCancelPending(null);
+  }, [queuedCancelPending, performCancelQueued]);
 
   const handleQueuedTextEdit = useCallback(
     (text: string, queuedId?: string) => {
@@ -8380,6 +8406,20 @@ function AppMain({
           message={t("app.deleteSessionConfirm", { name: sessionBeingDeleted?.name || t("fork.fork") })}
           onConfirm={confirmDeleteSession}
           onCancel={() => setSessionToDelete(null)}
+        />
+      )}
+      {queuedCancelPending && (
+        <ConfirmModal
+          open={!!queuedCancelPending}
+          title={t("queued.cancelConfirmTitle", { count: queuedCancelPending.count })}
+          message={t("queued.cancelConfirmMessage", {
+            count: queuedCancelPending.count,
+            preview: queuedCancelPending.preview,
+          })}
+          confirmLabel={t("queued.cancelConfirmAction", { count: queuedCancelPending.count })}
+          cancelLabel={t("queued.cancelConfirmKeep")}
+          onConfirm={confirmCancelQueued}
+          onCancel={() => setQueuedCancelPending(null)}
         />
       )}
       {projectSuggestion && (
