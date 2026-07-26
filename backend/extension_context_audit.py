@@ -249,9 +249,11 @@ def _fingerprint(inventory: dict[str, Any]) -> str:
 
 
 def _is_runtime_ready() -> bool:
-    import config_store
-    resolved = config_store.resolve_internal_llm(AUDIT_SPEC_KEY)
-    return bool(resolved.get("provider_id") and resolved.get("model"))
+    """The audit only runs when its fork-mode spec actually resolves — the
+    provider assigned to `extension_context_audit` (the active provider when
+    unassigned) must exist, have a model, and support forking. Anything else
+    means no audit context this turn, never a raise from the refresh thread."""
+    return provisioning.spec_is_runnable(AUDIT_SPEC)
 
 
 def _cache_path() -> Path:
