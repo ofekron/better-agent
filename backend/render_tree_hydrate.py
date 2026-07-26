@@ -442,6 +442,8 @@ def _bracket_orphan_rows(
     # Single-owner attribution prevents one event rendering under two
     # turns when windows overlap (e.g. an empty message with floor 0).
     out: dict[str, list[dict]] = {}
+    if not msg_boundaries:
+        return out
     for row in orphan_raw:
         raw_seq = row.get("seq", 0)
         best_floor: Optional[int] = None
@@ -454,8 +456,21 @@ def _bracket_orphan_rows(
             if best_floor is None or floor_seq > best_floor:
                 best_floor = floor_seq
                 best_msg = msg_id
-        if best_msg is not None:
-            out.setdefault(best_msg, []).append(row)
+        if best_msg is None:
+            # No window claimed the row — it sits below every floor, or in a
+            # gap a `_events_seq_floor` ceil opened. Never drop it: the row is
+            # durable in events.jsonl and live ingest renders it, so dropping
+            # here would make a cold hydrate diverge from the live tree. Fall
+            # back to the nearest preceding message, else the earliest one.
+            for msg_id, floor_seq, _ceil_seq in msg_boundaries:
+                if floor_seq >= raw_seq:
+                    continue
+                if best_floor is None or floor_seq > best_floor:
+                    best_floor = floor_seq
+                    best_msg = msg_id
+            if best_msg is None:
+                best_msg = msg_boundaries[0][0]
+        out.setdefault(best_msg, []).append(row)
     return out
 
 

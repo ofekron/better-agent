@@ -356,10 +356,48 @@ def test_parent_uuid_chain_owns_orphans_over_timestamp_guess() -> None:
     return True
 
 
+def test_orphan_below_every_floor_is_never_dropped() -> None:
+    """No orphan may be silently discarded by bracketing.
+
+    A row whose seq sits below every message's floor matched no window and
+    was dropped. It stays durable in events.jsonl and live ingest renders
+    it, so dropping it here makes a cold hydrate diverge from the live tree
+    — the convergence invariant forbids that. It must land on the nearest
+    preceding message, or the earliest one.
+    """
+    from render_tree_hydrate import _bracket_orphan_rows as bracket
+
+    msgs = [(0, {"id": "A"}), (1, {"id": "B"})]
+    named = {"A": [{"seq": 10}, {"seq": 20}], "B": [{"seq": 100}]}
+
+    out = bracket(msgs, named, [{"seq": 5}, {"seq": 50}, {"seq": 150}])
+    placed = [row["seq"] for rows in out.values() for row in rows]
+    if sorted(placed) != [5, 50, 150]:
+        print(f"  orphans dropped or duplicated: {out}")
+        return False
+    if out.get("A") != [{"seq": 5}, {"seq": 50}] or out.get("B") != [{"seq": 150}]:
+        print(f"  unexpected ownership: {out}")
+        return False
+
+    # Nothing named yet anywhere: everything belongs to the only message
+    # that could own it rather than vanishing.
+    out = bracket(msgs, {}, [{"seq": 5}, {"seq": 50}])
+    if [row["seq"] for row in out.get("A", [])] != [5, 50]:
+        print(f"  unnamed-tree orphans lost: {out}")
+        return False
+
+    if bracket([], named, [{"seq": 5}]) != {}:
+        print("  bracketing without messages should yield nothing")
+        return False
+    print("PASS  orphan below every floor is never dropped")
+    return True
+
+
 async def _run() -> int:
     event_journal_writer.register(bus)
     results = [
         test_parent_uuid_chain_owns_orphans_over_timestamp_guess(),
+        test_orphan_below_every_floor_is_never_dropped(),
         await test_fork_rows_never_graft_on_parent(),
         await test_legacy_claude_tailer_rows_still_render(),
         await test_warm_reconcile_brackets_by_journal_seq(),
