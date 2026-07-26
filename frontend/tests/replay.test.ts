@@ -459,6 +459,56 @@ describe("messages_replay / messages_delta upsert + since_seq cursor", () => {
     expect(msg?.events).toEqual([streamedEvent]);
   });
 
+  it("a collapsed finished turn shows the final answer, not the lead-in it opened with", async () => {
+    const session = makeSession({
+      messages: [
+        makeUserMsg({ id: "u1", content: "is it safe?", seq: 0 }),
+        makeAssistantMsg({
+          id: "a1",
+          content: "LEAD IN TEXT",
+          seq: 1,
+          isStreaming: true,
+          events: [textEvent("ev-lead", "LEAD IN TEXT")],
+        }),
+      ],
+    });
+    const h = await renderApp({ seed: { sessions: [session] } });
+    await h.selectSession(session.id);
+
+    // In-flight compacted deltas — the only carrier of the turn's content
+    // while it streams. Events are omitted, never zero-length.
+    h.emit({
+      type: "messages_delta",
+      data: {
+        app_session_id: session.id,
+        messages: [
+          {
+            ...makeAssistantMsg({
+              id: "a1",
+              content: "FINAL ANSWER TEXT",
+              seq: 1,
+              isStreaming: true,
+              omitted_payloads: { events: { revision: "rev-9", count: 2 } },
+            }),
+            events: undefined,
+          },
+        ],
+      },
+    });
+    h.emit({
+      type: "turn_complete",
+      data: { session_id: session.id, success: true },
+    });
+    await h.flush();
+
+    await waitFor(
+      h,
+      () => h.raw.container.textContent?.includes("FINAL ANSWER TEXT") === true,
+    );
+    expect(h.raw.container.textContent).not.toContain("LEAD IN TEXT");
+    h.unmount();
+  });
+
   it("compact messages_delta keeps the transient isRecovering flag", () => {
     const current = makeAssistantMsg({
       id: "a",
