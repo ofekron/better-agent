@@ -1840,10 +1840,22 @@ class Coordinator:
             runner = default_runner(provider_record)
         else:
             runner = inherited_runner
+        resolved_model = model or str(
+            target.get("model") or sender.get("model") or ""
+        ).strip()
+        inherited_effort = reasoning_effort or str(
+            target.get("reasoning_effort") or sender.get("reasoning_effort") or ""
+        ).strip()
+        from runtime_profile import fit_reasoning_effort
         return {
             "provider_id": resolved_provider_id,
-            "model": model or str(target.get("model") or sender.get("model") or "").strip(),
-            "reasoning_effort": reasoning_effort or str(target.get("reasoning_effort") or sender.get("reasoning_effort") or "").strip(),
+            "model": resolved_model,
+            "reasoning_effort": fit_reasoning_effort(
+                config_store.get_provider(resolved_provider_id) or {},
+                inherited_effort,
+                runner,
+                model=resolved_model,
+            ),
             "runner": runner,
         }
 

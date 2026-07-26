@@ -93,6 +93,30 @@ def reasoning_efforts(
     return tuple(str(value) for value in options if str(value or "").strip())
 
 
+def fit_reasoning_effort(
+    provider_record: dict | None,
+    effort: object = "",
+    runner: object = None,
+    *,
+    model: str = "",
+) -> str:
+    """Fit an effort inherited from another session onto this provider.
+
+    The inherited value describes the sender's provider, so anything the target
+    does not expose falls back to the target's default and then to its first
+    option. Providers exposing no efforts resolve to "".
+    """
+    record = provider_record or {}
+    options = reasoning_efforts(record, runner, model=model)
+    candidate = str(effort or "").strip()
+    if candidate and candidate in options:
+        return candidate
+    default_effort = str(record.get("default_reasoning_effort") or "").strip()
+    if default_effort in options:
+        return default_effort
+    return options[0] if options else ""
+
+
 def runner_profiles(provider_record: dict) -> list[dict]:
     return [
         {
