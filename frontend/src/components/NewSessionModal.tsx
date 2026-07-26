@@ -23,6 +23,8 @@ import { trackedFetch } from "../progress/store";
 import { useMachines } from "../hooks/useMachines";
 import { useLocalNodeId } from "../hooks/useLocalNodeId";
 import { useBackButtonDismiss } from "../hooks/useBackButtonDismiss";
+import { usePersistedDraft } from "../hooks/usePersistedDraft";
+import { ConfirmModal } from "./ConfirmModal";
 
 import { API, fetchSessionOrganization, createSessionFolder } from "../api";
 import { optionLabelWithQuota, summarizeProvider } from "../utils/quotaStatus";
@@ -154,6 +156,9 @@ interface Props {
 }
 
 const STORAGE_KEY = "better-agent-new-session-defaults";
+// Unsent initial-prompt text survives closing the modal so a half-written
+// prompt is never lost; cleared on successful create or on explicit discard.
+const PROMPT_DRAFT_KEY = "better-agent-new-session-prompt-draft";
 const EMPTY_EXTENSION_OPTIONS: NewSessionExtensionOption[] = [];
 
 interface NewSessionDefaults extends Partial<SessionConfig> {
@@ -578,7 +583,12 @@ export function NewSessionModal({
   const creatingRef = useRef(false);
   const [providers, setProviders] = useState<Provider[]>([]);
   const [editedPrompt, setEditedPrompt] = useState("");
-  const [initialPrompt, setInitialPrompt] = useState("");
+  // Investigation prompts are supplied by the caller and edited in
+  // `editedPrompt`, so only the plain new-session prompt is drafted.
+  const [initialPrompt, setInitialPrompt, clearPromptDraft] = usePersistedDraft(
+    investigation ? null : PROMPT_DRAFT_KEY,
+  );
+  const [discardPromptOpen, setDiscardPromptOpen] = useState(false);
   const [initialImages, setInitialImages] = useState<PastedImage[]>([]);
   const [initialFiles, setInitialFiles] = useState<FileAttachment[]>([]);
   const [capabilityContexts, setCapabilityContexts] = useState<CapabilityContext[]>([]);
@@ -652,7 +662,6 @@ export function NewSessionModal({
     if (!open) return;
     const defaults = loadDefaults();
     setEditedPrompt(investigation?.prompt ?? "");
-    setInitialPrompt("");
     dictatedRef.current = "";
     setInitialImages(investigation?.images ?? []);
     setInitialFiles(investigation?.files ?? []);
@@ -903,12 +912,23 @@ export function NewSessionModal({
         ? { ...investigation, prompt: promptOverride ?? editedPrompt, images: initialImages, files: initialFiles }
         : undefined;
       await onCreate(config, ctx, action);
+      clearPromptDraft();
     } catch (error) {
       window.alert(error instanceof Error ? error.message : String(error));
     } finally {
       creatingRef.current = false;
       setCreating(false);
     }
+  };
+
+  // Explicit cancel (Cancel button / header ×) with unsent text asks whether
+  // to keep the draft. Dismissing by overlay/back button keeps it silently.
+  const requestCancel = () => {
+    if (!investigation && initialPrompt.trim()) {
+      setDiscardPromptOpen(true);
+      return;
+    }
+    onClose();
   };
 
   const handlePromptKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -999,7 +1019,7 @@ export function NewSessionModal({
       <div className="modal-content ns-session-modal" onClick={(e) => e.stopPropagation()}>
         <div className="modal-header">
           <h2>{t("newSession.title")}</h2>
-          <button className="modal-close" onClick={creating ? undefined : onClose} disabled={creating}>
+          <button className="modal-close" onClick={creating ? undefined : requestCancel} disabled={creating}>
             <Icon name="x" size={16} />
           </button>
         </div>
@@ -1261,7 +1281,7 @@ export function NewSessionModal({
 
         </div>
         <div className="modal-footer ns-create-actions">
-          <button className="btn-secondary" onClick={onClose} disabled={creating}>
+          <button className="btn-secondary" onClick={requestCancel} disabled={creating}>
             {t("newSession.cancel")}
           </button>
           <NewSessionCreateButton
@@ -1320,6 +1340,22 @@ export function NewSessionModal({
         </div>
       </div>
     )}
+    <ConfirmModal
+      open={discardPromptOpen}
+      title={t("newSession.keepDraftTitle")}
+      message={t("newSession.keepDraftMessage")}
+      confirmLabel={t("newSession.keepDraftDiscard")}
+      cancelLabel={t("newSession.keepDraftKeep")}
+      onConfirm={() => {
+        clearPromptDraft();
+        setDiscardPromptOpen(false);
+        onClose();
+      }}
+      onCancel={() => {
+        setDiscardPromptOpen(false);
+        onClose();
+      }}
+    />
     </>
   );
 }
