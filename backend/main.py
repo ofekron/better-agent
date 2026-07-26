@@ -4808,6 +4808,10 @@ async def internal_broadcast_session(
     and fanned to the session's WS subscribers by the tailer. ``source`` is
     pinned to the calling extension id so emitted events are auditable and one
     extension cannot impersonate another."""
+    return await _broadcast_session_for_internal_authority(sid, body)
+
+
+async def _broadcast_session_for_internal_authority(sid: str, body: dict):
     if not _internal_authority_is_valid():
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
     extension_id = _internal_authority_extension_id() or ""
