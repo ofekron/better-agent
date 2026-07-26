@@ -5643,6 +5643,7 @@ function AppMain({
 
   const queueLocalFirstSession = useCallback(
     (
+      id: string,
       config: SessionConfig,
       initialPrompt: string,
       images: ImagePayload[],
@@ -5655,7 +5656,6 @@ function AppMain({
         window.alert(t("app.fileEditOfflineQueue", "File-editing sessions cannot be queued offline."));
         return false;
       }
-      const id = uuidv4();
       const now = new Date().toISOString();
       const clientId = `offline-create-${id}`;
       const localName = initialPrompt
@@ -5728,6 +5728,11 @@ function AppMain({
       investigation: InvestigationContext | undefined,
       action: NewSessionCreationAction,
     ) => {
+      // One id per user create action, minted before the first attempt.
+      // The backend treats `client_session_id` as the idempotency key, so a
+      // timed-out or 5xx attempt that actually landed server-side resolves to
+      // the SAME session on retry instead of orphaning an empty one.
+      const sessionId = uuidv4();
       const initialPrompt = (investigation?.prompt ?? config.initialPrompt).trim();
       const initialPromptImages = investigation?.images ?? config.initialImages;
       const images: ImagePayload[] = initialPromptImages.map((img) => ({
@@ -5789,6 +5794,7 @@ function AppMain({
         try {
           const session = await createSession({
             name: "",
+            clientSessionId: sessionId,
             model: config.main.model,
             cwd: config.cwd,
             orchestrationMode: config.orchestrationMode,
@@ -5807,6 +5813,7 @@ function AppMain({
         } catch (e) {
           if (isRetryableOfflineError(e)) {
             queueLocalFirstSession(
+              sessionId,
               config,
               initialPrompt,
               images,
@@ -5824,13 +5831,14 @@ function AppMain({
       }
 
       if (!connected) {
-        queueLocalFirstSession(config, initialPrompt, images, files, initialPromptImages, action);
+        queueLocalFirstSession(sessionId, config, initialPrompt, images, files, initialPromptImages, action);
         return;
       }
 
       try {
         const session = await createSession({
           name: "",
+          clientSessionId: sessionId,
           model: config.main.model,
           cwd: config.cwd,
           orchestrationMode: config.orchestrationMode,
@@ -5850,7 +5858,7 @@ function AppMain({
         finishCreatedSession(session);
       } catch (e) {
         if (isRetryableOfflineError(e)) {
-          queueLocalFirstSession(config, initialPrompt, images, files, initialPromptImages, action);
+          queueLocalFirstSession(sessionId, config, initialPrompt, images, files, initialPromptImages, action);
           return;
         }
         const msg = e instanceof Error ? e.message : String(e);

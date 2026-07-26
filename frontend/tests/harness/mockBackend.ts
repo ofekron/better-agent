@@ -127,6 +127,8 @@ function emptyState(): BackendState {
       config_dir: "",
       custom_models: [],
       default_model: "claude-sonnet-4-6",
+      runner: "native",
+      runner_options: ["native"],
       reasoning_effort_options: [],
       default_reasoning_effort: "",
       has_api_key: true,
@@ -175,7 +177,7 @@ export class MockBackend {
    * backend's stale-PATCH guard. Lives outside the Session type
    * because the frontend never reads the seq. */
   draftSeqs: Map<string, number> = new Map();
-  private routeHolds: Map<string, Promise<void>[]> = new Map();
+  private routeHolds: { method: string; path: string | RegExp; promise: Promise<void> }[] = [];
   private originalFetch: typeof fetch | undefined;
 
   seed(partial: Partial<BackendState>): void {
@@ -192,7 +194,7 @@ export class MockBackend {
     this.transientStatus = null;
     this.transientStatusPath = null;
     this.transientOfflineAfter = false;
-    this.routeHolds = new Map();
+    this.routeHolds = [];
   }
 
   setOffline(offline: boolean): void {
@@ -213,13 +215,15 @@ export class MockBackend {
     this.restartPostFailure = position;
   }
 
-  holdNext(method: string, path: string): () => void {
+  /** Stall the next matching request until the returned callback runs.
+   * `path` may be a RegExp — client-minted session ids are not predictable
+   * from the test, so exact paths are not always available up front. */
+  holdNext(method: string, path: string | RegExp): () => void {
     let release!: () => void;
     const promise = new Promise<void>((resolve) => {
       release = resolve;
     });
-    const key = `${method.toUpperCase()} ${path}`;
-    this.routeHolds.set(key, [...(this.routeHolds.get(key) ?? []), promise]);
+    this.routeHolds.push({ method: method.toUpperCase(), path, promise });
     return release;
   }
 
@@ -286,11 +290,15 @@ export class MockBackend {
       return jsonResponse({ detail: `HTTP ${status}` }, status);
     }
 
-    const holdKey = `${method} ${path}`;
-    const holds = this.routeHolds.get(holdKey);
-    const hold = holds?.shift();
-    if (holds && holds.length === 0) this.routeHolds.delete(holdKey);
-    if (hold) await hold;
+    const holdIndex = this.routeHolds.findIndex(
+      (h) =>
+        h.method === method &&
+        (typeof h.path === "string" ? h.path === path : h.path.test(path)),
+    );
+    if (holdIndex >= 0) {
+      const [hold] = this.routeHolds.splice(holdIndex, 1);
+      await hold.promise;
+    }
 
     const out = this.route(method, path, query, body);
     return jsonResponse(out);

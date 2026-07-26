@@ -23,6 +23,11 @@ export interface Harness {
     credentials?: RequestCredentials;
     body?: unknown;
   }[];
+  /** Id the client minted for a create it POSTed (negative index counts
+   * back from the newest). Session ids are minted client-side so a create
+   * that fails mid-flight replays under the same id — tests must read the
+   * id back instead of assuming how the backend numbered it. */
+  createdSessionId(index?: number): string;
   /** Push a single WS event into the app. */
   emit(event: WSEvent): void;
   /** Push many WS events in sequence. */
@@ -96,6 +101,20 @@ export async function renderApp(options: RenderAppOptions = {}): Promise<Harness
         credentials: c.credentials,
         body: c.body,
       }));
+    },
+    createdSessionId: (index = -1) => {
+      const creates = backend.calls.filter(
+        (c) => c.method === "POST" && c.path === "/api/sessions",
+      );
+      const call = index < 0 ? creates[creates.length + index] : creates[index];
+      const id = (call?.body as { client_session_id?: string } | undefined)
+        ?.client_session_id;
+      if (!id) {
+        throw new Error(
+          `no client_session_id on create #${index} of ${creates.length}`,
+        );
+      }
+      return id;
     },
     emit: (event) => wsController.emit(event),
     emitMany: (events) => wsController.emitMany(events),

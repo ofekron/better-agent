@@ -1163,22 +1163,23 @@ describe("session tabs with paged sessions", () => {
     await h.clickByText(/^(\+ New|session\.newButton)$/);
     await h.click(".modal-footer .btn-primary");
 
+    const createdId = h.createdSessionId();
     expect(JSON.parse(localStorage.getItem("better-agent-open-session-ids") || "[]"))
-      .toContain("sess-2");
+      .toContain(createdId);
     expect(
       h.restCalls.some(
         (c) =>
           c.method === "PATCH" &&
           c.path === "/api/ui-selection" &&
           Array.isArray((c.body as { open_session_tab_ids?: unknown }).open_session_tab_ids) &&
-          (c.body as { open_session_tab_ids: string[] }).open_session_tab_ids.includes("sess-2"),
+          (c.body as { open_session_tab_ids: string[] }).open_session_tab_ids.includes(createdId),
       ),
     ).toBe(true);
 
     expect(
       await waitFor(
         h,
-        () => tabIds(h).join(",") === "sess-2,existing-session",
+        () => tabIds(h).join(",") === `${createdId},existing-session`,
       ),
     ).toBe(true);
     h.unmount();

@@ -82,7 +82,7 @@ describe("sessions CRUD + subscribe lifecycle", () => {
     expect(h.restCalls).toContainEqual(
       expect.objectContaining({
         method: "PATCH",
-        path: "/api/sessions/sess-1/selectors",
+        path: `/api/sessions/${h.createdSessionId()}/selectors`,
         body: expect.objectContaining({ model: "claude-opus-4-7" }),
       }),
     );
@@ -140,12 +140,13 @@ describe("sessions CRUD + subscribe lifecycle", () => {
 
     expect(window.location.pathname).toBe("/s/current");
     expect(await waitForSend(h, "draft this in the new session")).toBeUndefined();
+    const draftedId = h.createdSessionId();
     expect(h.restCalls).toContainEqual(expect.objectContaining({
       method: "PATCH",
-      path: "/api/sessions/sess-2/draft",
+      path: `/api/sessions/${draftedId}/draft`,
       body: expect.objectContaining({ draft_input: "draft this in the new session" }),
     }));
-    expect(h.backend.state.sessions.find((session) => session.id === "sess-2")?.draft_input)
+    expect(h.backend.state.sessions.find((session) => session.id === draftedId)?.draft_input)
       .toBe("draft this in the new session");
     h.unmount();
   });
@@ -171,8 +172,52 @@ describe("sessions CRUD + subscribe lifecycle", () => {
 
     expect(window.location.pathname).toBe("/s/current");
     expect(await waitForSend(h, "send this in the background")).toEqual(
-      expect.objectContaining({ app_session_id: "sess-2" }),
+      expect.objectContaining({ app_session_id: h.createdSessionId() }),
     );
+    h.unmount();
+  });
+
+  it("retries a failed create under the same id instead of orphaning an empty session", async () => {
+    // A create that times out or 5xxes may still have landed server-side.
+    // Replaying it under a fresh id left the landed session behind as an
+    // empty "Session HH:MM" and put the prompt in a second session.
+    const current = makeSession({ id: "current", cwd: "/tmp/project" });
+    const h = await renderApp({
+      seed: {
+        sessions: [current],
+        projects: [{
+          path: "/tmp/project",
+          name: "project",
+          created_at: new Date().toISOString(),
+          last_used: new Date().toISOString(),
+        }],
+      },
+    });
+    await h.selectSession(current.id);
+    h.backend.failNextWithStatus(503, "/api/sessions");
+    await clickNewSession(h);
+    await enterNewSessionPrompt(h, "must not spawn two sessions");
+    await chooseNewSessionAction(h, /^(Create & Send|newSession\.createAndSend)$/);
+    await h.flush();
+
+    const attemptedId = h.createdSessionId(0);
+    const [queued] = JSON.parse(localStorage.getItem("better_agent_offline_queue") || "[]");
+    expect(queued).toEqual(expect.objectContaining({
+      type: "create_session",
+      session: expect.objectContaining({ id: attemptedId }),
+    }));
+
+    for (let i = 0; i < 10 && localStorage.getItem("better_agent_offline_queue"); i++) {
+      await h.flush();
+    }
+
+    const createIds = h.restCalls
+      .filter((c) => c.method === "POST" && c.path === "/api/sessions")
+      .map((c) => (c.body as { client_session_id?: string }).client_session_id);
+    expect(new Set(createIds)).toEqual(new Set([attemptedId]));
+    expect(
+      h.backend.state.sessions.filter((session) => session.id !== current.id),
+    ).toHaveLength(1);
     h.unmount();
   });
 
@@ -235,16 +280,17 @@ describe("sessions CRUD + subscribe lifecycle", () => {
     await clickNewSession(h);
     await h.click(".modal-footer .btn-primary");
 
+    const createdId = h.createdSessionId();
     const detailGetIndex = h.restCalls.findIndex(
-      (c) => c.method === "GET" && c.path === "/api/sessions/sess-1",
+      (c) => c.method === "GET" && c.path === `/api/sessions/${createdId}`,
     );
     const subscribeIndex = h.outbound.findIndex(
       (frame) =>
         frame.type === "subscribe" &&
-        frame.app_session_id === "sess-1",
+        frame.app_session_id === createdId,
     );
 
-    expect(window.location.pathname).toBe("/s/sess-1");
+    expect(window.location.pathname).toBe(`/s/${createdId}`);
     expect(detailGetIndex).toBeGreaterThan(-1);
     expect(subscribeIndex).toBeGreaterThan(-1);
     expect(h.toJSON().sidebar.sessions[0].active).toBe(true);
@@ -278,9 +324,10 @@ describe("sessions CRUD + subscribe lifecycle", () => {
     await h.click(".modal-footer .btn-primary");
     await h.flush();
 
-    expect(window.location.pathname).toBe("/s/sess-2");
+    const filteredOutId = h.createdSessionId();
+    expect(window.location.pathname).toBe(`/s/${filteredOutId}`);
     expect(h.restCalls).toContainEqual(
-      expect.objectContaining({ method: "GET", path: "/api/sessions/sess-2" }),
+      expect.objectContaining({ method: "GET", path: `/api/sessions/${filteredOutId}` }),
     );
     expect(h.toJSON().chat.title).toContain("New Session");
     expect(h.toJSON().sidebar.sessions.map((session) => session.id)).toEqual(["existing"]);
@@ -305,7 +352,7 @@ describe("sessions CRUD + subscribe lifecycle", () => {
 
     h.emit({
       type: "session_renamed",
-      data: { session_id: "sess-1", name: "AI titled session" },
+      data: { session_id: h.createdSessionId(), name: "AI titled session" },
     });
     await h.flush();
 
@@ -479,7 +526,13 @@ describe("sessions CRUD + subscribe lifecycle", () => {
       seed: { sessions: [current], projects },
     });
     await first.selectSession(current.id);
-    const releaseDetail = first.backend.holdNext("GET", "/api/sessions/sess-2");
+    // The new session's id is minted client-side, so hold the first detail
+    // GET for any uuid-shaped id (static subpaths like /summaries must not
+    // swallow the hold).
+    const releaseDetail = first.backend.holdNext(
+      "GET",
+      /^\/api\/sessions\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+    );
     await clickNewSession(first);
     await enterNewSessionPrompt(first, promptText);
     await first.click(".modal-footer .btn-primary");
@@ -493,13 +546,14 @@ describe("sessions CRUD + subscribe lifecycle", () => {
     const [durable] = JSON.parse(
       localStorage.getItem("better_agent_offline_queue") || "[]",
     );
+    const deferredId = first.createdSessionId();
     expect(durable).toEqual(expect.objectContaining({
-      sessionId: "sess-2",
+      sessionId: deferredId,
       prompt: promptText,
       deferUntilTargetReady: true,
     }));
     const clientId = durable.clientId as string;
-    const created = first.backend.state.sessions.find((session) => session.id === "sess-2")!;
+    const created = first.backend.state.sessions.find((session) => session.id === deferredId)!;
     first.unmount();
     releaseDetail();
 
@@ -508,13 +562,13 @@ describe("sessions CRUD + subscribe lifecycle", () => {
     });
     const firstReplay = await waitForSend(second, promptText);
     expect(firstReplay).toEqual(expect.objectContaining({
-      app_session_id: "sess-2",
+      app_session_id: deferredId,
       client_id: clientId,
     }));
     const subscribeIndex = second.outbound.findIndex(
       (frame) =>
         frame.type === "subscribe" &&
-        frame.app_session_id === "sess-2",
+        frame.app_session_id === deferredId,
     );
     expect(subscribeIndex).toBeLessThan(second.outbound.indexOf(firstReplay!));
     expect(JSON.parse(
@@ -527,13 +581,13 @@ describe("sessions CRUD + subscribe lifecycle", () => {
     });
     const secondReplay = await waitForSend(third, promptText);
     expect(secondReplay).toEqual(expect.objectContaining({
-      app_session_id: "sess-2",
+      app_session_id: deferredId,
       client_id: clientId,
     }));
     third.emit({
       type: "user_message_persisted",
       data: {
-        session_id: "sess-2",
+        session_id: deferredId,
         user_message: makeUserMsg({
           content: promptText,
           client_id: clientId,
@@ -633,7 +687,7 @@ describe("sessions CRUD + subscribe lifecycle", () => {
       expect.objectContaining({
         type: "send_message",
         prompt: "send elsewhere",
-        app_session_id: "sess-2",
+        app_session_id: h.createdSessionId(),
         files: [expect.objectContaining({
           name: "payload.txt",
           data: "cGF5bG9hZA==",
