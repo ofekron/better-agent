@@ -5461,7 +5461,8 @@ function AppMain({
     const base = currentSession.id in queuedBySession
       ? queuedBySession[currentSession.id] ?? []
       : persistedQueuedPrompts;
-    const banners = visibleQueuedPromptBanners(base);
+    // `base` is already the visible-banner projection from either channel.
+    const banners = base;
     if (banners.length === 0) return;
     const target = queuedId ? banners.find((item) => item.id === queuedId) ?? null : null;
     setQueuedCancelPending({
