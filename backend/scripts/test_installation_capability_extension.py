@@ -406,13 +406,61 @@ def test_readiness_rejects_a_receipt_that_is_not_this_commit() -> None:
             ), broken
 
 
+def _apply_selection_argv(make_default: bool) -> list[str]:
+    """The argv `_commit_activation` hands the apply-selection subprocess."""
+    seen: list[list[str]] = []
+
+    class _Completed:
+        returncode = 0
+
+    def _fake_run(argv, **_kwargs):
+        seen.append(list(argv))
+        return _Completed()
+
+    with (
+        patch.object(installation_profile, "selection_pending", lambda: True),
+        patch.object(installation_profile, "refresh_activation_receipt", lambda: False),
+        patch.object(dependency_plan.subprocess, "run", _fake_run),
+    ):
+        dependency_plan._commit_activation(Path("/usr/bin/python3"), make_default=make_default)
+    return seen[0] if seen else []
+
+
 def test_adoption_does_not_seize_a_default_the_user_already_had() -> None:
-    """Adoption infers a provider from what is on the machine — that is not a
-    user answering which provider they want, so it must not move the default."""
+    """Setup asks the user which provider they want, so their answer moves the
+    default. Adoption only infers one from whichever CLI is on the machine, so
+    it must not. Asserted at the seam the flag actually crosses."""
     with _with_home() as root:
         _test_installation.activate(
             root, mode=installation_profile.DEFAULT, provider="codex"
         )
+        assert "--make-default" in _apply_selection_argv(True)
+        assert "--make-default" not in _apply_selection_argv(False)
+
+        # The seam adoption crosses: setup activates with the user's answer,
+        # adoption activates without one. Nothing here may touch this
+        # checkout's dependency environment, so the activation's own side
+        # effects are stubbed — `_write_pointer` writes to backend/.active-venv.
+        forwarded: list[bool] = []
+        with (
+            patch.object(dependency_plan, "_assert_environment"),
+            patch.object(dependency_plan, "_write_pointer") as pointer,
+            patch.object(dependency_plan, "resolve_plan", return_value={"hash": "x"}),
+            patch.object(installation_profile, "stage_activation"),
+            patch.object(installation_profile, "selection_pending", lambda: False),
+            patch.object(
+                dependency_plan,
+                "_commit_activation",
+                lambda _python, make_default=False: forwarded.append(make_default),
+            ),
+        ):
+            for chosen in (True, False):
+                dependency_plan.activate_prepared_installation(
+                    Path("/tmp/env"), {"mode": "default"}, make_default=chosen,
+                )
+            assert pointer.called
+        assert forwarded == [True, False], forwarded
+
         config = root / "config.json"
         state = json.loads(config.read_text(encoding="utf-8"))
         state["providers"].append(
@@ -420,13 +468,15 @@ def test_adoption_does_not_seize_a_default_the_user_already_had() -> None:
         )
         state["default_provider_id"] = "gemini-id"
         config.write_text(json.dumps(state), encoding="utf-8")
+        config_store._state_cache = None
 
-        config_store.apply_installation_profile_selection()
+        config_store.apply_installation_profile_selection(make_default=False)
         adopted = json.loads(config.read_text(encoding="utf-8"))
         assert adopted["default_provider_id"] == "gemini-id", (
             "adoption must leave the configured default alone"
         )
         assert not any(p.get("suspended") for p in adopted["providers"])
+        config_store._state_cache = None
 
 
 def test_a_pending_runtime_is_reported_rather_than_assumed_capable() -> None:
