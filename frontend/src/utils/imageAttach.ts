@@ -1,4 +1,25 @@
-import type { PastedImage } from "../types";
+import type { FileAttachment, PastedImage } from "../types";
+import type { FilePayload, ImagePayload } from "../hooks/useWebSocket";
+
+/** Wire payload (base64 + media type) → renderable PastedImage. Single
+ *  source of truth for turning backend/offline-backlog attachments back
+ *  into the composer/banner shape. */
+export function imagePayloadToPastedImage(img: ImagePayload): PastedImage {
+  return {
+    mediaType: img.media_type,
+    base64: img.data,
+    dataUrl: `data:${img.media_type};base64,${img.data}`,
+  };
+}
+
+export function filePayloadToAttachment(file: FilePayload): FileAttachment {
+  return {
+    name: file.name,
+    mediaType: file.media_type,
+    base64: file.data,
+    size: file.size,
+  };
+}
 
 /** Max pixel dimension for an attached image. Phone cameras/screenshots
  *  produce 3-5MB files; resizing keeps WebSocket payloads small. */

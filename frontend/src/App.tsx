@@ -8,6 +8,7 @@ import {
   type FilePayload,
 } from "./hooks/useWebSocket";
 import { useOfflineQueue } from "./hooks/useOfflineQueue";
+import { filePayloadToAttachment, imagePayloadToPastedImage } from "./utils/imageAttach";
 import { useSession, type SessionMetadataPatch } from "./hooks/useSession";
 import { useResizable } from "./hooks/useResizable";
 import { useViewport } from "./hooks/useViewport";
@@ -112,6 +113,7 @@ import { mobileRightPanelSizingStyle } from "./utils/mobileRightPanelStyle";
 import { uuidv4 } from "./lib/uuid";
 import { logPromptSend } from "./lib/promptSendLog";
 import { logDurable } from "./lib/frontendLogger";
+import { acquireOfflineFlushLock } from "./lib/offlineFlushLock";
 import { openProviderConfigSyncPage } from "./lib/providerConfigSyncRoute";
 import { markFirstRunWizardSeen } from "./lib/firstRunWizard";
 import { SIDEBAR_MINIMIZED_WIDTH } from "./sidebarLayout";
@@ -1433,23 +1435,12 @@ function AppMain({
                 id: entry.clientId,
                 clientId: entry.clientId,
                 preview: entry.prompt,
-                ...(entry.images?.length ? {
-                  images: entry.images.map(img => ({
-                    mediaType: img.media_type,
-                    base64: img.data,
-                    dataUrl: `data:${img.media_type};base64,${img.data}`,
-                    file: new File([], "image"), // dummy file for typing
-                  })),
-                } : {}),
-                ...(entry.files?.length ? {
-                  files: entry.files.map(f => ({
-                    name: f.name,
-                    mediaType: f.media_type,
-                    base64: f.data,
-                    size: f.size,
-                    file: new File([], f.name), // dummy file
-                  })),
-                } : {}),
+                ...(entry.images?.length
+                  ? { images: entry.images.map(imagePayloadToPastedImage) }
+                  : {}),
+                ...(entry.files?.length
+                  ? { files: entry.files.map(filePayloadToAttachment) }
+                  : {}),
               }];
             }
           }
@@ -1622,6 +1613,9 @@ function AppMain({
   }, []);
   const offlineQueue = useOfflineQueue();
   const removeAckedOfflineAction = offlineQueue.removeBySessionAndClient;
+  const claimOfflineActionForDispatch = offlineQueue.claimForDispatch;
+  const releaseOfflineActionDispatch = offlineQueue.releaseDispatch;
+  const releaseAllDispatchedOfflineActions = offlineQueue.releaseAllDispatched;
   const offlineDispatchedRef = useRef<Set<string>>(new Set());
   const [offlineRetryTick, setOfflineRetryTick] = useState(0);
   const ackedRef = useRef<Set<string>>(new Set());
@@ -2004,8 +1998,11 @@ function AppMain({
 
   useEffect(() => {
     if (!connected || offlineQueue.queue.length === 0) return;
+    // Retry drives entries that never made it onto the wire (transient
+    // create failures, a send that found the socket closed). It must NOT
+    // clear dispatch claims: an action already awaiting its backend ack is
+    // re-dispatched only after an actual connection loss.
     const timer = window.setInterval(() => {
-      offlineDispatchedRef.current.clear();
       setOfflineRetryTick((tick) => tick + 1);
     }, 5000);
     return () => window.clearInterval(timer);
@@ -2183,6 +2180,7 @@ function AppMain({
   const sendInitialPromptToSession = useCallback(
     (pending: PendingInitialPrompt) => {
       offlineDispatchedRef.current.add(pending.clientId);
+      claimOfflineActionForDispatch(pending.clientId);
       setPendingForSession(pending.sessionId, (prev) =>
         prev.map((message) =>
           message.id === pending.clientId
@@ -2208,6 +2206,7 @@ function AppMain({
       );
       if (sent) return true;
       offlineDispatchedRef.current.delete(pending.clientId);
+      releaseOfflineActionDispatch(pending.clientId);
       setPendingForSession(pending.sessionId, (prev) =>
         prev.map((message) =>
           message.id === pending.clientId
@@ -2243,8 +2242,10 @@ function AppMain({
   // making retries idempotent across reconnects and reloads.
   const offlineFlushRunningRef = useRef(false);
   useEffect(() => {
-    if (!connected) offlineDispatchedRef.current.clear();
-  }, [connected]);
+    if (connected) return;
+    offlineDispatchedRef.current.clear();
+    releaseAllDispatchedOfflineActions();
+  }, [connected, releaseAllDispatchedOfflineActions]);
   const routeSessionId = route.kind === "session" ? route.sessionId : null;
   useEffect(() => {
     if (!connected || offlineFlushRunningRef.current) return;
@@ -2255,6 +2256,12 @@ function AppMain({
       // retried next tick) instead of racing a session that does not exist —
       // so one poison create can't strand or hard-fail unrelated work.
       const failedCreateSessionIds = new Set<string>();
+      // One flusher at a time across every tab of this origin. The dispatch
+      // claim below is a read-modify-write over shared storage, so sibling
+      // tabs waking on the same reconnect would otherwise both win it and
+      // send the same prompt twice. The lock is released by the browser if
+      // this tab dies, so it can never strand the backlog.
+      const releaseFlushLock = await acquireOfflineFlushLock();
       try {
         for (const entry of offlineQueue.getAll()) {
           if (
@@ -2269,6 +2276,10 @@ function AppMain({
             continue;
           }
           if (offlineDispatchedRef.current.has(entry.clientId)) continue;
+          // Another tab already owns this action's dispatch and is waiting
+          // for its ack — re-sending it here is what turned one prompt into
+          // N identical prompts on the backend.
+          if (entry.dispatched) continue;
           if (shouldSkipDependentSend(entry, failedCreateSessionIds)) {
             logPromptSend("offline_flush_skip_dependent", {
               type: entry.type,
@@ -2354,6 +2365,7 @@ function AppMain({
             const images = entry.images?.length ? entry.images : undefined;
             const offlineFiles = entry.files?.length ? entry.files : undefined;
             if (entry.prompt) {
+              if (!claimOfflineActionForDispatch(entry.clientId)) continue;
               offlineDispatchedRef.current.add(entry.clientId);
               const sent = sendMessage(
                 entry.prompt,
@@ -2378,6 +2390,7 @@ function AppMain({
                   client_id: entry.clientId,
                 }, "warn");
                 offlineDispatchedRef.current.delete(entry.clientId);
+                releaseOfflineActionDispatch(entry.clientId);
                 return;
               }
               logPromptSend("offline_flush_dispatched", {
@@ -2398,6 +2411,7 @@ function AppMain({
 
           const images = entry.images?.length ? entry.images : undefined;
           const offlineFiles = entry.files?.length ? entry.files : undefined;
+          if (!claimOfflineActionForDispatch(entry.clientId)) continue;
           offlineDispatchedRef.current.add(entry.clientId);
           const sent = sendMessage(
             entry.prompt,
@@ -2422,6 +2436,7 @@ function AppMain({
               client_id: entry.clientId,
             }, "warn");
             offlineDispatchedRef.current.delete(entry.clientId);
+            releaseOfflineActionDispatch(entry.clientId);
             return;
           }
           logPromptSend("offline_flush_dispatched", {
@@ -2449,15 +2464,18 @@ function AppMain({
         }, "error");
         // Keep the failed action and all following actions for reconnect.
       } finally {
+        releaseFlushLock();
         offlineFlushRunningRef.current = false;
       }
     })();
   }, [
+    claimOfflineActionForDispatch,
     connected,
     createSession,
     currentSession?.id,
     offlineQueue,
     offlineRetryTick,
+    releaseOfflineActionDispatch,
     persistDraftPatch,
     routeSessionId,
     sendMessage,
@@ -4844,9 +4862,9 @@ function AppMain({
       // Always add an optimistic user bubble. Backend will either
       // echo `user_message_persisted` (immediate dispatch) which
       // clears the bubble in favor of the real msg, or emit
-      // `prompt_queued` (queued behind another turn) — in the
-      // queued case the bubble lingers as "sending" until the
-      // queue dispatches and the ack arrives.
+      // `prompt_queued` (queued behind another turn) which also
+      // clears the bubble, handing the prompt over to the queued
+      // banner as the single surface for queued state.
       const pendingMsg: ChatMessage = {
         id: clientIdForMsg,
         role: "user",
@@ -4999,6 +5017,9 @@ function AppMain({
           queue_size: offlineQueue.queue.length,
         });
         offlineDispatchedRef.current.add(clientIdForMsg);
+        // The action is already durable in the shared backlog; claim it so a
+        // sibling tab's flush treats it as in flight rather than undelivered.
+        claimOfflineActionForDispatch(clientIdForMsg);
       }
 
       if (sessionTags.length > 0) {

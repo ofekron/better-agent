@@ -44,4 +44,18 @@ describe("queued prompt visibility", () => {
       },
     ]);
   });
+
+  it("carries backend attachment payloads through so the expanded banner can render thumbnails", () => {
+    const banner = queuedPromptToVisibleBanner({
+      ...queuedPrompt("queued-img", "queued_behind"),
+      images: [{ data: "AAA", media_type: "image/png" }],
+      files: [{ name: "notes.txt", data: "BBB", media_type: "text/plain", size: 12 }],
+    });
+    expect(banner?.images).toEqual([
+      { mediaType: "image/png", base64: "AAA", dataUrl: "data:image/png;base64,AAA" },
+    ]);
+    expect(banner?.files).toEqual([
+      { name: "notes.txt", mediaType: "text/plain", base64: "BBB", size: 12 },
+    ]);
+  });
 });

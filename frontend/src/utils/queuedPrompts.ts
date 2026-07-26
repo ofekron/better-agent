@@ -1,4 +1,5 @@
 import type { FileAttachment, PastedImage, QueuedPrompt } from "src/types";
+import { filePayloadToAttachment, imagePayloadToPastedImage } from "src/utils/imageAttach";
 
 export type QueuedBannerState = {
   id: string;
@@ -23,6 +24,12 @@ export function queuedPromptToVisibleBanner(
     id: prompt.id,
     ...(prompt.client_id !== undefined ? { clientId: prompt.client_id } : {}),
     preview: prompt.content,
+    ...(prompt.images?.length
+      ? { images: prompt.images.map(imagePayloadToPastedImage) }
+      : {}),
+    ...(prompt.files?.length
+      ? { files: prompt.files.map(filePayloadToAttachment) }
+      : {}),
     imagesCount: prompt.images_count,
     filesCount: prompt.files_count,
   };
