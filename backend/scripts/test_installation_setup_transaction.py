@@ -158,7 +158,7 @@ def test_successful_setup_orders_verification_environment_and_activation() -> No
         events.append("prepare")
         return Path("/prepared")
 
-    def activate(_environment: Path, _profile: dict):
+    def activate(_environment: Path, _profile: dict, **_kwargs):
         events.append("activate")
 
     with (

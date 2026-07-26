@@ -1048,7 +1048,23 @@ def _provider_ui_state(provider: dict) -> dict:
         **_provider_config(provider),
         "credential_status": credential_status,
         "has_api_key": credential_status == "available",
+        # Configuring a provider no longer waits for its runtime, so a record
+        # can exist before the activation that installs it. Say so rather than
+        # letting the capability matrix read as confirmed: it falls back to
+        # optimistic defaults while the class cannot be resolved.
+        "runtime_pending": _runtime_pending(provider),
     }
+
+
+def _runtime_pending(provider: dict) -> bool:
+    import dependency_plan
+
+    try:
+        return dependency_plan.provider_runtime_pending(
+            _runtime_kind_for_provider(provider)
+        )
+    except Exception:
+        return False
 
 
 # INVARIANT: when adding a new `supports_*` flag on `Provider`, add it

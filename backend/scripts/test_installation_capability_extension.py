@@ -383,6 +383,75 @@ def test_a_state_home_with_no_profile_adopts_an_installed_cli() -> None:
             os.environ["PATH"] = previous_path
 
 
+def test_readiness_rejects_a_receipt_that_is_not_this_commit() -> None:
+    """The tolerant compare must stay narrow: it forgives the encoding, never
+    a receipt for a different installation or a tampered one."""
+    with _with_home() as root:
+        profile = _test_installation.activate(
+            root, mode=installation_profile.DEFAULT, provider="codex"
+        )
+        receipt_path = root / "installation-activation.json"
+        committed = json.loads(receipt_path.read_text(encoding="utf-8"))
+        for broken in (
+            {},
+            {"generation": "0" * 32, "profile_sha256": committed["profile_sha256"]},
+            {"generation": profile["generation"], "profile_sha256": "0" * 64},
+            {"generation": profile["generation"]},
+        ):
+            receipt_path.write_text(json.dumps(broken), encoding="utf-8")
+            _restart()
+            assert installation_profile.capabilities()["setup_required"] is True, broken
+            assert not installation_profile.allows(
+                installation_profile.PROVIDER_CONVERSATIONS
+            ), broken
+
+
+def test_adoption_does_not_seize_a_default_the_user_already_had() -> None:
+    """Adoption infers a provider from what is on the machine — that is not a
+    user answering which provider they want, so it must not move the default."""
+    with _with_home() as root:
+        _test_installation.activate(
+            root, mode=installation_profile.DEFAULT, provider="codex"
+        )
+        config = root / "config.json"
+        state = json.loads(config.read_text(encoding="utf-8"))
+        state["providers"].append(
+            {"id": "gemini-id", "kind": "gemini", "name": "Gemini", "suspended": False}
+        )
+        state["default_provider_id"] = "gemini-id"
+        config.write_text(json.dumps(state), encoding="utf-8")
+
+        config_store.apply_installation_profile_selection()
+        adopted = json.loads(config.read_text(encoding="utf-8"))
+        assert adopted["default_provider_id"] == "gemini-id", (
+            "adoption must leave the configured default alone"
+        )
+        assert not any(p.get("suspended") for p in adopted["providers"])
+
+
+def test_a_pending_runtime_is_reported_rather_than_assumed_capable() -> None:
+    with _with_home() as root:
+        _test_installation.activate(
+            root, mode=installation_profile.DEFAULT, provider="codex"
+        )
+        config_store._state_cache = None
+        with patch.object(dependency_plan, "_module_available", return_value=False):
+            added = config_store.add_provider({
+                "name": "Claude",
+                "kind": "claude",
+                "mode": "subscription",
+            })
+            assert added["runtime_pending"] is True, (
+                "a provider whose runtime is not installed must not read as resolved"
+            )
+        config_store._state_cache = None
+
+
+def test_a_probe_that_cannot_be_inspected_reads_as_unavailable() -> None:
+    assert dependency_plan._module_available("no.such.parent.module") is False
+    assert dependency_plan._module_available("json") is True
+
+
 def main() -> int:
     tests = [value for name, value in sorted(globals().items()) if name.startswith("test_")]
     for test in tests:

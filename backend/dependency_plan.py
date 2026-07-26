@@ -275,7 +275,13 @@ def verified_active_python(backend_dir: Path) -> Path:
 def _module_available(module: str) -> bool:
     import importlib.util
 
-    return importlib.util.find_spec(module) is not None
+    # A probe whose parent package is missing raises rather than reporting
+    # absence, and this answer now gates provider resolution — an unavailable
+    # module must read as unavailable, never as a crash.
+    try:
+        return importlib.util.find_spec(module) is not None
+    except (ImportError, ValueError):
+        return False
 
 
 def _probe_environment(env_dir: Path, probes: tuple[str, ...]) -> None:
@@ -339,11 +345,18 @@ def provider_runtime_pending(kind: str) -> bool:
 
 
 def assert_provider_runtime_ready(kind: str) -> None:
-    if provider_runtime_pending(kind):
+    if not provider_runtime_pending(kind):
+        return
+    # Only a runtime that can install what it plans is one restart away.
+    if installation_capabilities.self_provisionable():
         raise DependencyPlanError(
             f"{kind} runtime dependencies are being installed; restart Better "
             f"Agent to finish activating them"
         )
+    raise DependencyPlanError(
+        f"{kind} is not part of this build; install Better Agent from source "
+        f"to use it"
+    )
 
 
 def _commit_activation(python: Path, make_default: bool = False) -> None:
@@ -436,7 +449,16 @@ def prepare_installation(uv: str, profile: dict[str, Any]) -> Path:
 def activate_prepared_installation(
     env_dir: Path,
     profile: dict[str, Any],
+    *,
+    make_default: bool = True,
 ) -> Path:
+    """Activate a prepared installation.
+
+    `make_default` carries whether the provider was *chosen*. Setup asks the
+    user, so their answer moves the default. Adoption only infers a provider
+    from what happens to be on the machine, so it must not seize a default the
+    user already had.
+    """
     plan = resolve_plan(profile=profile)
     _assert_environment(env_dir, plan)
     try:
@@ -446,7 +468,7 @@ def activate_prepared_installation(
     installation_profile.stage_activation(profile)
     _write_pointer(env_dir)
     try:
-        _commit_activation(_python_in(env_dir), make_default=True)
+        _commit_activation(_python_in(env_dir), make_default=make_default)
         if installation_profile.selection_pending():
             raise DependencyPlanError(
                 "installation activation receipt was not committed"

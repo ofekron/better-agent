@@ -1317,6 +1317,10 @@ export interface Provider {
    * map lets the provider editor show tri-state inherit/force-on/force-off
    * without confusing an override with a kind default. */
   capability_overrides: Partial<Record<string, boolean>>;
+  /** The provider is configured but its runtime is not installed in this
+   * process yet — it arrives with the next activation. While true, the
+   * `supports_*` matrix above is an assumption, not a resolved answer. */
+  runtime_pending?: boolean;
 }
 
 export interface ProvidersState {

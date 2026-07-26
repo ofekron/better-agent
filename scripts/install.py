@@ -111,7 +111,9 @@ async def _configure(mode: str, provider: str, adopt: bool = False) -> None:
             provider_identity=verified_identity,
         )
         environment = dependency_plan.prepare_installation(uv, profile)
-        dependency_plan.activate_prepared_installation(environment, profile)
+        dependency_plan.activate_prepared_installation(
+            environment, profile, make_default=not adopt,
+        )
 
     print(f"Better Agent installation mode: {mode}")
     print("Restart Better Agent if it is currently running so all integration projections reconcile.")
