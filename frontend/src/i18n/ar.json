@@ -222,6 +222,11 @@
   "setup.apiKeyBlockedReentryHint": "لا يمكن الوصول إلى مفتاح API المخزن. أدخله مرة أخرى لاستبداله.",
   "setup.apiKeyReenterPlaceholder": "أدخل مفتاح API مرة أخرى",
   "setup.setDefaultButton": "تعيين كافتراضي",
+  "setup.logIn": "تسجيل الدخول",
+  "setup.signingIn": "جارٍ تسجيل الدخول…",
+  "setup.logOut": "تسجيل الخروج",
+  "setup.signingOut": "جارٍ تسجيل الخروج…",
+  "setup.retryLogin": "إعادة محاولة تسجيل الدخول",
   "setup.editButton": "تعديل",
   "setup.deleteButton": "حذف",
   "setup.addProvider": "+ إضافة مزوّد",
@@ -1255,8 +1260,45 @@
   "harnessProfile.itemHint.permissions.native_mcp": "تسجيل خوادم أدواتها مباشرةً لدى واجهات CLI الخاصة بالمزوّدين، خارج Better Agent.",
   "harnessProfile.itemHint.permissions.internal_llm_tasks": "استخدام استدعاءات النموذج الداخلية في Better Agent لمهام الخلفية التي تُصرّح بها.",
   "marketplaceBridge": {
-    "request": "طلب من المتجر", "pairHelp": "أكّد السماح لحساب المتجر هذا بالاتصال بـ Better Agent. تبدأ الإدارة من الموقع وتبقى تأكيدات الأمان هنا.", "actionHelp": "تحقق من التفاصيل المفحوصة محليًا قبل السماح بهذا الإجراء.", "site": "الموقع", "account": "الحساب", "device": "الجهاز", "extension": "الإضافة", "publisher": "الناشر", "version": "الإصدار", "permissionChanges": "تغييرات الأذونات", "reject": "رفض", "approve": "موافقة", "approving": "جارٍ الاعتماد…", "connectionFailed": "فشل اتصال المتجر", "connectionTitle": "اتصال المتجر", "connection": { "connecting": "جارٍ الاتصال بأمان", "offline": "Better Agent غير متصل بالمتجر", "error": "الاتصال يحتاج إلى انتباه" },
-    "action": { "pair": "ربط المتجر", "install": "تثبيت الإضافة", "enable": "تفعيل الإضافة", "disable": "تعطيل الإضافة", "update": "تحديث الإضافة", "uninstall": "إزالة الإضافة" },
-    "status": { "pending": "بانتظار Better Agent", "leased": "استلمها Better Agent", "awaiting_confirmation": "بانتظار تأكيدك", "committing": "جارٍ التطبيق بأمان", "succeeded": "اكتمل", "rejected": "مرفوض", "failed": "فشل", "failed_unknown": "يتطلب فحصًا محليًا", "expired": "انتهت الصلاحية", "cancelled": "أُلغي" }
+    "request": "طلب من المتجر",
+    "pairHelp": "أكّد السماح لحساب المتجر هذا بالاتصال بـ Better Agent. تبدأ الإدارة من الموقع وتبقى تأكيدات الأمان هنا.",
+    "actionHelp": "تحقق من التفاصيل المفحوصة محليًا قبل السماح بهذا الإجراء.",
+    "site": "الموقع",
+    "account": "الحساب",
+    "device": "الجهاز",
+    "extension": "الإضافة",
+    "publisher": "الناشر",
+    "version": "الإصدار",
+    "permissionChanges": "تغييرات الأذونات",
+    "reject": "رفض",
+    "approve": "موافقة",
+    "approving": "جارٍ الاعتماد…",
+    "connectionFailed": "فشل اتصال المتجر",
+    "connectionTitle": "اتصال المتجر",
+    "connection": {
+      "connecting": "جارٍ الاتصال بأمان",
+      "offline": "Better Agent غير متصل بالمتجر",
+      "error": "الاتصال يحتاج إلى انتباه"
+    },
+    "action": {
+      "pair": "ربط المتجر",
+      "install": "تثبيت الإضافة",
+      "enable": "تفعيل الإضافة",
+      "disable": "تعطيل الإضافة",
+      "update": "تحديث الإضافة",
+      "uninstall": "إزالة الإضافة"
+    },
+    "status": {
+      "pending": "بانتظار Better Agent",
+      "leased": "استلمها Better Agent",
+      "awaiting_confirmation": "بانتظار تأكيدك",
+      "committing": "جارٍ التطبيق بأمان",
+      "succeeded": "اكتمل",
+      "rejected": "مرفوض",
+      "failed": "فشل",
+      "failed_unknown": "يتطلب فحصًا محليًا",
+      "expired": "انتهت الصلاحية",
+      "cancelled": "أُلغي"
+    }
   }
 }

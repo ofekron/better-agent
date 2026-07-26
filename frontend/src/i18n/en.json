@@ -232,6 +232,11 @@
   "setup.apiKeyBlockedReentryHint": "The stored API key cannot be accessed. Enter it again to replace it.",
   "setup.apiKeyReenterPlaceholder": "Enter the API key again",
   "setup.setDefaultButton": "Set default",
+  "setup.logIn": "Log in",
+  "setup.signingIn": "Signing in…",
+  "setup.logOut": "Log out",
+  "setup.signingOut": "Signing out…",
+  "setup.retryLogin": "Retry login",
   "setup.editButton": "Edit",
   "setup.deleteButton": "Delete",
   "setup.addProvider": "+ Add provider",
@@ -1342,7 +1347,11 @@
     "approving": "Approving…",
     "connectionFailed": "Marketplace connection failed",
     "connectionTitle": "Marketplace connection",
-    "connection": { "connecting": "Connecting securely", "offline": "Better Agent is offline from the Marketplace", "error": "Connection needs attention" },
+    "connection": {
+      "connecting": "Connecting securely",
+      "offline": "Better Agent is offline from the Marketplace",
+      "error": "Connection needs attention"
+    },
     "action": {
       "pair": "Connect Marketplace",
       "install": "Install extension",

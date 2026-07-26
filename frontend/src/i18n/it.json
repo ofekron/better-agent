@@ -222,6 +222,11 @@
   "setup.apiKeyBlockedReentryHint": "Impossibile accedere alla chiave API memorizzata. Inseriscila di nuovo per sostituirla.",
   "setup.apiKeyReenterPlaceholder": "Inserisci di nuovo la chiave API",
   "setup.setDefaultButton": "Imposta come predefinito",
+  "setup.logIn": "Accedi",
+  "setup.signingIn": "Accesso in corso…",
+  "setup.logOut": "Esci",
+  "setup.signingOut": "Disconnessione…",
+  "setup.retryLogin": "Riprova accesso",
   "setup.editButton": "Modifica",
   "setup.deleteButton": "Elimina",
   "setup.addProvider": "+ Aggiungi provider",
@@ -1256,8 +1261,45 @@
   "harnessProfile.itemHint.permissions.native_mcp": "Registrare i propri server di strumenti direttamente nelle CLI dei provider, fuori da Better Agent.",
   "harnessProfile.itemHint.permissions.internal_llm_tasks": "Usare le chiamate interne al modello di Better Agent per le attività in background dichiarate.",
   "marketplaceBridge": {
-    "request": "Richiesta del marketplace", "pairHelp": "Conferma che questo account Marketplace può connettersi a Better Agent. La gestione inizia sul sito; le conferme di sicurezza restano qui.", "actionHelp": "Verifica i dettagli controllati localmente prima di consentire questa azione.", "site": "Sito", "account": "Account", "device": "Dispositivo", "extension": "Estensione", "publisher": "Editore", "version": "Versione", "permissionChanges": "Modifiche alle autorizzazioni", "reject": "Rifiuta", "approve": "Approva", "approving": "Approvazione…", "connectionFailed": "Connessione al marketplace non riuscita", "connectionTitle": "Connessione al marketplace", "connection": { "connecting": "Connessione sicura", "offline": "Better Agent è disconnesso dal marketplace", "error": "La connessione richiede attenzione" },
-    "action": { "pair": "Connetti marketplace", "install": "Installa estensione", "enable": "Abilita estensione", "disable": "Disabilita estensione", "update": "Aggiorna estensione", "uninstall": "Disinstalla estensione" },
-    "status": { "pending": "In attesa di Better Agent", "leased": "Ricevuto da Better Agent", "awaiting_confirmation": "In attesa della tua conferma", "committing": "Applicazione sicura", "succeeded": "Completato", "rejected": "Rifiutato", "failed": "Non riuscito", "failed_unknown": "Richiede controllo locale", "expired": "Scaduto", "cancelled": "Annullato" }
+    "request": "Richiesta del marketplace",
+    "pairHelp": "Conferma che questo account Marketplace può connettersi a Better Agent. La gestione inizia sul sito; le conferme di sicurezza restano qui.",
+    "actionHelp": "Verifica i dettagli controllati localmente prima di consentire questa azione.",
+    "site": "Sito",
+    "account": "Account",
+    "device": "Dispositivo",
+    "extension": "Estensione",
+    "publisher": "Editore",
+    "version": "Versione",
+    "permissionChanges": "Modifiche alle autorizzazioni",
+    "reject": "Rifiuta",
+    "approve": "Approva",
+    "approving": "Approvazione…",
+    "connectionFailed": "Connessione al marketplace non riuscita",
+    "connectionTitle": "Connessione al marketplace",
+    "connection": {
+      "connecting": "Connessione sicura",
+      "offline": "Better Agent è disconnesso dal marketplace",
+      "error": "La connessione richiede attenzione"
+    },
+    "action": {
+      "pair": "Connetti marketplace",
+      "install": "Installa estensione",
+      "enable": "Abilita estensione",
+      "disable": "Disabilita estensione",
+      "update": "Aggiorna estensione",
+      "uninstall": "Disinstalla estensione"
+    },
+    "status": {
+      "pending": "In attesa di Better Agent",
+      "leased": "Ricevuto da Better Agent",
+      "awaiting_confirmation": "In attesa della tua conferma",
+      "committing": "Applicazione sicura",
+      "succeeded": "Completato",
+      "rejected": "Rifiutato",
+      "failed": "Non riuscito",
+      "failed_unknown": "Richiede controllo locale",
+      "expired": "Scaduto",
+      "cancelled": "Annullato"
+    }
   }
 }

@@ -1289,6 +1289,10 @@ export interface Provider {
   last_reasoning_effort?: ReasoningEffort;
   has_api_key: boolean;
   credential_status?: "unknown" | "available" | "missing" | "blocked";
+  /** OAuth login/logout flow state for subscription claude/codex records.
+   * Surfaced from the backend in-memory auth registry; the settings UI
+   * renders Log in / Log out from this. Desktop-only flow. */
+  login_state?: { status: string; message?: string };
   /** Whether this provider can branch a session via the CLI's
    * fork-session primitive. Drives UI gating for Fork, Fork-and-send,
    * Adversarial Sync, Prompt-Engineer refine.

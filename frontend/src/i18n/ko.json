@@ -222,6 +222,11 @@
   "setup.apiKeyBlockedReentryHint": "저장된 API 키에 접근할 수 없습니다. 교체하려면 다시 입력하세요.",
   "setup.apiKeyReenterPlaceholder": "API 키를 다시 입력하세요",
   "setup.setDefaultButton": "기본으로 설정",
+  "setup.logIn": "로그인",
+  "setup.signingIn": "로그인 중…",
+  "setup.logOut": "로그아웃",
+  "setup.signingOut": "로그아웃 중…",
+  "setup.retryLogin": "로그인 재시도",
   "setup.editButton": "편집",
   "setup.deleteButton": "삭제",
   "setup.addProvider": "+ 프로바이더 추가",
@@ -1255,8 +1260,45 @@
   "harnessProfile.itemHint.permissions.native_mcp": "Better Agent 밖에서 공급자 CLI에 도구 서버를 직접 등록합니다.",
   "harnessProfile.itemHint.permissions.internal_llm_tasks": "이 확장이 선언한 백그라운드 작업에 Better Agent의 내부 모델 호출을 사용합니다.",
   "marketplaceBridge": {
-    "request": "마켓플레이스 요청", "pairHelp": "이 Marketplace 계정이 Better Agent에 연결하도록 확인하세요. 관리는 웹사이트에서 시작되며 보안 확인은 여기에서 진행됩니다.", "actionHelp": "이 작업을 허용하기 전에 로컬에서 검증된 세부 정보를 확인하세요.", "site": "사이트", "account": "계정", "device": "기기", "extension": "확장", "publisher": "게시자", "version": "버전", "permissionChanges": "권한 변경", "reject": "거부", "approve": "승인", "approving": "승인 중…", "connectionFailed": "Marketplace 연결 실패", "connectionTitle": "Marketplace 연결", "connection": { "connecting": "안전하게 연결 중", "offline": "Better Agent가 Marketplace에서 오프라인입니다", "error": "연결에 주의가 필요합니다" },
-    "action": { "pair": "Marketplace 연결", "install": "확장 설치", "enable": "확장 활성화", "disable": "확장 비활성화", "update": "확장 업데이트", "uninstall": "확장 제거" },
-    "status": { "pending": "Better Agent 대기 중", "leased": "Better Agent가 수신함", "awaiting_confirmation": "확인 대기 중", "committing": "안전하게 적용 중", "succeeded": "완료됨", "rejected": "거부됨", "failed": "실패", "failed_unknown": "로컬 확인 필요", "expired": "만료됨", "cancelled": "취소됨" }
+    "request": "마켓플레이스 요청",
+    "pairHelp": "이 Marketplace 계정이 Better Agent에 연결하도록 확인하세요. 관리는 웹사이트에서 시작되며 보안 확인은 여기에서 진행됩니다.",
+    "actionHelp": "이 작업을 허용하기 전에 로컬에서 검증된 세부 정보를 확인하세요.",
+    "site": "사이트",
+    "account": "계정",
+    "device": "기기",
+    "extension": "확장",
+    "publisher": "게시자",
+    "version": "버전",
+    "permissionChanges": "권한 변경",
+    "reject": "거부",
+    "approve": "승인",
+    "approving": "승인 중…",
+    "connectionFailed": "Marketplace 연결 실패",
+    "connectionTitle": "Marketplace 연결",
+    "connection": {
+      "connecting": "안전하게 연결 중",
+      "offline": "Better Agent가 Marketplace에서 오프라인입니다",
+      "error": "연결에 주의가 필요합니다"
+    },
+    "action": {
+      "pair": "Marketplace 연결",
+      "install": "확장 설치",
+      "enable": "확장 활성화",
+      "disable": "확장 비활성화",
+      "update": "확장 업데이트",
+      "uninstall": "확장 제거"
+    },
+    "status": {
+      "pending": "Better Agent 대기 중",
+      "leased": "Better Agent가 수신함",
+      "awaiting_confirmation": "확인 대기 중",
+      "committing": "안전하게 적용 중",
+      "succeeded": "완료됨",
+      "rejected": "거부됨",
+      "failed": "실패",
+      "failed_unknown": "로컬 확인 필요",
+      "expired": "만료됨",
+      "cancelled": "취소됨"
+    }
   }
 }

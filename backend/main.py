@@ -73,6 +73,7 @@ import virtual_session_store
 import perf
 import lag_incident_queue
 from bounded_async_executor import AdmissionOverloaded
+import provider_auth
 import provider_setup
 import itertools
 from requirements_query_runner import (
@@ -2271,10 +2272,21 @@ class ProviderSetupInstallPayload(BaseModel):
 
 async def _broadcast_provider_changed():
     state = await asyncio.to_thread(config_store.list_provider_ui_state)
+    state = await asyncio.to_thread(_with_login_states, state)
     await coordinator.broadcast_global(
         "provider_changed",
         state,
     )
+
+
+def _with_login_states(state: dict) -> dict:
+    """Attach per-record OAuth login/logout flow state so the settings UI
+    can reflect login progress without a second WS channel."""
+    providers = state.get("providers")
+    if not isinstance(providers, list):
+        return state
+    state["providers"] = [provider_auth.detach_login_state(p) for p in providers]
+    return state
 
 
 def _provider_not_suspended(provider_id: str | None, *, action: str = "use provider") -> None:
@@ -2720,6 +2732,7 @@ async def get_providers():
         asyncio.to_thread(user_prefs.get_last_models),
         asyncio.to_thread(user_prefs.get_last_reasoning_efforts),
     )
+    state = _with_login_states(state)
     for record in state.get("providers", []):
         last = last_models.get(record.get("id"))
         if last:
@@ -2801,6 +2814,45 @@ async def retry_provider_credential(provider_id: str):
     status = await asyncio.to_thread(config_store.retry_provider_credential, provider_id)
     await _broadcast_provider_changed()
     return {"credential_status": status, "has_api_key": status == "available"}
+
+
+@app.post("/api/providers/{provider_id}/login")
+async def login_provider(provider_id: str):
+    """Spawn the provider's own OAuth login against this record's isolated
+    credential dir (desktop-only — the CLI opens the OS browser). Returns
+    immediately; state transitions arrive via `provider_changed`."""
+    provider = await asyncio.to_thread(config_store.get_provider, provider_id)
+    if provider is None:
+        raise HTTPException(status_code=404, detail=t("error.provider_not_found"))
+    if not provider_auth.supports_auth(provider):
+        raise HTTPException(status_code=409, detail="Provider does not support OAuth login.")
+    result = await provider_auth.start_login(provider_id, _broadcast_provider_changed)
+    if result.get("error") == "busy":
+        raise HTTPException(status_code=409, detail="A login is already in progress.")
+    if result.get("error") == "binary_missing":
+        raise HTTPException(status_code=409, detail="Provider CLI not found.")
+    if not result.get("ok"):
+        raise HTTPException(status_code=400, detail="Login could not start.")
+    await _broadcast_provider_changed()
+    return {"login_state": result.get("state")}
+
+
+@app.post("/api/providers/{provider_id}/logout")
+async def logout_provider(provider_id: str):
+    provider = await asyncio.to_thread(config_store.get_provider, provider_id)
+    if provider is None:
+        raise HTTPException(status_code=404, detail=t("error.provider_not_found"))
+    if not provider_auth.supports_auth(provider):
+        raise HTTPException(status_code=409, detail="Provider does not support OAuth login.")
+    result = await provider_auth.start_logout(provider_id, _broadcast_provider_changed)
+    if result.get("error") == "busy":
+        raise HTTPException(status_code=409, detail="A login/logout is already in progress.")
+    if result.get("error") == "binary_missing":
+        raise HTTPException(status_code=409, detail="Provider CLI not found.")
+    if not result.get("ok"):
+        raise HTTPException(status_code=400, detail="Logout could not start.")
+    await _broadcast_provider_changed()
+    return {"login_state": result.get("state")}
 
 
 @app.delete("/api/providers/{provider_id}")
@@ -10327,7 +10379,13 @@ async def _resolve_selector_updates(session_id: str, body: dict) -> dict:
         updates["harness_profile_id"] = profile_id
         updates["harness_profile_revision"] = revision
     if "cwd" in body and isinstance(body["cwd"], str) and body["cwd"].strip():
-        updates["cwd"] = body["cwd"].strip()
+        # Fail closed, matching move-to-project: a session cwd becomes a CLI
+        # subprocess working directory, so accept only an existing directory,
+        # resolved to the same identity the project registry stores.
+        requested_cwd = os.path.realpath(os.path.expanduser(body["cwd"].strip()))
+        if not os.path.isdir(requested_cwd):
+            raise HTTPException(status_code=400, detail="cwd must be an existing directory")
+        updates["cwd"] = requested_cwd
     if requested_provider_id or "runner" in updates or "model" in updates:
         if "reasoning_effort" not in updates:
             default_effort = (profile_record or {}).get("default_reasoning_effort") or ""

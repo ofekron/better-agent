@@ -1716,6 +1716,24 @@ function ProvidersSettingsSection({
 >) {
   const { t } = useTranslation();
   const quotaStatus = useQuotaStatus(API, providers);
+  // Desktop-only OAuth login: the provider CLI opens the OS browser and
+  // binds a localhost callback, so the user's browser must share the
+  // machine with the backend. Loopback access is the accurate signal.
+  const loginEnabled =
+    typeof window !== "undefined" &&
+    ["localhost", "127.0.0.1", "::1"].includes(window.location.hostname);
+  const [loginPendingId, setLoginPendingId] = useState<string | null>(null);
+  const runLoginAction = useCallback(
+    async (p: Provider, action: "login" | "logout") => {
+      setLoginPendingId(p.id);
+      try {
+        await fetch(`${API}/api/providers/${p.id}/${action}`, { method: "POST" });
+      } finally {
+        setLoginPendingId(null);
+      }
+    },
+    [],
+  );
   return (
     <>
       {!firstRunDone && (
@@ -1759,6 +1777,14 @@ function ProvidersSettingsSection({
           const isSuspended = p.suspended === true;
           const isCredentialRetrying = p.id === credentialRetryingId;
           const credentialStatus = p.credential_status || (p.has_api_key ? "available" : "unknown");
+          const loginState = p.login_state;
+          const loginStatus = loginState?.status ?? "idle";
+          const loginActionRunning =
+            loginStatus === "login_running" ||
+            loginStatus === "logout_running" ||
+            loginPendingId === p.id;
+          const loginSupported =
+            loginEnabled && p.mode === "subscription" && (p.kind === "claude" || p.kind === "codex");
           return (
             <div key={p.id} className={`provider-row ${isActive ? "active" : ""} ${isSuspended ? "suspended" : ""} credential-${credentialStatus}`}>
               <div className="provider-row-main" onClick={() => onEdit(p)}>
@@ -1812,6 +1838,41 @@ function ProvidersSettingsSection({
                     >
                       {t('setup.apiKeyReenter')}
                     </button>
+                  </>
+                )}
+                {loginSupported && (
+                  <>
+                    {loginStatus === "login_success" ? (
+                      <button
+                        type="button"
+                        className="btn-secondary provider-login-action"
+                        disabled={busy || loginActionRunning}
+                        onClick={() => runLoginAction(p, "logout")}
+                      >
+                        {loginStatus === "logout_running" || loginPendingId === p.id
+                          ? t('setup.signingOut')
+                          : t('setup.logOut')}
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        className={`provider-login-action ${
+                          loginStatus === "login_failed" ? "btn-warning" : "btn-secondary"
+                        }`}
+                        disabled={busy || loginActionRunning}
+                        onClick={() => runLoginAction(p, "login")}
+                        title={loginStatus === "login_failed" ? loginState?.message : undefined}
+                      >
+                        {loginActionRunning && (
+                          <span className="retrying-spinner" aria-hidden="true" />
+                        )}
+                        {loginActionRunning
+                          ? t('setup.signingIn')
+                          : loginStatus === "login_failed"
+                            ? t('setup.retryLogin')
+                            : t('setup.logIn')}
+                      </button>
+                    )}
                   </>
                 )}
                 {!isActive && !isSuspended && (

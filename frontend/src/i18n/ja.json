@@ -222,6 +222,11 @@
   "setup.apiKeyBlockedReentryHint": "保存されたAPIキーにアクセスできません。置き換えるには再入力してください。",
   "setup.apiKeyReenterPlaceholder": "APIキーを再入力してください",
   "setup.setDefaultButton": "デフォルトに設定",
+  "setup.logIn": "ログイン",
+  "setup.signingIn": "ログイン中…",
+  "setup.logOut": "ログアウト",
+  "setup.signingOut": "ログアウト中…",
+  "setup.retryLogin": "ログインを再試行",
   "setup.editButton": "編集",
   "setup.deleteButton": "削除",
   "setup.addProvider": "+ プロバイダーを追加",
@@ -1252,8 +1257,45 @@
   "harnessProfile.itemHint.permissions.native_mcp": "ツールサーバーを Better Agent の外で、プロバイダー CLI に直接登録します。",
   "harnessProfile.itemHint.permissions.internal_llm_tasks": "この拡張機能が宣言したバックグラウンドタスクに Better Agent の内部モデル呼び出しを使用します。",
   "marketplaceBridge": {
-    "request": "マーケットプレイスのリクエスト", "pairHelp": "この Marketplace アカウントから Better Agent への接続を確認します。管理はウェブサイトで開始し、セキュリティ確認はここで行います。", "actionHelp": "この操作を許可する前に、ローカルで検証された詳細を確認してください。", "site": "サイト", "account": "アカウント", "device": "デバイス", "extension": "拡張機能", "publisher": "発行元", "version": "バージョン", "permissionChanges": "権限の変更", "reject": "拒否", "approve": "許可", "approving": "許可中…", "connectionFailed": "Marketplace への接続に失敗しました", "connectionTitle": "Marketplace 接続", "connection": { "connecting": "安全に接続しています", "offline": "Better Agent は Marketplace からオフラインです", "error": "接続の確認が必要です" },
-    "action": { "pair": "Marketplace を接続", "install": "拡張機能をインストール", "enable": "拡張機能を有効化", "disable": "拡張機能を無効化", "update": "拡張機能を更新", "uninstall": "拡張機能をアンインストール" },
-    "status": { "pending": "Better Agent を待機中", "leased": "Better Agent が受信しました", "awaiting_confirmation": "確認を待機中", "committing": "安全に適用中", "succeeded": "完了", "rejected": "拒否済み", "failed": "失敗", "failed_unknown": "ローカルでの確認が必要です", "expired": "期限切れ", "cancelled": "キャンセル済み" }
+    "request": "マーケットプレイスのリクエスト",
+    "pairHelp": "この Marketplace アカウントから Better Agent への接続を確認します。管理はウェブサイトで開始し、セキュリティ確認はここで行います。",
+    "actionHelp": "この操作を許可する前に、ローカルで検証された詳細を確認してください。",
+    "site": "サイト",
+    "account": "アカウント",
+    "device": "デバイス",
+    "extension": "拡張機能",
+    "publisher": "発行元",
+    "version": "バージョン",
+    "permissionChanges": "権限の変更",
+    "reject": "拒否",
+    "approve": "許可",
+    "approving": "許可中…",
+    "connectionFailed": "Marketplace への接続に失敗しました",
+    "connectionTitle": "Marketplace 接続",
+    "connection": {
+      "connecting": "安全に接続しています",
+      "offline": "Better Agent は Marketplace からオフラインです",
+      "error": "接続の確認が必要です"
+    },
+    "action": {
+      "pair": "Marketplace を接続",
+      "install": "拡張機能をインストール",
+      "enable": "拡張機能を有効化",
+      "disable": "拡張機能を無効化",
+      "update": "拡張機能を更新",
+      "uninstall": "拡張機能をアンインストール"
+    },
+    "status": {
+      "pending": "Better Agent を待機中",
+      "leased": "Better Agent が受信しました",
+      "awaiting_confirmation": "確認を待機中",
+      "committing": "安全に適用中",
+      "succeeded": "完了",
+      "rejected": "拒否済み",
+      "failed": "失敗",
+      "failed_unknown": "ローカルでの確認が必要です",
+      "expired": "期限切れ",
+      "cancelled": "キャンセル済み"
+    }
   }
 }

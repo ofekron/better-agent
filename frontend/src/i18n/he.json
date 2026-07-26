@@ -221,6 +221,11 @@
   "setup.apiKeyBlockedReentryHint": "לא ניתן לגשת למפתח ה-API השמור. הזן אותו מחדש כדי להחליף אותו.",
   "setup.apiKeyReenterPlaceholder": "הזן שוב את מפתח ה-API",
   "setup.setDefaultButton": "קבע כברירת מחדל",
+  "setup.logIn": "התחברות",
+  "setup.signingIn": "מתחבר…",
+  "setup.logOut": "התנתקות",
+  "setup.signingOut": "מתנתק…",
+  "setup.retryLogin": "נסה שוב להתחבר",
   "setup.editButton": "ערוך",
   "setup.deleteButton": "מחק",
   "setup.addProvider": "+ הוסף ספק",
@@ -1299,8 +1304,45 @@
   "harnessProfile.itemHint.permissions.native_mcp": "רישום שרתי הכלים שלה ישירות ב-CLI של הספקים, מחוץ ל-Better Agent.",
   "harnessProfile.itemHint.permissions.internal_llm_tasks": "שימוש בקריאות המודל הפנימיות של Better Agent עבור משימות הרקע שהיא מצהירה עליהן.",
   "marketplaceBridge": {
-    "request": "בקשת Marketplace", "pairHelp": "אשרו לחשבון Marketplace הזה להתחבר ל-Better Agent. הניהול מתחיל באתר; אישורי האבטחה נשארים כאן.", "actionHelp": "בדקו את הפרטים שאומתו מקומית לפני אישור הפעולה.", "site": "אתר", "account": "חשבון", "device": "מכשיר", "extension": "תוסף", "publisher": "מפרסם", "version": "גרסה", "permissionChanges": "שינויים בהרשאות", "reject": "דחייה", "approve": "אישור", "approving": "מאשר…", "connectionFailed": "החיבור ל-Marketplace נכשל", "connectionTitle": "חיבור Marketplace", "connection": { "connecting": "מתחבר באופן מאובטח", "offline": "Better Agent אינו מחובר ל-Marketplace", "error": "החיבור דורש טיפול" },
-    "action": { "pair": "חיבור Marketplace", "install": "התקנת תוסף", "enable": "הפעלת תוסף", "disable": "השבתת תוסף", "update": "עדכון תוסף", "uninstall": "הסרת תוסף" },
-    "status": { "pending": "ממתין ל-Better Agent", "leased": "התקבל ב-Better Agent", "awaiting_confirmation": "ממתין לאישורכם", "committing": "מחיל באופן מאובטח", "succeeded": "הושלם", "rejected": "נדחה", "failed": "נכשל", "failed_unknown": "נדרשת בדיקה מקומית", "expired": "פג תוקף", "cancelled": "בוטל" }
+    "request": "בקשת Marketplace",
+    "pairHelp": "אשרו לחשבון Marketplace הזה להתחבר ל-Better Agent. הניהול מתחיל באתר; אישורי האבטחה נשארים כאן.",
+    "actionHelp": "בדקו את הפרטים שאומתו מקומית לפני אישור הפעולה.",
+    "site": "אתר",
+    "account": "חשבון",
+    "device": "מכשיר",
+    "extension": "תוסף",
+    "publisher": "מפרסם",
+    "version": "גרסה",
+    "permissionChanges": "שינויים בהרשאות",
+    "reject": "דחייה",
+    "approve": "אישור",
+    "approving": "מאשר…",
+    "connectionFailed": "החיבור ל-Marketplace נכשל",
+    "connectionTitle": "חיבור Marketplace",
+    "connection": {
+      "connecting": "מתחבר באופן מאובטח",
+      "offline": "Better Agent אינו מחובר ל-Marketplace",
+      "error": "החיבור דורש טיפול"
+    },
+    "action": {
+      "pair": "חיבור Marketplace",
+      "install": "התקנת תוסף",
+      "enable": "הפעלת תוסף",
+      "disable": "השבתת תוסף",
+      "update": "עדכון תוסף",
+      "uninstall": "הסרת תוסף"
+    },
+    "status": {
+      "pending": "ממתין ל-Better Agent",
+      "leased": "התקבל ב-Better Agent",
+      "awaiting_confirmation": "ממתין לאישורכם",
+      "committing": "מחיל באופן מאובטח",
+      "succeeded": "הושלם",
+      "rejected": "נדחה",
+      "failed": "נכשל",
+      "failed_unknown": "נדרשת בדיקה מקומית",
+      "expired": "פג תוקף",
+      "cancelled": "בוטל"
+    }
   }
 }
