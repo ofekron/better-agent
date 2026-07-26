@@ -31,7 +31,7 @@ except Exception:
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from fastapi import Response
 from pathlib import Path
@@ -3576,9 +3576,11 @@ def _can_page_default_local_visible_order(
     modes: set[str],
     sources: set[str],
     content_scores: dict[str, int],
+    status_filter: bool,
 ) -> bool:
     return (
-        not (search or "").strip()
+        not status_filter
+        and not (search or "").strip()
         and not show_archived
         and file_edit_mode is None
         and not folder_ids
@@ -3650,6 +3652,7 @@ def _local_session_page_for_sidebar_preserving_order(
     modes: set[str],
     sources: set[str],
     content_scores: dict[str, int],
+    status_gate: Callable[[dict], bool] | None = None,
 ) -> tuple[list[dict], int]:
     import working_mode as _wm
     if _can_page_default_local_visible_order(
@@ -3664,6 +3667,7 @@ def _local_session_page_for_sidebar_preserving_order(
         modes=modes,
         sources=sources,
         content_scores=content_scores,
+        status_filter=status_gate is not None,
     ):
         with perf.timed("sessions.list.local.visible_order_page"):
             expected_summary_index_version = session_store.summary_index_version()
@@ -3711,6 +3715,7 @@ def _local_session_page_for_sidebar_preserving_order(
                 modes=modes,
                 sources=sources,
                 content_scores=content_scores,
+                status_gate=status_gate,
             ):
                 continue
             if offset <= total < end:
@@ -6612,13 +6617,27 @@ def _has_open_work_items(session: dict) -> bool:
     )
 
 
-def _session_status_rank(
+#: Status buckets a sidebar session can fall into, highest priority first.
+#: The single source of truth for both the status sort order (rank = reverse
+#: index) and the status include/exclude filter.
+SESSION_STATUS_KEYS: tuple[str, ...] = (
+    "error",
+    "needs_decision",
+    "unread",
+    "open_work",
+    "running",
+    "all_done",
+    "idle",
+)
+
+
+def _session_status_key(
     session: dict,
     monitoring_by_sid: dict[str, str],
     unread_by_sid: dict[str, int],
     pending_input_by_sid: dict[str, int] | None = None,
-) -> int:
-    """Status bucket for the status-sort option. Higher sorts first."""
+) -> str:
+    """Which SESSION_STATUS_KEYS bucket this session is in."""
     sid = session.get("id") or ""
     # Snapshot wins for local rows (their summary has no monitoring_state at
     # sort time); fall back to the row's own fields for remote-node rows that
@@ -6634,7 +6653,7 @@ def _session_status_rank(
     except (TypeError, ValueError):
         pending_input_count = 0
     if session.get("has_error") or session.get("unseen_error"):
-        return 6
+        return "error"
     markers = session.get("markers") or {}
     tags = {
         (m or {}).get("tag")
@@ -6646,19 +6665,35 @@ def _session_status_rank(
         or pending_input_count > 0
         or _MARKER_TAG_NEEDS_DECISION in tags
     ):
-        return 5
+        return "needs_decision"
     unread = unread_by_sid.get(sid)
     if unread is None:
         unread = session.get("unread_count", 0)
     if (unread or 0) > 0 and state not in _RUNNING_STATES:
-        return 4
+        return "unread"
     if _has_open_work_items(session):
-        return 3
+        return "open_work"
     if state in _RUNNING_STATES:
-        return 2
+        return "running"
     if _MARKER_TAG_ALL_TASKS_DONE in tags:
-        return 1
-    return 0
+        return "all_done"
+    return "idle"
+
+
+def _session_status_rank(
+    session: dict,
+    monitoring_by_sid: dict[str, str],
+    unread_by_sid: dict[str, int],
+    pending_input_by_sid: dict[str, int] | None = None,
+) -> int:
+    """Status bucket for the status-sort option. Higher sorts first."""
+    key = _session_status_key(
+        session,
+        monitoring_by_sid,
+        unread_by_sid,
+        pending_input_by_sid,
+    )
+    return len(SESSION_STATUS_KEYS) - 1 - SESSION_STATUS_KEYS.index(key)
 
 
 def _session_list_sort_key(
@@ -6697,6 +6732,42 @@ def _split_session_filter(value: str | None) -> set[str]:
     if not value:
         return set()
     return {item.strip() for item in value.split(",") if item.strip()}
+
+
+def _split_session_statuses(value: str | None) -> frozenset[str]:
+    """Parse a comma-separated status list, dropping unknown buckets."""
+    return frozenset(
+        item for item in _split_session_filter(value) if item in SESSION_STATUS_KEYS
+    )
+
+
+def _session_status_gate(
+    include: frozenset[str],
+    exclude: frozenset[str],
+    snapshot: tuple[set[str], dict[str, str], dict[str, int], dict[str, int]],
+) -> Callable[[dict], bool] | None:
+    """Predicate keeping only sessions whose status bucket is shown.
+
+    `include` empty means "every bucket"; `exclude` always wins. Returns
+    None when nothing is filtered, which every caller treats as "no status
+    filter" (and which keeps the store-order fast paths eligible).
+    """
+    if not include and not exclude:
+        return None
+    _, monitoring_by_sid, unread_by_sid, pending_input_by_sid = snapshot
+
+    def gate(session: dict) -> bool:
+        key = _session_status_key(
+            session,
+            monitoring_by_sid,
+            unread_by_sid,
+            pending_input_by_sid,
+        )
+        if key in exclude:
+            return False
+        return not include or key in include
+
+    return gate
 
 
 def _split_session_search_fields(value: str | None) -> set[str]:
@@ -6802,8 +6873,11 @@ def _session_matches_list_filters(
     modes: set[str],
     sources: set[str],
     content_scores: dict[str, int] | None = None,
+    status_gate: Callable[[dict], bool] | None = None,
 ) -> bool:
     if not show_archived and session.get("archived"):
+        return False
+    if status_gate is not None and not status_gate(session):
         return False
     if file_edit_mode is not None:
         is_file_edit_mode = session.get("working_mode") == "file_editing"
@@ -6905,6 +6979,7 @@ def _filter_sort_sessions_for_list(
     content_scores: dict[str, int],
     sort_by: str,
     status_sort: bool = False,
+    status_gate: Callable[[dict], bool] | None = None,
     state_snapshot: tuple[set[str], dict[str, str], dict[str, int], dict[str, int]] | None = None,
 ) -> list[dict]:
     out = [
@@ -6922,6 +6997,7 @@ def _filter_sort_sessions_for_list(
             modes=modes,
             sources=sources,
             content_scores=content_scores,
+            status_gate=status_gate,
         )
     ]
     # Snapshots read ONCE per request (not per-session) — the same cheap
@@ -6983,6 +7059,7 @@ def _filter_sort_page_for_list(
     content_scores: dict[str, int],
     sort_by: str,
     status_sort: bool = False,
+    status_gate: Callable[[dict], bool] | None = None,
     state_snapshot: tuple[set[str], dict[str, str], dict[str, int], dict[str, int]] | None = None,
 ) -> tuple[list[dict], int]:
     import heapq
@@ -7035,6 +7112,7 @@ def _filter_sort_page_for_list(
             modes=modes,
             sources=sources,
             content_scores=content_scores,
+            status_gate=status_gate,
         ):
             continue
         total += 1
@@ -7063,6 +7141,7 @@ def _filter_sessions_for_list_preserving_order(
     modes: set[str],
     sources: set[str],
     content_scores: dict[str, int],
+    status_gate: Callable[[dict], bool] | None = None,
 ) -> list[dict]:
     return [
         session for session in sessions
@@ -7079,6 +7158,7 @@ def _filter_sessions_for_list_preserving_order(
             modes=modes,
             sources=sources,
             content_scores=content_scores,
+            status_gate=status_gate,
         )
     ]
 
@@ -7099,6 +7179,7 @@ def _filter_page_for_list_preserving_order(
     modes: set[str],
     sources: set[str],
     content_scores: dict[str, int],
+    status_gate: Callable[[dict], bool] | None = None,
 ) -> tuple[list[dict], int]:
     page: list[dict] = []
     total = 0
@@ -7117,6 +7198,7 @@ def _filter_page_for_list_preserving_order(
             modes=modes,
             sources=sources,
             content_scores=content_scores,
+            status_gate=status_gate,
         ):
             continue
         if offset <= total < end:
@@ -7132,9 +7214,11 @@ def _can_preserve_summary_order(
     folder_view: bool,
     sort_by: str,
     status_sort: bool,
+    status_filter: bool,
 ) -> bool:
     return (
-        not search_query
+        not status_filter
+        and not search_query
         and not appended_virtual_sessions
         and not folder_view
         and sort_by in {"updated_at", "last_user_prompt_at", "last_opened_at"}
@@ -7148,9 +7232,11 @@ def _can_page_local_summary_order(
     folder_view: bool,
     sort_by: str,
     status_sort: bool,
+    status_filter: bool,
 ) -> bool:
     return (
-        not search_query
+        not status_filter
+        and not search_query
         and not folder_view
         and sort_by in {"updated_at", "last_user_prompt_at", "last_opened_at"}
         and not status_sort
@@ -7172,9 +7258,11 @@ def _can_page_default_updated_at_with_virtual(
     sources: set[str],
     sort_by: str,
     status_sort: bool,
+    status_filter: bool,
 ) -> bool:
     return (
-        not search_query
+        not status_filter
+        and not search_query
         and project_path is None
         and not show_archived
         and file_edit_mode is None
@@ -7262,10 +7350,12 @@ def _can_page_local_search_scores(
     sources: set[str],
     sort_by: str,
     status_sort: bool,
+    status_filter: bool,
     connected: tuple[str, ...],
 ) -> bool:
     return (
-        project_path is None
+        not status_filter
+        and project_path is None
         and not show_archived
         and file_edit_mode is None
         and not folder_ids
@@ -7331,6 +7421,7 @@ def _build_local_sessions_page_for_list(
     search_fields: str | None,
     sort_by: str,
     status_sort: bool = False,
+    status_gate: Callable[[dict], bool] | None = None,
 ) -> tuple[list[dict], int]:
     content_scores: dict[str, int] = {}
     state_snapshot = _sidebar_state_snapshot() if status_sort else None
@@ -7350,12 +7441,14 @@ def _build_local_sessions_page_for_list(
         sources=sources,
         sort_by=sort_by,
         status_sort=status_sort,
+        status_filter=status_gate is not None,
     )
     can_page_local_order = _can_page_local_summary_order(
         search_query=search_query,
         folder_view=folder_view,
         sort_by=sort_by,
         status_sort=status_sort,
+        status_filter=status_gate is not None,
     )
     may_include_virtual = _session_filters_may_include_virtual(
         file_edit_mode=file_edit_mode,
@@ -7381,6 +7474,7 @@ def _build_local_sessions_page_for_list(
                 modes=modes,
                 sources=sources,
                 content_scores=content_scores,
+                status_gate=status_gate,
             )
         virtual_total = 0
         if may_include_virtual and sort_by == "last_user_prompt_at":
@@ -7416,6 +7510,7 @@ def _build_local_sessions_page_for_list(
             sort_by=sort_by,
             status_sort=status_sort,
             connected=(),
+            status_filter=status_gate is not None,
         ):
             page_source, total, content_scores = _build_local_search_page_for_sidebar(
                 offset=offset,
@@ -7468,6 +7563,7 @@ def _build_local_sessions_page_for_list(
                             modes=modes,
                             sources=sources,
                             content_scores=content_scores,
+                            status_gate=status_gate,
                         )
                     virtual_limit = max(offset + limit, 1)
                     cached_virtual = virtual_session_store.list_recent_cached(
@@ -7534,6 +7630,7 @@ def _build_local_sessions_page_for_list(
                 sort_by=sort_by,
                 status_sort=status_sort,
                 state_snapshot=state_snapshot,
+                status_gate=status_gate,
             )
             with perf.timed("sessions.list.page_decorate"):
                 page = _decorate_local_sidebar_sessions(page_source, state_snapshot)
@@ -7549,6 +7646,7 @@ def _build_local_sessions_page_for_list(
             folder_view=folder_view,
             sort_by=sort_by,
             status_sort=status_sort,
+            status_filter=status_gate is not None,
         ):
             page_source, total = _filter_page_for_list_preserving_order(
                 out,
@@ -7565,6 +7663,7 @@ def _build_local_sessions_page_for_list(
                 modes=modes,
                 sources=sources,
                 content_scores=content_scores,
+                status_gate=status_gate,
             )
             with perf.timed("sessions.list.page_decorate"):
                 page = _decorate_local_sidebar_sessions(page_source, state_snapshot)
@@ -7587,6 +7686,7 @@ def _build_local_sessions_page_for_list(
                 sort_by=sort_by,
                 status_sort=status_sort,
                 state_snapshot=state_snapshot,
+                status_gate=status_gate,
             )
     total = len(out)
     end = offset + limit
@@ -7643,6 +7743,8 @@ async def get_sessions(
     sources: str | None = Query(None),
     search_fields: str | None = Query(None),
     sort_by: str | None = Query(None),
+    statuses: str | None = Query(None),
+    exclude_statuses: str | None = Query(None),
 ):
     accept_encoding = request.headers.get("accept-encoding", "")
     search_query = (search or "").strip()
@@ -7673,6 +7775,8 @@ async def get_sessions(
             else default_sort_by
         )
         effective_search_fields = _split_session_search_fields(search_fields)
+        include_statuses = _split_session_statuses(statuses)
+        exclude_statuses_set = _split_session_statuses(exclude_statuses)
         filters = {
             "offset": offset,
             "limit": limit,
@@ -7708,6 +7812,8 @@ async def get_sessions(
         tuple(sorted(effective_search_fields)),
         effective_sort_by,
         effective_status_sort,
+        tuple(sorted(include_statuses)),
+        tuple(sorted(exclude_statuses_set)),
         connected_version,
         connected,
         _remote_sessions_cache_version_snapshot() if connected else 0,
@@ -7724,6 +7830,18 @@ async def get_sessions(
         offset=offset,
         limit=limit,
     )
+    # Status buckets are derived from live snapshots, so the gate closes over
+    # ONE snapshot per request — every path classifies a session identically.
+    status_gate = (
+        _session_status_gate(
+            include_statuses,
+            exclude_statuses_set,
+            await asyncio.to_thread(_sidebar_state_snapshot),
+        )
+        if include_statuses or exclude_statuses_set
+        else None
+    )
+    filters["status_gate"] = status_gate
     if search_query and _can_page_local_search_scores(
         project_path=project_path,
         show_archived=show_archived,
@@ -7738,6 +7856,7 @@ async def get_sessions(
         sort_by=effective_sort_by,
         status_sort=effective_status_sort,
         connected=(),
+        status_filter=status_gate is not None,
     ):
         page_source, total, content_scores = await _run_session_list_hot_path(
             "sessions.list.search_local_page.worker",
@@ -7817,6 +7936,7 @@ async def get_sessions(
         folder_view=effective_folder_view,
         sort_by=effective_sort_by,
         status_sort=effective_status_sort,
+        status_filter=status_gate is not None,
     )
     may_include_virtual = _session_filters_may_include_virtual(
         file_edit_mode=file_edit_mode,
@@ -7839,6 +7959,7 @@ async def get_sessions(
         sources=filters["sources"],
         sort_by=effective_sort_by,
         status_sort=effective_status_sort,
+        status_filter=status_gate is not None,
     )
     if search_query:
         with perf.timed("sessions.list.search_scores"):
@@ -7872,6 +7993,7 @@ async def get_sessions(
                     modes=filters["modes"],
                     sources=filters["sources"],
                     content_scores=content_scores,
+                    status_gate=status_gate,
                 )
                 local_page_candidates = out
         else:
@@ -8118,6 +8240,7 @@ async def get_sessions(
                 sort_by=effective_sort_by,
                 status_sort=effective_status_sort,
                 state_snapshot=state_snapshot,
+                status_gate=status_gate,
             )
         elif _can_preserve_summary_order(
             search_query=search_query,
@@ -8125,6 +8248,7 @@ async def get_sessions(
             folder_view=effective_folder_view,
             sort_by=effective_sort_by,
             status_sort=effective_status_sort,
+            status_filter=status_gate is not None,
         ):
             out = await asyncio.to_thread(
                 _filter_sessions_for_list_preserving_order,
@@ -8140,6 +8264,7 @@ async def get_sessions(
                 modes=filters["modes"],
                 sources=filters["sources"],
                 content_scores=content_scores,
+                status_gate=status_gate,
             )
         else:
             out = await asyncio.to_thread(
@@ -8160,6 +8285,7 @@ async def get_sessions(
                 sort_by=effective_sort_by,
                 status_sort=effective_status_sort,
                 state_snapshot=state_snapshot,
+                status_gate=status_gate,
             )
     total = (
         local_total

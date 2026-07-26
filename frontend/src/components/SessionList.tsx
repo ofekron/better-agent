@@ -22,10 +22,21 @@ import { SessionStatsPopover } from "./SessionStatsPopover";
 import Icon from "./Icon";
 import { SearchInput } from "./SearchInput";
 import { TagFilterAutocomplete, type TagFilterOption } from "./TagFilterAutocomplete";
+import { FilterDisclosure, StatusFilterChips } from "./SessionFilterControls";
+import {
+  nextStatusFilters,
+  sanitizeStatusFilters,
+  statusKeysWithMode,
+  type SessionStatusFilters,
+} from "../lib/sessionStatusFilters";
+import {
+  DEFAULT_EXPANDED_FILTER_GROUPS,
+  useExpandedFilterGroups,
+} from "../hooks/useExpandedFilterGroups";
 import type { SessionListFilters } from "../hooks/useSession";
 import { useLocalStorage } from "../hooks/useLocalStorage";
 import { eventBus } from "../lib/eventBus";
-import { markSessionUnread } from "../lib/sessionRegistry";
+import { markSessionUnread, type SessionStatusKey } from "../lib/sessionRegistry";
 import { sessionMessageCount } from "src/lib/sessionMessageCount";
 import {
   SESSION_SORT_LABEL,
@@ -159,6 +170,7 @@ type PersistedSessionFilters = {
   selectedSources: SessionSource[];
   fileEditModeFilter: SessionFileEditModeFilter;
   selectedSearchFields: SessionSearchField[];
+  statusFilters: SessionStatusFilters;
 };
 
 const SESSION_FILTERS_BY_PROJECT_LS_KEY = "better-agent-session-filters-by-project";
@@ -1739,7 +1751,10 @@ export function SessionList({
   const [selectedSources, setSelectedSources] = useState<SessionSource[]>([]);
   const [fileEditModeFilter, setFileEditModeFilter] = useState<SessionFileEditModeFilter>("any");
   const [selectedSearchFields, setSelectedSearchFields] = useState<SessionSearchField[]>(SESSION_SEARCH_FIELDS);
+  const [statusFilters, setStatusFilters] = useState<SessionStatusFilters>({});
   const [orgError, setOrgError] = useState<string | null>(null);
+  const { isExpanded: isFilterGroupExpanded, toggle: toggleFilterGroup } =
+    useExpandedFilterGroups(DEFAULT_EXPANDED_FILTER_GROUPS);
 
   // Search text + advanced filters are stored per project so switching
   // projects restores that project's own filter state instead of
@@ -1762,6 +1777,7 @@ export function SessionList({
     setSelectedSources(stored?.selectedSources ?? []);
     setFileEditModeFilter(stored?.fileEditModeFilter ?? "any");
     setSelectedSearchFields(stored?.selectedSearchFields ?? SESSION_SEARCH_FIELDS);
+    setStatusFilters(sanitizeStatusFilters(stored?.statusFilters));
   }, [backendProjectPath]);
   useEffect(() => {
     const key = filtersProjectKeyRef.current;
@@ -1777,6 +1793,7 @@ export function SessionList({
       selectedSources,
       fileEditModeFilter,
       selectedSearchFields,
+      statusFilters,
     });
   }, [
     search,
@@ -1789,6 +1806,7 @@ export function SessionList({
     selectedSources,
     fileEditModeFilter,
     selectedSearchFields,
+    statusFilters,
   ]);
   // Folder view: group sessions into folders (on) vs flat list (off).
   // Persistent backend pref (`folder_view_enabled`) is the source of truth;
@@ -2066,6 +2084,9 @@ export function SessionList({
       prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id],
     );
   }, []);
+  const cycleStatusFilter = useCallback((key: SessionStatusKey) => {
+    setStatusFilters((prev) => nextStatusFilters(prev, key));
+  }, []);
   const toggleSearchField = useCallback((field: SessionSearchField) => {
     setSelectedSearchFields((prev) =>
       prev.includes(field) ? prev.filter((x) => x !== field) : [...prev, field],
@@ -2081,6 +2102,7 @@ export function SessionList({
     setSelectedSources([]);
     setFileEditModeFilter("any");
     setSelectedSearchFields(SESSION_SEARCH_FIELDS);
+    setStatusFilters({});
   }, []);
 
   useEffect(() => {
@@ -2152,7 +2174,17 @@ export function SessionList({
     const valid = new Set(modeOptions);
     return selectedModes.filter((id) => valid.has(id));
   }, [modeOptions, selectedModes]);
+  const includedStatuses = useMemo(
+    () => statusKeysWithMode(statusFilters, "include"),
+    [statusFilters],
+  );
+  const excludedStatuses = useMemo(
+    () => statusKeysWithMode(statusFilters, "exclude"),
+    [statusFilters],
+  );
+  const statusFilterCount = includedStatuses.length + excludedStatuses.length;
   const advancedFilterActive =
+    statusFilterCount > 0 ||
     showArchived ||
     selectedSearchFields.length !== SESSION_SEARCH_FIELDS.length ||
     !SESSION_SEARCH_FIELDS.every((f) => selectedSearchFields.includes(f)) ||
@@ -2197,9 +2229,13 @@ export function SessionList({
       modes: activeModes,
       sources: activeSources,
       fileEditMode: fileEditModeFilter,
+      statuses: includedStatuses,
+      excludeStatuses: excludedStatuses,
     }),
     [
       activeModelIds,
+      excludedStatuses,
+      includedStatuses,
       activeModes,
       activeProviderIds,
       activeSources,
@@ -3050,11 +3086,30 @@ export function SessionList({
         {orgPanel === "advanced" && (
           <div className="session-org-bar session-advanced-filter-bar">
             <div className="session-filter-sections">
-              <section className="session-filter-section">
-                <div className="session-filter-section-title">{t("session.globalFilters")}</div>
+              <FilterDisclosure
+                id="filters.global"
+                label={t("session.globalFilters")}
+                variant="section"
+                isExpanded={isFilterGroupExpanded}
+                onToggle={toggleFilterGroup}
+              >
                 <div className="session-filter-section-body">
-                  <div className="session-filter-group">
-                    <div className="session-filter-label">{t("session.sortBy")}</div>
+                  <FilterDisclosure
+                    id="filters.status"
+                    label={t("session.statusFilter")}
+                    hint={t("session.statusFilterHint")}
+                    activeCount={statusFilterCount}
+                    isExpanded={isFilterGroupExpanded}
+                    onToggle={toggleFilterGroup}
+                  >
+                    <StatusFilterChips value={statusFilters} onCycle={cycleStatusFilter} />
+                  </FilterDisclosure>
+                  <FilterDisclosure
+                    id="filters.sortBy"
+                    label={t("session.sortBy")}
+                    isExpanded={isFilterGroupExpanded}
+                    onToggle={toggleFilterGroup}
+                  >
                     <div className="session-tag-filter">
                       <button
                         type="button"
@@ -3081,11 +3136,15 @@ export function SessionList({
                         {t("session.sortByOpened")}
                       </button>
                     </div>
-                  </div>
-                  <div className="session-filter-group">
-                    <div className="session-filter-label" title={t("session.groupByStatusHint")}>
-                      {t("session.groupByStatus")}
-                    </div>
+                  </FilterDisclosure>
+                  <FilterDisclosure
+                    id="filters.groupByStatus"
+                    label={t("session.groupByStatus")}
+                    hint={t("session.groupByStatusHint")}
+                    activeCount={sessionStatusSort ? 1 : 0}
+                    isExpanded={isFilterGroupExpanded}
+                    onToggle={toggleFilterGroup}
+                  >
                     <div className="session-tag-filter">
                       <button
                         type="button"
@@ -3097,9 +3156,14 @@ export function SessionList({
                         {t("session.groupByStatusOn")}
                       </button>
                     </div>
-                  </div>
-                  <div className="session-filter-group">
-                    <div className="session-filter-label">{t("session.showArchived")}</div>
+                  </FilterDisclosure>
+                  <FilterDisclosure
+                    id="filters.showArchived"
+                    label={t("session.showArchived")}
+                    activeCount={showArchived ? 1 : 0}
+                    isExpanded={isFilterGroupExpanded}
+                    onToggle={toggleFilterGroup}
+                  >
                     <div className="session-tag-filter">
                       <button
                         type="button"
@@ -3110,9 +3174,14 @@ export function SessionList({
                         {showArchived ? t("session.hideArchived") : t("session.showArchived")}
                       </button>
                     </div>
-                  </div>
-                  <div className="session-filter-group">
-                    <div className="session-filter-label">{t("session.searchIn")}</div>
+                  </FilterDisclosure>
+                  <FilterDisclosure
+                    id="filters.searchIn"
+                    label={t("session.searchIn")}
+                    activeCount={selectedSearchFields.length}
+                    isExpanded={isFilterGroupExpanded}
+                    onToggle={toggleFilterGroup}
+                  >
                     <div className="session-tag-filter session-search-field-filter">
                       {SESSION_SEARCH_FIELDS_ALL.map((field) => {
                         const active = selectedSearchFields.includes(field);
@@ -3128,10 +3197,15 @@ export function SessionList({
                         );
                       })}
                     </div>
-                  </div>
+                  </FilterDisclosure>
                   {providerOptions.length > 0 && (
-                    <div className="session-filter-group">
-                      <div className="session-filter-label">{t("session.providerFilter")}</div>
+                    <FilterDisclosure
+                      id="filters.provider"
+                      label={t("session.providerFilter")}
+                      activeCount={activeProviderIds.length}
+                      isExpanded={isFilterGroupExpanded}
+                      onToggle={toggleFilterGroup}
+                    >
                       <div className="session-tag-filter">
                         {providerOptions.map((provider) => {
                           const active = selectedProviderIds.includes(provider.id);
@@ -3148,11 +3222,16 @@ export function SessionList({
                           );
                         })}
                       </div>
-                    </div>
+                    </FilterDisclosure>
                   )}
                   {modelOptions.length > 0 && (
-                    <div className="session-filter-group">
-                      <div className="session-filter-label">{t("session.modelFilter")}</div>
+                    <FilterDisclosure
+                      id="filters.model"
+                      label={t("session.modelFilter")}
+                      activeCount={activeModelIds.length}
+                      isExpanded={isFilterGroupExpanded}
+                      onToggle={toggleFilterGroup}
+                    >
                       <div className="session-tag-filter">
                         {modelOptions.map((model) => {
                           const active = selectedModelIds.includes(model);
@@ -3169,11 +3248,16 @@ export function SessionList({
                           );
                         })}
                       </div>
-                    </div>
+                    </FilterDisclosure>
                   )}
                   {modeOptions.length > 0 && (
-                    <div className="session-filter-group">
-                      <div className="session-filter-label">{t("session.modeFilter")}</div>
+                    <FilterDisclosure
+                      id="filters.mode"
+                      label={t("session.modeFilter")}
+                      activeCount={activeModes.length}
+                      isExpanded={isFilterGroupExpanded}
+                      onToggle={toggleFilterGroup}
+                    >
                       <div className="session-tag-filter">
                         {modeOptions.map((mode) => {
                           const active = selectedModes.includes(mode);
@@ -3190,11 +3274,16 @@ export function SessionList({
                           );
                         })}
                       </div>
-                    </div>
+                    </FilterDisclosure>
                   )}
                   {sourceOptions.length > 0 && (
-                    <div className="session-filter-group">
-                      <div className="session-filter-label">{t("session.sourceFilter")}</div>
+                    <FilterDisclosure
+                      id="filters.source"
+                      label={t("session.sourceFilter")}
+                      activeCount={activeSources.length}
+                      isExpanded={isFilterGroupExpanded}
+                      onToggle={toggleFilterGroup}
+                    >
                       <div className="session-tag-filter">
                         {sourceOptions.map((src) => {
                           const active = selectedSources.includes(src);
@@ -3211,10 +3300,15 @@ export function SessionList({
                           );
                         })}
                       </div>
-                    </div>
+                    </FilterDisclosure>
                   )}
-                  <div className="session-filter-group">
-                    <div className="session-filter-label">{t("session.fileEditModeFilter")}</div>
+                  <FilterDisclosure
+                    id="filters.fileEditMode"
+                    label={t("session.fileEditModeFilter")}
+                    activeCount={fileEditModeFilter === "any" ? 0 : 1}
+                    isExpanded={isFilterGroupExpanded}
+                    onToggle={toggleFilterGroup}
+                  >
                     <div className="session-tag-filter">
                       {SESSION_FILE_EDIT_MODE_FILTERS.map((value) => {
                         const active = fileEditModeFilter === value;
@@ -3231,16 +3325,26 @@ export function SessionList({
                         );
                       })}
                     </div>
-                  </div>
+                  </FilterDisclosure>
                 </div>
-              </section>
+              </FilterDisclosure>
               {(folders.length > 0 || tags.length > 0 || requirementTagOptions.length > 0) && (
-                <section className="session-filter-section">
-                  <div className="session-filter-section-title">{t("session.projectFilters")}</div>
+                <FilterDisclosure
+                  id="filters.project"
+                  label={t("session.projectFilters")}
+                  variant="section"
+                  isExpanded={isFilterGroupExpanded}
+                  onToggle={toggleFilterGroup}
+                >
                   <div className="session-filter-section-body">
                     {folders.length > 0 && (
-                      <div className="session-filter-group">
-                        <div className="session-filter-label">{t("session.folder")}</div>
+                      <FilterDisclosure
+                        id="filters.folder"
+                        label={t("session.folder")}
+                        activeCount={selectedFolderIds.length}
+                        isExpanded={isFilterGroupExpanded}
+                        onToggle={toggleFilterGroup}
+                      >
                         <div className="session-tag-filter">
                           <button
                             type="button"
@@ -3265,20 +3369,25 @@ export function SessionList({
                             );
                           })}
                         </div>
-                      </div>
+                      </FilterDisclosure>
                     )}
                     {(tags.length > 0 || requirementTagOptions.length > 0) && (
-                      <div className="session-filter-group">
-                        <div className="session-filter-label">{t("session.tags")}</div>
+                      <FilterDisclosure
+                        id="filters.tags"
+                        label={t("session.tags")}
+                        activeCount={selectedTagIds.length}
+                        isExpanded={isFilterGroupExpanded}
+                        onToggle={toggleFilterGroup}
+                      >
                         <TagFilterAutocomplete
                           options={tagFilterOptions}
                           selectedTagIds={selectedTagIds}
                           onToggle={toggleTagFilter}
                         />
-                      </div>
+                      </FilterDisclosure>
                     )}
                   </div>
-                </section>
+                </FilterDisclosure>
               )}
             </div>
             {advancedFilterActive && (

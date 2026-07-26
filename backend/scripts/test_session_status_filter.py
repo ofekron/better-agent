@@ -1,0 +1,265 @@
+"""Status include/exclude filter regression tests for the sidebar list.
+
+Locks the backend half of "select which statuses to show or filter out":
+  1. `_session_status_key` names the same buckets `_session_status_rank`
+     orders (rank stays the reverse index, so the sort is unchanged).
+  2. `_session_status_gate` semantics: include-empty means every bucket,
+     exclude always wins, and no selection at all yields no gate.
+  3. The gate reaches every filter path — `_session_matches_list_filters`
+     and each wrapper that pages/sorts through it.
+  4. Every store-order fast path refuses to page when a status filter is
+     active (those paths skip the filter funnel, so taking them would
+     silently ignore the filter).
+
+Run with:
+    cd backend && .venv/bin/python scripts/test_session_status_filter.py
+"""
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+import _test_home  # noqa: E402
+_test_home.isolate("bc_test_status_filter_")
+
+import main  # noqa: E402
+
+failures: list[str] = []
+
+
+def check(name: str, cond: bool) -> None:
+    if not cond:
+        failures.append(name)
+        print(f"FAIL {name}")
+    else:
+        print(f"ok   {name}")
+
+
+MON = {"run": "active", "blocked": "blocked_on_user"}
+UNREAD = {"new": 3}
+SNAPSHOT = (set(), MON, UNREAD, {})
+
+NO_FILTERS = dict(
+    project_path=None,
+    search=None,
+    show_archived=False,
+    file_edit_mode=None,
+    folder_ids=set(),
+    tag_ids=set(),
+    provider_ids=set(),
+    model_ids=set(),
+    modes=set(),
+    sources=set(),
+    content_scores={},
+)
+
+SESSIONS = [
+    {"id": "err", "has_error": True, "updated_at": "2026-01-05T00:00:00Z"},
+    {"id": "blocked", "updated_at": "2026-01-04T00:00:00Z"},
+    {"id": "new", "updated_at": "2026-01-03T00:00:00Z"},
+    {"id": "run", "updated_at": "2026-01-02T00:00:00Z"},
+    {"id": "quiet", "updated_at": "2026-01-01T00:00:00Z"},
+]
+
+
+def ids(rows: list[dict]) -> list[str]:
+    return [row["id"] for row in rows]
+
+
+# ── 1. keys mirror ranks ─────────────────────────────────────────────────
+def key(session: dict) -> str:
+    return main._session_status_key(session, MON, UNREAD, {})
+
+
+check("key.error", key({"id": "err", "has_error": True}) == "error")
+check("key.needs_decision", key({"id": "blocked"}) == "needs_decision")
+check("key.unread", key({"id": "new"}) == "unread")
+check("key.open_work", key({"id": "x", "current_todos": [{"status": "pending"}]}) == "open_work")
+check("key.running", key({"id": "run"}) == "running")
+check("key.all_done", key({"id": "x", "markers": {"e": {"tag": main._MARKER_TAG_ALL_TASKS_DONE}}}) == "all_done")
+check("key.idle", key({"id": "quiet"}) == "idle")
+check(
+    "key.rank_parity",
+    all(
+        main._session_status_rank(session, MON, UNREAD, {})
+        == len(main.SESSION_STATUS_KEYS) - 1 - main.SESSION_STATUS_KEYS.index(key(session))
+        for session in SESSIONS
+    ),
+)
+
+# ── 2. gate semantics ────────────────────────────────────────────────────
+check("gate.none_when_empty", main._session_status_gate(frozenset(), frozenset(), SNAPSHOT) is None)
+
+include_only = main._session_status_gate(frozenset({"error", "running"}), frozenset(), SNAPSHOT)
+check("gate.include.keeps", include_only({"id": "err", "has_error": True}) is True)
+check("gate.include.keeps_second", include_only({"id": "run"}) is True)
+check("gate.include.drops_others", include_only({"id": "quiet"}) is False)
+
+exclude_only = main._session_status_gate(frozenset(), frozenset({"idle"}), SNAPSHOT)
+check("gate.exclude.drops", exclude_only({"id": "quiet"}) is False)
+check("gate.exclude.keeps_rest", exclude_only({"id": "run"}) is True)
+
+both = main._session_status_gate(frozenset({"idle", "running"}), frozenset({"idle"}), SNAPSHOT)
+check("gate.exclude_wins", both({"id": "quiet"}) is False)
+check("gate.include_still_applies", both({"id": "run"}) is True)
+check("gate.include_excludes_unlisted", both({"id": "new"}) is False)
+
+check("split.drops_unknown", main._split_session_statuses("error,bogus,idle") == frozenset({"error", "idle"}))
+check("split.empty", main._split_session_statuses(None) == frozenset())
+
+# ── 3. the gate reaches every filter path ────────────────────────────────
+gate = main._session_status_gate(frozenset(), frozenset({"idle", "unread"}), SNAPSHOT)
+
+check(
+    "funnel.matches_list_filters",
+    main._session_matches_list_filters({"id": "quiet"}, **NO_FILTERS, status_gate=gate) is False
+    and main._session_matches_list_filters({"id": "run"}, **NO_FILTERS, status_gate=gate) is True,
+)
+
+sorted_rows = main._filter_sort_sessions_for_list(
+    list(SESSIONS),
+    project_path=None,
+    search=None,
+    show_archived=False,
+    file_edit_mode=None,
+    folder_ids=set(),
+    folder_view=False,
+    tag_ids=set(),
+    provider_ids=set(),
+    model_ids=set(),
+    modes=set(),
+    sources=set(),
+    content_scores={},
+    sort_by="updated_at",
+    status_gate=gate,
+)
+check("funnel.filter_sort_sessions", ids(sorted_rows) == ["err", "blocked", "run"])
+
+page, total = main._filter_sort_page_for_list(
+    list(SESSIONS),
+    offset=0,
+    limit=2,
+    project_path=None,
+    search=None,
+    show_archived=False,
+    file_edit_mode=None,
+    folder_ids=set(),
+    folder_view=False,
+    tag_ids=set(),
+    provider_ids=set(),
+    model_ids=set(),
+    modes=set(),
+    sources=set(),
+    content_scores={},
+    sort_by="updated_at",
+    status_gate=gate,
+)
+check("funnel.filter_sort_page.total_excludes_filtered", total == 3)
+check("funnel.filter_sort_page.page", ids(page) == ["err", "blocked"])
+
+preserved = main._filter_sessions_for_list_preserving_order(
+    list(SESSIONS), **NO_FILTERS, status_gate=gate
+)
+check("funnel.preserving_order", ids(preserved) == ["err", "blocked", "run"])
+
+page2, total2 = main._filter_page_for_list_preserving_order(
+    list(SESSIONS), offset=1, limit=2, **NO_FILTERS, status_gate=gate
+)
+check("funnel.preserving_order_page", ids(page2) == ["blocked", "run"] and total2 == 3)
+
+check(
+    "funnel.no_gate_keeps_all",
+    ids(main._filter_sessions_for_list_preserving_order(list(SESSIONS), **NO_FILTERS)) == ids(SESSIONS),
+)
+
+# ── 4. fast paths stand down while a status filter is active ─────────────
+check(
+    "fastpath.local_visible_order",
+    main._can_page_default_local_visible_order(
+        project_path=None,
+        search=None,
+        show_archived=False,
+        file_edit_mode=None,
+        folder_ids=set(),
+        tag_ids=set(),
+        provider_ids=set(),
+        model_ids=set(),
+        modes=set(),
+        sources=set(),
+        content_scores={},
+        status_filter=True,
+    )
+    is False,
+)
+check(
+    "fastpath.local_summary_order",
+    main._can_page_local_summary_order(
+        search_query="", folder_view=False, sort_by="updated_at", status_sort=False, status_filter=True
+    )
+    is False,
+)
+check(
+    "fastpath.updated_at_with_virtual",
+    main._can_page_default_updated_at_with_virtual(
+        search_query="",
+        project_path=None,
+        show_archived=False,
+        file_edit_mode=None,
+        folder_ids=set(),
+        folder_view=False,
+        tag_ids=set(),
+        provider_ids=set(),
+        model_ids=set(),
+        modes=set(),
+        sources=set(),
+        sort_by="updated_at",
+        status_sort=False,
+        status_filter=True,
+    )
+    is False,
+)
+check(
+    "fastpath.preserve_summary_order",
+    main._can_preserve_summary_order(
+        search_query="",
+        appended_virtual_sessions=False,
+        folder_view=False,
+        sort_by="updated_at",
+        status_sort=False,
+        status_filter=True,
+    )
+    is False,
+)
+check(
+    "fastpath.local_search_scores",
+    main._can_page_local_search_scores(
+        project_path=None,
+        show_archived=False,
+        file_edit_mode=None,
+        folder_ids=set(),
+        folder_view=False,
+        tag_ids=set(),
+        provider_ids=set(),
+        model_ids=set(),
+        modes=set(),
+        sources=set(),
+        sort_by="updated_at",
+        status_sort=False,
+        status_filter=True,
+        connected=(),
+    )
+    is False,
+)
+check(
+    "fastpath.still_eligible_without_status_filter",
+    main._can_page_local_summary_order(
+        search_query="", folder_view=False, sort_by="updated_at", status_sort=False, status_filter=False
+    )
+    is True,
+)
+
+if failures:
+    print(f"\nFAILED {len(failures)}: {failures}")
+    sys.exit(1)
+print("\nPASS test_session_status_filter")

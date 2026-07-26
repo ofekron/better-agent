@@ -969,11 +969,26 @@ function hasOpenWorkItems(s: StatusFields): boolean {
   );
 }
 
-/** Status bucket for a session's live or row-snapshot status fields. Higher
- * sorts first. Mirrors the backend rank exactly. */
-export function statusRankOf(s: StatusFields): number {
+/** Status buckets, highest priority first. Mirrors the backend
+ * `SESSION_STATUS_KEYS` — the shared vocabulary of the status sort (rank =
+ * reverse index) and the status include/exclude filter. */
+export const SESSION_STATUS_KEYS = [
+  "error",
+  "needs_decision",
+  "unread",
+  "open_work",
+  "running",
+  "all_done",
+  "idle",
+] as const;
+
+export type SessionStatusKey = (typeof SESSION_STATUS_KEYS)[number];
+
+/** Status bucket for a session's live or row-snapshot status fields.
+ * Mirrors the backend `_session_status_key` exactly. */
+export function statusKeyOf(s: StatusFields): SessionStatusKey {
   const state = s.monitoring_state ?? "stopped";
-  if (s.has_error) return 6;
+  if (s.has_error) return "error";
   const tags = new Set(
     Object.values(s.markers ?? {}).map((m) => m?.tag).filter(Boolean),
   );
@@ -981,12 +996,18 @@ export function statusRankOf(s: StatusFields): number {
     state === "blocked_on_user" ||
     (s.pending_user_input_count ?? 0) > 0 ||
     tags.has(MARKER_TAG_NEEDS_DECISION)
-  ) return 5;
-  if ((s.unread_count ?? 0) > 0 && !RUNNING_STATES.has(state)) return 4;
-  if (hasOpenWorkItems(s)) return 3;
-  if (RUNNING_STATES.has(state)) return 2;
-  if (tags.has(MARKER_TAG_ALL_TASKS_DONE)) return 1;
-  return 0;
+  ) return "needs_decision";
+  if ((s.unread_count ?? 0) > 0 && !RUNNING_STATES.has(state)) return "unread";
+  if (hasOpenWorkItems(s)) return "open_work";
+  if (RUNNING_STATES.has(state)) return "running";
+  if (tags.has(MARKER_TAG_ALL_TASKS_DONE)) return "all_done";
+  return "idle";
+}
+
+/** Status bucket for a session's live or row-snapshot status fields. Higher
+ * sorts first. Mirrors the backend rank exactly. */
+export function statusRankOf(s: StatusFields): number {
+  return SESSION_STATUS_KEYS.length - 1 - SESSION_STATUS_KEYS.indexOf(statusKeyOf(s));
 }
 
 /** Rank for a session row: prefer the LIVE registry entry (so it agrees with

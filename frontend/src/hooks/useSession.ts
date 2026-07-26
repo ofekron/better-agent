@@ -119,6 +119,10 @@ export type SessionListFilters = {
   modelIds?: string[];
   modes?: string[];
   sources?: string[];
+  /** Status buckets to keep; empty means every bucket. */
+  statuses?: string[];
+  /** Status buckets to drop; wins over `statuses`. */
+  excludeStatuses?: string[];
   sortBy?: string;
   /** Status-bucket grouping as the strongest sort key (below empty-new +
    * pinned). Backend-owned (pref `session_status_sort`); the value here
@@ -154,7 +158,9 @@ export function isGlobalUnfilteredFetch(f: SessionListFilters): boolean {
     !(f.providerIds?.length) &&
     !(f.modelIds?.length) &&
     !(f.modes?.length) &&
-    !(f.sources?.length)
+    !(f.sources?.length) &&
+    !(f.statuses?.length) &&
+    !(f.excludeStatuses?.length)
   );
 }
 
@@ -201,6 +207,8 @@ function sameSessionListFilters(
     sameStringList(a.modelIds, b.modelIds) &&
     sameStringList(a.modes, b.modes) &&
     sameStringList(a.sources, b.sources) &&
+    sameStringList(a.statuses, b.statuses) &&
+    sameStringList(a.excludeStatuses, b.excludeStatuses) &&
     (a.sortBy ?? "") === (b.sortBy ?? "") &&
     Boolean(a.statusSort) === Boolean(b.statusSort)
   );
@@ -1255,6 +1263,10 @@ export function useSession(authStatus?: string) {
         if (filters.modelIds?.length) params.set("model_ids", filters.modelIds.join(","));
         if (filters.modes?.length) params.set("modes", filters.modes.join(","));
         if (filters.sources?.length) params.set("sources", filters.sources.join(","));
+        if (filters.statuses?.length) params.set("statuses", filters.statuses.join(","));
+        if (filters.excludeStatuses?.length) {
+          params.set("exclude_statuses", filters.excludeStatuses.join(","));
+        }
         if (filters.sortBy) params.set("sort_by", filters.sortBy);
         const res = await fetch(`${API}/api/sessions?${params}`, {
           credentials: "include",

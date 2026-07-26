@@ -10,6 +10,17 @@ vi.mock("react-i18next", () => ({
   useTranslation: () => ({ t: (key: string) => key }),
 }));
 
+/** Filter groups inside the advanced panel are collapsed by default (each
+ * costs one title row until opened), so a chip test must open its group. */
+function openFilterGroup(label: string): void {
+  const bar = document.querySelector(".session-advanced-filter-bar");
+  expect(bar).toBeTruthy();
+  // The header's accessible name also carries the active-count badge.
+  fireEvent.click(
+    within(bar as HTMLElement).getByRole("button", { name: new RegExp(`^${label}`) }),
+  );
+}
+
 const providers: Provider[] = [
   {
     id: "codex",
@@ -313,8 +324,11 @@ describe("SessionList advanced filters", () => {
     );
 
     fireEvent.click(screen.getByRole("button", { name: "session.advancedFilterPanel" }));
+    openFilterGroup("session.providerFilter");
     fireEvent.click(screen.getByRole("button", { name: "Codex" }));
+    openFilterGroup("session.modelFilter");
     fireEvent.click(screen.getByRole("button", { name: "gpt-5-codex" }));
+    openFilterGroup("session.modeFilter");
     fireEvent.click(screen.getByRole("button", { name: "session.native" }));
 
     await waitFor(() =>
@@ -340,6 +354,43 @@ describe("SessionList advanced filters", () => {
     );
   });
 
+  it("sends status show/hide selections to backend filters", async () => {
+    const onBackendFiltersChange = vi.fn();
+    renderList([makeSession({ id: "a", name: "Alpha" })], { onBackendFiltersChange });
+
+    fireEvent.click(screen.getByRole("button", { name: "session.advancedFilterPanel" }));
+    openFilterGroup("session.statusFilter");
+
+    // First click shows only that bucket…
+    fireEvent.click(screen.getByRole("button", { name: "session.status.running" }));
+    await waitFor(() =>
+      expect(onBackendFiltersChange).toHaveBeenLastCalledWith(
+        expect.objectContaining({ statuses: ["running"], excludeStatuses: [] }),
+      ),
+    );
+
+    // …a second click flips it to hidden…
+    fireEvent.click(screen.getByRole("button", { name: "session.status.running" }));
+    await waitFor(() =>
+      expect(onBackendFiltersChange).toHaveBeenLastCalledWith(
+        expect.objectContaining({ statuses: [], excludeStatuses: ["running"] }),
+      ),
+    );
+
+    // …and the header announces the active count without being opened.
+    const header = within(
+      document.querySelector(".session-advanced-filter-bar") as HTMLElement,
+    ).getByRole("button", { name: /session\.statusFilter/ });
+    expect(header.querySelector(".session-group-count")?.textContent).toBe("1");
+
+    fireEvent.click(screen.getByRole("button", { name: "session.clearFilters" }));
+    await waitFor(() =>
+      expect(onBackendFiltersChange).toHaveBeenLastCalledWith(
+        expect.objectContaining({ statuses: [], excludeStatuses: [] }),
+      ),
+    );
+  });
+
   it("sends source/user-awareness chips to backend filters", async () => {
     const onBackendFiltersChange = vi.fn();
     renderList(
@@ -351,6 +402,7 @@ describe("SessionList advanced filters", () => {
     );
 
     fireEvent.click(screen.getByRole("button", { name: "session.advancedFilterPanel" }));
+    openFilterGroup("session.sourceFilter");
     fireEvent.click(screen.getByRole("button", { name: "session.source.user" }));
     fireEvent.click(screen.getByRole("button", { name: "session.source.internal" }));
 
@@ -384,6 +436,7 @@ describe("SessionList advanced filters", () => {
     );
 
     fireEvent.click(screen.getByRole("button", { name: "session.advancedFilterPanel" }));
+    openFilterGroup("session.fileEditModeFilter");
     fireEvent.click(screen.getByRole("button", { name: "session.fileEditMode.yes" }));
 
     await waitFor(() =>
@@ -418,6 +471,7 @@ describe("SessionList advanced filters", () => {
     );
 
     fireEvent.click(screen.getByRole("button", { name: "session.advancedFilterPanel" }));
+    openFilterGroup("session.fileEditModeFilter");
     fireEvent.click(screen.getByRole("button", { name: "session.fileEditMode.yes" }));
     await waitFor(() =>
       expect(onBackendFiltersChange).toHaveBeenLastCalledWith(
@@ -653,6 +707,7 @@ describe("SessionList advanced filters", () => {
     );
 
     fireEvent.click(screen.getByRole("button", { name: "session.advancedFilterPanel" }));
+    openFilterGroup("session.providerFilter");
     fireEvent.click(screen.getByRole("button", { name: "deleted-provider" }));
 
     await waitFor(() =>
@@ -738,6 +793,7 @@ describe("SessionList advanced filters", () => {
     fireEvent.click(screen.getByRole("button", { name: "Client" }));
 
     fireEvent.click(screen.getByRole("button", { name: "session.advancedFilterPanel" }));
+    openFilterGroup("session.folder");
     await waitFor(() => expect(screen.getAllByRole("button", { name: "Client" }).length).toBeGreaterThan(0));
     const folderFilterChip = screen
       .getAllByRole("button", { name: "Client" })

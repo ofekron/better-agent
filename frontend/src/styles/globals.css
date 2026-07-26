@@ -1289,6 +1289,96 @@ body {
   align-self: flex-start;
 }
 
+/* Collapsible filter titles: every filter costs one header row until opened,
+   so the panel stays compact. The header doubles as the active-count readout
+   so a collapsed filter never hides that it is narrowing the list. */
+.session-filter-disclosure-head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  width: 100%;
+  min-width: 0;
+  padding: 2px 0;
+  border: 0;
+  background: none;
+  text-align: start;
+  cursor: pointer;
+}
+
+.session-filter-disclosure-head:hover .session-filter-disclosure-label {
+  color: var(--text-primary);
+}
+
+.session-filter-disclosure-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-filter-disclosure-chevron {
+  flex-shrink: 0;
+  transition: transform 140ms ease;
+}
+
+.session-filter-disclosure-body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  animation: session-filter-disclosure-open 160ms ease;
+}
+
+@keyframes session-filter-disclosure-open {
+  from {
+    opacity: 0;
+    transform: translateY(-3px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .session-filter-disclosure-body {
+    animation: none;
+  }
+  .session-filter-disclosure-chevron {
+    transition: none;
+  }
+}
+
+.session-status-filter {
+  gap: 4px;
+}
+
+.session-status-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.session-status-toggle-mark {
+  flex-shrink: 0;
+  opacity: 0.75;
+}
+
+.session-status-toggle.neutral .session-status-toggle-mark {
+  opacity: 0.35;
+}
+
+/* Excluded buckets read as struck-out so "hide these" is visually distinct
+   from "show only these" without a second control. */
+.session-status-toggle.exclude {
+  border-color: var(--danger, #f85149);
+  color: var(--danger, #f85149);
+}
+
+.session-status-toggle.exclude span {
+  text-decoration: line-through;
+}
+
 .session-search-field-filter {
   gap: 4px;
 }
