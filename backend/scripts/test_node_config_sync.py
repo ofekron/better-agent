@@ -182,6 +182,31 @@ def test_notify_from_worker_thread_reaches_the_bound_loop() -> None:
     asyncio.run(scenario())
 
 
+def test_bind_loop_off_loop_never_raises() -> None:
+    """main.py wires the listener at import time, where no loop is running.
+
+    A raising bind_loop there aborted the whole machine-node wiring block, so
+    the connect listener was never registered and nodes silently stopped
+    receiving any config.
+    """
+    node_config_sync._loop = None
+    node_config_sync.bind_loop()  # module scope: no running loop
+    if node_config_sync._loop is not None:
+        raise AssertionError("bind_loop bound a loop that was not running")
+
+
+def test_connect_listener_binds_the_loop_itself() -> None:
+    async def scenario() -> None:
+        rec = _Recorder([_worker("w1")])
+        rec.install()
+        node_config_sync._loop = None
+        await node_config_sync.on_node_state("w1", "connected")
+        if node_config_sync._loop is None:
+            raise AssertionError("connect listener did not self-bind the loop")
+
+    asyncio.run(scenario())
+
+
 def test_unknown_surface_is_rejected() -> None:
     rec = _Recorder([_worker("w1")])
     rec.install()
@@ -199,5 +224,7 @@ if __name__ == "__main__":
     test_failed_push_does_not_wedge_next_notify()
     test_one_broken_exporter_does_not_block_other_surfaces()
     test_notify_from_worker_thread_reaches_the_bound_loop()
+    test_bind_loop_off_loop_never_raises()
+    test_connect_listener_binds_the_loop_itself()
     test_unknown_surface_is_rejected()
     print("node_config_sync tests passed")

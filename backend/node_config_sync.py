@@ -79,10 +79,18 @@ def bind_loop(loop: asyncio.AbstractEventLoop | None = None) -> None:
     """Record the main loop so `notify_changed` works from worker threads.
 
     Store mutations run under `asyncio.to_thread`, so the publisher often has
-    no running loop of its own.
+    no running loop of its own. Binding is self-service: every on-loop entry
+    point calls this, so there is no import-time ordering to get wrong (an
+    import-time bind would raise `no running event loop` and take its caller
+    down with it).
     """
     global _loop
-    _loop = loop or asyncio.get_running_loop()
+    if loop is None:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+    _loop = loop
 
 
 def _snapshot_nodes() -> list[dict]:
@@ -140,6 +148,7 @@ def notify_changed(surface_name: str) -> None:
 
 def _schedule_push(loop: asyncio.AbstractEventLoop) -> None:
     global _push_task
+    bind_loop(loop)
     if _push_task is None or _push_task.done():
         _push_task = loop.create_task(_push_until_clean(), name="node-config-sync-push")
 
@@ -177,6 +186,7 @@ async def _push_until_clean() -> None:
 
 async def on_node_state(node_id: str, state: str) -> None:
     """node_store listener: project every surface onto a worker on connect."""
+    bind_loop()
     if state != "connected" or node_id == "primary":
         return
     try:

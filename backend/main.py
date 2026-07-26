@@ -2197,7 +2197,6 @@ if (
         # A (re)connecting worker gets the current extension, provider, and
         # harness state pushed so it never runs a stale projection after
         # downtime.
-        node_config_sync.bind_loop()
         node_store.add_listener(node_config_sync.on_node_state)
         import run_recovery as _run_recovery_mod
         _run_recovery_mod.set_remote_recovery_coordinator(coordinator)
@@ -9727,8 +9726,7 @@ async def create_session(body: Any = Body(default=None)):
     browser_harness_headless = bool(
         (_browser_harness_instance or {}).get("headless", {}).get("resolved", False)
     )
-    session = await asyncio.to_thread(
-        session_manager.create,
+    create_kwargs = dict(
         name=body.get("name", ""),
         model=model,
         cwd=body.get("cwd", ""),
@@ -9752,6 +9750,19 @@ async def create_session(body: Any = Body(default=None)):
         preset=requested_preset,
         id=client_session_id,
     )
+    try:
+        session = await asyncio.to_thread(session_manager.create, **create_kwargs)
+    except ValueError:
+        # Idempotent retry: a concurrent request carrying the same
+        # client_session_id won the create between our pre-check and this
+        # call. Return that session instead of failing the retry, which the
+        # client would classify as retryable and replay again.
+        if client_session_id is None:
+            raise
+        existing = await asyncio.to_thread(session_manager.get, client_session_id)
+        if existing is None:
+            raise
+        return existing
     backend_url = body.get("backend_url")
     if isinstance(backend_url, str) and (
         backend_url.startswith("http://127.0.0.1:")
