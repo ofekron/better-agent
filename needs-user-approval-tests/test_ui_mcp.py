@@ -16,6 +16,7 @@ No model text is parsed anywhere.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import urllib.error
 import urllib.request
@@ -56,8 +57,17 @@ async def _open_file_panel(vendor, backend, cwd):
         )
 
 
+import auth
+
+_TOKEN = auth.create_token("test-user")
+
+
 def _get(url: str) -> dict:
-    request = urllib.request.Request(url, method="GET")
+    request = urllib.request.Request(
+        url,
+        headers={"Authorization": f"Bearer {_TOKEN}"},
+        method="GET",
+    )
     with urllib.request.urlopen(request, timeout=10.0) as response:
         return json.loads(response.read() or b"{}")
 
@@ -66,7 +76,10 @@ def _post(url: str, payload: dict) -> dict:
     request = urllib.request.Request(
         url,
         data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {_TOKEN}",
+        },
         method="POST",
     )
     with urllib.request.urlopen(request, timeout=15.0) as response:
@@ -131,13 +144,27 @@ async def _ask_case(vendor, backend, cwd, *, tool: str, prompt: str):
     responder = asyncio.create_task(
         _respond_to_first_ask(backend, sid, deadline_s=240.0)
     )
+    turn_error: BaseException | None = None
     try:
         await backend.run_turn(vendor, sid=sid, prompt=prompt, cwd=str(cwd))
-    finally:
-        if not responder.done():
-            responder.cancel()
+    except BaseException as exc:  # noqa: BLE001 — re-raised below, after cleanup
+        turn_error = exc
 
-    record = await responder
+    if not responder.done():
+        # The turn ended without the agent ever asking, so nothing will answer
+        # the responder. Cancelling it must not become the reported failure.
+        responder.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await responder
+        if turn_error is not None:
+            raise turn_error
+        raise AssertionError(
+            f"{tool}: the turn completed without the agent calling the tool"
+        )
+
+    record = responder.result()
+    if turn_error is not None:
+        raise turn_error
     request_id = str(record.get("request_id") or "")
     stored = user_input_store.get_request(request_id)
     if not stored:

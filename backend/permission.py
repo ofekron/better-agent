@@ -18,6 +18,7 @@ OPENAI_PERMISSION_MODES = ("default", "bypassPermissions")
 PI_PERMISSION_MODES = ("yolo", "plan")
 CURSOR_PERMISSION_MODES = ("default", "force")
 AMP_PERMISSION_MODES = ("default", "dangerously-allow-all")
+AGY_PERMISSION_MODES = ("default", "dangerously-skip-permissions")
 OPENCODE_PERMISSION_MODES = ("default", "auto", "readonly")
 
 # Per-kind axis → allowed values. Order is the UI display order.
@@ -30,6 +31,7 @@ _AXES: dict[str, dict[str, tuple[str, ...]]] = {
     "qwen": {"mode": GEMINI_APPROVAL_MODES},
     "cursor": {"mode": CURSOR_PERMISSION_MODES},
     "amp": {"mode": AMP_PERMISSION_MODES},
+    "agy": {"mode": AGY_PERMISSION_MODES},
     "opencode": {"mode": OPENCODE_PERMISSION_MODES},
 }
 
@@ -44,8 +46,17 @@ DEFAULT_PERMISSION: dict[str, dict[str, str]] = {
     "qwen": {"mode": "yolo"},
     "cursor": {"mode": "force"},
     "amp": {"mode": "dangerously-allow-all"},
+    # Antigravity runs headless, where the CLI cannot prompt: without this it
+    # auto-denies every tool call, including every built-in MCP tool.
+    "agy": {"mode": "dangerously-skip-permissions"},
     "opencode": {"mode": "auto"},
 }
+
+# Fugu drives the codex binary through the codex runner, so it takes codex's
+# axes and defaults by reference. Without an entry it resolves to an empty
+# permission and the runner — which fails closed — denies every tool.
+_AXES["fugu"] = _AXES["codex"]
+DEFAULT_PERMISSION["fugu"] = DEFAULT_PERMISSION["codex"]
 
 
 def permission_axes_for_kind(kind: str) -> dict[str, tuple[str, ...]]:

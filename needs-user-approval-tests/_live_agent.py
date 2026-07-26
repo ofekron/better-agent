@@ -62,11 +62,18 @@ class Vendor:
 
     `model` must be a literal member of that provider's catalog — several
     providers validate `model` by exact membership and raise otherwise.
+
+    `mode` is the provider auth mode. It is not cosmetic: `config_store`
+    rejects a gemini or openai provider created in subscription mode outright,
+    so those kinds only exist here as api-key providers and are skipped when
+    the key is absent.
     """
 
     kind: str
     cli: str | None
     model: str
+    mode: str = "subscription"
+    api_key_env: str | None = None
 
     @property
     def runner_module(self) -> str | None:
@@ -82,12 +89,20 @@ class Vendor:
 
         return cli_paths.resolve_cli_binary(self.cli)
 
+    def api_key(self) -> str:
+        if not self.api_key_env:
+            return ""
+        return os.environ.get(self.api_key_env, "").strip()
+
 
 VENDORS: tuple[Vendor, ...] = (
     Vendor("claude", "claude", "claude-haiku-4-5-20251001"),
     Vendor("codex", "codex", "gpt-5.4-mini"),
-    Vendor("gemini", "gemini", "gemini-2.5-flash-lite"),
-    Vendor("agy", "agy", "Gemini 3.5 Flash (Low)"),
+    # Gemini CLI subscription auth is no longer supported; Antigravity is the
+    # replacement path for the same models, so `agy` carries the Gemini
+    # coverage and this row only runs when an API key is supplied.
+    Vendor("gemini", "gemini", "gemini-2.5-flash-lite", "api_key", "GEMINI_API_KEY"),
+    Vendor("agy", "agy", "gemini-3.5-flash-medium"),
     Vendor("fugu", "codex", "fugu"),
     Vendor("copilot", "copilot", "gpt-5-mini"),
     Vendor("cursor", "cursor-agent", "composer-1"),
@@ -276,13 +291,22 @@ class LiveBackend:
         self._server: Any = None
         self._thread: threading.Thread | None = None
         self._provider_ids: dict[str, str] = {}
+        self._instances: list[Any] = []
 
     @property
     def url(self) -> str:
         return f"http://127.0.0.1:{self.port}"
 
     def start(self) -> None:
+        import logging
+
         import uvicorn
+
+        # The backend's INFO-level perf rollups drown the case results, which
+        # are the only output this suite exists to produce.
+        logging.getLogger().setLevel(logging.WARNING)
+        for name in ("perf", "uvicorn", "uvicorn.error", "uvicorn.access"):
+            logging.getLogger(name).setLevel(logging.WARNING)
 
         import main
 
@@ -301,6 +325,14 @@ class LiveBackend:
         _wait_for_server(f"{self.url}/api/auth/needs_setup")
 
     def stop(self) -> None:
+        # Cancel before the server goes down: a CLI still mid-turn would
+        # otherwise survive the suite and keep spending.
+        for instance in self._instances:
+            try:
+                instance.cancel_all()
+            except Exception:  # noqa: BLE001 — teardown must not mask results
+                pass
+        self._instances.clear()
         if self._server is not None:
             self._server.should_exit = True
         if self._thread is not None:
@@ -325,12 +357,20 @@ class LiveBackend:
             return cached
         import config_store
 
-        record = config_store.add_provider({
+        payload = {
             "name": f"live-{vendor.kind}",
             "kind": vendor.kind,
-            "mode": "subscription",
+            "mode": vendor.mode,
             "default_model": vendor.model,
-        })
+        }
+        if vendor.mode == "api_key":
+            key = vendor.api_key()
+            if not key:
+                raise Skip(
+                    f"{vendor.kind} needs an api key; set {vendor.api_key_env}"
+                )
+            payload["api_key"] = key
+        record = config_store.add_provider(payload)
         self._provider_ids[vendor.kind] = record["id"]
         return record["id"]
 
@@ -368,6 +408,7 @@ class LiveBackend:
         provider_cls = provider_module._resolve_class(vendor.kind)
         record = config_store.get_provider(self.provider_id(vendor))
         instance = provider_cls(record)
+        self._instances.append(instance)
         run_id = f"live-{vendor.kind}-{uuid.uuid4().hex[:12]}"
         queue: asyncio.Queue = asyncio.Queue()
         instance.start_run(
@@ -408,6 +449,11 @@ class LiveBackend:
                         f"run_dir={run_dir}"
                     )
                 return complete
+
+        # An agent that blew the deadline is still running, and some CLIs are
+        # spawned with a multi-hour print timeout. Leaving it alive would burn
+        # quota for the rest of the suite and outlive the process entirely.
+        instance.cancel_run(run_id)
         raise AssertionError(
             f"{vendor.kind}: no complete within {timeout_s}s; events={seen} "
             f"run_dir={run_dir}"

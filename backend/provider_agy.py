@@ -155,6 +155,13 @@ class AgyProvider(GeminiProvider):
         _bare = bool(session_record.get("bare_config")) or bool(
             (resolved_harness_run_config or {}).get("bare_config")
         )
+        from permission import resolve_for_run as _resolve_perm
+        _permission = _resolve_perm(
+            sess_rec=session_record,
+            worker_sess_rec=worker_record,
+            is_worker=bool(worker_agent_session_id),
+            fallback_kind=self.KIND,
+        )
         input_payload = {
             "prompt": prompt,
             "images": images or [],
@@ -176,6 +183,7 @@ class AgyProvider(GeminiProvider):
             "browser_harness_enabled": bool(browser_harness_enabled),
             "user_facing": bool(user_facing),
             "worker_agent_session_id": worker_agent_session_id,
+            "permission": _permission,
             "bare_config": _bare,
             "working_mode": session_record.get("working_mode"),
             "worker_working_mode": (worker_record or {}).get("working_mode"),

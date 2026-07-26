@@ -35,9 +35,16 @@ REPO_ROOT = HERE.parent
 BACKEND = REPO_ROOT / "backend"
 SCRIPTS = BACKEND / "scripts"
 
-for path in (str(BACKEND), str(SCRIPTS), str(HERE)):
+# The bundled sdk is what the runners put on PYTHONPATH when they launch a
+# stdio MCP server; the backend itself imports from it too.
+SDK = REPO_ROOT / "sdk"
+
+for path in (str(BACKEND), str(SCRIPTS), str(SDK), str(HERE)):
     if path not in sys.path:
         sys.path.insert(0, path)
+os.environ["PYTHONPATH"] = os.pathsep.join(
+    [str(SDK), *([os.environ["PYTHONPATH"]] if os.environ.get("PYTHONPATH") else [])]
+)
 
 CASE_MODULES = (
     "test_ui_mcp",
@@ -138,7 +145,9 @@ async def _run(home: Path) -> int:
             except _live_agent.Skip as skip:
                 skipped.append((case.name, str(skip)))
                 print(f"SKIP {case.name}: {skip}")
-            except Exception:
+            except KeyboardInterrupt:
+                raise
+            except BaseException:  # noqa: BLE001 — one case must never abort a paid run
                 failed.append((case.name, traceback.format_exc()))
                 print(f"FAIL {case.name}")
             else:

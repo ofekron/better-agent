@@ -283,6 +283,12 @@ def _materialize_agy_run_home(
     settings = _load_json_object(real_cli / "settings.json")
     if mcp_servers:
         settings["mcpServers"] = mcp_servers
+        config_dir = overlay_home / ".gemini" / "config"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        (config_dir / "mcp_config.json").write_text(
+            json.dumps({"mcpServers": mcp_servers}, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
     if skills or ext_count:
         settings["skills"] = {"enabled": True}
     if settings:
@@ -295,6 +301,20 @@ def _materialize_agy_run_home(
         write_skill_tree(overlay_cli / "builtin" / "skills", skills)
         write_skill_tree(overlay_home / ".agents" / "skills", skills)
     return {"HOME": str(overlay_home)}
+
+
+def permission_argv(permission: Optional[dict]) -> list[str]:
+    """Fail closed: `--dangerously-skip-permissions` is added ONLY when the
+    resolved permission explicitly asks for full permission. Anything else runs
+    without the flag.
+
+    Antigravity runs headless and cannot prompt, so without the flag the CLI
+    auto-denies every tool that needs permission — including every built-in MCP
+    tool — and the turn completes having done nothing."""
+    mode = (permission or {}).get("mode") if isinstance(permission, dict) else None
+    if mode in ("dangerously-skip-permissions", "bypassPermissions", "yolo"):
+        return ["--dangerously-skip-permissions"]
+    return []
 
 
 def _prepend_capability_context(prompt: str, inputs: dict) -> str:
@@ -1263,6 +1283,7 @@ async def _run(run_dir: Path, inputs: dict[str, Any]) -> int:
         argv += ["--model", model]
     if resume_session_id:
         argv += ["--conversation", resume_session_id]
+    argv += permission_argv(inputs.get("permission"))
     argv += ["--add-dir", cwd, "--print-timeout", "24h"]
     if attachment_dir:
         argv += ["--add-dir", str(attachment_dir)]
