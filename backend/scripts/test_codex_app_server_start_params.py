@@ -189,6 +189,38 @@ def test_resume_dynamic_tools_use_only_missing_rollout_tools() -> None:
     assert malformed_error == runner_codex.CODEX_RESUME_CAPABILITY_METADATA_UNAVAILABLE
 
 
+def test_resume_ignores_codex_added_rollout_fields() -> None:
+    desired = [{"name": "mssg", "description": "Send", "inputSchema": {"type": "object"}}]
+    with tempfile.TemporaryDirectory() as tmp:
+        rollout = Path(tmp) / "rollout.jsonl"
+        rollout.write_text(
+            json.dumps({
+                "type": "session_meta",
+                "payload": {"dynamic_tools": [desired[0] | {"deferLoading": False}]},
+            }) + "\n",
+            encoding="utf-8",
+        )
+        unchanged, unchanged_error = runner_codex._dynamic_tools_missing_from_rollout(
+            rollout, desired,
+        )
+
+        rollout.write_text(
+            json.dumps({
+                "type": "session_meta",
+                "payload": {"dynamic_tools": [{"name": "mssg", "deferLoading": False}]},
+            }) + "\n",
+            encoding="utf-8",
+        )
+        dropped, dropped_error = runner_codex._dynamic_tools_missing_from_rollout(
+            rollout, desired,
+        )
+
+    assert unchanged == []
+    assert unchanged_error is None
+    assert dropped == []
+    assert dropped_error == runner_codex.CODEX_RESUME_CAPABILITY_CONTRACT_CHANGED
+
+
 async def test_app_server_passes_config_overrides_before_subcommand() -> None:
     _clients, argv = await _record_start_app_server(
         session_id=None,
@@ -282,4 +314,5 @@ if __name__ == "__main__":
     asyncio.run(test_app_server_start_registers_dynamic_tools())
     asyncio.run(test_app_server_passes_config_overrides_before_subcommand())
     test_resume_dynamic_tools_use_only_missing_rollout_tools()
+    test_resume_ignores_codex_added_rollout_fields()
     test_codex_config_overrides_preserve_mcp_tool_timeout()

@@ -193,8 +193,8 @@ CODEX_RESUME_CAPABILITY_METADATA_UNAVAILABLE = (
 CODEX_RESUME_CAPABILITY_CONTRACT_CHANGED = "codex_resume_capability_contract_changed"
 
 
-def _dynamic_tool_contracts_from_rollout(path: Path) -> Optional[dict[str, str]]:
-    contracts: dict[str, str] = {}
+def _dynamic_tool_contracts_from_rollout(path: Path) -> Optional[dict[str, dict]]:
+    contracts: dict[str, dict] = {}
     try:
         with path.open(encoding="utf-8") as stream:
             for line in stream:
@@ -215,10 +215,7 @@ def _dynamic_tool_contracts_from_rollout(path: Path) -> Optional[dict[str, str]]
                     name = str(tool.get("name") or "").strip()
                     if not name or name in contracts:
                         return None
-                    try:
-                        contracts[name] = json.dumps(tool, sort_keys=True, separators=(",", ":"))
-                    except (TypeError, ValueError):
-                        return None
+                    contracts[name] = tool
                 return contracts
     except (OSError, json.JSONDecodeError):
         return None
@@ -243,15 +240,22 @@ def _dynamic_tools_missing_from_rollout(
         name = str(tool.get("name") or "").strip()
         if not name:
             continue
-        try:
-            contract = json.dumps(tool, sort_keys=True, separators=(",", ":"))
-        except (TypeError, ValueError):
-            return [], CODEX_RESUME_CAPABILITY_CONTRACT_CHANGED
-        persisted_contract = persisted_contracts.get(name)
-        if persisted_contract is None:
+        persisted = persisted_contracts.get(name)
+        if persisted is None:
             missing.append(tool)
             continue
-        if persisted_contract != contract:
+        try:
+            requested = json.dumps(tool, sort_keys=True, separators=(",", ":"))
+            # Codex re-serializes the tool with its own defaults (e.g. deferLoading);
+            # only the fields we actually requested define the capability contract.
+            projected = json.dumps(
+                {key: persisted[key] for key in tool if key in persisted},
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        except (TypeError, ValueError):
+            return [], CODEX_RESUME_CAPABILITY_CONTRACT_CHANGED
+        if projected != requested:
             return [], CODEX_RESUME_CAPABILITY_CONTRACT_CHANGED
     return missing, None
 
