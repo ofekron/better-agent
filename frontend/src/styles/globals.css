@@ -1578,6 +1578,7 @@ body {
 .session-item {
   padding: 8px 8px 28px;   /* bottom padding reserves space for the action row */
   padding-inline-start: 34px;
+  padding-inline-end: 56px;
   border-radius: 6px;
   cursor: pointer;
   position: relative;
@@ -1672,6 +1673,13 @@ body {
   color: var(--text-muted);
   margin-top: 3px;
   line-height: 1.4;
+}
+
+.session-item-date-meta {
+  padding-inline-end: min(188px, 58%);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .session-team-summary {
@@ -16222,6 +16230,30 @@ button.progress-inflight {
   .fork-tab {
     min-width: 44px;
     min-height: 44px;
+  }
+
+  .session-item-actions,
+  .session-item-worker-eligible {
+    display: none !important;
+  }
+
+  .session-item-menu {
+    display: block;
+  }
+
+  .session-item-pin {
+    inset-inline-end: 52px;
+    opacity: 1;
+  }
+
+  .session-item {
+    padding-block: 8px;
+    padding-inline-start: 34px;
+    padding-inline-end: 100px;
+  }
+
+  .session-item-date-meta {
+    padding-inline-end: 0;
   }
 
   .right-panel-tabs {

@@ -25,6 +25,7 @@ in commit "v8 snapshot: drop msg.events from disk" so both
 session_manager → main` import cycle.
 """
 
+import bisect
 import hashlib
 import json
 import logging
@@ -138,28 +139,37 @@ def _bracket_orphan_rows(
     by_msg_id: dict[str, list[dict]],
     orphan_raw: list[dict],
 ) -> dict[str, list[dict]]:
-    msg_boundaries: list[tuple[str, int, Optional[int]]] = []
-    for idx, (ai, message) in enumerate(assistant_msgs):
+    """Assign each unowned journal row to exactly one assistant message:
+    the message that most recently wrote a NAMED row before it in journal
+    order (journal locality — an orphan appended right after message X's
+    rows belongs with X).
+
+    The previous floor/ceil window scheme assumed each message's named
+    seqs form a monotonically increasing block. A history backfill
+    appends old messages' rows at the journal tail, which inverted the
+    windows (floor > ceil → orphan silently dropped), made the LAST
+    message's open window swallow all trailing history, and could attach
+    one orphan to several messages when windows overlapped.
+    """
+    if not assistant_msgs or not orphan_raw:
+        return {}
+    named_index: list[tuple[int, str]] = []
+    for _ai, message in assistant_msgs:
         msg_id = message["id"]
-        named = by_msg_id.get(msg_id, [])
-        floor_seq = max(row.get("seq", 0) for row in named) if named else 0
-        if idx + 1 < len(assistant_msgs):
-            next_id = assistant_msgs[idx + 1][1]["id"]
-            next_named = by_msg_id.get(next_id, [])
-            ceil_seq = next_named[0].get("seq") if next_named else None
-        else:
-            ceil_seq = None
-        msg_boundaries.append((msg_id, floor_seq, ceil_seq))
+        for row in by_msg_id.get(msg_id, []):
+            named_index.append((int(row.get("seq") or 0), msg_id))
+    first_msg_id = assistant_msgs[0][1]["id"]
+    if not named_index:
+        return {first_msg_id: list(orphan_raw)}
+    named_index.sort(key=lambda pair: pair[0])
+    seqs = [seq for seq, _mid in named_index]
 
     out: dict[str, list[dict]] = {}
-    for msg_id, floor_seq, ceil_seq in msg_boundaries:
-        for row in orphan_raw:
-            raw_seq = row.get("seq", 0)
-            if raw_seq <= floor_seq:
-                continue
-            if ceil_seq is not None and raw_seq >= ceil_seq:
-                continue
-            out.setdefault(msg_id, []).append(row)
+    for row in orphan_raw:
+        raw_seq = int(row.get("seq") or 0)
+        pos = bisect.bisect_left(seqs, raw_seq)
+        owner = named_index[pos - 1][1] if pos > 0 else first_msg_id
+        out.setdefault(owner, []).append(row)
     return out
 
 

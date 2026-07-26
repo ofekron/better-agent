@@ -711,10 +711,71 @@ class EventJournalWriter:
         message_id = self._message_id_for_turn(event)
         if message_id:
             return message_id
+        owner = self._owner_for_parent_uuid(event)
+        if owner:
+            return owner
         source_ts = self._source_ts(event.data)
         if source_ts is not None:
             return self._message_id_for_source_ts(event.root_id, event.sid, source_ts)
         return None
+
+    def _owner_for_parent_uuid(self, event: Event) -> Optional[str]:
+        """Inherit ownership through a non-sidechain ``parentUuid`` chain.
+
+        Backfilled/orphan transcript rows carry no message_id, turn or
+        tool keys, so before this rung they fell straight to timestamp
+        bucketing — which assigns "the turn that started last before this
+        event's ts" and is wrong whenever the native session keeps
+        producing turns between two Better Agent turns (lingering
+        babysitter runs) or a stale queued turn flushes after a new run
+        starts. The parent chain follows the transcript's own structure
+        instead. In-file-order ingestion resolves parents before children,
+        so the `_event_messages` lookup is populated by the time a child
+        arrives; rows whose parent is unknown fall through to the
+        timestamp rung as before.
+
+        Real (non-meta, non-task-notification, non-tool_result) user
+        prompts must NOT inherit: a prompt's parentUuid points at the
+        PREVIOUS turn's last assistant line, so inheritance would glue
+        every new turn onto the prior message. (Sidechain parentUuid is
+        already a causal key handled earlier; tool_result users likewise
+        short-circuit via their tool keys.)
+        """
+        payload = self._provider_payload(event.data)
+        parent_uuid = payload.get("parentUuid")
+        if not isinstance(parent_uuid, str) or not parent_uuid:
+            return None
+        if payload.get("isSidechain") is True:
+            return None
+        if self._is_real_user_prompt(payload):
+            return None
+        return self._event_messages.get((event.root_id, parent_uuid))
+
+    @classmethod
+    def _is_real_user_prompt(cls, payload: dict) -> bool:
+        if payload.get("type") != "user":
+            return False
+        if payload.get("isMeta"):
+            return False
+        message = payload.get("message")
+        content = message.get("content") if isinstance(message, dict) else None
+        if isinstance(content, str):
+            text = content
+        elif isinstance(content, list):
+            if any(
+                isinstance(block, dict) and block.get("type") == "tool_result"
+                for block in content
+            ):
+                return False
+            text = " ".join(
+                block.get("text") or ""
+                for block in content
+                if isinstance(block, dict) and block.get("type") == "text"
+            )
+        else:
+            return False
+        text = text.lstrip()
+        return bool(text) and not text.startswith("<task-notification>")
 
     def _turn_started_message_id(self, event: Event) -> Optional[str]:
         message_id = event.message_id or event.data.get("message_id")

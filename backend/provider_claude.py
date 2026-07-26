@@ -150,6 +150,23 @@ class RunState:
     # bypass the dead queue and go through the orphan funnel
     # (`_ingest_late_flush`).
     turn_finalized: bool = False
+    # Origin filter for resumed runs on a SHARED session jsonl. A
+    # lingering babysitter instance of the same native session can write
+    # its own turns (Monitor continuations) while this run's tailer is
+    # live; without filtering those foreign lines are grafted onto this
+    # run's pending turn (and can get sealed as the user's "answer").
+    # The filter anchors on this run's own prompt user line and accepts
+    # only lines reachable from it (parentUuid chain / shared promptId /
+    # tool ids on accepted assistant lines); everything else routes to
+    # the orphan funnel. Fails open (accepts all) on unattributable
+    # roots, e.g. after context compaction.
+    resume_requested: bool = False
+    prompt_text: str = ""
+    origin_filter_active: bool = False
+    origin_anchor_uuid: Optional[str] = None
+    origin_anchor_prompt_id: Optional[str] = None
+    origin_accepted_uuids: set = field(default_factory=set)
+    origin_accepted_tool_ids: set = field(default_factory=set)
 
 
 # ============================================================================
@@ -469,6 +486,8 @@ class ClaudeProvider(Provider):
             persist_to=worker_agent_session_id or app_session_id,
             target_message_id=target_message_id,
             turn_run_id=turn_run_id,
+            resume_requested=bool(session_id),
+            prompt_text=prompt or "",
         )
         self._runs[run_id] = run_state
 
@@ -611,6 +630,14 @@ class ClaudeProvider(Provider):
             if recovered > start_offset:
                 start_offset = recovered
         rs.processed_byte = start_offset
+        # Arm the origin filter only for a genuine resume whose tailer
+        # starts exactly at the pre-query snapshot. A crash-recovery
+        # resume (recovered cursor past pre_query) may have consumed the
+        # anchor user line already, and a fresh session (offset 0) has no
+        # second writer — both must stay unfiltered.
+        rs.origin_filter_active = (
+            rs.resume_requested and 0 < pre_query_byte_offset == start_offset
+        )
 
         # 5) Persist the discovered session_id into backend_state.json now
         #    so crash recovery knows which jsonl to tail on restart.
@@ -635,6 +662,18 @@ class ClaudeProvider(Provider):
         def _dispatch_to_queue(enriched: dict, _rs: RunState = rs) -> None:
             if _rs.turn_finalized:
                 self._ingest_late_flush(_rs, enriched)
+                return
+            if _rs.origin_filter_active and not self._accept_resumed_line(
+                _rs, enriched,
+            ):
+                # Foreign line (another CLI instance writing the shared
+                # session jsonl). Journal it as an orphan instead of
+                # grafting it onto this run's pending turn. Raises on
+                # failure so the tailer cursor doesn't advance past an
+                # un-ingested line (same contract as _ingest_late_flush).
+                self._ingest_orphan_line(
+                    _rs.persist_to or _rs.app_session_id, _rs.run_id, enriched,
+                )
                 return
             try:
                 _rs.queue.put_nowait(StreamEvent("agent_message", enriched))
@@ -676,6 +715,148 @@ class ClaudeProvider(Provider):
         self._ingest_orphan_line(
             rs.persist_to or rs.app_session_id, rs.run_id, enriched,
         )
+
+    def has_lingering_sibling(self, run_id: str) -> bool:
+        """True when another still-lingering (babysitter) run of this
+        provider holds the SAME native session as `run_id` — the
+        double-writer condition under which a fresh --resume CLI
+        instance forwards the prompt to the live instance's queue and
+        returns an immediate empty success."""
+        rs = self._runs.get(run_id)
+        if rs is None or not rs.session_id:
+            return False
+        # list() snapshot: start_run inserts into _runs from a worker
+        # thread (asyncio.to_thread), so guard the iteration.
+        return any(
+            other.run_id != run_id
+            and other.lingering
+            and other.session_id == rs.session_id
+            for other in list(self._runs.values())
+        )
+
+    # ------------------------------------------------------------------
+    # Origin filter — resumed run on a shared session jsonl
+    # ------------------------------------------------------------------
+    def _accept_resumed_line(self, rs: RunState, enriched: dict) -> bool:
+        """True if `enriched` belongs to THIS run's turn (see the
+        RunState.origin_filter_active comment for the threat model).
+
+        Accept rules, in order:
+          - no uuid → accept (queue-operation / file-history-snapshot /
+            mode / last-prompt metadata: inert in apply_event, needed
+            for side effects);
+          - line carries parent_tool_use_id → accept iff that tool id
+            was seen on an accepted assistant line (subagent/sidechain
+            lines chain through their spawning Task/Agent tool_use, not
+            through main-file parentUuid);
+          - before the anchor: only this run's own prompt user line is
+            accepted (soft-matched against the sent prompt — mismatch
+            logs but still anchors, since the runner may mutate the
+            prompt with file preambles / image blocks);
+          - after the anchor: accept uuid==anchor, parentUuid within the
+            accepted set, or user lines sharing the anchor's promptId
+            (the CLI stamps every user line of one turn with the same
+            promptId; assistant lines carry promptId=null);
+          - a NEW null-parent non-meta root after the anchor (context
+            compaction) → fail open: disable the filter, accept all.
+        """
+        if not rs.origin_filter_active:
+            return True
+        uuid = enriched.get("uuid")
+        if not isinstance(uuid, str) or not uuid:
+            return True
+        parent_tool = enriched.get("parent_tool_use_id")
+        if isinstance(parent_tool, str) and parent_tool:
+            if parent_tool in rs.origin_accepted_tool_ids:
+                rs.origin_accepted_uuids.add(uuid)
+                self._harvest_accepted_tool_ids(rs, enriched)
+                return True
+            return False
+        if rs.origin_anchor_uuid is None:
+            if not self._is_own_prompt_line(rs, enriched):
+                return False
+            rs.origin_anchor_uuid = uuid
+            prompt_id = enriched.get("promptId")
+            rs.origin_anchor_prompt_id = (
+                prompt_id if isinstance(prompt_id, str) and prompt_id else None
+            )
+            rs.origin_accepted_uuids.add(uuid)
+            return True
+        if uuid in rs.origin_accepted_uuids:
+            return True
+        parent_uuid = enriched.get("parentUuid")
+        if isinstance(parent_uuid, str) and parent_uuid in rs.origin_accepted_uuids:
+            rs.origin_accepted_uuids.add(uuid)
+            self._harvest_accepted_tool_ids(rs, enriched)
+            return True
+        prompt_id = enriched.get("promptId")
+        if (
+            rs.origin_anchor_prompt_id
+            and isinstance(prompt_id, str)
+            and prompt_id == rs.origin_anchor_prompt_id
+        ):
+            rs.origin_accepted_uuids.add(uuid)
+            self._harvest_accepted_tool_ids(rs, enriched)
+            return True
+        if not parent_uuid and not enriched.get("isMeta"):
+            logger.warning(
+                "origin filter fail-open: new root %s after anchor, run %s "
+                "— accepting all subsequent lines",
+                uuid[:8], rs.run_id,
+            )
+            rs.origin_filter_active = False
+            return True
+        return False
+
+    @staticmethod
+    def _harvest_accepted_tool_ids(rs: RunState, enriched: dict) -> None:
+        message = enriched.get("message")
+        content = message.get("content") if isinstance(message, dict) else None
+        if not isinstance(content, list):
+            return
+        for block in content:
+            if (
+                isinstance(block, dict)
+                and block.get("type") == "tool_use"
+                and isinstance(block.get("id"), str)
+            ):
+                rs.origin_accepted_tool_ids.add(block["id"])
+
+    def _is_own_prompt_line(self, rs: RunState, enriched: dict) -> bool:
+        if enriched.get("type") != "user" or enriched.get("isMeta"):
+            return False
+        if enriched.get("isSidechain") is True:
+            return False
+        message = enriched.get("message")
+        content = message.get("content") if isinstance(message, dict) else None
+        if isinstance(content, str):
+            text = content
+        elif isinstance(content, list):
+            if any(
+                isinstance(block, dict) and block.get("type") == "tool_result"
+                for block in content
+            ):
+                return False
+            text = " ".join(
+                block.get("text") or ""
+                for block in content
+                if isinstance(block, dict) and block.get("type") == "text"
+            )
+        else:
+            return False
+        if text.lstrip().startswith("<task-notification>"):
+            return False
+        probe = " ".join((rs.prompt_text or "").split())[:120]
+        if probe and probe not in " ".join(text.split()):
+            # Soft check only: the runner prepends file preambles and
+            # reshapes image prompts into content arrays, so a mismatch
+            # is possible on a legitimate anchor. Anchor anyway, loudly.
+            logger.warning(
+                "origin filter: anchor text mismatch for run %s "
+                "(anchoring on first real user line %s)",
+                rs.run_id, str(enriched.get("uuid"))[:8],
+            )
+        return True
 
     def _ingest_orphan_line(
         self, app_sid: str, run_id: str, enriched: dict,

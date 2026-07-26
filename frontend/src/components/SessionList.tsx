@@ -936,7 +936,7 @@ function SessionNodeImpl({
             </span>
           )}
         </div>
-        <div className="session-item-meta">
+        <div className="session-item-meta session-item-date-meta">
           {t("session.created")}{timeAgo(t, session.created_at)} | {t(SESSION_SORT_LABEL[sortField] ?? "session.modified")} {timeAgo(t, sessionSortValue(session, sortField) || session.updated_at)}
         </div>
         <div className="session-item-status">

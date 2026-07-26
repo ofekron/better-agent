@@ -817,6 +817,13 @@ class OrchestrationStrategy(ABC):
         if not source_is_provider_stream or not ctx.root_id:
             return
         from event_ingester import event_ingester
+        from event_shape import is_synthetic_event
+        if is_synthetic_event(event):
+            # SDK continuation markers (`model == "<synthetic>"`, "No
+            # response requested.") are filtered on the live apply path;
+            # without this the orphan/backlog path journals them, where
+            # ownership inference can pin them to the wrong message.
+            return
         etype = event.get("type") or "unknown"
         data = event.get("data") or {}
         is_metadata = isinstance(data, dict) and self._apply_metadata_side_effects(

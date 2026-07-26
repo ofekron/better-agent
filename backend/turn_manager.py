@@ -176,6 +176,34 @@ def _rate_limit_wait_seconds(reset_dt: Optional[datetime]) -> float:
     )
 
 
+def _attempt_has_assistant_reply(attempt_events: list[dict]) -> bool:
+    """True if this attempt streamed any real assistant output (text or
+    tool_use), ignoring SDK synthetic continuation markers. Used to tell
+    a genuine empty-but-successful turn apart from a prompt that a busy
+    lingering CLI instance accepted without answering."""
+    from event_shape import is_synthetic_event
+    for event in attempt_events:
+        if event.get("type") != "agent_message" or is_synthetic_event(event):
+            continue
+        data = event.get("data") or {}
+        if data.get("type") != "assistant":
+            continue
+        message = data.get("message") or {}
+        content = message.get("content")
+        if isinstance(content, str) and content.strip():
+            return True
+        if isinstance(content, list) and any(
+            isinstance(block, dict)
+            and (
+                (block.get("type") == "text" and (block.get("text") or "").strip())
+                or block.get("type") == "tool_use"
+            )
+            for block in content
+        ):
+            return True
+    return False
+
+
 def _release_abandoned_queue(
     provider, run_id: str, queue, *, persist_to: str,
 ) -> None:
@@ -2780,6 +2808,41 @@ class TurnManager:
                     )
                     self._pop_run_id(app_session_id, run_id)
                     continue
+
+            # Forwarded-but-unanswered detection: when a lingering
+            # (babysitter) instance holds this native session, the fresh
+            # --resume CLI hands it the prompt and returns an immediate
+            # empty success. Without this check that empty success sealed
+            # the turn with whatever foreign content the shared-jsonl
+            # tailer swept in (now filtered upstream) — presenting a
+            # monitor progress note as the user's "answer". Surface the
+            # truth instead; if the busy instance answers later, the
+            # reply chains from this turn's user line and reconcile
+            # attaches it to this message.
+            if (
+                success
+                and not error
+                and not _attempt_has_assistant_reply(attempt_events)
+                and getattr(provider, "has_lingering_sibling", None)
+                and provider.has_lingering_sibling(run_id)
+            ):
+                success = False
+                error = (
+                    "The run completed without producing a reply: this "
+                    "session's still-running background agent received the "
+                    "prompt but has not answered yet. Its eventual reply "
+                    "will attach here; you can also stop the background "
+                    "run and retry."
+                )
+                # Keep the raw complete event consistent with the
+                # synthesized outcome — _emit_attempt_terminal journals
+                # it, and a success:true complete alongside a failed
+                # turn_complete would let payload-keyed clients disagree
+                # with the final message state.
+                complete_data["success"] = False
+                complete_data["error"] = error
+                if complete is not None:
+                    complete["data"] = complete_data
 
             await self._emit_attempt_terminal(
                 ws_callback=ws_callback,
