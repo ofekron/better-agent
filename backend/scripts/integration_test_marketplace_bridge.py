@@ -53,8 +53,10 @@ async def run() -> None:
             return {
                 "site_label": "Singular Marketplace",
                 "account_label": "marketplace@example.test",
-                "server_origin": origin,
-                "protocol_hash": marketplace_bridge.PROTOCOL_HASH,
+                "expires_at": (
+                    datetime.now(timezone.utc) + timedelta(minutes=5)
+                ).isoformat(),
+                "catalog_snapshot_sha256": "a" * 64,
             }
 
         async def pair(body: dict) -> dict:
@@ -76,9 +78,11 @@ async def run() -> None:
                 public_key=body["public_key"],
             )
             return {
+                "protocol_version": 1,
                 "protocol_hash": marketplace_bridge.PROTOCOL_HASH,
                 "server_origin": origin,
                 "device_id": body["device_id"],
+                "paired": True,
             }
 
         async def challenges(device_id: str) -> dict:
@@ -147,16 +151,17 @@ async def run() -> None:
                 }
             }
 
-        async def reject(device_id: str, action_id: str, signed: dict) -> dict:
+        async def acknowledge(device_id: str, action_id: str, signed: dict) -> dict:
             business = {
                 key: signed[key]
                 for key in (
                     "protocol_hash",
-                    "lease_capability",
-                    "envelope_digest",
+                    "capability",
+                    "outcome",
+                    "result_code",
                 )
             }
-            path = f"/protocol/v1/devices/{device_id}/actions/{action_id}/reject"
+            path = f"/protocol/v1/devices/{device_id}/actions/{action_id}/ack"
             verify_device("POST", path, signed, business)
             acknowledgements.append(business)
             return {"outcome": "rejected", "result_code": "user_rejected"}
@@ -165,13 +170,22 @@ async def run() -> None:
         marketplace_bridge.marketplace_service.protocol_pair = pair
         marketplace_bridge.marketplace_service.protocol_challenges = challenges
         marketplace_bridge.marketplace_service.protocol_lease = lease
-        marketplace_bridge.marketplace_service.protocol_reject = reject
+        marketplace_bridge.marketplace_service.protocol_ack = acknowledge
+
+        revisions: list[int] = []
+
+        async def on_change(revision: int) -> None:
+            revisions.append(revision)
 
         service = marketplace_bridge.MarketplaceBridge()
+        service._on_change = on_change
         await service.activate_pair(pair_token, 1)
-        pair_intent = service.snapshot()["intents"][0]
+        pair_snapshot = service.snapshot()
+        pair_intent = pair_snapshot["intents"][0]
         assert pair_intent["status"] == "awaiting_confirmation"
         assert pair_intent["account_label"] == "marketplace@example.test"
+        assert revisions == [1, 2]
+        assert pair_token not in json.dumps(pair_snapshot)
         await service.approve(pair_intent["intent_id"])
         paired = service.snapshot()
         assert paired["connection_state"] == "connected"
@@ -186,10 +200,9 @@ async def run() -> None:
         assert acknowledgements == [
             {
                 "protocol_hash": marketplace_bridge.PROTOCOL_HASH,
-                "lease_capability": "lease-capability",
-                "envelope_digest": service._store.read()["intents"][
-                    "baact_" + "b" * 32
-                ]["envelope_digest"],
+                "capability": "lease-capability",
+                "outcome": "rejected",
+                "result_code": "user_rejected",
             }
         ]
 
@@ -200,36 +213,45 @@ async def run() -> None:
             "signature": "artifact-signature",
         }
 
-        async def resolve_catalog(state: dict, intent: dict) -> tuple[dict, str, int]:
-            return verified_metadata, "default-v1", 1
-
         async def action_metadata(action_id: str) -> dict:
             assert action_id == "baact_" + "b" * 32
             return {
                 **verified_metadata,
                 "signature_alg": "ed25519",
+                "catalog_snapshot_sha256": "a" * 64,
                 "artifact_url": "https://ofek-dev.com/api/marketplace/action-artifact",
             }
 
-        service._resolve_catalog = resolve_catalog
         marketplace_bridge.marketplace_service.protocol_action_metadata = action_metadata
         state = service._store.read()
         intent = state["intents"]["baact_" + "b" * 32]
-        resolved = await service._resolve_action_metadata(state, intent)
-        assert resolved["artifact_url"].startswith("https://")
-
-        async def mismatched_metadata(action_id: str) -> dict:
-            return {**await action_metadata(action_id), "version": "9.9.9"}
-
-        marketplace_bridge.marketplace_service.protocol_action_metadata = (
-            mismatched_metadata
+        receipt = {"verified_catalog": {"catalog": {}, "signature": "test"}}
+        original_verify = (
+            marketplace_bridge.extension_store.verify_marketplace_catalog_snapshot
         )
         try:
-            await service._resolve_action_metadata(state, intent)
-        except marketplace_bridge.MarketplaceBridgeError:
-            pass
-        else:
-            raise AssertionError("mismatched action metadata was accepted")
+            marketplace_bridge.extension_store.verify_marketplace_catalog_snapshot = (
+                lambda **_kwargs: {"metadata": verified_metadata}
+            )
+            resolved = await service._resolve_action_metadata(state, intent, receipt)
+            assert resolved["artifact_url"].startswith("https://")
+
+            async def mismatched_metadata(action_id: str) -> dict:
+                return {**await action_metadata(action_id), "version": "9.9.9"}
+
+            marketplace_bridge.marketplace_service.protocol_action_metadata = (
+                mismatched_metadata
+            )
+            try:
+                await service._resolve_action_metadata(state, intent, receipt)
+            except marketplace_bridge.MarketplaceBridgeError:
+                pass
+            else:
+                raise AssertionError("mismatched action metadata was accepted")
+        finally:
+            marketplace_bridge.extension_store.verify_marketplace_catalog_snapshot = (
+                original_verify
+            )
 
         persisted = (
             root / "marketplace" / "intent-receipts-v1.json"

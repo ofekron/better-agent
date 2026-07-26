@@ -29,7 +29,8 @@ import runtime_operations  # noqa: E402
 from cryptography.hazmat.primitives.asymmetric.ed25519 import (  # noqa: E402
     Ed25519PrivateKey,
 )
-from fastapi import HTTPException  # noqa: E402
+from fastapi import FastAPI, HTTPException  # noqa: E402
+from fastapi.testclient import TestClient  # noqa: E402
 from marketplace_bridge import MarketplaceBridge, MarketplaceBridgeError  # noqa: E402
 from marketplace_bridge_store import (  # noqa: E402
     MarketplaceStateError,
@@ -610,6 +611,10 @@ def test_rest_ws_contract_and_extension_capability_boundary() -> None:
         expected <= paths,
         "REST snapshot/pair/approve/reject/revoke contract is registered",
     )
+    check(
+        ("POST", "/api/marketplace-bridge/pair") not in paths,
+        "public browser pairing mutation is not registered",
+    )
     event = global_events.validate_global_event(
         "marketplace_bridge_changed",
         {"revision": 3},
@@ -654,6 +659,82 @@ def test_rest_ws_contract_and_extension_capability_boundary() -> None:
             forbidden not in extension_source,
             f"Marketplace extension cannot observe core mutation secret {forbidden}",
         )
+
+
+def test_pair_activation_is_internal_and_exact() -> None:
+    class FakeBridge:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, int]] = []
+
+        async def activate_pair(self, intent: str, version: int) -> dict:
+            self.calls.append((intent, version))
+            return {
+                "revision": 1,
+                "connection_state": "connecting",
+                "paired_devices": [],
+                "intents": [],
+            }
+
+    app = FastAPI()
+    app.include_router(marketplace_bridge_api.router)
+    client = TestClient(app)
+    pair_intent = "A" * 43
+    body = {"intent": pair_intent, "version": 1}
+    fake_bridge = FakeBridge()
+    original_bridge = marketplace_bridge_api.marketplace_bridge.bridge
+    original_internal_token = marketplace_bridge_api._internal_token
+    try:
+        marketplace_bridge_api.marketplace_bridge.bridge = fake_bridge
+        marketplace_bridge_api._internal_token = lambda: "desktop-token"
+        check(
+            client.post("/api/marketplace-bridge/pair", json=body).status_code
+            == 404,
+            "public browser pairing endpoint is denied",
+        )
+        check(
+            client.post(
+                "/api/internal/marketplace-bridge/pair",
+                json=body,
+            ).status_code
+            == 422,
+            "internal pairing requires the desktop token header",
+        )
+        check(
+            client.post(
+                "/api/internal/marketplace-bridge/pair",
+                json=body,
+                headers={"X-Internal-Token": "wrong"},
+            ).status_code
+            == 403,
+            "internal pairing rejects the wrong desktop token",
+        )
+        check(
+            client.post(
+                "/api/internal/marketplace-bridge/pair",
+                json={**body, "unexpected": True},
+                headers={"X-Internal-Token": "desktop-token"},
+            ).status_code
+            == 422,
+            "internal pairing rejects extra request fields",
+        )
+        response = client.post(
+            "/api/internal/marketplace-bridge/pair",
+            json=body,
+            headers={"X-Internal-Token": "desktop-token"},
+        )
+        check(
+            response.status_code == 200
+            and fake_bridge.calls == [(pair_intent, 1)],
+            "valid desktop pairing reaches the canonical bridge once",
+        )
+        check(
+            pair_intent not in response.text and "desktop-token" not in response.text,
+            "pairing response exposes neither the intent secret nor internal token",
+        )
+    finally:
+        client.close()
+        marketplace_bridge_api.marketplace_bridge.bridge = original_bridge
+        marketplace_bridge_api._internal_token = original_internal_token
 
 
 def test_protocol_mutation_transport_bypasses_extension_backend() -> None:
@@ -898,6 +979,7 @@ if __name__ == "__main__":
     test_fence_commit_is_recoverable_after_response_loss()
     test_signed_ack_owns_terminal_and_rejection_recovery()
     test_rest_ws_contract_and_extension_capability_boundary()
+    test_pair_activation_is_internal_and_exact()
     test_protocol_mutation_transport_bypasses_extension_backend()
     test_protocol_transport_binds_origin_and_strips_signature_fields()
     test_protocol_transport_rejects_invalid_response_value_types()
