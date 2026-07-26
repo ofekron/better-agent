@@ -624,6 +624,7 @@ export function useWebSocket(
 
     ws.onopen = () => {
       setConnected(true);
+      eventBus.publish("ws_connection_changed", { connected: true });
       snapshotTransportRef.current.resume((frame) => sendWebSocketFrame(ws, frame));
       lastPongAtRef.current = Date.now();
       heartbeatIntervalRef.current = setInterval(() => {
@@ -646,6 +647,7 @@ export function useWebSocket(
         heartbeatIntervalRef.current = undefined;
       }
       setConnected(false);
+      eventBus.publish("ws_connection_changed", { connected: false });
       setIsStreaming(false);
       setIsStopping(false);
       setStreamingPhase(null);

@@ -12,6 +12,12 @@
  * into the bus via `publish(type, payload)`. New consumers subscribe
  * by type instead of plumbing a new `onXxx` callback prop through
  * App.tsx.
+ *
+ * A few facts are CLIENT-LOCAL rather than backend frames — they have
+ * no backend `WSEventType` counterpart and are published by frontend
+ * code about frontend state (see `ws_connection_changed`). They ride
+ * the same bus so any consumer can subscribe by type; they are marked
+ * as client-local in `BusEventMap`.
  */
 
 import type { Schedule, Session } from "../types";
@@ -20,6 +26,17 @@ import type { Schedule, Session } from "../types";
 // consumer need to be enumerated here; everything else falls back to
 // `unknown` via the generic publish/subscribe overload.
 export interface BusEventMap {
+  // CLIENT-LOCAL fact (no backend counterpart): the app's single
+  // WebSocket opened or closed. Published by `useWebSocket`. Consumers
+  // that mirror backend state from a REST snapshot subscribe to it and
+  // re-pull on `connected: true`, because cross-session pings are
+  // fire-and-forget (`coordinator.broadcast_global`) and are NOT
+  // replayed on reconnect — anything broadcast during a disconnect
+  // window is lost to this client. A FACT, not a command: each owner
+  // decides whether it needs to rehydrate.
+  ws_connection_changed: {
+    connected: boolean;
+  };
   // New unified running / unread frames (replace the old
   // `active_process_counts_changed` window event).
   session_running_changed: {

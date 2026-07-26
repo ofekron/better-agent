@@ -1,6 +1,7 @@
 import { useEffect, useReducer } from "react";
 
 import { extBackendBase } from "../extensionIds";
+import { eventBus } from "../lib/eventBus";
 import type {
   NodeRegistrationResolvedData,
   PendingNodeRegistration,
@@ -15,6 +16,7 @@ const machineNodesApi = () => extBackendBase("machineNodes");
 // snapshot lives on the backend; this module only reflects it.
 let _pending: PendingNodeRegistration[] = [];
 let _loaded = false;
+let _authed = false;
 let _inFlight: Promise<void> | null = null;
 const _subscribers = new Set<() => void>();
 
@@ -72,10 +74,22 @@ function _onResolved(ev: Event): void {
   }
 }
 
+// `node_registration_requested` is a live WS frame with no reconnect
+// replay, so anything emitted while this client was disconnected is
+// lost. Re-pull the snapshot whenever the socket comes back — including
+// when the first load never landed, which is exactly the offline case.
+// Gated on the mounted hook's auth status rather than on `_loaded`: a
+// thrown (offline) first fetch leaves `_loaded` false forever.
+function _onConnectionChanged({ connected }: { connected: boolean }): void {
+  if (connected && _authed) void _refetch();
+}
+
 if (typeof window !== "undefined") {
   window.addEventListener("node_registration_requested", _onRequested);
   window.addEventListener("node_registration_resolved", _onResolved);
 }
+
+const _offConnection = eventBus.subscribe("ws_connection_changed", _onConnectionChanged);
 
 // Vite HMR: tear the old listeners down before the new module evaluates
 // so we don't multiply patches per event.
@@ -85,6 +99,7 @@ if (import.meta.hot) {
       window.removeEventListener("node_registration_requested", _onRequested);
       window.removeEventListener("node_registration_resolved", _onResolved);
     }
+    _offConnection();
   });
 }
 
@@ -127,6 +142,7 @@ export function usePendingNodeRegistrations(
   const [, force] = useReducer((c: number) => c + 1, 0);
   useEffect(() => {
     _subscribers.add(force);
+    _authed = authStatus === "authed";
     if (authStatus === "authed" && !_loaded && !_inFlight) {
       void _refetch();
     }

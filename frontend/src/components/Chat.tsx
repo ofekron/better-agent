@@ -6,6 +6,7 @@ import { isGroupRunning } from "../utils/groupRunning";
 import { isUnanchoredRun } from "../utils/runTargets";
 import { useTranslation } from "react-i18next";
 import { useScrollLoadOlder } from "../hooks/useScrollLoadOlder";
+import { eventBus } from "../lib/eventBus";
 import type {
   CapabilityContext,
   ChatMessage,
@@ -1059,6 +1060,16 @@ export function Chat({
   }, [session?.id]);
   useEffect(() => {
     refetchToolApprovals();
+  }, [refetchToolApprovals]);
+  // `tool_approval_requested` is a live frame with no reconnect replay:
+  // an approval raised while this client was disconnected would sit
+  // invisible until the backend's fail-closed timeout denied it. Re-pull
+  // the snapshot when the socket returns. The fetch above already
+  // merges, so this cannot clobber a live card.
+  useEffect(() => {
+    return eventBus.subscribe("ws_connection_changed", ({ connected }) => {
+      if (connected) void refetchToolApprovals();
+    });
   }, [refetchToolApprovals]);
   useEffect(() => {
     const onRequested = (e: Event) => {
