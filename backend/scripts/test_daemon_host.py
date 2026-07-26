@@ -28,6 +28,17 @@ backend_dependency_plan.verified_active_env = backend_dependency_plan.active_env
 _TMP = tempfile.mkdtemp(prefix="ba-daemon-host-")
 paths.engage_test_home(_TMP)
 
+import _test_installation
+import installation_capabilities
+import installation_profile
+
+# The host only supervises daemons for an installation with integrations
+# enabled, so the fixture needs a real activated installation — otherwise every
+# assertion below passes vacuously against an empty registry.
+_test_installation.activate(Path(_TMP), provider="codex")
+installation_profile.capture_active_capabilities()
+assert installation_profile.integrations_enabled()
+
 from daemonhost import install as dh_install
 from daemonhost import pointer
 from daemonhost.host import DaemonHost
@@ -93,33 +104,35 @@ assert state["status"] == "running" and state["pid"], state
 daemon = host._daemons["test.ext:worker"]
 assert dh_install.current_dir(daemon.root).is_dir()
 
-# UI-only ignores a stale registry and retires an already-running child.
-(Path(_TMP) / "installation.json").write_text(
-    json.dumps({
-        "schema_version": 2,
-        "mode": "desktop-ui-only",
-        "provider": "codex",
-    }),
-    encoding="utf-8",
-)
+# Disabling integrations retires an already-running child; re-enabling brings
+# it back. The capability is read through its own authority, so the state is
+# driven the way the app drives it rather than by hand-writing a profile.
+def _set_integrations(enabled: bool) -> None:
+    installation_profile.set_capability_enabled(
+        installation_capabilities.INTEGRATIONS, enabled
+    )
+    installation_capabilities.forget_active()
+    installation_profile.capture_active_capabilities()
+
+
+_set_integrations(False)
 host.reconcile_once()
 assert "test.ext:worker" not in read_json(state_path())["daemons"]
-(Path(_TMP) / "installation.json").write_text(
-    json.dumps({"schema_version": 2, "mode": "default", "provider": "codex"}),
-    encoding="utf-8",
-)
+_set_integrations(True)
 host.reconcile_once()
 state = read_json(state_path())["daemons"]["test.ext:worker"]
 daemon = host._daemons["test.ext:worker"]
 
-# Malformed persisted mode also fails closed.
-(Path(_TMP) / "installation.json").write_text("{}", encoding="utf-8")
+# An unreadable installation profile fails closed.
+profile_path = Path(_TMP) / "installation.json"
+committed = profile_path.read_text(encoding="utf-8")
+profile_path.write_text("{}", encoding="utf-8")
+installation_capabilities.forget_active()
 host.reconcile_once()
 assert "test.ext:worker" not in read_json(state_path())["daemons"]
-(Path(_TMP) / "installation.json").write_text(
-    json.dumps({"schema_version": 2, "mode": "default", "provider": "codex"}),
-    encoding="utf-8",
-)
+profile_path.write_text(committed, encoding="utf-8")
+installation_capabilities.forget_active()
+installation_profile.capture_active_capabilities()
 host.reconcile_once()
 state = read_json(state_path())["daemons"]["test.ext:worker"]
 daemon = host._daemons["test.ext:worker"]

@@ -128,8 +128,12 @@ export function InstallationCapabilities({
             </label>
             <div className="capability-row-status" aria-live="polite">
               {busy && <span className="capability-badge is-busy">{t("settings.capabilitySaving")}</span>}
-              {!busy && state?.restart_required && state.self_provisionable
-                && state.in_app_restart_supported && (
+              {!busy && state?.enabled && !state.provisioned && !state.self_provisionable && (
+                <span className="capability-badge is-blocked">
+                  {t("settings.capabilityNeedsBuild")}
+                </span>
+              )}
+              {!busy && state?.restart_required && state.in_app_restart_supported && (
                 <button
                   type="button"
                   className="capability-badge is-restart"
@@ -138,15 +142,9 @@ export function InstallationCapabilities({
                   {t("settings.capabilityRestartRequired")}
                 </button>
               )}
-              {!busy && state?.restart_required && state.self_provisionable
-                && !state.in_app_restart_supported && (
+              {!busy && state?.restart_required && !state.in_app_restart_supported && (
                 <span className="capability-badge is-restart">
                   {t("settings.capabilityRestartManually")}
-                </span>
-              )}
-              {!busy && state?.restart_required && !state.self_provisionable && (
-                <span className="capability-badge is-blocked">
-                  {t("settings.capabilityNeedsBuild")}
                 </span>
               )}
               {!busy && !state?.restart_required && state?.active && (

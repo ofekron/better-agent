@@ -78,7 +78,11 @@ def test_broken_environment_pointer_does_not_revoke_the_installation() -> None:
         raise AssertionError("committing an activation must still fail closed")
 
 
-def test_legacy_receipt_restamps_without_resetting_provider_selection() -> None:
+def test_legacy_receipt_is_honoured_then_restamped() -> None:
+    """A receipt written in an older encoding still records the activation
+    commit for this generation. It is honoured immediately — a runtime that
+    never re-activates must not lose its installation — and normalised in
+    place, without reapplying the installer's provider selection."""
     profile = _test_installation.activate(_HOME)
     receipt_path = _HOME / "installation-activation.json"
     committed = json.loads(receipt_path.read_text(encoding="utf-8"))
@@ -93,7 +97,9 @@ def test_legacy_receipt_restamps_without_resetting_provider_selection() -> None:
         encoding="utf-8",
     )
     providers = _configure_extra_providers()
-    assert installation_profile.selection_pending()
+    assert not installation_profile.selection_pending(), (
+        "an older receipt encoding still proves setup ran"
+    )
     assert installation_profile.refresh_activation_receipt()
     assert not installation_profile.selection_pending()
     restamped = json.loads(receipt_path.read_text(encoding="utf-8"))
@@ -121,7 +127,7 @@ if __name__ == "__main__":
     try:
         test_environment_rebuild_keeps_provider_conversations_enabled()
         test_broken_environment_pointer_does_not_revoke_the_installation()
-        test_legacy_receipt_restamps_without_resetting_provider_selection()
+        test_legacy_receipt_is_honoured_then_restamped()
         test_receipt_from_another_generation_is_not_restamped()
         print("installation receipt rebuild tests passed")
     finally:

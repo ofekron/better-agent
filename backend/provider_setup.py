@@ -269,17 +269,18 @@ async def provider_setup_status(kind: str, *, wait_for_cold: bool = False) -> di
 def _repin_verified_executable(installer: ProviderInstaller) -> None:
     """Refresh the recorded executable after the CLI verified successfully.
 
-    Keeps the installation's provenance truthful across in-place CLI upgrades.
-    The launcher path is resolved without the pin so an executable that moved
-    is re-recorded where it actually lives.
+    Reads the identity at the *pinned* path, never at whatever PATH currently
+    resolves to: a status refresh is background work with no user intent behind
+    it, and resolving freely would hand the pin to any executable that answers
+    `--version` from an earlier PATH entry. This only keeps the recorded bytes
+    truthful across in-place upgrades.
     """
     import installation_profile
 
-    launcher = resolve_cli_binary(
-        installer.command,
-        respect_installation_profile=False,
+    pinned, launcher = installation_profile.pinned_provider_executable(
+        installer.command
     )
-    if not launcher:
+    if not pinned or not launcher:
         return
     try:
         identity = executable_identity(str(Path(launcher).absolute()))

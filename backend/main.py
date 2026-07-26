@@ -13392,6 +13392,10 @@ async def on_startup():
     # Kill any OAuth login/logout CLI that outlived a prior backend crash
     # so no `claude auth login` / `codex login` is left holding a callback port.
     _fire_and_forget(asyncio.to_thread(provider_auth.reap_orphaned_logins))
+    # Normalise a receipt written in an older encoding, so the on-disk shape
+    # converges without waiting for the next activation. The read path already
+    # honours the older shape; this only stops it lingering.
+    await asyncio.to_thread(installation_profile.refresh_activation_receipt)
     # Freeze the capability set this process serves before anything wires
     # itself from it, so a mid-run settings change can never leave subsystems
     # disagreeing with the gates.

@@ -279,6 +279,11 @@ def _bootstrap_ready(profile: dict[str, Any]) -> bool:
     Deliberately independent of the dependency environment and of provider
     selection: rebuilding the environment or changing providers is ordinary
     use, never a revoked installation.
+
+    The commit is identified by generation + profile hash. A receipt written
+    in an older encoding still records that commit, so it is honoured as-is —
+    a runtime that never re-activates (a frozen bundle, a container) must not
+    lose its installation to a change in how receipts are written.
     """
     if profile["status"] != "active":
         return False
@@ -286,7 +291,14 @@ def _bootstrap_ready(profile: dict[str, Any]) -> bool:
         receipt = json.loads(_activation_receipt_path().read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return False
-    return isinstance(receipt, dict) and receipt == _receipt(profile)
+    if not isinstance(receipt, dict):
+        return False
+    committed = _receipt(profile)
+    return all(
+        receipt.get(field) == value
+        for field, value in committed.items()
+        if field != "schema_version"
+    )
 
 
 def selection_pending() -> bool:
@@ -388,16 +400,24 @@ def pinned_provider_executable(command: str) -> tuple[bool, str | None]:
 def repin_provider_executable(identity: dict[str, Any]) -> bool:
     """Record a freshly verified identity for the installation's own provider.
 
-    Called from the setup path that actually ran the CLI, so the new bytes are
-    verification-backed. The generation is unchanged — the activation commit
-    still stands — so the receipt is re-stamped rather than revoked.
+    Accepts new bytes at the recorded launcher path — an in-place upgrade — and
+    nothing else. Re-pointing the anchor at a different path would let any
+    executable that answers `--version` from an earlier PATH entry inherit the
+    pin, which is the takeover the pin exists to prevent. A provider that
+    genuinely moved is re-recorded by running setup, not by a status refresh.
+
+    The generation is unchanged — the activation commit still stands — so the
+    receipt is re-stamped rather than revoked.
     """
     profile = load()
     if profile["status"] != "active":
         return False
-    if identity.get("command") != profile["provider_identity"]["command"]:
+    current = profile["provider_identity"]
+    if identity.get("command") != current["command"]:
         return False
-    if identity == profile["provider_identity"]:
+    if identity.get("launcher_path") != current["launcher_path"]:
+        return False
+    if identity == current:
         return False
     was_ready = _bootstrap_ready(profile)
     updated = _validate_active(dict(profile, provider_identity=identity))

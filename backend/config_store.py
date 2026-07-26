@@ -432,13 +432,14 @@ def _seed_default_state() -> dict:
 
 
 @_serialized_provider_mutation
-def apply_installation_profile_selection() -> dict:
-    """Make the installer's selection available and default.
+def apply_installation_profile_selection(make_default: bool = False) -> dict:
+    """Make the installer's selection available, and default when it is a
+    fresh choice.
 
-    The selection seeds the starting point; it never withdraws providers the
-    user configured afterwards. An existing default is left alone, because a
-    later activation of the same installation must not move the user's choice
-    back to what setup happened to pick.
+    Two callers, two intents. Setup passes `make_default` because the user just
+    answered which provider they want. A boot-time re-commit of the same
+    installation passes nothing: it must never move a default the user changed
+    afterwards. Neither one withdraws providers the user configured.
     """
     import installation_profile
 
@@ -460,7 +461,7 @@ def apply_installation_profile_selection() -> dict:
         state["providers"].append(target)
     target["suspended"] = False
     known_ids = {provider.get("id") for provider in state.get("providers", [])}
-    if state.get("default_provider_id") not in known_ids:
+    if make_default or state.get("default_provider_id") not in known_ids:
         state["default_provider_id"] = target["id"]
     _save_state(state)
     installation_profile.mark_selection_applied()

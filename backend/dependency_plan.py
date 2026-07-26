@@ -346,13 +346,18 @@ def assert_provider_runtime_ready(kind: str) -> None:
         )
 
 
-def _commit_activation(python: Path) -> None:
+def _commit_activation(python: Path, make_default: bool = False) -> None:
     if not installation_profile.selection_pending():
         return
     if installation_profile.refresh_activation_receipt():
         return
     subprocess.run(
-        [str(python), str(Path(__file__).resolve()), "apply-selection"],
+        [
+            str(python),
+            str(Path(__file__).resolve()),
+            "apply-selection",
+            *(("--make-default",) if make_default else ()),
+        ],
         cwd=BACKEND,
         check=True,
         stdout=subprocess.DEVNULL,
@@ -441,7 +446,7 @@ def activate_prepared_installation(
     installation_profile.stage_activation(profile)
     _write_pointer(env_dir)
     try:
-        _commit_activation(_python_in(env_dir))
+        _commit_activation(_python_in(env_dir), make_default=True)
         if installation_profile.selection_pending():
             raise DependencyPlanError(
                 "installation activation receipt was not committed"
@@ -481,6 +486,7 @@ def main() -> int:
         choices=("activate", "active", "plan", "apply-selection", "assert-active"),
     )
     parser.add_argument("--uv")
+    parser.add_argument("--make-default", action="store_true")
     args = parser.parse_args()
     try:
         if args.command == "activate":
@@ -490,7 +496,9 @@ def main() -> int:
         elif args.command == "apply-selection":
             import config_store
 
-            value = config_store.apply_installation_profile_selection()
+            value = config_store.apply_installation_profile_selection(
+                make_default=args.make_default,
+            )
         elif args.command == "active":
             value = str(active_env())
         elif args.command == "assert-active":

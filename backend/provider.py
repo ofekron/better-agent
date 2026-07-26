@@ -1274,6 +1274,12 @@ def _resolve_class(kind: str) -> type[Provider]:
     spec = provider_manifest.spec_for(kind)
     if spec is None or spec.virtual:
         raise ValueError(f"unknown provider kind: {kind!r}")
+    # Configuring a provider does not wait for its runtime, so a provider can
+    # legitimately be selected before the activation that installs it. Say so
+    # here, where the kind is known, instead of letting the runner module fail
+    # on an import deep inside a detached subprocess.
+    import dependency_plan
+    dependency_plan.assert_provider_runtime_ready(kind)
     module = importlib.import_module(spec.module)
     return getattr(module, spec.cls)
 

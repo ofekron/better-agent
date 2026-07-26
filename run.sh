@@ -742,9 +742,10 @@ if ! PYTHONPATH="$DIR/backend" "$BOOTSTRAP_PYTHON" -c \
   ADOPT_PROVIDER="$(PYTHONPATH="$DIR/backend" "$BOOTSTRAP_PYTHON" -c \
     'import installation_bootstrap; print(installation_bootstrap.adoptable_provider_kind() or "")')"
   if [ -n "$ADOPT_PROVIDER" ]; then
-    echo "No installation profile in this state home — adopting installed provider '$ADOPT_PROVIDER'."
+    ADOPT_MODE="${BETTER_AGENT_INSTALL_MODE:-default}"
+    echo "No installation profile in this state home — adopting installed provider '$ADOPT_PROVIDER' with mode '$ADOPT_MODE'."
     "$BOOTSTRAP_PYTHON" "$DIR/scripts/install.py" \
-      --mode default --provider "$ADOPT_PROVIDER" --yes --adopt \
+      --mode "$ADOPT_MODE" --provider "$ADOPT_PROVIDER" --yes --adopt \
       || echo "Installation profile adoption failed; finish setup from the app." >&2
   else
     echo "No installation profile and no provider CLI found — finish setup from the app." >&2

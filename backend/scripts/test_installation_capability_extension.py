@@ -24,6 +24,7 @@ os.environ["BETTER_AGENT_TEST_MODE"] = "1"
 
 import _test_installation
 import cli_paths
+from unittest.mock import patch
 import config_store
 import dependency_plan
 import installation_capabilities
@@ -55,6 +56,7 @@ def _with_home():
 
 def _restart() -> None:
     """Re-freeze the capability snapshot the way a fresh process would."""
+    installation_capabilities.forget_active()
     installation_profile.capture_active_capabilities()
 
 
@@ -234,6 +236,151 @@ def test_configuring_a_provider_never_waits_on_its_runtime() -> None:
         assert not hasattr(dependency_plan, "assert_state_transition_supported"), (
             "the transition block is what refused to add a provider"
         )
+
+
+def test_a_receipt_from_an_older_encoding_still_proves_setup_ran() -> None:
+    """Most runtimes never call `dependency_plan.activate` — a frozen bundle, a
+    container, a line attaching to an existing home. A change in how receipts
+    are written must not take their installation away."""
+    with _with_home() as root:
+        profile = _test_installation.activate(
+            root, mode=installation_profile.DEFAULT, provider="codex"
+        )
+        receipt_path = root / "installation-activation.json"
+        committed = json.loads(receipt_path.read_text(encoding="utf-8"))
+        receipt_path.write_text(
+            json.dumps({
+                "schema_version": 2,
+                "generation": profile["generation"],
+                "profile_sha256": committed["profile_sha256"],
+                "provider_selection_sha256": "0" * 64,
+            }),
+            encoding="utf-8",
+        )
+        _restart()
+        assert installation_profile.capabilities()["setup_required"] is False
+        assert installation_profile.allows(installation_profile.PROVIDER_CONVERSATIONS)
+        assert installation_profile.integrations_enabled()
+
+
+def test_a_status_refresh_cannot_move_the_pin_to_another_path() -> None:
+    """A status refresh is background work with no user intent behind it. If it
+    re-pinned whatever PATH resolves to, any executable answering `--version`
+    from an earlier PATH entry would inherit the pin."""
+    with _with_home() as root:
+        import provider_setup
+
+        legit = root / "legit-bin" / "codex"
+        legit.parent.mkdir(parents=True, exist_ok=True)
+        legit.write_bytes(b"#!/bin/sh\nexit 0\n")
+        legit.chmod(0o700)
+        _test_installation.activate(
+            root,
+            mode=installation_profile.DEFAULT,
+            provider="codex",
+            launcher_path=str(legit),
+        )
+        _restart()
+
+        other = root / "other-bin" / "codex"
+        other.parent.mkdir(parents=True, exist_ok=True)
+        other.write_bytes(b"#!/bin/sh\nexit 0\n")
+        other.chmod(0o700)
+        previous_path = os.environ.get("PATH", "")
+        os.environ["PATH"] = f"{other.parent}{os.pathsep}{previous_path}"
+        try:
+            provider_setup._repin_verified_executable(
+                provider_setup.installer_for("codex")
+            )
+            recorded = installation_profile.load()["provider_identity"]
+            assert recorded["launcher_path"] == str(legit), recorded["launcher_path"]
+            assert cli_paths.resolve_cli_binary("codex") == str(legit)
+        finally:
+            os.environ["PATH"] = previous_path
+
+        # The same refresh still records new bytes at the pinned path.
+        legit.write_bytes(b"#!/bin/sh\nexit 2\n")
+        legit.chmod(0o700)
+        provider_setup._repin_verified_executable(
+            provider_setup.installer_for("codex")
+        )
+        updated = installation_profile.load()["provider_identity"]
+        assert updated["launcher_path"] == str(legit)
+        assert installation_profile.executable_identity_matches(updated)
+        assert not installation_profile.selection_pending()
+
+
+def test_a_provider_without_its_runtime_fails_where_the_kind_is_known() -> None:
+    """Configuring a provider never waits on its runtime, so selecting one
+    before the activation that installs it is legitimate — and must say so
+    instead of dying on an import inside a detached runner."""
+    with _with_home() as root:
+        _test_installation.activate(
+            root, mode=installation_profile.DEFAULT, provider="codex"
+        )
+        import provider
+
+        with patch.object(dependency_plan, "_module_available", return_value=False):
+            try:
+                provider._resolve_class("claude")
+            except dependency_plan.DependencyPlanError as exc:
+                assert "restart" in str(exc), str(exc)
+            else:
+                raise AssertionError("a missing provider runtime must be reported")
+
+
+def test_setup_makes_the_provider_the_user_chose_the_default() -> None:
+    with _with_home() as root:
+        _test_installation.activate(
+            root, mode=installation_profile.DEFAULT, provider="codex"
+        )
+        config = root / "config.json"
+        state = json.loads(config.read_text(encoding="utf-8"))
+        state["providers"].append(
+            {"id": "claude-id", "kind": "claude", "name": "Claude", "suspended": False}
+        )
+        state["default_provider_id"] = "claude-id"
+        config.write_text(json.dumps(state), encoding="utf-8")
+
+        config_store.apply_installation_profile_selection(make_default=True)
+        chosen = json.loads(config.read_text(encoding="utf-8"))
+        assert chosen["default_provider_id"] == "codex-id", (
+            "answering the installer's provider question must move the default"
+        )
+        assert not any(p.get("suspended") for p in chosen["providers"])
+
+
+def test_a_state_home_with_no_profile_adopts_an_installed_cli() -> None:
+    """A fresh state home has no profile, so it can serve nothing. Adoption
+    answers the one question setup would have asked from what is already on the
+    machine, preferring what this home is already configured for."""
+    with _with_home() as root:
+        import installation_bootstrap
+        import provider_setup
+
+        assert installation_profile.load()["status"] == "setup_required"
+        (root / "config.json").write_text(
+            json.dumps({
+                "default_provider_id": "codex-id",
+                "providers": [{"id": "codex-id", "kind": "codex", "suspended": False}],
+            }),
+            encoding="utf-8",
+        )
+        assert installation_bootstrap.configured_provider_kind() == "codex"
+
+        bin_dir = root / "bin"
+        bin_dir.mkdir(parents=True, exist_ok=True)
+        stub = bin_dir / provider_setup.installer_for("codex").command
+        stub.write_bytes(b"#!/bin/sh\nexit 0\n")
+        stub.chmod(0o700)
+        previous_path = os.environ.get("PATH", "")
+        os.environ["PATH"] = f"{bin_dir}{os.pathsep}{previous_path}"
+        try:
+            assert installation_bootstrap.adoptable_provider_kind() == "codex", (
+                "adoption must prefer the kind this home is configured for"
+            )
+        finally:
+            os.environ["PATH"] = previous_path
 
 
 def main() -> int:

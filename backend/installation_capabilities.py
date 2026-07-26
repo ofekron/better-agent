@@ -144,6 +144,16 @@ def capture_active(seed_mode: str | None) -> dict[str, bool]:
     return dict(_active)
 
 
+def forget_active() -> None:
+    """Drop the frozen snapshot so the next read re-captures it.
+
+    For fixtures that swap state homes inside one process; production captures
+    once at startup.
+    """
+    global _active
+    _active = None
+
+
 def active(capability: str, seed_mode: str | None) -> bool:
     _assert_toggleable(capability)
     if _active is None:
@@ -158,13 +168,31 @@ def snapshot(seed_mode: str | None) -> dict[str, Any]:
     can_provision = self_provisionable()
     can_restart = in_app_restart_supported()
     return {
-        capability: {
-            "enabled": current[capability],
-            "provisioned": provisioned(capability),
-            "active": _active[capability],
-            "restart_required": current[capability] != _active[capability],
-            "self_provisionable": can_provision,
-            "in_app_restart_supported": can_restart,
-        }
+        capability: _capability_state(
+            capability, current[capability], can_provision, can_restart
+        )
         for capability in TOGGLEABLE
+    }
+
+
+def _capability_state(
+    capability: str,
+    wanted: bool,
+    can_provision: bool,
+    can_restart: bool,
+) -> dict[str, Any]:
+    is_provisioned = provisioned(capability)
+    # A restart only resolves the difference when this runtime can install what
+    # the capability needs. Wanting something a frozen bundle was never built
+    # with is reported by `self_provisionable`, not as a pending restart.
+    pending = wanted != _active[capability] and (
+        not wanted or is_provisioned or can_provision
+    )
+    return {
+        "enabled": wanted,
+        "provisioned": is_provisioned,
+        "active": _active[capability],
+        "restart_required": pending,
+        "self_provisionable": can_provision,
+        "in_app_restart_supported": can_restart,
     }
