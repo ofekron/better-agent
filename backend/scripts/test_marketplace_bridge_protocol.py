@@ -187,6 +187,87 @@ def _install_action() -> dict:
     }
 
 
+def test_action_versions_and_public_intent_projection_are_exact() -> None:
+    bridge = MarketplaceBridge()
+    bridge._extension_state = lambda _extension_id: {
+        "exists": True,
+        "source_type": "marketplace",
+        "version": "1.2.3",
+        "enabled": False,
+    }
+    for action_type, action_digit in (
+        ("enable", "6"),
+        ("disable", "7"),
+        ("uninstall", "8"),
+    ):
+        action = {
+            "action_id": f"baact_{action_digit * 32}",
+            "action_type": action_type,
+            "extension_id": "ofek.test",
+            "snapshot_id": f"default-v1:7:{'3' * 64}",
+            "lease_capability": "lease-secret",
+            "expected_version": "9.9.9",
+        }
+        try:
+            bridge._validate_action(action)
+        except MarketplaceBridgeError:
+            pass
+        else:
+            raise AssertionError(
+                f"Marketplace {action_type} accepted a target version"
+            )
+        action["expected_version"] = ""
+        check(
+            bridge._validate_action(action) is not None,
+            f"Marketplace {action_type} accepts an empty target version",
+        )
+        action.pop("expected_version")
+        check(
+            bridge._validate_action(action) is not None,
+            f"Marketplace {action_type} accepts an absent target version",
+        )
+
+    with tempfile.TemporaryDirectory() as directory:
+        store = MarketplaceStateStore(Path(directory) / "state.json")
+        state = empty_state()
+        pair_id = f"pair_{'1' * 32}"
+        created_at = datetime.now(timezone.utc)
+        state["intents"][pair_id] = {
+            "intent_id": pair_id,
+            "action": "pair",
+            "status": "awaiting_confirmation",
+            "site_label": "Singular Labs",
+            "account_label": "account@example.test",
+            "device_label": "Test device",
+            "created_at": created_at.isoformat(),
+        }
+        state["intents"][f"baact_{'2' * 32}"] = {
+            "intent_id": f"baact_{'2' * 32}",
+            "action": "install",
+            "status": "awaiting_confirmation",
+            "extension": {"id": "ofek.test", "name": "Test"},
+            "created_at": (created_at + timedelta(seconds=1)).isoformat(),
+        }
+        store.write(state)
+        intents = MarketplaceBridge(store=store).snapshot()["intents"]
+        check(
+            set(intents[0])
+            == {
+                "intent_id",
+                "action",
+                "status",
+                "site_label",
+                "account_label",
+                "device_label",
+            },
+            "pair projection exposes only protocol fields",
+        )
+        check(
+            set(intents[1]) == {"intent_id", "action", "status", "extension"},
+            "action projection exposes only protocol fields",
+        )
+
+
 def test_store_rejects_secret_account_substitution() -> None:
     with tempfile.TemporaryDirectory() as directory:
         store = MarketplaceStateStore(Path(directory) / "state.json")
@@ -973,6 +1054,7 @@ if __name__ == "__main__":
     test_protocol_artifact_is_canonical()
     test_device_signer_enforces_exact_operation_shape()
     test_store_is_durable_private_and_fail_closed()
+    test_action_versions_and_public_intent_projection_are_exact()
     test_store_rejects_secret_account_substitution()
     test_verified_catalog_proof_survives_expiry()
     test_action_envelope_excludes_coordinates_and_snapshot_excludes_secrets()

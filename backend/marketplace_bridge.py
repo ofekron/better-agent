@@ -147,9 +147,12 @@ class MarketplaceBridge:
             "site_label",
             "device_label",
             "error",
-            "created_at",
         }
-        for intent in state["intents"].values():
+        ordered_intents = sorted(
+            state["intents"].values(),
+            key=lambda item: (item["created_at"], item["intent_id"]),
+        )
+        for intent in ordered_intents:
             intents.append(
                 {
                     key: deepcopy(value)
@@ -157,7 +160,6 @@ class MarketplaceBridge:
                     if key in public_fields
                 }
             )
-        intents.sort(key=lambda item: (item["created_at"], item["intent_id"]))
         return {
             "revision": state["revision"],
             "connection_state": state["connection_state"],
@@ -452,6 +454,10 @@ class MarketplaceBridge:
             required=action in {"install", "update"},
             maximum=128,
         )
+        if action not in {"install", "update"} and expected_version:
+            raise MarketplaceBridgeError(
+                "Marketplace action has an unexpected target version"
+            )
         publisher_fingerprint = str(raw.get("publisher_fingerprint") or "")
         permission_hash = str(raw.get("permission_hash") or "")
         if action in {"install", "update"}:
