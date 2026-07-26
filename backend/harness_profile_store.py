@@ -38,6 +38,14 @@ def _path():
     return ba_home() / "harness_profiles.json"
 
 
+def store_fingerprint() -> tuple[int, int]:
+    try:
+        stat = _path().stat()
+    except FileNotFoundError:
+        return (0, 0)
+    return (stat.st_mtime_ns, stat.st_size)
+
+
 def _blank() -> dict[str, Any]:
     return {"schema_version": SCHEMA_VERSION, "profiles": {}}
 

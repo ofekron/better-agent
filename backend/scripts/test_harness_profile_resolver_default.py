@@ -179,6 +179,79 @@ def test_default_headless_reflects_extension_setting_write() -> None:
     assert after["extension_instances"][_FIXTURE_BROWSER_HARNESS_EXTENSION_ID]["headless"] is True
 
 
+def test_default_profile_synthesis_is_cached_until_invalidated() -> None:
+    harness_profile_resolver.invalidate_cache()
+    default_calls = 0
+    resolve_calls = 0
+    original_default = harness_profile_resolver._compute_default_profile_uncached
+    original_resolve = harness_profile_resolver.resolve_profile
+
+    def counted() -> dict:
+        nonlocal default_calls
+        default_calls += 1
+        return original_default()
+
+    def counted_resolve(*args, **kwargs) -> dict:
+        nonlocal resolve_calls
+        resolve_calls += 1
+        return original_resolve(*args, **kwargs)
+
+    harness_profile_resolver._compute_default_profile_uncached = counted
+    harness_profile_resolver.resolve_profile = counted_resolve
+    try:
+        first = harness_profile_resolver.resolve_for_session({})
+        second = harness_profile_resolver.resolve_for_session({})
+        assert first["profile_id"] == harness_profile_store.DEFAULT_PROFILE_ID
+        assert second["profile_id"] == harness_profile_store.DEFAULT_PROFILE_ID
+        assert default_calls == 1
+        assert resolve_calls == 1
+
+        harness_profile_resolver.invalidate_cache()
+        third = harness_profile_resolver.resolve_for_session({})
+        assert third["profile_id"] == harness_profile_store.DEFAULT_PROFILE_ID
+        assert default_calls == 2
+        assert resolve_calls == 2
+    finally:
+        harness_profile_resolver._compute_default_profile_uncached = original_default
+        harness_profile_resolver.resolve_profile = original_resolve
+        harness_profile_resolver.invalidate_cache()
+
+
+def test_run_snapshot_cache_tracks_selected_package_fingerprint() -> None:
+    _install_browser_harness_extension_with_headless_setting()
+    harness_profile_resolver.invalidate_cache()
+    resolve_calls = 0
+    package_fingerprint = "package-a"
+    original_resolve = harness_profile_resolver.resolve_profile
+    original_package_fingerprint = extension_store.runtime_package_content_fingerprint
+
+    def counted_resolve(*args, **kwargs) -> dict:
+        nonlocal resolve_calls
+        resolve_calls += 1
+        return original_resolve(*args, **kwargs)
+
+    def package_fingerprint_for_record(_record: dict) -> str:
+        return package_fingerprint
+
+    harness_profile_resolver.resolve_profile = counted_resolve
+    extension_store.runtime_package_content_fingerprint = package_fingerprint_for_record
+    try:
+        first = harness_profile_resolver.resolve_for_session({})
+        second = harness_profile_resolver.resolve_for_session({})
+        assert _FIXTURE_BROWSER_HARNESS_EXTENSION_ID in first["extension_revisions"]
+        assert _FIXTURE_BROWSER_HARNESS_EXTENSION_ID in second["extension_revisions"]
+        assert resolve_calls == 1
+
+        package_fingerprint = "package-b"
+        third = harness_profile_resolver.resolve_for_session({})
+        assert _FIXTURE_BROWSER_HARNESS_EXTENSION_ID in third["extension_revisions"]
+        assert resolve_calls == 2
+    finally:
+        harness_profile_resolver.resolve_profile = original_resolve
+        extension_store.runtime_package_content_fingerprint = original_package_fingerprint
+        harness_profile_resolver.invalidate_cache()
+
+
 def test_resolve_for_session_falls_back_to_default_profile() -> None:
     """A session/turn with no explicit harness_profile_id (the case for every
     session created before profile selection existed, and the overwhelming
@@ -306,6 +379,8 @@ def main() -> int:
     test_unoverridden_field_tracks_default_live()
     test_clearing_override_reverts_to_tracking_default()
     test_default_headless_reflects_extension_setting_write()
+    test_default_profile_synthesis_is_cached_until_invalidated()
+    test_run_snapshot_cache_tracks_selected_package_fingerprint()
     test_resolve_for_session_falls_back_to_default_profile()
     test_multi_level_base_chain_applies_deltas_in_order()
     test_resolve_time_cycle_detected()

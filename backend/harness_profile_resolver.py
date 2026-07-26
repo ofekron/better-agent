@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import copy
+import hashlib
+import json
+import threading
 from typing import Any
 
 import capability_contexts as capability_contexts_mod
@@ -13,6 +16,80 @@ import harness_profile_store
 
 class HarnessProfileResolutionError(ValueError):
     pass
+
+
+_CACHE_LOCK = threading.RLock()
+_DEFAULT_PROFILE_CACHE: tuple[tuple[Any, ...], dict[str, Any]] | None = None
+_RUN_SNAPSHOT_CACHE_MAX = 64
+_RUN_SNAPSHOT_CACHE: dict[
+    tuple[Any, ...],
+    tuple[tuple[tuple[str, str | None], ...], dict[str, Any]],
+] = {}
+
+
+def invalidate_cache() -> None:
+    global _DEFAULT_PROFILE_CACHE
+    with _CACHE_LOCK:
+        _DEFAULT_PROFILE_CACHE = None
+        _RUN_SNAPSHOT_CACHE.clear()
+
+
+def _default_profile_cache_key() -> tuple[Any, ...]:
+    return (
+        config_store.config_fingerprint(),
+        extension_store.store_fingerprint(),
+        extension_store.extension_settings_fingerprint(),
+        harness_profile_store.store_fingerprint(),
+    )
+
+
+def _json_cache_token(value: Any) -> str:
+    try:
+        encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+    except (TypeError, ValueError):
+        encoded = repr(value).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _run_snapshot_cache_get(key: tuple[Any, ...]) -> dict[str, Any] | None:
+    with _CACHE_LOCK:
+        cached = _RUN_SNAPSHOT_CACHE.get(key)
+    if cached is None:
+        return None
+    package_fingerprints, snapshot = cached
+    current_fingerprints = _selected_package_fingerprints(
+        (snapshot.get("extension_revisions") or {}).keys()
+    )
+    if current_fingerprints != package_fingerprints:
+        with _CACHE_LOCK:
+            if _RUN_SNAPSHOT_CACHE.get(key) == cached:
+                _RUN_SNAPSHOT_CACHE.pop(key, None)
+        return None
+    return copy.deepcopy(snapshot)
+
+
+def _run_snapshot_cache_put(key: tuple[Any, ...], value: dict[str, Any]) -> dict[str, Any]:
+    package_fingerprints = _selected_package_fingerprints(
+        (value.get("extension_revisions") or {}).keys()
+    )
+    with _CACHE_LOCK:
+        if len(_RUN_SNAPSHOT_CACHE) >= _RUN_SNAPSHOT_CACHE_MAX:
+            _RUN_SNAPSHOT_CACHE.pop(next(iter(_RUN_SNAPSHOT_CACHE)))
+        _RUN_SNAPSHOT_CACHE[key] = (package_fingerprints, copy.deepcopy(value))
+    return value
+
+
+def _selected_package_fingerprints(extension_ids: Any) -> tuple[tuple[str, str | None], ...]:
+    fingerprints: list[tuple[str, str | None]] = []
+    for extension_id in sorted(str(item) for item in extension_ids if str(item or "").strip()):
+        record = extension_store.get_extension(extension_id)
+        fingerprint = (
+            extension_store.runtime_package_content_fingerprint(record)
+            if isinstance(record, dict)
+            else None
+        )
+        fingerprints.append((extension_id, fingerprint))
+    return tuple(fingerprints)
 
 
 # browserHarness folded onto the extension identity for the browser-harness
@@ -66,12 +143,26 @@ def _extension_items(record: dict[str, Any]) -> dict[str, set[str]]:
 
 
 # ---------------------------------------------------------------------------
-# Default synthesis — aggregates LIVE state; never persisted, never cached.
+# Default synthesis — aggregates LIVE state and is cached by owner-store
+# fingerprints. The cache is disposable; profile/extension writes invalidate it.
 # Mirrors the read logic the deleted `_package_current_harness_profile_payload`
 # used to hand-assemble, and the same live reads turn_manager's no-profile
 # fallback path already performs.
 # ---------------------------------------------------------------------------
 def compute_default_profile() -> dict[str, Any]:
+    global _DEFAULT_PROFILE_CACHE
+    key = _default_profile_cache_key()
+    with _CACHE_LOCK:
+        cached = _DEFAULT_PROFILE_CACHE
+        if cached is not None and cached[0] == key:
+            return copy.deepcopy(cached[1])
+    profile = _compute_default_profile_uncached()
+    with _CACHE_LOCK:
+        _DEFAULT_PROFILE_CACHE = (key, copy.deepcopy(profile))
+    return profile
+
+
+def _compute_default_profile_uncached() -> dict[str, Any]:
     extension_instances: dict[str, Any] = {}
     for record in extension_store.list_extensions(include_hidden=True):
         manifest = record.get("manifest") or {}
@@ -488,6 +579,22 @@ def resolve_for_session(
     if not selected_id:
         return None
     selected_revision = str(revision or session.get("harness_profile_revision") or "").strip()
+    active_capability_ids = tuple(
+        str(item)
+        for item in session.get("active_capability_ids") or []
+        if str(item or "").strip()
+    )
+    cache_key = (
+        _default_profile_cache_key(),
+        selected_id,
+        selected_revision,
+        bool(session.get("bare_config")),
+        active_capability_ids,
+        _json_cache_token(turn_capability_contexts or []),
+    )
+    cached = _run_snapshot_cache_get(cache_key)
+    if cached is not None:
+        return cached
     resolved = resolve_profile(selected_id, selected_revision or None)
 
     selected: dict[str, dict[str, Any]] = {}
@@ -564,11 +671,7 @@ def resolve_for_session(
         "capability_contexts": profile_contexts,
         "provider_run_config": provider_run_config,
         "extra_mcp_servers": sorted({server for servers in extension_mcp_servers.values() for server in servers}),
-        "active_capability_ids": [
-            str(item)
-            for item in session.get("active_capability_ids") or []
-            if str(item or "").strip()
-        ],
+        "active_capability_ids": list(active_capability_ids),
         "disabled_builtin_tools": list(resolved["disabled_builtin_tools"]["resolved"]),
         "disabled_builtin_extensions": list(resolved["disabled_builtin_extensions"]["resolved"]),
         "extension_revisions": extension_revisions,
@@ -591,4 +694,4 @@ def resolve_for_session(
         "disabled_builtin_tools": snapshot["disabled_builtin_tools"],
         "active_capability_ids": snapshot["active_capability_ids"],
     }
-    return snapshot
+    return _run_snapshot_cache_put(cache_key, snapshot)

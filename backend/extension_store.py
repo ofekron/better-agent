@@ -6129,6 +6129,10 @@ def _native_mcp_package_content_fingerprint(record: dict[str, Any]) -> str | Non
     return fingerprint
 
 
+def runtime_package_content_fingerprint(record: dict[str, Any]) -> str | None:
+    return _native_mcp_package_content_fingerprint(record)
+
+
 def native_mcp_declarations(
     record: dict[str, Any],
 ) -> dict[tuple[str, str], "native_mcp_grants.ServerDeclaration"]:
@@ -6823,6 +6827,16 @@ def _load_ext_settings() -> dict[str, Any]:
 def _save_ext_settings(data: dict[str, Any]) -> None:
     with _EXT_SETTINGS_LOCK:
         write_json(_ext_settings_path(), data)
+    _clear_projection_cache()
+
+
+def _invalidate_harness_profile_resolver_cache() -> None:
+    try:
+        import harness_profile_resolver
+
+        harness_profile_resolver.invalidate_cache()
+    except Exception:
+        logger.debug("failed to invalidate harness profile resolver cache", exc_info=True)
 
 
 def _set_native_harness_value(
@@ -6955,6 +6969,7 @@ def set_extension_setting(extension_id: str, key: str, value: Any) -> dict[str, 
             password_manager.delete_service_password(
                 {"service": _SETTING_SECRET_SERVICE, "account": account}
             )
+        _invalidate_harness_profile_resolver_cache()
         return get_extension_settings(extension_id)
     coerced = _coerce_setting_value(value, spec["type"], key, enum=spec.get("enum"))
     data = _load_ext_settings()

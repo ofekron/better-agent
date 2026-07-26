@@ -125,6 +125,10 @@ def _config_fingerprint() -> tuple[int, int]:
     return (stat.st_mtime_ns, stat.st_size)
 
 
+def config_fingerprint() -> tuple[int, int]:
+    return _config_fingerprint()
+
+
 def _engine_env_path():
     return ba_home() / "engine.env"
 
