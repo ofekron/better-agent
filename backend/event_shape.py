@@ -132,11 +132,12 @@ TEXT_AGENT_DATA_TYPES = frozenset({"assistant", "operator"})
 
 def is_metadata_event(event: dict) -> bool:
     """True for non-render agent_message metadata (ai-title, last-prompt,
-    file-history-snapshot, …). Unwraps a manager_event frame first, like
-    is_synthetic_event."""
+    file-history-snapshot, …). Unwraps a manager_event/worker_event frame
+    first, like is_synthetic_event — worker panels carry the same CLI
+    sidecar records under `data.event` and must classify identically."""
     if not isinstance(event, dict):
         return False
-    if event.get("type") == "manager_event":
+    if event.get("type") in ("manager_event", "worker_event"):
         data = event.get("data")
         inner = data.get("event") if isinstance(data, dict) else None
         return is_metadata_event(inner) if isinstance(inner, dict) else False

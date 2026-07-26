@@ -31,6 +31,7 @@ import os
 import shutil
 import sys
 import tempfile
+from pathlib import Path
 from types import SimpleNamespace
 
 import _test_home
@@ -41,6 +42,9 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 _BACKEND = os.path.dirname(_HERE)
 if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
+
+import _test_installation  # noqa: E402
+_test_installation.activate(Path(_TMP_HOME))
 
 from event_ingester import event_ingester  # noqa: E402
 from event_journal import event_journal_writer  # noqa: E402
@@ -680,7 +684,17 @@ def test_m_session_panel_emitters_stamp_after_pending_trigger() -> bool:
                 {"type": "agent_message", "data": {"uuid": "before-trigger"}},
             ],
         }
-        fake = SimpleNamespace(turn_manager=tm)
+        # Panel emitters route their turn-save through the Coordinator's
+        # ordered per-panel queue; the fake needs that real machinery so
+        # the saves actually run.
+        fake = SimpleNamespace(
+            turn_manager=tm,
+            _panel_turn_save_tails={},
+            _background_turn_save_tasks=set(),
+        )
+        fake._schedule_ordered_panel_turn_save = (
+            lambda **kw: Coordinator._schedule_ordered_panel_turn_save(fake, **kw)
+        )
 
         panel = await Coordinator._start_team_message_panel(
             fake,
@@ -700,6 +714,10 @@ def test_m_session_panel_emitters_stamp_after_pending_trigger() -> bool:
                 "kind": "sub_session",
             },
         )
+        pending = list(fake._background_turn_save_tasks)
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+
         ok = (
             panel is not None
             and panel.get("insert_at") == 2
@@ -793,6 +811,84 @@ def test_n_snapshot_routes_journal_worker_event_to_panel_once() -> bool:
     return ok
 
 
+def test_o_inner_metadata_never_journaled_or_paneled() -> bool:
+    """Worker CLI sidecar metadata wrapped in a worker_event must be
+    dropped before BOTH the panel append and the events.jsonl write.
+
+    Before the fix `is_metadata_event` only unwrapped `manager_event`,
+    so worker-wrapped `queue-operation` / `ai-title` / … classified as
+    renderable: they were appended to panel.events (rendering as an
+    empty row) and journaled in full — `queue-operation` embeds the
+    entire prompt text on every enqueue, which is what grew a real
+    events.jsonl to multiple GB.
+
+    O1: each metadata inner type → panel.events and msg.events stay
+        empty, events.jsonl gains ZERO rows.
+    O2: a normal assistant inner event on the SAME panel still routes
+        and journals (the gate is type-scoped, not a blanket drop).
+    O3: `is_metadata_event` classifies manager_event and worker_event
+        envelopes identically for the same inner event.
+    """
+    from event_shape import NON_RENDER_AGENT_DATA_TYPES, is_metadata_event
+
+    sid, root_id, msg_id, _ = _mk_session_with_panel("del_O")
+    rows_before = len(_events_jsonl_for(root_id, sid))
+
+    for i, mtype in enumerate(sorted(NON_RENDER_AGENT_DATA_TYPES)):
+        _apply(sid, msg_id, root_id, {
+            "type": "worker_event",
+            "data": {
+                "delegation_id": "del_O",
+                "event": {
+                    "type": "agent_message",
+                    "data": {
+                        "uuid": f"uuid-O-{i}",
+                        "type": mtype,
+                        # queue-operation carries the whole prompt.
+                        "content": "x" * 4096,
+                    },
+                },
+            },
+        }, source_is_provider_stream=True)
+
+    meta_panel = _panel_events(sid, msg_id, "del_O")
+    meta_mgr = _mgr_events(sid, msg_id)
+    rows_after_meta = len(_events_jsonl_for(root_id, sid))
+    o1_ok = (
+        len(meta_panel) == 0
+        and len(meta_mgr) == 0
+        and rows_after_meta == rows_before
+    )
+
+    _apply(sid, msg_id, root_id,
+           _worker_event("del_O", "uuid-O-real", "real content"),
+           source_is_provider_stream=True)
+    real_panel = _panel_events(sid, msg_id, "del_O")
+    rows_after_real = len(_events_jsonl_for(root_id, sid))
+    o2_ok = (
+        len(real_panel) == 1
+        and rows_after_real == rows_after_meta + 1
+        and len(_mgr_events(sid, msg_id)) == 0
+    )
+
+    inner = {"type": "agent_message", "data": {"type": "ai-title"}}
+    o3_ok = (
+        is_metadata_event({"type": "worker_event",
+                           "data": {"delegation_id": "d", "event": inner}})
+        is is_metadata_event({"type": "manager_event",
+                              "data": {"event": inner}})
+        is True
+    )
+
+    ok = o1_ok and o2_ok and o3_ok
+    print(f"{PASS if ok else FAIL} O: inner metadata dropped — "
+          f"O1(meta_dropped)={o1_ok} (panel={len(meta_panel)} "
+          f"rows_delta={rows_after_meta - rows_before}); "
+          f"O2(real_kept)={o2_ok} (panel={len(real_panel)}); "
+          f"O3(envelope_parity)={o3_ok}")
+    return ok
+
+
 # ─── runner ───────────────────────────────────────────────────────
 
 def main() -> int:
@@ -815,6 +911,7 @@ def main() -> int:
             test_l_post_trigger_insert_at_counts_after_current_event(),
             test_m_session_panel_emitters_stamp_after_pending_trigger(),
             test_n_snapshot_routes_journal_worker_event_to_panel_once(),
+            test_o_inner_metadata_never_journaled_or_paneled(),
         ]
     finally:
         session_manager.flush_pending_persists()

@@ -783,6 +783,17 @@ class OrchestrationStrategy(ABC):
         delegation_id = data.get("delegation_id")
         inner = data.get("event") or {}
         inner_data = inner.get("data") or {}
+        # CLI sidecar records (queue-operation, ai-title, last-prompt,
+        # file-history-snapshot, mode, attachment, system) are owned by
+        # the worker's OWN session and render as nothing in the parent's
+        # panel. Journaling them duplicates the worker's stream into the
+        # parent — queue-operation alone embeds the full prompt text on
+        # every enqueue. Drop before the panel append and the journal
+        # write so all three ingestion scenarios converge on the same
+        # metadata-free panel.
+        from event_shape import is_metadata_event
+        if is_metadata_event(inner):
+            return
         # Rewrite file refs on the INNER claude-shaped event. The
         # outer worker_event wrapper has no file paths of its own.
         if source_is_provider_stream:

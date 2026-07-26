@@ -51,6 +51,9 @@ if _BACKEND not in sys.path:
 
 from pathlib import Path
 
+import _test_installation  # noqa: E402
+_test_installation.activate(Path(_TMP_HOME))
+
 from event_ingester import event_ingester  # noqa: E402
 from event_bus import BusEvent, bus  # noqa: E402
 from event_journal import FORK_BACKUP_SOURCE, event_journal_writer  # noqa: E402

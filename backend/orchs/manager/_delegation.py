@@ -42,6 +42,7 @@ from orchs.manager._approval import (
 )
 from orchs.manager._rewind import _safe_delete_forks
 from provider import StreamEvent
+from event_shape import is_metadata_event as _is_metadata_event
 from event_shape import is_synthetic_event as _is_synthetic_event
 from event_shape import extract_output_text, strip_synthetic_events
 from communication_modes import append_ask_response_contract, normalize_ask_mode
@@ -1471,11 +1472,16 @@ async def run_delegation_locked(
                                     "got %s",
                                     fork_agent_sid, disc,
                                 )
-                with perf.timed("delegate.worker_event_callback"):
-                    await ws_callback({"type": "worker_event", "data": {
-                        "delegation_id": delegation_id,
-                        "event": event_dict,
-                    }})
+                # Worker CLI sidecar metadata renders as nothing in the
+                # panel; skip the frame so it costs neither wire bytes nor
+                # a funnel round-trip. `_apply_worker_event` drops the same
+                # events on the recovery-replay path.
+                if not _is_metadata_event(event_dict):
+                    with perf.timed("delegate.worker_event_callback"):
+                        await ws_callback({"type": "worker_event", "data": {
+                            "delegation_id": delegation_id,
+                            "event": event_dict,
+                        }})
 
                 if first_tool_ms is None and _delegation_event_is_tool_activity(event_dict):
                     first_tool_ms = round((time.perf_counter() - run_started_at) * 1000, 3)
