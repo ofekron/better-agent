@@ -674,6 +674,52 @@ def test_internal_provision_workers_requires_internal_token():
     assert broadcasts == [None]
 
 
+def test_find_worker_removes_stale_provider_session_and_continues():
+    from stores import worker_store as _ws
+
+    stale = {
+        "agent_session_id": "stale-session",
+        "name": "worker:old",
+        "cwd": "/tmp/project",
+    }
+    current = {
+        "agent_session_id": "current-session",
+        "name": "worker:current",
+        "cwd": "/tmp/project",
+        "role_key": "current",
+    }
+    removed = []
+    real_read = _ws._read
+    real_remove = _ws.remove_worker
+    real_get_lite = main.session_manager.get_lite
+    _ws._read = lambda: {"workers": [stale, current]}
+    _ws.remove_worker = lambda cwd, session_id: removed.append((cwd, session_id))
+
+    def fake_get_lite(session_id):
+        if session_id == "stale-session":
+            raise main.session_store.SessionProviderNotConfiguredError(
+                "session provider is not configured"
+            )
+        return {
+            "id": session_id,
+            "name": "worker:current",
+            "cwd": "/tmp/project",
+            "orchestration_mode": "native",
+            "agent_session_id": "native-session",
+        }
+
+    main.session_manager.get_lite = fake_get_lite
+    try:
+        found = main._find_worker_by_session_name("/tmp/project", "worker:current")
+    finally:
+        _ws._read = real_read
+        _ws.remove_worker = real_remove
+        main.session_manager.get_lite = real_get_lite
+
+    assert removed == [("/tmp/project", "stale-session")]
+    assert found["agent_session_id"] == "current-session"
+
+
 def test_bare_provision_workers_returns_pending_without_init_turn():
     broadcasts = []
 
@@ -1247,6 +1293,7 @@ if __name__ == "__main__":
     test_worker_pool_dispatch_failure_requeues_without_blocking_later_items()
     test_worker_pool_affinity_reuses_bound_worker_even_when_busy()
     test_internal_provision_workers_requires_internal_token()
+    test_find_worker_removes_stale_provider_session_and_continues()
     test_bare_provision_workers_returns_pending_without_init_turn()
     test_bare_provision_worker_persists_disallowed_tools()
     test_team_messages_inherit_target_disallowed_tools()

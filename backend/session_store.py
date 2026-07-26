@@ -68,6 +68,10 @@ _logger = logging.getLogger(__name__)
 SCHEMA_VERSION = 11
 
 
+class SessionProviderNotConfiguredError(ValueError):
+    pass
+
+
 # ── User-initiation taxonomy ──────────────────────────────────────────
 #
 # `user_initiated` distinguishes sessions the user is AWARE of having
@@ -3589,7 +3593,7 @@ def _session_reasoning_effort(
 ) -> str:
     record = config_store.get_provider(provider_id) if provider_id else None
     if not record:
-        raise ValueError("session provider is not configured")
+        raise SessionProviderNotConfiguredError("session provider is not configured")
     options = runtime_profile.reasoning_efforts(record, runner, model=model)
     effort = normalize_reasoning_effort(value)
     if effort and effort in options:
@@ -3605,7 +3609,7 @@ def _session_reasoning_effort(
 def _session_runner(value: object, provider_id: Optional[str]) -> str:
     record = config_store.get_provider(provider_id) if provider_id else None
     if not record:
-        raise ValueError("session provider is not configured")
+        raise SessionProviderNotConfiguredError("session provider is not configured")
     return runtime_profile.resolve_runner(record, value)
 
 
