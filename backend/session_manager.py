@@ -4427,7 +4427,11 @@ class SessionManager:
                 session_queue_projection.delete_records(deleted_sids)
             except Exception:
                 logger.exception("queue projection delete failed for %s", sid)
-            self._fire(sid, {"kind": "deleted"})
+            # `deleted_sids` carries the whole removed subtree (the target
+            # plus every descendant fork) so projections that key off session
+            # ids — e.g. the ui_selection open-tab list — can prune all of
+            # them, not just the root of the delete.
+            self._fire(sid, {"kind": "deleted", "deleted_sids": deleted_sids})
         return True, revocations
 
     # ── Top-level metadata patches ─────────────────────────────────

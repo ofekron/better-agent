@@ -2048,6 +2048,10 @@ from event_bus_subscribers import (
 bind_worker_fanout_cleanup(coordinator.broadcast_workers_changed)
 bind_post_turn_hooks()
 bind_pre_turn_hooks()
+# Deleting a session closes its tab: the open-tab list projects session
+# deletions instead of stranding tabs that point at gone sessions.
+import ui_selection_projection  # noqa: E402
+ui_selection_projection.bind(coordinator.broadcast_global)
 import task_assessor
 task_assessor.bind(coordinator)
 
@@ -6347,6 +6351,13 @@ async def _delete_session_tree(session_id: str) -> bool:
     ok = await asyncio.to_thread(session_manager.delete, session_id)
     _dmark("session_delete", _t)
     if ok:
+        # Await the tab close here so the endpoint can't answer "deleted"
+        # while a tab for the gone session is still persisted. The
+        # `session.deleted` bus projection covers every other delete caller;
+        # it is idempotent, so the two paths don't conflict.
+        _t = _time.perf_counter()
+        await ui_selection_projection.close_tabs_for_deleted(removed_sids)
+        _dmark("close_tabs", _t)
         _t = _time.perf_counter()
         try:
             await asyncio.to_thread(runs_dir.delete_runs_for_sessions, removed_sids)
@@ -9912,6 +9923,7 @@ async def delete_session(session_id: str):
                     "session_deleted",
                     {"session_id": session_id},
                 )
+                await ui_selection_projection.close_tabs_for_deleted([session_id])
             return {"deleted": deleted}
         _t = _time.perf_counter()
         ok = await _delete_session_tree(session_id)
@@ -13797,6 +13809,7 @@ async def on_shutdown():
             logger.exception("node_store: offset flush loop stop failed")
     from event_bus_subscribers import unbind_session_ws_broadcaster
     unbind_session_ws_broadcaster()
+    ui_selection_projection.unbind()
     await coordinator.drain_global_broadcasts()
     shutdown_ws_json_executor()
 
@@ -14767,6 +14780,7 @@ async def internal_virtual_sessions_delete(
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     if deleted:
         await coordinator.broadcast_global("session_deleted", {"session_id": session_id})
+        await ui_selection_projection.close_tabs_for_deleted([session_id])
     return {"success": True, "deleted": deleted}
 
 

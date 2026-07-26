@@ -16,6 +16,11 @@ const PROJECT_NODE_KEY = "better-agent-selected-project-node";
 const REMEMBERED_KEY = "better-agent-remembered-session-by-project";
 const OPEN_SESSION_IDS_KEY = "better-agent-open-session-ids";
 const OPEN_SESSION_JOINED_AT_KEY = "better-agent-open-session-joined-at";
+// Marks that this browser's legacy localStorage-only tab list has been seeded
+// into the backend. After that the backend is unconditionally authoritative,
+// so a stale cache can never re-add a tab the backend closed (e.g. because its
+// session was deleted while this client was offline).
+const OPEN_SESSION_SEEDED_KEY = "better-agent-open-session-ids-seeded";
 
 // Nested by project path, then node id. JSON object keys are opaque strings,
 // so paths/node ids are stored verbatim with no escaping.
@@ -53,6 +58,22 @@ function readSelectedLS(): SelectedProject {
   const path = localStorage.getItem(PROJECT_PATH_KEY) || "";
   if (!path) return null;
   return { path, node_id: localStorage.getItem(PROJECT_NODE_KEY) || "primary" };
+}
+
+function openTabsSeeded(): boolean {
+  try {
+    return localStorage.getItem(OPEN_SESSION_SEEDED_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function markOpenTabsSeeded(): void {
+  try {
+    localStorage.setItem(OPEN_SESSION_SEEDED_KEY, "1");
+  } catch {
+    // best-effort
+  }
 }
 
 function readOpenSessionIdsLS(): string[] {
@@ -254,7 +275,10 @@ export function cacheOpenSessionTabIds(sessionIds: string[]): void {
 // received yet (in-flight write). Does NOT mutate React state or navigate —
 // callers decide how to use the refreshed cache. When `seedUp` is set (mount
 // only), local-only entries are pushed to the backend so a user upgrading
-// from the localStorage-only version migrates their state once.
+// from the localStorage-only version migrates their state once. Open tabs seed
+// up exactly once per browser (flagged in localStorage): afterwards the
+// backend list wins outright, so a tab the backend closed — e.g. when its
+// session was deleted — cannot be resurrected from a stale cache.
 export function applyBackendSnapshot(
   snap: UiSelectionSnapshot,
   seedUp = false,
@@ -289,7 +313,10 @@ export function applyBackendSnapshot(
   remembered = merged;
   writeRememberedLS();
 
-  if (seedUp && openSessionTabIds.length > 0) {
+  const seedTabsUp = seedUp && !openTabsSeeded();
+  if (seedUp) markOpenTabsSeeded();
+
+  if (seedTabsUp && openSessionTabIds.length > 0) {
     const mergedOpenIds = normalizeSessionIds([...backendOpenIds, ...openSessionTabIds]);
     const mergedJoinedAt = normalizeJoinedAt(
       { ...openSessionTabJoinedAt, ...backendJoinedAt },
