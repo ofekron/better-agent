@@ -2,24 +2,28 @@ from __future__ import annotations
 
 import base64
 import contextvars
-import hashlib
 import inspect
 import json
-import os
 import re
 import uuid
 from collections.abc import Iterator, MutableMapping
 from dataclasses import dataclass
 from typing import Annotated, Any, Awaitable, Callable, Literal
 
-from fastapi import APIRouter, Header, HTTPException
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError, field_validator
-from api_surface_sync import OperationContractError
-
 import extension_store
 import extension_token_registry
-import operation_catalog
 import operation_authority
+import operation_catalog
+from api_surface_sync import OperationContractError
+from fastapi import APIRouter, Header, HTTPException
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    ValidationError,
+    field_validator,
+)
 from runtime_principal import compatibility_extension_principal
 from scoped_runtime_client import ScopedRuntimeClient
 
@@ -29,7 +33,9 @@ class _StrictPayload(BaseModel):
 
 
 class InvokeCapabilityRequest(_StrictPayload):
-    capability: str = Field(min_length=1, max_length=64, pattern=r"^[a-z0-9][a-z0-9-]*$")
+    capability: str = Field(
+        min_length=1, max_length=64, pattern=r"^[a-z0-9][a-z0-9-]*$"
+    )
     action: str = Field(min_length=1, max_length=128, pattern=r"^[a-z0-9][a-z0-9._-]*$")
     payload: dict[str, Any] = Field(default_factory=dict)
 
@@ -67,14 +73,6 @@ class _MarketplaceSearchPayload(_StrictPayload):
 
 class _ExtensionIdPayload(_StrictPayload):
     extension_id: str = Field(min_length=1)
-
-
-class _MarketplaceInstallPayload(_ExtensionIdPayload):
-    entitlement_token: str = ""
-
-
-class _MarketplaceSetEnabledPayload(_ExtensionIdPayload):
-    enabled: bool
 
 
 class _MarketplaceAuthSecretPayload(_StrictPayload):
@@ -151,7 +149,9 @@ class _RequirementsQueryPayload(_StrictPayload):
 
 class _RequirementsFirePayload(_RequirementsQueryPayload):
     wait: bool = False
-    idempotency_key: str = Field(default="", max_length=128, pattern=r"^[A-Za-z0-9_-]*$")
+    idempotency_key: str = Field(
+        default="", max_length=128, pattern=r"^[A-Za-z0-9_-]*$"
+    )
 
 
 class _RequirementsResultsPayload(_StrictPayload):
@@ -226,7 +226,9 @@ _AutoTaggingId = Annotated[
         pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]*$",
     ),
 ]
-_AutoTaggingProjectId = Annotated[str, StringConstraints(strip_whitespace=True, max_length=4096)]
+_AutoTaggingProjectId = Annotated[
+    str, StringConstraints(strip_whitespace=True, max_length=4096)
+]
 _AutoTaggingLabel = Annotated[
     str,
     StringConstraints(strip_whitespace=True, min_length=1, max_length=48),
@@ -246,14 +248,20 @@ class _AutoTaggingSnapshotPayload(_StrictPayload):
 
 
 class _AutoTaggingEvidenceRow(_StrictPayload):
-    text: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=2000)]
+    text: Annotated[
+        str, StringConstraints(strip_whitespace=True, min_length=1, max_length=2000)
+    ]
     role: Literal["user", "assistant"]
-    ts: Annotated[str, StringConstraints(strip_whitespace=True, max_length=64)] | None = None
+    ts: (
+        Annotated[str, StringConstraints(strip_whitespace=True, max_length=64)] | None
+    ) = None
 
 
 class _AutoTaggingSelectPayload(_StrictPayload):
     session_id: _AutoTaggingId
-    task: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=2000)]
+    task: Annotated[
+        str, StringConstraints(strip_whitespace=True, min_length=1, max_length=2000)
+    ]
     evidence: list[_AutoTaggingEvidenceRow] = Field(min_length=1, max_length=40)
     existing_tags: list[_AutoTaggingLabel] = Field(default_factory=list, max_length=500)
     max_tags: int = Field(default=5, ge=1, le=5)
@@ -284,8 +292,13 @@ class _AutoTaggingUpdatePayload(_StrictPayload):
         ):
             raise ValueError("patch name must contain 1 to 48 characters")
         color = patch.get("color")
-        if "color" in patch and color is not None and (
-            not isinstance(color, str) or re.fullmatch(r"#[0-9A-Fa-f]{6}", color.strip()) is None
+        if (
+            "color" in patch
+            and color is not None
+            and (
+                not isinstance(color, str)
+                or re.fullmatch(r"#[0-9A-Fa-f]{6}", color.strip()) is None
+            )
         ):
             raise ValueError("patch color must be a six-digit hex color or null")
         return patch
@@ -303,7 +316,9 @@ class _AutoTaggingSyncPayload(_StrictPayload):
 
 
 class _AutoTaggingSqlPayload(_StrictPayload):
-    sql: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=16384)]
+    sql: Annotated[
+        str, StringConstraints(strip_whitespace=True, min_length=1, max_length=16384)
+    ]
 
 
 class _ScheduleCreatePayload(_StrictPayload):
@@ -646,7 +661,8 @@ class _ActionView(MutableMapping[tuple[str, str], _Action]):
 
 _ACTIONS: MutableMapping[tuple[str, str], _Action] = _ActionView()
 _CAPABILITY_CALLER: contextvars.ContextVar[str] = contextvars.ContextVar(
-    "capability_caller", default="unknown",
+    "capability_caller",
+    default="unknown",
 )
 
 
@@ -672,11 +688,13 @@ def register(
 def _require_grant(token: str, capability: str, action: str) -> str:
     extension_id = extension_token_registry.resolve(token)
     if not extension_id:
-        raise HTTPException(status_code=403, detail="capability invocation requires an extension token")
+        raise HTTPException(
+            status_code=403, detail="capability invocation requires an extension token"
+        )
     record = extension_store.get_extension(extension_id)
     if not record or not extension_store.is_extension_active(extension_id):
         raise HTTPException(status_code=403, detail="extension is not active")
-    grants = (extension_store.declared_permissions(record).get("capabilities") or [])
+    grants = extension_store.declared_permissions(record).get("capabilities") or []
     if f"{capability}.{action}" not in grants:
         raise HTTPException(status_code=403, detail="capability action is not granted")
     return extension_id
@@ -720,7 +738,9 @@ async def _invoke(request: InvokeCapabilityRequest, token: str) -> Any:
             operation=registered.key,
             grant_generation=_extension_generation(caller_extension),
         )
-        return await ScopedRuntimeClient(operation_authority.issue(principal), catalog).invoke(
+        return await ScopedRuntimeClient(
+            operation_authority.issue(principal), catalog
+        ).invoke(
             registered.key,
             request.payload,
         )
@@ -734,6 +754,7 @@ async def _invoke(request: InvokeCapabilityRequest, token: str) -> Any:
         _CAPABILITY_CALLER.reset(caller_token)
         if attribution_token is not None:
             from requirements_query_runner import reset_requirements_attribution
+
             reset_requirements_attribution(attribution_token)
 
 
@@ -772,43 +793,84 @@ def _register_ask() -> None:
 def _register_provider_config_sync() -> None:
     import provider_config_sync_api as pcs
 
-    async def call(fn: Callable[..., Any], payload: BaseModel, *, unpack: bool = False) -> Any:
+    async def call(
+        fn: Callable[..., Any], payload: BaseModel, *, unpack: bool = False
+    ) -> Any:
         result = fn(**payload.model_dump()) if unpack else fn(payload)
         return await result if inspect.isawaitable(result) else result
 
-    register("provider-config-sync", "state.get", _CwdPayload, lambda p: pcs._discover(p.cwd))
     register(
-        "provider-config-sync", "capability-picker.get", _CwdPayload,
+        "provider-config-sync", "state.get", _CwdPayload, lambda p: pcs._discover(p.cwd)
+    )
+    register(
+        "provider-config-sync",
+        "capability-picker.get",
+        _CwdPayload,
         lambda p: {"sources": pcs._capability_picker_sources(p.cwd)},
     )
     register(
-        "provider-config-sync", "settings.get", _SettingsPayload,
+        "provider-config-sync",
+        "settings.get",
+        _SettingsPayload,
         lambda p: pcs._standalone_api.get_auto_sync_settings(p.cwd, p.capability_id),
     )
     mappings = {
-        "settings.patch": (pcs._standalone_api.AutoSyncSettingsPatch, pcs.patch_provider_config_sync_settings),
-        "repository.init": (pcs._standalone_api.RepositoryConfigRequest, pcs.init_provider_config_sync_repository),
-        "repository.load": (pcs._standalone_api.RepositoryConfigRequest, pcs.load_provider_config_sync_repository),
+        "settings.patch": (
+            pcs._standalone_api.AutoSyncSettingsPatch,
+            pcs.patch_provider_config_sync_settings,
+        ),
+        "repository.init": (
+            pcs._standalone_api.RepositoryConfigRequest,
+            pcs.init_provider_config_sync_repository,
+        ),
+        "repository.load": (
+            pcs._standalone_api.RepositoryConfigRequest,
+            pcs.load_provider_config_sync_repository,
+        ),
         "file.put": (pcs.WriteNativeFileRequest, pcs.write_native_file_route),
         "file.restore": (pcs.RestoreNativeFileRequest, pcs.restore_native_file_route),
         "capability.delete": (pcs.DeleteCapabilityRequest, pcs.delete_capability_route),
         "capability.create": (pcs.CreateCapabilityRequest, pcs.create_capability_route),
-        "capability.transfer": (pcs.TransferCapabilityRequest, pcs.transfer_capability_route),
+        "capability.transfer": (
+            pcs.TransferCapabilityRequest,
+            pcs.transfer_capability_route,
+        ),
         "apply": (pcs.ApplyNativeFileRequest, pcs.apply_native_file_route),
         "auto-sync": (pcs.AutoSyncRequest, pcs.auto_sync_route),
-        "unified-item.upsert": (pcs.UpsertUnifiedCapabilityItemRequest, pcs.upsert_unified_capability_item_route),
-        "unified-item.remove": (pcs.RemoveUnifiedCapabilityItemRequest, pcs.remove_unified_capability_item_route),
+        "unified-item.upsert": (
+            pcs.UpsertUnifiedCapabilityItemRequest,
+            pcs.upsert_unified_capability_item_route,
+        ),
+        "unified-item.remove": (
+            pcs.RemoveUnifiedCapabilityItemRequest,
+            pcs.remove_unified_capability_item_route,
+        ),
     }
     for action, (schema, fn) in mappings.items():
         register("provider-config-sync", action, schema, lambda p, fn=fn: call(fn, p))
-    register("provider-config-sync", "repository.get", _StrictPayload, lambda _p: pcs.get_provider_config_sync_repository_status())
-    register("provider-config-sync", "repository.sync", _StrictPayload, lambda _p: pcs.sync_provider_config_sync_repository())
+    register(
+        "provider-config-sync",
+        "repository.get",
+        _StrictPayload,
+        lambda _p: pcs.get_provider_config_sync_repository_status(),
+    )
+    register(
+        "provider-config-sync",
+        "repository.sync",
+        _StrictPayload,
+        lambda _p: pcs.sync_provider_config_sync_repository(),
+    )
 
     async def broadcast(payload: BaseModel) -> Any:
         await pcs._broadcast_better_agent_changed(**payload.model_dump())
         return {"ok": True}
 
-    register("provider-config-sync", "change.broadcast", _ProviderConfigBroadcastPayload, broadcast)
+    register(
+        "provider-config-sync",
+        "change.broadcast",
+        _ProviderConfigBroadcastPayload,
+        broadcast,
+    )
 
 
 def _register_core() -> None:
@@ -860,7 +922,9 @@ def _role_main_handler(
 
         extension_id = extension_store.extension_id_for_role(role)
         if not extension_id:
-            raise HTTPException(status_code=503, detail=f"{role} extension is unavailable")
+            raise HTTPException(
+                status_code=503, detail=f"{role} extension is unavailable"
+            )
         body = payload.model_dump()
         if action:
             body["action"] = action
@@ -874,25 +938,25 @@ def _role_main_handler(
 
 
 def _register_marketplace() -> None:
+    import marketplace_auth
+
     extension_id = extension_store.MARKETPLACE_EXTENSION_ID
     actions: dict[str, tuple[type[BaseModel], str]] = {
         "search": (_MarketplaceSearchPayload, "search"),
         "installed.list": (_StrictPayload, "list_installed"),
         "installed.get": (_ExtensionIdPayload, "get_installed"),
-        "install": (_MarketplaceInstallPayload, "install"),
-        "enabled.set": (_MarketplaceSetEnabledPayload, "set_enabled"),
-        "uninstall": (_ExtensionIdPayload, "uninstall"),
-        "update": (_StrictPayload, "update"),
     }
     for capability_action, (schema, legacy_action) in actions.items():
         register(
             "marketplace",
             capability_action,
             schema,
-            _legacy_main_handler(extension_id, "internal_marketplace", action=legacy_action),
+            _legacy_main_handler(
+                extension_id, "internal_marketplace", action=legacy_action
+            ),
         )
 
-    service = "better-agent-marketplace"
+    service = marketplace_auth.service_name()
 
     def list_auth_secrets(_payload: BaseModel) -> dict[str, list[dict[str, str]]]:
         import password_manager
@@ -900,7 +964,9 @@ def _register_marketplace() -> None:
         try:
             items = password_manager.list_service_passwords().get("items", [])
         except password_manager.PasswordManagerError as exc:
-            raise HTTPException(status_code=500, detail="marketplace credential store unavailable") from exc
+            raise HTTPException(
+                status_code=500, detail="marketplace credential store unavailable"
+            ) from exc
         return {
             "items": [
                 {"account": str(item.get("account") or "")}
@@ -919,47 +985,75 @@ def _register_marketplace() -> None:
         try:
             value = json.loads(raw)
         except json.JSONDecodeError as exc:
-            raise HTTPException(status_code=500, detail="marketplace credential is invalid") from exc
+            raise HTTPException(
+                status_code=500, detail="marketplace credential is invalid"
+            ) from exc
         if not isinstance(value, dict):
-            raise HTTPException(status_code=500, detail="marketplace credential is invalid")
+            raise HTTPException(
+                status_code=500, detail="marketplace credential is invalid"
+            )
         return {"value": value}
 
-    def store_auth_secret(payload: _MarketplaceAuthSecretStorePayload) -> dict[str, bool]:
+    def store_auth_secret(
+        payload: _MarketplaceAuthSecretStorePayload,
+    ) -> dict[str, bool]:
         import password_manager
 
         try:
-            password_manager.store_service_password({
-                "service": service,
-                "account": payload.account,
-                "password": json.dumps(payload.value, separators=(",", ":")),
-            })
+            password_manager.store_service_password(
+                {
+                    "service": service,
+                    "account": payload.account,
+                    "password": json.dumps(payload.value, separators=(",", ":")),
+                }
+            )
         except password_manager.PasswordManagerError as exc:
-            raise HTTPException(status_code=500, detail="marketplace credential store unavailable") from exc
+            raise HTTPException(
+                status_code=500, detail="marketplace credential store unavailable"
+            ) from exc
         return {"stored": True}
 
     def delete_auth_secret(payload: _MarketplaceAuthSecretPayload) -> dict[str, bool]:
         import password_manager
 
         try:
-            password_manager.delete_service_password({"service": service, "account": payload.account})
+            password_manager.delete_service_password(
+                {"service": service, "account": payload.account}
+            )
         except password_manager.PasswordManagerError:
             return {"deleted": False}
         return {"deleted": True}
 
     register("marketplace", "auth-secret.list", _StrictPayload, list_auth_secrets)
-    register("marketplace", "auth-secret.get", _MarketplaceAuthSecretPayload, get_auth_secret)
-    register("marketplace", "auth-secret.store", _MarketplaceAuthSecretStorePayload, store_auth_secret)
-    register("marketplace", "auth-secret.delete", _MarketplaceAuthSecretPayload, delete_auth_secret)
+    register(
+        "marketplace", "auth-secret.get", _MarketplaceAuthSecretPayload, get_auth_secret
+    )
+    register(
+        "marketplace",
+        "auth-secret.store",
+        _MarketplaceAuthSecretStorePayload,
+        store_auth_secret,
+    )
+    register(
+        "marketplace",
+        "auth-secret.delete",
+        _MarketplaceAuthSecretPayload,
+        delete_auth_secret,
+    )
 
 
 def _register_session_control() -> None:
     extension_id = extension_store.BUILTIN_SESSION_CONTROL_EXTENSION_ID
     register(
-        "session-control", "selectors.set", _SessionSelectorsPayload,
+        "session-control",
+        "selectors.set",
+        _SessionSelectorsPayload,
         _legacy_main_handler(extension_id, "internal_session_control_selectors"),
     )
     register(
-        "session-control", "continue-fresh", _SessionContinuePayload,
+        "session-control",
+        "continue-fresh",
+        _SessionContinuePayload,
         _legacy_main_handler(extension_id, "internal_session_control_continue_fresh"),
     )
 
@@ -967,19 +1061,27 @@ def _register_session_control() -> None:
 def _register_session_bridge() -> None:
     extension_id = extension_store.BUILTIN_SESSION_BRIDGE_EXTENSION_ID
     register(
-        "session-bridge", "sessions.search", _SessionBridgeSearchPayload,
+        "session-bridge",
+        "sessions.search",
+        _SessionBridgeSearchPayload,
         _legacy_main_handler(extension_id, "internal_session_bridge_search"),
     )
     register(
-        "session-bridge", "delegate", _SessionBridgeDelegatePayload,
+        "session-bridge",
+        "delegate",
+        _SessionBridgeDelegatePayload,
         _legacy_main_handler(extension_id, "internal_session_bridge_delegate"),
     )
     register(
-        "session-bridge", "sessions.propose", _SessionBridgeProposePayload,
+        "session-bridge",
+        "sessions.propose",
+        _SessionBridgeProposePayload,
         _legacy_main_handler(extension_id, "internal_ask_propose"),
     )
     register(
-        "session-bridge", "delegation.resolve", _SessionBridgeResolvePayload,
+        "session-bridge",
+        "delegation.resolve",
+        _SessionBridgeResolvePayload,
         _legacy_main_handler(extension_id, "internal_session_bridge_delegate_resolve"),
     )
 
@@ -991,7 +1093,9 @@ def _register_requirements() -> None:
 
             extension_id = extension_store.extension_id_for_role("requirements")
             if not extension_id:
-                raise HTTPException(status_code=503, detail="requirements extension is unavailable")
+                raise HTTPException(
+                    status_code=503, detail="requirements extension is unavailable"
+                )
             fn = getattr(main, function_name)
             result = fn(
                 payload.model_dump(),
@@ -1023,7 +1127,10 @@ def _register_requirements() -> None:
         "unit-fts": (_RequirementsUnitPayload, "internal_requirements_unit_fts"),
         "unit-vector": (_RequirementsUnitPayload, "internal_requirements_unit_vector"),
         "thread-fts": (_RequirementsUnitPayload, "internal_requirements_thread_fts"),
-        "thread-vector": (_RequirementsUnitPayload, "internal_requirements_thread_vector"),
+        "thread-vector": (
+            _RequirementsUnitPayload,
+            "internal_requirements_thread_vector",
+        ),
         "index-sql": (_RequirementsSqlPayload, "internal_requirements_index_sql"),
     }
     register("requirements", "fire", _RequirementsFirePayload, fire)
@@ -1045,7 +1152,9 @@ def _main_action(
         if extension_role:
             extension_id = extension_store.extension_id_for_role(extension_role)
             if not extension_id:
-                raise HTTPException(status_code=503, detail=f"{extension_role} extension is unavailable")
+                raise HTTPException(
+                    status_code=503, detail=f"{extension_role} extension is unavailable"
+                )
             kwargs["x_internal_token"] = extension_token_registry.mint(extension_id)
         result = fn(payload.model_dump(), **kwargs)
         return await result if inspect.isawaitable(result) else result
@@ -1055,19 +1164,27 @@ def _main_action(
 
 def _register_supervisor() -> None:
     register(
-        "supervisor", "default-prompt.get", _StrictPayload,
+        "supervisor",
+        "default-prompt.get",
+        _StrictPayload,
         _main_action("internal_supervisor_default_prompt"),
     )
     register(
-        "supervisor", "separate", _SessionIdPayload,
+        "supervisor",
+        "separate",
+        _SessionIdPayload,
         _main_action("internal_supervisor_separate"),
     )
     register(
-        "supervisor", "toggle", _SupervisorTogglePayload,
+        "supervisor",
+        "toggle",
+        _SupervisorTogglePayload,
         _main_action("internal_supervisor_toggle"),
     )
     register(
-        "supervisor", "review-last-work", _SessionIdPayload,
+        "supervisor",
+        "review-last-work",
+        _SessionIdPayload,
         _main_action("internal_supervisor_review_last_work"),
     )
 
@@ -1076,13 +1193,18 @@ def _register_prompt_engineer() -> None:
     mappings = {
         "start": (_PromptEngineerStartPayload, "internal_prompt_engineering_start"),
         "get": (_SessionIdPayload, "internal_prompt_engineering_get"),
-        "comment": (_PromptEngineerCommentPayload, "internal_prompt_engineering_comment"),
+        "comment": (
+            _PromptEngineerCommentPayload,
+            "internal_prompt_engineering_comment",
+        ),
         "result": (_SessionIdPayload, "internal_prompt_engineering_result"),
         "cleanup": (_SessionIdPayload, "internal_prompt_engineering_cleanup"),
     }
     for action, (schema, function_name) in mappings.items():
         register(
-            "prompt-engineer", action, schema,
+            "prompt-engineer",
+            action,
+            schema,
             _main_action(function_name, extension_role="prompt-engineer"),
         )
 
@@ -1090,10 +1212,19 @@ def _register_prompt_engineer() -> None:
 def _register_private_workflows() -> None:
     assistant_actions = {
         "ensure": (_AssistantPreamblePayload, "internal_assistant_ui_ensure"),
-        "ensure-monitor": (_AssistantPreamblePayload, "internal_assistant_ui_ensure_monitor"),
+        "ensure-monitor": (
+            _AssistantPreamblePayload,
+            "internal_assistant_ui_ensure_monitor",
+        ),
         "search": (_AssistantSearchPayload, "internal_assistant_ui_search"),
-        "resolve-ba-session": (_AssistantSessionPayload, "internal_assistant_ui_resolve_ba_session"),
-        "adopt-native-session": (_AssistantAdoptPayload, "internal_assistant_ui_adopt_native_session"),
+        "resolve-ba-session": (
+            _AssistantSessionPayload,
+            "internal_assistant_ui_resolve_ba_session",
+        ),
+        "adopt-native-session": (
+            _AssistantAdoptPayload,
+            "internal_assistant_ui_adopt_native_session",
+        ),
         "delegate": (_AssistantDelegatePayload, "internal_assistant_ui_delegate"),
         "last-turn": (_AssistantSessionPayload, "internal_assistant_ui_last_turn"),
         "session-activity": (_AssistantSessionPayload, "internal_session_activity"),
@@ -1103,11 +1234,15 @@ def _register_private_workflows() -> None:
     }
     for action, (schema, function_name) in assistant_actions.items():
         register(
-            "assistant", action, schema,
+            "assistant",
+            action,
+            schema,
             _main_action(function_name, extension_role="assistant"),
         )
     register(
-        "composer-fill", "generate", _ComposerFillGeneratePayload,
+        "composer-fill",
+        "generate",
+        _ComposerFillGeneratePayload,
         _main_action("internal_headless_generate", extension_role="composer-fill"),
     )
     auto_tagging_actions = {
@@ -1122,7 +1257,9 @@ def _register_private_workflows() -> None:
     }
     for action, schema in auto_tagging_actions.items():
         register(
-            "auto-tagging", action, schema,
+            "auto-tagging",
+            action,
+            schema,
             _role_main_handler("auto-tagging", "internal_auto_tagging", action=action),
         )
     schedule_actions = {
@@ -1132,7 +1269,9 @@ def _register_private_workflows() -> None:
     }
     for action, schema in schedule_actions.items():
         register(
-            "scheduler", action, schema,
+            "scheduler",
+            action,
+            schema,
             _role_main_handler("scheduler", "internal_schedules", action=action),
         )
     routine_actions = {
@@ -1146,7 +1285,9 @@ def _register_private_workflows() -> None:
     }
     for action, schema in routine_actions.items():
         register(
-            "routines", action, schema,
+            "routines",
+            action,
+            schema,
             _role_main_handler("routines", "internal_tasks", action=action),
         )
 
@@ -1177,7 +1318,9 @@ def _register_private_workflows() -> None:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     register("routines", "memory.read", _RoutineMemoryReadPayload, routine_memory_read)
-    register("routines", "memory.commit", _RoutineMemoryCommitPayload, routine_memory_commit)
+    register(
+        "routines", "memory.commit", _RoutineMemoryCommitPayload, routine_memory_commit
+    )
 
     output_actions = {
         "outputs.list": _RoutineOutputsListPayload,
@@ -1185,7 +1328,9 @@ def _register_private_workflows() -> None:
     }
     for action, schema in output_actions.items():
         register(
-            "routines", action, schema,
+            "routines",
+            action,
+            schema,
             _role_main_handler(
                 "routines",
                 "internal_task_outputs",
@@ -1203,35 +1348,68 @@ def _register_private_workflows() -> None:
         except FileNotFoundError as exc:
             raise HTTPException(status_code=404, detail="unknown output") from exc
         raw = await __import__("asyncio").to_thread(path.read_bytes)
-        return {"content_base64": base64.b64encode(raw).decode("ascii"), "content_type": content_type}
+        return {
+            "content_base64": base64.b64encode(raw).decode("ascii"),
+            "content_type": content_type,
+        }
 
-    register("routines", "outputs.content", _RoutineOutputsContentPayload, output_content)
+    register(
+        "routines", "outputs.content", _RoutineOutputsContentPayload, output_content
+    )
     team_actions = {
         "policy.get": (_StrictPayload, "internal_get_delegate_task_policy_endpoint"),
-        "policy.set": (_DelegateTaskPolicyPayload, "internal_set_delegate_task_policy_endpoint"),
-        "definitions.list": (_StrictPayload, "internal_list_extension_team_definitions"),
-        "definitions.plan": (_TeamDefinitionPlanPayload, "internal_plan_team_definition"),
+        "policy.set": (
+            _DelegateTaskPolicyPayload,
+            "internal_set_delegate_task_policy_endpoint",
+        ),
+        "definitions.list": (
+            _StrictPayload,
+            "internal_list_extension_team_definitions",
+        ),
+        "definitions.plan": (
+            _TeamDefinitionPlanPayload,
+            "internal_plan_team_definition",
+        ),
         "workers.list": (_WorkersListPayload, "internal_list_workers_for_cwd"),
         "workers.create": (_WorkerCreatePayload, "internal_create_worker"),
-        "workers.provision": (_WorkersProvisionPayload, "internal_provision_workers_ui"),
-        "worker-pool.enqueue": (_WorkerPoolEnqueuePayload, "internal_enqueue_worker_pool_prompt"),
-        "workers.from-session": (_WorkerFromSessionPayload, "internal_register_existing_session_as_worker"),
+        "workers.provision": (
+            _WorkersProvisionPayload,
+            "internal_provision_workers_ui",
+        ),
+        "worker-pool.enqueue": (
+            _WorkerPoolEnqueuePayload,
+            "internal_enqueue_worker_pool_prompt",
+        ),
+        "workers.from-session": (
+            _WorkerFromSessionPayload,
+            "internal_register_existing_session_as_worker",
+        ),
         "workers.unregister": (_WorkerUnregisterPayload, "internal_unregister_worker"),
         "workers.reset-forks": (_WorkerIdentityPayload, "internal_reset_worker_forks"),
-        "approvals.list": (_PendingApprovalsListPayload, "internal_list_pending_approvals"),
-        "approvals.approve": (_PendingApprovalApprovePayload, "internal_approve_pending_approval"),
+        "approvals.list": (
+            _PendingApprovalsListPayload,
+            "internal_list_pending_approvals",
+        ),
+        "approvals.approve": (
+            _PendingApprovalApprovePayload,
+            "internal_approve_pending_approval",
+        ),
         "approvals.deny": (_PendingApprovalPayload, "internal_deny_pending_approval"),
     }
     for action, (schema, function_name) in team_actions.items():
         register(
-            "team-orchestration", action, schema,
+            "team-orchestration",
+            action,
+            schema,
             _main_action(function_name, extension_role="team-orchestration"),
         )
 
 
 def _register_agent_board() -> None:
     register(
-        "agent-board", "prompt.run", _AgentBoardPromptPayload,
+        "agent-board",
+        "prompt.run",
+        _AgentBoardPromptPayload,
         _main_action("internal_agent_board_run_prompt", extension_role="agent-board"),
     )
 
@@ -1241,16 +1419,30 @@ def _register_credential_broker() -> None:
         "request": (_CredentialRequestPayload, "internal_credential_request"),
         "execute": (_CredentialExecutePayload, "internal_credential_execute"),
         "ui.pending": (_CredentialPendingPayload, "internal_list_pending_credentials"),
-        "ui.approve": (_CredentialApprovePayload, "internal_approve_credential_consent"),
+        "ui.approve": (
+            _CredentialApprovePayload,
+            "internal_approve_credential_consent",
+        ),
         "ui.deny": (_CredentialConsentPayload, "internal_deny_credential_consent"),
         "ui.revoke": (_CredentialConsentPayload, "internal_revoke_credential_consent"),
-        "password-manager.list": (_StrictPayload, "internal_list_password_manager_secrets"),
-        "password-manager.store": (_PasswordManagerStorePayload, "internal_store_password_manager_secret"),
-        "password-manager.delete": (_PasswordManagerDeletePayload, "internal_delete_password_manager_secret"),
+        "password-manager.list": (
+            _StrictPayload,
+            "internal_list_password_manager_secrets",
+        ),
+        "password-manager.store": (
+            _PasswordManagerStorePayload,
+            "internal_store_password_manager_secret",
+        ),
+        "password-manager.delete": (
+            _PasswordManagerDeletePayload,
+            "internal_delete_password_manager_secret",
+        ),
     }
     for action, (schema, function_name) in mappings.items():
         register(
-            "credential-broker", action, schema,
+            "credential-broker",
+            action,
+            schema,
             _main_action(function_name, extension_role="credential-broker"),
         )
 
@@ -1267,7 +1459,9 @@ def _register_machine_nodes() -> None:
     }
     for action, (schema, function_name) in mappings.items():
         register(
-            "machine-nodes", action, schema,
+            "machine-nodes",
+            action,
+            schema,
             _main_action(function_name, extension_role="machine-nodes"),
         )
 
@@ -1276,16 +1470,24 @@ def _register_project_structure() -> None:
     mappings = {
         "updates.count": (_ProjectCwdPayload, "internal_project_update_count"),
         "updates.total": (_StrictPayload, "internal_project_update_total"),
-        "updates.counts-batch": (_ProjectCwdsPayload, "internal_project_update_counts_batch"),
+        "updates.counts-batch": (
+            _ProjectCwdsPayload,
+            "internal_project_update_counts_batch",
+        ),
         "updates.unseen": (_ProjectCwdPayload, "internal_project_updates_unseen"),
         "updates.capture": (_ProjectCapturePayload, "capture_project_update"),
-        "updates.mark-seen": (_ProjectMarkSeenPayload, "internal_project_updates_mark_seen"),
+        "updates.mark-seen": (
+            _ProjectMarkSeenPayload,
+            "internal_project_updates_mark_seen",
+        ),
         "edit.status": (_ProjectCwdPayload, "internal_project_structure_edit_status"),
         "edit.ensure": (_ProjectCwdPayload, "internal_project_structure_edit_ensure"),
     }
     for action, (schema, function_name) in mappings.items():
         register(
-            "project-structure", action, schema,
+            "project-structure",
+            action,
+            schema,
             _main_action(function_name, extension_role="project-structure"),
         )
 
@@ -1304,8 +1506,12 @@ def _register_git() -> None:
     }
     for action, schema in mappings.items():
         register(
-            "git", action, schema,
-            lambda payload, action=action: git_capability.execute(action, payload.model_dump()),
+            "git",
+            action,
+            schema,
+            lambda payload, action=action: git_capability.execute(
+                action, payload.model_dump()
+            ),
         )
 
 
@@ -1314,7 +1520,9 @@ def _register_session_events() -> None:
     # the request-bound principal inside internal_broadcast_session, so the
     # event source stays pinned to the calling extension.
     register(
-        "session-events", "broadcast", _SessionEventsBroadcastPayload,
+        "session-events",
+        "broadcast",
+        _SessionEventsBroadcastPayload,
         _main_action("internal_broadcast_session"),
     )
 
@@ -1336,5 +1544,6 @@ _register_project_structure()
 _register_git()
 _register_session_events()
 from runtime_operations import register_operations as _register_runtime_operations
+
 _register_runtime_operations(register)
 operation_catalog.publish()

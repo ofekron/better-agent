@@ -513,7 +513,10 @@ def test_marketplace_auth_service_is_home_scoped() -> None:
             os.environ.pop("BETTER_AGENT_HOME", None)
         else:
             os.environ["BETTER_AGENT_HOME"] = original_home
-    check(first != second, "Marketplace OAuth credentials are isolated by home")
+    check(
+        first != second and len(first.rsplit("-", 1)[-1]) == 64,
+        "Marketplace OAuth credentials use a full-digest home namespace",
+    )
 
 
 if __name__ == "__main__":

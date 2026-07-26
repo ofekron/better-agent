@@ -12,7 +12,5 @@ _SERVICE_PREFIX = "better-agent-marketplace"
 def service_name() -> str:
     if not home_suffix():
         return _SERVICE_PREFIX
-    home_digest = hashlib.sha256(str(paths.ba_home().resolve()).encode()).hexdigest()[
-        :16
-    ]
+    home_digest = hashlib.sha256(str(paths.ba_home().resolve()).encode()).hexdigest()
     return f"{_SERVICE_PREFIX}-{home_digest}"

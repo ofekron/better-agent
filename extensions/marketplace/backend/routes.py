@@ -272,6 +272,13 @@ def _pop_pending(state: str) -> str:
     return str(item.get("verifier") or "")
 
 
+def _clear_pending() -> None:
+    for item in _auth_secret("list").get("items", []):
+        account = str(item.get("account") or "") if isinstance(item, dict) else ""
+        if account.startswith(_PENDING_PREFIX):
+            _delete_secret(account)
+
+
 def _pkce_pair() -> tuple[str, str]:
     verifier = secrets.token_urlsafe(48)
     digest = hashlib.sha256(verifier.encode("ascii")).digest()
@@ -432,23 +439,24 @@ def create_router(context) -> APIRouter:
         app_redirect = (
             f"{base}/api/extensions/{context.extension_id}/backend/auth/callback"
         )
-        payload = _server_request(
-            "POST",
-            "/auth/app/start",
-            json_body={
-                "provider": provider,
-                "app_redirect": app_redirect,
-                "code_challenge": challenge,
-            },
-            error_detail="marketplace auth is unavailable",
-        )
-        state = str(payload.get("state") or "")
-        login_url = str(payload.get("login_url") or "")
-        if not state or not login_url:
-            raise HTTPException(
-                status_code=502, detail="marketplace auth is unavailable"
+        with _refresh_lock:
+            payload = _server_request(
+                "POST",
+                "/auth/app/start",
+                json_body={
+                    "provider": provider,
+                    "app_redirect": app_redirect,
+                    "code_challenge": challenge,
+                },
+                error_detail="marketplace auth is unavailable",
             )
-        _save_pending(state, verifier)
+            state = str(payload.get("state") or "")
+            login_url = str(payload.get("login_url") or "")
+            if not state or not login_url:
+                raise HTTPException(
+                    status_code=502, detail="marketplace auth is unavailable"
+                )
+            _save_pending(state, verifier)
         return {"login_url": login_url}
 
     @router.get("/auth/callback")
@@ -461,23 +469,24 @@ def create_router(context) -> APIRouter:
                 % ("Sign-in failed", "Return to Better Agent and try again."),
                 status_code=401,
             )
-        verifier = _pop_pending(state)
-        if not verifier:
-            return HTMLResponse(
-                _SIGNED_IN_HTML
-                % (
-                    "Sign-in failed",
-                    "This sign-in link expired. Return to Better Agent and try again.",
-                ),
-                status_code=401,
+        with _refresh_lock:
+            verifier = _pop_pending(state)
+            if not verifier:
+                return HTMLResponse(
+                    _SIGNED_IN_HTML
+                    % (
+                        "Sign-in failed",
+                        "This sign-in link expired. Return to Better Agent and try again.",
+                    ),
+                    status_code=401,
+                )
+            payload = _server_request(
+                "POST",
+                "/auth/app/exchange",
+                json_body={"code": code, "code_verifier": verifier},
+                error_detail="marketplace auth is unavailable",
             )
-        payload = _server_request(
-            "POST",
-            "/auth/app/exchange",
-            json_body={"code": code, "code_verifier": verifier},
-            error_detail="marketplace auth is unavailable",
-        )
-        _store_token_response(payload)
+            _store_token_response(payload)
         return HTMLResponse(
             _SIGNED_IN_HTML
             % ("Signed in", "You can close this tab and return to Better Agent.")
@@ -485,25 +494,21 @@ def create_router(context) -> APIRouter:
 
     @router.post("/auth/logout")
     async def auth_logout() -> dict[str, bool]:
-        tokens = _load_secret(_SESSION_ACCOUNT) or {}
-        refresh = str(tokens.get("refresh_token") or "")
-        if refresh:
-            try:
-                _server_request(
-                    "POST",
-                    "/auth/app/logout",
-                    json_body={"refresh_token": refresh},
-                    error_detail="marketplace auth is unavailable",
-                )
-            except HTTPException:
-                pass  # local sign-out must succeed even when the server is unreachable
         with _refresh_lock:
-            current = _load_secret(_SESSION_ACCOUNT) or {}
-            if secrets.compare_digest(
-                json.dumps(current, sort_keys=True, separators=(",", ":")),
-                json.dumps(tokens, sort_keys=True, separators=(",", ":")),
-            ):
-                _delete_secret(_SESSION_ACCOUNT)
+            _clear_pending()
+            tokens = _load_secret(_SESSION_ACCOUNT) or {}
+            refresh = str(tokens.get("refresh_token") or "")
+            if refresh:
+                try:
+                    _server_request(
+                        "POST",
+                        "/auth/app/logout",
+                        json_body={"refresh_token": refresh},
+                        error_detail="marketplace auth is unavailable",
+                    )
+                except HTTPException:
+                    pass  # local sign-out must succeed even when the server is unreachable
+            _delete_secret(_SESSION_ACCOUNT)
         return {"ok": True}
 
     @router.post("/auth/protocol-ready")
