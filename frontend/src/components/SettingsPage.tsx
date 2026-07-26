@@ -92,7 +92,7 @@ type View =
   | { kind: "wizard-form"; templateId: TemplateId }
   | { kind: "mobile" };
 
-type TemplateId = "claude" | "codex" | "copilot" | "agy" | "fugu" | "pi" | "qwen" | "cursor" | "kimi" | "amp" | "opencode" | "sakana" | "meta-muse" | "ollama" | "zai" | "zai-openai" | "custom" | "custom-openai";
+type TemplateId = (typeof TEMPLATES)[number]["id"];
 type InstallableProviderKind = "claude" | "codex" | "gemini" | "agy" | "copilot" | "pi" | "qwen" | "amp" | "opencode";
 type SettingsSection =
   | "providers"
@@ -147,7 +147,7 @@ interface ProviderConfigRepositoryStatus {
 }
 
 interface Template {
-  id: TemplateId;
+  id: string;
   label: string;
   blurb: string;
   defaults: {
@@ -228,7 +228,7 @@ function configDirCopyForKind(kind: string): {
   };
 }
 
-const TEMPLATES: Template[] = [
+const TEMPLATES = [
   {
     id: "claude",
     label: "Claude",
@@ -496,7 +496,7 @@ const TEMPLATES: Template[] = [
       default_reasoning_effort: "",
     },
   },
-];
+] as const satisfies readonly Template[];
 
 const KEEP = "__keep__";
 const PROVIDER_CONFIG_SYNC_API = `${API}/api/extensions/ofek-dev.provider-config-sync/backend`;
@@ -2232,6 +2232,7 @@ function WizardTemplates({
     ollama: { labelKey: "setup.templateOllamaLabel", blurbKey: "setup.templateOllamaBlurb" },
     zai: { labelKey: "setup.templateZaiLabel", blurbKey: "setup.templateZaiBlurb" },
     "zai-openai": { labelKey: "setup.templateZaiOpenAILabel", blurbKey: "setup.templateZaiOpenAIBlurb" },
+    hetzner: { labelKey: "setup.templateHetznerLabel", blurbKey: "setup.templateHetznerBlurb" },
     custom: { labelKey: "setup.templateCustomLabel", blurbKey: "setup.templateCustomBlurb" },
     "custom-openai": { labelKey: "setup.templateCustomOpenAILabel", blurbKey: "setup.templateCustomOpenAIBlurb" },
   };

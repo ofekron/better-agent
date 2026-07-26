@@ -257,6 +257,8 @@
   "setup.templateZaiBlurb": "واجهة Z.AI المتوافقة مع Anthropic عبر `claude` CLI. يتطلب مفتاح API.",
   "setup.templateZaiOpenAILabel": "Z.AI (OpenAI)",
   "setup.templateZaiOpenAIBlurb": "واجهة OpenAI الأصلية من Z.AI عبر مشغّل `codex-zai` (codex -p zai-openai). هنا يُبلَّغ عن التخزين المؤقت التلقائي للاستفسارات في Z.AI، لذا فهو أرخص في السياقات الطويلة. ثبّت المشغّل والملف الشخصي أولًا (الوثائق)، ثم أضفه هنا.",
+  "setup.templateHetznerLabel": "Hetzner Inference",
+  "setup.templateHetznerBlurb": "استدلال تجريبي متوافق مع OpenAI. يتطلب رمز API.",
   "setup.templateCustomLabel": "API مخصّص",
   "setup.templateCustomBlurb": "أي نقطة نهاية متوافقة مع Anthropic. وفّر الرابط والمفتاح بنفسك.",
   "setup.backTitle": "رجوع",

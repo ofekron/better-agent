@@ -257,6 +257,8 @@
   "setup.templateZaiBlurb": "`claude` CLI를 통한 Z.AI의 Anthropic 호환 API. API 키가 필요합니다.",
   "setup.templateZaiOpenAILabel": "Z.AI (OpenAI)",
   "setup.templateZaiOpenAIBlurb": "`codex-zai` 런처(codex -p zai-openai)를 통한 Z.AI의 네이티브 OpenAI 엔드포인트. Z.AI의 자동 프롬프트 캐싱이 여기에 보고되므로 긴 컨텍스트에서 더 저렴합니다. 먼저 런처와 프로필을 설치(문서 참조)한 후 추가하세요.",
+  "setup.templateHetznerLabel": "Hetzner Inference",
+  "setup.templateHetznerBlurb": "OpenAI 호환 실험적 추론 서비스입니다. API 토큰이 필요합니다.",
   "setup.templateCustomLabel": "사용자 정의 API",
   "setup.templateCustomBlurb": "모든 Anthropic 호환 엔드포인트. URL과 키를 직접 제공하세요.",
   "setup.backTitle": "뒤로",

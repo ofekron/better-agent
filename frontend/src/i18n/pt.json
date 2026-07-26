@@ -257,6 +257,8 @@
   "setup.templateZaiBlurb": "API compatível com Anthropic da Z.AI via CLI `claude`. Requer uma chave de API.",
   "setup.templateZaiOpenAILabel": "Z.AI (OpenAI)",
   "setup.templateZaiOpenAIBlurb": "Endpoint nativo OpenAI da Z.AI via lançador `codex-zai` (codex -p zai-openai). É onde o cache automático de prompt da Z.AI é reportado, então é mais barato em contextos longos. Instale o lançador + perfil primeiro (docs) e adicione-o aqui.",
+  "setup.templateHetznerLabel": "Hetzner Inference",
+  "setup.templateHetznerBlurb": "Inferência experimental compatível com OpenAI. Requer um token de API.",
   "setup.templateCustomLabel": "API personalizada",
   "setup.templateCustomBlurb": "Qualquer endpoint compatível com Anthropic. Forneça URL + chave por conta própria.",
   "setup.backTitle": "Voltar",

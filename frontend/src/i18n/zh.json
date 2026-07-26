@@ -257,6 +257,8 @@
   "setup.templateZaiBlurb": "通过 `claude` CLI 使用 Z.AI 的 Anthropic 兼容 API。需要 API key。",
   "setup.templateZaiOpenAILabel": "Z.AI (OpenAI)",
   "setup.templateZaiOpenAIBlurb": "通过 `codex-zai` 启动器 (codex -p zai-openai) 使用 Z.AI 原生 OpenAI 端点。Z.AI 的自动 prompt 缓存会在此上报，因此在长上下文下更便宜。请先安装启动器和 profile（见文档），然后在此添加。",
+  "setup.templateHetznerLabel": "Hetzner Inference",
+  "setup.templateHetznerBlurb": "兼容 OpenAI 的实验性推理服务。需要 API 令牌。",
   "setup.templateCustomLabel": "自定义 API",
   "setup.templateCustomBlurb": "任何 Anthropic 兼容端点。请自行提供 URL 和 key。",
   "setup.backTitle": "返回",

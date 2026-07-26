@@ -9,6 +9,7 @@ import {
 
 const settingsPageSource = readFileSync("src/components/SettingsPage.tsx", "utf8");
 const modelPickerSource = readFileSync("src/components/modelPicker.ts", "utf8");
+const englishSource = readFileSync("src/i18n/en.json", "utf8");
 
 describe("modesForKind", () => {
   it("restricts openai and gemini to api_key", () => {
@@ -83,5 +84,19 @@ describe("Meta Muse Spark template", () => {
     expect(settingsPageSource).toContain('base_url: "https://api.meta.ai/v1"');
     expect(settingsPageSource).toContain('default_model: "muse-spark-1.1"');
     expect(settingsPageSource).toContain('kind: "openai"');
+  });
+});
+
+describe("Hetzner Inference template", () => {
+  it("uses the OpenAI-compatible Better Agent defaults and localized copy", () => {
+    expect(settingsPageSource).toContain('id: "hetzner"');
+    expect(settingsPageSource).toContain('base_url: "https://inference.hetzner.com/api/v1"');
+    expect(settingsPageSource).toContain('default_model: "Qwen/Qwen3.6-35B-A3B-FP8"');
+    expect(settingsPageSource).toContain('kind: "openai"');
+    expect(settingsPageSource).toContain(
+      'hetzner: { labelKey: "setup.templateHetznerLabel", blurbKey: "setup.templateHetznerBlurb" }',
+    );
+    expect(englishSource).toContain('"setup.templateHetznerLabel": "Hetzner Inference"');
+    expect(englishSource).toContain('"setup.templateHetznerBlurb"');
   });
 });

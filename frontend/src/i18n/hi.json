@@ -257,6 +257,8 @@
   "setup.templateZaiBlurb": "`claude` CLI के माध्यम से Z.AI का Anthropic-संगत API। एक API कुंजी चाहिए।",
   "setup.templateZaiOpenAILabel": "Z.AI (OpenAI)",
   "setup.templateZaiOpenAIBlurb": "`codex-zai` लॉन्चर के माध्यम से Z.AI का नेटिव OpenAI एंडपॉइंट (codex -p zai-openai)। यहीं Z.AI की स्वतः प्रॉम्प्ट कैशिंग रिपोर्ट होती है, इसलिए लंबे संदर्भों पर यह सस्ता है। पहले लॉन्चर + प्रोफ़ाइल स्थापित करें (docs), फिर यहाँ जोड़ें।",
+  "setup.templateHetznerLabel": "Hetzner Inference",
+  "setup.templateHetznerBlurb": "OpenAI-संगत प्रायोगिक इन्फ़रेंस। API टोकन आवश्यक है।",
   "setup.templateCustomLabel": "कस्टम API",
   "setup.templateCustomBlurb": "कोई भी Anthropic-संगत एंडपॉइंट। URL + कुंजी स्वयं प्रदान करें।",
   "setup.backTitle": "पीछे",

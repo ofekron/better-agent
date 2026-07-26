@@ -257,6 +257,8 @@
   "setup.templateZaiBlurb": "Anthropic-совместимый API Z.AI через CLI `claude`. Требуется API-ключ.",
   "setup.templateZaiOpenAILabel": "Z.AI (OpenAI)",
   "setup.templateZaiOpenAIBlurb": "Нативный эндпоинт OpenAI от Z.AI через лаунчер `codex-zai` (codex -p zai-openai). Здесь отражается автоматическое кэширование промптов Z.AI, поэтому это дешевле на длинных контекстах. Сначала установите лаунчер + профиль (документация), затем добавьте здесь.",
+  "setup.templateHetznerLabel": "Hetzner Inference",
+  "setup.templateHetznerBlurb": "Экспериментальный сервис, совместимый с OpenAI. Требуется API-токен.",
   "setup.templateCustomLabel": "Свой API",
   "setup.templateCustomBlurb": "Любой Anthropic-совместимый эндпоинт. URL и ключ предоставляете сами.",
   "setup.backTitle": "Назад",

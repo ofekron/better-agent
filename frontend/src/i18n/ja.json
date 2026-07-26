@@ -257,6 +257,8 @@
   "setup.templateZaiBlurb": "`claude` CLI 経由の Z.AI の Anthropic 互換 API。API キーが必要です。",
   "setup.templateZaiOpenAILabel": "Z.AI（OpenAI）",
   "setup.templateZaiOpenAIBlurb": "`codex-zai` ランチャー（codex -p zai-openai）経由の Z.AI ネイティブ OpenAI エンドポイント。Z.AI の自動プロンプトキャッシュはここで報告されるため、長いコンテキストではより安価です。事前にランチャーとプロファイルをインストール（ドキュメント参照）してから追加してください。",
+  "setup.templateHetznerLabel": "Hetzner Inference",
+  "setup.templateHetznerBlurb": "OpenAI 互換の実験的推論サービス。API トークンが必要です。",
   "setup.templateCustomLabel": "カスタム API",
   "setup.templateCustomBlurb": "任意の Anthropic 互換エンドポイント。URL とキーはご自身で入力してください。",
   "setup.backTitle": "戻る",

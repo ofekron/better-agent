@@ -267,6 +267,8 @@
   "setup.templateZaiBlurb": "Z.AI's Anthropic-compatible API via the `claude` CLI. Needs an API key.",
   "setup.templateZaiOpenAILabel": "Z.AI (OpenAI)",
   "setup.templateZaiOpenAIBlurb": "Z.AI's native OpenAI endpoint (Coding-plan key) driven by Better Agent's own agent loop. This is where Z.AI's automatic prompt caching is reported, so it's cheaper on long contexts. Needs an API key.",
+  "setup.templateHetznerLabel": "Hetzner Inference",
+  "setup.templateHetznerBlurb": "OpenAI-compatible experimental inference. Requires an API token.",
   "setup.templateCustomLabel": "Custom API",
   "setup.templateCustomBlurb": "Any Anthropic-compatible endpoint. Provide URL + key yourself.",
   "setup.templateCustomOpenAILabel": "Custom OpenAI",

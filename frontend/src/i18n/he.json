@@ -256,6 +256,8 @@
   "setup.templateZaiBlurb": "API תואם Anthropic של Z.AI דרך ה-`claude` CLI. דורש מפתח API.",
   "setup.templateZaiOpenAILabel": "Z.AI (OpenAI)",
   "setup.templateZaiOpenAIBlurb": "נקודת הקצה ה-Native של Z.AI (OpenAI, מפתח Coding) מונעת על ידי לולאת הסוכן של Better Agent עצמו. כאן מדווח ה-caching האוטומטי של Z.AI, כך שזה זול יותר בהקשרים ארוכים. דורש מפתח API.",
+  "setup.templateHetznerLabel": "Hetzner Inference",
+  "setup.templateHetznerBlurb": "שירות הסקה ניסיוני תואם OpenAI. דורש אסימון API.",
   "setup.templateCustomLabel": "API מותאם",
   "setup.templateCustomBlurb": "כל נקודת קצה תואמת Anthropic. ספקו URL + מפתח בעצמכם.",
   "setup.templateCustomOpenAILabel": "OpenAI מותאם",
