@@ -5,31 +5,32 @@ import os
 import re
 import urllib.error
 import urllib.request
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 from fastapi import HTTPException
 
-_DEFAULT_ORIGIN = "https://ofek-dev.com/api/marketplace"
+from marketplace_protocol import PATTERNS, PROTOCOL
+
 _MAX_RESPONSE_BYTES = 2 * 1024 * 1024
-_HEADERS = {
-    "Accept": "application/json",
-    "User-Agent": "BetterAgent/marketplace-core",
-}
-_CHALLENGE_PATTERN = re.compile(r"^bachal_[A-Za-z0-9_-]{43}$")
+_SIGNED_OPERATIONS = frozenset({"lease", "fence", "reject", "projection", "revoke"})
+_PATH_PARAMETER_PATTERN = re.compile(r"\{([a-z_]+)\}")
 _SIGNATURE_PATTERN = re.compile(r"^[A-Za-z0-9_-]{86}$")
+_PATH_IDENTIFIER_KINDS = {
+    "action_id": "action",
+    "device_id": "device",
+}
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
+    def redirect_request(self, request, file_pointer, code, message, headers, new_url):
         return None
 
 
 def origin() -> str:
-    value = (
-        str(os.environ.get("BETTER_AGENT_MARKETPLACE_BASE_URL") or _DEFAULT_ORIGIN)
-        .strip()
-        .rstrip("/")
-    )
+    value = str(
+        os.environ.get("BETTER_AGENT_MARKETPLACE_BASE_URL")
+        or "https://ofek-dev.com/api/marketplace"
+    ).strip().rstrip("/")
     parsed = urlparse(value)
     if (
         parsed.scheme != "https"
@@ -46,63 +47,56 @@ def origin() -> str:
     ):
         raise HTTPException(
             status_code=500,
-            detail="marketplace server configuration is invalid",
+            detail="Marketplace server configuration is invalid",
         )
     return value
 
 
-def request(
+def _operation_path(operation: str, values: dict[str, str]) -> tuple[str, str, set[str]]:
+    spec = PROTOCOL["http"].get(operation)
+    if not isinstance(spec, dict):
+        raise HTTPException(status_code=500, detail="Marketplace operation is invalid")
+    path = str(spec["path"])
+    parameters = set(_PATH_PARAMETER_PATTERN.findall(path))
+    if set(values) != parameters:
+        raise HTTPException(status_code=500, detail="Marketplace path is incomplete")
+    for name, value in values.items():
+        kind = _PATH_IDENTIFIER_KINDS.get(name)
+        if kind is None or not isinstance(value, str) or not PATTERNS[kind].fullmatch(value):
+            raise HTTPException(status_code=400, detail="Marketplace identifier is invalid")
+        path = path.replace(f"{{{name}}}", quote(value, safe=""))
+    return str(spec["method"]), path, set(spec["request"])
+
+
+def _request_sync(
     method: str,
     path: str,
-    *,
-    access_token: str,
     body: dict,
-    signed: bool = False,
+    access_token: str,
+    signed: bool,
 ) -> dict:
-    if (
-        method not in {"POST", "PUT"}
-        or not path.startswith("/protocol/v1/")
-        or "://" in path
-        or "?" in path
-        or "#" in path
-        or "\r" in path
-        or "\n" in path
-        or not isinstance(body, dict)
-    ):
-        raise HTTPException(
-            status_code=500,
-            detail="marketplace protocol request is invalid",
-        )
-    if (
-        not isinstance(access_token, str)
-        or not access_token
-        or len(access_token) > 4096
-        or any(
-            ord(character) < 33 or ord(character) == 127 for character in access_token
-        )
-    ):
-        raise HTTPException(status_code=401, detail="marketplace login required")
-
+    headers = {
+        "Accept": "application/json",
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json",
+        "User-Agent": "BetterAgent/marketplace-protocol-v1",
+    }
     payload = dict(body)
-    headers = dict(_HEADERS)
-    headers["Authorization"] = f"Bearer {access_token}"
-    headers["Content-Type"] = "application/json"
     if signed:
-        challenge = payload.pop("challenge", None)
-        signature = payload.pop("signature", None)
+        challenge = payload.pop("challenge")
+        signature = payload.pop("signature")
         if (
             not isinstance(challenge, str)
-            or _CHALLENGE_PATTERN.fullmatch(challenge) is None
+            or not PATTERNS["challenge"].fullmatch(challenge)
             or not isinstance(signature, str)
-            or _SIGNATURE_PATTERN.fullmatch(signature) is None
+            or not _SIGNATURE_PATTERN.fullmatch(signature)
         ):
             raise HTTPException(
-                status_code=500,
-                detail="marketplace protocol signature is invalid",
+                status_code=400,
+                detail="Marketplace device proof is invalid",
             )
         headers["X-BA-Device-Challenge"] = challenge
         headers["X-BA-Device-Signature"] = signature
-
     encoded = json.dumps(
         payload,
         sort_keys=True,
@@ -111,61 +105,76 @@ def request(
         allow_nan=False,
     ).encode("utf-8")
     target = f"{origin()}{path}"
-    request_value = urllib.request.Request(
+    request = urllib.request.Request(
         target,
         data=encoded,
         headers=headers,
         method=method,
     )
+    timeout = 40 if path.endswith("/actions/lease") else 15
     try:
         with urllib.request.build_opener(_NoRedirect).open(
-            request_value,
-            timeout=15,
+            request,
+            timeout=timeout,
         ) as response:
             if response.geturl() != target:
-                raise HTTPException(
-                    status_code=502,
-                    detail="marketplace protocol origin changed",
-                )
+                raise HTTPException(status_code=502, detail="Marketplace redirect refused")
             raw = response.read(_MAX_RESPONSE_BYTES + 1)
     except urllib.error.HTTPError as exc:
-        status = {
-            400: 400,
-            401: 401,
-            404: 404,
-            409: 409,
-            410: 410,
-            429: 429,
-        }.get(exc.code, 502)
-        detail = {
-            400: "invalid marketplace request",
-            401: "marketplace login required",
-            404: "marketplace resource not found",
-            409: "marketplace state changed",
-            410: "marketplace request expired",
-            429: "too many marketplace requests",
-        }.get(exc.code, "marketplace protocol is unavailable")
-        raise HTTPException(status_code=status, detail=detail) from exc
+        status = exc.code if exc.code in {400, 401, 403, 404, 409, 410, 429} else 502
+        raise HTTPException(status_code=status, detail="Marketplace protocol request failed") from exc
     except (urllib.error.URLError, TimeoutError) as exc:
-        raise HTTPException(
-            status_code=502,
-            detail="marketplace protocol is unavailable",
-        ) from exc
+        raise HTTPException(status_code=502, detail="Marketplace protocol unavailable") from exc
     if len(raw) > _MAX_RESPONSE_BYTES:
-        raise HTTPException(
-            status_code=502,
-            detail="marketplace protocol response is too large",
-        )
+        raise HTTPException(status_code=502, detail="Marketplace response is too large")
+    if not raw:
+        return {}
     try:
-        payload_value = json.loads(raw.decode("utf-8")) if raw else {}
+        result = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=502, detail="Marketplace returned invalid JSON") from exc
+    if not isinstance(result, dict):
+        raise HTTPException(status_code=502, detail="Marketplace returned an invalid response")
+    return result
+
+
+def request(
+    operation: str,
+    path_values: dict[str, str],
+    *,
+    access_token: str,
+    body: dict,
+) -> dict:
+    method, path, request_fields = _operation_path(operation, path_values)
+    response_fields = set(PROTOCOL["http"][operation]["response"])
+    if set(body) != request_fields:
         raise HTTPException(
-            status_code=502,
-            detail="marketplace protocol returned invalid JSON",
-        ) from exc
-    if not isinstance(payload_value, dict):
-        raise HTTPException(
-            status_code=502,
-            detail="marketplace protocol returned an invalid response",
+            status_code=400,
+            detail="Marketplace protocol request has an invalid shape",
         )
-    return payload_value
+    signed = operation in _SIGNED_OPERATIONS
+    if signed != ({"challenge", "signature"} <= set(body)):
+        raise HTTPException(
+            status_code=400,
+            detail="Marketplace device proof has an invalid shape",
+        )
+    if (
+        not isinstance(access_token, str)
+        or not access_token
+        or len(access_token) > 8192
+        or any(ord(character) < 33 or ord(character) == 127 for character in access_token)
+    ):
+        raise HTTPException(status_code=401, detail="Marketplace login required")
+    result = _request_sync(
+        method,
+        path,
+        body,
+        access_token,
+        signed,
+    )
+    if set(result) != response_fields:
+        raise HTTPException(
+            status_code=502,
+            detail="Marketplace protocol response has an invalid shape",
+        )
+    return result

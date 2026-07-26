@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import threading
 from copy import deepcopy
+from datetime import datetime
 from pathlib import Path
 from typing import Callable, TypeVar
 
@@ -120,6 +121,7 @@ def _validate_receipt(action_id: str, receipt: object) -> None:
         "extension_id",
         "expected_version",
         "approved_target",
+        "verified_catalog",
         "precondition",
         "desired",
         "phase",
@@ -130,8 +132,47 @@ def _validate_receipt(action_id: str, receipt: object) -> None:
         "reconcile_deadline",
     }
     _require_keys(receipt, required, "Marketplace receipt")
+    if receipt["intent_id"] != action_id:
+        raise MarketplaceStateError("Marketplace receipt intent id is invalid")
+    if not PATTERNS["device"].fullmatch(str(receipt["device_id"])):
+        raise MarketplaceStateError("Marketplace receipt device id is invalid")
+    if (
+        not isinstance(receipt["device_epoch"], int)
+        or receipt["device_epoch"] < 0
+        or not isinstance(receipt["receipt_revision"], int)
+        or receipt["receipt_revision"] < 1
+    ):
+        raise MarketplaceStateError("Marketplace receipt revision is invalid")
     if not PATTERNS["sha256"].fullmatch(str(receipt["envelope_digest"])):
         raise MarketplaceStateError("Marketplace receipt digest is invalid")
+    if receipt["action"] not in PROTOCOL["actions"]:
+        raise MarketplaceStateError("Marketplace receipt action is invalid")
+    if not PATTERNS["extension"].fullmatch(str(receipt["extension_id"])):
+        raise MarketplaceStateError("Marketplace receipt extension id is invalid")
+    if not isinstance(receipt["expected_version"], str):
+        raise MarketplaceStateError("Marketplace receipt version is invalid")
+    target = receipt["approved_target"]
+    if not isinstance(target, dict) or set(target) != {
+        "snapshot_id",
+        "publisher_fingerprint",
+        "permission_hash",
+    }:
+        raise MarketplaceStateError("Marketplace receipt target is invalid")
+    if not PATTERNS["snapshot"].fullmatch(str(target["snapshot_id"])):
+        raise MarketplaceStateError("Marketplace receipt snapshot is invalid")
+    for field in ("publisher_fingerprint", "permission_hash"):
+        value = target[field]
+        if value and not PATTERNS["sha256"].fullmatch(str(value)):
+            raise MarketplaceStateError(f"Marketplace receipt {field} is invalid")
+    proof = receipt["verified_catalog"]
+    if not isinstance(proof, dict) or set(proof) != {"catalog", "signature"}:
+        raise MarketplaceStateError("Marketplace verified catalog is invalid")
+    if not isinstance(proof["catalog"], dict) or not isinstance(
+        proof["signature"], str
+    ):
+        raise MarketplaceStateError("Marketplace verified catalog is invalid")
+    _validate_extension_state(receipt["precondition"], "precondition")
+    _validate_extension_state(receipt["desired"], "desired")
     if receipt["phase"] not in {
         "fence_pending",
         "fenced",
@@ -140,8 +181,79 @@ def _validate_receipt(action_id: str, receipt: object) -> None:
         "terminal",
     }:
         raise MarketplaceStateError("Marketplace receipt phase is invalid")
+    expected_account = f"marketplace-terminal-capability:{action_id}"
+    account = receipt["terminal_capability_account"]
+    if receipt["phase"] == "fence_pending":
+        account_is_valid = account == ""
+    else:
+        account_is_valid = account == expected_account
+    if not account_is_valid:
+        raise MarketplaceStateError(
+            "Marketplace receipt terminal capability account is invalid"
+        )
+    terminal_result = receipt["terminal_result"]
+    if terminal_result is not None:
+        _validate_terminal_result(terminal_result)
+    if (receipt["phase"] == "terminal") != (terminal_result is not None):
+        raise MarketplaceStateError(
+            "Marketplace receipt terminal state is invalid"
+        )
     if receipt["ack_status"] not in {"pending", "acked", "conflict"}:
         raise MarketplaceStateError("Marketplace receipt ack state is invalid")
+    if receipt["ack_status"] != "pending" and receipt["phase"] != "terminal":
+        raise MarketplaceStateError("Marketplace receipt ack state is invalid")
+    _validate_timestamp(receipt["created_at"], "receipt created_at", allow_empty=False)
+    _validate_timestamp(
+        receipt["reconcile_deadline"],
+        "receipt reconcile_deadline",
+        allow_empty=receipt["phase"] == "fence_pending",
+    )
+
+
+def _validate_timestamp(value: object, field: str, *, allow_empty: bool) -> None:
+    if allow_empty and value == "":
+        return
+    if not isinstance(value, str):
+        raise MarketplaceStateError(f"Marketplace {field} is invalid")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise MarketplaceStateError(f"Marketplace {field} is invalid") from exc
+    if parsed.tzinfo is None:
+        raise MarketplaceStateError(f"Marketplace {field} is invalid")
+
+
+def _validate_extension_state(value: object, field: str) -> None:
+    if not isinstance(value, dict) or not isinstance(value.get("exists"), bool):
+        raise MarketplaceStateError(f"Marketplace receipt {field} is invalid")
+    if value["exists"] is False:
+        if set(value) != {"exists"}:
+            raise MarketplaceStateError(f"Marketplace receipt {field} is invalid")
+        return
+    if set(value) != {"exists", "source_type", "version", "enabled"}:
+        raise MarketplaceStateError(f"Marketplace receipt {field} is invalid")
+    if (
+        not isinstance(value["source_type"], str)
+        or not isinstance(value["version"], str)
+        or not isinstance(value["enabled"], bool)
+    ):
+        raise MarketplaceStateError(f"Marketplace receipt {field} is invalid")
+
+
+def _validate_terminal_result(value: object) -> None:
+    if not isinstance(value, dict) or set(value) != {"outcome", "result_code"}:
+        raise MarketplaceStateError("Marketplace terminal result is invalid")
+    if value["outcome"] not in {
+        "succeeded",
+        "rejected",
+        "failed",
+        "failed_unknown",
+    }:
+        raise MarketplaceStateError("Marketplace terminal outcome is invalid")
+    if not isinstance(value["result_code"], str) or not 1 <= len(
+        value["result_code"]
+    ) <= 80:
+        raise MarketplaceStateError("Marketplace terminal result code is invalid")
 
 
 def validate_state(state: object) -> dict:
@@ -175,6 +287,9 @@ def validate_state(state: object) -> dict:
         _require_keys(
             pending, {"token_account", "created_at"}, "Marketplace pending pair"
         )
+        if pending["token_account"] != f"marketplace-pair-token:{intent_id}":
+            raise MarketplaceStateError("Marketplace pending pair account is invalid")
+        _validate_timestamp(pending["created_at"], "pair created_at", allow_empty=False)
     for intent_id, intent in state["intents"].items():
         _validate_intent(intent_id, intent)
     for action_id, receipt in state["receipts"].items():
@@ -191,6 +306,17 @@ def validate_state(state: object) -> dict:
         )
         if not PATTERNS["sha256"].fullmatch(str(tombstone["envelope_digest"])):
             raise MarketplaceStateError("Marketplace tombstone digest is invalid")
+        if (
+            not isinstance(tombstone["receipt_revision"], int)
+            or tombstone["receipt_revision"] < 1
+        ):
+            raise MarketplaceStateError("Marketplace tombstone revision is invalid")
+        _validate_terminal_result(tombstone["terminal_result"])
+        _validate_timestamp(
+            tombstone["created_at"],
+            "tombstone created_at",
+            allow_empty=False,
+        )
     for key_id, sequence in state["catalog_sequences"].items():
         if (
             not isinstance(key_id, str)

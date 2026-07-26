@@ -166,6 +166,12 @@
       "request": ["protocol_hash", "snapshot_id", "extension_id"],
       "response": ["catalog", "signature"]
     },
+    "action_metadata": {
+      "method": "POST",
+      "path": "/protocol/v1/actions/{action_id}/metadata",
+      "request": [],
+      "response": ["extension_id", "version", "artifact_url", "artifact_sha256", "signature", "signature_alg", "catalog_snapshot_sha256"]
+    },
     "lease": {
       "method": "POST",
       "path": "/protocol/v1/devices/{device_id}/actions/lease",

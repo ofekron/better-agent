@@ -160,20 +160,17 @@ async def _protocol_access_token() -> str:
 
 
 async def _protocol_request(
-    method: str,
-    path: str,
+    operation: str,
+    path_values: dict[str, str],
     body: dict,
-    *,
-    signed: bool = False,
 ) -> dict:
     access_token = await _protocol_access_token()
     return await asyncio.to_thread(
         marketplace_protocol_transport.request,
-        method,
-        path,
+        operation,
+        path_values,
         access_token=access_token,
         body=body,
-        signed=signed,
     )
 
 
@@ -183,8 +180,8 @@ def protocol_origin() -> str:
 
 async def protocol_pair_context(pair_token: str) -> dict:
     return await _protocol_request(
-        "POST",
-        "/protocol/v1/pair/context",
+        "pair_context",
+        {},
         {
             "pair_token": pair_token,
             "protocol_hash": PROTOCOL_HASH,
@@ -193,75 +190,69 @@ async def protocol_pair_context(pair_token: str) -> dict:
 
 
 async def protocol_pair(body: dict) -> dict:
-    return await _protocol_request("POST", "/protocol/v1/pair/redeem", body)
+    return await _protocol_request("pair_redeem", {}, body)
 
 
 async def protocol_pair_reject(pair_token: str) -> dict:
     return await _protocol_request(
-        "POST",
-        "/protocol/v1/pair/reject",
+        "pair_reject",
+        {},
         {"pair_token": pair_token, "protocol_hash": PROTOCOL_HASH},
     )
 
 
 async def protocol_challenges(device_id: str) -> dict:
     return await _protocol_request(
-        "POST",
-        f"/protocol/v1/devices/{quote(device_id, safe='')}/challenges",
+        "device_challenges",
+        {"device_id": device_id},
         {"protocol_hash": PROTOCOL_HASH},
     )
 
 
 async def protocol_lease(device_id: str, body: dict) -> dict:
     return await _protocol_request(
-        "POST",
-        f"/protocol/v1/devices/{quote(device_id, safe='')}/actions/lease",
+        "lease",
+        {"device_id": device_id},
         body,
-        signed=True,
     )
 
 
 async def protocol_fence(device_id: str, action_id: str, body: dict) -> dict:
     return await _protocol_request(
-        "POST",
-        "/protocol/v1/devices/"
-        f"{quote(device_id, safe='')}/actions/{quote(action_id, safe='')}/fence",
+        "fence",
+        {"device_id": device_id, "action_id": action_id},
         body,
-        signed=True,
     )
 
 
 async def protocol_reject(device_id: str, action_id: str, body: dict) -> dict:
     return await _protocol_request(
-        "POST",
-        "/protocol/v1/devices/"
-        f"{quote(device_id, safe='')}/actions/{quote(action_id, safe='')}/reject",
+        "reject",
+        {"device_id": device_id, "action_id": action_id},
         body,
-        signed=True,
     )
 
 
 async def protocol_ack(action_id: str, body: dict) -> dict:
     return await _protocol_request(
-        "POST",
-        f"/protocol/v1/actions/{quote(action_id, safe='')}/terminal-ack",
+        "terminal_ack",
+        {"action_id": action_id},
         body,
     )
 
 
 async def protocol_projection(device_id: str, body: dict) -> dict:
     return await _protocol_request(
-        "PUT",
-        f"/protocol/v1/devices/{quote(device_id, safe='')}/projection",
+        "projection",
+        {"device_id": device_id},
         body,
-        signed=True,
     )
 
 
 async def protocol_catalog_snapshot(snapshot_id: str, extension_id: str) -> dict:
     return await _protocol_request(
-        "POST",
-        "/protocol/v1/catalog/resolve",
+        "catalog_snapshot",
+        {},
         {
             "protocol_hash": PROTOCOL_HASH,
             "snapshot_id": snapshot_id,
@@ -272,16 +263,15 @@ async def protocol_catalog_snapshot(snapshot_id: str, extension_id: str) -> dict
 
 async def protocol_revoke(device_id: str, body: dict) -> dict:
     return await _protocol_request(
-        "POST",
-        f"/protocol/v1/devices/{quote(device_id, safe='')}/revoke",
+        "revoke",
+        {"device_id": device_id},
         body,
-        signed=True,
     )
 
 
 async def protocol_action_metadata(action_id: str) -> dict:
     return await _protocol_request(
-        "POST",
-        f"/protocol/v1/actions/{quote(action_id, safe='')}/metadata",
+        "action_metadata",
+        {"action_id": action_id},
         {},
     )

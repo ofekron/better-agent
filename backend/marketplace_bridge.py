@@ -396,12 +396,14 @@ class MarketplaceBridge:
         operation: str,
         path_values: dict[str, str],
         body: dict[str, Any],
+        *,
+        allow_revoked: bool = False,
     ) -> tuple[str, dict[str, Any]]:
         device, identity = await asyncio.to_thread(
             self._identity.create_or_load,
             state["device"],
         )
-        if device["revoked"]:
+        if device["revoked"] and not allow_revoked:
             raise MarketplaceBridgeError("Marketplace device is revoked")
         challenge = await self._challenge(identity.device_id)
         return self._identity.sign_device_request(
@@ -549,7 +551,7 @@ class MarketplaceBridge:
         self,
         state: dict,
         intent: dict,
-    ) -> tuple[dict, str, int]:
+    ) -> tuple[dict, str, int, dict]:
         target = intent["approved_target"]
         extension_id = intent["extension"]["id"]
         response = await marketplace_service.protocol_catalog_snapshot(
@@ -567,10 +569,37 @@ class MarketplaceBridge:
             permission_hash=target["permission_hash"],
             minimum_sequence=state["catalog_sequences"].get("default-v1", 0),
         )
-        return verified["metadata"], verified["key_id"], verified["sequence"]
+        return (
+            verified["metadata"],
+            verified["key_id"],
+            verified["sequence"],
+            {
+                "catalog": deepcopy(response.get("catalog")),
+                "signature": str(response.get("signature") or ""),
+            },
+        )
 
-    async def _resolve_action_metadata(self, state: dict, intent: dict) -> dict:
-        verified, _, _ = await self._resolve_catalog(state, intent)
+    async def _resolve_action_metadata(
+        self,
+        state: dict,
+        intent: dict,
+        receipt: dict,
+    ) -> dict:
+        target = intent["approved_target"]
+        proof = receipt["verified_catalog"]
+        verified_result = await asyncio.to_thread(
+            extension_store.verify_marketplace_catalog_snapshot,
+            catalog=proof["catalog"],
+            signature=proof["signature"],
+            snapshot_id=target["snapshot_id"],
+            extension_id=intent["extension"]["id"],
+            expected_version=intent["extension"]["version"],
+            publisher_fingerprint=target["publisher_fingerprint"],
+            permission_hash=target["permission_hash"],
+            minimum_sequence=0,
+            allow_expired=True,
+        )
+        verified = verified_result["metadata"]
         action_id = intent["intent_id"]
         metadata = await marketplace_service.protocol_action_metadata(action_id)
         expected = {
@@ -580,6 +609,7 @@ class MarketplaceBridge:
             "signature": verified.get("signature")
             or verified.get("artifact_signature"),
             "signature_alg": "ed25519",
+            "catalog_snapshot_sha256": target["snapshot_id"].rsplit(":", 1)[-1],
         }
         actual = {
             "extension_id": metadata.get("extension_id"),
@@ -587,6 +617,7 @@ class MarketplaceBridge:
             "artifact_sha256": metadata.get("artifact_sha256"),
             "signature": metadata.get("signature"),
             "signature_alg": metadata.get("signature_alg"),
+            "catalog_snapshot_sha256": metadata.get("catalog_snapshot_sha256"),
         }
         if actual != expected:
             raise MarketplaceBridgeError(
@@ -610,8 +641,14 @@ class MarketplaceBridge:
             epoch = device["epoch"]
         catalog_key = ""
         catalog_sequence = 0
+        verified_catalog = {"catalog": {}, "signature": ""}
         if intent["action"] in {"install", "update"}:
-            _, catalog_key, catalog_sequence = await self._resolve_catalog(
+            (
+                _,
+                catalog_key,
+                catalog_sequence,
+                verified_catalog,
+            ) = await self._resolve_catalog(
                 state,
                 intent,
             )
@@ -646,6 +683,7 @@ class MarketplaceBridge:
                 "extension_id": intent["extension"]["id"],
                 "expected_version": intent["extension"]["version"],
                 "approved_target": deepcopy(intent["approved_target"]),
+                "verified_catalog": verified_catalog,
                 "precondition": deepcopy(intent["precondition"]),
                 "desired": deepcopy(intent["desired"]),
                 "phase": "fence_pending",
@@ -669,13 +707,25 @@ class MarketplaceBridge:
             device = deepcopy(state["device"])
             if receipt is None or receipt["phase"] != "fence_pending":
                 return
+            device_matches_receipt = (
+                isinstance(device, dict)
+                and device["device_id"] == receipt["device_id"]
+                and (
+                    (
+                        not device["revoked"]
+                        and device["epoch"] == receipt["device_epoch"]
+                    )
+                    or (
+                        device["revoked"]
+                        and device["revocation_pending"]
+                        and device["epoch"] == receipt["device_epoch"] + 1
+                    )
+                )
+            )
             if (
                 intent is None
                 or intent["status"] != "committing"
-                or not isinstance(device, dict)
-                or device["device_id"] != receipt["device_id"]
-                or device["epoch"] != receipt["device_epoch"]
-                or device["revoked"]
+                or not device_matches_receipt
             ):
                 raise MarketplaceBridgeError(
                     "Marketplace device changed while fencing action"
@@ -691,6 +741,7 @@ class MarketplaceBridge:
             "fence",
             {"device_id": device["device_id"], "action_id": intent_id},
             fence_body,
+            allow_revoked=device["revoked"],
         )
         fenced = await marketplace_service.protocol_fence(
             device["device_id"],
@@ -740,7 +791,11 @@ class MarketplaceBridge:
         if action in {"install", "update"}:
             if metadata is None:
                 intent = state["intents"][receipt["intent_id"]]
-                metadata = await self._resolve_action_metadata(state, intent)
+                metadata = await self._resolve_action_metadata(
+                    state,
+                    intent,
+                    receipt,
+                )
             if action == "install":
                 await marketplace_service.install_exact(
                     extension_id,
@@ -938,6 +993,7 @@ class MarketplaceBridge:
             await asyncio.to_thread(self._identity.delete_secret, account)
         await self._maybe_delete_revoked_key(state)
         await self._notify(state)
+        self._wake.set()
 
     async def _flush_rejection(self, action_id: str) -> None:
         async with self._mutation_lock:
@@ -1044,6 +1100,8 @@ class MarketplaceBridge:
                 for intent in state["intents"].values():
                     if intent["status"] == "awaiting_confirmation":
                         intent["status"] = "cancelled"
+                    if intent.get("rejection_pending"):
+                        intent["rejection_pending"] = False
                 state = await self._write(state)
         await self._notify(state)
         self._wake.set()
@@ -1058,6 +1116,11 @@ class MarketplaceBridge:
                 not isinstance(device, dict)
                 or not device["revoked"]
                 or not device["revocation_pending"]
+            ):
+                return
+            if any(
+                receipt["phase"] == "fence_pending"
+                for receipt in state["receipts"].values()
             ):
                 return
             _, identity = await asyncio.to_thread(
@@ -1220,7 +1283,8 @@ class MarketplaceBridge:
             await self._reconcile()
             self._wake.clear()
             if not await self._can_lease():
-                await self._wait_for_wake()
+                retry = 5 if await self._needs_reconciliation() else None
+                await self._wait_for_wake(timeout=retry)
                 continue
             lease = asyncio.create_task(self._lease_next())
             wake = asyncio.create_task(self._wake.wait())
@@ -1259,6 +1323,21 @@ class MarketplaceBridge:
         for task in done:
             if not task.cancelled():
                 task.exception()
+
+    async def _needs_reconciliation(self) -> bool:
+        state = await self._read()
+        device = state["device"]
+        return bool(
+            state["receipts"]
+            or any(
+                intent.get("rejection_pending")
+                for intent in state["intents"].values()
+            )
+            or (
+                isinstance(device, dict)
+                and device["revocation_pending"]
+            )
+        )
 
     async def start(
         self,

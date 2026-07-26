@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import os
 import sys
@@ -19,6 +20,7 @@ import _test_home
 _test_home.isolate("ba-marketplace-protocol-")
 
 import capability_api  # noqa: E402
+import extension_store  # noqa: E402
 import global_events  # noqa: E402
 import marketplace_auth  # noqa: E402
 import marketplace_bridge_api  # noqa: E402
@@ -117,6 +119,19 @@ def test_device_signer_enforces_exact_operation_shape() -> None:
         pass
     else:
         raise AssertionError("signer accepted an untyped request field")
+    try:
+        signer.sign_device_request(
+            identity,
+            "pair_reject",
+            {},
+            {"pair_token": "secret", "protocol_hash": PROTOCOL_HASH},
+            f"bachal_{'B' * 43}",
+            "https://marketplace.example",
+        )
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("signer accepted a non-device operation")
 
 
 def test_store_is_durable_private_and_fail_closed() -> None:
@@ -160,6 +175,109 @@ def _install_action() -> dict:
         "publisher_name": "Ofek",
         "permission_delta": ["network"],
     }
+
+
+def test_store_rejects_secret_account_substitution() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        store = MarketplaceStateStore(Path(directory) / "state.json")
+        action = _install_action()
+        bridge = MarketplaceBridge(store=store)
+        bridge._extension_state = lambda _extension_id: {"exists": False}
+        intent = bridge._validate_action(action)
+        state = empty_state()
+        state["intents"][action["action_id"]] = intent
+        state["receipts"][action["action_id"]] = {
+            "action_id": action["action_id"],
+            "intent_id": action["action_id"],
+            "device_id": f"badvc_{'1' * 32}",
+            "device_epoch": 1,
+            "envelope_digest": intent["envelope_digest"],
+            "receipt_revision": 1,
+            "action": "install",
+            "extension_id": "ofek.test",
+            "expected_version": "1.2.3",
+            "approved_target": intent["approved_target"],
+            "verified_catalog": {"catalog": {}, "signature": ""},
+            "precondition": {"exists": False},
+            "desired": intent["desired"],
+            "phase": "fenced",
+            "terminal_capability_account": (
+                f"marketplace-terminal-capability:{action['action_id']}"
+            ),
+            "terminal_result": None,
+            "ack_status": "pending",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "reconcile_deadline": (
+                datetime.now(timezone.utc) + timedelta(minutes=5)
+            ).isoformat(),
+        }
+        store.write(state)
+        substituted = store.read()
+        substituted["receipts"][action["action_id"]][
+            "terminal_capability_account"
+        ] = "unrelated-keychain-account"
+        try:
+            store.write(substituted)
+        except MarketplaceStateError:
+            pass
+        else:
+            raise AssertionError("state store accepted a substituted secret account")
+
+
+def test_verified_catalog_proof_survives_expiry() -> None:
+    private_key = Ed25519PrivateKey.generate()
+    public_key = base64.b64encode(
+        private_key.public_key().public_bytes_raw()
+    ).decode()
+    extension_id = "ofek.test"
+    publisher_fingerprint = "4" * 64
+    permission_hash = "5" * 64
+    catalog = {
+        "key_id": "default-v1",
+        "sequence": 7,
+        "issued_at": (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat(),
+        "expires_at": (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat(),
+        "extensions": {
+            extension_id: {
+                "extension_id": extension_id,
+                "version": "1.2.3",
+                "publisher_fingerprint": publisher_fingerprint,
+                "permission_hash": permission_hash,
+            }
+        },
+    }
+    canonical = json.dumps(
+        catalog,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode()
+    snapshot_id = f"default-v1:7:{hashlib.sha256(canonical).hexdigest()}"
+    signature = base64.b64encode(private_key.sign(canonical)).decode()
+    original_key = os.environ.get("BETTER_AGENT_MARKETPLACE_PUBLIC_KEY")
+    os.environ["BETTER_AGENT_MARKETPLACE_PUBLIC_KEY"] = public_key
+    try:
+        verified = extension_store.verify_marketplace_catalog_snapshot(
+            catalog=catalog,
+            signature=signature,
+            snapshot_id=snapshot_id,
+            extension_id=extension_id,
+            expected_version="1.2.3",
+            publisher_fingerprint=publisher_fingerprint,
+            permission_hash=permission_hash,
+            minimum_sequence=0,
+            allow_expired=True,
+        )
+    finally:
+        if original_key is None:
+            os.environ.pop("BETTER_AGENT_MARKETPLACE_PUBLIC_KEY", None)
+        else:
+            os.environ["BETTER_AGENT_MARKETPLACE_PUBLIC_KEY"] = original_key
+    check(
+        verified["metadata"]["extension_id"] == extension_id,
+        "persisted signed catalog remains verifiable after approval-time expiry",
+    )
 
 
 def test_action_envelope_excludes_coordinates_and_snapshot_excludes_secrets() -> None:
@@ -208,7 +326,7 @@ def test_fence_commit_is_recoverable_after_response_loss() -> None:
         class Identity:
             def store_terminal_capability(self, action_id: str, capability: str) -> str:
                 check(capability == "terminal-secret", "terminal secret stays in core")
-                return f"terminal-{action_id}"
+                return f"marketplace-terminal-capability:{action_id}"
 
         bridge = MarketplaceBridge(store=store, identity=Identity())
         bridge._extension_state = lambda _extension_id: {"exists": False}
@@ -229,14 +347,18 @@ def test_fence_commit_is_recoverable_after_response_loss() -> None:
         state["intents"][action["action_id"]] = intent
         store.write(state)
 
-        async def resolve_catalog(_state: dict, _intent: dict) -> tuple[dict, str, int]:
-            return {}, "default-v1", 7
+        async def resolve_catalog(
+            _state: dict,
+            _intent: dict,
+        ) -> tuple[dict, str, int, dict]:
+            return {}, "default-v1", 7, {"catalog": {}, "signature": ""}
 
         async def sign(
             _state: dict,
             _operation: str,
             _params: dict,
             body: dict,
+            **_options,
         ) -> tuple[str, dict]:
             return "/fence", body
 
@@ -268,6 +390,17 @@ def test_fence_commit_is_recoverable_after_response_loss() -> None:
             check(
                 pending["phase"] == "fence_pending",
                 "pre-fence receipt survives response loss",
+            )
+            revoked = store.read()
+            revoked["device"]["paired"] = False
+            revoked["device"]["revoked"] = True
+            revoked["device"]["revocation_pending"] = True
+            revoked["device"]["epoch"] += 1
+            store.write(revoked)
+            asyncio.run(bridge._reconcile_revocation())
+            check(
+                store.read()["device"]["revocation_pending"] is True,
+                "revocation waits until the pending fence yields a terminal capability",
             )
             asyncio.run(bridge._complete_pending_fence(action["action_id"]))
             recovered = store.read()["receipts"][action["action_id"]]
@@ -348,7 +481,7 @@ def test_rest_ws_contract_and_extension_capability_boundary() -> None:
 
 def test_protocol_mutation_transport_bypasses_extension_backend() -> None:
     extension_calls: list[tuple[str, str, dict | None]] = []
-    core_calls: list[tuple[str, str, str, dict, bool]] = []
+    core_calls: list[tuple[str, dict, str, dict]] = []
     original_invoke = marketplace_service._invoke
     original_get_secret = marketplace_service.password_manager.get_service_password
     original_request = marketplace_service.marketplace_protocol_transport.request
@@ -374,14 +507,13 @@ def test_protocol_mutation_transport_bypasses_extension_backend() -> None:
         return json.dumps({"access_token": "core-only-access"})
 
     def fake_request(
-        method: str,
-        path: str,
+        operation: str,
+        path_values: dict,
         *,
         access_token: str,
         body: dict,
-        signed: bool = False,
     ) -> dict:
-        core_calls.append((method, path, access_token, body, signed))
+        core_calls.append((operation, path_values, access_token, body))
         return {"terminal_capability": "core-only-terminal"}
 
     marketplace_service._invoke = fake_invoke
@@ -413,7 +545,7 @@ def test_protocol_mutation_transport_bypasses_extension_backend() -> None:
     check(
         core_calls[0][2] == "core-only-access"
         and core_calls[0][3]["lease_capability"] == "core-only-lease"
-        and core_calls[0][4] is True,
+        and core_calls[0][0] == "fence",
         "core alone receives mutation credentials and signed body",
     )
     check(
@@ -436,10 +568,13 @@ def test_protocol_transport_binds_origin_and_strips_signature_fields() -> None:
             return False
 
         def geturl(self):
-            return "https://marketplace.test/api/marketplace/protocol/v1/test"
+            return (
+                "https://marketplace.test/api/marketplace/protocol/v1/devices/"
+                f"badvc_{'1' * 32}/actions/lease"
+            )
 
         def read(self, _limit):
-            return b'{"ok":true}'
+            return b'{"action":null}'
 
     class Opener:
         def open(self, request, timeout):
@@ -453,15 +588,15 @@ def test_protocol_transport_binds_origin_and_strips_signature_fields() -> None:
         )
         transport.urllib.request.build_opener = lambda *_handlers: Opener()
         response = transport.request(
-            "POST",
-            "/protocol/v1/test",
+            "lease",
+            {"device_id": f"badvc_{'1' * 32}"},
             access_token="core-token",
             body={
                 "protocol_hash": PROTOCOL_HASH,
+                "wait_seconds": 30,
                 "challenge": f"bachal_{'A' * 43}",
                 "signature": "B" * 86,
             },
-            signed=True,
         )
         request_value = captured["request"]
         headers = {
@@ -469,10 +604,11 @@ def test_protocol_transport_binds_origin_and_strips_signature_fields() -> None:
         }
         encoded = json.loads(request_value.data)
         check(
-            response == {"ok": True}, "core protocol transport accepts object response"
+            response == {"action": None},
+            "core protocol transport accepts the exact typed response",
         )
         check(
-            set(encoded) == {"protocol_hash"},
+            set(encoded) == {"protocol_hash", "wait_seconds"},
             "device signature fields leave the JSON body",
         )
         check(
@@ -523,6 +659,8 @@ if __name__ == "__main__":
     test_protocol_artifact_is_canonical()
     test_device_signer_enforces_exact_operation_shape()
     test_store_is_durable_private_and_fail_closed()
+    test_store_rejects_secret_account_substitution()
+    test_verified_catalog_proof_survives_expiry()
     test_action_envelope_excludes_coordinates_and_snapshot_excludes_secrets()
     test_fence_commit_is_recoverable_after_response_loss()
     test_rest_ws_contract_and_extension_capability_boundary()

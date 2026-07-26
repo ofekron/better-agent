@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import platform
+import re
 import secrets
 from dataclasses import dataclass
 from typing import Any
@@ -16,6 +17,12 @@ from marketplace_protocol import PROTOCOL, PROTOCOL_HASH, canonical_hash, requir
 _PRIVATE_KEY_ACCOUNT = "marketplace-device-ed25519-v1"
 _PAIR_TOKEN_PREFIX = "marketplace-pair-token:"
 _TERMINAL_CAPABILITY_PREFIX = "marketplace-terminal-capability:"
+_SIGNED_OPERATIONS = frozenset({"lease", "fence", "reject", "projection", "revoke"})
+_PATH_PARAMETER_PATTERN = re.compile(r"\{([a-z_]+)\}")
+_PATH_IDENTIFIER_KINDS = {
+    "action_id": "action",
+    "device_id": "device",
+}
 
 
 class MarketplaceIdentityError(ValueError):
@@ -155,17 +162,22 @@ class MarketplaceDeviceIdentity:
         server_origin: str,
     ) -> tuple[str, dict[str, Any]]:
         spec = PROTOCOL["http"].get(operation)
-        if not isinstance(spec, dict) or operation in {
-            "pair_context",
-            "pair_redeem",
-            "terminal_ack",
-        }:
+        if not isinstance(spec, dict) or operation not in _SIGNED_OPERATIONS:
             raise MarketplaceIdentityError("Marketplace signing operation is not allowed")
         path = str(spec["path"])
-        for name, value in path_values.items():
-            path = path.replace(f"{{{name}}}", value)
-        if "{" in path or "}" in path:
+        parameters = set(_PATH_PARAMETER_PATTERN.findall(path))
+        if set(path_values) != parameters:
             raise MarketplaceIdentityError("Marketplace signing path is incomplete")
+        for name, value in path_values.items():
+            kind = _PATH_IDENTIFIER_KINDS.get(name)
+            if kind is None:
+                raise MarketplaceIdentityError(
+                    "Marketplace signing path is unsupported"
+                )
+            path = path.replace(
+                f"{{{name}}}",
+                require_identifier(kind, value),
+            )
         request_fields = set(spec["request"]) - {"challenge", "signature"}
         if set(body) != request_fields:
             raise MarketplaceIdentityError("Marketplace signed request has an invalid shape")

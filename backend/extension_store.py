@@ -2503,6 +2503,83 @@ def _marketplace_public_key() -> str:
     return str(os.environ.get("BETTER_AGENT_MARKETPLACE_PUBLIC_KEY") or _DEFAULT_MARKETPLACE_PUBLIC_KEY).strip()
 
 
+def verify_marketplace_catalog_snapshot(
+    *,
+    catalog: dict[str, Any],
+    signature: str,
+    snapshot_id: str,
+    extension_id: str,
+    expected_version: str,
+    publisher_fingerprint: str,
+    permission_hash: str,
+    minimum_sequence: int,
+    allow_expired: bool = False,
+) -> dict[str, Any]:
+    if not isinstance(catalog, dict) or set(catalog) != {
+        "key_id",
+        "sequence",
+        "issued_at",
+        "expires_at",
+        "extensions",
+    }:
+        raise ExtensionError("marketplace catalog has an invalid shape")
+    key_id = str(catalog["key_id"])
+    if key_id != "default-v1":
+        raise ExtensionError("marketplace catalog signing key is unknown")
+    sequence = catalog["sequence"]
+    if not isinstance(sequence, int) or sequence < minimum_sequence:
+        raise ExtensionError("marketplace catalog sequence is stale")
+    try:
+        issued_at = datetime.fromisoformat(str(catalog["issued_at"]).replace("Z", "+00:00"))
+        expires_at = datetime.fromisoformat(str(catalog["expires_at"]).replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ExtensionError("marketplace catalog timestamps are invalid") from exc
+    now = datetime.now(timezone.utc)
+    if (
+        issued_at.tzinfo is None
+        or expires_at.tzinfo is None
+        or issued_at > now
+        or (expires_at <= now and not allow_expired)
+    ):
+        raise ExtensionError("marketplace catalog is expired or not yet valid")
+    extensions = catalog["extensions"]
+    if not isinstance(extensions, dict):
+        raise ExtensionError("marketplace catalog extensions are invalid")
+    canonical = json.dumps(
+        catalog,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    catalog_hash = hashlib.sha256(canonical).hexdigest()
+    if snapshot_id != f"{key_id}:{sequence}:{catalog_hash}":
+        raise ExtensionError("marketplace catalog snapshot does not match action")
+    key_bytes = _decode_key_or_signature(_marketplace_public_key(), "marketplace public key")
+    signature_bytes = _decode_key_or_signature(signature, "catalog signature")
+    if len(key_bytes) != 32:
+        raise ExtensionError("marketplace public key must be an Ed25519 public key")
+    try:
+        Ed25519PublicKey.from_public_bytes(key_bytes).verify(signature_bytes, canonical)
+    except InvalidSignature as exc:
+        raise ExtensionError("marketplace catalog signature is invalid") from exc
+    metadata = extensions.get(extension_id)
+    if not isinstance(metadata, dict):
+        raise ExtensionError("marketplace extension is absent from approved catalog")
+    metadata_id = str(metadata.get("extension_id") or metadata.get("id") or "")
+    if metadata_id != extension_id or str(metadata.get("version") or "") != expected_version:
+        raise ExtensionError("marketplace catalog target does not match action")
+    if str(metadata.get("publisher_fingerprint") or "") != publisher_fingerprint:
+        raise ExtensionError("marketplace publisher fingerprint does not match action")
+    if str(metadata.get("permission_hash") or "") != permission_hash:
+        raise ExtensionError("marketplace permission hash does not match action")
+    return {
+        "metadata": copy.deepcopy(metadata),
+        "key_id": key_id,
+        "sequence": sequence,
+    }
+
+
 def _required_marketplace_metadata_url(extension_id: str) -> str:
     return f"{_marketplace_base_url()}/extensions/{quote(extension_id, safe='')}/metadata"
 
@@ -4641,6 +4718,46 @@ def install_marketplace_preview(
         source_type="marketplace",
         metadata_url=marketplace_metadata_url(clean_id),
     )
+
+
+def apply_marketplace_update_metadata(
+    extension_id: str,
+    metadata: dict[str, Any],
+    *,
+    expected_version: str,
+) -> dict[str, Any]:
+    clean_id = str(extension_id or "").strip()
+    clean_version = str(expected_version or "").strip()
+    if not _ID_RE.fullmatch(clean_id):
+        raise ExtensionError("extension_id is invalid")
+    if not _VERSION_RE.fullmatch(clean_version):
+        raise ExtensionError("expected_version is invalid")
+    record = require_extension_source(clean_id, "marketplace")
+    metadata_id = str(metadata.get("extension_id") or metadata.get("id") or "").strip()
+    metadata_version = str(metadata.get("version") or "").strip()
+    if metadata_id != clean_id or metadata_version != clean_version:
+        raise ExtensionError("marketplace update target does not match approved action")
+    installed_version = str((record.get("manifest") or {}).get("version") or "")
+    if installed_version == clean_version:
+        return {
+            "extension_id": clean_id,
+            "source_type": "marketplace",
+            "updated": False,
+            "skipped": "up_to_date",
+        }
+    updated = install_from_marketplace_metadata(
+        metadata=metadata,
+        source_type="marketplace",
+    )
+    _drop_update_cache_row(clean_id)
+    return {
+        "extension_id": clean_id,
+        "source_type": "marketplace",
+        "updated": True,
+        "version": updated["manifest"].get("version", ""),
+    }
+
+
 def _git_remote_commit(repo_url: str, ref: str) -> str:
     target = str(ref or "").strip() or "HEAD"
     output = _git(["ls-remote", repo_url, target])
