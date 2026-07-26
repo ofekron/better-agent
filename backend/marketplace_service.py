@@ -225,18 +225,10 @@ async def protocol_fence(device_id: str, action_id: str, body: dict) -> dict:
     )
 
 
-async def protocol_reject(device_id: str, action_id: str, body: dict) -> dict:
+async def protocol_ack(device_id: str, action_id: str, body: dict) -> dict:
     return await _protocol_request(
-        "reject",
+        "ack",
         {"device_id": device_id, "action_id": action_id},
-        body,
-    )
-
-
-async def protocol_ack(action_id: str, body: dict) -> dict:
-    return await _protocol_request(
-        "terminal_ack",
-        {"action_id": action_id},
         body,
     )
 

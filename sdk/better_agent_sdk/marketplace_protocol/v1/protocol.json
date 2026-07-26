@@ -16,7 +16,7 @@
   "bounds": {
     "pair_token_bytes": 32,
     "pair_ttl_seconds": 300,
-    "challenge_ttl_seconds": 60,
+    "challenge_ttl_seconds": 120,
     "challenge_batch_max": 4,
     "lease_wait_seconds_max": 30,
     "terminal_reconcile_seconds": 900,
@@ -140,13 +140,13 @@
       "method": "POST",
       "path": "/protocol/v1/pair/context",
       "request": ["pair_token", "protocol_hash"],
-      "response": ["site_label", "account_label", "server_origin", "protocol_hash"]
+      "response": ["site_label", "account_label", "expires_at", "catalog_snapshot_sha256"]
     },
     "pair_redeem": {
       "method": "POST",
       "path": "/protocol/v1/pair/redeem",
       "request": ["pair_token", "protocol_hash", "device_id", "public_key", "label", "pop_signature"],
-      "response": ["device_id", "server_origin", "protocol_hash"]
+      "response": ["protocol_version", "protocol_hash", "server_origin", "device_id", "paired"]
     },
     "pair_reject": {
       "method": "POST",
@@ -181,19 +181,13 @@
     "fence": {
       "method": "POST",
       "path": "/protocol/v1/devices/{device_id}/actions/{action_id}/fence",
-      "request": ["protocol_hash", "lease_capability", "envelope_digest", "receipt_revision", "challenge", "signature"],
+      "request": ["protocol_hash", "lease_capability", "challenge", "signature"],
       "response": ["terminal_capability", "reconcile_deadline"]
     },
-    "reject": {
+    "ack": {
       "method": "POST",
-      "path": "/protocol/v1/devices/{device_id}/actions/{action_id}/reject",
-      "request": ["protocol_hash", "lease_capability", "envelope_digest", "challenge", "signature"],
-      "response": ["outcome", "result_code"]
-    },
-    "terminal_ack": {
-      "method": "POST",
-      "path": "/protocol/v1/actions/{action_id}/terminal-ack",
-      "request": ["terminal_capability", "envelope_digest", "outcome", "result_code", "receipt_revision"],
+      "path": "/protocol/v1/devices/{device_id}/actions/{action_id}/ack",
+      "request": ["protocol_hash", "capability", "outcome", "result_code", "challenge", "signature"],
       "response": ["outcome", "result_code"]
     },
     "projection": {
@@ -209,10 +203,10 @@
       "response": ["device_id", "revoked"]
     }
   },
-  "terminal_ack": {
-    "capability_scope": "one exact action+device+envelope_digest+receipt_revision",
-    "valid_after_device_revocation": true,
-    "duplicate": "return stored terminal result",
+  "action_ack": {
+    "capability_scope": "lease capability rejects before fence; terminal capability reports one exact fenced action result",
+    "valid_after_device_revocation": false,
+    "duplicate": "return stored result",
     "conflict": "ack_conflict"
   },
   "recovery": {

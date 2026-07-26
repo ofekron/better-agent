@@ -12,7 +12,7 @@ from fastapi import HTTPException
 from marketplace_protocol import PATTERNS, PROTOCOL
 
 _MAX_RESPONSE_BYTES = 2 * 1024 * 1024
-_SIGNED_OPERATIONS = frozenset({"lease", "fence", "reject", "projection", "revoke"})
+_SIGNED_OPERATIONS = frozenset({"lease", "fence", "ack", "projection", "revoke"})
 _PATH_PARAMETER_PATTERN = re.compile(r"\{([a-z_]+)\}")
 _SIGNATURE_PATTERN = re.compile(r"^[A-Za-z0-9_-]{86}$")
 _PATH_IDENTIFIER_KINDS = {
@@ -49,13 +49,15 @@ _RESPONSE_VALUE_VALIDATORS = {
     "pair_context": {
         "site_label": _is_string,
         "account_label": _is_string,
-        "server_origin": _is_non_empty_string,
-        "protocol_hash": _is_non_empty_string,
+        "expires_at": _is_non_empty_string,
+        "catalog_snapshot_sha256": _is_non_empty_string,
     },
     "pair_redeem": {
-        "device_id": _is_non_empty_string,
-        "server_origin": _is_non_empty_string,
+        "protocol_version": lambda value: value == 1,
         "protocol_hash": _is_non_empty_string,
+        "server_origin": _is_non_empty_string,
+        "device_id": _is_non_empty_string,
+        "paired": lambda value: value is True,
     },
     "pair_reject": {"outcome": _is_non_empty_string},
     "device_challenges": {
@@ -77,11 +79,7 @@ _RESPONSE_VALUE_VALIDATORS = {
         "terminal_capability": _is_non_empty_string,
         "reconcile_deadline": _is_non_empty_string,
     },
-    "reject": {
-        "outcome": _is_non_empty_string,
-        "result_code": _is_non_empty_string,
-    },
-    "terminal_ack": {
+    "ack": {
         "outcome": _is_non_empty_string,
         "result_code": _is_non_empty_string,
     },

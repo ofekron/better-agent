@@ -223,13 +223,14 @@ class MarketplaceBridge:
             await self._expire_pair(intent_id)
             return
         context = await marketplace_service.protocol_pair_context(token.strip())
-        if context.get("protocol_hash") != PROTOCOL_HASH:
-            raise MarketplaceBridgeError("Marketplace server requires a client update")
         site_label = _bounded_text(context.get("site_label"), "site_label")
         account_label = _bounded_text(context.get("account_label"), "account_label")
-        origin = _server_origin(context.get("server_origin"))
-        if origin != marketplace_service.protocol_origin():
-            raise MarketplaceBridgeError("Marketplace server origin does not match")
+        _future_timestamp(context.get("expires_at"), "pair expiry")
+        require_hash(
+            context.get("catalog_snapshot_sha256"),
+            "catalog_snapshot_sha256",
+        )
+        origin = _server_origin(marketplace_service.protocol_origin())
         async with self._mutation_lock:
             state = await self._read()
             intent = state["intents"].get(intent_id)
@@ -315,8 +316,10 @@ class MarketplaceBridge:
                 }
             )
             if (
-                response.get("protocol_hash") != PROTOCOL_HASH
+                response.get("protocol_version") != 1
+                or response.get("protocol_hash") != PROTOCOL_HASH
                 or response.get("device_id") != identity.device_id
+                or response.get("paired") is not True
                 or _server_origin(response.get("server_origin"))
                 != device["server_origin"]
                 or device["server_origin"] != marketplace_service.protocol_origin()
@@ -733,8 +736,6 @@ class MarketplaceBridge:
         fence_body = {
             "protocol_hash": PROTOCOL_HASH,
             "lease_capability": intent["lease_capability"],
-            "envelope_digest": intent["envelope_digest"],
-            "receipt_revision": receipt["receipt_revision"],
         }
         _, signed = await self._signed_operation(
             state,
@@ -945,16 +946,29 @@ class MarketplaceBridge:
             raise MarketplaceBridgeError(
                 "Marketplace terminal capability is unavailable"
             )
+        device = state["device"]
+        if (
+            not isinstance(device, dict)
+            or device["device_id"] != receipt["device_id"]
+        ):
+            raise MarketplaceBridgeError("Marketplace receipt device is unavailable")
+        _, signed = await self._signed_operation(
+            state,
+            "ack",
+            {"device_id": device["device_id"], "action_id": action_id},
+            {
+                "protocol_hash": PROTOCOL_HASH,
+                "capability": capability,
+                "outcome": outcome,
+                "result_code": result_code,
+            },
+            allow_revoked=device["revoked"] and device["revocation_pending"],
+        )
         try:
             response = await marketplace_service.protocol_ack(
+                device["device_id"],
                 action_id,
-                {
-                    "terminal_capability": capability,
-                    "envelope_digest": receipt["envelope_digest"],
-                    "outcome": outcome,
-                    "result_code": result_code,
-                    "receipt_revision": receipt["receipt_revision"],
-                },
+                signed,
             )
         except Exception as exc:
             if getattr(exc, "status_code", None) != 409:
@@ -1004,25 +1018,32 @@ class MarketplaceBridge:
                 intent is None
                 or not intent.get("rejection_pending")
                 or not isinstance(device, dict)
-                or device["revoked"]
+                or (device["revoked"] and not device["revocation_pending"])
             ):
                 return
             epoch = device["epoch"]
         _, signed = await self._signed_operation(
             state,
-            "reject",
+            "ack",
             {"device_id": device["device_id"], "action_id": action_id},
             {
                 "protocol_hash": PROTOCOL_HASH,
-                "lease_capability": intent["lease_capability"],
-                "envelope_digest": intent["envelope_digest"],
+                "capability": intent["lease_capability"],
+                "outcome": "rejected",
+                "result_code": "user_rejected",
             },
+            allow_revoked=device["revoked"] and device["revocation_pending"],
         )
-        await marketplace_service.protocol_reject(
+        response = await marketplace_service.protocol_ack(
             device["device_id"],
             action_id,
             signed,
         )
+        if (
+            response.get("outcome") != "rejected"
+            or response.get("result_code") != "user_rejected"
+        ):
+            raise MarketplaceBridgeError("Marketplace rejection ack conflicts")
         async with self._mutation_lock:
             state = await self._read()
             current_device = state["device"]
@@ -1100,8 +1121,6 @@ class MarketplaceBridge:
                 for intent in state["intents"].values():
                     if intent["status"] == "awaiting_confirmation":
                         intent["status"] = "cancelled"
-                    if intent.get("rejection_pending"):
-                        intent["rejection_pending"] = False
                 state = await self._write(state)
         await self._notify(state)
         self._wake.set()
@@ -1118,9 +1137,9 @@ class MarketplaceBridge:
                 or not device["revocation_pending"]
             ):
                 return
-            if any(
-                receipt["phase"] == "fence_pending"
-                for receipt in state["receipts"].values()
+            if state["receipts"] or any(
+                intent.get("rejection_pending")
+                for intent in state["intents"].values()
             ):
                 return
             _, identity = await asyncio.to_thread(

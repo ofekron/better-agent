@@ -61,7 +61,16 @@ def test_protocol_artifact_is_canonical() -> None:
     raw = sdk_path.read_bytes()
     payload = json.loads(raw)
     check(payload == PROTOCOL, "backend and SDK load one protocol artifact")
-    check(len(PROTOCOL_HASH) == 64, "protocol compatibility hash is sha256")
+    check(
+        hashlib.sha256(raw).hexdigest() == PROTOCOL_HASH,
+        "protocol compatibility hash is the exact artifact sha256",
+    )
+    check(
+        "ack" in PROTOCOL["http"]
+        and "reject" not in PROTOCOL["http"]
+        and "terminal_ack" not in PROTOCOL["http"],
+        "one signed acknowledgement operation owns rejection and terminal results",
+    )
     check(
         set(PROTOCOL["actions"])
         == {
@@ -362,12 +371,12 @@ def test_fence_commit_is_recoverable_after_response_loss() -> None:
         ) -> tuple[str, dict]:
             return "/fence", body
 
-        revisions: list[int] = []
+        fence_bodies: list[dict] = []
         original_fence = marketplace_service.protocol_fence
 
         async def fence(_device_id: str, _action_id: str, signed: dict) -> dict:
-            revisions.append(signed["receipt_revision"])
-            if len(revisions) == 1:
+            fence_bodies.append(signed)
+            if len(fence_bodies) == 1:
                 raise RuntimeError("response lost after server commit")
             return {
                 "terminal_capability": "terminal-secret",
@@ -409,11 +418,179 @@ def test_fence_commit_is_recoverable_after_response_loss() -> None:
                 "reconciliation completes the durable pending fence",
             )
             check(
-                revisions == [pending["receipt_revision"]] * 2,
-                "fence retry preserves its idempotency revision",
+                fence_bodies
+                == [
+                    {
+                        "protocol_hash": PROTOCOL_HASH,
+                        "lease_capability": "lease-secret",
+                    }
+                ]
+                * 2,
+                "fence retry exposes no local receipt internals",
             )
         finally:
             marketplace_service.protocol_fence = original_fence
+
+
+def test_signed_ack_owns_terminal_and_rejection_recovery() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        store = MarketplaceStateStore(Path(directory) / "state.json")
+        action = _install_action()
+        bridge = MarketplaceBridge(store=store)
+        bridge._extension_state = lambda _extension_id: {"exists": False}
+        intent = bridge._validate_action(action)
+        device_id = f"badvc_{'1' * 32}"
+        state = empty_state()
+        state["device"] = {
+            "device_id": device_id,
+            "public_key": "A" * 43,
+            "label": "Test device",
+            "paired": True,
+            "revoked": False,
+            "revocation_pending": False,
+            "epoch": 1,
+            "server_origin": "https://ofek-dev.com/api/marketplace",
+        }
+        state["connection_state"] = "connected"
+        intent["status"] = "rejected"
+        intent["rejection_pending"] = True
+        state["intents"][action["action_id"]] = intent
+        store.write(state)
+
+        signed_operations: list[tuple[str, dict, bool]] = []
+
+        async def sign(
+            _state: dict,
+            operation: str,
+            _params: dict,
+            body: dict,
+            *,
+            allow_revoked: bool = False,
+        ) -> tuple[str, dict]:
+            signed_operations.append((operation, body, allow_revoked))
+            return "/ack", body
+
+        acknowledgements: list[dict] = []
+        terminal_attempts = 0
+        original_ack = marketplace_service.protocol_ack
+
+        async def ack(_device_id: str, _action_id: str, body: dict) -> dict:
+            nonlocal terminal_attempts
+            acknowledgements.append(body)
+            if body["outcome"] == "succeeded":
+                terminal_attempts += 1
+                if terminal_attempts == 1:
+                    raise RuntimeError("terminal acknowledgement response lost")
+            return {
+                "outcome": body["outcome"],
+                "result_code": body["result_code"],
+            }
+
+        bridge._signed_operation = sign
+        marketplace_service.protocol_ack = ack
+        try:
+            revoked = store.read()
+            revoked["device"]["paired"] = False
+            revoked["device"]["revoked"] = True
+            revoked["device"]["revocation_pending"] = True
+            revoked["device"]["epoch"] += 1
+            store.write(revoked)
+            asyncio.run(bridge._reconcile_revocation())
+            check(
+                store.read()["device"]["revocation_pending"] is True,
+                "revocation waits for a durable rejection acknowledgement",
+            )
+            asyncio.run(bridge._flush_rejection(action["action_id"]))
+
+            class Identity:
+                def get_secret(self, _account: str) -> str:
+                    return "terminal-secret"
+
+                def delete_secret(self, _account: str) -> None:
+                    return None
+
+            bridge._identity = Identity()
+            pending = store.read()
+            pending_intent = pending["intents"][action["action_id"]]
+            pending_intent["status"] = "committing"
+            pending["receipts"][action["action_id"]] = {
+                "action_id": action["action_id"],
+                "intent_id": action["action_id"],
+                "device_id": device_id,
+                "device_epoch": 1,
+                "envelope_digest": pending_intent["envelope_digest"],
+                "receipt_revision": 1,
+                "action": "install",
+                "extension_id": "ofek.test",
+                "expected_version": "1.2.3",
+                "approved_target": pending_intent["approved_target"],
+                "verified_catalog": {"catalog": {}, "signature": ""},
+                "precondition": {"exists": False},
+                "desired": pending_intent["desired"],
+                "phase": "fenced",
+                "terminal_capability_account": (
+                    f"marketplace-terminal-capability:{action['action_id']}"
+                ),
+                "terminal_result": None,
+                "ack_status": "pending",
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "reconcile_deadline": (
+                    datetime.now(timezone.utc) + timedelta(minutes=5)
+                ).isoformat(),
+            }
+            store.write(pending)
+            try:
+                asyncio.run(
+                    bridge._finalize_receipt(
+                        action["action_id"],
+                        "succeeded",
+                        "installed",
+                    )
+                )
+            except RuntimeError:
+                pass
+            else:
+                raise AssertionError("lost terminal acknowledgement did not surface")
+            check(
+                store.read()["receipts"][action["action_id"]]["phase"] == "terminal",
+                "terminal result survives a lost acknowledgement response",
+            )
+            asyncio.run(
+                bridge._finalize_receipt(
+                    action["action_id"],
+                    "succeeded",
+                    "installed",
+                )
+            )
+        finally:
+            marketplace_service.protocol_ack = original_ack
+        check(
+            acknowledgements[0]
+            == {
+                "protocol_hash": PROTOCOL_HASH,
+                "capability": "lease-secret",
+                "outcome": "rejected",
+                "result_code": "user_rejected",
+            },
+            "rejection uses the unified signed acknowledgement body",
+        )
+        check(
+            signed_operations
+            == [
+                ("ack", acknowledgements[0], True),
+                ("ack", acknowledgements[1], True),
+                ("ack", acknowledgements[2], True),
+            ],
+            "rejection and terminal retries share the signed acknowledgement path",
+        )
+        check(
+            store.read()["intents"][action["action_id"]]["rejection_pending"] is False,
+            "rejection acknowledgement clears only after server confirmation",
+        )
+        check(
+            action["action_id"] not in store.read()["receipts"],
+            "terminal receipt clears only after a confirmed acknowledgement",
+        )
 
 
 def test_rest_ws_contract_and_extension_capability_boundary() -> None:
@@ -470,7 +647,7 @@ def test_rest_ws_contract_and_extension_capability_boundary() -> None:
         "/protocol/v1/pair/context",
         "/protocol/v1/pair/redeem",
         "/protocol/v1/devices/{device_id}/actions/lease",
-        "/protocol/v1/actions/{action_id}/terminal-ack",
+        "/protocol/v1/devices/{device_id}/actions/{action_id}/ack",
         "X-BA-Device-Signature",
     ):
         check(
@@ -527,8 +704,6 @@ def test_protocol_mutation_transport_bypasses_extension_backend() -> None:
                 {
                     "protocol_hash": PROTOCOL_HASH,
                     "lease_capability": "core-only-lease",
-                    "envelope_digest": "3" * 64,
-                    "receipt_revision": 1,
                     "challenge": f"bachal_{'A' * 43}",
                     "signature": "B" * 86,
                 },
@@ -721,6 +896,7 @@ if __name__ == "__main__":
     test_verified_catalog_proof_survives_expiry()
     test_action_envelope_excludes_coordinates_and_snapshot_excludes_secrets()
     test_fence_commit_is_recoverable_after_response_loss()
+    test_signed_ack_owns_terminal_and_rejection_recovery()
     test_rest_ws_contract_and_extension_capability_boundary()
     test_protocol_mutation_transport_bypasses_extension_backend()
     test_protocol_transport_binds_origin_and_strips_signature_fields()

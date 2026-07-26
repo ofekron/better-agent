@@ -17,7 +17,7 @@ from marketplace_protocol import PROTOCOL, PROTOCOL_HASH, canonical_hash, requir
 _PRIVATE_KEY_ACCOUNT = "marketplace-device-ed25519-v1"
 _PAIR_TOKEN_PREFIX = "marketplace-pair-token:"
 _TERMINAL_CAPABILITY_PREFIX = "marketplace-terminal-capability:"
-_SIGNED_OPERATIONS = frozenset({"lease", "fence", "reject", "projection", "revoke"})
+_SIGNED_OPERATIONS = frozenset({"lease", "fence", "ack", "projection", "revoke"})
 _PATH_PARAMETER_PATTERN = re.compile(r"\{([a-z_]+)\}")
 _PATH_IDENTIFIER_KINDS = {
     "action_id": "action",
