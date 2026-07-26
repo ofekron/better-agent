@@ -46,6 +46,9 @@ logger = logging.getLogger(__name__)
 
 STORE_SCHEMA_VERSION = 2
 MANIFEST_KIND = "better-agent-extension"
+# Slow-call floor for backend routes that declare no `entrypoints.backend_timeouts`
+# budget. A route that declares one is judged against that declaration instead
+# (see `record_slow_backend_call`).
 EXTENSION_SLOW_CALL_SECONDS = 2.0
 _EXTENSION_SLOW_CALL_LIMIT = 3
 _EXTENSION_SLOW_CALL_WINDOW_SECONDS = 10 * 60.0
@@ -830,6 +833,10 @@ def export_extension_sync_state() -> dict[str, Any]:
         if isinstance(record, dict)
     }
     artifacts: list[dict[str, Any]] = []
+    # Packages that could not be shipped. Reported in the payload so the node
+    # (and the UI reading its result) sees a partial sync as partial instead of
+    # believing it received every extension.
+    artifact_failures: list[dict[str, str]] = []
     for extension_id, record in (data.get("extensions") or {}).items():
         if not isinstance(record, dict):
             continue
@@ -846,13 +853,18 @@ def export_extension_sync_state() -> dict[str, Any]:
                     extension_id,
                     raw_install_path,
                 )
+                artifact_failures.append({
+                    "extension_id": extension_id,
+                    "error": f"unusable install_path {raw_install_path!r}",
+                })
             continue
         try:
             archive = _build_package_artifact(install_path)
-        except Exception:
+        except Exception as exc:
             # One unshippable package must not deny every node all the others.
             # The next store change or node reconnect retries it.
             logger.exception("extension %s package export failed; skipping", extension_id)
+            artifact_failures.append({"extension_id": extension_id, "error": str(exc)})
             continue
         artifact_sha256 = hashlib.sha256(archive).hexdigest()
         artifacts.append({
@@ -877,6 +889,7 @@ def export_extension_sync_state() -> dict[str, Any]:
             "settings": copy.deepcopy(_load_ui_settings()),
         },
         "artifacts": artifacts,
+        "artifact_failures": artifact_failures,
     }
 
 
@@ -987,10 +1000,27 @@ def import_extension_sync_state(payload: dict[str, Any]) -> dict[str, Any]:
         if isinstance(settings, dict):
             _save_ui_settings(copy.deepcopy(settings))
     reconcile = _reconcile_after_sync(records)
+    # A package the primary could not build is missing on this node: its record
+    # exists but no code arrived. Surface it in the result instead of reporting a
+    # partial sync as a complete one.
+    failures = [
+        {
+            "extension_id": str(item.get("extension_id") or ""),
+            "error": str(item.get("error") or ""),
+        }
+        for item in (payload.get("artifact_failures") or [])
+        if isinstance(item, dict)
+    ]
+    if failures:
+        logger.warning(
+            "extension sync arrived without packages for: %s",
+            ", ".join(sorted(item["extension_id"] for item in failures)),
+        )
     return {
         "ok": True,
         "extension_count": len(records),
         "artifact_count": len(payload.get("artifacts") or []),
+        "artifact_failures": failures,
         "reconcile": reconcile,
     }
 
@@ -2293,6 +2323,60 @@ def _validate_backend_timeouts(raw: Any) -> dict[str, float]:
             raise ExtensionError(f"entrypoints.backend_timeouts['{key}'] must be a positive number")
         result[route] = float(value)
     return result
+
+
+def _is_positive_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0
+
+
+def resolve_route_timeout(
+    backend_timeouts: Any, path: str, *, default_seconds: float
+) -> float:
+    """Canonical "how long is this backend route allowed to take" resolution.
+
+    Single source of truth for the manifest-declared per-route budget: the host
+    uses it to time out a roundtrip and the quarantine path uses it to decide
+    what counts as a slow call, so a route cannot be granted 360s by one
+    subsystem and punished at the global floor by another.
+
+    Lookup order: exact route subpath, then longest segment-prefix, then the
+    special ``default`` key, then ``default_seconds``.
+    """
+    if not isinstance(backend_timeouts, dict) or not backend_timeouts:
+        return float(default_seconds)
+    p = str(path or "").strip("/")
+    chosen = backend_timeouts.get(p)
+    if not _is_positive_number(chosen):
+        best_len = -1
+        for key, value in backend_timeouts.items():
+            if key == "default" or not _is_positive_number(value):
+                continue
+            k = str(key).strip("/")
+            if (p == k or p.startswith(k + "/")) and len(k) > best_len:
+                best_len, chosen = len(k), value
+        if best_len < 0:
+            chosen = backend_timeouts.get("default")
+    if _is_positive_number(chosen):
+        return float(chosen)
+    return float(default_seconds)
+
+
+def slow_call_threshold(backend_timeouts: Any, path: str) -> float:
+    """Seconds one call to backend route ``path`` may take before it counts as
+    slow: the route's declared budget, or ``EXTENSION_SLOW_CALL_SECONDS`` when it
+    declares none. Callers on the request path use it to skip the store write for
+    a call that cannot be an incident; the quarantine path uses it to judge one.
+    """
+    return resolve_route_timeout(
+        backend_timeouts, path, default_seconds=EXTENSION_SLOW_CALL_SECONDS
+    )
+
+
+def _record_slow_call_threshold(record: dict[str, Any], route_path: str) -> float:
+    return slow_call_threshold(
+        ((record.get("manifest") or {}).get("entrypoints") or {}).get("backend_timeouts"),
+        route_path,
+    )
 
 
 def _validate_backend_retry_on_exit(raw: Any) -> tuple[str, ...]:
@@ -5063,9 +5147,12 @@ def _record_backend_incident(
     elapsed_seconds: float,
     history_key: str,
     reason: str,
-    minimum_seconds: float,
+    route_path: str | None = None,
 ) -> list[str]:
-    if elapsed_seconds < minimum_seconds:
+    # One threshold per incident kind: an incident tied to a backend route is
+    # judged by that route's declared budget (needs the record, so it is checked
+    # under the lock below); an incident with no route uses the global floor.
+    if route_path is None and elapsed_seconds < EXTENSION_SLOW_CALL_SECONDS:
         return []
     observed_at = time.time()
     cutoff = observed_at - _EXTENSION_SLOW_CALL_WINDOW_SECONDS
@@ -5078,6 +5165,10 @@ def _record_backend_incident(
             or not activation_id
             or record.get("activation_id") != activation_id
             or extension_id in REQUIRED_EXTENSION_IDS
+        ):
+            return []
+        if route_path is not None and elapsed_seconds < _record_slow_call_threshold(
+            record, route_path
         ):
             return []
         history = read_json(_slow_calls_path(), {"extensions": {}})
@@ -5153,28 +5244,38 @@ def _record_backend_incident(
 
 
 def record_slow_backend_call(
-    extension_id: str, *, activation_id: str, elapsed_seconds: float
+    extension_id: str, *, activation_id: str, elapsed_seconds: float, path: str
 ) -> list[str]:
+    """Count one slow in-extension call, quarantining after the third one.
+
+    "Slow" is ``path``'s manifest-declared ``backend_timeouts`` budget when it
+    declares one — a route the host is willing to wait 360s for is not slow at
+    40s — and ``EXTENSION_SLOW_CALL_SECONDS`` for routes with no declaration.
+    ``path`` is required: every call arrives through one backend route, and an
+    unattributed incident could only be judged against some other route's budget.
+    """
     return _record_backend_incident(
         extension_id,
         activation_id=activation_id,
         elapsed_seconds=elapsed_seconds,
         history_key="slow_asgi",
         reason="repeated_slow_backend_calls",
-        minimum_seconds=EXTENSION_SLOW_CALL_SECONDS,
+        route_path=str(path),
     )
 
 
 def record_backend_timeout(
     extension_id: str, *, activation_id: str, elapsed_seconds: float
 ) -> list[str]:
+    """Count one host-side timeout. The declared budget is deliberately not
+    consulted: the host only times a call out after that budget already elapsed,
+    so the incident is by construction outside what the manifest asked for."""
     return _record_backend_incident(
         extension_id,
         activation_id=activation_id,
         elapsed_seconds=elapsed_seconds,
         history_key="timeout",
         reason="repeated_backend_timeouts",
-        minimum_seconds=EXTENSION_SLOW_CALL_SECONDS,
     )
 
 

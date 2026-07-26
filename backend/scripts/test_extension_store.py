@@ -2267,13 +2267,13 @@ def test_slow_call_quarantine_disables_extension_and_dependents_durably() -> Non
         extension_store.install_from_repo(repo_url=feat_repo.as_uri(), extension_path="extensions/pkg")
         activation_id = extension_store.activation_identity("ofek.laggy-base")
 
-        if extension_store.record_slow_backend_call("ofek.laggy-base", activation_id=activation_id, elapsed_seconds=1.99):
+        if extension_store.record_slow_backend_call("ofek.laggy-base", activation_id=activation_id, elapsed_seconds=1.99, path="work"):
             raise AssertionError("short call counted")
-        if extension_store.record_slow_backend_call("ofek.laggy-base", activation_id=activation_id, elapsed_seconds=2.0):
+        if extension_store.record_slow_backend_call("ofek.laggy-base", activation_id=activation_id, elapsed_seconds=2.0, path="work"):
             raise AssertionError("first slow call quarantined")
-        if extension_store.record_slow_backend_call("ofek.laggy-base", activation_id=activation_id, elapsed_seconds=4.0):
+        if extension_store.record_slow_backend_call("ofek.laggy-base", activation_id=activation_id, elapsed_seconds=4.0, path="work"):
             raise AssertionError("second slow call quarantined")
-        disabled = extension_store.record_slow_backend_call("ofek.laggy-base", activation_id=activation_id, elapsed_seconds=4.25)
+        disabled = extension_store.record_slow_backend_call("ofek.laggy-base", activation_id=activation_id, elapsed_seconds=4.25, path="work")
         if disabled != ["ofek.laggy-base", "ofek.laggy-dependent"]:
             raise AssertionError(disabled)
         for extension_id in disabled:
@@ -2308,7 +2308,7 @@ def test_new_generation_recovers_exact_auto_quarantine_cohort() -> None:
         extension_store.install_from_repo(repo_url=dependent_repo.as_uri(), extension_path="extensions/pkg")
         activation_id = extension_store.activation_identity("ofek.recover-base")
         for elapsed in (2.1, 2.2, 2.3):
-            disabled = extension_store.record_slow_backend_call("ofek.recover-base", activation_id=activation_id, elapsed_seconds=elapsed)
+            disabled = extension_store.record_slow_backend_call("ofek.recover-base", activation_id=activation_id, elapsed_seconds=elapsed, path="work")
         if disabled != ["ofek.recover-base", "ofek.recover-dependent"]:
             raise AssertionError(disabled)
         quarantined = extension_store.get_extension("ofek.recover-base") or {}
@@ -2330,7 +2330,7 @@ def test_new_generation_recovers_exact_auto_quarantine_cohort() -> None:
             raise AssertionError("new-generation recovery did not rotate activation")
         for elapsed in (2.4, 2.5, 2.6):
             if extension_store.record_slow_backend_call(
-                "ofek.recover-base", activation_id=activation_id, elapsed_seconds=elapsed
+                "ofek.recover-base", activation_id=activation_id, elapsed_seconds=elapsed, path="work"
             ):
                 raise AssertionError("old generation quarantined recovered activation")
         history = read_json(extension_store._slow_calls_path(), {"extensions": {}})
@@ -2370,7 +2370,7 @@ def test_incidents_are_fenced_to_same_generation_activation() -> None:
         threads = [
             threading.Thread(
                 target=lambda: results.append(extension_store.record_slow_backend_call(
-                    extension_id, activation_id=old_activation, elapsed_seconds=3.0
+                    extension_id, activation_id=old_activation, elapsed_seconds=3.0, path="work"
                 ))
             )
             for _ in range(3)
@@ -2392,11 +2392,11 @@ def test_incidents_are_fenced_to_same_generation_activation() -> None:
 
         for _ in range(2):
             if extension_store.record_slow_backend_call(
-                extension_id, activation_id=current_activation, elapsed_seconds=3.0
+                extension_id, activation_id=current_activation, elapsed_seconds=3.0, path="work"
             ):
                 raise AssertionError("current activation quarantined before limit")
         disabled = extension_store.record_slow_backend_call(
-            extension_id, activation_id=current_activation, elapsed_seconds=3.0
+            extension_id, activation_id=current_activation, elapsed_seconds=3.0, path="work"
         )
         if disabled != [extension_id]:
             raise AssertionError(disabled)
@@ -2435,7 +2435,7 @@ def test_legacy_quarantine_is_annotated_without_enabling_then_recovers() -> None
         )
         for elapsed in (2.1, 2.2, 2.3):
             extension_store.record_slow_backend_call(
-                "ofek.legacy-base", activation_id=extension_store.activation_identity("ofek.legacy-base"), elapsed_seconds=elapsed
+                "ofek.legacy-base", activation_id=extension_store.activation_identity("ofek.legacy-base"), elapsed_seconds=elapsed, path="work"
             )
         with extension_store._store_lock():
             data = extension_store._read_store_unlocked()
@@ -2593,7 +2593,7 @@ def test_legacy_quarantine_retains_then_exactly_once_drains_lag_spool() -> None:
         )
         for elapsed in (2.1, 2.2, 2.3):
             extension_store.record_slow_backend_call(
-                "ofek-dev.agent-board", activation_id=extension_store.activation_identity("ofek-dev.agent-board"), elapsed_seconds=elapsed
+                "ofek-dev.agent-board", activation_id=extension_store.activation_identity("ofek-dev.agent-board"), elapsed_seconds=elapsed, path="work"
             )
         with extension_store._store_lock():
             data = extension_store._read_store_unlocked()

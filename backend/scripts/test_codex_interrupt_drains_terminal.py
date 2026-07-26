@@ -68,14 +68,11 @@ class _FakeCodexProcess:
         self.stdout = _FakeStdout(self, run_dir, rows)
         self._stderr_task = asyncio.create_task(asyncio.sleep(0))
         self.requests: list[tuple[str, dict]] = []
-        self._pending_tool_calls: dict = {}
+        self._pending_tool_calls: set = set()
 
     async def request(self, method: str, params: dict) -> dict:
         self.requests.append((method, params))
         return {}
-
-    async def _fail_pending_tool_calls(self, _reason: str) -> None:
-        return None
 
     async def wait(self) -> int:
         self.returncode = 0

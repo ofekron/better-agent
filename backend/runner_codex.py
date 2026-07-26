@@ -2002,7 +2002,6 @@ class _AppServerProcess:
         self.pid = proc.pid
         self.stdin = proc.stdin
         self.stderr = proc.stderr
-        self.returncode = proc.returncode
         self._run_dir = run_dir
         # When non-empty, interactive tool/command approvals round-trip to the
         # backend. Empty under approval_policy="never" (no approvals asked).
@@ -2010,7 +2009,11 @@ class _AppServerProcess:
         self._responses: dict[int, asyncio.Future] = {}
         self._next_id = 1
         self._send_lock = asyncio.Lock()
-        self._server_request_tasks: set[asyncio.Task] = set()
+        # In-flight `item/tool/call` handler tasks — the single home for the
+        # dynamic-tool calls a completed turn must join before termination
+        # (`_await_pending_tool_calls`). Approvals are deliberately not tracked
+        # here: they are fire-and-forget and must not hold up termination.
+        self._pending_tool_calls: set[asyncio.Task] = set()
         self._mapped: asyncio.Queue[Optional[bytes]] = asyncio.Queue()
         self.stdout = _MappedNotificationStream(self._mapped)
         self._tool_handlers = tool_handlers or {}
@@ -2027,8 +2030,19 @@ class _AppServerProcess:
         # initialize`. Reusable by the turn loop via `_stderr_task`.
         self._stderr_task = asyncio.create_task(self._drain_stderr())
 
+    @property
+    def returncode(self) -> Optional[int]:
+        """Live exit status of the app-server process.
+
+        Delegating instead of snapshotting keeps one authoritative home: every
+        `proc.returncode` reader (terminal forwarders, the pending-tool-call
+        join, the exit-code check) sees the process exiting the moment it does,
+        not only after `wait()` returned.
+        """
+        return self._proc.returncode
+
     def _server_request_done(self, task: asyncio.Task) -> None:
-        self._server_request_tasks.discard(task)
+        self._pending_tool_calls.discard(task)
         if task.cancelled():
             return
         error = task.exception()
@@ -2139,7 +2153,7 @@ class _AppServerProcess:
                 if request_id is not None:
                     if message.get("method") == "item/tool/call":
                         task = asyncio.create_task(self._handle_server_request(message))
-                        self._server_request_tasks.add(task)
+                        self._pending_tool_calls.add(task)
                         task.add_done_callback(self._server_request_done)
                         continue
                     handled = await self._handle_server_request(message)
@@ -2272,7 +2286,7 @@ class _AppServerProcess:
         inbox = self._run_dir / "steer.jsonl"
         offset = 0
         log = logging.getLogger("runner_codex")
-        while self._proc.returncode is None:
+        while self.returncode is None:
             try:
                 if inbox.exists():
                     with inbox.open(encoding="utf-8") as f:
@@ -2308,7 +2322,6 @@ class _AppServerProcess:
 
     async def wait(self) -> int:
         code = await self._proc.wait()
-        self.returncode = code
         self._steer_task.cancel()
         try:
             await asyncio.wait_for(self._reader_task, timeout=2.0)
@@ -2320,10 +2333,10 @@ class _AppServerProcess:
                 pass
         except Exception:
             logging.getLogger("runner_codex").exception("codex app-server reader failed")
-        for task in tuple(self._server_request_tasks):
+        for task in tuple(self._pending_tool_calls):
             task.cancel()
-        if self._server_request_tasks:
-            await asyncio.gather(*self._server_request_tasks, return_exceptions=True)
+        if self._pending_tool_calls:
+            await asyncio.gather(*self._pending_tool_calls, return_exceptions=True)
         return code
 
 
@@ -2756,7 +2769,11 @@ async def _forward_rollout_terminal(
     scanner = _IncrementalRolloutScanner(
         Path(rollout_path), byte_offset=byte_offset,
     )
-    while proc.returncode is None:
+    # Deliberately outlives the app-server process: an app-server that dies
+    # without emitting a terminal on stdout is exactly the ghost completion the
+    # rollout scan exists to rescue, so the rollout stays the ground truth until
+    # the stdout consumer cancels this task.
+    while True:
         terminal, usage, assistant_seen, _ = await _wait_rollout_terminal_state(
             rollout_path,
             byte_offset=byte_offset,
@@ -2807,12 +2824,7 @@ async def _await_pending_tool_calls(
         await asyncio.wait(pending, timeout=0.05)
         if cancel_path is not None and cancel_path.exists():
             raise asyncio.CancelledError()
-        live_returncode = getattr(
-            getattr(proc, "_proc", None),
-            "returncode",
-            getattr(proc, "returncode", None),
-        )
-        if live_returncode is not None:
+        if proc.returncode is not None:
             raise RuntimeError(
                 "Codex app-server exited before pending tool calls completed"
             )

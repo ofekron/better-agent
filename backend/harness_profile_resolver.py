@@ -110,10 +110,30 @@ def _setting_schema_hash(record: dict[str, Any], key: str) -> str:
         raise HarnessProfileResolutionError(str(exc)) from exc
 
 
-def _runtime_ready_record(extension_id: str) -> dict[str, Any]:
+def _run_extension_record(extension_id: str) -> dict[str, Any] | None:
+    """Second readiness read for a run snapshot, split by DURABILITY.
+
+    `compute_default_profile` already gated this extension on
+    `is_extension_runtime_ready`, so this is a re-read of the same fact and
+    readiness can flip in between (auto-quarantine, entitlement expiry, an
+    internal-LLM reassignment, the install-path window during an update).
+
+    Returns None when the flip is DURABLE — the record vanished or its
+    `enabled` flag went False. Neither recovers without a user re-enable or a
+    new extension generation, so a retried turn would run identically degraded
+    and the next default synthesis excludes the extension anyway. The caller
+    drops the instance and surfaces the id instead of failing the turn.
+
+    Raises when the flip is RECOVERABLE — still `enabled`, but not
+    runtime-ready. Those restore themselves with no user action, so failing
+    the turn is correct: the retry gets the COMPLETE harness instead of
+    silently running once without this extension's instructions.
+    """
     record = extension_store.get_extension(extension_id)
-    if not record or not record.get("enabled") or not extension_store.is_extension_runtime_ready(extension_id):
-        reason = extension_store.runtime_not_ready_reason(extension_id) or "disabled"
+    if not record or record.get("enabled") is not True:
+        return None
+    if not extension_store.is_extension_runtime_ready(extension_id):
+        reason = extension_store.runtime_not_ready_reason(extension_id) or "not_ready"
         raise HarnessProfileResolutionError(
             f"Harness profile requires enabled runtime-ready extension: {extension_id} ({reason})"
         )
@@ -464,12 +484,18 @@ def merge_selector_defaults(
 
 
 def _instruction_blocks(
-    instruction_sources: dict[str, dict[str, Any]], selected: dict[str, dict[str, Any]],
+    instruction_sources: dict[str, dict[str, Any]],
+    selected: dict[str, dict[str, Any]],
+    skip_names: set[str],
 ) -> list[dict[str, str]]:
+    """`skip_names` are sources whose owning extension was dropped from the run
+    (see `_run_extension_record`): omit them instead of raising the
+    not-selected error, so a durable mid-resolve disable reduces the harness
+    rather than failing the turn."""
     blocks: list[dict[str, str]] = []
     seen: set[str] = set()
     for name, source in instruction_sources.items():
-        if name in seen:
+        if name in seen or name in skip_names:
             continue
         if source.get("kind") == "inline":
             seen.add(name)
@@ -499,6 +525,31 @@ def _instruction_blocks(
         else:
             raise HarnessProfileResolutionError(f"Unknown extension instruction: {extension_id}.{name}")
     return [block for block in blocks if block.get("content")]
+
+
+def _dropped_instruction_names(
+    instruction_sources: dict[str, dict[str, Any]], dropped_extension_ids: list[str],
+) -> set[str]:
+    """Instruction-source keys owned by a dropped extension: its manifest
+    instruction entrypoints AND its free-text user instructions (keyed by
+    `harness_fields.user_instruction_source_name`, the single owner of that
+    key). Injecting an absent extension's instructions would describe
+    capabilities the run does not have, so both are omitted."""
+    dropped = set(dropped_extension_ids)
+    if not dropped:
+        return set()
+    names = {
+        name
+        for name, source in instruction_sources.items()
+        if isinstance(source, dict)
+        and source.get("kind") != "inline"
+        and source.get("extension_id") in dropped
+    }
+    for extension_id in dropped:
+        user_name = harness_fields.user_instruction_source_name(extension_id)
+        if user_name in instruction_sources:
+            names.add(user_name)
+    return names
 
 
 def _provider_context_blocks(blocks: list[dict[str, str]]) -> list[dict[str, Any]]:
@@ -604,6 +655,7 @@ def resolve_for_session(
     extension_revisions: dict[str, str] = {}
     extension_setting_overlays: dict[str, dict[str, Any]] = {}
     secret_refs: dict[str, list[str]] = {}
+    dropped_extension_ids: list[str] = []
     for extension_id, fields in resolved["extension_instances"].items():
         mcp_servers = fields["mcp_servers"]["resolved"]
         skills = fields["skills"]["resolved"]
@@ -611,7 +663,10 @@ def resolve_for_session(
         overlay_fields = fields.get("setting_overlays") or {}
         if not (mcp_servers or skills or instruction_names or overlay_fields):
             continue
-        record = _runtime_ready_record(extension_id)
+        record = _run_extension_record(extension_id)
+        if record is None:
+            dropped_extension_ids.append(extension_id)
+            continue
         actual_revision = _extension_revision(record)
         # The drift check is scoped ONLY to instances that carry an explicit
         # pinned extension_revision override; inherited (unpinned) instances
@@ -649,7 +704,8 @@ def resolve_for_session(
             secret_refs[extension_id] = list(live_secret_refs)
     secret_refs.update(copy.deepcopy(resolved.get("secret_refs") or {}))
     instruction_sources = {name: entry["resolved"] for name, entry in resolved["instruction_sources"].items()}
-    instruction_blocks = _instruction_blocks(instruction_sources, selected)
+    dropped_instruction_names = _dropped_instruction_names(instruction_sources, dropped_extension_ids)
+    instruction_blocks = _instruction_blocks(instruction_sources, selected, dropped_instruction_names)
     profile_contexts = _provider_context_blocks(instruction_blocks)
     profile_contexts.extend(_normalize_capability_contexts(resolved.get("capability_contexts")))
     if turn_capability_contexts:
@@ -681,6 +737,12 @@ def resolve_for_session(
         "extension_setting_overlays": extension_setting_overlays,
         "secret_refs": secret_refs,
         "instruction_blocks": instruction_blocks,
+        # Extensions the default synthesis selected but that were durably
+        # unavailable by the time this run resolved (see
+        # `_run_extension_record`). Surfaced so the run truthfully reports the
+        # reduced MCP/skill/instruction set instead of degrading silently.
+        "dropped_extension_ids": sorted(dropped_extension_ids),
+        "dropped_instruction_names": sorted(dropped_instruction_names),
     }
     snapshot["launcher_projection"] = {
         "profile_id": snapshot["profile_id"],
@@ -694,4 +756,9 @@ def resolve_for_session(
         "disabled_builtin_tools": snapshot["disabled_builtin_tools"],
         "active_capability_ids": snapshot["active_capability_ids"],
     }
+    if dropped_extension_ids:
+        # A degraded snapshot is an artifact of live state at this instant, not
+        # a function of the cache key (store_fingerprint's 0.5s TTL can hide a
+        # re-enable), so it is never cached — the next resolve re-reads.
+        return snapshot
     return _run_snapshot_cache_put(cache_key, snapshot)

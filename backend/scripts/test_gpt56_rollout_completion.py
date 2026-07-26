@@ -10,8 +10,12 @@ import sys
 BACKEND = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BACKEND))
 
-import runner_codex
-from runner_codex import (
+import _test_home  # noqa: E402
+
+_test_home.isolate("bc-test-gpt56-rollout-completion-")
+
+import runner_codex  # noqa: E402
+from runner_codex import (  # noqa: E402
     _AppServerProcess,
     _await_pending_tool_calls,
     _forward_rollout_terminal,
@@ -54,7 +58,7 @@ async def test_live_app_server_completes_from_rollout() -> None:
             # A completed commentary-only turn is a SUCCESS: no parent-final
             # guard exists — content falls back to last-assistant text.
             assert not hasattr(runner_codex, "_apply_parent_final_guard")
-            success, error = runner_codex.apply_ghost_completion_guard(
+            success, error, _retry = runner_codex.apply_ghost_completion_guard(
                 success=True,
                 cancelled=False,
                 error=None,
@@ -94,7 +98,7 @@ async def test_live_app_server_marks_tool_only_rollout_completion() -> None:
             row = json.loads(await asyncio.wait_for(proc._mapped.get(), timeout=2))
             assert row["type"] == "turn.completed"
             assert row["assistant_seen"] is False
-            success, error = runner_codex.apply_ghost_completion_guard(
+            success, error, _retry = runner_codex.apply_ghost_completion_guard(
                 success=True,
                 cancelled=False,
                 error=None,
@@ -124,7 +128,7 @@ async def test_live_app_server_marks_empty_rollout_completion() -> None:
             row = json.loads(await asyncio.wait_for(proc._mapped.get(), timeout=2))
             assert row["type"] == "turn.completed"
             assert row["assistant_seen"] is False
-            success, error = runner_codex.apply_ghost_completion_guard(
+            success, error, _retry = runner_codex.apply_ghost_completion_guard(
                 success=True,
                 cancelled=False,
                 error=None,
@@ -209,7 +213,7 @@ async def test_dynamic_tool_does_not_block_terminal_reader() -> None:
         try:
             row = json.loads(await asyncio.wait_for(client.stdout.__anext__(), timeout=1))
             assert row["type"] == "turn.completed"
-            assert len(client._server_request_tasks) == 1
+            assert len(client._pending_tool_calls) == 1
         finally:
             blocker.set()
             client._reader_task.cancel()
@@ -217,7 +221,7 @@ async def test_dynamic_tool_does_not_block_terminal_reader() -> None:
             await asyncio.gather(
                 client._reader_task,
                 client._steer_task,
-                *client._server_request_tasks,
+                *client._pending_tool_calls,
                 return_exceptions=True,
             )
 
@@ -250,21 +254,75 @@ async def test_terminal_waits_for_pending_dynamic_tool() -> None:
             await asyncio.gather(
                 client._reader_task,
                 client._steer_task,
-                *client._server_request_tasks,
+                *client._pending_tool_calls,
                 return_exceptions=True,
             )
 
 
+async def test_completed_turn_not_flipped_by_pending_tool_join() -> None:
+    """The join must never turn a completed turn into a failure.
+
+    `runner_codex._run` awaits `_await_pending_tool_calls` inside a guard whose
+    `except Exception` rewrites the outcome to `success=False` /
+    `error=f"{type}: {e}"`. Any attribute/API drift between the join and
+    `_AppServerProcess` therefore reports a COMPLETED turn as failed. This runs
+    the join against a real `_AppServerProcess` under the same guard shape and
+    asserts the completed outcome survives.
+    """
+    rows = [
+        {"id": 9, "method": "item/tool/call", "params": {"tool": "quick"}},
+        {"method": "turn/completed", "params": {"turn": {"status": "completed"}}},
+    ]
+
+    async def quick(_params: dict) -> dict:
+        return {"ok": True}
+
+    with tempfile.TemporaryDirectory() as tmp:
+        client = _AppServerProcess(_AppProc(rows), Path(tmp), {"quick": quick})
+        success, error = True, None
+        try:
+            row = json.loads(await asyncio.wait_for(client.stdout.__anext__(), timeout=1))
+            assert row["type"] == "turn.completed"
+            try:
+                await asyncio.wait_for(
+                    _await_pending_tool_calls(
+                        client, cancel_path=Path(tmp) / "cancel",
+                    ),
+                    timeout=2,
+                )
+            except asyncio.CancelledError:
+                success, error = False, "cancelled"
+            except Exception as join_error:
+                success = False
+                error = f"{type(join_error).__name__}: {join_error}"
+            assert success is True, f"completed turn flipped to failure: {error}"
+            assert error is None
+            assert not client._pending_tool_calls
+        finally:
+            client._reader_task.cancel()
+            client._steer_task.cancel()
+            await asyncio.gather(
+                client._reader_task,
+                client._steer_task,
+                return_exceptions=True,
+            )
+
+    # Lock the live call site: the join runs only for a completed, successful,
+    # uncancelled turn, and any exception it raises rewrites that outcome.
+    source = (BACKEND / "runner_codex.py").read_text(encoding="utf-8")
+    assert "await _await_pending_tool_calls(proc, cancel_path=_cancel_path)" in source
+    assert "if turn_completed_seen and success and not cancelled:" in source
+
+
 async def test_pending_dynamic_tool_wait_honors_cancel() -> None:
-    proc = object.__new__(_AppServerProcess)
     blocker = asyncio.Event()
     task = asyncio.create_task(blocker.wait())
-    proc._pending_tool_calls = {task: 9}
-    proc.returncode = None
     with tempfile.TemporaryDirectory() as tmp:
+        client = _AppServerProcess(_AppProc([]), Path(tmp), {})
+        client._pending_tool_calls.add(task)
         cancel_path = Path(tmp) / "cancel"
         waiting = asyncio.create_task(_await_pending_tool_calls(
-            proc, cancel_path=cancel_path,
+            client, cancel_path=cancel_path,
         ))
         await asyncio.sleep(0.05)
         cancel_path.touch()
@@ -276,7 +334,45 @@ async def test_pending_dynamic_tool_wait_honors_cancel() -> None:
             raise AssertionError("pending tool wait ignored cancellation")
         finally:
             task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
+            client._reader_task.cancel()
+            client._steer_task.cancel()
+            await asyncio.gather(
+                task,
+                client._reader_task,
+                client._steer_task,
+                return_exceptions=True,
+            )
+
+
+async def test_pending_tool_wait_reads_live_process_exit() -> None:
+    """The join must observe the process exiting, not a stale snapshot."""
+    blocker = asyncio.Event()
+    task = asyncio.create_task(blocker.wait())
+    with tempfile.TemporaryDirectory() as tmp:
+        app_proc = _AppProc([])
+        client = _AppServerProcess(app_proc, Path(tmp), {})
+        client._pending_tool_calls.add(task)
+        waiting = asyncio.create_task(_await_pending_tool_calls(client))
+        await asyncio.sleep(0.05)
+        assert not waiting.done()
+        app_proc.returncode = 3
+        try:
+            await asyncio.wait_for(waiting, timeout=1)
+        except RuntimeError as exc:
+            assert "exited before pending tool calls" in str(exc)
+        else:
+            raise AssertionError("pending tool wait ignored app-server exit")
+        finally:
+            blocker.set()
+            task.cancel()
+            client._reader_task.cancel()
+            client._steer_task.cancel()
+            await asyncio.gather(
+                task,
+                client._reader_task,
+                client._steer_task,
+                return_exceptions=True,
+            )
 
 
 async def test_parent_terminal_waits_for_recursive_agent_tree() -> None:
@@ -385,7 +481,9 @@ async def main() -> None:
     await test_live_app_server_accepts_marked_final_answer()
     await test_dynamic_tool_does_not_block_terminal_reader()
     await test_terminal_waits_for_pending_dynamic_tool()
+    await test_completed_turn_not_flipped_by_pending_tool_join()
     await test_pending_dynamic_tool_wait_honors_cancel()
+    await test_pending_tool_wait_reads_live_process_exit()
     await test_parent_terminal_waits_for_recursive_agent_tree()
     await test_rollout_completion_never_signals_or_kills()
     test_resumed_session_requires_proven_boundary()

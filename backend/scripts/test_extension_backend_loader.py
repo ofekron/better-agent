@@ -560,7 +560,7 @@ def main() -> int:
                     json.dumps(envelope).encode("utf-8"), rid, 50.0
                 )
 
-            def capture(_extension_id: str, *, activation_id: str, elapsed_seconds: float):
+            def capture(_extension_id: str, *, activation_id: str, elapsed_seconds: float, path: str):
                 slow_samples.append(elapsed_seconds)
                 return []
 
@@ -593,10 +593,12 @@ def main() -> int:
             original_activation_identity = extension_store.activation_identity
             original_get_handle = extension_backend_loader._get_handle  # type: ignore[attr-defined]
             slow_samples: list[float] = []
+            slow_paths: list[str] = []
             capture_order: list[str] = []
 
-            def capture(_extension_id: str, *, activation_id: str, elapsed_seconds: float):
+            def capture(_extension_id: str, *, activation_id: str, elapsed_seconds: float, path: str):
                 slow_samples.append(elapsed_seconds)
+                slow_paths.append(path)
                 return []
 
             def capture_activation(extension_id: str) -> str:
@@ -629,6 +631,7 @@ def main() -> int:
                 extension_backend_loader._get_handle = original_get_handle  # type: ignore[attr-defined]
             check(response.status_code == 200, "slow child ASGI route returns")
             check(len(slow_samples) == 1 and slow_samples[0] >= 0.04, "slow child ASGI duration is attributed")
+            check(slow_paths == ["sleep-short"], "slow call is attributed to the route it arrived on")
             check(capture_order[:2] == ["activation", "handle"], "activation is captured before backend resolution")
 
         asyncio.run(_check_slow_child_is_attributed())

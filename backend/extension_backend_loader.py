@@ -58,28 +58,13 @@ _EMPTY_B64 = ""
 
 
 def _resolve_host_timeout(spec: dict[str, Any], path: str) -> float:
-    """Per-route timeout for one extension-backend roundtrip. Looks up the
-    request subpath in the manifest-declared ``backend_timeouts`` (exact match,
-    then longest segment-prefix, then ``default``), falling back to the global
-    ``_HOST_TIMEOUT_SECONDS``."""
-    timeouts = spec.get("backend_timeouts")
-    if not isinstance(timeouts, dict) or not timeouts:
-        return _HOST_TIMEOUT_SECONDS
-    p = path.strip("/")
-    chosen = timeouts.get(p)
-    if not isinstance(chosen, (int, float)) or isinstance(chosen, bool):
-        best_len = -1
-        for key, value in timeouts.items():
-            if key == "default" or isinstance(value, bool) or not isinstance(value, (int, float)):
-                continue
-            k = str(key).strip("/")
-            if (p == k or p.startswith(k + "/")) and len(k) > best_len:
-                best_len, chosen = len(k), value
-        if best_len < 0:
-            chosen = timeouts.get("default")
-    if isinstance(chosen, (int, float)) and not isinstance(chosen, bool) and chosen > 0:
-        return float(chosen)
-    return _HOST_TIMEOUT_SECONDS
+    """How long THIS host waits for one roundtrip to ``path``: the route's
+    manifest-declared budget, else the host default. Binds the host's default to
+    the shared resolution in ``extension_store`` — the lookup rules live there so
+    the quarantine path cannot judge a route by a different budget."""
+    return extension_store.resolve_route_timeout(
+        spec.get("backend_timeouts"), path, default_seconds=_HOST_TIMEOUT_SECONDS
+    )
 
 
 def _allows_backend_exit_retry(spec: dict[str, Any], path: str) -> bool:
@@ -443,15 +428,22 @@ def shutdown_persistent_backends() -> None:
 
 
 async def _record_slow_call(
-    extension_id: str, activation_id: str, elapsed_seconds: float
+    spec: dict[str, Any], activation_id: str, path: str, elapsed_seconds: float
 ) -> None:
-    if elapsed_seconds < extension_store.EXTENSION_SLOW_CALL_SECONDS:
+    # Same per-route threshold the store judges the incident by, so this skips
+    # only calls that provably cannot become one — including a route whose
+    # declared budget is below the global floor.
+    if elapsed_seconds < extension_store.slow_call_threshold(
+        spec.get("backend_timeouts"), path
+    ):
         return
+    extension_id = spec["extension_id"]
     disabled = await asyncio.to_thread(
         extension_store.record_slow_backend_call,
         extension_id,
         activation_id=activation_id,
         elapsed_seconds=elapsed_seconds,
+        path=path,
     )
     if not disabled:
         return
@@ -624,7 +616,9 @@ async def _invoke_backend(
             perf.record_count("extension.backend.child_timing_invalid")
         else:
             _record_child_timing(child_timing, roundtrip.elapsed_ms)
-            await _record_slow_call(extension_id, activation_id, child_timing.asgi_ms / 1000.0)
+            await _record_slow_call(
+                spec, activation_id, path, child_timing.asgi_ms / 1000.0
+            )
         if status >= 500:
             headers = {"content-type": "text/plain"}
             content = b"Extension backend failed"

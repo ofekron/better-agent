@@ -18,7 +18,7 @@ from __future__ import annotations
 import os
 import shutil
 import sys
-import tempfile
+from pathlib import Path
 
 import _test_home
 _TMP_HOME = _test_home.isolate("bc-test-projagg-")
@@ -29,7 +29,13 @@ _BACKEND = os.path.dirname(_HERE)
 if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
-from orchestrator import Coordinator  # noqa: E402
+import _test_installation  # noqa: E402
+
+_test_installation.activate(Path(_TMP_HOME))
+
+from starlette.testclient import TestClient  # noqa: E402
+
+import auth  # noqa: E402
 from orchs import ApplyEventCtx, get_strategy  # noqa: E402
 from session_manager import manager as session_manager  # noqa: E402
 
@@ -155,6 +161,48 @@ def test_worker_fork_excluded_from_aggregates() -> None:
     print(f"{PASS} worker_fork_excluded_from_aggregates")
 
 
+def _sessions_page(accept_encoding: str) -> dict:
+    """Fetch `/api/sessions` over the real ASGI stack. The endpoint returns a
+    gzip-negotiated `Response`, not a dict, and its query params are FastAPI
+    `Query` defaults — so the sidebar payload is only reachable through an
+    actual request."""
+    client = TestClient(
+        backend_main.app,
+        client=("127.0.0.1", 50000),
+        base_url="http://localhost:8000",
+    )
+    client.headers.update({
+        "Authorization": f"Bearer {auth.create_token('native')}",
+        "Accept-Encoding": accept_encoding,
+    })
+    resp = client.get("/api/sessions", params={"limit": 200, "project_path": CWD})
+    assert resp.status_code == 200, f"/api/sessions -> {resp.status_code}: {resp.text}"
+    encoded = resp.headers.get("content-encoding", "")
+    if accept_encoding == "identity":
+        assert encoded != "gzip", "identity request must not be gzip-encoded"
+    return resp.json()
+
+
+def _enriched_row(payload: dict, sid: str) -> dict:
+    rows = payload["sessions"]
+    row = next((r for r in rows if r.get("id") == sid), None)
+    assert row is not None, f"session {sid} missing from /api/sessions output"
+    return row
+
+
+# The contract this test exists to protect: the sidebar-enrichment fields
+# `get_sessions` decorates onto every row. Timestamps and other summary
+# fields are deliberately NOT part of it — `session_store.list_sessions`
+# documents that the summary index may lag in-memory mutations by up to
+# `PERSIST_DEBOUNCE_S`, so comparing whole rows across two requests races
+# that window.
+_ENRICHMENT_FIELDS = ("is_running", "unread_count")
+
+
+def _enrichment(row: dict) -> dict:
+    return {field: row.get(field) for field in _ENRICHMENT_FIELDS}
+
+
 def test_session_list_enrichment() -> None:
     """The `/api/sessions` enrichment carries `is_running` +
     `unread_count` per row. Mirrors the sidebar's render path."""
@@ -177,18 +225,16 @@ def test_session_list_enrichment() -> None:
     )
     session_manager.warm_unread(sid)
 
-    # Drive the enrichment by hand — get_sessions is an async coroutine.
-    import asyncio
-    payload = asyncio.run(backend_main.get_sessions())
-    rows = payload["sessions"]
-    target = next((r for r in rows if r.get("id") == sid), None)
-    assert target is not None, f"session {sid} missing from /api/sessions output"
-    assert target.get("is_running") is True, (
-        f"is_running expected True, got {target.get('is_running')}"
-    )
-    assert target.get("unread_count") == 1, (
-        f"unread_count expected 1, got {target.get('unread_count')}"
-    )
+    expected = {"is_running": True, "unread_count": 1}
+    # `request` only carries Accept-Encoding into this endpoint (transport
+    # encoding + response-cache key), so the enrichment fields must be
+    # identical on both encodings.
+    for accept_encoding in ("gzip", "identity"):
+        row = _enriched_row(_sessions_page(accept_encoding), sid)
+        assert _enrichment(row) == expected, (
+            f"enrichment for accept-encoding={accept_encoding} expected "
+            f"{expected}, got {_enrichment(row)}"
+        )
     coord.run_state_remove(sid, "rr")
     print(f"{PASS} session_list_enrichment")
 
