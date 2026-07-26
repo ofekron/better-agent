@@ -266,6 +266,28 @@ async def provider_setup_status(kind: str, *, wait_for_cold: bool = False) -> di
     return _pending_status(installer_for(kind))
 
 
+def _repin_verified_executable(installer: ProviderInstaller) -> None:
+    """Refresh the recorded executable after the CLI verified successfully.
+
+    Keeps the installation's provenance truthful across in-place CLI upgrades.
+    The launcher path is resolved without the pin so an executable that moved
+    is re-recorded where it actually lives.
+    """
+    import installation_profile
+
+    launcher = resolve_cli_binary(
+        installer.command,
+        respect_installation_profile=False,
+    )
+    if not launcher:
+        return
+    try:
+        identity = executable_identity(str(Path(launcher).absolute()))
+    except (OSError, ValueError):
+        return
+    installation_profile.repin_provider_executable(identity)
+
+
 async def _refresh_status_cache(kind: str) -> dict[str, Any]:
     try:
         installer = installer_for(kind)
@@ -273,6 +295,8 @@ async def _refresh_status_cache(kind: str) -> dict[str, Any]:
             _check_argv(installer.prerequisite_argv),
             _check_argv(installer.verify_argv),
         )
+        if cli["ok"]:
+            await asyncio.to_thread(_repin_verified_executable, installer)
         status = _public_status(installer, prerequisite, cli)
         _STATUS_CACHE[kind] = (time.monotonic(), status)
         return status

@@ -1320,5 +1320,18 @@
       "expired": "समाप्त",
       "cancelled": "रद्द"
     }
-  }
+  },
+  "settings.capabilitiesTitle": "क्षमताएँ",
+  "settings.capabilityIntro": "इंस्टॉलेशन ने सिर्फ़ शुरुआत तय की थी। यहाँ कभी भी कुछ भी चालू या बंद करें।",
+  "settings.capabilityIntegrations": "इंटीग्रेशन",
+  "settings.capabilityIntegrationsHint": "एक्सटेंशन, स्किल, MCP सर्वर और टीम ऑर्केस्ट्रेशन।",
+  "settings.capabilityMobile": "मोबाइल ऐप",
+  "settings.capabilityMobileHint": "मोबाइल ऐप डाउनलोड, पुश सूचनाएँ और मोबाइल फ्रंटएंड बिल्ड।",
+  "settings.capabilityActive": "सक्रिय",
+  "settings.capabilitySaving": "सहेजा जा रहा है…",
+  "settings.capabilityRestartRequired": "लागू करने के लिए पुनः आरंभ करें",
+  "settings.capabilityNeedsBuild": "इसे शामिल करने वाला बिल्ड चाहिए",
+  "settings.capabilitySetupRequired": "क्षमताएँ चुनने के लिए इंस्टॉलेशन पूरा करें।",
+  "settings.capabilityIntegrationsDisableWarning": "इंटीग्रेशन बंद करने पर अगली शुरुआत में एक्सटेंशन का काम रद्द हो जाएगा। जारी रखें?",
+  "settings.capabilityRestartManually": "लागू करने के लिए Better Agent पुनः आरंभ करें"
 }

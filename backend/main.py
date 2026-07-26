@@ -90,6 +90,7 @@ import file_panel_drafts
 import file_preview_urls
 import task_output_preview_urls
 import mobile_bundle_ticket
+import installation_capabilities
 import installation_profile
 from secret_redaction import install_access_log_redaction, redact_secrets
 from ws_serialization import (
@@ -13391,6 +13392,10 @@ async def on_startup():
     # Kill any OAuth login/logout CLI that outlived a prior backend crash
     # so no `claude auth login` / `codex login` is left holding a callback port.
     _fire_and_forget(asyncio.to_thread(provider_auth.reap_orphaned_logins))
+    # Freeze the capability set this process serves before anything wires
+    # itself from it, so a mid-run settings change can never leave subsystems
+    # disagreeing with the gates.
+    await asyncio.to_thread(installation_profile.capture_active_capabilities)
     provider_runtime_enabled = installation_profile.provider_conversations_enabled()
     if not installation_profile.integrations_enabled():
         await extension_jobs.quiesce_for_ui_only()
@@ -17441,6 +17446,41 @@ async def _require_mobile_enabled() -> None:
 @app.get("/api/installation-profile")
 async def get_installation_profile():
     return await asyncio.to_thread(installation_profile.capabilities)
+
+
+@app.patch("/api/installation-profile/capabilities/{capability}")
+async def set_installation_capability(capability: str, body: dict | None = None):
+    """Enable or disable a capability for this installation.
+
+    The setting is user intent and takes effect for subsystems wired at the
+    next start, so the response reports `restart_required` rather than
+    claiming the change is already live. Disabling integrations cancels
+    extension-owned work at that next start, so it needs explicit
+    confirmation.
+    """
+    payload = body or {}
+    enabled = payload.get("enabled")
+    if not isinstance(enabled, bool):
+        raise HTTPException(status_code=400, detail="enabled must be a boolean")
+    if capability not in installation_capabilities.TOGGLEABLE:
+        raise HTTPException(status_code=404, detail="unknown capability")
+    if (
+        capability == installation_capabilities.INTEGRATIONS
+        and not enabled
+        and payload.get("confirm_cancels_extension_work") is not True
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="disabling integrations cancels extension-owned work; confirm to proceed",
+        )
+    try:
+        state = await asyncio.to_thread(
+            installation_profile.set_capability_enabled, capability, enabled
+        )
+    except installation_profile.InstallationProfileError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    await coordinator.broadcast_global("installation_capabilities_changed", state)
+    return state
 
 
 @app.get("/api/download/android")

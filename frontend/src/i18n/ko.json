@@ -1319,5 +1319,18 @@
       "expired": "만료됨",
       "cancelled": "취소됨"
     }
-  }
+  },
+  "settings.capabilitiesTitle": "기능",
+  "settings.capabilityIntro": "설치는 시작점을 정했을 뿐입니다. 여기서 언제든 켜고 끌 수 있습니다.",
+  "settings.capabilityIntegrations": "통합",
+  "settings.capabilityIntegrationsHint": "확장, 스킬, MCP 서버, 팀 오케스트레이션.",
+  "settings.capabilityMobile": "모바일 앱",
+  "settings.capabilityMobileHint": "모바일 앱 다운로드, 푸시 알림, 모바일 프런트엔드 빌드.",
+  "settings.capabilityActive": "활성",
+  "settings.capabilitySaving": "저장 중…",
+  "settings.capabilityRestartRequired": "다시 시작하면 적용",
+  "settings.capabilityNeedsBuild": "해당 기능이 포함된 빌드가 필요합니다",
+  "settings.capabilitySetupRequired": "설치 설정을 마치면 기능을 선택할 수 있습니다.",
+  "settings.capabilityIntegrationsDisableWarning": "통합을 끄면 다음 시작 시 확장이 소유한 작업이 취소됩니다. 계속할까요?",
+  "settings.capabilityRestartManually": "Better Agent를 다시 시작하면 적용"
 }

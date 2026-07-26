@@ -1374,6 +1374,11 @@ export function useWebSocket(
         if (event.type === "provider_changed") {
           window.dispatchEvent(new Event("provider_changed"));
         }
+        // Installation capabilities are backend-owned: any client that
+        // changed one must not be the only one that learns about it.
+        if (event.type === "installation_capabilities_changed") {
+          window.dispatchEvent(new Event("installation_capabilities_changed"));
+        }
         // Streaming provider-CLI install (Settings → Provider CLI tools).
         // provider_setup streams installer stdout/stderr line-by-line
         // (progress) and a terminal state (finished). useProviderInstalls

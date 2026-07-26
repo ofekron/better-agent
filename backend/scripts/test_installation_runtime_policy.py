@@ -104,16 +104,13 @@ def _write_probe_wheel(root: Path) -> Path:
 def test_profile_selection_acknowledgement() -> None:
     _stage_installation_profile(mode=installation_profile.DESKTOP_UI_ONLY, provider="codex")
     assert installation_profile.selection_pending()
-    try:
-        installation_profile.mark_selection_applied()
-    except installation_profile.InstallationProfileError:
-        pass
-    else:
-        raise AssertionError("selection receipt must require the applied provider config")
-    assert installation_profile.selection_pending()
+    installation_profile.mark_selection_applied()
+    assert not installation_profile.selection_pending(), (
+        "activation is committed by setup, not conditional on provider config"
+    )
 
 
-def test_selected_provider_is_the_only_active_provider() -> None:
+def test_installer_selection_keeps_user_configured_providers() -> None:
     _stage_installation_profile(mode=installation_profile.DEFAULT, provider="codex")
     config_path = Path(_HOME) / "config.json"
     config_path.write_text(
@@ -144,13 +141,14 @@ def test_selected_provider_is_the_only_active_provider() -> None:
     )
     _reset_config_cache()
 
-    with patch.object(dependency_plan, "assert_state_transition_supported"):
-        state = config_store.apply_installation_profile_selection()
+    state = config_store.apply_installation_profile_selection()
 
-    assert state["default_provider_id"] == "codex-id"
+    assert state["default_provider_id"] == "claude-id", "the user's default stands"
     by_id = {provider["id"]: provider for provider in state["providers"]}
-    assert by_id["codex-id"]["suspended"] is False
-    assert by_id["claude-id"]["suspended"] is True
+    assert by_id["codex-id"]["suspended"] is False, "setup's provider is made available"
+    assert by_id["claude-id"]["suspended"] is False, (
+        "setup never withdraws a provider the user configured"
+    )
     assert not installation_profile.selection_pending()
 
 
@@ -253,133 +251,51 @@ def test_unknown_suspended_provider_requirement_fails_closed() -> None:
             raise AssertionError("unknown suspended provider must fail closed")
 
 
-def test_provider_mutation_rejects_missing_runtime_before_persist() -> None:
+def test_provider_configuration_precedes_its_runtime() -> None:
+    """Adding a provider is configuration; its runtime arrives on the next
+    activation. Refusing the configuration used to make the missing runtime
+    permanent, because nothing would ever plan for it."""
     _stage_installation_profile(mode=installation_profile.DEFAULT, provider="codex")
     _ack_profile_for_dependency_tests()
     config_path = Path(_HOME) / "config.json"
     config_path.unlink(missing_ok=True)
     _reset_config_cache()
-    before = config_store.list_providers()
 
     with patch.object(dependency_plan, "_module_available", return_value=False):
-        try:
-            config_store.add_provider(
-                {
-                    "name": "Claude",
-                    "kind": "claude",
-                    "mode": "subscription",
-                    "suspended": False,
-                }
-            )
-        except dependency_plan.DependencyPlanError:
-            pass
-        else:
-            raise AssertionError("missing provider runtime must reject mutation")
-
-    assert config_store.list_providers() == before
-
-
-def test_provider_plan_transition_requires_activated_candidate() -> None:
-    _stage_installation_profile(mode=installation_profile.DEFAULT, provider="codex")
-    _ack_profile_for_dependency_tests()
-    current = {
-        "default_provider_id": "codex-id",
-        "providers": [
-            {
-                "id": "codex-id",
-                "kind": "codex",
-                "suspended": False,
-            }
-        ],
-    }
-    candidate = {
-        "default_provider_id": "claude-id",
-        "providers": [
-            {
-                "id": "claude-id",
-                "kind": "claude",
-                "suspended": False,
-            }
-        ],
-    }
-    (Path(_HOME) / "config.json").write_text(
-        json.dumps(current),
-        encoding="utf-8",
-    )
-    with patch.object(
-        dependency_plan,
-        "active_env",
-        return_value=Path("/tmp/not-the-candidate"),
-    ):
-        try:
-            dependency_plan.assert_state_transition_supported(candidate)
-        except dependency_plan.DependencyPlanError:
-            pass
-        else:
-            raise AssertionError("inactive candidate plan must fail closed")
-    with patch.object(
-        dependency_plan,
-        "_assert_environment",
-    ):
-        dependency_plan.assert_state_transition_supported(candidate)
-
-
-def test_provider_activation_mutations_reject_missing_runtime() -> None:
-    _stage_installation_profile(mode=installation_profile.DEFAULT, provider="codex")
-    _ack_profile_for_dependency_tests()
-    config_path = Path(_HOME) / "config.json"
-    config_path.unlink(missing_ok=True)
-    _reset_config_cache()
-    with patch.object(dependency_plan, "assert_state_transition_supported"):
-        suspended = config_store.add_provider(
+        added = config_store.add_provider(
             {
                 "name": "Claude",
                 "kind": "claude",
                 "mode": "subscription",
-                "suspended": True,
+                "suspended": False,
             }
         )
-    active_id = config_store.list_providers()["default_provider_id"]
-
-    with patch.object(dependency_plan, "_module_available", return_value=False):
-        for mutation in (
-            lambda: config_store.update_provider(
-                suspended["id"], {"suspended": False}
-            ),
-            lambda: config_store.set_provider_suspended(suspended["id"], False),
-            lambda: config_store.update_provider(
-                active_id, {"kind": "claude"}
-            ),
-            lambda: config_store.import_provider_sync_state(
-                {
-                    "default_provider_id": suspended["id"],
-                    "providers": [
-                        {
-                            "id": suspended["id"],
-                            "name": "Claude",
-                            "kind": "claude",
-                            "mode": "subscription",
-                            "suspended": False,
-                        }
-                    ],
-                }
-            ),
-        ):
-            try:
-                mutation()
-            except dependency_plan.DependencyPlanError:
-                pass
-            else:
-                raise AssertionError("provider activation must require its runtime")
+        assert dependency_plan.provider_runtime_pending("claude") is True
+        try:
+            dependency_plan.assert_provider_runtime_ready("claude")
+        except dependency_plan.DependencyPlanError as exc:
+            assert "restart" in str(exc), "the pending state must say what unblocks it"
+        else:
+            raise AssertionError("a pending runtime must still block running")
 
     persisted = json.loads(config_path.read_text(encoding="utf-8"))
-    claude = next(
-        provider
+    assert any(
+        provider["id"] == added["id"] and provider["suspended"] is False
         for provider in persisted["providers"]
-        if provider["id"] == suspended["id"]
-    )
-    assert claude["suspended"] is True
-    assert persisted["default_provider_id"] != suspended["id"]
+    ), "the configured provider must survive so the next plan installs it"
+
+    assert dependency_plan.provider_runtime_pending("codex") is False
+
+
+def test_unknown_provider_kind_is_still_rejected() -> None:
+    _stage_installation_profile(mode=installation_profile.DEFAULT, provider="codex")
+    _ack_profile_for_dependency_tests()
+    try:
+        dependency_plan.assert_state_supported({"providers": [{"kind": "not-a-provider"}]})
+    except dependency_plan.DependencyPlanError:
+        pass
+    else:
+        raise AssertionError("unvalidated provider kinds must never be accepted")
 
 
 def _write_credential_test_state() -> Path:
@@ -1049,7 +965,7 @@ def test_ui_only_quiesces_durable_jobs() -> None:
     record = extension_jobs.read_record("example", "work", "job-1")
     assert record is not None
     assert record["status"] == "cancelled"
-    assert record["error"] == "cancelled by UI-only installation mode"
+    assert record["error"] == "cancelled because integrations are disabled for this installation"
 
 
 def test_ui_only_cleanup_failure_is_not_ignored() -> None:
@@ -1071,14 +987,13 @@ def test_ui_only_cleanup_failure_is_not_ignored() -> None:
 
 if __name__ == "__main__":
     test_profile_selection_acknowledgement()
-    test_selected_provider_is_the_only_active_provider()
+    test_installer_selection_keeps_user_configured_providers()
     test_runtime_plan_uses_pending_selection_then_active_config()
     test_unknown_active_provider_requirement_fails_closed()
     test_suspended_provider_requirement_is_included()
     test_unknown_suspended_provider_requirement_fails_closed()
-    test_provider_mutation_rejects_missing_runtime_before_persist()
-    test_provider_plan_transition_requires_activated_candidate()
-    test_provider_activation_mutations_reject_missing_runtime()
+    test_provider_configuration_precedes_its_runtime()
+    test_unknown_provider_kind_is_still_rejected()
     test_rejected_provider_transitions_do_not_touch_credentials()
     test_failed_provider_persist_rolls_back_credentials()
     test_credential_transaction_requires_authoritative_snapshot()

@@ -1320,5 +1320,18 @@
       "expired": "已过期",
       "cancelled": "已取消"
     }
-  }
+  },
+  "settings.capabilitiesTitle": "功能",
+  "settings.capabilityIntro": "安装只决定了起点。你可以随时在这里开启或关闭任何功能。",
+  "settings.capabilityIntegrations": "集成",
+  "settings.capabilityIntegrationsHint": "扩展、技能、MCP 服务器与团队编排。",
+  "settings.capabilityMobile": "移动应用",
+  "settings.capabilityMobileHint": "移动应用下载、推送通知以及移动端前端构建。",
+  "settings.capabilityActive": "已启用",
+  "settings.capabilitySaving": "保存中…",
+  "settings.capabilityRestartRequired": "重启后生效",
+  "settings.capabilityNeedsBuild": "需要包含该功能的构建",
+  "settings.capabilitySetupRequired": "完成安装设置后即可选择功能。",
+  "settings.capabilityIntegrationsDisableWarning": "关闭集成会在下次启动时取消扩展所拥有的工作。是否继续？",
+  "settings.capabilityRestartManually": "重启 Better Agent 后生效"
 }

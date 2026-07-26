@@ -1320,5 +1320,18 @@
       "expired": "Expirado",
       "cancelled": "Cancelado"
     }
-  }
+  },
+  "settings.capabilitiesTitle": "Recursos",
+  "settings.capabilityIntro": "A instalação escolheu um ponto de partida. Ative ou desative o que quiser, a qualquer momento.",
+  "settings.capabilityIntegrations": "Integrações",
+  "settings.capabilityIntegrationsHint": "Extensões, habilidades, servidores MCP e orquestração de equipe.",
+  "settings.capabilityMobile": "Aplicativos móveis",
+  "settings.capabilityMobileHint": "Downloads do app móvel, notificações push e build móvel do frontend.",
+  "settings.capabilityActive": "Ativo",
+  "settings.capabilitySaving": "Salvando…",
+  "settings.capabilityRestartRequired": "Reinicie para aplicar",
+  "settings.capabilityNeedsBuild": "Precisa de um build que o inclua",
+  "settings.capabilitySetupRequired": "Conclua a instalação para escolher os recursos.",
+  "settings.capabilityIntegrationsDisableWarning": "Desativar integrações cancelará o trabalho das extensões na próxima inicialização. Continuar?",
+  "settings.capabilityRestartManually": "Reinicie o Better Agent para aplicar"
 }

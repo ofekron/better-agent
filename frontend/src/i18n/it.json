@@ -1320,5 +1320,18 @@
       "expired": "Scaduto",
       "cancelled": "Annullato"
     }
-  }
+  },
+  "settings.capabilitiesTitle": "Funzionalità",
+  "settings.capabilityIntro": "L'installazione ha scelto un punto di partenza. Attiva o disattiva ciò che vuoi, quando vuoi.",
+  "settings.capabilityIntegrations": "Integrazioni",
+  "settings.capabilityIntegrationsHint": "Estensioni, skill, server MCP e orchestrazione del team.",
+  "settings.capabilityMobile": "App mobili",
+  "settings.capabilityMobileHint": "Download dell'app mobile, notifiche push e build mobile del frontend.",
+  "settings.capabilityActive": "Attivo",
+  "settings.capabilitySaving": "Salvataggio…",
+  "settings.capabilityRestartRequired": "Riavvia per applicare",
+  "settings.capabilityNeedsBuild": "Richiede una build che la includa",
+  "settings.capabilitySetupRequired": "Completa l'installazione per scegliere le funzionalità.",
+  "settings.capabilityIntegrationsDisableWarning": "Disattivare le integrazioni annullerà il lavoro delle estensioni al prossimo avvio. Continuare?",
+  "settings.capabilityRestartManually": "Riavvia Better Agent per applicare"
 }

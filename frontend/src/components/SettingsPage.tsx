@@ -11,6 +11,7 @@ import { RecursionGuardsSettings } from "./RecursionGuardsSettings";
 import { ContextStrategySetting } from "./ContextStrategySetting";
 import { SessionTabsSettings } from "./SessionTabsSettings";
 import { VoiceSettings } from "./VoiceSettings";
+import { InstallationCapabilities } from "./InstallationCapabilities";
 import { SessionAutoDeleteSetting } from "./SessionAutoDeleteSetting";
 import { NativeImportSetting } from "./NativeImportSetting";
 import { DelegateTaskPolicySetting } from "./DelegateTaskPolicySetting";
@@ -108,6 +109,7 @@ type SettingsSection =
   | "sessions"
   | "voice"
   | "extensions"
+  | "capabilities"
   | "harnessProfiles"
   | "passwords"
   | "server"
@@ -658,6 +660,12 @@ export function SettingsPage({
     const handler = () => refetch();
     window.addEventListener("provider_changed", handler);
     return () => window.removeEventListener("provider_changed", handler);
+  }, []);
+
+  useEffect(() => {
+    const handler = () => refetchInstallationProfile();
+    window.addEventListener("installation_capabilities_changed", handler);
+    return () => window.removeEventListener("installation_capabilities_changed", handler);
   }, []);
 
   useEffect(() => {
@@ -1424,6 +1432,7 @@ function ProvidersList({
     ...(credentialBrokerEnabled ? [{ id: "passwords" as const, label: t("settings.passwordManager"), group: "general" as const }] : []),
     ...(isNative ? [{ id: "server" as const, label: t("settings.serverTitle"), group: "general" as const }] : []),
     ...(integrationsEnabled ? [{ id: "extensions" as const, label: t("settings.extensionsTitle"), group: "harness" as const }] : []),
+    { id: "capabilities", label: t("settings.capabilitiesTitle"), group: "harness" },
     { id: "harnessProfiles", label: t("settings.harnessProfilesSection"), group: "harness" },
     ...extensionSettingsModules.map((item) => ({
       id: `extension:${item.extension_id}:${item.id}` as const,
@@ -1516,6 +1525,9 @@ function ProvidersList({
       )}
       {section === "voice" && <VoiceSettings />}
       {section === "extensions" && <ExtensionUiSettingsSection />}
+      {section === "capabilities" && (
+        <InstallationCapabilities onRestartRequested={onRefreshApp} />
+      )}
       {section === "harnessProfiles" && <HarnessSettingsEditor />}
       {section === "passwords" && credentialBrokerEnabled && <PasswordManagerSetting />}
       {section === "server" && isNative && <ServerSetting />}

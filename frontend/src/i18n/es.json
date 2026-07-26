@@ -1319,5 +1319,18 @@
       "expired": "Caducado",
       "cancelled": "Cancelado"
     }
-  }
+  },
+  "settings.capabilitiesTitle": "Funcionalidades",
+  "settings.capabilityIntro": "La instalación eligió un punto de partida. Activa o desactiva lo que quieras aquí en cualquier momento.",
+  "settings.capabilityIntegrations": "Integraciones",
+  "settings.capabilityIntegrationsHint": "Extensiones, habilidades, servidores MCP y orquestación de equipo.",
+  "settings.capabilityMobile": "Aplicaciones móviles",
+  "settings.capabilityMobileHint": "Descargas de la app móvil, notificaciones push y compilación móvil del frontend.",
+  "settings.capabilityActive": "Activo",
+  "settings.capabilitySaving": "Guardando…",
+  "settings.capabilityRestartRequired": "Reinicia para aplicar",
+  "settings.capabilityNeedsBuild": "Requiere una compilación que lo incluya",
+  "settings.capabilitySetupRequired": "Completa la instalación para elegir funcionalidades.",
+  "settings.capabilityIntegrationsDisableWarning": "Desactivar las integraciones cancelará el trabajo de las extensiones en el próximo inicio. ¿Continuar?",
+  "settings.capabilityRestartManually": "Reinicia Better Agent para aplicar"
 }

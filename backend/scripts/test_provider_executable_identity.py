@@ -49,13 +49,16 @@ def test_selected_provider_is_pinned_across_path_reordering() -> None:
 
         with (
             patch.object(installation_profile, "load", return_value=_profile(identity)),
-            patch.object(installation_profile, "_activation_ready", return_value=True),
+            patch.object(installation_profile, "_bootstrap_ready", return_value=True),
             patch.dict(os.environ, {"PATH": os.pathsep.join((str(second), str(first)))}),
         ):
             assert cli_paths.resolve_cli_binary("codex") == str(selected.absolute())
 
 
-def test_replacement_and_in_place_mutation_fail_drift_validation() -> None:
+def test_in_place_upgrade_stays_resolvable_and_is_reported_as_drifted() -> None:
+    """Upgrading the provider CLI is ordinary use. The pinned path still wins,
+    and the digest change is reported as drift so the verified setup path can
+    re-record it — it never makes the CLI unresolvable."""
     with tempfile.TemporaryDirectory(prefix="ba-provider-drift-") as tmp:
         launcher = _launcher(Path(tmp), b"before")
         identity = provider_setup.executable_identity(str(launcher.absolute()))
@@ -63,13 +66,22 @@ def test_replacement_and_in_place_mutation_fail_drift_validation() -> None:
 
         with (
             patch.object(installation_profile, "load", return_value=profile),
-            patch.object(installation_profile, "_activation_ready", return_value=True),
+            patch.object(installation_profile, "_bootstrap_ready", return_value=True),
         ):
             launcher.write_bytes(b"after")
-            assert cli_paths.resolve_cli_binary("codex") is None
+            assert not installation_profile.executable_identity_matches(identity)
+            assert cli_paths.resolve_cli_binary("codex") == str(launcher.absolute())
 
 
-def test_symlink_target_swap_fails_drift_validation() -> None:
+def test_touching_the_launcher_is_not_a_change_of_identity() -> None:
+    with tempfile.TemporaryDirectory(prefix="ba-provider-touch-") as tmp:
+        launcher = _launcher(Path(tmp), b"same")
+        identity = provider_setup.executable_identity(str(launcher.absolute()))
+        os.utime(launcher, (0, 0))
+        assert installation_profile.executable_identity_matches(identity)
+
+
+def test_symlink_target_swap_is_reported_without_breaking_resolution() -> None:
     if os.name == "nt":
         return
     with tempfile.TemporaryDirectory(prefix="ba-provider-symlink-") as tmp:
@@ -87,11 +99,12 @@ def test_symlink_target_swap_fails_drift_validation() -> None:
 
         with (
             patch.object(installation_profile, "load", return_value=profile),
-            patch.object(installation_profile, "_activation_ready", return_value=True),
+            patch.object(installation_profile, "_bootstrap_ready", return_value=True),
         ):
             launcher.unlink()
             launcher.symlink_to(second)
-            assert cli_paths.resolve_cli_binary("codex") is None
+            assert not installation_profile.executable_identity_matches(identity)
+            assert cli_paths.resolve_cli_binary("codex") == str(launcher.absolute())
 
 
 def test_verification_detects_mutation_before_activation() -> None:
@@ -147,8 +160,9 @@ def test_exact_native_launcher_executes_on_current_platform() -> None:
 
 if __name__ == "__main__":
     test_selected_provider_is_pinned_across_path_reordering()
-    test_replacement_and_in_place_mutation_fail_drift_validation()
-    test_symlink_target_swap_fails_drift_validation()
+    test_in_place_upgrade_stays_resolvable_and_is_reported_as_drifted()
+    test_touching_the_launcher_is_not_a_change_of_identity()
+    test_symlink_target_swap_is_reported_without_breaking_resolution()
     test_verification_detects_mutation_before_activation()
     test_exact_native_launcher_executes_on_current_platform()
     print("provider executable identity tests passed")

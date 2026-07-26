@@ -16,6 +16,9 @@ _BOOTSTRAP_EXACT = frozenset({
     "/api/provider-setup/installs",
     "/api/provider-setup/status",
 })
+# Turning a capability back on must stay reachable while it is off, otherwise
+# the gate that disables a capability also removes the way to re-enable it.
+_BOOTSTRAP_PREFIX_EXACT = "/api/installation-profile/capabilities/"
 _BOOTSTRAP_PREFIXES = (
     "/api/auth",
     "/api/download/desktop",
@@ -55,7 +58,11 @@ def capability_for_scope(scope: dict[str, Any]) -> str | None:
     path = str(scope.get("path") or "")
     if not path.startswith("/api/") and path != "/ws/chat":
         return installation_profile.BOOTSTRAP
-    if path in _BOOTSTRAP_EXACT or path.startswith(_BOOTSTRAP_PREFIXES):
+    if (
+        path in _BOOTSTRAP_EXACT
+        or path.startswith(_BOOTSTRAP_PREFIXES)
+        or path.startswith(_BOOTSTRAP_PREFIX_EXACT)
+    ):
         return installation_profile.BOOTSTRAP
     if path.startswith(_MOBILE_PREFIXES):
         return installation_profile.MOBILE

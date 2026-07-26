@@ -1319,5 +1319,18 @@
       "expired": "انتهت الصلاحية",
       "cancelled": "أُلغي"
     }
-  }
+  },
+  "settings.capabilitiesTitle": "القدرات",
+  "settings.capabilityIntro": "اختار التثبيت نقطة البداية فقط. يمكنك تفعيل أو تعطيل أي شيء هنا في أي وقت.",
+  "settings.capabilityIntegrations": "التكاملات",
+  "settings.capabilityIntegrationsHint": "الإضافات والمهارات وخوادم MCP وتنسيق الفريق.",
+  "settings.capabilityMobile": "تطبيقات الجوال",
+  "settings.capabilityMobileHint": "تنزيلات تطبيق الجوال والإشعارات الفورية وبناء واجهة الجوال.",
+  "settings.capabilityActive": "مفعّل",
+  "settings.capabilitySaving": "جارٍ الحفظ…",
+  "settings.capabilityRestartRequired": "أعد التشغيل للتطبيق",
+  "settings.capabilityNeedsBuild": "يتطلب بناءً يتضمنه",
+  "settings.capabilitySetupRequired": "أكمل إعداد التثبيت لاختيار القدرات.",
+  "settings.capabilityIntegrationsDisableWarning": "إيقاف التكاملات سيلغي عمل الإضافات عند التشغيل التالي. هل تريد المتابعة؟",
+  "settings.capabilityRestartManually": "أعد تشغيل Better Agent للتطبيق"
 }

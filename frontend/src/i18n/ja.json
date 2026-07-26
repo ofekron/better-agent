@@ -1316,5 +1316,18 @@
       "expired": "期限切れ",
       "cancelled": "キャンセル済み"
     }
-  }
+  },
+  "settings.capabilitiesTitle": "機能",
+  "settings.capabilityIntro": "セットアップは出発点を決めただけです。ここでいつでも有効・無効を切り替えられます。",
+  "settings.capabilityIntegrations": "統合機能",
+  "settings.capabilityIntegrationsHint": "拡張機能、スキル、MCP サーバー、チームオーケストレーション。",
+  "settings.capabilityMobile": "モバイルアプリ",
+  "settings.capabilityMobileHint": "モバイルアプリのダウンロード、プッシュ通知、モバイル向けフロントエンドビルド。",
+  "settings.capabilityActive": "有効",
+  "settings.capabilitySaving": "保存中…",
+  "settings.capabilityRestartRequired": "再起動で適用",
+  "settings.capabilityNeedsBuild": "対応ビルドが必要です",
+  "settings.capabilitySetupRequired": "インストール設定を完了すると機能を選べます。",
+  "settings.capabilityIntegrationsDisableWarning": "統合機能を無効にすると、次回起動時に拡張機能の作業がキャンセルされます。続行しますか？",
+  "settings.capabilityRestartManually": "Better Agent を再起動して適用"
 }

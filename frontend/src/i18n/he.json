@@ -1363,5 +1363,18 @@
       "expired": "פג תוקף",
       "cancelled": "בוטל"
     }
-  }
+  },
+  "settings.capabilitiesTitle": "יכולות",
+  "settings.capabilityIntro": "ההתקנה בחרה נקודת התחלה. אפשר להדליק או לכבות כל יכולת כאן בכל רגע.",
+  "settings.capabilityIntegrations": "אינטגרציות",
+  "settings.capabilityIntegrationsHint": "הרחבות, מיומנויות, שרתי MCP ותזמור צוות.",
+  "settings.capabilityMobile": "אפליקציות מובייל",
+  "settings.capabilityMobileHint": "הורדות אפליקציית מובייל, התראות דחיפה ובניית הפרונטאנד למובייל.",
+  "settings.capabilityActive": "פעיל",
+  "settings.capabilitySaving": "שומר…",
+  "settings.capabilityRestartRequired": "הפעל מחדש כדי להחיל",
+  "settings.capabilityNeedsBuild": "נדרשת בנייה הכוללת את היכולת",
+  "settings.capabilitySetupRequired": "סיים את הגדרת ההתקנה כדי לבחור יכולות.",
+  "settings.capabilityIntegrationsDisableWarning": "כיבוי אינטגרציות יבטל עבודה בבעלות הרחבות בהפעלה הבאה. להמשיך?",
+  "settings.capabilityRestartManually": "הפעל מחדש את Better Agent כדי להחיל"
 }

@@ -433,7 +433,13 @@ def _seed_default_state() -> dict:
 
 @_serialized_provider_mutation
 def apply_installation_profile_selection() -> dict:
-    """Make a pending installer selection the only active provider."""
+    """Make the installer's selection available and default.
+
+    The selection seeds the starting point; it never withdraws providers the
+    user configured afterwards. An existing default is left alone, because a
+    later activation of the same installation must not move the user's choice
+    back to what setup happened to pick.
+    """
     import installation_profile
 
     kind = installation_profile.load().get("provider")
@@ -452,10 +458,10 @@ def apply_installation_profile_selection() -> dict:
     if target is None:
         target = _new_provider_record(kind)
         state["providers"].append(target)
-    for provider in state.get("providers", []):
-        provider["suspended"] = provider is not target
     target["suspended"] = False
-    state["default_provider_id"] = target["id"]
+    known_ids = {provider.get("id") for provider in state.get("providers", [])}
+    if state.get("default_provider_id") not in known_ids:
+        state["default_provider_id"] = target["id"]
     _save_state(state)
     installation_profile.mark_selection_applied()
     apply_provider_config_env_vars()
@@ -707,7 +713,6 @@ def _log_removed_providers(new_providers: list) -> None:
 
 
 def _validate_state_for_save(state: dict) -> None:
-    dependency_plan.assert_state_transition_supported(state)
     dependency_plan.assert_state_supported(state)
 
 

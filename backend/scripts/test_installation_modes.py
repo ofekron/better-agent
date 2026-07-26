@@ -51,7 +51,18 @@ def _with_home():
 
 
 def _activate(root: Path, mode: str, provider: str = "codex") -> dict:
-    return _test_installation.activate(root, mode=mode, provider=provider)
+    profile = _test_installation.activate(root, mode=mode, provider=provider)
+    installation_profile.capture_active_capabilities()
+    return profile
+
+
+def _legacy_capabilities() -> dict:
+    """The capability payload without the per-capability detail block."""
+    return {
+        key: value
+        for key, value in installation_profile.capabilities().items()
+        if key != "capabilities"
+    }
 
 
 def test_missing_legacy_malformed_and_interrupted_profiles_require_setup() -> None:
@@ -91,10 +102,10 @@ def test_missing_legacy_malformed_and_interrupted_profiles_require_setup() -> No
         assert installation_profile.load()["status"] == "setup_required"
 
 
-def test_activation_receipt_binds_profile_environment_and_selection() -> None:
+def test_activation_receipt_binds_profile_generation() -> None:
     with _with_home() as root:
         profile = _activate(root, installation_profile.DEFAULT)
-        assert installation_profile.capabilities() == {
+        assert _legacy_capabilities() == {
             "status": "active",
             "setup_required": False,
             "mode": "default",
@@ -107,16 +118,8 @@ def test_activation_receipt_binds_profile_environment_and_selection() -> None:
         original = receipt_path.read_text(encoding="utf-8")
         receipt = json.loads(original)
 
-        stripped = {
-            key: value
-            for key, value in receipt.items()
-            if key != "provider_selection_sha256"
-        }
-        receipt_path.write_text(json.dumps(stripped), encoding="utf-8")
-        assert installation_profile.capabilities()["setup_required"] is True
-
         receipt_path.write_text(
-            json.dumps({**receipt, "provider_selection_sha256": "not-a-hash"}),
+            json.dumps({**receipt, "profile_sha256": "not-a-hash"}),
             encoding="utf-8",
         )
         assert installation_profile.capabilities()["setup_required"] is True
@@ -156,7 +159,7 @@ def test_provider_config_changes_do_not_invalidate_activation() -> None:
         state["default_provider_id"] = "claude-id"
         config_path.write_text(json.dumps(state), encoding="utf-8")
 
-        assert installation_profile.capabilities() == active
+        assert _legacy_capabilities() == active
         assert not installation_profile.selection_pending()
 
 
@@ -368,7 +371,7 @@ def test_platform_installers_share_transactional_activation() -> None:
 
 if __name__ == "__main__":
     test_missing_legacy_malformed_and_interrupted_profiles_require_setup()
-    test_activation_receipt_binds_profile_environment_and_selection()
+    test_activation_receipt_binds_profile_generation()
     test_provider_config_changes_do_not_invalidate_activation()
     test_authoritative_admission_rejects_before_side_effects()
     test_mode_matrix_uses_one_policy_for_discovery_and_authorization()

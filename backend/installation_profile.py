@@ -2,15 +2,17 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sys
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+import installation_capabilities
 from json_store import write_json_durable
-from paths import ba_home, bc_home
+from paths import ba_home
 
 SCHEMA_VERSION = 3
-RECEIPT_SCHEMA_VERSION = 2
+RECEIPT_SCHEMA_VERSION = 3
 DESKTOP_UI_ONLY = "desktop-ui-only"
 MOBILE_DESKTOP_UI_ONLY = "mobile-desktop-ui-only"
 DEFAULT = "default"
@@ -19,8 +21,8 @@ BACKEND_ROOT = Path(__file__).resolve().parent
 
 BOOTSTRAP = "bootstrap"
 PROVIDER_CONVERSATIONS = "provider_conversations"
-MOBILE = "mobile"
-INTEGRATIONS = "integrations"
+MOBILE = installation_capabilities.MOBILE
+INTEGRATIONS = installation_capabilities.INTEGRATIONS
 CAPABILITIES = frozenset({
     BOOTSTRAP,
     PROVIDER_CONVERSATIONS,
@@ -37,6 +39,15 @@ _IDENTITY_FIELDS = {
     "size",
     "mtime_ns",
 }
+# Fields that identify the executable itself. `size`/`mtime_ns` are recorded as
+# provenance but say nothing about identity that the digests do not.
+_IDENTITY_MATCH_FIELDS = (
+    "command",
+    "launcher_path",
+    "launcher_sha256",
+    "target_path",
+    "target_sha256",
+)
 
 
 class InstallationProfileError(ValueError):
@@ -193,7 +204,12 @@ def _assert_active_environment() -> None:
     The environment is a rebuildable cache of the profile's dependency plan, so
     it is checked where it lives instead of being pinned into the activation
     receipt: a rebuild must never invalidate a committed installation.
+
+    A frozen bundle carries its dependencies inside the bundle and has no
+    pointer to validate — the bundle itself is the environment.
     """
+    if getattr(sys, "frozen", False):
+        return
     backend = BACKEND_ROOT
     pointer_path = backend / ".active-venv"
     try:
@@ -219,66 +235,25 @@ def _assert_active_environment() -> None:
         raise InstallationProfileError("backend dependency plan marker is invalid")
 
 
-def _provider_selection_fingerprint(provider: str) -> str:
-    path = bc_home() / "config.json"
-    try:
-        state = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise InstallationProfileError("provider selection is not persisted") from exc
-    providers = state.get("providers") if isinstance(state, dict) else None
-    default_id = state.get("default_provider_id") if isinstance(state, dict) else None
-    if not isinstance(providers, list) or not isinstance(default_id, str):
-        raise InstallationProfileError("provider selection is not persisted")
-    selected = next(
-        (
-            item
-            for item in providers
-            if isinstance(item, dict) and item.get("id") == default_id
-        ),
-        None,
-    )
-    if selected is None or selected.get("kind") != provider or selected.get("suspended") is True:
-        raise InstallationProfileError("provider selection does not match installation")
-    projection = {
-        "default_provider_id": default_id,
-        "providers": [
-            {
-                "id": item.get("id"),
-                "kind": item.get("kind"),
-                "suspended": item.get("suspended") is True,
-            }
-            for item in providers
-            if isinstance(item, dict)
-        ],
-    }
-    return _canonical_hash(projection)
-
-
-def _receipt(profile: dict[str, Any], selection_sha256: str) -> dict[str, Any]:
+def _receipt(profile: dict[str, Any]) -> dict[str, Any]:
     return {
         "schema_version": RECEIPT_SCHEMA_VERSION,
         "generation": profile["generation"],
         "profile_sha256": _canonical_hash(profile),
-        "provider_selection_sha256": selection_sha256,
     }
 
 
 def mark_selection_applied() -> None:
     profile = require_active()
     _assert_active_environment()
-    write_json_durable(
-        _activation_receipt_path(),
-        _receipt(profile, _provider_selection_fingerprint(profile["provider"])),
-    )
+    write_json_durable(_activation_receipt_path(), _receipt(profile))
 
 
 def refresh_activation_receipt() -> bool:
     """Re-encode a receipt whose commit for the active generation still stands.
 
     The activation commit belongs to the installation generation, so a receipt
-    written in an older encoding is re-stamped in place. Reapplying the
-    installer's provider selection instead would suspend every provider the
-    user configured after setup.
+    written in an older encoding is re-stamped in place.
     """
     profile = load()
     if profile["status"] != "active":
@@ -294,62 +269,86 @@ def refresh_activation_receipt() -> bool:
         return False
     if prior.get("profile_sha256") != _canonical_hash(profile):
         return False
-    selection_hash = prior.get("provider_selection_sha256")
-    if not isinstance(selection_hash, str) or len(selection_hash) != 64:
-        return False
-    write_json_durable(_activation_receipt_path(), _receipt(profile, selection_hash))
+    write_json_durable(_activation_receipt_path(), _receipt(profile))
     return True
 
 
-def _activation_ready(profile: dict[str, Any]) -> bool:
+def _bootstrap_ready(profile: dict[str, Any]) -> bool:
+    """Whether setup ran to completion for this installation generation.
+
+    Deliberately independent of the dependency environment and of provider
+    selection: rebuilding the environment or changing providers is ordinary
+    use, never a revoked installation.
+    """
     if profile["status"] != "active":
         return False
     try:
         receipt = json.loads(_activation_receipt_path().read_text(encoding="utf-8"))
-        _assert_active_environment()
-    except (OSError, json.JSONDecodeError, InstallationProfileError):
+    except (OSError, json.JSONDecodeError):
         return False
-    if not isinstance(receipt, dict):
-        return False
-    selection_hash = receipt.get("provider_selection_sha256")
-    if not isinstance(selection_hash, str) or len(selection_hash) != 64:
-        return False
-    return receipt == _receipt(profile, selection_hash)
+    return isinstance(receipt, dict) and receipt == _receipt(profile)
 
 
 def selection_pending() -> bool:
     profile = load()
-    return profile["status"] == "active" and not _activation_ready(profile)
+    return profile["status"] == "active" and not _bootstrap_ready(profile)
 
 
 def allows(capability: str) -> bool:
+    """Whether this process serves the capability.
+
+    Toggleable capabilities read the snapshot captured when the process
+    started, so subsystems wired at boot can never disagree with the gate.
+    """
     if capability not in CAPABILITIES:
         raise InstallationProfileError("unknown installation capability")
     if capability == BOOTSTRAP:
         return True
     profile = load()
-    if not _activation_ready(profile):
+    if not _bootstrap_ready(profile):
         return False
-    mode = profile["mode"]
     if capability == PROVIDER_CONVERSATIONS:
         return True
-    if capability == MOBILE:
-        return mode != DESKTOP_UI_ONLY
-    return mode == DEFAULT
+    return installation_capabilities.active(capability, profile["mode"])
 
 
 def capabilities() -> dict[str, Any]:
     profile = load()
-    ready = _activation_ready(profile)
-    mode = profile["mode"] if ready else None
+    ready = _bootstrap_ready(profile)
+    detail = installation_capabilities.snapshot(profile["mode"]) if ready else {}
     return {
         "status": "active" if ready else "setup_required",
         "setup_required": not ready,
-        "mode": mode,
+        "mode": profile["mode"] if ready else None,
         "provider_conversations_enabled": ready,
-        "mobile_enabled": ready and mode != DESKTOP_UI_ONLY,
-        "integrations_enabled": ready and mode == DEFAULT,
+        "mobile_enabled": ready and detail[MOBILE]["active"],
+        "integrations_enabled": ready and detail[INTEGRATIONS]["active"],
+        "capabilities": detail,
     }
+
+
+def set_capability_enabled(capability: str, value: bool) -> dict[str, Any]:
+    """Record user intent for a toggleable capability."""
+    profile = require_active()
+    installation_capabilities.set_enabled(capability, value, profile["mode"])
+    return capabilities()
+
+
+def capture_active_capabilities() -> dict[str, bool]:
+    """Freeze the capability set this process serves. Called once at startup."""
+    return installation_capabilities.capture_active(load()["mode"])
+
+
+def capability_requested(capability: str) -> bool:
+    """User intent for a capability, independent of what this process can serve.
+
+    Provisioning decisions read intent — that is how a newly enabled capability
+    gets its dependencies installed. Runtime gates read `allows`.
+    """
+    profile = load()
+    if not _bootstrap_ready(profile):
+        return False
+    return installation_capabilities.settings(profile["mode"])[capability]
 
 
 def integrations_enabled() -> bool:
@@ -365,25 +364,63 @@ def provider_conversations_enabled() -> bool:
 
 
 def pinned_provider_executable(command: str) -> tuple[bool, str | None]:
+    """Prefer the launcher path setup recorded for the installation's provider.
+
+    The recorded path is the anchor worth keeping: it stops a later PATH entry
+    from taking over the provider's command. The recorded digests are
+    provenance, not a gate — upgrading the CLI in place is ordinary use, and
+    re-pinning happens on the verified setup path. When the recorded launcher
+    is gone the command resolves normally, so a reinstall elsewhere can never
+    leave the provider reported as missing.
+    """
     profile = load()
     if profile["status"] != "active":
         return False, None
     identity = profile["provider_identity"]
-    if command != identity["command"]:
+    if command != identity["command"] or not _bootstrap_ready(profile):
         return False, None
-    if not _activation_ready(profile) or not executable_identity_matches(identity):
-        return True, None
-    return True, identity["launcher_path"]
+    launcher = Path(identity["launcher_path"])
+    if not launcher.is_file():
+        return False, None
+    return True, str(launcher)
+
+
+def repin_provider_executable(identity: dict[str, Any]) -> bool:
+    """Record a freshly verified identity for the installation's own provider.
+
+    Called from the setup path that actually ran the CLI, so the new bytes are
+    verification-backed. The generation is unchanged — the activation commit
+    still stands — so the receipt is re-stamped rather than revoked.
+    """
+    profile = load()
+    if profile["status"] != "active":
+        return False
+    if identity.get("command") != profile["provider_identity"]["command"]:
+        return False
+    if identity == profile["provider_identity"]:
+        return False
+    was_ready = _bootstrap_ready(profile)
+    updated = _validate_active(dict(profile, provider_identity=identity))
+    write_json_durable(_path(), updated)
+    if was_ready:
+        write_json_durable(_activation_receipt_path(), _receipt(updated))
+    return True
 
 
 def executable_identity_matches(identity: dict[str, Any]) -> bool:
+    """Whether the recorded provider executable is still byte-identical.
+
+    Compares identity, not incidental file metadata: a byte-identical reinstall
+    or a touched mtime is the same executable.
+    """
     try:
         expected = _validate_identity(identity)
         from provider_setup import executable_identity
 
-        return executable_identity(expected["launcher_path"]) == expected
+        current = executable_identity(expected["launcher_path"])
     except (OSError, InstallationProfileError, ValueError):
         return False
+    return all(current[field] == expected[field] for field in _IDENTITY_MATCH_FIELDS)
 
 
 def assert_orchestration_mode_allowed(mode: str) -> None:
@@ -394,5 +431,5 @@ def assert_orchestration_mode_allowed(mode: str) -> None:
         raise InstallationProfileError("installation setup is required")
     if normalized == "team" and not integrations_enabled():
         raise InstallationProfileError(
-            "team orchestration is unavailable in UI-only installation modes"
+            "team orchestration needs integrations enabled for this installation"
         )

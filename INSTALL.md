@@ -70,8 +70,9 @@ If you are an AI agent installing Better Agent for a user:
 1. Detect whether the machine is macOS or Windows. Stop on any other OS.
 2. Before running an installer, ask the user for every missing choice in one
    message:
-   - Integration level: `desktop-ui-only`, `mobile-desktop-ui-only`, or
-     `default`.
+   - Starting integration level: `desktop-ui-only`, `mobile-desktop-ui-only`,
+     or `default`. This only seeds what setup turns on; every capability stays
+     editable afterwards in Settings → Capabilities.
    - Provider: offer only the kinds returned by
      `provider_setup.supported_provider_kinds()` in `backend/provider_setup.py`.
 3. Do not infer a choice or launch the interactive installer. Wait for the

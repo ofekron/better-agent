@@ -22,6 +22,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--mode", choices=sorted(installation_profile.MODES))
     parser.add_argument("--provider", choices=provider_setup.supported_provider_kinds())
     parser.add_argument("--yes", action="store_true")
+    parser.add_argument(
+        "--adopt",
+        action="store_true",
+        help="adopt an already-installed provider CLI; never install one",
+    )
     return parser
 
 
@@ -64,7 +69,7 @@ def _resolve_args(args: argparse.Namespace) -> tuple[str, str]:
     return mode, provider
 
 
-async def _configure(mode: str, provider: str) -> None:
+async def _configure(mode: str, provider: str, adopt: bool = False) -> None:
     async def report(event: str, payload: dict) -> None:
         if event == "provider_install_progress" and payload.get("text"):
             print(payload["text"])
@@ -77,6 +82,10 @@ async def _configure(mode: str, provider: str) -> None:
     with dependency_plan.activation_lock():
         print(f"Checking {installer.label}...")
         initial_identity = await provider_setup.verified_provider_identity(provider)
+        if initial_identity is None and adopt:
+            raise RuntimeError(
+                f"{installer.label} is not installed; run setup without --adopt to install it"
+            )
         if initial_identity is None:
             result = await provider_setup.install_if_missing(provider, report)
             if result["state"] != "succeeded":
@@ -109,9 +118,10 @@ async def _configure(mode: str, provider: str) -> None:
 
 
 def main() -> int:
-    mode, provider = _resolve_args(_parser().parse_args())
+    args = _parser().parse_args()
+    mode, provider = _resolve_args(args)
     try:
-        asyncio.run(_configure(mode, provider))
+        asyncio.run(_configure(mode, provider, adopt=args.adopt))
     except (installation_profile.InstallationProfileError, RuntimeError, ValueError) as exc:
         print(str(exc), file=sys.stderr)
         return 1

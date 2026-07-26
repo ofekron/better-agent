@@ -1391,5 +1391,18 @@
       "expired": "Expired",
       "cancelled": "Cancelled"
     }
-  }
+  },
+  "settings.capabilitiesTitle": "Capabilities",
+  "settings.capabilityIntro": "Setup chose where to start. Turn anything on or off here at any time.",
+  "settings.capabilityIntegrations": "Integrations",
+  "settings.capabilityIntegrationsHint": "Extensions, skills, MCP servers and team orchestration.",
+  "settings.capabilityMobile": "Mobile apps",
+  "settings.capabilityMobileHint": "Mobile app downloads, push notifications and the mobile frontend build.",
+  "settings.capabilityActive": "Active",
+  "settings.capabilitySaving": "Saving…",
+  "settings.capabilityRestartRequired": "Restart to apply",
+  "settings.capabilityNeedsBuild": "Needs a build that includes it",
+  "settings.capabilitySetupRequired": "Finish installation setup to choose capabilities.",
+  "settings.capabilityIntegrationsDisableWarning": "Turning integrations off cancels extension-owned work at the next start. Continue?",
+  "settings.capabilityRestartManually": "Restart Better Agent to apply"
 }

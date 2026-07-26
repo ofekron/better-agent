@@ -22209,3 +22209,106 @@ button.progress-inflight {
     justify-content: flex-end;
   }
 }
+
+/* Installation capabilities — what setup started with, editable afterwards. */
+.capability-settings {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.capability-settings-intro,
+.capability-settings-empty {
+  color: var(--text-muted, #8a8f98);
+  font-size: 13px;
+  margin: 0;
+}
+.capability-row {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px;
+  border: 1px solid var(--border, #2a2d34);
+  border-radius: 10px;
+  transition: border-color 220ms ease, background-color 220ms ease;
+}
+.capability-row:hover {
+  border-color: var(--border-strong, #3a3f47);
+}
+.capability-row-main {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  cursor: pointer;
+}
+.capability-row-text {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+.capability-row-label {
+  font-weight: 600;
+}
+.capability-row-hint {
+  color: var(--text-muted, #8a8f98);
+  font-size: 12px;
+}
+.capability-row-status {
+  display: flex;
+  min-height: 22px;
+  align-items: center;
+}
+.capability-badge {
+  border: 1px solid transparent;
+  border-radius: 999px;
+  padding: 3px 10px;
+  font-size: 12px;
+  line-height: 1.4;
+  animation: capability-badge-in 240ms ease both;
+}
+.capability-badge.is-active {
+  color: var(--success, #4fb477);
+  border-color: color-mix(in srgb, var(--success, #4fb477) 40%, transparent);
+}
+.capability-badge.is-busy {
+  color: var(--text-muted, #8a8f98);
+  border-color: var(--border, #2a2d34);
+}
+.capability-badge.is-restart {
+  color: var(--warning, #d99a4e);
+  border-color: color-mix(in srgb, var(--warning, #d99a4e) 45%, transparent);
+  background: transparent;
+  cursor: pointer;
+  transition: background-color 200ms ease;
+}
+.capability-badge.is-restart:hover {
+  background: color-mix(in srgb, var(--warning, #d99a4e) 14%, transparent);
+}
+.capability-badge.is-blocked {
+  color: var(--text-muted, #8a8f98);
+  border-color: var(--border, #2a2d34);
+}
+.capability-settings-error {
+  color: var(--error, #e0556a);
+  font-size: 13px;
+}
+@keyframes capability-badge-in {
+  from { opacity: 0; transform: translateY(-3px); }
+  to { opacity: 1; transform: none; }
+}
+@media (max-width: 640px) {
+  .capability-row-main {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .capability-row,
+  .capability-badge,
+  .capability-badge.is-restart {
+    transition: none;
+    animation: none;
+  }
+}

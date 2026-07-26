@@ -1316,5 +1316,18 @@
       "expired": "Verlopen",
       "cancelled": "Geannuleerd"
     }
-  }
+  },
+  "settings.capabilitiesTitle": "Mogelijkheden",
+  "settings.capabilityIntro": "De installatie koos een startpunt. Zet hier alles aan of uit, wanneer je wilt.",
+  "settings.capabilityIntegrations": "Integraties",
+  "settings.capabilityIntegrationsHint": "Extensies, skills, MCP-servers en teamorkestratie.",
+  "settings.capabilityMobile": "Mobiele apps",
+  "settings.capabilityMobileHint": "Downloads van de mobiele app, pushmeldingen en de mobiele frontendbuild.",
+  "settings.capabilityActive": "Actief",
+  "settings.capabilitySaving": "Opslaan…",
+  "settings.capabilityRestartRequired": "Herstart om toe te passen",
+  "settings.capabilityNeedsBuild": "Vereist een build die dit bevat",
+  "settings.capabilitySetupRequired": "Rond de installatie af om mogelijkheden te kiezen.",
+  "settings.capabilityIntegrationsDisableWarning": "Integraties uitzetten annuleert extensiewerk bij de volgende start. Doorgaan?",
+  "settings.capabilityRestartManually": "Herstart Better Agent om toe te passen"
 }

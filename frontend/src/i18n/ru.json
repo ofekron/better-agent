@@ -1322,5 +1322,18 @@
       "expired": "Срок истёк",
       "cancelled": "Отменено"
     }
-  }
+  },
+  "settings.capabilitiesTitle": "Возможности",
+  "settings.capabilityIntro": "Установка выбрала отправную точку. Включайте и отключайте что угодно здесь в любой момент.",
+  "settings.capabilityIntegrations": "Интеграции",
+  "settings.capabilityIntegrationsHint": "Расширения, навыки, MCP-серверы и командная оркестрация.",
+  "settings.capabilityMobile": "Мобильные приложения",
+  "settings.capabilityMobileHint": "Загрузки мобильного приложения, push-уведомления и мобильная сборка фронтенда.",
+  "settings.capabilityActive": "Активно",
+  "settings.capabilitySaving": "Сохранение…",
+  "settings.capabilityRestartRequired": "Перезапустите, чтобы применить",
+  "settings.capabilityNeedsBuild": "Нужна сборка с этой возможностью",
+  "settings.capabilitySetupRequired": "Завершите установку, чтобы выбрать возможности.",
+  "settings.capabilityIntegrationsDisableWarning": "Отключение интеграций отменит работу расширений при следующем запуске. Продолжить?",
+  "settings.capabilityRestartManually": "Перезапустите Better Agent, чтобы применить"
 }

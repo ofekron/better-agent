@@ -16,6 +16,7 @@ from typing import Any
 
 BACKEND = Path(__file__).resolve().parent
 
+import installation_capabilities
 import installation_profile
 import provider_manifest
 from paths import bc_home
@@ -104,6 +105,21 @@ def _installation_mode(profile: dict[str, Any] | None = None) -> str:
     return str(mode) if mode in installation_profile.MODES else "setup-required"
 
 
+def _mobile_requested(profile: dict[str, Any] | None = None) -> bool:
+    """Whether the dependency set must carry mobile support.
+
+    Reads the capability the user currently wants, not the install-time mode:
+    enabling mobile later must change the plan so the next activation installs
+    what it needs.
+    """
+    selected = installation_profile.load() if profile is None else profile
+    if selected.get("status") != "active":
+        return False
+    return installation_capabilities.settings(selected.get("mode"))[
+        installation_capabilities.MOBILE
+    ]
+
+
 def _provider_kinds(
     state: dict[str, Any] | None = None,
     profile: dict[str, Any] | None = None,
@@ -147,7 +163,8 @@ def resolve_plan(
     kinds = _provider_kinds(state, profile)
     requirements = [BASE_REQUIREMENTS]
     probes = list(BASE_PROBES)
-    if mode not in ("setup-required", "desktop-ui-only"):
+    mobile = _mobile_requested(profile)
+    if mobile:
         requirements.append(MOBILE_REQUIREMENTS)
         probes.append("firebase_admin")
     for kind in kinds:
@@ -160,7 +177,7 @@ def resolve_plan(
     probe_names = tuple(dict.fromkeys(probes))
     digest = hashlib.sha256()
     digest.update(json.dumps({
-        "mode": mode,
+        "mobile": mobile,
         "requirements": requirement_names,
         "probes": probe_names,
     }, sort_keys=True).encode())
@@ -290,16 +307,14 @@ def _assert_environment(env_dir: Path, plan: dict[str, Any]) -> None:
 
 
 def assert_provider_supported(provider: dict[str, Any]) -> None:
+    """Validate the provider kind. Configuring a provider never depends on its
+    runtime dependencies already being installed — the next activation installs
+    what the configured set needs. Whether a provider can run *right now* is
+    `provider_runtime_pending`."""
     kind = str(provider.get("kind") or "").strip()
     spec = provider_manifest.spec_for(kind)
     if spec is None or spec.virtual:
         raise DependencyPlanError(f"unknown provider kind: {kind or '<empty>'}")
-    for module in spec.runtime_probe_imports:
-        if not _module_available(module):
-            raise DependencyPlanError(
-                f"{kind} runtime dependencies are not installed; rerun the "
-                f"installer with provider={kind} and restart Better Agent"
-            )
 
 
 def assert_state_supported(state: dict[str, Any]) -> None:
@@ -312,21 +327,23 @@ def assert_state_supported(state: dict[str, Any]) -> None:
         assert_provider_supported(provider)
 
 
-def assert_state_transition_supported(state: dict[str, Any]) -> None:
-    current = _read_object(bc_home() / "config.json")
-    if not isinstance(current.get("providers"), list):
-        return
-    current_plan = resolve_plan(current)
-    candidate_plan = resolve_plan(state)
-    if current_plan["hash"] == candidate_plan["hash"]:
-        return
-    try:
-        _assert_environment(active_env(), candidate_plan)
-    except DependencyPlanError as exc:
+def provider_runtime_pending(kind: str) -> bool:
+    """Whether the provider is configured but its runtime is not importable yet,
+    i.e. it needs the restart that installs the newly planned dependencies."""
+    spec = provider_manifest.spec_for(kind)
+    if spec is None:
+        return False
+    return any(
+        not _module_available(module) for module in spec.runtime_probe_imports
+    )
+
+
+def assert_provider_runtime_ready(kind: str) -> None:
+    if provider_runtime_pending(kind):
         raise DependencyPlanError(
-            "provider runtime dependency plan changed; rerun the installer "
-            "before changing active providers"
-        ) from exc
+            f"{kind} runtime dependencies are being installed; restart Better "
+            f"Agent to finish activating them"
+        )
 
 
 def _commit_activation(python: Path) -> None:

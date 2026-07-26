@@ -733,8 +733,28 @@ if [ -z "$BOOTSTRAP_PYTHON" ]; then
   echo "Python is required to resolve installation dependencies." >&2
   exit 1
 fi
+
+# A state home with no installation profile has nothing to serve. Adopt an
+# already-installed provider CLI so a fresh home boots usable; never install a
+# CLI here — that stays an explicit `scripts/install.py` run.
+if ! PYTHONPATH="$DIR/backend" "$BOOTSTRAP_PYTHON" -c \
+  'import installation_profile; raise SystemExit(0 if installation_profile.load()["status"] == "active" else 1)'; then
+  ADOPT_PROVIDER="$(PYTHONPATH="$DIR/backend" "$BOOTSTRAP_PYTHON" -c \
+    'import installation_bootstrap; print(installation_bootstrap.adoptable_provider_kind() or "")')"
+  if [ -n "$ADOPT_PROVIDER" ]; then
+    echo "No installation profile in this state home — adopting installed provider '$ADOPT_PROVIDER'."
+    "$BOOTSTRAP_PYTHON" "$DIR/scripts/install.py" \
+      --mode default --provider "$ADOPT_PROVIDER" --yes --adopt \
+      || echo "Installation profile adoption failed; finish setup from the app." >&2
+  else
+    echo "No installation profile and no provider CLI found — finish setup from the app." >&2
+  fi
+fi
+
+# Provisioning follows the capability the user asked for, not what this
+# bootstrap interpreter happens to have importable.
 if PYTHONPATH="$DIR/backend" "$BOOTSTRAP_PYTHON" -c \
-  'import installation_profile; raise SystemExit(0 if installation_profile.mobile_enabled() else 1)'; then
+  'import installation_profile as p; raise SystemExit(0 if p.capability_requested(p.MOBILE) else 1)'; then
   FRONTEND_NPM_MODE="mobile"
 else
   FRONTEND_NPM_MODE="desktop"
@@ -1011,15 +1031,13 @@ wait_for_backend_exit() {
 PENDING_REFRESH_ID=""
 INITIAL_FRONTEND_BUILD_STARTED=0
 
-installation_mode() {
+integrations_enabled() {
   PYTHONPATH="$DIR/backend" "$PY" -c \
-    'import installation_profile; print(installation_profile.load()["mode"])'
+    'import installation_profile as p; print("1" if p.capability_requested(p.INTEGRATIONS) else "0")'
 }
 
 prepare_daemon_host_for_backend() {
-  local installation_mode=""
-  installation_mode="$(installation_mode)"
-  if [ "$installation_mode" = "default" ]; then
+  if [ "$(integrations_enabled)" = "1" ]; then
     return
   fi
   stop_child_process "daemon host" "$DAEMON_HOST_PID"
@@ -1030,9 +1048,7 @@ prepare_daemon_host_for_backend() {
 }
 
 start_daemon_host_after_backend_ready() {
-  local installation_mode=""
-  installation_mode="$(installation_mode)"
-  if [ "$installation_mode" != "default" ] || tracked_child_is_running "$DAEMON_HOST_PID"; then
+  if [ "$(integrations_enabled)" != "1" ] || tracked_child_is_running "$DAEMON_HOST_PID"; then
     return
   fi
   PYTHONPATH="$DIR" "$PY" -m daemonhost &

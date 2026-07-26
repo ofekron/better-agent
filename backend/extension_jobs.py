@@ -674,7 +674,7 @@ async def quiesce_for_ui_only() -> None:
         _finish_progress(record, now)
         record.update(
             status="cancelled",
-            error="cancelled by UI-only installation mode",
+            error="cancelled because integrations are disabled for this installation",
             completed_at=now,
         )
         write_json(path, record)

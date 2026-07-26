@@ -1316,5 +1316,18 @@
       "expired": "Abgelaufen",
       "cancelled": "Abgebrochen"
     }
-  }
+  },
+  "settings.capabilitiesTitle": "Funktionen",
+  "settings.capabilityIntro": "Die Installation hat einen Startpunkt gewählt. Alles lässt sich hier jederzeit ein- oder ausschalten.",
+  "settings.capabilityIntegrations": "Integrationen",
+  "settings.capabilityIntegrationsHint": "Erweiterungen, Skills, MCP-Server und Team-Orchestrierung.",
+  "settings.capabilityMobile": "Mobile Apps",
+  "settings.capabilityMobileHint": "Mobile-App-Downloads, Push-Benachrichtigungen und der mobile Frontend-Build.",
+  "settings.capabilityActive": "Aktiv",
+  "settings.capabilitySaving": "Speichern…",
+  "settings.capabilityRestartRequired": "Zum Anwenden neu starten",
+  "settings.capabilityNeedsBuild": "Erfordert einen Build, der es enthält",
+  "settings.capabilitySetupRequired": "Schließe die Installation ab, um Funktionen zu wählen.",
+  "settings.capabilityIntegrationsDisableWarning": "Das Abschalten der Integrationen bricht Erweiterungs-Arbeit beim nächsten Start ab. Fortfahren?",
+  "settings.capabilityRestartManually": "Better Agent neu starten, um es anzuwenden"
 }

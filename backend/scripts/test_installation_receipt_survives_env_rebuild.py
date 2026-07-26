@@ -59,13 +59,23 @@ def test_environment_rebuild_keeps_provider_conversations_enabled() -> None:
     assert installation_profile.capabilities()["setup_required"] is False
 
 
-def test_broken_environment_pointer_still_fails_closed() -> None:
+def test_broken_environment_pointer_does_not_revoke_the_installation() -> None:
+    """The pointer is validated where it is used — when an activation is
+    committed and when run.sh picks the interpreter. A capability read must not
+    depend on it, or a rebuilt or unreadable cache revokes a real install."""
     _test_installation.activate(_HOME)
+    installation_profile.capture_active_capabilities()
     (installation_profile.BACKEND_ROOT / ".active-venv").write_text(
         "../escape",
         encoding="utf-8",
     )
-    assert not installation_profile.allows(installation_profile.PROVIDER_CONVERSATIONS)
+    assert installation_profile.allows(installation_profile.PROVIDER_CONVERSATIONS)
+    try:
+        installation_profile.mark_selection_applied()
+    except installation_profile.InstallationProfileError:
+        pass
+    else:
+        raise AssertionError("committing an activation must still fail closed")
 
 
 def test_legacy_receipt_restamps_without_resetting_provider_selection() -> None:
@@ -77,7 +87,6 @@ def test_legacy_receipt_restamps_without_resetting_provider_selection() -> None:
             "schema_version": 1,
             "generation": committed["generation"],
             "profile_sha256": committed["profile_sha256"],
-            "provider_selection_sha256": committed["provider_selection_sha256"],
             "active_env": ".venvs/stale",
             "dependency_plan_hash": "stale",
         }),
@@ -92,7 +101,6 @@ def test_legacy_receipt_restamps_without_resetting_provider_selection() -> None:
         "schema_version": installation_profile.RECEIPT_SCHEMA_VERSION,
         "generation": profile["generation"],
         "profile_sha256": committed["profile_sha256"],
-        "provider_selection_sha256": committed["provider_selection_sha256"],
     }
     state = json.loads((_HOME / "config.json").read_text(encoding="utf-8"))
     assert state["providers"] == providers
@@ -112,7 +120,7 @@ def test_receipt_from_another_generation_is_not_restamped() -> None:
 if __name__ == "__main__":
     try:
         test_environment_rebuild_keeps_provider_conversations_enabled()
-        test_broken_environment_pointer_still_fails_closed()
+        test_broken_environment_pointer_does_not_revoke_the_installation()
         test_legacy_receipt_restamps_without_resetting_provider_selection()
         test_receipt_from_another_generation_is_not_restamped()
         print("installation receipt rebuild tests passed")
