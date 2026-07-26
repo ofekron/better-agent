@@ -455,6 +455,20 @@ const TEMPLATES: Template[] = [
     },
   },
   {
+    id: "hetzner",
+    label: "Hetzner Inference",
+    blurb: "Hetzner's OpenAI-compatible inference endpoint, driven by Better Agent's own agent loop. Free experimental service with no SLA. Needs an API token from experiments.hetzner.com.",
+    defaults: {
+      name: "Hetzner Inference",
+      kind: "openai",
+      mode: "api_key",
+      base_url: "https://inference.hetzner.com/api/v1",
+      config_dir: "",
+      default_model: "Qwen/Qwen3.6-35B-A3B-FP8",
+      default_reasoning_effort: "",
+    },
+  },
+  {
     id: "custom",
     label: "Custom API",
     blurb: "Any Anthropic-compatible endpoint. Provide URL + key yourself.",
