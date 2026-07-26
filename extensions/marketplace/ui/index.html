@@ -1,474 +1,546 @@
 <!doctype html>
 <html lang="en">
   <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Better Agent Marketplace</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Singular Marketplace — extensions for Better Agent</title>
+    <meta name="description" content="Browse permissioned, reviewable extensions for Better Agent.">
     <style>
       :root {
         color-scheme: dark;
-        --ink: #0B0E14;
-        --surface: #12161F;
-        --surface-2: #171C27;
-        --line: rgba(255, 255, 255, 0.09);
-        --line-strong: rgba(255, 255, 255, 0.16);
-        --text: #E7EAF0;
-        --muted: #9AA3B4;
-        --faint: #6C7688;
-        --gold: #F4C95D;
-        --cyan: #71D6FF;
-        --ok: #33D6A6;
-        --display: "Space Grotesk", ui-sans-serif, system-ui, -apple-system, sans-serif;
-        --body: "Inter", ui-sans-serif, system-ui, -apple-system, sans-serif;
+        --ink: #0b0e14;
+        --surface: #12161f;
+        --surface-2: #171c27;
+        --line: rgba(255, 255, 255, 0.1);
+        --line-strong: rgba(255, 255, 255, 0.18);
+        --text: #e7eaf0;
+        --muted: #9aa3b4;
+        --faint: #6c7688;
+        --gold: #f4c95d;
+        --cyan: #71d6ff;
+        --danger: #ff8095;
+        --display: "Space Grotesk", ui-sans-serif, system-ui, sans-serif;
+        --body: "Inter", ui-sans-serif, system-ui, sans-serif;
         --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
-        font-family: var(--body);
-        background: var(--ink);
-        color: var(--text);
       }
       * { box-sizing: border-box; }
+      html { scroll-behavior: smooth; }
       body {
         margin: 0;
+        min-width: 0;
         min-height: 100vh;
-        background:
-          radial-gradient(60% 45% at 85% -8%, rgba(113, 214, 255, 0.12), transparent 60%),
-          radial-gradient(50% 40% at 4% 0%, rgba(244, 201, 93, 0.10), transparent 58%),
-          var(--ink);
+        overflow-x: hidden;
         color: var(--text);
+        background:
+          radial-gradient(56% 40% at 82% -4%, rgba(113, 214, 255, 0.14), transparent 62%),
+          radial-gradient(48% 38% at 7% 0%, rgba(244, 201, 93, 0.1), transparent 60%),
+          var(--ink);
+        font: 15px/1.55 var(--body);
         -webkit-font-smoothing: antialiased;
       }
-      [hidden] { display: none !important; }
-      main {
-        max-width: 980px;
-        margin: 0 auto;
-        padding: 32px 20px 48px;
-      }
-      header {
+      button, input { font: inherit; }
+      button, a { -webkit-tap-highlight-color: transparent; }
+      a { color: inherit; text-decoration: none; }
+      .site-header {
+        position: sticky;
+        top: 0;
+        z-index: 10;
         display: flex;
+        min-height: 68px;
         align-items: center;
         justify-content: space-between;
         gap: 16px;
-        margin-bottom: 24px;
+        padding: 12px max(20px, calc((100% - 1120px) / 2));
+        border-bottom: 1px solid var(--line);
+        background: rgba(11, 14, 20, 0.84);
+        backdrop-filter: blur(16px);
       }
-      h1 {
-        margin: 0;
-        font-family: var(--display);
-        font-size: 28px;
-        font-weight: 600;
-        letter-spacing: -0.02em;
-      }
-      button {
-        border: 1px solid var(--line-strong);
-        border-radius: 9px;
-        background: rgba(255, 255, 255, 0.03);
-        color: var(--text);
-        font-family: var(--body);
-        font-weight: 600;
-        font-size: 14px;
-        min-height: 36px;
-        padding: 0 16px;
-        cursor: pointer;
-        transition: background-color 160ms ease, border-color 160ms ease, box-shadow 200ms ease, opacity 160ms ease, transform 160ms ease;
-      }
-      button:hover:not(:disabled) { transform: translateY(-1px); border-color: var(--cyan); }
-      button.primary {
+      .brand { display: inline-flex; min-width: 0; align-items: center; gap: 11px; font: 700 19px/1 var(--display); }
+      .brand-mark {
+        display: grid;
+        width: 34px;
+        height: 34px;
+        flex: none;
+        place-items: center;
+        border-radius: 10px;
         color: #081018;
         background: linear-gradient(135deg, var(--gold), var(--cyan));
-        border-color: transparent;
-        box-shadow: 0 0 0 1px rgba(113, 214, 255, 0.25), 0 12px 30px rgba(20, 22, 28, 0.5);
       }
-      button.primary:hover:not(:disabled) { box-shadow: 0 0 0 1px rgba(113, 214, 255, 0.5), 0 16px 40px rgba(20, 22, 28, 0.6); }
-      button:disabled {
-        opacity: 0.5;
-        cursor: default;
-      }
-      .status {
-        min-height: 24px;
-        color: var(--muted);
-        font-family: var(--mono);
-        font-size: 13px;
-        margin-bottom: 12px;
-      }
-      .grid {
-        display: grid;
-        gap: 12px;
-      }
-      .row {
-        display: grid;
-        grid-template-columns: 1fr auto;
-        gap: 16px;
-        align-items: center;
+      .brand small { display: block; margin-top: 4px; color: var(--faint); font: 500 9px/1 var(--mono); letter-spacing: .15em; text-transform: uppercase; }
+      .header-actions { display: flex; min-width: 0; align-items: center; justify-content: flex-end; gap: 10px; }
+      .account-label { max-width: 220px; overflow: hidden; color: var(--muted); text-overflow: ellipsis; white-space: nowrap; }
+      .host-nav { display: flex; gap: 18px; color: var(--muted); }
+      .shell { width: min(1120px, calc(100% - 40px)); margin: 0 auto; }
+      .hero { max-width: 720px; padding: clamp(46px, 7vw, 86px) 0 34px; }
+      .kicker { margin: 0; color: var(--cyan); font: 500 11px/1.2 var(--mono); letter-spacing: .16em; text-transform: uppercase; }
+      h1, h2 { margin: 0; font-family: var(--display); letter-spacing: -.025em; }
+      h1 { margin-top: 15px; font-size: clamp(36px, 6vw, 66px); line-height: 1.03; }
+      .lead { max-width: 62ch; margin: 18px 0 0; color: var(--muted); font-size: clamp(16px, 2vw, 20px); }
+      .facets { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; padding-bottom: 42px; }
+      .facet, .account-gate, .card {
         border: 1px solid var(--line);
-        border-radius: 14px;
-        background: linear-gradient(180deg, rgba(255,255,255,0.025), rgba(255,255,255,0));
-        padding: 18px;
-        animation: marketplace-enter 220ms ease both;
-        transition: border-color 180ms ease, background 180ms ease;
+        border-radius: 15px;
+        background: linear-gradient(180deg, rgba(255,255,255,.025), rgba(255,255,255,0));
       }
-      .row:hover { border-color: var(--line-strong); background: linear-gradient(180deg, rgba(113,214,255,0.05), rgba(255,255,255,0)); }
-      h2 {
-        margin: 0 0 6px;
-        font-family: var(--display);
-        font-size: 17px;
-        font-weight: 600;
-        letter-spacing: -0.01em;
-      }
-      p {
-        margin: 0;
-        color: var(--muted);
-        line-height: 1.5;
-      }
-      .meta {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 8px;
-        margin-top: 12px;
-      }
-      .meta span {
-        border: 1px solid var(--line);
-        border-radius: 999px;
-        padding: 3px 9px;
-        color: var(--muted);
-        font-family: var(--mono);
-        font-size: 11px;
-        letter-spacing: 0.02em;
-      }
-      .actions {
-        display: flex;
-        gap: 8px;
-      }
-      .account-gate {
-        display: grid;
-        gap: 12px;
-        border: 1px solid var(--line-strong);
-        border-radius: 14px;
-        background: linear-gradient(180deg, var(--surface-2), var(--surface));
-        padding: 20px;
-        margin-bottom: 16px;
-        animation: marketplace-enter 220ms ease both;
-      }
-      .provider-actions {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 8px;
-      }
-      .token {
-        width: min(360px, 100%);
-        box-sizing: border-box;
-        border: 1px solid var(--line-strong);
-        border-radius: 9px;
-        min-height: 36px;
-        padding: 0 12px;
-        background: var(--surface);
+      .facet { padding: 22px; }
+      .facet b { font-family: var(--display); }
+      .facet p { margin: 8px 0 0; color: var(--muted); }
+      .workspace { padding: 30px 0 clamp(48px, 8vw, 90px); }
+      .workspace-head { display: flex; align-items: end; justify-content: space-between; gap: 16px; margin-bottom: 16px; }
+      .workspace-head h2 { font-size: clamp(24px, 3vw, 32px); }
+      .toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 18px; }
+      .search {
+        width: 100%;
+        min-width: 0;
+        padding: 11px 14px;
         color: var(--text);
-        font-family: var(--body);
-        font-size: 14px;
+        border: 1px solid var(--line-strong);
+        border-radius: 11px;
+        outline: 0;
+        background: var(--surface);
       }
-      .token::placeholder { color: var(--faint); }
-      button:focus-visible, .token:focus-visible, input:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
-      @media (max-width: 720px) {
-        header,
-        .row {
-          grid-template-columns: 1fr;
-          align-items: stretch;
-        }
-        header {
-          display: grid;
-        }
-        .actions {
-          justify-content: flex-start;
-          flex-wrap: wrap;
-        }
+      .search:focus { border-color: var(--cyan); }
+      button, .button {
+        min-height: 42px;
+        padding: 9px 14px;
+        color: var(--text);
+        border: 1px solid var(--line-strong);
+        border-radius: 10px;
+        background: var(--surface-2);
+        cursor: pointer;
+        transition: transform 180ms ease, border-color 180ms ease, background 180ms ease, opacity 180ms ease;
       }
-      @keyframes marketplace-enter {
-        from { opacity: 0; transform: translateY(6px); }
-        to { opacity: 1; transform: translateY(0); }
+      button:hover:not(:disabled), .button:hover { transform: translateY(-1px); border-color: rgba(113,214,255,.5); }
+      button:disabled { cursor: not-allowed; opacity: .5; }
+      button.primary, .button.primary { color: #081018; border-color: transparent; background: linear-gradient(135deg, var(--gold), var(--cyan)); font-weight: 700; }
+      .account-gate { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 18px; padding: 16px; }
+      .account-gate p { margin: 0; color: var(--muted); }
+      .provider-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+      .status { min-height: 24px; margin: 4px 0 14px; color: var(--muted); }
+      .status.error { color: var(--danger); }
+      .spinner {
+        display: inline-block;
+        width: 16px;
+        height: 16px;
+        margin-right: 8px;
+        vertical-align: -3px;
+        border: 2px solid var(--line-strong);
+        border-top-color: var(--cyan);
+        border-radius: 50%;
+        animation: spin .8s linear infinite;
+      }
+      .grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 15px; }
+      .card {
+        display: flex;
+        min-width: 0;
+        min-height: 230px;
+        flex-direction: column;
+        padding: 20px;
+        animation: rise .36s ease-out both;
+        transition: transform 180ms ease, border-color 180ms ease;
+      }
+      .card:hover { transform: translateY(-3px); border-color: var(--line-strong); }
+      .card-top { display: flex; min-width: 0; align-items: center; gap: 12px; }
+      .ext-mark {
+        display: grid;
+        width: 40px;
+        height: 40px;
+        flex: none;
+        place-items: center;
+        border-radius: 11px;
+        color: #081018;
+        background: linear-gradient(135deg, var(--gold), var(--cyan));
+        font: 700 16px/1 var(--display);
+      }
+      .card h2 { overflow: hidden; font-size: 18px; text-overflow: ellipsis; white-space: nowrap; }
+      .version { margin: 3px 0 0; color: var(--faint); font: 11px/1.3 var(--mono); }
+      .description { flex: 1; margin: 14px 0; color: var(--muted); overflow-wrap: anywhere; }
+      .meta { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 16px; }
+      .meta span { padding: 3px 8px; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; font: 10px/1.4 var(--mono); }
+      .actions { display: flex; flex-wrap: wrap; gap: 8px; }
+      .site-footer { min-height: 90px; padding: 28px max(20px, calc((100% - 1120px) / 2)); color: var(--faint); border-top: 1px solid var(--line); }
+      .embedded .host-only { display: none !important; }
+      .hosted .embedded-only { display: none !important; }
+      .embedded .shell { width: min(100%, 1040px); }
+      .embedded .workspace { padding-top: 22px; }
+      .embedded .site-header { position: static; padding-inline: 18px; }
+      .embedded .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      :focus-visible { outline: 2px solid var(--cyan); outline-offset: 3px; }
+      @keyframes spin { to { transform: rotate(360deg); } }
+      @keyframes rise { from { opacity: 0; transform: translateY(9px); } }
+      @media (max-width: 880px) {
+        .grid, .embedded .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        .facets { grid-template-columns: 1fr; }
+      }
+      @media (max-width: 620px) {
+        .site-header, .workspace-head, .account-gate { align-items: stretch; flex-direction: column; }
+        .header-actions, .provider-actions { justify-content: flex-start; }
+        .host-nav { flex-wrap: wrap; }
+        .shell { width: min(100% - 28px, 1120px); }
+        .grid, .embedded .grid { grid-template-columns: 1fr; }
+        .card { min-height: 0; }
       }
       @media (prefers-reduced-motion: reduce) {
-        *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+        html { scroll-behavior: auto; }
+        *, *::before, *::after { animation: none !important; transition: none !important; }
       }
     </style>
   </head>
   <body>
-    <main>
-      <header>
-        <h1>Marketplace</h1>
+    <header class="site-header">
+      <a class="brand" href="https://singular-labs.ai" aria-label="Singular Labs home">
+        <span class="brand-mark" aria-hidden="true">S</span>
+        <span>Singular<small>marketplace</small></span>
+      </a>
+      <nav class="host-nav host-only" aria-label="Primary">
+        <a href="https://singular-labs.ai">Singular Labs</a>
+        <a href="https://ofek-dev.com/better-agent">Better Agent</a>
+        <a href="https://github.com/ofekron/better-agent">GitHub</a>
+      </nav>
+      <div class="header-actions embedded-only">
+        <span id="accountLabel" class="account-label" hidden></span>
+        <button id="signOut" type="button" hidden>Sign out</button>
         <button id="refresh" type="button" disabled>Refresh</button>
-      </header>
-      <section id="accountGate" class="account-gate" hidden>
-        <p>Sign in to browse and install marketplace extensions.</p>
-        <div id="providerActions" class="provider-actions"></div>
+      </div>
+    </header>
+
+    <main>
+      <section class="shell hero host-only">
+        <p class="kicker">Empower · the extension marketplace</p>
+        <h1>Capabilities for Better Agent, under your control.</h1>
+        <p class="lead">Browse permissioned, reviewable extensions. Pair the local app with an opaque one-time link; every requested change remains visible and locally governed.</p>
       </section>
-      <button id="marketplaceLogout" type="button" hidden>Sign out</button>
-      <div id="status" class="status"></div>
-      <div id="grid" class="grid"></div>
+      <section class="shell facets host-only" aria-label="Marketplace principles">
+        <article class="facet"><b>Extend</b><p>Add capabilities without surrendering the open core.</p></article>
+        <article class="facet"><b>Review</b><p>Inspect permissions, provenance, and versions before local execution.</p></article>
+        <article class="facet"><b>Govern</b><p>Queue intent on the server; keep device control inside Better Agent.</p></article>
+      </section>
+
+      <section class="shell workspace">
+        <div class="workspace-head">
+          <div>
+            <p class="kicker embedded-only">Better Agent</p>
+            <h2>The catalog</h2>
+          </div>
+          <button id="pair" class="primary host-only" type="button" hidden>Pair Better Agent</button>
+        </div>
+        <section id="accountGate" class="account-gate embedded-only" hidden>
+          <p id="gateMessage">Sign in to browse and install marketplace extensions.</p>
+          <div id="providerActions" class="provider-actions"></div>
+        </section>
+        <div class="toolbar">
+          <input id="search" class="search" type="search" placeholder="Search extensions" aria-label="Search extensions" autocomplete="off">
+        </div>
+        <div id="status" class="status" aria-live="polite"><span class="spinner" aria-hidden="true"></span>Loading extensions…</div>
+        <div id="grid" class="grid"></div>
+      </section>
     </main>
+    <footer class="site-footer host-only">© Singular Labs · Better Agent Marketplace</footer>
+
     <script src="./catalog.js"></script>
     <script src="./bridge.js"></script>
-    <script type="module">
-      const { isMarketplaceManaged, marketplaceRows } = globalThis.marketplaceCatalog;
-      const { uuidv4 } = globalThis.marketplaceBridge;
-      const statusEl = document.getElementById("status");
-      const gridEl = document.getElementById("grid");
-      const refreshEl = document.getElementById("refresh");
-      const accountGateEl = document.getElementById("accountGate");
-      const providerActionsEl = document.getElementById("providerActions");
-      const marketplaceLogoutEl = document.getElementById("marketplaceLogout");
-      let busyId = "";
-      let bridgeNonce = "";
-      const pendingRequests = new Map();
 
-      async function requestJson(url, options = {}) {
-        if (!bridgeNonce) throw new Error("Marketplace connection is not ready");
-        const requestId = uuidv4();
-        const body = typeof options.body === "string" ? JSON.parse(options.body) : options.body;
-        const result = new Promise((resolve, reject) => {
-          pendingRequests.set(requestId, { resolve, reject, raw: false });
-        });
-        window.parent.postMessage({
-          source: "ba-extension",
-          nonce: bridgeNonce,
-          action: "marketplace-request",
-          requestId,
-          path: url,
-          method: options.method || "GET",
-          body,
-        }, "*");
-        return result;
-      }
+    <script>
+      (() => {
+        "use strict";
+        const mode = "embedded";
+        document.body.classList.add(mode);
+        const backendBase = "/api/extensions/ofek-dev.marketplace/backend";
+        const providerLabels = { google: "Google", apple: "Apple", github: "GitHub" };
+        const statusEl = document.getElementById("status");
+        const gridEl = document.getElementById("grid");
+        const searchEl = document.getElementById("search");
+        const pairEl = document.getElementById("pair");
+        const accountGateEl = document.getElementById("accountGate");
+        const gateMessageEl = document.getElementById("gateMessage");
+        const providerActionsEl = document.getElementById("providerActions");
+        const accountLabelEl = document.getElementById("accountLabel");
+        const signOutEl = document.getElementById("signOut");
+        const refreshEl = document.getElementById("refresh");
+        const pendingRequests = new Map();
+        let bridgeNonce = "";
+        let items = [];
+        let installed = [];
+        let snapshotId = "";
+        let busyId = "";
+        let signInPollTimer = 0;
 
-      async function requestAction(action, payload = {}) {
-        if (!bridgeNonce) throw new Error("Marketplace connection is not ready");
-        const requestId = uuidv4();
-        const result = new Promise((resolve, reject) => {
-          pendingRequests.set(requestId, { resolve, reject, raw: true });
-        });
-        window.parent.postMessage({
-          source: "ba-extension",
-          nonce: bridgeNonce,
-          action,
-          requestId,
-          ...payload,
-        }, "*");
-        return result;
-      }
-
-      function installedById(records) {
-        const map = new Map();
-        for (const record of records) {
-          const id = record?.manifest?.id;
-          if (id) map.set(id, record);
+        function esc(value) {
+          return String(value ?? "").replace(/[&<>"]/g, char => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[char]);
         }
-        return map;
-      }
 
-      function describeStatus(record) {
-        if (!record) return "Available";
-        return record.enabled ? "Installed" : "Disabled";
-      }
+        function initials(name) {
+          return String(name || "?").split(/[\s._-]+/).filter(Boolean).slice(0, 2).map(part => part[0]).join("").toUpperCase();
+        }
 
-      function renderAccountGate(providers) {
-        providerActionsEl.replaceChildren();
-        for (const provider of providers) {
-          const button = document.createElement("button");
-          button.type = "button";
-          button.textContent = `Continue with ${provider.label}`;
-          button.addEventListener("click", () => {
-            if (!bridgeNonce) return;
-            statusEl.textContent = `Opening ${provider.label} sign-in...`;
-            window.parent.postMessage({
-              source: "ba-extension",
-              nonce: bridgeNonce,
-              action: "marketplace-auth-start",
-              requestId: uuidv4(),
-              provider: provider.id,
-            }, "*");
+        function uuidv4() {
+          if (!globalThis.marketplaceBridge?.uuidv4) throw new Error("Secure request identity is unavailable");
+          return globalThis.marketplaceBridge.uuidv4();
+        }
+
+        function requestJson(path, options = {}) {
+          if (mode === "hosted") {
+
+          }
+
+          if (!bridgeNonce) return Promise.reject(new Error("Marketplace connection is not ready"));
+          const requestId = uuidv4();
+          const promise = new Promise((resolve, reject) => pendingRequests.set(requestId, { resolve, reject, raw: false }));
+          window.parent.postMessage({
+            source: "ba-extension",
+            nonce: bridgeNonce,
+            action: "marketplace-request",
+            requestId,
+            path,
+            method: options.method || "GET",
+            body: options.body,
+          }, "*");
+          return promise;
+
+          return Promise.reject(new Error("Marketplace request transport is unavailable"));
+        }
+
+        function requestAction(action, payload = {}) {
+
+          if (mode !== "embedded" || !bridgeNonce) return Promise.reject(new Error("Marketplace connection is not ready"));
+          const requestId = uuidv4();
+          const promise = new Promise((resolve, reject) => pendingRequests.set(requestId, { resolve, reject, raw: true }));
+          window.parent.postMessage({ source: "ba-extension", nonce: bridgeNonce, action, requestId, ...payload }, "*");
+          return promise;
+
+          return Promise.reject(new Error("Marketplace actions are local-only"));
+        }
+
+        function installedById() {
+          return new Map(installed.map(record => [record?.manifest?.id, record]).filter(([id]) => id));
+        }
+
+        function visibleItems() {
+          const query = searchEl.value.trim().toLowerCase();
+          const merged = mode === "embedded" && globalThis.marketplaceCatalog
+            ? globalThis.marketplaceCatalog.marketplaceRows(items, installed, query)
+            : items;
+          if (!query) return merged;
+          return merged.filter(item => `${item.id} ${item.name} ${item.description} ${(item.surfaces || []).join(" ")}`.toLowerCase().includes(query));
+        }
+
+        function render() {
+          const rows = visibleItems();
+          const installedMap = installedById();
+          gridEl.replaceChildren();
+          if (!rows.length) {
+            statusEl.textContent = "No extensions match your search.";
+            return;
+          }
+          statusEl.textContent = "";
+          rows.forEach((item, index) => {
+            const record = installedMap.get(item.id);
+            const managed = globalThis.marketplaceCatalog?.isMarketplaceManaged?.(record);
+            const card = document.createElement("article");
+            card.className = "card";
+            card.style.animationDelay = `${Math.min(index * 24, 240)}ms`;
+            const tags = [item.version, record ? (record.enabled ? "Installed" : "Disabled") : "Available", ...(item.surfaces || [])]
+              .filter(Boolean).map(value => `<span>${esc(String(value).replaceAll("_", " "))}</span>`).join("");
+            card.innerHTML = `
+              <div class="card-top"><span class="ext-mark" aria-hidden="true">${esc(initials(item.name))}</span>
+                <div style="min-width:0"><h2>${esc(item.name || item.id)}</h2><p class="version">${esc(item.id)}</p></div>
+              </div>
+              <p class="description">${esc(item.description || item.id)}</p>
+              <div class="meta">${tags}</div>
+              <div class="actions"></div>`;
+            const actions = card.querySelector(".actions");
+            if (mode === "hosted") {
+              const button = document.createElement("button");
+              button.type = "button";
+              button.textContent = "Pair to manage";
+              button.addEventListener("click", pairDevice);
+              actions.appendChild(button);
+            } else {
+              const button = document.createElement("button");
+              button.type = "button";
+              button.className = record ? "" : "primary";
+              button.disabled = busyId === item.id || item.id === "ofek-dev.marketplace" || Boolean(record && !managed);
+              button.textContent = record ? (managed ? (record.enabled ? "Disable" : "Enable") : "Installed") : "Install";
+              button.addEventListener("click", () => record ? setEnabled(item.id, !record.enabled) : install(item));
+              actions.appendChild(button);
+              if (record && managed && item.id !== "ofek-dev.marketplace") {
+                const uninstallButton = document.createElement("button");
+                uninstallButton.type = "button";
+                uninstallButton.textContent = "Uninstall";
+                uninstallButton.addEventListener("click", () => uninstall(item));
+                actions.appendChild(uninstallButton);
+              }
+            }
+            gridEl.appendChild(card);
           });
-          providerActionsEl.appendChild(button);
         }
-      }
 
-      function render(catalog, installed) {
-        const installedMap = installedById(installed);
-        const rows = marketplaceRows(catalog, installed);
-        gridEl.replaceChildren();
-        for (const item of rows) {
-          const record = installedMap.get(item.id);
-          const marketplaceManaged = isMarketplaceManaged(record);
-          const row = document.createElement("article");
-          row.className = "row";
-          const info = document.createElement("div");
-          const title = document.createElement("h2");
-          title.textContent = item.name || item.id;
-          const description = document.createElement("p");
-          description.textContent = item.description || item.id;
-          const meta = document.createElement("div");
-          meta.className = "meta";
-          for (const value of [
-            item.version,
-            describeStatus(record),
-            item.marketplace?.subscription_required ? "Subscription" : "Included",
-            ...(item.surfaces || []),
-          ].filter(Boolean)) {
-            const pill = document.createElement("span");
-            pill.textContent = value;
-            meta.appendChild(pill);
+        function renderAccount(auth) {
+          providerActionsEl.replaceChildren();
+          for (const provider of auth.providers || []) {
+            const button = document.createElement("button");
+            button.type = "button";
+            button.textContent = `Continue with ${providerLabels[provider] || provider}`;
+            button.addEventListener("click", () => signIn(provider));
+            providerActionsEl.appendChild(button);
           }
-          info.append(title, description, meta);
-          const actions = document.createElement("div");
-          actions.className = "actions";
-          if (item.marketplace?.subscription_required && !record) {
-            const token = document.createElement("input");
-            token.className = "token";
-            token.type = "password";
-            token.placeholder = "Entitlement token";
-            token.autocomplete = "off";
-            actions.appendChild(token);
+          accountGateEl.hidden = Boolean(auth.authenticated);
+          accountLabelEl.hidden = !auth.authenticated;
+          accountLabelEl.textContent = auth.account?.email || auth.account?.name || "";
+          signOutEl.hidden = !auth.authenticated;
+        }
+
+        async function load() {
+          statusEl.innerHTML = '<span class="spinner" aria-hidden="true"></span>Loading extensions…';
+          try {
+            if (mode === "hosted") {
+              const payload = await requestJson("/api/marketplace/catalog-v1.json");
+              items = payload.extensions || [];
+              snapshotId = payload.snapshot_id || "";
+              pairEl.hidden = !snapshotId;
+            } else {
+              const [auth, catalog, installedPayload] = await Promise.all([
+                requestJson(`${backendBase}/auth/status`),
+                requestJson(`${backendBase}/catalog`),
+                requestJson("/api/extensions"),
+              ]);
+              renderAccount(auth);
+              items = catalog.extensions || [];
+              snapshotId = catalog.snapshot_id || "";
+              installed = installedPayload.extensions || [];
+            }
+            render();
+          } catch (error) {
+            statusEl.className = "status error";
+            statusEl.textContent = error instanceof Error ? error.message : "Marketplace catalog failed";
           }
-          const button = document.createElement("button");
-          button.type = "button";
-          button.className = record ? "" : "primary";
-          button.disabled = busyId === item.id || item.id === "ofek-dev.marketplace" || Boolean(record && !marketplaceManaged);
-          button.textContent = record
-            ? (marketplaceManaged ? (record.enabled ? "Disable" : "Enable") : "Installed")
-            : "Install";
-          button.addEventListener("click", () => {
-            if (record) {
-              void setEnabled(item.id, !record.enabled);
+        }
+
+        async function pairDevice() {
+          pairEl.disabled = true;
+          statusEl.innerHTML = '<span class="spinner" aria-hidden="true"></span>Creating a secure pairing link…';
+          try {
+            const session = await requestJson("/api/marketplace/auth/me");
+            const pair = await requestJson("/api/marketplace/protocol/v1/pairs", {
+              method: "POST",
+              headers: { "X-CSRF-Token": session.csrf_token },
+              body: { snapshot_id: snapshotId },
+            });
+            if (!/^betteragent:\/\/marketplace\/pair\?v=1&intent=[A-Za-z0-9_-]{43}$/.test(pair.deep_link || "")) {
+              throw new Error("Pairing response was invalid");
+            }
+            location.assign(pair.deep_link);
+            statusEl.textContent = "Pairing link opened. Confirm inside Better Agent.";
+          } catch (error) {
+            if (String(error?.message || "").includes("login")) {
+              location.assign(`/api/marketplace/auth/login/github?return_to=${encodeURIComponent("/marketplace/")}`);
               return;
             }
-            const token = actions.querySelector("input")?.value || "";
-            void install(item, token);
-          });
-          actions.appendChild(button);
-          if (record && marketplaceManaged && item.id !== "ofek-dev.marketplace") {
-            const uninstallButton = document.createElement("button");
-            uninstallButton.type = "button";
-            uninstallButton.disabled = busyId === item.id;
-            uninstallButton.textContent = "Uninstall";
-            uninstallButton.addEventListener("click", () => {
-              void uninstall(item);
-            });
-            actions.appendChild(uninstallButton);
+            statusEl.className = "status error";
+            statusEl.textContent = error instanceof Error ? error.message : "Pairing failed";
+          } finally {
+            pairEl.disabled = false;
           }
-          row.append(info, actions);
-          gridEl.appendChild(row);
         }
-      }
 
-      async function load() {
-        statusEl.textContent = "Loading...";
-        let installed = [];
-        try {
-          const [authPayload, authStatus, installedPayload] = await Promise.all([
-            requestJson("/api/extensions/ofek-dev.marketplace/backend/auth/providers"),
-            requestJson("/api/extensions/ofek-dev.marketplace/backend/auth/status"),
-            requestJson("/api/extensions"),
-          ]);
-          installed = installedPayload.extensions || [];
-          renderAccountGate(authPayload.providers || []);
-          accountGateEl.hidden = authStatus.authenticated === true;
-          marketplaceLogoutEl.hidden = authStatus.authenticated !== true;
-          if (authStatus.authenticated !== true) {
-            render([], installed);
-            statusEl.textContent = "Sign in with Google or GitHub to continue.";
-            return;
-          }
-          const catalogPayload = await requestJson("/api/extensions/ofek-dev.marketplace/backend/catalog");
-          render(catalogPayload.extensions || [], installed);
-          statusEl.textContent = "";
-        } catch (error) {
-          render([], installed);
-          accountGateEl.hidden = false;
-          marketplaceLogoutEl.hidden = true;
-          statusEl.textContent = error instanceof Error ? error.message : "Marketplace catalog failed";
+        async function signIn(provider) {
+          gateMessageEl.innerHTML = '<span class="spinner"></span>Complete sign-in in your browser…';
+          await requestAction("marketplace-auth-start", { provider });
+          clearInterval(signInPollTimer);
+          const startedAt = Date.now();
+          signInPollTimer = setInterval(async () => {
+            if (Date.now() - startedAt > 5 * 60 * 1000) {
+              clearInterval(signInPollTimer);
+              gateMessageEl.textContent = "Sign-in timed out. Try again.";
+              return;
+            }
+            try {
+              const auth = await requestJson(`${backendBase}/auth/status`);
+              if (auth.authenticated) {
+                clearInterval(signInPollTimer);
+                await load();
+              }
+            } catch {}
+          }, 2000);
         }
-      }
 
-      async function install(item, entitlementToken) {
-        busyId = item.id;
-        statusEl.textContent = `Installing ${item.name || item.id}...`;
-        try {
-          const result = await requestAction("marketplace-install", {
-            extensionId: item.id,
-            entitlementToken,
-          });
-          if (result.status === "cancelled") {
-            statusEl.textContent = "";
-            return;
+        async function install(item) {
+          busyId = item.id;
+          render();
+          statusEl.innerHTML = `<span class="spinner"></span>Installing ${esc(item.name || item.id)}…`;
+          try {
+            const result = item.marketplace?.subscription_required
+              ? await requestAction("marketplace-purchase", { productId: item.marketplace?.product_id || "", extensionId: item.id })
+              : { status: "active", entitlementToken: "" };
+            if (result.status === "cancelled") return;
+            if (result.status !== "active") throw new Error(result.error || "Payment did not complete");
+            await requestAction("marketplace-install", { extensionId: item.id, entitlementToken: result.entitlementToken || "" });
+            await load();
+          } catch (error) {
+            statusEl.className = "status error";
+            statusEl.textContent = error instanceof Error ? error.message : "Install failed";
+          } finally {
+            busyId = "";
+            render();
           }
+        }
+
+        async function setEnabled(extensionId, enabled) {
+          busyId = extensionId;
+          try {
+            await requestAction("marketplace-set-enabled", { extensionId, enabled });
+            await load();
+          } catch (error) {
+            statusEl.className = "status error";
+            statusEl.textContent = error instanceof Error ? error.message : "Update failed";
+          } finally {
+            busyId = "";
+          }
+        }
+
+        async function uninstall(item) {
+          busyId = item.id;
+          try {
+            await requestAction("marketplace-uninstall", { extensionId: item.id });
+            await load();
+          } catch (error) {
+            statusEl.className = "status error";
+            statusEl.textContent = error instanceof Error ? error.message : "Uninstall failed";
+          } finally {
+            busyId = "";
+          }
+        }
+
+        searchEl.addEventListener("input", render);
+        pairEl.addEventListener("click", pairDevice);
+        refreshEl.addEventListener("click", load);
+        signOutEl.addEventListener("click", async () => {
+          await requestJson(`${backendBase}/auth/logout`, { method: "POST" });
           await load();
-        } catch (error) {
-          statusEl.textContent = error instanceof Error ? error.message : "Install failed";
-        } finally {
-          busyId = "";
-        }
-      }
+        });
+        if (mode === "embedded") {
 
-      async function setEnabled(id, enabled) {
-        busyId = id;
-        statusEl.textContent = "Updating...";
-        try {
-          await requestAction("marketplace-set-enabled", {
-            extensionId: id,
-            enabled,
+          window.addEventListener("message", event => {
+            const data = event.data;
+            if (event.source !== window.parent || data?.source !== "ba-core") return;
+            if (data.action === "marketplace-auth-init" && typeof data.nonce === "string") {
+              bridgeNonce = data.nonce;
+              refreshEl.disabled = false;
+              load();
+              return;
+            }
+            if (data.nonce !== bridgeNonce || typeof data.requestId !== "string") return;
+            const pending = pendingRequests.get(data.requestId);
+            if (!pending) return;
+            pendingRequests.delete(data.requestId);
+            if (data.ok === false || data.status === "failed") pending.reject(new Error(data.error || "Marketplace request failed"));
+            else pending.resolve(pending.raw ? data : data.payload);
           });
-          await load();
-        } catch (error) {
-          statusEl.textContent = error instanceof Error ? error.message : "Update failed";
-        } finally {
-          busyId = "";
-        }
-      }
 
-      async function uninstall(item) {
-        busyId = item.id;
-        statusEl.textContent = `Uninstalling ${item.name || item.id}...`;
-        try {
-          await requestAction("marketplace-uninstall", {
-            extensionId: item.id,
-          });
-          await load();
-        } catch (error) {
-          statusEl.textContent = error instanceof Error ? error.message : "Uninstall failed";
-        } finally {
-          busyId = "";
+        } else {
+          load();
         }
-      }
-
-      refreshEl.addEventListener("click", () => {
-        void load();
-      });
-      marketplaceLogoutEl.addEventListener("click", async () => {
-        statusEl.textContent = "Signing out...";
-        await requestJson("/api/extensions/ofek-dev.marketplace/backend/auth/logout", { method: "POST" });
-        await load();
-      });
-      window.addEventListener("message", (event) => {
-        if (event.source !== window.parent || event.data?.source !== "ba-core") return;
-        if (event.data.action === "marketplace-auth-init" && typeof event.data.nonce === "string") {
-          bridgeNonce = event.data.nonce;
-          refreshEl.disabled = false;
-          void load();
-          return;
-        }
-        if (event.data.nonce === bridgeNonce && typeof event.data.requestId === "string") {
-          const pending = pendingRequests.get(event.data.requestId);
-          if (!pending) return;
-          pendingRequests.delete(event.data.requestId);
-          if (event.data.ok === false || event.data.status === "failed") {
-            pending.reject(new Error(event.data.error || "Marketplace request failed"));
-          } else {
-            pending.resolve(pending.raw ? event.data : event.data.payload);
-          }
-          return;
-        }
-        if (event.data.nonce !== bridgeNonce || event.data.action !== "marketplace-auth-result") return;
-        statusEl.textContent = event.data.status === "cancelled" ? "Sign-in cancelled." : "Sign-in complete.";
-        if (event.data.status === "authenticated") void load();
-      });
+      })();
     </script>
   </body>
 </html>

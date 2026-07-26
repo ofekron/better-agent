@@ -8,7 +8,7 @@ from urllib.parse import parse_qs, urlsplit
 SCHEME = "betteragent"
 PAIR_HOST = "marketplace"
 PAIR_PATH = "/pair"
-PROTOCOL_VERSION = "1"
+PROTOCOL_VERSION = 1
 MAX_URL_LENGTH = 512
 PAIR_TOKEN_BYTES = 32
 _TOKEN_PATTERN = re.compile(r"^[A-Za-z0-9_-]{43}$")
@@ -21,9 +21,9 @@ class DeepLinkError(ValueError):
 @dataclass(frozen=True)
 class MarketplacePairLink:
     intent: str
-    version: str = PROTOCOL_VERSION
+    version: int = PROTOCOL_VERSION
 
-    def as_event(self) -> dict[str, str]:
+    def as_event(self) -> dict[str, str | int]:
         return {
             "type": "marketplace_pair",
             "intent": self.intent,
@@ -65,7 +65,7 @@ def parse_deep_link(value: str) -> MarketplacePairLink:
     query = parse_qs(parsed.query, keep_blank_values=True, strict_parsing=True)
     if set(query) != {"v", "intent"}:
         raise DeepLinkError("unexpected deep-link fields")
-    if query["v"] != [PROTOCOL_VERSION]:
+    if query["v"] != [str(PROTOCOL_VERSION)]:
         raise DeepLinkError("unsupported deep-link version")
     intent_values = query["intent"]
     if len(intent_values) != 1 or not _valid_token(intent_values[0]):

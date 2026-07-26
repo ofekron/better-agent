@@ -1,14 +1,5 @@
 import type { UserInteractionRequest } from "../types";
-
-declare global {
-  interface Window {
-    pywebview?: {
-      api?: {
-        notify_user?: (title: string, body: string) => Promise<unknown>;
-      };
-    };
-  }
-}
+import "../desktopBridge";
 
 function requestBody(request: UserInteractionRequest): string {
   if (request.kind === "approval") return request.prompt;

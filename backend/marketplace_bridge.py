@@ -1,0 +1,1244 @@
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import secrets
+from collections.abc import Awaitable, Callable
+from copy import deepcopy
+from datetime import datetime, timezone
+from typing import Any
+from urllib.parse import urlparse
+
+import extension_store
+import marketplace_service
+from marketplace_bridge_store import MarketplaceStateStore
+from marketplace_device_identity import MarketplaceDeviceIdentity
+from marketplace_protocol import (
+    ALLOWED_ACTIONS,
+    FORBIDDEN_ACTION_FIELDS,
+    PATTERNS,
+    PROTOCOL,
+    PROTOCOL_HASH,
+    canonical_hash,
+    require_hash,
+    require_identifier,
+)
+
+_ACTIVE_INTENT_STATES = frozenset({"awaiting_confirmation", "committing"})
+_DISPLAY_FIELDS = frozenset(
+    {"extension_name", "publisher_name", "permission_delta"}
+)
+_ACTION_FIELDS = frozenset(
+    {
+        "action_id",
+        "action_type",
+        "extension_id",
+        "expected_version",
+        "snapshot_id",
+        "publisher_fingerprint",
+        "permission_hash",
+        "lease_capability",
+        *_DISPLAY_FIELDS,
+    }
+)
+
+
+class MarketplaceBridgeError(ValueError):
+    pass
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _bounded_text(
+    value: object,
+    field: str,
+    *,
+    required: bool = True,
+    maximum: int = 500,
+) -> str:
+    if not isinstance(value, str):
+        raise MarketplaceBridgeError(f"{field} must be a string")
+    text = value.strip()
+    if required and not text:
+        raise MarketplaceBridgeError(f"{field} is required")
+    if len(text) > maximum or any(ord(character) < 32 for character in text):
+        raise MarketplaceBridgeError(f"{field} is invalid")
+    return text
+
+
+def _server_origin(value: object) -> str:
+    origin = _bounded_text(value, "server_origin")
+    parsed = urlparse(origin)
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or parsed.params
+        or parsed.query
+        or parsed.fragment
+        or "%" in parsed.path
+        or "\\" in parsed.path
+        or "//" in parsed.path
+        or any(segment in {".", ".."} for segment in parsed.path.split("/"))
+    ):
+        raise MarketplaceBridgeError("server_origin is invalid")
+    return origin.rstrip("/")
+
+
+def _future_timestamp(value: object, field: str) -> str:
+    text = _bounded_text(value, field)
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise MarketplaceBridgeError(f"{field} is invalid") from exc
+    if parsed.tzinfo is None or parsed <= datetime.now(timezone.utc):
+        raise MarketplaceBridgeError(f"{field} is expired")
+    return text
+
+
+class MarketplaceBridge:
+    def __init__(
+        self,
+        *,
+        store: MarketplaceStateStore | None = None,
+        identity: MarketplaceDeviceIdentity | None = None,
+    ) -> None:
+        self._store = store or MarketplaceStateStore()
+        self._identity = identity or MarketplaceDeviceIdentity()
+        self._mutation_lock = asyncio.Lock()
+        self._wake = asyncio.Event()
+        self._stop = asyncio.Event()
+        self._task: asyncio.Task | None = None
+        self._on_change: Callable[[int], Awaitable[None]] | None = None
+        self._on_extensions_change: Callable[[], Awaitable[None]] | None = None
+
+    async def _read(self) -> dict:
+        return await asyncio.to_thread(self._store.read)
+
+    async def _write(self, state: dict) -> dict:
+        return await asyncio.to_thread(self._store.write, state)
+
+    async def _notify(self, state: dict) -> None:
+        if self._on_change is not None:
+            await self._on_change(state["revision"])
+
+    def snapshot(self) -> dict:
+        state = self._store.read()
+        device = state["device"]
+        paired_devices = []
+        revocation_pending = False
+        if isinstance(device, dict):
+            revocation_pending = device["revocation_pending"]
+            if device["paired"] and not device["revoked"]:
+                paired_devices.append(
+                    {
+                        "device_id": device["device_id"],
+                        "label": device["label"],
+                        "public_key": device["public_key"],
+                    }
+                )
+        intents = []
+        public_fields = {
+            "intent_id",
+            "action",
+            "status",
+            "extension",
+            "account_label",
+            "site_label",
+            "device_label",
+            "error",
+            "created_at",
+        }
+        for intent in state["intents"].values():
+            intents.append(
+                {
+                    key: deepcopy(value)
+                    for key, value in intent.items()
+                    if key in public_fields
+                }
+            )
+        intents.sort(key=lambda item: (item["created_at"], item["intent_id"]))
+        return {
+            "revision": state["revision"],
+            "connection_state": state["connection_state"],
+            "revocation_pending": revocation_pending,
+            "paired_devices": paired_devices,
+            "intents": intents,
+        }
+
+    async def activate_pair(self, pair_token: str, version: int) -> dict:
+        if version != 1 or not PATTERNS["pair_token"].fullmatch(pair_token):
+            raise MarketplaceBridgeError("invalid Marketplace pair intent")
+        digest = hashlib.sha256(pair_token.encode("ascii")).hexdigest()
+        intent_id = f"pair_{digest[:32]}"
+        async with self._mutation_lock:
+            state = await self._read()
+            existing_device = state["device"]
+            identity_device = (
+                None
+                if isinstance(existing_device, dict)
+                and existing_device["revoked"]
+                and not existing_device["revocation_pending"]
+                else existing_device
+            )
+            device, _ = await asyncio.to_thread(
+                self._identity.create_or_load,
+                identity_device,
+            )
+            token_account = await asyncio.to_thread(
+                self._identity.store_pair_token,
+                intent_id,
+                pair_token,
+            )
+            state["device"] = device
+            state["pending_pairs"][intent_id] = {
+                "token_account": token_account,
+                "created_at": _now(),
+            }
+            state["intents"][intent_id] = {
+                "intent_id": intent_id,
+                "action": "pair",
+                "status": "pending",
+                "device_label": device["label"],
+                "created_at": _now(),
+            }
+            state["connection_state"] = "connecting"
+            state = await self._write(state)
+        await self._notify(state)
+        self._wake.set()
+        await self._resolve_pair(intent_id)
+        return self.snapshot()
+
+    async def _resolve_pair(self, intent_id: str) -> None:
+        async with self._mutation_lock:
+            state = await self._read()
+            pending = state["pending_pairs"].get(intent_id)
+            if pending is None:
+                return
+            token = await asyncio.to_thread(
+                self._identity.get_secret,
+                pending["token_account"],
+            )
+        if token is None:
+            await self._expire_pair(intent_id)
+            return
+        context = await marketplace_service.protocol_pair_context(token.strip())
+        if context.get("protocol_hash") != PROTOCOL_HASH:
+            raise MarketplaceBridgeError("Marketplace server requires a client update")
+        site_label = _bounded_text(context.get("site_label"), "site_label")
+        account_label = _bounded_text(context.get("account_label"), "account_label")
+        origin = _server_origin(context.get("server_origin"))
+        async with self._mutation_lock:
+            state = await self._read()
+            intent = state["intents"].get(intent_id)
+            if intent is None or intent["status"] != "pending":
+                return
+            intent.update(
+                {
+                    "status": "awaiting_confirmation",
+                    "site_label": site_label,
+                    "account_label": account_label,
+                }
+            )
+            state["device"]["server_origin"] = origin
+            state = await self._write(state)
+        await self._notify(state)
+
+    async def _expire_pair(self, intent_id: str) -> None:
+        async with self._mutation_lock:
+            state = await self._read()
+            pending = state["pending_pairs"].pop(intent_id, None)
+            intent = state["intents"].get(intent_id)
+            if intent is not None:
+                intent["status"] = "expired"
+            state["connection_state"] = "unpaired"
+            state = await self._write(state)
+        if pending is not None:
+            await asyncio.to_thread(
+                self._identity.delete_secret,
+                pending["token_account"],
+            )
+        await self._notify(state)
+
+    async def approve(self, intent_id: str) -> dict:
+        if not (
+            PATTERNS["pair_intent"].fullmatch(intent_id)
+            or PATTERNS["action"].fullmatch(intent_id)
+        ):
+            raise MarketplaceBridgeError("Marketplace intent id is invalid")
+        state = await self._read()
+        intent = state["intents"].get(intent_id)
+        if intent is None:
+            raise MarketplaceBridgeError("Marketplace intent not found")
+        if intent["status"] != "awaiting_confirmation":
+            raise MarketplaceBridgeError("Marketplace intent is not awaiting confirmation")
+        if intent["action"] == "pair":
+            await self._approve_pair(intent_id)
+        else:
+            await self._approve_action(intent_id)
+        self._wake.set()
+        return self.snapshot()
+
+    async def _approve_pair(self, intent_id: str) -> None:
+        async with self._mutation_lock:
+            state = await self._read()
+            intent = state["intents"].get(intent_id)
+            pending = state["pending_pairs"].get(intent_id)
+            if (
+                intent is None
+                or pending is None
+                or intent["status"] != "awaiting_confirmation"
+            ):
+                raise MarketplaceBridgeError("Marketplace pair intent is unavailable")
+            token = await asyncio.to_thread(
+                self._identity.get_secret,
+                pending["token_account"],
+            )
+            if token is None:
+                raise MarketplaceBridgeError("Marketplace pair intent expired")
+            device, identity = await asyncio.to_thread(
+                self._identity.create_or_load,
+                state["device"],
+            )
+            response = await marketplace_service.protocol_pair(
+                {
+                    "pair_token": token.strip(),
+                    "protocol_hash": PROTOCOL_HASH,
+                    "device_id": identity.device_id,
+                    "public_key": identity.public_key,
+                    "label": identity.label,
+                    "pop_signature": self._identity.sign_pair(identity, token.strip()),
+                }
+            )
+            if (
+                response.get("protocol_hash") != PROTOCOL_HASH
+                or response.get("device_id") != identity.device_id
+                or _server_origin(response.get("server_origin"))
+                != device["server_origin"]
+            ):
+                raise MarketplaceBridgeError("Marketplace pair response is invalid")
+            device["paired"] = True
+            device["revoked"] = False
+            device["revocation_pending"] = False
+            intent["status"] = "redeemed"
+            state["connection_state"] = "connected"
+            state["pending_pairs"].pop(intent_id, None)
+            state = await self._write(state)
+        await asyncio.to_thread(
+            self._identity.delete_secret,
+            pending["token_account"],
+        )
+        await self._notify(state)
+
+    async def reject(self, intent_id: str) -> dict:
+        async with self._mutation_lock:
+            state = await self._read()
+            intent = state["intents"].get(intent_id)
+            if intent is None:
+                raise MarketplaceBridgeError("Marketplace intent not found")
+            if intent["status"] != "awaiting_confirmation":
+                raise MarketplaceBridgeError(
+                    "Marketplace intent is not awaiting confirmation"
+                )
+            if intent["action"] == "pair":
+                pending = state["pending_pairs"].pop(intent_id, None)
+                token = (
+                    await asyncio.to_thread(
+                        self._identity.get_secret,
+                        pending["token_account"],
+                    )
+                    if pending is not None
+                    else None
+                )
+                intent["status"] = "rejected"
+                state["connection_state"] = "unpaired"
+                state = await self._write(state)
+            else:
+                intent["status"] = "rejected"
+                intent["rejection_pending"] = True
+                state = await self._write(state)
+                pending = None
+                token = None
+        await self._notify(state)
+        if pending is not None:
+            try:
+                if token is not None:
+                    await marketplace_service.protocol_pair_reject(token.strip())
+            finally:
+                await asyncio.to_thread(
+                    self._identity.delete_secret,
+                    pending["token_account"],
+                )
+        elif intent["action"] != "pair":
+            await self._flush_rejection(intent_id)
+        self._wake.set()
+        return self.snapshot()
+
+    async def _challenge(self, device_id: str) -> str:
+        response = await marketplace_service.protocol_challenges(device_id)
+        challenges = response.get("challenges")
+        _future_timestamp(response.get("expires_at"), "challenge expiry")
+        if (
+            not isinstance(challenges, list)
+            or not 1 <= len(challenges) <= PROTOCOL["bounds"]["challenge_batch_max"]
+        ):
+            raise MarketplaceBridgeError("Marketplace challenge batch is invalid")
+        return require_identifier("challenge", challenges[0])
+
+    async def _signed_operation(
+        self,
+        state: dict,
+        operation: str,
+        path_values: dict[str, str],
+        body: dict[str, Any],
+    ) -> tuple[str, dict[str, Any]]:
+        device, identity = await asyncio.to_thread(
+            self._identity.create_or_load,
+            state["device"],
+        )
+        if device["revoked"]:
+            raise MarketplaceBridgeError("Marketplace device is revoked")
+        challenge = await self._challenge(identity.device_id)
+        return self._identity.sign_device_request(
+            identity,
+            operation,
+            path_values,
+            body,
+            challenge,
+            device["server_origin"],
+        )
+
+    def _extension_state(self, extension_id: str) -> dict:
+        record = extension_store.get_extension(extension_id)
+        if record is None:
+            return {"exists": False}
+        return {
+            "exists": True,
+            "source_type": str((record.get("source") or {}).get("type") or ""),
+            "version": str((record.get("manifest") or {}).get("version") or ""),
+            "enabled": record.get("enabled") is True,
+        }
+
+    def _validate_action(self, raw: object) -> dict | None:
+        if raw is None:
+            return None
+        if not isinstance(raw, dict) or not set(raw) <= _ACTION_FIELDS:
+            raise MarketplaceBridgeError("Marketplace action has an invalid shape")
+        if FORBIDDEN_ACTION_FIELDS & set(raw):
+            raise MarketplaceBridgeError("Marketplace action contains forbidden fields")
+        action_id = require_identifier("action", raw.get("action_id"))
+        action = str(raw.get("action_type") or "")
+        if action not in ALLOWED_ACTIONS:
+            raise MarketplaceBridgeError("Marketplace action is not allowed")
+        extension_id = require_identifier("extension", raw.get("extension_id"))
+        snapshot_id = require_identifier("snapshot", raw.get("snapshot_id"))
+        lease_capability = _bounded_text(
+            raw.get("lease_capability"),
+            "lease_capability",
+        )
+        expected_version = _bounded_text(
+            raw.get("expected_version", ""),
+            "expected_version",
+            required=action in {"install", "update"},
+            maximum=128,
+        )
+        publisher_fingerprint = str(raw.get("publisher_fingerprint") or "")
+        permission_hash = str(raw.get("permission_hash") or "")
+        if action in {"install", "update"}:
+            publisher_fingerprint = require_hash(
+                publisher_fingerprint,
+                "publisher_fingerprint",
+            )
+            permission_hash = require_hash(permission_hash, "permission_hash")
+        elif publisher_fingerprint or permission_hash:
+            raise MarketplaceBridgeError(
+                "Marketplace action has unexpected target hashes"
+            )
+        permission_delta = raw.get("permission_delta", [])
+        if (
+            not isinstance(permission_delta, list)
+            or len(permission_delta) > PROTOCOL["bounds"]["permission_count_max"]
+        ):
+            raise MarketplaceBridgeError("Marketplace permission delta is invalid")
+        extension = {
+            "id": extension_id,
+            "name": _bounded_text(
+                raw.get("extension_name", extension_id),
+                "extension_name",
+            ),
+            "version": expected_version,
+            "publisher": _bounded_text(
+                raw.get("publisher_name", ""),
+                "publisher_name",
+                required=False,
+            ),
+            "permission_delta": [
+                _bounded_text(value, "permission") for value in permission_delta
+            ],
+        }
+        approved_target = {
+            "snapshot_id": snapshot_id,
+            "publisher_fingerprint": publisher_fingerprint,
+            "permission_hash": permission_hash,
+        }
+        envelope = {
+            "action_id": action_id,
+            "action_type": action,
+            "extension_id": extension_id,
+            "expected_version": expected_version,
+            **approved_target,
+        }
+        precondition = self._extension_state(extension_id)
+        if action == "install" and precondition["exists"]:
+            raise MarketplaceBridgeError(
+                "Marketplace install target is already installed"
+            )
+        if action != "install" and (
+            not precondition["exists"]
+            or precondition.get("source_type") != "marketplace"
+        ):
+            raise MarketplaceBridgeError(
+                "Marketplace action target is not an installed Marketplace extension"
+            )
+        desired = self._desired_state(action, expected_version, precondition)
+        return {
+            "intent_id": action_id,
+            "action": action,
+            "status": "awaiting_confirmation",
+            "extension": extension,
+            "lease_capability": lease_capability,
+            "envelope_digest": canonical_hash(envelope),
+            "approved_target": approved_target,
+            "precondition": precondition,
+            "desired": desired,
+            "created_at": _now(),
+        }
+
+    @staticmethod
+    def _desired_state(
+        action: str,
+        expected_version: str,
+        precondition: dict,
+    ) -> dict:
+        if action == "uninstall":
+            return {"exists": False}
+        if action == "enable":
+            return {**precondition, "enabled": True}
+        if action == "disable":
+            return {**precondition, "enabled": False}
+        if action == "install":
+            return {
+                "exists": True,
+                "source_type": "marketplace",
+                "version": expected_version,
+                "enabled": False,
+            }
+        return {
+            "exists": True,
+            "source_type": "marketplace",
+            "version": expected_version,
+            "enabled": bool(precondition.get("enabled")),
+        }
+
+    async def _resolve_catalog(
+        self,
+        state: dict,
+        intent: dict,
+    ) -> tuple[dict, str, int]:
+        target = intent["approved_target"]
+        extension_id = intent["extension"]["id"]
+        response = await marketplace_service.protocol_catalog_snapshot(
+            target["snapshot_id"],
+            extension_id,
+        )
+        verified = await asyncio.to_thread(
+            extension_store.verify_marketplace_catalog_snapshot,
+            catalog=response.get("catalog"),
+            signature=str(response.get("signature") or ""),
+            snapshot_id=target["snapshot_id"],
+            extension_id=extension_id,
+            expected_version=intent["extension"]["version"],
+            publisher_fingerprint=target["publisher_fingerprint"],
+            permission_hash=target["permission_hash"],
+            minimum_sequence=state["catalog_sequences"].get("default-v1", 0),
+        )
+        return verified["metadata"], verified["key_id"], verified["sequence"]
+
+    async def _resolve_action_metadata(self, state: dict, intent: dict) -> dict:
+        verified, _, _ = await self._resolve_catalog(state, intent)
+        action_id = intent["intent_id"]
+        metadata = await marketplace_service.protocol_action_metadata(action_id)
+        expected = {
+            "extension_id": intent["extension"]["id"],
+            "version": intent["extension"]["version"],
+            "artifact_sha256": verified.get("artifact_sha256"),
+            "signature": verified.get("signature")
+            or verified.get("artifact_signature"),
+            "signature_alg": "ed25519",
+        }
+        actual = {
+            "extension_id": metadata.get("extension_id"),
+            "version": metadata.get("version"),
+            "artifact_sha256": metadata.get("artifact_sha256"),
+            "signature": metadata.get("signature"),
+            "signature_alg": metadata.get("signature_alg"),
+        }
+        if actual != expected:
+            raise MarketplaceBridgeError(
+                "Marketplace action metadata does not match the approved catalog"
+            )
+        return metadata
+
+    async def _approve_action(self, intent_id: str) -> None:
+        async with self._mutation_lock:
+            state = await self._read()
+            intent = deepcopy(state["intents"].get(intent_id))
+            device = deepcopy(state["device"])
+            if intent is None or intent["status"] != "awaiting_confirmation":
+                raise MarketplaceBridgeError("Marketplace action is unavailable")
+            if not isinstance(device, dict) or device["revoked"] or not device["paired"]:
+                raise MarketplaceBridgeError("Marketplace device is unavailable")
+            epoch = device["epoch"]
+        catalog_key = ""
+        catalog_sequence = 0
+        if intent["action"] in {"install", "update"}:
+            _, catalog_key, catalog_sequence = await self._resolve_catalog(
+                state,
+                intent,
+            )
+        receipt_revision = state["revision"] + 1
+        fence_body = {
+            "protocol_hash": PROTOCOL_HASH,
+            "lease_capability": intent["lease_capability"],
+            "envelope_digest": intent["envelope_digest"],
+            "receipt_revision": receipt_revision,
+        }
+        _, signed = await self._signed_operation(
+            state,
+            "fence",
+            {"device_id": device["device_id"], "action_id": intent_id},
+            fence_body,
+        )
+        fenced = await marketplace_service.protocol_fence(
+            device["device_id"],
+            intent_id,
+            signed,
+        )
+        terminal_capability = _bounded_text(
+            fenced.get("terminal_capability"),
+            "terminal_capability",
+        )
+        reconcile_deadline = _future_timestamp(
+            fenced.get("reconcile_deadline"),
+            "reconcile_deadline",
+        )
+        async with self._mutation_lock:
+            state = await self._read()
+            current_device = state["device"]
+            current_intent = state["intents"].get(intent_id)
+            if (
+                not isinstance(current_device, dict)
+                or current_device["epoch"] != epoch
+                or current_device["revoked"]
+                or current_intent is None
+                or current_intent["status"] != "awaiting_confirmation"
+            ):
+                raise MarketplaceBridgeError(
+                    "Marketplace device changed while fencing action"
+                )
+            if catalog_key:
+                state["catalog_sequences"][catalog_key] = max(
+                    state["catalog_sequences"].get(catalog_key, 0),
+                    catalog_sequence,
+                )
+            capability_account = await asyncio.to_thread(
+                self._identity.store_terminal_capability,
+                intent_id,
+                terminal_capability,
+            )
+            receipt = {
+                "action_id": intent_id,
+                "intent_id": intent_id,
+                "device_id": device["device_id"],
+                "device_epoch": epoch,
+                "envelope_digest": intent["envelope_digest"],
+                "receipt_revision": receipt_revision,
+                "action": intent["action"],
+                "extension_id": intent["extension"]["id"],
+                "expected_version": intent["extension"]["version"],
+                "approved_target": deepcopy(intent["approved_target"]),
+                "precondition": deepcopy(intent["precondition"]),
+                "desired": deepcopy(intent["desired"]),
+                "phase": "fenced",
+                "terminal_capability_account": capability_account,
+                "terminal_result": None,
+                "ack_status": "pending",
+                "created_at": _now(),
+                "reconcile_deadline": reconcile_deadline,
+            }
+            state["receipts"][intent_id] = receipt
+            current_intent["status"] = "committing"
+            state = await self._write(state)
+        await self._notify(state)
+        await self._run_receipt(intent_id)
+
+    async def _execute_receipt(
+        self,
+        state: dict,
+        receipt: dict,
+        *,
+        metadata: dict | None = None,
+    ) -> None:
+        action = receipt["action"]
+        extension_id = receipt["extension_id"]
+        if action in {"install", "update"}:
+            if metadata is None:
+                intent = state["intents"][receipt["intent_id"]]
+                metadata = await self._resolve_action_metadata(state, intent)
+            if action == "install":
+                await marketplace_service.install_exact(
+                    extension_id,
+                    metadata,
+                    expected_version=receipt["expected_version"],
+                )
+                await asyncio.to_thread(
+                    extension_store.set_enabled,
+                    extension_id,
+                    False,
+                    required_source_type="marketplace",
+                )
+                return
+            await marketplace_service.update_exact(
+                extension_id,
+                metadata,
+                expected_version=receipt["expected_version"],
+            )
+            return
+        if action in {"enable", "disable"}:
+            await asyncio.to_thread(
+                extension_store.set_enabled,
+                extension_id,
+                action == "enable",
+                required_source_type="marketplace",
+            )
+            return
+        if action == "uninstall":
+            await asyncio.to_thread(
+                extension_store.uninstall,
+                extension_id,
+                required_source_type="marketplace",
+            )
+            return
+        raise MarketplaceBridgeError("Marketplace action is not allowed")
+
+    async def _run_receipt(
+        self,
+        action_id: str,
+        *,
+        metadata: dict | None = None,
+    ) -> None:
+        async with self._mutation_lock:
+            state = await self._read()
+            receipt = state["receipts"].get(action_id)
+            if receipt is None or receipt["phase"] == "terminal":
+                return
+            if datetime.fromisoformat(
+                receipt["reconcile_deadline"].replace("Z", "+00:00")
+            ) <= datetime.now(timezone.utc):
+                outcome = result_code = "failed_unknown"
+                execute = False
+            else:
+                actual = await asyncio.to_thread(
+                    self._extension_state,
+                    receipt["extension_id"],
+                )
+                if actual == receipt["desired"]:
+                    outcome, result_code, execute = "succeeded", "ok", False
+                elif actual == receipt["precondition"]:
+                    receipt["phase"] = "effect_started"
+                    state = await self._write(state)
+                    outcome = result_code = ""
+                    execute = True
+                else:
+                    outcome = result_code = "failed_unknown"
+                    execute = False
+        if execute:
+            try:
+                await self._execute_receipt(state, receipt, metadata=metadata)
+            except Exception as exc:
+                actual = await asyncio.to_thread(
+                    self._extension_state,
+                    receipt["extension_id"],
+                )
+                if actual == receipt["desired"]:
+                    outcome, result_code = "succeeded", "ok"
+                elif actual == receipt["precondition"]:
+                    outcome, result_code = "failed", "local_mutation_failed"
+                else:
+                    outcome = result_code = "failed_unknown"
+                async with self._mutation_lock:
+                    current = await self._read()
+                    intent = current["intents"].get(action_id)
+                    if intent is not None:
+                        intent["error"] = str(exc)[:500]
+                    current = await self._write(current)
+                await self._notify(current)
+            else:
+                outcome, result_code = "succeeded", "ok"
+                async with self._mutation_lock:
+                    current = await self._read()
+                    current_receipt = current["receipts"].get(action_id)
+                    if current_receipt is not None:
+                        current_receipt["phase"] = "effect_applied"
+                        current = await self._write(current)
+                if self._on_extensions_change is not None:
+                    await self._on_extensions_change()
+                await self._publish_projection()
+        await self._finalize_receipt(action_id, outcome, result_code)
+
+    async def _finalize_receipt(
+        self,
+        action_id: str,
+        outcome: str,
+        result_code: str,
+    ) -> None:
+        async with self._mutation_lock:
+            state = await self._read()
+            receipt = state["receipts"].get(action_id)
+            if receipt is None:
+                return
+            terminal_result = {
+                "outcome": outcome,
+                "result_code": result_code,
+            }
+            if (
+                receipt["terminal_result"] is not None
+                and receipt["terminal_result"] != terminal_result
+            ):
+                receipt["ack_status"] = "conflict"
+                state = await self._write(state)
+                conflict = True
+                capability = None
+            else:
+                conflict = False
+                receipt["terminal_result"] = terminal_result
+                receipt["phase"] = "terminal"
+                state["tombstones"][action_id] = {
+                    "envelope_digest": receipt["envelope_digest"],
+                    "terminal_result": deepcopy(terminal_result),
+                    "receipt_revision": receipt["receipt_revision"],
+                    "created_at": _now(),
+                }
+                intent = state["intents"].get(action_id)
+                if intent is not None:
+                    intent["status"] = outcome
+                state = await self._write(state)
+                capability = await asyncio.to_thread(
+                    self._identity.get_secret,
+                    receipt["terminal_capability_account"],
+                )
+        if conflict:
+            await self._notify(state)
+            raise MarketplaceBridgeError("Marketplace terminal ack conflicts")
+        if capability is None:
+            raise MarketplaceBridgeError(
+                "Marketplace terminal capability is unavailable"
+            )
+        try:
+            response = await marketplace_service.protocol_ack(
+                action_id,
+                {
+                    "terminal_capability": capability,
+                    "envelope_digest": receipt["envelope_digest"],
+                    "outcome": outcome,
+                    "result_code": result_code,
+                    "receipt_revision": receipt["receipt_revision"],
+                },
+            )
+        except Exception as exc:
+            if getattr(exc, "status_code", None) != 409:
+                raise
+            async with self._mutation_lock:
+                state = await self._read()
+                current = state["receipts"].get(action_id)
+                if current is not None:
+                    current["ack_status"] = "conflict"
+                    state = await self._write(state)
+            await self._notify(state)
+            raise MarketplaceBridgeError(
+                "Marketplace terminal ack conflicts"
+            ) from exc
+        if (
+            response.get("outcome") != outcome
+            or response.get("result_code") != result_code
+        ):
+            async with self._mutation_lock:
+                state = await self._read()
+                current = state["receipts"].get(action_id)
+                if current is not None:
+                    current["ack_status"] = "conflict"
+                    state = await self._write(state)
+            await self._notify(state)
+            raise MarketplaceBridgeError("Marketplace terminal ack conflicts")
+        async with self._mutation_lock:
+            state = await self._read()
+            current = state["receipts"].get(action_id)
+            if current is not None:
+                current["ack_status"] = "acked"
+                account = current["terminal_capability_account"]
+                state["receipts"].pop(action_id, None)
+                state = await self._write(state)
+            else:
+                account = ""
+        if account:
+            await asyncio.to_thread(self._identity.delete_secret, account)
+        await self._maybe_delete_revoked_key(state)
+        await self._notify(state)
+
+    async def _flush_rejection(self, action_id: str) -> None:
+        async with self._mutation_lock:
+            state = await self._read()
+            intent = deepcopy(state["intents"].get(action_id))
+            device = deepcopy(state["device"])
+            if (
+                intent is None
+                or not intent.get("rejection_pending")
+                or not isinstance(device, dict)
+                or device["revoked"]
+            ):
+                return
+            epoch = device["epoch"]
+        _, signed = await self._signed_operation(
+            state,
+            "reject",
+            {"device_id": device["device_id"], "action_id": action_id},
+            {
+                "protocol_hash": PROTOCOL_HASH,
+                "lease_capability": intent["lease_capability"],
+                "envelope_digest": intent["envelope_digest"],
+            },
+        )
+        await marketplace_service.protocol_reject(
+            device["device_id"],
+            action_id,
+            signed,
+        )
+        async with self._mutation_lock:
+            state = await self._read()
+            current_device = state["device"]
+            current = state["intents"].get(action_id)
+            if (
+                isinstance(current_device, dict)
+                and current_device["epoch"] == epoch
+                and current is not None
+            ):
+                current["rejection_pending"] = False
+                state = await self._write(state)
+        await self._notify(state)
+
+    async def _publish_projection(self) -> None:
+        async with self._mutation_lock:
+            state = await self._read()
+            device = deepcopy(state["device"])
+            if (
+                not isinstance(device, dict)
+                or device["revoked"]
+                or not device["paired"]
+            ):
+                return
+            epoch = device["epoch"]
+            revision = state["projection_revision"] + 1
+        extensions = []
+        for record in await asyncio.to_thread(extension_store.list_extensions):
+            if (record.get("source") or {}).get("type") != "marketplace":
+                continue
+            manifest = record.get("manifest") or {}
+            extensions.append(
+                {
+                    "id": manifest.get("id"),
+                    "version": manifest.get("version"),
+                    "enabled": record.get("enabled") is True,
+                }
+            )
+        extensions.sort(key=lambda item: str(item["id"]))
+        _, signed = await self._signed_operation(
+            state,
+            "projection",
+            {"device_id": device["device_id"]},
+            {
+                "protocol_hash": PROTOCOL_HASH,
+                "revision": revision,
+                "extensions": extensions,
+            },
+        )
+        await marketplace_service.protocol_projection(device["device_id"], signed)
+        async with self._mutation_lock:
+            state = await self._read()
+            current = state["device"]
+            if (
+                isinstance(current, dict)
+                and current["epoch"] == epoch
+                and not current["revoked"]
+            ):
+                state["projection_revision"] = revision
+                state = await self._write(state)
+        await self._notify(state)
+
+    async def revoke(self, device_id: str) -> dict:
+        require_identifier("device", device_id)
+        async with self._mutation_lock:
+            state = await self._read()
+            device = state["device"]
+            if not isinstance(device, dict) or device["device_id"] != device_id:
+                raise MarketplaceBridgeError("Marketplace device not found")
+            if not device["revoked"]:
+                device["epoch"] += 1
+                device["paired"] = False
+                device["revoked"] = True
+                device["revocation_pending"] = True
+                state["connection_state"] = "unpaired"
+                for intent in state["intents"].values():
+                    if intent["status"] == "awaiting_confirmation":
+                        intent["status"] = "cancelled"
+                state = await self._write(state)
+        await self._notify(state)
+        self._wake.set()
+        await self._reconcile_revocation()
+        return self.snapshot()
+
+    async def _reconcile_revocation(self) -> None:
+        async with self._mutation_lock:
+            state = await self._read()
+            device = deepcopy(state["device"])
+            if (
+                not isinstance(device, dict)
+                or not device["revoked"]
+                or not device["revocation_pending"]
+            ):
+                return
+            _, identity = await asyncio.to_thread(
+                self._identity.create_or_load,
+                state["device"],
+            )
+        challenge = await self._challenge(device["device_id"])
+        path, signed = self._identity.sign_device_request(
+            identity,
+            "revoke",
+            {"device_id": device["device_id"]},
+            {"protocol_hash": PROTOCOL_HASH},
+            challenge,
+            device["server_origin"],
+        )
+        if path != f"/protocol/v1/devices/{device['device_id']}/revoke":
+            raise MarketplaceBridgeError("Marketplace revoke path is invalid")
+        response = await marketplace_service.protocol_revoke(
+            device["device_id"],
+            signed,
+        )
+        if (
+            response.get("device_id") != device["device_id"]
+            or response.get("revoked") is not True
+        ):
+            raise MarketplaceBridgeError("Marketplace revoke response is invalid")
+        async with self._mutation_lock:
+            state = await self._read()
+            current = state["device"]
+            if (
+                isinstance(current, dict)
+                and current["device_id"] == device["device_id"]
+                and current["revoked"]
+            ):
+                current["revocation_pending"] = False
+                state = await self._write(state)
+        await self._maybe_delete_revoked_key(state)
+        await self._notify(state)
+
+    async def _maybe_delete_revoked_key(self, state: dict) -> None:
+        device = state["device"]
+        if (
+            isinstance(device, dict)
+            and device["revoked"]
+            and not device["revocation_pending"]
+            and not state["receipts"]
+        ):
+            await asyncio.to_thread(self._identity.delete_private_key)
+
+    async def _lease_next(self) -> None:
+        async with self._mutation_lock:
+            state = await self._read()
+            device = deepcopy(state["device"])
+            if (
+                not isinstance(device, dict)
+                or device["revoked"]
+                or not device["paired"]
+                or any(
+                    intent["status"] in _ACTIVE_INTENT_STATES
+                    for intent in state["intents"].values()
+                )
+            ):
+                return
+            epoch = device["epoch"]
+        _, signed = await self._signed_operation(
+            state,
+            "lease",
+            {"device_id": device["device_id"]},
+            {
+                "protocol_hash": PROTOCOL_HASH,
+                "wait_seconds": PROTOCOL["bounds"]["lease_wait_seconds_max"],
+            },
+        )
+        payload = await marketplace_service.protocol_lease(
+            device["device_id"],
+            signed,
+        )
+        action = self._validate_action(payload.get("action"))
+        async with self._mutation_lock:
+            state = await self._read()
+            current = state["device"]
+            if (
+                not isinstance(current, dict)
+                or current["epoch"] != epoch
+                or current["revoked"]
+                or not current["paired"]
+            ):
+                return
+            state["connection_state"] = "connected"
+            if action is not None:
+                tombstone = state["tombstones"].get(action["intent_id"])
+                if tombstone is not None:
+                    if tombstone["envelope_digest"] != action["envelope_digest"]:
+                        raise MarketplaceBridgeError(
+                            "Marketplace action id conflicts with tombstone"
+                        )
+                    return
+                existing = state["intents"].get(action["intent_id"])
+                if (
+                    existing is not None
+                    and existing["envelope_digest"] != action["envelope_digest"]
+                ):
+                    raise MarketplaceBridgeError(
+                        "Marketplace action id has a conflicting envelope"
+                    )
+                state["intents"][action["intent_id"]] = action
+            state = await self._write(state)
+        await self._notify(state)
+
+    async def _reconcile(self) -> None:
+        state = await self._read()
+        for intent_id, pending in list(state["pending_pairs"].items()):
+            if state["intents"].get(intent_id, {}).get("status") == "pending":
+                try:
+                    await self._resolve_pair(intent_id)
+                except Exception:
+                    pass
+        for action_id, receipt in list(state["receipts"].items()):
+            try:
+                if receipt["phase"] == "terminal":
+                    result = receipt["terminal_result"]
+                    await self._finalize_receipt(
+                        action_id,
+                        result["outcome"],
+                        result["result_code"],
+                    )
+                else:
+                    await self._run_receipt(action_id)
+            except Exception:
+                pass
+        for action_id, intent in list(state["intents"].items()):
+            if intent.get("rejection_pending"):
+                try:
+                    await self._flush_rejection(action_id)
+                except Exception:
+                    pass
+        try:
+            await self._reconcile_revocation()
+        except Exception:
+            pass
+
+    async def _can_lease(self) -> bool:
+        state = await self._read()
+        device = state["device"]
+        return bool(
+            isinstance(device, dict)
+            and device["paired"]
+            and not device["revoked"]
+            and not any(
+                intent["status"] in _ACTIVE_INTENT_STATES
+                for intent in state["intents"].values()
+            )
+        )
+
+    async def _run(self) -> None:
+        while not self._stop.is_set():
+            await self._reconcile()
+            self._wake.clear()
+            if not await self._can_lease():
+                await self._wait_for_wake()
+                continue
+            lease = asyncio.create_task(self._lease_next())
+            wake = asyncio.create_task(self._wake.wait())
+            done, pending = await asyncio.wait(
+                {lease, wake},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+            if lease in done:
+                try:
+                    await lease
+                except Exception:
+                    state = await self._read()
+                    if state["connection_state"] != "unpaired":
+                        state["connection_state"] = "offline"
+                        state = await self._write(state)
+                        await self._notify(state)
+                    await self._wait_for_wake(timeout=5)
+
+    async def _wait_for_wake(self, timeout: float | None = None) -> None:
+        wake = asyncio.create_task(self._wake.wait())
+        stop = asyncio.create_task(self._stop.wait())
+        tasks = {wake, stop}
+        if timeout is not None:
+            retry = asyncio.create_task(asyncio.sleep(timeout))
+            tasks.add(retry)
+        done, pending = await asyncio.wait(
+            tasks,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+        for task in done:
+            if not task.cancelled():
+                task.exception()
+
+    async def start(
+        self,
+        on_change: Callable[[int], Awaitable[None]],
+        on_extensions_change: Callable[[], Awaitable[None]],
+    ) -> None:
+        if self._task is not None and not self._task.done():
+            return
+        self._on_change = on_change
+        self._on_extensions_change = on_extensions_change
+        self._stop = asyncio.Event()
+        self._wake = asyncio.Event()
+        self._task = asyncio.create_task(
+            self._run(),
+            name="marketplace-bridge",
+        )
+
+    async def stop(self) -> None:
+        self._stop.set()
+        self._wake.set()
+        task = self._task
+        self._task = None
+        if task is not None:
+            await task
+
+
+bridge = MarketplaceBridge()

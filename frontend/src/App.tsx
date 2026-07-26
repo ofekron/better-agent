@@ -39,6 +39,7 @@ import { setFocusedTagHighlight } from "./utils/tagHighlights";
 import { scrollCommentTargetIntoView } from "./utils/commentFocus";
 import { additionalSessionSubscriptionIds } from "./utils/sessionSubscriptions";
 import { StartupTasksBanner } from "./components/StartupTasksBanner";
+import { MarketplaceBridgeCenter } from "./components/MarketplaceBridgeCenter";
 import { SettingsPage } from "./components/SettingsPage";
 import { ExtensionModuleSlot, useExtensionFrontendModules } from "./components/ExtensionSlots";
 import { useAttentionSound } from "./utils/attentionSound";
@@ -6580,6 +6581,7 @@ function AppMain({
         </div>
       )}
       <StartupTasksBanner />
+      {authStatus === "authed" ? <MarketplaceBridgeCenter /> : null}
       {authStatus === "authed" &&
         sessionDragOverlayModules.map((module) => (
           <ExtensionModuleSlot

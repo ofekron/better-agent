@@ -11,10 +11,36 @@ from collections.abc import Callable
 from pathlib import Path
 
 MAX_MESSAGE_BYTES = 2048
+ActivationEvent = dict[str, str | int]
 _EVENT_FIELDS = {
     "activate": {"type"},
     "marketplace_pair": {"type", "intent", "version"},
 }
+
+
+def _process_alive(pid: int) -> bool:
+    if os.name != "nt":
+        try:
+            os.kill(pid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except OSError:
+            return True
+    import ctypes
+    process = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)
+    if not process:
+        return False
+    try:
+        exit_code = ctypes.c_ulong()
+        if not ctypes.windll.kernel32.GetExitCodeProcess(
+            process,
+            ctypes.byref(exit_code),
+        ):
+            return False
+        return exit_code.value == 259
+    finally:
+        ctypes.windll.kernel32.CloseHandle(process)
 
 
 def _valid_event(value: object) -> bool:
@@ -23,11 +49,18 @@ def _valid_event(value: object) -> bool:
     expected = _EVENT_FIELDS.get(value["type"])
     if expected is None or set(value) != expected:
         return False
-    return all(isinstance(item, str) for item in value.values())
+    if value["type"] == "activate":
+        return True
+    return (
+        isinstance(value.get("intent"), str)
+        and isinstance(value.get("version"), int)
+        and not isinstance(value.get("version"), bool)
+        and value["version"] == 1
+    )
 
 
 class ActivationServer:
-    def __init__(self, state_dir: Path, on_activation: Callable[[dict[str, str]], None]):
+    def __init__(self, state_dir: Path, on_activation: Callable[[ActivationEvent], None]):
         self._state_path = state_dir / "desktop_activation.json"
         self._owner_path = state_dir / "desktop_activation.owner"
         self._on_activation = on_activation
@@ -65,10 +98,8 @@ class ActivationServer:
                 try:
                     owner = json.loads(self._owner_path.read_text(encoding="utf-8"))
                     pid = owner.get("pid") if isinstance(owner, dict) else None
-                    if isinstance(pid, int):
-                        os.kill(pid, 0)
+                    if isinstance(pid, int) and _process_alive(pid):
                         raise RuntimeError("desktop instance already running")
-                except ProcessLookupError:
                     self._owner_path.unlink(missing_ok=True)
                     continue
                 except (OSError, json.JSONDecodeError):
@@ -168,7 +199,7 @@ class ActivationServer:
         self._release_ownership()
 
 
-def forward_activation(state_dir: Path, event: dict[str, str]) -> bool:
+def forward_activation(state_dir: Path, event: ActivationEvent) -> bool:
     if not _valid_event(event):
         return False
     try:
@@ -196,7 +227,7 @@ def forward_activation(state_dir: Path, event: dict[str, str]) -> bool:
 
 def forward_activation_when_ready(
     state_dir: Path,
-    event: dict[str, str],
+    event: ActivationEvent,
     timeout: float = 1.0,
 ) -> bool:
     deadline = time.monotonic() + timeout

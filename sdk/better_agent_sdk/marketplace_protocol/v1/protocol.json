@@ -1,0 +1,239 @@
+{
+  "name": "better-agent-marketplace",
+  "version": 1,
+  "compatibility": {
+    "protocol_hash": "sha256 of the exact UTF-8 protocol.json bytes",
+    "mismatch_error": "client_update_required",
+    "fallback": false
+  },
+  "canonical_json": {
+    "encoding": "UTF-8",
+    "object_keys": "lexicographic",
+    "separators": [",", ":"],
+    "ensure_ascii": false,
+    "allow_nan": false
+  },
+  "bounds": {
+    "pair_token_bytes": 32,
+    "pair_ttl_seconds": 300,
+    "challenge_ttl_seconds": 60,
+    "challenge_batch_max": 4,
+    "lease_wait_seconds_max": 30,
+    "terminal_reconcile_seconds": 900,
+    "display_text_max": 500,
+    "permission_count_max": 64
+  },
+  "identifiers": {
+    "pair_token": "^[A-Za-z0-9_-]{43}$",
+    "pair_intent": "^pair_[a-f0-9]{32}$",
+    "device": "^badvc_[a-f0-9]{32}$",
+    "action": "^baact_[a-f0-9]{32}$",
+    "challenge": "^bachal_[A-Za-z0-9_-]{43}$",
+    "extension": "^[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?$",
+    "sha256": "^[a-f0-9]{64}$",
+    "snapshot": "^[A-Za-z0-9._-]{1,80}:[0-9]{1,20}:[a-f0-9]{64}$"
+  },
+  "pair_states": [
+    "pending",
+    "awaiting_confirmation",
+    "redeemed",
+    "rejected",
+    "cancelled",
+    "expired"
+  ],
+  "pair_transitions": {
+    "pending": ["awaiting_confirmation", "cancelled", "expired"],
+    "awaiting_confirmation": ["redeemed", "rejected", "cancelled", "expired"],
+    "redeemed": [],
+    "rejected": [],
+    "cancelled": [],
+    "expired": []
+  },
+  "action_states": [
+    "pending",
+    "leased",
+    "awaiting_confirmation",
+    "committing",
+    "succeeded",
+    "rejected",
+    "failed",
+    "failed_unknown",
+    "expired",
+    "cancelled"
+  ],
+  "action_transitions": {
+    "pending": ["leased", "expired", "cancelled"],
+    "leased": ["awaiting_confirmation", "pending", "expired", "cancelled"],
+    "awaiting_confirmation": ["committing", "rejected", "expired", "cancelled"],
+    "committing": ["succeeded", "failed", "failed_unknown"],
+    "succeeded": [],
+    "rejected": [],
+    "failed": [],
+    "failed_unknown": [],
+    "expired": [],
+    "cancelled": []
+  },
+  "actions": {
+    "install": {
+      "required": ["extension_id", "expected_version", "snapshot_id", "publisher_fingerprint", "permission_hash"],
+      "effect": "install the exact verified target disabled"
+    },
+    "enable": {
+      "required": ["extension_id", "snapshot_id"],
+      "effect": "enable an installed Marketplace extension"
+    },
+    "disable": {
+      "required": ["extension_id", "snapshot_id"],
+      "effect": "disable an installed Marketplace extension"
+    },
+    "update": {
+      "required": ["extension_id", "expected_version", "snapshot_id", "publisher_fingerprint", "permission_hash"],
+      "effect": "update to the exact verified target"
+    },
+    "uninstall": {
+      "required": ["extension_id", "snapshot_id"],
+      "effect": "uninstall an installed Marketplace extension"
+    }
+  },
+  "forbidden_action_fields": [
+    "artifact_url",
+    "artifact_sha256",
+    "artifact_signature",
+    "download_url",
+    "metadata_url",
+    "command",
+    "arguments"
+  ],
+  "signatures": {
+    "algorithm": "Ed25519",
+    "body_hash": "sha256(canonical_json(body_without_signature))",
+    "device_transcript_lines": [
+      "better-agent-marketplace",
+      "protocol-v1",
+      "protocol_hash",
+      "server_origin",
+      "method",
+      "path",
+      "device_id",
+      "challenge",
+      "body_hash"
+    ],
+    "pair_transcript_lines": [
+      "better-agent-marketplace",
+      "protocol-v1",
+      "protocol_hash",
+      "pair",
+      "pair_token",
+      "device_id",
+      "public_key"
+    ]
+  },
+  "catalog": {
+    "snapshot_id": "key_id:sequence:sha256(canonical signed catalog)",
+    "required_signed_fields": ["key_id", "sequence", "issued_at", "expires_at", "extensions"],
+    "rollback_allowed": false,
+    "unknown_key_allowed": false,
+    "rotation": "current key signs a manifest promoting a predeclared next key"
+  },
+  "http": {
+    "pair_context": {
+      "method": "POST",
+      "path": "/protocol/v1/pair/context",
+      "request": ["pair_token", "protocol_hash"],
+      "response": ["site_label", "account_label", "server_origin", "protocol_hash"]
+    },
+    "pair_redeem": {
+      "method": "POST",
+      "path": "/protocol/v1/pair/redeem",
+      "request": ["pair_token", "protocol_hash", "device_id", "public_key", "label", "pop_signature"],
+      "response": ["device_id", "server_origin", "protocol_hash"]
+    },
+    "pair_reject": {
+      "method": "POST",
+      "path": "/protocol/v1/pair/reject",
+      "request": ["pair_token", "protocol_hash"],
+      "response": ["outcome"]
+    },
+    "device_challenges": {
+      "method": "POST",
+      "path": "/protocol/v1/devices/{device_id}/challenges",
+      "request": ["protocol_hash"],
+      "response": ["challenges", "expires_at"]
+    },
+    "catalog_snapshot": {
+      "method": "POST",
+      "path": "/protocol/v1/catalog/resolve",
+      "request": ["protocol_hash", "snapshot_id", "extension_id"],
+      "response": ["catalog", "signature"]
+    },
+    "lease": {
+      "method": "POST",
+      "path": "/protocol/v1/devices/{device_id}/actions/lease",
+      "request": ["protocol_hash", "wait_seconds", "challenge", "signature"],
+      "response": ["action"]
+    },
+    "fence": {
+      "method": "POST",
+      "path": "/protocol/v1/devices/{device_id}/actions/{action_id}/fence",
+      "request": ["protocol_hash", "lease_capability", "envelope_digest", "receipt_revision", "challenge", "signature"],
+      "response": ["terminal_capability", "reconcile_deadline"]
+    },
+    "reject": {
+      "method": "POST",
+      "path": "/protocol/v1/devices/{device_id}/actions/{action_id}/reject",
+      "request": ["protocol_hash", "lease_capability", "envelope_digest", "challenge", "signature"],
+      "response": ["outcome", "result_code"]
+    },
+    "terminal_ack": {
+      "method": "POST",
+      "path": "/protocol/v1/actions/{action_id}/terminal-ack",
+      "request": ["terminal_capability", "envelope_digest", "outcome", "result_code", "receipt_revision"],
+      "response": ["outcome", "result_code"]
+    },
+    "projection": {
+      "method": "PUT",
+      "path": "/protocol/v1/devices/{device_id}/projection",
+      "request": ["protocol_hash", "revision", "extensions", "challenge", "signature"],
+      "response": ["revision"]
+    },
+    "revoke": {
+      "method": "POST",
+      "path": "/protocol/v1/devices/{device_id}/revoke",
+      "request": ["protocol_hash", "challenge", "signature"],
+      "response": ["device_id", "revoked"]
+    }
+  },
+  "terminal_ack": {
+    "capability_scope": "one exact action+device+envelope_digest+receipt_revision",
+    "valid_after_device_revocation": true,
+    "duplicate": "return stored terminal result",
+    "conflict": "ack_conflict"
+  },
+  "recovery": {
+    "pre_fence": "resume confirmation or release lease",
+    "fenced_unchanged": "execute once",
+    "fenced_desired": "ack succeeded",
+    "fenced_ambiguous": "ack failed_unknown and permanently tombstone",
+    "tombstones_retained": true
+  },
+  "errors": [
+    "invalid_request",
+    "unauthorized",
+    "forbidden",
+    "not_found",
+    "expired",
+    "cancelled",
+    "replayed",
+    "challenge_invalid",
+    "challenge_exhausted",
+    "client_update_required",
+    "catalog_invalid",
+    "catalog_expired",
+    "catalog_rollback",
+    "snapshot_mismatch",
+    "lease_conflict",
+    "fence_conflict",
+    "ack_conflict",
+    "failed_unknown"
+  ]
+}

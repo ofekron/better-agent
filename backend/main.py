@@ -1855,6 +1855,16 @@ import extension_api  # noqa: E402
 app.include_router(extension_api.router)
 import extension_storage_api  # noqa: E402
 app.include_router(extension_storage_api.router)
+import marketplace_bridge_api  # noqa: E402
+marketplace_bridge_api.configure(
+    lambda: coordinator.internal_token,
+    lambda revision: coordinator.broadcast_global(
+        "marketplace_bridge_changed",
+        {"revision": revision},
+    ),
+    lambda: coordinator.broadcast_global("extensions_changed", {}),
+)
+app.include_router(marketplace_bridge_api.router)
 import testape_api  # noqa: E402
 app.include_router(testape_api.router)
 
@@ -13248,6 +13258,7 @@ async def on_startup():
 
     _start_tailscale_serve_reconciler()
     _start_extension_update_checker()
+    await marketplace_bridge_api.start()
 
     # Daily model-catalog refresher. Assumes uvicorn --workers 1
     # (see auth.py:8, run.sh:132) — a second worker would fire a
@@ -13750,6 +13761,7 @@ async def on_shutdown():
         except asyncio.CancelledError:
             pass
     await lag_incident_queue.stop()
+    await marketplace_bridge_api.stop()
     await extension_api.shutdown_hot_path_executors()
     from orchestrator import shutdown_auth_executor
     await shutdown_auth_executor()

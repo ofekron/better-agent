@@ -1252,5 +1252,10 @@
   "harnessProfile.itemHint.permissions.in_process_execution": "Executar código próprio dentro do processo de backend do Better Agent, com acesso a tudo o que o backend alcança.",
   "harnessProfile.itemHint.permissions.daemons": "Executar um processo em segundo plano de longa duração junto do backend ou do supervisor.",
   "harnessProfile.itemHint.permissions.native_mcp": "Registar os seus servidores de ferramentas diretamente nas CLIs dos fornecedores, fora do Better Agent.",
-  "harnessProfile.itemHint.permissions.internal_llm_tasks": "Usar as chamadas de modelo internas do Better Agent para as tarefas em segundo plano que declara."
+  "harnessProfile.itemHint.permissions.internal_llm_tasks": "Usar as chamadas de modelo internas do Better Agent para as tarefas em segundo plano que declara.",
+  "marketplaceBridge": {
+    "request": "Solicitação do marketplace", "pairHelp": "Confirme que esta conta do Marketplace pode se conectar a este Better Agent. O gerenciamento começa no site; as confirmações de segurança permanecem aqui.", "actionHelp": "Confira os detalhes verificados localmente antes de permitir esta ação.", "site": "Site", "account": "Conta", "device": "Dispositivo", "extension": "Extensão", "publisher": "Publicador", "version": "Versão", "permissionChanges": "Alterações de permissões", "reject": "Rejeitar", "approve": "Aprovar", "approving": "Aprovando…", "connectionFailed": "Falha na conexão com o marketplace", "connectionTitle": "Conexão do marketplace", "connection": { "connecting": "Conectando com segurança", "offline": "Better Agent está desconectado do marketplace", "error": "A conexão requer atenção" },
+    "action": { "pair": "Conectar marketplace", "install": "Instalar extensão", "enable": "Ativar extensão", "disable": "Desativar extensão", "update": "Atualizar extensão", "uninstall": "Desinstalar extensão" },
+    "status": { "pending": "Aguardando o Better Agent", "leased": "Recebido pelo Better Agent", "awaiting_confirmation": "Aguardando sua confirmação", "committing": "Aplicando com segurança", "succeeded": "Concluído", "rejected": "Rejeitado", "failed": "Falhou", "failed_unknown": "Requer inspeção local", "expired": "Expirado", "cancelled": "Cancelado" }
+  }
 }

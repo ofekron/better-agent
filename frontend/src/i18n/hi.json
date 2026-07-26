@@ -1252,5 +1252,10 @@
   "harnessProfile.itemHint.permissions.in_process_execution": "Better Agent बैकएंड प्रोसेस के भीतर अपना कोड चलाएँ, उस सब तक पहुँच के साथ जहाँ बैकएंड पहुँच सकता है।",
   "harnessProfile.itemHint.permissions.daemons": "बैकएंड या सुपरवाइज़र के साथ एक लंबे समय तक चलने वाली पृष्ठभूमि प्रक्रिया चलाएँ।",
   "harnessProfile.itemHint.permissions.native_mcp": "अपने टूल सर्वर सीधे प्रोवाइडर CLI में पंजीकृत करें, Better Agent के बाहर।",
-  "harnessProfile.itemHint.permissions.internal_llm_tasks": "घोषित पृष्ठभूमि कार्यों के लिए Better Agent की आंतरिक मॉडल कॉल का उपयोग करें।"
+  "harnessProfile.itemHint.permissions.internal_llm_tasks": "घोषित पृष्ठभूमि कार्यों के लिए Better Agent की आंतरिक मॉडल कॉल का उपयोग करें।",
+  "marketplaceBridge": {
+    "request": "मार्केटप्लेस अनुरोध", "pairHelp": "पुष्टि करें कि यह Marketplace खाता इस Better Agent से जुड़ सकता है। प्रबंधन वेबसाइट से शुरू होता है; सुरक्षा पुष्टियाँ यहीं रहती हैं।", "actionHelp": "इस कार्रवाई की अनुमति देने से पहले स्थानीय रूप से सत्यापित विवरण जाँचें।", "site": "साइट", "account": "खाता", "device": "डिवाइस", "extension": "एक्सटेंशन", "publisher": "प्रकाशक", "version": "संस्करण", "permissionChanges": "अनुमति बदलाव", "reject": "अस्वीकार करें", "approve": "स्वीकृत करें", "approving": "स्वीकृत किया जा रहा है…", "connectionFailed": "Marketplace कनेक्शन विफल", "connectionTitle": "Marketplace कनेक्शन", "connection": { "connecting": "सुरक्षित रूप से कनेक्ट हो रहा है", "offline": "Better Agent Marketplace से ऑफ़लाइन है", "error": "कनेक्शन पर ध्यान देना आवश्यक है" },
+    "action": { "pair": "Marketplace जोड़ें", "install": "एक्सटेंशन इंस्टॉल करें", "enable": "एक्सटेंशन सक्षम करें", "disable": "एक्सटेंशन अक्षम करें", "update": "एक्सटेंशन अपडेट करें", "uninstall": "एक्सटेंशन हटाएँ" },
+    "status": { "pending": "Better Agent की प्रतीक्षा", "leased": "Better Agent ने प्राप्त किया", "awaiting_confirmation": "आपकी पुष्टि की प्रतीक्षा", "committing": "सुरक्षित रूप से लागू हो रहा है", "succeeded": "पूरा हुआ", "rejected": "अस्वीकृत", "failed": "विफल", "failed_unknown": "स्थानीय जाँच आवश्यक", "expired": "समाप्त", "cancelled": "रद्द" }
+  }
 }

@@ -8,14 +8,14 @@ describe("marketplace settings authentication", () => {
   it("uses the nonce-bound core bridge and never stores marketplace tokens in the iframe", () => {
     const html = readFileSync(resolve(repoRoot, "extensions/marketplace/ui/index.html"), "utf8");
 
-    expect(html).toContain('action: "marketplace-auth-start"');
+    expect(html).toContain('requestAction("marketplace-auth-start"');
     expect(html).toContain('action: "marketplace-request"');
-    expect(html).toContain("pendingRequests.get(event.data.requestId)");
-    expect(html).toContain('event.data.action === "marketplace-auth-init"');
+    expect(html).toContain("pendingRequests.get(data.requestId)");
+    expect(html).toContain('data.action === "marketplace-auth-init"');
     expect(html).toContain("refreshEl.disabled = false");
-    expect(html).toContain('event.data.nonce !== bridgeNonce');
-    expect(html).toContain("/backend/auth/status");
-    expect(html).toContain("/backend/auth/logout");
+    expect(html).toContain("data.nonce !== bridgeNonce");
+    expect(html).toContain("`${backendBase}/auth/status`");
+    expect(html).toContain("`${backendBase}/auth/logout`");
     expect(html).not.toContain("better-agent.marketplace.accessToken");
     expect(html).not.toContain("Marketplace access token");
     expect(html).not.toContain("window.localStorage");

@@ -1,222 +1,360 @@
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 import os
 import re
-import base64
-import hashlib
 import secrets
-import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime
+from pathlib import Path
+from urllib.parse import urlparse
+from urllib.request import url2pathname
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse
-
-from better_agent_sdk import BetterAgentError, Client
 
 _MARKETPLACE_HEADERS = {
     "Accept": "application/json",
     "User-Agent": "BetterAgent/marketplace-extension",
 }
 
-# Extension ids are namespace.name over [A-Za-z0-9._-]. Anything else is rejected
-# before being interpolated into a hosted URL path so a crafted id cannot inject
-# path segments ("../") or query fragments ("?", "#") into the marketplace request.
-_EXTENSION_ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
-_SESSION_ACCOUNT = "oauth-session"
-_PENDING_PREFIX = "oauth-pending-"
-_AUTH_TTL_SECONDS = 600
-_STATE_RE = re.compile(r"^[A-Za-z0-9_-]{20,160}$")
-_refresh_lock = threading.Lock()
+_TOKENS_KEY = "auth_tokens"
+_PENDING_KEY = "auth_pending"
+_PENDING_TTL_SECONDS = 600
+_ACCESS_REFRESH_SLACK_SECONDS = 60
+_PROTOCOL_VERSION = 1
+_PROTOCOL_HASH = "425ec53e50f2bb093bb79cf2c2090a61a8c752cc44b93b731a7fa0ffc5430d8f"
+
+
+# ─── extension storage (backend-held tokens; never exposed to the iframe) ───
+
+
+def _storage_client():
+    from better_agent_sdk import Client
+
+    return Client()
+
+
+def _storage_load_json(key: str) -> dict:
+    raw = _storage_client().storage_get_bytes(key)
+    if not raw:
+        return {}
+    try:
+        value = json.loads(raw.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _storage_save_json(key: str, value: dict) -> None:
+    _storage_client().storage_put(key, json.dumps(value, separators=(",", ":")))
+
+
+def _storage_delete(key: str) -> None:
+    _storage_client().storage_delete(key)
+
+
+# ─── remote marketplace server access ───
 
 
 def _marketplace_base_url() -> str:
-    value = str(os.environ.get("BETTER_AGENT_MARKETPLACE_BASE_URL") or "https://singular-labs.ai/api/marketplace").strip().rstrip("/")
-    parsed = urllib.parse.urlparse(value)
-    loopback = parsed.hostname in {"127.0.0.1", "localhost", "::1"}
-    if not parsed.hostname or (parsed.scheme != "https" and not (parsed.scheme == "http" and loopback)):
-        raise RuntimeError("marketplace base URL must use HTTPS")
+    value = str(
+        os.environ.get("BETTER_AGENT_MARKETPLACE_BASE_URL")
+        or "https://ofek-dev.com/api/marketplace"
+    ).strip().rstrip("/")
+    parsed = urlparse(value)
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise HTTPException(status_code=500, detail="marketplace server configuration is invalid")
     return value
 
 
-def _require_extension_id(extension_id: str) -> str:
-    clean = str(extension_id or "").strip()
-    if not _EXTENSION_ID_RE.fullmatch(clean):
-        raise HTTPException(status_code=400, detail="invalid extension id")
-    return clean
-
-
-def _provider_login_url(provider: str) -> str:
-    if provider not in {"google", "github"}:
-        raise HTTPException(status_code=404, detail="unknown login provider")
-    return f"{_marketplace_base_url()}/auth/login/{provider}"
-
-
-def _json_request(path: str, payload: dict[str, object]) -> dict[str, object]:
-    request = urllib.request.Request(
-        f"{_marketplace_base_url()}{path}",
-        data=json.dumps(payload, separators=(",", ":")).encode("utf-8"),
-        headers={**_MARKETPLACE_HEADERS, "Content-Type": "application/json"},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=15) as response:
-            result = json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        if exc.code == 401:
-            raise HTTPException(status_code=401, detail="marketplace login required") from exc
-        raise HTTPException(status_code=502, detail="marketplace authentication is unavailable") from exc
-    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
-        raise HTTPException(status_code=502, detail="marketplace authentication is unavailable") from exc
-    if not isinstance(result, dict):
-        raise HTTPException(status_code=502, detail="marketplace authentication is invalid")
-    return result
-
-
-def _auth_secret(action: str, payload: dict[str, object] | None = None) -> dict[str, object]:
-    try:
-        return Client().invoke_capability("marketplace", f"auth-secret.{action}", payload or {})
-    except BetterAgentError as exc:
-        raise HTTPException(status_code=502, detail="marketplace credential store unavailable") from exc
-
-
-def _store_secret(account: str, value: dict[str, object]) -> None:
-    _auth_secret("store", {"account": account, "value": value})
-
-
-def _load_secret(account: str) -> dict[str, object] | None:
-    value = _auth_secret("get", {"account": account}).get("value")
-    return value if isinstance(value, dict) else None
-
-
-def _delete_secret(account: str) -> None:
-    _auth_secret("delete", {"account": account})
-
-
-def _cleanup_pending() -> None:
-    now = int(time.time())
-    for item in _auth_secret("list").get("items", []):
-        if not isinstance(item, dict):
-            continue
-        account = str(item.get("account") or "")
-        if not account.startswith(_PENDING_PREFIX):
-            continue
-        pending = _load_secret(account)
-        if not pending or int(pending.get("expires_at") or 0) <= now:
-            _delete_secret(account)
-
-
-def _session_tokens() -> dict[str, object] | None:
-    return _load_secret(_SESSION_ACCOUNT)
-
-
-def _expires_at_epoch(value: object) -> int:
-    text = str(value or "").strip()
-    if not text:
-        return 0
-    try:
-        return int(datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp())
-    except ValueError:
-        return 0
-
-
-def _refresh_session(tokens: dict[str, object]) -> dict[str, object]:
-    refresh_token = str(tokens.get("refresh_token") or "")
-    if not refresh_token:
-        raise HTTPException(status_code=401, detail="marketplace login required")
-    with _refresh_lock:
-        current = _session_tokens()
-        if current and current != tokens and _expires_at_epoch(current.get("access_token_expires_at")) > int(time.time()) + 30:
-            return current
-        try:
-            rotated = _json_request("/auth/app/refresh", {"refresh_token": refresh_token})
-        except HTTPException as exc:
-            if exc.status_code == 401:
-                _delete_secret(_SESSION_ACCOUNT)
-            raise
-        rotated["provider"] = str(tokens.get("provider") or "")
-        _store_secret(_SESSION_ACCOUNT, rotated)
-        return rotated
-
-
-def _access_token() -> str:
-    tokens = _session_tokens()
-    if not tokens:
-        return ""
-    if _expires_at_epoch(tokens.get("access_token_expires_at")) <= int(time.time()) + 30:
-        tokens = _refresh_session(tokens)
-    return str(tokens.get("access_token") or "")
-
-
-def _account_for_access_token(access_token: str) -> dict[str, object] | None:
-    if not access_token:
-        return None
-    request = urllib.request.Request(
-        f"{_marketplace_base_url()}/auth/me",
-        headers={**_MARKETPLACE_HEADERS, "Authorization": f"Bearer {access_token}"},
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=15) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        if exc.code == 401:
-            return None
-        raise HTTPException(status_code=502, detail="marketplace authentication is unavailable") from exc
-    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
-        raise HTTPException(status_code=502, detail="marketplace authentication is unavailable") from exc
-    if not isinstance(payload, dict):
-        raise HTTPException(status_code=502, detail="marketplace authentication is invalid")
-    return payload
-
-
-def _validated_access_token() -> tuple[str, dict[str, object] | None]:
-    if not _session_tokens():
-        return "", None
-    try:
-        access_token = _access_token()
-    except HTTPException as exc:
-        if exc.status_code == 401:
-            _delete_secret(_SESSION_ACCOUNT)
-            return "", None
-        raise
-    account = _account_for_access_token(access_token)
-    if account is not None:
-        return access_token, account
-    _delete_secret(_SESSION_ACCOUNT)
-    return "", None
-
-
-def _marketplace_headers(access_token: str) -> dict[str, str]:
+def _server_request(
+    method: str,
+    path: str,
+    *,
+    access_token: str = "",
+    json_body: dict | None = None,
+    extra_headers: dict[str, str] | None = None,
+    error_detail: str,
+) -> dict:
     headers = dict(_MARKETPLACE_HEADERS)
     if access_token:
         headers["Authorization"] = f"Bearer {access_token}"
-    return headers
-
-
-def _ofekdev_rows(access_token: str) -> list[dict[str, object]]:
-    # The hosted marketplace is a static publish: the aggregate catalog lives at
-    # extensions.json (not /extensions, which is the artifact directory and would
-    # return a filesystem autoindex). Per-item metadata lives at extensions/<id>/metadata.
-    url = f"{_marketplace_base_url()}/extensions.json"
-    request = urllib.request.Request(url, headers=_marketplace_headers(access_token))
+    body: bytes | None = None
+    if json_body is not None:
+        headers["Content-Type"] = "application/json"
+        body = json.dumps(
+            json_body, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        ).encode("utf-8")
+    for key, value in (extra_headers or {}).items():
+        if key not in {"X-BA-Device-Challenge", "X-BA-Device-Signature"}:
+            raise HTTPException(status_code=500, detail="marketplace request configuration is invalid")
+        headers[key] = value
+    if not path.startswith("/") or "://" in path or "\r" in path or "\n" in path:
+        raise HTTPException(status_code=500, detail="marketplace request configuration is invalid")
+    request = urllib.request.Request(
+        f"{_marketplace_base_url()}{path}", data=body, headers=headers, method=method
+    )
     try:
-        with urllib.request.urlopen(request, timeout=10) as response:
-            payload = json.loads(response.read().decode("utf-8"))
+        with urllib.request.urlopen(request, timeout=15) as response:
+            raw = response.read()
     except urllib.error.HTTPError as exc:
         if exc.code == 401:
             raise HTTPException(status_code=401, detail="marketplace login required") from exc
-        raise HTTPException(status_code=502, detail="marketplace catalog is unavailable") from exc
-    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
-        raise HTTPException(status_code=502, detail="marketplace catalog is unavailable") from exc
+        if exc.code == 404:
+            raise HTTPException(status_code=404, detail="not found") from exc
+        if exc.code == 400:
+            raise HTTPException(status_code=400, detail="invalid marketplace request") from exc
+        if exc.code == 409:
+            raise HTTPException(status_code=409, detail="marketplace state changed") from exc
+        if exc.code == 410:
+            raise HTTPException(status_code=410, detail="marketplace request expired") from exc
+        if exc.code == 429:
+            raise HTTPException(status_code=429, detail="too many marketplace requests") from exc
+        raise HTTPException(status_code=502, detail=error_detail) from exc
+    except (urllib.error.URLError, TimeoutError) as exc:
+        raise HTTPException(status_code=502, detail=error_detail) from exc
+    if not raw:
+        return {}
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise HTTPException(status_code=502, detail=error_detail) from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=502, detail=error_detail)
+    return payload
+
+
+# ─── backend-held token lifecycle ───
+
+
+def _parse_expiry(value: str) -> float:
+    from datetime import datetime
+
+    raw = str(value or "").strip()
+    if not raw:
+        return 0.0
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return 0.0
+
+
+def _store_token_response(payload: dict) -> None:
+    _storage_save_json(
+        _TOKENS_KEY,
+        {
+            "access_token": str(payload.get("access_token") or ""),
+            "access_expires_at": str(payload.get("access_token_expires_at") or ""),
+            "refresh_token": str(payload.get("refresh_token") or ""),
+        },
+    )
+
+
+def _access_token() -> str:
+    """Current access token, transparently refreshed; empty when signed out."""
+    tokens = _storage_load_json(_TOKENS_KEY)
+    access = str(tokens.get("access_token") or "")
+    refresh = str(tokens.get("refresh_token") or "")
+    if not access and not refresh:
+        return ""
+    expires = _parse_expiry(str(tokens.get("access_expires_at") or ""))
+    if access and expires > time.time() + _ACCESS_REFRESH_SLACK_SECONDS:
+        return access
+    if not refresh:
+        _storage_delete(_TOKENS_KEY)
+        return ""
+    try:
+        payload = _server_request(
+            "POST",
+            "/auth/app/refresh",
+            json_body={"refresh_token": refresh},
+            error_detail="marketplace auth is unavailable",
+        )
+    except HTTPException as exc:
+        if exc.status_code == 401:
+            _storage_delete(_TOKENS_KEY)
+            return ""
+        raise
+    _store_token_response(payload)
+    return str(payload.get("access_token") or "")
+
+
+def _require_access_token() -> str:
+    token = _access_token()
+    if not token:
+        raise HTTPException(status_code=401, detail="marketplace login required")
+    return token
+
+
+# ─── pending PKCE requests (state → verifier) ───
+
+
+def _state_key(state: str) -> str:
+    return hashlib.sha256(state.encode("utf-8")).hexdigest()
+
+
+def _save_pending(state: str, verifier: str) -> None:
+    pending = _storage_load_json(_PENDING_KEY)
+    now = time.time()
+    pending = {
+        key: item
+        for key, item in pending.items()
+        if isinstance(item, dict) and float(item.get("created_at") or 0) > now - _PENDING_TTL_SECONDS
+    }
+    pending[_state_key(state)] = {"verifier": verifier, "created_at": now}
+    _storage_save_json(_PENDING_KEY, pending)
+
+
+def _pop_pending(state: str) -> str:
+    pending = _storage_load_json(_PENDING_KEY)
+    item = pending.pop(_state_key(state), None)
+    _storage_save_json(_PENDING_KEY, pending)
+    if not isinstance(item, dict):
+        return ""
+    if float(item.get("created_at") or 0) <= time.time() - _PENDING_TTL_SECONDS:
+        return ""
+    return str(item.get("verifier") or "")
+
+
+def _pkce_pair() -> tuple[str, str]:
+    verifier = secrets.token_urlsafe(48)
+    digest = hashlib.sha256(verifier.encode("ascii")).digest()
+    challenge = base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
+    return verifier, challenge
+
+
+# ─── protocol-v1 transport ───
+
+
+def _strict_object(
+    value: object,
+    allowed: set[str],
+    required: set[str],
+    detail: str,
+) -> dict:
+    if not isinstance(value, dict) or set(value) - allowed or not required <= set(value):
+        raise HTTPException(status_code=400, detail=detail)
+    return value
+
+
+def _strict_protocol_string(body: dict, field: str, pattern: str, detail: str) -> str:
+    value = body.get(field)
+    if not isinstance(value, str) or re.fullmatch(pattern, value) is None:
+        raise HTTPException(status_code=400, detail=detail)
+    return value
+
+
+def _require_protocol_hash(body: dict, detail: str) -> None:
+    if body.get("protocol_hash") != _PROTOCOL_HASH:
+        raise HTTPException(status_code=409, detail=detail)
+
+
+def _signed_protocol_request(
+    method: str,
+    path: str,
+    body: dict,
+    *,
+    error_detail: str,
+) -> dict:
+    signed = _strict_object(
+        body,
+        set(body),
+        {"challenge", "signature"},
+        "invalid signed marketplace request",
+    )
+    challenge = _strict_protocol_string(
+        signed,
+        "challenge",
+        r"bachal_[A-Za-z0-9_-]{43}",
+        "invalid signed marketplace request",
+    )
+    signature = _strict_protocol_string(
+        signed,
+        "signature",
+        r"[A-Za-z0-9_-]{86}",
+        "invalid signed marketplace request",
+    )
+    payload = {
+        key: value for key, value in signed.items() if key not in {"challenge", "signature"}
+    }
+    return _server_request(
+        method,
+        path,
+        access_token=_require_access_token(),
+        json_body=payload,
+        extra_headers={
+            "X-BA-Device-Challenge": challenge,
+            "X-BA-Device-Signature": signature,
+        },
+        error_detail=error_detail,
+    )
+
+
+# ─── catalog ───
+
+
+def _private_repo_root(context) -> Path:
+    raw = str(context.source.get("repo_url") or "").strip()
+    if not raw:
+        raise HTTPException(status_code=500, detail="marketplace source repo is unavailable")
+    parsed = urlparse(raw)
+    if parsed.scheme == "file":
+        return Path(url2pathname(parsed.path)).resolve()
+    return Path(raw).resolve()
+
+
+def _extension_rows(private_root: Path) -> list[dict[str, object]]:
+    extensions_root = private_root / "extensions"
+    if not extensions_root.is_dir():
+        raise HTTPException(status_code=500, detail="private extensions directory is unavailable")
+    rows: list[dict[str, object]] = []
+    for manifest_path in sorted(extensions_root.glob("*/better-agent-extension.json")):
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if (manifest.get("marketplace") or {}).get("hidden") is True:
+            continue
+        extension_path = manifest_path.parent.relative_to(private_root).as_posix()
+        rows.append(
+            {
+                "id": str(manifest.get("id") or ""),
+                "name": str(manifest.get("name") or ""),
+                "version": str(manifest.get("version") or ""),
+                "description": str(manifest.get("description") or ""),
+                "surfaces": list(manifest.get("surfaces") or []),
+                "marketplace": dict(manifest.get("marketplace") or {}),
+                "install": {
+                    "repo_url": private_root.as_uri(),
+                    "extension_path": extension_path,
+                    "ref": "",
+                },
+            }
+        )
+    return rows
+
+
+def _ofekdev_catalog(access_token: str) -> tuple[list[dict[str, object]], str]:
+    payload = _server_request(
+        "GET",
+        "/catalog-v1.json",
+        access_token=access_token,
+        error_detail="marketplace catalog is unavailable",
+    )
     rows = []
     for item in payload.get("extensions") or []:
         if not isinstance(item, dict):
             continue
-        extension_id = _require_extension_id(str(item.get("id") or ""))
+        extension_id = str(item.get("id") or "")
         rows.append(
             {
                 "id": extension_id,
@@ -230,161 +368,554 @@ def _ofekdev_rows(access_token: str) -> list[dict[str, object]]:
                 },
             }
         )
-    return rows
+    snapshot_id = str(payload.get("snapshot_id") or "")
+    if not re.fullmatch(
+        r"[A-Za-z0-9._-]{1,80}:[0-9]{1,20}:[a-f0-9]{64}",
+        snapshot_id,
+    ):
+        raise HTTPException(status_code=502, detail="marketplace catalog is unavailable")
+    return rows, snapshot_id
 
 
-def _ofekdev_metadata(extension_id: str, access_token: str) -> dict[str, object]:
-    safe_id = _require_extension_id(extension_id)
-    url = f"{_marketplace_base_url()}/extensions/{safe_id}/metadata"
-    request = urllib.request.Request(url, headers=_marketplace_headers(access_token))
-    try:
-        with urllib.request.urlopen(request, timeout=10) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        if exc.code == 401:
-            raise HTTPException(status_code=401, detail="marketplace login required") from exc
-        raise HTTPException(status_code=502, detail="marketplace metadata is unavailable") from exc
-    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
-        raise HTTPException(status_code=502, detail="marketplace metadata is unavailable") from exc
-    if not isinstance(payload, dict):
-        raise HTTPException(status_code=502, detail="marketplace metadata is invalid")
-    return payload
+def _filter_rows(rows: list[dict[str, object]], query: str) -> list[dict[str, object]]:
+    needle = str(query or "").strip().lower()
+    if not needle:
+        return rows
+    return [
+        row
+        for row in rows
+        if needle in str(row.get("id") or "").lower()
+        or needle in str(row.get("name") or "").lower()
+        or needle in str(row.get("description") or "").lower()
+    ]
 
 
-def _ofekdev_uninstall(extension_id: str, access_token: str) -> None:
-    safe_id = _require_extension_id(extension_id)
-    url = f"{_marketplace_base_url()}/extensions/{safe_id}/uninstall"
-    request = urllib.request.Request(
-        url,
-        headers=_marketplace_headers(access_token),
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=10) as response:
-            response.read()
-    except urllib.error.HTTPError as exc:
-        if exc.code == 401:
-            raise HTTPException(status_code=401, detail="marketplace login required") from exc
-        if exc.code == 404:
-            raise HTTPException(status_code=404, detail="extension not found") from exc
-        raise HTTPException(status_code=502, detail="marketplace uninstall is unavailable") from exc
-    except (urllib.error.URLError, TimeoutError) as exc:
-        raise HTTPException(status_code=502, detail="marketplace uninstall is unavailable") from exc
+_SIGNED_IN_HTML = """<!doctype html>
+<title>Better Agent Marketplace</title>
+<main style="font-family: system-ui, sans-serif; max-width: 480px; margin: 15vh auto; text-align: center;">
+  <h1>%s</h1>
+  <p>%s</p>
+</main>"""
 
 
 def create_router(context) -> APIRouter:
     router = APIRouter()
 
+    def _remote_source() -> bool:
+        return str(context.source.get("type") or "") in {"marketplace", "required_artifact"}
+
     @router.get("/health")
     async def health() -> dict[str, bool]:
         return {"ok": True}
 
-    @router.get("/auth/providers")
-    async def auth_providers() -> dict[str, object]:
+    @router.get("/auth/status")
+    async def auth_status() -> dict[str, object]:
+        if not _remote_source():
+            return {"authenticated": True, "mode": "local", "providers": []}
+        token = _access_token()
+        if not token:
+            providers = _server_request(
+                "GET", "/auth/providers", error_detail="marketplace auth is unavailable"
+            ).get("providers")
+            return {"authenticated": False, "mode": "remote", "providers": list(providers or [])}
+        me = _server_request(
+            "GET", "/auth/me", access_token=token, error_detail="marketplace auth is unavailable"
+        )
         return {
-            "providers": [
-                {"id": "google", "label": "Google"},
-                {"id": "github", "label": "GitHub"},
-            ]
+            "authenticated": True,
+            "mode": "remote",
+            "account": me.get("account") or {},
+            "providers": list(me.get("providers") or []),
         }
 
     @router.post("/auth/start")
     async def auth_start(request: Request) -> dict[str, str]:
         body = await request.json()
-        provider = str(body.get("provider") or "") if isinstance(body, dict) else ""
-        _provider_login_url(provider)
-        app_session = request.cookies.get("better_agent_session", "")
-        if not app_session:
-            raise HTTPException(status_code=401, detail="Better Agent login required")
-        _cleanup_pending()
-        verifier = secrets.token_urlsafe(64)
-        challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode("ascii")).digest()).rstrip(b"=").decode("ascii")
-        callback = str(request.base_url).rstrip("/") + "/api/extensions/ofek-dev.marketplace/backend/auth/callback"
-        started = _json_request("/auth/app/start", {
-            "provider": provider,
-            "app_redirect": callback,
-            "code_challenge": challenge,
-        })
-        state = str(started.get("state") or "")
-        login_url = str(started.get("login_url") or "")
-        if not _STATE_RE.fullmatch(state) or not login_url:
-            raise HTTPException(status_code=502, detail="marketplace authentication is invalid")
-        _store_secret(_PENDING_PREFIX + state, {
-            "provider": provider,
-            "verifier": verifier,
-            "app_session_digest": hashlib.sha256(app_session.encode("utf-8")).hexdigest(),
-            "expires_at": int(time.time()) + _AUTH_TTL_SECONDS,
-        })
-        return {"login_url": login_url, "state": state}
+        provider = str((body or {}).get("provider") or "")
+        if provider not in {"google", "apple", "github"}:
+            raise HTTPException(status_code=400, detail="unknown login provider")
+        verifier, challenge = _pkce_pair()
+        base = str(request.base_url).rstrip("/")
+        app_redirect = f"{base}/api/extensions/{context.extension_id}/backend/auth/callback"
+        payload = _server_request(
+            "POST",
+            "/auth/app/start",
+            json_body={"provider": provider, "app_redirect": app_redirect, "code_challenge": challenge},
+            error_detail="marketplace auth is unavailable",
+        )
+        state = str(payload.get("state") or "")
+        login_url = str(payload.get("login_url") or "")
+        if not state or not login_url:
+            raise HTTPException(status_code=502, detail="marketplace auth is unavailable")
+        _save_pending(state, verifier)
+        return {"login_url": login_url}
 
     @router.get("/auth/callback")
-    async def auth_callback(request: Request, code: str = "", state: str = "") -> HTMLResponse:
-        if not _STATE_RE.fullmatch(state):
-            raise HTTPException(status_code=401, detail="marketplace authentication expired")
-        pending_account = _PENDING_PREFIX + state
-        pending = _load_secret(pending_account)
-        _delete_secret(pending_account)
-        app_session_digest = hashlib.sha256(request.cookies.get("better_agent_session", "").encode("utf-8")).hexdigest()
-        if (
-            not code
-            or not pending
-            or int(pending.get("expires_at") or 0) <= int(time.time())
-            or not secrets.compare_digest(str(pending.get("app_session_digest") or ""), app_session_digest)
-        ):
-            raise HTTPException(status_code=401, detail="marketplace authentication expired")
-        tokens = _json_request("/auth/app/exchange", {
-            "code": code,
-            "code_verifier": str(pending.get("verifier") or ""),
-        })
-        tokens["provider"] = str(pending.get("provider") or "")
-        _store_secret(_SESSION_ACCOUNT, tokens)
-        state_json = json.dumps(state)
-        return HTMLResponse(
-            "<!doctype html><meta charset=utf-8><title>Marketplace sign-in complete</title>"
-            "<p>Sign-in complete. You can close this window.</p>"
-            f"<script>if(window.opener)window.opener.postMessage({{source:'better-agent-marketplace-auth',state:{state_json}}},'*');window.close();</script>"
+    async def auth_callback(code: str = "", state: str = "", error: str = "") -> HTMLResponse:
+        if error or not code or not state:
+            return HTMLResponse(
+                _SIGNED_IN_HTML % ("Sign-in failed", "Return to Better Agent and try again."), status_code=401
+            )
+        verifier = _pop_pending(state)
+        if not verifier:
+            return HTMLResponse(
+                _SIGNED_IN_HTML % ("Sign-in failed", "This sign-in link expired. Return to Better Agent and try again."),
+                status_code=401,
+            )
+        payload = _server_request(
+            "POST",
+            "/auth/app/exchange",
+            json_body={"code": code, "code_verifier": verifier},
+            error_detail="marketplace auth is unavailable",
         )
-
-    @router.get("/auth/status")
-    async def auth_status() -> dict[str, object]:
-        access_token, account = _validated_access_token()
-        if not access_token or account is None:
-            return {"authenticated": False, "provider": ""}
-        tokens = _session_tokens()
-        return {
-            "authenticated": True,
-            "provider": str((tokens or {}).get("provider") or ""),
-            "account": account.get("account") or account,
-        }
+        _store_token_response(payload)
+        return HTMLResponse(
+            _SIGNED_IN_HTML % ("Signed in", "You can close this tab and return to Better Agent.")
+        )
 
     @router.post("/auth/logout")
     async def auth_logout() -> dict[str, bool]:
-        tokens = _session_tokens()
-        if tokens and tokens.get("refresh_token"):
+        tokens = _storage_load_json(_TOKENS_KEY)
+        refresh = str(tokens.get("refresh_token") or "")
+        if refresh:
             try:
-                _json_request("/auth/app/logout", {"refresh_token": str(tokens["refresh_token"])})
-            finally:
-                _delete_secret(_SESSION_ACCOUNT)
-        else:
-            _delete_secret(_SESSION_ACCOUNT)
+                _server_request(
+                    "POST",
+                    "/auth/app/logout",
+                    json_body={"refresh_token": refresh},
+                    error_detail="marketplace auth is unavailable",
+                )
+            except HTTPException:
+                pass  # local sign-out must succeed even when the server is unreachable
+        _storage_delete(_TOKENS_KEY)
         return {"ok": True}
 
     @router.get("/catalog")
-    async def catalog() -> dict[str, object]:
-        access_token, _ = _validated_access_token()
-        return {"extensions": _ofekdev_rows(access_token)}
+    async def catalog(q: str = "") -> dict[str, object]:
+        if _remote_source():
+            rows, snapshot_id = _ofekdev_catalog(_require_access_token())
+        else:
+            rows = _extension_rows(_private_repo_root(context))
+            snapshot_id = ""
+        return {
+            "protocol_version": _PROTOCOL_VERSION,
+            "protocol_hash": _PROTOCOL_HASH,
+            "snapshot_id": snapshot_id,
+            "extensions": _filter_rows(rows, q),
+        }
+
+    @router.post("/protocol/v1/pair/context")
+    async def protocol_pair_context(request: Request) -> dict[str, object]:
+        body = _strict_object(
+            await request.json(),
+            {"pair_token", "protocol_hash"},
+            {"pair_token", "protocol_hash"},
+            "invalid pairing request",
+        )
+        _require_protocol_hash(body, "marketplace client update required")
+        pair_token = _strict_protocol_string(
+            body,
+            "pair_token",
+            r"[A-Za-z0-9_-]{43}",
+            "invalid pairing request",
+        )
+        return _server_request(
+            "POST",
+            "/protocol/v1/pair/context",
+            access_token=_require_access_token(),
+            json_body=body,
+            error_detail="marketplace pairing is unavailable",
+        )
+
+    @router.post("/protocol/v1/pair/redeem")
+    async def protocol_pair(request: Request) -> dict[str, object]:
+        body = _strict_object(
+            await request.json(),
+            {
+                "pair_token",
+                "protocol_hash",
+                "device_id",
+                "public_key",
+                "pop_signature",
+                "label",
+            },
+            {
+                "pair_token",
+                "protocol_hash",
+                "device_id",
+                "public_key",
+                "pop_signature",
+                "label",
+            },
+            "invalid pairing request",
+        )
+        _require_protocol_hash(body, "marketplace client update required")
+        for field, pattern in {
+            "pair_token": r"[A-Za-z0-9_-]{43}",
+            "device_id": r"badvc_[a-f0-9]{32}",
+            "public_key": r"[A-Za-z0-9_-]{43}",
+            "pop_signature": r"[A-Za-z0-9_-]{86}",
+        }.items():
+            _strict_protocol_string(body, field, pattern, "invalid pairing request")
+        label = body["label"]
+        if (
+            not isinstance(label, str)
+            or not 1 <= len(label.strip()) <= 80
+            or any(ord(character) < 32 or ord(character) == 127 for character in label)
+        ):
+            raise HTTPException(status_code=400, detail="invalid pairing request")
+        return _server_request(
+            "POST",
+            "/protocol/v1/pair/redeem",
+            access_token=_require_access_token(),
+            json_body=body,
+            error_detail="marketplace pairing is unavailable",
+        )
+
+    @router.post("/protocol/v1/pair/reject")
+    async def protocol_pair_reject(request: Request) -> dict[str, object]:
+        body = _strict_object(
+            await request.json(),
+            {"pair_token", "protocol_hash"},
+            {"pair_token", "protocol_hash"},
+            "invalid pairing rejection",
+        )
+        _require_protocol_hash(body, "marketplace client update required")
+        _strict_protocol_string(
+            body, "pair_token", r"[A-Za-z0-9_-]{43}", "invalid pairing rejection"
+        )
+        return _server_request(
+            "POST",
+            "/protocol/v1/pair/reject",
+            access_token=_require_access_token(),
+            json_body=body,
+            error_detail="marketplace pairing is unavailable",
+        )
+
+    @router.post("/protocol/v1/devices/{device_id}/challenges")
+    async def protocol_challenge(device_id: str, request: Request) -> dict[str, object]:
+        if not re.fullmatch(r"badvc_[a-f0-9]{32}", device_id):
+            raise HTTPException(status_code=400, detail="invalid device id")
+        body = _strict_object(
+            await request.json(),
+            {"protocol_hash"},
+            {"protocol_hash"},
+            "invalid challenge request",
+        )
+        _require_protocol_hash(body, "marketplace client update required")
+        return _server_request(
+            "POST",
+            f"/protocol/v1/devices/{device_id}/challenges",
+            access_token=_require_access_token(),
+            json_body=body,
+            error_detail="marketplace device authentication is unavailable",
+        )
+
+    @router.post("/protocol/v1/devices/{device_id}/actions/lease")
+    async def protocol_actions_lease(
+        device_id: str, request: Request
+    ) -> dict[str, object]:
+        if not re.fullmatch(r"badvc_[a-f0-9]{32}", device_id):
+            raise HTTPException(status_code=400, detail="invalid device id")
+        body = _strict_object(
+            await request.json(),
+            {"protocol_hash", "wait_seconds", "challenge", "signature"},
+            {"protocol_hash", "wait_seconds", "challenge", "signature"},
+            "invalid lease request",
+        )
+        _require_protocol_hash(body, "marketplace client update required")
+        if (
+            not isinstance(body["wait_seconds"], int)
+            or isinstance(body["wait_seconds"], bool)
+            or not 0 <= body["wait_seconds"] <= 30
+        ):
+            raise HTTPException(status_code=400, detail="invalid lease request")
+        return _signed_protocol_request(
+            "POST",
+            f"/protocol/v1/devices/{device_id}/actions/lease",
+            body,
+            error_detail="marketplace action polling is unavailable",
+        )
+
+    @router.post("/protocol/v1/devices/{device_id}/actions/{action_id}/fence")
+    async def protocol_action_fence(
+        device_id: str, action_id: str, request: Request
+    ) -> dict[str, object]:
+        if not re.fullmatch(r"badvc_[a-f0-9]{32}", device_id) or not re.fullmatch(
+            r"baact_[a-f0-9]{32}", action_id
+        ):
+            raise HTTPException(status_code=400, detail="invalid fence request")
+        body = _strict_object(
+            await request.json(),
+            {
+                "protocol_hash",
+                "lease_capability",
+                "envelope_digest",
+                "receipt_revision",
+                "challenge",
+                "signature",
+            },
+            {
+                "protocol_hash",
+                "lease_capability",
+                "envelope_digest",
+                "receipt_revision",
+                "challenge",
+                "signature",
+            },
+            "invalid fence request",
+        )
+        _require_protocol_hash(body, "marketplace client update required")
+        _strict_protocol_string(
+            body, "lease_capability", r"balease_[A-Za-z0-9_-]{43}", "invalid fence request"
+        )
+        _strict_protocol_string(
+            body, "envelope_digest", r"[a-f0-9]{64}", "invalid fence request"
+        )
+        if (
+            not isinstance(body["receipt_revision"], int)
+            or isinstance(body["receipt_revision"], bool)
+            or body["receipt_revision"] < 1
+        ):
+            raise HTTPException(status_code=400, detail="invalid fence request")
+        return _signed_protocol_request(
+            "POST",
+            f"/protocol/v1/devices/{device_id}/actions/{action_id}/fence",
+            body,
+            error_detail="marketplace action fencing is unavailable",
+        )
+
+    @router.post("/protocol/v1/devices/{device_id}/actions/{action_id}/reject")
+    async def protocol_action_reject(
+        device_id: str, action_id: str, request: Request
+    ) -> dict[str, object]:
+        if not re.fullmatch(r"badvc_[a-f0-9]{32}", device_id) or not re.fullmatch(
+            r"baact_[a-f0-9]{32}", action_id
+        ):
+            raise HTTPException(status_code=400, detail="invalid rejection")
+        body = _strict_object(
+            await request.json(),
+            {
+                "protocol_hash",
+                "lease_capability",
+                "envelope_digest",
+                "challenge",
+                "signature",
+            },
+            {
+                "protocol_hash",
+                "lease_capability",
+                "envelope_digest",
+                "challenge",
+                "signature",
+            },
+            "invalid rejection",
+        )
+        _require_protocol_hash(body, "marketplace client update required")
+        _strict_protocol_string(
+            body, "lease_capability", r"balease_[A-Za-z0-9_-]{43}", "invalid rejection"
+        )
+        _strict_protocol_string(
+            body, "envelope_digest", r"[a-f0-9]{64}", "invalid rejection"
+        )
+        return _signed_protocol_request(
+            "POST",
+            f"/protocol/v1/devices/{device_id}/actions/{action_id}/reject",
+            body,
+            error_detail="marketplace action rejection is unavailable",
+        )
+
+    @router.post("/protocol/v1/actions/{action_id}/terminal-ack")
+    async def protocol_action_ack(
+        action_id: str, request: Request
+    ) -> dict[str, object]:
+        if not re.fullmatch(r"baact_[a-f0-9]{32}", action_id):
+            raise HTTPException(status_code=400, detail="invalid acknowledgement")
+        body = _strict_object(
+            await request.json(),
+            {
+                "terminal_capability",
+                "envelope_digest",
+                "outcome",
+                "result_code",
+                "receipt_revision",
+            },
+            {
+                "terminal_capability",
+                "envelope_digest",
+                "outcome",
+                "result_code",
+                "receipt_revision",
+            },
+            "invalid acknowledgement",
+        )
+        _strict_protocol_string(
+            body,
+            "terminal_capability",
+            r"baterm_[A-Za-z0-9_-]{43}",
+            "invalid acknowledgement",
+        )
+        _strict_protocol_string(
+            body, "envelope_digest", r"[a-f0-9]{64}", "invalid acknowledgement"
+        )
+        _strict_protocol_string(
+            body,
+            "outcome",
+            r"(?:succeeded|failed|failed_unknown)",
+            "invalid acknowledgement",
+        )
+        _strict_protocol_string(
+            body, "result_code", r"[a-z0-9_]{1,80}", "invalid acknowledgement"
+        )
+        if (
+            not isinstance(body["receipt_revision"], int)
+            or isinstance(body["receipt_revision"], bool)
+            or body["receipt_revision"] < 1
+        ):
+            raise HTTPException(status_code=400, detail="invalid acknowledgement")
+        return _server_request(
+            "POST",
+            f"/protocol/v1/actions/{action_id}/terminal-ack",
+            access_token=_require_access_token(),
+            json_body=body,
+            error_detail="marketplace action acknowledgement is unavailable",
+        )
+
+    @router.put("/protocol/v1/devices/{device_id}/projection")
+    async def protocol_projection(
+        device_id: str, request: Request
+    ) -> dict[str, object]:
+        if not re.fullmatch(r"badvc_[a-f0-9]{32}", device_id):
+            raise HTTPException(status_code=400, detail="invalid projection")
+        body = _strict_object(
+            await request.json(),
+            {"protocol_hash", "revision", "extensions", "challenge", "signature"},
+            {"protocol_hash", "revision", "extensions", "challenge", "signature"},
+            "invalid projection",
+        )
+        _require_protocol_hash(body, "marketplace client update required")
+        if (
+            not isinstance(body["revision"], int)
+            or isinstance(body["revision"], bool)
+            or body["revision"] < 0
+            or not isinstance(body["extensions"], list)
+        ):
+            raise HTTPException(status_code=400, detail="invalid projection")
+        return _signed_protocol_request(
+            "PUT",
+            f"/protocol/v1/devices/{device_id}/projection",
+            body,
+            error_detail="marketplace projection update is unavailable",
+        )
+
+    @router.post("/protocol/v1/catalog/resolve")
+    async def protocol_catalog_resolve(request: Request) -> dict[str, object]:
+        body = _strict_object(
+            await request.json(),
+            {"protocol_hash", "snapshot_id", "extension_id"},
+            {"protocol_hash", "snapshot_id", "extension_id"},
+            "invalid catalog request",
+        )
+        _require_protocol_hash(body, "marketplace client update required")
+        _strict_protocol_string(
+            body,
+            "snapshot_id",
+            r"[A-Za-z0-9._-]{1,80}:[0-9]{1,20}:[a-f0-9]{64}",
+            "invalid catalog request",
+        )
+        _strict_protocol_string(
+            body,
+            "extension_id",
+            r"[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?",
+            "invalid catalog request",
+        )
+        return _server_request(
+            "POST",
+            "/protocol/v1/catalog/resolve",
+            access_token=_require_access_token(),
+            json_body=body,
+            error_detail="marketplace catalog is unavailable",
+        )
+
+    @router.post("/protocol/v1/devices/{device_id}/revoke")
+    async def protocol_revoke(device_id: str, request: Request) -> dict[str, object]:
+        if not re.fullmatch(r"badvc_[a-f0-9]{32}", device_id):
+            raise HTTPException(status_code=400, detail="invalid revocation")
+        body = _strict_object(
+            await request.json(),
+            {"protocol_hash", "challenge", "signature"},
+            {"protocol_hash", "challenge", "signature"},
+            "invalid revocation",
+        )
+        _require_protocol_hash(body, "marketplace client update required")
+        return _signed_protocol_request(
+            "POST",
+            f"/protocol/v1/devices/{device_id}/revoke",
+            body,
+            error_detail="marketplace revocation is unavailable",
+        )
+
+    @router.post("/protocol/actions/{action_id}/metadata")
+    async def protocol_action_metadata(
+        action_id: str, request: Request
+    ) -> dict[str, object]:
+        if not re.fullmatch(r"baact_[a-f0-9]{32}", action_id):
+            raise HTTPException(status_code=400, detail="invalid action id")
+        _strict_object(await request.json(), set(), set(), "invalid metadata request")
+        return _server_request(
+            "POST",
+            f"/protocol/v1/actions/{action_id}/metadata",
+            access_token=_require_access_token(),
+            json_body={},
+            error_detail="marketplace action metadata is unavailable",
+        )
 
     @router.get("/metadata/{extension_id}")
     async def metadata(extension_id: str) -> dict[str, object]:
-        access_token, _ = _validated_access_token()
-        return _ofekdev_metadata(extension_id, access_token)
+        return _server_request(
+            "GET",
+            f"/extensions/{urllib.parse.quote(extension_id, safe='')}/metadata",
+            access_token=_require_access_token(),
+            error_detail="marketplace metadata is unavailable",
+        )
 
     @router.post("/extensions/{extension_id}/uninstall")
     async def extension_uninstall(extension_id: str) -> dict[str, bool]:
-        access_token, _ = _validated_access_token()
-        if not access_token:
-            raise HTTPException(status_code=401, detail="marketplace login required")
-        _ofekdev_uninstall(extension_id, access_token)
+        if not _remote_source():
+            return {"ok": True}
+        _server_request(
+            "POST",
+            f"/extensions/{urllib.parse.quote(extension_id, safe='')}/uninstall",
+            access_token=_require_access_token(),
+            error_detail="marketplace uninstall is unavailable",
+        )
         return {"ok": True}
+
+    @router.get("/billing/config")
+    async def billing_config() -> dict[str, object]:
+        return _server_request("GET", "/billing/config", error_detail="billing is unavailable")
+
+    @router.post("/billing/checkout")
+    async def billing_checkout(request: Request) -> dict[str, object]:
+        body = await request.json()
+        product_id = str((body or {}).get("product_id") or "")
+        if not product_id:
+            raise HTTPException(status_code=400, detail="product_id is required")
+        return _server_request(
+            "POST",
+            "/billing/checkout",
+            access_token=_require_access_token(),
+            json_body={"product_id": product_id},
+            error_detail="billing is unavailable",
+        )
+
+    @router.get("/billing/entitlement/{product_id}")
+    async def billing_entitlement(product_id: str) -> dict[str, object]:
+        return _server_request(
+            "GET",
+            f"/billing/entitlement/{urllib.parse.quote(product_id, safe='')}",
+            access_token=_require_access_token(),
+            error_detail="billing is unavailable",
+        )
 
     return router

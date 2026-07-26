@@ -1248,5 +1248,10 @@
   "harnessProfile.itemHint.permissions.in_process_execution": "Eigenen Code im Better Agent-Backend-Prozess ausführen, mit allem, worauf das Backend zugreifen kann.",
   "harnessProfile.itemHint.permissions.daemons": "Einen langlebigen Hintergrundprozess neben Backend oder Supervisor ausführen.",
   "harnessProfile.itemHint.permissions.native_mcp": "Ihre Tool-Server direkt bei den Provider-CLIs registrieren, außerhalb von Better Agent.",
-  "harnessProfile.itemHint.permissions.internal_llm_tasks": "Die internen Modellaufrufe von Better Agent für die deklarierten Hintergrundaufgaben nutzen."
+  "harnessProfile.itemHint.permissions.internal_llm_tasks": "Die internen Modellaufrufe von Better Agent für die deklarierten Hintergrundaufgaben nutzen.",
+  "marketplaceBridge": {
+    "request": "Marketplace-Anfrage", "pairHelp": "Bestätige, dass dieses Marketplace-Konto eine Verbindung zu diesem Better Agent herstellen darf. Die Verwaltung beginnt auf der Website; Sicherheitsbestätigungen bleiben hier.", "actionHelp": "Prüfe die lokal verifizierten Details, bevor du diese Aktion erlaubst.", "site": "Website", "account": "Konto", "device": "Gerät", "extension": "Erweiterung", "publisher": "Herausgeber", "version": "Version", "permissionChanges": "Berechtigungsänderungen", "reject": "Ablehnen", "approve": "Genehmigen", "approving": "Wird genehmigt…", "connectionFailed": "Marketplace-Verbindung fehlgeschlagen", "connectionTitle": "Marketplace-Verbindung", "connection": { "connecting": "Sichere Verbindung wird hergestellt", "offline": "Better Agent ist vom Marketplace getrennt", "error": "Verbindung erfordert Aufmerksamkeit" },
+    "action": { "pair": "Marketplace verbinden", "install": "Erweiterung installieren", "enable": "Erweiterung aktivieren", "disable": "Erweiterung deaktivieren", "update": "Erweiterung aktualisieren", "uninstall": "Erweiterung deinstallieren" },
+    "status": { "pending": "Wartet auf Better Agent", "leased": "Von Better Agent empfangen", "awaiting_confirmation": "Wartet auf deine Bestätigung", "committing": "Wird sicher angewendet", "succeeded": "Abgeschlossen", "rejected": "Abgelehnt", "failed": "Fehlgeschlagen", "failed_unknown": "Lokale Prüfung erforderlich", "expired": "Abgelaufen", "cancelled": "Abgebrochen" }
+  }
 }

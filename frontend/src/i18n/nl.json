@@ -1248,5 +1248,10 @@
   "harnessProfile.itemHint.permissions.in_process_execution": "Eigen code uitvoeren binnen het backendproces van Better Agent, met alles waar de backend bij kan.",
   "harnessProfile.itemHint.permissions.daemons": "Een langlopend achtergrondproces draaien naast de backend of supervisor.",
   "harnessProfile.itemHint.permissions.native_mcp": "De eigen toolservers rechtstreeks registreren bij de provider-CLI's, buiten Better Agent om.",
-  "harnessProfile.itemHint.permissions.internal_llm_tasks": "De interne modelaanroepen van Better Agent gebruiken voor de achtergrondtaken die de extensie declareert."
+  "harnessProfile.itemHint.permissions.internal_llm_tasks": "De interne modelaanroepen van Better Agent gebruiken voor de achtergrondtaken die de extensie declareert.",
+  "marketplaceBridge": {
+    "request": "Marketplace-verzoek", "pairHelp": "Bevestig dat dit Marketplace-account verbinding mag maken met deze Better Agent. Beheer begint op de website; beveiligingsbevestigingen blijven hier.", "actionHelp": "Controleer de lokaal geverifieerde gegevens voordat je deze actie toestaat.", "site": "Website", "account": "Account", "device": "Apparaat", "extension": "Extensie", "publisher": "Uitgever", "version": "Versie", "permissionChanges": "Wijzigingen in machtigingen", "reject": "Weigeren", "approve": "Goedkeuren", "approving": "Goedkeuren…", "connectionFailed": "Marketplace-verbinding mislukt", "connectionTitle": "Marketplace-verbinding", "connection": { "connecting": "Veilig verbinding maken", "offline": "Better Agent is offline voor de Marketplace", "error": "De verbinding vereist aandacht" },
+    "action": { "pair": "Marketplace verbinden", "install": "Extensie installeren", "enable": "Extensie inschakelen", "disable": "Extensie uitschakelen", "update": "Extensie bijwerken", "uninstall": "Extensie verwijderen" },
+    "status": { "pending": "Wachten op Better Agent", "leased": "Ontvangen door Better Agent", "awaiting_confirmation": "Wachten op je bevestiging", "committing": "Veilig toepassen", "succeeded": "Voltooid", "rejected": "Geweigerd", "failed": "Mislukt", "failed_unknown": "Lokale controle vereist", "expired": "Verlopen", "cancelled": "Geannuleerd" }
+  }
 }

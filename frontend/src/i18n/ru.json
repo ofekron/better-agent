@@ -1254,5 +1254,10 @@
   "harnessProfile.itemHint.permissions.in_process_execution": "Выполнять собственный код внутри backend-процесса Better Agent со всем доступом, который есть у backend.",
   "harnessProfile.itemHint.permissions.daemons": "Запускать долгоживущий фоновый процесс рядом с backend или супервизором.",
   "harnessProfile.itemHint.permissions.native_mcp": "Регистрировать свои серверы инструментов напрямую в CLI провайдеров, минуя Better Agent.",
-  "harnessProfile.itemHint.permissions.internal_llm_tasks": "Использовать внутренние вызовы моделей Better Agent для объявленных фоновых задач."
+  "harnessProfile.itemHint.permissions.internal_llm_tasks": "Использовать внутренние вызовы моделей Better Agent для объявленных фоновых задач.",
+  "marketplaceBridge": {
+    "request": "Запрос Marketplace", "pairHelp": "Подтвердите подключение этой учётной записи Marketplace к Better Agent. Управление начинается на сайте, а подтверждения безопасности остаются здесь.", "actionHelp": "Проверьте локально подтверждённые данные перед разрешением действия.", "site": "Сайт", "account": "Учётная запись", "device": "Устройство", "extension": "Расширение", "publisher": "Издатель", "version": "Версия", "permissionChanges": "Изменения разрешений", "reject": "Отклонить", "approve": "Разрешить", "approving": "Разрешение…", "connectionFailed": "Не удалось подключиться к Marketplace", "connectionTitle": "Подключение Marketplace", "connection": { "connecting": "Безопасное подключение", "offline": "Better Agent не подключён к Marketplace", "error": "Подключение требует внимания" },
+    "action": { "pair": "Подключить Marketplace", "install": "Установить расширение", "enable": "Включить расширение", "disable": "Отключить расширение", "update": "Обновить расширение", "uninstall": "Удалить расширение" },
+    "status": { "pending": "Ожидание Better Agent", "leased": "Получено Better Agent", "awaiting_confirmation": "Ожидание вашего подтверждения", "committing": "Безопасное применение", "succeeded": "Завершено", "rejected": "Отклонено", "failed": "Ошибка", "failed_unknown": "Нужна локальная проверка", "expired": "Срок истёк", "cancelled": "Отменено" }
+  }
 }

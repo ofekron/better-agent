@@ -5,12 +5,14 @@ import os
 import sys
 import tempfile
 import threading
+import ctypes
 from pathlib import Path
 
 _HERE = Path(__file__).resolve().parent
 if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
 
+import activation_server
 from activation_server import ActivationServer, forward_activation
 from deep_link import DeepLinkError, parse_deep_link, redact_argv
 
@@ -24,6 +26,7 @@ def test_pair_link_is_strict_and_redacted() -> None:
     parsed = parse_deep_link(raw)
     assert parsed.intent == _token()
     assert parsed.as_event()["type"] == "marketplace_pair"
+    assert parsed.as_event()["version"] == 1
     assert _token() not in " ".join(redact_argv(["Better Agent", raw]))
     invalid = (
         raw + "&extra=1",
@@ -44,17 +47,17 @@ def test_pair_link_is_strict_and_redacted() -> None:
 
 def test_activation_forwarding_authenticates_and_delivers() -> None:
     state_dir = Path(tempfile.mkdtemp(prefix="ba-activation-"))
-    delivered: list[dict[str, str]] = []
+    delivered: list[dict[str, str | int]] = []
     received = threading.Event()
 
-    def on_activation(event: dict[str, str]) -> None:
+    def on_activation(event: dict[str, str | int]) -> None:
         delivered.append(event)
         received.set()
 
     server = ActivationServer(state_dir, on_activation)
     server.start()
     try:
-        event = {"type": "marketplace_pair", "intent": _token(), "version": "1"}
+        event = {"type": "marketplace_pair", "intent": _token(), "version": 1}
         assert forward_activation(state_dir, event)
         assert received.wait(2)
         assert delivered == [event]
@@ -93,8 +96,35 @@ def test_malformed_state_fails_closed() -> None:
     assert not forward_activation(state_dir, {"type": "activate"})
 
 
+def test_windows_liveness_probe_never_signals_the_owner() -> None:
+    class Kernel32:
+        def OpenProcess(self, _access, _inherit, _pid):
+            return 123
+
+        def GetExitCodeProcess(self, _process, output):
+            output._obj.value = 259
+            return 1
+
+        def CloseHandle(self, _process):
+            return 1
+
+    original_name = activation_server.os.name
+    original_windll = getattr(ctypes, "windll", None)
+    try:
+        activation_server.os.name = "nt"
+        ctypes.windll = type("Windll", (), {"kernel32": Kernel32()})()
+        assert activation_server._process_alive(42)
+    finally:
+        activation_server.os.name = original_name
+        if original_windll is None:
+            del ctypes.windll
+        else:
+            ctypes.windll = original_windll
+
+
 if __name__ == "__main__":
     test_pair_link_is_strict_and_redacted()
     test_activation_forwarding_authenticates_and_delivers()
     test_second_server_cannot_replace_owner_state()
     test_malformed_state_fails_closed()
+    test_windows_liveness_probe_never_signals_the_owner()

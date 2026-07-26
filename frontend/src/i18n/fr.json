@@ -1252,5 +1252,10 @@
   "harnessProfile.itemHint.permissions.in_process_execution": "Exécuter son propre code dans le processus backend de Better Agent, avec tout ce que le backend peut atteindre.",
   "harnessProfile.itemHint.permissions.daemons": "Exécuter un processus d'arrière-plan durable aux côtés du backend ou du superviseur.",
   "harnessProfile.itemHint.permissions.native_mcp": "Enregistrer ses serveurs d'outils directement auprès des CLI des fournisseurs, hors de Better Agent.",
-  "harnessProfile.itemHint.permissions.internal_llm_tasks": "Utiliser les appels de modèle internes de Better Agent pour les tâches d'arrière-plan qu'elle déclare."
+  "harnessProfile.itemHint.permissions.internal_llm_tasks": "Utiliser les appels de modèle internes de Better Agent pour les tâches d'arrière-plan qu'elle déclare.",
+  "marketplaceBridge": {
+    "request": "Demande de la marketplace", "pairHelp": "Confirmez que ce compte Marketplace peut se connecter à ce Better Agent. La gestion commence sur le site ; les confirmations de sécurité restent ici.", "actionHelp": "Vérifiez les informations contrôlées localement avant d'autoriser cette action.", "site": "Site", "account": "Compte", "device": "Appareil", "extension": "Extension", "publisher": "Éditeur", "version": "Version", "permissionChanges": "Modifications des autorisations", "reject": "Refuser", "approve": "Autoriser", "approving": "Autorisation…", "connectionFailed": "Échec de la connexion à la marketplace", "connectionTitle": "Connexion à la marketplace", "connection": { "connecting": "Connexion sécurisée", "offline": "Better Agent est hors ligne pour la marketplace", "error": "La connexion requiert votre attention" },
+    "action": { "pair": "Connecter la marketplace", "install": "Installer l'extension", "enable": "Activer l'extension", "disable": "Désactiver l'extension", "update": "Mettre à jour l'extension", "uninstall": "Désinstaller l'extension" },
+    "status": { "pending": "En attente de Better Agent", "leased": "Reçu par Better Agent", "awaiting_confirmation": "En attente de votre confirmation", "committing": "Application sécurisée", "succeeded": "Terminé", "rejected": "Refusé", "failed": "Échec", "failed_unknown": "Inspection locale requise", "expired": "Expiré", "cancelled": "Annulé" }
+  }
 }

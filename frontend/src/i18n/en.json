@@ -1323,5 +1323,43 @@
   "harnessProfile.itemHint.permissions.in_process_execution": "Run its own code inside the Better Agent backend process, with everything the backend can reach.",
   "harnessProfile.itemHint.permissions.daemons": "Run a long-lived background process alongside the backend or supervisor.",
   "harnessProfile.itemHint.permissions.native_mcp": "Register its tool servers directly with the provider CLIs, outside Better Agent.",
-  "harnessProfile.itemHint.permissions.internal_llm_tasks": "Use Better Agent's internal model calls for the background tasks it declares."
+  "harnessProfile.itemHint.permissions.internal_llm_tasks": "Use Better Agent's internal model calls for the background tasks it declares.",
+  "marketplaceBridge": {
+    "request": "Marketplace request",
+    "pairHelp": "Confirm that this Marketplace account may connect to this Better Agent. Management starts on the website; security confirmations stay here.",
+    "actionHelp": "Verify the locally checked details before allowing this Marketplace action.",
+    "site": "Site",
+    "account": "Account",
+    "device": "Device",
+    "extension": "Extension",
+    "publisher": "Publisher",
+    "version": "Version",
+    "permissionChanges": "Permission changes",
+    "reject": "Reject",
+    "approve": "Approve",
+    "approving": "Approving…",
+    "connectionFailed": "Marketplace connection failed",
+    "connectionTitle": "Marketplace connection",
+    "connection": { "connecting": "Connecting securely", "offline": "Better Agent is offline from the Marketplace", "error": "Connection needs attention" },
+    "action": {
+      "pair": "Connect Marketplace",
+      "install": "Install extension",
+      "enable": "Enable extension",
+      "disable": "Disable extension",
+      "update": "Update extension",
+      "uninstall": "Uninstall extension"
+    },
+    "status": {
+      "pending": "Waiting for Better Agent",
+      "leased": "Received by Better Agent",
+      "awaiting_confirmation": "Waiting for your confirmation",
+      "committing": "Applying securely",
+      "succeeded": "Completed",
+      "rejected": "Rejected",
+      "failed": "Failed",
+      "failed_unknown": "Needs local inspection",
+      "expired": "Expired",
+      "cancelled": "Cancelled"
+    }
+  }
 }

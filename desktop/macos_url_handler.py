@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+from activation_server import ActivationEvent
 from deep_link import DeepLinkError, parse_deep_link
 
 
-def install_macos_url_handler(on_event: Callable[[dict[str, str]], None]) -> None:
+def install_macos_url_handler(on_event: Callable[[ActivationEvent], None]) -> None:
     from webview.platforms.cocoa import BrowserView
 
     class BetterAgentAppDelegate(BrowserView.AppDelegate):

@@ -1,7 +1,7 @@
 import { useMemo } from "react";
 import { useTranslation } from "react-i18next";
-import { useBackButtonDismiss } from "../hooks/useBackButtonDismiss";
 import { extensionPermissionTranslationKey } from "./extensionPermissions";
+import { MarketplaceConfirmationModal } from "./MarketplaceConfirmationModal";
 
 type PermissionValue = boolean | "optional" | string[];
 
@@ -36,19 +36,15 @@ export function MarketplaceInstallModal({
       .sort(([left], [right]) => left.localeCompare(right)),
     [manifest.permissions],
   );
-  useBackButtonDismiss(open, busy ? () => undefined : onCancel);
-  if (!open) return null;
-
   return (
-    <div className="modal-overlay" onClick={busy ? undefined : onCancel}>
-      <div className="modal-content" style={{ maxWidth: "560px" }} onClick={(event) => event.stopPropagation()}>
-        <div className="modal-header">
-          <h2>{manifest.name}</h2>
-          <button className="modal-close" onClick={onCancel} disabled={busy} aria-label={t("app.cancel")}>
-            &times;
-          </button>
-        </div>
-        <div className="modal-body">
+    <MarketplaceConfirmationModal
+      open={open}
+      title={manifest.name}
+      busy={busy}
+      error={error}
+      onConfirm={onConfirm}
+      onCancel={onCancel}
+    >
           <div>
             <strong>{t("settings.extensionsPermissions")}</strong>
             <p style={{ color: "var(--text-secondary)" }}>{t("settings.extensionsPermissionsHelp")}</p>
@@ -80,17 +76,6 @@ export function MarketplaceInstallModal({
               <div className="extension-ui-settings-permission-key">{permission}</div>
             </div>
           ))}
-          {error && <div className="setup-error">{error}</div>}
-        </div>
-        <div className="modal-footer">
-          <button type="button" className="btn-secondary" onClick={onCancel} disabled={busy}>
-            {t("app.cancel")}
-          </button>
-          <button type="button" className="btn-primary" onClick={onConfirm} disabled={busy} autoFocus>
-            {busy ? t("settings.extensionsUpdating") : t("app.confirm")}
-          </button>
-        </div>
-      </div>
-    </div>
+    </MarketplaceConfirmationModal>
   );
 }

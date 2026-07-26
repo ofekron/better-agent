@@ -26,7 +26,7 @@ from pathlib import Path
 import webview
 
 import updater
-from activation_server import ActivationServer, forward_activation_when_ready
+from activation_server import ActivationEvent, ActivationServer, forward_activation_when_ready
 from notifications import DesktopNotificationApi
 from supervisor import BackendSupervisor
 from updater import start_background_check
@@ -139,35 +139,64 @@ def _configure_logging() -> None:
     root.addHandler(handler)
 
 
-def _emit_activation(window, event: dict[str, str]) -> None:
+def _emit_activation(
+    window,
+    event: ActivationEvent,
+) -> None:
     if event["type"] == "activate":
         window.show()
         return
-    payload = json.dumps(event, separators=(",", ":"))
     window.evaluate_js(
-        "window.__betterAgentDesktopActivations ??= [];"
-        f"window.__betterAgentDesktopActivations.push({payload});"
         "window.dispatchEvent(new CustomEvent("
-        "'better-agent:deep-link',{detail:"
-        f"{payload}"
-        "}));"
+        "'better-agent:deep-link'));"
     )
     window.show()
 
 
-def main(initial_activation: dict[str, str] | None = None) -> int:
+def _submit_marketplace_activation(local_url: str, event: ActivationEvent) -> bool:
+    if event.get("type") != "marketplace_pair":
+        return True
+    from paths import ba_home
+    try:
+        token = (ba_home() / "internal_token").read_text(encoding="utf-8").strip()
+        if not token:
+            return False
+        request = urllib.request.Request(
+            f"{local_url.rstrip('/')}/api/internal/marketplace-bridge/pair",
+            data=json.dumps(
+                {"intent": event["intent"], "version": event["version"]},
+                separators=(",", ":"),
+            ).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "X-Internal-Token": token,
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=5) as response:
+            return response.status == 200
+    except (OSError, KeyError, urllib.error.URLError):
+        return False
+
+
+def main(initial_activation: ActivationEvent | None = None) -> int:
     _configure_logging()
     pending_activations = [initial_activation] if initial_activation else []
     active_window = {"value": None}
+    active_backend_url = {"value": None}
     activation_lock = threading.Lock()
 
-    def _on_activation(event: dict[str, str]) -> None:
+    def _on_activation(event: ActivationEvent) -> None:
         with activation_lock:
             window = active_window["value"]
-            if window is None:
+            backend_url = active_backend_url["value"]
+            if window is None or (
+                event.get("type") == "marketplace_pair" and backend_url is None
+            ):
                 pending_activations.append(event)
                 return
-        _emit_activation(window, event)
+        if _submit_marketplace_activation(backend_url or "", event):
+            _emit_activation(window, event)
 
     from paths import ba_home
     activation_server = ActivationServer(ba_home(), _on_activation)
@@ -228,6 +257,9 @@ def main(initial_activation: dict[str, str] | None = None) -> int:
         return 1
 
     local_url = sup.local_url()
+    with activation_lock:
+        active_backend_url["value"] = local_url
+    desktop_api = DesktopNotificationApi()
     quitting = threading.Event()
     kill_on_quit = {"value": False}
     if role == "node":
@@ -246,7 +278,7 @@ def main(initial_activation: dict[str, str] | None = None) -> int:
         window = webview.create_window(
             "Better Agent",
             local_url,
-            js_api=DesktopNotificationApi(),
+            js_api=desktop_api,
         )
     def _deliver_initial_activations() -> None:
         with activation_lock:
@@ -254,7 +286,8 @@ def main(initial_activation: dict[str, str] | None = None) -> int:
             queued_activations = list(pending_activations)
             pending_activations.clear()
         for event in queued_activations:
-            _emit_activation(window, event)
+            if _submit_marketplace_activation(local_url, event):
+                _emit_activation(window, event)
 
     window.events.loaded += _deliver_initial_activations
 

@@ -98,6 +98,7 @@ export interface BusEventMap {
   extension_updates_changed: {
     available: string[];
   };
+  marketplace_bridge_changed: Record<string, unknown>;
   testape_session_state: {
     session_id: string;
     active: boolean;
