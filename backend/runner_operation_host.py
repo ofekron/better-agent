@@ -34,8 +34,24 @@ def hydrate_runner_inputs(inputs: dict[str, Any], run_dir: Path) -> dict[str, An
     )
     for name in ("BETTER_AGENT_INTERNAL_TOKEN", "BETTER_CLAUDE_INTERNAL_TOKEN"):
         os.environ.pop(name, None)
-    atexit.register(host.stop)
+    global _ACTIVE_HOST
+    _ACTIVE_HOST = host
+    atexit.register(stop_active_host)
     return inputs
+
+
+# The host owns a listener socket (and, on the long-path branch, a temp
+# dir). `runner_exit.hard_exit` bypasses atexit, so the teardown needs an
+# explicit entry point too; both routes land here and it is idempotent.
+_ACTIVE_HOST: Any = None
+
+
+def stop_active_host() -> None:
+    global _ACTIVE_HOST
+    host, _ACTIVE_HOST = _ACTIVE_HOST, None
+    if host is None:
+        return
+    host.stop()
 
 
 class _RunnerOperationHost:

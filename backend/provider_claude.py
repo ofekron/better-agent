@@ -131,6 +131,7 @@ _TAIL_POLL_INTERVAL = 0.05       # seconds between empty-read polls
 # tree. Background execution is forbidden on every run, so a post-turn
 # process is pure infrastructure — a hung disconnect must not pin the
 # native session (the wind-down gate defers new prompts behind it).
+_WIND_DOWN_GRACE = 30.0
 
 
 def _jsonl_size_bytes(path: Path) -> int:
@@ -501,6 +502,7 @@ class ClaudeProvider(Provider):
                         session_id=session_id,
                         app_session_id=app_session_id,
                         loop=loop,
+                        turn_run_id=turn_run_id,
                     )
                     schedule_loop_task(
                         loop,
@@ -1340,12 +1342,17 @@ class ClaudeProvider(Provider):
     # ------------------------------------------------------------------
     # _watch_process_exit — wind-down epilogue. The turn is finalized but
     # the runner process is still briefly alive (normal per-turn
-    # shutdown). Wait for exit, drain+stop the tailer, deregister the
-    # run (which fires `released` for the wind-down gate).
+    # shutdown). Wait for exit — reaping a runner that outstays the
+    # grace — then drain+stop the tailer and deregister the run (which
+    # fires `released` for the wind-down gate).
     # ------------------------------------------------------------------
     async def _watch_process_exit(self, rs: RunState) -> None:
         try:
+            deadline = time.monotonic() + _WIND_DOWN_GRACE
             while await popen_is_running_off_loop(rs.popen):
+                if time.monotonic() >= deadline:
+                    await self._reap_wound_down_runner(rs)
+                    break
                 await asyncio.sleep(_TAIL_POLL_INTERVAL)
             await self._await_tailer_drained(rs)
             if rs.tailer is not None:
@@ -1362,6 +1369,51 @@ class ClaudeProvider(Provider):
             # `_cleanup_run` — a skipped cleanup leaves `released` unset
             # and wedges start_run's wind-down gate.
             self._cleanup_run(rs.run_id)
+
+    async def _reap_wound_down_runner(self, rs: RunState) -> None:
+        """Force-kill a runner that outlived the wind-down grace.
+
+        Reached only after the turn finalized (run-level complete.json
+        read), so every artifact the backend needs is already durable and
+        no retry can spawn another CLI on this native session. Without
+        this, a runner wedged in interpreter shutdown keeps the run
+        registered and the gate parks every later turn on the session
+        until the backend restarts.
+
+        Recovered runs are exempt. Their `popen` is a `RecoveredPopen`
+        stub wrapping a pid read off disk, and its liveness check is a
+        bare `kill(pid, 0)` with no ownership proof — after a restart
+        that pid may belong to anything. Signalling it would `killpg` an
+        unrelated process group. Releasing the gate does not depend on
+        the kill: the caller's `finally` deregisters the run either
+        way."""
+        if getattr(rs.popen, "recovered_stub", False):
+            logger.warning(
+                "wind-down grace (%.0fs) expired for recovered run %s — "
+                "releasing the gate without signalling unverified pid %s",
+                _WIND_DOWN_GRACE, rs.run_id, rs.popen.pid,
+            )
+            return
+        logger.warning(
+            "wind-down grace (%.0fs) expired for run %s pid=%s — reaping "
+            "the process tree so the gate releases",
+            _WIND_DOWN_GRACE, rs.run_id, rs.popen.pid,
+        )
+        try:
+            forced = await asyncio.to_thread(
+                _process_control().terminate_tree, rs.popen, timeout=3.0,
+            )
+            logger.info(
+                "wind-down reap terminated pid=%s run=%s (forced=%s)",
+                rs.popen.pid, rs.run_id, forced,
+            )
+        except Exception as e:
+            # Never let a failed kill skip the caller's tailer drain —
+            # only cancellation (backend shutdown) may propagate.
+            logger.warning(
+                "wind-down reap failed pid=%s run=%s: %s",
+                rs.popen.pid, rs.run_id, e,
+            )
 
     # ------------------------------------------------------------------
     # _emit_complete_from_file — read complete.json and enqueue complete

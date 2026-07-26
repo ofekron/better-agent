@@ -480,6 +480,10 @@ class ParkedRun:
     run_id: str
     session_id: str
     app_session_id: str
+    # Orchestrator-level turn id. A cancel fanned out by turn_run_id has
+    # no other way to find a run that never spawned, so the gate records
+    # it at park time.
+    turn_run_id: Optional[str]
     released: asyncio.Event
     # Loop the `released` event belongs to. `unpark_run` runs on a turn
     # dispatch worker thread, and `asyncio.Event.set` does not wake
@@ -747,6 +751,7 @@ class Provider(ABC):
         session_id: str,
         app_session_id: str,
         loop: asyncio.AbstractEventLoop,
+        turn_run_id: Optional[str] = None,
     ) -> ParkedRun:
         """Park a run, or return its existing entry. A run that re-enters
         the gate keeps its original arrival order — re-issuing it would
@@ -759,6 +764,7 @@ class Provider(ABC):
             run_id=run_id,
             session_id=session_id,
             app_session_id=app_session_id,
+            turn_run_id=turn_run_id,
             released=asyncio.Event(),
             loop=loop,
             seq=self._park_seq,
@@ -1031,6 +1037,32 @@ class Provider(ABC):
     # interrupt and are closed cleanly by the SDK's `disconnect()`.
     # ------------------------------------------------------------------
     def cancel_turn(self, run_id: str) -> bool:
+        # A parked run has neither a process nor a run dir, so the cancel
+        # sentinel below cannot reach it and the turn would stay wedged at
+        # the gate forever. Dropping it from the gate IS the cancel, and
+        # it releases anything queued behind it. Resolve by turn_run_id
+        # too: a cancel fanned out by the orchestrator never carries this
+        # provider's own run id.
+        # Drop inline rather than via `cancel_run`: that path is dual-mode
+        # and, if the gate spawned between the lookup and the call, would
+        # escalate this cooperative cancel into a SIGTERM/SIGKILL of the
+        # process tree — losing the graceful interrupt this method exists
+        # to provide. Every match is dropped: retry/continuation attempts
+        # mint a new provider run id per attempt under one turn_run_id, so
+        # a survivor would keep blocking the gate.
+        parked_matches = [
+            p for p in self._parked_runs.values()
+            if p.run_id == run_id or p.turn_run_id == run_id
+        ]
+        if parked_matches:
+            for parked in parked_matches:
+                parked.cancelled = True
+                self.unpark_run(parked.run_id)
+                logger.info(
+                    "%s.cancel_turn: dropped parked run %s",
+                    type(self).__name__, parked.run_id,
+                )
+            return True
         rs = self._runs.get(run_id)
         if rs is None:
             # `run_id` may be the orchestrator-level turn_run_id rather than

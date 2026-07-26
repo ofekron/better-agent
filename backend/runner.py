@@ -38,7 +38,6 @@ import contextvars
 import json
 import logging
 import os
-import sys
 import time
 import http.client
 import threading
@@ -47,7 +46,7 @@ import urllib.request
 from contextlib import suppress
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Optional
+from typing import Any, Awaitable, Callable, NoReturn, Optional
 
 import chat_store
 import inbox_store
@@ -60,6 +59,7 @@ from communication_modes import (
 )
 from env_compat import get_env
 from loopback_http import raise_loopback_http_error
+from runner_exit import hard_exit
 from trace_collector import aggregate_claude_turn_usage
 from orchestration_tool_descriptions import (
     ASK_DESCRIPTION as _ASK_DESCRIPTION,
@@ -3741,9 +3741,9 @@ async def _run(run_dir: Path, inputs: dict) -> int:
     # durable) — close the CLI and exit. Background execution is disabled
     # on every run, so no work can outlive this process.
     try:
-        # Bounded: a hung disconnect must not pin this process — the
-        # backend's wind-down escalation reaps a runner that outlives
-        # its grace window, but exiting promptly here is the normal path.
+        # Bounded: a hung disconnect must not pin this process. The
+        # hard exit below is the guarantee; this timeout just keeps the
+        # normal path from waiting on it.
         await asyncio.wait_for(client.disconnect(), timeout=15.0)
     except asyncio.TimeoutError:
         logger.warning("client.disconnect() timed out — exiting anyway")
@@ -3774,6 +3774,26 @@ async def _run(run_dir: Path, inputs: dict) -> int:
     return 0 if final_success else 1
 
 
+def _exit_runner(run_dir: Path, code: int) -> NoReturn:
+    """The runner's single process exit.
+
+    Drops the liveness sentinel LAST — a completion artifact is durable
+    on every path that reaches here — then hard-exits. Every exit funnels
+    through this one place so the guarantee is structural: no path can
+    stall in interpreter shutdown joining asyncio's non-daemon executor
+    threads, which would keep the run registered and park every later
+    turn on the same native session behind the wind-down gate."""
+    try:
+        from runs_dir import runner_alive_path as _rap
+        _rap(run_dir).unlink(missing_ok=True)
+    except Exception:
+        # Nothing may escape a function whose contract is "no path
+        # returns" — an exception here would land in interpreter
+        # shutdown, the exact stall this exists to prevent.
+        logger.exception("failed to remove runner_alive sentinel")
+    hard_exit(code)
+
+
 def _fail(run_dir: Path, error: str) -> None:
     """Write an error complete.json for fatal pre-run failures."""
     logger.error("runner fatal: %s", error)
@@ -3791,7 +3811,7 @@ def _fail(run_dir: Path, error: str) -> None:
         logger.exception("failed to write error complete.json")
 
 
-def main(run_dir: Path) -> int:
+def main(run_dir: Path) -> NoReturn:
     logging.basicConfig(
         level=logging.INFO,
         format="[runner %(process)d] %(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -3809,30 +3829,29 @@ def main(run_dir: Path) -> int:
         inputs = harness_run_projection.apply_to_inputs(inputs)
     except Exception as e:
         _fail(run_dir, t("runner.failed_read_input", e=str(e)))
-        return 1
+        _exit_runner(run_dir, 1)
 
+    # Deliberately NOT `asyncio.run`: its close() joins the default
+    # executor with a 300 s timeout, and a runtime-operation POST (24 h
+    # timeout) still parked on one of those threads would stall the exit
+    # for the whole window. Driving the loop directly skips that join,
+    # and `_exit_runner` skips interpreter shutdown's unbounded one.
+    loop = asyncio.new_event_loop()
     try:
-        return asyncio.run(_run(run_dir, inputs))
+        code = loop.run_until_complete(_run(run_dir, inputs))
     except Exception as e:
         logger.exception("runner top-level failure")
-        # Exception path: `_run` raised before reaching its success-path
-        # sentinel cleanup, so `runner_alive` may linger. `_fail` makes
-        # the error complete.json durable first; THEN remove the sentinel
-        # (same ordering invariant as the success path — sentinel removed
-        # only once a complete.json exists). asyncio.run has already
-        # cancelled the heartbeat task at loop teardown, so no tick can
-        # re-create the file here.
+        # `_run` raised before its success-path cleanup, so `runner_alive`
+        # may linger. `_fail` makes the error complete.json durable first;
+        # `_exit_runner` removes the sentinel after, preserving the
+        # ordering invariant the success path also upholds.
         _fail(run_dir, f"{type(e).__name__}: {e}")
-        try:
-            from runs_dir import runner_alive_path as _rap
-            _rap(run_dir).unlink(missing_ok=True)
-        except OSError:
-            pass
-        return 1
+        code = 1
+    _exit_runner(run_dir, code)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--run-dir", required=True, type=Path)
     args = parser.parse_args()
-    sys.exit(main(args.run_dir))
+    main(args.run_dir)

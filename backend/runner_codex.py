@@ -24,7 +24,6 @@ import http.client
 import json
 import logging
 import os
-import sys
 import time
 import uuid
 from tool_approval_client import request_tool_approval
@@ -32,7 +31,7 @@ import urllib.error
 import urllib.request
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, NoReturn, Optional
 
 import re
 
@@ -72,6 +71,7 @@ import chat_store
 import inbox_store
 import extension_store
 from runs_dir import atomic_write_json
+from runner_exit import hard_exit
 from env_compat import get_env
 from user_interaction_tool_contracts import (
     REQUEST_USER_APPROVAL_DESCRIPTION as _REQUEST_USER_APPROVAL_DESCRIPTION,
@@ -3437,6 +3437,14 @@ async def _run(run_dir: Path, inputs: dict) -> int:
     return 0 if final_success else 1
 
 
+def _exit_runner(code: int) -> NoReturn:
+    """The runner's single process exit — see runner_exit.hard_exit.
+
+    Every exit funnels through here so no path can stall in interpreter
+    shutdown joining asyncio's non-daemon executor threads."""
+    hard_exit(code)
+
+
 def _fail(run_dir: Path, error: str) -> None:
     logger.error("runner_codex fatal: %s", error)
     try:
@@ -3451,7 +3459,7 @@ def _fail(run_dir: Path, error: str) -> None:
         logger.exception("failed to write error complete.json")
 
 
-def main(run_dir: Path) -> int:
+def main(run_dir: Path) -> NoReturn:
     logging.basicConfig(
         level=logging.INFO,
         format="[runner_codex %(process)d] %(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -3468,18 +3476,23 @@ def main(run_dir: Path) -> int:
         inputs = harness_run_projection.apply_to_inputs(inputs)
     except Exception as e:
         _fail(run_dir, f"failed to read input.json: {e}")
-        return 1
+        _exit_runner(1)
 
+    # Deliberately NOT `asyncio.run`: its close() joins the default
+    # executor with a 300 s timeout, which a runtime-operation POST
+    # parked on one of those threads would stall.
+    loop = asyncio.new_event_loop()
     try:
-        return asyncio.run(_run(run_dir, inputs))
+        code = loop.run_until_complete(_run(run_dir, inputs))
     except Exception as e:
         logger.exception("runner_codex top-level failure")
         _fail(run_dir, f"{type(e).__name__}: {e}")
-        return 1
+        code = 1
+    _exit_runner(code)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--run-dir", required=True, type=Path)
     args = parser.parse_args()
-    sys.exit(main(args.run_dir))
+    main(args.run_dir)

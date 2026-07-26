@@ -54,11 +54,14 @@ class _FakePopen:
 class _FakeRunState:
     """Stands in for the RunState `_spawn_run` would register."""
 
-    def __init__(self, run_id: str, session_id: str) -> None:
+    def __init__(self, run_id: str, session_id: str, turn_run_id=None) -> None:
         self.run_id = run_id
         self.session_id = session_id
+        self.turn_run_id = turn_run_id
         self.popen = _FakePopen()
         self.released = asyncio.Event()
+        self.tailer = None
+        self.tailer_task = None
 
 
 def _spawn_kwargs(run_id: str, loop, queue) -> dict:
@@ -225,11 +228,196 @@ async def test_cancelled_parked_run_is_dropped() -> None:
     print("PASS cancelled parked run dropped")
 
 
+async def test_cancel_turn_reaches_parked_run() -> None:
+    """Stop must end a turn that is still parked at the gate.
+
+    The cancel fans out by the orchestrator's turn_run_id, which never
+    matches the provider's own run id, and a parked run has no run dir
+    for the sentinel fallback to touch — so the turn used to stay wedged
+    with no way out."""
+    prov = _make_provider()
+    loop = asyncio.get_running_loop()
+    spawned: list = []
+    _install_spawn_recorder(prov, spawned)
+
+    blocker = _FakeRunState("blocker0", NATIVE_SID)
+    prov._runs["blocker0"] = blocker
+
+    queue: asyncio.Queue = asyncio.Queue()
+    kwargs = _spawn_kwargs("parked-c", loop, queue)
+    kwargs["turn_run_id"] = "turn-run-under-test"
+    await asyncio.to_thread(prov.start_run, **kwargs)
+    assert prov.is_running("parked-c") is True
+
+    assert prov.cancel_turn("turn-run-under-test") is True, (
+        "cancel_turn must resolve a parked run by turn_run_id — otherwise "
+        "the Stop button is a no-op for a turn stuck at the gate"
+    )
+    assert prov.is_running("parked-c") is False
+
+    prov._cleanup_run("blocker0")
+    await asyncio.sleep(0.3)
+    assert spawned == [], (
+        f"a cancelled parked run must never spawn, got {spawned}"
+    )
+    print("PASS cancel_turn reaches parked run")
+
+
+async def test_hung_runner_releases_gate() -> None:
+    """A runner that finalized its turn but never exits must not wedge
+    the native session forever.
+
+    Production case: the runner logged `runner done`, wrote complete.json,
+    then blocked in interpreter shutdown joining a non-daemon executor
+    thread. It stayed registered, so every later turn on that native
+    session parked at the gate until the backend restarted."""
+    prov = _make_provider()
+    loop = asyncio.get_running_loop()
+    spawned: list = []
+    _install_spawn_recorder(prov, spawned)
+
+    hung = _FakeRunState("hung0", NATIVE_SID)
+    prov._runs["hung0"] = hung
+
+    reaped: dict = {}
+
+    class _StubControl:
+        def terminate_tree(self, popen, *, timeout=3.0):
+            reaped["pid"] = popen.pid
+            popen.exit()
+            return True
+
+    orig_control = provider_claude._process_control
+    orig_grace = provider_claude._WIND_DOWN_GRACE
+    provider_claude._process_control = lambda: _StubControl()
+    provider_claude._WIND_DOWN_GRACE = 0.3
+
+    async def _no_drain(rs):
+        return None
+
+    prov._await_tailer_drained = _no_drain  # type: ignore[assignment]
+
+    try:
+        queue: asyncio.Queue = asyncio.Queue()
+        await asyncio.to_thread(
+            prov.start_run, **_spawn_kwargs("after-hung", loop, queue)
+        )
+        assert spawned == [], "the new turn must park behind the hung run"
+
+        # The wind-down epilogue for a runner whose process never exits.
+        # Unbounded before the fix — wait_for turns that hang into a
+        # clean failure.
+        await asyncio.wait_for(prov._watch_process_exit(hung), timeout=10)
+
+        assert reaped.get("pid") == hung.popen.pid, (
+            "the hung runner was never reaped, so the gate never released"
+        )
+        for _ in range(200):
+            await asyncio.sleep(0.01)
+            if spawned:
+                break
+        assert spawned == ["after-hung"], (
+            "the parked turn must spawn once the hung runner is reaped, "
+            f"got {spawned}"
+        )
+    finally:
+        provider_claude._process_control = orig_control
+        provider_claude._WIND_DOWN_GRACE = orig_grace
+    print("PASS hung runner releases gate")
+
+
+async def test_cancel_turn_drops_every_parked_attempt() -> None:
+    """Retry/continuation attempts mint a new provider run id per attempt
+    under one turn_run_id. Cancelling only the first leaves the survivor
+    blocking the gate for every later turn on the session."""
+    prov = _make_provider()
+    loop = asyncio.get_running_loop()
+    spawned: list = []
+    _install_spawn_recorder(prov, spawned)
+    prov._runs["blocker0"] = _FakeRunState("blocker0", NATIVE_SID)
+
+    for run_id in ("attempt-1", "attempt-2"):
+        kwargs = _spawn_kwargs(run_id, loop, asyncio.Queue())
+        kwargs["turn_run_id"] = "shared-turn"
+        await asyncio.to_thread(prov.start_run, **kwargs)
+    assert len(prov._parked_runs) == 2
+
+    assert prov.cancel_turn("shared-turn") is True
+    assert not prov._parked_runs, (
+        "every parked attempt of the cancelled turn must be dropped, "
+        f"still parked: {list(prov._parked_runs)}"
+    )
+
+    prov._cleanup_run("blocker0")
+    await asyncio.sleep(0.3)
+    assert spawned == [], f"no cancelled attempt may spawn, got {spawned}"
+    print("PASS cancel_turn drops every parked attempt")
+
+
+async def test_recovered_run_is_never_signalled() -> None:
+    """A recovered run's `popen` is a stub around a pid read off disk,
+    with no ownership proof. After a restart that pid may belong to an
+    unrelated process, so the reap must never signal it — while the gate
+    must still release."""
+    prov = _make_provider()
+    loop = asyncio.get_running_loop()
+    spawned: list = []
+    _install_spawn_recorder(prov, spawned)
+
+    recovered = _FakeRunState("recovered0", NATIVE_SID)
+    recovered.popen.recovered_stub = True  # never exits, never verifiable
+    prov._runs["recovered0"] = recovered
+
+    signalled: list = []
+
+    class _StubControl:
+        def terminate_tree(self, popen, *, timeout=3.0):
+            signalled.append(popen.pid)
+            popen.exit()
+            return True
+
+    orig_control = provider_claude._process_control
+    orig_grace = provider_claude._WIND_DOWN_GRACE
+    provider_claude._process_control = lambda: _StubControl()
+    provider_claude._WIND_DOWN_GRACE = 0.3
+
+    async def _no_drain(rs):
+        return None
+
+    prov._await_tailer_drained = _no_drain  # type: ignore[assignment]
+
+    try:
+        await asyncio.to_thread(
+            prov.start_run, **_spawn_kwargs("after-recovered", loop, asyncio.Queue())
+        )
+        await asyncio.wait_for(prov._watch_process_exit(recovered), timeout=10)
+
+        assert signalled == [], (
+            "the backend signalled an unverified recovered pid — a "
+            f"recycled pid would kill an unrelated process group: {signalled}"
+        )
+        for _ in range(200):
+            await asyncio.sleep(0.01)
+            if spawned:
+                break
+        assert spawned == ["after-recovered"], (
+            f"the gate must still release for a recovered run, got {spawned}"
+        )
+    finally:
+        provider_claude._process_control = orig_control
+        provider_claude._WIND_DOWN_GRACE = orig_grace
+    print("PASS recovered run released without being signalled")
+
+
 async def main() -> None:
     try:
         await test_parked_run_reports_running()
         await test_simultaneous_release_does_not_double_spawn()
         await test_cancelled_parked_run_is_dropped()
+        await test_cancel_turn_reaches_parked_run()
+        await test_hung_runner_releases_gate()
+        await test_cancel_turn_drops_every_parked_attempt()
+        await test_recovered_run_is_never_signalled()
         print("ALL WIND-DOWN GATE TESTS PASSED")
     finally:
         shutil.rmtree(_TEST_HOME, ignore_errors=True)
