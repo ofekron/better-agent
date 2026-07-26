@@ -46,12 +46,12 @@ const capabilityPickerClient = {
   listCapabilityPickerSources: vi.fn(async () => ({ sources: [] })),
 };
 
-function renderModal(open: boolean, onClose: () => void) {
+function renderModal(open: boolean, onClose: () => void, onCreate: () => void = vi.fn()) {
   return render(
     <NewSessionModal
       open={open}
       onClose={onClose}
-      onCreate={vi.fn()}
+      onCreate={onCreate}
       defaultCwd="/tmp/project"
       projects={[]}
       capabilityPickerClient={capabilityPickerClient}
@@ -139,6 +139,19 @@ describe("NewSessionModal prompt draft", () => {
     expect(onClose).not.toHaveBeenCalled();
     expect(view.queryByRole("button", { name: "newSession.keepDraftDiscard" })).toBeNull();
     expect((await promptTextarea(view)).value).toBe("still deciding");
+    view.unmount();
+  });
+
+  it("keeps Enter as a newline instead of creating the session", async () => {
+    const onCreate = vi.fn();
+    const view = renderModal(true, () => {}, onCreate);
+    const textarea = await promptTextarea(view);
+    fireEvent.change(textarea, { target: { value: "first line" } });
+
+    const notPrevented = fireEvent.keyDown(textarea, { key: "Enter", code: "Enter" });
+
+    expect(notPrevented).toBe(true);
+    expect(onCreate).not.toHaveBeenCalled();
     view.unmount();
   });
 

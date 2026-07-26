@@ -934,13 +934,6 @@ export function NewSessionModal({
 
   useBackButtonDismiss(open, requestCancel);
 
-  const handlePromptKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key !== "Enter" || e.shiftKey) return;
-    e.preventDefault();
-    if (!(cwd || defaultCwd) || creating) return;
-    handleCreate("send-and-open");
-  };
-
   const handlePromptPaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
     const files = imageFilesFromClipboard(e.clipboardData);
     if (files.length === 0) return;
@@ -1059,7 +1052,6 @@ export function NewSessionModal({
               data-testid={NEW_SESSION_PROMPT_TESTID}
               value={promptText}
               onChange={(e) => investigation ? setEditedPrompt(e.target.value) : setInitialPrompt(e.target.value)}
-              onKeyDown={handlePromptKeyDown}
               onPaste={handlePromptPaste}
               rows={4}
             />
