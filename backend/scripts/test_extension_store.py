@@ -3504,7 +3504,13 @@ def test_builtin_feature_gate_rejects_inactive_entitlement() -> None:
 def test_installed_extension_instructions_are_managed_blocks() -> None:
     work = _private_monorepo_test_work()
     import config_store
+    import installation_profile
     original_state = config_store._load_state()
+    # Bare test homes have no installation.json -- _record_active() gates on
+    # integrations_enabled(), which is False without one, so user_instruction_contexts()
+    # would surface nothing regardless of the extension's own state.
+    original_integrations_enabled = installation_profile.integrations_enabled
+    installation_profile.integrations_enabled = lambda: True  # type: ignore[assignment]
     try:
         # Redirect the claude provider config dir into the tempdir so the managed
         # block lands there, never in the real ~/.claude/CLAUDE.md.
@@ -3523,6 +3529,8 @@ def test_installed_extension_instructions_are_managed_blocks() -> None:
             extension_path="extensions/instructions",
         )
         ext_id = "ofek.instructions"
+        # Installs land disabled; this test is about instruction exposure once active.
+        extension_store.set_enabled(ext_id, True)
         instructions_file = claude_home / "CLAUDE.md"
 
         def has_block() -> bool:
@@ -3552,6 +3560,7 @@ def test_installed_extension_instructions_are_managed_blocks() -> None:
         if has_block():
             raise AssertionError("block not removed on uninstall")
     finally:
+        installation_profile.integrations_enabled = original_integrations_enabled  # type: ignore[assignment]
         config_store._save_state(original_state)
         shutil.rmtree(work, ignore_errors=True)
 

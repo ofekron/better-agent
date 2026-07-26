@@ -2868,6 +2868,7 @@ def _install_from_package_dir(
     source: dict[str, str],
     entitlement_token: str = "",
     force_enabled: bool = False,
+    default_enabled: bool = False,
     persist: bool = True,
     existing_record: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -2900,7 +2901,9 @@ def _install_from_package_dir(
     now = _now()
     record = {
         "manifest": manifest,
-        "enabled": True if force_enabled or manifest["id"] in REQUIRED_EXTENSION_IDS else existing.get("enabled", True),
+        # Fresh installs arrive inert: installing third-party code must not also
+        # start running it. An update keeps whatever the user already chose.
+        "enabled": True if force_enabled or manifest["id"] in REQUIRED_EXTENSION_IDS else existing.get("enabled", default_enabled),
         "activation_id": uuid.uuid4().hex,
         "instructions_enabled": extension_instructions.normalize_state(existing),
         "permission_grants": permission_grants(existing),

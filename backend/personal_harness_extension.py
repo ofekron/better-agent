@@ -110,6 +110,10 @@ def create(
                 "commit_sha": _directory_content_sha256(package_dir),
             },
             persist=True,
+            # Synthesized from the user's own instruction files rather than
+            # installed third-party code, so it starts active; an explicit
+            # disable is still preserved across regeneration.
+            default_enabled=True,
             existing_record=existing,
         )
     return _enable_projects(record, projects, has_project_instructions=bool(project_content))

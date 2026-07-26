@@ -96,8 +96,9 @@ my-extensions/
   (`_private_extension_commit_sha`). When you commit a change, the next
   reconcile detects the new HEAD and re-snapshots — edits take effect on the
   next store reconcile without a manual reinstall.
-- Local extensions are first-party, so they are enabled without a consent
-  prompt and may use `backend_routes` / `internal_loopback`.
+- Local extensions are first-party, so they skip the consent prompt and may use
+  `backend_routes` / `internal_loopback`. Like every install, they still land
+  disabled and you turn them on once; later reconciles keep that choice.
 
 > State isolation: all snapshots live under `$BETTER_AGENT_HOME` (defaults to
 > `~/.better-claude`). Never write scripts that touch that path directly — go
