@@ -48,6 +48,7 @@ hiddenimports = [
     "main", "main_node", "app_entry", "runner", "runner_gemini",
     "runner_codex", "runner_better_agent", "runner_agy", "runner_copilot",
     "shell", "supervisor", "shell_env", "setup", "auth_secrets",
+    "deep_link", "activation_server", "macos_url_handler",
     "updater", "_version",
     "node_client", "node_identity", "node_link", "node_protocol",
     "node_registry_store", "node_rpc_handlers", "node_store", "topology",
@@ -110,6 +111,7 @@ exe = EXE(                                               # noqa: F821
     exclude_binaries=True,
     name="Better Agent",
     console=False,          # windowed app — no terminal
+    argv_emulation=sys.platform == "darwin",
     target_arch=None,       # build for the host architecture
     codesign_identity=None,  # signed by desktop/local_codesign.sh
 )
@@ -133,6 +135,10 @@ if sys.platform == "darwin":
             "CFBundleDisplayName": "Better Agent",
             "CFBundleShortVersionString": _APP_VERSION,
             "CFBundleVersion": _APP_VERSION,
+            "CFBundleURLTypes": [{
+                "CFBundleURLName": "com.betteragent.marketplace",
+                "CFBundleURLSchemes": ["betteragent"],
+            }],
             "LSMinimumSystemVersion": "11.0",
             "NSHighResolutionCapable": True,
             # The backend binds 0.0.0.0 for LAN access; macOS 15+ prompts

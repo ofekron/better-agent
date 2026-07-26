@@ -17,6 +17,7 @@ from __future__ import annotations
 import os
 import sys
 
+from deep_link import DeepLinkError, deep_link_from_argv, redact_argv
 from paths import ba_home
 
 # Early-startup diagnostics. A windowed `.app` has no stdout/stderr —
@@ -30,7 +31,9 @@ try:
     import threading as _th
     import traceback as _tb
     _fh = (_home / "faulthandler.log").open("a", buffering=1)
-    _fh.write(f"=== app_main pid={os.getpid()} argv={sys.argv} ===\n")
+    _fh.write(
+        f"=== app_main pid={os.getpid()} argv={redact_argv(sys.argv)} ===\n"
+    )
     faulthandler.enable(file=_fh)
     faulthandler.dump_traceback_later(15, repeat=True, file=_fh)
 
@@ -79,8 +82,16 @@ def main() -> int:
     if _role(argv) == "backend":
         from app_entry import _main as backend_main
         return backend_main(argv)
+    try:
+        pair_link = deep_link_from_argv(argv)
+    except DeepLinkError:
+        return 2
+    activation = pair_link.as_event() if pair_link is not None else None
+    from activation_server import forward_activation
+    if forward_activation(ba_home(), activation or {"type": "activate"}):
+        return 0
     from shell import main as shell_main
-    return shell_main()
+    return shell_main(initial_activation=activation)
 
 
 if __name__ == "__main__":

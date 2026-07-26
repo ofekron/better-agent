@@ -17,6 +17,7 @@ for _p in (_HERE, _BACKEND):
 
 import app_main
 from app_main import _role
+from deep_link import redact_argv
 
 PASS = "\x1b[32mPASS\x1b[0m"
 FAIL = "\x1b[31mFAIL\x1b[0m"
@@ -38,9 +39,20 @@ def test_role_dispatch() -> bool:
     return True
 
 
+def test_diagnostic_argv_redacts_pair_intent() -> bool:
+    argv = [
+        "Better Agent",
+        "betteragent://marketplace/pair?v=1&intent=secret-pair-token",
+    ]
+    redacted = redact_argv(argv)
+    return "secret-pair-token" not in " ".join(redacted)
+
+
 TESTS = [
     ("app_main._role classifies shell vs backend invocations",
      test_role_dispatch),
+    ("app_main diagnostics redact marketplace pair intents",
+     test_diagnostic_argv_redacts_pair_intent),
 ]
 
 

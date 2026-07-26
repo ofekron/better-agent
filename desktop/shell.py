@@ -26,6 +26,7 @@ from pathlib import Path
 import webview
 
 import updater
+from activation_server import ActivationServer, forward_activation_when_ready
 from notifications import DesktopNotificationApi
 from supervisor import BackendSupervisor
 from updater import start_background_check
@@ -138,8 +139,48 @@ def _configure_logging() -> None:
     root.addHandler(handler)
 
 
-def main() -> int:
+def _emit_activation(window, event: dict[str, str]) -> None:
+    if event["type"] == "activate":
+        window.show()
+        return
+    payload = json.dumps(event, separators=(",", ":"))
+    window.evaluate_js(
+        "window.__betterAgentDesktopActivations ??= [];"
+        f"window.__betterAgentDesktopActivations.push({payload});"
+        "window.dispatchEvent(new CustomEvent("
+        "'better-agent:deep-link',{detail:"
+        f"{payload}"
+        "}));"
+    )
+    window.show()
+
+
+def main(initial_activation: dict[str, str] | None = None) -> int:
     _configure_logging()
+    pending_activations = [initial_activation] if initial_activation else []
+    active_window = {"value": None}
+    activation_lock = threading.Lock()
+
+    def _on_activation(event: dict[str, str]) -> None:
+        with activation_lock:
+            window = active_window["value"]
+            if window is None:
+                pending_activations.append(event)
+                return
+        _emit_activation(window, event)
+
+    from paths import ba_home
+    activation_server = ActivationServer(ba_home(), _on_activation)
+    try:
+        activation_server.start()
+    except RuntimeError:
+        return 0 if forward_activation_when_ready(
+            ba_home(),
+            initial_activation or {"type": "activate"},
+        ) else 1
+    if platform.system() == "Darwin":
+        from macos_url_handler import install_macos_url_handler
+        install_macos_url_handler(_on_activation)
     from setup import (
         ensure_desktop_role,
         ensure_node_topology,
@@ -148,12 +189,15 @@ def main() -> int:
     )
     role = ensure_desktop_role()
     if role is None:
+        activation_server.close()
         return 1
     if role == "node":
         if not ensure_node_topology():
+            activation_server.close()
             return 1
     else:
         if not ensure_primary_network_bind():
+            activation_server.close()
             return 1
         # Primary first run: the backend cannot boot until the keychain
         # holds the credential entries (SessionMiddleware reads the secret
@@ -162,6 +206,7 @@ def main() -> int:
         if auth_secrets.needs_bootstrap():
             from setup import run_setup
             if not run_setup():
+                activation_server.close()
                 return 1  # user closed setup without creating an account
 
     sup = BackendSupervisor(role=role)
@@ -169,6 +214,7 @@ def main() -> int:
         sup.start(on_port_conflict=resolve_port_conflict)
     except RuntimeError as e:
         _error_window(str(e))
+        activation_server.close()
         return 1
     if not sup.wait_healthy():
         message = (
@@ -178,6 +224,7 @@ def main() -> int:
         if not _line_switch_fallback():
             _error_window(message)
         sup.shutdown(kill_runners=True)
+        activation_server.close()
         return 1
 
     local_url = sup.local_url()
@@ -201,6 +248,15 @@ def main() -> int:
             local_url,
             js_api=DesktopNotificationApi(),
         )
+    def _deliver_initial_activations() -> None:
+        with activation_lock:
+            active_window["value"] = window
+            queued_activations = list(pending_activations)
+            pending_activations.clear()
+        for event in queued_activations:
+            _emit_activation(window, event)
+
+    window.events.loaded += _deliver_initial_activations
 
     def _on_closing() -> None:
         # Runs on the GUI thread when the window is closing. The confirm
@@ -240,8 +296,11 @@ def main() -> int:
         updater.apply_and_relaunch()
 
     start_background_check(_on_update_available)
-    webview.start()  # blocks until the window is closed
-    sup.shutdown(kill_runners=kill_on_quit["value"])
+    try:
+        webview.start()  # blocks until the window is closed
+    finally:
+        sup.shutdown(kill_runners=kill_on_quit["value"])
+        activation_server.close()
     return 0
 
 
