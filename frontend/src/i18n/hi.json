@@ -1275,12 +1275,18 @@
     "reject": "अस्वीकार करें",
     "approve": "स्वीकृत करें",
     "approving": "स्वीकृत किया जा रहा है…",
+    "connectedDevice": "Marketplace से जुड़ा डिवाइस",
+    "revoke": "पहुँच रद्द करें",
+    "revoking": "पहुँच रद्द हो रही है…",
+    "revokeTitle": "Marketplace की पहुँच रद्द करें?",
+    "revokeHelp": "यह डिवाइस Marketplace अनुरोध स्वीकार करना बंद कर देगा। दोबारा जोड़ने के लिए Marketplace वेबसाइट से फिर पेयर करें।",
+    "revokingTitle": "Marketplace की पहुँच रद्द हो रही है",
+    "revokingHelp": "Marketplace के साथ सुरक्षित निष्कासन पूरा हो रहा है",
     "connectionFailed": "Marketplace कनेक्शन विफल",
     "connectionTitle": "Marketplace कनेक्शन",
     "connection": {
       "connecting": "सुरक्षित रूप से कनेक्ट हो रहा है",
-      "offline": "Better Agent Marketplace से ऑफ़लाइन है",
-      "error": "कनेक्शन पर ध्यान देना आवश्यक है"
+      "offline": "Better Agent Marketplace से ऑफ़लाइन है"
     },
     "action": {
       "pair": "Marketplace जोड़ें",
@@ -1295,6 +1301,7 @@
       "leased": "Better Agent ने प्राप्त किया",
       "awaiting_confirmation": "आपकी पुष्टि की प्रतीक्षा",
       "committing": "सुरक्षित रूप से लागू हो रहा है",
+      "redeemed": "कनेक्टेड",
       "succeeded": "पूरा हुआ",
       "rejected": "अस्वीकृत",
       "failed": "विफल",

@@ -1271,12 +1271,18 @@
     "reject": "Ablehnen",
     "approve": "Genehmigen",
     "approving": "Wird genehmigt…",
+    "connectedDevice": "Verbundenes Marketplace-Gerät",
+    "revoke": "Zugriff entziehen",
+    "revoking": "Zugriff wird entzogen…",
+    "revokeTitle": "Marketplace-Zugriff entziehen?",
+    "revokeHelp": "Dieses Gerät nimmt keine Marketplace-Anfragen mehr an. Kopple es auf der Marketplace-Website erneut, um die Verbindung wiederherzustellen.",
+    "revokingTitle": "Marketplace-Zugriff wird entzogen",
+    "revokingHelp": "Sichere Entfernung vom Marketplace wird abgeschlossen",
     "connectionFailed": "Marketplace-Verbindung fehlgeschlagen",
     "connectionTitle": "Marketplace-Verbindung",
     "connection": {
       "connecting": "Sichere Verbindung wird hergestellt",
-      "offline": "Better Agent ist vom Marketplace getrennt",
-      "error": "Verbindung erfordert Aufmerksamkeit"
+      "offline": "Better Agent ist vom Marketplace getrennt"
     },
     "action": {
       "pair": "Marketplace verbinden",
@@ -1291,6 +1297,7 @@
       "leased": "Von Better Agent empfangen",
       "awaiting_confirmation": "Wartet auf deine Bestätigung",
       "committing": "Wird sicher angewendet",
+      "redeemed": "Verbunden",
       "succeeded": "Abgeschlossen",
       "rejected": "Abgelehnt",
       "failed": "Fehlgeschlagen",

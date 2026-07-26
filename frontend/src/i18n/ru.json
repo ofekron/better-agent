@@ -1277,12 +1277,18 @@
     "reject": "Отклонить",
     "approve": "Разрешить",
     "approving": "Разрешение…",
+    "connectedDevice": "Устройство, подключённое к Marketplace",
+    "revoke": "Отозвать доступ",
+    "revoking": "Доступ отзывается…",
+    "revokeTitle": "Отозвать доступ к Marketplace?",
+    "revokeHelp": "Это устройство перестанет принимать запросы Marketplace. Чтобы подключить его снова, повторите сопряжение на сайте.",
+    "revokingTitle": "Доступ к Marketplace отзывается",
+    "revokingHelp": "Завершается безопасное отключение от Marketplace",
     "connectionFailed": "Не удалось подключиться к Marketplace",
     "connectionTitle": "Подключение Marketplace",
     "connection": {
       "connecting": "Безопасное подключение",
-      "offline": "Better Agent не подключён к Marketplace",
-      "error": "Подключение требует внимания"
+      "offline": "Better Agent не подключён к Marketplace"
     },
     "action": {
       "pair": "Подключить Marketplace",
@@ -1297,6 +1303,7 @@
       "leased": "Получено Better Agent",
       "awaiting_confirmation": "Ожидание вашего подтверждения",
       "committing": "Безопасное применение",
+      "redeemed": "Подключено",
       "succeeded": "Завершено",
       "rejected": "Отклонено",
       "failed": "Ошибка",

@@ -2,44 +2,17 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { API } from "../api";
 import { eventBus } from "../lib/eventBus";
+import {
+  marketplaceBridgeSnapshotFrom,
+  type MarketplaceBridgeSnapshot,
+  type MarketplaceDevice,
+  type MarketplaceIntent,
+  type MarketplaceIntentStatus,
+} from "../marketplaceBridgeSnapshot";
 import { MarketplaceConfirmationModal } from "./MarketplaceConfirmationModal";
 
-type IntentStatus =
-  | "pending" | "leased" | "awaiting_confirmation" | "committing"
-  | "succeeded" | "rejected" | "failed" | "failed_unknown"
-  | "expired" | "cancelled";
-
-interface MarketplaceIntent {
-  intent_id: string;
-  action: "pair" | "install" | "enable" | "disable" | "update" | "uninstall";
-  status: IntentStatus;
-  extension?: {
-    id: string;
-    name: string;
-    version?: string;
-    publisher?: string;
-    permission_delta?: string[];
-  };
-  account_label?: string;
-  site_label?: string;
-  device_label?: string;
-  error?: string;
-}
-
-interface MarketplaceBridgeSnapshot {
-  connection_state: "unpaired" | "connecting" | "connected" | "offline" | "error";
-  intents: MarketplaceIntent[];
-}
-
-const TERMINAL = new Set<IntentStatus>([
-  "succeeded", "rejected", "failed", "failed_unknown", "expired", "cancelled",
-]);
-const ACTIONS = new Set<MarketplaceIntent["action"]>([
-  "pair", "install", "enable", "disable", "update", "uninstall",
-]);
-const STATUSES = new Set<IntentStatus>([
-  "pending", "leased", "awaiting_confirmation", "committing", "succeeded",
-  "rejected", "failed", "failed_unknown", "expired", "cancelled",
+const TERMINAL = new Set<MarketplaceIntentStatus>([
+  "redeemed", "succeeded", "rejected", "failed", "failed_unknown", "expired", "cancelled",
 ]);
 
 async function responseJson<T>(response: Response): Promise<T> {
@@ -51,78 +24,14 @@ async function responseJson<T>(response: Response): Promise<T> {
   return payload as T;
 }
 
-function snapshotFrom(value: unknown): MarketplaceBridgeSnapshot {
-  if (!value || typeof value !== "object") throw new Error("invalid marketplace snapshot");
-  const item = value as Record<string, unknown>;
-  if (
-    !["unpaired", "connecting", "connected", "offline", "error"].includes(
-      String(item.connection_state),
-    )
-    || !Array.isArray(item.intents)
-  ) {
-    throw new Error("invalid marketplace snapshot");
-  }
-  for (const intent of item.intents) {
-    if (!intent || typeof intent !== "object") throw new Error("invalid marketplace intent");
-    const row = intent as Record<string, unknown>;
-    if (
-      typeof row.intent_id !== "string"
-      || row.intent_id.length === 0
-      || row.intent_id.length > 128
-      || !ACTIONS.has(row.action as MarketplaceIntent["action"])
-      || !STATUSES.has(row.status as IntentStatus)
-    ) {
-      throw new Error("invalid marketplace intent");
-    }
-    const bounded = (field: unknown, required = false) => (
-      typeof field === "string"
-      && field.length <= 500
-      && (!required || field.trim().length > 0)
-    );
-    if (row.error !== undefined && !bounded(row.error)) {
-      throw new Error("invalid marketplace intent");
-    }
-    if (row.action === "pair") {
-      if (
-        !bounded(row.site_label, true)
-        || !bounded(row.account_label, true)
-        || !bounded(row.device_label, true)
-      ) {
-        throw new Error("invalid marketplace pair intent");
-      }
-      continue;
-    }
-    if (!row.extension || typeof row.extension !== "object") {
-      throw new Error("invalid marketplace extension intent");
-    }
-    const extension = row.extension as Record<string, unknown>;
-    if (!bounded(extension.id, true) || !bounded(extension.name, true)) {
-      throw new Error("invalid marketplace extension intent");
-    }
-    for (const field of ["version", "publisher"] as const) {
-      if (extension[field] !== undefined && !bounded(extension[field])) {
-        throw new Error("invalid marketplace extension intent");
-      }
-    }
-    if (
-      extension.permission_delta !== undefined
-      && (
-        !Array.isArray(extension.permission_delta)
-        || extension.permission_delta.length > 64
-        || extension.permission_delta.some((entry) => !bounded(entry, true))
-      )
-    ) {
-      throw new Error("invalid marketplace permission delta");
-    }
-  }
-  return value as MarketplaceBridgeSnapshot;
-}
-
 export function MarketplaceBridgeCenter() {
   const { t } = useTranslation();
   const [snapshot, setSnapshot] = useState<MarketplaceBridgeSnapshot | null>(null);
   const [busyIntentId, setBusyIntentId] = useState<string | null>(null);
+  const [busyDeviceId, setBusyDeviceId] = useState<string | null>(null);
+  const [selectedDeviceId, setSelectedDeviceId] = useState<string | null>(null);
   const [error, setError] = useState("");
+  const [revokeError, setRevokeError] = useState("");
   const [fresh, setFresh] = useState(false);
   const [dismissed, setDismissed] = useState<Set<string>>(new Set());
   const requestVersion = useRef(0);
@@ -132,9 +41,19 @@ export function MarketplaceBridgeCenter() {
     setFresh(false);
     try {
       const response = await fetch(`${API}/api/marketplace-bridge`);
-      const next = snapshotFrom(await responseJson<unknown>(response));
+      const next = marketplaceBridgeSnapshotFrom(await responseJson<unknown>(response));
       if (version !== requestVersion.current) return;
       setSnapshot(next);
+      const nextAwaitsConfirmation = next.intents.some(
+        (intent) => intent.status === "awaiting_confirmation",
+      );
+      setSelectedDeviceId((current) => (
+        current
+        && !nextAwaitsConfirmation
+        && next.paired_devices.some((device) => device.device_id === current)
+          ? current
+          : null
+      ));
       setError("");
       setFresh(true);
     } catch (caught) {
@@ -160,6 +79,12 @@ export function MarketplaceBridgeCenter() {
     () => snapshot?.intents.find((intent) => intent.status === "awaiting_confirmation") ?? null,
     [snapshot],
   );
+  const selectedDevice = useMemo(
+    () => awaiting
+      ? null
+      : snapshot?.paired_devices.find((device) => device.device_id === selectedDeviceId) ?? null,
+    [awaiting, selectedDeviceId, snapshot],
+  );
   const visibleStatuses = useMemo(
     () => (snapshot?.intents ?? []).filter(
       (intent) => !dismissed.has(intent.intent_id) && intent !== awaiting,
@@ -167,13 +92,17 @@ export function MarketplaceBridgeCenter() {
     [awaiting, dismissed, snapshot],
   );
   const canDecide = fresh
+    && snapshot?.connection_state !== "offline";
+  const canRevoke = fresh
+    && !awaiting
+    && !snapshot?.revocation_pending
     && snapshot?.connection_state !== "offline"
-    && snapshot?.connection_state !== "error";
+    && busyDeviceId === null;
   const connectionNotice = snapshot
     && !["connected", "unpaired"].includes(snapshot.connection_state)
     ? snapshot.connection_state
     : null;
-  const globalError = awaiting ? "" : error;
+  const globalError = awaiting || selectedDevice ? "" : error;
 
   const decide = useCallback(async (intent: MarketplaceIntent, decision: "approve" | "reject") => {
     if (!fresh) return;
@@ -186,7 +115,7 @@ export function MarketplaceBridgeCenter() {
         `${API}/api/marketplace-bridge/intents/${encodeURIComponent(intent.intent_id)}/${decision}`,
         { method: "POST" },
       );
-      const next = snapshotFrom(await responseJson<unknown>(response));
+      const next = marketplaceBridgeSnapshotFrom(await responseJson<unknown>(response));
       if (version !== requestVersion.current) return;
       setSnapshot(next);
       setFresh(true);
@@ -198,9 +127,60 @@ export function MarketplaceBridgeCenter() {
     }
   }, [fresh]);
 
+  const revoke = useCallback(async (device: MarketplaceDevice) => {
+    if (!canRevoke) return;
+    const version = ++requestVersion.current;
+    setBusyDeviceId(device.device_id);
+    setFresh(false);
+    setRevokeError("");
+    try {
+      const response = await fetch(
+        `${API}/api/marketplace-bridge/devices/${encodeURIComponent(device.device_id)}`,
+        { method: "DELETE" },
+      );
+      const next = marketplaceBridgeSnapshotFrom(await responseJson<unknown>(response));
+      if (version !== requestVersion.current) return;
+      setSnapshot(next);
+      setSelectedDeviceId(null);
+      setFresh(true);
+    } catch (caught) {
+      if (version !== requestVersion.current) return;
+      setRevokeError(caught instanceof Error ? caught.message : String(caught));
+      await load();
+    } finally {
+      setBusyDeviceId((current) => current === device.device_id ? null : current);
+    }
+  }, [canRevoke, load]);
+
   return (
     <>
-      {awaiting ? (
+      {selectedDevice ? (
+        <MarketplaceConfirmationModal
+          open
+          title={t("marketplaceBridge.revokeTitle")}
+          eyebrow={t("marketplaceBridge.connectedDevice")}
+          busy={busyDeviceId === selectedDevice.device_id}
+          confirmDisabled={!canRevoke}
+          error={revokeError || error}
+          confirmLabel={busyDeviceId === selectedDevice.device_id
+            ? t("marketplaceBridge.revoking")
+            : t("marketplaceBridge.revoke")}
+          cancelLabel={t("app.cancel")}
+          onCancel={() => {
+            setSelectedDeviceId(null);
+            setRevokeError("");
+          }}
+          onConfirm={() => void revoke(selectedDevice)}
+        >
+          <p>{t("marketplaceBridge.revokeHelp")}</p>
+          <dl className="marketplace-intent-facts">
+            <div>
+              <dt>{t("marketplaceBridge.device")}</dt>
+              <dd>{selectedDevice.label}</dd>
+            </div>
+          </dl>
+        </MarketplaceConfirmationModal>
+      ) : awaiting ? (
         <MarketplaceConfirmationModal
           open
           title={t(`marketplaceBridge.action.${awaiting.action}`)}
@@ -246,7 +226,11 @@ export function MarketplaceBridgeCenter() {
               )}
         </MarketplaceConfirmationModal>
       ) : null}
-      {(globalError || connectionNotice || visibleStatuses.length > 0) ? (
+      {(globalError
+        || connectionNotice
+        || snapshot?.revocation_pending
+        || (snapshot?.paired_devices.length ?? 0) > 0
+        || visibleStatuses.length > 0) ? (
         <aside className="marketplace-bridge-statuses" aria-live="polite">
           {globalError ? (
             <article className="marketplace-bridge-status marketplace-bridge-status--failed" role="alert">
@@ -266,6 +250,44 @@ export function MarketplaceBridgeCenter() {
               </div>
             </article>
           ) : null}
+          {!globalError && snapshot?.revocation_pending ? (
+            <article
+              className="marketplace-bridge-status marketplace-bridge-status--committing"
+              role="status"
+            >
+              <span className="marketplace-bridge-status__pulse" aria-hidden="true" />
+              <div>
+                <strong>{t("marketplaceBridge.revokingTitle")}</strong>
+                <span>{t("marketplaceBridge.revokingHelp")}</span>
+              </div>
+            </article>
+          ) : null}
+          {!snapshot?.revocation_pending
+            ? snapshot?.paired_devices.map((device) => (
+              <article
+                className="marketplace-bridge-status marketplace-bridge-device"
+                key={device.device_id}
+                role="status"
+              >
+                <span className="marketplace-bridge-status__pulse" aria-hidden="true" />
+                <div>
+                  <strong>{t("marketplaceBridge.connectedDevice")}</strong>
+                  <span>{device.label}</span>
+                </div>
+                <button
+                  type="button"
+                  className="marketplace-bridge-device__revoke"
+                  disabled={!canRevoke}
+                  onClick={() => {
+                    setRevokeError("");
+                    setSelectedDeviceId(device.device_id);
+                  }}
+                >
+                  {t("marketplaceBridge.revoke")}
+                </button>
+              </article>
+            ))
+            : null}
           {visibleStatuses.map((intent) => (
             <article
               className={`marketplace-bridge-status marketplace-bridge-status--${intent.status}`}

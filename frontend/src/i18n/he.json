@@ -1318,12 +1318,18 @@
     "reject": "דחייה",
     "approve": "אישור",
     "approving": "מאשר…",
+    "connectedDevice": "מכשיר מחובר ל-Marketplace",
+    "revoke": "ביטול גישה",
+    "revoking": "מבטל גישה…",
+    "revokeTitle": "לבטל את הגישה ל-Marketplace?",
+    "revokeHelp": "המכשיר יפסיק לקבל בקשות מ-Marketplace. כדי להתחבר מחדש, יש לצמד אותו שוב מאתר Marketplace.",
+    "revokingTitle": "מבטל את הגישה ל-Marketplace",
+    "revokingHelp": "משלים הסרה מאובטחת מול Marketplace",
     "connectionFailed": "החיבור ל-Marketplace נכשל",
     "connectionTitle": "חיבור Marketplace",
     "connection": {
       "connecting": "מתחבר באופן מאובטח",
-      "offline": "Better Agent אינו מחובר ל-Marketplace",
-      "error": "החיבור דורש טיפול"
+      "offline": "Better Agent אינו מחובר ל-Marketplace"
     },
     "action": {
       "pair": "חיבור Marketplace",
@@ -1338,6 +1344,7 @@
       "leased": "התקבל ב-Better Agent",
       "awaiting_confirmation": "ממתין לאישורכם",
       "committing": "מחיל באופן מאובטח",
+      "redeemed": "מחובר",
       "succeeded": "הושלם",
       "rejected": "נדחה",
       "failed": "נכשל",

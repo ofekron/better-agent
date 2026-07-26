@@ -1274,12 +1274,18 @@
     "reject": "رفض",
     "approve": "موافقة",
     "approving": "جارٍ الاعتماد…",
+    "connectedDevice": "جهاز متصل بالمتجر",
+    "revoke": "إلغاء الوصول",
+    "revoking": "جارٍ إلغاء الوصول…",
+    "revokeTitle": "إلغاء الوصول إلى المتجر؟",
+    "revokeHelp": "سيتوقف هذا الجهاز عن قبول طلبات المتجر. لإعادة الاتصال، اربطه مجددًا من موقع المتجر.",
+    "revokingTitle": "جارٍ إلغاء الوصول إلى المتجر",
+    "revokingHelp": "جارٍ إكمال الإزالة الآمنة مع المتجر",
     "connectionFailed": "فشل اتصال المتجر",
     "connectionTitle": "اتصال المتجر",
     "connection": {
       "connecting": "جارٍ الاتصال بأمان",
-      "offline": "Better Agent غير متصل بالمتجر",
-      "error": "الاتصال يحتاج إلى انتباه"
+      "offline": "Better Agent غير متصل بالمتجر"
     },
     "action": {
       "pair": "ربط المتجر",
@@ -1294,6 +1300,7 @@
       "leased": "استلمها Better Agent",
       "awaiting_confirmation": "بانتظار تأكيدك",
       "committing": "جارٍ التطبيق بأمان",
+      "redeemed": "متصل",
       "succeeded": "اكتمل",
       "rejected": "مرفوض",
       "failed": "فشل",

@@ -1274,12 +1274,18 @@
     "reject": "거부",
     "approve": "승인",
     "approving": "승인 중…",
+    "connectedDevice": "Marketplace 연결 기기",
+    "revoke": "접근 권한 해제",
+    "revoking": "해제 중…",
+    "revokeTitle": "Marketplace 접근 권한을 해제할까요?",
+    "revokeHelp": "이 기기는 Marketplace 요청을 더 이상 받지 않습니다. 다시 연결하려면 Marketplace 웹사이트에서 다시 페어링하세요.",
+    "revokingTitle": "Marketplace 접근 권한 해제 중",
+    "revokingHelp": "Marketplace와의 안전한 연결 해제를 마무리하고 있습니다",
     "connectionFailed": "Marketplace 연결 실패",
     "connectionTitle": "Marketplace 연결",
     "connection": {
       "connecting": "안전하게 연결 중",
-      "offline": "Better Agent가 Marketplace에서 오프라인입니다",
-      "error": "연결에 주의가 필요합니다"
+      "offline": "Better Agent가 Marketplace에서 오프라인입니다"
     },
     "action": {
       "pair": "Marketplace 연결",
@@ -1294,6 +1300,7 @@
       "leased": "Better Agent가 수신함",
       "awaiting_confirmation": "확인 대기 중",
       "committing": "안전하게 적용 중",
+      "redeemed": "연결됨",
       "succeeded": "완료됨",
       "rejected": "거부됨",
       "failed": "실패",

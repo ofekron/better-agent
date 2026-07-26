@@ -1275,12 +1275,18 @@
     "reject": "拒绝",
     "approve": "批准",
     "approving": "正在批准…",
+    "connectedDevice": "已连接扩展市场的设备",
+    "revoke": "撤销访问权限",
+    "revoking": "正在撤销…",
+    "revokeTitle": "撤销扩展市场访问权限？",
+    "revokeHelp": "此设备将不再接受扩展市场请求。如需重新连接，请在扩展市场网站上再次配对。",
+    "revokingTitle": "正在撤销扩展市场访问权限",
+    "revokingHelp": "正在完成与扩展市场的安全解绑",
     "connectionFailed": "扩展市场连接失败",
     "connectionTitle": "扩展市场连接",
     "connection": {
       "connecting": "正在安全连接",
-      "offline": "Better Agent 已与扩展市场断开连接",
-      "error": "连接需要处理"
+      "offline": "Better Agent 已与扩展市场断开连接"
     },
     "action": {
       "pair": "连接扩展市场",
@@ -1295,6 +1301,7 @@
       "leased": "Better Agent 已接收",
       "awaiting_confirmation": "正在等待你的确认",
       "committing": "正在安全应用",
+      "redeemed": "已连接",
       "succeeded": "已完成",
       "rejected": "已拒绝",
       "failed": "失败",

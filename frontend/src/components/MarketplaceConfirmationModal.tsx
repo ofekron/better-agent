@@ -8,6 +8,7 @@ interface Props {
   eyebrow?: string;
   busy: boolean;
   disabled?: boolean;
+  confirmDisabled?: boolean;
   error: string;
   confirmLabel?: string;
   cancelLabel?: string;
@@ -22,6 +23,7 @@ export function MarketplaceConfirmationModal({
   eyebrow,
   busy,
   disabled = false,
+  confirmDisabled = false,
   error,
   confirmLabel,
   cancelLabel,
@@ -115,7 +117,7 @@ export function MarketplaceConfirmationModal({
             type="button"
             className="btn-primary"
             onClick={onConfirm}
-            disabled={busy || disabled}
+            disabled={busy || disabled || confirmDisabled}
           >
             {confirmLabel ?? (busy ? t("settings.extensionsUpdating") : t("app.confirm"))}
           </button>

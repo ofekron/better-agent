@@ -1346,12 +1346,18 @@
     "reject": "Reject",
     "approve": "Approve",
     "approving": "Approving…",
+    "connectedDevice": "Connected Marketplace device",
+    "revoke": "Revoke",
+    "revoking": "Revoking…",
+    "revokeTitle": "Revoke Marketplace access?",
+    "revokeHelp": "This device will stop accepting Marketplace requests. To reconnect, pair it again from the Marketplace website.",
+    "revokingTitle": "Revoking Marketplace access",
+    "revokingHelp": "Finishing secure removal with the Marketplace",
     "connectionFailed": "Marketplace connection failed",
     "connectionTitle": "Marketplace connection",
     "connection": {
       "connecting": "Connecting securely",
-      "offline": "Better Agent is offline from the Marketplace",
-      "error": "Connection needs attention"
+      "offline": "Better Agent is offline from the Marketplace"
     },
     "action": {
       "pair": "Connect Marketplace",
@@ -1366,6 +1372,7 @@
       "leased": "Received by Better Agent",
       "awaiting_confirmation": "Waiting for your confirmation",
       "committing": "Applying securely",
+      "redeemed": "Connected",
       "succeeded": "Completed",
       "rejected": "Rejected",
       "failed": "Failed",

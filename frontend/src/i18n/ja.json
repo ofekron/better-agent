@@ -1271,12 +1271,18 @@
     "reject": "拒否",
     "approve": "許可",
     "approving": "許可中…",
+    "connectedDevice": "Marketplace 接続デバイス",
+    "revoke": "アクセスを取り消す",
+    "revoking": "取り消し中…",
+    "revokeTitle": "Marketplace へのアクセスを取り消しますか？",
+    "revokeHelp": "このデバイスは Marketplace のリクエストを受け付けなくなります。再接続するには、Marketplace のウェブサイトからもう一度ペアリングしてください。",
+    "revokingTitle": "Marketplace へのアクセスを取り消しています",
+    "revokingHelp": "Marketplace との安全な切断を完了しています",
     "connectionFailed": "Marketplace への接続に失敗しました",
     "connectionTitle": "Marketplace 接続",
     "connection": {
       "connecting": "安全に接続しています",
-      "offline": "Better Agent は Marketplace からオフラインです",
-      "error": "接続の確認が必要です"
+      "offline": "Better Agent は Marketplace からオフラインです"
     },
     "action": {
       "pair": "Marketplace を接続",
@@ -1291,6 +1297,7 @@
       "leased": "Better Agent が受信しました",
       "awaiting_confirmation": "確認を待機中",
       "committing": "安全に適用中",
+      "redeemed": "接続済み",
       "succeeded": "完了",
       "rejected": "拒否済み",
       "failed": "失敗",

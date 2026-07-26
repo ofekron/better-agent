@@ -1271,12 +1271,18 @@
     "reject": "Weigeren",
     "approve": "Goedkeuren",
     "approving": "Goedkeuren…",
+    "connectedDevice": "Verbonden Marketplace-apparaat",
+    "revoke": "Toegang intrekken",
+    "revoking": "Toegang intrekken…",
+    "revokeTitle": "Marketplace-toegang intrekken?",
+    "revokeHelp": "Dit apparaat accepteert geen Marketplace-verzoeken meer. Koppel het opnieuw via de Marketplace-website om weer verbinding te maken.",
+    "revokingTitle": "Marketplace-toegang wordt ingetrokken",
+    "revokingHelp": "Beveiligde verwijdering bij de Marketplace wordt afgerond",
     "connectionFailed": "Marketplace-verbinding mislukt",
     "connectionTitle": "Marketplace-verbinding",
     "connection": {
       "connecting": "Veilig verbinding maken",
-      "offline": "Better Agent is offline voor de Marketplace",
-      "error": "De verbinding vereist aandacht"
+      "offline": "Better Agent is offline voor de Marketplace"
     },
     "action": {
       "pair": "Marketplace verbinden",
@@ -1291,6 +1297,7 @@
       "leased": "Ontvangen door Better Agent",
       "awaiting_confirmation": "Wachten op je bevestiging",
       "committing": "Veilig toepassen",
+      "redeemed": "Verbonden",
       "succeeded": "Voltooid",
       "rejected": "Geweigerd",
       "failed": "Mislukt",

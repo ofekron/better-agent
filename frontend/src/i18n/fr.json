@@ -1275,12 +1275,18 @@
     "reject": "Refuser",
     "approve": "Autoriser",
     "approving": "Autorisation…",
+    "connectedDevice": "Appareil connecté à la marketplace",
+    "revoke": "Révoquer l’accès",
+    "revoking": "Révocation…",
+    "revokeTitle": "Révoquer l’accès à la marketplace ?",
+    "revokeHelp": "Cet appareil n’acceptera plus les demandes de la marketplace. Pour le reconnecter, associez-le à nouveau depuis le site.",
+    "revokingTitle": "Révocation de l’accès à la marketplace",
+    "revokingHelp": "Finalisation de la suppression sécurisée avec la marketplace",
     "connectionFailed": "Échec de la connexion à la marketplace",
     "connectionTitle": "Connexion à la marketplace",
     "connection": {
       "connecting": "Connexion sécurisée",
-      "offline": "Better Agent est hors ligne pour la marketplace",
-      "error": "La connexion requiert votre attention"
+      "offline": "Better Agent est hors ligne pour la marketplace"
     },
     "action": {
       "pair": "Connecter la marketplace",
@@ -1295,6 +1301,7 @@
       "leased": "Reçu par Better Agent",
       "awaiting_confirmation": "En attente de votre confirmation",
       "committing": "Application sécurisée",
+      "redeemed": "Connecté",
       "succeeded": "Terminé",
       "rejected": "Refusé",
       "failed": "Échec",
