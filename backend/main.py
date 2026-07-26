@@ -18391,7 +18391,12 @@ def _find_worker_by_session_name(cwd: str, name: str) -> dict | None:
     raw = _ws._read()
     for worker in raw.get("workers", []):
         worker_name = str(worker.get("name") or "").strip()
-        bc = session_manager.get_lite(worker.get("agent_session_id"))
+        agent_session_id = worker.get("agent_session_id")
+        try:
+            bc = session_manager.get_lite(agent_session_id)
+        except session_store.SessionProviderNotConfiguredError:
+            _ws.remove_worker(worker.get("cwd") or cwd, agent_session_id)
+            continue
         worker_cwd = str((worker.get("cwd") or bc.get("cwd")) if bc else "").strip()
         if worker_name and worker_name == name and worker_cwd == str(cwd or "").strip():
             return {
