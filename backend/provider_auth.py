@@ -21,6 +21,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 from pathlib import Path
 from typing import Awaitable, Callable, Optional
@@ -221,7 +222,7 @@ def _markers_dir() -> Path:
 # Provider ids are uuid4, but an imported record can carry an arbitrary id;
 # refuse anything that isn't a safe filename component so a crafted id
 # ("../x") can't escape the markers dir.
-_SAFE_ID = __import__("re").compile(r"^[A-Za-z0-9_-]{1,128}$")
+_SAFE_ID = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 
 
 def _marker_path(provider_id: str) -> Optional[Path]:
@@ -234,13 +235,24 @@ def _write_marker(provider_id: str, proc: asyncio.subprocess.Process, kind: str)
     path = _marker_path(provider_id)
     if path is None:
         return
+    # Record the process's creation time so a later reap can tell the
+    # original orphan from an unrelated process the OS recycled the pid
+    # into (deterministic; survives reboot where pids restart low).
+    create_time = _process_create_time(proc.pid)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         # Atomic: a crash mid-write leaves the old file (or none), never a
         # truncated marker that masks an orphan.
         tmp = path.with_suffix(".json.tmp")
         tmp.write_text(
-            json.dumps({"pid": proc.pid, "provider_id": provider_id, "kind": kind}),
+            json.dumps(
+                {
+                    "pid": proc.pid,
+                    "provider_id": provider_id,
+                    "kind": kind,
+                    "create_time": create_time,
+                }
+            ),
             encoding="utf-8",
         )
         os.replace(tmp, path)
@@ -258,30 +270,15 @@ def _clear_marker(provider_id: str) -> None:
         pass
 
 
-def _proc_is_expected_cli(pid: int, kind: str) -> bool:
-    """True ONLY if the live process at ``pid`` is the provider's own CLI
-    (claude/codex). Fail-closed: any uncertainty -> False, so a recycled
-    PID (after a reboot, PIDs restart low) is never mistaken for our
-    orphan. Cross-platform, dependency-free (ps -o args= / tasklist)."""
-    expected = _BINARY_NAME.get(kind or "", "")
-    if not expected or pid <= 0:
-        return False
-    import subprocess
-
+def _process_create_time(pid: int) -> Optional[float]:
+    """The process's creation time, or None if it can't be determined
+    (psutil missing, or the pid isn't a live process we can introspect)."""
     try:
-        if os.name == "nt":
-            out = subprocess.run(
-                ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
-                capture_output=True, text=True, timeout=5,
-            ).stdout.lower()
-            return expected.lower() in out
-        args = subprocess.run(
-            ["ps", "-p", str(pid), "-o", "args="],
-            capture_output=True, text=True, timeout=5,
-        ).stdout
-        return expected in args
+        import psutil
+
+        return float(psutil.Process(pid).create_time())
     except Exception:
-        return False
+        return None
 
 
 def reap_orphaned_logins() -> None:
@@ -291,43 +288,54 @@ def reap_orphaned_logins() -> None:
     - a marker for a record currently in `_procs` is a live, intentional
       flow -> left untouched (not an orphan);
     - a marker whose pid is gone -> unlinked, no kill;
-    - a marker whose pid is alive but is NOT the expected claude/codex CLI
-      (PID was reused by an unrelated process after a reboot) -> unlinked,
-      NO kill. Killing would SIGKILL that process's whole group.
+    - a marker whose pid is alive but whose create_time no longer matches
+      what we stored at spawn -> the PID was reused by an UNRELATED
+      process (guaranteed reachable after a reboot). Unlink, NO kill.
+      (Substring/command-line heuristics are deliberately NOT used: this
+      repo's own path contains "claude", so they false-positive on the
+      backend's own workers. create_time is deterministic.)
 
-    Only a live pid that IS our own CLI is reaped."""
+    The marker is unlinked BEFORE the kill so a kill that takes down the
+    backend's own group can't repeat on the next boot."""
     d = _markers_dir()
     if not d.is_dir():
         return
+    # Sweep stale atomic-write temp files first (a crash between write_text
+    # and os.replace leaves a .json.tmp the marker glob below skips).
+    for tmp in d.glob("*.json.tmp"):
+        _safe_unlink(tmp)
     pc = process_control()
     for marker in d.glob("*.json"):
         try:
             data = json.loads(marker.read_text(encoding="utf-8"))
             pid = int(data.get("pid") or 0)
-            kind = str(data.get("kind") or "")
             provider_id = str(data.get("provider_id") or "")
+            expected_ct = data.get("create_time")
         except Exception:
-            pid, kind, provider_id = 0, "", ""
+            pid, provider_id, expected_ct = 0, "", None
         # Live, intentional flow (startup race) — leave it alone.
         if provider_id and provider_id in _procs:
             continue
         if not pid or not pc.pid_alive(pid):
             _safe_unlink(marker)
             continue
-        if not _proc_is_expected_cli(pid, kind):
-            # PID reuse / unrelated process — must not kill. Drop the marker.
+        # Deterministic identity: the create_time we recorded at spawn must
+        # still match. A mismatch means the original died and the OS reused
+        # the pid for something else — must not kill.
+        current_ct = _process_create_time(pid)
+        if expected_ct is None or current_ct is None or current_ct != expected_ct:
             logger.warning(
-                "provider_auth: skipping reap pid=%d (not the expected %s CLI); "
-                "clearing stale marker", pid, kind or "?",
+                "provider_auth: skipping reap pid=%d (identity mismatch / "
+                "unverifiable); clearing stale marker", pid,
             )
             _safe_unlink(marker)
             continue
+        _safe_unlink(marker)  # unlink BEFORE kill so a self-hit can't repeat
         try:
             pc.force_kill(pid)
-            logger.info("provider_auth: reaped orphaned login pid=%d kind=%s", pid, kind)
+            logger.info("provider_auth: reaped orphaned login pid=%d", pid)
         except Exception:
             logger.warning("provider_auth: failed to reap orphan pid=%d", pid)
-        _safe_unlink(marker)
 
 
 def _safe_unlink(path: Path) -> None:
