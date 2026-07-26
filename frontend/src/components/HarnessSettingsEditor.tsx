@@ -4,7 +4,7 @@ import { API } from "../api";
 import { eventBus } from "../lib/eventBus";
 import { trackedFetch } from "../progress/store";
 import type { HarnessProfile } from "../types";
-import { HarnessGroup } from "./harness/HarnessGroup";
+import { ExtensionEnabledToggle, HarnessGroup } from "./harness/HarnessGroup";
 import { HarnessProfileMeta } from "./harness/HarnessProfileMeta";
 import {
   REVISION_MISMATCH,
@@ -298,6 +298,15 @@ export function HarnessSettingsEditor() {
                   {extension.description && (
                     <p className="harness-extension-block-description">{extension.description}</p>
                   )}
+                  <ExtensionEnabledToggle
+                    group={descriptor.builtin_extensions}
+                    profile={profile}
+                    extensionId={extension.id}
+                    isDefault={isDefault}
+                    disabled={disabled}
+                    diffOnly={diffOnly}
+                    onWrite={(write) => applyWrites([write])}
+                  />
                   {extension.groups.map((group) => (
                     <HarnessGroup
                       key={group.id}
@@ -314,18 +323,8 @@ export function HarnessSettingsEditor() {
               ))}
 
               <article className="harness-extension-block">
-                <div className="harness-extension-block-title">{t("harnessProfile.builtinsTitle")}</div>
                 <HarnessGroup
                   group={descriptor.builtin_tools}
-                  profile={profile}
-                  extensionId={null}
-                  isDefault={isDefault}
-                  disabled={disabled}
-                  diffOnly={diffOnly}
-                  onWrite={(write) => applyWrites([write])}
-                />
-                <HarnessGroup
-                  group={descriptor.builtin_extensions}
                   profile={profile}
                   extensionId={null}
                   isDefault={isDefault}

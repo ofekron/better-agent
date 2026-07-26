@@ -87,7 +87,8 @@ function ToggleRow({
   isDefault,
   disabled,
   onWrite,
-}: GroupProps & { item: HarnessDescriptorItem }) {
+  labelOverride,
+}: GroupProps & { item: HarnessDescriptorItem; labelOverride?: string }) {
   const { t } = useTranslation();
   const state = toggleState(profile, group, item, extensionId);
   const isGlobal = group.scope === SCOPE_GLOBAL;
@@ -112,7 +113,7 @@ function ToggleRow({
           onChange={(e) => confirm.request(e.target.checked)}
         />
         <span className="harness-item-label">
-          {labelKey ? t(labelKey, { defaultValue: item.label }) : item.label}
+          {labelOverride ?? (labelKey ? t(labelKey, { defaultValue: item.label }) : item.label)}
         </span>
       </label>
       {item.detail && <span className="harness-item-detail">{item.detail}</span>}
@@ -349,6 +350,33 @@ export function HarnessGroup(props: GroupProps) {
       </div>
       {hint && <p className="harness-group-hint">{hint}</p>}
       {body}
+    </div>
+  );
+}
+
+/** The profile-scoped "is this extension live here" switch. It is stored in
+ * the top-level disabled_builtin_extensions list, but it belongs on the
+ * extension's own card: enablement is what gates every other control there,
+ * so splitting it into a separate section hid the master switch from the
+ * settings it governs. Path stays top-level, hence extensionId={null}. */
+export function ExtensionEnabledToggle({
+  group,
+  extensionId,
+  ...rest
+}: Omit<GroupProps, "extensionId"> & { extensionId: string }) {
+  const { t } = useTranslation();
+  const item = group.items.find((candidate) => candidate.name === extensionId);
+  if (!item) return null;
+  if (rest.diffOnly && !isItemOverridden(rest.profile, group, item, null)) return null;
+  return (
+    <div className="harness-extension-enabled">
+      <ToggleRow
+        {...rest}
+        group={group}
+        extensionId={null}
+        item={item}
+        labelOverride={t("harnessProfile.extensionEnabled")}
+      />
     </div>
   );
 }
