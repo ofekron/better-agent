@@ -7482,6 +7482,7 @@ def extension_mcp_servers(extension_id: str) -> list[dict[str, Any]]:
     if get_extension(extension_id) is None:
         raise ExtensionError("Extension not installed")
     record = get_extension(extension_id)
+    root = runtime_package_root_for_record(record)
     servers: list[dict[str, Any]] = []
     for item in _stored_mcp_entrypoints(record):
         if item["name"] in _RESERVED_MCP_SERVER_NAMES:
@@ -7490,7 +7491,7 @@ def extension_mcp_servers(extension_id: str) -> list[dict[str, Any]]:
             {
                 "name": item["name"],
                 "label": item.get("label") or item["name"],
-                "description": item.get("description") or "",
+                "description": extension_descriptions.mcp_description(root, item),
                 "user_facing": item.get("user_facing", True),
                 "enabled": is_mcp_server_enabled(extension_id, item["name"], record=record),
                 "forced_by_skills": mcp_forcing_skills(extension_id, item["name"], record=record),

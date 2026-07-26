@@ -32,6 +32,14 @@ def _package(tmp: Path) -> Path:
         encoding="utf-8",
     )
     (root / "docs" / "empty.md").write_text("# Only A Heading\n", encoding="utf-8")
+    (root / "mcp").mkdir(parents=True)
+    (root / "mcp" / "boards.md").write_text(
+        "# Boards\n\nCreate and query project boards, columns and cards.\n", encoding="utf-8"
+    )
+    (root / "mcp" / "scheduler.md").write_text(
+        "---\ndescription: Run agents on a cron schedule.\n---\n\n# Scheduler\n\nLonger body.\n",
+        encoding="utf-8",
+    )
     return root
 
 
@@ -68,6 +76,35 @@ def test_absent_text_stays_empty_rather_than_placeheld() -> None:
         assert extension_descriptions.skill_description(None, {"path": "skills/deploy"}) == ""
 
 
+def test_mcp_description_comes_from_markdown_beside_the_server() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = _package(Path(tmp))
+        # Script-launched server: doc sits next to the script.
+        script = extension_descriptions.mcp_description(
+            root, {"name": "boards", "python": "mcp/server.py"}
+        )
+        assert script == "Create and query project boards, columns and cards.", script
+        # Module-launched server: doc sits in the module's top package dir.
+        module = extension_descriptions.mcp_description(
+            root, {"name": "scheduler", "module": "mcp.server"}
+        )
+        assert module == "Run agents on a cron schedule.", module
+
+
+def test_every_kind_reads_markdown_by_the_same_rule() -> None:
+    """Frontmatter description wins over lead paragraph, for every kind."""
+    with tempfile.TemporaryDirectory() as tmp:
+        root = _package(Path(tmp))
+        # scheduler.md has BOTH frontmatter and a body; frontmatter wins.
+        assert extension_descriptions.mcp_description(
+            root, {"name": "scheduler", "module": "mcp.server"}
+        ) == "Run agents on a cron schedule."
+        # boards.md has NO frontmatter; the lead paragraph is used instead.
+        assert extension_descriptions.mcp_description(
+            root, {"name": "boards", "python": "mcp/server.py"}
+        ) == "Create and query project boards, columns and cards."
+
+
 def test_paths_cannot_escape_the_extension_package() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         root = _package(Path(tmp))
@@ -81,6 +118,8 @@ def main() -> int:
         test_skill_description_comes_from_skill_md,
         test_manifest_description_wins_over_the_artifact,
         test_instruction_description_is_the_lead_paragraph,
+        test_mcp_description_comes_from_markdown_beside_the_server,
+        test_every_kind_reads_markdown_by_the_same_rule,
         test_absent_text_stays_empty_rather_than_placeheld,
         test_paths_cannot_escape_the_extension_package,
     ):
