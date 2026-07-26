@@ -14,6 +14,7 @@ Locks the backend half of "select which statuses to show or filter out":
 Run with:
     cd backend && .venv/bin/python scripts/test_session_status_filter.py
 """
+import asyncio
 import sys
 from pathlib import Path
 
@@ -258,6 +259,54 @@ check(
     )
     is True,
 )
+
+# ── 5. the route wires the query params to the gate ──────────────────────
+class _FakeRequest:
+    headers: dict[str, str] = {}
+
+
+def route_ids(**params) -> list[str]:
+    main._local_session_summaries_for_sidebar = lambda: [dict(s) for s in SESSIONS]
+    main._local_session_summaries_by_ids_for_sidebar = lambda ids: [
+        dict(s) for s in SESSIONS if s["id"] in set(ids)
+    ]
+    main._sidebar_state_snapshot = lambda: SNAPSHOT
+    main._decorate_local_sidebar_sessions = lambda rows, _snapshot=None: list(rows)
+    main._sessions_list_cache_get = lambda *a, **k: None
+    main._sessions_list_response_maybe_cache = lambda _key, payload, **k: payload
+    main._schedule_session_event_meta_warm = lambda _page: None
+    route_args = dict(
+        offset=0,
+        limit=50,
+        project_path=None,
+        search=None,
+        show_archived=False,
+        file_edit_mode=None,
+        folder_ids=None,
+        folder_view=False,
+        tag_ids=None,
+        provider_ids=None,
+        model_ids=None,
+        modes=None,
+        sources=None,
+        search_fields=None,
+        sort_by="updated_at",
+        statuses=None,
+        exclude_statuses=None,
+    )
+    route_args.update(params)
+    payload = asyncio.run(main.get_sessions(request=_FakeRequest(), **route_args))
+    return [row["id"] for row in payload["sessions"]]
+
+
+check("route.include", set(route_ids(statuses="running,error")) == {"run", "err"})
+check(
+    "route.exclude",
+    set(route_ids(exclude_statuses="idle,unread")) == {"err", "blocked", "run"},
+)
+# An unknown bucket builds no gate, so the route behaves exactly as it does
+# with no status params at all (both stay on the store-order fast path).
+check("route.unknown_bucket_ignored", route_ids(statuses="bogus") == route_ids())
 
 if failures:
     print(f"\nFAILED {len(failures)}: {failures}")
