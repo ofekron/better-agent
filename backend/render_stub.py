@@ -53,9 +53,16 @@ def primary_events(msg: dict) -> list:
 
 
 def _renderable(events: list) -> list:
+    # `is_metadata_event` drops CLI sidecar records. Sessions written
+    # before the ingest gate landed still hold them inside persisted
+    # `panel.events`, and that snapshot path never passes through the
+    # journal→frontend converter — so without this they keep shipping.
+    from event_shape import is_metadata_event
     return [
         e for e in events
-        if isinstance(e, dict) and e.get("type") not in _NON_RENDER_TYPES
+        if isinstance(e, dict)
+        and e.get("type") not in _NON_RENDER_TYPES
+        and not is_metadata_event(e)
     ]
 
 

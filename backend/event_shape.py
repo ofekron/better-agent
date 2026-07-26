@@ -133,6 +133,22 @@ NON_RENDER_AGENT_DATA_TYPES = frozenset({
     "mode",
 })
 
+# Raw Codex rollout envelopes that reach the render tree un-normalized.
+# Never valid chat content: the frontend drops every one of them in
+# `agentMessages.flattenClaudeMessages`, and the facts they carry are
+# already surfaced through normalized events — Codex's compaction
+# boundary, for one, becomes a `lifecycle_notice` with kind "compacted"
+# (codex_native.py). Gating them keeps Codex at parity with the Claude /
+# Gemini sidecar types above.
+NON_RENDER_PROVIDER_ENVELOPE_TYPES = frozenset({
+    "response_item",
+    "event_msg",
+    "session_meta",
+    "turn_context",
+    "compacted",
+    "thread.started",
+})
+
 TEXT_AGENT_DATA_TYPES = frozenset({"assistant", "operator"})
 
 
@@ -150,7 +166,11 @@ def is_metadata_event(event: dict) -> bool:
     data = event.get("data")
     if not isinstance(data, dict):
         return False
-    return data.get("type") in NON_RENDER_AGENT_DATA_TYPES
+    dtype = data.get("type")
+    return (
+        dtype in NON_RENDER_AGENT_DATA_TYPES
+        or dtype in NON_RENDER_PROVIDER_ENVELOPE_TYPES
+    )
 
 
 def strip_synthetic_events(events: list[dict]) -> list[dict]:

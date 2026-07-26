@@ -893,6 +893,101 @@ def test_o_inner_metadata_never_journaled_or_paneled() -> bool:
     return ok
 
 
+def test_p_legacy_panel_metadata_not_shipped_in_snapshot() -> bool:
+    """Sessions written BEFORE the ingest gate still hold sidecar
+    metadata inside persisted `panel.events`. That snapshot path never
+    passes through the journal→frontend converter, so filtering the
+    converter alone left legacy rows shipping. `render_stub` must drop
+    them, and real content in the same panel must survive."""
+    sid, root_id, msg_id, _ = _mk_session_with_panel("del_P")
+
+    # Simulate a legacy panel: metadata already persisted in panel.events,
+    # bypassing apply_event entirely (as pre-gate sessions have on disk).
+    def _seed_legacy(s: dict) -> None:
+        m = next((mm for mm in s.get("messages") or []
+                  if mm.get("id") == msg_id), None)
+        if not m:
+            return
+        panel = next((p for p in m.get("workers") or []
+                      if p.get("delegation_id") == "del_P"), None)
+        if panel is None:
+            return
+        panel["events"] = [
+            {"type": "agent_message",
+             "data": {"uuid": "legacy-meta-1", "type": "queue-operation",
+                      "content": "x" * 2048}},
+            {"type": "agent_message",
+             "data": {"uuid": "legacy-meta-2", "type": "ai-title"}},
+            {"type": "agent_message",
+             "data": {"uuid": "legacy-codex", "type": "response_item"}},
+            {"type": "agent_message",
+             "data": {"uuid": "legacy-real", "type": "assistant",
+                      "message": {"content": "kept"}}},
+        ]
+        panel.pop("_uid_idx", None)
+
+    session_manager._run(sid, _seed_legacy, {"kind": "test_seed_legacy_panel"})
+    session_manager.set_streaming(sid, msg_id, False)
+
+    sess = session_manager.get(sid) or {}
+    msg = next(m for m in sess["messages"] if m.get("id") == msg_id)
+    timeline = render_stub.timeline_events(msg)
+    kinds = [(e.get("data") or {}).get("type") for e in timeline]
+    leaked = [
+        k for k in kinds
+        if k in ("queue-operation", "ai-title", "response_item")
+    ]
+    ok = not leaked and "assistant" in kinds and render_stub.renderable_count(msg) == 1
+    print(f"{PASS if ok else FAIL} P: legacy panel metadata not shipped — "
+          f"leaked={leaked} kinds={kinds} "
+          f"renderable={render_stub.renderable_count(msg)}")
+    return ok
+
+
+def test_q_codex_envelopes_gated_like_claude_sidecars() -> bool:
+    """Cross-provider parity: Codex rollout envelopes reach the render
+    tree un-normalized and are dropped client-side, so the backend must
+    gate them exactly like the Claude/Gemini sidecar types. Codex's
+    compaction boundary survives separately as a `lifecycle_notice`."""
+    from event_shape import NON_RENDER_PROVIDER_ENVELOPE_TYPES, is_metadata_event
+
+    sid, root_id, msg_id, _ = _mk_session_with_panel("del_Q")
+    rows_before = len(_events_jsonl_for(root_id, sid))
+
+    for i, etype in enumerate(sorted(NON_RENDER_PROVIDER_ENVELOPE_TYPES)):
+        _apply(sid, msg_id, root_id, {
+            "type": "worker_event",
+            "data": {
+                "delegation_id": "del_Q",
+                "event": {
+                    "type": "agent_message",
+                    "data": {"uuid": f"uuid-Q-{i}", "type": etype,
+                             "payload": "y" * 2048},
+                },
+            },
+        }, source_is_provider_stream=True)
+
+    panel = _panel_events(sid, msg_id, "del_Q")
+    rows_after = len(_events_jsonl_for(root_id, sid))
+    gated_ok = (
+        len(NON_RENDER_PROVIDER_ENVELOPE_TYPES) >= 6
+        and len(panel) == 0
+        and rows_after == rows_before
+    )
+
+    # The normalized compaction boundary must NOT be swept up with it.
+    lifecycle_ok = not is_metadata_event({
+        "type": "lifecycle_notice",
+        "data": {"kind": "compacted", "message": "Context compacted"},
+    })
+
+    ok = gated_ok and lifecycle_ok
+    print(f"{PASS if ok else FAIL} Q: codex envelopes gated — "
+          f"gated={gated_ok} (panel={len(panel)} rows_delta={rows_after - rows_before}); "
+          f"lifecycle_notice_preserved={lifecycle_ok}")
+    return ok
+
+
 # ─── runner ───────────────────────────────────────────────────────
 
 def main() -> int:
@@ -916,6 +1011,8 @@ def main() -> int:
             test_m_session_panel_emitters_stamp_after_pending_trigger(),
             test_n_snapshot_routes_journal_worker_event_to_panel_once(),
             test_o_inner_metadata_never_journaled_or_paneled(),
+            test_p_legacy_panel_metadata_not_shipped_in_snapshot(),
+            test_q_codex_envelopes_gated_like_claude_sidecars(),
         ]
     finally:
         session_manager.flush_pending_persists()
