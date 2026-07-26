@@ -503,9 +503,10 @@ def test_protocol_transport_binds_origin_and_strips_signature_fields() -> None:
 def test_marketplace_auth_service_is_home_scoped() -> None:
     original_home = os.environ.get("BETTER_AGENT_HOME")
     try:
-        os.environ["BETTER_AGENT_HOME"] = "/tmp/better-agent-marketplace-a"
+        shared_tail = "/same-marketplace-home-tail-" + "x" * 80
+        os.environ["BETTER_AGENT_HOME"] = "/tmp/first-root" + shared_tail
         first = marketplace_auth.service_name()
-        os.environ["BETTER_AGENT_HOME"] = "/tmp/better-agent-marketplace-b"
+        os.environ["BETTER_AGENT_HOME"] = "/tmp/second-root" + shared_tail
         second = marketplace_auth.service_name()
     finally:
         if original_home is None:

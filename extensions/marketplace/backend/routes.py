@@ -32,7 +32,7 @@ _ACCESS_REFRESH_SLACK_SECONDS = 60
 _MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 _PROTOCOL_VERSION = 1
 _PROTOCOL_HASH = "425ec53e50f2bb093bb79cf2c2090a61a8c752cc44b93b731a7fa0ffc5430d8f"
-_refresh_lock = threading.Lock()
+_refresh_lock = threading.RLock()
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -176,27 +176,23 @@ def _parse_expiry(value: str) -> float:
 
 
 def _store_token_response(payload: dict) -> None:
-    _store_secret(
-        _SESSION_ACCOUNT,
-        {
-            "access_token": str(payload.get("access_token") or ""),
-            "access_expires_at": str(payload.get("access_token_expires_at") or ""),
-            "refresh_token": str(payload.get("refresh_token") or ""),
-        },
-    )
+    with _refresh_lock:
+        _store_secret(
+            _SESSION_ACCOUNT,
+            {
+                "access_token": str(payload.get("access_token") or ""),
+                "access_expires_at": str(payload.get("access_token_expires_at") or ""),
+                "refresh_token": str(payload.get("refresh_token") or ""),
+            },
+        )
 
 
 def _access_token() -> str:
     tokens = _load_secret(_SESSION_ACCOUNT) or {}
     access = str(tokens.get("access_token") or "")
-    if not access and not tokens.get("refresh_token"):
-        return ""
     expires = _parse_expiry(str(tokens.get("access_expires_at") or ""))
     if access and expires > time.time() + _ACCESS_REFRESH_SLACK_SECONDS:
         return access
-    if not tokens.get("refresh_token"):
-        _delete_secret(_SESSION_ACCOUNT)
-        return ""
     with _refresh_lock:
         current = _load_secret(_SESSION_ACCOUNT) or {}
         current_access = str(current.get("access_token") or "")
@@ -208,6 +204,8 @@ def _access_token() -> str:
             return current_access
         current_refresh = str(current.get("refresh_token") or "")
         if not current_refresh:
+            if current_access:
+                _delete_secret(_SESSION_ACCOUNT)
             return ""
         try:
             payload = _server_request(
@@ -499,7 +497,13 @@ def create_router(context) -> APIRouter:
                 )
             except HTTPException:
                 pass  # local sign-out must succeed even when the server is unreachable
-        _delete_secret(_SESSION_ACCOUNT)
+        with _refresh_lock:
+            current = _load_secret(_SESSION_ACCOUNT) or {}
+            if secrets.compare_digest(
+                json.dumps(current, sort_keys=True, separators=(",", ":")),
+                json.dumps(tokens, sort_keys=True, separators=(",", ":")),
+            ):
+                _delete_secret(_SESSION_ACCOUNT)
         return {"ok": True}
 
     @router.post("/auth/protocol-ready")
