@@ -14,8 +14,22 @@ from pathlib import Path
 from typing import Any
 
 
-def provider_identity(root: Path, provider: str) -> dict[str, Any]:
+def provider_identity(
+    root: Path,
+    provider: str,
+    launcher_path: str | None = None,
+) -> dict[str, Any]:
+    """Identity for the profile's pinned provider executable.
+
+    Defaults to a stub launcher, which is what deterministic tests want. Live
+    tests that actually spawn the vendor CLI must pass the real binary:
+    `cli_paths.resolve_cli_binary` returns the pinned path for this command,
+    so a stub here would silently no-op every real run.
+    """
     import provider_setup
+
+    if launcher_path:
+        return provider_setup.executable_identity(str(Path(launcher_path).absolute()))
 
     command = provider_setup.installer_for(provider).command
     suffix = ".cmd" if os.name == "nt" else ""
@@ -31,6 +45,7 @@ def activate(
     root: Path,
     mode: str | None = None,
     provider: str = "claude",
+    launcher_path: str | None = None,
 ) -> dict[str, Any]:
     import installation_profile
 
@@ -61,7 +76,7 @@ def activate(
     profile = installation_profile.new_active_profile(
         mode=mode,
         provider=provider,
-        provider_identity=provider_identity(root, provider),
+        provider_identity=provider_identity(root, provider, launcher_path),
     )
     installation_profile.stage_activation(profile)
     installation_profile.mark_selection_applied()

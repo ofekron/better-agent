@@ -14882,6 +14882,7 @@ async def internal_create_session(
         )
     node_id = str(body.get("node_id") or "").strip() or "primary"
     extra_mcp_servers = _api_extra_mcp_servers(body.get("mcp_servers"))
+    preset = str(body.get("preset") or "").strip()
     if not model:
         model = await asyncio.to_thread(config_store.default_session_model)
     sess = await asyncio.to_thread(
@@ -14898,6 +14899,7 @@ async def internal_create_session(
             bare_config=bare_config,
             capability_contexts=capability_contexts,
             extra_mcp_servers=extra_mcp_servers,
+            preset=preset,
             harness_profile_id=harness_profile_id,
             harness_profile_revision=harness_profile_revision,
         )

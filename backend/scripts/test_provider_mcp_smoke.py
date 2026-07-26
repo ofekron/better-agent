@@ -119,14 +119,27 @@ async def _run_provider_smoke(provider_name: str, provider_cls, main, session_st
     print(f"PASS {provider_name}: model called open_file_panel")
 
 
-async def _main() -> None:
+async def _main(home: Path) -> None:
     import uvicorn
 
+    import _test_installation
+    import cli_paths
     import main
     import session_store
     from session_manager import manager as session_manager
-    from provider_codex import CodexProvider
     from provider_gemini import GeminiProvider
+
+    # `with_builtin_mcp_servers` returns the run config untouched unless the
+    # installation profile is active, so without this the ui server is never
+    # registered and the assertion below can only fail. The profile pins one
+    # provider executable and `resolve_cli_binary` returns that pinned path,
+    # so it has to be the real binary rather than a stub launcher.
+    real_claude = cli_paths.resolve_cli_binary(
+        "claude", respect_installation_profile=False
+    )
+    if not real_claude:
+        raise RuntimeError("claude CLI is required to activate an installation profile")
+    _test_installation.activate(home, provider="claude", launcher_path=real_claude)
 
     port = _free_port()
     server = uvicorn.Server(
@@ -142,7 +155,9 @@ async def _main() -> None:
     thread.start()
     try:
         _wait_for_server(f"http://127.0.0.1:{port}/api/auth/needs_setup")
-        await _run_provider_smoke("codex", CodexProvider, main, session_store, session_manager, port)
+        # Codex is deliberately excluded: provider_manifest marks it
+        # hosts_ui_mcp=False, so it never receives the ui server and can never
+        # call open_file_panel.
         await _run_provider_smoke("gemini", GeminiProvider, main, session_store, session_manager, port)
     finally:
         server.should_exit = True
@@ -155,7 +170,7 @@ if __name__ == "__main__":
     os.environ["BETTER_AGENT_HOME"] = str(home)
     os.environ["BETTER_CLAUDE_TEST_AUTH_BYPASS"] = "1"
     try:
-        asyncio.run(_main())
+        asyncio.run(_main(home))
     except Exception:
         print(f"FAILED home preserved at {home}")
         raise
