@@ -1461,7 +1461,7 @@ body {
 
 .marketplace-bridge-statuses {
   position: fixed;
-  z-index: 1800;
+  z-index: 999;
   right: 18px;
   bottom: 18px;
   display: grid;
@@ -1505,12 +1505,36 @@ body {
   font-size: calc(12px * var(--app-font-scale));
 }
 
-.marketplace-bridge-status > button {
+/* Scoped to the dismiss control by class, not `> button`: a descendant-plus-
+   element selector outranks .marketplace-bridge-device__revoke and would
+   silently strip that button's own border, background and spacing. */
+.marketplace-bridge-status__dismiss {
+  display: grid;
+  place-items: center;
+  min-width: 32px;
+  min-height: 32px;
+  margin: -6px -6px 0 0;
   border: 0;
+  border-radius: 8px;
   background: transparent;
   color: var(--text-muted);
   cursor: pointer;
   font-size: 18px;
+  transition: background 140ms ease, color 140ms ease;
+}
+
+.marketplace-bridge-status__dismiss:hover {
+  background: color-mix(in srgb, var(--text-muted) 14%, transparent);
+  color: var(--text-primary);
+}
+
+.marketplace-bridge-status__dismiss:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+[dir="rtl"] .marketplace-bridge-status__dismiss {
+  margin: -6px 0 0 -6px;
 }
 
 .marketplace-bridge-device {
@@ -1566,7 +1590,12 @@ body {
 }
 
 .marketplace-bridge-status--failed .marketplace-bridge-status__pulse,
-.marketplace-bridge-status--failed_unknown .marketplace-bridge-status__pulse,
+.marketplace-bridge-status--failed_unknown .marketplace-bridge-status__pulse {
+  background: var(--error);
+  box-shadow: none;
+  animation: none;
+}
+
 .marketplace-bridge-status__error {
   color: var(--error) !important;
 }
@@ -16411,6 +16440,9 @@ pre .inline-tag-highlight {
 }
 .supervisor-banner-close:hover { opacity: 1; }
 
+/* Stays above .modal-overlay: this stack hosts blocking approval / input
+   requests from background sessions, which must stay actionable while a
+   modal is open. The passive marketplace status stack does not. */
 .chat-toast-stack {
   position: fixed;
   bottom: 88px;

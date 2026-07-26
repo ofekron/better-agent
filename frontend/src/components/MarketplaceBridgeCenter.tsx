@@ -31,6 +31,8 @@ export function MarketplaceBridgeCenter() {
   const [busyDeviceId, setBusyDeviceId] = useState<string | null>(null);
   const [selectedDeviceId, setSelectedDeviceId] = useState<string | null>(null);
   const [error, setError] = useState("");
+  const [errorDismissed, setErrorDismissed] = useState(false);
+  const [decideError, setDecideError] = useState("");
   const [revokeError, setRevokeError] = useState("");
   const [fresh, setFresh] = useState(false);
   const [dismissed, setDismissed] = useState<Set<string>>(new Set());
@@ -55,11 +57,13 @@ export function MarketplaceBridgeCenter() {
           : null
       ));
       setError("");
+      setErrorDismissed(false);
       setFresh(true);
     } catch (caught) {
       if (version !== requestVersion.current) return;
       setFresh(false);
       setError(caught instanceof Error ? caught.message : String(caught));
+      setErrorDismissed(false);
     }
   }, []);
 
@@ -102,14 +106,19 @@ export function MarketplaceBridgeCenter() {
     && !["connected", "unpaired"].includes(snapshot.connection_state)
     ? snapshot.connection_state
     : null;
-  const globalError = awaiting || selectedDevice ? "" : error;
+  const globalError = awaiting || selectedDevice || errorDismissed ? "" : error;
+  // A failed fetch leaves `snapshot` holding the last good response. Rendering
+  // it as current state would claim a live connection we cannot verify, so the
+  // cards stay hidden until a load succeeds — dismissing the banner silences
+  // the message, it does not make the stale snapshot trustworthy again.
+  const stale = Boolean(error);
 
   const decide = useCallback(async (intent: MarketplaceIntent, decision: "approve" | "reject") => {
     if (!fresh) return;
     const version = ++requestVersion.current;
     setBusyIntentId(intent.intent_id);
     setFresh(false);
-    setError("");
+    setDecideError("");
     try {
       const response = await fetch(
         `${API}/api/marketplace-bridge/intents/${encodeURIComponent(intent.intent_id)}/${decision}`,
@@ -121,11 +130,14 @@ export function MarketplaceBridgeCenter() {
       setFresh(true);
     } catch (caught) {
       if (version !== requestVersion.current) return;
-      setError(caught instanceof Error ? caught.message : String(caught));
+      setDecideError(caught instanceof Error ? caught.message : String(caught));
+      // Re-establish a trustworthy snapshot; without it `fresh` stays false and
+      // both modal buttons are inert with no way back.
+      await load();
     } finally {
       setBusyIntentId(null);
     }
-  }, [fresh]);
+  }, [fresh, load]);
 
   const revoke = useCallback(async (device: MarketplaceDevice) => {
     if (!canRevoke) return;
@@ -187,7 +199,7 @@ export function MarketplaceBridgeCenter() {
           eyebrow={t("marketplaceBridge.request")}
           busy={busyIntentId === awaiting.intent_id}
           disabled={!canDecide}
-          error={error}
+          error={decideError || error}
           confirmLabel={busyIntentId === awaiting.intent_id
             ? t("marketplaceBridge.approving")
             : t("marketplaceBridge.approve")}
@@ -227,18 +239,29 @@ export function MarketplaceBridgeCenter() {
         </MarketplaceConfirmationModal>
       ) : null}
       {(globalError
-        || connectionNotice
-        || snapshot?.revocation_pending
-        || (snapshot?.paired_devices.length ?? 0) > 0
-        || visibleStatuses.length > 0) ? (
+        || (!stale && (connectionNotice
+          || snapshot?.revocation_pending
+          || (snapshot?.paired_devices.length ?? 0) > 0
+          || visibleStatuses.length > 0))) ? (
         <aside className="marketplace-bridge-statuses" aria-live="polite">
           {globalError ? (
             <article className="marketplace-bridge-status marketplace-bridge-status--failed" role="alert">
-              <strong>{t("marketplaceBridge.connectionFailed")}</strong>
-              <span>{globalError}</span>
+              <span className="marketplace-bridge-status__pulse" aria-hidden="true" />
+              <div>
+                <strong>{t("marketplaceBridge.connectionFailed")}</strong>
+                <span className="marketplace-bridge-status__error">{globalError}</span>
+              </div>
+              <button
+                type="button"
+                className="marketplace-bridge-status__dismiss"
+                onClick={() => setErrorDismissed(true)}
+                aria-label={t("userRequest.dismiss")}
+              >
+                ×
+              </button>
             </article>
           ) : null}
-          {!globalError && connectionNotice ? (
+          {!stale && connectionNotice ? (
             <article
               className={`marketplace-bridge-status marketplace-bridge-status--${connectionNotice}`}
               role="status"
@@ -250,7 +273,7 @@ export function MarketplaceBridgeCenter() {
               </div>
             </article>
           ) : null}
-          {!globalError && snapshot?.revocation_pending ? (
+          {!stale && snapshot?.revocation_pending ? (
             <article
               className="marketplace-bridge-status marketplace-bridge-status--committing"
               role="status"
@@ -262,7 +285,7 @@ export function MarketplaceBridgeCenter() {
               </div>
             </article>
           ) : null}
-          {!snapshot?.revocation_pending
+          {!stale && !snapshot?.revocation_pending
             ? snapshot?.paired_devices.map((device) => (
               <article
                 className="marketplace-bridge-status marketplace-bridge-device"
@@ -288,7 +311,7 @@ export function MarketplaceBridgeCenter() {
               </article>
             ))
             : null}
-          {visibleStatuses.map((intent) => (
+          {(stale ? [] : visibleStatuses).map((intent) => (
             <article
               className={`marketplace-bridge-status marketplace-bridge-status--${intent.status}`}
               key={intent.intent_id}
@@ -303,6 +326,7 @@ export function MarketplaceBridgeCenter() {
               {TERMINAL.has(intent.status) ? (
                 <button
                   type="button"
+                  className="marketplace-bridge-status__dismiss"
                   onClick={() => setDismissed((current) => new Set(current).add(intent.intent_id))}
                   aria-label={t("userRequest.dismiss")}
                 >
