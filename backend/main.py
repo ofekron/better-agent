@@ -10,7 +10,9 @@ import gzip
 import hashlib
 import json
 import logging
+import logging.handlers
 import os
+import queue
 import re
 import signal
 import subprocess
@@ -223,7 +225,7 @@ class _WebSocketOutbox:
             if put_task in done:
                 return True
             perf.record_count("ws.outbox.rejected_timeout")
-            _warning_off_loop(
+            logger.warning(
                 "closing slow WebSocket: outbox enqueue timeout type=%s depth=%d",
                 event_type,
                 self._queue.qsize(),
@@ -345,7 +347,7 @@ class _WebSocketOutbox:
                 wire_end_at - queued_at
             ) * 1000.0)
             if wire_ms > 250.0:
-                _warning_off_loop(
+                logger.warning(
                     "slow binary WebSocket wire type=%s elapsed_ms=%.1f bytes=%d "
                     "conn=%s frame=%d enqueue_depth=%d current_depth=%d",
                     event_type,
@@ -488,7 +490,7 @@ class _WebSocketOutbox:
                 wire_end_at - timeline_origin
             ) * 1000.0)
             if wire_ms > 250.0:
-                _warning_off_loop(
+                logger.warning(
                     "slow WebSocket wire type=%s elapsed_ms=%.1f bytes=%d "
                     "conn=%s frame=%d enqueue_depth=%d current_depth=%d",
                     event_type,
@@ -510,7 +512,7 @@ class _WebSocketOutbox:
         elapsed_ms = (time.perf_counter() - send_t) * 1000.0
         perf.record("ws.send_json", elapsed_ms)
         if elapsed_ms > 250.0:
-            _warning_off_loop(
+            logger.warning(
                 "slow WebSocket send type=%s elapsed_ms=%.1f",
                 event_type,
                 elapsed_ms,
@@ -1574,16 +1576,62 @@ import harness_profile_store
 _log_dir = ba_home() / "logs"
 _log_dir.mkdir(parents=True, exist_ok=True)
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)-5s %(name)s: %(message)s",
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler(_log_dir / "backend.log", encoding="utf-8"),
-    ],
+_LOG_FORMAT = logging.Formatter("%(asctime)s %(levelname)-5s %(name)s: %(message)s")
+_LOG_QUEUE_LISTENERS: list[logging.handlers.QueueListener] = []
+
+
+def _install_queued_logging(target_logger: logging.Logger, *handlers: logging.Handler) -> None:
+    """Route every record through an in-memory queue serviced by a
+    dedicated listener thread, instead of letting the calling thread write
+    to `handlers` directly. `logging.FileHandler`/`StreamHandler` writes
+    synchronously under a lock shared by every thread using that handler —
+    with 80+ background worker threads (ledger writers, event ingesters,
+    extension backends, ...) all logging heavily, the asyncio event-loop
+    thread can block on that lock for multiple seconds waiting its turn,
+    making the backend briefly deaf to every client's request regardless
+    of platform or network (observed once via the process's own
+    faulthandler dump: the event-loop thread caught inside
+    `logging.StreamHandler.flush()`'s `with self.lock:`; that specific
+    sample has since rotated out of the dump file and can't be re-cited,
+    but a slow/contended handler on the calling thread's path is a real
+    risk independent of that one observation). Queuing makes every
+    `logger.log()` call a fast, lock-free `put_nowait()`; the slow file
+    I/O happens exclusively on the listener thread.
+
+    Two accepted tradeoffs: the queue is unbounded, so a disk stall or
+    full disk no longer blocks producers (the bug this fixes) but instead
+    grows memory without limit until something else notices — this is
+    the stdlib-canonical pattern, but it trades a latency failure for a
+    potential memory failure. And records sitting in the queue when the
+    process is hard-killed (not a graceful shutdown) are lost, unlike a
+    synchronous handler that would have already written them."""
+    log_queue: queue.SimpleQueue = queue.SimpleQueue()
+    target_logger.handlers = []
+    target_logger.addHandler(logging.handlers.QueueHandler(log_queue))
+    listener = logging.handlers.QueueListener(log_queue, *handlers, respect_handler_level=True)
+    listener.start()
+    _LOG_QUEUE_LISTENERS.append(listener)
+
+
+def stop_queued_logging() -> None:
+    """Flush and join every queue listener's thread. Call once, late in
+    shutdown, after every other shutdown step has finished logging."""
+    for listener in _LOG_QUEUE_LISTENERS:
+        listener.stop()
+
+
+_root_stream_handler = logging.StreamHandler()
+_root_stream_handler.setFormatter(_LOG_FORMAT)
+# Rotated, not unbounded: an ever-growing backend.log (500MB+ observed)
+# makes every write — and therefore every queue-listener flush — slower
+# over a long-running process's lifetime.
+_root_file_handler = logging.handlers.RotatingFileHandler(
+    _log_dir / "backend.log", maxBytes=50 * 1024 * 1024, backupCount=5, encoding="utf-8",
 )
+_root_file_handler.setFormatter(_LOG_FORMAT)
+logging.getLogger().setLevel(logging.INFO)
+_install_queued_logging(logging.getLogger(), _root_stream_handler, _root_file_handler)
 logger = logging.getLogger(__name__)
-_LOG_WRITE_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="log-write")
 _project_match_executor: ProcessPoolExecutor | None = None
 _project_match_ready = False
 _project_match_warm_task: asyncio.Task | None = None
@@ -1606,17 +1654,11 @@ frontend_logger = logging.getLogger("frontend")
 frontend_logger.setLevel(logging.DEBUG)
 frontend_logger.propagate = False
 if not frontend_logger.handlers:
-    _frontend_handler = logging.FileHandler(_log_dir / "frontend.log", encoding="utf-8")
-    _frontend_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)-5s %(message)s"))
-    frontend_logger.addHandler(_frontend_handler)
-
-
-def _warning_off_loop(message: str, *args: Any) -> None:
-    _LOG_WRITE_EXECUTOR.submit(logger.warning, message, *args)
-
-
-def _frontend_log_off_loop(level: int, line: str) -> None:
-    _LOG_WRITE_EXECUTOR.submit(frontend_logger.log, level, line)
+    _frontend_file_handler = logging.handlers.RotatingFileHandler(
+        _log_dir / "frontend.log", maxBytes=20 * 1024 * 1024, backupCount=5, encoding="utf-8",
+    )
+    _frontend_file_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)-5s %(message)s"))
+    _install_queued_logging(frontend_logger, _frontend_file_handler)
 
 
 def create_api_app() -> FastAPI:
@@ -10713,7 +10755,7 @@ async def frontend_log(request: Request):
         line += f" | url={url}"
     if stack:
         line += f"\n{stack}"
-    _frontend_log_off_loop(log_level, line)
+    frontend_logger.log(log_level, line)
     return {"ok": True}
 
 
@@ -13242,7 +13284,7 @@ async def on_startup():
             now = time.monotonic()
             lag = now - expected
             if lag > warn_after:
-                _warning_off_loop("event loop lag %.3fs", lag)
+                logger.warning("event loop lag %.3fs", lag)
             # Heartbeat for the lag watchdog thread: proves the loop is
             # alive. A sync blocker starves this coroutine, the heartbeat
             # goes stale, and the watchdog dumps the blocker mid-flight.
@@ -13812,6 +13854,10 @@ async def on_shutdown():
     ui_selection_projection.unbind()
     await coordinator.drain_global_broadcasts()
     shutdown_ws_json_executor()
+    # Last: every earlier shutdown step above still logs through the
+    # queued loggers. Flush + join their listener threads only now, so
+    # nothing logged during shutdown is silently dropped.
+    await asyncio.to_thread(stop_queued_logging)
 
 
 # ============================================================================

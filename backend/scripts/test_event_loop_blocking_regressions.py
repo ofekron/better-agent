@@ -4,6 +4,7 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 import importlib
 import json
+import logging
 import threading
 import tempfile
 import os
@@ -83,28 +84,113 @@ def test_wire_tailer_gap_fill_reads_journal_off_loop() -> None:
 
 
 def test_hot_path_warning_logs_are_off_loop() -> None:
+    # Superseded by queued logging (`_install_queued_logging` /
+    # `logging.handlers.QueueHandler` + `QueueListener`): EVERY
+    # logger.log() call anywhere in the process — not just the few call
+    # sites this test used to special-case via `_warning_off_loop`/
+    # `_frontend_log_off_loop` — is now a fast, lock-free enqueue. The
+    # per-call-site executor workaround is gone because the root cause
+    # (the calling thread blocking on the FileHandler's write lock) no
+    # longer exists for any call site, hot-path or not.
     source = (ROOT / "main.py").read_text(encoding="utf-8")
-    assert "_LOG_WRITE_EXECUTOR = ThreadPoolExecutor(" in source
-    assert "def _warning_off_loop(" in source
-    assert "def _frontend_log_off_loop(" in source
+    assert "_LOG_WRITE_EXECUTOR" not in source
+    assert "_warning_off_loop" not in source
+    assert "_frontend_log_off_loop" not in source
+    assert "def _install_queued_logging(" in source
+    assert "def stop_queued_logging(" in source
+
+    root_setup_start = source.index("_root_stream_handler = logging.StreamHandler()")
+    root_setup_end = source.index("logger = logging.getLogger(__name__)")
+    root_setup_source = source[root_setup_start:root_setup_end]
+    assert "logging.handlers.RotatingFileHandler(" in root_setup_source
+    assert "_install_queued_logging(logging.getLogger(), _root_stream_handler, _root_file_handler)" in root_setup_source
+
+    frontend_setup_start = source.index('frontend_logger = logging.getLogger("frontend")')
+    frontend_setup_end = source.index("frontend_logger.log(log_level, line)")
+    frontend_setup_source = source[frontend_setup_start:frontend_setup_end]
+    assert "logging.handlers.RotatingFileHandler(" in frontend_setup_source
+    assert "_install_queued_logging(frontend_logger, _frontend_file_handler)" in frontend_setup_source
 
     monitor_start = source.index("async def _event_loop_lag_monitor()")
     monitor_end = source.index("asyncio.create_task(", monitor_start)
     monitor_source = source[monitor_start:monitor_end]
-    assert '_warning_off_loop("event loop lag %.3fs", lag)' in monitor_source
-    assert 'logger.warning("event loop lag %.3fs", lag)' not in monitor_source
+    assert 'logger.warning("event loop lag %.3fs", lag)' in monitor_source
 
     outbox_start = source.index("class _WebSocketOutbox:")
     outbox_end = source.index("@app.websocket(\"/ws/chat\")", outbox_start)
     outbox_source = source[outbox_start:outbox_end]
-    assert "_warning_off_loop(" in outbox_source
-    assert "logger.warning(\n                \"slow WebSocket send type=%s elapsed_ms=%.1f\"" not in outbox_source
+    assert "logger.warning(" in outbox_source
+    assert '"slow WebSocket send type=%s elapsed_ms=%.1f"' in outbox_source
 
     frontend_start = source.index("async def frontend_log(")
     frontend_end = source.index("@app.get(\"/api/mobile/bundle/manifest\")", frontend_start)
     frontend_source = source[frontend_start:frontend_end]
-    assert "_frontend_log_off_loop(log_level, line)" in frontend_source
-    assert "frontend_logger.log(log_level, line)" not in frontend_source
+    assert "frontend_logger.log(log_level, line)" in frontend_source
+
+    shutdown_start = source.index("async def on_shutdown():")
+    shutdown_end = source.index("@app.post(\"/api/internal/ask-fork\")", shutdown_start)
+    shutdown_source = source[shutdown_start:shutdown_end]
+    assert "await asyncio.to_thread(stop_queued_logging)" in shutdown_source
+
+
+def test_queued_logging_does_not_block_caller_on_slow_handler() -> None:
+    # The actual regression this whole investigation traced to: the
+    # process's own faulthandler dump caught the asyncio event-loop
+    # thread blocked inside `logging.StreamHandler.flush()`'s
+    # `with self.lock:` while the backend was briefly unreachable to
+    # every client at once — observed once via the backend's own
+    # faulthandler dump; that specific sample has since rotated out of
+    # the (also self-truncating) dump file, so it can't be re-cited, but
+    # a slow/contended handler on the calling thread's path is a real,
+    # independently-justified risk regardless. This proves the fix
+    # directly: a handler that blocks for a full second must not delay
+    # the logging call itself.
+    #
+    # `import main` here is safe without explicit isolation because
+    # `scripts/conftest.py` engages session-wide test-home protection
+    # (`_test_home.engage(...)`) at CONFTEST IMPORT time, which pytest
+    # guarantees runs before any test module in this directory —
+    # including this one — is collected. `main.py`'s `ba_home()` call at
+    # its own import time therefore already resolves to an isolated
+    # tempdir, not the real `~/.better-claude`.
+    import main
+
+    release = threading.Event()
+    entered = threading.Event()
+
+    class SlowHandler(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            entered.set()
+            release.wait(timeout=5)
+
+    test_logger = logging.getLogger(f"test.queued_logging.{id(release)}")
+    test_logger.setLevel(logging.INFO)
+    test_logger.propagate = False
+    main._install_queued_logging(test_logger, SlowHandler())
+
+    try:
+        started = time.monotonic()
+        test_logger.info("first record — the slow handler will hang on this one")
+        elapsed = time.monotonic() - started
+        assert elapsed < 0.5, f"logger.info() blocked for {elapsed:.3f}s waiting on the handler"
+
+        # The listener thread is now stuck inside SlowHandler.emit() for
+        # up to 5s. A second call, on a different (or the same) thread,
+        # must still return instantly — it only needs to reach the queue,
+        # not wait for the handler to drain.
+        started = time.monotonic()
+        test_logger.info("second record — must not wait for the first to drain")
+        elapsed = time.monotonic() - started
+        assert elapsed < 0.5, f"logger.info() blocked for {elapsed:.3f}s behind an in-flight slow handler"
+
+        assert entered.wait(timeout=1), "listener thread never reached the slow handler"
+    finally:
+        release.set()
+        for listener in list(main._LOG_QUEUE_LISTENERS):
+            if listener.queue is test_logger.handlers[0].queue:  # type: ignore[attr-defined]
+                listener.stop()
+                main._LOG_QUEUE_LISTENERS.remove(listener)
+                break
 
 
 def test_websocket_json_serializes_off_loop() -> None:
