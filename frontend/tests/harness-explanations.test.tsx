@@ -100,6 +100,34 @@ describe("harness control explanations", () => {
     expect(container.querySelector(".harness-item-hint")?.textContent).toBe("Board tools");
   });
 
+  it("says what each instruction section contains under the Default toggle", () => {
+    // Default toggles instruction injection for the whole extension, so the
+    // sections have no per-item control — they still have to explain
+    // themselves, or the toggle is a blind switch.
+    renderGroup(
+      group({
+        id: "instruction_names",
+        scope: "profile",
+        control: "instructions",
+        value: true,
+        default_granularity: "extension",
+        items: [
+          {
+            name: "coordination-git-ops-lock",
+            label: "coordination-git-ops-lock",
+            description: "Before editing files in multi-agent work, call lock_ops with exact file locks.",
+            detail: "global",
+            default_enabled: true,
+          },
+        ],
+      }),
+    );
+    expect(screen.getByText("coordination-git-ops-lock")).toBeTruthy();
+    expect(screen.getByText(/call lock_ops with exact file locks/i)).toBeTruthy();
+    // The level chip stays a separate element, not swallowed by the sentence.
+    expect(screen.getByText("global")).toBeTruthy();
+  });
+
   it("renders no caption when the extension describes nothing", () => {
     const { container } = renderGroup(
       group({

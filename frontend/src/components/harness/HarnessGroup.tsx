@@ -313,10 +313,21 @@ export function HarnessGroup(props: GroupProps) {
           />
           <span className="harness-item-label">{t("harnessProfile.injectInstructions")}</span>
         </label>
-        <span className="harness-item-detail">
-          {group.items.map((item) => item.label).join(", ")}
-        </span>
       </div>
+    );
+    // The single toggle covers every section, but the user still needs to see
+    // WHICH rules that turns on — list each section with what it says.
+    body = (
+      <>
+        {body}
+        {group.items.map((item) => (
+          <div key={item.name} className="harness-item-row harness-instruction-section">
+            <span className="harness-item-label">{item.label}</span>
+            {item.detail && <span className="harness-item-detail">{item.detail}</span>}
+            {item.description && <p className="harness-item-hint">{item.description}</p>}
+          </div>
+        ))}
+      </>
     );
   } else if (group.id === GROUP_SETTINGS && extensionId) {
     if (!visibleItems.length) return null;
