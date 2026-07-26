@@ -78,6 +78,8 @@ export const GROUP_SKILLS = "skills";
 export const GROUP_INSTRUCTIONS = "instruction_names";
 export const GROUP_SETTINGS = "setting_overlays";
 export const GROUP_USER_INSTRUCTIONS = "user_instructions";
+export const GROUP_UI_SURFACES = "ui_surfaces";
+export const GROUP_PERMISSIONS = "permissions";
 export const GROUP_DISABLED_BUILTIN_TOOLS = "disabled_builtin_tools";
 export const GROUP_DISABLED_BUILTIN_EXTENSIONS = "disabled_builtin_extensions";
 
@@ -91,4 +93,30 @@ export const INVERTED_GROUPS: ReadonlySet<string> = new Set([
 /** i18n key for a group's heading. */
 export function groupTitleKey(groupId: string): string {
   return `harnessProfile.group.${groupId}`;
+}
+
+/** i18n key for the plain-language explanation of what a group controls. */
+export function groupHintKey(groupId: string): string {
+  return `harnessProfile.groupHint.${groupId}`;
+}
+
+/** Groups whose item names are a fixed vocabulary the UI can explain by name.
+ * Everything else names extension-authored items, whose text comes from the
+ * manifest via the descriptor instead. */
+const EXPLAINED_ITEM_GROUPS: ReadonlySet<string> = new Set([
+  GROUP_PERMISSIONS,
+  GROUP_UI_SURFACES,
+]);
+
+/** i18n key for an item's explanation, or null when the group's items are
+ * extension-authored and carry their own descriptor text. */
+export function itemHintKey(groupId: string, itemName: string): string | null {
+  if (!EXPLAINED_ITEM_GROUPS.has(groupId)) return null;
+  return `harnessProfile.itemHint.${groupId}.${itemName}`;
+}
+
+/** i18n key for an item's display label, or null to use the descriptor label. */
+export function itemLabelKey(groupId: string, itemName: string): string | null {
+  if (groupId !== GROUP_UI_SURFACES) return null;
+  return `harnessProfile.itemLabel.${groupId}.${itemName}`;
 }

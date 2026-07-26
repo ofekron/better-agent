@@ -10125,6 +10125,13 @@ button.run-badge-clickable:focus-visible {
   color: var(--text-muted);
 }
 
+.harness-extension-block-description {
+  margin: -4px 0 0;
+  font-size: calc(11.5px * var(--app-font-scale));
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+
 .harness-group {
   display: flex;
   flex-direction: column;
@@ -10146,6 +10153,28 @@ button.run-badge-clickable:focus-visible {
   letter-spacing: 0.04em;
   color: var(--text-muted);
   margin-bottom: 4px;
+}
+
+/* Explains what the group's controls actually change, so a toggle is not the
+   only thing the user has to reason from. */
+.harness-group-hint {
+  margin: 0 0 6px;
+  padding-inline-start: 8px;
+  font-size: calc(11.5px * var(--app-font-scale));
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+
+/* Per-item explanation for the fixed vocabularies (permissions, UI surfaces)
+   whose names carry no meaning on their own. Full-width inside the wrapping
+   row so it reads as a caption under the control. */
+.harness-item-hint {
+  flex-basis: 100%;
+  margin: 0;
+  padding-inline-start: 22px;
+  font-size: calc(11px * var(--app-font-scale));
+  line-height: 1.5;
+  color: var(--text-muted);
 }
 
 .harness-item-row {

@@ -295,6 +295,9 @@ export function HarnessSettingsEditor() {
                       </span>
                     )}
                   </div>
+                  {extension.description && (
+                    <p className="harness-extension-block-description">{extension.description}</p>
+                  )}
                   {extension.groups.map((group) => (
                     <HarnessGroup
                       key={group.id}

@@ -7,7 +7,10 @@ import {
   GROUP_SETTINGS,
   GROUP_USER_INSTRUCTIONS,
   SCOPE_GLOBAL,
+  groupHintKey,
   groupTitleKey,
+  itemHintKey,
+  itemLabelKey,
   type HarnessDescriptorGroup,
   type HarnessDescriptorItem,
   type HarnessFieldWrite,
@@ -93,6 +96,9 @@ function ToggleRow({
     : ["extension_instances", extensionId, group.id, item.name];
   const confirm = useGlobalConfirm(isGlobal && !isDefault, (value) => onWrite({ path, value }));
   const locked = (item.locked_by ?? []).length > 0;
+  const labelKey = itemLabelKey(group.id, item.name);
+  const hintKey = itemHintKey(group.id, item.name);
+  const hint = hintKey ? t(hintKey, { defaultValue: "" }) : "";
 
   return (
     <div className={`harness-item-row ${state.overridden ? "is-overridden" : ""}`}>
@@ -103,7 +109,9 @@ function ToggleRow({
           disabled={disabled || locked}
           onChange={(e) => confirm.request(e.target.checked)}
         />
-        <span className="harness-item-label">{item.label}</span>
+        <span className="harness-item-label">
+          {labelKey ? t(labelKey, { defaultValue: item.label }) : item.label}
+        </span>
       </label>
       {item.description && <span className="harness-item-description">{item.description}</span>}
       {locked && (
@@ -136,6 +144,7 @@ function ToggleRow({
           </button>
         </span>
       )}
+      {hint && <p className="harness-item-hint">{hint}</p>}
     </div>
   );
 }
@@ -317,12 +326,15 @@ export function HarnessGroup(props: GroupProps) {
     body = visibleItems.map((item) => <ToggleRow key={item.name} {...props} item={item} />);
   }
 
+  const hint = t(groupHintKey(group.id), { defaultValue: "" });
+
   return (
     <div className="harness-group">
       <div className="harness-group-title">
         {t(groupTitleKey(group.id))}
         {group.scope === SCOPE_GLOBAL && <GlobalBadge />}
       </div>
+      {hint && <p className="harness-group-hint">{hint}</p>}
       {body}
     </div>
   );
