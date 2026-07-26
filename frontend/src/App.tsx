@@ -113,7 +113,7 @@ import { mobileRightPanelSizingStyle } from "./utils/mobileRightPanelStyle";
 import { uuidv4 } from "./lib/uuid";
 import { logPromptSend } from "./lib/promptSendLog";
 import { logDurable } from "./lib/frontendLogger";
-import { acquireOfflineFlushLock } from "./lib/offlineFlushLock";
+import { acquireOfflineFlushLock, holdTabPresence, liveTabIds } from "./lib/offlineFlushLock";
 import { openProviderConfigSyncPage } from "./lib/providerConfigSyncRoute";
 import { markFirstRunWizardSeen } from "./lib/firstRunWizard";
 import { SIDEBAR_MINIMIZED_WIDTH } from "./sidebarLayout";
@@ -1615,7 +1615,8 @@ function AppMain({
   const removeAckedOfflineAction = offlineQueue.removeBySessionAndClient;
   const claimOfflineActionForDispatch = offlineQueue.claimForDispatch;
   const releaseOfflineActionDispatch = offlineQueue.releaseDispatch;
-  const releaseAllDispatchedOfflineActions = offlineQueue.releaseAllDispatched;
+  const releaseOwnDispatchedOfflineActions = offlineQueue.releaseOwnDispatched;
+  const releaseDeadOfflineClaims = offlineQueue.releaseDeadClaims;
   const offlineDispatchedRef = useRef<Set<string>>(new Set());
   const [offlineRetryTick, setOfflineRetryTick] = useState(0);
   const ackedRef = useRef<Set<string>>(new Set());
@@ -2216,7 +2217,12 @@ function AppMain({
       );
       return false;
     },
-    [sendMessage, setPendingForSession],
+    [
+      claimOfflineActionForDispatch,
+      releaseOfflineActionDispatch,
+      sendMessage,
+      setPendingForSession,
+    ],
   );
 
   // Retries automatically on reconnect; clears on send or navigation away.
@@ -2241,11 +2247,16 @@ function AppMain({
   // actions use their client-generated session UUID as the backend id,
   // making retries idempotent across reconnects and reloads.
   const offlineFlushRunningRef = useRef(false);
+  // Advertise this tab for as long as it lives, so sibling tabs can tell an
+  // in-flight dispatch claim from one orphaned by a closed tab.
+  useEffect(() => holdTabPresence(), []);
   useEffect(() => {
     if (connected) return;
     offlineDispatchedRef.current.clear();
-    releaseAllDispatchedOfflineActions();
-  }, [connected, releaseAllDispatchedOfflineActions]);
+    // Only our own in-flight sends died with our socket. Claims held by other
+    // tabs stay put — their sockets may be perfectly healthy.
+    releaseOwnDispatchedOfflineActions();
+  }, [connected, releaseOwnDispatchedOfflineActions]);
   const routeSessionId = route.kind === "session" ? route.sessionId : null;
   useEffect(() => {
     if (!connected || offlineFlushRunningRef.current) return;
@@ -2262,6 +2273,9 @@ function AppMain({
       // send the same prompt twice. The lock is released by the browser if
       // this tab dies, so it can never strand the backlog.
       const releaseFlushLock = await acquireOfflineFlushLock();
+      // A tab that closed between dispatching and its ack left its claim
+      // behind; nobody is waiting on that send, so reclaim it for delivery.
+      releaseDeadOfflineClaims(await liveTabIds());
       try {
         for (const entry of offlineQueue.getAll()) {
           if (
@@ -2276,10 +2290,6 @@ function AppMain({
             continue;
           }
           if (offlineDispatchedRef.current.has(entry.clientId)) continue;
-          // Another tab already owns this action's dispatch and is waiting
-          // for its ack — re-sending it here is what turned one prompt into
-          // N identical prompts on the backend.
-          if (entry.dispatched) continue;
           if (shouldSkipDependentSend(entry, failedCreateSessionIds)) {
             logPromptSend("offline_flush_skip_dependent", {
               type: entry.type,
@@ -2475,6 +2485,7 @@ function AppMain({
     currentSession?.id,
     offlineQueue,
     offlineRetryTick,
+    releaseDeadOfflineClaims,
     releaseOfflineActionDispatch,
     persistDraftPatch,
     routeSessionId,
@@ -5040,7 +5051,7 @@ function AppMain({
 
       return true;
     },
-    [currentSession, model, cwd, sendMessage, applySessionMetadata, setPendingForSession, appendPendingForSession, handleDraftClearImmediate, clearSessionInlineTags, appendPendingQueueDraft, takePendingQueueDraft, offlineQueue, sendTarget, turnCapabilityContextsBySession, projects, selectedProjectNodeId, navigate, queuedBySession, persistedQueuedPrompts, connected, getCurrentOpenFileSnapshots]
+    [currentSession, model, cwd, sendMessage, applySessionMetadata, setPendingForSession, appendPendingForSession, handleDraftClearImmediate, clearSessionInlineTags, appendPendingQueueDraft, takePendingQueueDraft, offlineQueue, claimOfflineActionForDispatch, sendTarget, turnCapabilityContextsBySession, projects, selectedProjectNodeId, navigate, queuedBySession, persistedQueuedPrompts, connected, getCurrentOpenFileSnapshots]
   );
 
   // One-time bypass-permission warning on the first prompt send. The user

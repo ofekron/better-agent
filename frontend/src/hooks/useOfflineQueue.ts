@@ -2,12 +2,17 @@ import { useState, useCallback, useRef, useEffect } from "react";
 import type { CapabilityContext, OrchestrationMode, SendMode, Session } from "../types";
 import type { ImagePayload, FilePayload } from "./useWebSocket";
 import { uuidv4 } from "../lib/uuid";
+import { OFFLINE_TAB_ID } from "../lib/offlineFlushLock";
 
 export type { ImagePayload };
 export type { FilePayload };
 
 export interface OfflinePromptEntry {
   type?: "send_message";
+  /** Id of the tab that put this action on the wire and is waiting for its
+   * ack. Shared across tabs through the same storage record as the entry, so
+   * a sibling tab's flush never re-sends an action already in flight. */
+  dispatchedBy?: string;
   sessionId: string;
   clientId: string;
   prompt: string;
@@ -26,6 +31,7 @@ export interface OfflinePromptEntry {
 
 export interface OfflineCreateSessionEntry {
   type: "create_session";
+  dispatchedBy?: string;
   clientId: string;
   session: Pick<
     Session,
@@ -222,6 +228,67 @@ export function useOfflineQueue() {
     [commit],
   );
 
+  /** Take ownership of dispatching `clientId` for this tab. Read-modify-writes
+   * against fresh storage so the claim is visible to every tab, and returns
+   * false when another tab already owns the dispatch or the claim could not
+   * be persisted — in both cases this tab must not put the action on the
+   * wire. */
+  const claimForDispatch = useCallback((clientId: string): boolean => {
+    const base = readQueue();
+    const target = base.find((entry) => entry.clientId === clientId);
+    if (!target || target.dispatchedBy) return false;
+    const next = base.map((entry) =>
+      entry.clientId === clientId ? { ...entry, dispatchedBy: OFFLINE_TAB_ID } : entry
+    );
+    if (!writeQueueRaw(next)) return false;
+    queueRef.current = next;
+    setQueue(next);
+    return true;
+  }, []);
+
+  /** Strip the claim from every entry the predicate selects. Writes nothing
+   * when no claim matches: `commit` always mints a new array, and an
+   * unconditional write here would re-render the flush effect into an endless
+   * reap loop. */
+  const dropClaims = useCallback(
+    (matches: (entry: OfflineQueueEntry) => boolean) => {
+      if (!readQueue().some((entry) => entry.dispatchedBy && matches(entry))) return true;
+      return commit((prev) => prev.map((entry) => {
+        if (!entry.dispatchedBy || !matches(entry)) return entry;
+        const unclaimed = { ...entry };
+        delete unclaimed.dispatchedBy;
+        return unclaimed;
+      }));
+    },
+    [commit],
+  );
+
+  const releaseDispatch = useCallback(
+    (clientId: string) => dropClaims((entry) => entry.clientId === clientId),
+    [dropClaims],
+  );
+
+  /** Drop this tab's dispatch claims. Called on connection loss: our socket
+   * going away is the event that makes OUR in-flight actions undelivered.
+   * Another tab's claims are none of our business — its socket may be fine. */
+  const releaseOwnDispatched = useCallback(() => {
+    return dropClaims((entry) => entry.dispatchedBy === OFFLINE_TAB_ID);
+  }, [dropClaims]);
+
+  /** Drop claims owned by tabs that no longer exist. A tab closed or crashed
+   * between dispatching and its ack would otherwise strand the action in the
+   * backlog forever. `null` means liveness is unknowable here — leave every
+   * claim alone rather than risk duplicating a live tab's send. */
+  const releaseDeadClaims = useCallback(
+    (liveTabs: Set<string> | null) => {
+      if (!liveTabs) return true;
+      return dropClaims((entry) =>
+        entry.dispatchedBy !== OFFLINE_TAB_ID && !liveTabs.has(entry.dispatchedBy!)
+      );
+    },
+    [dropClaims],
+  );
+
   const removeBySessionAndClient = useCallback(
     (sessionId: string, clientId: string) => {
       return commit((prev) => prev.filter((entry) => {
@@ -244,5 +311,16 @@ export function useOfflineQueue() {
     return () => window.removeEventListener("storage", onStorage);
   }, []);
 
-  return { queue, enqueue, getAll, remove, removeBySessionAndClient, persistFailed };
+  return {
+    queue,
+    enqueue,
+    getAll,
+    remove,
+    removeBySessionAndClient,
+    claimForDispatch,
+    releaseDispatch,
+    releaseOwnDispatched,
+    releaseDeadClaims,
+    persistFailed,
+  };
 }
