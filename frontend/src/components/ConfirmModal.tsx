@@ -9,6 +9,9 @@ interface Props {
   cancelLabel?: string;
   onConfirm: () => void;
   onCancel: () => void;
+  /** Overlay click / × / back button. Defaults to `onCancel`; pass it
+   *  separately when dismissing must not carry the cancel action's effect. */
+  onDismiss?: () => void;
   danger?: boolean;
 }
 
@@ -20,18 +23,20 @@ export function ConfirmModal({
   cancelLabel,
   onConfirm,
   onCancel,
+  onDismiss,
   danger = true,
 }: Props) {
   const { t } = useTranslation();
-  useBackButtonDismiss(open, onCancel);
+  const dismiss = onDismiss ?? onCancel;
+  useBackButtonDismiss(open, dismiss);
   if (!open) return null;
 
   return (
-    <div className="modal-overlay" onClick={onCancel}>
+    <div className="modal-overlay" onClick={dismiss}>
       <div className="modal-content" style={{ maxWidth: '400px' }} onClick={(e) => e.stopPropagation()}>
         <div className="modal-header">
           <h2>{title}</h2>
-          <button className="modal-close" onClick={onCancel}>
+          <button className="modal-close" onClick={dismiss}>
             &times;
           </button>
         </div>

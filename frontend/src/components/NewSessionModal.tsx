@@ -578,7 +578,6 @@ export function NewSessionModal({
   extensionOptions = EMPTY_EXTENSION_OPTIONS,
 }: Props) {
   const { t } = useTranslation();
-  useBackButtonDismiss(open, onClose);
   const [creating, setCreating] = useState(false);
   const creatingRef = useRef(false);
   const [providers, setProviders] = useState<Provider[]>([]);
@@ -921,15 +920,19 @@ export function NewSessionModal({
     }
   };
 
-  // Explicit cancel (Cancel button / header ×) with unsent text asks whether
-  // to keep the draft. Dismissing by overlay/back button keeps it silently.
+  // The modal closes only through an explicit cancel (Cancel button, header
+  // ×, back button) or a successful create — never on a stray click outside
+  // it. Cancelling with unsent text asks whether to keep the draft.
   const requestCancel = () => {
+    if (creating) return;
     if (!investigation && initialPrompt.trim()) {
       setDiscardPromptOpen(true);
       return;
     }
     onClose();
   };
+
+  useBackButtonDismiss(open, requestCancel);
 
   const handlePromptKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key !== "Enter" || e.shiftKey) return;
@@ -1015,11 +1018,11 @@ export function NewSessionModal({
 
   return (
     <>
-    <div className="modal-overlay ns-session-overlay" onClick={creating ? undefined : onClose}>
-      <div className="modal-content ns-session-modal" onClick={(e) => e.stopPropagation()}>
+    <div className="modal-overlay ns-session-overlay">
+      <div className="modal-content ns-session-modal">
         <div className="modal-header">
           <h2>{t("newSession.title")}</h2>
-          <button className="modal-close" onClick={creating ? undefined : requestCancel} disabled={creating}>
+          <button className="modal-close" onClick={requestCancel} disabled={creating}>
             <Icon name="x" size={16} />
           </button>
         </div>
@@ -1355,6 +1358,7 @@ export function NewSessionModal({
         setDiscardPromptOpen(false);
         onClose();
       }}
+      onDismiss={() => setDiscardPromptOpen(false)}
     />
     </>
   );

@@ -116,6 +116,32 @@ describe("NewSessionModal prompt draft", () => {
     reopened.unmount();
   });
 
+  it("never closes on a click outside the modal", async () => {
+    const onClose = vi.fn();
+    const view = renderModal(true, onClose);
+    await promptTextarea(view);
+
+    const overlay = view.container.querySelector(".ns-session-overlay") as HTMLElement;
+    fireEvent.click(overlay);
+    expect(onClose).not.toHaveBeenCalled();
+    view.unmount();
+  });
+
+  it("returns to the modal when the keep/discard question is dismissed", async () => {
+    const onClose = vi.fn();
+    const view = renderModal(true, onClose);
+    fireEvent.change(await promptTextarea(view), { target: { value: "still deciding" } });
+
+    fireEvent.click(view.getByRole("button", { name: "newSession.cancel" }));
+    const confirmOverlay = view.container.querySelectorAll(".modal-overlay")[1] as HTMLElement;
+    fireEvent.click(confirmOverlay);
+
+    expect(onClose).not.toHaveBeenCalled();
+    expect(view.queryByRole("button", { name: "newSession.keepDraftDiscard" })).toBeNull();
+    expect((await promptTextarea(view)).value).toBe("still deciding");
+    view.unmount();
+  });
+
   it("closes immediately when there is no text", async () => {
     const onClose = vi.fn();
     const view = renderModal(true, onClose);
