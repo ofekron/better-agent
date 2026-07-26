@@ -39,10 +39,7 @@ from i18n import t
 from builtin_mcp_config import native_mcp_runtime_env, with_builtin_mcp_servers
 from capability_contexts import prepend_capability_context
 import harness_run_projection
-from continuation import (
-    PROVIDER_CAPABILITIES_CHANGED_ERROR,
-    normalize_context_overflow_error,
-)
+from continuation import normalize_context_overflow_error
 from codex_normalize import (
     _codex_primary_assistant_text,
     _codex_terminal_state,
@@ -190,26 +187,14 @@ def _codex_config_overrides(
     return [f"mcp_servers={toml_literal(mcp_servers)}"]
 
 
-def _canonical_dynamic_tools(tools: object) -> Optional[frozenset[str]]:
-    if not isinstance(tools, list):
-        return None
-    names: set[str] = set()
-    contracts: set[str] = set()
-    for tool in tools:
-        if not isinstance(tool, dict):
-            return None
-        name = str(tool.get("name") or "").strip()
-        if not name or name in names:
-            return None
-        names.add(name)
-        try:
-            contracts.add(json.dumps(tool, sort_keys=True, separators=(",", ":")))
-        except (TypeError, ValueError):
-            return None
-    return frozenset(contracts)
+CODEX_RESUME_CAPABILITY_METADATA_UNAVAILABLE = (
+    "codex_resume_capability_metadata_unavailable"
+)
+CODEX_RESUME_CAPABILITY_CONTRACT_CHANGED = "codex_resume_capability_contract_changed"
 
 
-def _dynamic_tools_from_rollout(path: Path) -> Optional[frozenset[str]]:
+def _dynamic_tool_contracts_from_rollout(path: Path) -> Optional[dict[str, str]]:
+    contracts: dict[str, str] = {}
     try:
         with path.open(encoding="utf-8") as stream:
             for line in stream:
@@ -221,23 +206,54 @@ def _dynamic_tools_from_rollout(path: Path) -> Optional[frozenset[str]]:
                 payload = row.get("payload")
                 if not isinstance(payload, dict):
                     return None
-                return _canonical_dynamic_tools(payload.get("dynamic_tools"))
+                raw_tools = payload.get("dynamic_tools")
+                if not isinstance(raw_tools, list):
+                    return None
+                for tool in raw_tools:
+                    if not isinstance(tool, dict):
+                        return None
+                    name = str(tool.get("name") or "").strip()
+                    if not name or name in contracts:
+                        return None
+                    try:
+                        contracts[name] = json.dumps(tool, sort_keys=True, separators=(",", ":"))
+                    except (TypeError, ValueError):
+                        return None
+                return contracts
     except (OSError, json.JSONDecodeError):
         return None
     return None
 
 
-def _dynamic_tool_set_changed(
+def _dynamic_tools_missing_from_rollout(
     rollout_path: Optional[Path],
     dynamic_tools: Optional[list[dict]],
-) -> bool:
+) -> tuple[list[dict], Optional[str]]:
+    if not dynamic_tools:
+        return [], None
     if rollout_path is None:
-        return True
-    persisted_tools = _dynamic_tools_from_rollout(rollout_path)
-    desired_tools = _canonical_dynamic_tools(dynamic_tools or [])
-    if persisted_tools is None or desired_tools is None:
-        return True
-    return persisted_tools != desired_tools
+        return [], CODEX_RESUME_CAPABILITY_METADATA_UNAVAILABLE
+    persisted_contracts = _dynamic_tool_contracts_from_rollout(rollout_path)
+    if persisted_contracts is None:
+        return [], CODEX_RESUME_CAPABILITY_METADATA_UNAVAILABLE
+    missing: list[dict] = []
+    for tool in dynamic_tools or []:
+        if not isinstance(tool, dict):
+            continue
+        name = str(tool.get("name") or "").strip()
+        if not name:
+            continue
+        try:
+            contract = json.dumps(tool, sort_keys=True, separators=(",", ":"))
+        except (TypeError, ValueError):
+            return [], CODEX_RESUME_CAPABILITY_CONTRACT_CHANGED
+        persisted_contract = persisted_contracts.get(name)
+        if persisted_contract is None:
+            missing.append(tool)
+            continue
+        if persisted_contract != contract:
+            return [], CODEX_RESUME_CAPABILITY_CONTRACT_CHANGED
+    return missing, None
 
 
 def _materialize_codex_run_home(
@@ -2373,7 +2389,7 @@ async def _start_app_server(
         await client.notify("initialized", {})
         if session_id:
             capability_params = _codex_thread_capability_params(
-                dynamic_tools=None,
+                dynamic_tools=dynamic_tools,
                 provider_run_config=provider_run_config,
             )
             if fork:
@@ -2975,9 +2991,15 @@ async def _run(run_dir: Path, inputs: dict) -> int:
     initial_rollout_path = resolve_rollout_path(session_id or "")
     if session_id and initial_rollout_path is None:
         initial_rollout_path = await resolve_rollout_path_polled(session_id, timeout=5.0)
-    if session_id and _dynamic_tool_set_changed(initial_rollout_path, dynamic_tools):
-        _fail(run_dir, PROVIDER_CAPABILITIES_CHANGED_ERROR)
-        return 1
+    dynamic_tools_for_start = dynamic_tools
+    if session_id:
+        dynamic_tools_for_start, capability_error = _dynamic_tools_missing_from_rollout(
+            initial_rollout_path,
+            dynamic_tools,
+        )
+        if capability_error:
+            _fail(run_dir, capability_error)
+            return 1
     initial_byte_offset = _file_size(initial_rollout_path)
 
     state: dict = {
@@ -3039,7 +3061,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
                 session_id=session_id,
                 fork=fork,
                 turn_input=turn_input,
-                dynamic_tools=dynamic_tools,
+                dynamic_tools=dynamic_tools_for_start,
                 tool_handlers=tool_handlers,
                 provider_run_config=provider_run_config,
                 config_overrides=[

@@ -30,11 +30,8 @@ class _FakeAppServerProcess:
 
     async def request(self, method: str, params: dict) -> dict:
         self.requests.append((method, params))
-        resumed_names = {
-            str(tool.get("name") or "")
-            for tool in params.get("dynamicTools") or []
-        }
-        if method in ("thread/resume", "thread/fork") and "request_user_input" in resumed_names:
+        names = [str(tool.get("name") or "") for tool in params.get("dynamicTools") or []]
+        if len(names) != len(set(names)):
             raise RuntimeError("request_user_input already registered")
         if method in ("thread/start", "thread/resume", "thread/fork"):
             return {"thread": {"id": "thread-1"}}
@@ -88,7 +85,7 @@ async def test_app_server_resume_receives_capability_config() -> None:
     client = created_clients[0]
     resume = next(params for method, params in client.requests if method == "thread/resume")
     assert resume["threadId"] == "thread-existing"
-    assert "dynamicTools" not in resume
+    assert resume["dynamicTools"][0]["name"] == "tool_x"
     assert resume["config"]["mcpServers"]["server-x"]["command"] == "echo"
     assert client.tool_handlers["tool_x"] is tool_handler
 
@@ -128,7 +125,7 @@ async def test_app_server_fork_receives_capability_config() -> None:
     client = created_clients[0]
     fork = next(params for method, params in client.requests if method == "thread/fork")
     assert fork["threadId"] == "thread-existing"
-    assert "dynamicTools" not in fork
+    assert fork["dynamicTools"][0]["name"] == "tool_x"
     assert fork["config"]["mcpServers"]["server-x"]["command"] == "echo"
     assert client.tool_handlers["tool_x"] is tool_handler
 
@@ -146,7 +143,7 @@ async def test_app_server_start_registers_dynamic_tools() -> None:
     assert start["config"]["mcpServers"]["server-x"]["command"] == "echo"
 
 
-def test_dynamic_tool_set_change_uses_persisted_rollout() -> None:
+def test_resume_dynamic_tools_use_only_missing_rollout_tools() -> None:
     desired = [
         {"name": "mssg", "description": "Send", "inputSchema": {"type": "object"}},
         {"name": "inbox", "description": "Read", "inputSchema": {"type": "object"}},
@@ -160,10 +157,14 @@ def test_dynamic_tool_set_change_uses_persisted_rollout() -> None:
             }) + "\n",
             encoding="utf-8",
         )
-        changed = runner_codex._dynamic_tool_set_changed(rollout, desired)
-        unchanged = runner_codex._dynamic_tool_set_changed(rollout, desired[:1])
+        missing, missing_error = runner_codex._dynamic_tools_missing_from_rollout(
+            rollout, desired,
+        )
+        unchanged, unchanged_error = runner_codex._dynamic_tools_missing_from_rollout(
+            rollout, desired[:1],
+        )
         same_name_changed_schema = [desired[0] | {"inputSchema": {"type": "string"}}]
-        schema_changed = runner_codex._dynamic_tool_set_changed(
+        schema_changed, schema_error = runner_codex._dynamic_tools_missing_from_rollout(
             rollout,
             same_name_changed_schema,
         )
@@ -171,13 +172,21 @@ def test_dynamic_tool_set_change_uses_persisted_rollout() -> None:
             '{"type":"session_meta","payload":{"dynamic_tools":[{"name":"mssg"},null]}}\n',
             encoding="utf-8",
         )
-        malformed = runner_codex._dynamic_tool_set_changed(rollout, desired)
+        malformed, malformed_error = runner_codex._dynamic_tools_missing_from_rollout(
+            rollout, desired,
+        )
 
-    assert changed is True
-    assert unchanged is False
-    assert schema_changed is True
-    assert runner_codex._dynamic_tool_set_changed(None, desired) is True
-    assert malformed is True
+    assert missing == [desired[1]]
+    assert missing_error is None
+    assert unchanged == []
+    assert unchanged_error is None
+    assert schema_changed == []
+    assert schema_error == runner_codex.CODEX_RESUME_CAPABILITY_CONTRACT_CHANGED
+    none_missing, none_error = runner_codex._dynamic_tools_missing_from_rollout(None, desired)
+    assert none_missing == []
+    assert none_error == runner_codex.CODEX_RESUME_CAPABILITY_METADATA_UNAVAILABLE
+    assert malformed == []
+    assert malformed_error == runner_codex.CODEX_RESUME_CAPABILITY_METADATA_UNAVAILABLE
 
 
 async def test_app_server_passes_config_overrides_before_subcommand() -> None:
@@ -272,5 +281,5 @@ if __name__ == "__main__":
     asyncio.run(test_app_server_fork_receives_capability_config())
     asyncio.run(test_app_server_start_registers_dynamic_tools())
     asyncio.run(test_app_server_passes_config_overrides_before_subcommand())
-    test_dynamic_tool_set_change_uses_persisted_rollout()
+    test_resume_dynamic_tools_use_only_missing_rollout_tools()
     test_codex_config_overrides_preserve_mcp_tool_timeout()
