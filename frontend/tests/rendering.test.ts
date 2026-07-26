@@ -230,7 +230,7 @@ describe("message rendering", () => {
         id: "a-omitted",
         content: "",
         events: undefined,
-        omitted_payloads: { events: { revision: "rev-1" } },
+        omitted_payloads: { events: { revision: "rev-1", count: 1 } },
       });
       const { container, unmount } = render(
         React.createElement(MessageBubble, {
@@ -277,7 +277,7 @@ describe("message rendering", () => {
         id: "a-omitted",
         content: "",
         events: undefined,
-        omitted_payloads: { events: { revision: "rev-1" } },
+        omitted_payloads: { events: { revision: "rev-1", count: 1 } },
       });
       const { container, rerender, unmount } = render(
         React.createElement(MessageBubble, {
@@ -292,7 +292,7 @@ describe("message rendering", () => {
 
       const second = makeAssistantMsg({
         ...first,
-        omitted_payloads: { events: { revision: "rev-2" } },
+        omitted_payloads: { events: { revision: "rev-2", count: 1 } },
       });
       rerender(
         React.createElement(MessageBubble, {

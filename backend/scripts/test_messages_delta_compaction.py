@@ -191,6 +191,62 @@ def test_missing_precomputed_falls_back_to_full_recompute() -> bool:
     return ok
 
 
+def test_empty_events_still_reported_as_omitted() -> bool:
+    """Stripping an EMPTY events list must still emit the omitted marker.
+    The client restores its own live events only when the marker is
+    present, so without it a delta silently wipes them."""
+    payload = compact_message_delta_payload({
+        "id": "msg-1",
+        "content": "final answer",
+        "events": [],
+        "workers": [{"delegation_id": "d1", "events": []}],
+    })
+
+    ok = (
+        "events" not in payload
+        and "events" not in payload["workers"][0]
+        and isinstance(
+            payload.get("omitted_payloads", {}).get("events", {}).get("revision"),
+            str,
+        )
+        and payload["omitted_payloads"]["events"]["count"] == 0
+    )
+    print(f"{PASS if ok else FAIL} empty stripped events still reported as omitted")
+    return ok
+
+
+def test_internal_bookkeeping_keys_never_reach_the_wire() -> bool:
+    """`_uid_idx` & friends are O(N) in the event count — shipping them on
+    a per-event delta reinstates the O(N^2) wire cost compaction removes."""
+    payload = compact_message_delta_payload({
+        "id": "msg-1",
+        "events": [{"type": "agent_message", "data": {"uuid": "e1"}}],
+        "_uid_idx": {"e1": 0},
+        "_has_final": True,
+        "_content_dirty": False,
+        "_events_seq_floor": 12,
+        "workers": [
+            {
+                "delegation_id": "d1",
+                "events": [{"type": "agent_message", "data": {"uuid": "we1"}}],
+                "_uid_idx": {"we1": 0},
+                "_has_final": False,
+            },
+        ],
+    })
+
+    leaked = [
+        key for key in ("_uid_idx", "_has_final", "_content_dirty", "_events_seq_floor")
+        if key in payload or key in payload["workers"][0]
+    ]
+    ok = not leaked and payload["omitted_payloads"]["events"]["count"] == 2
+    print(
+        f"{PASS if ok else FAIL} internal bookkeeping keys never reach the wire"
+        + (f" (leaked: {leaked})" if leaked else ""),
+    )
+    return ok
+
+
 def test_fold_revision_changes_with_each_new_event_and_is_deterministic() -> bool:
     prev = full_revision([])
     a = fold_revision(prev, {"uuid": "e1", "text": "one"})
@@ -216,6 +272,8 @@ def main() -> int:
             test_precomputed_revision_is_used_when_trustworthy,
             test_precomputed_revision_ignored_when_workers_contribute,
             test_missing_precomputed_falls_back_to_full_recompute,
+            test_empty_events_still_reported_as_omitted,
+            test_internal_bookkeeping_keys_never_reach_the_wire,
             test_fold_revision_changes_with_each_new_event_and_is_deterministic,
         ]
         return 0 if all(test() for test in tests) else 1

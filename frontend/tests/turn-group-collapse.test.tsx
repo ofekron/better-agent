@@ -258,7 +258,7 @@ describe("TurnGroup collapsed interrupted indicator", () => {
             ...assistantMessage,
             content: "final reply",
             isStreaming: false,
-            omitted_payloads: { events: { revision: "rev-1" } },
+            omitted_payloads: { events: { revision: "rev-1", count: 1 } },
             events: undefined,
           }],
         },
@@ -1026,7 +1026,7 @@ describe("TurnGroup collapsed interrupted indicator", () => {
             id: "a1",
             content: "stale fallback content",
             events: undefined,
-            omitted_payloads: { events: { revision: "rev-1" } },
+            omitted_payloads: { events: { revision: "rev-1", count: 1 } },
           })}
           defaultCollapsed
           sessionId="s1"
@@ -1047,6 +1047,55 @@ describe("TurnGroup collapsed interrupted indicator", () => {
       expect(fetchMock.mock.calls[0][0]).toBe(
         "/api/sessions/s1/messages/a1/events",
       );
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  it("never lazily fetches events for a streaming message", async () => {
+    const realFetch = globalThis.fetch;
+    const fetchMock = vi.fn(async () => new Response("{}", { status: 200 }));
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    try {
+      const { rerender, unmount } = render(
+        <TurnGroup
+          initiatorMessage={makeUserMsg({ id: "u1", content: "go" })}
+          responseMessage={makeAssistantMsg({
+            id: "a1",
+            content: "lead-in",
+            isStreaming: true,
+            events: [{ type: "output", data: { output: "live tail" } }],
+            omitted_payloads: { events: { revision: "rev-1", count: 3 } },
+          })}
+          defaultCollapsed={false}
+          sessionId="s1"
+          orchestrationMode="native"
+        />,
+      );
+
+      // Every in-flight delta re-folds the revision; none may cost a request.
+      for (const revision of ["rev-2", "rev-3", "rev-4"]) {
+        rerender(
+          <TurnGroup
+            initiatorMessage={makeUserMsg({ id: "u1", content: "go" })}
+            responseMessage={makeAssistantMsg({
+              id: "a1",
+              content: `text ${revision}`,
+              isStreaming: true,
+              events: [{ type: "output", data: { output: "live tail" } }],
+              omitted_payloads: { events: { revision, count: 3 } },
+            })}
+            defaultCollapsed={false}
+            sessionId="s1"
+            orchestrationMode="native"
+          />,
+        );
+      }
+
+      await Promise.resolve();
+      expect(fetchMock).not.toHaveBeenCalled();
+      unmount();
     } finally {
       globalThis.fetch = realFetch;
     }
@@ -1079,7 +1128,7 @@ describe("TurnGroup collapsed interrupted indicator", () => {
         id: "a1",
         content: "stale fallback content",
         events: undefined,
-        omitted_payloads: { events: { revision: "rev-1" } },
+        omitted_payloads: { events: { revision: "rev-1", count: 1 } },
       });
       const { container, rerender } = render(
         <TurnGroup
@@ -1161,7 +1210,7 @@ describe("TurnGroup collapsed interrupted indicator", () => {
                 id: "child-a1",
                 content: "child stale fallback",
                 events: undefined,
-                omitted_payloads: { events: { revision: "child-rev-1" } },
+                omitted_payloads: { events: { revision: "child-rev-1", count: 1 } },
               }),
             },
           ]}

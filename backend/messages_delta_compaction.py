@@ -12,6 +12,12 @@ import json
 # payload before it reaches the wire.
 PRECOMPUTED_REVISION_KEY = "_omitted_events_revision"
 
+# Backend-only bookkeeping stamped on live message/worker dicts. They are
+# O(N) in the message's event count, so shipping them on a per-event delta
+# reinstates the very O(N²) wire cost the omitted-events compaction exists
+# to remove — and they mean nothing to a client.
+_INTERNAL_KEYS = ("_uid_idx", "_has_final", "_content_dirty", "_events_seq_floor")
+
 
 def _hash_json(value: object) -> str:
     encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
@@ -40,7 +46,10 @@ def _omitted_events_revision(events: list[object], precomputed: str = "") -> str
 
 
 def _events_payload_ref(msg: dict, events: list[object], precomputed: str = "") -> dict:
-    ref = {"revision": _omitted_events_revision(events, precomputed)}
+    ref = {
+        "revision": _omitted_events_revision(events, precomputed),
+        "count": len(events),
+    }
     message_id = msg.get("id")
     if isinstance(message_id, str) and message_id:
         ref["href"] = f"messages/{message_id}/events"
@@ -50,11 +59,15 @@ def _events_payload_ref(msg: dict, events: list[object], precomputed: str = "") 
 def compact_message_delta_payload(msg: dict) -> dict:
     payload = dict(msg)
     precomputed_revision = payload.pop(PRECOMPUTED_REVISION_KEY, "")
+    for key in _INTERNAL_KEYS:
+        payload.pop(key, None)
     omitted_events: list[object] = []
     own_events_present = False
     workers_contributed = False
+    events_key_removed = False
     if "events" in payload:
         events = payload.pop("events", None)
+        events_key_removed = True
         if isinstance(events, list):
             omitted_events.extend(events)
             own_events_present = True
@@ -66,14 +79,21 @@ def compact_message_delta_payload(msg: dict) -> dict:
                 next_workers.append(worker)
                 continue
             next_worker = dict(worker)
+            for key in _INTERNAL_KEYS:
+                next_worker.pop(key, None)
             if "events" in next_worker:
                 events = next_worker.pop("events", None)
+                events_key_removed = True
                 if isinstance(events, list) and events:
                     workers_contributed = True
                     omitted_events.extend(events)
             next_workers.append(next_worker)
         payload["workers"] = next_workers
-    if omitted_events:
+    # Keyed off "an events key was stripped", NOT "the stripped events were
+    # non-empty": the receiver restores its own events list only when the
+    # marker is present, so an empty-but-present list must still be reported
+    # as omitted or the delta silently wipes the client's live events.
+    if events_key_removed:
         # Only trust the precomputed revision when msg's own top-level
         # events are genuinely what's being hashed and nothing else was
         # folded in — any other shape falls back to the always-correct

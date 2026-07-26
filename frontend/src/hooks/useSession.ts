@@ -300,6 +300,13 @@ export function mergeProjectedMessageDelta(
 ): ChatMessage {
   if (!incoming.omitted_payloads?.events) return incoming;
   const next: ChatMessage = { ...incoming };
+  // `isRecovering` is a transient backend flag the client only ever learns
+  // from `message_recovering_changed` / a REST snapshot — a compacted delta
+  // never carries it, so taking `incoming` wholesale would silently retire
+  // the "Updating state…" state while recovery is still running.
+  if (incoming.isRecovering === undefined && current.isRecovering !== undefined) {
+    next.isRecovering = current.isRecovering;
+  }
   if (incoming.events === undefined && current.events !== undefined) {
     next.events = current.events;
   }
@@ -325,15 +332,23 @@ export function mergeIncomingMessageSnapshot(
     current.isStreaming &&
     incoming.role === "assistant"
   ) {
+    // A compacted delta carries no `events` — they moved into
+    // `omitted_payloads` — so its event count is structurally 0. The
+    // freshness guards below use event count as the proxy for "is this
+    // snapshot behind the live stream?", which would drop EVERY in-flight
+    // delta and freeze the message's backend-owned fields (content,
+    // workers, terminal flags) at whatever the live placeholder captured.
+    // Omitted events are deliberately absent, not missing, so the count
+    // carries no freshness signal and the guards must not run on them.
+    if (incoming.omitted_payloads?.events) {
+      return mergeProjectedMessageDelta(current, incoming);
+    }
     const replayEvents = totalEventCount(incoming);
     const liveEvents = totalEventCount(current);
     if (incoming.isStreaming === true && replayEvents <= liveEvents) {
       return null;
     }
     if (incoming.isStreaming !== true) {
-      if (incoming.omitted_payloads?.events) {
-        return mergeProjectedMessageDelta(current, incoming);
-      }
       const replayText = incoming.content ?? "";
       const liveText = current.content ?? "";
       const replayTextLen = replayText.length;

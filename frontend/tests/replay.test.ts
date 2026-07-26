@@ -433,6 +433,55 @@ describe("messages_replay / messages_delta upsert + since_seq cursor", () => {
     expect(msg?.events).toEqual([streamedEvent]);
   });
 
+  it("in-flight compact messages_delta updates a streaming message instead of being dropped", () => {
+    const streamedEvent = {
+      type: "agent_message" as const,
+      data: { uuid: "ev-1", type: "assistant" },
+    };
+    const current = makeAssistantMsg({
+      id: "a",
+      content: "lead-in",
+      seq: 1,
+      isStreaming: true,
+      events: [streamedEvent],
+    });
+    const compact = makeAssistantMsg({
+      id: "a",
+      content: "final answer",
+      seq: 1,
+      isStreaming: true,
+      events: undefined,
+      omitted_payloads: { events: { revision: "rev-2", count: 1 } },
+    });
+
+    const msg = mergeIncomingMessageSnapshot(current, compact);
+    expect(msg?.content).toBe("final answer");
+    expect(msg?.events).toEqual([streamedEvent]);
+  });
+
+  it("compact messages_delta keeps the transient isRecovering flag", () => {
+    const current = makeAssistantMsg({
+      id: "a",
+      content: "lead-in",
+      seq: 1,
+      isStreaming: true,
+      isRecovering: true,
+      events: [],
+    });
+    const compact = makeAssistantMsg({
+      id: "a",
+      content: "later text",
+      seq: 1,
+      isStreaming: true,
+      events: undefined,
+      omitted_payloads: { events: { revision: "rev-3", count: 2 } },
+    });
+
+    const msg = mergeIncomingMessageSnapshot(current, compact);
+    expect(msg?.content).toBe("later text");
+    expect(msg?.isRecovering).toBe(true);
+  });
+
   it("terminal replay replaces an empty streaming placeholder with zero events", () => {
     const current = makeAssistantMsg({
       id: "a",

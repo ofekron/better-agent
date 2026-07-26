@@ -2617,8 +2617,13 @@ const AssistantMessage = memo(function AssistantMessage({
       : fetchedForId.current === fetchKey
         ? fetched
         : null;
+  // A streaming message's events arrive on the live WS stream, which is
+  // ahead of anything the endpoint can return — fetching would spend a
+  // request per in-flight delta and could render an older tail. An
+  // omitted list of zero entries has nothing to fetch at all.
   const needsFetch =
-    (!!message.stub || !!omittedEvents) &&
+    !message.isStreaming &&
+    (!!message.stub || (!!omittedEvents && omittedEvents.count !== 0)) &&
     !cachedFetched;
   useEffect(() => {
     if (!needsFetch || !sessionId) return;

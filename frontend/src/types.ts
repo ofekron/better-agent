@@ -642,6 +642,9 @@ export interface MessageFile {
 export interface OmittedPayloadRef {
   revision: string;
   href?: string;
+  /** How many payload entries were omitted. Zero means the stripped list
+   * was genuinely empty, so there is nothing to lazily fetch. */
+  count: number;
 }
 
 export interface OmittedPayloads {
