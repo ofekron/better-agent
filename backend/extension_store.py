@@ -41,6 +41,7 @@ import extension_mcp
 import native_mcp_grants
 import installation_profile
 import harness_run_projection
+import dependency_plan
 
 logger = logging.getLogger(__name__)
 
@@ -3277,8 +3278,17 @@ def _install_python_requirements(target: Path, manifest: dict[str, Any]) -> None
     if os.environ.get("BETTER_AGENT_SKIP_EXTENSION_DEPENDENCY_INSTALL") == "1":
         return
     venv_dir = target / ".venv"
+    try:
+        backend_python = dependency_plan.verified_active_python(
+            Path(__file__).resolve().parent
+        )
+    except dependency_plan.DependencyPlanError as exc:
+        raise ExtensionError(
+            "extension dependency environment creation requires an active "
+            "backend dependency environment"
+        ) from exc
     result = subprocess.run(
-        [sys.executable, "-m", "venv", str(venv_dir)],
+        [str(backend_python), "-m", "venv", str(venv_dir)],
         check=False,
         capture_output=True,
         text=True,

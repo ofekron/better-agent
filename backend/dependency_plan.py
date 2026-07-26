@@ -251,6 +251,10 @@ def verified_active_env(backend_dir: Path) -> Path:
     return env_dir
 
 
+def verified_active_python(backend_dir: Path) -> Path:
+    return _python_in(verified_active_env(backend_dir))
+
+
 def _module_available(module: str) -> bool:
     import importlib.util
 

@@ -5769,8 +5769,44 @@ def test_v1_store_migrates_source_types_to_v2_without_wipe() -> None:
         shutil.rmtree(temp_home, ignore_errors=True)
 
 
+def test_extension_dependencies_use_active_backend_python() -> None:
+    calls: list[list[str]] = []
+    original_verified = extension_store.dependency_plan.verified_active_python
+    original_run = extension_store.subprocess.run
+
+    class Result:
+        returncode = 0
+        stderr = ""
+        stdout = ""
+
+    def fake_run(args, **_kwargs):
+        calls.append([str(item) for item in args])
+        return Result()
+
+    active_python = Path("/authoritative/backend/python")
+    target = Path(tempfile.mkdtemp(prefix="bc-test-extension-python-"))
+    try:
+        extension_store.dependency_plan.verified_active_python = (
+            lambda _backend_dir: active_python
+        )
+        extension_store.subprocess.run = fake_run
+        extension_store._install_python_requirements(
+            target,
+            {"entrypoints": {"python_requirements": ["example-package==1.0"]}},
+        )
+        if calls[0][:3] != [str(active_python), "-m", "venv"]:
+            raise AssertionError(calls)
+        if calls[1][0] != str(extension_store._venv_python(target / ".venv")):
+            raise AssertionError(calls)
+    finally:
+        extension_store.dependency_plan.verified_active_python = original_verified
+        extension_store.subprocess.run = original_run
+        shutil.rmtree(target, ignore_errors=True)
+
+
 if __name__ == "__main__":
     try:
+        test_extension_dependencies_use_active_backend_python()
         test_v1_store_migrates_source_types_to_v2_without_wipe()
         test_manifest_validation_rejects_unknown_permissions()
         test_manifest_validates_mcp_predicate()
