@@ -834,10 +834,26 @@ def export_extension_sync_state() -> dict[str, Any]:
         if not isinstance(record, dict):
             continue
         source = record.get("source") or {}
-        install_path = Path(str(source.get("install_path") or ""))
-        if not install_path.is_dir():
+        raw_install_path = str(source.get("install_path") or "")
+        install_path = Path(raw_install_path)
+        # Install paths are absolute under the extensions root. A relative one
+        # is a corrupt record that would resolve against the process cwd and
+        # try to ship that whole tree.
+        if not install_path.is_absolute() or not install_path.is_dir():
+            if raw_install_path:
+                logger.warning(
+                    "extension %s has unusable install_path %r; skipping package",
+                    extension_id,
+                    raw_install_path,
+                )
             continue
-        archive = _build_package_artifact(install_path)
+        try:
+            archive = _build_package_artifact(install_path)
+        except Exception:
+            # One unshippable package must not deny every node all the others.
+            # The next store change or node reconnect retries it.
+            logger.exception("extension %s package export failed; skipping", extension_id)
+            continue
         artifact_sha256 = hashlib.sha256(archive).hexdigest()
         artifacts.append({
             "extension_id": extension_id,
@@ -2765,18 +2781,43 @@ def _safe_extract_tar_gz(archive_bytes: bytes, target: Path) -> None:
         raise ExtensionError("marketplace artifact is not a valid tar.gz") from exc
 
 
+# Runtime/build trees, never package content: they are platform-specific (a
+# macOS venv is useless on a Windows node), they are rebuilt on the target from
+# the package's own manifests, and they routinely contain symlinks that the
+# package guard below would otherwise reject.
+_PACKAGE_ARTIFACT_SKIP_DIRS = frozenset({".git", ".venv", "node_modules", "__pycache__"})
+
+
+def _package_artifact_paths(package_dir: Path) -> list[Path]:
+    """Files to ship for ``package_dir``, pruning runtime/build subtrees.
+
+    Pruning happens before the symlink guard so a symlinked ``node_modules``
+    is skipped rather than failing the package; the guard still rejects links
+    anywhere in real package content.
+    """
+    found: list[Path] = []
+    stack = [package_dir]
+    while stack:
+        for entry in sorted(stack.pop().iterdir()):
+            if entry.name in _PACKAGE_ARTIFACT_SKIP_DIRS:
+                continue
+            if entry.is_symlink():
+                raise ExtensionError("extension package must not contain links")
+            if entry.is_dir():
+                stack.append(entry)
+                continue
+            if not entry.is_file():
+                raise ExtensionError("extension package contains unsupported filesystem entries")
+            found.append(entry)
+    return sorted(found)
+
+
 def _build_package_artifact(package_dir: Path) -> bytes:
     buf = io.BytesIO()
     with gzip.GzipFile(fileobj=buf, mode="wb", mtime=0) as gzip_file:
         with tarfile.open(fileobj=gzip_file, mode="w") as archive:
-            for path in sorted(package_dir.rglob("*")):
+            for path in _package_artifact_paths(package_dir):
                 rel = path.relative_to(package_dir).as_posix()
-                if path.is_symlink():
-                    raise ExtensionError("extension package must not contain links")
-                if path.is_dir():
-                    continue
-                if not path.is_file():
-                    raise ExtensionError("extension package contains unsupported filesystem entries")
                 # Snapshot the bytes and declare that exact size, so a package
                 # file rewritten mid-build cannot emit a header promising more
                 # bytes than follow and yield an unreadable archive.

@@ -2193,10 +2193,12 @@ if (
 
         node_store.add_listener(_on_node_connected_recover)
 
-        import node_extension_sync
-        # A (re)connecting worker gets the current extension state pushed so
-        # it never runs a stale projection after downtime.
-        node_store.add_listener(node_extension_sync.on_node_state)
+        import node_config_sync
+        # A (re)connecting worker gets the current extension, provider, and
+        # harness state pushed so it never runs a stale projection after
+        # downtime.
+        node_config_sync.bind_loop()
+        node_store.add_listener(node_config_sync.on_node_state)
         import run_recovery as _run_recovery_mod
         _run_recovery_mod.set_remote_recovery_coordinator(coordinator)
 
@@ -2421,6 +2423,25 @@ def _provider_reasoning_effort(
             detail=f"{name} does not support reasoning_effort={effort!r}",
         )
     return effort
+
+
+def _inherited_reasoning_effort(
+    provider_id: str | None,
+    effort: str | None,
+    runner: str | None = None,
+    model: str = "",
+) -> str:
+    """Resolve the target provider record, then fit the inherited effort onto it.
+
+    Explicitly requested efforts still go through _provider_reasoning_effort so a
+    caller asking for an unsupported value gets a 400 instead of a silent
+    downgrade.
+    """
+    record = config_store.get_provider(provider_id) if provider_id else None
+    if record is None:
+        active = config_store.get_default_provider()
+        record = config_store.get_provider(active["id"]) if active else None
+    return runtime_profile.fit_reasoning_effort(record, effort, runner, model=model)
 
 
 def _provider_runner(provider_id: str | None, runner: object = None) -> str:
@@ -4062,6 +4083,12 @@ async def _broadcast_harness_profiles_changed() -> None:
         await coordinator.broadcast_global("harness_profiles_changed", {})
     except Exception:
         logger.exception("failed to broadcast harness profile change")
+    try:
+        import node_config_sync
+
+        node_config_sync.notify_changed("harness")
+    except Exception:
+        logger.exception("node harness sync notify failed")
 
 
 _PROFILE_INSTANCE_FIELD_KEYS = (
@@ -12656,8 +12683,8 @@ async def _housekeeping_task() -> None:
                 result["updated"],
             )
             await coordinator.broadcast_global("extensions_changed", {})
-            import node_extension_sync
-            node_extension_sync.notify_extensions_changed()
+            import node_config_sync
+            node_config_sync.notify_changed("extensions")
     except Exception:
         logger.exception("housekeeping: update_installed_extensions failed")
 
@@ -14587,16 +14614,23 @@ async def internal_create_session(
     if requested_model or requested_provider_id:
         await asyncio.to_thread(_validate_provider_model, provider_id, model)
     requested_effort = profile_selectors["reasoning_effort"]
-    reasoning_effort: object = requested_effort
-    if (reasoning_effort is None or not str(reasoning_effort).strip()) and sender_session:
-        reasoning_effort = str(sender_session.get("reasoning_effort") or "").strip()
-    reasoning_effort = await asyncio.to_thread(
-        _provider_reasoning_effort,
-        provider_id,
-        _api_reasoning_effort(reasoning_effort),
-        runner,
-        model,
-    )
+    reasoning_effort: object
+    if requested_effort is not None and str(requested_effort).strip():
+        reasoning_effort = await asyncio.to_thread(
+            _provider_reasoning_effort,
+            provider_id,
+            _api_reasoning_effort(requested_effort),
+            runner,
+            model,
+        )
+    else:
+        reasoning_effort = await asyncio.to_thread(
+            _inherited_reasoning_effort,
+            provider_id,
+            str((sender_session or {}).get("reasoning_effort") or "").strip(),
+            runner,
+            model,
+        )
     node_id = str(body.get("node_id") or "").strip() or "primary"
     extra_mcp_servers = _api_extra_mcp_servers(body.get("mcp_servers"))
     if not model:
@@ -14690,16 +14724,23 @@ async def internal_create_sub_session(
     if requested_model or requested_provider_id:
         await asyncio.to_thread(_validate_provider_model, provider_id, model)
     requested_effort = body.get("reasoning_effort")
-    reasoning_effort: object = requested_effort
-    if reasoning_effort is None or not str(reasoning_effort).strip():
-        reasoning_effort = str(parent.get("reasoning_effort") or "").strip()
-    reasoning_effort = await asyncio.to_thread(
-        _provider_reasoning_effort,
-        provider_id,
-        _api_reasoning_effort(reasoning_effort),
-        runner,
-        model,
-    )
+    reasoning_effort: object
+    if requested_effort is not None and str(requested_effort).strip():
+        reasoning_effort = await asyncio.to_thread(
+            _provider_reasoning_effort,
+            provider_id,
+            _api_reasoning_effort(requested_effort),
+            runner,
+            model,
+        )
+    else:
+        reasoning_effort = await asyncio.to_thread(
+            _inherited_reasoning_effort,
+            provider_id,
+            str(parent.get("reasoning_effort") or "").strip(),
+            runner,
+            model,
+        )
     cwd = str(body.get("cwd") or "").strip() or str(parent.get("cwd") or "").strip()
     node_id = str(body.get("node_id") or "").strip() or str(parent.get("node_id") or "primary")
     disallowed_tools = _api_disallowed_tools(body.get("disallowed_tools"))

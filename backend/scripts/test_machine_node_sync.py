@@ -18,6 +18,7 @@ _TMP_HOME = _test_home.isolate("bc-test-machine-node-sync-")
 
 import config_store  # noqa: E402
 import extension_api  # noqa: E402
+import extension_store  # noqa: E402
 import node_link  # noqa: E402
 import node_rpc_handlers  # noqa: E402
 import node_store  # noqa: E402
@@ -584,6 +585,116 @@ def test_machine_page_uses_sync_callbacks() -> None:
     assert "Sync extensions" in ui
 
 
+def _write_package(root, name: str):
+    package = root / name
+    (package / "src").mkdir(parents=True)
+    (package / "better-agent-extension.json").write_text("{}")
+    (package / "src" / "main.py").write_text("print('hi')\n")
+    return package
+
+
+def test_package_artifact_prunes_runtime_trees_with_links() -> None:
+    """A built .venv/node_modules must not make a package unshippable."""
+    import tempfile
+    from pathlib import Path
+
+    with tempfile.TemporaryDirectory() as tmp:
+        package = _write_package(Path(tmp), "ext-with-venv")
+        venv_bin = package / ".venv" / "bin"
+        venv_bin.mkdir(parents=True)
+        (venv_bin / "python3.12").write_text("#!/bin/sh\n")
+        (venv_bin / "python").symlink_to("python3.12")
+        (package / "node_modules").mkdir()
+        (package / "node_modules" / "dep").symlink_to("../src")
+
+        archive = extension_store._build_package_artifact(package)
+        assert archive
+        shipped = {p.relative_to(package).as_posix() for p in extension_store._package_artifact_paths(package)}
+        assert shipped == {"better-agent-extension.json", "src/main.py"}
+
+
+def test_package_artifact_still_rejects_links_in_real_content() -> None:
+    """The symlink guard is a path-escape control; pruning must not weaken it."""
+    import tempfile
+    from pathlib import Path
+
+    with tempfile.TemporaryDirectory() as tmp:
+        package = _write_package(Path(tmp), "ext-with-link")
+        (package / "src" / "escape.py").symlink_to("/etc/passwd")
+        try:
+            extension_store._build_package_artifact(package)
+        except extension_store.ExtensionError:
+            return
+        raise AssertionError("symlink in package content was accepted")
+
+
+def test_export_skips_bad_package_instead_of_aborting() -> None:
+    """One unshippable package must not deny every node all the others."""
+    import tempfile
+    from pathlib import Path
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        good = _write_package(root, "good")
+        bad = _write_package(root, "bad")
+        (bad / "src" / "escape.py").symlink_to("/etc/passwd")
+
+        original = extension_store._load_with_changes
+        record = lambda path: {"source": {"install_path": str(path), "commit_sha": ""}}  # noqa: E731
+        extension_store._load_with_changes = lambda: (  # type: ignore[assignment]
+            {
+                "extensions": {
+                    "ok.ext": record(good),
+                    "bad.ext": record(bad),
+                    # Corrupt record: a relative path would resolve against the
+                    # process cwd and try to ship that whole tree.
+                    "relative.ext": record(Path(".")),
+                },
+                "deleted_extensions": {},
+            },
+            False,
+            False,
+        )
+        try:
+            payload = extension_store.export_extension_sync_state()
+        finally:
+            extension_store._load_with_changes = original  # type: ignore[assignment]
+
+    shipped = {a["extension_id"] for a in payload["artifacts"]}
+    assert shipped == {"ok.ext"}, shipped
+
+
+def test_harness_sync_state_round_trips() -> None:
+    import harness_profile_store
+
+    exported = harness_profile_store.export_harness_sync_state()
+    assert exported["schema_version"] == harness_profile_store.SCHEMA_VERSION
+    assert isinstance(exported["profiles"], dict)
+
+    result = harness_profile_store.import_harness_sync_state(exported)
+    assert result["profiles"] == len(exported["profiles"])
+    assert harness_profile_store.export_harness_sync_state() == exported
+
+
+def test_harness_sync_state_refuses_foreign_schema() -> None:
+    import harness_profile_store
+
+    for bad in ({"schema_version": 999, "profiles": {}}, {"profiles": {}}, "nope"):
+        try:
+            harness_profile_store.import_harness_sync_state(bad)
+        except harness_profile_store.HarnessProfileError:
+            continue
+        raise AssertionError(f"accepted incompatible harness sync state: {bad!r}")
+
+
+def test_harness_surface_is_registered_for_node_sync() -> None:
+    import node_config_sync
+
+    names = {surface.name for surface in node_config_sync.SURFACES}
+    assert names == {"extensions", "providers", "harness"}, names
+    assert "sync_harness_profile" in node_rpc_handlers._HANDLERS
+
+
 async def _main() -> None:
     await test_sync_providers_all_nodes_reports_node_failures()
     await test_first_approval_uses_topology_cwd_roots()
@@ -603,6 +714,12 @@ async def _main() -> None:
     test_import_provider_sync_skips_keyless_api_provider_as_default()
     test_import_provider_sync_clears_default_when_every_provider_needs_missing_key()
     test_machine_page_uses_sync_callbacks()
+    test_package_artifact_prunes_runtime_trees_with_links()
+    test_package_artifact_still_rejects_links_in_real_content()
+    test_export_skips_bad_package_instead_of_aborting()
+    test_harness_sync_state_round_trips()
+    test_harness_sync_state_refuses_foreign_schema()
+    test_harness_surface_is_registered_for_node_sync()
 
 
 if __name__ == "__main__":

@@ -120,6 +120,7 @@ async def handle_spawn_run(node_client, msg: dict) -> None:
             extra_env=msg.get("extra_env"),
             provider_run_config=msg.get("provider_run_config"),
             capability_contexts=msg.get("capability_contexts"),
+            resolved_harness_run_config=msg.get("resolved_harness_run_config"),
             target_message_id=msg.get("target_message_id"),
             turn_run_id=msg.get("turn_run_id"),
             provisioned_tool_profile=_node_provisioned_tool_profile(
@@ -840,6 +841,14 @@ def _rpc_sync_extension_config(params: dict) -> dict:
     return extension_store.import_extension_sync_state(extension_state)
 
 
+def _rpc_sync_harness_profile(params: dict) -> dict:
+    harness_state = params.get("harness_state")
+    if not isinstance(harness_state, dict):
+        raise ValueError("harness_state must be an object")
+    import harness_profile_store
+    return harness_profile_store.import_harness_sync_state(harness_state)
+
+
 # Prompt-engineer temp files live under this node's own state home —
 # NEVER under a client-supplied path. The eng_session_id is the only
 # client input and is shape-validated, so the served path is confined
@@ -1051,6 +1060,7 @@ _HANDLERS = {
     "list_sessions": _rpc_list_sessions,
     "sync_provider_config": _rpc_sync_provider_config,
     "sync_extension_config": _rpc_sync_extension_config,
+    "sync_harness_profile": _rpc_sync_harness_profile,
     "list_directories": _rpc_list_directories,
     "get_file_tree": _rpc_get_file_tree,
     "search_tree": _rpc_search_tree,

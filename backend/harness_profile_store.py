@@ -534,6 +534,40 @@ def apply_override_patch(profile_id: str, ops: list[dict[str, Any]], revision: s
         return _commit_profile(data, clean_id, profile)
 
 
+def export_harness_sync_state() -> dict[str, Any]:
+    """Harness profile state to project onto an approved worker node.
+
+    Profiles hold only opaque `secret_refs` token references, never secret
+    values, so the whole set is safe to copy.
+    """
+    with _LOCK:
+        data = _load()
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "profiles": copy.deepcopy(data.get("profiles") or {}),
+        }
+
+
+def import_harness_sync_state(state: object) -> dict[str, Any]:
+    """Replace this host's profiles with the primary's projection.
+
+    Schema migrations are not supported, so a payload from a differently
+    versioned primary is refused rather than partially applied.
+    """
+    if not isinstance(state, dict):
+        raise HarnessProfileError("harness sync state must be an object")
+    if state.get("schema_version") != SCHEMA_VERSION:
+        raise HarnessProfileError(
+            "harness sync state is incompatible with this Better Agent version"
+        )
+    profiles = state.get("profiles")
+    if not isinstance(profiles, dict):
+        raise HarnessProfileError("harness sync state profiles must be an object")
+    with _LOCK:
+        _save({"schema_version": SCHEMA_VERSION, "profiles": copy.deepcopy(profiles)})
+    return {"profiles": len(profiles)}
+
+
 def delete_profile(profile_id: str, revision: str | None = None) -> bool:
     clean_id = _clean_id(profile_id)
     if clean_id == DEFAULT_PROFILE_ID:

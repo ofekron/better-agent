@@ -91,9 +91,26 @@ def _serialized_provider_mutation(function):
             with _config_file_transaction():
                 with _state_cache_lock:
                     _state_cache = None
-                return function(*args, **kwargs)
+                result = function(*args, **kwargs)
+        _notify_provider_config_changed()
+        return result
 
     return wrapped
+
+
+def _notify_provider_config_changed() -> None:
+    """Publish the "provider config changed" fact for worker-node projection.
+
+    Fired outside the mutation lock so a slow subscriber cannot serialize
+    provider writes. Nodes receive a credential-free projection; API keys sync
+    only through the explicit per-node route.
+    """
+    try:
+        import node_config_sync
+
+        node_config_sync.notify_changed("providers")
+    except Exception:
+        logger.exception("node provider sync notify failed")
 
 
 def _config_path():

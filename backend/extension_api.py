@@ -264,9 +264,9 @@ async def _broadcast_extensions_changed() -> None:
         await coordinator.broadcast_global("extensions_changed", {})
 
     try:
-        import node_extension_sync
+        import node_config_sync
 
-        node_extension_sync.notify_extensions_changed()
+        node_config_sync.notify_changed("extensions")
     except Exception:
         logger.exception("node extension sync notify failed")
 
