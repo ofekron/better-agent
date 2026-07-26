@@ -10,7 +10,7 @@ from json_store import write_json_durable
 from paths import ba_home, bc_home
 
 SCHEMA_VERSION = 3
-RECEIPT_SCHEMA_VERSION = 1
+RECEIPT_SCHEMA_VERSION = 2
 DESKTOP_UI_ONLY = "desktop-ui-only"
 MOBILE_DESKTOP_UI_ONLY = "mobile-desktop-ui-only"
 DEFAULT = "default"
@@ -187,7 +187,13 @@ def stage_activation(profile: dict[str, Any]) -> dict[str, Any]:
     return validated
 
 
-def _active_environment_receipt() -> dict[str, str]:
+def _assert_active_environment() -> None:
+    """Validate the live dependency environment pointer and its plan marker.
+
+    The environment is a rebuildable cache of the profile's dependency plan, so
+    it is checked where it lives instead of being pinned into the activation
+    receipt: a rebuild must never invalidate a committed installation.
+    """
     backend = BACKEND_ROOT
     pointer_path = backend / ".active-venv"
     try:
@@ -206,10 +212,11 @@ def _active_environment_receipt() -> dict[str, str]:
         marker = json.loads(marker_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise InstallationProfileError("backend dependency plan marker is invalid") from exc
-    plan_hash = marker.get("hash") if isinstance(marker, dict) else None
-    if marker.get("schema_version") != 1 or not isinstance(plan_hash, str) or not plan_hash:
+    if not isinstance(marker, dict) or marker.get("schema_version") != 1:
         raise InstallationProfileError("backend dependency plan marker is invalid")
-    return {"active_env": relative.as_posix(), "dependency_plan_hash": plan_hash}
+    plan_hash = marker.get("hash")
+    if not isinstance(plan_hash, str) or not plan_hash:
+        raise InstallationProfileError("backend dependency plan marker is invalid")
 
 
 def _provider_selection_fingerprint(provider: str) -> str:
@@ -247,17 +254,51 @@ def _provider_selection_fingerprint(provider: str) -> str:
     return _canonical_hash(projection)
 
 
-def mark_selection_applied() -> None:
-    profile = require_active()
-    environment = _active_environment_receipt()
-    receipt = {
+def _receipt(profile: dict[str, Any], selection_sha256: str) -> dict[str, Any]:
+    return {
         "schema_version": RECEIPT_SCHEMA_VERSION,
         "generation": profile["generation"],
         "profile_sha256": _canonical_hash(profile),
-        "provider_selection_sha256": _provider_selection_fingerprint(profile["provider"]),
-        **environment,
+        "provider_selection_sha256": selection_sha256,
     }
-    write_json_durable(_activation_receipt_path(), receipt)
+
+
+def mark_selection_applied() -> None:
+    profile = require_active()
+    _assert_active_environment()
+    write_json_durable(
+        _activation_receipt_path(),
+        _receipt(profile, _provider_selection_fingerprint(profile["provider"])),
+    )
+
+
+def refresh_activation_receipt() -> bool:
+    """Re-encode a receipt whose commit for the active generation still stands.
+
+    The activation commit belongs to the installation generation, so a receipt
+    written in an older encoding is re-stamped in place. Reapplying the
+    installer's provider selection instead would suspend every provider the
+    user configured after setup.
+    """
+    profile = load()
+    if profile["status"] != "active":
+        return False
+    try:
+        prior = json.loads(_activation_receipt_path().read_text(encoding="utf-8"))
+        _assert_active_environment()
+    except (OSError, json.JSONDecodeError, InstallationProfileError):
+        return False
+    if not isinstance(prior, dict):
+        return False
+    if prior.get("generation") != profile["generation"]:
+        return False
+    if prior.get("profile_sha256") != _canonical_hash(profile):
+        return False
+    selection_hash = prior.get("provider_selection_sha256")
+    if not isinstance(selection_hash, str) or len(selection_hash) != 64:
+        return False
+    write_json_durable(_activation_receipt_path(), _receipt(profile, selection_hash))
+    return True
 
 
 def _activation_ready(profile: dict[str, Any]) -> bool:
@@ -265,7 +306,7 @@ def _activation_ready(profile: dict[str, Any]) -> bool:
         return False
     try:
         receipt = json.loads(_activation_receipt_path().read_text(encoding="utf-8"))
-        environment = _active_environment_receipt()
+        _assert_active_environment()
     except (OSError, json.JSONDecodeError, InstallationProfileError):
         return False
     if not isinstance(receipt, dict):
@@ -273,14 +314,7 @@ def _activation_ready(profile: dict[str, Any]) -> bool:
     selection_hash = receipt.get("provider_selection_sha256")
     if not isinstance(selection_hash, str) or len(selection_hash) != 64:
         return False
-    expected = {
-        "schema_version": RECEIPT_SCHEMA_VERSION,
-        "generation": profile["generation"],
-        "profile_sha256": _canonical_hash(profile),
-        "provider_selection_sha256": selection_hash,
-        **environment,
-    }
-    return receipt == expected
+    return receipt == _receipt(profile, selection_hash)
 
 
 def selection_pending() -> bool:

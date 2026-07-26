@@ -222,7 +222,7 @@ def test_interrupted_commit_restores_pointer_and_leaves_setup_incomplete() -> No
                 ),
                 patch.object(
                     dependency_plan,
-                    "_apply_pending_selection",
+                    "_commit_activation",
                     side_effect=RuntimeError("interrupted"),
                 ),
             ):

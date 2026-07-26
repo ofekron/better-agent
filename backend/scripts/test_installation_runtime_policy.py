@@ -661,7 +661,7 @@ def test_selection_failure_restores_previous_pointer() -> None:
             patch.object(dependency_plan, "_write_pointer", side_effect=write_candidate),
             patch.object(
                 dependency_plan,
-                "_apply_pending_selection",
+                "_commit_activation",
                 side_effect=RuntimeError("config commit failed"),
             ),
         ):
@@ -683,12 +683,17 @@ def test_pending_selection_does_not_write_activation_stdout() -> None:
             return_value=True,
         ),
         patch.object(
+            installation_profile,
+            "refresh_activation_receipt",
+            return_value=False,
+        ),
+        patch.object(
             dependency_plan.subprocess,
             "run",
             return_value=subprocess.CompletedProcess([], 0),
         ) as run,
     ):
-        dependency_plan._apply_pending_selection(Path(sys.executable))
+        dependency_plan._commit_activation(Path(sys.executable))
     assert run.call_args.kwargs["stdout"] is subprocess.DEVNULL
 
 

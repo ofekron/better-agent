@@ -325,8 +325,10 @@ def assert_state_transition_supported(state: dict[str, Any]) -> None:
         ) from exc
 
 
-def _apply_pending_selection(python: Path) -> None:
+def _commit_activation(python: Path) -> None:
     if not installation_profile.selection_pending():
+        return
+    if installation_profile.refresh_activation_receipt():
         return
     subprocess.run(
         [str(python), str(Path(__file__).resolve()), "apply-selection"],
@@ -418,7 +420,7 @@ def activate_prepared_installation(
     installation_profile.stage_activation(profile)
     _write_pointer(env_dir)
     try:
-        _apply_pending_selection(_python_in(env_dir))
+        _commit_activation(_python_in(env_dir))
         if installation_profile.selection_pending():
             raise DependencyPlanError(
                 "installation activation receipt was not committed"
@@ -438,20 +440,16 @@ def activate(uv: str) -> Path:
             raise DependencyPlanError(
                 "dependency plan changed during activation; rerun the installer"
             )
-        python = _python_in(env_dir)
-        if installation_profile.selection_pending():
-            try:
-                previous_pointer = ACTIVE_POINTER.read_text(encoding="utf-8")
-            except FileNotFoundError:
-                previous_pointer = None
-            _write_pointer(env_dir)
-            try:
-                _apply_pending_selection(python)
-            except Exception:
-                _restore_pointer(previous_pointer)
-                raise
-        else:
-            _write_pointer(env_dir)
+        try:
+            previous_pointer = ACTIVE_POINTER.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            previous_pointer = None
+        _write_pointer(env_dir)
+        try:
+            _commit_activation(_python_in(env_dir))
+        except Exception:
+            _restore_pointer(previous_pointer)
+            raise
         return env_dir
 
 

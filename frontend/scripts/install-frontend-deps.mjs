@@ -32,6 +32,12 @@ export function absolutizeLocalReferences(value, sourceDirectory) {
   );
 }
 
+// The retired copy lives inside the caller's own stage directory: concurrent
+// installs never share a swap slot, and the stage cleanup reclaims it.
+export function retiredNodeModulesPath(stage) {
+  return join(stage, "node_modules.retired");
+}
+
 function install(profile) {
   if (profile !== "desktop" && profile !== "mobile") {
     throw new Error(`Unknown frontend dependency profile: ${profile}`);
@@ -39,7 +45,7 @@ function install(profile) {
 
   const stage = mkdtempSync(join(repository, `.frontend-${profile}-install-`));
   const current = join(frontend, "node_modules");
-  const previous = join(frontend, ".node_modules.previous");
+  const previous = retiredNodeModulesPath(stage);
 
   try {
     const manifest = JSON.parse(
@@ -70,7 +76,6 @@ function install(profile) {
     );
     cpSync(join(frontend, "scripts"), join(stage, "scripts"), { recursive: true });
     execFileSync("npm", ["ci"], { cwd: stage, stdio: "inherit" });
-    rmSync(previous, { recursive: true, force: true });
     if (existsSync(current)) {
       renameSync(current, previous);
     }
@@ -82,7 +87,6 @@ function install(profile) {
       }
       throw error;
     }
-    rmSync(previous, { recursive: true, force: true });
   } finally {
     rmSync(stage, { recursive: true, force: true });
   }
