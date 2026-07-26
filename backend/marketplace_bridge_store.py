@@ -132,7 +132,13 @@ def _validate_receipt(action_id: str, receipt: object) -> None:
     _require_keys(receipt, required, "Marketplace receipt")
     if not PATTERNS["sha256"].fullmatch(str(receipt["envelope_digest"])):
         raise MarketplaceStateError("Marketplace receipt digest is invalid")
-    if receipt["phase"] not in {"fenced", "effect_started", "effect_applied", "terminal"}:
+    if receipt["phase"] not in {
+        "fence_pending",
+        "fenced",
+        "effect_started",
+        "effect_applied",
+        "terminal",
+    }:
         raise MarketplaceStateError("Marketplace receipt phase is invalid")
     if receipt["ack_status"] not in {"pending", "acked", "conflict"}:
         raise MarketplaceStateError("Marketplace receipt ack state is invalid")
@@ -162,15 +168,21 @@ def validate_state(state: object) -> dict:
         if not isinstance(state[field], dict):
             raise MarketplaceStateError(f"Marketplace {field} is invalid")
     for intent_id, pending in state["pending_pairs"].items():
-        if not PATTERNS["pair_intent"].fullmatch(intent_id) or not isinstance(pending, dict):
+        if not PATTERNS["pair_intent"].fullmatch(intent_id) or not isinstance(
+            pending, dict
+        ):
             raise MarketplaceStateError("Marketplace pending pair is invalid")
-        _require_keys(pending, {"token_account", "created_at"}, "Marketplace pending pair")
+        _require_keys(
+            pending, {"token_account", "created_at"}, "Marketplace pending pair"
+        )
     for intent_id, intent in state["intents"].items():
         _validate_intent(intent_id, intent)
     for action_id, receipt in state["receipts"].items():
         _validate_receipt(action_id, receipt)
     for action_id, tombstone in state["tombstones"].items():
-        if not PATTERNS["action"].fullmatch(action_id) or not isinstance(tombstone, dict):
+        if not PATTERNS["action"].fullmatch(action_id) or not isinstance(
+            tombstone, dict
+        ):
             raise MarketplaceStateError("Marketplace tombstone is invalid")
         _require_keys(
             tombstone,

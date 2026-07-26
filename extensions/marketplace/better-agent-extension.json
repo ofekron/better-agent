@@ -26,10 +26,15 @@
   "permissions": {
     "backend_routes": true,
     "internal_loopback": true,
-    "storage": true,
     "network": true,
     "marketplace_auth": true,
-    "payments": true
+    "payments": true,
+    "capabilities": [
+      "marketplace.auth-secret.list",
+      "marketplace.auth-secret.get",
+      "marketplace.auth-secret.store",
+      "marketplace.auth-secret.delete"
+    ]
   },
   "marketplace": {
     "product_id": "",
@@ -38,11 +43,6 @@
   },
   "protocol": {
     "version": 1,
-    "marketplace_transport": {
-      "version": 1,
-      "sha256": "425ec53e50f2bb093bb79cf2c2090a61a8c752cc44b93b731a7fa0ffc5430d8f",
-      "public_core_commit": null
-    },
     "smoke_test": {
       "required_paths": [
         "better-agent-extension.json",

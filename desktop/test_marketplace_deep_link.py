@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import base64
+import ctypes
 import os
 import sys
 import tempfile
 import threading
-import ctypes
 from pathlib import Path
 
 _HERE = Path(__file__).resolve().parent
@@ -32,6 +32,9 @@ def test_pair_link_is_strict_and_redacted() -> None:
         raw + "&extra=1",
         raw.replace("marketplace", "attacker"),
         raw.replace("v=1", "v=2"),
+        raw.replace("?v=1&intent=", "?intent=") + "&v=1",
+        raw.replace("?v=1", "?%76=1"),
+        raw.replace("betteragent://", "BETTERAGENT://"),
         f"betteragent://marketplace/pair?v=1&intent={_token()[:-1]}",
         f"betteragent://marketplace/pair?v=1&intent={_token()}#fragment",
         f"betteragent://marketplace:bad/pair?v=1&intent={_token()}",
@@ -84,7 +87,9 @@ def test_second_server_cannot_replace_owner_state() -> None:
             pass
         else:
             raise AssertionError("second server acquired active ownership")
-        assert (state_dir / "desktop_activation.json").read_text(encoding="utf-8") == original_state
+        assert (state_dir / "desktop_activation.json").read_text(
+            encoding="utf-8"
+        ) == original_state
     finally:
         second.close()
         first.close()

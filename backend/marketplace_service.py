@@ -4,10 +4,12 @@ import asyncio
 import json
 from urllib.parse import quote
 
-from fastapi import HTTPException
-
 import extension_backend_loader
 import extension_store
+import marketplace_auth
+import marketplace_protocol_transport
+import password_manager
+from fastapi import HTTPException
 from marketplace_protocol import PROTOCOL_HASH
 
 
@@ -15,12 +17,19 @@ def _response_json(response) -> dict:
     try:
         payload = json.loads(bytes(response.body))
     except (TypeError, ValueError, json.JSONDecodeError) as exc:
-        raise HTTPException(status_code=502, detail="marketplace backend returned invalid JSON") from exc
+        raise HTTPException(
+            status_code=502, detail="marketplace backend returned invalid JSON"
+        ) from exc
     if not 200 <= response.status_code < 300:
         detail = payload.get("detail") if isinstance(payload, dict) else None
-        raise HTTPException(status_code=response.status_code, detail=str(detail or "marketplace request failed"))
+        raise HTTPException(
+            status_code=response.status_code,
+            detail=str(detail or "marketplace request failed"),
+        )
     if not isinstance(payload, dict):
-        raise HTTPException(status_code=502, detail="marketplace backend returned an invalid response")
+        raise HTTPException(
+            status_code=502, detail="marketplace backend returned an invalid response"
+        )
     return payload
 
 
@@ -122,7 +131,6 @@ async def uninstall(extension_id: str) -> None:
         extension_id,
         "marketplace",
     )
-    await _invoke(f"extensions/{quote(extension_id, safe='')}/uninstall", method="POST")
     await asyncio.to_thread(
         extension_store.uninstall,
         extension_id,
@@ -130,11 +138,54 @@ async def uninstall(extension_id: str) -> None:
     )
 
 
+async def _protocol_access_token() -> str:
+    ready = await _invoke("auth/protocol-ready", method="POST")
+    if ready != {"authenticated": True}:
+        raise HTTPException(status_code=401, detail="marketplace login required")
+    try:
+        raw = await asyncio.to_thread(
+            password_manager.get_service_password,
+            marketplace_auth.service_name(),
+            marketplace_auth.AUTH_ACCOUNT,
+        )
+        tokens = json.loads(raw)
+    except (password_manager.PasswordManagerError, json.JSONDecodeError) as exc:
+        raise HTTPException(
+            status_code=401, detail="marketplace login required"
+        ) from exc
+    access_token = tokens.get("access_token") if isinstance(tokens, dict) else None
+    if not isinstance(access_token, str) or not access_token:
+        raise HTTPException(status_code=401, detail="marketplace login required")
+    return access_token
+
+
+async def _protocol_request(
+    method: str,
+    path: str,
+    body: dict,
+    *,
+    signed: bool = False,
+) -> dict:
+    access_token = await _protocol_access_token()
+    return await asyncio.to_thread(
+        marketplace_protocol_transport.request,
+        method,
+        path,
+        access_token=access_token,
+        body=body,
+        signed=signed,
+    )
+
+
+def protocol_origin() -> str:
+    return marketplace_protocol_transport.origin()
+
+
 async def protocol_pair_context(pair_token: str) -> dict:
-    return await _invoke(
-        "protocol/v1/pair/context",
-        method="POST",
-        body={
+    return await _protocol_request(
+        "POST",
+        "/protocol/v1/pair/context",
+        {
             "pair_token": pair_token,
             "protocol_hash": PROTOCOL_HASH,
         },
@@ -142,73 +193,76 @@ async def protocol_pair_context(pair_token: str) -> dict:
 
 
 async def protocol_pair(body: dict) -> dict:
-    return await _invoke("protocol/v1/pair/redeem", method="POST", body=body)
+    return await _protocol_request("POST", "/protocol/v1/pair/redeem", body)
 
 
 async def protocol_pair_reject(pair_token: str) -> dict:
-    return await _invoke(
-        "protocol/v1/pair/reject",
-        method="POST",
-        body={"pair_token": pair_token, "protocol_hash": PROTOCOL_HASH},
+    return await _protocol_request(
+        "POST",
+        "/protocol/v1/pair/reject",
+        {"pair_token": pair_token, "protocol_hash": PROTOCOL_HASH},
     )
 
 
 async def protocol_challenges(device_id: str) -> dict:
-    return await _invoke(
-        f"protocol/v1/devices/{quote(device_id, safe='')}/challenges",
-        method="POST",
-        body={"protocol_hash": PROTOCOL_HASH},
+    return await _protocol_request(
+        "POST",
+        f"/protocol/v1/devices/{quote(device_id, safe='')}/challenges",
+        {"protocol_hash": PROTOCOL_HASH},
     )
 
 
 async def protocol_lease(device_id: str, body: dict) -> dict:
-    return await _invoke(
-        f"protocol/v1/devices/{quote(device_id, safe='')}/actions/lease",
-        method="POST",
-        body=body,
+    return await _protocol_request(
+        "POST",
+        f"/protocol/v1/devices/{quote(device_id, safe='')}/actions/lease",
+        body,
+        signed=True,
     )
 
 
 async def protocol_fence(device_id: str, action_id: str, body: dict) -> dict:
-    return await _invoke(
-        "protocol/v1/devices/"
+    return await _protocol_request(
+        "POST",
+        "/protocol/v1/devices/"
         f"{quote(device_id, safe='')}/actions/{quote(action_id, safe='')}/fence",
-        method="POST",
-        body=body,
+        body,
+        signed=True,
     )
 
 
 async def protocol_reject(device_id: str, action_id: str, body: dict) -> dict:
-    return await _invoke(
-        "protocol/v1/devices/"
+    return await _protocol_request(
+        "POST",
+        "/protocol/v1/devices/"
         f"{quote(device_id, safe='')}/actions/{quote(action_id, safe='')}/reject",
-        method="POST",
-        body=body,
+        body,
+        signed=True,
     )
 
 
 async def protocol_ack(action_id: str, body: dict) -> dict:
-    return await _invoke(
-        "protocol/v1/actions/"
-        f"{quote(action_id, safe='')}/terminal-ack",
-        method="POST",
-        body=body,
+    return await _protocol_request(
+        "POST",
+        f"/protocol/v1/actions/{quote(action_id, safe='')}/terminal-ack",
+        body,
     )
 
 
 async def protocol_projection(device_id: str, body: dict) -> dict:
-    return await _invoke(
-        f"protocol/v1/devices/{quote(device_id, safe='')}/projection",
-        method="PUT",
-        body=body,
+    return await _protocol_request(
+        "PUT",
+        f"/protocol/v1/devices/{quote(device_id, safe='')}/projection",
+        body,
+        signed=True,
     )
 
 
 async def protocol_catalog_snapshot(snapshot_id: str, extension_id: str) -> dict:
-    return await _invoke(
-        "protocol/v1/catalog/resolve",
-        method="POST",
-        body={
+    return await _protocol_request(
+        "POST",
+        "/protocol/v1/catalog/resolve",
+        {
             "protocol_hash": PROTOCOL_HASH,
             "snapshot_id": snapshot_id,
             "extension_id": extension_id,
@@ -217,16 +271,17 @@ async def protocol_catalog_snapshot(snapshot_id: str, extension_id: str) -> dict
 
 
 async def protocol_revoke(device_id: str, body: dict) -> dict:
-    return await _invoke(
-        f"protocol/v1/devices/{quote(device_id, safe='')}/revoke",
-        method="POST",
-        body=body,
+    return await _protocol_request(
+        "POST",
+        f"/protocol/v1/devices/{quote(device_id, safe='')}/revoke",
+        body,
+        signed=True,
     )
 
 
 async def protocol_action_metadata(action_id: str) -> dict:
-    return await _invoke(
-        f"protocol/actions/{quote(action_id, safe='')}/metadata",
-        method="POST",
-        body={},
+    return await _protocol_request(
+        "POST",
+        f"/protocol/v1/actions/{quote(action_id, safe='')}/metadata",
+        {},
     )

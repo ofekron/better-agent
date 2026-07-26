@@ -3,7 +3,7 @@ from __future__ import annotations
 import base64
 import re
 from dataclasses import dataclass
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import urlsplit
 
 SCHEME = "betteragent"
 PAIR_HOST = "marketplace"
@@ -62,15 +62,16 @@ def parse_deep_link(value: str) -> MarketplacePairLink:
         or port is not None
     ):
         raise DeepLinkError("unsupported deep link")
-    query = parse_qs(parsed.query, keep_blank_values=True, strict_parsing=True)
-    if set(query) != {"v", "intent"}:
+    prefix = f"v={PROTOCOL_VERSION}&intent="
+    if not parsed.query.startswith(prefix):
         raise DeepLinkError("unexpected deep-link fields")
-    if query["v"] != [str(PROTOCOL_VERSION)]:
-        raise DeepLinkError("unsupported deep-link version")
-    intent_values = query["intent"]
-    if len(intent_values) != 1 or not _valid_token(intent_values[0]):
+    intent = parsed.query[len(prefix) :]
+    if not _valid_token(intent):
         raise DeepLinkError("invalid pair intent")
-    return MarketplacePairLink(intent=intent_values[0])
+    canonical = f"{SCHEME}://{PAIR_HOST}{PAIR_PATH}?{prefix}{intent}"
+    if value != canonical:
+        raise DeepLinkError("non-canonical deep link")
+    return MarketplacePairLink(intent=intent)
 
 
 def deep_link_from_argv(argv: list[str]) -> MarketplacePairLink | None:

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import secrets
 from collections.abc import Awaitable, Callable
 from copy import deepcopy
 from datetime import datetime, timezone
@@ -25,9 +24,7 @@ from marketplace_protocol import (
 )
 
 _ACTIVE_INTENT_STATES = frozenset({"awaiting_confirmation", "committing"})
-_DISPLAY_FIELDS = frozenset(
-    {"extension_name", "publisher_name", "permission_delta"}
-)
+_DISPLAY_FIELDS = frozenset({"extension_name", "publisher_name", "permission_delta"})
 _ACTION_FIELDS = frozenset(
     {
         "action_id",
@@ -231,6 +228,8 @@ class MarketplaceBridge:
         site_label = _bounded_text(context.get("site_label"), "site_label")
         account_label = _bounded_text(context.get("account_label"), "account_label")
         origin = _server_origin(context.get("server_origin"))
+        if origin != marketplace_service.protocol_origin():
+            raise MarketplaceBridgeError("Marketplace server origin does not match")
         async with self._mutation_lock:
             state = await self._read()
             intent = state["intents"].get(intent_id)
@@ -274,7 +273,9 @@ class MarketplaceBridge:
         if intent is None:
             raise MarketplaceBridgeError("Marketplace intent not found")
         if intent["status"] != "awaiting_confirmation":
-            raise MarketplaceBridgeError("Marketplace intent is not awaiting confirmation")
+            raise MarketplaceBridgeError(
+                "Marketplace intent is not awaiting confirmation"
+            )
         if intent["action"] == "pair":
             await self._approve_pair(intent_id)
         else:
@@ -318,6 +319,7 @@ class MarketplaceBridge:
                 or response.get("device_id") != identity.device_id
                 or _server_origin(response.get("server_origin"))
                 != device["server_origin"]
+                or device["server_origin"] != marketplace_service.protocol_origin()
             ):
                 raise MarketplaceBridgeError("Marketplace pair response is invalid")
             device["paired"] = True
@@ -599,7 +601,11 @@ class MarketplaceBridge:
             device = deepcopy(state["device"])
             if intent is None or intent["status"] != "awaiting_confirmation":
                 raise MarketplaceBridgeError("Marketplace action is unavailable")
-            if not isinstance(device, dict) or device["revoked"] or not device["paired"]:
+            if (
+                not isinstance(device, dict)
+                or device["revoked"]
+                or not device["paired"]
+            ):
                 raise MarketplaceBridgeError("Marketplace device is unavailable")
             epoch = device["epoch"]
         catalog_key = ""
@@ -609,12 +615,76 @@ class MarketplaceBridge:
                 state,
                 intent,
             )
-        receipt_revision = state["revision"] + 1
+        async with self._mutation_lock:
+            state = await self._read()
+            current_device = state["device"]
+            current_intent = state["intents"].get(intent_id)
+            if (
+                not isinstance(current_device, dict)
+                or current_device["epoch"] != epoch
+                or current_device["revoked"]
+                or current_intent is None
+                or current_intent["status"] != "awaiting_confirmation"
+            ):
+                raise MarketplaceBridgeError(
+                    "Marketplace device changed while preparing action"
+                )
+            if catalog_key:
+                state["catalog_sequences"][catalog_key] = max(
+                    state["catalog_sequences"].get(catalog_key, 0),
+                    catalog_sequence,
+                )
+            receipt_revision = state["revision"] + 1
+            state["receipts"][intent_id] = {
+                "action_id": intent_id,
+                "intent_id": intent_id,
+                "device_id": device["device_id"],
+                "device_epoch": epoch,
+                "envelope_digest": intent["envelope_digest"],
+                "receipt_revision": receipt_revision,
+                "action": intent["action"],
+                "extension_id": intent["extension"]["id"],
+                "expected_version": intent["extension"]["version"],
+                "approved_target": deepcopy(intent["approved_target"]),
+                "precondition": deepcopy(intent["precondition"]),
+                "desired": deepcopy(intent["desired"]),
+                "phase": "fence_pending",
+                "terminal_capability_account": "",
+                "terminal_result": None,
+                "ack_status": "pending",
+                "created_at": _now(),
+                "reconcile_deadline": "",
+            }
+            current_intent["status"] = "committing"
+            state = await self._write(state)
+        await self._notify(state)
+        await self._complete_pending_fence(intent_id)
+        await self._run_receipt(intent_id)
+
+    async def _complete_pending_fence(self, intent_id: str) -> None:
+        async with self._mutation_lock:
+            state = await self._read()
+            receipt = deepcopy(state["receipts"].get(intent_id))
+            intent = deepcopy(state["intents"].get(intent_id))
+            device = deepcopy(state["device"])
+            if receipt is None or receipt["phase"] != "fence_pending":
+                return
+            if (
+                intent is None
+                or intent["status"] != "committing"
+                or not isinstance(device, dict)
+                or device["device_id"] != receipt["device_id"]
+                or device["epoch"] != receipt["device_epoch"]
+                or device["revoked"]
+            ):
+                raise MarketplaceBridgeError(
+                    "Marketplace device changed while fencing action"
+                )
         fence_body = {
             "protocol_hash": PROTOCOL_HASH,
             "lease_capability": intent["lease_capability"],
             "envelope_digest": intent["envelope_digest"],
-            "receipt_revision": receipt_revision,
+            "receipt_revision": receipt["receipt_revision"],
         }
         _, signed = await self._signed_operation(
             state,
@@ -637,53 +707,26 @@ class MarketplaceBridge:
         )
         async with self._mutation_lock:
             state = await self._read()
-            current_device = state["device"]
-            current_intent = state["intents"].get(intent_id)
+            current_receipt = state["receipts"].get(intent_id)
+            if current_receipt is None or current_receipt["phase"] != "fence_pending":
+                return
             if (
-                not isinstance(current_device, dict)
-                or current_device["epoch"] != epoch
-                or current_device["revoked"]
-                or current_intent is None
-                or current_intent["status"] != "awaiting_confirmation"
+                current_receipt["receipt_revision"] != receipt["receipt_revision"]
+                or current_receipt["device_epoch"] != receipt["device_epoch"]
             ):
                 raise MarketplaceBridgeError(
-                    "Marketplace device changed while fencing action"
-                )
-            if catalog_key:
-                state["catalog_sequences"][catalog_key] = max(
-                    state["catalog_sequences"].get(catalog_key, 0),
-                    catalog_sequence,
+                    "Marketplace receipt changed while fencing"
                 )
             capability_account = await asyncio.to_thread(
                 self._identity.store_terminal_capability,
                 intent_id,
                 terminal_capability,
             )
-            receipt = {
-                "action_id": intent_id,
-                "intent_id": intent_id,
-                "device_id": device["device_id"],
-                "device_epoch": epoch,
-                "envelope_digest": intent["envelope_digest"],
-                "receipt_revision": receipt_revision,
-                "action": intent["action"],
-                "extension_id": intent["extension"]["id"],
-                "expected_version": intent["extension"]["version"],
-                "approved_target": deepcopy(intent["approved_target"]),
-                "precondition": deepcopy(intent["precondition"]),
-                "desired": deepcopy(intent["desired"]),
-                "phase": "fenced",
-                "terminal_capability_account": capability_account,
-                "terminal_result": None,
-                "ack_status": "pending",
-                "created_at": _now(),
-                "reconcile_deadline": reconcile_deadline,
-            }
-            state["receipts"][intent_id] = receipt
-            current_intent["status"] = "committing"
+            current_receipt["phase"] = "fenced"
+            current_receipt["terminal_capability_account"] = capability_account
+            current_receipt["reconcile_deadline"] = reconcile_deadline
             state = await self._write(state)
         await self._notify(state)
-        await self._run_receipt(intent_id)
 
     async def _execute_receipt(
         self,
@@ -868,9 +911,7 @@ class MarketplaceBridge:
                     current["ack_status"] = "conflict"
                     state = await self._write(state)
             await self._notify(state)
-            raise MarketplaceBridgeError(
-                "Marketplace terminal ack conflicts"
-            ) from exc
+            raise MarketplaceBridgeError("Marketplace terminal ack conflicts") from exc
         if (
             response.get("outcome") != outcome
             or response.get("result_code") != result_code
@@ -1136,7 +1177,10 @@ class MarketplaceBridge:
                     pass
         for action_id, receipt in list(state["receipts"].items()):
             try:
-                if receipt["phase"] == "terminal":
+                if receipt["phase"] == "fence_pending":
+                    await self._complete_pending_fence(action_id)
+                    await self._run_receipt(action_id)
+                elif receipt["phase"] == "terminal":
                     result = receipt["terminal_result"]
                     await self._finalize_receipt(
                         action_id,

@@ -3,9 +3,9 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import json
 import os
 import sys
-import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -13,6 +13,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT.parent / "sdk"))
 
 import _test_home
+
 _test_home.isolate("ba-test-")
 os.environ["BETTER_AGENT_SKIP_EXTENSION_DEPENDENCY_INSTALL"] = "1"
 os.environ["BETTER_CLAUDE_TEST_AUTH_BYPASS"] = "1"
@@ -22,9 +23,10 @@ dist_dir = ROOT.parent / "frontend" / "dist"
 created_dist = not dist_dir.exists()
 if created_dist:
     dist_dir.mkdir(parents=True, exist_ok=True)
-    (dist_dir / "index.html").write_text("<!doctype html><title>stub</title>", encoding="utf-8")
+    (dist_dir / "index.html").write_text(
+        "<!doctype html><title>stub</title>", encoding="utf-8"
+    )
 
-import builtin_mcp_config  # noqa: E402
 import extension_store  # noqa: E402
 import installation_profile  # noqa: E402
 
@@ -38,74 +40,33 @@ def check(condition: bool, message: str) -> None:
     print(f"PASS {message}")
 
 
-def test_marketplace_extension_is_seeded_and_exposed_as_runtime_mcp() -> None:
+def test_marketplace_extension_is_seeded_without_agent_mutation_surface() -> None:
     # Reconcile required extensions like app startup does so the marketplace
     # package is seeded before we assert on it.
     extension_store.list_extensions_with_reconciliation(include_hidden=True)
     extensions = extension_store.list_extensions()
     check(
-        extension_store.MARKETPLACE_EXTENSION_ID in {item["manifest"]["id"] for item in extensions},
+        extension_store.MARKETPLACE_EXTENSION_ID
+        in {item["manifest"]["id"] for item in extensions},
         "marketplace is listed in the public extension list",
     )
     hidden_extensions = extension_store.list_extensions(include_hidden=True)
     check(
-        extension_store.MARKETPLACE_EXTENSION_ID in {item["manifest"]["id"] for item in hidden_extensions},
+        extension_store.MARKETPLACE_EXTENSION_ID
+        in {item["manifest"]["id"] for item in hidden_extensions},
         "marketplace is available to settings extension list",
     )
     record = extension_store.get_extension(extension_store.MARKETPLACE_EXTENSION_ID)
     check(record is not None, "marketplace extension record is installed")
     check(record["enabled"] is True, "marketplace extension is enabled")
-    check(record["source"]["type"] == "better_agent_bundled", "marketplace extension seeds from bundled package")
     check(
-        Path(record["source"]["install_path"], "mcp", "server.py").is_file(),
-        "marketplace installed package contains declared MCP server",
-    )
-
-    configs = builtin_mcp_config.with_builtin_mcp_servers(
-        {
-            "app_session_id": "session-1",
-            "backend_url": "http://localhost:8000",
-            "internal_token": "token",
-            "user_facing": True,
-        },
-        {},
-    )["mcp_servers"]
-    check("ofek-dev-marketplace" in configs, "marketplace MCP is exposed to user-facing runs")
-    config = configs["ofek-dev-marketplace"]
-    check(config["command"] == sys.executable, "marketplace MCP runs through python")
-    check(
-        config["env"].get("BETTER_AGENT_EXTENSION_ID") == extension_store.MARKETPLACE_EXTENSION_ID,
-        "marketplace MCP receives its extension id",
+        record["source"]["type"] == "better_agent_bundled",
+        "marketplace extension seeds from bundled package",
     )
     check(
-        config["env"].get("BETTER_AGENT_RUNTIME_BROKER")
-        == "unix:/tmp/better-agent-test.sock",
-        "marketplace MCP receives the scoped runtime broker",
+        record["manifest"]["entrypoints"]["mcp"] == [],
+        "marketplace exposes no agent-side mutation surface",
     )
-    check(
-        "BETTER_AGENT_INTERNAL_TOKEN" not in config["env"],
-        "marketplace MCP receives no bearer token",
-    )
-
-
-def test_marketplace_mcp_wrapper_calls_internal_marketplace_endpoint() -> None:
-    server_path = ROOT.parent / "extensions" / "marketplace" / "mcp" / "server.py"
-    spec = importlib.util.spec_from_file_location("marketplace_mcp_server", server_path)
-    module = importlib.util.module_from_spec(spec)
-    assert spec and spec.loader
-    spec.loader.exec_module(module)
-
-    calls: list[tuple[str, dict, float]] = []
-
-    class FakeClient:
-        def invoke_capability(self, capability, action, payload=None, *, timeout=60.0):
-            calls.append((capability, action, payload or {}, timeout))
-            return {"success": True, "body": payload}
-
-    module.Client = FakeClient
-    result = module.marketplace_action("search", query="todos", limit=5)
-    check(result["success"] is True, "marketplace MCP wrapper returns internal result")
-    check(calls == [("marketplace", "search", {"query": "todos", "limit": 5}, 60.0)], "marketplace MCP wrapper uses exact capability action")
 
 
 def test_marketplace_backend_loads_inside_isolated_extension_host() -> None:
@@ -113,7 +74,7 @@ def test_marketplace_backend_loads_inside_isolated_extension_host() -> None:
 
     status, body = extension_backend_loader.invoke_extension_backend_sync(
         extension_store.MARKETPLACE_EXTENSION_ID,
-        "auth/providers",
+        "health",
         method="GET",
         base_url="http://localhost:8000",
     )
@@ -122,58 +83,63 @@ def test_marketplace_backend_loads_inside_isolated_extension_host() -> None:
     check(status == 200, f"marketplace backend loads in isolated host: {body!r}")
 
 
-def test_marketplace_backend_clears_revoked_tokens_for_direct_catalog_calls() -> None:
+def test_marketplace_backend_auth_readiness_never_exposes_token() -> None:
     routes_path = ROOT.parent / "extensions" / "marketplace" / "backend" / "routes.py"
-    spec = importlib.util.spec_from_file_location("marketplace_backend_routes", routes_path)
+    spec = importlib.util.spec_from_file_location(
+        "marketplace_backend_routes", routes_path
+    )
     module = importlib.util.module_from_spec(spec)
     assert spec and spec.loader
     spec.loader.exec_module(module)
 
-    deleted: list[str] = []
     catalog_tokens: list[str] = []
-    module._session_tokens = lambda: {"access_token": "revoked", "provider": "github"}
-    module._access_token = lambda: "revoked"
-    module._account_for_access_token = lambda _token: None
-    module._delete_secret = deleted.append
-    module._ofekdev_rows = lambda token: catalog_tokens.append(token) or [{"id": "ofek.adv"}]
+    module._access_token = lambda: "core-owned-access"
+    module._ofekdev_catalog = lambda token: (
+        catalog_tokens.append(token) or [{"id": "ofek.adv"}],
+        "default-v1:1:" + "a" * 64,
+    )
 
-    router = module.create_router(object())
+    context = type(
+        "Context",
+        (),
+        {
+            "source": {"type": "marketplace"},
+            "extension_id": extension_store.MARKETPLACE_EXTENSION_ID,
+        },
+    )()
+    router = module.create_router(context)
     catalog_endpoint = next(
         route.endpoint for route in router.routes if route.path == "/catalog"
     )
-    catalog = asyncio.run(catalog_endpoint())
-
-    check(catalog == {"extensions": [{"id": "ofek.adv"}]}, "revoked direct catalog call remains public")
-    check(catalog_tokens == [""], "revoked bearer is not reused for direct catalog")
-    check(deleted == [module._SESSION_ACCOUNT], "revoked marketplace session is deleted")
-
-    uninstall_tokens: list[str] = []
-    module._ofekdev_uninstall = lambda _extension_id, token: uninstall_tokens.append(token)
-    uninstall_endpoint = next(
-        route.endpoint for route in router.routes if route.path == "/extensions/{extension_id}/uninstall"
+    catalog = asyncio.run(catalog_endpoint(q=""))
+    check(
+        catalog["extensions"] == [{"id": "ofek.adv"}],
+        "catalog transport remains available",
     )
-    try:
-        asyncio.run(uninstall_endpoint("ofek.adv"))
-    except module.HTTPException as exc:
-        check(exc.status_code == 401, "revoked marketplace uninstall fails locally")
-    else:
-        raise AssertionError("revoked marketplace uninstall must require login")
-    check(uninstall_tokens == [], "revoked marketplace uninstall never reaches the remote")
+    check(catalog_tokens == ["core-owned-access"], "catalog uses backend-held auth")
 
-    module._account_for_access_token = lambda token: {"id": "account-1"} if token == "valid" else None
-    module._access_token = lambda: "valid"
-    auth_status_endpoint = next(
-        route.endpoint for route in router.routes if route.path == "/auth/status"
+    ready_endpoint = next(
+        route.endpoint
+        for route in router.routes
+        if route.path == "/auth/protocol-ready"
     )
-    status = asyncio.run(auth_status_endpoint())
-
-    check(status["authenticated"] is True, "valid marketplace account remains authenticated")
-    check(status["account"] == {"id": "account-1"}, "validated marketplace account is returned")
+    ready = asyncio.run(ready_endpoint())
+    check(ready == {"authenticated": True}, "core receives only auth readiness")
+    check(
+        "core-owned-access" not in json.dumps(ready),
+        "auth readiness excludes credentials",
+    )
+    check(
+        all("/protocol/" not in route.path for route in router.routes),
+        "extension backend exposes no device protocol routes",
+    )
 
 
 def test_marketplace_catalog_search_uses_static_catalog_and_filters_locally() -> None:
     old_base = os.environ.get("BETTER_AGENT_MARKETPLACE_BASE_URL")
-    os.environ["BETTER_AGENT_MARKETPLACE_BASE_URL"] = "https://marketplace.test/api/marketplace"
+    os.environ["BETTER_AGENT_MARKETPLACE_BASE_URL"] = (
+        "https://marketplace.test/api/marketplace"
+    )
     calls: list[str] = []
     original_fetch = extension_store._fetch_json
 
@@ -183,7 +149,11 @@ def test_marketplace_catalog_search_uses_static_catalog_and_filters_locally() ->
             "extensions": [
                 {"id": "ofek.alpha", "name": "Alpha", "description": "Notes"},
                 {"id": "ofek.todos", "name": "Todos", "description": "Task tracking"},
-                {"id": "ofek.todos-pro", "name": "Todos Pro", "description": "Advanced tasks"},
+                {
+                    "id": "ofek.todos-pro",
+                    "name": "Todos Pro",
+                    "description": "Advanced tasks",
+                },
             ]
         }
 
@@ -207,10 +177,12 @@ def test_marketplace_catalog_search_uses_static_catalog_and_filters_locally() ->
     )
 
 
-def test_internal_marketplace_endpoint_requires_marketplace_extension_and_valid_actions() -> None:
-    from fastapi.testclient import TestClient
-    import main
+def test_internal_marketplace_endpoint_requires_marketplace_extension_and_valid_actions() -> (
+    None
+):
     import extension_token_registry
+    import main
+    from fastapi.testclient import TestClient
 
     client = TestClient(
         main.app,
@@ -219,7 +191,9 @@ def test_internal_marketplace_endpoint_requires_marketplace_extension_and_valid_
     )
     # Identity is token-derived: act as an extension by sending ITS minted token.
     other_token = extension_token_registry.mint("ofek-dev.coordination")
-    marketplace_token = extension_token_registry.mint(extension_store.MARKETPLACE_EXTENSION_ID)
+    marketplace_token = extension_token_registry.mint(
+        extension_store.MARKETPLACE_EXTENSION_ID
+    )
 
     response = client.post(
         "/api/internal/marketplace",
@@ -233,13 +207,22 @@ def test_internal_marketplace_endpoint_requires_marketplace_extension_and_valid_
         headers={"X-Internal-Token": marketplace_token},
         json={"action": "list_installed"},
     )
-    check(response.status_code == 200, "marketplace endpoint lists installed extensions")
-    check(isinstance(response.json().get("extensions"), list), "marketplace list returns extensions")
+    check(
+        response.status_code == 200, "marketplace endpoint lists installed extensions"
+    )
+    check(
+        isinstance(response.json().get("extensions"), list),
+        "marketplace list returns extensions",
+    )
 
     response = client.post(
         "/api/internal/marketplace",
         headers={"X-Internal-Token": marketplace_token},
-        json={"action": "set_enabled", "extension_id": "ofek-dev.ask", "enabled": "yes"},
+        json={
+            "action": "set_enabled",
+            "extension_id": "ofek-dev.ask",
+            "enabled": "yes",
+        },
     )
     check(response.status_code == 400, "marketplace set_enabled requires boolean")
 
@@ -250,8 +233,8 @@ def test_internal_marketplace_endpoint_requires_marketplace_extension_and_valid_
     )
     check(response.status_code == 400, "marketplace endpoint rejects unknown actions")
 
-    from pydantic import ValidationError
     import extension_api
+    from pydantic import ValidationError
 
     try:
         extension_api.MarketplaceInstallRequest.model_validate(
@@ -260,7 +243,9 @@ def test_internal_marketplace_endpoint_requires_marketplace_extension_and_valid_
     except ValidationError:
         pass
     else:
-        raise AssertionError("semantic marketplace install accepts generic install coordinates")
+        raise AssertionError(
+            "semantic marketplace install accepts generic install coordinates"
+        )
     check(True, "semantic marketplace install rejects generic install coordinates")
 
     try:
@@ -277,10 +262,11 @@ def test_internal_marketplace_endpoint_requires_marketplace_extension_and_valid_
 
 
 def test_marketplace_auth_secret_capabilities_are_scoped() -> None:
-    from fastapi.testclient import TestClient
     import extension_token_registry
     import main
+    import marketplace_auth
     import password_manager
+    from fastapi.testclient import TestClient
 
     values: dict[tuple[str, str], str] = {
         ("other-service", "oauth-session"): "hidden",
@@ -291,7 +277,11 @@ def test_marketplace_auth_secret_capabilities_are_scoped() -> None:
     original_delete = password_manager.delete_service_password
 
     def fake_list() -> dict[str, list[dict[str, str]]]:
-        return {"items": [{"service": service, "account": account} for service, account in values]}
+        return {
+            "items": [
+                {"service": service, "account": account} for service, account in values
+            ]
+        }
 
     def fake_get(service: str, account: str) -> str:
         try:
@@ -313,20 +303,31 @@ def test_marketplace_auth_secret_capabilities_are_scoped() -> None:
     password_manager.store_service_password = fake_store
     password_manager.delete_service_password = fake_delete
     try:
-        client = TestClient(main.app, client=("127.0.0.1", 50000), base_url="http://localhost:8000")
-        marketplace_token = extension_token_registry.mint(extension_store.MARKETPLACE_EXTENSION_ID)
+        client = TestClient(
+            main.app, client=("127.0.0.1", 50000), base_url="http://localhost:8000"
+        )
+        marketplace_token = extension_token_registry.mint(
+            extension_store.MARKETPLACE_EXTENSION_ID
+        )
         other_token = extension_token_registry.mint("ofek-dev.coordination")
         endpoint = "/api/internal/capabilities/invoke"
 
         def invoke(token: str, action: str, payload: dict | None = None):
-            return client.post(endpoint, headers={"X-Internal-Token": token}, json={
-                "capability": "marketplace",
-                "action": action,
-                "payload": payload or {},
-            })
+            return client.post(
+                endpoint,
+                headers={"X-Internal-Token": token},
+                json={
+                    "capability": "marketplace",
+                    "action": action,
+                    "payload": payload or {},
+                },
+            )
 
         response = invoke(other_token, "auth-secret.list")
-        check(response.status_code == 403, "marketplace auth secrets reject other extension tokens")
+        check(
+            response.status_code == 403,
+            "marketplace auth secrets reject other extension tokens",
+        )
 
         response = invoke(
             marketplace_token,
@@ -335,8 +336,8 @@ def test_marketplace_auth_secret_capabilities_are_scoped() -> None:
         )
         check(response.status_code == 200, "marketplace token stores its auth secret")
         check(
-            ("better-agent-marketplace", "oauth-session") in values,
-            "marketplace auth secrets use the fixed service namespace",
+            (marketplace_auth.service_name(), "oauth-session") in values,
+            "marketplace auth secrets use the home-scoped service namespace",
         )
 
         response = invoke(
@@ -344,16 +345,32 @@ def test_marketplace_auth_secret_capabilities_are_scoped() -> None:
             "auth-secret.store",
             {"account": "arbitrary-account", "value": {}},
         )
-        check(response.status_code == 422, "marketplace auth secrets reject arbitrary accounts")
+        check(
+            response.status_code == 422,
+            "marketplace auth secrets reject arbitrary accounts",
+        )
 
-        response = invoke(marketplace_token, "auth-secret.get", {"account": "oauth-session"})
-        check(response.json() == {"value": {"access_token": "secret"}}, "marketplace reads only its scoped secret")
+        response = invoke(
+            marketplace_token, "auth-secret.get", {"account": "oauth-session"}
+        )
+        check(
+            response.json() == {"value": {"access_token": "secret"}},
+            "marketplace reads only its scoped secret",
+        )
 
         response = invoke(marketplace_token, "auth-secret.list")
-        check(response.json() == {"items": [{"account": "oauth-session"}]}, "marketplace secret listing excludes other services")
+        check(
+            response.json() == {"items": [{"account": "oauth-session"}]},
+            "marketplace secret listing excludes other services",
+        )
 
-        response = invoke(marketplace_token, "auth-secret.delete", {"account": "oauth-session"})
-        check(response.json() == {"deleted": True}, "marketplace deletes its scoped secret")
+        response = invoke(
+            marketplace_token, "auth-secret.delete", {"account": "oauth-session"}
+        )
+        check(
+            response.json() == {"deleted": True},
+            "marketplace deletes its scoped secret",
+        )
     finally:
         password_manager.list_service_passwords = original_list
         password_manager.get_service_password = original_get
@@ -361,15 +378,21 @@ def test_marketplace_auth_secret_capabilities_are_scoped() -> None:
         password_manager.delete_service_password = original_delete
 
 
-def test_marketplace_service_uses_authenticated_backend_and_validates_uninstall_source() -> None:
-    from fastapi.responses import JSONResponse
+def test_marketplace_service_uses_authenticated_backend_and_validates_uninstall_source() -> (
+    None
+):
     import marketplace_service
+    from fastapi.responses import JSONResponse
 
     calls: list[tuple[str, str, str]] = []
-    original_invoke = marketplace_service.extension_backend_loader.invoke_extension_backend
+    original_invoke = (
+        marketplace_service.extension_backend_loader.invoke_extension_backend
+    )
     original_prepare = extension_store.prepare_marketplace_install
 
-    async def fake_invoke(extension_id: str, path: str, *, method: str = "POST", **_kwargs):
+    async def fake_invoke(
+        extension_id: str, path: str, *, method: str = "POST", **_kwargs
+    ):
         calls.append((extension_id, path, method))
         return JSONResponse(
             {
@@ -383,7 +406,10 @@ def test_marketplace_service_uses_authenticated_backend_and_validates_uninstall_
         )
 
     def fake_prepare(extension_id: str, metadata: dict) -> dict:
-        check(extension_id == metadata["extension_id"], "authenticated metadata keeps extension identity")
+        check(
+            extension_id == metadata["extension_id"],
+            "authenticated metadata keeps extension identity",
+        )
         return {"manifest": {"id": extension_id}, "preview_token": "a" * 32}
 
     marketplace_service.extension_backend_loader.invoke_extension_backend = fake_invoke
@@ -391,11 +417,17 @@ def test_marketplace_service_uses_authenticated_backend_and_validates_uninstall_
     try:
         prepared = asyncio.run(marketplace_service.prepare_install("ofek.adv"))
     finally:
-        marketplace_service.extension_backend_loader.invoke_extension_backend = original_invoke
+        marketplace_service.extension_backend_loader.invoke_extension_backend = (
+            original_invoke
+        )
         extension_store.prepare_marketplace_install = original_prepare
-    check(prepared["preview_token"] == "a" * 32, "authenticated metadata produces preview token")
     check(
-        calls == [(extension_store.MARKETPLACE_EXTENSION_ID, "metadata/ofek.adv", "GET")],
+        prepared["preview_token"] == "a" * 32,
+        "authenticated metadata produces preview token",
+    )
+    check(
+        calls
+        == [(extension_store.MARKETPLACE_EXTENSION_ID, "metadata/ofek.adv", "GET")],
         "marketplace preview retrieves metadata through authenticated extension backend",
     )
 
@@ -403,22 +435,25 @@ def test_marketplace_service_uses_authenticated_backend_and_validates_uninstall_
     marketplace_service.extension_backend_loader.invoke_extension_backend = fake_invoke
     try:
         try:
-            asyncio.run(marketplace_service.uninstall(extension_store.MARKETPLACE_EXTENSION_ID))
+            asyncio.run(
+                marketplace_service.uninstall(extension_store.MARKETPLACE_EXTENSION_ID)
+            )
         except extension_store.ExtensionError:
             pass
         else:
             raise AssertionError("invalid-source marketplace uninstall was accepted")
     finally:
-        marketplace_service.extension_backend_loader.invoke_extension_backend = original_invoke
+        marketplace_service.extension_backend_loader.invoke_extension_backend = (
+            original_invoke
+        )
     check(calls == [], "invalid-source uninstall never calls marketplace backend")
 
 
 def main() -> int:
     try:
-        test_marketplace_extension_is_seeded_and_exposed_as_runtime_mcp()
-        test_marketplace_mcp_wrapper_calls_internal_marketplace_endpoint()
+        test_marketplace_extension_is_seeded_without_agent_mutation_surface()
         test_marketplace_backend_loads_inside_isolated_extension_host()
-        test_marketplace_backend_clears_revoked_tokens_for_direct_catalog_calls()
+        test_marketplace_backend_auth_readiness_never_exposes_token()
         test_marketplace_catalog_search_uses_static_catalog_and_filters_locally()
         test_internal_marketplace_endpoint_requires_marketplace_extension_and_valid_actions()
         test_marketplace_auth_secret_capabilities_are_scoped()
@@ -426,7 +461,11 @@ def main() -> int:
     finally:
         if created_dist:
             index = dist_dir / "index.html"
-            if index.exists() and index.read_text(encoding="utf-8") == "<!doctype html><title>stub</title>":
+            if (
+                index.exists()
+                and index.read_text(encoding="utf-8")
+                == "<!doctype html><title>stub</title>"
+            ):
                 index.unlink()
             try:
                 dist_dir.rmdir()
