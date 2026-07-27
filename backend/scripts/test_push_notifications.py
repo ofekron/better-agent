@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 
 import _test_home
@@ -13,6 +14,8 @@ if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
 import device_token_store  # noqa: E402
+from event_bus import BusEvent, bus  # noqa: E402
+from event_bus_subscribers import bind_push_notifications  # noqa: E402
 import push_sender  # noqa: E402
 import user_input_store  # noqa: E402
 
@@ -25,6 +28,12 @@ def test_register_unregister_round_trip() -> bool:
     if record["device_id"] != "dev-1" or record["platform"] != "android":
         return False
     if record["session_ids"] != ["sid-1"]:
+        return False
+    if record["notification_preferences"] != {
+        "pending_approvals": True,
+        "pending_questions": True,
+        "completed_turns": True,
+    }:
         return False
 
     tokens = device_token_store.get_tokens_for_session("sid-1")
@@ -44,6 +53,71 @@ def test_register_unregister_round_trip() -> bool:
         return False
     if device_token_store.unregister_token("dev-1"):
         return False
+    return True
+
+
+def test_preferences_are_durable_validated_and_filter_devices() -> bool:
+    initial = device_token_store.update_notification_preferences(
+        "dev-prefs",
+        {"completed_turns": False},
+    )
+    if initial["completed_turns"]:
+        return False
+    device_token_store.register_token(
+        "dev-prefs",
+        "tok-prefs",
+        "ios",
+        "sid-prefs",
+    )
+    persisted = device_token_store.get_notification_preferences("dev-prefs")
+    if persisted["completed_turns"]:
+        return False
+    if device_token_store.get_tokens_for_session_category(
+        "sid-prefs",
+        "completed_turns",
+    ):
+        return False
+    if len(device_token_store.get_tokens_for_session_category(
+        "sid-prefs",
+        "pending_questions",
+    )) != 1:
+        return False
+    try:
+        device_token_store.update_notification_preferences(
+            "dev-prefs",
+            {"completed_turns": "yes"},
+        )
+        return False
+    except device_token_store.NotificationPreferencesError:
+        pass
+    try:
+        device_token_store.update_notification_preferences(
+            "dev-prefs",
+            {"unknown": True},
+        )
+        return False
+    except device_token_store.NotificationPreferencesError:
+        pass
+    device_token_store.unregister_token("dev-prefs")
+    if device_token_store.get_notification_preferences(
+        "dev-prefs"
+    )["completed_turns"]:
+        return False
+    return True
+
+
+def test_token_re_registration_has_one_device_owner() -> bool:
+    device_token_store.register_token("dev-old", "tok-shared", "ios", "sid-shared")
+    device_token_store.register_token(
+        "dev-current",
+        "tok-shared",
+        "ios",
+        "sid-shared",
+    )
+    devices = device_token_store.get_tokens_for_session("sid-shared")
+    if [device["device_id"] for device in devices] != ["dev-current"]:
+        return False
+    device_token_store.unregister_token("dev-current")
     return True
 
 
@@ -109,21 +183,59 @@ def test_new_pending_request_triggers_push_per_device() -> bool:
         push_sender.send_pending_input_push = original
 
 
+def test_successful_turn_emits_configurable_response_push() -> bool:
+    import asyncio
+
+    calls: list[str] = []
+    original = push_sender.send_turn_completed_push
+
+    def fake_send(session_id: str) -> None:
+        calls.append(session_id)
+
+    push_sender.send_turn_completed_push = fake_send
+    bind_push_notifications()
+    try:
+        asyncio.run(bus.publish(BusEvent(
+            type="lifecycle.turn_complete",
+            root_id="sid-complete",
+            sid="sid-complete",
+            payload={"reason": "success"},
+            persist=False,
+        )))
+        asyncio.run(bus.publish(BusEvent(
+            type="lifecycle.turn_complete",
+            root_id="sid-error",
+            sid="sid-error",
+            payload={"reason": "error"},
+            persist=False,
+        )))
+        return calls == ["sid-complete"]
+    finally:
+        bus.unsubscribe("push_notification_turn_complete")
+        push_sender.send_turn_completed_push = original
+
+
 TESTS = [
     test_register_unregister_round_trip,
+    test_preferences_are_durable_validated_and_filter_devices,
+    test_token_re_registration_has_one_device_owner,
     test_send_with_no_service_account_is_safe_noop,
     test_new_pending_request_triggers_push_per_device,
+    test_successful_turn_emits_configurable_response_push,
 ]
 
 
 def main() -> int:
     failures = 0
-    for test in TESTS:
-        ok = test()
-        print(f"{PASS if ok else FAIL} {test.__name__}")
-        if not ok:
-            failures += 1
-    return 1 if failures else 0
+    try:
+        for test in TESTS:
+            ok = test()
+            print(f"{PASS if ok else FAIL} {test.__name__}")
+            if not ok:
+                failures += 1
+        return 1 if failures else 0
+    finally:
+        shutil.rmtree(_TMP_HOME, ignore_errors=True)
 
 
 if __name__ == "__main__":

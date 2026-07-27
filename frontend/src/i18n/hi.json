@@ -1315,6 +1315,18 @@
       "cancelled": "रद्द"
     }
   },
+  "settings.mobileNotificationsTitle": "मोबाइल सूचनाएँ",
+  "settings.mobileNotificationsHint": "चुनें कि किन घटनाओं की सूचना आपके मोबाइल उपकरणों पर भेजी जाए।",
+  "settings.mobileNotificationsApprovals": "अनुमोदन अनुरोध",
+  "settings.mobileNotificationsApprovalsHint": "किसी कार्रवाई को आपकी मंज़ूरी चाहिए तो सूचना पाएँ।",
+  "settings.mobileNotificationsQuestions": "सवाल",
+  "settings.mobileNotificationsQuestionsHint": "एजेंट को आपका जवाब चाहिए तो सूचना पाएँ।",
+  "settings.mobileNotificationsCompleted": "पूरे हुए चरण",
+  "settings.mobileNotificationsCompletedHint": "एजेंट के चरण पूरा करने पर सूचना पाएँ।",
+  "settings.mobileNotificationsLoading": "सूचना सेटिंग लोड हो रही हैं…",
+  "settings.mobileNotificationsSaving": "सहेजा जा रहा है…",
+  "settings.mobileNotificationsUnavailable": "मोबाइल सूचना सेटिंग उपलब्ध नहीं हैं।",
+  "settings.mobileNotificationsSaveFailed": "सूचना सेटिंग सहेजी नहीं जा सकीं।",
   "settings.capabilitiesTitle": "क्षमताएँ",
   "settings.capabilityIntro": "इंस्टॉलेशन ने सिर्फ़ शुरुआत तय की थी। यहाँ कभी भी कुछ भी चालू या बंद करें।",
   "settings.capabilityIntegrations": "इंटीग्रेशन",

@@ -5,6 +5,7 @@ import { registerPushToken, unregisterPushToken } from "../api";
 import { navigateRoute, parseRoutePath, sessionPath, ROUTE_NAVIGATE_EVENT } from "../hooks/useRoute";
 import { ASK_SINGLETON_ID } from "../askSession";
 import { uuidv4 } from "../lib/uuid";
+import { scheduleMobileBackgroundSyncMirror } from "../lib/mobileBackgroundSync";
 
 const DEVICE_ID_KEY = "better_agent_push_device_id";
 
@@ -13,7 +14,7 @@ let initialized = false;
 let cachedToken: string | null = null;
 let lastSubscribedSessionId: string | null = null;
 
-async function getOrCreateDeviceId(): Promise<string> {
+export async function getOrCreateMobilePushDeviceId(): Promise<string> {
   if (!deviceIdPromise) {
     deviceIdPromise = (async () => {
       const existing = await Preferences.get({ key: DEVICE_ID_KEY });
@@ -49,7 +50,7 @@ async function subscribeCurrentSession(): Promise<void> {
   if (!cachedToken) return;
   const sessionId = currentSessionId();
   if (!sessionId || sessionId === lastSubscribedSessionId) return;
-  const deviceId = await getOrCreateDeviceId();
+  const deviceId = await getOrCreateMobilePushDeviceId();
   try {
     await registerPushToken(deviceId, cachedToken, Capacitor.getPlatform(), sessionId);
     lastSubscribedSessionId = sessionId;
@@ -67,6 +68,7 @@ async function subscribeCurrentSession(): Promise<void> {
 export async function initMobilePushNotifications(): Promise<void> {
   if (!Capacitor.isNativePlatform() || initialized) return;
   initialized = true;
+  scheduleMobileBackgroundSyncMirror();
 
   await PushNotifications.addListener("registration", (token: Token) => {
     cachedToken = token.value;
@@ -98,7 +100,7 @@ export async function initMobilePushNotifications(): Promise<void> {
 export async function teardownMobilePushNotifications(): Promise<void> {
   if (!Capacitor.isNativePlatform()) return;
   try {
-    const deviceId = await getOrCreateDeviceId();
+    const deviceId = await getOrCreateMobilePushDeviceId();
     await unregisterPushToken(deviceId);
   } catch {
     // Best-effort — logout must proceed regardless of network reachability.

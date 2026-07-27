@@ -1315,6 +1315,18 @@
       "cancelled": "Annulé"
     }
   },
+  "settings.mobileNotificationsTitle": "Notifications mobiles",
+  "settings.mobileNotificationsHint": "Choisissez les événements qui envoient des notifications à vos appareils mobiles.",
+  "settings.mobileNotificationsApprovals": "Demandes d’approbation",
+  "settings.mobileNotificationsApprovalsHint": "Notifier lorsqu’une action nécessite votre approbation.",
+  "settings.mobileNotificationsQuestions": "Questions",
+  "settings.mobileNotificationsQuestionsHint": "Notifier lorsque l’agent a besoin de votre réponse.",
+  "settings.mobileNotificationsCompleted": "Tours terminés",
+  "settings.mobileNotificationsCompletedHint": "Notifier lorsqu’un agent termine un tour.",
+  "settings.mobileNotificationsLoading": "Chargement des paramètres de notification…",
+  "settings.mobileNotificationsSaving": "Enregistrement…",
+  "settings.mobileNotificationsUnavailable": "Les paramètres de notifications mobiles sont indisponibles.",
+  "settings.mobileNotificationsSaveFailed": "Impossible d’enregistrer les paramètres de notification.",
   "settings.capabilitiesTitle": "Fonctionnalités",
   "settings.capabilityIntro": "L'installation a choisi un point de départ. Activez ou désactivez ce que vous voulez, à tout moment.",
   "settings.capabilityIntegrations": "Intégrations",

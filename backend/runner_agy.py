@@ -10,7 +10,7 @@ import re
 import sqlite3
 import sys
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -1270,7 +1270,7 @@ async def _run(run_dir: Path, inputs: dict[str, Any]) -> int:
         "mode": inputs.get("mode", "native"),
         "runner_pid": os.getpid(),
         "app_session_id": inputs.get("app_session_id"),
-        "started_at": datetime.now().isoformat(),
+        "started_at": datetime.now(timezone.utc).isoformat(),
         "session_id": resume_session_id or None,
         "jsonl_path": str(run_dir / "session_events.jsonl"),
         "complete": False,

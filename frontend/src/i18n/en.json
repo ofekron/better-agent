@@ -1388,6 +1388,18 @@
       "cancelled": "Cancelled"
     }
   },
+  "settings.mobileNotificationsTitle": "Mobile notifications",
+  "settings.mobileNotificationsHint": "Choose which events send notifications to your mobile devices.",
+  "settings.mobileNotificationsApprovals": "Approval requests",
+  "settings.mobileNotificationsApprovalsHint": "Notify when an action needs your approval.",
+  "settings.mobileNotificationsQuestions": "Questions",
+  "settings.mobileNotificationsQuestionsHint": "Notify when the agent needs your input.",
+  "settings.mobileNotificationsCompleted": "Completed turns",
+  "settings.mobileNotificationsCompletedHint": "Notify when an agent finishes a turn.",
+  "settings.mobileNotificationsLoading": "Loading notification settings…",
+  "settings.mobileNotificationsSaving": "Saving…",
+  "settings.mobileNotificationsUnavailable": "Mobile notification settings are unavailable.",
+  "settings.mobileNotificationsSaveFailed": "Could not save notification settings.",
   "settings.capabilitiesTitle": "Capabilities",
   "settings.capabilityIntro": "Setup chose where to start. Turn anything on or off here at any time.",
   "settings.capabilityIntegrations": "Integrations",

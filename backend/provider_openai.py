@@ -401,7 +401,7 @@ class OpenAIProvider(Provider):
             mode=mode,
             app_session_id=app_session_id,
             queue=queue,
-            started_at=datetime.now().isoformat(),
+            started_at=datetime.now(timezone.utc).isoformat(),
             # In supervisor mode, worker turns persist to the worker BC,
             # not the supervisor's app_session_id. Mirrors ClaudeProvider.
             persist_to=worker_agent_session_id or app_session_id,
@@ -686,7 +686,10 @@ class OpenAIProvider(Provider):
             queue=queue,
             session_id=desc.get("session_id"),
             processed_line=processed_line,
-            started_at=desc.get("started_at") or datetime.now().isoformat(),
+            started_at=(
+                desc.get("started_at")
+                or datetime.now(timezone.utc).isoformat()
+            ),
             cancelled=bool(desc.get("cancelled", False)),
             persist_to=desc.get("persist_to") or desc.get("app_session_id") or "",
             target_message_id=desc.get("target_message_id"),

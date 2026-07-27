@@ -18,6 +18,7 @@
 // browsers keep riding the cookie.
 
 import { Capacitor } from "@capacitor/core";
+import { scheduleMobileBackgroundSyncMirror } from "./lib/mobileBackgroundSync";
 
 const STORAGE_KEY = "better_agent_auth_token";
 const REFRESH_KEY = "better_agent_refresh_token";
@@ -41,6 +42,7 @@ export function getStoredRefreshToken(): string | null {
 export function setStoredToken(token: string): void {
   try {
     localStorage.setItem(STORAGE_KEY, token);
+    scheduleMobileBackgroundSyncMirror();
   } catch {
     /* private mode etc. — token-less requests will 401 and the user
      * bounces back to login, which is the right fallback. */
@@ -61,6 +63,7 @@ export function clearStoredToken(): void {
   try {
     localStorage.removeItem(STORAGE_KEY);
     localStorage.removeItem(REFRESH_KEY);
+    scheduleMobileBackgroundSyncMirror();
   } catch {
     /* nothing to clear is the same outcome */
   }

@@ -44,7 +44,7 @@ import threading
 import urllib.error
 import urllib.request
 from contextlib import suppress
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable, NoReturn, Optional
 
@@ -2605,7 +2605,7 @@ async def _run_one_turn(
     start_payload = {
         "turn_id": turn_id,
         "pre_query_byte_offset": pre_query_byte_offset,
-        "started_at": datetime.now().isoformat(),
+        "started_at": datetime.now(timezone.utc).isoformat(),
     }
     try:
         atomic_write_json(turn_d / "start.json", start_payload)
@@ -3489,7 +3489,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
         "mode": mode,
         "runner_pid": os.getpid(),
         "app_session_id": inputs.get("app_session_id"),
-        "started_at": datetime.now().isoformat(),
+        "started_at": datetime.now(timezone.utc).isoformat(),
         "session_id": None,
         "jsonl_path": None,
         "pre_query_byte_offset": pre_query_byte_offset,

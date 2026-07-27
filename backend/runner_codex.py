@@ -29,7 +29,7 @@ import uuid
 from tool_approval_client import request_tool_approval
 import urllib.error
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, NoReturn, Optional
 
@@ -3257,7 +3257,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
         "mode": mode,
         "runner_pid": os.getpid(),
         "app_session_id": app_session_id,
-        "started_at": datetime.now().isoformat(),
+        "started_at": datetime.now(timezone.utc).isoformat(),
         "session_id": session_id,
         "jsonl_path": str(initial_rollout_path) if initial_rollout_path else None,
         "rollout_path": str(initial_rollout_path) if initial_rollout_path else None,

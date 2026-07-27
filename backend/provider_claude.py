@@ -931,7 +931,7 @@ class ClaudeProvider(Provider):
             # gate sees this run before state.json lands; bootstrap
             # overwrites with the discovered sid.
             session_id=session_id,
-            started_at=datetime.now().isoformat(),
+            started_at=datetime.now(timezone.utc).isoformat(),
             persist_to=worker_agent_session_id or app_session_id,
             target_message_id=target_message_id,
             turn_run_id=turn_run_id,
@@ -1649,7 +1649,10 @@ class ClaudeProvider(Provider):
             session_id=desc.get("session_id"),
             jsonl_path=Path(desc["jsonl_path"]) if desc.get("jsonl_path") else None,
             processed_byte=processed_byte,
-            started_at=desc.get("started_at") or datetime.now().isoformat(),
+            started_at=(
+                desc.get("started_at")
+                or datetime.now(timezone.utc).isoformat()
+            ),
             cancelled=bool(desc.get("cancelled", False)),
             persist_to=desc.get("persist_to") or desc.get("app_session_id") or "",
             target_message_id=desc.get("target_message_id"),

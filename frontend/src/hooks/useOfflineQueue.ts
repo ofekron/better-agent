@@ -3,6 +3,13 @@ import type { CapabilityContext, OrchestrationMode, SendMode, Session } from "..
 import type { ImagePayload, FilePayload } from "./useWebSocket";
 import { uuidv4 } from "../lib/uuid";
 import { OFFLINE_TAB_ID } from "../lib/offlineFlushLock";
+import {
+  clearMobileBackgroundAcknowledgements,
+  getMobileBackgroundAcknowledgements,
+  scheduleMobileBackgroundSyncMirror,
+} from "../lib/mobileBackgroundSync";
+import { App as CapacitorApp } from "@capacitor/app";
+import { Capacitor } from "@capacitor/core";
 
 export type { ImagePayload };
 export type { FilePayload };
@@ -152,6 +159,7 @@ function writeQueueRaw(queue: OfflineQueueEntry[]): boolean {
     } else {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(queue));
     }
+    scheduleMobileBackgroundSyncMirror();
     return true;
   } catch {
     return false;
@@ -307,6 +315,35 @@ export function useOfflineQueue() {
     window.addEventListener("storage", onStorage);
     return () => window.removeEventListener("storage", onStorage);
   }, []);
+
+  useEffect(() => {
+    if (!Capacitor.isNativePlatform()) return;
+    let cancelled = false;
+    const reconcile = async () => {
+      try {
+        const acknowledged = await getMobileBackgroundAcknowledgements();
+        if (cancelled || acknowledged.length === 0) return;
+        const keys = new Set(
+          acknowledged.map((item) => `${item.sessionId}\u0000${item.clientId}`),
+        );
+        if (!commit((prev) => prev.filter((entry) => !keys.has(entryIdentity(entry))))) return;
+        await clearMobileBackgroundAcknowledgements();
+      } catch {
+        // Runner acknowledgements remain durable for the next foreground.
+      }
+    };
+    void reconcile();
+    let removeListener: (() => Promise<void>) | undefined;
+    void CapacitorApp.addListener("appStateChange", ({ isActive }) => {
+      if (isActive) void reconcile();
+    }).then((handle) => {
+      removeListener = () => handle.remove();
+    });
+    return () => {
+      cancelled = true;
+      void removeListener?.();
+    };
+  }, [commit]);
 
   return {
     queue,

@@ -1314,6 +1314,18 @@
       "cancelled": "취소됨"
     }
   },
+  "settings.mobileNotificationsTitle": "모바일 알림",
+  "settings.mobileNotificationsHint": "모바일 기기로 알림을 보낼 이벤트를 선택하세요.",
+  "settings.mobileNotificationsApprovals": "승인 요청",
+  "settings.mobileNotificationsApprovalsHint": "작업에 승인이 필요할 때 알립니다.",
+  "settings.mobileNotificationsQuestions": "질문",
+  "settings.mobileNotificationsQuestionsHint": "에이전트가 답변을 필요로 할 때 알립니다.",
+  "settings.mobileNotificationsCompleted": "완료된 턴",
+  "settings.mobileNotificationsCompletedHint": "에이전트가 턴을 마치면 알립니다.",
+  "settings.mobileNotificationsLoading": "알림 설정 불러오는 중…",
+  "settings.mobileNotificationsSaving": "저장 중…",
+  "settings.mobileNotificationsUnavailable": "모바일 알림 설정을 사용할 수 없습니다.",
+  "settings.mobileNotificationsSaveFailed": "알림 설정을 저장하지 못했습니다.",
   "settings.capabilitiesTitle": "기능",
   "settings.capabilityIntro": "설치는 시작점을 정했을 뿐입니다. 여기서 언제든 켜고 끌 수 있습니다.",
   "settings.capabilityIntegrations": "통합",

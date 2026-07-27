@@ -67,17 +67,69 @@ def send_pending_input_push(session_id: str, request_kind: str, request_id: str)
 
 
 def _send_pending_input_push(session_id: str, request_kind: str, request_id: str) -> None:
+    title = "Better Agent needs your input"
+    body = (
+        "Approve or respond to continue"
+        if request_kind == "approval"
+        else "A question is waiting for your response"
+    )
+    category = (
+        "pending_approvals"
+        if request_kind == "approval"
+        else "pending_questions"
+    )
+    _send_push(
+        session_id,
+        category,
+        title,
+        body,
+        {
+            "session_id": session_id,
+            "request_id": request_id,
+            "request_kind": request_kind,
+            "notification_kind": category,
+        },
+    )
+
+
+def send_turn_completed_push(session_id: str) -> None:
+    """Notify interested devices that a successful response is ready."""
+    try:
+        _send_push(
+            session_id,
+            "completed_turns",
+            "Better Agent response ready",
+            "Open the app to view the latest response",
+            {
+                "session_id": session_id,
+                "notification_kind": "completed_turn",
+            },
+        )
+    except Exception:
+        logger.exception(
+            "push_sender: send_turn_completed_push failed for session=%s",
+            session_id,
+        )
+
+
+def _send_push(
+    session_id: str,
+    category: str,
+    title: str,
+    body: str,
+    data: dict[str, str],
+) -> None:
     app = _get_app()
     if app is None:
         return
-    devices = device_token_store.get_tokens_for_session(session_id)
+    devices = device_token_store.get_tokens_for_session_category(
+        session_id,
+        category,
+    )
     if not devices:
         return
 
     from firebase_admin import messaging
-
-    title = "Better Agent needs your input"
-    body = "Approve or respond to continue" if request_kind == "approval" else "A question is waiting for your response"
 
     for device in devices:
         token = device.get("token")
@@ -85,11 +137,7 @@ def _send_pending_input_push(session_id: str, request_kind: str, request_id: str
             continue
         message = messaging.Message(
             notification=messaging.Notification(title=title, body=body),
-            data={
-                "session_id": session_id,
-                "request_id": request_id,
-                "request_kind": request_kind,
-            },
+            data=data,
             token=token,
         )
         try:

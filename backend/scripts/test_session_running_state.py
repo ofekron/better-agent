@@ -28,6 +28,8 @@ import os
 import shutil
 import sys
 import threading
+import time
+from datetime import datetime, timezone
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _BACKEND = os.path.dirname(_HERE)
@@ -38,6 +40,7 @@ import _test_home
 _TMP_HOME = _test_home.isolate("bc-test-running-")
 
 from orchestrator import Coordinator  # noqa: E402
+from run_recovery import _normalize_recovered_started_at  # noqa: E402
 from session_manager import manager as session_manager  # noqa: E402
 
 
@@ -92,6 +95,58 @@ def test_run_start_fires_running_true() -> None:
     assert session_manager.is_running(sid) is True
     coord.run_state_remove(sid, "r1")
     print(f"{PASS} run_start_fires_running_true")
+
+
+def test_run_start_is_utc_and_recovery_preserves_original_start() -> None:
+    sid = _mk_session()
+    coord = _bound_coord()
+    created = coord.run_state_add(
+        sid, run_id="utc-run", kind="native", target_message_id=None,
+    )
+    created_at = datetime.fromisoformat(created["started_at"])
+    assert created_at.tzinfo == timezone.utc, (
+        f"new run start must be UTC-aware, got {created['started_at']!r}"
+    )
+    coord.run_state_remove(sid, "utc-run")
+
+    original_start = "2026-01-02T03:04:05+00:00"
+    recovered = coord.run_state_add(
+        sid,
+        run_id="recovered-run",
+        kind="native",
+        target_message_id=None,
+        started_at=original_start,
+    )
+    assert recovered["started_at"] == original_start, (
+        "recovery must preserve the persisted run start instead of "
+        f"restarting elapsed time: {recovered}"
+    )
+    coord.run_state_remove(sid, "recovered-run")
+    print(f"{PASS} run_start_is_utc_and_recovery_preserves_original_start")
+
+
+def test_legacy_recovery_start_uses_server_local_timezone() -> None:
+    if not hasattr(time, "tzset"):
+        print(f"{PASS} legacy_recovery_start_uses_server_local_timezone (unsupported)")
+        return
+    original_tz = os.environ.get("TZ")
+    try:
+        os.environ["TZ"] = "Asia/Jerusalem"
+        time.tzset()
+        normalized = _normalize_recovered_started_at(
+            "2026-01-02T03:04:05",
+        )
+    finally:
+        if original_tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = original_tz
+        time.tzset()
+    assert normalized == "2026-01-02T01:04:05+00:00", (
+        "legacy naive timestamps must be interpreted in the server-local "
+        f"timezone before conversion to UTC, got {normalized!r}"
+    )
+    print(f"{PASS} legacy_recovery_start_uses_server_local_timezone")
 
 
 def test_multiple_runs_single_fire() -> None:
@@ -243,6 +298,8 @@ def test_audit_running_discrepancy_records_state_layers() -> None:
 def main() -> int:
     try:
         test_run_start_fires_running_true()
+        test_run_start_is_utc_and_recovery_preserves_original_start()
+        test_legacy_recovery_start_uses_server_local_timezone()
         test_multiple_runs_single_fire()
         test_worker_fork_does_not_set_running()
         test_active_pidless_turn_survives_prune()

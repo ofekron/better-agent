@@ -1315,6 +1315,18 @@
       "cancelled": "已取消"
     }
   },
+  "settings.mobileNotificationsTitle": "移动通知",
+  "settings.mobileNotificationsHint": "选择要向移动设备发送通知的事件。",
+  "settings.mobileNotificationsApprovals": "审批请求",
+  "settings.mobileNotificationsApprovalsHint": "当操作需要你的批准时通知。",
+  "settings.mobileNotificationsQuestions": "问题",
+  "settings.mobileNotificationsQuestionsHint": "当智能体需要你的回复时通知。",
+  "settings.mobileNotificationsCompleted": "已完成的轮次",
+  "settings.mobileNotificationsCompletedHint": "当智能体完成一轮时通知。",
+  "settings.mobileNotificationsLoading": "正在加载通知设置…",
+  "settings.mobileNotificationsSaving": "正在保存…",
+  "settings.mobileNotificationsUnavailable": "移动通知设置不可用。",
+  "settings.mobileNotificationsSaveFailed": "无法保存通知设置。",
   "settings.capabilitiesTitle": "功能",
   "settings.capabilityIntro": "安装只决定了起点。你可以随时在这里开启或关闭任何功能。",
   "settings.capabilityIntegrations": "集成",

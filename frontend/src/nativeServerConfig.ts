@@ -24,6 +24,7 @@ export function readNativeServerUrl(): string {
 
 export function writeNativeServerUrl(url: string): void {
   localStorage.setItem(NATIVE_SERVER_URL_STORAGE_KEY, normalizeServerUrl(url));
+  scheduleMobileBackgroundSyncMirror();
 }
 
 export function hasNativeServerUrl(): boolean {
@@ -33,7 +34,9 @@ export function hasNativeServerUrl(): boolean {
 export function clearNativeServerUrl(): void {
   try {
     localStorage.removeItem(NATIVE_SERVER_URL_STORAGE_KEY);
+    scheduleMobileBackgroundSyncMirror();
   } catch {
     /* empty */
   }
 }
+import { scheduleMobileBackgroundSyncMirror } from "./lib/mobileBackgroundSync";

@@ -704,7 +704,7 @@ class CodexProvider(Provider):
             mode=mode,
             app_session_id=app_session_id,
             queue=queue,
-            started_at=datetime.now().isoformat(),
+            started_at=datetime.now(timezone.utc).isoformat(),
             persist_to=worker_agent_session_id or app_session_id,
             target_message_id=target_message_id,
             turn_run_id=turn_run_id,
@@ -1344,7 +1344,10 @@ class CodexProvider(Provider):
                 str(k): v for k, v in child_sources.items()
                 if isinstance(v, dict)
             },
-            started_at=desc.get("started_at") or datetime.now().isoformat(),
+            started_at=(
+                desc.get("started_at")
+                or datetime.now(timezone.utc).isoformat()
+            ),
             cancelled=bool(desc.get("cancelled", False)),
             persist_to=desc.get("persist_to") or desc.get("app_session_id") or "",
             target_message_id=desc.get("target_message_id"),

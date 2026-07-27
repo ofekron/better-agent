@@ -676,6 +676,7 @@ class TurnManager:
         target_message_id: Optional[str] = None,
         delegation_id: Optional[str] = None,
         pid: Optional[int] = None,
+        started_at: Optional[str] = None,
     ) -> dict:
         if kind != "worker" and target_message_id:
             current = self._run_state.get(app_session_id) or []
@@ -689,7 +690,7 @@ class TurnManager:
             ]
             if not self._run_state[app_session_id]:
                 self._run_state.pop(app_session_id, None)
-        now = datetime.now().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         for entry in self._run_state.get(app_session_id) or []:
             if entry.get("run_id") != run_id:
                 continue
@@ -712,7 +713,7 @@ class TurnManager:
             "target_message_id": target_message_id,
             "delegation_id": delegation_id,
             "pid": pid,
-            "started_at": now,
+            "started_at": started_at or now,
             "last_event_at": now,
         }
         self._run_state.setdefault(app_session_id, []).append(entry)

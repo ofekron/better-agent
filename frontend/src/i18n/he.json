@@ -1358,6 +1358,18 @@
       "cancelled": "בוטל"
     }
   },
+  "settings.mobileNotificationsTitle": "התראות בנייד",
+  "settings.mobileNotificationsHint": "בחר אילו אירועים ישלחו התראות למכשירים הניידים שלך.",
+  "settings.mobileNotificationsApprovals": "בקשות אישור",
+  "settings.mobileNotificationsApprovalsHint": "קבל התראה כשפעולה דורשת את אישורך.",
+  "settings.mobileNotificationsQuestions": "שאלות",
+  "settings.mobileNotificationsQuestionsHint": "קבל התראה כשהסוכן זקוק לתשובתך.",
+  "settings.mobileNotificationsCompleted": "סבבים שהושלמו",
+  "settings.mobileNotificationsCompletedHint": "קבל התראה כשסוכן מסיים סבב.",
+  "settings.mobileNotificationsLoading": "הגדרות ההתראות נטענות…",
+  "settings.mobileNotificationsSaving": "שומר…",
+  "settings.mobileNotificationsUnavailable": "הגדרות ההתראות בנייד אינן זמינות.",
+  "settings.mobileNotificationsSaveFailed": "לא ניתן לשמור את הגדרות ההתראות.",
   "settings.capabilitiesTitle": "יכולות",
   "settings.capabilityIntro": "ההתקנה בחרה נקודת התחלה. אפשר להדליק או לכבות כל יכולת כאן בכל רגע.",
   "settings.capabilityIntegrations": "אינטגרציות",

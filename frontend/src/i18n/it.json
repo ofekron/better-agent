@@ -1315,6 +1315,18 @@
       "cancelled": "Annullato"
     }
   },
+  "settings.mobileNotificationsTitle": "Notifiche mobili",
+  "settings.mobileNotificationsHint": "Scegli quali eventi inviano notifiche ai tuoi dispositivi mobili.",
+  "settings.mobileNotificationsApprovals": "Richieste di approvazione",
+  "settings.mobileNotificationsApprovalsHint": "Ricevi una notifica quando un’azione richiede la tua approvazione.",
+  "settings.mobileNotificationsQuestions": "Domande",
+  "settings.mobileNotificationsQuestionsHint": "Ricevi una notifica quando l’agente ha bisogno della tua risposta.",
+  "settings.mobileNotificationsCompleted": "Turni completati",
+  "settings.mobileNotificationsCompletedHint": "Ricevi una notifica quando un agente completa un turno.",
+  "settings.mobileNotificationsLoading": "Caricamento delle impostazioni di notifica…",
+  "settings.mobileNotificationsSaving": "Salvataggio…",
+  "settings.mobileNotificationsUnavailable": "Le impostazioni delle notifiche mobili non sono disponibili.",
+  "settings.mobileNotificationsSaveFailed": "Impossibile salvare le impostazioni di notifica.",
   "settings.capabilitiesTitle": "Funzionalità",
   "settings.capabilityIntro": "L'installazione ha scelto un punto di partenza. Attiva o disattiva ciò che vuoi, quando vuoi.",
   "settings.capabilityIntegrations": "Integrazioni",

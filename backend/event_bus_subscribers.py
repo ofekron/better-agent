@@ -746,6 +746,7 @@ def register_default_subscribers() -> None:
     bind_requirement_tags_projection()
     bind_ask_delivery()
     bind_extension_job_delivery()
+    bind_push_notifications()
     bus.unsubscribe("ingester_to_events_jsonl")
     bus.unsubscribe("event_journal_persistence_adapter")
     bus.subscribe(
@@ -763,6 +764,23 @@ def register_default_subscribers() -> None:
     except Exception:
         logger.exception("event_bus: hook runner registration failed")
     bind_task_turn_end_triggers()
+
+
+def bind_push_notifications() -> None:
+    async def _on_turn_complete(event: BusEvent) -> None:
+        if (event.payload or {}).get("reason") != "success":
+            return
+        import push_sender
+
+        await asyncio.to_thread(push_sender.send_turn_completed_push, event.sid)
+
+    bus.unsubscribe("push_notification_turn_complete")
+    bus.subscribe(
+        "lifecycle.turn_complete",
+        _on_turn_complete,
+        priority=300,
+        name="push_notification_turn_complete",
+    )
 
 
 def bind_ask_delivery() -> None:

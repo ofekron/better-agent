@@ -10,7 +10,7 @@ import uuid
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Optional
@@ -56,6 +56,18 @@ _RECOVERY_LEASE_SHUTTING_DOWN = False
 _MARKER_INDEX_BATCH = threading.local()
 _TERMINAL_MARKER_QUANTUM_MAX = 16
 _TERMINAL_MARKER_QUANTUM_MS = 5.0
+
+
+def _normalize_recovered_started_at(value: object) -> str:
+    """Return a UTC-aware run start, interpreting legacy naive values locally."""
+    if isinstance(value, str) and value:
+        try:
+            started_at = datetime.fromisoformat(value)
+        except ValueError:
+            pass
+        else:
+            return started_at.astimezone(timezone.utc).isoformat()
+    return datetime.now(timezone.utc).isoformat()
 
 
 def shutdown_recovery_lease_executor() -> None:
@@ -1755,7 +1767,9 @@ async def _integrate_one_locked(
                     session_id=claude_sid,
                     jsonl_path=Path(desc["jsonl_path"]) if desc.get("jsonl_path") else None,
                     processed_byte=int(desc.get("processed_byte") or 0),
-                    started_at=datetime.now().isoformat(),
+                    started_at=_normalize_recovered_started_at(
+                        desc.get("started_at"),
+                    ),
                     cancelled=cancelled,
                     persist_to=persist_sid,
                     tailer=None,
@@ -1811,6 +1825,9 @@ async def _integrate_one_locked(
                 kind=mode,
                 target_message_id=recovering_msg_id,
                 pid=int(pid) if pid else None,
+                started_at=_normalize_recovered_started_at(
+                    desc.get("started_at"),
+                ),
             )
             await _to_thread_joined(
                 coordinator.turn_manager.run_state_mark_provider_submitted,

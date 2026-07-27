@@ -49,6 +49,7 @@ import {
 import { ExtensionQuickButtons, type HookActionContext } from "./ExtensionUiHooks";
 import { ServerSetting } from "./ServerSetting";
 import { BasCompanionAppsSetting } from "./BasCompanionAppsSetting";
+import { MobileNotificationSettings } from "./MobileNotificationSettings";
 
 import { API } from "../api";
 import { providerQuotaStatus } from "../utils/quotaStatus";
@@ -113,6 +114,7 @@ type SettingsSection =
   | "harnessProfiles"
   | "passwords"
   | "server"
+  | "notifications"
   | `extension:${string}`;
 type NetworkBindAddress = "127.0.0.1" | "0.0.0.0";
 
@@ -1424,6 +1426,7 @@ function ProvidersList({
     { id: "voice", label: t("settings.voiceTitle"), group: "general" },
     ...(credentialBrokerEnabled ? [{ id: "passwords" as const, label: t("settings.passwordManager"), group: "general" as const }] : []),
     ...(isNative ? [{ id: "server" as const, label: t("settings.serverTitle"), group: "general" as const }] : []),
+    ...(isNative ? [{ id: "notifications" as const, label: t("settings.mobileNotificationsTitle"), group: "general" as const }] : []),
     ...(integrationsEnabled ? [{ id: "extensions" as const, label: t("settings.extensionsTitle"), group: "harness" as const }] : []),
     { id: "capabilities", label: t("settings.capabilitiesTitle"), group: "harness" },
     { id: "harnessProfiles", label: t("settings.harnessProfilesSection"), group: "harness" },
@@ -1524,6 +1527,7 @@ function ProvidersList({
       {section === "harnessProfiles" && <HarnessSettingsEditor />}
       {section === "passwords" && credentialBrokerEnabled && <PasswordManagerSetting />}
       {section === "server" && isNative && <ServerSetting />}
+      {section === "notifications" && isNative && <MobileNotificationSettings />}
       {extensionSettingsSection && <ExtensionModuleSlot module={extensionSettingsSection} />}
     </>
   );

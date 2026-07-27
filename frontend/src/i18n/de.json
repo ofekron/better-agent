@@ -1311,6 +1311,18 @@
       "cancelled": "Abgebrochen"
     }
   },
+  "settings.mobileNotificationsTitle": "Mobile Benachrichtigungen",
+  "settings.mobileNotificationsHint": "Wähle aus, welche Ereignisse Benachrichtigungen an deine Mobilgeräte senden.",
+  "settings.mobileNotificationsApprovals": "Genehmigungsanfragen",
+  "settings.mobileNotificationsApprovalsHint": "Benachrichtigen, wenn eine Aktion deine Genehmigung benötigt.",
+  "settings.mobileNotificationsQuestions": "Fragen",
+  "settings.mobileNotificationsQuestionsHint": "Benachrichtigen, wenn der Agent deine Eingabe benötigt.",
+  "settings.mobileNotificationsCompleted": "Abgeschlossene Durchläufe",
+  "settings.mobileNotificationsCompletedHint": "Benachrichtigen, wenn ein Agent einen Durchlauf beendet.",
+  "settings.mobileNotificationsLoading": "Benachrichtigungseinstellungen werden geladen…",
+  "settings.mobileNotificationsSaving": "Wird gespeichert…",
+  "settings.mobileNotificationsUnavailable": "Mobile Benachrichtigungseinstellungen sind nicht verfügbar.",
+  "settings.mobileNotificationsSaveFailed": "Benachrichtigungseinstellungen konnten nicht gespeichert werden.",
   "settings.capabilitiesTitle": "Funktionen",
   "settings.capabilityIntro": "Die Installation hat einen Startpunkt gewählt. Alles lässt sich hier jederzeit ein- oder ausschalten.",
   "settings.capabilityIntegrations": "Integrationen",

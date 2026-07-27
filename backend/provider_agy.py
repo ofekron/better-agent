@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import ClassVar, Optional
 
@@ -249,7 +250,7 @@ class AgyProvider(SessionEventsProvider):
             mode=mode,
             app_session_id=app_session_id,
             queue=queue,
-            started_at=__import__("datetime").datetime.now().isoformat(),
+            started_at=datetime.now(timezone.utc).isoformat(),
             persist_to=worker_agent_session_id or app_session_id,
             target_message_id=target_message_id,
             turn_run_id=turn_run_id,

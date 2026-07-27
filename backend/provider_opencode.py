@@ -28,6 +28,7 @@ import logging
 import os
 import re
 import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import ClassVar, Optional
 
@@ -332,7 +333,6 @@ class OpencodeProvider(SessionEventsProvider):
             popen.pid, mode, run_id,
         )
 
-        from datetime import datetime as _dt
         rs = RunState(
             run_id=run_id,
             run_dir=run_dir,
@@ -340,7 +340,7 @@ class OpencodeProvider(SessionEventsProvider):
             mode=mode,
             app_session_id=app_session_id,
             queue=queue,
-            started_at=_dt.now().isoformat(),
+            started_at=datetime.now(timezone.utc).isoformat(),
             persist_to=worker_agent_session_id or app_session_id,
             target_message_id=target_message_id,
             turn_run_id=turn_run_id,

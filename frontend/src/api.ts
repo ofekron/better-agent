@@ -370,6 +370,40 @@ export async function unregisterPushToken(deviceId: string): Promise<void> {
   });
 }
 
+export interface MobileNotificationPreferences {
+  pending_approvals: boolean;
+  pending_questions: boolean;
+  completed_turns: boolean;
+}
+
+export async function getMobileNotificationPreferences(
+  deviceId: string,
+): Promise<MobileNotificationPreferences> {
+  const res = await fetch(
+    `${API}/api/push-tokens/${encodeURIComponent(deviceId)}/notification-preferences`,
+    { credentials: "include" },
+  );
+  return (await _json<{ notification_preferences: MobileNotificationPreferences }>(res))
+    .notification_preferences;
+}
+
+export async function updateMobileNotificationPreferences(
+  deviceId: string,
+  patch: Partial<MobileNotificationPreferences>,
+): Promise<MobileNotificationPreferences> {
+  const res = await fetch(
+    `${API}/api/push-tokens/${encodeURIComponent(deviceId)}/notification-preferences`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify({ notification_preferences: patch }),
+    },
+  );
+  return (await _json<{ notification_preferences: MobileNotificationPreferences }>(res))
+    .notification_preferences;
+}
+
 export async function updateSessionOrganization(
   sessionId: string,
   patch: {

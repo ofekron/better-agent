@@ -1311,6 +1311,18 @@
       "cancelled": "キャンセル済み"
     }
   },
+  "settings.mobileNotificationsTitle": "モバイル通知",
+  "settings.mobileNotificationsHint": "モバイル端末に通知するイベントを選択します。",
+  "settings.mobileNotificationsApprovals": "承認リクエスト",
+  "settings.mobileNotificationsApprovalsHint": "操作に承認が必要なときに通知します。",
+  "settings.mobileNotificationsQuestions": "質問",
+  "settings.mobileNotificationsQuestionsHint": "エージェントが回答を必要とするときに通知します。",
+  "settings.mobileNotificationsCompleted": "完了したターン",
+  "settings.mobileNotificationsCompletedHint": "エージェントがターンを完了したときに通知します。",
+  "settings.mobileNotificationsLoading": "通知設定を読み込み中…",
+  "settings.mobileNotificationsSaving": "保存中…",
+  "settings.mobileNotificationsUnavailable": "モバイル通知設定を利用できません。",
+  "settings.mobileNotificationsSaveFailed": "通知設定を保存できませんでした。",
   "settings.capabilitiesTitle": "機能",
   "settings.capabilityIntro": "セットアップは出発点を決めただけです。ここでいつでも有効・無効を切り替えられます。",
   "settings.capabilityIntegrations": "統合機能",

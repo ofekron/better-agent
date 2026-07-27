@@ -378,7 +378,10 @@ class SessionEventsProvider(Provider):
             queue=queue,
             session_id=desc.get("session_id"),
             processed_line=processed_line,
-            started_at=desc.get("started_at") or datetime.now().isoformat(),
+            started_at=(
+                desc.get("started_at")
+                or datetime.now(timezone.utc).isoformat()
+            ),
             cancelled=bool(desc.get("cancelled", False)),
             persist_to=desc.get("persist_to") or desc.get("app_session_id") or "",
             target_message_id=desc.get("target_message_id"),

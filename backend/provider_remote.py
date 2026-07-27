@@ -28,7 +28,7 @@ import asyncio
 import logging
 import threading
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -220,7 +220,7 @@ class RemoteProviderProxy(Provider):
         # reconnects. Events/jsonl stay on the node (and in the shadow);
         # only the descriptor lives here.
         run_dir = runs_root() / run_id
-        started_at = datetime.now().isoformat()
+        started_at = datetime.now(timezone.utc).isoformat()
         try:
             run_dir.mkdir(parents=True, exist_ok=True)
             atomic_write_json(run_dir / "backend_state.json", {

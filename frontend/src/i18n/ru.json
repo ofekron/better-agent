@@ -1317,6 +1317,18 @@
       "cancelled": "Отменено"
     }
   },
+  "settings.mobileNotificationsTitle": "Мобильные уведомления",
+  "settings.mobileNotificationsHint": "Выберите события, о которых нужно уведомлять на мобильных устройствах.",
+  "settings.mobileNotificationsApprovals": "Запросы на подтверждение",
+  "settings.mobileNotificationsApprovalsHint": "Уведомлять, когда действие требует вашего подтверждения.",
+  "settings.mobileNotificationsQuestions": "Вопросы",
+  "settings.mobileNotificationsQuestionsHint": "Уведомлять, когда агенту нужен ваш ответ.",
+  "settings.mobileNotificationsCompleted": "Завершённые ходы",
+  "settings.mobileNotificationsCompletedHint": "Уведомлять, когда агент завершает ход.",
+  "settings.mobileNotificationsLoading": "Загрузка настроек уведомлений…",
+  "settings.mobileNotificationsSaving": "Сохранение…",
+  "settings.mobileNotificationsUnavailable": "Настройки мобильных уведомлений недоступны.",
+  "settings.mobileNotificationsSaveFailed": "Не удалось сохранить настройки уведомлений.",
   "settings.capabilitiesTitle": "Возможности",
   "settings.capabilityIntro": "Установка выбрала отправную точку. Включайте и отключайте что угодно здесь в любой момент.",
   "settings.capabilityIntegrations": "Интеграции",

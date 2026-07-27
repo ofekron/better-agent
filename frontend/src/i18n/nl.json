@@ -1311,6 +1311,18 @@
       "cancelled": "Geannuleerd"
     }
   },
+  "settings.mobileNotificationsTitle": "Mobiele meldingen",
+  "settings.mobileNotificationsHint": "Kies welke gebeurtenissen meldingen naar je mobiele apparaten sturen.",
+  "settings.mobileNotificationsApprovals": "Goedkeuringsverzoeken",
+  "settings.mobileNotificationsApprovalsHint": "Meld wanneer een actie je goedkeuring nodig heeft.",
+  "settings.mobileNotificationsQuestions": "Vragen",
+  "settings.mobileNotificationsQuestionsHint": "Meld wanneer de agent je antwoord nodig heeft.",
+  "settings.mobileNotificationsCompleted": "Voltooide beurten",
+  "settings.mobileNotificationsCompletedHint": "Meld wanneer een agent een beurt voltooit.",
+  "settings.mobileNotificationsLoading": "Meldingsinstellingen laden…",
+  "settings.mobileNotificationsSaving": "Opslaan…",
+  "settings.mobileNotificationsUnavailable": "Instellingen voor mobiele meldingen zijn niet beschikbaar.",
+  "settings.mobileNotificationsSaveFailed": "Meldingsinstellingen konden niet worden opgeslagen.",
   "settings.capabilitiesTitle": "Mogelijkheden",
   "settings.capabilityIntro": "De installatie koos een startpunt. Zet hier alles aan of uit, wanneer je wilt.",
   "settings.capabilityIntegrations": "Integraties",

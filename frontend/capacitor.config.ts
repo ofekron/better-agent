@@ -1,5 +1,7 @@
 import type { CapacitorConfig } from "@capacitor/cli";
 
+/// <reference types="@capacitor/background-runner" />
+
 const config: CapacitorConfig = {
   appId: "com.betteragent.app",
   appName: "Better Agent",
@@ -30,6 +32,14 @@ const config: CapacitorConfig = {
       // If a freshly-applied bundle never calls notifyAppReady within
       // this window, capgo reverts to the last good bundle.
       appReadyTimeout: 10000,
+    },
+    BackgroundRunner: {
+      label: "com.betteragent.offline-sync",
+      src: "runners/offline-sync.js",
+      event: "syncOfflineActions",
+      repeat: true,
+      interval: 15,
+      autoStart: true,
     },
   },
 };

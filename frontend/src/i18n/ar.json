@@ -1314,6 +1314,18 @@
       "cancelled": "أُلغي"
     }
   },
+  "settings.mobileNotificationsTitle": "إشعارات الجوال",
+  "settings.mobileNotificationsHint": "اختر الأحداث التي ترسل إشعارات إلى أجهزتك المحمولة.",
+  "settings.mobileNotificationsApprovals": "طلبات الموافقة",
+  "settings.mobileNotificationsApprovalsHint": "تلقي إشعار عندما يحتاج إجراء إلى موافقتك.",
+  "settings.mobileNotificationsQuestions": "الأسئلة",
+  "settings.mobileNotificationsQuestionsHint": "تلقي إشعار عندما يحتاج الوكيل إلى ردك.",
+  "settings.mobileNotificationsCompleted": "الجولات المكتملة",
+  "settings.mobileNotificationsCompletedHint": "تلقي إشعار عندما يكمل الوكيل جولة.",
+  "settings.mobileNotificationsLoading": "جارٍ تحميل إعدادات الإشعارات…",
+  "settings.mobileNotificationsSaving": "جارٍ الحفظ…",
+  "settings.mobileNotificationsUnavailable": "إعدادات إشعارات الجوال غير متاحة.",
+  "settings.mobileNotificationsSaveFailed": "تعذر حفظ إعدادات الإشعارات.",
   "settings.capabilitiesTitle": "القدرات",
   "settings.capabilityIntro": "اختار التثبيت نقطة البداية فقط. يمكنك تفعيل أو تعطيل أي شيء هنا في أي وقت.",
   "settings.capabilityIntegrations": "التكاملات",
