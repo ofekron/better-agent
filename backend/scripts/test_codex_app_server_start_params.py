@@ -90,6 +90,102 @@ async def test_app_server_resume_receives_capability_config() -> None:
     assert client.tool_handlers["tool_x"] is tool_handler
 
 
+async def test_resume_bridges_selected_extension_mcp_tools_as_dynamic_tools() -> None:
+    original_launcher_configs = runner_codex.extension_store.native_mcp_launcher_server_configs
+    original_mcp_list_tools = runner_codex.mcp_stdio_bridge.mcp_list_tools
+    original_mcp_call_tool = runner_codex.mcp_stdio_bridge.mcp_call_tool
+
+    def fake_launcher_configs(_inputs: dict, *, user_facing: bool, bare: bool):
+        assert user_facing is True
+        assert bare is False
+        return {
+            "testape": {
+                "command": "/fake/testape-mcp",
+                "args": [],
+                "env": {"BETTER_CLAUDE_EXTENSION_ID": "ofek.testape"},
+            },
+            "not-selected": {
+                "command": "/fake/other-mcp",
+                "args": [],
+                "env": {},
+            },
+        }
+
+    async def fake_mcp_list_tools(server_name: str, config: dict):
+        assert server_name == "testape"
+        assert config["_server_name"] == "testape"
+        return [{
+            "name": "test_ui",
+            "description": "Run TestApe UI test",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "task": {"type": "string"},
+                    "repo_path": {"type": "string"},
+                },
+                "required": ["task", "repo_path"],
+            },
+        }]
+
+    async def fake_mcp_call_tool(config: dict, tool_name: str, args: dict):
+        assert config["command"] == "/fake/testape-mcp"
+        assert config["_server_name"] == "testape"
+        assert tool_name == "test_ui"
+        assert args == {"task": "check", "repo_path": "/repo"}
+        return {"content": [{"type": "text", "text": "ok"}]}
+
+    runner_codex.extension_store.native_mcp_launcher_server_configs = fake_launcher_configs  # type: ignore[method-assign]
+    runner_codex.mcp_stdio_bridge.mcp_list_tools = fake_mcp_list_tools  # type: ignore[assignment]
+    runner_codex.mcp_stdio_bridge.mcp_call_tool = fake_mcp_call_tool  # type: ignore[assignment]
+    try:
+        dynamic_tools: list[dict] = []
+        tool_handlers: dict = {}
+        existing_tool_names: set[str] = set()
+        await runner_codex._bridge_resume_extension_mcp_dynamic_tools(
+            inputs={"provider_kind": "codex", "app_session_id": "sender-1"},
+            provider_run_config={
+                "mcp_servers": {
+                    "testape": {"command": "/fake/testape-mcp", "args": []},
+                },
+            },
+            dynamic_tools=dynamic_tools,
+            tool_handlers=tool_handlers,
+            existing_tool_names=existing_tool_names,
+            user_facing=True,
+            bare_config=False,
+        )
+        result = await tool_handlers["test_ui"]({
+            "arguments": {"task": "check", "repo_path": "/repo"},
+        })
+        with tempfile.TemporaryDirectory() as tmp:
+            rollout = Path(tmp) / "rollout.jsonl"
+            rollout.write_text(
+                json.dumps({"type": "session_meta", "payload": {"dynamic_tools": []}}) + "\n",
+                encoding="utf-8",
+            )
+            missing, missing_error = runner_codex._dynamic_tools_missing_from_rollout(
+                rollout,
+                dynamic_tools,
+            )
+    finally:
+        runner_codex.extension_store.native_mcp_launcher_server_configs = original_launcher_configs  # type: ignore[method-assign]
+        runner_codex.mcp_stdio_bridge.mcp_list_tools = original_mcp_list_tools  # type: ignore[assignment]
+        runner_codex.mcp_stdio_bridge.mcp_call_tool = original_mcp_call_tool  # type: ignore[assignment]
+
+    assert [tool["name"] for tool in dynamic_tools] == ["test_ui"]
+    assert [tool["name"] for tool in missing] == ["test_ui"]
+    assert missing_error is None
+    assert dynamic_tools[0]["inputSchema"]["required"] == ["task", "repo_path"]
+    assert "test_ui" in existing_tool_names
+    assert result == {
+        "contentItems": [{
+            "type": "inputText",
+            "text": '{"content":[{"type":"text","text":"ok"}]}',
+        }],
+        "success": True,
+    }
+
+
 async def test_app_server_resume_preserves_mcp_tool_timeout() -> None:
     created_clients, _argv = await _record_start_app_server(
         session_id="thread-existing",
@@ -314,6 +410,7 @@ async def _record_start_app_server(
 if __name__ == "__main__":
     asyncio.run(test_app_server_uses_structured_sandbox_policy())
     asyncio.run(test_app_server_resume_receives_capability_config())
+    asyncio.run(test_resume_bridges_selected_extension_mcp_tools_as_dynamic_tools())
     asyncio.run(test_app_server_resume_preserves_mcp_tool_timeout())
     asyncio.run(test_app_server_fork_receives_capability_config())
     asyncio.run(test_app_server_start_registers_dynamic_tools())

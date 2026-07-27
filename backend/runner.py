@@ -52,6 +52,7 @@ import chat_store
 import inbox_store
 import extension_store
 import harness_run_projection
+import mcp_stdio_bridge
 from communication_modes import (
     ASK_MODE_CONTINUE_AND_EXPECT_INBOX_BACK_ASYNC,
     ASK_MODE_WAIT_AND_GRAB_LAST_ASSISTANT_MSSG_IN_TURN,
@@ -204,9 +205,11 @@ def _background_policy_hooks() -> dict:
 
 _RESPONSE_NO_PROGRESS_TIMEOUT_S = 0
 _RESPONSE_ACTIVITY_POLL_S = 1.0
-_MCP_LIST_TIMEOUT_S = 8.0
-_MCP_CALL_TIMEOUT_S = 300.0
-_REQUIREMENTS_WAIT_TRUE_MCP_CALL_TIMEOUT_S = 1380.0
+_MCP_LIST_TIMEOUT_S = mcp_stdio_bridge.MCP_LIST_TIMEOUT_S
+_MCP_CALL_TIMEOUT_S = mcp_stdio_bridge.MCP_CALL_TIMEOUT_S
+_REQUIREMENTS_WAIT_TRUE_MCP_CALL_TIMEOUT_S = (
+    mcp_stdio_bridge.REQUIREMENTS_WAIT_TRUE_MCP_CALL_TIMEOUT_S
+)
 # An in-flight tool call counts as response progress: the CLI is silent while
 # a tool executes, so the no-progress watchdog must not read a long MCP/Bash
 # call as a wedged CLI. The backstop must exceed the longest declared tool
@@ -312,12 +315,7 @@ def _mark_runner_activity() -> None:
 
 
 def _mcp_subprocess_env(config: dict[str, Any]) -> dict[str, str]:
-    env = {
-        "PATH": os.environ.get("PATH", ""),
-        "PYTHONIOENCODING": "utf-8",
-    }
-    env.update({str(k): str(v) for k, v in (config.get("env") or {}).items()})
-    return env
+    return mcp_stdio_bridge.mcp_subprocess_env(config)
 
 
 async def _mcp_json_request(
@@ -327,57 +325,12 @@ async def _mcp_json_request(
     *,
     timeout: float,
 ) -> dict[str, Any]:
-    command = str(config.get("command") or "").strip()
-    if not command:
-        raise RuntimeError("MCP server config missing command")
-    proc = await asyncio.create_subprocess_exec(
-        command,
-        *[str(arg) for arg in config.get("args") or []],
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.DEVNULL,
-        env=_mcp_subprocess_env(config),
-        limit=SUBPROCESS_LINE_LIMIT_BYTES,
+    return await mcp_stdio_bridge.mcp_json_request(
+        config,
+        method,
+        params,
+        timeout=timeout,
     )
-    assert proc.stdin is not None
-    assert proc.stdout is not None
-
-    async def _send(payload: dict[str, Any]) -> None:
-        proc.stdin.write((json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8"))
-        await proc.stdin.drain()
-
-    async def _read_response() -> dict[str, Any]:
-        line = await asyncio.wait_for(proc.stdout.readline(), timeout=timeout)
-        if not line:
-            raise RuntimeError("MCP server closed stdout")
-        response = json.loads(line.decode("utf-8", "replace"))
-        if response.get("error"):
-            raise RuntimeError(json.dumps(response["error"], ensure_ascii=False))
-        return response.get("result") or {}
-
-    try:
-        await _send({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "initialize",
-            "params": {
-                "protocolVersion": "2024-11-05",
-                "capabilities": {},
-                "clientInfo": {"name": "better-agent-runner", "version": "1"},
-            },
-        })
-        await _read_response()
-        await _send({"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}})
-        await _send({"jsonrpc": "2.0", "id": 2, "method": method, "params": params})
-        return await _read_response()
-    finally:
-        if proc.returncode is None:
-            proc.terminate()
-            try:
-                await asyncio.wait_for(proc.wait(), timeout=2.0)
-            except asyncio.TimeoutError:
-                proc.kill()
-                await proc.wait()
 
 
 async def _mcp_list_tools(server_name: str, config: dict[str, Any]) -> list[dict[str, Any]]:
@@ -391,21 +344,7 @@ async def _mcp_list_tools(server_name: str, config: dict[str, Any]) -> list[dict
 
 
 def _mcp_call_timeout_s(config: dict[str, Any], tool_name: str, args: dict[str, Any]) -> float:
-    configured_timeout = config.get("tool_timeout_sec")
-    if (
-        isinstance(configured_timeout, (int, float))
-        and not isinstance(configured_timeout, bool)
-        and configured_timeout > 0
-    ):
-        return float(configured_timeout)
-    server_name = str(config.get("_server_name") or config.get("server_name") or "")
-    if (
-        server_name in {"get-requirements", "better-agent-requirements"}
-        and tool_name == "fire_get_requirements"
-        and args.get("wait") is True
-    ):
-        return _REQUIREMENTS_WAIT_TRUE_MCP_CALL_TIMEOUT_S
-    return _MCP_CALL_TIMEOUT_S
+    return mcp_stdio_bridge.mcp_call_timeout_s(config, tool_name, args)
 
 
 async def _mcp_call_tool(

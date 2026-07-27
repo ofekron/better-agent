@@ -71,6 +71,7 @@ from communication_modes import (
 import chat_store
 import inbox_store
 import extension_store
+import mcp_stdio_bridge
 from runs_dir import atomic_write_json
 from runner_exit import hard_exit
 from env_compat import get_env
@@ -355,6 +356,98 @@ def _add_dynamic_tool(
     tool_handlers[name] = handler
     existing_tool_names.add(name)
     return True
+
+
+def _mcp_dynamic_tool(server_name: str, item: dict[str, Any]) -> Optional[dict[str, Any]]:
+    name = str(item.get("name") or "").strip()
+    if not name:
+        logger.warning("extension MCP %s tools/list returned an unnamed tool", server_name)
+        return None
+    input_schema = item.get("inputSchema") or item.get("input_schema")
+    if not isinstance(input_schema, dict):
+        logger.warning(
+            "extension MCP %s tool %s has no object inputSchema",
+            server_name,
+            name,
+        )
+        return None
+    return {
+        "name": name,
+        "description": str(item.get("description") or ""),
+        "inputSchema": input_schema,
+    }
+
+
+def _build_mcp_dynamic_tool_handler(
+    *,
+    server_name: str,
+    config: dict[str, Any],
+    tool_name: str,
+):
+    async def call_mcp_tool(params: dict[str, Any]) -> dict[str, Any]:
+        args = params.get("arguments") or {}
+        if not isinstance(args, dict):
+            return _dynamic_tool_text_result(
+                f"{tool_name} arguments must be an object",
+                success=False,
+            )
+        try:
+            result = await mcp_stdio_bridge.mcp_call_tool(config, tool_name, args)
+        except Exception as e:
+            logger.exception(
+                "extension MCP %s dynamic tool %s failed",
+                server_name,
+                tool_name,
+            )
+            return _dynamic_tool_text_result(f"{tool_name} failed: {e}", success=False)
+        return _dynamic_tool_text_result(
+            json.dumps(result, ensure_ascii=False, separators=(",", ":")),
+            success=not bool(result.get("is_error") or result.get("isError")),
+        )
+
+    return call_mcp_tool
+
+
+async def _bridge_resume_extension_mcp_dynamic_tools(
+    *,
+    inputs: dict[str, Any],
+    provider_run_config: dict[str, Any],
+    dynamic_tools: list[dict[str, Any]],
+    tool_handlers: dict[str, Any],
+    existing_tool_names: set[str],
+    user_facing: bool,
+    bare_config: bool,
+) -> None:
+    configured_servers = provider_run_config.get("mcp_servers") or {}
+    if not isinstance(configured_servers, dict) or not configured_servers:
+        return
+    launcher_configs = extension_store.native_mcp_launcher_server_configs(
+        inputs,
+        user_facing=user_facing,
+        bare=bare_config,
+    )
+    for server_name, config in launcher_configs.items():
+        if server_name not in configured_servers:
+            continue
+        call_config = dict(config)
+        call_config["_server_name"] = server_name
+        tools = await mcp_stdio_bridge.mcp_list_tools(server_name, call_config)
+        for item in tools:
+            tool = _mcp_dynamic_tool(server_name, item)
+            if tool is None:
+                continue
+            tool_name = tool["name"]
+            _add_dynamic_tool(
+                dynamic_tools,
+                tool_handlers,
+                tool,
+                _build_mcp_dynamic_tool_handler(
+                    server_name=server_name,
+                    config=call_config,
+                    tool_name=tool_name,
+                ),
+                existing_tool_names=existing_tool_names,
+            )
 
 
 _CREATE_WORKER_INPUT_SCHEMA: dict[str, Any] = {
@@ -3068,6 +3161,15 @@ async def _run(run_dir: Path, inputs: dict) -> int:
         initial_rollout_path = await resolve_rollout_path_polled(session_id, timeout=5.0)
     dynamic_tools_for_start = dynamic_tools
     if session_id:
+        await _bridge_resume_extension_mcp_dynamic_tools(
+            inputs=runner_inputs,
+            provider_run_config=provider_run_config,
+            dynamic_tools=dynamic_tools,
+            tool_handlers=tool_handlers,
+            existing_tool_names=existing_tool_names,
+            user_facing=bool(user_facing and app_session_id),
+            bare_config=bare_config,
+        )
         dynamic_tools_for_start, capability_error = _dynamic_tools_missing_from_rollout(
             initial_rollout_path,
             dynamic_tools,
