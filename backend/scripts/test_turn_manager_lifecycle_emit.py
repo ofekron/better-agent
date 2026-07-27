@@ -376,6 +376,55 @@ def test_user_lifecycle_routes_through_user_prompt_manager() -> None:
         )
 
 
+def test_reported_error_makes_the_done_payload_fail() -> None:
+    """A turn that failed must not publish a success-shaped `done`.
+
+    run_turn's error handler reports the failure and returns instead of
+    raising, so nothing recorded a sub-turn result. With no sub-turns and
+    no error handed over, make_done_payload fell through to its
+    "completed cleanly" baseline and published success=True next to an
+    `error` event describing the failure.
+    """
+    from orchs import get_strategy
+
+    strategy = get_strategy("native")
+
+    payload = strategy.make_done_payload("life-clean")
+    assert payload["success"] is True, "a clean turn must still report success"
+
+    payload = strategy.make_done_payload(
+        "life-failed", terminal_error="NodeOffline: node 'lenovo' is offline",
+    )
+    assert payload["success"] is False, "a reported terminal error must fail the turn"
+    assert "NodeOffline" in (payload["error"] or ""), payload["error"]
+
+
+def test_run_turn_hands_its_reported_error_to_the_done_emit() -> None:
+    """Lock the hand-off wiring, not just the payload rule.
+
+    make_done_payload already accepted `terminal_error`, but no caller
+    ever supplied it — the parameter was unreachable, so the payload rule
+    alone could not fire. Guard both ends of the hand-off.
+    """
+    backend_dir = Path(__file__).resolve().parent.parent
+    turn_src = (backend_dir / "turn_manager.py").read_text(encoding="utf-8")
+    orch_src = (backend_dir / "orchestrator.py").read_text(encoding="utf-8")
+    upm_src = (backend_dir / "user_prompt_manager.py").read_text(encoding="utf-8")
+
+    assert "_terminal_error_by_session[app_session_id] = error_text" in turn_src, (
+        "run_turn's error path no longer hands its failure to the terminal emit"
+    )
+    assert "_terminal_error_by_session.pop(" in orch_src, (
+        "the done-emit caller no longer consumes the handed-over failure"
+    )
+    assert "terminal_error=terminal_error" in orch_src, (
+        "the handed-over failure is not passed to emit_user_msg_done"
+    )
+    assert "terminal_error=terminal_error" in upm_src, (
+        "emit_user_msg_done no longer forwards terminal_error to make_done_payload"
+    )
+
+
 def test_publish_terminal_swallows_subscriber_exception() -> None:
     """A misbehaving subscriber must NEVER tear down the turn-finalize
     sequence. The bus emit is wrapped in try/except."""
@@ -400,5 +449,7 @@ if __name__ == "__main__":
     test_publish_terminal_emits_exactly_once_complete()
     test_publish_terminal_emits_exactly_once_each_stopped_cause()
     test_user_lifecycle_routes_through_user_prompt_manager()
+    test_reported_error_makes_the_done_payload_fail()
+    test_run_turn_hands_its_reported_error_to_the_done_emit()
     test_publish_terminal_swallows_subscriber_exception()
     print("OK: TurnManager sole lifecycle emitter — runtime + structural")

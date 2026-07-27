@@ -4980,6 +4980,9 @@ class Coordinator:
                 )
             raise
         except Exception as e:
+            # This turn already terminates as failed; drop any handed-over
+            # error so it cannot leak into the next turn's done payload.
+            self.turn_manager._terminal_error_by_session.pop(app_session_id, None)
             if lifecycle_msg_id:
                 await self.user_prompt_manager.emit_user_msg_failed(
                     app_session_id, lifecycle_msg_id,
@@ -4991,9 +4994,13 @@ class Coordinator:
                 interrupted_by = self.turn_manager._interrupted_by_msg_id.pop(
                     app_session_id, None,
                 )
+                terminal_error = self.turn_manager._terminal_error_by_session.pop(
+                    app_session_id, None,
+                )
                 await self.user_prompt_manager.emit_user_msg_done(
                     app_session_id, lifecycle_msg_id, mode,
                     interrupted_by_msg_id=interrupted_by,
+                    terminal_error=terminal_error,
                 )
         finally:
             if previous_worker_registry_cwds is None:
