@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import os
 from pathlib import Path
@@ -12,7 +13,11 @@ def normalize_provider_run_config(value: Optional[dict]) -> dict:
     if not isinstance(value, dict):
         raise ValueError("provider_run_config must be an object")
 
-    out: dict[str, Any] = {}
+    out = {
+        key: copy.deepcopy(item)
+        for key, item in value.items()
+        if key not in ("mcp_servers", "mcpServers", "skills")
+    }
     mcp_servers = value.get("mcp_servers", value.get("mcpServers", {}))
     if mcp_servers:
         if not isinstance(mcp_servers, dict):
@@ -26,6 +31,20 @@ def normalize_provider_run_config(value: Optional[dict]) -> dict:
         out["skills"] = skills
 
     return out
+
+
+def merge_provider_run_configs(base: Optional[dict], override: Optional[dict]) -> dict:
+    merged = normalize_provider_run_config(base)
+    incoming = normalize_provider_run_config(override)
+    for key, value in incoming.items():
+        if key in ("mcp_servers", "skills") and isinstance(value, dict):
+            merged[key] = {
+                **copy.deepcopy(merged.get(key) or {}),
+                **copy.deepcopy(value),
+            }
+            continue
+        merged[key] = copy.deepcopy(value)
+    return merged
 
 
 def write_skill_tree(root: Path, skills: dict) -> None:
