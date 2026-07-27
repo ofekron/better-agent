@@ -28,6 +28,7 @@
   --md-shape-sm: 10px;
   --md-shape-md: 14px;
   --md-shape-lg: 20px;
+  --md-button-radius: 8px;
   --md-control-height: 40px;
   --md-state-hover: 8%;
   --md-state-pressed: 12%;
@@ -5120,18 +5121,22 @@ button.run-badge-clickable:focus-visible {
 
 .stop-btn {
   padding: 4px 14px;
-  background: rgba(248, 81, 73, 0.12);
-  color: var(--error);
-  border: 1px solid rgba(248, 81, 73, 0.3);
-  border-radius: 6px;
+  background: var(--md-error-container);
+  color: var(--md-on-error-container);
+  border: 1px solid color-mix(in srgb, var(--error) 40%, transparent);
+  border-radius: var(--md-button-radius);
   font-size: calc(12px * var(--app-font-scale));
   font-weight: 500;
   cursor: pointer;
-  transition: all 0.15s;
+  transition:
+    background-color 180ms var(--md-motion-standard),
+    border-color 180ms var(--md-motion-standard),
+    color 180ms var(--md-motion-standard),
+    opacity 180ms var(--md-motion-standard);
 }
 
 .stop-btn:hover {
-  background: rgba(248, 81, 73, 0.25);
+  background: color-mix(in srgb, var(--error) 22%, transparent);
   border-color: var(--error);
 }
 
@@ -5155,9 +5160,9 @@ button.run-badge-clickable:focus-visible {
   gap: 0;
   padding: 0;
   margin: 4px 0;
-  background: var(--bg-secondary);
-  border: 1px solid var(--border);
-  border-radius: 6px;
+  background: transparent;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--md-shape-sm);
   font-size: calc(13px * var(--app-font-scale));
   font-family: "SF Mono", "Fira Code", monospace;
   overflow: hidden;
@@ -5168,6 +5173,7 @@ button.run-badge-clickable:focus-visible {
   align-items: center;
   gap: 8px;
   padding: 6px 12px;
+  background: color-mix(in srgb, var(--md-surface-container) 58%, transparent);
 }
 
 /* Agent/Task tool call */
@@ -5250,7 +5256,7 @@ button.run-badge-clickable:focus-visible {
 }
 
 .bash-result {
-  border-top: 1px solid var(--border);
+  border-top: 1px solid var(--border-subtle);
 }
 
 .bash-result-content {
@@ -5258,7 +5264,9 @@ button.run-badge-clickable:focus-visible {
   padding: 6px 12px;
   font-size: calc(12px * var(--app-font-scale));
   line-height: 1.5;
-  background: var(--bg-primary);
+  background: transparent;
+  border: 0;
+  border-radius: 0;
   white-space: pre-wrap;
   word-break: break-all;
   color: var(--text-secondary);
@@ -5275,7 +5283,7 @@ button.run-badge-clickable:focus-visible {
   padding: 4px 12px;
   background: transparent;
   border: none;
-  border-top: 1px solid var(--border);
+  border-top: 1px solid var(--border-subtle);
   color: var(--text-muted);
   font-size: calc(11px * var(--app-font-scale));
   font-family: "SF Mono", "Fira Code", monospace;
@@ -5703,14 +5711,14 @@ button.run-badge-clickable:focus-visible {
   font-size: calc(12px * var(--app-font-scale));
   color: var(--text-muted);
   font-family: "SF Mono", "Fira Code", monospace;
-  border-top: 1px solid var(--border);
+  border-top: 1px solid var(--border-subtle);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .tool-result-block {
-  border-top: 1px solid var(--border);
+  border-top: 1px solid var(--border-subtle);
 }
 
 .tool-result-toggle {
@@ -5747,7 +5755,7 @@ button.run-badge-clickable:focus-visible {
   overflow-y: auto;
   font-size: calc(12px * var(--app-font-scale));
   line-height: 1.5;
-  background: var(--bg-primary);
+  background: transparent;
   border-top: 1px solid var(--border);
   white-space: pre-wrap;
   word-break: break-all;
@@ -5763,8 +5771,8 @@ button.run-badge-clickable:focus-visible {
 }
 
 .tool-result-monaco {
-  border-top: 1px solid var(--border);
-  background: var(--bg-primary);
+  border-top: 1px solid var(--border-subtle);
+  background: transparent;
 }
 
 .inline-image-viewer {
@@ -7775,11 +7783,11 @@ button.run-badge-clickable:focus-visible {
   --input-prompt-font-size: calc(16px * var(--app-font-scale));
   --input-prompt-max-height: 200px;
   display: flex;
-  gap: 2px;
+  gap: 4px;
   align-items: center;
   background: var(--bg-surface-raised);
   border: 1px solid var(--border-strong);
-  border-radius: 16px;
+  border-radius: 12px;
   padding: 5px;
   box-shadow: var(--shadow-surface);
   transition: border-color 0.18s ease, box-shadow 0.18s ease,
@@ -7798,7 +7806,7 @@ button.run-badge-clickable:focus-visible {
   background: transparent;
   color: var(--text-muted);
   border: none;
-  border-radius: 8px;
+  border-radius: var(--md-button-radius);
   font-size: calc(16px * var(--app-font-scale));
   cursor: pointer;
   flex-shrink: 0;
@@ -7918,7 +7926,7 @@ button.run-badge-clickable:focus-visible {
   background: transparent;
   color: var(--text-muted);
   border: none;
-  border-radius: 8px;
+  border-radius: var(--md-button-radius);
   cursor: pointer;
   transition: background 0.15s ease, color 0.15s ease, opacity 0.15s ease;
 }
@@ -7996,20 +8004,24 @@ button.run-badge-clickable:focus-visible {
   align-items: center;
   justify-content: center;
   padding: 0 16px;
-  background: var(--accent);
-  color: white;
-  border: none;
-  border-radius: 8px;
+  background: var(--md-primary);
+  color: var(--md-on-primary);
+  border: 1px solid transparent;
+  border-radius: var(--md-button-radius);
   font-size: calc(13px * var(--app-font-scale));
   font-weight: 600;
   cursor: pointer;
   white-space: nowrap;
   line-height: 1;
-  transition: background 0.15s, opacity 0.15s;
+  transition:
+    background-color 180ms var(--md-motion-standard),
+    border-color 180ms var(--md-motion-standard),
+    color 180ms var(--md-motion-standard),
+    opacity 180ms var(--md-motion-standard);
 }
 
 .send-btn:hover:not(:disabled) {
-  background: #6a5acd;
+  background: color-mix(in srgb, var(--md-on-primary) var(--md-state-hover), var(--md-primary));
 }
 
 .send-btn:disabled {
@@ -8018,23 +8030,30 @@ button.run-badge-clickable:focus-visible {
 }
 
 .send-btn.queue {
-  background: #7b68ee;
+  background: transparent;
+  color: var(--md-primary);
+  border-color: var(--md-outline);
 }
 .send-btn.queue:hover:not(:disabled) {
-  background: #6a5acd;
+  background: color-mix(in srgb, var(--md-primary) var(--md-state-hover), transparent);
+  border-color: var(--md-primary);
 }
 
 .send-btn.steer {
-  background: #2f81f7;
+  background: var(--md-primary);
+  color: var(--md-on-primary);
 }
 .send-btn.steer:hover:not(:disabled) {
-  background: #1f6feb;
+  background: color-mix(in srgb, var(--md-on-primary) var(--md-state-hover), var(--md-primary));
 }
 .send-btn.interrupt {
-  background: #e05555;
+  background: color-mix(in srgb, var(--warning) 12%, transparent);
+  color: var(--warning);
+  border-color: color-mix(in srgb, var(--warning) 42%, transparent);
 }
 .send-btn.interrupt:hover:not(:disabled) {
-  background: #c04444;
+  background: color-mix(in srgb, var(--warning) 20%, transparent);
+  border-color: color-mix(in srgb, var(--warning) 64%, transparent);
 }
 
 .mobile-steer-actions {
@@ -8131,7 +8150,7 @@ button.run-badge-clickable:focus-visible {
 }
 .schedule-popover-submit {
   padding: 8px 12px;
-  border-radius: 8px;
+  border-radius: var(--md-button-radius);
   border: none;
   background: var(--accent, #7b68ee);
   color: white;
@@ -8154,7 +8173,7 @@ button.run-badge-clickable:focus-visible {
   padding: 0 16px;
   font-size: calc(13px * var(--app-font-scale));
   font-weight: 600;
-  border-radius: 8px;
+  border-radius: var(--md-button-radius);
   flex-shrink: 0;
   line-height: 1;
 }
@@ -8181,7 +8200,7 @@ button.run-badge-clickable:focus-visible {
   padding: 8px 6px;
   background: transparent;
   border: none;
-  border-radius: 8px;
+  border-radius: var(--md-button-radius);
   font-size: calc(12px * var(--app-font-scale));
   font-weight: 700;
   cursor: pointer;
@@ -8213,7 +8232,7 @@ button.run-badge-clickable:focus-visible {
   padding: 0;
   background: transparent;
   border: none;
-  border-radius: 8px;
+  border-radius: var(--md-button-radius);
   font-size: calc(18px * var(--app-font-scale));
   cursor: pointer;
   color: var(--text-muted);
@@ -8823,7 +8842,7 @@ button.run-badge-clickable:focus-visible {
     --input-action-height: 40px;
     gap: 4px;
     padding: 5px;
-    border-radius: 16px;
+    border-radius: 12px;
   }
 }
 .queued-prompt-edit-input {
@@ -21755,7 +21774,7 @@ button.progress-inflight {
 .harness-profile-rail-item {
   min-height: var(--md-control-height);
   border: 0;
-  border-radius: var(--md-shape-lg);
+  border-radius: var(--md-button-radius);
   color: var(--md-on-surface-variant);
   transition:
     background-color 180ms var(--md-motion-standard),
@@ -21848,14 +21867,16 @@ button.progress-inflight {
   background: color-mix(in srgb, var(--md-on-surface) var(--md-state-hover), transparent);
 }
 
-.setup-btn,
 .setup-cancel-btn,
 .setup-save-btn,
+.btn-primary,
+.btn-secondary,
+.btn-warning,
 .an-btn,
 .native-import-btn,
 .communication-chat-send {
   min-height: var(--md-control-height);
-  border-radius: var(--md-shape-lg);
+  border-radius: var(--md-button-radius);
   padding-inline: 16px;
   font-weight: 600;
   transition:
@@ -21931,13 +21952,13 @@ button.progress-inflight {
 
 .setup-mode-toggle {
   padding: 4px;
-  border-radius: var(--md-shape-lg);
+  border-radius: calc(var(--md-button-radius) + 4px);
   background: var(--md-surface-container);
 }
 
 .setup-mode-btn {
   min-height: var(--md-control-height);
-  border-radius: calc(var(--md-shape-lg) - 4px);
+  border-radius: var(--md-button-radius);
 }
 
 .setup-mode-btn.active {
