@@ -1485,12 +1485,6 @@ def _run_import(
                     status.errors.append({"key": sess.registry_key, "error": str(exc)})
                     logger.exception("native_import: failed %s", sess.registry_key)
             _persist_job(status)  # checkpoint so a crash here resumes cleanly
-        # An all-projects import enumerated sessions regardless of configured
-        # projects, so the repair must not re-apply a project scope filter —
-        # doing so would delete every imported session whose cwd lives outside
-        # a configured project (the common case). [] disables scope deletion
-        # while keeping prompt/timestamp/registry pruning; a scoped job still
-        # repairs against the loaded project set.
         repair_imported_roots([] if status.all_projects else None)
         status.status = "done"
     except Exception:
