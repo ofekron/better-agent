@@ -39,6 +39,7 @@ if _BACKEND not in sys.path:
 from provider import default_provider  # noqa: E402
 from provider_claude import _runs_root  # noqa: E402
 from provider_codex import CodexProvider  # noqa: E402
+from run_recovery import _should_retry_transient  # noqa: E402
 from ingestion_versions import CLAUDE_INGESTION_VERSION  # noqa: E402
 
 PASS = "\x1b[32mPASS\x1b[0m"
@@ -242,6 +243,45 @@ def test_codex_orphaned_live_cli_reattaches() -> bool:
     return True
 
 
+def test_dead_codex_with_tool_progress_is_recoverable_partial() -> bool:
+    run_id = _seed_codex_run(
+        runner_pid=_spawn_dead_pid(), cli_pid=_spawn_dead_pid(),
+    )
+    run_dir = _runs_root() / run_id
+    rollout = run_dir / "codex-rollout.jsonl"
+    rollout.write_text(json.dumps({
+        "type": "response_item",
+        "payload": {
+            "type": "custom_tool_call_output",
+            "call_id": "call-once",
+            "output": "side effect completed",
+        },
+    }) + "\n", encoding="utf-8")
+    expected_sid = json.loads((run_dir / "state.json").read_text())["session_id"]
+
+    recovered = CodexProvider({"id": "codex-test"}).recover_in_flight(
+        run_id_filter={run_id},
+    )
+    desc = next((d for d in recovered if d.get("run_id") == run_id), None)
+    complete = json.loads((run_dir / "complete.json").read_text())
+    if desc is None or desc.get("recovered_as") != "completed_from_rollout":
+        print(f"  expected completed_from_rollout descriptor, got {desc!r}")
+        return False
+    if complete.get("outcome") != "recoverable_partial":
+        print(f"  expected recoverable_partial, got {complete!r}")
+        return False
+    if complete.get("success") is not False or complete.get("recoverable") is not True:
+        print(f"  invalid recoverable completion envelope: {complete!r}")
+        return False
+    if complete.get("session_id") != expected_sid:
+        print("  recoverable partial lost the native Codex session id")
+        return False
+    if _should_retry_transient(run_dir, None):
+        print("  recovery would replay the original prompt after tool progress")
+        return False
+    return True
+
+
 def test_both_dead_is_dead_orphan() -> bool:
     run_id = _seed_claude_run(
         runner_pid=_spawn_dead_pid(), cli_pid=_spawn_dead_pid(), stale_jsonl=False,
@@ -261,6 +301,7 @@ TESTS = [
     ("recycled pid + stale jsonl → dead_orphan", test_reused_pid_not_reattached),
     ("inode mismatch → dead_orphan", test_inode_mismatch_not_reattached),
     ("codex orphaned live CLI re-attaches (not dead_orphan)", test_codex_orphaned_live_cli_reattaches),
+    ("dead Codex tool progress becomes recoverable partial", test_dead_codex_with_tool_progress_is_recoverable_partial),
     ("wrapper + CLI both dead → dead_orphan", test_both_dead_is_dead_orphan),
 ]
 

@@ -759,6 +759,76 @@ def test_resume_dynamic_tools_use_only_missing_rollout_tools() -> None:
     assert malformed_error == runner_codex.CODEX_RESUME_CAPABILITY_METADATA_UNAVAILABLE
 
 
+def test_resume_supplies_all_dynamic_tools_when_session_meta_omits_them() -> None:
+    desired = [
+        {"name": "mssg", "description": "Send", "inputSchema": {"type": "object"}},
+        {"name": "inbox", "description": "Read", "inputSchema": {"type": "object"}},
+    ]
+    with tempfile.TemporaryDirectory() as tmp:
+        rollout = Path(tmp) / "rollout.jsonl"
+        rollout.write_text(
+            json.dumps({
+                "type": "session_meta",
+                "payload": {
+                    "id": "019fa434-ed1e-7c31-ad76-5a7156851517",
+                    "timestamp": "2026-07-27T15:32:39.000Z",
+                    "originator": "codex_cli_rs",
+                    "cli_version": "0.0.0",
+                    "source": "app_server",
+                    "model_provider": "openai",
+                    "cwd": "/tmp/project",
+                },
+            }) + "\n",
+            encoding="utf-8",
+        )
+
+        first, first_error = runner_codex._dynamic_tools_missing_from_rollout(
+            rollout, desired,
+        )
+        repeated, repeated_error = runner_codex._dynamic_tools_missing_from_rollout(
+            rollout, desired,
+        )
+
+    assert first == desired
+    assert first_error is None
+    assert repeated == desired
+    assert repeated_error is None
+
+
+def test_resume_rejects_present_invalid_dynamic_tool_metadata() -> None:
+    desired = [{"name": "mssg", "description": "Send", "inputSchema": {"type": "object"}}]
+    invalid_values = [None, {}, "unknown"]
+    with tempfile.TemporaryDirectory() as tmp:
+        rollout = Path(tmp) / "rollout.jsonl"
+        for invalid in invalid_values:
+            rollout.write_text(
+                json.dumps({
+                    "type": "session_meta",
+                    "payload": {"dynamic_tools": invalid},
+                }) + "\n",
+                encoding="utf-8",
+            )
+            missing, error = runner_codex._dynamic_tools_missing_from_rollout(
+                rollout, desired,
+            )
+            assert missing == []
+            assert error == runner_codex.CODEX_RESUME_CAPABILITY_METADATA_UNAVAILABLE
+
+        rollout.write_text(
+            json.dumps({
+                "type": "session_meta",
+                "payload": {"dynamic_tools": [desired[0], desired[0] | {"description": "Changed"}]},
+            }) + "\n",
+            encoding="utf-8",
+        )
+        duplicate, duplicate_error = runner_codex._dynamic_tools_missing_from_rollout(
+            rollout, desired,
+        )
+
+    assert duplicate == []
+    assert duplicate_error == runner_codex.CODEX_RESUME_CAPABILITY_METADATA_UNAVAILABLE
+
+
 def test_resume_ignores_codex_added_rollout_fields() -> None:
     """Codex stamps its own `type`/`deferLoading` defaults into session_meta.
 

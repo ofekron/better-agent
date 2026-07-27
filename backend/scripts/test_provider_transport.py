@@ -284,6 +284,7 @@ def test_profile_settings_and_session_reach_transport_extension():
             provider_id="p",
             provider_kind="claude",
             provider_mode="subscription",
+            run_id="run-identity-123",
             session_id="session-1",
             resolved_harness_run_config={
                 "extension_setting_overlays": {
@@ -297,7 +298,34 @@ def test_profile_settings_and_session_reach_transport_extension():
             },
         )
     assert captured["session_id"] == "session-1"
+    assert captured["run_id"] == "run-identity-123"
+    assert captured["version"] == 2
     assert captured["extension_settings"] == {"zeroing_enabled": True}
+
+
+def test_run_id_validation_rejects_paths_but_auth_calls_may_omit_identity():
+    with (
+        patch.object(provider_transport.extension_store, "provider_transport_hooks", return_value=[("x", "/transport")]),
+        patch.object(provider_transport, "invoke_extension_backend_sync", return_value=response()),
+    ):
+        try:
+            provider_transport.apply_provider_transport(
+                {},
+                provider_id="p",
+                provider_kind="codex",
+                provider_mode="subscription",
+                run_id="../escaped-run",
+            )
+        except provider_transport.ProviderTransportError:
+            pass
+        else:
+            raise AssertionError("unsafe run_id reached provider transport extension")
+        provider_transport.apply_provider_transport(
+            {},
+            provider_id="p",
+            provider_kind="codex",
+            provider_mode="subscription",
+        )
 
 
 def test_each_local_provider_executes_run_transport_finalizer():
@@ -322,6 +350,7 @@ def test_each_local_provider_executes_run_transport_finalizer():
             }
             env = instance.finalize_run_env(
                 instance.build_env(),
+                run_id=f"run-{spec.kind}-123",
                 app_session_id="session-1",
                 resolved_harness_run_config={},
             )
@@ -331,8 +360,13 @@ def test_each_local_provider_executes_run_transport_finalizer():
                 assert env[spec.transport_gateway_env].startswith("http://127.0.0.1:18889/"), spec.kind
             assert any(
                 "finalize_run_env(" in inspect.getsource(base)
+                and "run_id=run_id" in inspect.getsource(base)
                 for base in provider_class.__mro__
-                if inspect.isclass(base) and base.__module__.startswith("provider_")
+                if (
+                    inspect.isclass(base)
+                    and base is not provider.Provider
+                    and base.__module__.startswith("provider_")
+                )
             ), spec.kind
 
 
@@ -352,5 +386,6 @@ if __name__ == "__main__":
     test_disabled_hook_strips_stale_managed_transport_environment()
     test_active_hook_failure_is_strict()
     test_profile_settings_and_session_reach_transport_extension()
+    test_run_id_validation_rejects_paths_but_auth_calls_may_omit_identity()
     test_each_local_provider_executes_run_transport_finalizer()
     print("provider transport tests passed")

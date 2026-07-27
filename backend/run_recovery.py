@@ -2542,6 +2542,8 @@ def _should_retry_transient(
         payload = json.loads(complete_path.read_text(encoding="utf-8"))
     except Exception:
         return False
+    if payload.get("recoverable") is True:
+        return False
     if payload.get("success"):
         return False
 

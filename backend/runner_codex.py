@@ -47,6 +47,7 @@ from codex_normalize import (
 )
 from codex_usage import token_usage_from_codex_usage
 import codex_rate_limits
+from provider_completion import recoverable_partial_payload
 from codex_agent_tree import (
     resolve_rollout_path_for_join as _resolve_rollout_path_for_join,
     wait_for_agent_tree_terminal as _wait_codex_agent_tree_terminal,
@@ -229,6 +230,8 @@ def _dynamic_tool_contracts_from_rollout(path: Path) -> Optional[dict[str, dict]
                 payload = row.get("payload")
                 if not isinstance(payload, dict):
                     return None
+                if "dynamic_tools" not in payload:
+                    return {}
                 raw_tools = payload.get("dynamic_tools")
                 if not isinstance(raw_tools, list):
                     return None
@@ -3065,7 +3068,8 @@ _NETWORK_ERROR_PATTERN = re.compile(
     r"(?:"
     r"ECONNREFUSED|ECONNRESET|ETIMEDOUT|EPIPE|"
     r"ENOTFOUND|EAI_NONAME|getaddrinfo|could not resolve|"
-    r"socket hang up|network error|"
+    r"socket hang up|network error|connection reset|connection refused|"
+    r"websocket.*(?:closed|reset|refused)|"
     r"connect ETIMEDOUT|connect ECONNREFUSED|"
     r"TLS handshake|SSL handshake|"
     r"HTTP 50[23]|HTTP 429|"
@@ -3077,6 +3081,61 @@ _NETWORK_ERROR_PATTERN = re.compile(
 
 def _is_network_error_message(msg: str) -> bool:
     return bool(_NETWORK_ERROR_PATTERN.search(msg))
+
+
+_ROLLOUT_PROGRESS_ITEM_TYPES = frozenset({
+    "computer_call",
+    "custom_tool_call",
+    "custom_tool_call_output",
+    "function_call",
+    "function_call_output",
+    "local_shell_call",
+    "mcp_tool_call",
+    "reasoning",
+})
+
+
+def _rollout_progress_seen(rollout_path: Optional[str], *, byte_offset: int) -> bool:
+    if not rollout_path:
+        return False
+    try:
+        with Path(rollout_path).open("rb") as stream:
+            stream.seek(max(0, byte_offset))
+            for raw in stream:
+                if not raw.endswith(b"\n"):
+                    break
+                try:
+                    row = json.loads(raw)
+                except (TypeError, json.JSONDecodeError):
+                    continue
+                payload = row.get("payload") if isinstance(row, dict) else None
+                if not isinstance(payload, dict):
+                    continue
+                if _codex_primary_assistant_text(row):
+                    return True
+                if payload.get("type") in _ROLLOUT_PROGRESS_ITEM_TYPES:
+                    return True
+    except OSError:
+        return False
+    return False
+
+
+def _should_preserve_recoverable_partial(
+    *,
+    error: Optional[str],
+    cancelled: bool,
+    turn_completed_seen: bool,
+    native_session_id: Optional[str],
+    progress_seen: bool,
+) -> bool:
+    return bool(
+        error
+        and not cancelled
+        and not turn_completed_seen
+        and native_session_id
+        and progress_seen
+        and _is_network_error_message(error)
+    )
 
 
 def _sum_usage(a: Optional[dict], b: Optional[dict]) -> dict:
@@ -3235,6 +3294,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
                 raise asyncio.CancelledError()
             await asyncio.sleep(min(0.5, deadline - _time.monotonic()))
 
+    partial_cause: Optional[str] = None
     while True:
         discovered_sid: Optional[str] = None
         total_usage: dict = {}
@@ -3629,6 +3689,23 @@ async def _run(run_dir: Path, inputs: dict) -> int:
         # (no assistant output at all) may fail a completed turn.
 
         # Network retry check
+        native_session_id = discovered_sid or session_id or state.get("session_id")
+        progress_seen = bool(assistant_seen or total_usage) or _rollout_progress_seen(
+            state.get("rollout_path"),
+            byte_offset=attempt_start_byte or (state.get("pre_query_byte_offset") or 0),
+        )
+        if _should_preserve_recoverable_partial(
+            error=error,
+            cancelled=cancelled,
+            turn_completed_seen=turn_completed_seen,
+            native_session_id=native_session_id,
+            progress_seen=progress_seen,
+        ):
+            partial_cause = error
+            discovered_sid = str(native_session_id)
+            total_usage = _sum_usage(_accumulated_usage, total_usage)
+            break
+
         if error and not cancelled and _is_network_error_message(error):
             if total_usage:
                 _accumulated_usage = _sum_usage(_accumulated_usage, total_usage)
@@ -3661,13 +3738,20 @@ async def _run(run_dir: Path, inputs: dict) -> int:
 
     final_success = success and not cancelled and not error
 
-    complete = {
-        "success": final_success,
-        "session_id": discovered_sid,
-        "error": error,
-        "token_usage": total_usage or None,
-        "finished_at": datetime.now().isoformat(),
-    }
+    if partial_cause and discovered_sid:
+        complete = recoverable_partial_payload(
+            session_id=discovered_sid,
+            cause=partial_cause,
+            token_usage=total_usage,
+        )
+    else:
+        complete = {
+            "success": final_success,
+            "session_id": discovered_sid,
+            "error": error,
+            "token_usage": total_usage or None,
+            "finished_at": datetime.now().isoformat(),
+        }
     try:
         (run_dir / "complete.json").write_text(json.dumps(complete, indent=2), encoding="utf-8")
     except Exception:

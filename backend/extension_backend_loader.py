@@ -8,6 +8,7 @@ import logging
 import math
 import os
 import queue
+import re
 import subprocess
 import sys
 import threading
@@ -24,6 +25,7 @@ from starlette.requests import ClientDisconnect
 from env_compat import dual_env_many
 import extension_store
 import perf
+from paths import ba_home
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +57,23 @@ _BLOCKED_RESPONSE_HEADERS = {
 }
 _METHODS_WITH_REQUEST_BODY = {"POST", "PUT", "PATCH", "DELETE"}
 _EMPTY_B64 = ""
+_EXTENSION_ID_RE = re.compile(r"^[a-z0-9][a-z0-9.-]{0,127}$")
+
+
+def _stable_extension_paths(extension_id: str) -> tuple[Path, Path]:
+    if _EXTENSION_ID_RE.fullmatch(extension_id) is None:
+        raise RuntimeError("extension id is unsafe for stable storage")
+    roots = (
+        ba_home() / "extension-state" / extension_id,
+        ba_home() / "extension-data" / extension_id,
+    )
+    resolved: list[Path] = []
+    for path in roots:
+        path.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if path.is_symlink():
+            raise RuntimeError("extension stable path is unsafe")
+        resolved.append(path.resolve())
+    return resolved[0], resolved[1]
 
 
 def _resolve_host_timeout(spec: dict[str, Any], path: str) -> float:
@@ -259,9 +278,12 @@ def _spawn_persistent_proc(spec: dict[str, Any], base_url: str) -> Any:
     loaded once inside the host; subsequent stdin lines are requests. Blocking —
     run in an executor thread, never on the event loop."""
     host = Path(__file__).with_name("extension_backend_host.py")
+    state_path, data_path = _stable_extension_paths(str(spec["extension_id"]))
     spec_payload = {
         "extension_id": spec["extension_id"],
         "install_path": spec["install_path"],
+        "state_path": str(state_path),
+        "data_path": str(data_path),
         "entrypoint": spec["entrypoint"],
         "entrypoint_kind": spec.get("entrypoint_kind") or "file",
         "source": spec["source"],

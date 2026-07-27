@@ -378,6 +378,7 @@ class CopilotProvider(SessionEventsProvider):
         try:
             env = self.finalize_run_env(
                 self.build_env(),
+                run_id=run_id,
                 app_session_id=app_session_id,
                 resolved_harness_run_config=resolved_harness_run_config,
             )

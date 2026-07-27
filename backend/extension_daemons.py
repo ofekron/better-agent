@@ -23,6 +23,7 @@ import os
 import subprocess
 import sys
 import threading
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -32,7 +33,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 from daemonhost.host import scrubbed_env  # noqa: E402
 from daemonhost.jsonio import read_json, write_json  # noqa: E402
-from daemonhost.paths import registry_path, state_path  # noqa: E402
+from daemonhost.paths import daemon_root, registry_path, state_path  # noqa: E402
 
 import extension_store  # noqa: E402
 
@@ -43,6 +44,31 @@ _BUILTIN_SWITCH_MANIFEST = _REPO_ROOT / "extensions" / "switch-control" / "bette
 
 def _daemon_key(extension_id: str, name: str) -> str:
     return f"{extension_id}:{name}"
+
+
+def _is_drained(key: str, entry: dict[str, Any]) -> bool:
+    generation = str(entry.get("generation") or "")
+    if not generation:
+        return False
+    path = daemon_root(str(entry["extension_id"]), str(entry["name"])) / "lifecycle.json"
+    try:
+        payload = read_json(path)
+    except OSError:
+        return False
+    return (
+        payload.get("generation") == generation
+        and payload.get("state") == "drained"
+    )
+
+
+def _drain_or_remove(entries: dict[str, Any], key: str) -> None:
+    existing = entries.get(key)
+    if not isinstance(existing, dict):
+        return
+    if existing.get("retire_policy") != "drain" or _is_drained(key, existing):
+        entries.pop(key, None)
+        return
+    entries[key] = {**existing, "desired_state": "draining"}
 
 
 def _declared_daemons() -> list[tuple[str, dict[str, Any], dict[str, Any]]]:
@@ -84,7 +110,7 @@ def publish_registry() -> dict[str, Any]:
             continue
         desired_keys.setdefault(extension_id, set()).add(key)
         if not extension_store.is_extension_active(extension_id):
-            entries.pop(key, None)
+            _drain_or_remove(entries, key)
             continue
         source_root = extension_store.runtime_package_root(extension_id)
         if source_root is None:
@@ -92,11 +118,15 @@ def publish_registry() -> dict[str, Any]:
             continue
         available_ids.add(extension_id)
         source_root = extension_store.supervisor_daemon_package_root(extension_id, source_root)
+        generation = str((entries.get(key) or {}).get("generation") or uuid.uuid4().hex)
         entries[key] = {
             "extension_id": extension_id,
             "name": spec["name"],
             "module": spec["module"],
             "lifecycle": "supervisor",
+            "retire_policy": spec.get("retire_policy") or "immediate",
+            "desired_state": "active",
+            "generation": generation,
             "restart_policy": spec.get("restart_policy") or {},
             "env_allowlist": spec.get("env_allowlist") or [],
             "ports": spec.get("ports") or [],
@@ -108,10 +138,10 @@ def publish_registry() -> dict[str, Any]:
     for key in list(entries):
         extension_id = str(entries[key].get("extension_id") or "")
         if extension_id in available_ids and key not in desired_keys.get(extension_id, set()):
-            del entries[key]
+            _drain_or_remove(entries, key)
             continue
         if extension_id not in known_ids and extension_store.get_extension(extension_id) is None:
-            del entries[key]
+            _drain_or_remove(entries, key)
     write_json(registry_path(), {"daemons": entries})
     return entries
 

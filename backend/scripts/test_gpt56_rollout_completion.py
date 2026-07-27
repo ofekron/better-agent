@@ -20,9 +20,12 @@ from runner_codex import (  # noqa: E402
     _await_pending_tool_calls,
     _forward_rollout_terminal,
     _rollout_attempt_boundary,
+    _rollout_progress_seen,
     _settle_app_server_process,
+    _should_preserve_recoverable_partial,
     _wait_codex_agent_tree_terminal,
 )
+from provider_completion import recoverable_partial_payload  # noqa: E402
 
 
 def _event(payload: dict) -> str:
@@ -475,6 +478,46 @@ def test_resumed_session_requires_proven_boundary() -> None:
     assert "not cancelled and attempt_boundary_known" in source
 
 
+def test_transport_truncation_after_tool_progress_is_recoverable_without_replay() -> None:
+    native_session_id = "019fa434-ed1e-7c31-ad76-5a7156851517"
+    with tempfile.TemporaryDirectory() as tmp:
+        rollout = Path(tmp) / "rollout.jsonl"
+        rollout.write_text(
+            json.dumps({
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call",
+                    "name": "exec_command",
+                    "call_id": "call-once",
+                },
+            }) + "\n",
+            encoding="utf-8",
+        )
+        progress_seen = _rollout_progress_seen(str(rollout), byte_offset=0)
+
+    preserve = _should_preserve_recoverable_partial(
+        error="WebSocket connection reset by peer",
+        cancelled=False,
+        turn_completed_seen=False,
+        native_session_id=native_session_id,
+        progress_seen=progress_seen,
+    )
+    complete = recoverable_partial_payload(
+        session_id=native_session_id,
+        cause="WebSocket connection reset by peer",
+    )
+
+    assert preserve is True
+    assert complete["success"] is False
+    assert complete["outcome"] == "recoverable_partial"
+    assert complete["recoverable"] is True
+    assert complete["session_id"] == native_session_id
+    source = (BACKEND / "runner_codex.py").read_text(encoding="utf-8")
+    assert source.index("if _should_preserve_recoverable_partial(") < source.index(
+        "if error and not cancelled and _is_network_error_message(error):"
+    )
+
+
 async def main() -> None:
     await test_live_app_server_completes_from_rollout()
     await test_live_app_server_marks_tool_only_rollout_completion()
@@ -488,6 +531,7 @@ async def main() -> None:
     await test_parent_terminal_waits_for_recursive_agent_tree()
     await test_rollout_completion_never_signals_or_kills()
     test_resumed_session_requires_proven_boundary()
+    test_transport_truncation_after_tool_progress_is_recoverable_without_replay()
 
 
 if __name__ == "__main__":

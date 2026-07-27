@@ -16,7 +16,7 @@ from paths import ba_home
 from provider_manifest import spec_for
 
 
-CONTRACT_VERSION = 1
+CONTRACT_VERSION = 2
 _MAX_CA_BYTES = 64 * 1024
 _LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
 _PROXY_ENV_KEYS = ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy")
@@ -28,6 +28,7 @@ _CA_ENV_KEYS = (
 )
 _LOCK = threading.Lock()
 _PROXY_TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+_RUN_ID_RE = re.compile(r"^[A-Za-z0-9_-]{8,128}$")
 
 
 class ProviderTransportError(RuntimeError):
@@ -172,6 +173,7 @@ def _request_payload(
     provider_id: str,
     provider_kind: str,
     provider_mode: str,
+    run_id: str,
     session_id: str,
     resolved_harness_run_config: dict | None,
 ) -> bytes:
@@ -204,12 +206,23 @@ def _request_payload(
         for key, item in (extension_overlays or {}).items()
         if isinstance(key, str) and isinstance(item, dict) and "value" in item
     }
+    normalized_run_id = run_id if isinstance(run_id, str) else ""
+    if (
+        run_id not in ("", None)
+        and (
+            not isinstance(run_id, str)
+            or normalized_run_id != normalized_run_id.strip()
+            or _RUN_ID_RE.fullmatch(normalized_run_id) is None
+        )
+    ):
+        raise ProviderTransportError("provider transport run_id is invalid")
     return json.dumps(
         {
             "version": CONTRACT_VERSION,
             "provider_id": provider_id,
             "provider_kind": provider_kind,
             "provider_mode": provider_mode,
+            "run_id": normalized_run_id,
             "session_id": str(session_id or ""),
             "extension_settings": extension_settings,
             "gateway_env": gateway_env or "",
@@ -225,6 +238,7 @@ def apply_provider_transport(
     provider_id: str,
     provider_kind: str,
     provider_mode: str,
+    run_id: str = "",
     session_id: str = "",
     resolved_harness_run_config: dict | None = None,
 ) -> dict[str, str]:
@@ -243,6 +257,7 @@ def apply_provider_transport(
             provider_id=provider_id,
             provider_kind=provider_kind,
             provider_mode=provider_mode,
+            run_id=run_id,
             session_id=session_id,
             resolved_harness_run_config=resolved_harness_run_config,
         ),
@@ -253,7 +268,7 @@ def apply_provider_transport(
         payload = json.loads(body or b"{}")
     except (TypeError, ValueError) as exc:
         raise ProviderTransportError("provider transport returned invalid JSON") from exc
-    if not isinstance(payload, dict) or payload.get("version") != CONTRACT_VERSION:
+    if not isinstance(payload, dict) or payload.get("version") not in {1, CONTRACT_VERSION}:
         raise ProviderTransportError("provider transport contract version mismatch")
     if payload.get("enabled") is not True:
         return _strip_managed_transport_env(env, provider_kind=provider_kind)

@@ -11,23 +11,30 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, FastAPI
+from paths import ba_home
 
 
 @dataclass(frozen=True)
 class ExtensionBackendContext:
     extension_id: str
     install_path: Path
+    state_path: Path
+    data_path: Path
     source: dict[str, str]
 
 
 def _load_router(
     extension_id: str,
     install_path: Path,
+    state_path: Path,
+    data_path: Path,
     entrypoint: str,
     entrypoint_kind: str,
     source: dict[str, str],
 ) -> APIRouter:
     install_path = install_path.resolve()
+    state_path = _validated_stable_path(state_path, extension_id, "extension-state")
+    data_path = _validated_stable_path(data_path, extension_id, "extension-data")
     _prepare_import_path(install_path)
 
     if entrypoint_kind == "module":
@@ -50,12 +57,24 @@ def _load_router(
         ExtensionBackendContext(
             extension_id=extension_id,
             install_path=install_path,
+            state_path=state_path,
+            data_path=data_path,
             source=source,
         )
     )
     if not isinstance(router, APIRouter):
         raise RuntimeError("create_router(context) must return fastapi.APIRouter")
     return router
+
+
+def _validated_stable_path(path: Path, extension_id: str, root_name: str) -> Path:
+    resolved = path.resolve()
+    expected = (ba_home() / root_name / extension_id).resolve()
+    if resolved != expected:
+        raise RuntimeError("extension stable path has invalid ownership")
+    if not resolved.is_dir() or path.is_symlink():
+        raise RuntimeError("extension stable path is unavailable")
+    return resolved
 
 
 def _prepare_import_path(install_path: Path) -> None:
@@ -149,12 +168,22 @@ async def _run_asgi(app: FastAPI, payload: dict[str, Any]) -> tuple[dict[str, An
 async def _main_async() -> int:
     payload = json.loads(sys.stdin.buffer.read().decode("utf-8"))
     install_path = Path(str(payload["install_path"]))
+    state_path = Path(str(payload["state_path"]))
+    data_path = Path(str(payload["data_path"]))
     entrypoint = str(payload["entrypoint"])
     entrypoint_kind = str(payload.get("entrypoint_kind") or "file")
     source = {str(key): str(value) for key, value in dict(payload.get("source") or {}).items()}
     app = FastAPI()
     app.include_router(
-        _load_router(str(payload["extension_id"]), install_path, entrypoint, entrypoint_kind, source)
+        _load_router(
+            str(payload["extension_id"]),
+            install_path,
+            state_path,
+            data_path,
+            entrypoint,
+            entrypoint_kind,
+            source,
+        )
     )
     result, _, _, _ = await _run_asgi(app, payload)
     sys.stdout.write(json.dumps(result, separators=(",", ":")))
@@ -184,6 +213,8 @@ async def _serve_persistent() -> int:
         _load_router(
             str(spec["extension_id"]),
             Path(str(spec["install_path"])),
+            Path(str(spec["state_path"])),
+            Path(str(spec["data_path"])),
             str(spec["entrypoint"]),
             str(spec.get("entrypoint_kind") or "file"),
             {str(key): str(value) for key, value in dict(spec.get("source") or {}).items()},

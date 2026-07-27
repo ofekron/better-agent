@@ -667,6 +667,7 @@ class Provider(ABC):
         self,
         env: dict[str, str],
         *,
+        run_id: str,
         app_session_id: str,
         resolved_harness_run_config: Optional[dict],
     ) -> dict[str, str]:
@@ -677,6 +678,7 @@ class Provider(ABC):
             provider_id=self.id,
             provider_kind=str(self.record.get("kind") or self.KIND),
             provider_mode=str(self.record.get("mode") or ""),
+            run_id=run_id,
             session_id=app_session_id,
             resolved_harness_run_config=resolved_harness_run_config,
         )

@@ -55,6 +55,7 @@ from runs_dir import (
 from ingestion_versions import CODEX_INGESTION_VERSION, marker_matches_current
 from codex_normalize import _codex_terminal_state
 from codex_usage import token_usage_from_codex_usage
+from provider_completion import recoverable_partial_payload
 
 logger = logging.getLogger(__name__)
 
@@ -206,6 +207,33 @@ def _read_run_rollout_complete(run_dir: Path, session_id: Optional[str]) -> Opti
         start_byte=_run_start_byte(bs, rs_disk),
         session_id=sid,
     )
+
+
+def _read_run_rollout_partial(
+    run_dir: Path, session_id: Optional[str], *, cause: str,
+) -> Optional[dict[str, Any]]:
+    bs: dict = {}
+    rs_disk: dict = {}
+    for target, path in (
+        (bs, run_dir / "backend_state.json"),
+        (rs_disk, run_dir / "state.json"),
+    ):
+        if not path.exists():
+            continue
+        try:
+            target.update(json.loads(path.read_text(encoding="utf-8")))
+        except (OSError, json.JSONDecodeError):
+            continue
+    sid = session_id or bs.get("session_id") or rs_disk.get("session_id")
+    jsonl_path = bs.get("jsonl_path") or rs_disk.get("jsonl_path") or rs_disk.get("rollout_path")
+    if not sid or not jsonl_path:
+        return None
+    from runner_codex import _rollout_progress_seen
+    if not _rollout_progress_seen(
+        str(jsonl_path), byte_offset=_run_start_byte(bs, rs_disk),
+    ):
+        return None
+    return recoverable_partial_payload(session_id=str(sid), cause=cause)
 
 
 def read_codex_run_rollout_events(run_dir: Path) -> list[dict[str, Any]]:
@@ -626,6 +654,7 @@ class CodexProvider(Provider):
         try:
             env = self.finalize_run_env(
                 self.build_env(),
+                run_id=run_id,
                 app_session_id=app_session_id,
                 resolved_harness_run_config=resolved_harness_run_config,
             )
@@ -1464,6 +1493,12 @@ class CodexProvider(Provider):
                     child,
                     bs.get("session_id") or rs_disk.get("session_id"),
                 )
+                if recovered_payload is None:
+                    recovered_payload = _read_run_rollout_partial(
+                        child,
+                        bs.get("session_id") or rs_disk.get("session_id"),
+                        cause="runner died before completion (recovered at startup)",
+                    )
                 if recovered_payload is not None:
                     try:
                         _atomic_write_json(complete_path, recovered_payload)

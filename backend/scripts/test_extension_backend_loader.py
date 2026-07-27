@@ -86,6 +86,8 @@ def _seed_extension() -> Path:
                 "        return {",
                 "            'extension_id': context.extension_id,",
                 "            'install_path': str(context.install_path),",
+                "            'state_path': str(context.state_path),",
+                "            'data_path': str(context.data_path),",
                 "            'source_repo_url': context.source.get('repo_url'),",
                 "            'source_extension_path': context.source.get('extension_path'),",
                 "        }",
@@ -458,6 +460,14 @@ def main() -> int:
         check(response.status_code == 200, "backend extension route dispatches after runtime install")
         check(response.json()["extension_id"] == "ofek.backend", "backend extension receives context")
         check(response.json()["source_repo_url"] == "https://example.test/extensions.git", "backend extension receives source repo")
+        check(
+            response.json()["state_path"].endswith("/extension-state/ofek.backend"),
+            "backend extension receives stable state path",
+        )
+        check(
+            response.json()["data_path"].endswith("/extension-data/ofek.backend"),
+            "backend extension receives stable data path",
+        )
         check(response.json()["source_extension_path"] == "extensions/backend", "backend extension receives source path")
         spec = extension_store.backend_entrypoint_spec("ofek.backend")
         assert spec is not None

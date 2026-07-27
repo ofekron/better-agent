@@ -2215,7 +2215,10 @@ def _validate_daemons(value: Any, *, extension_id: str) -> list[dict[str, Any]]:
     for item in value:
         if not isinstance(item, dict):
             raise ExtensionError("entrypoints.daemons entries must be objects")
-        unknown = sorted(set(item) - {"name", "module", "lifecycle", "restart_policy", "env_allowlist", "ports"})
+        unknown = sorted(set(item) - {
+            "name", "module", "lifecycle", "retire_policy",
+            "restart_policy", "env_allowlist", "ports",
+        })
         if unknown:
             raise ExtensionError(f"entrypoints.daemons entry has unknown keys: {', '.join(unknown)}")
         name = str(item.get("name") or "").strip()
@@ -2231,6 +2234,15 @@ def _validate_daemons(value: Any, *, extension_id: str) -> list[dict[str, Any]]:
         if lifecycle not in _DAEMON_LIFECYCLES:
             raise ExtensionError(
                 "entrypoints.daemons lifecycle must be one of: " + ", ".join(sorted(_DAEMON_LIFECYCLES))
+            )
+        retire_policy = str(item.get("retire_policy") or "immediate").strip()
+        if retire_policy not in {"immediate", "drain"}:
+            raise ExtensionError(
+                "entrypoints.daemons retire_policy must be one of: drain, immediate"
+            )
+        if retire_policy == "drain" and lifecycle != "supervisor":
+            raise ExtensionError(
+                "entrypoints.daemons retire_policy='drain' requires supervisor lifecycle"
             )
         restart_policy_raw = item.get("restart_policy") or {}
         if not isinstance(restart_policy_raw, dict):
@@ -2268,6 +2280,7 @@ def _validate_daemons(value: Any, *, extension_id: str) -> list[dict[str, Any]]:
                 "name": name,
                 "module": module,
                 "lifecycle": lifecycle,
+                "retire_policy": retire_policy,
                 "restart_policy": {"max_restarts": max_restarts, "backoff_seconds": backoff_seconds},
                 "env_allowlist": env_allowlist,
                 "ports": ports,

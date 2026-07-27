@@ -33,7 +33,7 @@ from daemonhost.install import (
     rollback_to_last_good,
 )
 from daemonhost.jsonio import read_json, write_json
-from daemonhost.paths import daemon_root, logs_root, registry_path, state_path
+from daemonhost.paths import ba_home, daemon_root, logs_root, registry_path, state_path
 from daemonhost.pointer import reconcile_startup
 
 _BACKEND = Path(__file__).resolve().parent.parent / "backend"
@@ -55,6 +55,8 @@ def scrubbed_env(env_allowlist: list[str]) -> dict[str, str]:
         value = os.environ.get(key)
         if value is not None:
             env[key] = value
+    env["BETTER_AGENT_HOME"] = str(ba_home())
+    env.pop("BETTER_CLAUDE_HOME", None)
     return env
 
 
@@ -72,6 +74,14 @@ class _Daemon:
     @property
     def root(self) -> Path:
         return daemon_root(self.spec["extension_id"], self.spec["name"])
+
+    @property
+    def lifecycle_path(self) -> Path:
+        return self.root / "lifecycle.json"
+
+    @property
+    def desired_path(self) -> Path:
+        return self.root / "desired.json"
 
 
 class DaemonHost:
@@ -101,12 +111,29 @@ class DaemonHost:
             if key not in desired:
                 self._retire(self._daemons.pop(key))
         for key, spec in desired.items():
-            daemon = self._daemons.get(key)
-            if daemon is None or daemon.spec != spec:
+            probe = _Daemon(key, spec)
+            if self._is_drained(probe):
+                daemon = self._daemons.pop(key, None)
                 if daemon is not None:
-                    self._stop_proc(daemon)
+                    self._retire(daemon)
+                continue
+            daemon = self._daemons.get(key)
+            if daemon is None:
                 daemon = _Daemon(key, spec)
                 self._daemons[key] = daemon
+            elif self._identity_spec(daemon.spec) != self._identity_spec(spec):
+                self._stop_proc(daemon)
+                daemon = _Daemon(key, spec)
+                self._daemons[key] = daemon
+            else:
+                daemon.spec = spec
+            write_json(
+                daemon.desired_path,
+                {
+                    "generation": daemon.spec.get("generation"),
+                    "state": daemon.spec.get("desired_state") or "active",
+                },
+            )
             self._tick(daemon)
         self._write_state()
 
@@ -124,6 +151,20 @@ class DaemonHost:
             for key, spec in entries.items()
             if isinstance(spec, dict) and spec.get("lifecycle") == "supervisor"
         }
+
+    @staticmethod
+    def _identity_spec(spec: dict[str, Any]) -> dict[str, Any]:
+        return {key: value for key, value in spec.items() if key != "desired_state"}
+
+    @staticmethod
+    def _is_drained(daemon: _Daemon) -> bool:
+        if daemon.spec.get("desired_state") != "draining":
+            return False
+        payload = read_json(daemon.lifecycle_path)
+        return (
+            payload.get("generation") == daemon.spec.get("generation")
+            and payload.get("state") == "drained"
+        )
 
     def _tick(self, daemon: _Daemon) -> None:
         proc = daemon.proc
@@ -177,6 +218,12 @@ class DaemonHost:
         env = scrubbed_env(daemon.spec.get("env_allowlist") or [])
         env["PYTHONPATH"] = str(copy)
         env["BETTER_AGENT_DAEMON"] = daemon.key
+        env["BETTER_AGENT_DAEMON_GENERATION"] = str(daemon.spec.get("generation") or "")
+        env["BETTER_AGENT_DAEMON_DESIRED_STATE"] = str(
+            daemon.spec.get("desired_state") or "active"
+        )
+        env["BETTER_AGENT_DAEMON_LIFECYCLE_PATH"] = str(daemon.lifecycle_path)
+        env["BETTER_AGENT_DAEMON_DESIRED_PATH"] = str(daemon.desired_path)
         logs_root().mkdir(parents=True, exist_ok=True)
         log_path = logs_root() / f"{daemon.key.replace(':', '.')}.log"
         try:

@@ -21,6 +21,12 @@ import paths
 _TMP = tempfile.mkdtemp(prefix="ba-daemons-surface-")
 paths.engage_test_home(_TMP)
 
+import _test_installation
+import installation_profile
+
+_test_installation.activate(Path(_TMP), provider="codex")
+installation_profile.capture_active_capabilities()
+
 import extension_store
 import extension_daemons
 from daemonhost.jsonio import read_json, write_json
@@ -52,6 +58,7 @@ def _rejects(manifest, needle):
 
 
 DAEMON = {"name": "worker", "module": "daemon.worker", "lifecycle": "supervisor"}
+DRAINING_DAEMON = {**DAEMON, "retire_policy": "drain"}
 
 # Valid manifest round-trips with defaults applied.
 validated = extension_store.validate_manifest(_manifest([DAEMON]))
@@ -76,6 +83,12 @@ _rejects(no_surface, "requires the 'daemons' surface")
 
 # Shape validation.
 _rejects(_manifest([{**DAEMON, "lifecycle": "forever"}]), "lifecycle")
+_rejects(_manifest([{**DAEMON, "retire_policy": "later"}]), "retire_policy")
+_rejects(
+    _manifest([{**DAEMON, "lifecycle": "backend", "retire_policy": "drain"}],
+              permissions={"daemons": "backend"}),
+    "requires supervisor lifecycle",
+)
 _rejects(_manifest([{**DAEMON, "ports": [8000]}]), "reserved")
 _rejects(_manifest([{**DAEMON, "ports": [80]}]), "1024..65535")
 _rejects(_manifest([{**DAEMON, "env_allowlist": ["bad-key"]}]), "invalid env keys")
@@ -119,13 +132,13 @@ source_root.mkdir(parents=True)
 records["test.daemons"] = {
     "enabled": True,
     "entitlement": {"status": "not_required"},
-    "manifest": extension_store.validate_manifest(_manifest([DAEMON])),
+    "manifest": extension_store.validate_manifest(_manifest([DRAINING_DAEMON])),
     "_root": source_root,
 }
 
 entries = extension_daemons.publish_registry()
 key = "test.daemons:worker"
-assert key in entries and entries[key]["source_root"] == str(source_root)
+assert key in entries and entries[key]["source_root"] == str(source_root), entries
 
 switch_manifest = json.loads(
     (BACKEND.parent / "extensions" / "switch-control" / "better-agent-extension.json").read_text(
@@ -175,17 +188,32 @@ records["test.daemons"]["_root"] = None
 entries = extension_daemons.publish_registry()
 assert key in entries, "entry must survive a line whose checkout lacks the package"
 
-# Disabled: entry removed.
+# Disabled: drain-capable entry remains until its own matching generation
+# reports terminal durability.
 records["test.daemons"]["enabled"] = False
 entries = extension_daemons.publish_registry()
-assert key not in entries, "disable must remove the registry entry"
+assert entries[key]["desired_state"] == "draining"
+generation = entries[key]["generation"]
+lifecycle_path = (
+    extension_daemons.daemon_root("test.daemons", "worker") / "lifecycle.json"
+)
+write_json(lifecycle_path, {"generation": "stale", "state": "drained"})
+assert key in extension_daemons.publish_registry(), "stale generation must not retire daemon"
+write_json(lifecycle_path, {"generation": generation, "state": "drained"})
+assert key not in extension_daemons.publish_registry(), "matching drained generation must retire daemon"
 
 # Re-enable, then full uninstall (record gone): entry removed.
 records["test.daemons"]["enabled"] = True
 records["test.daemons"]["_root"] = source_root
 assert key in extension_daemons.publish_registry()
 del records["test.daemons"]
-assert key not in extension_daemons.publish_registry(), "uninstall must remove the entry"
+entries = extension_daemons.publish_registry()
+assert entries[key]["desired_state"] == "draining", "uninstall must drain retained generation"
+write_json(
+    lifecycle_path,
+    {"generation": entries[key]["generation"], "state": "drained"},
+)
+assert key not in extension_daemons.publish_registry(), "drained uninstall must remove entry"
 
 # Foreign entries (unknown writer) with a live record are preserved by merge.
 write_json(registry_path(), {"daemons": {"other.ext:d": {"extension_id": "other.ext", "lifecycle": "supervisor"}}})

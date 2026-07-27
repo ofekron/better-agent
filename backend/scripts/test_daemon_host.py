@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import shutil
 import json
+import os
 import sys
 import tempfile
 import time
@@ -41,7 +42,7 @@ assert installation_profile.integrations_enabled()
 
 from daemonhost import install as dh_install
 from daemonhost import pointer
-from daemonhost.host import DaemonHost
+from daemonhost.host import DaemonHost, scrubbed_env
 from daemonhost.jsonio import read_json, write_json
 from daemonhost.paths import registry_path, state_path, switch_journal_path
 
@@ -81,6 +82,9 @@ def _registry(source: Path, max_restarts: int = 1) -> None:
                     "name": "worker",
                     "module": "daemon.worker",
                     "lifecycle": "supervisor",
+                    "retire_policy": "drain",
+                    "desired_state": "active",
+                    "generation": "generation-1",
                     "restart_policy": {"max_restarts": max_restarts, "backoff_seconds": 1},
                     "env_allowlist": [],
                     "ports": [],
@@ -103,6 +107,16 @@ state = read_json(state_path())["daemons"]["test.ext:worker"]
 assert state["status"] == "running" and state["pid"], state
 daemon = host._daemons["test.ext:worker"]
 assert dh_install.current_dir(daemon.root).is_dir()
+saved_home = os.environ.pop("BETTER_AGENT_HOME", None)
+try:
+    assert scrubbed_env([])["BETTER_AGENT_HOME"] == str(paths.ba_home())
+finally:
+    if saved_home is not None:
+        os.environ["BETTER_AGENT_HOME"] = saved_home
+assert read_json(daemon.desired_path) == {
+    "generation": "generation-1",
+    "state": "active",
+}
 
 # Disabling integrations retires an already-running child; re-enabling brings
 # it back. The capability is read through its own authority, so the state is
@@ -169,6 +183,22 @@ while time.time() < deadline:
         break
     time.sleep(0.1)
 assert dh_install.install_meta(daemon.root).get("rolled_back_at"), "crash must roll back to last_good"
+
+# Draining preserves the exact process until the matching generation reports
+# drained. A stale artifact cannot retire a newer generation.
+registry = read_json(registry_path())
+registry["daemons"]["test.ext:worker"]["desired_state"] = "draining"
+write_json(registry_path(), registry)
+running_pid = read_json(state_path())["daemons"]["test.ext:worker"]["pid"]
+host.reconcile_once()
+assert read_json(state_path())["daemons"]["test.ext:worker"]["pid"] == running_pid
+assert read_json(daemon.desired_path)["state"] == "draining"
+write_json(daemon.lifecycle_path, {"generation": "stale", "state": "drained"})
+host.reconcile_once()
+assert "test.ext:worker" in read_json(state_path())["daemons"]
+write_json(daemon.lifecycle_path, {"generation": "generation-1", "state": "drained"})
+host.reconcile_once()
+assert "test.ext:worker" not in read_json(state_path())["daemons"]
 
 # Registry entry removed -> process stopped and state cleared.
 write_json(registry_path(), {"daemons": {}})
