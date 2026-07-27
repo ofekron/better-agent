@@ -4,6 +4,7 @@ import { API } from "../api";
 import type { Provider, ReasoningEffort, Session } from "../types";
 import { trackedFetch, useOpProgress } from "../progress/store";
 import { cacheProviderModels, readProviderCache } from "../utils/providerCache";
+import { providerDisplayName } from "../utils/providerDisplayName";
 import { optionLabelWithQuota, summarizeProvider } from "../utils/quotaStatus";
 import { useQuotaStatus } from "../hooks/useQuotaStatus";
 import { HarnessProfileSelector } from "./HarnessProfileSelector";
@@ -178,7 +179,7 @@ export function ModelPickerModal({
                 const q = summarizeProvider(quotaStatus, p);
                 return (
                   <option key={p.id} value={p.id} disabled={p.suspended}>
-                    {optionLabelWithQuota(p.name, q, t)}
+                    {optionLabelWithQuota(providerDisplayName(p), q, t)}
                     {p.suspended ? ` - ${t("setup.suspended", "Suspended")}` : ""}
                   </option>
                 );

@@ -391,6 +391,7 @@ def _new_provider_record(kind: str) -> dict:
     return {
         "id": provider_id,
         "name": kind.replace("-", " ").title(),
+        "nickname": "",
         "kind": kind,
         "mode": "subscription",
         "base_url": "",
@@ -624,6 +625,7 @@ def _clean_provider_record(provider: dict) -> dict:
     clean = {
         "id": str(provider.get("id") or uuid.uuid4()),
         "name": str(provider.get("name") or "").strip() or "Provider",
+        "nickname": str(provider.get("nickname") or "").strip(),
         "kind": kind,
         "mode": mode,
         "base_url": base_url,
@@ -993,6 +995,7 @@ def _provider_config(provider: dict) -> dict:
     return {
         "id": provider["id"],
         "name": provider.get("name", ""),
+        "nickname": provider.get("nickname", ""),
         "kind": kind,
         "mode": provider.get("mode", "subscription"),
         "base_url": provider.get("base_url", ""),
@@ -1521,6 +1524,7 @@ def add_provider(payload: dict) -> dict:
     provider = {
         "id": pid,
         "name": (payload.get("name") or "").strip() or "Provider",
+        "nickname": (payload.get("nickname") or "").strip(),
         "kind": kind,
         "mode": mode,
         "base_url": base_url,
@@ -1571,6 +1575,8 @@ def update_provider(provider_id: str, payload: dict) -> Optional[dict]:
         return None
     if "name" in payload:
         target["name"] = (payload.get("name") or "").strip() or target.get("name", "")
+    if "nickname" in payload:
+        target["nickname"] = (payload.get("nickname") or "").strip()
     if "kind" in payload:
         target["kind"] = (payload.get("kind") or "claude").strip()
     if "mode" in payload and payload["mode"] in ("subscription", "api_key"):

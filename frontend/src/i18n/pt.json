@@ -273,6 +273,8 @@
   "setup.providerNotFound": "Provedor não encontrado",
   "setup.nameLabel": "Nome",
   "setup.namePlaceholder": "Meu provedor",
+  "setup.nicknameLabel": "Apelido",
+  "setup.nicknamePlaceholder": "Alias da conta (opcional)",
   "setup.subscriptionButton": "Assinatura",
   "setup.apiKeyButton": "Chave de API",
   "setup.runnerLabel": "Runner",

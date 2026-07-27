@@ -5,6 +5,7 @@ import { API } from "../api";
 import { trackPromise } from "../progress/store";
 import type { Provider } from "../types";
 import { effortsForRunner, runnerForProvider, runnerLabelKey } from "./modelPicker";
+import { providerDisplayName } from "../utils/providerDisplayName";
 
 /** Per-task runtime profile assignment for the
  * backend's internal LLM calls (requirement analysis, config-sync review,
@@ -136,7 +137,7 @@ export function InternalLLMSetting({ tasks: taskOverride, showHint = true, exten
                 onChange={(v) => void change(task, "provider_id", v)}
                 options={[
                   { value: INHERIT, label: t("settings.internalLlmInherit") },
-                  ...providers.map((p) => ({ value: p.id, label: p.name })),
+                  ...providers.map((p) => ({ value: p.id, label: providerDisplayName(p) })),
                 ]}
               />
             </label>

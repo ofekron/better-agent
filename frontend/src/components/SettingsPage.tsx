@@ -26,6 +26,7 @@ import {
 } from "./providerFormShape";
 import { Select } from "./Select";
 import { cacheProviders } from "../utils/providerCache";
+import { providerNickname } from "../utils/providerDisplayName";
 import { runnerLabelKey, runtimeKindForRunner } from "./modelPicker";
 import { useProviderInstalls, type InstallRun } from "../hooks/useProviderInstalls";
 import { MobileSetup } from "./MobileSetup";
@@ -984,7 +985,7 @@ export function ExtensionUiSettingsSection() {
     const unsubscribeUpdates = eventBus.subscribe("extension_updates_changed", () => {
       void refreshUpdates();
     });
-    const unsubscribeExtensions = eventBus.subscribe("extensions_changed", () => {
+    const unsubscribeExtensions = eventBus.subscribe("extension.catalog", () => {
       void refreshUpdates();
     });
     return () => {
@@ -1738,6 +1739,9 @@ function ProvidersSettingsSection({
               <div className="provider-row-main" onClick={() => onEdit(p)}>
                 <div className="provider-row-name">
                   {p.name}
+                  {providerNickname(p) && (
+                    <span className="provider-nickname">{providerNickname(p)}</span>
+                  )}
                   {isActive && (
                     <span className="provider-active-pill">{t('setup.default')}</span>
                   )}
@@ -2231,6 +2235,7 @@ function WizardTemplates({
 
 interface FormPayload {
   name: string;
+  nickname?: string;
   kind: string;
   mode: Provider["mode"];
   base_url: string;
@@ -2322,6 +2327,7 @@ function ProviderForm({
 }) {
   const { t } = useTranslation();
   const [name, setName] = useState(initial.name);
+  const [nickname, setNickname] = useState(initial.nickname ?? "");
   const [kind] = useState(initial.kind || "claude");
   const runnerOptions = runnerOptionsForKind(kind, initial.runner_options);
   const initialRunner = initial.runner ?? runnerOptions[0];
@@ -2426,6 +2432,7 @@ function ProviderForm({
     try {
       await onSubmit({
         name,
+        nickname,
         kind,
         mode: mode_,
         base_url: baseUrl,
@@ -2464,15 +2471,27 @@ function ProviderForm({
       </div>
 
       <div className="modal-body">
-        <div className="setup-field">
-          <label>{t('setup.nameLabel')}</label>
-          <input
-            type="text"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            placeholder={t('setup.namePlaceholder')}
-            spellCheck={false}
-          />
+        <div className="setup-field-row setup-field-row-2col">
+          <div className="setup-field">
+            <label>{t('setup.nameLabel')}</label>
+            <input
+              type="text"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder={t('setup.namePlaceholder')}
+              spellCheck={false}
+            />
+          </div>
+          <div className="setup-field">
+            <label>{t('setup.nicknameLabel')}</label>
+            <input
+              type="text"
+              value={nickname}
+              onChange={(e) => setNickname(e.target.value)}
+              placeholder={t('setup.nicknamePlaceholder')}
+              spellCheck={false}
+            />
+          </div>
         </div>
 
         {modes.length > 1 && (

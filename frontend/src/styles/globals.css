@@ -11845,6 +11845,16 @@ button.run-badge-clickable:focus-visible {
   gap: 12px;
 }
 
+.setup-field-row {
+  display: flex;
+  gap: 12px;
+}
+
+.setup-field-row-2col > .setup-field {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
 .setup-field {
   display: flex;
   flex-direction: column;
@@ -12280,6 +12290,17 @@ button.run-badge-clickable:focus-visible {
   gap: 8px;
   min-width: 0;
   overflow-wrap: anywhere;
+}
+
+.provider-nickname {
+  font-size: calc(10px * var(--app-font-scale));
+  letter-spacing: 0.3px;
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 1px 7px;
+  font-weight: 500;
+  white-space: nowrap;
 }
 
 .provider-active-pill {

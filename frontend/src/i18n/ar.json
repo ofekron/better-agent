@@ -273,6 +273,8 @@
   "setup.providerNotFound": "المزوّد غير موجود",
   "setup.nameLabel": "الاسم",
   "setup.namePlaceholder": "مزوّدي",
+  "setup.nicknameLabel": "اللقب",
+  "setup.nicknamePlaceholder": "اسم مميز للحساب (اختياري)",
   "setup.subscriptionButton": "اشتراك",
   "setup.apiKeyButton": "مفتاح API",
   "setup.runnerLabel": "Runner",

@@ -273,6 +273,8 @@
   "setup.providerNotFound": "Провайдер не найден",
   "setup.nameLabel": "Имя",
   "setup.namePlaceholder": "Мой провайдер",
+  "setup.nicknameLabel": "Псевдоним",
+  "setup.nicknamePlaceholder": "Псевдоним аккаунта (необязательно)",
   "setup.subscriptionButton": "Подписка",
   "setup.apiKeyButton": "API-ключ",
   "setup.runnerLabel": "Runner",

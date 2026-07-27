@@ -4,6 +4,7 @@ import { useAnimatedTabMovement } from "src/hooks/useAnimatedTabMovement";
 import { scrollHorizontalItemToCenter } from "src/utils/tabScroll";
 import { sessionLinkMarker } from "src/utils/linkifyFilePaths";
 import { copyToClipboard } from "src/utils/clipboard";
+import { providerDisplayName } from "../utils/providerDisplayName";
 import type { Provider, Session } from "../types";
 import { SessionStatusBadge } from "./SessionStatusBadge";
 import { sessionSortValue, timeAgo } from "../lib/sessionSort";
@@ -169,8 +170,7 @@ export function SessionTabs({
         const isActive = s.id === currentSessionId;
         const projectName = s.cwd.replace(/\/+$/, "").split("/").pop() || s.cwd;
         const providerName =
-          providers.find((provider) => provider.id === s.provider_id)?.name
-          ?? s.provider_id
+          providerDisplayName(providers.find((provider) => provider.id === s.provider_id), s.provider_id)
           ?? "";
         const providerModel = [providerName, s.model].filter(Boolean).join(" / ");
         const topbarPinned = Boolean(s.topbar_pinned);

@@ -22,6 +22,7 @@ import { ConfirmModal } from "./ConfirmModal";
 
 import { API, fetchSessionOrganization, createSessionFolder } from "../api";
 import { optionLabelWithQuota, summarizeProvider } from "../utils/quotaStatus";
+import { providerDisplayName } from "../utils/providerDisplayName";
 import { useQuotaStatus } from "../hooks/useQuotaStatus";
 import Icon from "./Icon";
 import { ComposerImagePreviews } from "./ComposerImagePreviews";
@@ -372,7 +373,7 @@ function RuntimeProfilePicker({
             const q = summarizeProvider(quotaStatus, p);
             return (
               <option key={p.id} value={p.id} disabled={p.suspended}>
-                {optionLabelWithQuota(p.name, q, t)}
+                {optionLabelWithQuota(providerDisplayName(p), q, t)}
                 {p.suspended ? ` — ${t("setup.suspended", "Suspended")}` : ""}
               </option>
             );

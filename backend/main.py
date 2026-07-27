@@ -2234,6 +2234,7 @@ if (
 
 class ProviderPayload(BaseModel):
     name: str = ""
+    nickname: str = ""
     kind: str = "claude"  # provider kind — selects the Provider impl
     mode: str = "subscription"  # "subscription" | "api_key"
     api_key: str = ""
@@ -2251,6 +2252,7 @@ class ProviderPayload(BaseModel):
 class ProviderPatch(BaseModel):
     """All fields optional — only the supplied ones are written."""
     name: str | None = None
+    nickname: str | None = None
     kind: str | None = None
     mode: str | None = None
     api_key: str | None = None  # "__keep__" preserves the existing key

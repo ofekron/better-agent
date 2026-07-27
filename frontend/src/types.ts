@@ -1280,6 +1280,9 @@ export interface ToolApproval {
 export interface Provider {
   id: string;
   name: string;
+  /** Optional distinguishing label shown beside the name (e.g. an account
+   * alias separating two same-kind subscription providers). */
+  nickname?: string;
   kind: string;
   mode: ProviderMode;
   base_url: string;

@@ -273,6 +273,8 @@
   "setup.providerNotFound": "Provider non trovato",
   "setup.nameLabel": "Nome",
   "setup.namePlaceholder": "Il mio provider",
+  "setup.nicknameLabel": "Soprannome",
+  "setup.nicknamePlaceholder": "Alias account (facoltativo)",
   "setup.subscriptionButton": "Abbonamento",
   "setup.apiKeyButton": "Chiave API",
   "setup.runnerLabel": "Runner",

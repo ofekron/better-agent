@@ -273,6 +273,8 @@
   "setup.providerNotFound": "Provider niet gevonden",
   "setup.nameLabel": "Naam",
   "setup.namePlaceholder": "Mijn provider",
+  "setup.nicknameLabel": "Bijnaam",
+  "setup.nicknamePlaceholder": "Accountalias (optioneel)",
   "setup.subscriptionButton": "Abonnement",
   "setup.apiKeyButton": "API-sleutel",
   "setup.runnerLabel": "Runner",

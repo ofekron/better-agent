@@ -273,6 +273,8 @@
   "setup.providerNotFound": "Proveedor no encontrado",
   "setup.nameLabel": "Nombre",
   "setup.namePlaceholder": "Mi proveedor",
+  "setup.nicknameLabel": "Apodo",
+  "setup.nicknamePlaceholder": "Alias de cuenta (opcional)",
   "setup.subscriptionButton": "Suscripción",
   "setup.apiKeyButton": "Clave API",
   "setup.runnerLabel": "Runner",

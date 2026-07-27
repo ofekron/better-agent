@@ -1,4 +1,5 @@
 import type { Provider } from "../types";
+import { providerDisplayName } from "./providerDisplayName";
 
 const STORAGE_KEY = "better-agent-provider-cache";
 const VERSION = 4;
@@ -90,7 +91,8 @@ export function readProviderCache(): ProviderCache | null {
 export function providerNameForId(providerId: string | null | undefined): string {
   const id = providerId?.trim();
   if (!id) return "";
-  return readProviderCache()?.providers.find((provider) => provider.id === id)?.name ?? "";
+  const provider = readProviderCache()?.providers.find((provider) => provider.id === id);
+  return provider ? providerDisplayName(provider) : "";
 }
 
 export function providerKindForId(providerId: string | null | undefined): string {

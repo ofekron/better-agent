@@ -273,6 +273,8 @@
   "setup.providerNotFound": "프로바이더를 찾을 수 없습니다",
   "setup.nameLabel": "이름",
   "setup.namePlaceholder": "내 프로바이더",
+  "setup.nicknameLabel": "별명",
+  "setup.nicknamePlaceholder": "계정 별명 (선택)",
   "setup.subscriptionButton": "구독",
   "setup.apiKeyButton": "API 키",
   "setup.runnerLabel": "Runner",

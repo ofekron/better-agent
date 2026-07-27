@@ -273,6 +273,8 @@
   "setup.providerNotFound": "プロバイダーが見つかりません",
   "setup.nameLabel": "名前",
   "setup.namePlaceholder": "マイプロバイダー",
+  "setup.nicknameLabel": "ニックネーム",
+  "setup.nicknamePlaceholder": "アカウントのエイリアス（任意）",
   "setup.subscriptionButton": "サブスクリプション",
   "setup.apiKeyButton": "API キー",
   "setup.runnerLabel": "Runner",

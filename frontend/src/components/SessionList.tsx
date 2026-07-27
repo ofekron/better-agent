@@ -49,6 +49,7 @@ import { todoProgress } from "./TodosPanel";
 import { sessionLinkMarker } from "../utils/linkifyFilePaths";
 import { copyToClipboard } from "../utils/clipboard";
 import { shouldStartAgentBoardSessionDrag, type SessionDragPoint } from "../utils/sessionDragThreshold";
+import { providerDisplayName } from "../utils/providerDisplayName";
 
 const SESSION_BULK_SELECT_LONG_PRESS_MS = 500;
 interface Props {
@@ -818,7 +819,7 @@ function SessionNodeImpl({
   };
 
   const provider = providers.find(p => p.id === session.provider_id);
-  const providerName = provider?.name ?? session.provider_id?.split('/')[0] ?? 'unknown';
+  const providerName = providerDisplayName(provider, session.provider_id?.split('/')[0] ?? 'unknown');
   const additionalModelCount = (session.model_history || [])
     .filter((model) => model && model !== session.model).length;
   const modelLabel = additionalModelCount > 0
@@ -2130,7 +2131,7 @@ export function SessionList({
   // facet (distinct models across all the project's sessions).
   const providerOptions = useMemo(
     () => {
-      const names = new Map(providers.map((provider) => [provider.id, provider.name]));
+      const names = new Map(providers.map((provider) => [provider.id, providerDisplayName(provider)]));
       for (const session of sessions) {
         const id = session.provider_id?.trim();
         if (id && !names.has(id)) names.set(id, id);
@@ -3219,7 +3220,7 @@ export function SessionList({
                               aria-pressed={active}
                               onClick={() => toggleProviderFilter(provider.id)}
                             >
-                              {provider.name}
+                              {providerDisplayName(provider)}
                             </button>
                           );
                         })}

@@ -285,6 +285,8 @@
   "setup.providerNotFound": "Provider not found",
   "setup.nameLabel": "Name",
   "setup.namePlaceholder": "My provider",
+  "setup.nicknameLabel": "Nickname",
+  "setup.nicknamePlaceholder": "Account alias (optional)",
   "setup.subscriptionButton": "Subscription",
   "setup.apiKeyButton": "API Key",
   "setup.runnerLabel": "Runner",

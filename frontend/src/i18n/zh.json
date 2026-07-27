@@ -273,6 +273,8 @@
   "setup.providerNotFound": "未找到提供商",
   "setup.nameLabel": "名称",
   "setup.namePlaceholder": "我的提供商",
+  "setup.nicknameLabel": "昵称",
+  "setup.nicknamePlaceholder": "账户别名（可选）",
   "setup.subscriptionButton": "订阅",
   "setup.apiKeyButton": "API Key",
   "setup.runnerLabel": "Runner",

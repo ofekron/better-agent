@@ -274,6 +274,8 @@
   "setup.providerNotFound": "ספק לא נמצא",
   "setup.nameLabel": "שם",
   "setup.namePlaceholder": "הספק שלי",
+  "setup.nicknameLabel": "כינוי",
+  "setup.nicknamePlaceholder": "כינוי חשבון (אופציונלי)",
   "setup.subscriptionButton": "מנוי",
   "setup.apiKeyButton": "מפתח API",
   "setup.runnerLabel": "Runner",

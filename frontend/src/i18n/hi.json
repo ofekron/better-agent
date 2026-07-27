@@ -273,6 +273,8 @@
   "setup.providerNotFound": "प्रदाता नहीं मिला",
   "setup.nameLabel": "नाम",
   "setup.namePlaceholder": "मेरा प्रदाता",
+  "setup.nicknameLabel": "उपनाम",
+  "setup.nicknamePlaceholder": "खाता उपनाम (वैकल्पिक)",
   "setup.subscriptionButton": "सदस्यता",
   "setup.apiKeyButton": "API कुंजी",
   "setup.runnerLabel": "Runner",
