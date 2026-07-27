@@ -53,8 +53,30 @@ def test_every_win32_call_has_a_declared_prototype() -> None:
     assert not missing, f"Win32 calls without declared argtypes: {missing}"
 
 
+def test_error_reply_to_a_dead_peer_does_not_raise() -> None:
+    """Reporting a failure must not become a second, fatal failure.
+
+    The serve loops reply to a failed request on the same connection. A
+    client that already disconnected turned that reply into
+    `BrokenPipeError` raised out of the except block, killing the serving
+    thread — one bad request took the whole broker down.
+    """
+    from runtime_broker import _reply_error
+
+    def dead_peer(_payload: bytes) -> None:
+        raise BrokenPipeError("[WinError 232] The pipe is being closed")
+
+    _reply_error(dead_peer, ValueError("original failure"))
+
+    delivered: list[bytes] = []
+    _reply_error(delivered.append, ValueError("original failure"))
+    assert delivered, "a live peer must still receive the error reply"
+    assert b"original failure" in delivered[0]
+
+
 def main() -> None:
     test_every_win32_call_has_a_declared_prototype()
+    test_error_reply_to_a_dead_peer_does_not_raise()
     received: list[BrokerRequest] = []
 
     def handle(request: BrokerRequest):

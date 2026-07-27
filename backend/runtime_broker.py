@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ctypes
 import json
+import logging
 from multiprocessing.connection import Listener
 import os
 from pathlib import Path
@@ -16,6 +17,22 @@ from typing import Any, Callable
 from pydantic import BaseModel, ConfigDict
 
 _MAX_MESSAGE_BYTES = 4 * 1024 * 1024
+
+logger = logging.getLogger(__name__)
+
+
+def _reply_error(send: Callable[[bytes], Any], exc: Exception) -> None:
+    """Best-effort error reply to a peer that may already be gone.
+
+    A client that disconnects mid-request leaves the serve loop holding a
+    dead pipe/socket, so reporting the first failure raised a second one
+    (`BrokenPipeError: [WinError 232]`) out of the except block and killed
+    the serving thread — one bad request took the whole broker down.
+    """
+    try:
+        send(_encode({"success": False, "error": str(exc)}))
+    except Exception:
+        logger.debug("runtime broker could not deliver error reply", exc_info=True)
 
 
 class BrokerRequest(BaseModel):
@@ -142,7 +159,7 @@ class RuntimeBroker:
                     request = _decode(_recv_frame(connection))
                     _send_frame(connection, _encode(self._dispatch(request)))
                 except Exception as exc:
-                    _send_frame(connection, _encode({"success": False, "error": str(exc)}))
+                    _reply_error(lambda payload: _send_frame(connection, payload), exc)
 
     def _serve_pipe(self) -> None:
         address = self.address.removeprefix("pipe:")
@@ -165,7 +182,7 @@ class RuntimeBroker:
                     request = _decode(connection.recv_bytes(_MAX_MESSAGE_BYTES))
                     connection.send_bytes(_encode(self._dispatch(request)))
                 except Exception as exc:
-                    connection.send_bytes(_encode({"success": False, "error": str(exc)}))
+                    _reply_error(connection.send_bytes, exc)
 
     def _dispatch(self, raw: dict[str, Any]) -> dict[str, Any]:
         request = BrokerRequest.model_validate(raw)
