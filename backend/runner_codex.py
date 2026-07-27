@@ -497,6 +497,13 @@ async def _bridge_extension_mcp_dynamic_tools(
         raise RuntimeError(
             f"selected extension MCP {server_name!r} failed to list tools"
         ) from exc
+    if bridge_configs:
+        logger.info(
+            "extension MCP bridge servers=%s dynamic_tools=%s errors=%s",
+            sorted(bridge_configs),
+            sorted(tool["name"] for tool in dynamic_tools),
+            [server_name for server_name, _exc in bridge_errors],
+        )
 
 
 _CREATE_WORKER_INPUT_SCHEMA: dict[str, Any] = {
