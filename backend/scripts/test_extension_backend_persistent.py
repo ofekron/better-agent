@@ -24,14 +24,22 @@ import extension_backend_loader as L  # noqa: E402
 import extension_store  # noqa: E402
 
 FAILURES: list[str] = []
+_ORIGINAL_HOST_ENV = L._host_env
 
 _ROUTES = (
     "import os\n"
     "from pathlib import Path\n"
     "from fastapi import APIRouter\n"
+    "_perf_marker = Path(__file__).parents[1] / 'perf-imported.marker'\n"
+    "_perf_imported_during_validation = _perf_marker.exists()\n"
+    "import paths as extension_paths\n"
     "_count = 0\n"
     "def create_router(ctx):\n"
     "    r = APIRouter()\n"
+    "    @r.get('/imports')\n"
+    "    def imports():\n"
+    "        return {'paths_source': extension_paths.SOURCE, "
+    "'perf_imported_during_validation': _perf_imported_during_validation}\n"
     "    @r.get('/pid')\n"
     "    def pid(): return {'pid': os.getpid()}\n"
     "    @r.get('/bump')\n"
@@ -58,10 +66,23 @@ def check(cond: bool, msg: str) -> None:
         FAILURES.append(msg)
 
 
+def _isolated_host_env() -> dict[str, str]:
+    env = _ORIGINAL_HOST_ENV()
+    for key in ("BETTER_AGENT_HOME", "BETTER_CLAUDE_HOME", "BETTER_AGENT_TEST_MODE"):
+        env[key] = os.environ[key]
+    return env
+
+
 def _seed() -> None:
     pkg = TMP / "pkg"
     (pkg / "backend").mkdir(parents=True)
     (pkg / "backend" / "routes.py").write_text(_ROUTES, encoding="utf-8")
+    (pkg / "paths.py").write_text("SOURCE = 'extension'\n", encoding="utf-8")
+    (pkg / "perf.py").write_text(
+        "from pathlib import Path\n"
+        "(Path(__file__).with_name('perf-imported.marker')).write_text('1', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
     data = extension_store._load()
     data["extensions"]["ofek.persist"] = {
         "manifest": {
@@ -90,10 +111,22 @@ def _seed() -> None:
 
 def main() -> None:
     try:
+        extension_store.installation_profile.integrations_enabled = lambda: True
+        L._host_env = _isolated_host_env
         _seed()
         app = FastAPI()
         app.include_router(extension_api.router)
         client = TestClient(app)
+
+        imports = client.get("/api/extensions/ofek.persist/backend/imports")
+        check(
+            imports.status_code == 200
+            and imports.json() == {
+                "paths_source": "extension",
+                "perf_imported_during_validation": False,
+            },
+            "host validation cannot import extension modules and extension paths stays isolated",
+        )
 
         r = client.get("/api/extensions/ofek.persist/backend/pid")
         check(r.status_code == 200, "first request dispatches")
@@ -131,6 +164,7 @@ def main() -> None:
               "undeclared route keeps fail-closed process-exit behavior")
     finally:
         L.shutdown_persistent_backends()
+        L._host_env = _ORIGINAL_HOST_ENV
         from shutil import rmtree
         rmtree(TMP, ignore_errors=True)
     if FAILURES:

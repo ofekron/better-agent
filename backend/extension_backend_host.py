@@ -11,7 +11,22 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, FastAPI
-from paths import ba_home
+
+
+def _load_core_ba_home():
+    paths_file = Path(__file__).resolve().with_name("paths.py")
+    spec = importlib.util.spec_from_file_location(
+        "_better_agent_extension_host_paths",
+        paths_file,
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError("core paths module could not be loaded")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.ba_home
+
+
+ba_home = _load_core_ba_home()
 
 
 @dataclass(frozen=True)
