@@ -10,8 +10,13 @@ venv/
 
 # Node
 node_modules/
+node_modules.retired/
 dist/
 *.log
+
+# Frontend dependency-install staging dirs (install-frontend-deps.mjs)
+# Ephemeral scratch — never commit.
+.frontend-*-install-*/
 
 # Generated local build inputs / test artifacts
 # APKs embed this machine's backend IP at build time (detect-ips.mjs),
