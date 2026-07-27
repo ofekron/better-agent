@@ -18,6 +18,12 @@ class HarnessProfileResolutionError(ValueError):
     pass
 
 
+class HarnessProfileMissingError(HarnessProfileResolutionError):
+    """The profile being resolved is gone (or its pinned revision is). The API
+    layer answers 404 for it so a deleted selection reads as a selection
+    change rather than a server failure."""
+
+
 _CACHE_LOCK = threading.RLock()
 _DEFAULT_PROFILE_CACHE: tuple[tuple[Any, ...], dict[str, Any]] | None = None
 _RUN_SNAPSHOT_CACHE_MAX = 64
@@ -379,7 +385,13 @@ def resolve_profile(
     else:
         stored = harness_profile_store.get_profile(profile_id, revision)
         if not stored:
-            raise HarnessProfileResolutionError("Harness profile is missing or its pinned revision is unavailable")
+            # get_profile answers None for both "no such profile" and "the
+            # pinned revision moved". Only the first is a 404 — a stale
+            # revision is a conflict the caller resolves by reloading, so the
+            # two must not collapse into one error.
+            if harness_profile_store.get_profile(profile_id) is None:
+                raise HarnessProfileMissingError("Harness profile is missing")
+            raise HarnessProfileResolutionError("Harness profile's pinned revision is unavailable")
         overrides = stored.get("overrides") or {}
         base_profile_id = stored.get("base_profile_id")
         if base_profile_id:

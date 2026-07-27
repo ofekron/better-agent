@@ -34,6 +34,12 @@ class HarnessProfileError(ValueError):
     pass
 
 
+class HarnessProfileNotFoundError(HarnessProfileError):
+    """The addressed profile is not in the store. Separate from a validation
+    failure so the API layer can answer 404 instead of 400 — the editor keys
+    its "selection was deleted" recovery on that status."""
+
+
 def _path():
     return ba_home() / "harness_profiles.json"
 
@@ -376,7 +382,7 @@ def set_profile_meta(profile_id: str, patch: dict[str, Any], revision: str | Non
             raise HarnessProfileError("the default profile is not a stored profile")
         existing = data["profiles"].get(clean_id)
         if not existing:
-            raise HarnessProfileError("harness profile not found")
+            raise HarnessProfileNotFoundError("harness profile not found")
         if revision and existing.get("revision") != revision:
             raise HarnessProfileError("Harness profile changed; reload before editing")
         payload = _input_payload_from_profile(existing)
@@ -520,7 +526,7 @@ def apply_override_patch(profile_id: str, ops: list[dict[str, Any]], revision: s
             raise HarnessProfileError("the default profile is not a stored profile")
         existing = data["profiles"].get(clean_id)
         if not existing:
-            raise HarnessProfileError("harness profile not found")
+            raise HarnessProfileNotFoundError("harness profile not found")
         if revision and existing.get("revision") != revision:
             raise HarnessProfileError("Harness profile changed; reload before editing")
         overrides = copy.deepcopy(existing.get("overrides") or {})

@@ -4319,6 +4319,11 @@ async def patch_harness_profile_fields(profile_id: str, body: dict = Body(defaul
         response = await asyncio.to_thread(
             _profile_field_write_response, profile_id, body.get("revision") or None, writes
         )
+    except (
+        harness_profile_store.HarnessProfileNotFoundError,
+        harness_profile_resolver.HarnessProfileMissingError,
+    ) as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     except (harness_fields.HarnessFieldError, harness_profile_store.HarnessProfileError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except extension_store.ExtensionError as exc:
@@ -4369,6 +4374,8 @@ async def patch_harness_profile_overrides(profile_id: str, body: dict = Body(def
             ops,
             body.get("revision") or None,
         )
+    except harness_profile_store.HarnessProfileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     except harness_profile_store.HarnessProfileError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     await _broadcast_harness_profiles_changed()
@@ -4383,6 +4390,8 @@ async def delete_harness_profile(profile_id: str, revision: str = ""):
             profile_id,
             revision or None,
         )
+    except harness_profile_store.HarnessProfileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     except harness_profile_store.HarnessProfileError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not deleted:
