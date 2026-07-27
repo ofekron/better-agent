@@ -846,12 +846,15 @@ export function useSession(authStatus?: string) {
   const [sessionsHasMore, setSessionsHasMore] = useState(true);
   const [sessionsLoadingMore, setSessionsLoadingMore] = useState(false);
   const [sessionsSearching, setSessionsSearching] = useState(false);
-  // True once the initial /api/sessions response has resolved.
-  // Callers (e.g. SessionView's deep-link gate) need to wait until
-  // this flips before treating a missing id as "unknown" — without
-  // it, the first render incorrectly bounces every direct URL load
-  // because `sessions` is the initial empty array.
+  // True only after a complete authoritative snapshot. Consumers that
+  // treat missing rows as "unknown" must not use a failed attempt.
   const [sessionsLoaded, setSessionsLoaded] = useState(false);
+  // The blocking startup phase ends after either a complete snapshot or
+  // a terminal failure; incomplete snapshots remain pending while retried.
+  const [sessionsInitialAttemptSettled, setSessionsInitialAttemptSettled] =
+    useState(false);
+  const [sessionInventoryUnavailable, setSessionInventoryUnavailable] =
+    useState(false);
   const [currentSession, setCurrentSession] = useState<Session | null>(null);
   // True while REST fetch for the selected session is in flight.
   // Prevents flash-of-empty-content when switching sessions.
@@ -1036,6 +1039,7 @@ export function useSession(authStatus?: string) {
   sessionListFiltersRef.current = sessionListFilters;
   const pendingSessionListFiltersRef = useRef<SessionListFilters>({});
   const sessionSearchDebounceRef = useRef<number | undefined>(undefined);
+  const sessionSnapshotRetryRef = useRef<number | undefined>(undefined);
   const sessionsHasMoreRef = useRef(true);
   sessionsHasMoreRef.current = sessionsHasMore;
   const sessionsLoadedRef = useRef(false);
@@ -1231,6 +1235,10 @@ export function useSession(authStatus?: string) {
       silent = false,
     ) => {
       if (sessionsLoadingPageRef.current && !replace) return;
+      if (replace) {
+        window.clearTimeout(sessionSnapshotRetryRef.current);
+        sessionSnapshotRetryRef.current = undefined;
+      }
       const requestSeq = ++sessionListRequestSeqRef.current;
       // Snapshot the insert watermark at DISPATCH time: rows inserted
       // after this are newer than this page and must survive its replace.
@@ -1241,7 +1249,7 @@ export function useSession(authStatus?: string) {
       // the search spinner — it is reserved for user-initiated fetches.
       if (replace && !silent && sessionsLoadedRef.current) setSessionsSearching(true);
       startOp(replace ? "session:list" : "session:list:more");
-      let completedSnapshot = false;
+      let outcome: "success" | "incomplete" | "failure" = "failure";
       try {
         const params = new URLSearchParams({
           offset: String(offset),
@@ -1269,7 +1277,7 @@ export function useSession(authStatus?: string) {
           params.set("exclude_statuses", filters.excludeStatuses.join(","));
         }
         if (filters.sortBy) params.set("sort_by", filters.sortBy);
-        const res = await fetch(`${API}/api/sessions?${params}`, {
+        const res = await fetchWithTimeout(`${API}/api/sessions?${params}`, {
           credentials: "include",
         });
         if (!res.ok) {
@@ -1281,7 +1289,9 @@ export function useSession(authStatus?: string) {
         const data = await res.json();
         if (replace && requestSeq !== sessionListRequestSeqRef.current) return;
         if (replace && offset === 0 && data?.snapshot_complete === false) {
-          window.setTimeout(() => {
+          outcome = "incomplete";
+          sessionSnapshotRetryRef.current = window.setTimeout(() => {
+            sessionSnapshotRetryRef.current = undefined;
             void fetchSessionPage(0, true, filterSnapshot, limitOverride, silent);
           }, 150);
           return;
@@ -1313,21 +1323,28 @@ export function useSession(authStatus?: string) {
         setSessions((prev) => mergeSessionPage(prev, page, replace, dispatchInsertGen));
         sessionsNextOffsetRef.current = offset + rawPage.length;
         setSessionsHasMore(Boolean(data.has_more));
-        completedSnapshot = true;
+        outcome = "success";
       } catch {
         // ignore
       } finally {
         if (!replace) setSessionsLoadingMore(false);
         if (requestSeq === sessionListRequestSeqRef.current) {
-          if (replace && completedSnapshot) {
-            setSessionsLoaded(true);
-            if (
-              sameSessionListFilters(
-                pendingSessionListFiltersRef.current,
-                filterSnapshot,
-              )
-            ) {
-              setSessionsSearching(false);
+          if (replace) {
+            if (outcome === "success") {
+              setSessionsLoaded(true);
+              setSessionsInitialAttemptSettled(true);
+              setSessionInventoryUnavailable(false);
+              if (
+                sameSessionListFilters(
+                  pendingSessionListFiltersRef.current,
+                  filterSnapshot,
+                )
+              ) {
+                setSessionsSearching(false);
+              }
+            } else if (outcome === "failure") {
+              setSessionsInitialAttemptSettled(true);
+              setSessionInventoryUnavailable(true);
             }
           }
           sessionsLoadingPageRef.current = false;
@@ -1452,6 +1469,7 @@ export function useSession(authStatus?: string) {
 
   useEffect(() => () => {
     window.clearTimeout(sessionSearchDebounceRef.current);
+    window.clearTimeout(sessionSnapshotRetryRef.current);
   }, []);
 
   useEffect(() => {
@@ -2969,6 +2987,8 @@ export function useSession(authStatus?: string) {
   return {
     sessions,
     sessionsLoaded,
+    sessionsInitialAttemptSettled,
+    sessionInventoryUnavailable,
     sessionsHasMore,
     sessionsLoadingMore,
     sessionsSearching,

@@ -23,7 +23,10 @@ type Pending = {
 
 function installFetchStub() {
   const pending: Pending[] = [];
-  const stub = vi.fn(async (input: RequestInfo | URL): Promise<Response> => {
+  const stub = vi.fn(async (
+    input: RequestInfo | URL,
+    init?: RequestInit,
+  ): Promise<Response> => {
     const url =
       typeof input === "string"
         ? input
@@ -31,6 +34,11 @@ function installFetchStub() {
         ? input.toString()
         : input.url;
     return new Promise<Response>((res, reject) => {
+      init?.signal?.addEventListener(
+        "abort",
+        () => reject(new DOMException("Aborted", "AbortError")),
+        { once: true },
+      );
       pending.push({
         url,
         resolve: (body) =>
@@ -75,6 +83,120 @@ afterEach(() => {
 });
 
 describe("sessions list background refresh is silent", () => {
+  it("settles the initial attempt without claiming a failed snapshot loaded", async () => {
+    const gate = installFetchStub();
+    const { result } = renderHook(() => useSession("authed"));
+
+    await gate.rejectOldestList(new TypeError("Failed to fetch"));
+
+    expect(result.current.sessionsInitialAttemptSettled).toBe(true);
+    expect(result.current.sessionsLoaded).toBe(false);
+    expect(result.current.sessionInventoryUnavailable).toBe(true);
+  });
+
+  it("settles the initial attempt when the sessions request hangs", async () => {
+    vi.useFakeTimers();
+    installFetchStub();
+    const { result } = renderHook(() => useSession("authed"));
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(8000);
+    });
+
+    expect(result.current.sessionsInitialAttemptSettled).toBe(true);
+    expect(result.current.sessionsLoaded).toBe(false);
+    expect(result.current.sessionInventoryUnavailable).toBe(true);
+  });
+
+  it("keeps an incomplete snapshot pending until its retry succeeds", async () => {
+    vi.useFakeTimers();
+    const gate = installFetchStub();
+    const { result } = renderHook(() => useSession("authed"));
+
+    await gate.resolveOldestList({
+      sessions: [],
+      has_more: false,
+      snapshot_complete: false,
+    });
+    expect(result.current.sessionsInitialAttemptSettled).toBe(false);
+    expect(result.current.sessionsLoaded).toBe(false);
+    expect(result.current.sessionInventoryUnavailable).toBe(false);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(150);
+    });
+    await gate.resolveOldestList(EMPTY_PAGE);
+
+    expect(result.current.sessionsInitialAttemptSettled).toBe(true);
+    expect(result.current.sessionsLoaded).toBe(true);
+    expect(result.current.sessionInventoryUnavailable).toBe(false);
+  });
+
+  it("preserves loaded sessions while exposing and clearing refresh failure", async () => {
+    const gate = installFetchStub();
+    const session = { id: "s1", name: "existing" };
+    const { result } = renderHook(() => useSession("authed"));
+
+    await gate.resolveOldestList({
+      sessions: [session],
+      has_more: false,
+      snapshot_complete: true,
+    });
+    expect(result.current.sessionsLoaded).toBe(true);
+
+    let failedRefresh!: Promise<void>;
+    act(() => {
+      failedRefresh = result.current.refreshSessions();
+    });
+    await gate.rejectOldestList(new TypeError("Failed to fetch"));
+    await act(async () => {
+      await failedRefresh;
+    });
+
+    expect(result.current.sessionsLoaded).toBe(true);
+    expect(result.current.sessionInventoryUnavailable).toBe(true);
+    expect(result.current.sessions.map((item) => item.id)).toEqual(["s1"]);
+
+    let recoveredRefresh!: Promise<void>;
+    act(() => {
+      recoveredRefresh = result.current.refreshSessions();
+    });
+    await gate.resolveOldestList({
+      sessions: [session],
+      has_more: false,
+      snapshot_complete: true,
+    });
+    await act(async () => {
+      await recoveredRefresh;
+    });
+    expect(result.current.sessionInventoryUnavailable).toBe(false);
+  });
+
+  it("ignores a stale failure after a newer replacement succeeds", async () => {
+    const gate = installFetchStub();
+    const { result } = renderHook(() => useSession("authed"));
+
+    let newerRefresh!: Promise<void>;
+    act(() => {
+      newerRefresh = result.current.refreshSessions();
+    });
+    const pending = gate.pendingList();
+    expect(pending).toHaveLength(2);
+
+    await act(async () => {
+      pending[1].resolve(EMPTY_PAGE);
+    });
+    await act(async () => {
+      await newerRefresh;
+    });
+    await act(async () => {
+      pending[0].reject(new TypeError("stale failure"));
+    });
+
+    expect(result.current.sessionsLoaded).toBe(true);
+    expect(result.current.sessionInventoryUnavailable).toBe(false);
+  });
+
   it("keeps search loading visible while the server is offline", async () => {
     vi.useFakeTimers();
     const gate = installFetchStub();

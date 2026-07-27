@@ -230,6 +230,51 @@ describe("WebSocket event handling", () => {
     h.unmount();
   });
 
+  it("first WS connection retries an initial sessions request failure", async () => {
+    const session = makeSession({ id: "s1", name: "recovered-session" });
+    const h = await renderApp({
+      seed: { sessions: [session] },
+      configureBackend: (backend) => {
+        backend.failNextWithStatus(503, "/api/sessions", true);
+      },
+      autoOpenWebSocket: false,
+    });
+
+    const before = h.restCalls.filter(
+      (call) => call.method === "GET" && call.path === "/api/sessions",
+    ).length;
+    h.backend.setOffline(false);
+    h.reopenConnection();
+    await h.flush();
+
+    const after = h.restCalls.filter(
+      (call) => call.method === "GET" && call.path === "/api/sessions",
+    ).length;
+    expect(after).toBeGreaterThan(before);
+    expect(h.toJSON().sidebar.sessions.map((item) => item.id)).toContain("s1");
+    h.unmount();
+  });
+
+  it("first WS connection does not duplicate a successful initial request", async () => {
+    const session = makeSession({ id: "s1", name: "existing" });
+    const h = await renderApp({
+      seed: { sessions: [session] },
+      autoOpenWebSocket: false,
+    });
+    const before = h.restCalls.filter(
+      (call) => call.method === "GET" && call.path === "/api/sessions",
+    ).length;
+
+    h.reopenConnection();
+    await h.flush();
+
+    const after = h.restCalls.filter(
+      (call) => call.method === "GET" && call.path === "/api/sessions",
+    ).length;
+    expect(after).toBe(before);
+    h.unmount();
+  });
+
   it("session_metadata_updated applies a model patch from another tab", async () => {
     const session = makeSession({ id: "s1", name: "x", model: "old-model" });
     const h = await renderApp({ seed: { sessions: [session] } });

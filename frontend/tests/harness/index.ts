@@ -9,6 +9,8 @@ import { extractView, type AppView } from "./view";
 
 export interface RenderAppOptions {
   seed?: Partial<BackendState>;
+  configureBackend?: (backend: MockBackend) => void;
+  autoOpenWebSocket?: boolean;
 }
 
 export interface Harness {
@@ -73,9 +75,12 @@ export interface Harness {
 export async function renderApp(options: RenderAppOptions = {}): Promise<Harness> {
   const backend = new MockBackend();
   if (options.seed) backend.seed(options.seed);
+  options.configureBackend?.(backend);
   backend.install();
 
-  const wsController = new MockWebSocketController();
+  const wsController = new MockWebSocketController(
+    options.autoOpenWebSocket ?? true,
+  );
   wsController.install();
 
   // user-event v14 needs to be set up before render; configure it to

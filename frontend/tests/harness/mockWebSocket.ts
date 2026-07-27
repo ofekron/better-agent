@@ -12,7 +12,11 @@ export class MockWebSocketController {
   private current: MockWebSocket | null = null;
   private sockets: MockWebSocket[] = [];
   private originalCtor: typeof WebSocket | undefined;
-  private autoOpen = true;
+  private autoOpen: boolean;
+
+  constructor(autoOpen = true) {
+    this.autoOpen = autoOpen;
+  }
 
   install(): void {
     this.originalCtor = globalThis.WebSocket;

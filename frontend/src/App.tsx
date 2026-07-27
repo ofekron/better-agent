@@ -731,6 +731,8 @@ function AppMain({
   const {
     sessions,
     sessionsLoaded,
+    sessionsInitialAttemptSettled,
+    sessionInventoryUnavailable,
     sessionsHasMore,
     sessionsLoadingMore,
     sessionsSearching,
@@ -1914,15 +1916,33 @@ function AppMain({
     refreshSessions();
   }, [refreshSessions]);
 
-  const sawInitialConnectionRef = useRef(false);
+  const sessionConnectionStateRef = useRef({
+    connected: false,
+    inventoryUnavailable: false,
+    hasConnected: false,
+  });
   useEffect(() => {
+    const previous = sessionConnectionStateRef.current;
+    const connectionOpened = connected && !previous.connected;
+    const inventoryBecameUnavailable =
+      connected &&
+      sessionInventoryUnavailable &&
+      !previous.inventoryUnavailable;
+    const isFirstConnection = connectionOpened && !previous.hasConnected;
+    sessionConnectionStateRef.current = {
+      connected,
+      inventoryUnavailable: sessionInventoryUnavailable,
+      hasConnected: previous.hasConnected || connectionOpened,
+    };
     if (!connected) return;
-    if (!sawInitialConnectionRef.current) {
-      sawInitialConnectionRef.current = true;
+    if (connectionOpened && (!isFirstConnection || sessionInventoryUnavailable)) {
+      refreshSessionInventory();
       return;
     }
-    refreshSessionInventory();
-  }, [connected, refreshSessionInventory]);
+    if (inventoryBecameUnavailable && previous.hasConnected) {
+      refreshSessionInventory();
+    }
+  }, [connected, refreshSessionInventory, sessionInventoryUnavailable]);
 
   useEffect(() => {
     if (!Capacitor.isNativePlatform()) return;
@@ -6442,7 +6462,7 @@ function AppMain({
     <MobileActionSheetProvider>
     <InvestigateContextMenu onInvestigate={handleInvestigate} activeSessionId={currentSession?.id} activeSessionCwd={currentSession?.cwd}>
     <>
-      {(!sessionsLoaded || authStatus === "loading") && (
+      {(!sessionsInitialAttemptSettled || authStatus === "loading") && (
         <div className="app-splash-overlay">
           <div className="app-splash-content">
             <div className="app-splash-logo" aria-label="Better Agent">
@@ -6514,6 +6534,19 @@ function AppMain({
             "app.installationSetupRequired",
             "Installation setup is required — run the installer to enable providers and sessions.",
           )}
+        </div>
+      )}
+      {sessionInventoryUnavailable && (
+        <div className="offline-banner offline-banner--warn" role="alert">
+          <span className="offline-banner-dot" />
+          <span>{t("backendUnavailable.subtitle")}</span>
+          <button
+            className="restart-error-banner-close"
+            type="button"
+            onClick={refreshSessionInventory}
+          >
+            {t("backendUnavailable.retry")}
+          </button>
         </div>
       )}
       {restartError && (
