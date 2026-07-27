@@ -5349,17 +5349,13 @@ class Coordinator:
                 )
             )
             # INVARIANT: every failed run MUST surface SOMETHING to the
-            # user. Four branches in priority order:
+            # user. Three branches in priority order:
             #   1. runner gave us a typed `run_error` → surface it
             #   2. success=False and content looks like an API error →
             #      surface the content (better UX than the typed code)
-            #   3. success=True but content contains an API error →
-            #      Gemini CLI sometimes reports quota/API errors as
-            #      assistant text while claiming the run succeeded.
-            #      Treat the content as the error message.
-            #   4. success=False with neither — generic silent-failure
+            #   3. success=False with neither — generic silent-failure
             #      fallback so the assistant message gets an error
-            #      bubble instead of staying blank. Catches gemini-cli
+            #      bubble instead of staying blank. Catches CLI
             #      silent exits, future provider regressions, anything
             #      that slips through.
             if (run_error and not stopped_at) or (run_failed and content_looks_erroring):
@@ -5379,14 +5375,6 @@ class Coordinator:
                 )
                 assistant_failed = True
                 dot_error_text = err_text
-            elif content_looks_erroring and not stopped_at:
-                # Gemini CLI reported success but the content IS an API
-                # error (e.g. quota exhaustion with no 4xx code).
-                session_manager.set_assistant_error(
-                    app_session_id, msg_id, extracted or "",
-                )
-                assistant_failed = True
-                dot_error_text = extracted or ""
             elif run_failed and not run_error:
                 session_manager.set_assistant_error(
                     app_session_id,

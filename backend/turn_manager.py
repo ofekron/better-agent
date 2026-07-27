@@ -1554,11 +1554,6 @@ class TurnManager:
         import traceback
 
         persist_to = persist_to or app_session_id
-        harness_profile_revision = (
-            str(harness_profile_revision or "").strip()
-            or str(session.get("harness_profile_revision") or "").strip()
-            or None
-        )
         lifecycle_msg_id = self._c.user_prompt_manager.get_in_flight_lifecycle_msg_id(
             app_session_id,
         )

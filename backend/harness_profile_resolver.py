@@ -753,10 +753,7 @@ def resolve_for_session(
     extension_setting_overlays: dict[str, dict[str, Any]] = {}
     secret_refs: dict[str, list[str]] = {}
     dropped_extension_ids: list[str] = []
-    disabled_extension_ids = set(resolved["disabled_builtin_extensions"]["resolved"])
     for extension_id, fields in resolved["extension_instances"].items():
-        if extension_id in disabled_extension_ids:
-            continue
         mcp_servers = fields["mcp_servers"]["resolved"]
         skills = fields["skills"]["resolved"]
         instruction_names = fields["instruction_names"]["resolved"]

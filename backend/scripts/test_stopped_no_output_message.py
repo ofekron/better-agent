@@ -137,6 +137,25 @@ def _finalize_success_with_error_content() -> dict:
     return assistant_msg
 
 
+def _finalize_failed_with_error_content() -> dict:
+    sid, session, user_msg, assistant_msg = _seed_turn()
+    Coordinator._finalize_turn_messages(
+        object(),
+        session=session,
+        app_session_id=sid,
+        user_msg=user_msg,
+        assistant_msg=assistant_msg,
+        primary_result={
+            "success": False,
+            "events": [],
+            "sdk_output": "API Error: quota exhausted",
+        },
+        stopped_at=None,
+        trace_id="trace-failed-error-content",
+    )
+    return assistant_msg
+
+
 def main() -> int:
     failures: list[str] = []
 
@@ -189,12 +208,22 @@ def main() -> int:
         print(f"{FAIL} completed assistant={completed!r}")
         failures.append("success completed_at")
 
-    error_content = _finalize_success_with_error_content()
-    if error_content.get("error") and not error_content.get("completed_at"):
-        print(f"{PASS} error-looking successful result has no completed_at")
+    successful_error_content = _finalize_success_with_error_content()
+    if (
+        successful_error_content.get("completed_at")
+        and not successful_error_content.get("error")
+    ):
+        print(f"{PASS} successful explanatory error text stays completed")
     else:
-        print(f"{FAIL} error-content assistant={error_content!r}")
-        failures.append("error-content completed_at")
+        print(f"{FAIL} successful error-content assistant={successful_error_content!r}")
+        failures.append("successful error-content")
+
+    failed_error_content = _finalize_failed_with_error_content()
+    if failed_error_content.get("error") and not failed_error_content.get("completed_at"):
+        print(f"{PASS} failed API-error content remains failed")
+    else:
+        print(f"{FAIL} failed error-content assistant={failed_error_content!r}")
+        failures.append("failed error-content")
 
     shutil.rmtree(_TMP_HOME, ignore_errors=True)
     if failures:
