@@ -4375,7 +4375,6 @@ def _migrate_session(session: dict, ctx: Optional[dict] = None) -> dict:
     session.setdefault("draft_images", [])
     session.setdefault("capability_contexts", [])
     session.setdefault("harness_profile_id", "")
-    session.setdefault("harness_profile_revision", "")
     session.setdefault("working_mode", None)
     session.setdefault("working_mode_meta", None)
     session.setdefault("browser_harness_enabled", True)
@@ -4557,7 +4556,6 @@ def create_session(
     disabled_builtin_tools: Optional[list[str]] = None,
     disabled_runtime_skills: Optional[list[str]] = None,
     harness_profile_id: Optional[str] = None,
-    harness_profile_revision: Optional[str] = None,
     storage_scope: Optional[dict] = None,
     id: Optional[str] = None,
     created_at: Optional[str] = None,
@@ -4672,7 +4670,6 @@ def create_session(
         "queued_prompts": [],
         "capability_contexts": [],
         "harness_profile_id": str(harness_profile_id or "").strip(),
-        "harness_profile_revision": str(harness_profile_revision or "").strip(),
         "draft_input": "",
         "draft_input_seq": 0,
         "draft_images": [],
@@ -5533,7 +5530,6 @@ def create_sub_session(
     disabled_builtin_tools: Optional[list[str]] = None,
     disabled_runtime_skills: Optional[list[str]] = None,
     harness_profile_id: Optional[str] = None,
-    harness_profile_revision: Optional[str] = None,
 ) -> dict:
     parent = _find_in_tree(root, parent_session_id)
     if parent is None:
@@ -5616,7 +5612,6 @@ def create_sub_session(
         "queued_prompts": [],
         "capability_contexts": [],
         "harness_profile_id": str(harness_profile_id or "").strip(),
-        "harness_profile_revision": str(harness_profile_revision or "").strip(),
         "token_usage_total": {
             "input_tokens": 0,
             "output_tokens": 0,

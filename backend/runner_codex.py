@@ -785,10 +785,7 @@ def _build_create_worker_tool_handler(
                     "node_id": node_id,
                     "folder_id": args.get("folder_id"),
                     "tag_ids": args.get("tag_ids") or [],
-                    **_harness_profile_wire_fields(
-                        args.get("harness_profile_id"),
-                        args.get("harness_profile_revision"),
-                    ),
+                    **_harness_profile_wire_fields(args.get("harness_profile_id")),
                 },
                 backend_url=backend_url,
                 internal_token=internal_token,
@@ -857,10 +854,7 @@ def _build_ensure_named_worker_tool_handler(
             "tags": [name],
             "folder_id": args.get("folder_id"),
             "tag_ids": args.get("tag_ids") or [],
-            **_harness_profile_wire_fields(
-                args.get("harness_profile_id"),
-                args.get("harness_profile_revision"),
-            ),
+            **_harness_profile_wire_fields(args.get("harness_profile_id")),
         }
         try:
             result = await asyncio.to_thread(
@@ -1362,10 +1356,7 @@ def _build_delegate_task_tool_handler(
                     "sub_session": args.get("sub_session") is not False,
                     "folder_id": args.get("folder_id"),
                     "tag_ids": args.get("tag_ids") or [],
-                    **_harness_profile_wire_fields(
-                        args.get("harness_profile_id"),
-                        args.get("harness_profile_revision"),
-                    ),
+                    **_harness_profile_wire_fields(args.get("harness_profile_id")),
                 },
                 backend_url=backend_url,
                 internal_token=internal_token,
@@ -1415,10 +1406,7 @@ def _build_create_session_tool_handler(
                     "folder_id": args.get("folder_id"),
                     "tag_ids": args.get("tag_ids") or [],
                     "mcp_servers": args.get("mcp_servers") or [],
-                    **_harness_profile_wire_fields(
-                        args.get("harness_profile_id"),
-                        args.get("harness_profile_revision"),
-                    ),
+                    **_harness_profile_wire_fields(args.get("harness_profile_id")),
                 },
                 backend_url=backend_url,
                 internal_token=internal_token,
@@ -1467,10 +1455,7 @@ def _build_create_sub_session_tool_handler(
                     "folder_id": args.get("folder_id"),
                     "tag_ids": args.get("tag_ids") or [],
                     "mcp_servers": args.get("mcp_servers") or [],
-                    **_harness_profile_wire_fields(
-                        args.get("harness_profile_id"),
-                        args.get("harness_profile_revision"),
-                    ),
+                    **_harness_profile_wire_fields(args.get("harness_profile_id")),
                 },
                 backend_url=backend_url,
                 internal_token=internal_token,

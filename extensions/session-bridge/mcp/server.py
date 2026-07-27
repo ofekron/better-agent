@@ -149,17 +149,16 @@ def delegate_to_session_response(
     model: str = "",
     reasoning_effort: str = "",
     harness_profile_id: str = "",
-    harness_profile_revision: str = "",
 ) -> dict[str, Any]:
     """Run a prompt against ANY user-chosen session (fork / continue / new) and
     WAIT for its result, returned inline. The cross-session, user-driven
     counterpart to delegate_task — unlike delegate_task (detached, team-routed),
     this blocks and returns the answer.
 
-    `harness_profile_id`/`harness_profile_revision` apply only in new-session
-    mode (empty `session_id`): the profile decides which instructions, skills
-    and MCP servers the new session gets, and which it does not. An existing
-    target keeps its own profile.
+    `harness_profile_id` applies only in new-session mode (empty
+    `session_id`): the profile decides which instructions, skills and MCP
+    servers the new session gets, and which it does not. An existing target
+    keeps its own profile.
     """
     try:
         return SessionBridgeClient().invoke_durable(
@@ -177,7 +176,6 @@ def delegate_to_session_response(
                 "model": model,
                 "reasoning_effort": reasoning_effort,
                 "harness_profile_id": harness_profile_id,
-                "harness_profile_revision": harness_profile_revision,
             },
             timeout=_DELEGATE_TIMEOUT,
         )

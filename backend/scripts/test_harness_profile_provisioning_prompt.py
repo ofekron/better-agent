@@ -42,7 +42,6 @@ def main_test() -> None:
         body={
             "provision_prompt": "Explicit prep",
             "harness_profile_id": "prompted.profile",
-            "harness_profile_revision": profile["revision"],
         },
         bc_session_id="",
         description="worker",
@@ -63,7 +62,6 @@ def main_test() -> None:
         orchestration_mode="native",
         provider_id=None,
         harness_profile_id="prompted.profile",
-        harness_profile_revision=profile["revision"],
     )
     from_session = main._worker_provision_prompt_for_body(
         body={},

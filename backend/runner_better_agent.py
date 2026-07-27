@@ -1702,10 +1702,7 @@ def _build_loopback_tool_handlers(
                     "cwd": cwd,
                     "client_request_id": f"cw_{uuid.uuid4().hex[:10]}",
                     "node_id": node_id,
-                    **_harness_profile_wire_fields(
-                        args.get("harness_profile_id"),
-                        args.get("harness_profile_revision"),
-                    ),
+                    **_harness_profile_wire_fields(args.get("harness_profile_id")),
                 },
                 backend_url=backend_url,
                 internal_token=internal_token,
@@ -1751,10 +1748,7 @@ def _build_loopback_tool_handlers(
             "runner": args.get("runner"),
             "node_id": node_id,
             "tags": [name],
-            **_harness_profile_wire_fields(
-                args.get("harness_profile_id"),
-                args.get("harness_profile_revision"),
-            ),
+            **_harness_profile_wire_fields(args.get("harness_profile_id")),
         }
         try:
             result = await asyncio.to_thread(
@@ -1917,10 +1911,7 @@ def _build_loopback_tool_handlers(
                     "sub_session": args.get("sub_session") is not False,
                     "folder_id": args.get("folder_id"),
                     "tag_ids": args.get("tag_ids") or [],
-                    **_harness_profile_wire_fields(
-                        args.get("harness_profile_id"),
-                        args.get("harness_profile_revision"),
-                    ),
+                    **_harness_profile_wire_fields(args.get("harness_profile_id")),
                 },
                 backend_url=backend_url,
                 internal_token=internal_token,
@@ -1955,10 +1946,7 @@ def _build_loopback_tool_handlers(
                     "orchestration_mode": args.get("orchestration_mode") or "native",
                     "node_id": node_id,
                     "mcp_servers": args.get("mcp_servers") or [],
-                    **_harness_profile_wire_fields(
-                        args.get("harness_profile_id"),
-                        args.get("harness_profile_revision"),
-                    ),
+                    **_harness_profile_wire_fields(args.get("harness_profile_id")),
                 },
                 backend_url=backend_url,
                 internal_token=internal_token,
@@ -1989,10 +1977,7 @@ def _build_loopback_tool_handlers(
                     "runner": str(args.get("runner") or "").strip() or None,
                     "node_id": node_id,
                     "mcp_servers": args.get("mcp_servers") or [],
-                    **_harness_profile_wire_fields(
-                        args.get("harness_profile_id"),
-                        args.get("harness_profile_revision"),
-                    ),
+                    **_harness_profile_wire_fields(args.get("harness_profile_id")),
                 },
                 backend_url=backend_url,
                 internal_token=internal_token,

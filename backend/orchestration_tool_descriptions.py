@@ -28,9 +28,8 @@ _PROVIDER_SELECTOR_NOTE = (
 _HARNESS_PROFILE_NOTE = (
     " Pass harness_profile_id to give the new session a specific harness profile"
     " — it selects which instructions, skills and MCP servers that session gets,"
-    " and equally excludes everything the profile does not select. Add"
-    " harness_profile_revision only to pin an exact revision. Omit both for the"
-    " default profile."
+    " and equally excludes everything the profile does not select. Omit it for"
+    " the default profile."
 )
 
 MSSG_DESCRIPTION = (

@@ -87,7 +87,6 @@ interface SessionConfig {
   initialFiles: FileAttachment[];
   capabilityContexts: CapabilityContext[];
   harnessProfileId: string;
-  harnessProfileRevision: string;
   /** Optional folder to file the new session into. `null` means "no
    * folder" (Unfiled) — a valid, persistable choice. Persisted across
    * opens as the last selection; re-validated against the chosen
@@ -187,7 +186,6 @@ function saveDefaults(config: SessionConfig, creationAction: NewSessionCreationA
       worker: config.worker,
       folderId: config.folderId,
       harnessProfileId: config.harnessProfileId,
-      harnessProfileRevision: config.harnessProfileRevision,
       creationAction,
     }),
   );
@@ -589,7 +587,6 @@ export function NewSessionModal({
   const [initialFiles, setInitialFiles] = useState<FileAttachment[]>([]);
   const [capabilityContexts, setCapabilityContexts] = useState<CapabilityContext[]>([]);
   const [harnessProfileId, setHarnessProfileId] = useState("");
-  const [harnessProfileRevision, setHarnessProfileRevision] = useState("");
   // File Edit's availability derives purely from whether the
   // "ofek-dev.file-edit" extension is enabled on the currently selected
   // harness profile (Default when none is picked) — refetched whenever the
@@ -662,7 +659,6 @@ export function NewSessionModal({
     setInitialFiles(investigation?.files ?? []);
     setCapabilityContexts([]);
     setHarnessProfileId(defaults.harnessProfileId ?? "");
-    setHarnessProfileRevision(defaults.harnessProfileRevision ?? "");
     // Prefer the Ask flow's proposed project, else fall back to defaultCwd
     // (the project currently selected in the sidebar), else first project.
     // Re-run on every open so reopening with a new shortcut doesn't show
@@ -893,7 +889,6 @@ export function NewSessionModal({
         initialFiles,
         capabilityContexts,
         harnessProfileId,
-        harnessProfileRevision,
         folderId,
       };
       const config = applyExtensionOptionsToSessionConfig(
@@ -1222,10 +1217,7 @@ export function NewSessionModal({
               value={harnessProfileId}
               className="ns-modal-row harness-profile-selector"
               disabled={creating}
-              onChange={(profileId, revision) => {
-                setHarnessProfileId(profileId);
-                setHarnessProfileRevision(revision);
-              }}
+              onChange={setHarnessProfileId}
             />
           </div>
 

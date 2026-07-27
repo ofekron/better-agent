@@ -1537,7 +1537,6 @@ class TurnManager:
         team_message: Optional[dict] = None,
         capability_contexts: Optional[list[dict]] = None,
         harness_profile_id: Optional[str] = None,
-        harness_profile_revision: Optional[str] = None,
         resolved_harness_run_config: Optional[dict] = None,
         file_discussion_id: Optional[str] = None,
     ) -> None:
@@ -1554,11 +1553,6 @@ class TurnManager:
         import traceback
 
         persist_to = persist_to or app_session_id
-        harness_profile_revision = (
-            str(harness_profile_revision or "").strip()
-            or str(session.get("harness_profile_revision") or "").strip()
-            or None
-        )
         lifecycle_msg_id = self._c.user_prompt_manager.get_in_flight_lifecycle_msg_id(
             app_session_id,
         )
@@ -1823,7 +1817,6 @@ class TurnManager:
                 disabled_builtin_extensions=disabled_builtin_extensions,
                 capability_contexts=capability_contexts,
                 harness_profile_id=harness_profile_id,
-                harness_profile_revision=harness_profile_revision,
                 resolved_harness_run_config=resolved_harness_run_config,
             )
 
@@ -2288,7 +2281,6 @@ class TurnManager:
         disabled_builtin_extensions: Optional[list[str]] = None,
         capability_contexts: Optional[list[dict]] = None,
         harness_profile_id: Optional[str] = None,
-        harness_profile_revision: Optional[str] = None,
         resolved_harness_run_config: Optional[dict] = None,
     ) -> dict:
         loop = asyncio.get_running_loop()
@@ -2330,7 +2322,6 @@ class TurnManager:
                     harness_profile_resolver.resolve_for_session,
                     _session_rec,
                     profile_id=harness_profile_id,
-                    revision=harness_profile_revision,
                     turn_capability_contexts=capability_contexts,
                 )
             except harness_profile_resolver.HarnessProfileResolutionError:

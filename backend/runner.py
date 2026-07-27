@@ -1358,10 +1358,7 @@ def _build_create_worker_tool(
             "node_id": node_id,
             "folder_id": args.get("folder_id"),
             "tag_ids": args.get("tag_ids") or [],
-            **_harness_profile_wire_fields(
-                args.get("harness_profile_id"),
-                args.get("harness_profile_revision"),
-            ),
+            **_harness_profile_wire_fields(args.get("harness_profile_id")),
         }
         try:
             result = await asyncio.to_thread(_post_create_worker_sync, payload)
@@ -1423,10 +1420,7 @@ def _build_ensure_named_worker_tool(
             "tags": [name],
             "folder_id": args.get("folder_id"),
             "tag_ids": args.get("tag_ids") or [],
-            **_harness_profile_wire_fields(
-                args.get("harness_profile_id"),
-                args.get("harness_profile_revision"),
-            ),
+            **_harness_profile_wire_fields(args.get("harness_profile_id")),
         }
         payload = {"cwd": worker_cwd, "workers": [spec]}
         try:
@@ -1782,10 +1776,7 @@ def _build_delegate_task_tool(
             "sub_session": args.get("sub_session") is not False,
             "folder_id": args.get("folder_id"),
             "tag_ids": args.get("tag_ids") or [],
-            **_harness_profile_wire_fields(
-                args.get("harness_profile_id"),
-                args.get("harness_profile_revision"),
-            ),
+            **_harness_profile_wire_fields(args.get("harness_profile_id")),
         }
         try:
             result = await asyncio.to_thread(_post_delegate_task_sync, payload)
@@ -1928,10 +1919,7 @@ def _build_create_session_tool(
             "folder_id": args.get("folder_id"),
             "tag_ids": args.get("tag_ids") or [],
             "mcp_servers": args.get("mcp_servers") or [],
-            **_harness_profile_wire_fields(
-                args.get("harness_profile_id"),
-                args.get("harness_profile_revision"),
-            ),
+            **_harness_profile_wire_fields(args.get("harness_profile_id")),
         }
         try:
             result = await asyncio.to_thread(_post_create_session_sync, payload)
@@ -1979,10 +1967,7 @@ def _build_create_sub_session_tool(
             "folder_id": args.get("folder_id"),
             "tag_ids": args.get("tag_ids") or [],
             "mcp_servers": args.get("mcp_servers") or [],
-            **_harness_profile_wire_fields(
-                args.get("harness_profile_id"),
-                args.get("harness_profile_revision"),
-            ),
+            **_harness_profile_wire_fields(args.get("harness_profile_id")),
         }
         try:
             result = await asyncio.to_thread(_post_create_sub_session_sync, payload)

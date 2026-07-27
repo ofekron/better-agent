@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
 """Every session-creating MCP tool must accept a harness profile and apply it.
 
-`create_session` used to be the only tool that carried
-`harness_profile_id`/`harness_profile_revision` to the backend. The rest —
-`create_sub_session` (its registered surface silently dropped the params),
-`delegate_task`, `create_worker`, `ensure_named_worker` — minted sessions that
-always ran the default harness, so a caller could not scope what a spawned
-session is allowed to see.
+`create_session` used to be the only tool that carried `harness_profile_id`
+to the backend. The rest — `create_sub_session` (its registered surface
+silently dropped the param), `delegate_task`, `create_worker`,
+`ensure_named_worker` — minted sessions that always ran the default harness,
+so a caller could not scope what a spawned session is allowed to see.
+
+A session names a profile, never a revision of it, so a later edit to the
+profile reaches every session already on it.
 
 Two things are locked here:
   1. Surface: every session-creating tool, on every provider surface
      (communicate stdio MCP, Claude SDK tools, Codex dynamic tools, the
-     better-agent runtime), takes the profile arguments and forwards them.
+     better-agent runtime), takes the profile argument and forwards it.
      The registered handler is checked, not an inner helper, because the
      original bug was a wrapper that accepted fewer parameters than the
      function behind it.
@@ -52,7 +54,7 @@ from session_manager import manager as session_manager  # noqa: E402
 
 installation_profile.integrations_enabled = lambda: True
 
-PROFILE_PARAMS = ("harness_profile_id", "harness_profile_revision")
+PROFILE_PARAMS = ("harness_profile_id",)
 
 # Tools that can mint a Better Agent session. `ask` is deliberately absent: it
 # forks an existing session, which must inherit that session's own profile.
@@ -116,11 +118,9 @@ def test_delegate_task_forwards_the_profile() -> None:
         communicate_mcp.delegate_task_response,
         task="do work",
         harness_profile_id="  scoped.profile  ",
-        harness_profile_revision="  rev1  ",
     )
     assert seen["path"] == "/api/internal/delegate-task"
     assert seen["payload"]["harness_profile_id"] == "scoped.profile"
-    assert seen["payload"]["harness_profile_revision"] == "rev1"
 
 
 def test_create_worker_forwards_the_profile() -> None:
@@ -133,7 +133,6 @@ def test_create_worker_forwards_the_profile() -> None:
     )
     assert seen["path"] == "/api/internal/create-worker"
     assert seen["payload"]["harness_profile_id"] == "scoped.profile"
-    assert seen["payload"]["harness_profile_revision"] is None
 
 
 def test_ensure_named_worker_forwards_the_profile_on_the_spec() -> None:
@@ -142,12 +141,10 @@ def test_ensure_named_worker_forwards_the_profile_on_the_spec() -> None:
         name="reviewer",
         orchestration_mode="native",
         harness_profile_id="scoped.profile",
-        harness_profile_revision="rev1",
     )
     assert seen["path"] == "/api/internal/workers/provision"
     spec = seen["payload"]["workers"][0]
     assert spec["harness_profile_id"] == "scoped.profile"
-    assert spec["harness_profile_revision"] == "rev1"
 
 
 def test_every_provider_surface_exposes_the_profile() -> None:
@@ -296,11 +293,9 @@ def test_created_session_applies_inclusion_and_exclusion() -> None:
         orchestration_mode="native",
         model="model-x",
         harness_profile_id=profile["id"],
-        harness_profile_revision=profile["revision"],
     )
     record = session_manager.get(scoped["id"])
     assert record["harness_profile_id"] == profile["id"]
-    assert record["harness_profile_revision"] == profile["revision"]
 
     servers = _servers_offered_to(scoped["id"])
     assert KEPT_SERVER in servers, f"profile-selected server missing: {sorted(servers)}"
@@ -322,7 +317,6 @@ def test_created_sub_session_applies_inclusion_and_exclusion() -> None:
         model="model-x",
         cwd=_TMP_HOME,
         harness_profile_id=profile["id"],
-        harness_profile_revision=profile["revision"],
     )
     record = session_manager.get(sub["id"])
     assert record["harness_profile_id"] == profile["id"]

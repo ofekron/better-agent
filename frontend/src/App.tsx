@@ -2133,7 +2133,6 @@ function AppMain({
     orchestrationMode: OrchestrationMode;
     capabilityContexts: CapabilityContext[];
     harnessProfileId?: string;
-    harnessProfileRevision?: string;
   };
   type PendingInitialPrompt = InitialPromptPayload & { clientId: string };
 
@@ -2159,7 +2158,6 @@ function AppMain({
         sendMode: "queue",
         capabilityContexts: initial.capabilityContexts,
         harnessProfileId: initial.harnessProfileId,
-        harnessProfileRevision: initial.harnessProfileRevision,
         deferUntilTargetReady,
       });
       if (!queued) return null;
@@ -2205,7 +2203,6 @@ function AppMain({
         pending.files.length > 0 ? pending.files : undefined,
         pending.capabilityContexts,
         pending.harnessProfileId,
-        pending.harnessProfileRevision,
       );
       if (sent) return true;
       offlineDispatchedRef.current.delete(pending.clientId);
@@ -2322,7 +2319,6 @@ function AppMain({
                 clientSessionId: queued.id,
                 capabilityContexts: entry.capabilityContexts,
                 harnessProfileId: queued.harness_profile_id || undefined,
-                harnessProfileRevision: queued.harness_profile_revision || undefined,
                 folderId: queued.folder_id,
               });
               if (queued.draft_input || queued.draft_images?.length) {
@@ -2393,7 +2389,6 @@ function AppMain({
                 offlineFiles,
                 entry.capabilityContexts,
                 entry.harnessProfileId,
-                entry.harnessProfileRevision,
               );
               if (!sent) {
                 logPromptSend("offline_flush_ws_not_open", {
@@ -2439,7 +2434,6 @@ function AppMain({
             offlineFiles,
             entry.capabilityContexts,
             entry.harnessProfileId,
-            entry.harnessProfileRevision,
           );
           if (!sent) {
             logPromptSend("offline_flush_ws_not_open", {
@@ -4983,7 +4977,6 @@ function AppMain({
         filePayloads.length > 0 ? filePayloads : undefined,
         capabilityContexts,
         currentSession?.harness_profile_id,
-        currentSession?.harness_profile_revision,
       );
 
       // Gap 1: WS not open — keep the durable localStorage action for
@@ -5189,7 +5182,6 @@ function AppMain({
         undefined,
         undefined,
         currentSession.harness_profile_id,
-        currentSession.harness_profile_revision,
       );
       if (!sent) {
         setPendingForSession(sessionId, (prev) =>
@@ -5220,7 +5212,6 @@ function AppMain({
       reasoningEffort: currentSession?.reasoning_effort || provider?.last_reasoning_effort || provider?.default_reasoning_effort || undefined,
       runner: currentSession?.runner || provider?.runner,
       harnessProfileId: currentSession?.harness_profile_id || undefined,
-      harnessProfileRevision: currentSession?.harness_profile_revision || undefined,
     });
     if (session?.id) {
       navigateToCreatedSession(session);
@@ -5310,7 +5301,6 @@ function AppMain({
         undefined,
         undefined,
         currentSession.harness_profile_id,
-        currentSession.harness_profile_revision,
       );
 
       if (!sent) {
@@ -5660,7 +5650,6 @@ function AppMain({
         orchestration_mode: config.orchestrationMode,
         provider_id: config.main.providerId,
         harness_profile_id: config.harnessProfileId || "",
-        harness_profile_revision: config.harnessProfileRevision || "",
         node_id: config.nodeId,
         created_at: now,
         updated_at: now,
@@ -5687,7 +5676,6 @@ function AppMain({
         files: shouldSend && files.length ? files : undefined,
         capabilityContexts: config.capabilityContexts,
         harnessProfileId: config.harnessProfileId || undefined,
-        harnessProfileRevision: config.harnessProfileRevision || undefined,
       });
       if (!offlineQueued) return false;
       addOfflineSession(localSession, action === "send-and-open");
@@ -5759,7 +5747,6 @@ function AppMain({
             orchestrationMode: config.orchestrationMode,
             capabilityContexts: config.capabilityContexts,
             harnessProfileId: config.harnessProfileId || undefined,
-            harnessProfileRevision: config.harnessProfileRevision || undefined,
           };
           const durablePending = persistInitialPromptForSession(
             pending,
@@ -5793,7 +5780,6 @@ function AppMain({
             permission: config.main.permission,
             capabilityContexts: config.capabilityContexts,
             harnessProfileId: config.harnessProfileId || undefined,
-            harnessProfileRevision: config.harnessProfileRevision || undefined,
             folderId: config.folderId,
           });
           finishCreatedSession(session);
@@ -5838,7 +5824,6 @@ function AppMain({
           permission: config.main.permission,
           capabilityContexts: config.capabilityContexts,
           harnessProfileId: config.harnessProfileId || undefined,
-          harnessProfileRevision: config.harnessProfileRevision || undefined,
           folderId: config.folderId,
         });
         finishCreatedSession(session);
@@ -6178,7 +6163,6 @@ function AppMain({
           (picked.orchestration_mode as OrchestrationMode) ?? "team",
         capabilityContexts: [],
         harnessProfileId: picked.harness_profile_id || undefined,
-        harnessProfileRevision: picked.harness_profile_revision || undefined,
       }, true);
       if (!durablePending) return;
       void fetch(
@@ -7742,7 +7726,6 @@ function AppMain({
               cwd?: string;
               orchestration_mode?: OrchestrationMode;
               harness_profile_id?: string;
-              harness_profile_revision?: string;
               forks?: PromptEngineerParentNode[];
             };
             let parentRecord: PromptEngineerParentNode | null = null;
@@ -7788,7 +7771,6 @@ function AppMain({
               undefined,
               undefined,
               parentRecord?.harness_profile_id || fallback?.harness_profile_id,
-              parentRecord?.harness_profile_revision || fallback?.harness_profile_revision,
             );
             try {
               await progressTrackedFetch(

@@ -76,6 +76,11 @@ RUN_CONFIG_SESSION_FIELDS = (
     "provider_id",
     "disabled_builtin_extensions",
     "extra_mcp_servers",
+    "disabled_builtin_tools",
+    "disabled_runtime_skills",
+    "working_mode",
+    "active_capability_ids",
+    "harness_profile_id",
 )
 from provider_env import is_ollama_base_url
 from reasoning_effort import CLAUDE_REASONING_EFFORTS, DEFAULT_REASONING_EFFORT

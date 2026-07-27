@@ -329,7 +329,6 @@ async def _run_new(
     reasoning_effort: str = "",
     runner: str = "",
     harness_profile_id: str = "",
-    harness_profile_revision: str = "",
 ) -> dict:
     """Create a brand-new session inheriting the caller's config and run
     the prompt in it. Returns the same shape as `_run`."""
@@ -354,7 +353,6 @@ async def _run_new(
         # the picker, so this session is user-aware.
         user_initiated=True,
         harness_profile_id=harness_profile_id,
-        harness_profile_revision=harness_profile_revision,
     )
     run_sid = sess["id"]
     final = await _run_turn_with_sync_wait(
@@ -522,7 +520,6 @@ async def delegate(
     reasoning_effort: str = "",
     runner: str = "",
     harness_profile_id: str = "",
-    harness_profile_revision: str = "",
 ) -> dict:
     """Entry point for the `delegate_to_session` MCP tool. Returns either
     `{session_id, run_mode, final_message, turn_id}` or `{error: ...}`.
@@ -576,7 +573,6 @@ async def delegate(
             reasoning_effort=reasoning_effort,
             runner=runner,
             harness_profile_id=harness_profile_id,
-            harness_profile_revision=harness_profile_revision,
         )
 
     auto_ok = (

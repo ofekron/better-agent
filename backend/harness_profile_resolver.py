@@ -709,7 +709,6 @@ def resolve_for_session(
     session: dict[str, Any] | None,
     *,
     profile_id: str | None = None,
-    revision: str | None = None,
     turn_capability_contexts: list[dict] | None = None,
 ) -> dict[str, Any] | None:
     session = session or {}
@@ -725,16 +724,17 @@ def resolve_for_session(
     ).strip()
     if not selected_id:
         return None
-    selected_revision = str(revision or session.get("harness_profile_revision") or "").strip()
     active_capability_ids = tuple(
         str(item)
         for item in session.get("active_capability_ids") or []
         if str(item or "").strip()
     )
+    # No revision in the key: a session names a profile, never a revision of
+    # it, and every profile mutation clears this cache outright
+    # (`invalidate_cache`), so a stale entry cannot survive an edit.
     cache_key = (
         _default_profile_cache_key(),
         selected_id,
-        selected_revision,
         bool(session.get("bare_config")),
         active_capability_ids,
         _json_cache_token(turn_capability_contexts or []),
@@ -742,7 +742,7 @@ def resolve_for_session(
     cached = _run_snapshot_cache_get(cache_key)
     if cached is not None:
         return cached
-    resolved = resolve_profile(selected_id, selected_revision or None)
+    resolved = resolve_profile(selected_id)
 
     selected: dict[str, dict[str, Any]] = {}
     extension_mcp_servers: dict[str, list[str]] = {}
@@ -753,10 +753,7 @@ def resolve_for_session(
     extension_setting_overlays: dict[str, dict[str, Any]] = {}
     secret_refs: dict[str, list[str]] = {}
     dropped_extension_ids: list[str] = []
-    disabled_extension_ids = set(resolved["disabled_builtin_extensions"]["resolved"])
     for extension_id, fields in resolved["extension_instances"].items():
-        if extension_id in disabled_extension_ids:
-            continue
         mcp_servers = fields["mcp_servers"]["resolved"]
         skills = fields["skills"]["resolved"]
         instruction_names = fields["instruction_names"]["resolved"]

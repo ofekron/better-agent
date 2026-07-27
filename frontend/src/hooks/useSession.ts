@@ -43,7 +43,6 @@ export interface CreateSessionOptions {
   clientSessionId?: string;
   capabilityContexts?: CapabilityContext[];
   harnessProfileId?: string;
-  harnessProfileRevision?: string;
   folderId?: string | null;
 }
 
@@ -1446,7 +1445,6 @@ export function useSession(authStatus?: string) {
         clientSessionId,
         capabilityContexts,
         harnessProfileId,
-        harnessProfileRevision,
         folderId,
       } = opts;
       startOp("session:create");
@@ -1470,7 +1468,6 @@ export function useSession(authStatus?: string) {
             client_session_id: clientSessionId,
             capability_contexts: capabilityContexts && capabilityContexts.length > 0 ? capabilityContexts : undefined,
             harness_profile_id: wireHarnessProfileId(harnessProfileId),
-            harness_profile_revision: wireHarnessProfileId(harnessProfileId) ? harnessProfileRevision || undefined : undefined,
             folder_id: folderId || undefined,
           }),
         });

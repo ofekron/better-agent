@@ -254,7 +254,6 @@ def delegate_task_response(
     folder_id: str = "",
     tag_ids: list[str] | None = None,
     harness_profile_id: str = "",
-    harness_profile_revision: str = "",
 ) -> dict[str, Any]:
     """Smart detached handoff. POSTs /api/internal/delegate-task which routes
     per the global delegate_task_policy (search first suggestion / create new /
@@ -279,7 +278,7 @@ def delegate_task_response(
         "sub_session": sub_session is not False,
         "folder_id": (folder_id or "").strip() or None,
         "tag_ids": tag_ids or [],
-        **harness_profile_wire_fields(harness_profile_id, harness_profile_revision),
+        **harness_profile_wire_fields(harness_profile_id),
     }, timeout=_LONG_TIMEOUT)
 
 
@@ -367,7 +366,6 @@ def create_worker_response(
     folder_id: str = "",
     tag_ids: list[str] | None = None,
     harness_profile_id: str = "",
-    harness_profile_revision: str = "",
 ) -> dict[str, Any]:
     worker_description = (worker_description or "").strip()
     justification = (justification or "").strip()
@@ -393,7 +391,7 @@ def create_worker_response(
         "node_id": node_id.strip() or None,
         "folder_id": (folder_id or "").strip() or None,
         "tag_ids": tag_ids or [],
-        **harness_profile_wire_fields(harness_profile_id, harness_profile_revision),
+        **harness_profile_wire_fields(harness_profile_id),
     }, timeout=_LONG_TIMEOUT)
 
 
@@ -411,7 +409,6 @@ def ensure_named_worker_response(
     folder_id: str = "",
     tag_ids: list[str] | None = None,
     harness_profile_id: str = "",
-    harness_profile_revision: str = "",
 ) -> dict[str, Any]:
     name = (name or "").strip()
     cwd = _resolve_cwd(cwd)
@@ -430,7 +427,7 @@ def ensure_named_worker_response(
         "tags": [name],
         "folder_id": (folder_id or "").strip() or None,
         "tag_ids": tag_ids or [],
-        **harness_profile_wire_fields(harness_profile_id, harness_profile_revision),
+        **harness_profile_wire_fields(harness_profile_id),
     }
     if (provision_prompt or "").strip():
         spec["provision_prompt"] = provision_prompt.strip()
@@ -473,7 +470,6 @@ def create_session_response(
     tag_ids: list[str] | None = None,
     mcp_servers: list[str] | None = None,
     harness_profile_id: str = "",
-    harness_profile_revision: str = "",
 ) -> dict[str, Any]:
     name = (name or "").strip()
     if not name:
@@ -496,7 +492,7 @@ def create_session_response(
         "folder_id": (folder_id or "").strip() or None,
         "tag_ids": tag_ids or [],
         "mcp_servers": mcp_servers or [],
-        **harness_profile_wire_fields(harness_profile_id, harness_profile_revision),
+        **harness_profile_wire_fields(harness_profile_id),
     }, timeout=30.0)
 
 
@@ -512,7 +508,6 @@ def create_sub_session_response(
     tag_ids: list[str] | None = None,
     mcp_servers: list[str] | None = None,
     harness_profile_id: str = "",
-    harness_profile_revision: str = "",
 ) -> dict[str, Any]:
     return _post_json("/api/internal/create-sub-session", {
         "sender_session_id": _env_required("BETTER_CLAUDE_MSSG_SENDER_SESSION_ID"),
@@ -526,7 +521,7 @@ def create_sub_session_response(
         "folder_id": (folder_id or "").strip() or None,
         "tag_ids": tag_ids or [],
         "mcp_servers": mcp_servers or [],
-        **harness_profile_wire_fields(harness_profile_id, harness_profile_revision),
+        **harness_profile_wire_fields(harness_profile_id),
     }, timeout=30.0)
 
 

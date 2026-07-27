@@ -999,7 +999,6 @@ export interface Session {
   permission?: Permission;
   provider_id?: string;
   harness_profile_id?: string;
-  harness_profile_revision?: string;
   cwd: string;
   /** Session belongs to every project regardless of cwd (e.g. the
    * assistant singleton). Mirrors backend session_matches_project. */

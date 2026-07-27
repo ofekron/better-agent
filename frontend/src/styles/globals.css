@@ -3824,17 +3824,6 @@ body {
   flex: 1;
   min-width: 0;
 }
-.harness-profile-selector.ns-modal-row .harness-profile-revision {
-  flex-basis: 100%;
-}
-.harness-profile-revision {
-  overflow: hidden;
-  color: var(--text-muted);
-  font-family: var(--font-mono);
-  font-size: calc(10px * var(--app-font-scale));
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
 .session-runtime-axis,
 .ns-runtime-axis {
   animation: runtimeAxisIn 180ms ease-out both;

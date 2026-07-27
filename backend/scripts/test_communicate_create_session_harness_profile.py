@@ -45,42 +45,35 @@ def _captured_payload(call, **kwargs) -> dict:
 def test_create_session_accepts_harness_profile():
     signature = inspect.signature(communicate_mcp.create_session_response)
     assert "harness_profile_id" in signature.parameters
-    assert "harness_profile_revision" in signature.parameters
     assert "preset" not in signature.parameters, "create_session still exposes removed presets"
 
     seen = _captured_payload(
         communicate_mcp.create_session_response,
         name="probe",
         harness_profile_id="  focused.profile  ",
-        harness_profile_revision="  rev1  ",
     )
     assert seen["path"] == "/api/internal/create-session"
     assert seen["payload"]["harness_profile_id"] == "focused.profile"
-    assert seen["payload"]["harness_profile_revision"] == "rev1"
 
 
 def test_create_session_without_harness_profile_still_succeeds():
     seen = _captured_payload(communicate_mcp.create_session_response, name="probe")
     assert seen["payload"]["harness_profile_id"] is None
-    assert seen["payload"]["harness_profile_revision"] is None
     assert seen["payload"]["name"] == "probe"
 
 
 def test_create_sub_session_forwards_harness_profile():
     signature = inspect.signature(communicate_mcp.create_sub_session_response)
     assert "harness_profile_id" in signature.parameters
-    assert "harness_profile_revision" in signature.parameters
     assert "preset" not in signature.parameters, "create_sub_session still exposes removed presets"
 
     seen = _captured_payload(
         communicate_mcp.create_sub_session_response,
         description="probe",
         harness_profile_id="  focused.profile  ",
-        harness_profile_revision="  rev1  ",
     )
     assert seen["path"] == "/api/internal/create-sub-session"
     assert seen["payload"]["harness_profile_id"] == "focused.profile"
-    assert seen["payload"]["harness_profile_revision"] == "rev1"
 
 
 def test_internal_create_session_route_reads_harness_profile():
@@ -91,7 +84,6 @@ def test_internal_create_session_route_reads_harness_profile():
     handler = source[start:end]
     assert "_harness_profile_selection(body)" in handler
     assert "harness_profile_id=harness_profile_id," in handler
-    assert "harness_profile_revision=harness_profile_revision," in handler
 
 
 if __name__ == "__main__":

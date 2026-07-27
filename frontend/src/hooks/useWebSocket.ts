@@ -383,7 +383,6 @@ interface UseWebSocketReturn {
     files?: FilePayload[],
     capabilityContexts?: CapabilityContext[],
     harnessProfileId?: string,
-    harnessProfileRevision?: string,
   ) => boolean;
   stopStreaming: (appSessionId: string) => boolean;
   sendPromoteQueued: (
@@ -1621,7 +1620,6 @@ export function useWebSocket(
       files?: FilePayload[],
       capabilityContexts?: CapabilityContext[],
       harnessProfileId?: string,
-      harnessProfileRevision?: string,
     ) => {
       const wsState = wsRef.current?.readyState ?? -1;
       const logData = {
@@ -1674,7 +1672,6 @@ export function useWebSocket(
           send_target: sendTarget || undefined,
           capability_contexts: capabilityContexts && capabilityContexts.length > 0 ? capabilityContexts : undefined,
           harness_profile_id: wireHarnessProfileId(harnessProfileId),
-          harness_profile_revision: wireHarnessProfileId(harnessProfileId) ? harnessProfileRevision || undefined : undefined,
         });
       } catch (error) {
         logPromptSend("ws_send_throw", {

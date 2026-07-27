@@ -108,7 +108,6 @@ export function ModelPickerModal({
       runner: runnerForProvider(nextProvider),
       permission: nextProvider.default_permission || {},
       harness_profile_id: current.harness_profile_id,
-      harness_profile_revision: current.harness_profile_revision,
     }));
   };
 
@@ -275,8 +274,8 @@ export function ModelPickerModal({
           <HarnessProfileSelector
             value={draft.harness_profile_id}
             disabled={busy}
-            onChange={(harness_profile_id, harness_profile_revision) =>
-              setDraft({ ...draft, harness_profile_id, harness_profile_revision })
+            onChange={(harness_profile_id) =>
+              setDraft({ ...draft, harness_profile_id })
             }
           />
           {error || modelLoadError ? <div className="session-model-picker-error">{error || modelLoadError}</div> : null}

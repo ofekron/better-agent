@@ -392,7 +392,6 @@ class LiveHarness:
         }
         if profile:
             payload["harness_profile_id"] = profile["id"]
-            payload["harness_profile_revision"] = profile["revision"]
         return (await self._post("/api/sessions", payload))["id"]
 
     async def turn(self, sid: str) -> TurnResult:

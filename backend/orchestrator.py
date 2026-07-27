@@ -1920,7 +1920,6 @@ class Coordinator:
         runner: Optional[str] = None,
         sub_session: bool = True,
         harness_profile_id: Optional[str] = None,
-        harness_profile_revision: Optional[str] = None,
     ) -> str:
         """Mint the session target for an auto-created delegate_task."""
         import config_store
@@ -1940,7 +1939,6 @@ class Coordinator:
                 runner=runner,
                 reasoning_effort=reasoning_effort,
                 harness_profile_id=harness_profile_id,
-                harness_profile_revision=harness_profile_revision,
             )
             return sess["id"]
         sess = session_manager.create(
@@ -1951,7 +1949,6 @@ class Coordinator:
             reasoning_effort=reasoning_effort,
             source="cli",
             harness_profile_id=harness_profile_id,
-            harness_profile_revision=harness_profile_revision,
         )
         return sess["id"]
 
@@ -1974,7 +1971,6 @@ class Coordinator:
         search_folder: Optional[str] = None,
         search_tags: Optional[list[str]] = None,
         harness_profile_id: Optional[str] = None,
-        harness_profile_revision: Optional[str] = None,
     ) -> dict:
         """The `delegate_task` router. Per the global `delegate_task_policy`:
         resolve a target (caller-supplied → search first suggestion → create
@@ -2030,7 +2026,6 @@ class Coordinator:
                     runner=delegate_runner,
                     sub_session=sub_session,
                     harness_profile_id=harness_profile_id,
-                    harness_profile_revision=harness_profile_revision,
                 )
                 created = True
             else:  # auto / manual → search_sessions, take the first usable suggestion
@@ -3125,7 +3120,6 @@ class Coordinator:
         client_request_id: Optional[str] = None,
         node_id: Optional[str] = None,
         harness_profile_id: str = "",
-        harness_profile_revision: str = "",
     ) -> dict:
         import uuid
         from orchs.manager._approval import (
@@ -3187,7 +3181,6 @@ class Coordinator:
                 provider_id=self.provider_for_session(app_session_id).id,
                 node_id=effective_node_id,
                 harness_profile_id=harness_profile_id,
-                harness_profile_revision=harness_profile_revision,
             )
         else:
             if turn_save is None:
@@ -3206,7 +3199,6 @@ class Coordinator:
                 cancel_event=cancel_event,
                 node_id=effective_node_id,
                 harness_profile_id=harness_profile_id,
-                harness_profile_revision=harness_profile_revision,
             )
         if approved is None:
             return {"success": False, "error": t("delegation.user_denied_creation")}
@@ -3262,7 +3254,6 @@ class Coordinator:
                 "disabled_builtin_extensions": qp.get("disabled_builtin_extensions"),
                 "capability_contexts": qp.get("capability_contexts") or [],
                 "harness_profile_id": qp.get("harness_profile_id") or "",
-                "harness_profile_revision": qp.get("harness_profile_revision") or "",
                 "_alter_rewind_latest": bool(qp.get("alter_rewind_latest")),
                 "collapse_key": qp.get("collapse_key") or "",
                 "collapse_policy": qp.get("collapse_policy") or "",
@@ -4702,7 +4693,6 @@ class Coordinator:
         team_message: Optional[dict] = None,
         capability_contexts: Optional[list[dict]] = None,
         harness_profile_id: Optional[str] = None,
-        harness_profile_revision: Optional[str] = None,
         resolved_harness_run_config: Optional[dict] = None,
         file_discussion_id: Optional[str] = None,
         allow_model_override: bool = False,
@@ -4887,7 +4877,6 @@ class Coordinator:
                     queue_item_id=queue_item_id,
                     capability_contexts=capability_contexts,
                     harness_profile_id=harness_profile_id,
-                    harness_profile_revision=harness_profile_revision,
                     resolved_harness_run_config=resolved_harness_run_config,
                     file_discussion_id=file_discussion_id,
                     disallowed_tools=disallowed_tools,
@@ -4972,7 +4961,6 @@ class Coordinator:
                 team_message=team_message,
                 capability_contexts=capability_contexts,
                 harness_profile_id=harness_profile_id,
-                harness_profile_revision=harness_profile_revision,
                 resolved_harness_run_config=resolved_harness_run_config,
                 file_discussion_id=file_discussion_id,
             )

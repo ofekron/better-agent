@@ -26,24 +26,16 @@ HARNESS_PROFILE_INPUT_PROPERTIES: dict[str, Any] = {
             "to use the default profile."
         ),
     },
-    "harness_profile_revision": {
-        "type": ["string", "null"],
-        "description": (
-            "OPTIONAL - pin the harness profile to this exact revision. "
-            "Requires harness_profile_id. Omit to use the profile's current revision."
-        ),
-    },
 }
 
 
-def harness_profile_wire_fields(profile_id: Any = "", revision: Any = "") -> dict[str, Any]:
-    """Normalize a tool's harness-profile arguments into the wire fields every
+def harness_profile_wire_fields(profile_id: Any = "") -> dict[str, Any]:
+    """Normalize a tool's harness-profile argument into the wire field every
     session-creating backend route reads. Blank means "no explicit selection",
-    which the route resolves to the default profile."""
-    return {
-        "harness_profile_id": str(profile_id or "").strip() or None,
-        "harness_profile_revision": str(revision or "").strip() or None,
-    }
+    which the route resolves to the default profile. A session names the
+    profile, never a revision of it: the profile's current content is what
+    every turn resolves, so an edit applies to sessions already on it."""
+    return {"harness_profile_id": str(profile_id or "").strip() or None}
 
 
 STOP_TURN_INPUT_SCHEMA: dict[str, Any] = {

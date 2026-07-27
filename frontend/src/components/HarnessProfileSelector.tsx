@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { API } from "../api";
 import { eventBus } from "../lib/eventBus";
@@ -9,7 +9,7 @@ interface Props {
   value?: string;
   disabled?: boolean;
   className?: string;
-  onChange: (profileId: string, revision: string) => void;
+  onChange: (profileId: string) => void;
 }
 
 const loadOp = "harnessProfiles:list";
@@ -50,11 +50,6 @@ export function HarnessProfileSelector({
 
   const effectiveValue = value || "default";
 
-  const selectedRevision = useMemo(
-    () => profiles.find((profile) => profile.id === effectiveValue)?.revision ?? "",
-    [profiles, effectiveValue],
-  );
-
   return (
     <div className={className}>
       <span>{t("harnessProfile.label", "Harness profile")}</span>
@@ -63,11 +58,7 @@ export function HarnessProfileSelector({
           aria-label={t("harnessProfile.label", "Harness profile")}
           value={effectiveValue}
           disabled={disabled}
-          onChange={(event) => {
-            const profileId = event.target.value;
-            const profile = profiles.find((item) => item.id === profileId);
-            onChange(profileId, profile?.revision ?? "");
-          }}
+          onChange={(event) => onChange(event.target.value)}
         >
           {profiles.length === 0 ? (
             <option value="default">{t("harnessProfile.defaultOptionLabel")}</option>
@@ -80,9 +71,6 @@ export function HarnessProfileSelector({
         </select>
       </div>
       {error ? <span className="session-selector-error" title={error}>!</span> : null}
-      {effectiveValue !== "default" && selectedRevision ? (
-        <span className="harness-profile-revision">{selectedRevision}</span>
-      ) : null}
     </div>
   );
 }
