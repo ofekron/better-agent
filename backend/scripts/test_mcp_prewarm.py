@@ -361,6 +361,14 @@ async def test_readiness_gate_fail_closed() -> None:
         "extension_store falls back to real cold-spawn when prewarm was never attempted for this call",
     )
 
+    missing_server = extension_store._apply_mcp_prewarm_daemon(
+        real_server_config, server_name, {"_mcp_prewarm_ready": {}},
+    )
+    check(
+        missing_server == real_server_config,
+        "extension_store cold-spawns a server absent from the prewarm result map",
+    )
+
     ready_map = {"_mcp_prewarm_ready": {server_name: "/tmp/does-not-matter.sock"}}
     substituted = extension_store._apply_mcp_prewarm_daemon(real_server_config, server_name, ready_map)
     check(

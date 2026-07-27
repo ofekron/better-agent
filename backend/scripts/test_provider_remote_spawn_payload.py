@@ -59,8 +59,28 @@ def test_node_run_uses_node_local_backend_proxy() -> None:
     assert 'backend_url=msg.get("backend_url")' not in source
 
 
+def test_remote_spawn_forwards_effective_harness_policy() -> None:
+    provider_source = ast.get_source_segment(_PROVIDER_SOURCE, _start_run_node()) or ""
+    handler_source = Path(_BACKEND, "node_rpc_handlers.py").read_text()
+    protocol_source = Path(_BACKEND, "node_protocol.py").read_text()
+    assert "payload.update(run_policy)" in provider_source
+    for field in (
+        "extra_mcp_servers",
+        "disabled_builtin_tools",
+        "provider_run_config",
+        "capability_contexts",
+        "resolved_harness_run_config",
+    ):
+        assert f"{field}:" in protocol_source
+    assert (
+        'resolved_harness_run_config=msg.get("resolved_harness_run_config")'
+        in handler_source
+    )
+
+
 if __name__ == "__main__":
     test_start_run_binds_extension_policy_records_locally()
     test_start_run_does_not_send_internal_token_field()
     test_node_run_uses_node_local_backend_proxy()
+    test_remote_spawn_forwards_effective_harness_policy()
     print("provider_remote spawn-payload test passed")

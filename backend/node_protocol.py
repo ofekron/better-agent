@@ -72,6 +72,7 @@ class SpawnRun(TypedDict, total=False):
     mode: str  # "native" | "manager"
     app_session_id: str
     worker_agent_session_id: Optional[str]
+    mssg_sender_session_id: Optional[str]
     root_id: str  # primary's root_id this run's events should be ingested into
     fork: bool
     setting_sources: Optional[list[str]]
@@ -81,7 +82,19 @@ class SpawnRun(TypedDict, total=False):
     supervisor_agent_session_id: Optional[str]
     browser_harness_enabled: bool
     user_facing: bool
+    is_worker: bool
+    working_mode: Optional[str]
     extra_env: Optional[dict[str, str]]
+    files: Optional[list]
+    continuation_chain: list[str]
+    provider_run_config: dict
+    capability_contexts: list[dict]
+    resolved_harness_run_config: dict
+    extra_mcp_servers: list[str]
+    active_capability_ids: list[str]
+    disabled_builtin_tools: list[str]
+    target_message_id: Optional[str]
+    turn_run_id: Optional[str]
     provisioned_tool_profile: str
     disabled_builtin_extensions: Optional[list[str]]
 

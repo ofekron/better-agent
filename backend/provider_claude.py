@@ -60,10 +60,8 @@ from provider import (
 )
 import config_store
 from extension_run_policy import (
-    disabled_builtin_extensions_for_run,
-    disabled_builtin_tools_for_run,
     disabled_runtime_skills_for_run,
-    extra_mcp_servers_for_run,
+    resolve_extension_run_policy,
 )
 
 # Session-record fields _build_input_payload resolves run behavior from. Any
@@ -662,9 +660,16 @@ class ClaudeProvider(Provider):
             is_worker=is_worker,
             fallback_kind=self.KIND,
         )
-        _bare = bool(_sess_rec.get("bare_config")) or bool(
-            (resolved_harness_run_config or {}).get("bare_config")
+        run_policy = resolve_extension_run_policy(
+            resolved_harness_run_config=resolved_harness_run_config,
+            session_record=_sess_rec,
+            worker_record=_worker_sess_rec,
+            provider_kind=self.KIND,
+            provider_run_config=provider_run_config,
+            capability_contexts=capability_contexts,
+            disabled_builtin_extensions=disabled_builtin_extensions,
         )
+        _bare = bool(run_policy["bare_config"])
         if _bare:
             # No user/project/local CLAUDE.md, settings, or memory.
             setting_sources = []
@@ -694,11 +699,6 @@ class ClaudeProvider(Provider):
             "app_session_id": app_session_id,
             "working_mode": (_sess_rec or {}).get("working_mode"),
             "worker_working_mode": (_worker_sess_rec or {}).get("working_mode"),
-            "active_capability_ids": [
-                str(cid)
-                for cid in ((_sess_rec or {}).get("active_capability_ids") or [])
-                if str(cid or "").strip()
-            ],
             "disallowed_tools": list(dict.fromkeys(
                 (disallowed_tools or DEFAULT_DISALLOWED_TOOLS)
                 + list(TIMER_TOOLS)
@@ -718,30 +718,14 @@ class ClaudeProvider(Provider):
             "user_facing": user_facing,
             "bare_config": _bare,
             "continuation_chain": continuation_chain or [],
-            "provider_run_config": provider_run_config or {},
-            "capability_contexts": capability_contexts or [],
-            "resolved_harness_run_config": resolved_harness_run_config or {},
             "target_message_id": target_message_id,
             "turn_run_id": turn_run_id,
             "provisioned_tool_profile": str(provisioned_tool_profile or "").strip(),
-            "disabled_builtin_tools": disabled_builtin_tools_for_run(
-                session_record=_sess_rec, worker_record=_worker_sess_rec,
-            ),
             "disabled_runtime_skills": disabled_runtime_skills_for_run(
                 session_record=_sess_rec, worker_record=_worker_sess_rec,
             ),
-            "disabled_builtin_extensions": (
-                disabled_builtin_extensions_for_run(
-                    disabled_builtin_extensions,
-                    session_record=_sess_rec,
-                    worker_record=_worker_sess_rec,
-                )
-            ),
-            "extra_mcp_servers": extra_mcp_servers_for_run(
-                session_record=_sess_rec,
-                worker_record=_worker_sess_rec,
-            ),
         }
+        input_payload.update(run_policy)
         return input_payload, _bare, mode, resolved_backend_url
 
     def _prewarm_extension_mcp_ready(
