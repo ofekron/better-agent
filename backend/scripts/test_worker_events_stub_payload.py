@@ -95,6 +95,46 @@ def _mk_session_with_panel(
     return sid, msg["id"]
 
 
+def _mk_session_with_journal_only_panel() -> tuple[str, str]:
+    sess = session_manager.create(
+        name="t", model="sonnet", cwd="/tmp",
+        orchestration_mode="manager", source="cli",
+    )
+    sid = sess["id"]
+    msg = {
+        "id": "msg-journal-only",
+        "role": "assistant",
+        "events": [],
+        "workers": [],
+    }
+    session_manager.append_assistant_msg(sid, msg)
+    event_ingester.ingest(
+        sid, sid, "worker_start",
+        {
+            "delegation_id": "d-journal-only",
+            "worker_session_id": "worker-journal-only",
+            "worker_description": "journal worker",
+            "panel_kind": "worker",
+        },
+        source="test", msg_id=msg["id"],
+    )
+    event_ingester.ingest(
+        sid, sid, "worker_event",
+        _worker_event_data("d-journal-only", "d-journal-only-u1", "event"),
+        source="test", msg_id=msg["id"],
+    )
+    event_ingester.ingest(
+        sid, sid, "worker_complete",
+        {
+            "delegation_id": "d-journal-only",
+            "worker_session_id": "worker-journal-only",
+            "success": True,
+        },
+        source="test", msg_id=msg["id"],
+    )
+    return sid, msg["id"]
+
+
 def _tree_assistant(tree: dict, msg_id: str) -> dict:
     return next(m for m in tree["messages"] if m.get("id") == msg_id)
 
@@ -125,6 +165,21 @@ def test_streaming_message_keeps_journal_worker_events() -> bool:
     asst = _tree_assistant(tree, msg_id)
     workers = asst.get("workers") or []
     return len(workers) == 1 and len(workers[0].get("events") or []) == 3
+
+
+def test_completed_message_recovers_journal_only_worker_panel() -> bool:
+    sid, msg_id = _mk_session_with_journal_only_panel()
+    tree = session_manager.get_root_tree_stubbed(sid, exchange_count=3)
+    asst = _tree_assistant(tree, msg_id)
+    workers = asst.get("workers") or []
+    return (
+        len(workers) == 1
+        and workers[0].get("delegation_id") == "d-journal-only"
+        and workers[0].get("worker_session_id") == "worker-journal-only"
+        and workers[0].get("worker_description") == "journal worker"
+        and workers[0].get("success") is True
+        and workers[0].get("events") == []
+    )
 
 
 def test_legacy_hydrate_returns_all_rows_including_msg_id_less() -> bool:
@@ -196,6 +251,7 @@ def test_journal_growth_appends_without_full_reparse() -> bool:
 TESTS = [
     test_completed_message_ships_empty_worker_events,
     test_streaming_message_keeps_journal_worker_events,
+    test_completed_message_recovers_journal_only_worker_panel,
     test_legacy_hydrate_returns_all_rows_including_msg_id_less,
     test_stubbed_tree_build_does_zero_full_journal_scans,
     test_journal_growth_appends_without_full_reparse,

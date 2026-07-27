@@ -2044,6 +2044,96 @@ class SessionManager:
             )
 
     @staticmethod
+    def _worker_panel_from_start(data: dict, event_index: int) -> dict:
+        return {
+            "delegation_id": data.get("delegation_id"),
+            "worker_session_id": data.get("worker_session_id") or "",
+            "worker_description": data.get("worker_description")
+            or data.get("delegation_id"),
+            "panel_kind": data.get("panel_kind") or "worker",
+            "started_at": data.get("started_at"),
+            "insert_at": data.get("insert_at")
+            if isinstance(data.get("insert_at"), (int, float))
+            else event_index,
+            "orchestration_mode": data.get("orchestration_mode"),
+            "is_new": bool(data.get("is_new", False)),
+            "instructions_preview": data.get("instructions_preview") or "",
+            "events": [],
+            "jsonl_path": data.get("jsonl_path"),
+            "new_byte_offset": data.get("new_byte_offset"),
+            "fork_agent_sid": data.get("fork_agent_sid"),
+            "run_mode": data.get("run_mode"),
+            "token_usage": data.get("token_usage"),
+        }
+
+    def _restore_worker_panels_from_events(
+        self, msg: dict, events: list[dict],
+    ) -> None:
+        existing = [
+            worker for worker in (msg.get("workers") or [])
+            if isinstance(worker, dict) and worker.get("delegation_id")
+        ]
+        by_delegation = {
+            str(worker.get("delegation_id")): worker
+            for worker in existing
+        }
+        order = [str(worker.get("delegation_id")) for worker in existing]
+        for index, event in enumerate(events):
+            if not isinstance(event, dict):
+                continue
+            data = event.get("data") if isinstance(event.get("data"), dict) else {}
+            delegation_id = data.get("delegation_id")
+            if not isinstance(delegation_id, str) or not delegation_id:
+                continue
+            if event.get("type") == "worker_start":
+                panel = self._worker_panel_from_start(data, index)
+                prior = by_delegation.get(delegation_id)
+                if prior:
+                    retained_events = prior.get("events") or []
+                    prior.update(panel)
+                    prior["events"] = retained_events
+                    panel = prior
+                else:
+                    by_delegation[delegation_id] = panel
+                    order.append(delegation_id)
+                continue
+            if event.get("type") == "worker_complete":
+                panel = by_delegation.get(delegation_id)
+                if panel is None:
+                    panel = {
+                        "delegation_id": delegation_id,
+                        "worker_session_id": data.get("worker_session_id") or "",
+                        "worker_description": delegation_id,
+                        "panel_kind": "worker",
+                        "insert_at": index,
+                        "events": [],
+                    }
+                    by_delegation[delegation_id] = panel
+                    order.append(delegation_id)
+                fields = {
+                    "worker_session_id": data.get("worker_session_id"),
+                    "jsonl_path": data.get("jsonl_path"),
+                    "new_byte_offset": data.get("new_byte_offset"),
+                    "token_usage": data.get("token_usage"),
+                    "success": data.get("success"),
+                    "error": data.get("error"),
+                    "fork_agent_sid": data.get("fork_agent_sid"),
+                    "run_mode": data.get("run_mode"),
+                }
+                panel.update({k: v for k, v in fields.items() if v is not None})
+        if order:
+            msg["workers"] = [by_delegation[delegation_id] for delegation_id in order]
+
+    @staticmethod
+    def _summary_may_have_worker_panels(summary: dict) -> bool:
+        for event in summary.get("last_events") or []:
+            if isinstance(event, dict) and event.get("type") in {
+                "worker_start", "worker_event", "worker_complete",
+            }:
+                return True
+        return False
+
+    @staticmethod
     def _worker_panel_delegation_ids(msg: dict) -> set[str]:
         return {
             str(worker.get("delegation_id"))
@@ -2102,6 +2192,12 @@ class SessionManager:
         events = event_journal_reader.read_ws_events(
             root_id, sid_filter=node_sid, msg_id_filter=msg_id,
         )
+        raw_events = event_journal_reader.read_message_events(
+            root_id,
+            msg_id,
+            fork_id=node_sid if node_sid != root_id else None,
+        )
+        self._restore_worker_panels_from_events(msg, raw_events)
         events.extend(
             self._legacy_worker_events_for_message_copy(root_id, node_sid, msg)
         )
@@ -3083,6 +3179,21 @@ class SessionManager:
                 elif is_streaming:
                     self._route_frontend_events_to_message_copy(m, worker_events)
                 else:
+                    if (
+                        not (m.get("workers") or [])
+                        and summary
+                        and self._summary_may_have_worker_panels(summary)
+                    ):
+                        raw_events = event_journal_reader.read_message_events(
+                            rid,
+                            message_id=msg_id,
+                            fork_id=node_sid if node_sid != rid else None,
+                            summary=summary,
+                        )
+                        self._restore_worker_panels_from_events(m, raw_events)
+                        for worker in m.get("workers") or []:
+                            if isinstance(worker, dict):
+                                worker["events"] = []
                     m["stub"] = {
                         "event_count": summary.get("event_count", 0),
                         "last_events": _copy_jsonish(
@@ -3202,6 +3313,21 @@ class SessionManager:
                 m["events"] = []
             else:
                 m["events"] = []
+                if (
+                    not (m.get("workers") or [])
+                    and summary
+                    and self._summary_may_have_worker_panels(summary)
+                ):
+                    raw_events = event_journal_reader.read_message_events(
+                        rid,
+                        message_id=msg_id,
+                        fork_id=node_sid if node_sid != rid else None,
+                        summary=summary,
+                    )
+                    self._restore_worker_panels_from_events(m, raw_events)
+                    for worker in m.get("workers") or []:
+                        if isinstance(worker, dict):
+                            worker["events"] = []
                 m["stub"] = {
                     "event_count": summary.get("event_count", 0),
                     "last_events": _copy_jsonish(summary.get("last_events") or []),

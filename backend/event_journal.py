@@ -1487,6 +1487,7 @@ class EventJournalReader:
         fork_id: Optional[str] = None,
         worker_id: Optional[str] = None,
         delegate_id: Optional[str] = None,
+        summary: Optional[dict] = None,
     ) -> list[dict]:
         cached = self._ensure_message_cache(
             session_id,
@@ -1494,6 +1495,7 @@ class EventJournalReader:
             fork_id=fork_id,
             worker_id=worker_id,
             delegate_id=delegate_id,
+            summary=summary,
         )
         if cached is None:
             return []
