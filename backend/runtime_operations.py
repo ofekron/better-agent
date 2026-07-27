@@ -61,7 +61,7 @@ def register_operations(register: Register) -> None:
         "delete_chat": communicate_mcp.delete_chat_response,
         "delegate_task": communicate_mcp.delegate_task_response,
         "create_session": communicate_mcp.create_session_response,
-        "create_sub_session": communicate_mcp.create_sub_session_surface_response,
+        "create_sub_session": communicate_mcp.create_sub_session_response,
         "ask": communicate_mcp.ask_response,
         "create_worker": communicate_mcp.create_worker_response,
         "ensure_named_worker": communicate_mcp.ensure_named_worker_response,

@@ -4255,6 +4255,7 @@ def _with_profile_meta(response: dict[str, Any], stored: dict[str, Any] | None) 
     response["default_provider_id"] = stored.get("default_provider_id")
     response["default_model"] = stored.get("default_model")
     response["default_reasoning_effort"] = stored.get("default_reasoning_effort")
+    response["provisioning_prompt"] = stored.get("provisioning_prompt")
     response["read_only"] = bool(stored.get("read_only"))
     response["source"] = stored.get("source") or ""
     response["extension_id"] = stored.get("extension_id") or ""
@@ -17851,6 +17852,8 @@ def _pool_worker_context_for_prompt(*, body: dict, bc_session_id: str, descripti
 def _worker_provision_prompt_for_body(*, body: dict, bc_session_id: str, description: str) -> str:
     base = _api_optional_provision_prompt(body.get("provision_prompt"))
     if base is None:
+        base = _profile_provisioning_prompt_for_body(body=body, bc_session_id=bc_session_id)
+    if base is None:
         base = render_prompt("provisioning/worker_prep.md", {"description": description})
     pool_context = _pool_worker_context_for_prompt(
         body=body,
@@ -17860,6 +17863,23 @@ def _worker_provision_prompt_for_body(*, body: dict, bc_session_id: str, descrip
     if not pool_context:
         return base
     return f"{base}\n\n{pool_context}"
+
+
+def _profile_provisioning_prompt_for_body(*, body: dict, bc_session_id: str) -> str | None:
+    profile_id = str((body or {}).get("harness_profile_id") or "").strip()
+    revision = str((body or {}).get("harness_profile_revision") or "").strip()
+    if not profile_id and bc_session_id:
+        session = session_manager.get_lite(bc_session_id) or {}
+        profile_id = str(session.get("harness_profile_id") or "").strip()
+        revision = str(session.get("harness_profile_revision") or "").strip()
+    if not profile_id:
+        return None
+    try:
+        resolved = harness_profile_resolver.resolve_profile(profile_id, revision or None)
+    except harness_profile_resolver.HarnessProfileResolutionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    prompt = str(resolved.get("provisioning_prompt") or "").strip()
+    return prompt or None
 
 
 def _api_optional_pool_affinity_key(value: object) -> str:

@@ -1397,6 +1397,7 @@ export interface HarnessProfile {
   default_provider_id?: string | null;
   default_model?: string | null;
   default_reasoning_effort?: string | null;
+  provisioning_prompt?: string | null;
 }
 
 

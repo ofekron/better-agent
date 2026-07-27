@@ -17,6 +17,7 @@ if str(BACKEND) not in sys.path:
     sys.path.insert(0, str(BACKEND))
 
 import harness_profile_store
+import harness_profile_resolver
 
 
 def test_create_profile_has_empty_overrides() -> None:
@@ -25,10 +26,11 @@ def test_create_profile_has_empty_overrides() -> None:
         "name": "Personal Harness",
         "description": "hand-tuned overrides",
     })
-    assert profile["schema_version"] == 4
+    assert profile["schema_version"] == 5
     assert profile["overrides"] == {}
     assert profile["base_profile_id"] is None
     assert profile["default_model"] is None
+    assert profile["provisioning_prompt"] is None
     loaded = harness_profile_store.get_profile("personal.harness")
     assert loaded == profile
 
@@ -137,7 +139,7 @@ def test_schema_version_2_mismatch_raises() -> None:
     else:
         raise AssertionError("v1-shaped file should have raised on load")
     finally:
-        # Reset to a fresh v2 blank store for any tests that run after this one.
+        # Reset to a fresh blank store for any tests that run after this one.
         path.write_text(json.dumps(harness_profile_store._blank()), encoding="utf-8")
 
 
@@ -198,6 +200,7 @@ def test_set_profile_meta_roundtrip() -> None:
             "default_provider_id": "codex",
             "default_model": "gpt-5.5",
             "default_reasoning_effort": "high",
+            "provisioning_prompt": "Prepare a strict reviewer workspace.",
         },
         revision=child["revision"],
     )
@@ -205,8 +208,22 @@ def test_set_profile_meta_roundtrip() -> None:
     assert updated["default_provider_id"] == "codex"
     assert updated["default_model"] == "gpt-5.5"
     assert updated["default_reasoning_effort"] == "high"
+    assert updated["provisioning_prompt"] == "Prepare a strict reviewer workspace."
     loaded = harness_profile_store.get_profile("meta.child")
     assert loaded["base_profile_id"] == "meta.base"
+
+
+def test_provisioning_prompt_inherits_from_base_profile() -> None:
+    base = harness_profile_store.create_profile({"id": "prompt.base", "name": "Prompt Base"})
+    harness_profile_store.set_profile_meta(
+        "prompt.base",
+        {"provisioning_prompt": "Base worker prep"},
+        revision=base["revision"],
+    )
+    harness_profile_store.create_profile({"id": "prompt.child", "name": "Prompt Child"})
+    harness_profile_store.set_profile_meta("prompt.child", {"base_profile_id": "prompt.base"})
+    resolved = harness_profile_resolver.resolve_profile("prompt.child")
+    assert resolved["provisioning_prompt"] == "Base worker prep"
 
 
 def test_set_profile_meta_rejects_unknown_field() -> None:
@@ -321,6 +338,7 @@ def main() -> int:
         test_rejects_invalid_delta_shape()
         test_stale_revision_rejected()
         test_set_profile_meta_roundtrip()
+        test_provisioning_prompt_inherits_from_base_profile()
         test_set_profile_meta_rejects_unknown_field()
         test_base_self_reference_rejected()
         test_indirect_base_cycle_rejected_at_save()

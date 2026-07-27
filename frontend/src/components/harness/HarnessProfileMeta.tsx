@@ -24,6 +24,7 @@ const BASE_FIELD = "base_profile_id";
 const PROVIDER_FIELD = "default_provider_id";
 const MODEL_FIELD = "default_model";
 const EFFORT_FIELD = "default_reasoning_effort";
+const PROVISIONING_PROMPT_FIELD = "provisioning_prompt";
 
 /** Base pointer + provider/model/effort pins. These are scalar profile fields,
  * not deltas over Default, so they render here rather than through the generic
@@ -36,7 +37,9 @@ export function HarnessProfileMeta({ profile, profiles, disabled, onWrite }: Pro
   const pinnedProviderId = profile.default_provider_id ?? "";
   const pinnedModel = profile.default_model ?? "";
   const pinnedEffort = profile.default_reasoning_effort ?? "";
+  const provisioningPrompt = profile.provisioning_prompt ?? "";
   const baseId = profile.base_profile_id ?? "";
+  const [provisioningPromptDraft, setProvisioningPromptDraft] = useState(provisioningPrompt);
 
   useEffect(() => {
     let cancelled = false;
@@ -74,6 +77,10 @@ export function HarnessProfileMeta({ profile, profiles, disabled, onWrite }: Pro
       cancelled = true;
     };
   }, [pinnedProviderId]);
+
+  useEffect(() => {
+    setProvisioningPromptDraft(provisioningPrompt);
+  }, [provisioningPrompt]);
 
   // A profile cannot base on itself or on the synthesized Default; the backend
   // rejects a deeper cycle at save time and surfaces it as a patch error.
@@ -159,6 +166,25 @@ export function HarnessProfileMeta({ profile, profiles, disabled, onWrite }: Pro
             <option key={effort} value={effort}>{effort}</option>
           ))}
         </select>
+      </div>
+
+      <div className="harness-item-row">
+        <span className="harness-item-label">{t("harnessProfile.provisioningPromptLabel")}</span>
+        <textarea
+          key={provisioningPrompt}
+          className="harness-setting-input"
+          value={provisioningPromptDraft}
+          disabled={disabled}
+          rows={5}
+          placeholder={t("harnessProfile.provisioningPromptPlaceholder")}
+          onChange={(e) => setProvisioningPromptDraft(e.target.value)}
+          onBlur={() => {
+            if (provisioningPromptDraft !== provisioningPrompt) {
+              write(PROVISIONING_PROMPT_FIELD, provisioningPromptDraft);
+            }
+          }}
+        />
+        <p className="harness-item-hint">{t("harnessProfile.provisioningPromptHint")}</p>
       </div>
     </article>
   );

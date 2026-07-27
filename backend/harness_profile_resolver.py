@@ -380,7 +380,12 @@ def resolve_profile(
         raise HarnessProfileResolutionError(
             "harness profile base chain cycle: " + " -> ".join(_chain + (profile_id,))
         )
-    base_pins = {"default_provider_id": None, "default_model": None, "default_reasoning_effort": None}
+    base_pins = {
+        "default_provider_id": None,
+        "default_model": None,
+        "default_reasoning_effort": None,
+        "provisioning_prompt": None,
+    }
     if profile_id == harness_profile_store.DEFAULT_PROFILE_ID:
         stored: dict[str, Any] | None = None
         overrides: dict[str, Any] = {}
@@ -460,6 +465,7 @@ def resolve_profile(
         "default_provider_id": (stored or {}).get("default_provider_id") or base_pins["default_provider_id"],
         "default_model": (stored or {}).get("default_model") or base_pins["default_model"],
         "default_reasoning_effort": (stored or {}).get("default_reasoning_effort") or base_pins["default_reasoning_effort"],
+        "provisioning_prompt": (stored or {}).get("provisioning_prompt") or base_pins["provisioning_prompt"],
         "extension_instances": extension_instances,
         "disabled_builtin_tools": _field(disabled_tools, overrides.get("disabled_builtin_tools") if tools_overridden else None),
         "disabled_builtin_extensions": _field(

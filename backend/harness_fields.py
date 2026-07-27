@@ -59,13 +59,15 @@ GROUP_DISABLED_BUILTIN_EXTENSIONS = "disabled_builtin_extensions"
 GROUP_DISABLED_RUNTIME_SKILLS = "disabled_runtime_skills"
 
 # Profile-meta: scalar profile fields that are NOT sparse deltas over Default
-# and do not exist on the Default profile — the optional base-profile pointer
-# and the optional provider/model/reasoning-effort pins. Written through the
-# same /fields route (see harness_field_writer), stored by set_profile_meta.
+# and do not exist on the Default profile — the optional base-profile pointer,
+# provider/model/reasoning-effort pins, and provisioning prompt. Written
+# through the same /fields route (see harness_field_writer), stored by
+# set_profile_meta.
 GROUP_PROFILE_META = "profile_meta"
 BASE_PROFILE_FIELD = "base_profile_id"
 PIN_FIELDS = ("default_provider_id", "default_model", "default_reasoning_effort")
-PROFILE_META_FIELDS = (BASE_PROFILE_FIELD, *PIN_FIELDS)
+PROVISIONING_PROMPT_FIELD = "provisioning_prompt"
+PROFILE_META_FIELDS = (BASE_PROFILE_FIELD, *PIN_FIELDS, PROVISIONING_PROMPT_FIELD)
 
 _UI_SURFACE_KEYS = ("quick_button", "page")
 
@@ -349,10 +351,9 @@ def _extension_descriptor(record: dict[str, Any], extension_id: str) -> dict[str
 
 
 def _profile_meta_descriptor() -> dict[str, Any]:
-    """The scalar profile-meta fields (base pointer + provider/model/effort
-    pins). Not a delta-over-Default control, so the editor renders it with a
-    dedicated widget; the option lists (existing profiles, providers, models)
-    come from their own live sources, not embedded here."""
+    """The scalar profile-meta fields. Not a delta-over-Default control, so
+    the editor renders it with a dedicated widget; option lists come from their
+    own live sources, not embedded here."""
     return {
         "id": GROUP_PROFILE_META,
         "scope": SCOPE_PROFILE,
@@ -361,6 +362,7 @@ def _profile_meta_descriptor() -> dict[str, Any]:
             {"name": "default_provider_id", "kind": "provider"},
             {"name": "default_model", "kind": "model"},
             {"name": "default_reasoning_effort", "kind": "reasoning_effort"},
+            {"name": PROVISIONING_PROMPT_FIELD, "kind": "textarea"},
         ],
     }
 

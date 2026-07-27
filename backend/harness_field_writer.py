@@ -55,7 +55,8 @@ def apply_field_writes(
     resolved = harness_profile_resolver.resolve_profile(profile_id, revision, default=default)
 
     ops: list[dict[str, Any]] = []
-    # Scalar profile-meta fields (base pointer + provider/model/effort pins)
+    # Scalar profile-meta fields (base pointer, provider/model/effort pins,
+    # and provisioning prompt)
     # collected across this request and applied via the typed store setter.
     meta_writes: dict[str, Any] = {}
     # Working copies of the absolute resolved lists, mutated across the

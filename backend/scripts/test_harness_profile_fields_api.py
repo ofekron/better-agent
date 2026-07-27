@@ -121,6 +121,19 @@ def main_test() -> None:
     created = client.post("/api/harness-profiles", json={"name": "Api Profile"})
     check(created.status_code == 200, "profile creation succeeds")
     profile = created.json()
+    prompt_write = client.patch(
+        f"/api/harness-profiles/{profile['id']}/fields",
+        json={"revision": profile["revision"], "writes": [
+            {"path": ["profile_meta", "provisioning_prompt"],
+             "value": "Provision this profile's workers carefully."},
+        ]},
+    )
+    check(prompt_write.status_code == 200, "profile provisioning prompt write succeeds")
+    check(
+        prompt_write.json()["provisioning_prompt"] == "Provision this profile's workers carefully.",
+        "profile response includes own provisioning prompt",
+    )
+    profile = prompt_write.json()
 
     # A named profile narrows without touching global state.
     toggle = client.patch(

@@ -20,13 +20,16 @@ from paths import ba_home
 # optional provider/model/reasoning-effort pins consulted as a
 # session-creation fallback.
 # v4 adds disabled_runtime_skills so harness profiles cover the full
-# capability-narrowing surface. Schema migrations are not supported: a store on
-# an older version is refused at load (wipe harness_profiles.json to reset).
-SCHEMA_VERSION = 4
+# capability-narrowing surface. v5 adds an optional provisioning_prompt used
+# as the default worker-provisioning prompt. Schema migrations are not
+# supported: a store on an older version is refused at load (wipe
+# harness_profiles.json to reset).
+SCHEMA_VERSION = 5
 MAX_NAME_CHARS = 120
 MAX_DESCRIPTION_CHARS = 1_000
 MAX_INLINE_INSTRUCTION_CHARS = 80_000
 MAX_SELECTOR_CHARS = 200
+MAX_PROVISIONING_PROMPT_CHARS = 80_000
 _ID_RE = re.compile(r"^[a-z0-9][a-z0-9_.-]{2,79}$")
 _LOCK = threading.RLock()
 DEFAULT_PROFILE_ID = "default"
@@ -277,6 +280,11 @@ def _normalized_payload(profile_id: str, payload: dict[str, Any], *, existing: d
         "default_provider_id": _clean_text(payload.get("default_provider_id"), "default_provider_id", MAX_SELECTOR_CHARS) or None,
         "default_model": _clean_text(payload.get("default_model"), "default_model", MAX_SELECTOR_CHARS) or None,
         "default_reasoning_effort": _clean_text(payload.get("default_reasoning_effort"), "default_reasoning_effort", 40) or None,
+        "provisioning_prompt": _clean_text(
+            payload.get("provisioning_prompt"),
+            "provisioning_prompt",
+            MAX_PROVISIONING_PROMPT_CHARS,
+        ) or None,
         "created_at": (existing or {}).get("created_at") or now,
         "updated_at": now,
     }
@@ -317,6 +325,7 @@ def _input_payload_from_profile(profile: dict[str, Any]) -> dict[str, Any]:
         "default_provider_id": profile.get("default_provider_id"),
         "default_model": profile.get("default_model"),
         "default_reasoning_effort": profile.get("default_reasoning_effort"),
+        "provisioning_prompt": profile.get("provisioning_prompt"),
     }
 
 
@@ -391,6 +400,7 @@ _META_FIELDS = (
     "default_provider_id",
     "default_model",
     "default_reasoning_effort",
+    "provisioning_prompt",
 )
 
 
