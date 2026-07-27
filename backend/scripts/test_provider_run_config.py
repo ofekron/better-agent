@@ -1682,6 +1682,126 @@ def t_requirements_processor_profile_marks_requirements_mcp_env() -> None:
     )
 
 
+def _with_runtime_broker_env(*, agent: str = "", legacy: str = ""):
+    class BrokerEnv:
+        def __enter__(self):
+            self.previous_agent = os.environ.get("BETTER_AGENT_RUNTIME_BROKER")
+            self.previous_legacy = os.environ.get("BETTER_CLAUDE_RUNTIME_BROKER")
+            if agent:
+                os.environ["BETTER_AGENT_RUNTIME_BROKER"] = agent
+            else:
+                os.environ.pop("BETTER_AGENT_RUNTIME_BROKER", None)
+            if legacy:
+                os.environ["BETTER_CLAUDE_RUNTIME_BROKER"] = legacy
+            else:
+                os.environ.pop("BETTER_CLAUDE_RUNTIME_BROKER", None)
+            return self
+
+        def __exit__(self, *_exc):
+            if self.previous_agent is None:
+                os.environ.pop("BETTER_AGENT_RUNTIME_BROKER", None)
+            else:
+                os.environ["BETTER_AGENT_RUNTIME_BROKER"] = self.previous_agent
+            if self.previous_legacy is None:
+                os.environ.pop("BETTER_CLAUDE_RUNTIME_BROKER", None)
+            else:
+                os.environ["BETTER_CLAUDE_RUNTIME_BROKER"] = self.previous_legacy
+
+    return BrokerEnv()
+
+
+def _with_integrations_enabled():
+    class IntegrationsEnabled:
+        def __enter__(self):
+            self.previous = extension_store.installation_profile.integrations_enabled
+            extension_store.installation_profile.integrations_enabled = lambda: True
+            return self
+
+        def __exit__(self, *_exc):
+            extension_store.installation_profile.integrations_enabled = self.previous
+
+    return IntegrationsEnabled()
+
+
+def _coordination_launcher_inputs() -> dict:
+    return {
+        "user_facing": True,
+        "app_session_id": "coordination-sid",
+        "backend_url": "http://127.0.0.1:8000",
+        "internal_token": "secret",
+        "mode": "native",
+        "cwd": "/tmp/project",
+        "model": "m",
+        "provider_id": "prov-coordination",
+        "resolved_harness_run_config": {
+            "launcher_projection": {
+                "extension_revisions": {
+                    extension_store.BUILTIN_COORDINATION_EXTENSION_ID: "test",
+                },
+                "extension_mcp_servers": {
+                    extension_store.BUILTIN_COORDINATION_EXTENSION_ID: [
+                        "ofek-dev-coordination",
+                    ],
+                },
+            },
+        },
+    }
+
+
+def _check_coordination_broker_env(env: dict, expected: str, label: str) -> None:
+    check(
+        env.get("BETTER_AGENT_RUNTIME_BROKER") == expected,
+        f"{label} carries Better Agent runtime broker alias",
+    )
+    check(
+        env.get("BETTER_CLAUDE_RUNTIME_BROKER") == expected,
+        f"{label} carries legacy runtime broker alias",
+    )
+
+
+def t_coordination_native_launcher_preserves_runtime_broker_aliases() -> None:
+    _install_coordination_extension_record()
+    cases = [
+        ("agent-only", "unix:/tmp/agent-only.sock", ""),
+        ("legacy-only", "", "unix:/tmp/legacy-only.sock"),
+        ("both", "unix:/tmp/agent-first.sock", "unix:/tmp/legacy-second.sock"),
+    ]
+    for label, agent, legacy in cases:
+        expected = agent or legacy
+        with _with_integrations_enabled(), _with_runtime_broker_env(agent=agent, legacy=legacy):
+            configs = extension_store.native_mcp_launcher_server_configs(
+                _coordination_launcher_inputs(),
+                user_facing=True,
+                bare=False,
+            )
+            launcher = configs.get("better-agent-coordination")
+            check(launcher is not None, f"{label} coordination launcher config resolves")
+            if launcher:
+                _check_coordination_broker_env(launcher.get("env") or {}, expected, f"{label} launcher")
+
+
+def t_coordination_launcher_second_stage_preserves_runtime_broker() -> None:
+    _install_coordination_extension_record()
+    broker = "unix:/tmp/coordination-second-stage.sock"
+    with _with_integrations_enabled(), _with_runtime_broker_env(agent=broker):
+        inputs = {
+            **_coordination_launcher_inputs(),
+            "extension_mcp_launcher_context": True,
+        }
+        resolved = extension_store.resolve_native_mcp_server_config(
+            extension_id=extension_store.BUILTIN_COORDINATION_EXTENSION_ID,
+            server_name="ofek-dev-coordination",
+            inputs=inputs,
+        )
+    check(resolved is not None, "coordination launcher second stage resolves MCP config")
+    if resolved:
+        _check_coordination_broker_env(resolved.get("env") or {}, broker, "second-stage coordination")
+        check(
+            "BETTER_AGENT_INTERNAL_TOKEN" not in (resolved.get("env") or {}),
+            "brokered coordination MCP does not receive internal token",
+        )
+
+
 def t_bare_testape_mcp_stays_on_better_agent_runtime() -> None:
     _install_testape_extension_record()
     inputs = {
@@ -1956,6 +2076,8 @@ def main() -> int:
         ("better-agent runner uses extension mcp configs", t_better_agent_runner_uses_extension_mcp_configs),
         ("requirements mcp stays on Better Agent runtime", t_requirements_mcp_stays_on_better_agent_runtime),
         ("requirements processor profile marks requirements mcp env", t_requirements_processor_profile_marks_requirements_mcp_env),
+        ("coordination native launcher preserves runtime broker aliases", t_coordination_native_launcher_preserves_runtime_broker_aliases),
+        ("coordination launcher second stage preserves runtime broker", t_coordination_launcher_second_stage_preserves_runtime_broker),
         ("bare TestApe mcp stays on Better Agent runtime", t_bare_testape_mcp_stays_on_better_agent_runtime),
         ("bare mcp availability matrix", t_bare_mcp_availability_matrix),
         ("open-file-panel mcp validates required fields", t_open_file_panel_mcp_validates_required_fields),

@@ -5891,6 +5891,7 @@ def _native_mcp_launcher_env(inputs: dict[str, Any]) -> dict[str, str]:
     provisioned_tool_profile = str(inputs.get("provisioned_tool_profile") or "").strip()
     return dual_env_many({
         "BETTER_CLAUDE_BACKEND_URL": backend_url,
+        "BETTER_CLAUDE_RUNTIME_BROKER": get_env("BETTER_CLAUDE_RUNTIME_BROKER"),
         "BETTER_CLAUDE_APP_SESSION_ID": str(inputs.get("app_session_id") or ""),
         "BETTER_CLAUDE_CWD": str(inputs.get("cwd") or ""),
         "BETTER_CLAUDE_MODEL": str(inputs.get("model") or ""),
