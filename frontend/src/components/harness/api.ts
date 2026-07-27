@@ -9,6 +9,19 @@ import type { HarnessDescriptor, HarnessFieldWrite } from "./types";
  * HTTP error. */
 export const REVISION_MISMATCH = "revision_mismatch";
 
+/** Thrown when the addressed profile no longer exists — it was deleted here
+ * or in another tab while it was still the editor's selection. Distinguished
+ * so the UI can follow the backend down to Default instead of showing a raw
+ * "Not Found" against a dead id. */
+export const PROFILE_NOT_FOUND = "profile_not_found";
+
+/** The per-profile endpoints; a 404 from them means the profile is gone,
+ * which is a selection transition rather than a failure. */
+async function throwForProfileStatus(res: Response): Promise<never> {
+  if (res.status === 404) throw new Error(PROFILE_NOT_FOUND);
+  return throwForStatus(res);
+}
+
 async function throwForStatus(res: Response): Promise<never> {
   if (res.status === 409) throw new Error(REVISION_MISMATCH);
   let detail = "";
@@ -31,7 +44,7 @@ export async function fetchProfile(id: string): Promise<HarnessProfile> {
     `harnessProfiles:fetch:${id}`,
     `${API}/api/harness-profiles/${encodeURIComponent(id)}`,
   );
-  if (!res.ok) return throwForStatus(res);
+  if (!res.ok) return throwForProfileStatus(res);
   return res.json();
 }
 
@@ -48,7 +61,7 @@ export async function writeFields(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ revision, writes }),
   });
-  if (!res.ok) return throwForStatus(res);
+  if (!res.ok) return throwForProfileStatus(res);
   return res.json();
 }
 
@@ -68,5 +81,5 @@ export async function deleteProfile(id: string, revision: string): Promise<void>
     `${API}/api/harness-profiles/${encodeURIComponent(id)}?revision=${encodeURIComponent(revision)}`,
     { method: "DELETE", credentials: "include" },
   );
-  if (!res.ok) await throwForStatus(res);
+  if (!res.ok) await throwForProfileStatus(res);
 }

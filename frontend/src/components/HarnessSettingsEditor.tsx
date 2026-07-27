@@ -7,6 +7,7 @@ import type { HarnessProfile } from "../types";
 import { ExtensionEnabledToggle, HarnessGroup } from "./harness/HarnessGroup";
 import { HarnessProfileMeta } from "./harness/HarnessProfileMeta";
 import {
+  PROFILE_NOT_FOUND,
   REVISION_MISMATCH,
   createProfile,
   deleteProfile,
@@ -79,8 +80,17 @@ export function HarnessSettingsEditor() {
         setError("");
       })
       .catch((err) => {
+        const message = err instanceof Error ? err.message : String(err);
+        // The selection was deleted (here or in another tab) and the
+        // profiles-changed refetch is chasing an id the backend no longer
+        // has. Follow the backend down to Default rather than reporting a
+        // dead id as a failure.
+        if (message === PROFILE_NOT_FOUND) {
+          setSelectedId(DEFAULT_ID);
+          return;
+        }
         setProfile(null);
-        setError(err instanceof Error ? err.message : String(err));
+        setError(message);
       })
       .finally(() => setLoading(false));
   }, [selectedId]);
@@ -113,6 +123,12 @@ export function HarnessSettingsEditor() {
         .then(() => load())
         .catch((err) => {
           const message = err instanceof Error ? err.message : String(err);
+          // A write against a profile that no longer exists is the same
+          // stale-selection case as above — reselect instead of erroring.
+          if (message === PROFILE_NOT_FOUND) {
+            setSelectedId(DEFAULT_ID);
+            return;
+          }
           setError(message);
           // A stale-revision rejection means another writer moved the
           // profile forward — refetch so the editor converges on the
@@ -152,7 +168,16 @@ export function HarnessSettingsEditor() {
     setError("");
     deleteProfile(profile.id, profile.revision)
       .then(() => setSelectedId(DEFAULT_ID))
-      .catch((err) => setError(err instanceof Error ? err.message : String(err)))
+      .catch((err) => {
+        const message = err instanceof Error ? err.message : String(err);
+        // Already gone (another tab deleted it first) is the outcome this
+        // click wanted, not a failure.
+        if (message === PROFILE_NOT_FOUND) {
+          setSelectedId(DEFAULT_ID);
+          return;
+        }
+        setError(message);
+      })
       .finally(() => setSaving(false));
   }, [profile, isDefault]);
 
