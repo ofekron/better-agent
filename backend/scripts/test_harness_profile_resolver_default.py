@@ -179,6 +179,24 @@ def test_default_headless_reflects_extension_setting_write() -> None:
     assert after["extension_instances"][_FIXTURE_BROWSER_HARNESS_EXTENSION_ID]["headless"] is True
 
 
+def test_disabled_default_extension_is_not_selected_for_run() -> None:
+    _install_browser_harness_extension_with_headless_setting()
+    try:
+        config_store.set_disabled_builtin_extensions([_FIXTURE_BROWSER_HARNESS_EXTENSION_ID])
+
+        resolved = harness_profile_resolver.resolve_profile("default")
+        assert _FIXTURE_BROWSER_HARNESS_EXTENSION_ID in resolved["extension_instances"]
+        assert _FIXTURE_BROWSER_HARNESS_EXTENSION_ID in resolved["disabled_builtin_extensions"]["resolved"]
+
+        snapshot = harness_profile_resolver.resolve_for_session({})
+        assert _FIXTURE_BROWSER_HARNESS_EXTENSION_ID not in snapshot["extension_revisions"]
+        assert _FIXTURE_BROWSER_HARNESS_EXTENSION_ID not in snapshot["extension_setting_overlays"]
+        assert _FIXTURE_BROWSER_HARNESS_EXTENSION_ID in snapshot["disabled_builtin_extensions"]
+    finally:
+        config_store.set_disabled_builtin_extensions([])
+        harness_profile_resolver.invalidate_cache()
+
+
 def test_default_profile_synthesis_is_cached_until_invalidated() -> None:
     harness_profile_resolver.invalidate_cache()
     default_calls = 0
