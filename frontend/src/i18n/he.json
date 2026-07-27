@@ -741,10 +741,6 @@
   "newSession.projectLabel": "פרויקט",
   "newSession.pickProject": "— בחר פרויקט —",
   "newSession.orchestration": "תזמור",
-  "newSession.preset": "פרופיל יכולות",
-  "newSession.presetDefault": "יכולות מלאות (ברירת מחדל)",
-  "newSession.presetReviewer": "סוקר — בלי כלי סשנים, בלי מיומנויות",
-  "newSession.presetHint": "פרופילים מסירים יכולות בעת היצירה. סשן סוקר לא יכול ליצור, לשלוח הודעות או להמתין לסשנים אחרים ולא טוען מיומנויות ריצה.",
   "newSession.provider": "ספק",
   "newSession.runner": "Runner",
   "newSession.model": "מודל",
@@ -1377,5 +1373,9 @@
   "settings.capabilityNeedsBuild": "נדרשת בנייה הכוללת את היכולת",
   "settings.capabilitySetupRequired": "סיים את הגדרת ההתקנה כדי לבחור יכולות.",
   "settings.capabilityIntegrationsDisableWarning": "כיבוי אינטגרציות יבטל עבודה בבעלות הרחבות בהפעלה הבאה. להמשיך?",
-  "settings.capabilityRestartManually": "הפעל מחדש את Better Agent כדי להחיל"
+  "settings.capabilityRestartManually": "הפעל מחדש את Better Agent כדי להחיל",
+  "harnessProfile.group.disabled_runtime_skills": "Runtime skills",
+  "harnessProfile.groupHint.disabled_runtime_skills": "Runtime skills available to the agent. Turn all off for reviewer-style sessions that must not load skills.",
+  "harnessProfile.readOnlyHint": "Extension-owned profile; edit it in the extension package.",
+  "harnessProfile.deleteReadOnlyBlocked": "Extension-owned profiles cannot be deleted here."
 }

@@ -28,6 +28,7 @@ const DEFAULT_ID = "default";
 interface ProfileSummary {
   id: string;
   name: string;
+  read_only?: boolean;
 }
 
 /** Every configurable group paired with the extension it belongs to (null
@@ -43,6 +44,7 @@ function allGroups(
   }
   groups.push({ group: descriptor.builtin_tools, extensionId: null });
   groups.push({ group: descriptor.builtin_extensions, extensionId: null });
+  groups.push({ group: descriptor.runtime_skills, extensionId: null });
   return groups;
 }
 
@@ -61,12 +63,13 @@ export function HarnessSettingsEditor() {
   const [search, setSearch] = useState("");
 
   const isDefault = selectedId === DEFAULT_ID;
+  const isReadOnly = Boolean(profile?.read_only);
 
   const loadProfiles = useCallback(() => {
     trackedFetch("harnessProfiles:list", `${API}/api/harness-profiles`)
       .then((res) => (res.ok ? res.json() : Promise.reject(new Error(`HTTP ${res.status}`))))
       .then((data: { profiles: HarnessProfile[] }) =>
-        setProfiles((data.profiles || []).map((item) => ({ id: item.id, name: item.name }))),
+        setProfiles((data.profiles || []).map((item) => ({ id: item.id, name: item.name, read_only: item.read_only }))),
       )
       .catch(() => setProfiles([{ id: DEFAULT_ID, name: t("harnessProfile.defaultOptionLabel") }]));
   }, [t]);
@@ -142,7 +145,7 @@ export function HarnessSettingsEditor() {
 
   const applyWrites = useCallback(
     (writes: HarnessFieldWrite[]) => {
-      if (!profile || !writes.length) return;
+      if (!profile || profile.read_only || !writes.length) return;
       runMutation(() => writeFields(profile.id, writes, profile.revision));
     },
     [profile, runMutation],
@@ -163,7 +166,7 @@ export function HarnessSettingsEditor() {
   }, [newProfileName]);
 
   const handleDelete = useCallback(() => {
-    if (!profile || isDefault) return;
+    if (!profile || isDefault || profile.read_only) return;
     setSaving(true);
     setError("");
     deleteProfile(profile.id, profile.revision)
@@ -201,7 +204,7 @@ export function HarnessSettingsEditor() {
     );
   }, [descriptor, search]);
 
-  const disabled = saving || loading;
+  const disabled = saving || loading || isReadOnly;
 
   if (loading && !profile) {
     return <div className="harness-settings-editor">{t("common.loading", "Loading…")}</div>;
@@ -248,7 +251,11 @@ export function HarnessSettingsEditor() {
               {saving && <span className="harness-settings-saving">{t("harnessProfile.saving")}</span>}
             </div>
             <p className="harness-settings-header-hint">
-              {isDefault ? t("harnessProfile.defaultHint") : t("harnessProfile.overrideCount", { count: overrideCount })}
+              {isDefault
+                ? t("harnessProfile.defaultHint")
+                : isReadOnly
+                  ? t("harnessProfile.readOnlyHint")
+                  : t("harnessProfile.overrideCount", { count: overrideCount })}
             </p>
             <div className="harness-settings-header-actions">
               <input
@@ -258,7 +265,7 @@ export function HarnessSettingsEditor() {
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
               />
-              {!isDefault && (
+              {!isDefault && !isReadOnly && (
                 <label className="harness-diff-toggle">
                   <input
                     type="checkbox"
@@ -268,7 +275,7 @@ export function HarnessSettingsEditor() {
                   {t("harnessProfile.diffOnly")}
                 </label>
               )}
-              {!isDefault && (
+              {!isDefault && !isReadOnly && (
                 <button
                   type="button"
                   className="btn-secondary"
@@ -281,8 +288,14 @@ export function HarnessSettingsEditor() {
               <button
                 type="button"
                 className="btn-danger"
-                disabled={isDefault || disabled}
-                title={isDefault ? t("harnessProfile.deleteDefaultBlocked") : undefined}
+                disabled={isDefault || isReadOnly || disabled}
+                title={
+                  isDefault
+                    ? t("harnessProfile.deleteDefaultBlocked")
+                    : isReadOnly
+                      ? t("harnessProfile.deleteReadOnlyBlocked")
+                      : undefined
+                }
                 onClick={handleDelete}
               >
                 {t("harnessProfile.deleteProfile")}
@@ -300,7 +313,7 @@ export function HarnessSettingsEditor() {
 
           {profile && descriptor && (
             <div className="harness-settings-editor-body">
-              {!isDefault && descriptor.profile_meta && (
+              {!isDefault && !isReadOnly && descriptor.profile_meta && (
                 <HarnessProfileMeta
                   profile={profile}
                   profiles={profiles}
@@ -354,6 +367,15 @@ export function HarnessSettingsEditor() {
                   extensionId={null}
                   isDefault={isDefault}
                   disabled={disabled}
+                  diffOnly={diffOnly}
+                  onWrite={(write) => applyWrites([write])}
+                />
+                <HarnessGroup
+                  group={descriptor.runtime_skills}
+                  profile={profile}
+                  extensionId={null}
+                  isDefault={isDefault}
+                  disabled={disabled || isDefault}
                   diffOnly={diffOnly}
                   onWrite={(write) => applyWrites([write])}
                 />

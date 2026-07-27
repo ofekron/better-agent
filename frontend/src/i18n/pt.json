@@ -736,10 +736,6 @@
   "newSession.projectLabel": "Projeto",
   "newSession.pickProject": "— Escolha um projeto —",
   "newSession.orchestration": "Orquestração",
-  "newSession.preset": "Predefinição de capacidades",
-  "newSession.presetDefault": "Capacidades completas (padrão)",
-  "newSession.presetReviewer": "Revisor — sem ferramentas de sessão, sem habilidades",
-  "newSession.presetHint": "Predefinições removem capacidades na criação. Sessões revisoras não podem criar, enviar mensagens nem aguardar outras sessões e não carregam habilidades.",
   "newSession.provider": "Provedor",
   "newSession.runner": "Runner",
   "newSession.model": "Modelo",
@@ -1334,5 +1330,9 @@
   "settings.capabilityNeedsBuild": "Precisa de um build que o inclua",
   "settings.capabilitySetupRequired": "Conclua a instalação para escolher os recursos.",
   "settings.capabilityIntegrationsDisableWarning": "Desativar integrações cancelará o trabalho das extensões na próxima inicialização. Continuar?",
-  "settings.capabilityRestartManually": "Reinicie o Better Agent para aplicar"
+  "settings.capabilityRestartManually": "Reinicie o Better Agent para aplicar",
+  "harnessProfile.group.disabled_runtime_skills": "Runtime skills",
+  "harnessProfile.groupHint.disabled_runtime_skills": "Runtime skills available to the agent. Turn all off for reviewer-style sessions that must not load skills.",
+  "harnessProfile.readOnlyHint": "Extension-owned profile; edit it in the extension package.",
+  "harnessProfile.deleteReadOnlyBlocked": "Extension-owned profiles cannot be deleted here."
 }

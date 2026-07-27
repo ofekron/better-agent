@@ -252,6 +252,7 @@ def _compute_default_profile_uncached() -> dict[str, Any]:
         "extension_instances": extension_instances,
         "disabled_builtin_tools": config_store.get_disabled_builtin_tools(),
         "disabled_builtin_extensions": config_store.get_disabled_builtin_extensions(),
+        "disabled_runtime_skills": [],
         "instruction_sources": instruction_sources,
     }
 
@@ -345,6 +346,7 @@ def _resolved_to_default_shape(resolved: dict[str, Any]) -> dict[str, Any]:
         "extension_instances": extension_instances,
         "disabled_builtin_tools": list(resolved["disabled_builtin_tools"]["resolved"]),
         "disabled_builtin_extensions": list(resolved["disabled_builtin_extensions"]["resolved"]),
+        "disabled_runtime_skills": list(resolved["disabled_runtime_skills"]["resolved"]),
         "instruction_sources": {
             name: copy.deepcopy(entry["resolved"])
             for name, entry in resolved["instruction_sources"].items()
@@ -429,6 +431,9 @@ def resolve_profile(
     disabled_extensions, extensions_overridden = _apply_delta(
         base_shape["disabled_builtin_extensions"], overrides.get("disabled_builtin_extensions")
     )
+    disabled_runtime_skills, runtime_skills_overridden = _apply_delta(
+        base_shape.get("disabled_runtime_skills") or [], overrides.get("disabled_runtime_skills")
+    )
 
     instruction_sources: dict[str, Any] = {}
     override_sources = overrides.get("instruction_sources") or {}
@@ -458,6 +463,10 @@ def resolve_profile(
         "disabled_builtin_tools": _field(disabled_tools, overrides.get("disabled_builtin_tools") if tools_overridden else None),
         "disabled_builtin_extensions": _field(
             disabled_extensions, overrides.get("disabled_builtin_extensions") if extensions_overridden else None
+        ),
+        "disabled_runtime_skills": _field(
+            disabled_runtime_skills,
+            overrides.get("disabled_runtime_skills") if runtime_skills_overridden else None,
         ),
         "instruction_sources": instruction_sources,
         "mcp_overrides": copy.deepcopy((stored or {}).get("mcp_overrides") or {}),
@@ -742,6 +751,7 @@ def resolve_for_session(
         "active_capability_ids": list(active_capability_ids),
         "disabled_builtin_tools": list(resolved["disabled_builtin_tools"]["resolved"]),
         "disabled_builtin_extensions": list(resolved["disabled_builtin_extensions"]["resolved"]),
+        "disabled_runtime_skills": list(resolved["disabled_runtime_skills"]["resolved"]),
         "extension_revisions": extension_revisions,
         "extension_mcp_servers": extension_mcp_servers,
         "extension_skills": extension_skills,
@@ -766,6 +776,7 @@ def resolve_for_session(
         "secret_refs": snapshot["secret_refs"],
         "disabled_builtin_extensions": snapshot["disabled_builtin_extensions"],
         "disabled_builtin_tools": snapshot["disabled_builtin_tools"],
+        "disabled_runtime_skills": snapshot["disabled_runtime_skills"],
         "active_capability_ids": snapshot["active_capability_ids"],
     }
     if dropped_extension_ids:

@@ -736,10 +736,6 @@
   "newSession.projectLabel": "项目",
   "newSession.pickProject": "— 选择一个项目 —",
   "newSession.orchestration": "编排",
-  "newSession.preset": "能力预设",
-  "newSession.presetDefault": "完整能力（默认）",
-  "newSession.presetReviewer": "评审者 — 无会话工具、无技能",
-  "newSession.presetHint": "预设在创建时移除能力。评审者会话无法创建、联系或等待其他会话，也不加载运行时技能。",
   "newSession.provider": "提供商",
   "newSession.runner": "Runner",
   "newSession.model": "模型",
@@ -1334,5 +1330,9 @@
   "settings.capabilityNeedsBuild": "需要包含该功能的构建",
   "settings.capabilitySetupRequired": "完成安装设置后即可选择功能。",
   "settings.capabilityIntegrationsDisableWarning": "关闭集成会在下次启动时取消扩展所拥有的工作。是否继续？",
-  "settings.capabilityRestartManually": "重启 Better Agent 后生效"
+  "settings.capabilityRestartManually": "重启 Better Agent 后生效",
+  "harnessProfile.group.disabled_runtime_skills": "Runtime skills",
+  "harnessProfile.groupHint.disabled_runtime_skills": "Runtime skills available to the agent. Turn all off for reviewer-style sessions that must not load skills.",
+  "harnessProfile.readOnlyHint": "Extension-owned profile; edit it in the extension package.",
+  "harnessProfile.deleteReadOnlyBlocked": "Extension-owned profiles cannot be deleted here."
 }

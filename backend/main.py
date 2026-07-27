@@ -4255,6 +4255,9 @@ def _with_profile_meta(response: dict[str, Any], stored: dict[str, Any] | None) 
     response["default_provider_id"] = stored.get("default_provider_id")
     response["default_model"] = stored.get("default_model")
     response["default_reasoning_effort"] = stored.get("default_reasoning_effort")
+    response["read_only"] = bool(stored.get("read_only"))
+    response["source"] = stored.get("source") or ""
+    response["extension_id"] = stored.get("extension_id") or ""
     return response
 
 
@@ -9809,11 +9812,6 @@ async def create_session(body: Any = Body(default=None)):
         capability_contexts = normalize_capability_contexts(body.get("capability_contexts"))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    import session_presets
-    try:
-        requested_preset = session_presets.normalize_preset(body.get("preset"))
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
     harness_profile_id, harness_profile_revision = _harness_profile_selection(body)
     # A harness profile may pin provider/model/reasoning-effort defaults used
     # ONLY for whichever the caller omitted; explicit body values always win.
@@ -9981,7 +9979,6 @@ async def create_session(body: Any = Body(default=None)):
         # action — the user is aware of (and owns) this session.
         user_initiated=True,
         capability_contexts=capability_contexts,
-        preset=requested_preset,
         id=client_session_id,
     )
     try:
@@ -14900,7 +14897,6 @@ async def internal_create_session(
         )
     node_id = str(body.get("node_id") or "").strip() or "primary"
     extra_mcp_servers = _api_extra_mcp_servers(body.get("mcp_servers"))
-    preset = str(body.get("preset") or "").strip()
     if not model:
         model = await asyncio.to_thread(config_store.default_session_model)
     sess = await asyncio.to_thread(
@@ -14917,7 +14913,6 @@ async def internal_create_session(
             bare_config=bare_config,
             capability_contexts=capability_contexts,
             extra_mcp_servers=extra_mcp_servers,
-            preset=preset,
             harness_profile_id=harness_profile_id,
             harness_profile_revision=harness_profile_revision,
         )
@@ -15015,7 +15010,7 @@ async def internal_create_sub_session(
     disallowed_tools = _api_disallowed_tools(body.get("disallowed_tools"))
     disabled_builtin_extensions = _api_disabled_builtin_extensions(body.get("disabled_builtin_extensions"))
     extra_mcp_servers = _api_extra_mcp_servers(body.get("mcp_servers"))
-    preset = str(body.get("preset") or "").strip()
+    harness_profile_id, harness_profile_revision = _harness_profile_selection(body)
     name = description or "sub-session"
 
     try:
@@ -15032,7 +15027,8 @@ async def internal_create_sub_session(
                 disallowed_tools=disallowed_tools,
                 disabled_builtin_extensions=disabled_builtin_extensions,
                 extra_mcp_servers=extra_mcp_servers,
-                preset=preset,
+                harness_profile_id=harness_profile_id,
+                harness_profile_revision=harness_profile_revision,
             )
         )
         await _apply_initial_session_organization(sub["id"], folder_id, tag_ids)
@@ -15060,6 +15056,8 @@ async def internal_create_sub_session(
         "disallowed_tools": sub.get("disallowed_tools") or [],
         "disabled_builtin_extensions": sub.get("disabled_builtin_extensions") or [],
         "extra_mcp_servers": sub.get("extra_mcp_servers") or [],
+        "harness_profile_id": sub.get("harness_profile_id") or "",
+        "harness_profile_revision": sub.get("harness_profile_revision") or "",
     }
 
 

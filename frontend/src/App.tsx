@@ -5795,7 +5795,6 @@ function AppMain({
             harnessProfileId: config.harnessProfileId || undefined,
             harnessProfileRevision: config.harnessProfileRevision || undefined,
             folderId: config.folderId,
-            preset: config.preset,
           });
           finishCreatedSession(session);
         } catch (e) {
@@ -5841,7 +5840,6 @@ function AppMain({
           harnessProfileId: config.harnessProfileId || undefined,
           harnessProfileRevision: config.harnessProfileRevision || undefined,
           folderId: config.folderId,
-          preset: config.preset,
         });
         finishCreatedSession(session);
       } catch (e) {

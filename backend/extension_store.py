@@ -1334,6 +1334,36 @@ def _validate_skills(value: Any) -> list[dict[str, Any]]:
     return items
 
 
+def _validate_harness_profiles(value: Any) -> list[dict[str, Any]]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ExtensionError("entrypoints.harness_profiles must be a list")
+    items: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in value:
+        if not isinstance(item, dict):
+            raise ExtensionError("entrypoints.harness_profiles items must be objects")
+        profile_id = str(item.get("id") or "").strip()
+        if not _ID_RE.fullmatch(profile_id):
+            raise ExtensionError("entrypoints.harness_profiles.id contains invalid characters")
+        if profile_id == "default":
+            raise ExtensionError("entrypoints.harness_profiles cannot declare default")
+        if profile_id in seen:
+            raise ExtensionError(f"entrypoints.harness_profiles contains duplicate id: {profile_id}")
+        seen.add(profile_id)
+        path = _clean_rel_path(str(item.get("path") or ""), field="entrypoints.harness_profiles.path")
+        cleaned = {"id": profile_id, "path": path}
+        if "name" in item:
+            cleaned["name"] = str(item.get("name") or "").strip()
+        if "description" in item:
+            cleaned["description"] = _validate_entrypoint_description(
+                item.get("description"), field="entrypoints.harness_profiles.description"
+            )
+        items.append(cleaned)
+    return items
+
+
 _CAPABILITY_SCOPES = {"global", "project", "session", "turn", "runtime"}
 _CAPABILITY_GATES = {"internal", "external"}
 
@@ -2439,6 +2469,7 @@ def validate_manifest(raw: Any) -> dict[str, Any]:
             extension_instructions.instruction_items_from_entrypoints(entrypoints_raw)
         ),
         "skills": _validate_skills(entrypoints_raw.get("skills")),
+        "harness_profiles": _validate_harness_profiles(entrypoints_raw.get("harness_profiles")),
         "capabilities": _validate_capabilities(
             entrypoints_raw.get("capabilities"), extension_id=extension_id
         ),
@@ -4048,6 +4079,12 @@ def _validate_declared_files(manifest: dict[str, Any], package_dir: Path) -> Non
             raise ExtensionError(f"skill directory not found: {item['path']}")
         if not (path / "SKILL.md").is_file():
             raise ExtensionError(f"skill SKILL.md not found: {item['path']}/SKILL.md")
+    for item in manifest["entrypoints"]["harness_profiles"]:
+        path = (package_dir / item["path"]).resolve()
+        if not path.is_relative_to(root):
+            raise ExtensionError("harness profile path escapes extension package")
+        if not path.exists() or not path.is_file():
+            raise ExtensionError(f"harness profile file not found: {item['path']}")
     for item in manifest["entrypoints"]["team_definitions"]:
         path = (package_dir / item["path"]).resolve()
         if not path.is_relative_to(root):
@@ -7727,6 +7764,45 @@ def extension_runtime_skills(extension_id: str) -> list[dict[str, Any]]:
         for item in entrypoints.get("skills") or []
         if isinstance(item, dict) and item.get("name")
     ]
+
+
+def extension_harness_profiles() -> list[dict[str, Any]]:
+    profiles: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for record in _active_records():
+        manifest = record.get("manifest") or {}
+        extension_id = str(manifest.get("id") or "").strip()
+        if not extension_id or not is_extension_runtime_ready(extension_id):
+            continue
+        root = runtime_package_root_for_record(record)
+        if root is None:
+            continue
+        package_root = root.resolve()
+        for item in (manifest.get("entrypoints") or {}).get("harness_profiles") or []:
+            profile_id = str((item or {}).get("id") or "").strip()
+            if not profile_id or profile_id in seen:
+                raise ExtensionError(f"Duplicate harness profile id: {profile_id}")
+            path = (package_root / str(item.get("path") or "")).resolve()
+            if not path.is_relative_to(package_root) or not path.is_file():
+                raise ExtensionError(f"Harness profile file not found: {extension_id}.{profile_id}")
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError as exc:
+                raise ExtensionError(f"Harness profile is invalid JSON: {extension_id}.{profile_id}") from exc
+            if not isinstance(payload, dict):
+                raise ExtensionError(f"Harness profile payload must be an object: {extension_id}.{profile_id}")
+            profile = {
+                **payload,
+                "id": profile_id,
+                "name": str(item.get("name") or payload.get("name") or profile_id).strip(),
+                "description": str(item.get("description") or payload.get("description") or "").strip(),
+                "source": f"extension:{extension_id}",
+                "extension_id": extension_id,
+                "read_only": True,
+            }
+            seen.add(profile_id)
+            profiles.append(profile)
+    return profiles
 
 
 def extension_mcp_servers(extension_id: str) -> list[dict[str, Any]]:

@@ -764,10 +764,6 @@
   "newSession.projectLabel": "Project",
   "newSession.pickProject": "— Pick a project —",
   "newSession.orchestration": "Orchestration",
-  "newSession.preset": "Capability preset",
-  "newSession.presetDefault": "Full capabilities (default)",
-  "newSession.presetReviewer": "Reviewer — no session tools, no skills",
-  "newSession.presetHint": "Presets remove capabilities at creation. Reviewer sessions cannot create, message, or wait on other sessions and load no runtime skills.",
   "newSession.provider": "Provider",
   "newSession.runner": "Runner",
   "newSession.model": "Model",
@@ -1321,6 +1317,8 @@
   "harnessProfile.groupHint.permissions": "What this extension is allowed to reach on your machine. Required permissions come with the install; optional ones are yours to grant, and anything you leave off is denied.",
   "harnessProfile.groupHint.disabled_builtin_tools": "Better Agent's own built-in agent tools. Turn one off and the agent cannot use it in sessions using this profile.",
   "harnessProfile.groupHint.disabled_builtin_extensions": "Better Agent's built-in extensions. Turn one off and its tools, skills and instructions are withheld from sessions using this profile.",
+  "harnessProfile.group.disabled_runtime_skills": "Runtime skills",
+  "harnessProfile.groupHint.disabled_runtime_skills": "Runtime skills available to the agent. Turn all off for reviewer-style sessions that must not load skills.",
   "harnessProfile.itemLabel.ui_surfaces.quick_button": "Quick button",
   "harnessProfile.itemLabel.ui_surfaces.page": "Page",
   "harnessProfile.itemHint.ui_surfaces.quick_button": "Show this extension's button in the session and settings views.",
@@ -1405,5 +1403,7 @@
   "settings.capabilityNeedsBuild": "Needs a build that includes it",
   "settings.capabilitySetupRequired": "Finish installation setup to choose capabilities.",
   "settings.capabilityIntegrationsDisableWarning": "Turning integrations off cancels extension-owned work at the next start. Continue?",
-  "settings.capabilityRestartManually": "Restart Better Agent to apply"
+  "settings.capabilityRestartManually": "Restart Better Agent to apply",
+  "harnessProfile.readOnlyHint": "Extension-owned profile; edit it in the extension package.",
+  "harnessProfile.deleteReadOnlyBlocked": "Extension-owned profiles cannot be deleted here."
 }

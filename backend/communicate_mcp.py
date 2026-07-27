@@ -461,7 +461,8 @@ def create_session_response(
     folder_id: str = "",
     tag_ids: list[str] | None = None,
     mcp_servers: list[str] | None = None,
-    preset: str = "",
+    harness_profile_id: str = "",
+    harness_profile_revision: str = "",
 ) -> dict[str, Any]:
     name = (name or "").strip()
     if not name:
@@ -484,7 +485,8 @@ def create_session_response(
         "folder_id": (folder_id or "").strip() or None,
         "tag_ids": tag_ids or [],
         "mcp_servers": mcp_servers or [],
-        "preset": (preset or "").strip(),
+        "harness_profile_id": (harness_profile_id or "").strip() or None,
+        "harness_profile_revision": (harness_profile_revision or "").strip() or None,
     }, timeout=30.0)
 
 
@@ -499,7 +501,8 @@ def create_sub_session_response(
     folder_id: str = "",
     tag_ids: list[str] | None = None,
     mcp_servers: list[str] | None = None,
-    preset: str = "",
+    harness_profile_id: str = "",
+    harness_profile_revision: str = "",
 ) -> dict[str, Any]:
     return _post_json("/api/internal/create-sub-session", {
         "sender_session_id": _env_required("BETTER_CLAUDE_MSSG_SENDER_SESSION_ID"),
@@ -513,7 +516,8 @@ def create_sub_session_response(
         "folder_id": (folder_id or "").strip() or None,
         "tag_ids": tag_ids or [],
         "mcp_servers": mcp_servers or [],
-        "preset": (preset or "").strip(),
+        "harness_profile_id": (harness_profile_id or "").strip() or None,
+        "harness_profile_revision": (harness_profile_revision or "").strip() or None,
     }, timeout=30.0)
 
 

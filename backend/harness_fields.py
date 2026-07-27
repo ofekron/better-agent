@@ -56,6 +56,7 @@ GROUP_PERMISSIONS = "permissions"
 # Top-level (non per-extension) groups.
 GROUP_DISABLED_BUILTIN_TOOLS = "disabled_builtin_tools"
 GROUP_DISABLED_BUILTIN_EXTENSIONS = "disabled_builtin_extensions"
+GROUP_DISABLED_RUNTIME_SKILLS = "disabled_runtime_skills"
 
 # Profile-meta: scalar profile fields that are NOT sparse deltas over Default
 # and do not exist on the Default profile — the optional base-profile pointer
@@ -401,6 +402,21 @@ def descriptor() -> dict[str, Any]:
                 for extension_id in sorted(installed_ids)
             ],
         ),
+        "runtime_skills": _group(
+            GROUP_DISABLED_RUNTIME_SKILLS,
+            scope=SCOPE_PROFILE,
+            control=CONTROL_ITEM_TOGGLES,
+            items=[
+                {
+                    "name": "*",
+                    "label": "*",
+                    "description": "",
+                    "detail": "",
+                    "default_enabled": True,
+                    "locked_by": [],
+                }
+            ],
+        ),
         "profile_meta": _profile_meta_descriptor(),
     }
 
@@ -458,6 +474,9 @@ def write_default(path: list[str], value: Any) -> None:
             )
         )
         return
+
+    if head == GROUP_DISABLED_RUNTIME_SKILLS:
+        raise HarnessFieldError("disabled_runtime_skills is profile-scoped only")
 
     if head != "extension_instances" or len(path) < 3:
         raise HarnessFieldError(f"Unknown harness field path: {'.'.join(str(p) for p in path)}")
@@ -534,7 +553,11 @@ def scope_for(path: list[str]) -> str:
     override or writes the one global value."""
     if not path:
         raise HarnessFieldError("field path is required")
-    if path[0] in (GROUP_DISABLED_BUILTIN_TOOLS, GROUP_DISABLED_BUILTIN_EXTENSIONS):
+    if path[0] in (
+        GROUP_DISABLED_BUILTIN_TOOLS,
+        GROUP_DISABLED_BUILTIN_EXTENSIONS,
+        GROUP_DISABLED_RUNTIME_SKILLS,
+    ):
         return SCOPE_PROFILE
     if path[0] == "extension_instances" and len(path) >= 3:
         group = str(path[2])

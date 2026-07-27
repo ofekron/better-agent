@@ -735,10 +735,6 @@
   "newSession.projectLabel": "المشروع",
   "newSession.pickProject": "— اختر مشروعًا —",
   "newSession.orchestration": "التنسيق",
-  "newSession.preset": "إعداد القدرات المسبق",
-  "newSession.presetDefault": "قدرات كاملة (افتراضي)",
-  "newSession.presetReviewer": "مراجع — بلا أدوات جلسات وبلا مهارات",
-  "newSession.presetHint": "تزيل الإعدادات المسبقة قدرات عند الإنشاء. جلسة المراجع لا يمكنها إنشاء جلسات أخرى أو مراسلتها أو انتظارها ولا تحمّل مهارات وقت التشغيل.",
   "newSession.provider": "المزوّد",
   "newSession.runner": "Runner",
   "newSession.model": "النموذج",
@@ -1333,5 +1329,9 @@
   "settings.capabilityNeedsBuild": "يتطلب بناءً يتضمنه",
   "settings.capabilitySetupRequired": "أكمل إعداد التثبيت لاختيار القدرات.",
   "settings.capabilityIntegrationsDisableWarning": "إيقاف التكاملات سيلغي عمل الإضافات عند التشغيل التالي. هل تريد المتابعة؟",
-  "settings.capabilityRestartManually": "أعد تشغيل Better Agent للتطبيق"
+  "settings.capabilityRestartManually": "أعد تشغيل Better Agent للتطبيق",
+  "harnessProfile.group.disabled_runtime_skills": "Runtime skills",
+  "harnessProfile.groupHint.disabled_runtime_skills": "Runtime skills available to the agent. Turn all off for reviewer-style sessions that must not load skills.",
+  "harnessProfile.readOnlyHint": "Extension-owned profile; edit it in the extension package.",
+  "harnessProfile.deleteReadOnlyBlocked": "Extension-owned profiles cannot be deleted here."
 }

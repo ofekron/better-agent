@@ -738,10 +738,6 @@
   "newSession.projectLabel": "Проект",
   "newSession.pickProject": "— Выберите проект —",
   "newSession.orchestration": "Оркестрация",
-  "newSession.preset": "Пресет возможностей",
-  "newSession.presetDefault": "Полные возможности (по умолчанию)",
-  "newSession.presetReviewer": "Рецензент — без инструментов сессий и навыков",
-  "newSession.presetHint": "Пресеты убирают возможности при создании. Сессия-рецензент не может создавать другие сессии, писать им или ждать их и не загружает навыки.",
   "newSession.provider": "Провайдер",
   "newSession.runner": "Runner",
   "newSession.model": "Модель",
@@ -1336,5 +1332,9 @@
   "settings.capabilityNeedsBuild": "Нужна сборка с этой возможностью",
   "settings.capabilitySetupRequired": "Завершите установку, чтобы выбрать возможности.",
   "settings.capabilityIntegrationsDisableWarning": "Отключение интеграций отменит работу расширений при следующем запуске. Продолжить?",
-  "settings.capabilityRestartManually": "Перезапустите Better Agent, чтобы применить"
+  "settings.capabilityRestartManually": "Перезапустите Better Agent, чтобы применить",
+  "harnessProfile.group.disabled_runtime_skills": "Runtime skills",
+  "harnessProfile.groupHint.disabled_runtime_skills": "Runtime skills available to the agent. Turn all off for reviewer-style sessions that must not load skills.",
+  "harnessProfile.readOnlyHint": "Extension-owned profile; edit it in the extension package.",
+  "harnessProfile.deleteReadOnlyBlocked": "Extension-owned profiles cannot be deleted here."
 }

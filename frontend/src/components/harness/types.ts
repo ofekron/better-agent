@@ -68,6 +68,7 @@ export interface HarnessDescriptor {
   extensions: HarnessDescriptorExtension[];
   builtin_tools: HarnessDescriptorGroup;
   builtin_extensions: HarnessDescriptorGroup;
+  runtime_skills: HarnessDescriptorGroup;
   profile_meta?: HarnessProfileMetaDescriptor;
 }
 
@@ -88,12 +89,14 @@ export const GROUP_UI_SURFACES = "ui_surfaces";
 export const GROUP_PERMISSIONS = "permissions";
 export const GROUP_DISABLED_BUILTIN_TOOLS = "disabled_builtin_tools";
 export const GROUP_DISABLED_BUILTIN_EXTENSIONS = "disabled_builtin_extensions";
+export const GROUP_DISABLED_RUNTIME_SKILLS = "disabled_runtime_skills";
 
 /** Groups whose stored field is a disable-list, so the toggle shown to the
  * user ("available") is the inverse of the stored membership. */
 export const INVERTED_GROUPS: ReadonlySet<string> = new Set([
   GROUP_DISABLED_BUILTIN_TOOLS,
   GROUP_DISABLED_BUILTIN_EXTENSIONS,
+  GROUP_DISABLED_RUNTIME_SKILLS,
 ]);
 
 /** i18n key for a group's heading. */

@@ -3915,7 +3915,6 @@ class SessionManager:
         extra_mcp_servers: Optional[list[str]] = None,
         disabled_builtin_tools: Optional[list[str]] = None,
         disabled_runtime_skills: Optional[list[str]] = None,
-        preset: Optional[str] = None,
         harness_profile_id: Optional[str] = None,
         harness_profile_revision: Optional[str] = None,
         storage_scope: Optional[dict] = None,
@@ -3940,12 +3939,6 @@ class SessionManager:
         _validate_orchestration_mode_against_provider(
             orchestration_mode=orchestration_mode, provider_id=provider_id,
         )
-        import session_presets
-        exclusions = session_presets.apply_preset(preset or "", {
-            "disabled_builtin_tools": disabled_builtin_tools,
-            "disabled_builtin_extensions": disabled_builtin_extensions,
-            "disabled_runtime_skills": disabled_runtime_skills,
-        })
         sess = session_store.create_session(
             name=name, model=model, cwd=cwd,
             orchestration_mode=orchestration_mode, source=source,
@@ -3960,10 +3953,10 @@ class SessionManager:
             bare_config=bare_config,
             user_initiated=user_initiated,
             disallowed_tools=disallowed_tools,
-            disabled_builtin_extensions=exclusions["disabled_builtin_extensions"],
+            disabled_builtin_extensions=disabled_builtin_extensions,
             extra_mcp_servers=extra_mcp_servers,
-            disabled_builtin_tools=exclusions["disabled_builtin_tools"],
-            disabled_runtime_skills=exclusions["disabled_runtime_skills"],
+            disabled_builtin_tools=disabled_builtin_tools,
+            disabled_runtime_skills=disabled_runtime_skills,
             harness_profile_id=harness_profile_id,
             harness_profile_revision=harness_profile_revision,
             storage_scope=storage_scope,
@@ -4104,7 +4097,8 @@ class SessionManager:
         extra_mcp_servers: Optional[list[str]] = None,
         disabled_builtin_tools: Optional[list[str]] = None,
         disabled_runtime_skills: Optional[list[str]] = None,
-        preset: Optional[str] = None,
+        harness_profile_id: Optional[str] = None,
+        harness_profile_revision: Optional[str] = None,
     ) -> dict:
         rid = self._root_id_for(parent_session_id)
         if rid is None:
@@ -4112,15 +4106,6 @@ class SessionManager:
         _validate_orchestration_mode_against_provider(
             orchestration_mode="native", provider_id=provider_id,
         )
-        import session_presets
-        exclusions = session_presets.apply_preset(preset or "", {
-            "disabled_builtin_tools": disabled_builtin_tools,
-            "disabled_builtin_extensions": disabled_builtin_extensions,
-            "disabled_runtime_skills": disabled_runtime_skills,
-        })
-        disabled_builtin_tools = exclusions["disabled_builtin_tools"]
-        disabled_builtin_extensions = exclusions["disabled_builtin_extensions"]
-        disabled_runtime_skills = exclusions["disabled_runtime_skills"]
         with self._lock_for_root(rid):
             cached_root = self._ensure_root_loaded(rid)
             if cached_root is None:
@@ -4142,6 +4127,8 @@ class SessionManager:
                 extra_mcp_servers=extra_mcp_servers,
                 disabled_builtin_tools=disabled_builtin_tools,
                 disabled_runtime_skills=disabled_runtime_skills,
+                harness_profile_id=harness_profile_id,
+                harness_profile_revision=harness_profile_revision,
             )
             self._index_root(cached_root)
             session_store.write_session_full(cached_root, bump_updated_at=False)

@@ -45,7 +45,6 @@ export interface CreateSessionOptions {
   harnessProfileId?: string;
   harnessProfileRevision?: string;
   folderId?: string | null;
-  preset?: string;
 }
 
 export type SessionMetadataPatch = {
@@ -1449,7 +1448,6 @@ export function useSession(authStatus?: string) {
         harnessProfileId,
         harnessProfileRevision,
         folderId,
-        preset,
       } = opts;
       startOp("session:create");
       try {
@@ -1474,7 +1472,6 @@ export function useSession(authStatus?: string) {
             harness_profile_id: wireHarnessProfileId(harnessProfileId),
             harness_profile_revision: wireHarnessProfileId(harnessProfileId) ? harnessProfileRevision || undefined : undefined,
             folder_id: folderId || undefined,
-            preset: preset || undefined,
           }),
         });
         if (!res.ok) {

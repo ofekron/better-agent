@@ -778,6 +778,14 @@ _CREATE_SESSION_INPUT_SCHEMA: dict[str, Any] = {
             "items": {"type": "string"},
             "description": "OPTIONAL — extension MCP server names to opt this session into (servers that are default-off globally, e.g. 'testape-internal').",
         },
+        "harness_profile_id": {
+            "type": ["string", "null"],
+            "description": "OPTIONAL — harness profile id for the new session.",
+        },
+        "harness_profile_revision": {
+            "type": ["string", "null"],
+            "description": "OPTIONAL — pinned harness profile revision.",
+        },
         **_SESSION_ORGANIZATION_INPUT_PROPERTIES,
     },
     "required": ["name"],
@@ -820,9 +828,13 @@ _CREATE_SUB_SESSION_INPUT_SCHEMA: dict[str, Any] = {
             "items": {"type": "string"},
             "description": "OPTIONAL — extension MCP server names to opt this session into (servers that are default-off globally, e.g. 'testape-internal').",
         },
-        "preset": {
+        "harness_profile_id": {
             "type": ["string", "null"],
-            "description": "OPTIONAL \u2014 named capability preset for the sub-session. 'reviewer' strips session-reach MCP tools (ask/delegate/create_*) and all runtime skills; the sub-session can only reply to you.",
+            "description": "OPTIONAL — harness profile id for the sub-session.",
+        },
+        "harness_profile_revision": {
+            "type": ["string", "null"],
+            "description": "OPTIONAL — pinned harness profile revision.",
         },
         **_SESSION_ORGANIZATION_INPUT_PROPERTIES,
     },
@@ -1915,6 +1927,8 @@ def _build_create_session_tool(
             "folder_id": args.get("folder_id"),
             "tag_ids": args.get("tag_ids") or [],
             "mcp_servers": args.get("mcp_servers") or [],
+            "harness_profile_id": str(args.get("harness_profile_id") or "").strip() or None,
+            "harness_profile_revision": str(args.get("harness_profile_revision") or "").strip() or None,
         }
         try:
             result = await asyncio.to_thread(_post_create_session_sync, payload)
@@ -1962,7 +1976,8 @@ def _build_create_sub_session_tool(
             "folder_id": args.get("folder_id"),
             "tag_ids": args.get("tag_ids") or [],
             "mcp_servers": args.get("mcp_servers") or [],
-            "preset": str(args.get("preset") or "").strip(),
+            "harness_profile_id": str(args.get("harness_profile_id") or "").strip() or None,
+            "harness_profile_revision": str(args.get("harness_profile_revision") or "").strip() or None,
         }
         try:
             result = await asyncio.to_thread(_post_create_sub_session_sync, payload)

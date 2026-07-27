@@ -736,10 +736,6 @@
   "newSession.projectLabel": "प्रोजेक्ट",
   "newSession.pickProject": "— एक प्रोजेक्ट चुनें —",
   "newSession.orchestration": "ऑर्केस्ट्रेशन",
-  "newSession.preset": "क्षमता प्रीसेट",
-  "newSession.presetDefault": "पूर्ण क्षमताएँ (डिफ़ॉल्ट)",
-  "newSession.presetReviewer": "समीक्षक — सत्र उपकरण नहीं, कौशल नहीं",
-  "newSession.presetHint": "प्रीसेट निर्माण के समय क्षमताएँ हटाते हैं। समीक्षक सत्र अन्य सत्र नहीं बना सकते, संदेश नहीं भेज सकते, प्रतीक्षा नहीं कर सकते और रनटाइम कौशल लोड नहीं करते।",
   "newSession.provider": "प्रदाता",
   "newSession.runner": "Runner",
   "newSession.model": "मॉडल",
@@ -1334,5 +1330,9 @@
   "settings.capabilityNeedsBuild": "इसे शामिल करने वाला बिल्ड चाहिए",
   "settings.capabilitySetupRequired": "क्षमताएँ चुनने के लिए इंस्टॉलेशन पूरा करें।",
   "settings.capabilityIntegrationsDisableWarning": "इंटीग्रेशन बंद करने पर अगली शुरुआत में एक्सटेंशन का काम रद्द हो जाएगा। जारी रखें?",
-  "settings.capabilityRestartManually": "लागू करने के लिए Better Agent पुनः आरंभ करें"
+  "settings.capabilityRestartManually": "लागू करने के लिए Better Agent पुनः आरंभ करें",
+  "harnessProfile.group.disabled_runtime_skills": "Runtime skills",
+  "harnessProfile.groupHint.disabled_runtime_skills": "Runtime skills available to the agent. Turn all off for reviewer-style sessions that must not load skills.",
+  "harnessProfile.readOnlyHint": "Extension-owned profile; edit it in the extension package.",
+  "harnessProfile.deleteReadOnlyBlocked": "Extension-owned profiles cannot be deleted here."
 }

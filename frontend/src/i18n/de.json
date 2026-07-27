@@ -732,10 +732,6 @@
   "newSession.projectLabel": "Projekt",
   "newSession.pickProject": "— Projekt auswählen —",
   "newSession.orchestration": "Orchestrierung",
-  "newSession.preset": "Fähigkeiten-Preset",
-  "newSession.presetDefault": "Volle Fähigkeiten (Standard)",
-  "newSession.presetReviewer": "Reviewer — keine Session-Tools, keine Skills",
-  "newSession.presetHint": "Presets entfernen Fähigkeiten bei der Erstellung. Reviewer-Sessions können keine anderen Sessions erstellen, anschreiben oder auf sie warten und laden keine Runtime-Skills.",
   "newSession.provider": "Provider",
   "newSession.runner": "Runner",
   "newSession.model": "Modell",
@@ -1330,5 +1326,9 @@
   "settings.capabilityNeedsBuild": "Erfordert einen Build, der es enthält",
   "settings.capabilitySetupRequired": "Schließe die Installation ab, um Funktionen zu wählen.",
   "settings.capabilityIntegrationsDisableWarning": "Das Abschalten der Integrationen bricht Erweiterungs-Arbeit beim nächsten Start ab. Fortfahren?",
-  "settings.capabilityRestartManually": "Better Agent neu starten, um es anzuwenden"
+  "settings.capabilityRestartManually": "Better Agent neu starten, um es anzuwenden",
+  "harnessProfile.group.disabled_runtime_skills": "Runtime skills",
+  "harnessProfile.groupHint.disabled_runtime_skills": "Runtime skills available to the agent. Turn all off for reviewer-style sessions that must not load skills.",
+  "harnessProfile.readOnlyHint": "Extension-owned profile; edit it in the extension package.",
+  "harnessProfile.deleteReadOnlyBlocked": "Extension-owned profiles cannot be deleted here."
 }

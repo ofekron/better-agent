@@ -45,9 +45,10 @@ def test_empty_snapshot_is_noop() -> None:
         "capability_contexts": [{"name": "existing", "content": "keep"}],
         "provider_run_config": {"keep": True},
         "extra_mcp_servers": ["existing"],
-        "active_capability_ids": ["cap"],
-        "disabled_builtin_extensions": ["ext"],
-        "disabled_builtin_tools": ["tool"],
+            "active_capability_ids": ["cap"],
+            "disabled_runtime_skills": ["runtime"],
+            "disabled_builtin_extensions": ["ext"],
+            "disabled_builtin_tools": ["tool"],
         "resolved_harness_run_config": {},
     }
     assert harness_run_projection.apply_to_inputs(inputs) == inputs
@@ -85,10 +86,48 @@ def test_active_snapshot_uses_renderable_context_shape() -> None:
     assert projected["capability_contexts"][0]["content"] == "render me"
 
 
+def test_active_snapshot_merges_run_local_policy() -> None:
+    projected = harness_run_projection.apply_to_inputs(
+        {
+            "provider_run_config": {
+                "fork_parent_line_count": 31,
+                "mcp_servers": {"caller": {"command": "caller"}},
+                "skills": {"caller": "caller"},
+            },
+            "extra_mcp_servers": ["shared", "session-only"],
+            "disabled_builtin_extensions": ["session.disabled"],
+            "disabled_builtin_tools": ["ask"],
+            "disabled_runtime_skills": ["session.skill"],
+            "resolved_harness_run_config": {
+                "profile_id": "profile",
+                "provider_run_config": {
+                    "mcp_servers": {"profile": {"command": "profile"}},
+                    "skills": {"profile": "profile"},
+                },
+                "extra_mcp_servers": ["profile-only", "shared"],
+                "disabled_builtin_extensions": ["profile.disabled"],
+                "disabled_builtin_tools": ["mssg"],
+                "disabled_runtime_skills": ["profile.skill"],
+            },
+        }
+    )
+    assert projected["provider_run_config"]["fork_parent_line_count"] == 31
+    assert set(projected["provider_run_config"]["mcp_servers"]) == {"profile", "caller"}
+    assert set(projected["provider_run_config"]["skills"]) == {"profile", "caller"}
+    assert projected["extra_mcp_servers"] == ["profile-only", "shared", "session-only"]
+    assert projected["disabled_builtin_extensions"] == [
+        "profile.disabled",
+        "session.disabled",
+    ]
+    assert projected["disabled_builtin_tools"] == ["mssg", "ask"]
+    assert projected["disabled_runtime_skills"] == ["profile.skill", "session.skill"]
+
+
 def test_provider_bare_gate_reads_profile_snapshot() -> None:
     for filename in PROVIDER_FILES:
         source = (BACKEND / filename).read_text(encoding="utf-8")
-        assert '(resolved_harness_run_config or {}).get("bare_config")' in source, filename
+        assert "resolve_extension_run_policy(" in source, filename
+        assert '_bare = bool(run_policy["bare_config"])' in source, filename
         assert '"bare_config": _bare' in source, filename
         assert "user_facing=bool(user_facing) and not _bare" in source or filename == "provider_claude.py", filename
 
@@ -167,6 +206,7 @@ def main() -> int:
     for test in (
         test_empty_snapshot_is_noop,
         test_active_snapshot_uses_renderable_context_shape,
+        test_active_snapshot_merges_run_local_policy,
         test_provider_bare_gate_reads_profile_snapshot,
         test_selected_extension_skills_become_run_local_skills,
         test_setting_overlays_apply_without_secret_values,

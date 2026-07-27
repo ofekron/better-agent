@@ -732,10 +732,6 @@
   "newSession.projectLabel": "Project",
   "newSession.pickProject": "— Kies een project —",
   "newSession.orchestration": "Orkestratie",
-  "newSession.preset": "Capaciteitenpreset",
-  "newSession.presetDefault": "Volledige capaciteiten (standaard)",
-  "newSession.presetReviewer": "Reviewer — geen sessietools, geen skills",
-  "newSession.presetHint": "Presets verwijderen capaciteiten bij aanmaak. Reviewersessies kunnen geen andere sessies aanmaken, berichten of afwachten en laden geen runtime-skills.",
   "newSession.provider": "Provider",
   "newSession.runner": "Runner",
   "newSession.model": "Model",
@@ -1330,5 +1326,9 @@
   "settings.capabilityNeedsBuild": "Vereist een build die dit bevat",
   "settings.capabilitySetupRequired": "Rond de installatie af om mogelijkheden te kiezen.",
   "settings.capabilityIntegrationsDisableWarning": "Integraties uitzetten annuleert extensiewerk bij de volgende start. Doorgaan?",
-  "settings.capabilityRestartManually": "Herstart Better Agent om toe te passen"
+  "settings.capabilityRestartManually": "Herstart Better Agent om toe te passen",
+  "harnessProfile.group.disabled_runtime_skills": "Runtime skills",
+  "harnessProfile.groupHint.disabled_runtime_skills": "Runtime skills available to the agent. Turn all off for reviewer-style sessions that must not load skills.",
+  "harnessProfile.readOnlyHint": "Extension-owned profile; edit it in the extension package.",
+  "harnessProfile.deleteReadOnlyBlocked": "Extension-owned profiles cannot be deleted here."
 }

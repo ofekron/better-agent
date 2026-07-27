@@ -18,9 +18,11 @@ from paths import ba_home
 # inherits live Default state at resolve time (see harness_profile_resolver).
 # v3 adds optional profile-to-profile inheritance (base_profile_id) and
 # optional provider/model/reasoning-effort pins consulted as a
-# session-creation fallback. Schema migrations are not supported: a store on
+# session-creation fallback.
+# v4 adds disabled_runtime_skills so harness profiles cover the full
+# capability-narrowing surface. Schema migrations are not supported: a store on
 # an older version is refused at load (wipe harness_profiles.json to reset).
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 MAX_NAME_CHARS = 120
 MAX_DESCRIPTION_CHARS = 1_000
 MAX_INLINE_INSTRUCTION_CHARS = 80_000
@@ -233,7 +235,7 @@ def _normalize_overrides(value: object) -> dict[str, Any]:
             instances[clean_id] = _normalize_extension_instance_override(item, clean_id)
         if instances:
             out["extension_instances"] = instances
-    for field in ("disabled_builtin_tools", "disabled_builtin_extensions"):
+    for field in ("disabled_builtin_tools", "disabled_builtin_extensions", "disabled_runtime_skills"):
         delta = _normalize_delta(value.get(field), f"overrides.{field}")
         if delta is not None:
             out[field] = delta
@@ -357,6 +359,32 @@ def _commit_profile(data: dict[str, Any], profile_id: str, profile: dict[str, An
     return copy.deepcopy(profile)
 
 
+def _extension_profiles() -> list[dict[str, Any]]:
+    import extension_store
+    raw_profiles = extension_store.extension_harness_profiles()
+    profiles: list[dict[str, Any]] = []
+    for raw in raw_profiles:
+        if not isinstance(raw, dict):
+            continue
+        profile_id = _clean_id(raw.get("id"))
+        profile = _normalized_payload(profile_id, raw)
+        profile["source"] = _clean_text(raw.get("source"), "source", 80)
+        profile["extension_id"] = _clean_id(raw.get("extension_id"))
+        profile["read_only"] = True
+        profiles.append(profile)
+    return profiles
+
+
+def _extension_profile(profile_id: str, revision: str | None = None) -> dict[str, Any] | None:
+    for profile in _extension_profiles():
+        if profile.get("id") != profile_id:
+            continue
+        if revision and profile.get("revision") != revision:
+            return None
+        return copy.deepcopy(profile)
+    return None
+
+
 _META_FIELDS = (
     "base_profile_id",
     "base_profile_revision",
@@ -395,6 +423,7 @@ def set_profile_meta(profile_id: str, patch: dict[str, Any], revision: str | Non
 def list_profiles() -> list[dict[str, Any]]:
     with _LOCK:
         profiles = list(_load()["profiles"].values())
+    profiles.extend(_extension_profiles())
     return sorted((copy.deepcopy(p) for p in profiles), key=lambda p: (p.get("name") or "", p.get("id") or ""))
 
 
@@ -405,7 +434,7 @@ def get_profile(profile_id: str, revision: str | None = None) -> dict[str, Any] 
     with _LOCK:
         profile = _load()["profiles"].get(clean_id)
     if not profile:
-        return None
+        return _extension_profile(clean_id, revision)
     if revision and profile.get("revision") != revision:
         return None
     return copy.deepcopy(profile)
@@ -420,6 +449,8 @@ def upsert_profile(payload: dict[str, Any], profile_id: str | None = None) -> di
         clean_id = _clean_id(profile_id or payload.get("id"))
         if clean_id == DEFAULT_PROFILE_ID:
             raise HarnessProfileError("the default profile is not a stored profile")
+        if _extension_profile(clean_id):
+            raise HarnessProfileError("harness profile id is owned by an extension")
         existing = data["profiles"].get(clean_id)
         profile = _normalized_payload(clean_id, payload, existing=existing)
         return _commit_profile(data, clean_id, profile)
@@ -450,9 +481,12 @@ def create_profile(payload: dict[str, Any]) -> dict[str, Any]:
         raise HarnessProfileError("Harness profile payload must be an object")
     with _LOCK:
         profile_id = _clean_id(payload.get("id") or None, required=False)
+        extension_ids = {profile["id"] for profile in _extension_profiles()}
         if not profile_id:
-            existing_ids = set(_load()["profiles"].keys()) | {DEFAULT_PROFILE_ID}
+            existing_ids = set(_load()["profiles"].keys()) | extension_ids | {DEFAULT_PROFILE_ID}
             profile_id = _unique_id_from_name(payload.get("name"), existing_ids=existing_ids)
+        elif profile_id in extension_ids:
+            raise HarnessProfileError("harness profile id is owned by an extension")
         clean_payload = {
             "id": profile_id,
             "name": payload.get("name"),
@@ -505,7 +539,11 @@ def _clear_at_path(tree: dict[str, Any], path: list[str]) -> None:
 
 
 _KNOWN_OVERRIDE_TOP_LEVEL_KEYS = (
-    "extension_instances", "disabled_builtin_tools", "disabled_builtin_extensions", "instruction_sources",
+    "extension_instances",
+    "disabled_builtin_tools",
+    "disabled_builtin_extensions",
+    "disabled_runtime_skills",
+    "instruction_sources",
 )
 
 

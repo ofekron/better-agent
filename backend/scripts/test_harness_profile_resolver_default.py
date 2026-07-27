@@ -286,6 +286,20 @@ def test_resolve_for_session_falls_back_to_default_profile() -> None:
     assert explicit_snapshot["profile_id"] == "explicit.profile"
 
 
+def test_profile_can_disable_runtime_skills_for_run_snapshot() -> None:
+    harness_profile_store.create_profile({"id": "no.skills", "name": "No Skills"})
+    harness_profile_store.apply_override_patch(
+        "no.skills",
+        [{"path": ["disabled_runtime_skills"], "op": "set", "value": {"add": ["*"], "remove": []}}],
+    )
+
+    resolved = harness_profile_resolver.resolve_profile("no.skills")
+    assert resolved["disabled_runtime_skills"]["resolved"] == ["*"]
+    snapshot = harness_profile_resolver.resolve_for_session({"harness_profile_id": "no.skills"})
+    assert snapshot["disabled_runtime_skills"] == ["*"]
+    assert snapshot["launcher_projection"]["disabled_runtime_skills"] == ["*"]
+
+
 def test_multi_level_base_chain_applies_deltas_in_order() -> None:
     config_store.set_disabled_builtin_tools(["ask"])
     for pid, name in (("chain.a", "A"), ("chain.b", "B"), ("chain.c", "C")):
@@ -382,6 +396,7 @@ def main() -> int:
     test_default_profile_synthesis_is_cached_until_invalidated()
     test_run_snapshot_cache_tracks_selected_package_fingerprint()
     test_resolve_for_session_falls_back_to_default_profile()
+    test_profile_can_disable_runtime_skills_for_run_snapshot()
     test_multi_level_base_chain_applies_deltas_in_order()
     test_resolve_time_cycle_detected()
     test_pin_inherited_from_grandparent_when_child_pins_none()

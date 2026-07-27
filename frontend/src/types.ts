@@ -1343,7 +1343,8 @@ export interface HarnessProfileDelta {
 }
 
 /** Resolved+override pairing for list-shaped fields (mcp_servers, skills,
- * instruction_names, disabled_builtin_tools, disabled_builtin_extensions):
+ * instruction_names, disabled_builtin_tools, disabled_builtin_extensions,
+ * disabled_runtime_skills):
  * `resolved` is the effective plain string list; `override` (when present)
  * is the delta the profile applies on top of Default's resolved list. */
 export interface HarnessProfileListFieldView {
@@ -1372,12 +1373,16 @@ export interface HarnessProfile {
   name: string;
   description: string;
   revision: string;
+  read_only?: boolean;
+  source?: string;
+  extension_id?: string;
   created_at: string;
   updated_at: string;
   fields: {
     extension_instances: Record<string, HarnessProfileExtensionInstanceView>;
     disabled_builtin_tools: HarnessProfileListFieldView;
     disabled_builtin_extensions: HarnessProfileListFieldView;
+    disabled_runtime_skills: HarnessProfileListFieldView;
     instruction_sources: Record<string, HarnessProfileFieldView<HarnessProfileInstructionSourceValue>>;
   };
   /** Opaque pass-through fields — no per-field UI treatment. */

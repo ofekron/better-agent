@@ -5528,6 +5528,8 @@ def create_sub_session(
     extra_mcp_servers: Optional[list[str]] = None,
     disabled_builtin_tools: Optional[list[str]] = None,
     disabled_runtime_skills: Optional[list[str]] = None,
+    harness_profile_id: Optional[str] = None,
+    harness_profile_revision: Optional[str] = None,
 ) -> dict:
     parent = _find_in_tree(root, parent_session_id)
     if parent is None:
@@ -5609,6 +5611,8 @@ def create_sub_session(
         "draft_images": [],
         "queued_prompts": [],
         "capability_contexts": [],
+        "harness_profile_id": str(harness_profile_id or "").strip(),
+        "harness_profile_revision": str(harness_profile_revision or "").strip(),
         "token_usage_total": {
             "input_tokens": 0,
             "output_tokens": 0,

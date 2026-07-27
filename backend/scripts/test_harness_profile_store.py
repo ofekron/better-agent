@@ -25,7 +25,7 @@ def test_create_profile_has_empty_overrides() -> None:
         "name": "Personal Harness",
         "description": "hand-tuned overrides",
     })
-    assert profile["schema_version"] == 3
+    assert profile["schema_version"] == 4
     assert profile["overrides"] == {}
     assert profile["base_profile_id"] is None
     assert profile["default_model"] is None
@@ -73,6 +73,11 @@ def test_overrides_delta_add_remove_roundtrip() -> None:
                 "value": {"add": ["mssg", "ask"], "remove": ["create_session"]},
             },
             {
+                "path": ["disabled_runtime_skills"],
+                "op": "set",
+                "value": {"add": ["*"], "remove": []},
+            },
+            {
                 "path": ["extension_instances", "personal.harness", "mcp_servers"],
                 "op": "set",
                 "value": {"add": ["personal"], "remove": []},
@@ -82,6 +87,7 @@ def test_overrides_delta_add_remove_roundtrip() -> None:
     assert updated["overrides"]["disabled_builtin_tools"] == {
         "add": ["mssg", "ask"], "remove": ["create_session"],
     }
+    assert updated["overrides"]["disabled_runtime_skills"] == {"add": ["*"], "remove": []}
     assert updated["overrides"]["extension_instances"]["personal.harness"]["mcp_servers"] == {
         "add": ["personal"], "remove": [],
     }
@@ -260,6 +266,46 @@ def test_base_bad_revision_rejected() -> None:
         raise AssertionError("base pinned to a nonexistent revision was accepted")
 
 
+def test_extension_owned_profile_is_read_only() -> None:
+    original = harness_profile_store._extension_profiles
+    harness_profile_store._extension_profiles = lambda: [{
+        "id": "private.reviewer",
+        "schema_version": harness_profile_store.SCHEMA_VERSION,
+        "name": "Private Reviewer",
+        "description": "",
+        "source": "extension",
+        "extension_id": "private.adv",
+        "read_only": True,
+        "overrides": {"disabled_runtime_skills": {"add": ["*"], "remove": []}},
+        "mcp_overrides": {},
+        "skill_overrides": {},
+        "native_harness_overrides": {},
+        "provider_run_config_overlay": {},
+        "capability_contexts": [],
+        "secret_refs": {},
+        "base_profile_id": None,
+        "base_profile_revision": None,
+        "default_provider_id": None,
+        "default_model": None,
+        "default_reasoning_effort": None,
+        "created_at": "2026-01-01T00:00:00",
+        "updated_at": "2026-01-01T00:00:00",
+        "revision": "fixture",
+    }]
+    try:
+        profile = harness_profile_store.get_profile("private.reviewer")
+        assert profile["read_only"] is True
+        assert profile["overrides"]["disabled_runtime_skills"] == {"add": ["*"], "remove": []}
+        try:
+            harness_profile_store.create_profile({"id": "private.reviewer", "name": "Duplicate"})
+        except harness_profile_store.HarnessProfileError as exc:
+            assert "owned by an extension" in str(exc)
+        else:
+            raise AssertionError("extension-owned profile id was overwritten")
+    finally:
+        harness_profile_store._extension_profiles = original
+
+
 def main() -> int:
     try:
         test_create_profile_has_empty_overrides()
@@ -280,6 +326,7 @@ def main() -> int:
         test_indirect_base_cycle_rejected_at_save()
         test_base_missing_profile_rejected()
         test_base_bad_revision_rejected()
+        test_extension_owned_profile_is_read_only()
     finally:
         shutil.rmtree(TMP_HOME, ignore_errors=True)
     print("PASS harness profile store")

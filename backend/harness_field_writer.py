@@ -96,6 +96,7 @@ def apply_field_writes(
         if head in (
             harness_fields.GROUP_DISABLED_BUILTIN_TOOLS,
             harness_fields.GROUP_DISABLED_BUILTIN_EXTENSIONS,
+            harness_fields.GROUP_DISABLED_RUNTIME_SKILLS,
         ):
             # The toggle reads "available"; the stored field lists disables.
             key = (head,)

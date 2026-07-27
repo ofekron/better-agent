@@ -1,13 +1,5 @@
 #!/usr/bin/env python3
-"""`create_session` / `create_sub_session` MCP tools carry `preset` through.
-
-`create_session_response` used to build its payload with an undefined `preset`
-name, so every call to the tool raised NameError and `_safe_result` turned it
-into `{"success": False, "error": "name 'preset' is not defined"}` — the tool
-was unusable from Codex, Gemini, and AGY. Its sibling had the mirror-image bug:
-`create_sub_session_response` declared `preset` and then dropped it on the
-floor, so the value never reached the route that reads it.
-"""
+"""`create_session` / `create_sub_session` MCP tools carry harness profiles through."""
 from __future__ import annotations
 
 import inspect
@@ -17,7 +9,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-_TMP_HOME = tempfile.mkdtemp(prefix="communicate_preset_test_home_")
+_TMP_HOME = tempfile.mkdtemp(prefix="communicate_profile_test_home_")
 os.environ["BETTER_AGENT_HOME"] = _TMP_HOME
 os.environ.setdefault("BETTER_CLAUDE_HOME", _TMP_HOME)
 
@@ -50,56 +42,64 @@ def _captured_payload(call, **kwargs) -> dict:
     return seen
 
 
-def test_create_session_accepts_preset():
-    assert "preset" in inspect.signature(
-        communicate_mcp.create_session_response
-    ).parameters, "create_session lost its preset parameter"
+def test_create_session_accepts_harness_profile():
+    signature = inspect.signature(communicate_mcp.create_session_response)
+    assert "harness_profile_id" in signature.parameters
+    assert "harness_profile_revision" in signature.parameters
+    assert "preset" not in signature.parameters, "create_session still exposes removed presets"
 
     seen = _captured_payload(
         communicate_mcp.create_session_response,
         name="probe",
-        preset="  focused  ",
+        harness_profile_id="  focused.profile  ",
+        harness_profile_revision="  rev1  ",
     )
     assert seen["path"] == "/api/internal/create-session"
-    assert seen["payload"]["preset"] == "focused"
+    assert seen["payload"]["harness_profile_id"] == "focused.profile"
+    assert seen["payload"]["harness_profile_revision"] == "rev1"
 
 
-def test_create_session_without_preset_still_succeeds():
-    """The regression surfaced as a NameError, not a validation error — a call
-    that never mentions preset must reach the route all the same."""
+def test_create_session_without_harness_profile_still_succeeds():
     seen = _captured_payload(communicate_mcp.create_session_response, name="probe")
-    assert seen["payload"]["preset"] == ""
+    assert seen["payload"]["harness_profile_id"] is None
+    assert seen["payload"]["harness_profile_revision"] is None
     assert seen["payload"]["name"] == "probe"
 
 
-def test_create_sub_session_forwards_preset():
+def test_create_sub_session_forwards_harness_profile():
+    signature = inspect.signature(communicate_mcp.create_sub_session_response)
+    assert "harness_profile_id" in signature.parameters
+    assert "harness_profile_revision" in signature.parameters
+    assert "preset" not in signature.parameters, "create_sub_session still exposes removed presets"
+
     seen = _captured_payload(
         communicate_mcp.create_sub_session_response,
         description="probe",
-        preset="  focused  ",
+        harness_profile_id="  focused.profile  ",
+        harness_profile_revision="  rev1  ",
     )
     assert seen["path"] == "/api/internal/create-sub-session"
-    assert seen["payload"]["preset"] == "focused"
+    assert seen["payload"]["harness_profile_id"] == "focused.profile"
+    assert seen["payload"]["harness_profile_revision"] == "rev1"
 
 
-def test_internal_create_session_route_reads_preset():
-    """The route must consume the key the tool sends, or the round trip is a
-    silent no-op."""
+def test_internal_create_session_route_reads_harness_profile():
     source = (_BACKEND / "main.py").read_text(encoding="utf-8")
     marker = '@app.post("/api/internal/create-session")'
     start = source.index(marker)
     end = source.index('@app.post("/api/internal/create-sub-session")', start)
     handler = source[start:end]
-    assert 'body.get("preset")' in handler
-    assert "preset=preset," in handler
+    assert "_harness_profile_selection(body)" in handler
+    assert "harness_profile_id=harness_profile_id," in handler
+    assert "harness_profile_revision=harness_profile_revision," in handler
 
 
 if __name__ == "__main__":
     try:
-        test_create_session_accepts_preset()
-        test_create_session_without_preset_still_succeeds()
-        test_create_sub_session_forwards_preset()
-        test_internal_create_session_route_reads_preset()
+        test_create_session_accepts_harness_profile()
+        test_create_session_without_harness_profile_still_succeeds()
+        test_create_sub_session_forwards_harness_profile()
+        test_internal_create_session_route_reads_harness_profile()
         print("OK")
     finally:
         shutil.rmtree(_TMP_HOME, ignore_errors=True)
