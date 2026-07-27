@@ -21,6 +21,11 @@ const webPlatformAliases = {
   'send-intent': fileURLToPath(new URL('./src/platform/web/send-intent.ts', import.meta.url)),
 }
 
+const backendPort =
+  process.env.BETTER_AGENT_BACKEND_PORT ||
+  process.env.BETTER_CLAUDE_BACKEND_PORT ||
+  "18765";
+
 export default defineConfig(({ mode }) => ({
   base: '/',
   build: {
@@ -84,19 +89,19 @@ export default defineConfig(({ mode }) => ({
   // Proxy /api and /ws to the backend so the dev server and backend
   // share an origin. Same-origin lets the bc_session cookie ride
   // along on every fetch and WebSocket upgrade without CORS-with-
-  // credentials gymnastics. Prod is already single-origin (backend
-  // serves the built frontend at :8000).
+  // credentials gymnastics. Prod is already single-origin because the
+  // backend serves the built frontend.
   server: {
     host: true, // bind 0.0.0.0 so LAN/other-devices can reach the dev server
     port: 3000, // canonical dev port — see project-structure `running.md`
     strictPort: true, // fail fast instead of silently falling back to another port
     proxy: {
       "/api": {
-        target: "http://localhost:8000",
+        target: `http://localhost:${backendPort}`,
         changeOrigin: true,
       },
       "/ws": {
-        target: "ws://localhost:8000",
+        target: `ws://localhost:${backendPort}`,
         ws: true,
         changeOrigin: true,
       },

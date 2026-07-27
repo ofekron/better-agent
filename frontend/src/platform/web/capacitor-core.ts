@@ -7,6 +7,8 @@ export const Capacitor = {
   getPlatform: () => "web",
 };
 
+export class WebPlugin {}
+
 export function registerPlugin<T>(
   _name: string,
   implementations?: { web?: T },
