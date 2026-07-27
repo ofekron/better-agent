@@ -1202,6 +1202,7 @@
   "harnessProfile.userInstructionsLabel": "Ihre Anweisungen",
   "harnessProfile.userInstructionsPlaceholder": "Wie soll der Agent diese Erweiterung nutzen?",
   "harnessProfile.injectInstructions": "Anweisungen einfügen",
+  "harnessProfile.providerScope": "Nur {{providers}}",
   "harnessProfile.defaultHint": "Live-Basis — spiegelt Ihre installierten Erweiterungen wider. Änderungen gelten überall, sofern kein Profil sie überschreibt.",
   "harnessProfile.overrideCount": "{{count}} Überschreibungen",
   "harnessProfile.diffOnly": "Nur Überschreibungen anzeigen",

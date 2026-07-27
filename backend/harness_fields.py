@@ -177,6 +177,10 @@ def _instructions_group(record: dict[str, Any]) -> dict[str, Any]:
             "label": str(item["name"]),
             "description": extension_descriptions.instruction_description(root, item),
             "detail": "project" if item.get("level") == "project" else "global",
+            # Manifest provider scope — the run path and the file-sync path
+            # both drop this section for any provider outside the list, so the
+            # editor must show that a toggle here is provider-limited.
+            "providers": list(item.get("providers") or []),
             # Default injects either all of an extension's sections or none —
             # the store's toggle is extension-level. Named profiles select
             # per section, so per-item default state mirrors the extension flag.

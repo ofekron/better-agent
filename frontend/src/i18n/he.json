@@ -1249,6 +1249,7 @@
   "harnessProfile.userInstructionsLabel": "ההוראות שלך",
   "harnessProfile.userInstructionsPlaceholder": "כיצד על הסוכן להשתמש בהרחבה זו?",
   "harnessProfile.injectInstructions": "הזרקת הוראות",
+  "harnessProfile.providerScope": "{{providers}} בלבד",
   "harnessProfile.defaultHint": "בסיס חי — משקף את ההרחבות המותקנות. שינויים חלים בכל מקום אלא אם פרופיל דורס אותם.",
   "harnessProfile.overrideCount": "{{count}} דריסות",
   "harnessProfile.diffOnly": "הצג דריסות בלבד",

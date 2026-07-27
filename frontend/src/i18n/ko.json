@@ -1205,6 +1205,7 @@
   "harnessProfile.userInstructionsLabel": "내 지침",
   "harnessProfile.userInstructionsPlaceholder": "에이전트가 이 확장을 어떻게 사용해야 하나요?",
   "harnessProfile.injectInstructions": "지침 주입",
+  "harnessProfile.providerScope": "{{providers}}만",
   "harnessProfile.defaultHint": "실시간 기준 — 설치된 확장을 반영합니다. 프로필이 재정의하지 않는 한 변경은 모든 곳에 적용됩니다.",
   "harnessProfile.overrideCount": "재정의 {{count}}개",
   "harnessProfile.diffOnly": "재정의만 표시",

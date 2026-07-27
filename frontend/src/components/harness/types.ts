@@ -19,6 +19,9 @@ export interface HarnessDescriptorItem {
   /** Short classification chip (instruction level, native kind, module slot,
    * required/optional) — a label, never an explanation. */
   detail?: string;
+  /** Instruction items only: the provider kinds this section is limited to.
+   * Empty means every provider. */
+  providers?: string[];
   /** Live global state — what Default resolves to for this item. */
   default_enabled?: boolean;
   /** Non-empty when the item can't be toggled, naming what holds it. */

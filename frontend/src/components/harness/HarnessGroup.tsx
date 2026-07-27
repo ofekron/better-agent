@@ -52,6 +52,18 @@ function StateBadge({
   );
 }
 
+/** A manifest-scoped instruction section only reaches the provider kinds it
+ * names, so the toggle alone would overstate what enabling it does. */
+function ProviderScope({ providers }: { providers?: string[] }) {
+  const { t } = useTranslation();
+  if (!providers?.length) return null;
+  return (
+    <span className="harness-item-detail harness-item-providers">
+      {t("harnessProfile.providerScope", { providers: providers.join(", ") })}
+    </span>
+  );
+}
+
 function GlobalBadge() {
   const { t } = useTranslation();
   return <span className="harness-field-badge global">{t("harnessProfile.globalBadge")}</span>;
@@ -117,6 +129,7 @@ function ToggleRow({
         </span>
       </label>
       {item.detail && <span className="harness-item-detail">{item.detail}</span>}
+      <ProviderScope providers={item.providers} />
       {locked && (
         <span className="harness-item-locked">
           {t("harnessProfile.lockedBy", { holders: (item.locked_by ?? []).join(", ") })}
@@ -325,6 +338,7 @@ export function HarnessGroup(props: GroupProps) {
           <div key={item.name} className="harness-item-row harness-instruction-section">
             <span className="harness-item-label">{item.label}</span>
             {item.detail && <span className="harness-item-detail">{item.detail}</span>}
+            <ProviderScope providers={item.providers} />
             {item.description && <p className="harness-item-hint">{item.description}</p>}
           </div>
         ))}

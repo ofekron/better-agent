@@ -17,6 +17,7 @@ from typing import Any
 
 import extension_store
 import paths
+import provider_kinds
 import session_bridge
 import session_search
 from session_manager import manager as session_manager
@@ -61,41 +62,11 @@ def _monitor_prompt() -> str:
         return ""
 
 
-# Every provider KIND the assistant session can run on. The role prompt is
-# provider-agnostic, so the same content is attached to every kind;
-# `provider_capability_contexts` selects per turn by the runner's provider_kind,
-# so an output must exist for each kind the session may use. This list is the
-# comprehensive fallback (and the stability anchor): the live registry is unioned
-# in, but since every registry KIND is already here, the merged set is constant
-# across calls → the capability_contexts hash stays byte-stable (no cache churn)
-# and coverage never depends on the registry being loaded. New provider KINDs
-# must be added here.
-_FALLBACK_PROVIDER_KINDS = (
-    "claude", "codex", "gemini", "openai",
-    "agy", "fugu", "claude-remote", "copilot",
-)
-
-
 def _provider_kinds() -> list[str]:
-    """Deterministic list of provider KINDs to attach the role prompt to.
-
-    The fallback list already covers every known KIND, so the registry is only
-    a safety net for a brand-new provider not yet listed above. Sorted so the
-    capability_contexts hash is byte-stable regardless of registry order."""
-    kinds: list[str] = []
-    try:
-        from provider import known_providers
-        for prov in known_providers():
-            kind = getattr(prov, "KIND", "")
-            if isinstance(kind, str) and kind:
-                kinds.append(kind)
-    except Exception:  # noqa: BLE001 — registry unavailable in some test contexts
-        kinds = []
-    merged: list[str] = []
-    for kind in [*kinds, *_FALLBACK_PROVIDER_KINDS]:
-        if kind not in merged:
-            merged.append(kind)
-    return sorted(merged)
+    """Provider KINDs to attach the role prompt to. The prompt is
+    provider-agnostic, so the same content goes to every kind and
+    `provider_capability_contexts` selects per turn by the runner's kind."""
+    return provider_kinds.all_provider_kinds()
 
 
 def _build_role_capability_contexts(

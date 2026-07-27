@@ -1206,6 +1206,7 @@
   "harnessProfile.userInstructionsLabel": "你的说明",
   "harnessProfile.userInstructionsPlaceholder": "代理应如何使用此扩展？",
   "harnessProfile.injectInstructions": "注入说明",
+  "harnessProfile.providerScope": "仅 {{providers}}",
   "harnessProfile.defaultHint": "实时基线 — 反映已安装的扩展。除非配置文件覆盖，否则更改处处生效。",
   "harnessProfile.overrideCount": "{{count}} 项覆盖",
   "harnessProfile.diffOnly": "仅显示覆盖项",

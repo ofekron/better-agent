@@ -1205,6 +1205,7 @@
   "harnessProfile.userInstructionsLabel": "تعليماتك",
   "harnessProfile.userInstructionsPlaceholder": "كيف ينبغي للوكيل استخدام هذه الإضافة؟",
   "harnessProfile.injectInstructions": "إدراج التعليمات",
+  "harnessProfile.providerScope": "{{providers}} فقط",
   "harnessProfile.defaultHint": "خط أساس حي — يعكس الإضافات المثبتة لديك. تسري التغييرات في كل مكان ما لم يتجاوزها ملف شخصي.",
   "harnessProfile.overrideCount": "{{count}} تجاوزات",
   "harnessProfile.diffOnly": "إظهار التجاوزات فقط",

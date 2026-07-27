@@ -12,10 +12,12 @@ if str(BACKEND) not in sys.path:
 import _test_home
 _TMP_HOME = _test_home.isolate("bc-harness-instruction-selection-")
 
+import capability_contexts
 import extension_store
 import harness_profile_resolver
 import harness_profile_store
 import installation_profile
+import provider_kinds
 
 installation_profile.integrations_enabled = lambda: True
 
@@ -23,7 +25,13 @@ _ON_ID = "fixture.instructions-on"
 _OFF_ID = "fixture.instructions-off"
 
 
-def _install(extension_id: str, sections: list[str], *, instructions_enabled: bool) -> None:
+def _install(
+    extension_id: str,
+    sections: list[str],
+    *,
+    instructions_enabled: bool,
+    providers: dict[str, list[str]] | None = None,
+) -> None:
     package = Path(_TMP_HOME) / extension_id
     package.mkdir(parents=True, exist_ok=True)
     for name in sections:
@@ -41,7 +49,13 @@ def _install(extension_id: str, sections: list[str], *, instructions_enabled: bo
             "mcp": [],
             "frontend_modules": [],
             "instructions": [
-                {"name": name, "path": f"{name}.md", "level": "global"} for name in sections
+                {
+                    "name": name,
+                    "path": f"{name}.md",
+                    "level": "global",
+                    **({"providers": (providers or {})[name]} if name in (providers or {}) else {}),
+                }
+                for name in sections
             ],
         },
         "permissions": {},
@@ -125,13 +139,43 @@ def test_selected_section_of_globally_disabled_extension_is_injected() -> None:
     assert names == ["alpha", "beta", "gamma"], names
 
 
+def _content_for(profile_id: str, provider_kind: str) -> str:
+    harness_profile_resolver.invalidate_cache()
+    snapshot = harness_profile_resolver.resolve_for_session({}, profile_id=profile_id)
+    contexts = capability_contexts.provider_capability_contexts(
+        snapshot["capability_contexts"], provider_kind
+    )
+    return "\n".join(item["content"] for item in contexts)
+
+
+def test_provider_scoped_section_reaches_only_its_providers() -> None:
+    # "beta" is declared codex-only; every provider still gets "alpha".
+    codex = _content_for(harness_profile_store.DEFAULT_PROFILE_ID, "codex")
+    assert "CONTENT OF alpha" in codex and "CONTENT OF beta" in codex, codex
+
+    for kind in ("claude", "gemini"):
+        scoped = _content_for(harness_profile_store.DEFAULT_PROFILE_ID, kind)
+        assert "CONTENT OF alpha" in scoped, (kind, scoped)
+        assert "CONTENT OF beta" not in scoped, (kind, scoped)
+
+
+def test_every_provider_kind_receives_unscoped_sections() -> None:
+    # A kind missing from the emitted outputs would silently get NO harness
+    # instructions at all, which is how provider coverage regressed before.
+    for kind in provider_kinds.all_provider_kinds():
+        content = _content_for(harness_profile_store.DEFAULT_PROFILE_ID, kind)
+        assert "CONTENT OF alpha" in content, (kind, content)
+
+
 def main() -> int:
-    _install(_ON_ID, ["alpha", "beta"], instructions_enabled=True)
+    _install(_ON_ID, ["alpha", "beta"], instructions_enabled=True, providers={"beta": ["codex"]})
     _install(_OFF_ID, ["gamma"], instructions_enabled=False)
     test_default_injects_every_globally_enabled_section()
     test_deselected_section_is_not_injected()
     test_deselecting_every_section_does_not_fail_the_run()
     test_selected_section_of_globally_disabled_extension_is_injected()
+    test_provider_scoped_section_reaches_only_its_providers()
+    test_every_provider_kind_receives_unscoped_sections()
     print("PASS harness profile instruction selection")
     return 0
 

@@ -1202,6 +1202,7 @@
   "harnessProfile.userInstructionsLabel": "Jouw instructies",
   "harnessProfile.userInstructionsPlaceholder": "Hoe moet de agent deze extensie gebruiken?",
   "harnessProfile.injectInstructions": "Instructies invoegen",
+  "harnessProfile.providerScope": "Alleen {{providers}}",
   "harnessProfile.defaultHint": "Live basis — weerspiegelt je geïnstalleerde extensies. Wijzigingen gelden overal tenzij een profiel ze overschrijft.",
   "harnessProfile.overrideCount": "{{count}} overschrijvingen",
   "harnessProfile.diffOnly": "Alleen overschrijvingen tonen",

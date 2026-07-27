@@ -1277,6 +1277,7 @@
   "harnessProfile.userInstructionsLabel": "Your instructions",
   "harnessProfile.userInstructionsPlaceholder": "How should the agent use this extension?",
   "harnessProfile.injectInstructions": "Inject instructions",
+  "harnessProfile.providerScope": "{{providers}} only",
   "harnessProfile.defaultHint": "Live baseline — reflects your installed extensions. Changes apply everywhere unless a profile overrides them.",
   "harnessProfile.overrideCount": "{{count}} overrides",
   "harnessProfile.diffOnly": "Show overrides only",

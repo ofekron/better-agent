@@ -12,6 +12,7 @@ import extension_instructions
 import extension_store
 import harness_fields
 import harness_profile_store
+import provider_kinds
 
 
 class HarnessProfileResolutionError(ValueError):
@@ -520,7 +521,12 @@ def _instruction_blocks(
             continue
         if source.get("kind") == "inline":
             seen.add(name)
-            blocks.append({"source": "profile", "name": name, "content": source.get("content") or ""})
+            blocks.append({
+                "source": "profile",
+                "name": name,
+                "content": source.get("content") or "",
+                "providers": [],
+            })
             continue
         extension_id = source.get("extension_id")
         if extension_id not in selected:
@@ -541,6 +547,8 @@ def _instruction_blocks(
                 "source": extension_id,
                 "name": name,
                 "content": content_path.read_text(encoding="utf-8").strip(),
+                # Manifest provider scope; empty means every provider kind.
+                "providers": list(item.get("providers") or []),
             })
             break
         else:
@@ -618,24 +626,40 @@ def _dropped_instruction_names(
     return names
 
 
-def _provider_context_blocks(blocks: list[dict[str, str]]) -> list[dict[str, Any]]:
+def _provider_context_blocks(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """One capability context whose per-provider outputs each carry only the
+    sections that apply to that provider kind.
+
+    A manifest section may declare `providers` (validated by
+    `extension_store`); the file-sync path already honors it via
+    `extension_instructions._sections_for_level`, and this is the same filter
+    for the run path, so a provider-scoped section never reaches a provider
+    outside its scope. An empty/absent list means every provider kind.
+    """
     if not blocks:
         return []
-    content = "\n\n".join(f"## {block['name']}\n\n{block['content']}" for block in blocks)
+    outputs: list[dict[str, Any]] = []
+    for kind in provider_kinds.all_provider_kinds():
+        scoped = [
+            block for block in blocks
+            if not block.get("providers") or kind in block["providers"]
+        ]
+        if not scoped:
+            continue
+        outputs.append({
+            "provider_kind": kind,
+            "provider_name": "",
+            "content_kind": "instructions",
+            "content": "\n\n".join(f"## {block['name']}\n\n{block['content']}" for block in scoped),
+        })
+    if not outputs:
+        return []
     return [{
         "source_id": "harness_profile:instructions",
         "capability_id": "harness_profile:instructions",
         "name": "Harness Profile Instructions",
         "category": "harness_profile",
-        "outputs": [
-            {
-                "provider_kind": kind,
-                "provider_name": "",
-                "content_kind": "instructions",
-                "content": content,
-            }
-            for kind in ("claude", "codex", "gemini", "openai", "qwen", "kimi", "pi", "remote")
-        ],
+        "outputs": outputs,
     }]
 
 

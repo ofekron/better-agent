@@ -1208,6 +1208,7 @@
   "harnessProfile.userInstructionsLabel": "Ваши инструкции",
   "harnessProfile.userInstructionsPlaceholder": "Как агент должен использовать это расширение?",
   "harnessProfile.injectInstructions": "Вставлять инструкции",
+  "harnessProfile.providerScope": "Только {{providers}}",
   "harnessProfile.defaultHint": "Живая база — отражает установленные расширения. Изменения действуют везде, если профиль их не переопределяет.",
   "harnessProfile.overrideCount": "Переопределений: {{count}}",
   "harnessProfile.diffOnly": "Показывать только переопределения",

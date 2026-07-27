@@ -10621,6 +10621,21 @@ button.run-badge-clickable:focus-visible {
   color: var(--text-muted);
 }
 
+/* Provider-limited instruction section: enabling it only reaches the named
+   provider kinds, so the chip is emphasized over the plain detail chip. */
+.harness-item-providers {
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text-secondary, var(--text-muted));
+  transition: background 160ms ease, border-color 160ms ease;
+}
+
+.harness-item-row:hover .harness-item-providers {
+  background: var(--bg-hover, transparent);
+  border-color: var(--accent, var(--border));
+}
+
 .harness-item-locked {
   font-size: calc(11px * var(--app-font-scale));
   color: var(--warning, #d29922);

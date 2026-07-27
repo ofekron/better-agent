@@ -1202,6 +1202,7 @@
   "harnessProfile.userInstructionsLabel": "あなたの指示",
   "harnessProfile.userInstructionsPlaceholder": "エージェントはこの拡張機能をどう使うべきですか?",
   "harnessProfile.injectInstructions": "指示を挿入",
+  "harnessProfile.providerScope": "{{providers}} のみ",
   "harnessProfile.defaultHint": "ライブ基準 — インストール済みの拡張機能を反映します。プロファイルが上書きしない限り、変更はどこにでも適用されます。",
   "harnessProfile.overrideCount": "{{count}} 件の上書き",
   "harnessProfile.diffOnly": "上書きのみ表示",

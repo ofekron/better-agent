@@ -1206,6 +1206,7 @@
   "harnessProfile.userInstructionsLabel": "आपके निर्देश",
   "harnessProfile.userInstructionsPlaceholder": "एजेंट इस एक्सटेंशन का उपयोग कैसे करे?",
   "harnessProfile.injectInstructions": "निर्देश जोड़ें",
+  "harnessProfile.providerScope": "केवल {{providers}}",
   "harnessProfile.defaultHint": "सजीव आधार — आपके स्थापित एक्सटेंशन दर्शाता है। परिवर्तन हर जगह लागू होते हैं जब तक कोई प्रोफ़ाइल उन्हें न बदले।",
   "harnessProfile.overrideCount": "{{count}} ओवरराइड",
   "harnessProfile.diffOnly": "केवल ओवरराइड दिखाएँ",

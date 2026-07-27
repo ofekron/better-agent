@@ -1206,6 +1206,7 @@
   "harnessProfile.userInstructionsLabel": "Le tue istruzioni",
   "harnessProfile.userInstructionsPlaceholder": "Come deve usare l'agente questa estensione?",
   "harnessProfile.injectInstructions": "Inserisci istruzioni",
+  "harnessProfile.providerScope": "Solo {{providers}}",
   "harnessProfile.defaultHint": "Base dal vivo — riflette le estensioni installate. Le modifiche valgono ovunque salvo override di un profilo.",
   "harnessProfile.overrideCount": "{{count}} override",
   "harnessProfile.diffOnly": "Mostra solo gli override",

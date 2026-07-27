@@ -1206,6 +1206,7 @@
   "harnessProfile.userInstructionsLabel": "Vos instructions",
   "harnessProfile.userInstructionsPlaceholder": "Comment l'agent doit-il utiliser cette extension ?",
   "harnessProfile.injectInstructions": "Injecter les instructions",
+  "harnessProfile.providerScope": "{{providers}} uniquement",
   "harnessProfile.defaultHint": "Base en direct — reflète vos extensions installées. Les changements s'appliquent partout sauf si un profil les remplace.",
   "harnessProfile.overrideCount": "{{count}} remplacements",
   "harnessProfile.diffOnly": "Afficher uniquement les remplacements",
