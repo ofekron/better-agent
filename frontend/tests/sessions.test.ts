@@ -3,6 +3,8 @@ import { fireEvent } from "@testing-library/react";
 import { renderApp } from "./harness";
 import { makeSession, makeUserMsg } from "./fixtures";
 
+const NEW_SESSION_DEFAULTS_KEY = "better-agent-new-session-defaults";
+
 async function waitForSend(
   h: Awaited<ReturnType<typeof renderApp>>,
   prompt: string,
@@ -15,6 +17,24 @@ async function waitForSend(
     await h.flush();
   }
   return undefined;
+}
+
+async function acknowledgeSentPrompt(
+  h: Awaited<ReturnType<typeof renderApp>>,
+  sent: NonNullable<Awaited<ReturnType<typeof waitForSend>>>,
+  content: string,
+) {
+  h.emit({
+    type: "user_message_persisted",
+    data: {
+      session_id: sent.app_session_id,
+      user_message: makeUserMsg({
+        content,
+        client_id: sent.client_id as string,
+      }),
+    },
+  });
+  await h.flush();
 }
 
 async function waitForSelector(
@@ -41,6 +61,18 @@ async function chooseNewSessionAction(
   await h.clickByText(action);
 }
 
+function setNewSessionActionDefault(action: "create" | "send" | "send-and-open") {
+  const previous = localStorage.getItem(NEW_SESSION_DEFAULTS_KEY);
+  localStorage.setItem(NEW_SESSION_DEFAULTS_KEY, JSON.stringify({ creationAction: action }));
+  return () => {
+    if (previous === null) {
+      localStorage.removeItem(NEW_SESSION_DEFAULTS_KEY);
+      return;
+    }
+    localStorage.setItem(NEW_SESSION_DEFAULTS_KEY, previous);
+  };
+}
+
 async function enterNewSessionPrompt(
   h: Awaited<ReturnType<typeof renderApp>>,
   text: string,
@@ -48,6 +80,20 @@ async function enterNewSessionPrompt(
   const prompt = h.$(".ns-investigation-textarea") as HTMLTextAreaElement;
   fireEvent.input(prompt, { target: { value: text } });
   await h.flush();
+}
+
+async function pressEnterInNewSessionPrompt(
+  h: Awaited<ReturnType<typeof renderApp>>,
+  init?: KeyboardEventInit,
+) {
+  const defaultAllowed = fireEvent.keyDown(h.$(".ns-investigation-textarea") as HTMLTextAreaElement, {
+    key: "Enter",
+    code: "Enter",
+    charCode: 13,
+    ...init,
+  });
+  await h.flush();
+  return defaultAllowed;
 }
 
 describe("sessions CRUD + subscribe lifecycle", () => {
@@ -462,7 +508,8 @@ describe("sessions CRUD + subscribe lifecycle", () => {
     h.unmount();
   });
 
-  it("pressing Enter in the new-session initial prompt creates and sends", async () => {
+  it("pressing Enter in the new-session initial prompt runs the selected Create action", async () => {
+    const restoreDefault = setNewSessionActionDefault("create");
     const current = makeSession({ id: "current", cwd: "/tmp/project" });
     const h = await renderApp({
       seed: {
@@ -477,19 +524,36 @@ describe("sessions CRUD + subscribe lifecycle", () => {
     });
     await h.selectSession(current.id);
     await clickNewSession(h);
+    await enterNewSessionPrompt(h, "draft from enter");
+    await pressEnterInNewSessionPrompt(h);
 
-    const prompt = h.$(".ns-investigation-textarea") as HTMLTextAreaElement;
-    Object.getOwnPropertyDescriptor(
-      window.HTMLTextAreaElement.prototype,
-      "value",
-    )!.set!.call(prompt, "create and send from enter");
-    prompt.dispatchEvent(new Event("input", { bubbles: true }));
-    prompt.dispatchEvent(new KeyboardEvent("keydown", {
-      key: "Enter",
-      bubbles: true,
-      cancelable: true,
-    }));
-    await h.flush();
+    const draftedId = h.createdSessionId();
+    expect(window.location.pathname).toBe("/s/current");
+    expect(await waitForSend(h, "draft from enter")).toBeUndefined();
+    expect(h.backend.state.sessions.find((session) => session.id === draftedId)?.draft_input)
+      .toBe("draft from enter");
+    h.unmount();
+    restoreDefault();
+  });
+
+  it("pressing Enter in the new-session initial prompt runs the selected Create & Send action", async () => {
+    const restoreDefault = setNewSessionActionDefault("send");
+    const current = makeSession({ id: "current", cwd: "/tmp/project" });
+    const h = await renderApp({
+      seed: {
+        sessions: [current],
+        projects: [{
+          path: "/tmp/project",
+          name: "project",
+          created_at: new Date().toISOString(),
+          last_used: new Date().toISOString(),
+        }],
+      },
+    });
+    await h.selectSession(current.id);
+    await clickNewSession(h);
+    await enterNewSessionPrompt(h, "create and send from enter");
+    await pressEnterInNewSessionPrompt(h);
 
     expect(
       h.restCalls.filter((c) => c.method === "POST" && c.path === "/api/sessions"),
@@ -510,7 +574,84 @@ describe("sessions CRUD + subscribe lifecycle", () => {
     const sendIndex = h.outbound.indexOf(sent!);
     expect(subscribeIndex).toBeGreaterThan(-1);
     expect(subscribeIndex).toBeLessThan(sendIndex);
+    await acknowledgeSentPrompt(h, sent!, "create and send from enter");
     h.unmount();
+    restoreDefault();
+  });
+
+  it("pressing Enter in the new-session initial prompt runs the selected Create & Send & Open action", async () => {
+    const restoreDefault = setNewSessionActionDefault("send-and-open");
+    const current = makeSession({ id: "current", cwd: "/tmp/project" });
+    const h = await renderApp({
+      seed: {
+        sessions: [current],
+        projects: [{
+          path: "/tmp/project",
+          name: "project",
+          created_at: new Date().toISOString(),
+          last_used: new Date().toISOString(),
+        }],
+      },
+    });
+    await h.selectSession(current.id);
+    await clickNewSession(h);
+    await enterNewSessionPrompt(h, "create send and open from enter");
+    await pressEnterInNewSessionPrompt(h);
+
+    const createdId = h.createdSessionId();
+    expect(window.location.pathname).toBe(`/s/${createdId}`);
+    const sent = await waitForSend(h, "create send and open from enter");
+    expect(sent).toEqual(
+      expect.objectContaining({ app_session_id: createdId }),
+    );
+    await acknowledgeSentPrompt(h, sent!, "create send and open from enter");
+    h.unmount();
+    restoreDefault();
+  });
+
+  it("keeps multiline and IME initial prompt Enter paths from creating a session", async () => {
+    const restoreDefault = setNewSessionActionDefault("send-and-open");
+    const current = makeSession({ id: "current", cwd: "/tmp/project" });
+    const h = await renderApp({
+      seed: {
+        sessions: [current],
+        projects: [{
+          path: "/tmp/project",
+          name: "project",
+          created_at: new Date().toISOString(),
+          last_used: new Date().toISOString(),
+        }],
+      },
+    });
+    await h.selectSession(current.id);
+    await clickNewSession(h);
+    await enterNewSessionPrompt(h, "do not create");
+    await pressEnterInNewSessionPrompt(h, { shiftKey: true });
+    await pressEnterInNewSessionPrompt(h, { isComposing: true });
+
+    expect(
+      h.restCalls.filter((c) => c.method === "POST" && c.path === "/api/sessions"),
+    ).toHaveLength(0);
+    expect(h.outbound.some((frame) => frame.type === "send_message")).toBe(false);
+    h.unmount();
+    restoreDefault();
+  });
+
+  it("keeps disabled initial prompt Enter from creating a session", async () => {
+    const restoreDefault = setNewSessionActionDefault("send-and-open");
+    const h = await renderApp({
+      seed: { sessions: [], projects: [] },
+    });
+    await clickNewSession(h);
+    await enterNewSessionPrompt(h, "do not create");
+    await expect(pressEnterInNewSessionPrompt(h)).resolves.toBe(false);
+
+    expect(
+      h.restCalls.filter((c) => c.method === "POST" && c.path === "/api/sessions"),
+    ).toHaveLength(0);
+    expect(h.outbound.some((frame) => frame.type === "send_message")).toBe(false);
+    h.unmount();
+    restoreDefault();
   });
 
   it("keeps a deferred new-session prompt durable across reload and pre-ack replay", async () => {

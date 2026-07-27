@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
+import type { KeyboardEvent } from "react";
 import { useTranslation } from "react-i18next";
 import type {
   CapabilityContext,
@@ -876,9 +877,10 @@ export function NewSessionModal({
     : t("session.unfiled");
   const missingProviderConfig =
     !main.providerId || (effectiveOrchestrationMode === "team" && !worker.providerId);
+  const createDisabled = !(cwd || defaultCwd) || (!allowOfflineCreate && missingProviderConfig);
 
   const handleCreate = async (action: NewSessionCreationAction, promptOverride?: string) => {
-    if (creatingRef.current) return;
+    if (creatingRef.current || createDisabled) return;
     creatingRef.current = true;
     setCreating(true);
     try {
@@ -918,6 +920,15 @@ export function NewSessionModal({
       creatingRef.current = false;
       setCreating(false);
     }
+  };
+
+  const handlePromptKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (event.key !== "Enter") return;
+    if (event.shiftKey || event.metaKey || event.ctrlKey || event.altKey) return;
+    if (event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) return;
+    event.preventDefault();
+    if (createDisabled) return;
+    void handleCreate(creationAction);
   };
 
   // The modal closes only through an explicit cancel (Cancel button, header
@@ -1052,6 +1063,7 @@ export function NewSessionModal({
               data-testid={NEW_SESSION_PROMPT_TESTID}
               value={promptText}
               onChange={(e) => investigation ? setEditedPrompt(e.target.value) : setInitialPrompt(e.target.value)}
+              onKeyDown={handlePromptKeyDown}
               onPaste={handlePromptPaste}
               rows={4}
             />
@@ -1287,7 +1299,7 @@ export function NewSessionModal({
               "send-and-open": t("newSession.createAndSendAndOpen"),
             }}
             loadingLabel={t("newSession.creating")}
-            disabled={!(cwd || defaultCwd) || (!allowOfflineCreate && missingProviderConfig)}
+            disabled={createDisabled}
             creating={creating}
             onAction={handleCreate}
           />
