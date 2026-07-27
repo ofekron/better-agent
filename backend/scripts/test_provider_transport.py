@@ -131,6 +131,83 @@ def test_no_hook_preserves_environment():
     assert result is original
 
 
+def stale_managed_env():
+    ca_path = Path(TEST_HOME) / "runtime" / "provider-transport" / "stale.pem"
+    ca_path.parent.mkdir(parents=True, exist_ok=True)
+    ca_path.write_text(PEM)
+    proxy_url = "http://stale_transport_token@127.0.0.1:18888"
+    return {
+        "HTTPS_PROXY": proxy_url,
+        "HTTP_PROXY": proxy_url,
+        "https_proxy": proxy_url,
+        "http_proxy": proxy_url,
+        "OPENAI_BASE_URL": "http://127.0.0.1:18889/stale_transport_token",
+        "ANTHROPIC_BASE_URL": "http://127.0.0.1:18890/stale_transport_token",
+        "SSL_CERT_FILE": str(ca_path),
+        "REQUESTS_CA_BUNDLE": str(ca_path),
+        "CURL_CA_BUNDLE": str(ca_path),
+        "NODE_EXTRA_CA_CERTS": str(ca_path),
+    }
+
+
+def test_no_hook_strips_stale_managed_transport_environment():
+    original = stale_managed_env()
+    with patch.object(provider_transport.extension_store, "provider_transport_hooks", return_value=[]):
+        result = provider_transport.apply_provider_transport(
+            original, provider_id="p", provider_kind="codex", provider_mode="subscription"
+        )
+    for key in (
+        "HTTPS_PROXY",
+        "HTTP_PROXY",
+        "https_proxy",
+        "http_proxy",
+        "OPENAI_BASE_URL",
+        "SSL_CERT_FILE",
+        "REQUESTS_CA_BUNDLE",
+        "CURL_CA_BUNDLE",
+        "NODE_EXTRA_CA_CERTS",
+    ):
+        assert key not in result, key
+
+
+def test_no_hook_preserves_user_owned_loopback_transport_environment():
+    original = {
+        "HTTPS_PROXY": "http://dev@127.0.0.1:8080",
+        "OPENAI_BASE_URL": "http://127.0.0.1:11434/v1",
+        "ANTHROPIC_BASE_URL": "http://127.0.0.1:11435/api",
+    }
+    with patch.object(provider_transport.extension_store, "provider_transport_hooks", return_value=[]):
+        result = provider_transport.apply_provider_transport(
+            original, provider_id="p", provider_kind="codex", provider_mode="subscription"
+        )
+    assert result is original
+
+
+def test_no_hook_preserves_provider_owned_loopback_base_url_with_stale_ca_marker():
+    original = stale_managed_env()
+    original["OPENAI_BASE_URL"] = "http://127.0.0.1:11434/v1"
+    with patch.object(provider_transport.extension_store, "provider_transport_hooks", return_value=[]):
+        result = provider_transport.apply_provider_transport(
+            original, provider_id="p", provider_kind="codex", provider_mode="subscription"
+        )
+    assert result["OPENAI_BASE_URL"] == "http://127.0.0.1:11434/v1"
+    assert "HTTPS_PROXY" not in result
+    assert "SSL_CERT_FILE" not in result
+
+
+def test_no_hook_preserves_user_owned_loopback_proxy_with_stale_ca_marker():
+    original = stale_managed_env()
+    original["HTTPS_PROXY"] = "http://dev@127.0.0.1:8080"
+    with patch.object(provider_transport.extension_store, "provider_transport_hooks", return_value=[]):
+        result = provider_transport.apply_provider_transport(
+            original, provider_id="p", provider_kind="codex", provider_mode="subscription"
+        )
+    assert result["HTTPS_PROXY"] == "http://dev@127.0.0.1:8080"
+    assert "HTTP_PROXY" not in result
+    assert "OPENAI_BASE_URL" not in result
+    assert "SSL_CERT_FILE" not in result
+
+
 def test_disabled_hook_preserves_environment():
     original = {
         "HTTPS_PROXY": "http://existing.test:8080",
@@ -148,6 +225,33 @@ def test_disabled_hook_preserves_environment():
             original, provider_id="p", provider_kind="claude", provider_mode="subscription"
         )
     assert result is original
+
+
+def test_disabled_hook_strips_stale_managed_transport_environment():
+    original = stale_managed_env()
+    with (
+        patch.object(provider_transport.extension_store, "provider_transport_hooks", return_value=[("x", "/transport")]),
+        patch.object(
+            provider_transport,
+            "invoke_extension_backend_sync",
+            return_value=response(enabled=False),
+        ),
+    ):
+        result = provider_transport.apply_provider_transport(
+            original, provider_id="p", provider_kind="claude", provider_mode="subscription"
+        )
+    for key in (
+        "HTTPS_PROXY",
+        "HTTP_PROXY",
+        "https_proxy",
+        "http_proxy",
+        "ANTHROPIC_BASE_URL",
+        "SSL_CERT_FILE",
+        "REQUESTS_CA_BUNDLE",
+        "CURL_CA_BUNDLE",
+        "NODE_EXTRA_CA_CERTS",
+    ):
+        assert key not in result, key
 
 
 def test_active_hook_failure_is_strict():
@@ -240,7 +344,12 @@ if __name__ == "__main__":
     test_rejects_proxy_password_or_unbounded_username()
     test_rejects_multiple_hooks()
     test_no_hook_preserves_environment()
+    test_no_hook_strips_stale_managed_transport_environment()
+    test_no_hook_preserves_user_owned_loopback_transport_environment()
+    test_no_hook_preserves_provider_owned_loopback_base_url_with_stale_ca_marker()
+    test_no_hook_preserves_user_owned_loopback_proxy_with_stale_ca_marker()
     test_disabled_hook_preserves_environment()
+    test_disabled_hook_strips_stale_managed_transport_environment()
     test_active_hook_failure_is_strict()
     test_profile_settings_and_session_reach_transport_extension()
     test_each_local_provider_executes_run_transport_finalizer()

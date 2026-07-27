@@ -111,6 +111,60 @@ def _merge_no_proxy(env: dict[str, str]) -> None:
     env["no_proxy"] = value
 
 
+def _managed_ca_path(value: Any) -> bool:
+    raw = str(value or "").strip()
+    if not raw:
+        return False
+    try:
+        path = Path(raw).expanduser().resolve()
+        root = (ba_home() / "runtime" / "provider-transport").resolve()
+        return path.is_relative_to(root)
+    except OSError:
+        return False
+
+
+def _has_managed_transport_marker(env: dict[str, str]) -> bool:
+    return any(_managed_ca_path(env.get(key)) for key in _CA_ENV_KEYS)
+
+
+def _managed_proxy_url(value: Any) -> bool:
+    try:
+        raw = str(value or "").strip()
+        parsed = urlsplit(raw)
+        _loopback_http_url(raw, "proxy", allow_path=False, allow_proxy_token=True)
+    except ProviderTransportError:
+        return False
+    username = parsed.username or ""
+    return bool(_PROXY_TOKEN_RE.fullmatch(username) and len(username) >= 16)
+
+
+def _managed_gateway_url(value: Any) -> bool:
+    try:
+        parsed = urlsplit(str(value or "").strip())
+        _loopback_http_url(value, "gateway", allow_path=True)
+    except ProviderTransportError:
+        return False
+    token = parsed.path.strip("/")
+    return bool(_PROXY_TOKEN_RE.fullmatch(token) and len(token) >= 16)
+
+
+def _strip_managed_transport_env(env: dict[str, str], *, provider_kind: str) -> dict[str, str]:
+    if not _has_managed_transport_marker(env):
+        return env
+    result = dict(env)
+    for key in _PROXY_ENV_KEYS:
+        if _managed_proxy_url(result.get(key)):
+            result.pop(key, None)
+    for key in _CA_ENV_KEYS:
+        if _managed_ca_path(result.get(key)):
+            result.pop(key, None)
+    spec = spec_for(provider_kind)
+    for key in (spec.transport_gateway_env,) if spec and spec.transport_gateway_env else ():
+        if _managed_gateway_url(result.get(key)):
+            result.pop(key, None)
+    return result
+
+
 def _request_payload(
     env: dict[str, str],
     *,
@@ -176,7 +230,7 @@ def apply_provider_transport(
 ) -> dict[str, str]:
     hooks = extension_store.provider_transport_hooks()
     if not hooks:
-        return env
+        return _strip_managed_transport_env(env, provider_kind=provider_kind)
     if len(hooks) != 1:
         raise ProviderTransportError("exactly one active provider transport extension is required")
     extension_id, path = hooks[0]
@@ -202,7 +256,7 @@ def apply_provider_transport(
     if not isinstance(payload, dict) or payload.get("version") != CONTRACT_VERSION:
         raise ProviderTransportError("provider transport contract version mismatch")
     if payload.get("enabled") is not True:
-        return env
+        return _strip_managed_transport_env(env, provider_kind=provider_kind)
 
     proxy_url = _loopback_http_url(
         payload.get("forward_proxy_url"),
