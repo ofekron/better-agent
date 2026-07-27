@@ -3184,6 +3184,11 @@ async def patch_user_prefs(request: Request, body: dict = Body(...)):
                     f"{user_prefs.MIN_FONT_SIZE} and {user_prefs.MAX_FONT_SIZE}"
                 )
             user_prefs.set_font_size(val)
+        if "appearance_theme" in body:
+            val = body["appearance_theme"]
+            if val not in user_prefs.APPEARANCE_THEME_VALUES:
+                raise ValueError("appearance_theme must be default, nord, or dracula")
+            user_prefs.set_appearance_theme(val)
         if "first_run_wizard_done" in body:
             val = body["first_run_wizard_done"]
             if not isinstance(val, bool):

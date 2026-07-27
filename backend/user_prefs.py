@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 SendMode = Literal["queue", "interrupt"]
 ContextStrategy = Literal["native_compact", "continuation"]
 FontFamily = Literal["system", "serif", "mono", "inter"]
+AppearanceTheme = Literal["default", "nord", "dracula"]
 NetworkBindAddress = Literal["127.0.0.1", "0.0.0.0"]
 SessionSort = Literal["updated_at", "last_user_prompt_at", "last_opened_at"]
 SESSION_SORT_VALUES: tuple[SessionSort, ...] = (
@@ -44,6 +45,8 @@ DEFAULT_FONT_FAMILY: FontFamily = "system"
 DEFAULT_FONT_SIZE = 14
 MIN_FONT_SIZE = 11
 MAX_FONT_SIZE = 20
+DEFAULT_APPEARANCE_THEME: AppearanceTheme = "default"
+APPEARANCE_THEME_VALUES: tuple[AppearanceTheme, ...] = ("default", "nord", "dracula")
 DEFAULT_LANGUAGE = "en"
 DEFAULT_USER_DISPLAY_NAME = None
 MAX_USER_DISPLAY_NAME_LENGTH = 80
@@ -312,6 +315,15 @@ def set_font_size(font_size: int) -> int:
     prefs["font_size"] = font_size
     _save(prefs)
     return font_size
+
+
+def set_appearance_theme(theme: AppearanceTheme) -> AppearanceTheme:
+    if theme not in APPEARANCE_THEME_VALUES:
+        raise ValueError(f"Invalid appearance_theme: {theme!r}")
+    prefs = _load()
+    prefs["appearance_theme"] = theme
+    _save(prefs)
+    return theme
 
 
 def get_first_run_wizard_done() -> bool:
@@ -615,6 +627,12 @@ def get_all(login_username: str | None = None) -> dict:
             DEFAULT_FONT_SIZE,
             MIN_FONT_SIZE,
             MAX_FONT_SIZE,
+        ),
+        "appearance_theme": _choice_pref(
+            prefs,
+            "appearance_theme",
+            DEFAULT_APPEARANCE_THEME,
+            APPEARANCE_THEME_VALUES,
         ),
         "first_run_wizard_done": _bool_pref(
             prefs,

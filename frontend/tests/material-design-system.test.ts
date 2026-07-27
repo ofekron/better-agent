@@ -50,4 +50,33 @@ describe("Material design system", () => {
     expect(styles).toContain("padding-inline-start: clamp(10px, 1vw, 16px)");
     expect(styles).toContain("padding-inline-end: calc(clamp(10px, 1vw, 16px) + 8px)");
   });
+
+  it("defines complete Nord and Dracula semantic palettes", () => {
+    for (const theme of ["nord", "dracula"]) {
+      const start = styles.indexOf(`:root[data-theme="${theme}"]`);
+      expect(start).toBeGreaterThan(-1);
+      const palette = styles.slice(start, styles.indexOf("}", start));
+      for (const token of [
+        "--bg-primary",
+        "--text-primary",
+        "--border",
+        "--accent",
+        "--success",
+        "--error",
+        "--warning",
+        "--md-surface",
+        "--md-primary",
+        "--md-on-primary",
+      ]) {
+        expect(palette).toContain(`${token}:`);
+      }
+    }
+  });
+
+  it("aligns manager and sub-session streams with ordinary events", () => {
+    const start = styles.indexOf(".manager-scope {");
+    const managerScope = styles.slice(start, styles.indexOf("}", start));
+    expect(managerScope).toContain("padding-inline-start: 0");
+    expect(managerScope).toContain("border-inline-start: 0");
+  });
 });
