@@ -1619,7 +1619,7 @@ def _run_import(
                     status.errors.append({"key": sess.registry_key, "error": str(exc)})
                     logger.exception("native_import: failed %s", sess.registry_key)
             _persist_job(status)  # checkpoint so a crash here resumes cleanly
-        repair_imported_roots()
+        repair_imported_roots([] if status.all_projects else None)
         status.status = "done"
     except Exception:
         status.status = "error"
