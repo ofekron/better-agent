@@ -50,6 +50,43 @@ describe("unknown lifecycle events are not rendered", () => {
     unmount();
   });
 
+  it("drops file-history-delta CLI sidecar records", () => {
+    const message = makeAssistantMsg({
+      id: "a",
+      content: "",
+      events: [
+        {
+          type: "agent_message",
+          data: {
+            type: "file-history-delta",
+            messageId: "m1",
+            snapshotMessageId: "s1",
+            trackingPath: "/repo/src/App.tsx",
+            backup: {
+              backupFileName: "325365c15b74a757@v1",
+              version: 1,
+              backupTime: "2026-01-01T00:00:00Z",
+              realParentDir: "/repo/src",
+            },
+            timestamp: "2026-01-01T00:00:00Z",
+          },
+        },
+      ],
+    });
+    const { container, unmount } = render(
+      React.createElement(MessageBubble, {
+        message,
+        orchestrationMode: "native",
+      }),
+    );
+
+    expect(container.querySelector(".event-diagnostic")).toBeNull();
+    expect(container.textContent ?? "").not.toContain("unknown event");
+    expect(container.textContent ?? "").not.toContain("file-history-delta");
+
+    unmount();
+  });
+
   it("routes leaked worker_event wrappers into their worker panel", () => {
     const message = makeAssistantMsg({
       id: "a",

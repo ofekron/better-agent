@@ -122,7 +122,7 @@ def is_synthetic_event(event: dict) -> bool:
 # Agent-message `data.type` values that are session/UI metadata, not
 # renderable assistant content. They have no uuid, never land on
 # msg.events, and must not be surfaced as detached root children either.
-# Mirrors the frontend skip list in MessageBubble.tsx (`mtype === ...`).
+# Mirrors the frontend skip list in utils/agentMessages.ts (`mtype === ...`).
 NON_RENDER_AGENT_DATA_TYPES = frozenset({
     "system",
     "queue-operation",
@@ -130,6 +130,7 @@ NON_RENDER_AGENT_DATA_TYPES = frozenset({
     "attachment",
     "ai-title",
     "file-history-snapshot",
+    "file-history-delta",
     "mode",
 })
 

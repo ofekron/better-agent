@@ -182,6 +182,7 @@ export function flattenClaudeMessages(events: WSEvent[]): FlatEventsResult {
       mtype === "attachment" ||
       mtype === "ai-title" ||
       mtype === "file-history-snapshot" ||
+      mtype === "file-history-delta" ||
       mtype === "mode"
     ) {
       continue;

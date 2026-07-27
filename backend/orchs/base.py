@@ -595,7 +595,7 @@ class OrchestrationStrategy(ABC):
                     app_session_id, title.strip(), require_allowed=True,
                 )
             return True
-        if metadata_type == "file-history-snapshot":
+        if metadata_type in ("file-history-snapshot", "file-history-delta"):
             return True
         return False
 
@@ -688,7 +688,9 @@ class OrchestrationStrategy(ABC):
             else data
         )
 
-        if normalized_data.get("type") in ("ai-title", "file-history-snapshot"):
+        if normalized_data.get("type") in (
+            "ai-title", "file-history-snapshot", "file-history-delta",
+        ):
             import hashlib as _hashlib
 
             payload = json.dumps(norm_data, sort_keys=True)
