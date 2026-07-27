@@ -131,6 +131,25 @@ def test_no_hook_preserves_environment():
     assert result is original
 
 
+def test_disabled_hook_preserves_environment():
+    original = {
+        "HTTPS_PROXY": "http://existing.test:8080",
+        "ANTHROPIC_BASE_URL": "https://api.anthropic.com",
+    }
+    with (
+        patch.object(provider_transport.extension_store, "provider_transport_hooks", return_value=[("x", "/transport")]),
+        patch.object(
+            provider_transport,
+            "invoke_extension_backend_sync",
+            return_value=response(enabled=False),
+        ),
+    ):
+        result = provider_transport.apply_provider_transport(
+            original, provider_id="p", provider_kind="claude", provider_mode="subscription"
+        )
+    assert result is original
+
+
 def test_active_hook_failure_is_strict():
     with (
         patch.object(provider_transport.extension_store, "provider_transport_hooks", return_value=[("x", "/transport")]),
@@ -221,6 +240,7 @@ if __name__ == "__main__":
     test_rejects_proxy_password_or_unbounded_username()
     test_rejects_multiple_hooks()
     test_no_hook_preserves_environment()
+    test_disabled_hook_preserves_environment()
     test_active_hook_failure_is_strict()
     test_profile_settings_and_session_reach_transport_extension()
     test_each_local_provider_executes_run_transport_finalizer()
