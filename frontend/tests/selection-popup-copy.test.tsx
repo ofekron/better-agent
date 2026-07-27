@@ -119,6 +119,217 @@ describe("SelectionPopup copy", () => {
     }
   });
 
+  it("keeps the selection and popup copy available after right-click", async () => {
+    const { captured, restore } = captureDocumentListeners();
+
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+
+    let unmount = () => {};
+    try {
+      ({ unmount } = render(
+        <>
+          <div data-message-id="m1">
+            <span data-testid="start">alpha </span>
+            <code>special</code>
+            <span data-testid="end"> omega</span>
+          </div>
+          <SelectionPopup onAdd={() => {}} />
+        </>,
+      ));
+
+      const selection = stubSelectedMessageText("alpha special omega");
+
+      await waitFor(() => {
+        expect(captured.some((listener) => listener.type === "mouseup")).toBe(true);
+        expect(captured.some((listener) => listener.type === "contextmenu")).toBe(true);
+      });
+      await act(async () => {
+        captured.find((listener) => listener.type === "mouseup")!.fn(
+          new MouseEvent("mouseup", { bubbles: true }),
+        );
+      });
+      await screen.findByText("Copy");
+
+      await act(async () => {
+        captured.find((listener) => listener.type === "contextmenu")!.fn(
+          new MouseEvent("contextmenu", { bubbles: true, cancelable: true }),
+        );
+      });
+
+      expect(selection.removeAllRanges).not.toHaveBeenCalled();
+      await act(async () => {
+        screen.getByRole("button", { name: "Copy" }).click();
+      });
+
+      await waitFor(() => {
+        expect(writeText).toHaveBeenCalledWith("alpha special omega");
+      });
+    } finally {
+      unmount();
+      restore();
+    }
+  });
+
+  it("keeps Ctrl+C available after right-click", async () => {
+    const { captured, restore } = captureDocumentListeners();
+
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+
+    let unmount = () => {};
+    try {
+      ({ unmount } = render(
+        <>
+          <div data-message-id="m1">
+            <span data-testid="start">alpha </span>
+            <code>special</code>
+            <span data-testid="end"> omega</span>
+          </div>
+          <SelectionPopup onAdd={() => {}} />
+        </>,
+      ));
+
+      const selection = stubSelectedMessageText("alpha special omega");
+
+      await waitFor(() => {
+        expect(captured.some((listener) => listener.type === "mouseup")).toBe(true);
+        expect(captured.some((listener) => listener.type === "contextmenu")).toBe(true);
+        expect(captured.some((listener) => listener.type === "keydown")).toBe(true);
+      });
+      await act(async () => {
+        captured.find((listener) => listener.type === "mouseup")!.fn(
+          new MouseEvent("mouseup", { bubbles: true }),
+        );
+      });
+      await screen.findByText("Copy");
+      await act(async () => {
+        captured.find((listener) => listener.type === "contextmenu")!.fn(
+          new MouseEvent("contextmenu", { bubbles: true, cancelable: true }),
+        );
+      });
+      await act(async () => {
+        captured.find((listener) => listener.type === "keydown")!.fn(
+          new KeyboardEvent("keydown", { key: "c", ctrlKey: true }),
+        );
+      });
+
+      expect(selection.removeAllRanges).toHaveBeenCalledTimes(1);
+      await waitFor(() => {
+        expect(writeText).toHaveBeenCalledWith("alpha special omega");
+      });
+    } finally {
+      unmount();
+      restore();
+    }
+  });
+
+  it("does not copy stale text after Comment closes the popup", async () => {
+    const { captured, restore } = captureDocumentListeners();
+
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+
+    let unmount = () => {};
+    try {
+      ({ unmount } = render(
+        <>
+          <div data-message-id="m1">
+            <span data-testid="start">alpha </span>
+            <code>special</code>
+            <span data-testid="end"> omega</span>
+          </div>
+          <SelectionPopup onAdd={() => {}} />
+        </>,
+      ));
+
+      stubSelectedMessageText("alpha special omega");
+
+      await waitFor(() => {
+        expect(captured.some((listener) => listener.type === "mouseup")).toBe(true);
+        expect(captured.some((listener) => listener.type === "keydown")).toBe(true);
+      });
+      await act(async () => {
+        captured.find((listener) => listener.type === "mouseup")!.fn(
+          new MouseEvent("mouseup", { bubbles: true }),
+        );
+      });
+      await screen.findByText("Comment");
+      await act(async () => {
+        screen.getByRole("button", { name: "Comment" }).click();
+      });
+      await act(async () => {
+        captured.find((listener) => listener.type === "keydown")!.fn(
+          new KeyboardEvent("keydown", { key: "c", ctrlKey: true }),
+        );
+      });
+
+      expect(writeText).not.toHaveBeenCalled();
+    } finally {
+      unmount();
+      restore();
+    }
+  });
+
+  it("does not copy stale text after Adversarial sync closes the popup", async () => {
+    const { captured, restore } = captureDocumentListeners();
+
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+
+    let unmount = () => {};
+    try {
+      ({ unmount } = render(
+        <>
+          <div data-message-id="m1">
+            <span data-testid="start">alpha </span>
+            <code>special</code>
+            <span data-testid="end"> omega</span>
+          </div>
+          <SelectionPopup onAdd={() => {}} onAdvSync={() => {}} />
+        </>,
+      ));
+
+      stubSelectedMessageText("alpha special omega");
+
+      await waitFor(() => {
+        expect(captured.some((listener) => listener.type === "mouseup")).toBe(true);
+        expect(captured.some((listener) => listener.type === "keydown")).toBe(true);
+      });
+      await act(async () => {
+        captured.find((listener) => listener.type === "mouseup")!.fn(
+          new MouseEvent("mouseup", { bubbles: true }),
+        );
+      });
+      await screen.findByText("Adversarial sync");
+      await act(async () => {
+        screen.getByRole("button", { name: "Adversarial sync" }).click();
+      });
+      await act(async () => {
+        captured.find((listener) => listener.type === "keydown")!.fn(
+          new KeyboardEvent("keydown", { key: "c", ctrlKey: true }),
+        );
+      });
+
+      expect(writeText).not.toHaveBeenCalled();
+    } finally {
+      unmount();
+      restore();
+    }
+  });
+
   it("opens the mobile copy sheet for touch selection on wide Android-style viewports", async () => {
     const { captured, restore } = captureDocumentListeners();
     const writeText = vi.fn().mockResolvedValue(undefined);

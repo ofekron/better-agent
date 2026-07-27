@@ -1,6 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useTranslation } from "react-i18next";
-import { applyTagHighlights, PENDING_TAG_ID } from "../utils/tagHighlights";
 import { copyToClipboard } from "../utils/clipboard";
 import { useMobileActionSheet, isTouchInteractionViewport } from "./MobileActionSheet";
 import type { ActionItem } from "./MobileActionSheet";
@@ -31,10 +30,6 @@ export function SelectionPopup({ onAdd, onAdvSync }: Props) {
   const [comment, setComment] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
   const popupRef = useRef<HTMLDivElement>(null);
-  // Cleanup function returned by `applyTagHighlights` for the live
-  // preview highlight. Stored in a ref so dismiss/Add can tear it down
-  // without depending on render cycles.
-  const pendingCleanupRef = useRef<(() => void) | null>(null);
   // Mirrors popup.text synchronously so the keydown handler can read it
   // without waiting for React to re-render (avoids one-frame race).
   const popupTextRef = useRef<string | null>(null);
@@ -47,9 +42,11 @@ export function SelectionPopup({ onAdd, onAdvSync }: Props) {
 
   const { show: showSheet } = useMobileActionSheet();
 
-  const clearPendingHighlight = useCallback(() => {
-    pendingCleanupRef.current?.();
-    pendingCleanupRef.current = null;
+  const closePopup = useCallback(() => {
+    popupTextRef.current = null;
+    setPopup(null);
+    setComment("");
+    setPhase("actions");
   }, []);
 
   const dismiss = useCallback(() => {
@@ -57,17 +54,12 @@ export function SelectionPopup({ onAdd, onAdvSync }: Props) {
     // On mobile (Android WebView), long-pressing text fires contextmenu
     // before the selection settles; unconditionally calling removeAllRanges()
     // kills the browser-created selection and prevents text selection entirely.
-    const wasOpen = !!popupTextRef.current;
-    clearPendingHighlight();
-    popupTextRef.current = null;
-    if (wasOpen) {
+    if (popupTextRef.current) {
       const sel = window.getSelection();
       if (sel && !sel.isCollapsed) sel.removeAllRanges();
     }
-    setPopup(null);
-    setComment("");
-    setPhase("actions");
-  }, [clearPendingHighlight]);
+    closePopup();
+  }, [closePopup]);
 
   // Show the mobile action sheet for a text selection.
   const showMobileSheet = useCallback(
@@ -109,9 +101,8 @@ export function SelectionPopup({ onAdd, onAdvSync }: Props) {
     let lastPointerType: "mouse" | "touch" | null = null;
 
     // Shared: given an active selection, resolve it to a message and
-    // show the popup. `isTouch` controls whether the native selection
-    // is cleared (desktop: yes, to avoid highlight washout; mobile:
-    // no, to keep native selection handles visible).
+    // show the popup. Touch selections use the native mobile handles;
+    // mouse selections keep the native range available for browser copy.
     const showPopupForSelection = (isTouch: boolean) => {
       const sel = window.getSelection();
       if (!sel || sel.isCollapsed || !sel.toString().trim()) return;
@@ -142,29 +133,6 @@ export function SelectionPopup({ onAdd, onAdvSync }: Props) {
 
       const range = sel.getRangeAt(0);
       const rect = range.getBoundingClientRect();
-
-      if (!isTouch) {
-        // Tear down any prior pending preview before applying a new one.
-        // applyTagHighlights splits text nodes and wraps them in spans,
-        // which destroys the native browser selection. We intentionally
-        // do NOT re-select — re-selecting from the spans would hit the
-        // wrong occurrence when the selected text appears multiple times
-        // (applyTagHighlights uses indexOf, always finding the first match).
-        // The backup Ctrl+C handler and Copy button both use copyToClipboard
-        // which holds the correct text from the original selection.
-        clearPendingHighlight();
-        pendingCleanupRef.current = applyTagHighlights(messageEl, [
-          {
-            id: PENDING_TAG_ID,
-            messageId,
-            selectedText: text,
-            comment: "",
-            timestamp: "",
-          },
-        ]);
-      } else {
-        clearPendingHighlight();
-      }
 
       setPopup({
         text,
@@ -221,9 +189,10 @@ export function SelectionPopup({ onAdd, onAdvSync }: Props) {
       }, 400);
     };
 
-    // Dismiss selection popup on right-click — the unified context menu
-    // takes over selection actions when it appears.
-    const handleContextMenu = () => { dismiss(); };
+    const handleContextMenu = () => {
+      if (popupTextRef.current) return;
+      dismiss();
+    };
 
     document.addEventListener("mouseup", handleMouseUp);
     document.addEventListener("touchend", handleTouchEnd, { passive: true });
@@ -234,11 +203,10 @@ export function SelectionPopup({ onAdd, onAdvSync }: Props) {
       document.removeEventListener("contextmenu", handleContextMenu, true);
       if (touchTimeout) clearTimeout(touchTimeout);
     };
-  }, [dismiss, clearPendingHighlight, showMobileSheet]);
+  }, [dismiss, showMobileSheet]);
 
-  // Ctrl/Cmd+C copies the captured selection snapshot. Native copy can
-  // truncate around rendered markdown nodes after the preview highlight
-  // mutates the selected DOM.
+  // Ctrl/Cmd+C copies the captured message text even when rendered
+  // markdown splits the browser selection across nested nodes.
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (!popupTextRef.current) return;
@@ -260,20 +228,12 @@ export function SelectionPopup({ onAdd, onAdvSync }: Props) {
     }
   }, [popup, phase]);
 
-  // Cleanup any lingering pending highlight on unmount.
-  useEffect(() => {
-    return () => clearPendingHighlight();
-  }, [clearPendingHighlight]);
-
   const handleSubmit = useCallback(() => {
     if (!popup) return;
-    clearPendingHighlight();
     window.getSelection()?.removeAllRanges();
     onAddRef.current(popup.text, comment.trim(), popup.messageId);
-    setPopup(null);
-    setComment("");
-    setPhase("actions");
-  }, [popup, comment, clearPendingHighlight]);
+    closePopup();
+  }, [popup, comment, closePopup]);
 
   const handleCopy = useCallback(() => {
     if (!popup) return;
@@ -283,22 +243,16 @@ export function SelectionPopup({ onAdd, onAdvSync }: Props) {
 
   const handleComment = useCallback(() => {
     if (!popup) return;
-    clearPendingHighlight();
     window.getSelection()?.removeAllRanges();
     onAddRef.current(popup.text, "", popup.messageId);
-    setPopup(null);
-    setComment("");
-    setPhase("actions");
-  }, [popup, clearPendingHighlight]);
+    closePopup();
+  }, [popup, closePopup]);
 
   const handleAdvSync = useCallback(() => {
     if (!popup || !onAdvSyncRef.current) return;
-    clearPendingHighlight();
     onAdvSyncRef.current(popup.text, popup.messageId);
-    setPopup(null);
-    setComment("");
-    setPhase("actions");
-  }, [popup, clearPendingHighlight]);
+    closePopup();
+  }, [popup, closePopup]);
 
   if (!popup) return null;
 
