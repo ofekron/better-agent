@@ -178,7 +178,6 @@ _STARTUP_ACTIVITY_KINDS = {
     "codex": "task_started",
     "fugu": "task_started",
     "claude": "provider_response",
-    "gemini": "init",
 }
 
 
@@ -2992,9 +2991,6 @@ class TurnManager:
                             continue
                         provider_start_observed = (
                             provider_kind == "claude" and event.type == "agent_message"
-                        ) or (
-                            provider_kind == "gemini"
-                            and event.type in ("session_discovered", "agent_message")
                         )
                         if provider_start_observed:
                             expected_kind = _STARTUP_ACTIVITY_KINDS[provider_kind]
