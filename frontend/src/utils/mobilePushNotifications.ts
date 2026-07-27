@@ -6,6 +6,7 @@ import { navigateRoute, parseRoutePath, sessionPath, ROUTE_NAVIGATE_EVENT } from
 import { ASK_SINGLETON_ID } from "../askSession";
 import { uuidv4 } from "../lib/uuid";
 import { scheduleMobileBackgroundSyncMirror } from "../lib/mobileBackgroundSync";
+import { requestMessageFocus } from "./messageFocus";
 
 const DEVICE_ID_KEY = "better_agent_push_device_id";
 
@@ -36,6 +37,16 @@ function currentSessionId(): string | null {
 function deepLinkToRequest(data: Record<string, unknown> | undefined | null): void {
   const sessionId = typeof data?.session_id === "string" ? data.session_id : null;
   if (!sessionId) return;
+  const messageId = typeof data?.message_id === "string" ? data.message_id : null;
+  if (messageId) {
+    // Queue the focus before navigating: the target message may live in a
+    // different session whose messages are still loading, so the request
+    // outlives the navigation and is consumed by Chat once it renders
+    // (same path event links use — see utils/linkifyFilePaths.tsx).
+    requestMessageFocus(sessionId, messageId);
+    navigateRoute(`${sessionPath(sessionId)}?m=${encodeURIComponent(messageId)}`);
+    return;
+  }
   navigateRoute(sessionPath(sessionId));
 }
 

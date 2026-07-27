@@ -7,6 +7,11 @@ import { isUnanchoredRun } from "../utils/runTargets";
 import { useTranslation } from "react-i18next";
 import { useScrollLoadOlder } from "../hooks/useScrollLoadOlder";
 import { eventBus } from "../lib/eventBus";
+import {
+  peekPendingMessageFocus,
+  clearPendingMessageFocus,
+  scrollMessageIntoView,
+} from "../utils/messageFocus";
 import type {
   CapabilityContext,
   ChatMessage,
@@ -1071,6 +1076,28 @@ export function Chat({
       if (connected) void refetchToolApprovals();
     });
   }, [refetchToolApprovals]);
+  // Consume a queued message focus (deep-link from a mobile push notification
+  // or an in-chat event link). The target may live in a session whose messages
+  // are still loading, so retry on every render commit until the element
+  // exists, then clear so it focuses only once.
+  useEffect(() => {
+    const sid = session?.id;
+    if (!sid) return;
+    const tryFocus = () => {
+      const targetId = peekPendingMessageFocus(sid);
+      if (targetId && scrollMessageIntoView(targetId)) clearPendingMessageFocus(targetId);
+    };
+    const off = eventBus.subscribe("focus_message", (p) => {
+      if (p?.session_id === sid) tryFocus();
+    });
+    return () => off();
+  }, [session?.id]);
+  useLayoutEffect(() => {
+    const sid = session?.id;
+    if (!sid) return;
+    const targetId = peekPendingMessageFocus(sid);
+    if (targetId && scrollMessageIntoView(targetId)) clearPendingMessageFocus(targetId);
+  });
   useEffect(() => {
     const onRequested = (e: Event) => {
       const detail = (e as CustomEvent<ToolApproval>).detail;

@@ -772,7 +772,16 @@ def bind_push_notifications() -> None:
             return
         import push_sender
 
-        await asyncio.to_thread(push_sender.send_turn_completed_push, event.sid)
+        sid = event.sid
+
+        # Resolve the latest assistant message off the event-loop thread
+        # (latest_assistant_msg_id takes a per-root lock) so the push can
+        # deep-link to the finished response instead of the session root.
+        def _send() -> None:
+            message_id = session_manager.latest_assistant_msg_id(sid)
+            push_sender.send_turn_completed_push(sid, message_id=message_id)
+
+        await asyncio.to_thread(_send)
 
     bus.unsubscribe("push_notification_turn_complete")
     bus.subscribe(

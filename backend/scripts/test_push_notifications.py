@@ -186,14 +186,22 @@ def test_new_pending_request_triggers_push_per_device() -> bool:
 def test_successful_turn_emits_configurable_response_push() -> bool:
     import asyncio
 
-    calls: list[str] = []
+    import session_manager
+
+    calls: list[tuple[str, str | None]] = []
     original = push_sender.send_turn_completed_push
 
-    def fake_send(session_id: str) -> None:
-        calls.append(session_id)
+    def fake_send(session_id: str, *, message_id: str | None = None) -> None:
+        calls.append((session_id, message_id))
 
     push_sender.send_turn_completed_push = fake_send
     bind_push_notifications()
+    # The subscriber resolves the deep-link target via session_manager; stub
+    # it so we can assert the latest assistant message id is forwarded.
+    original_lookup = session_manager.manager.latest_assistant_msg_id
+    session_manager.manager.latest_assistant_msg_id = (
+        lambda sid: "msg-latest" if sid == "sid-complete" else None
+    )
     try:
         asyncio.run(bus.publish(BusEvent(
             type="lifecycle.turn_complete",
@@ -209,9 +217,12 @@ def test_successful_turn_emits_configurable_response_push() -> bool:
             payload={"reason": "error"},
             persist=False,
         )))
-        return calls == ["sid-complete"]
+        # Successful turn deep-links to the resolved latest assistant message;
+        # the error turn is skipped entirely.
+        return calls == [("sid-complete", "msg-latest")]
     finally:
         bus.unsubscribe("push_notification_turn_complete")
+        session_manager.manager.latest_assistant_msg_id = original_lookup
         push_sender.send_turn_completed_push = original
 
 

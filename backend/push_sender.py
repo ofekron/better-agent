@@ -92,18 +92,28 @@ def _send_pending_input_push(session_id: str, request_kind: str, request_id: str
     )
 
 
-def send_turn_completed_push(session_id: str) -> None:
-    """Notify interested devices that a successful response is ready."""
+def send_turn_completed_push(
+    session_id: str, *, message_id: str | None = None
+) -> None:
+    """Notify interested devices that a successful response is ready.
+
+    `message_id` is the latest assistant message so the device can deep-link
+    to that response rather than just the session root; omitted when no
+    assistant message can be resolved.
+    """
+    data: dict[str, str] = {
+        "session_id": session_id,
+        "notification_kind": "completed_turn",
+    }
+    if message_id:
+        data["message_id"] = message_id
     try:
         _send_push(
             session_id,
             "completed_turns",
             "Better Agent response ready",
             "Open the app to view the latest response",
-            {
-                "session_id": session_id,
-                "notification_kind": "completed_turn",
-            },
+            data,
         )
     except Exception:
         logger.exception(
