@@ -14,6 +14,7 @@ The user can confirm, reject, or manually reassign groups via the UI.
 import copy
 import json
 import logging
+import re
 import uuid
 from pathlib import Path
 from typing import Optional
@@ -23,6 +24,38 @@ from json_store import read_json, write_json
 from paths import ba_home
 
 logger = logging.getLogger(__name__)
+
+
+# scp-like ("git@github.com:owner/repo.git") and url-like forms of the same
+# origin must collapse to one key so equivalent remotes group together.
+_SCP_RE = re.compile(r"^[\w.-]+@([\w.-]+):(.+)$")
+_URL_RE = re.compile(r"^\w+://(?:[^@/]+@)?([^/]+)/(.+)$")
+
+
+def normalize_remote_url(url: str) -> str:
+    """Normalize a git remote URL to a canonical ``host/path`` key.
+
+    Mirrors agent-board's ``normalize_remote_url`` rules exactly (kept local to
+    avoid a cross-repo import): strip scp/https schemes and any trailing
+    ``.git``, lowercase the host. Returns ``""`` for empty/None/non-str input.
+    """
+    if not isinstance(url, str):
+        return ""
+    url = url.strip()
+    if not url:
+        return ""
+
+    m = _SCP_RE.match(url)
+    if not m:
+        m = _URL_RE.match(url)
+    if not m:
+        return url.lower().rstrip("/")
+
+    host = m.group(1).lower()
+    path = m.group(2).strip("/")
+    if path.endswith(".git"):
+        path = path[:-4]
+    return f"{host}/{path}"
 
 SCHEMA_VERSION = 1
 
@@ -127,10 +160,10 @@ def auto_match(projects: list[dict]) -> list[dict]:
     def _member_key(p: dict) -> tuple[str, str]:
         return (p.get("node_id") or "primary", p.get("path") or "")
 
-    # Pass 1: git_remote
+    # Pass 1: git_remote (normalized so scp/https/.git variants merge)
     git_groups: dict[str, list[dict]] = {}
     for p in projects:
-        remote = p.get("git_remote")
+        remote = normalize_remote_url(p.get("git_remote") or "")
         if remote:
             git_groups.setdefault(remote, []).append(p)
 
