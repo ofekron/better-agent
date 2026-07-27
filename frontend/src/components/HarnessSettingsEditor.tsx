@@ -131,10 +131,12 @@ export function HarnessSettingsEditor({ onEditDescriptionFile }: HarnessSettings
     };
     // Default is a projection of extension state, so an extension change
     // moves it just as a profile write does — both channels refetch.
-    const unsubExtensions = eventBus.subscribe("extensions_changed", (payload) => reload(payload, "extensions"));
+    const unsubExtensionConfig = eventBus.subscribe("extension.config", (payload) => reload(payload, "extensions"));
+    const unsubDefaultHarness = eventBus.subscribe("extension.harness.default", (payload) => reload(payload, "extensions"));
     const unsubProfiles = eventBus.subscribe("harness_profiles_changed", (payload) => reload(payload, "profiles"));
     return () => {
-      unsubExtensions();
+      unsubExtensionConfig();
+      unsubDefaultHarness();
       unsubProfiles();
     };
   }, [load, loadProfiles]);
