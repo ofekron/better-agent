@@ -178,29 +178,29 @@ def test_rollout_scan() -> None:
         prior = _token_count(HEALTHY_PLAN, info={"total_token_usage": {"total_tokens": 10}}) + "\n"
         rollout.write_text(prior + _token_count(EXHAUSTED_CREDITS) + "\n", encoding="utf-8")
 
-        limits = runner_codex._rollout_terminal_state(
+        _, _, _, limits = runner_codex._rollout_terminal_state(
             str(rollout), byte_offset=len(prior.encode()),
-        ).rate_limits
+        )
         _check("the attempt slice reports this attempt's quota state",
                codex_rate_limits.empty_turn_error(limits) == CREDITS_EXHAUSTED_ERROR,
                f"got {limits!r}")
 
-        whole = runner_codex._rollout_terminal_state(str(rollout)).rate_limits
+        _, _, _, whole = runner_codex._rollout_terminal_state(str(rollout))
         _check("the last payload wins when a slice spans several turns",
                codex_rate_limits.empty_turn_error(whole) == CREDITS_EXHAUSTED_ERROR)
 
         healthy = Path(tmp) / "healthy.jsonl"
         healthy.write_text(_token_count(HEALTHY_PLAN) + "\n", encoding="utf-8")
-        healthy_limits = runner_codex._rollout_terminal_state(str(healthy)).rate_limits
+        _, _, _, healthy_limits = runner_codex._rollout_terminal_state(str(healthy))
         _check("a plan-governed empty attempt yields no cause (stays a ghost)",
                codex_rate_limits.empty_turn_error(healthy_limits) is None)
 
         _check("a rollout with no token_count fails open to the generic ghost",
                codex_rate_limits.empty_turn_error(
-                   runner_codex._rollout_terminal_state(str(Path(tmp) / "nope.jsonl")).rate_limits,
+                   runner_codex._rollout_terminal_state(str(Path(tmp) / "nope.jsonl"))[3],
                ) is None)
         _check("no rollout path is inert",
-               runner_codex._rollout_terminal_state(None).rate_limits is None)
+               runner_codex._rollout_terminal_state(None)[3] is None)
 
 
 def main() -> int:

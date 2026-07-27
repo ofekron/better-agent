@@ -82,7 +82,7 @@ def test_rollout_assistant_seen(tmp: Path) -> None:
     ghost = _write_rollout(tmp / "ghost.jsonl", [
         _rollout_line("task_complete"),
     ])
-    terminal, usage, assistant_seen, *_ = runner_codex._rollout_terminal_state(ghost)
+    terminal, usage, assistant_seen, _ = runner_codex._rollout_terminal_state(ghost)
     _check("1a: ghost rollout is terminal", terminal is True)
     _check("1b: ghost rollout saw no assistant content", assistant_seen is False)
     _check("1c: ghost rollout has zero usage", usage == {})
@@ -96,7 +96,7 @@ def test_rollout_assistant_seen(tmp: Path) -> None:
         ),
         _rollout_line("task_complete"),
     ])
-    terminal, usage, assistant_seen, *_ = runner_codex._rollout_terminal_state(legit)
+    terminal, usage, assistant_seen, _ = runner_codex._rollout_terminal_state(legit)
     _check("1d: legit rollout is terminal", terminal is True)
     _check("1e: legit rollout saw assistant content", assistant_seen is True)
     _check("1f: legit rollout captured usage", usage.get("input_tokens") == 12)
@@ -106,14 +106,14 @@ def test_rollout_assistant_seen(tmp: Path) -> None:
         _rollout_line("agent_message", message="   "),
         _rollout_line("task_complete"),
     ])
-    _, _, assistant_seen, *_ = runner_codex._rollout_terminal_state(empty_msg)
+    _, _, assistant_seen, _ = runner_codex._rollout_terminal_state(empty_msg)
     _check("1g: whitespace-only agent_message is not assistant content", assistant_seen is False)
 
     current = _write_rollout(tmp / "current.jsonl", [
         _response_message("current primary answer"),
         _rollout_line("task_complete"),
     ])
-    terminal, _, assistant_seen, *_ = runner_codex._rollout_terminal_state(current)
+    terminal, _, assistant_seen, _ = runner_codex._rollout_terminal_state(current)
     _check("1h: current response_item primary output is recognized",
            terminal is True and assistant_seen is True)
 
@@ -124,7 +124,7 @@ def test_rollout_assistant_seen(tmp: Path) -> None:
         }}),
         _rollout_line("task_complete"),
     ])
-    _, _, assistant_seen, *_ = runner_codex._rollout_terminal_state(inter_agent)
+    _, _, assistant_seen, _ = runner_codex._rollout_terminal_state(inter_agent)
     _check("1i: inter-agent output is not primary assistant content", assistant_seen is False)
 
 
@@ -150,11 +150,11 @@ def test_rollout_cumulative_preamble(tmp: Path) -> None:
         f.write("\n".join(this_turn) + "\n")
 
     # Byte-0 scan (the bug): preamble agent_message poisons assistant_seen.
-    _, _, poisoned, *_ = runner_codex._rollout_terminal_state(str(path))
+    _, _, poisoned, _ = runner_codex._rollout_terminal_state(str(path))
     _check("1h: byte-0 scan sees preamble assistant content (the bug)", poisoned is True)
 
     # Offset scan (the fix): only THIS turn counts -> no assistant content.
-    terminal, _, assistant_seen, *_ = runner_codex._rollout_terminal_state(
+    terminal, _, assistant_seen, _ = runner_codex._rollout_terminal_state(
         str(path), byte_offset=offset,
     )
     _check("1i: offset scan ignores preamble assistant content", assistant_seen is False)
@@ -171,7 +171,7 @@ def _finalize_like_run(*, prompt, rollout_path, byte_offset=0):
     """Mirror the exact finalization sequence runner_codex._run runs
     after the rollout terminal check: terminal success + the shared
     ghost-completion guard."""
-    terminal, rollout_usage, assistant_seen, *_ = runner_codex._rollout_terminal_state(
+    terminal, rollout_usage, assistant_seen, _ = runner_codex._rollout_terminal_state(
         rollout_path, byte_offset=byte_offset,
     )
     success = False
@@ -234,7 +234,7 @@ def test_parent_final_phase(tmp: Path) -> None:
             },
         }),
     ])
-    terminal, _, assistant_seen, *_ = runner_codex._rollout_terminal_state(commentary_only)
+    terminal, _, assistant_seen, _ = runner_codex._rollout_terminal_state(commentary_only)
     _check("2d: commentary-only subagent rollout has no terminal", terminal is None)
     _check("2e: commentary remains primary assistant content", assistant_seen is True)
 
@@ -243,7 +243,7 @@ def test_parent_final_phase(tmp: Path) -> None:
         _response_message("All work is complete.", phase="final_answer"),
         _rollout_line("task_complete"),
     ])
-    terminal, _, assistant_seen, *_ = runner_codex._rollout_terminal_state(final_answer)
+    terminal, _, assistant_seen, _ = runner_codex._rollout_terminal_state(final_answer)
     _check(
         "2g: explicit parent final answer is accepted",
         terminal is True and assistant_seen is True,
@@ -293,11 +293,11 @@ def test_retry_attempt_isolation(tmp: Path) -> None:
         f.write("\n".join([_rollout_line("task_complete")]) + "\n")
 
     # Run-start offset (the bug): includes the failed attempt's agent_message.
-    _, _, poisoned, *_ = runner_codex._rollout_terminal_state(str(path), byte_offset=run_start_offset)
+    _, _, poisoned, _ = runner_codex._rollout_terminal_state(str(path), byte_offset=run_start_offset)
     _check("4a: run-start scan sees failed attempt's content (the bug)", poisoned is True)
 
     # Per-attempt offset (the fix): excludes the failed attempt.
-    terminal, _, assistant_seen, *_ = runner_codex._rollout_terminal_state(
+    terminal, _, assistant_seen, _ = runner_codex._rollout_terminal_state(
         str(path), byte_offset=attempt_start,
     )
     _check("4b: attempt-start scan excludes failed attempt", assistant_seen is False)
@@ -338,7 +338,7 @@ def test_resumed_cumulative_usage(tmp: Path) -> None:
             _rollout_line("task_complete"),
         ]) + "\n")
 
-    terminal, usage, assistant_seen, *_ = runner_codex._rollout_terminal_state(
+    terminal, usage, assistant_seen, _ = runner_codex._rollout_terminal_state(
         str(path), byte_offset=offset,
     )
     _check("5a: resumed ghost slice usage delta is zero",
@@ -361,7 +361,7 @@ def test_resumed_cumulative_usage(tmp: Path) -> None:
             }}),
             _rollout_line("task_complete"),
         ]) + "\n")
-    terminal, usage, assistant_seen, *_ = runner_codex._rollout_terminal_state(
+    terminal, usage, assistant_seen, _ = runner_codex._rollout_terminal_state(
         str(path2), byte_offset=offset2,
     )
     _check("5d: real resumed turn is terminal with assistant content",
@@ -381,7 +381,7 @@ def test_resumed_cumulative_usage(tmp: Path) -> None:
         _rollout_line("token_count", info={"total_token_usage": {"input_tokens": 12, "output_tokens": 5}}),
         _rollout_line("task_complete"),
     ])
-    _, usage, _, *_ = runner_codex._rollout_terminal_state(fresh)
+    _, usage, _, _ = runner_codex._rollout_terminal_state(fresh)
     _check("5g: fresh-session usage passes through", usage.get("input_tokens") == 12, f"usage={usage}")
 
 
@@ -395,7 +395,7 @@ def test_guard_narrowness(tmp: Path) -> None:
     _check("3a: empty prompt is not flagged", res["error"] is None and res["success"] is True)
 
     # Cancelled turn: guard must not override a cancel.
-    terminal, rollout_usage, assistant_seen, *_ = runner_codex._rollout_terminal_state(ghost)
+    terminal, rollout_usage, assistant_seen, _ = runner_codex._rollout_terminal_state(ghost)
     success, error, _ = apply_ghost_completion_guard(
         success=True, cancelled=True, error=None, prompt="x",
         assistant_seen=assistant_seen, total_usage={},

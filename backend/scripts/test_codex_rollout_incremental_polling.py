@@ -72,7 +72,7 @@ def test_incremental_results_match_stateless_across_boundaries() -> None:
         with path.open("ab") as file:
             file.write(b'{"malformed":\n')
             file.write(assistant[:-3])
-        assert scanner.poll() == runner_codex.EMPTY_ROLLOUT_SCAN
+        assert scanner.poll() == (None, {}, False, None)
 
         with path.open("ab") as file:
             file.write(assistant[-3:])
@@ -90,12 +90,12 @@ def test_replacement_resets_incremental_state() -> None:
         path = Path(tmp) / "rollout.jsonl"
         path.write_bytes(_event({"type": "agent_message", "message": "old"}))
         scanner = runner_codex._IncrementalRolloutScanner(path)
-        assert scanner.poll() == runner_codex.EMPTY_ROLLOUT_SCAN._replace(assistant_seen=True)
+        assert scanner.poll() == (None, {}, True, None)
 
         replacement = path.with_suffix(".replacement")
         replacement.write_bytes(_event({"type": "task_failed"}))
         os.replace(replacement, path)
-        assert scanner.poll() == runner_codex.EMPTY_ROLLOUT_SCAN._replace(terminal=False)
+        assert scanner.poll() == (False, {}, False, None)
 
 
 if __name__ == "__main__":
