@@ -262,6 +262,7 @@ async def test_bridge_uses_configured_extension_during_resolution_race() -> None
                     "command": "/configured/testape-mcp",
                     "args": [],
                     "env": {"BETTER_AGENT_EXTENSION_ID": "ofek.testape"},
+                    "tool_names": ["test_ui"],
                 },
             },
         }
@@ -271,7 +272,7 @@ async def test_bridge_uses_configured_extension_during_resolution_race() -> None
             provider_run_config=provider_run_config,
             dynamic_tools=dynamic_tools,
             tool_handlers={},
-            existing_tool_names=set(),
+            existing_tool_names={"test_ui"},
             user_facing=True,
             bare_config=False,
         )

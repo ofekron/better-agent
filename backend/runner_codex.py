@@ -450,6 +450,13 @@ async def _bridge_extension_mcp_dynamic_tools(
     bridge_errors: list[tuple[str, Exception]] = []
     bridged_any_server = False
     for server_name, config in bridge_configs.items():
+        configured_config = configured_servers.get(server_name)
+        same_extension = (
+            _extension_config_id(configured_config) == _extension_config_id(config)
+        )
+        if same_extension and isinstance(configured_config, dict):
+            for tool_name in configured_config.get("tool_names") or ():
+                existing_tool_names.discard(str(tool_name))
         call_config = dict(config)
         call_config["_server_name"] = server_name
         try:
@@ -479,11 +486,10 @@ async def _bridge_extension_mcp_dynamic_tools(
             bridged_any = bridged_any or added
             bridged_all = bridged_all and added
         bridged_any_server = bridged_any_server or bridged_any
-        configured_config = configured_servers.get(server_name)
         if (
             bridged_any
             and bridged_all
-            and _extension_config_id(configured_config) == _extension_config_id(config)
+            and same_extension
         ):
             configured_servers.pop(server_name, None)
     if bridge_errors and not bridged_any_server:
