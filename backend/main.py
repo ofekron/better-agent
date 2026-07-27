@@ -9706,7 +9706,45 @@ def _resolve_session_node_id(body: dict) -> str:
     return node_id
 
 
-def _node_offline_error(session: Optional[dict]) -> Optional[str]:
+_node_cwd_verified: set[tuple[str, str]] = set()
+
+
+async def _node_cwd_error(node_id: str, cwd: str) -> Optional[str]:
+    """Reject a cwd the node cannot actually use, before the turn starts.
+
+    A session created for a node inherits the primary's cwd unless one is
+    given, and nothing else notices until the runner spawns there — on a
+    Windows node under a POSIX primary that surfaces as a bare
+    `NotADirectoryError: [WinError 267]` mid-turn. Ask the node instead;
+    it is the only authority on its own filesystem.
+
+    Cached per (node, cwd): a directory that resolved once does not need
+    re-checking on every send, and a transport failure is left to the
+    offline/version checks rather than blocking the user here.
+    """
+    if not cwd:
+        return None
+    key = (node_id, cwd)
+    if key in _node_cwd_verified:
+        return None
+    from node_rpc_handlers import call_local_or_remote
+
+    try:
+        await call_local_or_remote(node_id, "list_dir", {"path": cwd}, timeout=20)
+    except Exception as exc:
+        text = str(exc)
+        if isinstance(exc, FileNotFoundError) or "not a directory" in text:
+            return (
+                f"cwd {cwd!r} does not exist on node {node_id!r}, which is where "
+                f"this session runs. Set the session's directory to a path on "
+                f"that machine and resend."
+            )
+        return None
+    _node_cwd_verified.add(key)
+    return None
+
+
+async def _node_offline_error(session: Optional[dict]) -> Optional[str]:
     """Fail-closed gate for sends into a node-hosted session: a prompt
     accepted while the node is down would sit queued and error minutes
     later — reject upfront with a clear message instead."""
@@ -9739,7 +9777,7 @@ def _node_offline_error(session: Optional[dict]) -> Optional[str]:
             f"but primary is running {primary_sha}. Update or restart the node "
             f"onto the primary version and resend."
         )
-    return None
+    return await _node_cwd_error(node_id, str((session or {}).get("cwd") or ""))
 
 
 async def _file_op(node_id: str, method: str, params: dict):
@@ -19759,7 +19797,7 @@ async def websocket_chat(websocket: WebSocket):
                     session_manager.get_lite,
                     app_session_id,
                 )
-                _offline_err = _node_offline_error(_offline_session)
+                _offline_err = await _node_offline_error(_offline_session)
                 if _offline_err:
                     await _send_message_error(_offline_err)
                     continue

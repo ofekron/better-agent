@@ -585,6 +585,48 @@ def test_machine_page_uses_sync_callbacks() -> None:
     assert "Sync extensions" in ui
 
 
+async def test_node_cwd_is_validated_against_the_node() -> None:
+    """A cwd the node cannot use must be rejected before the turn starts.
+
+    A node session inherits the primary's cwd unless one is given. On a
+    Windows node under a POSIX primary that reached the runner and failed
+    as a bare `NotADirectoryError: [WinError 267]` mid-turn.
+    """
+    import main
+    import node_rpc_handlers
+
+    calls: list[dict] = []
+
+    async def fake_rpc(node_id, method, params, **kwargs):
+        calls.append({"node_id": node_id, "method": method, "params": params})
+        if params.get("path") == "/does/not/exist":
+            raise RuntimeError("FileNotFoundError: not a directory: /does/not/exist")
+        if params.get("path") == "/transport/flake":
+            raise RuntimeError("node went away mid-call")
+        return {"path": params.get("path"), "entries": []}
+
+    original = node_rpc_handlers.call_local_or_remote
+    node_rpc_handlers.call_local_or_remote = fake_rpc
+    main._node_cwd_verified.clear()
+    try:
+        assert await main._node_cwd_error("n1", "") is None, "empty cwd should not be probed"
+        assert not calls
+
+        bad = await main._node_cwd_error("n1", "/does/not/exist")
+        assert bad and "/does/not/exist" in bad and "n1" in bad, bad
+
+        # A transport failure is the offline/version checks' job, not this one.
+        assert await main._node_cwd_error("n1", "/transport/flake") is None
+
+        assert await main._node_cwd_error("n1", "/good") is None
+        before = len(calls)
+        assert await main._node_cwd_error("n1", "/good") is None
+        assert len(calls) == before, "a verified cwd should not be re-probed"
+    finally:
+        node_rpc_handlers.call_local_or_remote = original
+        main._node_cwd_verified.clear()
+
+
 def _write_package(root, name: str):
     package = root / name
     (package / "src").mkdir(parents=True)
@@ -713,6 +755,7 @@ async def _main() -> None:
     test_import_provider_sync_fails_when_api_key_cannot_be_stored()
     test_import_provider_sync_skips_keyless_api_provider_as_default()
     test_import_provider_sync_clears_default_when_every_provider_needs_missing_key()
+    await test_node_cwd_is_validated_against_the_node()
     test_machine_page_uses_sync_callbacks()
     test_package_artifact_prunes_runtime_trees_with_links()
     test_package_artifact_still_rejects_links_in_real_content()
