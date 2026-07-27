@@ -777,6 +777,72 @@ def test_repair_enforces_loaded_project_scope() -> None:
         check(generated not in projects, "generated project removed")
 
 
+def test_job_all_projects_keeps_out_of_project_imports() -> None:
+    """Regression: an all-projects import must not delete the sessions it
+    imported during the post-import repair. The repair used to re-scope to
+    loaded_project_paths() unconditionally; with >=1 configured project and
+    imported cwds outside it, every imported root was deleted in the same
+    job that reported it imported.
+
+    Isolates `_run_import`'s repair dispatch: with no sessions to enumerate,
+    the only effect of the job is the repair call, so a pre-seeded imported
+    root whose cwd is out of scope proves whether the all-projects flag
+    disables scope deletion."""
+    native_import._registry_save({})
+    for p in project_store.list_projects():
+        try:
+            project_store.remove_project(p.get("path") or "", node_id=p.get("node_id") or "primary")
+        except Exception:
+            pass
+
+    with tempfile.TemporaryDirectory(dir=str(Path.home())) as proj_home, tempfile.TemporaryDirectory(
+        dir=str(Path.home())
+    ) as cwd_home:
+        # Configured project pointing at a real (non-junk) path, distinct from
+        # the imported session's cwd so the session is out of scope.
+        project_store.add_project(proj_home)
+        check(native_import.loaded_project_paths(), "a configured project is loaded")
+
+        outside = str(Path(cwd_home, "imported-cwd").resolve())
+        seeded = session_manager.create(
+            name="imported", model="sonnet", cwd=outside,
+            orchestration_mode="native", source="import", user_initiated=True,
+            created_at="2026-01-01T00:00:00",
+        )
+        seeded["messages"] = [{
+            "id": str(uuid.uuid4()), "role": "user",
+            "content": "real ask", "timestamp": "2026-01-01T00:00:00",
+        }]
+        session_store.write_session_full(
+            seeded, bump_updated_at=False, preserve_projection_fields=True,
+        )
+        seeded_id = seeded["id"]
+
+        status = native_import.JobStatus(
+            status="running", all_projects=True, project_paths=[],
+        )
+        # No enumeration / no per-session import — the repair call is the only
+        # mutating step, which is exactly where the scope bug lived.
+        real_enum = native_import.enumerate_native_sessions
+        native_import.enumerate_native_sessions = lambda *a, **k: []
+        try:
+            native_import._run_import(status, None, None, None)
+        finally:
+            native_import.enumerate_native_sessions = real_enum
+
+        check(status.status == "done", f"job done, got {status.status}")
+        check(
+            session_store.get_session(seeded_id) is not None,
+            "all-projects import keeps its out-of-project imported root",
+        )
+
+        for p in project_store.list_projects():
+            try:
+                project_store.remove_project(p.get("path") or "", node_id=p.get("node_id") or "primary")
+            except Exception:
+                pass
+
+
 # --------------------------------------------------------------------------- #
 # J. codex end-to-end ingest (user messages dropped → single turn collapse)
 # --------------------------------------------------------------------------- #
@@ -1166,6 +1232,7 @@ def main() -> None:
     test_registry()
     test_ingest_claude_matrix()
     test_repair_enforces_loaded_project_scope()
+    test_job_all_projects_keeps_out_of_project_imports()
     test_ingest_codex()
     test_enumerate_agy()
     test_enumerate_pi()
