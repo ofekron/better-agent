@@ -14,6 +14,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 import auth  # noqa: E402
 import extension_store  # noqa: E402
 import harness_fields  # noqa: E402
+import harness_profile_resolver  # noqa: E402
 import installation_profile  # noqa: E402
 import main  # noqa: E402
 
@@ -103,6 +104,25 @@ def main_test() -> None:
     check(harness_fields.GROUP_MCP in group_ids, "descriptor exposes the MCP group")
     check(harness_fields.GROUP_SETTINGS in group_ids, "descriptor exposes the settings group")
 
+    original_resolve_profile = harness_profile_resolver.resolve_profile
+    resolve_calls = 0
+
+    def counted_resolve_profile(*args, **kwargs):
+        nonlocal resolve_calls
+        resolve_calls += 1
+        return original_resolve_profile(*args, **kwargs)
+
+    harness_profile_resolver.resolve_profile = counted_resolve_profile
+    try:
+        profiles = client.get("/api/harness-profiles")
+        check(profiles.status_code == 200, "profile summary list succeeds")
+        listed = profiles.json()["profiles"]
+        check(listed[0]["id"] == "default", "profile summary list includes Default")
+        check("fields" not in listed[0], "profile summary list omits resolved fields")
+        check(resolve_calls == 0, "profile summary list does not resolve every profile")
+    finally:
+        harness_profile_resolver.resolve_profile = original_resolve_profile
+
     # Default writes pass through to the owning store.
     default_write = client.patch(
         "/api/harness-profiles/default/fields",
@@ -121,14 +141,20 @@ def main_test() -> None:
     created = client.post("/api/harness-profiles", json={"name": "Api Profile"})
     check(created.status_code == 200, "profile creation succeeds")
     profile = created.json()
-    prompt_write = client.patch(
-        f"/api/harness-profiles/{profile['id']}/fields",
-        json={"revision": profile["revision"], "writes": [
-            {"path": ["profile_meta", "provisioning_prompt"],
-             "value": "Provision this profile's workers carefully."},
-        ]},
-    )
+    resolve_calls = 0
+    harness_profile_resolver.resolve_profile = counted_resolve_profile
+    try:
+        prompt_write = client.patch(
+            f"/api/harness-profiles/{profile['id']}/fields",
+            json={"revision": profile["revision"], "writes": [
+                {"path": ["profile_meta", "provisioning_prompt"],
+                 "value": "Provision this profile's workers carefully."},
+            ]},
+        )
+    finally:
+        harness_profile_resolver.resolve_profile = original_resolve_profile
     check(prompt_write.status_code == 200, "profile provisioning prompt write succeeds")
+    check(resolve_calls <= 2, "profile field write resolves only for write validation and response")
     check(
         prompt_write.json()["provisioning_prompt"] == "Provision this profile's workers carefully.",
         "profile response includes own provisioning prompt",

@@ -4179,10 +4179,10 @@ def _extension_settings_harness_inputs(extension_id: str, body: dict) -> dict[st
     return {"resolved_harness_run_config": {"launcher_projection": projection, **projection}}
 
 
-async def _broadcast_harness_profiles_changed() -> None:
+async def _broadcast_harness_profiles_changed(payload: dict[str, Any] | None = None) -> None:
     harness_profile_resolver.invalidate_cache()
     try:
-        await coordinator.broadcast_global("harness_profiles_changed", {})
+        await coordinator.broadcast_global("harness_profiles_changed", payload or {})
     except Exception:
         logger.exception("failed to broadcast harness profile change")
     try:
@@ -4268,6 +4268,26 @@ def _profile_response(profile: dict[str, Any], default: dict[str, Any] | None = 
     return _with_profile_meta(_profile_response_from_resolved(resolved), profile)
 
 
+def _profile_summary_response(profile: dict[str, Any] | None = None) -> dict[str, Any]:
+    if profile is None:
+        return {
+            "id": "default",
+            "name": "Default",
+            "description": "The live harness state before any profile override is applied.",
+            "revision": "",
+            "base_profile_id": None,
+            "base_profile_revision": None,
+            "default_provider_id": None,
+            "default_model": None,
+            "default_reasoning_effort": None,
+            "provisioning_prompt": None,
+            "read_only": False,
+            "source": "",
+            "extension_id": "",
+        }
+    return _with_profile_meta({"id": profile["id"]}, profile)
+
+
 def _default_profile_response(default: dict[str, Any] | None = None) -> dict[str, Any]:
     resolved = harness_profile_resolver.resolve_profile(harness_profile_store.DEFAULT_PROFILE_ID, default=default)
     response = _profile_response_from_resolved(resolved)
@@ -4280,12 +4300,7 @@ def _default_profile_response(default: dict[str, Any] | None = None) -> dict[str
 @app.get("/api/harness-profiles")
 async def list_harness_profiles():
     stored = await asyncio.to_thread(harness_profile_store.list_profiles)
-    default = await asyncio.to_thread(harness_profile_resolver.compute_default_profile)
-    default_response, *profile_responses = await asyncio.gather(
-        asyncio.to_thread(_default_profile_response, default),
-        *[asyncio.to_thread(_profile_response, profile, default) for profile in stored],
-    )
-    return {"profiles": [default_response, *profile_responses]}
+    return {"profiles": [_profile_summary_response(), *[_profile_summary_response(profile) for profile in stored]]}
 
 
 @app.get("/api/harness-profiles/descriptor")
@@ -4310,6 +4325,18 @@ def _profile_field_write_response(
     return _profile_response(stored)
 
 
+def _field_writes_change_global(profile_id: str, writes: list[dict[str, Any]]) -> bool:
+    if profile_id == harness_profile_store.DEFAULT_PROFILE_ID:
+        return True
+    for write in writes:
+        path = [str(part) for part in (write.get("path") or [])]
+        if path and path[0] == harness_fields.GROUP_PROFILE_META:
+            continue
+        if harness_fields.scope_for(path) == harness_fields.SCOPE_GLOBAL:
+            return True
+    return False
+
+
 @app.patch("/api/harness-profiles/{profile_id}/fields")
 async def patch_harness_profile_fields(profile_id: str, body: dict = Body(default={})):
     if not isinstance(body, dict):
@@ -4321,6 +4348,7 @@ async def patch_harness_profile_fields(profile_id: str, body: dict = Body(defaul
         if not isinstance(write, dict) or not isinstance(write.get("path"), list) or not write["path"]:
             raise HTTPException(status_code=400, detail="each write needs a non-empty path")
     try:
+        changes_global_state = _field_writes_change_global(profile_id, writes)
         response = await asyncio.to_thread(
             _profile_field_write_response, profile_id, body.get("revision") or None, writes
         )
@@ -4335,8 +4363,13 @@ async def patch_harness_profile_fields(profile_id: str, body: dict = Body(defaul
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except harness_profile_resolver.HarnessProfileResolutionError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    await coordinator.broadcast_global("extensions_changed", {})
-    await _broadcast_harness_profiles_changed()
+    if changes_global_state:
+        await coordinator.broadcast_global("extensions_changed", {})
+    await _broadcast_harness_profiles_changed({
+        "action": "fields_updated",
+        "profile_id": response.get("id"),
+        "revision": response.get("revision"),
+    })
     return response
 
 
@@ -4361,8 +4394,13 @@ async def create_harness_profile(body: dict = Body(default={})):
         profile = await asyncio.to_thread(harness_profile_store.create_profile, body)
     except harness_profile_store.HarnessProfileError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    await _broadcast_harness_profiles_changed()
-    return await asyncio.to_thread(_profile_response, profile)
+    response = await asyncio.to_thread(_profile_response, profile)
+    await _broadcast_harness_profiles_changed({
+        "action": "created",
+        "profile_id": response.get("id"),
+        "revision": response.get("revision"),
+    })
+    return response
 
 
 @app.patch("/api/harness-profiles/{profile_id}/overrides")
@@ -4383,8 +4421,13 @@ async def patch_harness_profile_overrides(profile_id: str, body: dict = Body(def
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except harness_profile_store.HarnessProfileError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    await _broadcast_harness_profiles_changed()
-    return await asyncio.to_thread(_profile_response, profile)
+    response = await asyncio.to_thread(_profile_response, profile)
+    await _broadcast_harness_profiles_changed({
+        "action": "overrides_updated",
+        "profile_id": response.get("id"),
+        "revision": response.get("revision"),
+    })
+    return response
 
 
 @app.delete("/api/harness-profiles/{profile_id}")
@@ -4401,7 +4444,11 @@ async def delete_harness_profile(profile_id: str, revision: str = ""):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not deleted:
         raise HTTPException(status_code=404, detail="harness profile not found")
-    await _broadcast_harness_profiles_changed()
+    await _broadcast_harness_profiles_changed({
+        "action": "deleted",
+        "profile_id": profile_id,
+        "revision": "",
+    })
     return {"success": True}
 
 

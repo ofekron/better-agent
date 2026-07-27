@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { API } from "../api";
 import { eventBus } from "../lib/eventBus";
@@ -61,6 +61,9 @@ export function HarnessSettingsEditor() {
   const [newProfileName, setNewProfileName] = useState("");
   const [diffOnly, setDiffOnly] = useState(false);
   const [search, setSearch] = useState("");
+  const localProfileWriteInFlight = useRef(false);
+  const inFlightHarnessProfileEvents = useRef<Record<string, unknown>[]>([]);
+  const inFlightExternalEvent = useRef(false);
 
   const isDefault = selectedId === DEFAULT_ID;
   const isReadOnly = Boolean(profile?.read_only);
@@ -104,14 +107,22 @@ export function HarnessSettingsEditor() {
   }, [load, loadProfiles]);
 
   useEffect(() => {
-    const reload = () => {
+    const reload = (payload: unknown, kind: "extensions" | "profiles") => {
+      if (localProfileWriteInFlight.current) {
+        if (kind === "profiles" && payload && typeof payload === "object") {
+          inFlightHarnessProfileEvents.current.push(payload as Record<string, unknown>);
+        } else {
+          inFlightExternalEvent.current = true;
+        }
+        return;
+      }
       load();
       loadProfiles();
     };
     // Default is a projection of extension state, so an extension change
     // moves it just as a profile write does — both channels refetch.
-    const unsubExtensions = eventBus.subscribe("extensions_changed", reload);
-    const unsubProfiles = eventBus.subscribe("harness_profiles_changed", reload);
+    const unsubExtensions = eventBus.subscribe("extensions_changed", (payload) => reload(payload, "extensions"));
+    const unsubProfiles = eventBus.subscribe("harness_profiles_changed", (payload) => reload(payload, "profiles"));
     return () => {
       unsubExtensions();
       unsubProfiles();
@@ -119,11 +130,28 @@ export function HarnessSettingsEditor() {
   }, [load, loadProfiles]);
 
   const runMutation = useCallback(
-    (fn: () => Promise<unknown>) => {
+    (fn: () => Promise<HarnessProfile>) => {
       setSaving(true);
       setError("");
+      localProfileWriteInFlight.current = true;
       fn()
-        .then(() => load())
+        .then((nextProfile) => {
+          setProfile(nextProfile);
+          setError("");
+          const events = inFlightHarnessProfileEvents.current;
+          const sawOnlyLocalEcho =
+            !inFlightExternalEvent.current &&
+            events.length > 0 &&
+            events.every((event) =>
+              event.action === "fields_updated" &&
+              event.profile_id === nextProfile.id &&
+              event.revision === nextProfile.revision
+            );
+          if (!sawOnlyLocalEcho && (inFlightExternalEvent.current || events.length > 0)) {
+            load();
+            loadProfiles();
+          }
+        })
         .catch((err) => {
           const message = err instanceof Error ? err.message : String(err);
           // A write against a profile that no longer exists is the same
@@ -138,7 +166,12 @@ export function HarnessSettingsEditor() {
           // authoritative state instead of staying stuck on the stale one.
           if (message === REVISION_MISMATCH) load();
         })
-        .finally(() => setSaving(false));
+        .finally(() => {
+          localProfileWriteInFlight.current = false;
+          inFlightHarnessProfileEvents.current = [];
+          inFlightExternalEvent.current = false;
+          setSaving(false);
+        });
     },
     [load],
   );
