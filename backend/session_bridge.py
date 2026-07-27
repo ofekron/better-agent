@@ -328,6 +328,8 @@ async def _run_new(
     model: str = "",
     reasoning_effort: str = "",
     runner: str = "",
+    harness_profile_id: str = "",
+    harness_profile_revision: str = "",
 ) -> dict:
     """Create a brand-new session inheriting the caller's config and run
     the prompt in it. Returns the same shape as `_run`."""
@@ -351,6 +353,8 @@ async def _run_new(
         # New-session mode always reaches here only after the user approves
         # the picker, so this session is user-aware.
         user_initiated=True,
+        harness_profile_id=harness_profile_id,
+        harness_profile_revision=harness_profile_revision,
     )
     run_sid = sess["id"]
     final = await _run_turn_with_sync_wait(
@@ -517,10 +521,13 @@ async def delegate(
     model: str = "",
     reasoning_effort: str = "",
     runner: str = "",
+    harness_profile_id: str = "",
+    harness_profile_revision: str = "",
 ) -> dict:
     """Entry point for the `delegate_to_session` MCP tool. Returns either
     `{session_id, run_mode, final_message, turn_id}` or `{error: ...}`.
-    Empty `target_sid` triggers new-session creation mode."""
+    Empty `target_sid` triggers new-session creation mode; the harness profile
+    applies only there, since an existing target keeps its own."""
     prompt = (prompt or "").strip()
     if not prompt:
         return {"error": "prompt_required"}
@@ -568,6 +575,8 @@ async def delegate(
             model=model,
             reasoning_effort=reasoning_effort,
             runner=runner,
+            harness_profile_id=harness_profile_id,
+            harness_profile_revision=harness_profile_revision,
         )
 
     auto_ok = (

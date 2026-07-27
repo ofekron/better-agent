@@ -98,11 +98,13 @@ from orchestration_tool_descriptions import (
 from orchestration_tool_schemas import (
     DELEGATE_TASK_INPUT_SCHEMA as _DELEGATE_TASK_INPUT_SCHEMA,
     ENSURE_NAMED_WORKER_INPUT_SCHEMA as _ENSURE_NAMED_WORKER_INPUT_SCHEMA,
+    HARNESS_PROFILE_INPUT_PROPERTIES as _HARNESS_PROFILE_INPUT_PROPERTIES,
     INBOX_INPUT_SCHEMA as _INBOX_INPUT_SCHEMA,
     LIST_AVAILABLE_PROVIDER_MODELS_INPUT_SCHEMA as _LIST_AVAILABLE_PROVIDER_MODELS_INPUT_SCHEMA,
     READ_INBOX_HISTORY_INPUT_SCHEMA as _READ_INBOX_HISTORY_INPUT_SCHEMA,
     SESSION_ORGANIZATION_INPUT_PROPERTIES as _SESSION_ORGANIZATION_INPUT_PROPERTIES,
     STOP_TURN_INPUT_SCHEMA as _STOP_TURN_INPUT_SCHEMA,
+    harness_profile_wire_fields as _harness_profile_wire_fields,
 )
 from provider_catalog_mcp import available_provider_models_response
 from provider_run_config import symlink_home_overlay, toml_literal, write_skill_tree
@@ -363,6 +365,7 @@ _CREATE_WORKER_INPUT_SCHEMA: dict[str, Any] = {
         "orchestration_mode": {"type": "string", "enum": ["team", "native"]},
         "node_id": {"type": "string"},
         **_SESSION_ORGANIZATION_INPUT_PROPERTIES,
+        **_HARNESS_PROFILE_INPUT_PROPERTIES,
     },
     "required": ["worker_description", "justification", "orchestration_mode"],
     "additionalProperties": False,
@@ -581,9 +584,8 @@ _CREATE_SESSION_INPUT_SCHEMA: dict[str, Any] = {
             "items": {"type": "string"},
             "description": "OPTIONAL — extension MCP server names to opt this session into (servers that are default-off globally, e.g. 'testape-internal').",
         },
-        "harness_profile_id": {"type": "string"},
-        "harness_profile_revision": {"type": "string"},
         **_SESSION_ORGANIZATION_INPUT_PROPERTIES,
+        **_HARNESS_PROFILE_INPUT_PROPERTIES,
     },
     "required": ["name"],
     "additionalProperties": False,
@@ -603,9 +605,8 @@ _CREATE_SUB_SESSION_INPUT_SCHEMA: dict[str, Any] = {
             "items": {"type": "string"},
             "description": "OPTIONAL — extension MCP server names to opt this session into (servers that are default-off globally, e.g. 'testape-internal').",
         },
-        "harness_profile_id": {"type": "string"},
-        "harness_profile_revision": {"type": "string"},
         **_SESSION_ORGANIZATION_INPUT_PROPERTIES,
+        **_HARNESS_PROFILE_INPUT_PROPERTIES,
     },
     "required": [],
     "additionalProperties": False,
@@ -784,6 +785,10 @@ def _build_create_worker_tool_handler(
                     "node_id": node_id,
                     "folder_id": args.get("folder_id"),
                     "tag_ids": args.get("tag_ids") or [],
+                    **_harness_profile_wire_fields(
+                        args.get("harness_profile_id"),
+                        args.get("harness_profile_revision"),
+                    ),
                 },
                 backend_url=backend_url,
                 internal_token=internal_token,
@@ -852,6 +857,10 @@ def _build_ensure_named_worker_tool_handler(
             "tags": [name],
             "folder_id": args.get("folder_id"),
             "tag_ids": args.get("tag_ids") or [],
+            **_harness_profile_wire_fields(
+                args.get("harness_profile_id"),
+                args.get("harness_profile_revision"),
+            ),
         }
         try:
             result = await asyncio.to_thread(
@@ -1353,6 +1362,10 @@ def _build_delegate_task_tool_handler(
                     "sub_session": args.get("sub_session") is not False,
                     "folder_id": args.get("folder_id"),
                     "tag_ids": args.get("tag_ids") or [],
+                    **_harness_profile_wire_fields(
+                        args.get("harness_profile_id"),
+                        args.get("harness_profile_revision"),
+                    ),
                 },
                 backend_url=backend_url,
                 internal_token=internal_token,
@@ -1402,8 +1415,10 @@ def _build_create_session_tool_handler(
                     "folder_id": args.get("folder_id"),
                     "tag_ids": args.get("tag_ids") or [],
                     "mcp_servers": args.get("mcp_servers") or [],
-                    "harness_profile_id": str(args.get("harness_profile_id") or "").strip() or None,
-                    "harness_profile_revision": str(args.get("harness_profile_revision") or "").strip() or None,
+                    **_harness_profile_wire_fields(
+                        args.get("harness_profile_id"),
+                        args.get("harness_profile_revision"),
+                    ),
                 },
                 backend_url=backend_url,
                 internal_token=internal_token,
@@ -1452,8 +1467,10 @@ def _build_create_sub_session_tool_handler(
                     "folder_id": args.get("folder_id"),
                     "tag_ids": args.get("tag_ids") or [],
                     "mcp_servers": args.get("mcp_servers") or [],
-                    "harness_profile_id": str(args.get("harness_profile_id") or "").strip() or None,
-                    "harness_profile_revision": str(args.get("harness_profile_revision") or "").strip() or None,
+                    **_harness_profile_wire_fields(
+                        args.get("harness_profile_id"),
+                        args.get("harness_profile_revision"),
+                    ),
                 },
                 backend_url=backend_url,
                 internal_token=internal_token,

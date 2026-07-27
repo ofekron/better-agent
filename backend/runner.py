@@ -81,11 +81,13 @@ from orchestration_tool_descriptions import (
 from orchestration_tool_schemas import (
     DELEGATE_TASK_INPUT_SCHEMA as _DELEGATE_TASK_INPUT_SCHEMA,
     ENSURE_NAMED_WORKER_INPUT_SCHEMA as _ENSURE_NAMED_WORKER_INPUT_SCHEMA,
+    HARNESS_PROFILE_INPUT_PROPERTIES as _HARNESS_PROFILE_INPUT_PROPERTIES,
     INBOX_INPUT_SCHEMA as _INBOX_INPUT_SCHEMA,
     LIST_AVAILABLE_PROVIDER_MODELS_INPUT_SCHEMA as _LIST_AVAILABLE_PROVIDER_MODELS_INPUT_SCHEMA,
     READ_INBOX_HISTORY_INPUT_SCHEMA as _READ_INBOX_HISTORY_INPUT_SCHEMA,
     SESSION_ORGANIZATION_INPUT_PROPERTIES as _SESSION_ORGANIZATION_INPUT_PROPERTIES,
     STOP_TURN_INPUT_SCHEMA as _STOP_TURN_INPUT_SCHEMA,
+    harness_profile_wire_fields as _harness_profile_wire_fields,
 )
 from provider_catalog_mcp import available_provider_models_response
 from user_interaction_tool_contracts import (
@@ -573,6 +575,7 @@ _CREATE_WORKER_INPUT_SCHEMA: dict[str, Any] = {
             ),
         },
         **_SESSION_ORGANIZATION_INPUT_PROPERTIES,
+        **_HARNESS_PROFILE_INPUT_PROPERTIES,
     },
     "required": ["worker_description", "justification", "orchestration_mode"],
 }
@@ -778,15 +781,8 @@ _CREATE_SESSION_INPUT_SCHEMA: dict[str, Any] = {
             "items": {"type": "string"},
             "description": "OPTIONAL — extension MCP server names to opt this session into (servers that are default-off globally, e.g. 'testape-internal').",
         },
-        "harness_profile_id": {
-            "type": ["string", "null"],
-            "description": "OPTIONAL — harness profile id for the new session.",
-        },
-        "harness_profile_revision": {
-            "type": ["string", "null"],
-            "description": "OPTIONAL — pinned harness profile revision.",
-        },
         **_SESSION_ORGANIZATION_INPUT_PROPERTIES,
+        **_HARNESS_PROFILE_INPUT_PROPERTIES,
     },
     "required": ["name"],
 }
@@ -828,15 +824,8 @@ _CREATE_SUB_SESSION_INPUT_SCHEMA: dict[str, Any] = {
             "items": {"type": "string"},
             "description": "OPTIONAL — extension MCP server names to opt this session into (servers that are default-off globally, e.g. 'testape-internal').",
         },
-        "harness_profile_id": {
-            "type": ["string", "null"],
-            "description": "OPTIONAL — harness profile id for the sub-session.",
-        },
-        "harness_profile_revision": {
-            "type": ["string", "null"],
-            "description": "OPTIONAL — pinned harness profile revision.",
-        },
         **_SESSION_ORGANIZATION_INPUT_PROPERTIES,
+        **_HARNESS_PROFILE_INPUT_PROPERTIES,
     },
     "required": [],
 }
@@ -1369,6 +1358,10 @@ def _build_create_worker_tool(
             "node_id": node_id,
             "folder_id": args.get("folder_id"),
             "tag_ids": args.get("tag_ids") or [],
+            **_harness_profile_wire_fields(
+                args.get("harness_profile_id"),
+                args.get("harness_profile_revision"),
+            ),
         }
         try:
             result = await asyncio.to_thread(_post_create_worker_sync, payload)
@@ -1430,6 +1423,10 @@ def _build_ensure_named_worker_tool(
             "tags": [name],
             "folder_id": args.get("folder_id"),
             "tag_ids": args.get("tag_ids") or [],
+            **_harness_profile_wire_fields(
+                args.get("harness_profile_id"),
+                args.get("harness_profile_revision"),
+            ),
         }
         payload = {"cwd": worker_cwd, "workers": [spec]}
         try:
@@ -1785,6 +1782,10 @@ def _build_delegate_task_tool(
             "sub_session": args.get("sub_session") is not False,
             "folder_id": args.get("folder_id"),
             "tag_ids": args.get("tag_ids") or [],
+            **_harness_profile_wire_fields(
+                args.get("harness_profile_id"),
+                args.get("harness_profile_revision"),
+            ),
         }
         try:
             result = await asyncio.to_thread(_post_delegate_task_sync, payload)
@@ -1927,8 +1928,10 @@ def _build_create_session_tool(
             "folder_id": args.get("folder_id"),
             "tag_ids": args.get("tag_ids") or [],
             "mcp_servers": args.get("mcp_servers") or [],
-            "harness_profile_id": str(args.get("harness_profile_id") or "").strip() or None,
-            "harness_profile_revision": str(args.get("harness_profile_revision") or "").strip() or None,
+            **_harness_profile_wire_fields(
+                args.get("harness_profile_id"),
+                args.get("harness_profile_revision"),
+            ),
         }
         try:
             result = await asyncio.to_thread(_post_create_session_sync, payload)
@@ -1976,8 +1979,10 @@ def _build_create_sub_session_tool(
             "folder_id": args.get("folder_id"),
             "tag_ids": args.get("tag_ids") or [],
             "mcp_servers": args.get("mcp_servers") or [],
-            "harness_profile_id": str(args.get("harness_profile_id") or "").strip() or None,
-            "harness_profile_revision": str(args.get("harness_profile_revision") or "").strip() or None,
+            **_harness_profile_wire_fields(
+                args.get("harness_profile_id"),
+                args.get("harness_profile_revision"),
+            ),
         }
         try:
             result = await asyncio.to_thread(_post_create_sub_session_sync, payload)

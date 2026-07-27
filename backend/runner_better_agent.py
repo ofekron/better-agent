@@ -66,6 +66,8 @@ from orchestration_tool_descriptions import (
 )
 from orchestration_tool_schemas import (
     DELEGATE_TASK_INPUT_SCHEMA as _DELEGATE_TASK_INPUT_SCHEMA,
+    HARNESS_PROFILE_INPUT_PROPERTIES as _HARNESS_PROFILE_INPUT_PROPERTIES,
+    harness_profile_wire_fields as _harness_profile_wire_fields,
 )
 from capability_contexts import prepend_capability_context, render_capability_context
 from user_interaction_tool_contracts import (
@@ -829,6 +831,7 @@ _CREATE_WORKER_INPUT_SCHEMA: dict[str, Any] = {
         "justification": {"type": "string"},
         "orchestration_mode": {"type": "string", "enum": ["team", "native"]},
         "node_id": {"type": "string"},
+        **_HARNESS_PROFILE_INPUT_PROPERTIES,
     },
     "required": ["worker_description", "justification", "orchestration_mode"],
     "additionalProperties": False,
@@ -847,6 +850,7 @@ _ENSURE_NAMED_WORKER_INPUT_SCHEMA: dict[str, Any] = {
         "reasoning_effort": {"type": "string"},
         "runner": {"type": "string"},
         "node_id": {"type": "string"},
+        **_HARNESS_PROFILE_INPUT_PROPERTIES,
     },
     "required": ["name", "orchestration_mode"],
     "additionalProperties": False,
@@ -957,8 +961,7 @@ _CREATE_SESSION_INPUT_SCHEMA: dict[str, Any] = {
             "items": {"type": "string"},
             "description": "OPTIONAL — extension MCP server names to opt this session into (servers that are default-off globally, e.g. 'testape-internal').",
         },
-        "harness_profile_id": {"type": "string"},
-        "harness_profile_revision": {"type": "string"},
+        **_HARNESS_PROFILE_INPUT_PROPERTIES,
     },
     "required": ["name"],
     "additionalProperties": False,
@@ -978,8 +981,7 @@ _CREATE_SUB_SESSION_INPUT_SCHEMA: dict[str, Any] = {
             "items": {"type": "string"},
             "description": "OPTIONAL — extension MCP server names to opt this session into (servers that are default-off globally, e.g. 'testape-internal').",
         },
-        "harness_profile_id": {"type": "string"},
-        "harness_profile_revision": {"type": "string"},
+        **_HARNESS_PROFILE_INPUT_PROPERTIES,
     },
     "required": [],
     "additionalProperties": False,
@@ -1700,6 +1702,10 @@ def _build_loopback_tool_handlers(
                     "cwd": cwd,
                     "client_request_id": f"cw_{uuid.uuid4().hex[:10]}",
                     "node_id": node_id,
+                    **_harness_profile_wire_fields(
+                        args.get("harness_profile_id"),
+                        args.get("harness_profile_revision"),
+                    ),
                 },
                 backend_url=backend_url,
                 internal_token=internal_token,
@@ -1745,6 +1751,10 @@ def _build_loopback_tool_handlers(
             "runner": args.get("runner"),
             "node_id": node_id,
             "tags": [name],
+            **_harness_profile_wire_fields(
+                args.get("harness_profile_id"),
+                args.get("harness_profile_revision"),
+            ),
         }
         try:
             result = await asyncio.to_thread(
@@ -1907,6 +1917,10 @@ def _build_loopback_tool_handlers(
                     "sub_session": args.get("sub_session") is not False,
                     "folder_id": args.get("folder_id"),
                     "tag_ids": args.get("tag_ids") or [],
+                    **_harness_profile_wire_fields(
+                        args.get("harness_profile_id"),
+                        args.get("harness_profile_revision"),
+                    ),
                 },
                 backend_url=backend_url,
                 internal_token=internal_token,
@@ -1941,8 +1955,10 @@ def _build_loopback_tool_handlers(
                     "orchestration_mode": args.get("orchestration_mode") or "native",
                     "node_id": node_id,
                     "mcp_servers": args.get("mcp_servers") or [],
-                    "harness_profile_id": str(args.get("harness_profile_id") or "").strip() or None,
-                    "harness_profile_revision": str(args.get("harness_profile_revision") or "").strip() or None,
+                    **_harness_profile_wire_fields(
+                        args.get("harness_profile_id"),
+                        args.get("harness_profile_revision"),
+                    ),
                 },
                 backend_url=backend_url,
                 internal_token=internal_token,
@@ -1973,8 +1989,10 @@ def _build_loopback_tool_handlers(
                     "runner": str(args.get("runner") or "").strip() or None,
                     "node_id": node_id,
                     "mcp_servers": args.get("mcp_servers") or [],
-                    "harness_profile_id": str(args.get("harness_profile_id") or "").strip() or None,
-                    "harness_profile_revision": str(args.get("harness_profile_revision") or "").strip() or None,
+                    **_harness_profile_wire_fields(
+                        args.get("harness_profile_id"),
+                        args.get("harness_profile_revision"),
+                    ),
                 },
                 backend_url=backend_url,
                 internal_token=internal_token,

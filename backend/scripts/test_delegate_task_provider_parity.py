@@ -67,6 +67,8 @@ def test_delegate_task_schema_is_shared_by_runner_providers() -> None:
         "cwd",
         "folder_id",
         "tag_ids",
+        "harness_profile_id",
+        "harness_profile_revision",
     }
     assert properties["target_session_id"]["type"] == "string"
     assert properties["provider_id"]["type"] == "string"
@@ -126,6 +128,8 @@ def test_claude_delegate_task_posts_shared_payload() -> None:
         "sub_session": False,
         "folder_id": None,
         "tag_ids": [],
+        "harness_profile_id": None,
+        "harness_profile_revision": None,
     }
 
 

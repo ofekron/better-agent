@@ -79,6 +79,8 @@ async def await_fresh_worker_approval(
     ws_callback: Callable[[dict], Awaitable[None]],
     cancel_event: asyncio.Event,
     node_id: str = "primary",
+    harness_profile_id: str = "",
+    harness_profile_revision: str = "",
 ) -> Optional[dict]:
     """Block until the user approves or denies fresh worker creation.
 
@@ -120,6 +122,13 @@ async def await_fresh_worker_approval(
                     app_session_id=app_session_id,
                     provider_id=coordinator.provider_for_session(app_session_id).id,
                     node_id=existing.get("node_id") or node_id,
+                    # Re-entry after a restart: the record on disk is the
+                    # authority for the harness selection the caller made,
+                    # since the in-memory arguments came from a fresh call.
+                    harness_profile_id=existing.get("harness_profile_id") or harness_profile_id,
+                    harness_profile_revision=(
+                        existing.get("harness_profile_revision") or harness_profile_revision
+                    ),
                     # Reached from await_fresh_worker_approval — the user
                     # approved this fresh-worker popup, so they are aware.
                     user_initiated=True,
@@ -149,6 +158,8 @@ async def await_fresh_worker_approval(
                 instructions_preview=instructions_preview,
                 model=model,
                 node_id=node_id,
+                harness_profile_id=harness_profile_id,
+                harness_profile_revision=harness_profile_revision,
             )
         except Exception:
             logger.exception("failed to persist pending approval; continuing in-memory")
@@ -235,6 +246,10 @@ async def await_fresh_worker_approval(
         app_session_id=app_session_id,
         provider_id=coordinator.provider_for_session(app_session_id).id,
         node_id=node_id,
+        harness_profile_id=payload.get("harness_profile_id") or harness_profile_id,
+        harness_profile_revision=(
+            payload.get("harness_profile_revision") or harness_profile_revision
+        ),
         # The user just approved this fresh-worker popup ("ask" policy).
         user_initiated=True,
     )
@@ -254,6 +269,8 @@ async def spawn_approved_worker(
     provider_id: Optional[str] = None,
     node_id: str = "primary",
     user_initiated: bool = False,
+    harness_profile_id: Optional[str] = None,
+    harness_profile_revision: Optional[str] = None,
 ) -> Optional[dict]:
     """Spawn the new Better Agent session + init turn for an approved fresh
     worker request. Extracted so the re-entry path (backend
@@ -273,6 +290,8 @@ async def spawn_approved_worker(
         name=description, model=model, cwd=cwd, orchestration_mode=mode,
         provider_id=provider_id, runner=runtime_provider.record.get("runner"), node_id=node_id,
         user_initiated=user_initiated,
+        harness_profile_id=harness_profile_id,
+        harness_profile_revision=harness_profile_revision,
     )
     # Register a cancel event keyed on the new BC id so DELETE
     # /api/workers/{id} during init can short-circuit the spawn —

@@ -16,6 +16,36 @@ SESSION_ORGANIZATION_INPUT_PROPERTIES: dict[str, Any] = {
 }
 
 
+HARNESS_PROFILE_INPUT_PROPERTIES: dict[str, Any] = {
+    "harness_profile_id": {
+        "type": ["string", "null"],
+        "description": (
+            "OPTIONAL - harness profile id applied to a newly-created session. "
+            "The profile decides which instructions, skills, and MCP servers "
+            "that session gets, and equally which ones it does NOT get. Omit "
+            "to use the default profile."
+        ),
+    },
+    "harness_profile_revision": {
+        "type": ["string", "null"],
+        "description": (
+            "OPTIONAL - pin the harness profile to this exact revision. "
+            "Requires harness_profile_id. Omit to use the profile's current revision."
+        ),
+    },
+}
+
+
+def harness_profile_wire_fields(profile_id: Any = "", revision: Any = "") -> dict[str, Any]:
+    """Normalize a tool's harness-profile arguments into the wire fields every
+    session-creating backend route reads. Blank means "no explicit selection",
+    which the route resolves to the default profile."""
+    return {
+        "harness_profile_id": str(profile_id or "").strip() or None,
+        "harness_profile_revision": str(revision or "").strip() or None,
+    }
+
+
 STOP_TURN_INPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -109,6 +139,7 @@ DELEGATE_TASK_INPUT_SCHEMA: dict[str, Any] = {
             "description": "OPTIONAL - working directory for a newly-created target session. Defaults to (inherits) the creating session's cwd. Ignored when delegating to an existing target_session_id.",
         },
         **SESSION_ORGANIZATION_INPUT_PROPERTIES,
+        **HARNESS_PROFILE_INPUT_PROPERTIES,
     },
     "required": ["task"],
 }
@@ -175,6 +206,7 @@ ENSURE_NAMED_WORKER_INPUT_SCHEMA: dict[str, Any] = {
             "description": "OPTIONAL - worker node id. Defaults to the session's node_id.",
         },
         **SESSION_ORGANIZATION_INPUT_PROPERTIES,
+        **HARNESS_PROFILE_INPUT_PROPERTIES,
     },
     "required": ["name", "orchestration_mode"],
 }

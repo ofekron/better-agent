@@ -14321,10 +14321,22 @@ async def _handle_internal_delegate_task(body: dict) -> dict[str, Any]:
             detail="sender_session_id and task are required",
         )
     folder_id, tag_ids = _session_organization_input_from_body(body)
+    harness_profile_id, harness_profile_revision = _harness_profile_selection(body)
+    # A profile's provider/model/effort pins fill in only what the caller left
+    # out, so an auto-created delegate target runs the profile's intended stack.
+    profile_selectors = harness_profile_resolver.merge_selector_defaults(
+        {
+            "provider_id": str(body.get("provider_id") or "").strip() or None,
+            "model": str(body.get("model") or "").strip() or None,
+            "reasoning_effort": body.get("reasoning_effort"),
+        },
+        harness_profile_id,
+        harness_profile_revision,
+    )
     target = body.get("target_session_id")
     if target in ("", "null"):
         target = None
-    raw_provider_id = str(body.get("provider_id") or "").strip()
+    raw_provider_id = str(profile_selectors["provider_id"] or "").strip()
     if target:
         requested_provider_id = await _resolve_provider_id_ref(raw_provider_id) if raw_provider_id else ""
     elif raw_provider_id.upper() == "ANY":
@@ -14337,7 +14349,7 @@ async def _handle_internal_delegate_task(body: dict) -> dict[str, Any]:
         # the coordinator still creates a fallback target from the sender's
         # provider/model.
         requested_provider_id = ""
-    requested_model = str(body.get("model") or "").strip()
+    requested_model = str(profile_selectors["model"] or "").strip()
     model = requested_model
     run_provider_id = "" if requested_provider_id.upper() == "ANY" else requested_provider_id
     if requested_model or run_provider_id:
@@ -14364,9 +14376,11 @@ async def _handle_internal_delegate_task(body: dict) -> dict[str, Any]:
             target_session_id=target,
             provider_id=requested_provider_id,
             model=model,
-            reasoning_effort=str(body.get("reasoning_effort") or "").strip(),
+            reasoning_effort=str(profile_selectors["reasoning_effort"] or "").strip(),
             runner=str(body.get("runner") or "").strip(),
             sub_session=body.get("sub_session") is not False,
+            harness_profile_id=harness_profile_id,
+            harness_profile_revision=harness_profile_revision,
             cwd=str(body.get("cwd") or ""),
             run_mode=str(body.get("run_mode") or "direct").strip() or "direct",
             folder_id=folder_id,
@@ -14784,7 +14798,15 @@ async def internal_create_worker(
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
     app_session_id = str(body.get("app_session_id") or "")
     folder_id, tag_ids = await _initial_session_organization_from_body(body)
-    requested_model = str(body.get("model") or "").strip()
+    harness_profile_id, harness_profile_revision = _harness_profile_selection(body)
+    # Only the model pin applies here: a fresh worker always inherits the
+    # calling manager's provider (its CLI session branches off the manager's).
+    profile_selectors = harness_profile_resolver.merge_selector_defaults(
+        {"model": str(body.get("model") or "").strip() or None},
+        harness_profile_id,
+        harness_profile_revision,
+    )
+    requested_model = str(profile_selectors["model"] or "").strip()
     if requested_model:
         caller = await _session_lite(app_session_id)
         provider_id = str((caller or {}).get("provider_id") or "").strip() or None
@@ -14798,6 +14820,8 @@ async def internal_create_worker(
         cwd=str(body.get("cwd") or ""),
         client_request_id=str(body.get("client_request_id") or "") or None,
         node_id=str(body.get("node_id") or "") or None,
+        harness_profile_id=harness_profile_id,
+        harness_profile_revision=harness_profile_revision,
     )
     if result.get("success") and result.get("worker_session_id"):
         await _apply_initial_session_organization(
@@ -14965,8 +14989,20 @@ async def internal_create_sub_session(
     if not parent:
         raise HTTPException(status_code=400, detail="sender_session_id does not exist")
 
+    harness_profile_id, harness_profile_revision = _harness_profile_selection(body)
+    # Profile provider/model/effort pins fill in whatever the caller omitted,
+    # outranking parent-session inheritance but never an explicit body value.
+    profile_selectors = harness_profile_resolver.merge_selector_defaults(
+        {
+            "provider_id": str(body.get("provider_id") or "").strip() or None,
+            "model": str(body.get("model") or "").strip() or None,
+            "reasoning_effort": body.get("reasoning_effort"),
+        },
+        harness_profile_id,
+        harness_profile_revision,
+    )
     requested_provider_id = await _resolve_provider_id_ref(
-        str(body.get("provider_id") or "").strip(),
+        str(profile_selectors["provider_id"] or "").strip(),
     )
     provider_id = requested_provider_id or str(parent.get("provider_id") or "").strip()
     provider_id = provider_id or None
@@ -14976,7 +15012,7 @@ async def internal_create_sub_session(
     if not str(runner_input or "").strip() and provider_id == parent.get("provider_id"):
         runner_input = parent.get("runner")
     runner = _provider_runner(provider_id, runner_input)
-    requested_model = str(body.get("model") or "").strip()
+    requested_model = str(profile_selectors["model"] or "").strip()
     model = requested_model
     if not model and requested_provider_id and provider_id:
         provider = await asyncio.to_thread(config_store.get_provider, provider_id) or {}
@@ -14991,7 +15027,7 @@ async def internal_create_sub_session(
         model = str(provider.get("default_model") or "").strip()
     if requested_model or requested_provider_id:
         await asyncio.to_thread(_validate_provider_model, provider_id, model)
-    requested_effort = body.get("reasoning_effort")
+    requested_effort = profile_selectors["reasoning_effort"]
     reasoning_effort: object
     if requested_effort is not None and str(requested_effort).strip():
         reasoning_effort = await asyncio.to_thread(
@@ -15014,7 +15050,6 @@ async def internal_create_sub_session(
     disallowed_tools = _api_disallowed_tools(body.get("disallowed_tools"))
     disabled_builtin_extensions = _api_disabled_builtin_extensions(body.get("disabled_builtin_extensions"))
     extra_mcp_servers = _api_extra_mcp_servers(body.get("mcp_servers"))
-    harness_profile_id, harness_profile_revision = _harness_profile_selection(body)
     name = description or "sub-session"
 
     try:
@@ -17181,10 +17216,22 @@ async def internal_session_bridge_delegate(
 
 async def _handle_internal_session_bridge_delegate(body: dict) -> dict[str, Any]:
     caller_sid = str(body.get("app_session_id") or "")
-    requested_provider_id = await _resolve_provider_id_ref(
-        str(body.get("provider_id") or "").strip(),
+    # Only new-session mode consumes the profile; an existing target keeps its
+    # own. Validated here so a bad selection fails before the user picker.
+    harness_profile_id, harness_profile_revision = _harness_profile_selection(body)
+    profile_selectors = harness_profile_resolver.merge_selector_defaults(
+        {
+            "provider_id": str(body.get("provider_id") or "").strip() or None,
+            "model": str(body.get("model") or "").strip() or None,
+            "reasoning_effort": body.get("reasoning_effort"),
+        },
+        harness_profile_id,
+        harness_profile_revision,
     )
-    requested_model = str(body.get("model") or "").strip()
+    requested_provider_id = await _resolve_provider_id_ref(
+        str(profile_selectors["provider_id"] or "").strip(),
+    )
+    requested_model = str(profile_selectors["model"] or "").strip()
     await _validate_optional_run_selector(
         caller_sid,
         requested_provider_id,
@@ -17201,8 +17248,10 @@ async def _handle_internal_session_bridge_delegate(body: dict) -> dict[str, Any]
         client_id=str(body.get("client_id") or "") or None,
         provider_id=requested_provider_id,
         model=requested_model,
-        reasoning_effort=str(body.get("reasoning_effort") or "").strip(),
+        reasoning_effort=str(profile_selectors["reasoning_effort"] or "").strip(),
         runner=str(body.get("runner") or "").strip(),
+        harness_profile_id=harness_profile_id,
+        harness_profile_revision=harness_profile_revision,
     )
     return result
 
@@ -18323,15 +18372,31 @@ async def _provision_workers_from_body(body: dict):
                     _register_provisioned_team_member(team_store, body, spec, result, key)
                     results.append(result)
                     continue
+                # Harness profile is a creation-time property, like
+                # provision_prompt: it shapes the worker's instructions, skills
+                # and MCP servers at session birth and is ignored when an
+                # existing named worker is reused.
+                harness_profile_id, harness_profile_revision = _harness_profile_selection(spec)
+                profile_selectors = harness_profile_resolver.merge_selector_defaults(
+                    {
+                        "provider_id": spec.get("provider_id"),
+                        "model": spec.get("model"),
+                        "reasoning_effort": spec.get("reasoning_effort"),
+                    },
+                    harness_profile_id,
+                    harness_profile_revision,
+                )
                 create_body = {
                     "cwd": worker_cwd,
                     "name": name,
                     "description": spec.get("description") or name,
                     "orchestration_mode": spec.get("orchestration_mode") or "native",
-                    "model": spec.get("model"),
-                    "provider_id": spec.get("provider_id"),
-                    "reasoning_effort": spec.get("reasoning_effort"),
+                    "model": profile_selectors["model"],
+                    "provider_id": profile_selectors["provider_id"],
+                    "reasoning_effort": profile_selectors["reasoning_effort"],
                     "runner": spec.get("runner"),
+                    "harness_profile_id": harness_profile_id,
+                    "harness_profile_revision": harness_profile_revision,
                     "node_id": spec.get("node_id"),
                     "role_key": key,
                     "tags": spec.get("tags"),
@@ -18456,6 +18521,7 @@ def _create_pending_worker_from_body(body: dict):
         capability_contexts = normalize_capability_contexts(body.get("capability_contexts"))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+    harness_profile_id, harness_profile_revision = _harness_profile_selection(body)
     provider_record = _provider_for_required_model(provider_id)
     model = _required_model_from_body_or_provider(body, provider_record)
     runner = _provider_runner(provider_id, body.get("runner"))
@@ -18485,6 +18551,8 @@ def _create_pending_worker_from_body(body: dict):
         capability_contexts=capability_contexts,
         disallowed_tools=body.get("disallowed_tools"),
         disabled_builtin_extensions=body.get("disabled_builtin_extensions"),
+        harness_profile_id=harness_profile_id,
+        harness_profile_revision=harness_profile_revision,
     )
     rec = _ws.upsert_worker(
         cwd=cwd,
@@ -18524,6 +18592,7 @@ async def _create_worker_from_body(body: dict, broadcast: bool = True):
         capability_contexts = normalize_capability_contexts(body.get("capability_contexts"))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+    harness_profile_id, harness_profile_revision = _harness_profile_selection(body)
     provider_record = await asyncio.to_thread(_provider_for_required_model, provider_id)
     model = _required_model_from_body_or_provider(body, provider_record)
     runner = _provider_runner(provider_id, body.get("runner"))
@@ -18552,6 +18621,8 @@ async def _create_worker_from_body(body: dict, broadcast: bool = True):
             capability_contexts=capability_contexts,
             disallowed_tools=body.get("disallowed_tools"),
             disabled_builtin_extensions=body.get("disabled_builtin_extensions"),
+            harness_profile_id=harness_profile_id,
+            harness_profile_revision=harness_profile_revision,
         )
     )
     cancel_event = asyncio.Event()

@@ -23,6 +23,16 @@ _PROVIDER_SELECTOR_NOTE = (
     " Leave provider/model/reasoning unset unless a different one is truly required."
 )
 
+# Appended to every tool that can mint a session, so the model knows the one
+# control that decides what the new session's harness contains AND excludes.
+_HARNESS_PROFILE_NOTE = (
+    " Pass harness_profile_id to give the new session a specific harness profile"
+    " — it selects which instructions, skills and MCP servers that session gets,"
+    " and equally excludes everything the profile does not select. Add"
+    " harness_profile_revision only to pin an exact revision. Omit both for the"
+    " default profile."
+)
+
 MSSG_DESCRIPTION = (
     "Send a one-way queued message to one target and return after the backend "
     "accepts it; this does not wait for target execution or a reply. Target "
@@ -70,7 +80,7 @@ DELEGATE_TASK_DESCRIPTION = (
     "off-topic work so you stay focused. Not for reviews — use ask(run_mode='fork'). "
     "Pass provider_id only when auto-routing should be constrained to that provider; provider_id='ANY' keeps cross-provider search. "
     "Distinct from the session-bridge delegate_to_session tool, which waits for the "
-    "result." + _PROVIDER_SELECTOR_NOTE
+    "result." + _PROVIDER_SELECTOR_NOTE + _HARNESS_PROFILE_NOTE
 )
 
 CREATE_SESSION_DESCRIPTION = (
@@ -78,21 +88,27 @@ CREATE_SESSION_DESCRIPTION = (
     "approval); returns its session_id so you can send work to it with "
     "mssg/ask/delegate_task. orchestration_mode='team' only for complex tasks that "
     "need their own coordinator, otherwise 'native'. To add a session to your team's "
-    "worker roster instead, use create_worker." + _PROVIDER_SELECTOR_NOTE
+    "worker roster instead, use create_worker."
+    + _PROVIDER_SELECTOR_NOTE
+    + _HARNESS_PROFILE_NOTE
 )
 
 CREATE_SUB_SESSION_DESCRIPTION = (
     "Create a hidden native sub-session under your current session — no prompt is "
     "sent, and it does not appear as a sidebar session or team worker. Returns "
     "target_session_id; send work to it later with mssg or ask. Use to "
-    "pre-provision a private helper session." + _PROVIDER_SELECTOR_NOTE
+    "pre-provision a private helper session."
+    + _PROVIDER_SELECTOR_NOTE
+    + _HARNESS_PROFILE_NOTE
 )
 
 CREATE_WORKER_DESCRIPTION = (
     "Request a fresh TEAM worker session (team managers only). May show the user an "
     "approval card and BLOCKS until approved or denied. After success, send work to "
     "the returned worker_session_id with mssg/ask/delegate_task. For a standalone "
-    "non-roster session, use create_session instead." + _PROVIDER_SELECTOR_NOTE
+    "non-roster session, use create_session instead."
+    + _PROVIDER_SELECTOR_NOTE
+    + _HARNESS_PROFILE_NOTE
 )
 
 CHAT_DESCRIPTION = (
@@ -148,6 +164,7 @@ ENSURE_NAMED_WORKER_DESCRIPTION = (
     "create_worker — when you want a STABLE, REUSABLE named worker reachable from any "
     "session (e.g. a single global cross-project worker). After it returns, delegate "
     "work with ask/mssg/delegate_task. Available to all sessions."
+    + _HARNESS_PROFILE_NOTE
 )
 
 LIST_AVAILABLE_PROVIDER_MODELS_DESCRIPTION = (

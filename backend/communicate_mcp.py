@@ -37,6 +37,8 @@ from orchestration_tool_descriptions import (
 )
 
 
+from orchestration_tool_schemas import harness_profile_wire_fields
+
 import chat_store
 import inbox_store
 from provider_catalog_mcp import available_provider_models_response
@@ -251,6 +253,8 @@ def delegate_task_response(
     cwd: str = "",
     folder_id: str = "",
     tag_ids: list[str] | None = None,
+    harness_profile_id: str = "",
+    harness_profile_revision: str = "",
 ) -> dict[str, Any]:
     """Smart detached handoff. POSTs /api/internal/delegate-task which routes
     per the global delegate_task_policy (search first suggestion / create new /
@@ -275,6 +279,7 @@ def delegate_task_response(
         "sub_session": sub_session is not False,
         "folder_id": (folder_id or "").strip() or None,
         "tag_ids": tag_ids or [],
+        **harness_profile_wire_fields(harness_profile_id, harness_profile_revision),
     }, timeout=_LONG_TIMEOUT)
 
 
@@ -361,6 +366,8 @@ def create_worker_response(
     cwd: str = "",
     folder_id: str = "",
     tag_ids: list[str] | None = None,
+    harness_profile_id: str = "",
+    harness_profile_revision: str = "",
 ) -> dict[str, Any]:
     worker_description = (worker_description or "").strip()
     justification = (justification or "").strip()
@@ -386,6 +393,7 @@ def create_worker_response(
         "node_id": node_id.strip() or None,
         "folder_id": (folder_id or "").strip() or None,
         "tag_ids": tag_ids or [],
+        **harness_profile_wire_fields(harness_profile_id, harness_profile_revision),
     }, timeout=_LONG_TIMEOUT)
 
 
@@ -402,6 +410,8 @@ def ensure_named_worker_response(
     node_id: str = "",
     folder_id: str = "",
     tag_ids: list[str] | None = None,
+    harness_profile_id: str = "",
+    harness_profile_revision: str = "",
 ) -> dict[str, Any]:
     name = (name or "").strip()
     cwd = _resolve_cwd(cwd)
@@ -420,6 +430,7 @@ def ensure_named_worker_response(
         "tags": [name],
         "folder_id": (folder_id or "").strip() or None,
         "tag_ids": tag_ids or [],
+        **harness_profile_wire_fields(harness_profile_id, harness_profile_revision),
     }
     if (provision_prompt or "").strip():
         spec["provision_prompt"] = provision_prompt.strip()
@@ -485,8 +496,7 @@ def create_session_response(
         "folder_id": (folder_id or "").strip() or None,
         "tag_ids": tag_ids or [],
         "mcp_servers": mcp_servers or [],
-        "harness_profile_id": (harness_profile_id or "").strip() or None,
-        "harness_profile_revision": (harness_profile_revision or "").strip() or None,
+        **harness_profile_wire_fields(harness_profile_id, harness_profile_revision),
     }, timeout=30.0)
 
 
@@ -516,8 +526,7 @@ def create_sub_session_response(
         "folder_id": (folder_id or "").strip() or None,
         "tag_ids": tag_ids or [],
         "mcp_servers": mcp_servers or [],
-        "harness_profile_id": (harness_profile_id or "").strip() or None,
-        "harness_profile_revision": (harness_profile_revision or "").strip() or None,
+        **harness_profile_wire_fields(harness_profile_id, harness_profile_revision),
     }, timeout=30.0)
 
 
@@ -598,32 +607,6 @@ def delete_chat_response(chat_id: str) -> dict[str, Any]:
     return chat_store.delete_chat(chat_id)
 
 
-def create_sub_session_surface_response(
-    description: str = "",
-    node_id: str = "",
-    provider_id: str = "",
-    model: str = "",
-    reasoning_effort: str = "",
-    runner: str = "",
-    cwd: str = "",
-    folder_id: str = "",
-    tag_ids: list[str] | None = None,
-    mcp_servers: list[str] | None = None,
-) -> dict[str, Any]:
-    return create_sub_session_response(
-        description,
-        node_id,
-        provider_id,
-        model,
-        reasoning_effort,
-        runner,
-        cwd,
-        folder_id,
-        tag_ids,
-        mcp_servers,
-    )
-
-
 _INSTRUCTIONS = (
     "Team tools for Better Agent sessions. mssg is one-way; ask waits inline by default. "
     "Async ask and delegate_task return through Inbox. Use fork mode for isolated reviews, "
@@ -654,11 +637,7 @@ def _specs() -> tuple[OperationSpec, ...]:
         ("delete_chat", delete_chat_response, DELETE_CHAT_DESCRIPTION),
         ("delegate_task", delegate_task_response, DELEGATE_TASK_DESCRIPTION),
         ("create_session", create_session_response, CREATE_SESSION_DESCRIPTION),
-        (
-            "create_sub_session",
-            create_sub_session_surface_response,
-            CREATE_SUB_SESSION_DESCRIPTION,
-        ),
+        ("create_sub_session", create_sub_session_response, CREATE_SUB_SESSION_DESCRIPTION),
         ("ask", ask_response, ASK_DESCRIPTION),
         ("ensure_named_worker", ensure_named_worker_response, ENSURE_NAMED_WORKER_DESCRIPTION),
     )

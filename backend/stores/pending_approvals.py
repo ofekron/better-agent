@@ -24,6 +24,8 @@ Storage: one JSON file per delegation at
         "proposed_orchestration_mode": "manager" | "native",
         "instructions_preview": str,
         "model": str,
+        "harness_profile_id": str,      # "" = default profile
+        "harness_profile_revision": str,
         "status": "pending" | "approved" | "denied",
         "created_at": iso,
         "expires_at": iso,             # 24h after created_at
@@ -121,8 +123,15 @@ def create(
     instructions_preview: str,
     model: str,
     node_id: str = "primary",
+    harness_profile_id: str = "",
+    harness_profile_revision: str = "",
 ) -> dict:
     """Persist a new pending-approval record. Returns the record.
+
+    `harness_profile_id`/`harness_profile_revision` carry the caller's harness
+    selection for the worker that gets spawned on approval. They live on the
+    record so a backend restart mid-approval still spawns the worker with the
+    profile the caller asked for instead of silently falling back to default.
 
     `node_id` is the worker-node the spawned worker will run on if the
     user approves. Surfaced to the frontend so the approval card can
@@ -149,6 +158,8 @@ def create(
         "instructions_preview": instructions_preview[:2000],
         "model": model,
         "node_id": node_id,
+        "harness_profile_id": harness_profile_id,
+        "harness_profile_revision": harness_profile_revision,
         "status": "pending",
         "created_at": now_dt.isoformat(),
         "expires_at": (now_dt + timedelta(hours=EXPIRY_HOURS)).isoformat(),
