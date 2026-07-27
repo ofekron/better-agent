@@ -3530,7 +3530,7 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.55, ease: "easeInOut" }}
     >
-      <div className="turn-group" ref={groupRef}>
+      <div className={`turn-group${isRunning ? " is-running" : ""}`} ref={groupRef}>
       <ModelSwitchBoundaryEvents
         events={precedingModelSwitchEvents}
         testId="model-switch-preceding"

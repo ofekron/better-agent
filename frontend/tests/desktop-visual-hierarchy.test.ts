@@ -6,6 +6,10 @@ const css = fs.readFileSync(
   path.resolve(__dirname, "../src/styles/globals.css"),
   "utf8",
 );
+const messageBubble = fs.readFileSync(
+  path.resolve(__dirname, "../src/components/MessageBubble.tsx"),
+  "utf8",
+);
 
 function ruleBodies(selector: string): string[] {
   const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -28,6 +32,9 @@ describe("desktop visual hierarchy", () => {
       "--border-subtle",
       "--border-strong",
       "--shadow-surface",
+      "--signal-violet",
+      "--signal-mint",
+      "--conversation-measure",
     ]) {
       expect(css).toContain(`${token}:`);
     }
@@ -59,14 +66,47 @@ describe("desktop visual hierarchy", () => {
 
   it("keeps the conversation readable as grouped content", () => {
     const turn = ruleBodyContaining(".turn-group", "max-width");
-    expect(turn).toContain("max-width: 1480px");
+    expect(turn).toContain("max-width: var(--conversation-measure)");
 
     const children = ruleBodyContaining(
       ".turn-group-children",
-      "border-inline-start",
+      "position: relative",
     );
     expect(children).toContain("padding-inline-start");
     expect(children).not.toMatch(/\b(left|right)\s*:/);
+
+    const composerChild = ruleBodyContaining(
+      ".input-area > :where",
+      "var(--conversation-measure)",
+    );
+    expect(composerChild).toContain("margin-inline: auto");
+    expect(composerChild).not.toContain(".modal-overlay");
+  });
+
+  it("reserves the signature signal path for backend-owned running turns", () => {
+    expect(messageBubble).toContain(
+      'className={`turn-group${isRunning ? " is-running" : ""}`}',
+    );
+
+    const runningRail = ruleBodyContaining(
+      ".turn-group.is-running > .turn-group-children::before",
+      "var(--signal-mint)",
+    );
+    expect(runningRail).toContain("var(--signal-violet)");
+    expect(runningRail).toContain("animation: execution-signal");
+
+    const executionKeyframesIndex = css.indexOf("@keyframes execution-signal");
+    const reducedMotionIndex = css.indexOf(
+      "@media (prefers-reduced-motion: reduce)",
+      executionKeyframesIndex,
+    );
+    const reducedMotion = css.slice(reducedMotionIndex, reducedMotionIndex + 220);
+    expect(executionKeyframesIndex).toBeGreaterThan(-1);
+    expect(reducedMotionIndex).toBeGreaterThan(executionKeyframesIndex);
+    expect(reducedMotion).toContain(
+      ".turn-group.is-running > .turn-group-children::before",
+    );
+    expect(reducedMotion).toContain("animation: none");
   });
 
   it("limits the pass to presentation declarations", () => {

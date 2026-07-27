@@ -9,6 +9,9 @@
   --border-subtle: rgba(139, 148, 158, 0.14);
   --border-strong: rgba(139, 148, 158, 0.28);
   --shadow-surface: 0 10px 28px rgba(0, 0, 0, 0.18);
+  --signal-violet: #8b7cf6;
+  --signal-mint: #34d399;
+  --conversation-measure: 1180px;
   --text-primary: #e6edf3;
   --text-secondary: #8b949e;
   --text-muted: #6e7681;
@@ -3478,16 +3481,19 @@ body {
   min-width: 60px;
   max-width: 33vw;
   overflow: hidden;
+  opacity: 0.66;
 }
 
 .session-tab-wrapper:hover {
   background: color-mix(in srgb, var(--bg-hover) 62%, transparent);
+  opacity: 0.9;
 }
 
 .session-tab-wrapper.active {
   background: var(--bg-canvas);
   border-color: var(--border-subtle);
   box-shadow: inset 0 2px 0 var(--accent);
+  opacity: 1;
 }
 
 .session-tab {
@@ -3695,12 +3701,12 @@ body {
 }
 
 .chat-toolbar {
-  --chat-toolbar-control-size: 42px;
+  --chat-toolbar-control-size: 36px;
   display: flex;
   align-items: center;
   gap: 8px;
-  min-height: 56px;
-  padding: 7px 14px;
+  min-height: 50px;
+  padding: 6px 12px;
   background: color-mix(in srgb, var(--bg-canvas) 88%, transparent);
   border-bottom: 1px solid var(--border-subtle);
   flex-shrink: 0;
@@ -6005,14 +6011,14 @@ button.run-badge-clickable:focus-visible {
 .thinking-block {
   padding: 8px 12px;
   margin: 4px 0;
-  border-inline-start: 3px solid var(--accent-dim);
+  border-inline-start: 2px solid color-mix(in srgb, var(--signal-violet) 42%, transparent);
   cursor: pointer;
   border-radius: 0 6px 6px 0;
-  background: var(--bg-secondary);
+  background: transparent;
 }
 
 .thinking-block:hover {
-  background: var(--bg-tertiary);
+  background: color-mix(in srgb, var(--bg-surface-raised) 52%, transparent);
 }
 
 .thinking-indicator {
@@ -7367,6 +7373,20 @@ button.run-badge-clickable:focus-visible {
   gap: 8px;
   background: var(--bg-surface);
   flex-shrink: 0;
+}
+
+.input-area > :where(
+  .image-previews,
+  .file-previews,
+  .queued-list-header,
+  .queued-prompt-banner,
+  .input-fork-target,
+  .mobile-steer-actions,
+  .input-row,
+  .input-capability-context-list
+) {
+  width: min(100%, var(--conversation-measure));
+  margin-inline: auto;
 }
 
 .image-previews {
@@ -9496,7 +9516,7 @@ button.run-badge-clickable:focus-visible {
 
 .turn-group {
   margin: 0 auto 22px;
-  max-width: 1480px;
+  max-width: var(--conversation-measure);
 }
 
 /* User prompt rendered as a MessageBox, matching tool/assistant events. */
@@ -9506,6 +9526,11 @@ button.run-badge-clickable:focus-visible {
 
 .user-message-box .message-box-body {
   background: var(--bg-surface-raised);
+}
+
+.user-message-box {
+  border-color: color-mix(in srgb, var(--turn-accent, var(--signal-violet)) 24%, var(--border-subtle));
+  box-shadow: 0 7px 24px rgba(0, 0, 0, 0.12);
 }
 
 .hidden-prompt-btn {
@@ -9532,12 +9557,60 @@ button.run-badge-clickable:focus-visible {
 /* Children of a turn group sit to the right of a vertical line, visually
    grouping the entire assistant response under the prompt that triggered it. */
 .turn-group-children {
+  position: relative;
   display: flex;
   flex-direction: column;
   margin-block: 10px 0;
   margin-inline-start: 14px;
   padding-inline-start: 18px;
-  border-inline-start: 1px solid color-mix(in srgb, var(--accent) 48%, transparent);
+  border-inline-start: 0;
+}
+
+.turn-group-children::before {
+  content: "";
+  position: absolute;
+  inset-block: 0;
+  inset-inline-start: 0;
+  width: 1px;
+  border-radius: 999px;
+  background: linear-gradient(
+    to bottom,
+    color-mix(in srgb, var(--signal-violet) 62%, transparent),
+    color-mix(in srgb, var(--signal-violet) 14%, transparent)
+  );
+}
+
+.turn-group.is-running > .user-message-box {
+  border-color: color-mix(in srgb, var(--signal-violet) 52%, var(--border-subtle));
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.16),
+    0 0 0 1px color-mix(in srgb, var(--signal-violet) 10%, transparent);
+}
+
+.turn-group.is-running > .turn-group-children::before {
+  width: 2px;
+  background: linear-gradient(
+    to bottom,
+    var(--signal-violet),
+    var(--signal-mint)
+  );
+  box-shadow: 0 0 12px color-mix(in srgb, var(--signal-violet) 48%, transparent);
+  animation: execution-signal 2.4s ease-in-out infinite;
+}
+
+@keyframes execution-signal {
+  0%,
+  100% {
+    opacity: 0.68;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .turn-group.is-running > .turn-group-children::before {
+    animation: none;
+  }
 }
 
 /* Worker output sub-groups nested inside a supervisor/main turn group. */
@@ -13425,7 +13498,7 @@ button.run-badge-clickable:focus-visible {
   align-items: stretch;
   background: transparent;
   border: none;
-  border-inline-start: 2px solid color-mix(in srgb, var(--accent) 46%, transparent);
+  border-inline-start: 0;
 }
 
 .message-box-toggle {
@@ -13812,8 +13885,8 @@ button.run-badge-clickable:focus-visible {
 .message-box:not(.user-message-box) > .message-box-body {
   flex: 1;
   min-width: 0;
-  padding-block: 10px;
-  padding-inline: 0 16px;
+  padding-block: 11px;
+  padding-inline: 2px 16px;
   border-top: none;
 }
 
