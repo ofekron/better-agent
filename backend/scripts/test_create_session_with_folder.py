@@ -24,14 +24,34 @@ import _test_home  # noqa: E402
 _TMP_HOME = _test_home.isolate("bc-test-create-session-folder-")
 os.environ["BETTER_CLAUDE_API_ONLY"] = "1"
 
+# An isolated home has no installation profile, and the admission middleware
+# answers 503 for every gated API until one exists.
+import _test_installation  # noqa: E402
+_test_installation.activate(Path(_TMP_HOME))
+
 from fastapi.testclient import TestClient  # noqa: E402
 
 from auth_test_helpers import authenticate_client  # noqa: E402
+import config_store  # noqa: E402
 import main  # noqa: E402
 
 CWD = "/tmp/project"
 PASS = "\x1b[32mPASS\x1b[0m"
 FAIL = "\x1b[31mFAIL\x1b[0m"
+
+
+def _seed_default_provider() -> None:
+    """Session creation resolves a model from the default provider, and the
+    fixture installation leaves it without one."""
+    default = config_store.get_default_provider() or {}
+    payload: dict = {}
+    if not default.get("name"):
+        payload["name"] = "Default Test Provider"
+    if not default.get("default_model"):
+        payload["default_model"] = "test-model"
+        payload["custom_models"] = ["test-model"]
+    if payload:
+        config_store.update_provider(default["id"], payload)
 
 
 def _folder_id(client: TestClient, session_id: str) -> str | None:
@@ -47,6 +67,7 @@ def _folder_id(client: TestClient, session_id: str) -> str | None:
 def main_runner() -> int:
     results: list[tuple[str, bool]] = []
 
+    _seed_default_provider()
     with TestClient(main.app, client=("127.0.0.1", 54001)) as client:
         authenticate_client(client)
 

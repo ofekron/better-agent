@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import sys
 from pathlib import Path
@@ -53,6 +54,27 @@ def test_disable_lists_cover_both_inbox_tools() -> None:
         assert {"inbox", "read_inbox_history"} <= disabled
 
 
+def _local_tools() -> dict:
+    """Tools bound to in-process dispatch. The default server routes each call
+    through the runtime broker over HTTP, which needs a live backend and would
+    test transport instead of the bound-session rule."""
+    from better_agent_sdk.surfaces import build_mcp_server
+
+    server = build_mcp_server(
+        "communicate",
+        communicate_mcp._specs(),
+        instructions=communicate_mcp._INSTRUCTIONS,
+        local=True,
+    )
+    return {tool.name: tool for tool in server._tool_manager.list_tools()}
+
+
+def _call(tool, **kwargs):
+    """Invoke a registered MCP tool. The generated tool bodies are coroutine
+    functions, so calling `.fn` directly only builds a coroutine."""
+    return asyncio.run(tool.fn(**kwargs))
+
+
 def test_communicate_mcp_reads_only_the_bound_session() -> None:
     for session_id in ("sender-session", "recipient-session"):
         session_store.create_session(
@@ -62,19 +84,20 @@ def test_communicate_mcp_reads_only_the_bound_session() -> None:
             cwd="/tmp",
             orchestration_mode="native",
         )
-    tools = {tool.name: tool for tool in communicate_mcp.build_server()._tool_manager.list_tools()}
+    tools = _local_tools()
     original_sender = os.environ["BETTER_CLAUDE_MSSG_SENDER_SESSION_ID"]
     try:
         os.environ["BETTER_CLAUDE_MSSG_SENDER_SESSION_ID"] = "sender-session"
-        receipt = tools["inbox"].fn(
+        receipt = _call(
+            tools["inbox"],
             recipient_session_id="recipient-session",
             message="private",
         )
         assert receipt["sent"] is True
-        assert tools["inbox"].fn()["count"] == 0
+        assert _call(tools["inbox"])["count"] == 0
 
         os.environ["BETTER_CLAUDE_MSSG_SENDER_SESSION_ID"] = "recipient-session"
-        received = tools["inbox"].fn()
+        received = _call(tools["inbox"])
         assert received["count"] == 1
         assert received["new_messages"][0]["text"] == "private"
     finally:
