@@ -169,14 +169,20 @@ def resolve_extension_run_policy(
         snapshot.get("extra_mcp_servers"),
         explicit_mcp_servers,
     )
-    effective_disabled_extensions = _merge_names(
-        snapshot.get("disabled_builtin_extensions"),
-        disabled_builtin_extensions_for_run(
-            disabled_builtin_extensions,
-            session_record=session_record,
-            worker_record=worker_record,
-        ),
-    )
+    snapshot_disabled_extensions = snapshot.get("disabled_builtin_extensions")
+    if snapshot_supplied and isinstance(snapshot_disabled_extensions, list):
+        effective_disabled_extensions = (
+            normalize_disabled_builtin_extensions(snapshot_disabled_extensions) or []
+        )
+    else:
+        effective_disabled_extensions = _merge_names(
+            snapshot_disabled_extensions,
+            disabled_builtin_extensions_for_run(
+                disabled_builtin_extensions,
+                session_record=session_record,
+                worker_record=worker_record,
+            ),
+        )
     effective_disabled_tools = _merge_names(
         snapshot.get("disabled_builtin_tools"),
         disabled_builtin_tools_for_run(

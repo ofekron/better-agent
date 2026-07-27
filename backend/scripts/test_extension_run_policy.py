@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import os
 import shutil
 import sys
@@ -184,6 +185,62 @@ def main() -> int:
         ["disabled_builtin_extensions"]
         == ["profile.disabled", "worker.disabled"],
     )
+
+    supplied_policy = resolve_extension_run_policy(
+        resolved_harness_run_config={
+            "profile_id": "capture-profile",
+            "bare_config": False,
+            "capability_contexts": [],
+            "provider_run_config": {},
+            "extra_mcp_servers": [],
+            "active_capability_ids": [],
+            "disabled_builtin_extensions": ["profile.disabled"],
+            "disabled_builtin_tools": [],
+            "disabled_runtime_skills": [],
+            "launcher_projection": {},
+        },
+        session_record={
+            "harness_profile_id": "capture-profile",
+            "disabled_builtin_extensions": ["stale.default.disabled"],
+        },
+        provider_kind="codex",
+        provider_run_config={},
+        capability_contexts=[],
+        disabled_builtin_extensions=["stale.default.disabled"],
+    )
+    check(
+        "resolved profile extension selection ignores stale caller defaults",
+        supplied_policy["disabled_builtin_extensions"] == ["profile.disabled"],
+    )
+    check(
+        "launcher projection uses authoritative resolved profile selection",
+        supplied_policy["resolved_harness_run_config"]["launcher_projection"]
+        ["disabled_builtin_extensions"]
+        == ["profile.disabled"],
+    )
+    for invalid_snapshot_value in (None, "profile.disabled"):
+        invalid_snapshot = copy.deepcopy(
+            supplied_policy["resolved_harness_run_config"]
+        )
+        if invalid_snapshot_value is None:
+            invalid_snapshot.pop("disabled_builtin_extensions", None)
+        else:
+            invalid_snapshot["disabled_builtin_extensions"] = invalid_snapshot_value
+        guarded_policy = resolve_extension_run_policy(
+            resolved_harness_run_config=invalid_snapshot,
+            session_record={
+                "harness_profile_id": "capture-profile",
+                "disabled_builtin_extensions": ["durable.disabled"],
+            },
+            provider_kind="codex",
+            provider_run_config={},
+            capability_contexts=[],
+            disabled_builtin_extensions=["caller.disabled"],
+        )
+        check(
+            f"invalid supplied extension selection fails closed: {invalid_snapshot_value!r}",
+            guarded_policy["disabled_builtin_extensions"] == ["caller.disabled"],
+        )
     shutil.rmtree(_TMP_HOME, ignore_errors=True)
     return 0 if ok else 1
 
