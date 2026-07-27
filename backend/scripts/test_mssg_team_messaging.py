@@ -16,6 +16,7 @@ from orchestrator import Coordinator
 from orchs.manager import bootstrap
 from session_manager import manager as session_manager
 import config_store
+import inbox_store
 import team_messaging
 
 
@@ -337,6 +338,89 @@ def test_assistant_self_message_uses_update_source(monkeypatch):
     queued = session_manager.get(assistant["id"])["queued_prompts"]
     assert queued[0]["source"] == team_messaging.UPDATE_SOURCE
     assert queued[0]["sender_session_id"] == assistant["id"]
+
+
+def test_submit_team_message_queue_turn_false_deposits_without_firing_turn(monkeypatch):
+    sender = session_manager.create(name="mssg sender", cwd="/repo", orchestration_mode="native")
+    target = session_manager.create(name="mssg target", cwd="/repo", orchestration_mode="native")
+    coordinator = Coordinator()
+
+    submit_calls: list[str] = []
+
+    async def fail_if_called(sid: str, *_args, **_kwargs) -> str:
+        submit_calls.append(sid)
+        raise AssertionError("submit_prompt_async must not run when queue_turn=False")
+
+    monkeypatch.setattr(coordinator, "submit_prompt_async", fail_if_called)
+
+    result = asyncio.run(coordinator.submit_team_message(
+        sender_session_id=sender["id"],
+        target_session_id=target["id"],
+        message="drop in inbox",
+        detach=True,
+        queue_turn=False,
+    ))
+
+    assert result["success"] is True
+    assert result["delivered"] is True
+    assert result["queued"] is False
+    assert submit_calls == []
+    assert session_manager.get(target["id"])["queued_prompts"] == []
+
+    inbox = inbox_store.read_new(recipient_session_id=target["id"])
+    assert inbox["count"] == 1
+    assert inbox["new_messages"][0]["text"] == "drop in inbox"
+    assert inbox["new_messages"][0]["sender_session_id"] == sender["id"]
+
+
+def test_submit_team_message_queue_turn_false_rejects_collapse():
+    sender = session_manager.create(name="mssg sender", cwd="/repo", orchestration_mode="native")
+    target = session_manager.create(name="mssg target", cwd="/repo", orchestration_mode="native")
+    coordinator = Coordinator()
+
+    try:
+        asyncio.run(coordinator.submit_team_message(
+            sender_session_id=sender["id"],
+            target_session_id=target["id"],
+            message="no collapse without a turn",
+            queue_turn=False,
+            collapse_key="assistant-waker",
+            collapse_policy="take_latest",
+        ))
+    except ValueError as exc:
+        assert "queue_turn=True" in str(exc)
+    else:
+        raise AssertionError("collapse_key must be rejected when queue_turn=False")
+
+
+def test_submit_team_message_queue_turn_true_still_fires_turn(monkeypatch):
+    sender = session_manager.create(name="mssg sender", cwd="/repo", orchestration_mode="native")
+    target = session_manager.create(name="mssg target", cwd="/repo", orchestration_mode="native")
+    coordinator = Coordinator()
+
+    submitted: dict = {}
+
+    async def fake_submit_prompt_async(sid: str, params: dict, **_kwargs) -> str:
+        submitted["sid"] = sid
+        submitted["params"] = params
+        return params["_queued_id"]
+
+    monkeypatch.setattr(coordinator, "submit_prompt_async", fake_submit_prompt_async)
+
+    result = asyncio.run(coordinator.submit_team_message(
+        sender_session_id=sender["id"],
+        target_session_id=target["id"],
+        message="fire a turn",
+        detach=True,
+        queue_turn=True,
+    ))
+
+    assert result["success"] is True
+    assert "queued_id" in result
+    assert submitted["sid"] == target["id"]
+    queued = session_manager.get(target["id"])["queued_prompts"]
+    assert len(queued) == 1
+    assert queued[0]["content"] == "fire a turn"
 
 
 def test_submit_team_message_take_latest_collapse_keeps_one_waiting_message(monkeypatch):

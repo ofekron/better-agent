@@ -165,6 +165,7 @@ def _communication_payload(
     runner: str = "",
     collapse_key: str = "",
     collapse_policy: str = "",
+    queue_turn: bool = False,
 ) -> dict[str, Any]:
     target_session_id = (target_session_id or "").strip()
     target_worker_id = (target_worker_id or "").strip()
@@ -188,6 +189,7 @@ def _communication_payload(
         "runner": (runner or "").strip() or None,
         "collapse_key": (collapse_key or "").strip(),
         "collapse_policy": (collapse_policy or "").strip(),
+        "queue_turn": bool(queue_turn),
     }
 
 
@@ -203,6 +205,7 @@ def mssg_response(
     runner: str = "",
     collapse_key: str = "",
     collapse_policy: str = "",
+    queue_turn: bool = False,
 ) -> dict[str, Any]:
     payload = _communication_payload(
         target_session_id,
@@ -216,6 +219,7 @@ def mssg_response(
         runner,
         collapse_key,
         collapse_policy,
+        queue_turn,
     )
     if payload.get("success") is False:
         return payload
@@ -603,9 +607,11 @@ def delete_chat_response(chat_id: str) -> dict[str, Any]:
 
 
 _INSTRUCTIONS = (
-    "Team tools for Better Agent sessions. mssg is one-way; ask waits inline by default. "
-    "Async ask and delegate_task return through Inbox. Use fork mode for isolated reviews, "
-    "create_session for standalone sessions, and create_sub_session for hidden helpers."
+    "Team tools for Better Agent sessions. mssg is one-way and by default deposits into the "
+    "target's inbox without starting a turn; set queue_turn=true to fire a turn. ask waits "
+    "inline by default. Async ask and delegate_task return through Inbox. Use fork mode for "
+    "isolated reviews, create_session for standalone sessions, and create_sub_session for "
+    "hidden helpers."
 )
 
 

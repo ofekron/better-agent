@@ -33,14 +33,17 @@ _HARNESS_PROFILE_NOTE = (
 )
 
 MSSG_DESCRIPTION = (
-    "Send a one-way queued message to one target and return after the backend "
-    "accepts it; this does not wait for target execution or a reply. Target "
-    "with exactly one of target_session_id, "
-    "target_worker_id, or target_worker_pool. Use for direct coordination. Async "
-    "ask and delegate_task results use inbox, not mssg. For an inline reply, use ask "
+    "Send a one-way message to one target. By default (queue_turn=false, the "
+    "default) the message is deposited in the target's inbox and NO turn is "
+    "started — the target reads it when it next calls inbox(); this does not "
+    "wait for target execution or a reply. Set queue_turn=true to queue the "
+    "message as a prompt and fire a turn in the target now. Target with exactly "
+    "one of target_session_id, target_worker_id, or target_worker_pool. Use for "
+    "direct coordination. Async ask and delegate_task results use inbox, not "
+    "mssg. For an inline reply, use ask "
     f"mode='{ASK_MODE_WAIT_AND_GRAB_LAST_ASSISTANT_MSSG_IN_TURN}' instead. With "
     "target_worker_pool, pass pool_affinity_key to continue the same thread on "
-    "the same pool worker."
+    "the same pool worker. collapse_key/collapse_policy require queue_turn=true."
 )
 
 STOP_TURN_DESCRIPTION = (

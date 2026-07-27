@@ -1547,6 +1547,7 @@ class Coordinator:
         collapse_policy: str = "",
         source: str = "",
         target_selector: Optional[dict] = None,
+        queue_turn: bool = True,
     ) -> dict:
         import uuid
         import team_messaging
@@ -1556,6 +1557,30 @@ class Coordinator:
             sender_session_id=sender_session_id,
             target_session_id=target_session_id,
         )
+        # mssg defaults to a deposit-only send: the message lands in the
+        # recipient's inbox without starting a turn. queue_turn=True restores
+        # the queue-and-fire-turn behavior (ask / delegate_task / pool
+        # dispatch always pass it).
+        if not queue_turn:
+            if expect_inbox_response:
+                raise ValueError("queue_turn=True is required to expect an inbox response")
+            if str(collapse_key or "").strip() or str(collapse_policy or "").strip():
+                raise ValueError("collapse_key/collapse_policy require queue_turn=True")
+            import inbox_store
+
+            delivered = await _to_team_message_thread(
+                inbox_store.send,
+                sender_session_id=sender_session_id,
+                recipient_session_id=target_session_id,
+                message=message,
+            )
+            return {
+                "success": True,
+                "target_session_id": target_session_id,
+                "delivered": True,
+                "queued": False,
+                "seq": delivered.get("seq"),
+            }
         if expect_inbox_response:
             team_messaging.validate_inbox_response_route(sender, target)
         run_config = self._resolve_delegation_run_config(

@@ -15981,6 +15981,7 @@ async def _handle_internal_mssg(body: dict) -> dict[str, Any]:
             collapse_key=str(body.get("collapse_key") or "").strip(),
             collapse_policy=str(body.get("collapse_policy") or "").strip(),
             target_selector=_communication_target_selector(body),
+            queue_turn=_body_bool(body, "queue_turn", default=False),
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -16198,6 +16199,17 @@ async def _resolve_communication_target(body: dict) -> str:
     if not target:
         raise HTTPException(status_code=409, detail="no idle worker in target_worker_pool")
     return str(target.get("agent_session_id") or "")
+
+
+def _body_bool(body: dict, key: str, *, default: bool = False) -> bool:
+    """Parse a boolean from a request body field, accepting real bools and
+    common string spellings; returns `default` when absent."""
+    value = (body or {}).get(key)
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in ("1", "true", "yes", "on")
 
 
 def _communication_target_selector(body: dict) -> dict:
@@ -18481,6 +18493,8 @@ def _pick_idle_pool_worker(tag: str) -> dict | None:
         session = session_manager.get_lite(sid)
         if not session:
             continue
+        if not session.get("agent_session_id"):
+            continue
         if coordinator.turn_manager.is_running_cached(sid):
             continue
         if session.get("queued_prompts"):
@@ -18504,6 +18518,8 @@ def _pool_worker_by_session_id(tag: str, worker_session_id: str) -> dict | None:
             return None
         session = session_manager.get_lite(wanted)
         if not session:
+            return None
+        if not session.get("agent_session_id"):
             return None
         return {**worker, "name": session.get("name") or worker.get("name")}
     return None
@@ -18549,6 +18565,25 @@ def _find_worker_by_agent_session_id(agent_session_id: str) -> dict | None:
         if str(worker.get("agent_session_id") or "") == wanted:
             return worker
     return None
+
+
+def _existing_worker_is_initialized(worker: dict | None) -> bool:
+    if not worker:
+        return False
+    session = session_manager.get_lite(str(worker.get("agent_session_id") or ""))
+    if session:
+        return bool(session.get("agent_session_id"))
+    return bool(worker.get("agent_sid"))
+
+
+def _remove_stale_uninitialized_worker(worker: dict, cwd: str) -> None:
+    from stores import worker_store as _ws
+
+    sid = str(worker.get("agent_session_id") or "").strip()
+    if not sid:
+        return
+    _ws.remove_worker(worker.get("registry_cwd") or worker.get("cwd") or cwd, sid)
+    session_manager.delete(sid)
 
 
 def _provision_parent_session_id(body: dict, spec: dict) -> str:
@@ -18637,6 +18672,18 @@ async def _provision_workers_from_body(body: dict):
             parent_session_id = _provision_parent_session_id(body, spec)
             async with _provision_lock(name, worker_cwd):
                 existing = await asyncio.to_thread(_find_worker_by_session_name, worker_cwd, name)
+                if existing:
+                    replace_uninitialized = bool(
+                        spec.get("replace_uninitialized")
+                        or body.get("replace_uninitialized")
+                    )
+                    if replace_uninitialized and not _existing_worker_is_initialized(existing):
+                        await asyncio.to_thread(
+                            _remove_stale_uninitialized_worker,
+                            existing,
+                            worker_cwd,
+                        )
+                        existing = None
                 if existing:
                     if disallowed_tools:
                         await asyncio.to_thread(
