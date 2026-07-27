@@ -34,7 +34,6 @@ _MOBILE_PREFIXES = (
 )
 _INTEGRATION_PREFIXES = (
     "/api/extensions",
-    "/api/provider-config-sync",
     "/api/internal/capabilities",
     "/api/internal/coordination",
     "/api/internal/extension-",

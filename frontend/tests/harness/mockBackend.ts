@@ -619,13 +619,6 @@ export class MockBackend {
       };
       return { discussion };
     }
-    if (
-      method === "GET" &&
-      (path === "/api/provider-config-sync/capability-picker" ||
-        path === "/api/provider-config-sync/capability-picker")
-    ) {
-      return { sources: this.state.capabilitySources };
-    }
     if (method === "POST" && path === "/api/sessions") {
       const b = body as Partial<Session> & { client_session_id?: string };
       const existing = b.client_session_id

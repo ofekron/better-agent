@@ -30,9 +30,6 @@ describe("SettingsPage title", () => {
       if (url.includes("/api/projects")) {
         return jsonResponse({ projects: [] });
       }
-      if (url.includes("/api/provider-config-sync/repository")) {
-        return jsonResponse({ configured: false });
-      }
       if (url.includes("/api/settings/password-manager")) {
         return jsonResponse({ items: [] });
       }
@@ -40,10 +37,7 @@ describe("SettingsPage title", () => {
     });
 
     render(
-      <SettingsPage
-        onClose={() => {}}
-        onOpenProviderConfigSync={() => {}}
-      />,
+      <SettingsPage onClose={() => {}} />,
     );
 
     expect(await screen.findByRole("heading", { name: "Settings" })).toBeTruthy();
@@ -67,9 +61,6 @@ describe("SettingsPage title", () => {
       if (url.includes("/api/projects")) {
         return jsonResponse({ projects: [] });
       }
-      if (url.includes("/api/provider-config-sync/repository")) {
-        return jsonResponse({ configured: false });
-      }
       if (url.includes("/api/settings/password-manager")) {
         return jsonResponse({ items: [] });
       }
@@ -77,10 +68,7 @@ describe("SettingsPage title", () => {
     });
 
     render(
-      <SettingsPage
-        onClose={() => {}}
-        onOpenProviderConfigSync={() => {}}
-      />,
+      <SettingsPage onClose={() => {}} />,
     );
 
     const providersTab = await screen.findByRole("button", { name: "Providers" });
@@ -109,9 +97,6 @@ describe("SettingsPage title", () => {
       if (url.includes("/api/projects")) {
         return jsonResponse({ projects: [] });
       }
-      if (url.includes("/api/provider-config-sync/repository")) {
-        return jsonResponse({ enabled: false, remote_url: "" });
-      }
       if (url.includes("/api/settings/password-manager")) {
         return jsonResponse({ items: [] });
       }
@@ -119,10 +104,7 @@ describe("SettingsPage title", () => {
     });
 
     render(
-      <SettingsPage
-        onClose={() => {}}
-        onOpenProviderConfigSync={() => {}}
-      />,
+      <SettingsPage onClose={() => {}} />,
     );
 
     await screen.findByRole("heading", { name: "Set up Better Agent" });
@@ -147,9 +129,6 @@ describe("SettingsPage title", () => {
       if (url.includes("/api/projects")) {
         return jsonResponse({ projects: [] });
       }
-      if (url.includes("/api/provider-config-sync/repository")) {
-        return jsonResponse({ enabled: false, remote_url: "" });
-      }
       if (url.includes("/api/settings/password-manager")) {
         return jsonResponse({ items: [] });
       }
@@ -157,11 +136,7 @@ describe("SettingsPage title", () => {
     });
 
     render(
-      <SettingsPage
-        onClose={() => {}}
-        onRefreshApp={() => {}}
-        onOpenProviderConfigSync={() => {}}
-      />,
+      <SettingsPage onClose={() => {}} onRefreshApp={() => {}} />,
     );
 
     await screen.findByRole("heading", { name: "Set up Better Agent" });
@@ -196,11 +171,11 @@ describe("SettingsPage title", () => {
       if (url.includes("/api/projects")) {
         return jsonResponse({ projects: [] });
       }
-      if (url.includes("/api/provider-config-sync/repository")) {
-        return jsonResponse({ configured: false });
-      }
       if (url.includes("/api/settings/password-manager")) {
         return jsonResponse({ items: [] });
+      }
+      if (url.includes("/api/installation-profile")) {
+        return jsonResponse({ integrations_enabled: true });
       }
       if (url.includes("/api/extensions?") || url.endsWith("/api/extensions")) {
         return jsonResponse({
@@ -243,32 +218,22 @@ describe("SettingsPage title", () => {
     });
 
     render(
-      <SettingsPage
-        onClose={() => {}}
-        onOpenProviderConfigSync={() => {}}
-      />,
+      <SettingsPage onClose={() => {}} />,
     );
 
     fireEvent.click(await screen.findByRole("button", { name: "Extensions" }));
 
+    // The extension row contract: name, id, description, and the enabled
+    // toggle driven by the installed extension's enabled state. The legacy
+    // per-capability groups UI was removed; this asserts the row that remains.
     expect(await screen.findByText("Scheduler")).toBeTruthy();
     expect(screen.getByText("Runs scheduled session prompts and follow-up work.")).toBeTruthy();
     const row = screen.getByText("Scheduler").closest(".extension-ui-settings-row");
-    const groups = row?.querySelector(".extension-ui-settings-groups");
-    expect(groups).toBeTruthy();
-    expect(groups?.querySelectorAll(".extension-ui-settings-group")).toHaveLength(6);
-    expect(screen.getByText("App UI")).toBeTruthy();
-    expect(screen.getByText("Buttons or pages this extension adds to Better Agent.")).toBeTruthy();
-    expect(screen.getByText("Agent tools")).toBeTruthy();
-    expect(screen.getByText("MCP servers exposed as tools to Claude, Codex, or AGY runs.")).toBeTruthy();
-    expect(screen.getByText("Permissions")).toBeTruthy();
-    expect(screen.getByText("Read and update sessions")).toBeTruthy();
-    expect(screen.getByText(/buggy or malicious extension could expose or alter your conversations/)).toBeTruthy();
-    expect(screen.getByText("Call Better Agent internals")).toBeTruthy();
-    expect(screen.getByText("Access files")).toBeTruthy();
-    expect(screen.getByLabelText("Blocked")).toBeTruthy();
-    expect(screen.getByText("Change selected session fields")).toBeTruthy();
-    expect(screen.getByText("Limited to: supervisor_enabled")).toBeTruthy();
+    expect(row).toBeTruthy();
+    expect(row?.querySelector(".extension-ui-settings-id")?.textContent).toBe("ofek.scheduler");
+    const toggle = row?.querySelector(".extension-ui-settings-main-toggle input") as HTMLInputElement | null;
+    expect(toggle).toBeTruthy();
+    expect(toggle?.checked).toBe(true);
   });
 
   it("shows desktop app downloads in settings", async () => {
@@ -286,9 +251,6 @@ describe("SettingsPage title", () => {
       if (url.includes("/api/projects")) {
         return jsonResponse({ projects: [] });
       }
-      if (url.includes("/api/provider-config-sync/repository")) {
-        return jsonResponse({ configured: false });
-      }
       if (url.includes("/api/settings/password-manager")) {
         return jsonResponse({ items: [] });
       }
@@ -299,10 +261,7 @@ describe("SettingsPage title", () => {
     });
 
     render(
-      <SettingsPage
-        onClose={() => {}}
-        onOpenProviderConfigSync={() => {}}
-      />,
+      <SettingsPage onClose={() => {}} />,
     );
 
     fireEvent.click(await screen.findByRole("button", { name: "Desktop app" }));
@@ -342,9 +301,6 @@ describe("SettingsPage title", () => {
       if (url.includes("/api/projects")) {
         return jsonResponse({ projects: [] });
       }
-      if (url.includes("/api/provider-config-sync/repository")) {
-        return jsonResponse({ configured: false });
-      }
       if (url.includes("/api/settings/password-manager")) {
         return jsonResponse({ items: [] });
       }
@@ -352,10 +308,7 @@ describe("SettingsPage title", () => {
     });
 
     render(
-      <SettingsPage
-        onClose={() => {}}
-        onOpenProviderConfigSync={() => {}}
-      />,
+      <SettingsPage onClose={() => {}} />,
     );
 
     fireEvent.click(await screen.findByRole("button", { name: "Account" }));
@@ -409,9 +362,6 @@ describe("SettingsPage title", () => {
       if (url.includes("/api/projects")) {
         return jsonResponse({ projects: [] });
       }
-      if (url.includes("/api/provider-config-sync/repository")) {
-        return jsonResponse({ configured: false });
-      }
       if (url.includes("/api/settings/password-manager")) {
         return jsonResponse({ items: [] });
       }
@@ -419,12 +369,7 @@ describe("SettingsPage title", () => {
     });
 
     try {
-      render(
-        <SettingsPage
-          onClose={() => {}}
-          onOpenProviderConfigSync={() => {}}
-        />,
-      );
+      render(<SettingsPage onClose={() => {}} />);
 
       fireEvent.click(await screen.findByRole("button", { name: "Account" }));
       fireEvent.change(await screen.findByLabelText("Current username"), { target: { value: currentActor } });

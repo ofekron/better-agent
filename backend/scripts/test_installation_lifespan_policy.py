@@ -157,11 +157,6 @@ def _child(mode: str, home: Path) -> None:
             ),
             patch.object(
                 extension_store,
-                "reconcile_native_mcp_servers",
-                side_effect=integration_call("native_mcp"),
-            ),
-            patch.object(
-                extension_store,
                 "reconcile_extension_tokens",
                 side_effect=integration_call("tokens"),
             ),

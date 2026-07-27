@@ -96,23 +96,6 @@ describe("navigateRoute", () => {
   });
 });
 
-describe("useRoute — /provider-config-sync", () => {
-  it("parses /provider-config-sync on initial load", () => {
-    window.history.pushState(null, "", "/provider-config-sync");
-    const r = mountRouter();
-    expect(r.get().route.kind).toBe("providerConfigSync");
-    r.cleanup();
-  });
-
-  it("navigate('/provider-config-sync') yields route.kind === 'providerConfigSync'", () => {
-    window.history.pushState(null, "", "/");
-    const r = mountRouter();
-    act(() => r.get().navigate("/provider-config-sync"));
-    expect(r.get().route.kind).toBe("providerConfigSync");
-    r.cleanup();
-  });
-});
-
 describe("useRoute — /settings", () => {
   it("parses /settings on initial load", () => {
     window.history.pushState(null, "", "/settings");

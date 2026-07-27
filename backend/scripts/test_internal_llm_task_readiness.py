@@ -113,11 +113,6 @@ def run() -> None:
         es.extension_internal_llm_tasks(ask_record) == ["session_search_worker"],
         "ask extension owns session_search_worker task",
     )
-    provider_config_record = {"manifest": {"id": es.BUILTIN_PROVIDER_CONFIG_SYNC_EXTENSION_ID}}
-    check(
-        es.extension_internal_llm_tasks(provider_config_record) == ["provider_config_sync_review"],
-        "provider-config-sync extension owns provider_config_sync_review task",
-    )
     team_record = {"manifest": {
         "id": es.extension_id_for_role('team-orchestration'),
         "core_roles": ["team-orchestration"],

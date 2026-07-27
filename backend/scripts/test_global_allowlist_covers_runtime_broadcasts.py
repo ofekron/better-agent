@@ -61,12 +61,12 @@ SCANNED_FILES = [
     Path(_BACKEND) / "session_ws_broadcaster.py",
     Path(_BACKEND) / "orchestrator.py",
     Path(_BACKEND) / "run_recovery.py",
-    Path(_BACKEND) / "provider_config_sync_api.py",
     Path(_BACKEND) / "project_structure_edit_session.py",
     Path(_BACKEND) / "extension_api.py",
     Path(_BACKEND) / "session_search.py",
     Path(_BACKEND) / "task_assessor.py",
     Path(_BACKEND) / "task_runner.py",
+    Path(_BACKEND) / "ui_selection_projection.py",
 ]
 
 # f-strings whose interpolations CANNOT be statically enumerated from
@@ -104,6 +104,10 @@ KNOWN_DYNAMIC_CALLERS: dict[str, str] = {
     "session_ws_broadcaster.py:_dispatch": (
         "_dispatch fed by typed on_change mapping; payload['type'] is "
         "always a literal in the mapping construction"
+    ),
+    "extension_api.py:_broadcast_extension_changed": (
+        "_broadcast_extension_changed deduplicates explicit extension tree topics; "
+        "every caller passes literals or EXTENSION_CATALOG_TOPICS registered in global_events"
     ),
 }
 
@@ -169,7 +173,7 @@ def _run() -> bool:
     backend_dir = Path(_BACKEND)
     py_files = [
         p for p in backend_dir.rglob("*.py")
-        if "/scripts/" not in str(p) and ".venv/" not in str(p)
+        if "/scripts/" not in str(p) and ".venv/" not in str(p) and ".venvs/" not in str(p)
     ]
     scanned_str = {str(p.resolve()) for p in SCANNED_FILES}
     extra_callers: list[str] = []

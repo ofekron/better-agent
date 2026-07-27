@@ -66,7 +66,7 @@ describe("provider credential denial", () => {
     });
 
     const { unmount } = render(
-      <SettingsPage onClose={() => {}} onOpenProviderConfigSync={() => {}} />,
+      <SettingsPage onClose={() => {}} />,
     );
 
     expect(await screen.findByText(/access blocked/)).toBeTruthy();

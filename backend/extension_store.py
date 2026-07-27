@@ -35,7 +35,7 @@ from paths import ba_home
 import password_manager
 import extension_applied_config
 import extension_descriptions
-from provider_config_sync_backend.api import KNOWN_PROVIDER_KINDS
+import provider_kinds
 import extension_instructions
 import extension_mcp
 import native_mcp_grants
@@ -58,7 +58,11 @@ _ID_RE = re.compile(r"^[a-z0-9][a-z0-9_.-]{2,79}$")
 _VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.+:-]{0,127}$")
 _REL_PATH_RE = re.compile(r"^[A-Za-z0-9._/-]+$")
 _GIT_SCP_RE = re.compile(r"^git@[A-Za-z0-9_.-]+:[A-Za-z0-9_.~/-]+\.git$")
-_ALLOWED_SURFACES = {"backend_feature", "frontend_feature", "runtime_mcp", "instructions", "skills", "daemons"}
+_ALLOWED_SURFACES = {"backend_feature", "frontend_feature", "runtime_mcp", "instructions", "skills", "agents", "daemons"}
+# Providers an extension-declared subagent can target. Each maps to a native
+# agent-definition surface; providers without one (e.g. gemini/agy) get a
+# graceful no-op at materialization time.
+_AGENT_TARGET_PROVIDERS = frozenset({"claude", "codex"})
 # Daemon lifecycles: "backend" daemons live and die with the backend process;
 # "supervisor" daemons are installed copies run by the platform daemon host and
 # survive backend restarts (they auto-update from the active checkout, so they
@@ -119,7 +123,6 @@ _RESERVED_MCP_SERVER_NAMES = {
     "open-config-panel",
     "project-updates",
     "ui",
-    "provider-config-sync",
     "better-agent-coordination",
     "session-bridge",
 }
@@ -138,14 +141,13 @@ BUILTIN_ASK_EXTENSION_ID = "ofek-dev.ask"
 BUILTIN_SESSION_BRIDGE_EXTENSION_ID = "ofek-dev.session-bridge"
 BUILTIN_SESSION_CONTROL_EXTENSION_ID = "ofek-dev.session-control"
 BUILTIN_COORDINATION_EXTENSION_ID = "ofek-dev.coordination"
-BUILTIN_PROVIDER_CONFIG_SYNC_EXTENSION_ID = "ofek-dev.provider-config-sync"
+# REMOVED: Provider Config Sync builtin extension (replaced by temporal harness profiles)
 BUILTIN_TODOS_EXTENSION_ID = "ofek-dev.todos"
 BUILTIN_FILE_EDIT_EXTENSION_ID = "ofek-dev.file-edit"
 BUILTIN_HARNESS_INSTRUCTIONS_EXTENSION_ID = "better-agent.harness-for-better-agent"
 BUILTIN_USER_ATTENTION_EXTENSION_ID = "ofek-dev.user-attention"
 BUILTIN_SWITCH_CONTROL_EXTENSION_ID = "ofek-dev.switch-control"
 _BUILTIN_MCP_REPLACEMENTS_BY_EXTENSION_ID = {
-    BUILTIN_PROVIDER_CONFIG_SYNC_EXTENSION_ID: frozenset({"provider-config-sync"}),
     BUILTIN_COORDINATION_EXTENSION_ID: frozenset({"better-agent-coordination"}),
 }
 _MCP_REPLACEMENT_CORE_ROLES = {
@@ -156,7 +158,6 @@ _MCP_REPLACEMENT_CORE_ROLES = {
 MARKETPLACE_EXTENSION_ID = "ofek-dev.marketplace"
 _BROKERED_MCP_EXTENSION_IDS = frozenset({
     BUILTIN_COORDINATION_EXTENSION_ID,
-    BUILTIN_PROVIDER_CONFIG_SYNC_EXTENSION_ID,
     BUILTIN_SESSION_BRIDGE_EXTENSION_ID,
     BUILTIN_SESSION_CONTROL_EXTENSION_ID,
     MARKETPLACE_EXTENSION_ID,
@@ -172,7 +173,6 @@ _PUBLIC_EXTENSION_PATHS = {
     BUILTIN_SESSION_BRIDGE_EXTENSION_ID: "extensions/session-bridge",
     BUILTIN_SESSION_CONTROL_EXTENSION_ID: "extensions/session-control",
     BUILTIN_COORDINATION_EXTENSION_ID: "extensions/coordination",
-    BUILTIN_PROVIDER_CONFIG_SYNC_EXTENSION_ID: "extensions/provider-config-sync",
     BUILTIN_TODOS_EXTENSION_ID: "extensions/todos",
     BUILTIN_FILE_EDIT_EXTENSION_ID: "extensions/file-edit",
     BUILTIN_HARNESS_INSTRUCTIONS_EXTENSION_ID: "extensions/harness-instructions",
@@ -185,7 +185,6 @@ _EXTENSION_DISPLAY_NAMES = {
     BUILTIN_SESSION_BRIDGE_EXTENSION_ID: "Session Bridge",
     BUILTIN_SESSION_CONTROL_EXTENSION_ID: "Session Control",
     BUILTIN_COORDINATION_EXTENSION_ID: "Coordination",
-    BUILTIN_PROVIDER_CONFIG_SYNC_EXTENSION_ID: "Provider Config Sync",
     BUILTIN_TODOS_EXTENSION_ID: "Todos",
     BUILTIN_FILE_EDIT_EXTENSION_ID: "File Edit",
     BUILTIN_HARNESS_INSTRUCTIONS_EXTENSION_ID: "Harness instructions",
@@ -206,7 +205,6 @@ _required_artifact_update_checked: set[str] = set()
 
 _BUILTIN_INTERNAL_LLM_TASKS: dict[str, tuple[str, ...]] = {
     BUILTIN_ASK_EXTENSION_ID: ("session_search_worker",),
-    BUILTIN_PROVIDER_CONFIG_SYNC_EXTENSION_ID: ("provider_config_sync_review",),
     BUILTIN_HARNESS_INSTRUCTIONS_EXTENSION_ID: ("extension_context_audit",),
 }
 _DEFAULT_NATIVE_HARNESS_BY_EXTENSION_ID: dict[str, tuple[str, ...]] = {
@@ -218,11 +216,6 @@ _EXTENSION_SETTINGS_INTERNAL_LLM_TASKS: dict[str, tuple[str, ...]] = {
     **(
         {BUILTIN_ASK_EXTENSION_ID: ("session_search_worker",)}
         if BUILTIN_ASK_EXTENSION_ID
-        else {}
-    ),
-    **(
-        {BUILTIN_PROVIDER_CONFIG_SYNC_EXTENSION_ID: ("provider_config_sync_review",)}
-        if BUILTIN_PROVIDER_CONFIG_SYNC_EXTENSION_ID
         else {}
     ),
     **(
@@ -249,7 +242,6 @@ _BUILTIN_RUNTIME_REQUIRED_PATHS: dict[str, tuple[str, ...]] = {
 
 _PUBLIC_FRONTEND_BUILTIN_KEYS = {
     "ask": BUILTIN_ASK_EXTENSION_ID,
-    "providerConfigSync": BUILTIN_PROVIDER_CONFIG_SYNC_EXTENSION_ID,
     "sessionBridge": BUILTIN_SESSION_BRIDGE_EXTENSION_ID,
 }
 
@@ -971,7 +963,6 @@ def _install_synced_artifact(artifact: dict[str, Any], records: dict[str, Any]) 
 def _reconcile_after_sync(records: dict[str, Any]) -> dict[str, int]:
     instruction_swept = reconcile_all_instructions()
     skill_changes = reconcile_runtime_skills()
-    mcp_changes = reconcile_native_mcp_servers()
     token_changes = reconcile_extension_tokens()
     consent_changes = reconcile_extension_consent()
     for extension_id in records:
@@ -985,7 +976,6 @@ def _reconcile_after_sync(records: dict[str, Any]) -> dict[str, int]:
     return {
         "instruction_swept": int(instruction_swept or 0),
         "runtime_skill_changes": int(skill_changes or 0),
-        "native_mcp_changes": int(mcp_changes or 0),
         "token_changes": int(token_changes or 0),
         "consent_changes": int(consent_changes or 0),
     }
@@ -1301,11 +1291,11 @@ def _validate_instructions(value: Any) -> list[dict[str, Any]]:
                     "entrypoints.instructions.providers must be a non-empty list when present"
                 )
             providers = [str(p).strip() for p in providers_raw]
-            unknown = sorted(set(providers) - KNOWN_PROVIDER_KINDS)
+            unknown = sorted(set(providers) - set(provider_kinds.all_provider_kinds()))
             if unknown:
                 raise ExtensionError(
                     f"entrypoints.instructions.providers has unknown provider kinds: {', '.join(unknown)} "
-                    f"(known: {sorted(KNOWN_PROVIDER_KINDS)})"
+                    f"(known: {sorted(provider_kinds.all_provider_kinds())})"
                 )
             normalized["providers"] = sorted(set(providers))
         items.append(normalized)
@@ -1361,6 +1351,45 @@ def _validate_skills(value: Any) -> list[dict[str, Any]]:
                     "entrypoints.skills.requires_mcp must be a boolean or a list of MCP server names"
                 )
         items.append(cleaned)
+    return items
+
+
+def _validate_agents(value: Any) -> list[dict[str, Any]]:
+    """Subagent definitions materialized into each provider's native agent
+    surface. One entry per agent; `providers` maps a provider id to that
+    provider's native-format source file (e.g. claude .md, codex .toml).
+    Providers not native to subagents are simply absent and get a no-op."""
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ExtensionError("entrypoints.agents must be a list")
+    items: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in value:
+        if not isinstance(item, dict):
+            raise ExtensionError("entrypoints.agents items must be objects")
+        name = str(item.get("name") or "").strip()
+        if not _ID_RE.fullmatch(name):
+            raise ExtensionError("entrypoints.agents.name contains invalid characters")
+        if name in seen:
+            raise ExtensionError(f"entrypoints.agents contains duplicate name: {name}")
+        seen.add(name)
+        providers_raw = item.get("providers")
+        if not isinstance(providers_raw, dict) or not providers_raw:
+            raise ExtensionError(
+                "entrypoints.agents.providers must be a non-empty object mapping provider id to source path"
+            )
+        providers: dict[str, str] = {}
+        for provider_id, rel_path in providers_raw.items():
+            provider_id = str(provider_id or "").strip()
+            if provider_id not in _AGENT_TARGET_PROVIDERS:
+                raise ExtensionError(
+                    f"entrypoints.agents.providers has unsupported provider: {provider_id}"
+                )
+            providers[provider_id] = _clean_rel_path(
+                str(rel_path or ""), field="entrypoints.agents.providers.path"
+            )
+        items.append({"name": name, "providers": providers})
     return items
 
 
@@ -2512,6 +2541,7 @@ def validate_manifest(raw: Any) -> dict[str, Any]:
             extension_instructions.instruction_items_from_entrypoints(entrypoints_raw)
         ),
         "skills": _validate_skills(entrypoints_raw.get("skills")),
+        "agents": _validate_agents(entrypoints_raw.get("agents")),
         "harness_profiles": _validate_harness_profiles(entrypoints_raw.get("harness_profiles")),
         "capabilities": _validate_capabilities(
             entrypoints_raw.get("capabilities"), extension_id=extension_id
@@ -3215,10 +3245,8 @@ def _install_from_package_dir(
                 _evict_extension_backend(manifest["id"])
             _reconcile_recovered_cohorts(data, recovered)
             if not recovered:
-                extension_instructions.reconcile_blocks(record)
                 extension_applied_config.reconcile(record)
                 reconcile_runtime_skills()
-                reconcile_native_mcp_servers()
         except Exception:
             _save(previous_data)
             for recovered_id in recovered:
@@ -3402,6 +3430,7 @@ def _placeholder_record(extension_id: str, *, source_type: str, error: str = "")
                 "frontend": "",
                 "mcp": [],
                 "instructions": [],
+                "agents": [],
             },
             "permissions": {},
             "marketplace": {
@@ -3661,11 +3690,9 @@ def _reconcile_recovered_cohorts(data: dict[str, Any], recovered: list[str]) -> 
         record = data["extensions"][extension_id]
         if needs_identity_token(record):
             extension_token_registry.mint(extension_id)
-        extension_instructions.reconcile_blocks(record)
         extension_applied_config.reconcile(record)
     if recovered:
         reconcile_runtime_skills()
-        reconcile_native_mcp_servers()
 
 
 def _ensure_local_extensions(data: dict[str, Any]) -> tuple[bool, list[str]]:
@@ -5216,10 +5243,8 @@ def set_enabled(
     record["updated_at"] = _now()
     _save(data)
     _evict_extension_backend(extension_id)
-    extension_instructions.reconcile_blocks(record)
     extension_applied_config.reconcile(record)
     reconcile_runtime_skills()
-    reconcile_native_mcp_servers()
     import extension_token_registry
     if bool(enabled):
         if needs_identity_token(record):
@@ -5324,12 +5349,10 @@ def _record_backend_incident(
     for candidate_id in disabled:
         candidate = data["extensions"][candidate_id]
         _evict_extension_backend(candidate_id)
-        extension_instructions.reconcile_blocks(candidate)
         extension_applied_config.reconcile(candidate)
         import extension_token_registry
         extension_token_registry.revoke(candidate_id)
     reconcile_runtime_skills()
-    reconcile_native_mcp_servers()
     return sorted(disabled)
 
 
@@ -5396,27 +5419,17 @@ def set_instruction_enabled(
     record["instructions_enabled"] = state
     record["updated_at"] = _now()
     _save(data)
-    extension_instructions.reconcile_blocks(record)
     return record
 
 
 def reconcile_all_instructions() -> None:
-    """Reconcile every installed extension's instruction blocks and sweep orphans.
+    """Reconcile applied config for every installed extension on startup.
 
-    Self-heals the provider instruction files: re-applies enabled extensions,
-    purges disabled ones from every file, and removes blocks owned by extensions
-    no longer installed. Run on backend startup so on-disk blocks can't drift
-    from the store.
+    Instruction content is resolved per session/turn through temporal harness
+    profiles, so there are no on-disk instruction blocks to self-heal; this hook
+    only re-applies extension applied-config state.
     """
-    data = _load()
-    installed_ids: set[str] = set()
-    for record in data["extensions"].values():
-        manifest = record.get("manifest") or {}
-        if manifest.get("id"):
-            installed_ids.add(manifest["id"])
-        extension_instructions.reconcile_blocks(record)
     extension_applied_config.reconcile_all()
-    return extension_instructions.sweep_orphan_blocks(installed_ids)
 
 
 def reconcile_runtime_skills() -> int:
@@ -5503,6 +5516,29 @@ def runtime_skill_entries() -> list[dict[str, str]]:
     return skills
 
 
+def runtime_agent_entries() -> list[dict[str, str]]:
+    """Subagent definitions from active extensions, resolved to absolute
+    per-provider source files. Each entry: {"name": ..., "<provider>": <abspath>}
+    for every provider whose source file exists."""
+    agents: list[dict[str, str]] = []
+    data = _load()
+    for record in _active_records_from_data(data):
+        manifest = record["manifest"]
+        install_root = runtime_package_root_for_record(record)
+        if install_root is None or not install_root.exists():
+            continue
+        for item in manifest.get("entrypoints", {}).get("agents") or []:
+            resolved: dict[str, str] = {"name": item["name"]}
+            for provider_id, rel_path in (item.get("providers") or {}).items():
+                source = (install_root / rel_path).resolve()
+                if not source.is_relative_to(install_root) or not source.is_file():
+                    continue
+                resolved[provider_id] = str(source)
+            if len(resolved) > 1:  # has at least one provider besides "name"
+                agents.append(resolved)
+    return agents
+
+
 def _active_records_from_data(data: dict[str, Any]) -> list[dict[str, Any]]:
     if not installation_profile.integrations_enabled():
         return []
@@ -5587,7 +5623,6 @@ def uninstall(extension_id: str, *, required_source_type: str = "") -> None:
         import assistant_ui
         assistant_ui.cleanup_singleton()
     _evict_extension_backend(extension_id)
-    extension_instructions.clear_all_blocks(record)
     extension_applied_config.clear_for_uninstall(record)
     source = record.get("source") or {}
     install_path = Path(str(source.get("install_path") or ""))
@@ -5609,7 +5644,6 @@ def uninstall(extension_id: str, *, required_source_type: str = "") -> None:
     # manifest declaration hasn't changed) -- a reinstall must not silently
     # resurrect grants against what could be a completely different package.
     native_mcp_grants.remove_grants_for_extension(extension_id)
-    reconcile_native_mcp_servers()
 
 
 def team_definition_sources() -> list[dict[str, Any]]:
@@ -6091,15 +6125,6 @@ def _runtime_mcp_server_config_for_item(
                 sort_keys=True,
             ),
         }))
-    if (
-        manifest["id"] == BUILTIN_PROVIDER_CONFIG_SYNC_EXTENSION_ID
-        and internal_token
-    ):
-        from provider_config_sync_api import provider_config_sync_mcp_env
-        env.update(provider_config_sync_mcp_env(
-            backend_url=backend_url,
-            internal_token=internal_token,
-        ))
     timeout_config = _mcp_tool_timeout_config(manifest, item)
     command = str(item.get("command") or "").strip()
     if command:
@@ -6168,7 +6193,12 @@ def _mcp_item_available_for_inputs(
         return False
     bare = bool(inputs.get("bare_config"))
     user_facing = bool(inputs.get("user_facing")) and not bare
-    if item.get("user_facing") and not user_facing and not (bare and item.get("bare_allowed")):
+    if (
+        item.get("user_facing")
+        and not user_facing
+        and not session_opted_in
+        and not (bare and item.get("bare_allowed"))
+    ):
         return False
     if bare and not item.get("bare_allowed"):
         return False
@@ -6338,9 +6368,8 @@ def native_mcp_declarations(
     record: dict[str, Any],
 ) -> dict[tuple[str, str], "native_mcp_grants.ServerDeclaration"]:
     """The reviewable declarations for one extension record: every native MCP
-    server it exposes (per entrypoints.mcp, same eligibility check
-    reconcile_native_mcp_servers already applied -- ambient/native-eligible
-    items only) paired with the scopes permissions.native_mcp declares it
+    server it exposes (per entrypoints.mcp, ambient/native-eligible items
+    only) paired with the scopes permissions.native_mcp declares it
     eligible for. Command/args are always the fixed launcher stub
     (extension_mcp._launcher_command) -- extensions never control the
     literal command; what a grant actually authorizes is "this extension_id
@@ -6405,15 +6434,7 @@ def grant_native_mcp_server(
     manifest-declared, install-time-reviewed server resolve at the given
     scope. Only `global` and `project` are reachable here (PR1); `session`
     and `turn` grants are created at runtime via activate_mcp_server, a
-    separate, deliberately isolated surface (PR3), not this function.
-
-    Commit-and-fail, not transactional, by deliberate choice: the grant is
-    persisted BEFORE reconcile_native_mcp_servers() runs, so if the PCS
-    mirror step fails, the grant survives and the NEXT reconcile converges
-    it -- the grant store is the sole authority on what's active (see
-    reconcile_native_mcp_servers' own docstring: it's a PROJECTION of the
-    grant store, not a second authority), so a failed mirror must not
-    invalidate an authorized grant the store itself already accepted."""
+    separate, deliberately isolated surface (PR3), not this function."""
     if scope not in ("global", "project"):
         raise ExtensionError(f"grant_native_mcp_server only supports global/project scope, got {scope!r}")
     record = get_extension(extension_id)
@@ -6442,17 +6463,6 @@ def grant_native_mcp_server(
         extension_id=extension_id, server_id=server_id, scope=scope, target=target,
         digest=declaration.digest(), created_at=_now(),
     )
-    try:
-        reconcile_native_mcp_servers()
-    except Exception as exc:
-        # The grant is already persisted (commit-and-fail, see docstring) --
-        # an exception here must not read as "nothing happened". It already
-        # applies to per-turn resolution; only the out-of-BA provider-config
-        # mirror lags until the next reconcile.
-        raise ExtensionError(
-            f"grant created and active, but mirroring it to the native provider config failed "
-            f"and will retry on the next reconcile: {exc}"
-        ) from exc
 
 
 def revoke_native_mcp_server(
@@ -6469,8 +6479,6 @@ def revoke_native_mcp_server(
     removed = native_mcp_grants.remove_grant(
         extension_id=extension_id, server_id=server_id, scope=scope, target=target,
     )
-    if removed:
-        reconcile_native_mcp_servers()
     return removed
 
 
@@ -6490,38 +6498,6 @@ def resolve_native_mcp_servers_for_context(
         node_id=node_id, project_path=project_path,
         session_id=session_id, root_id=root_id, turn_id=turn_id,
     )
-
-
-def reconcile_native_mcp_servers() -> int:
-    """Global-scope native MCP servers are additionally mirrored into each
-    provider's real native config file (via extension_mcp.py's PCS fan-out)
-    for out-of-BA visibility -- e.g. `claude mcp list` shows them even
-    outside a BA-driven turn. The grant store (native_mcp_grants.py) is the
-    single authority for WHICH servers are active; this function is a
-    PROJECTION of that state, not a second place that decides it. Reuses
-    resolve_native_mcp_servers_for_context() (no project_path -> only global
-    grants match) instead of re-checking grant/digest here -- one predicate,
-    not a second copy that can drift."""
-    import config_store
-
-    disabled_extension_ids = set(config_store.get_disabled_builtin_extensions())
-    granted_global = resolve_native_mcp_servers_for_context()
-    active_records: list[dict[str, Any]] = []
-    for record in _active_records():
-        extension_id = record["manifest"]["id"]
-        if extension_id in disabled_extension_ids or not _record_runtime_ready(record):
-            continue
-        native_items = [
-            item
-            for item in _stored_mcp_entrypoints(record)
-            if f"{extension_id}:{_native_mcp_server_id(item)}" in granted_global
-        ]
-        if not native_items:
-            continue
-        native_record = copy.deepcopy(record)
-        native_record["manifest"]["entrypoints"]["mcp"] = native_items
-        active_records.append(native_record)
-    return extension_mcp.reconcile_native_mcp_servers(active_records)
 
 
 def _hook_endpoints(hook_key: str) -> list[tuple[str, str]]:
@@ -7381,13 +7357,12 @@ def native_harness_exposed(
 
 def set_native_harness_exposed(extension_id: str, kind: str, name: str, enabled: bool) -> bool:
     if kind == "mcp":
-        # This flag no longer has any effect on native MCP resolution --
-        # reconcile_native_mcp_servers() reads the scoped grant store
-        # (native_mcp_grants.py) exclusively now. Reject rather than
-        # silently accept-and-do-nothing, which would tell a caller
+        # Native MCP exposure is managed via grant_native_mcp_server()/
+        # revoke_native_mcp_server(). Reject rather than silently
+        # accept-and-do-nothing, which would tell a caller
         # {"native_exposed": true} while nothing actually changed.
         raise ExtensionError(
-            "native exposure for kind='mcp' is now managed via "
+            "native exposure for kind='mcp' is managed via "
             "grant_native_mcp_server()/revoke_native_mcp_server(), not this flag"
         )
     if not isinstance(enabled, bool):
@@ -7404,10 +7379,6 @@ def set_native_harness_exposed(extension_id: str, kind: str, name: str, enabled:
     try:
         if kind == "skill":
             reconcile_runtime_skills()
-        elif kind == "instructions":
-            extension_instructions.reconcile_blocks(record)
-        elif kind == "mcp":
-            reconcile_native_mcp_servers()
     except Exception as exc:
         restored = _restore_native_harness_if_unchanged(
             extension_id,
@@ -7418,10 +7389,6 @@ def set_native_harness_exposed(extension_id: str, kind: str, name: str, enabled:
             if restored:
                 if kind == "skill":
                     reconcile_runtime_skills()
-                elif kind == "instructions":
-                    extension_instructions.reconcile_blocks(record)
-                elif kind == "mcp":
-                    reconcile_native_mcp_servers()
         except Exception:
             pass
         raise ExtensionError(f"Could not apply native exposure: {exc}") from exc

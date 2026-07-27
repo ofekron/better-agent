@@ -11,7 +11,6 @@ import _test_home
 
 _test_home.isolate("ba-test-native-exposure-safety-")
 
-import extension_mcp  # noqa: E402
 import extension_store  # noqa: E402
 
 
@@ -159,34 +158,6 @@ def test_concurrent_successful_exposure_updates_are_both_preserved() -> None:
         extension_store.get_extension = real_get  # type: ignore[assignment]
         extension_store._load_ext_settings = real_load  # type: ignore[assignment]
         extension_store.reconcile_runtime_skills = real_reconcile  # type: ignore[assignment]
-
-
-def test_user_owned_native_mcp_name_collision_is_rejected() -> None:
-    active = extension_mcp._active_server_items([_record("ofek.extension", mcp="search")])
-    capability = {"unified": {}, "specifics": []}
-    real_content = extension_mcp._pcs._mcp_tool_content
-    extension_mcp._pcs._mcp_tool_content = lambda _current, _exists: {
-        "mcpServers": {"search": {"command": "personal-search"}}
-    }
-    try:
-        try:
-            extension_mcp._assert_entries_available(capability, {}, True, active)
-            raise AssertionError("user-owned MCP collision was accepted")
-        except ValueError:
-            pass
-    finally:
-        extension_mcp._pcs._mcp_tool_content = real_content
-
-
-def test_extension_native_mcp_name_collision_is_rejected() -> None:
-    try:
-        extension_mcp._active_server_items([
-            _record("ofek.first", mcp="search"),
-            _record("ofek.second", mcp="search"),
-        ])
-        raise AssertionError("extension MCP collision was accepted")
-    except ValueError:
-        pass
 
 
 if __name__ == "__main__":

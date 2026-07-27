@@ -85,7 +85,6 @@ def _assert_maintained_catalog_alignment() -> None:
     import capability_api
     import operation_catalog
     from runtime_operations import _load_bundled_server
-    from provider_config_sync_backend.mcp_server import create_server
 
     previous_file_editing = os.environ.get("BETTER_CLAUDE_FILE_EDITING")
     os.environ["BETTER_CLAUDE_FILE_EDITING"] = "1"
@@ -102,13 +101,6 @@ def _assert_maintained_catalog_alignment() -> None:
             open_config_panel_mcp._specs(),
             open_file_panel_mcp._specs(),
             *bundled_groups,
-            specs_from_fastmcp(
-                create_server(),
-                operations={
-                    name: "provider_config_sync_tools_" + name
-                    for name in create_server()._tool_manager._tools
-                },
-            ),
         )
         specs = tuple(spec for group in groups for spec in group)
     finally:
@@ -116,7 +108,7 @@ def _assert_maintained_catalog_alignment() -> None:
             os.environ.pop("BETTER_CLAUDE_FILE_EDITING", None)
         else:
             os.environ["BETTER_CLAUDE_FILE_EDITING"] = previous_file_editing
-    assert len(specs) == 54
+    assert len(specs) == 37
     catalog = operation_catalog.current()
     assert capability_api
     for spec in (item for group in bundled_groups for item in group):

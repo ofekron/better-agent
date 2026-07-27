@@ -303,61 +303,8 @@ def _install_core_mcp_gate_extensions() -> None:
     _install_session_bridge_extension_record()
     _install_browser_harness_extension_record()
     _install_credential_broker_extension_record()
-    _install_provider_config_sync_extension_record()
     _install_canvas_extension_record()
     _install_scheduler_extension_record()
-
-
-def _install_provider_config_sync_extension_record() -> None:
-    package = Path(_TMP_HOME) / "provider-config-sync-extension"
-    (package / "mcp").mkdir(parents=True, exist_ok=True)
-    (package / "mcp" / "server.py").write_text("print('provider config sync')\n", encoding="utf-8")
-    data = extension_store._load()  # type: ignore[attr-defined]
-    data["extensions"][extension_store.BUILTIN_PROVIDER_CONFIG_SYNC_EXTENSION_ID] = {
-        "manifest": _write_installed_manifest(package, {
-            "kind": extension_store.MANIFEST_KIND,
-            "id": extension_store.BUILTIN_PROVIDER_CONFIG_SYNC_EXTENSION_ID,
-            "name": "Provider Config Sync",
-            "version": "1.0.0",
-            "description": "Provider Config Sync",
-            "surfaces": ["backend_feature", "runtime_mcp"],
-            "entrypoints": {
-                "mcp": [
-                    {
-                        "name": "better-agent-provider-config-sync",
-                        "replaces_builtin": "provider-config-sync",
-                        "python": "mcp/server.py",
-                        "args": [],
-                        "env": {},
-                        "user_facing": True,
-                        "bare_allowed": False,
-                        "requires_backend_auth": True,
-                    }
-                ]
-            },
-            "permissions": {"session_state": True, "internal_loopback": True},
-            "marketplace": {},
-        }),
-        "enabled": True,
-        "installed_at": "2026-01-01T00:00:00+00:00",
-        "updated_at": "2026-01-01T00:00:00+00:00",
-        "source": {
-            "type": "git",
-            "repo_url": "https://example.test/private.git",
-            "extension_path": "extensions/provider-config-sync",
-            "ref": "",
-            "commit_sha": "provider-config-sync-private",
-            "install_path": str(package),
-        },
-        "entitlement": {
-            "status": "not_required",
-            "product_id": "",
-            "token_present": False,
-            "last_checked_at": "",
-            "expires_at": "",
-        },
-    }
-    _save_runtime_extension_record(data, extension_store.BUILTIN_PROVIDER_CONFIG_SYNC_EXTENSION_ID)
 
 
 def _install_browser_harness_extension_record() -> None:
@@ -1128,7 +1075,6 @@ def t_builtin_user_facing_mcp_servers_injected() -> None:
         "default_session",
         "requirement_analysis",
         "project_structure_edit",
-        "provider_config_sync_review",
     )
     config = builtin_mcp_config.with_builtin_mcp_servers({
         "user_facing": True,
@@ -1152,7 +1098,6 @@ def t_builtin_user_facing_mcp_servers_injected() -> None:
         "credential-broker",
         "ui",
         "scheduler",
-        "provider-config-sync",
         "better-agent-requirements",
         "better-agent-canvas",
     ):
@@ -1381,7 +1326,6 @@ def t_runtime_mcp_servers_reload_after_backend_restart_simulation() -> None:
         "default_session",
         "requirement_analysis",
         "project_structure_edit",
-        "provider_config_sync_review",
     )
     inputs = {
         "user_facing": True,
@@ -1404,7 +1348,6 @@ def t_runtime_mcp_servers_reload_after_backend_restart_simulation() -> None:
         "better-agent-requirements",
         "better-agent-coordination",
         "better-agent-session-bridge",
-        "provider-config-sync",
     ):
         check(name in before, f"restart simulation baseline includes {name}")
         check(name in after, f"restart simulation keeps {name}")
@@ -1456,11 +1399,6 @@ def t_builtin_mcp_registry_applies_to_all_provider_runners() -> None:
     check(
         "native_mcp_launcher_server_configs(" in (Path(_BACKEND) / "builtin_mcp_config.py").read_text(encoding="utf-8"),
         "native CLI provider config injects extension launchers instead of resolved native MCP configs",
-    )
-    check(
-        "provider_config_sync_mcp_server_config(" not in runner_src
-        and '"provider-config-sync"' not in runner_src,
-        "Claude provider-config-sync MCP registration is private runtime-owned",
     )
     supervisor_src = (Path(_BACKEND) / "orchs" / "supervisor" / "__init__.py").read_text(encoding="utf-8")
     orchestrator_src = (Path(_BACKEND) / "orchestrator.py").read_text(encoding="utf-8")
@@ -1814,6 +1752,29 @@ def t_bare_testape_mcp_stays_on_better_agent_runtime() -> None:
     check(raw is None, "session-aware TestApe MCP is excluded from ambient native tools")
 
 
+def t_explicit_testape_mcp_opt_in_works_headlessly() -> None:
+    _install_testape_extension_record()
+    inputs = {
+        "user_facing": False,
+        "app_session_id": "testape-headless-sid",
+        "backend_url": "http://127.0.0.1:8000",
+        "internal_token": "secret",
+        "mode": "native",
+        "cwd": "/tmp/project",
+        "model": "m",
+        "provider_id": "prov-testape",
+        "bare_config": False,
+        "extra_mcp_servers": ["testape"],
+    }
+    config = builtin_mcp_config.with_builtin_mcp_servers(inputs, {})
+    server = config["mcp_servers"].get("testape")
+    check(server is not None, "explicit TestApe MCP opt-in is injected headlessly")
+    if not server:
+        return
+    check(Path(server["args"][0]).name == "server.py", "explicit TestApe opt-in uses runtime server")
+    check(server["env"]["BETTER_CLAUDE_APP_SESSION_ID"] == "testape-headless-sid", "explicit TestApe opt-in carries session id")
+
+
 def t_bare_mcp_availability_matrix() -> None:
     _install_bare_matrix_extension_record()
     inputs = {
@@ -1835,6 +1796,21 @@ def t_bare_mcp_availability_matrix() -> None:
     check("headless-bare" in servers, "bare non-user-facing MCP is available when bare_allowed")
     check("visible-bare" not in servers, "user-facing MCP is excluded from ambient native tools")
     check("visible-not-bare" not in servers, "bare user-facing MCP is excluded without bare_allowed")
+
+    explicit = dict(inputs)
+    explicit["extra_mcp_servers"] = ["visible-not-bare"]
+    explicit_servers = extension_store.native_mcp_launcher_server_configs(
+        explicit,
+        user_facing=False,
+        bare=True,
+    )
+    check("visible-not-bare" not in explicit_servers, "explicit opt-in does not bypass bare_allowed")
+    explicit_runtime_servers = extension_store.runtime_mcp_server_configs(
+        explicit,
+        user_facing=False,
+        bare=True,
+    )
+    check("visible-not-bare" not in explicit_runtime_servers, "explicit runtime opt-in does not bypass bare_allowed")
 
 
 def t_open_file_panel_mcp_validates_required_fields() -> None:
@@ -2093,6 +2069,7 @@ def main() -> int:
         ("coordination native launcher preserves runtime broker aliases", t_coordination_native_launcher_preserves_runtime_broker_aliases),
         ("coordination launcher second stage preserves runtime broker", t_coordination_launcher_second_stage_preserves_runtime_broker),
         ("bare TestApe mcp stays on Better Agent runtime", t_bare_testape_mcp_stays_on_better_agent_runtime),
+        ("explicit TestApe mcp opt-in works headlessly", t_explicit_testape_mcp_opt_in_works_headlessly),
         ("bare mcp availability matrix", t_bare_mcp_availability_matrix),
         ("open-file-panel mcp validates required fields", t_open_file_panel_mcp_validates_required_fields),
         ("request-user-input mcp validates required fields", t_request_user_input_mcp_validates_required_fields),

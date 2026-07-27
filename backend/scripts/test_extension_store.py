@@ -296,43 +296,6 @@ def _make_repo(root: Path, extension_id: str = "ofek.requirements") -> tuple[Pat
     return repo, commit
 
 
-def _make_instructions_repo(root: Path, extension_id: str = "ofek.instructions") -> tuple[Path, str]:
-    """Extension shipping a global-level instruction section (for block-lifecycle tests)."""
-    repo = root / "instructions-repo"
-    package = repo / "extensions" / "instructions"
-    package.mkdir(parents=True)
-    manifest = {
-        "kind": "better-agent-extension",
-        "id": extension_id,
-        "name": "Instructions",
-        "version": "1.0.0",
-        "description": "Instruction-section extension",
-        "surfaces": ["instructions"],
-        "entrypoints": {
-            "instructions": [
-                {"name": "rules", "path": "instructions/rules.md", "level": "global"},
-                {"name": "projrules", "path": "instructions/projrules.md", "level": "project"},
-            ],
-        },
-        "permissions": {},
-        "protocol": {
-            "version": 1,
-            "smoke_test": {"required_paths": ["better-agent-extension.json"], "python_modules": ["mcp.server"]},
-        },
-        "marketplace": {},
-    }
-    (package / "better-agent-extension.json").write_text(json.dumps(manifest), encoding="utf-8")
-    (package / "instructions").mkdir()
-    (package / "instructions" / "rules.md").write_text("Requirement analysis capability\n", encoding="utf-8")
-    (package / "instructions" / "projrules.md").write_text("Project-scoped rules\n", encoding="utf-8")
-    _git(repo, "init")
-    _git(repo, "config", "user.email", "test@example.test")
-    _git(repo, "config", "user.name", "Test")
-    _git(repo, "add", "extensions")
-    _git(repo, "commit", "-m", "add instructions extension")
-    return repo, _git(repo, "rev-parse", "HEAD")
-
-
 def _make_runtime_repo(root: Path) -> tuple[Path, str]:
     repo = root / "private-runtime-extensions"
     package = repo / "extensions" / "scheduler"
@@ -731,7 +694,7 @@ def test_recorded_runtime_mcp_outside_builtin_maps_can_be_disabled_per_run() -> 
         raise AssertionError(disabled)
 
 
-def test_native_mcp_reconcile_omits_disabled_recorded_runtime_mcp() -> None:
+def test_native_mcp_resolution_omits_disabled_recorded_runtime_mcp() -> None:
     import config_store
     import installation_profile
 
@@ -740,9 +703,8 @@ def test_native_mcp_reconcile_omits_disabled_recorded_runtime_mcp() -> None:
     original_has_permission = extension_store.has_permission
     original_integrations_enabled = installation_profile.integrations_enabled
     # Bare test homes have no installation.json -- _record_active() gates on
-    # integrations_enabled(), which is False without one. Patch it for the
-    # whole test body: both resolve_native_mcp_server_config below and
-    # reconcile_native_mcp_servers() further down depend on _record_active.
+    # integrations_enabled(), which is False without one. resolve_native_mcp_servers_for_context
+    # depends on _record_active, so patch it for the whole test body.
     installation_profile.integrations_enabled = lambda: True  # type: ignore[assignment]
     extension_store.has_permission = lambda _record, permission: permission == "internal_loopback"  # type: ignore[assignment]
     try:
@@ -755,30 +717,18 @@ def test_native_mcp_reconcile_omits_disabled_recorded_runtime_mcp() -> None:
             raise AssertionError("ambient-native MCP did not resolve")
         if any("INTERNAL_TOKEN" in key for key in ambient_config.get("env", {})):
             raise AssertionError("ambient-native MCP received an internal token")
-        captured: list[str] = []
-        original_reconcile = extension_store.extension_mcp.reconcile_native_mcp_servers
-
-        def fake_reconcile(records):
-            captured.extend(record["manifest"]["id"] for record in records)
-            return 0
-
-        extension_store.extension_mcp.reconcile_native_mcp_servers = fake_reconcile
-        try:
-            config_store.set_disabled_builtin_extensions([])
-            extension_store.reconcile_native_mcp_servers()
-            if "ofek.testape-internal" not in captured:
-                raise AssertionError(captured)
-            captured.clear()
-            config_store.set_disabled_builtin_extensions(["ofek.testape-internal"])
-        finally:
-            extension_store.extension_mcp.reconcile_native_mcp_servers = original_reconcile
+        config_store.set_disabled_builtin_extensions([])
+        resolved_enabled = extension_store.resolve_native_mcp_servers_for_context()
+        if "ofek.testape-internal:testape" not in resolved_enabled:
+            raise AssertionError(resolved_enabled)
+        config_store.set_disabled_builtin_extensions(["ofek.testape-internal"])
+        resolved_disabled = extension_store.resolve_native_mcp_servers_for_context()
+        if "ofek.testape-internal:testape" in resolved_disabled:
+            raise AssertionError(resolved_disabled)
     finally:
         extension_store.has_permission = original_has_permission  # type: ignore[assignment]
         installation_profile.integrations_enabled = original_integrations_enabled  # type: ignore[assignment]
         config_store.set_disabled_builtin_extensions([])
-
-    if "ofek.testape-internal" in captured:
-        raise AssertionError(captured)
 
 
 def test_extension_store_save_preserves_concurrent_marketplace_mcp_records() -> None:
@@ -3501,70 +3451,6 @@ def test_builtin_feature_gate_rejects_inactive_entitlement() -> None:
         raise AssertionError("expired builtin extension entitlement enabled feature gate")
 
 
-def test_installed_extension_instructions_are_managed_blocks() -> None:
-    work = _private_monorepo_test_work()
-    import config_store
-    import installation_profile
-    original_state = config_store._load_state()
-    # Bare test homes have no installation.json -- _record_active() gates on
-    # integrations_enabled(), which is False without one, so user_instruction_contexts()
-    # would surface nothing regardless of the extension's own state.
-    original_integrations_enabled = installation_profile.integrations_enabled
-    installation_profile.integrations_enabled = lambda: True  # type: ignore[assignment]
-    try:
-        # Redirect the claude provider config dir into the tempdir so the managed
-        # block lands there, never in the real ~/.claude/CLAUDE.md.
-        claude_home = work / "claude-home"
-        claude_home.mkdir()
-        state = config_store._load_state()
-        state["providers"] = [
-            {"id": "test-claude", "kind": "claude", "name": "Claude", "config_dir": str(claude_home)}
-        ]
-        state["default_provider_id"] = "test-claude"
-        config_store._save_state(state)
-
-        repo, _commit = _make_instructions_repo(work)
-        extension_store.install_from_repo(
-            repo_url=repo.as_uri(),
-            extension_path="extensions/instructions",
-        )
-        ext_id = "ofek.instructions"
-        # Installs land disabled; this test is about instruction exposure once active.
-        extension_store.set_enabled(ext_id, True)
-        instructions_file = claude_home / "CLAUDE.md"
-
-        def has_block() -> bool:
-            return instructions_file.is_file() and "Requirement analysis capability" in instructions_file.read_text(encoding="utf-8")
-
-        if has_block():
-            raise AssertionError("instruction block was ambiently exposed without user opt-in")
-        runtime_content = "\n".join(
-            str(item.get("content") or "") for item in extension_store.user_instruction_contexts()
-        )
-        if "Requirement analysis capability" not in runtime_content:
-            raise AssertionError("Better Agent runtime lost extension instructions")
-
-        extension_store.set_native_harness_exposed(ext_id, "instructions", "rules", True)
-        if not has_block():
-            raise AssertionError("instruction block not injected after native exposure")
-
-        extension_store.set_instruction_enabled(ext_id, level="global", enabled=False)
-        if has_block():
-            raise AssertionError("block not removed on global disable")
-
-        extension_store.set_instruction_enabled(ext_id, level="global", enabled=True)
-        if not has_block():
-            raise AssertionError("block not restored on global enable")
-
-        extension_store.uninstall(ext_id)
-        if has_block():
-            raise AssertionError("block not removed on uninstall")
-    finally:
-        installation_profile.integrations_enabled = original_integrations_enabled  # type: ignore[assignment]
-        config_store._save_state(original_state)
-        shutil.rmtree(work, ignore_errors=True)
-
-
 def test_builtin_harness_instructions_are_visible_extension() -> None:
     # Seed bundled public extensions from the repo. _load()/get_extension() are
     # pure reads; list_extensions_with_reconciliation is the explicit seed path.
@@ -3586,172 +3472,57 @@ def test_builtin_harness_instructions_are_visible_extension() -> None:
         raise AssertionError("action grouping instruction is not owned by harness extension")
 
 
-def test_disabled_extension_has_no_blocks_anywhere() -> None:
-    import project_store
-    import config_store
-
-    work = _private_monorepo_test_work()
-    original_state = config_store._load_state()
-    try:
-        claude_home = work / "claude-home"
-        claude_home.mkdir()
-        state = config_store._load_state()
-        state["providers"] = [
-            {"id": "test-claude", "kind": "claude", "name": "Claude", "config_dir": str(claude_home)}
-        ]
-        state["default_provider_id"] = "test-claude"
-        config_store._save_state(state)
-
-        project_path = work / "proj"
-        project_path.mkdir()
-        project_store.add_project(str(project_path), "Proj")
-
-        repo, _commit = _make_instructions_repo(work)
-        extension_store.install_from_repo(
-            repo_url=repo.as_uri(),
-            extension_path="extensions/instructions",
-        )
-        ext_id = "ofek.instructions"
-        extension_store.set_native_harness_exposed(ext_id, "instructions", "rules", True)
-        extension_store.set_native_harness_exposed(ext_id, "instructions", "projrules", True)
-        extension_store.set_instruction_enabled(ext_id, level="project", enabled=True, project_path=str(project_path))
-
-        global_file = claude_home / "CLAUDE.md"
-        project_file = project_path / "CLAUDE.md"
-        if "Requirement analysis capability" not in global_file.read_text(encoding="utf-8"):
-            raise AssertionError("global block missing after install")
-        if "Project-scoped rules" not in project_file.read_text(encoding="utf-8"):
-            raise AssertionError("project block missing after project enable")
-
-        # Disable the whole extension -> blocks must vanish from BOTH files.
-        extension_store.set_enabled(ext_id, False)
-        global_text = global_file.read_text(encoding="utf-8")
-        project_text = project_file.read_text(encoding="utf-8")
-        if "better-agent:extension:" in global_text or "better-claude:extension:" in global_text:
-            raise AssertionError("global block survived disable")
-        if "better-agent:extension:" in project_text or "better-claude:extension:" in project_text:
-            raise AssertionError("project block survived disable")
-
-        # Re-enable -> global block returns; project block returns only after re-enabling project level.
-        extension_store.set_enabled(ext_id, True)
-        if "Requirement analysis capability" not in global_file.read_text(encoding="utf-8"):
-            raise AssertionError("global block not restored on enable")
-    finally:
-        try:
-            extension_store.uninstall(ext_id)
-        except extension_store.ExtensionError:
-            pass
-        config_store._save_state(original_state)
-        shutil.rmtree(work, ignore_errors=True)
-
-
-def test_reconcile_all_sweeps_orphans_and_clears_disabled() -> None:
-    import project_store
-    import config_store
-    import extension_instructions as ei
-
-    work = _private_monorepo_test_work()
-    original_state = config_store._load_state()
-    try:
-        claude_home = work / "claude-home"
-        claude_home.mkdir()
-        state = config_store._load_state()
-        state["providers"] = [
-            {"id": "test-claude", "kind": "claude", "name": "Claude", "config_dir": str(claude_home)}
-        ]
-        state["default_provider_id"] = "test-claude"
-        config_store._save_state(state)
-        project_store.add_project(str(work / "proj"), "Proj")
-
-        global_file = claude_home / "CLAUDE.md"
-        # Orphan block for an extension that was never installed.
-        ei._pcs.apply_managed_instruction_blocks(
-            owner="extension:ghost.uninstalled",
-            sections=[("rules", "haunted instructions")],
-            scope="global",
-            project_root=None,
-            providers=config_store.list_provider_metadata(),
-        )
-        if "haunted instructions" not in global_file.read_text(encoding="utf-8"):
-            raise AssertionError("orphan block not written")
-
-        # The orphan owner is not installed -> reconcile_all must purge it.
-        # (Other installed extensions may legitimately have blocks, so assert
-        # the ghost's content is gone, not that the file has no markers.)
-        swept = extension_store.reconcile_all_instructions()
-        if swept < 1:
-            raise AssertionError("orphan block not swept")
-        if "haunted instructions" in global_file.read_text(encoding="utf-8"):
-            raise AssertionError("orphan block survived reconcile_all")
-    finally:
-        config_store._save_state(original_state)
-        shutil.rmtree(work, ignore_errors=True)
-
-
 def test_legacy_provider_capabilities_field_is_aliased() -> None:
     """Extensions authored with the old provider_capabilities field/surface still work."""
-    import config_store
+    import extension_instructions
 
     work = _private_monorepo_test_work()
-    original_state = config_store._load_state()
-    try:
-        claude_home = work / "claude-home"
-        claude_home.mkdir()
-        state = config_store._load_state()
-        state["providers"] = [
-            {"id": "test-claude", "kind": "claude", "name": "Claude", "config_dir": str(claude_home)}
-        ]
-        state["default_provider_id"] = "test-claude"
-        config_store._save_state(state)
-
-        repo = work / "legacy-repo"
-        package = repo / "extensions" / "legacy"
-        package.mkdir(parents=True)
-        manifest = {
-            "kind": "better-agent-extension",
-            "id": "ofek.legacy",
-            "name": "Legacy",
-            "version": "1.0.0",
-            "description": "Legacy field name",
-            "surfaces": ["provider_capabilities"],
-            "entrypoints": {
-                "provider_capabilities": [{"name": "rules", "path": "capabilities/rules.md"}],
+    repo = work / "legacy-repo"
+    package = repo / "extensions" / "legacy"
+    package.mkdir(parents=True)
+    manifest = {
+        "kind": "better-agent-extension",
+        "id": "ofek.legacy",
+        "name": "Legacy",
+        "version": "1.0.0",
+        "description": "Legacy field name",
+        "surfaces": ["provider_capabilities"],
+        "entrypoints": {
+            "provider_capabilities": [{"name": "rules", "path": "capabilities/rules.md"}],
+        },
+        "protocol": {
+            "version": 1,
+            "smoke_test": {
+                "required_paths": ["better-agent-extension.json", "capabilities/rules.md"],
+                "python_modules": [],
             },
-            "protocol": {
-                "version": 1,
-                "smoke_test": {
-                    "required_paths": ["better-agent-extension.json", "capabilities/rules.md"],
-                    "python_modules": [],
-                },
-            },
-            "permissions": {},
-            "marketplace": {},
-        }
-        (package / "better-agent-extension.json").write_text(json.dumps(manifest), encoding="utf-8")
-        (package / "capabilities").mkdir()
-        (package / "capabilities" / "rules.md").write_text("Legacy global rules\n", encoding="utf-8")
-        _git(repo, "init")
-        _git(repo, "config", "user.email", "t@example.test")
-        _git(repo, "config", "user.name", "Test")
-        _git(repo, "add", "extensions")
-        _git(repo, "commit", "-m", "legacy extension")
+        },
+        "permissions": {},
+        "marketplace": {},
+    }
+    (package / "better-agent-extension.json").write_text(json.dumps(manifest), encoding="utf-8")
+    (package / "capabilities").mkdir()
+    (package / "capabilities" / "rules.md").write_text("Legacy global rules\n", encoding="utf-8")
+    _git(repo, "init")
+    _git(repo, "config", "user.email", "t@example.test")
+    _git(repo, "config", "user.name", "Test")
+    _git(repo, "add", "extensions")
+    _git(repo, "commit", "-m", "legacy extension")
 
-        record = extension_store.install_from_repo(
-            repo_url=repo.as_uri(),
-            extension_path="extensions/legacy",
-        )
-        extension_store.set_native_harness_exposed("ofek.legacy", "instructions", "rules", True)
-        instructions = record["manifest"]["entrypoints"]["instructions"]
-        if not any(i.get("name") == "rules" and i.get("level") == "global" for i in instructions):
-            raise AssertionError(f"legacy field not normalized to instructions: {instructions}")
-        if record["manifest"]["surfaces"] != ["instructions"]:
-            raise AssertionError(f"legacy surface not aliased: {record['manifest']['surfaces']}")
-        if "Legacy global rules" not in (claude_home / "CLAUDE.md").read_text(encoding="utf-8"):
-            raise AssertionError("legacy instruction content not applied as a managed block")
-        extension_store.uninstall("ofek.legacy")
-    finally:
-        config_store._save_state(original_state)
-        shutil.rmtree(work, ignore_errors=True)
+    record = extension_store.install_from_repo(
+        repo_url=repo.as_uri(),
+        extension_path="extensions/legacy",
+    )
+    instructions = record["manifest"]["entrypoints"]["instructions"]
+    if not any(i.get("name") == "rules" and i.get("level") == "global" for i in instructions):
+        raise AssertionError(f"legacy field not normalized to instructions: {instructions}")
+    if record["manifest"]["surfaces"] != ["instructions"]:
+        raise AssertionError(f"legacy surface not aliased: {record['manifest']['surfaces']}")
+    blocks = extension_instructions.runtime_instruction_blocks(record)
+    if not any("Legacy global rules" in block for block in blocks):
+        raise AssertionError(f"legacy instruction content not reachable at runtime: {blocks}")
+    extension_store.uninstall("ofek.legacy")
+    shutil.rmtree(work, ignore_errors=True)
 
 
 def test_manifest_accepts_skill_entrypoints_and_requires_skill_md() -> None:
@@ -5841,10 +5612,7 @@ if __name__ == "__main__":
         test_update_installed_extensions_updates_marketplace_metadata_record()
         test_update_installed_extensions_updates_git_record_and_preserves_enabled()
         test_builtin_feature_gate_rejects_inactive_entitlement()
-        test_installed_extension_instructions_are_managed_blocks()
         test_builtin_harness_instructions_are_visible_extension()
-        test_disabled_extension_has_no_blocks_anywhere()
-        test_reconcile_all_sweeps_orphans_and_clears_disabled()
         test_legacy_provider_capabilities_field_is_aliased()
         test_manifest_accepts_skill_entrypoints_and_requires_skill_md()
         test_extension_enable_disable_installs_runtime_skills()
@@ -5865,7 +5633,7 @@ if __name__ == "__main__":
         test_requirements_role_mcp_repair_keeps_processor_tools_available()
         test_dynamic_runtime_mcp_can_be_disabled_per_run()
         test_recorded_runtime_mcp_outside_builtin_maps_can_be_disabled_per_run()
-        test_native_mcp_reconcile_omits_disabled_recorded_runtime_mcp()
+        test_native_mcp_resolution_omits_disabled_recorded_runtime_mcp()
         test_legacy_string_mcp_entrypoints_do_not_crash_runtime_config()
         test_builtin_mcp_registry_respects_feature_extension_state()
         test_builtin_feature_extensions_are_toggleable_and_uninstall_removes_record()

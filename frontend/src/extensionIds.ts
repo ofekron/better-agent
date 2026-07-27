@@ -1,7 +1,7 @@
 // Frontend-facing logical keys for builtin extensions. The REAL extension ids
 // (including private/commercial ones) are fetched from
 // /api/extensions/builtin-ids at bootstrap — no private id is hardcoded here.
-// Public ids (ask, provider-config-sync, session-bridge, ...) may still appear
+// Public ids (ask, session-bridge, ...) may still appear
 // as literals at call sites; only private ids must route through extId().
 
 import { API } from "./api";
@@ -14,7 +14,6 @@ export const BUILTIN_EXTENSION_KEYS = [
   "projectStructure",
   "machineNodes",
   "credentialBroker",
-  "providerConfigSync",
   "canvas",
   "promptEngineer",
   "browserHarness",
@@ -82,7 +81,7 @@ async function _attemptLoad(): Promise<boolean> {
     // Notify extId() consumers (flag gates, extBackendBase call sites) so a
     // late population re-renders them via the same channel /api/extensions
     // changes flow through. Only on the unloaded->loaded transition.
-    if (!wasLoaded) eventBus.publish("extensions_changed", {});
+    if (!wasLoaded) eventBus.publish("extension.catalog", {});
     return true;
   } catch (err) {
     // A failure here leaves every private-extension UI unreachable (empty-id

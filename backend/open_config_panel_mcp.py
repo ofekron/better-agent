@@ -60,7 +60,7 @@ def open_config_panel_response(
 
 
 _INSTRUCTIONS = (
-    "Embed a provider-config-sync capability panel inline in the Better Agent chat."
+    "Embed a config panel inline in the Better Agent chat."
 )
 
 

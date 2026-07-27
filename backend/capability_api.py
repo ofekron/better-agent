@@ -48,14 +48,6 @@ class _SettingsPayload(_CwdPayload):
     capability_id: str = ""
 
 
-class _ProviderConfigBroadcastPayload(_StrictPayload):
-    scope: str = ""
-    category: str = ""
-    capability_id: str = ""
-    path: str = ""
-    cwd: str = ""
-
-
 class _AskSearchPayload(_StrictPayload):
     query: str = Field(min_length=1)
     max_results: int | None = Field(default=None, gt=0)
@@ -790,89 +782,6 @@ def _register_ask() -> None:
     register("ask", "ensure", _StrictPayload, ensure)
 
 
-def _register_provider_config_sync() -> None:
-    import provider_config_sync_api as pcs
-
-    async def call(
-        fn: Callable[..., Any], payload: BaseModel, *, unpack: bool = False
-    ) -> Any:
-        result = fn(**payload.model_dump()) if unpack else fn(payload)
-        return await result if inspect.isawaitable(result) else result
-
-    register(
-        "provider-config-sync", "state.get", _CwdPayload, lambda p: pcs._discover(p.cwd)
-    )
-    register(
-        "provider-config-sync",
-        "capability-picker.get",
-        _CwdPayload,
-        lambda p: {"sources": pcs._capability_picker_sources(p.cwd)},
-    )
-    register(
-        "provider-config-sync",
-        "settings.get",
-        _SettingsPayload,
-        lambda p: pcs._standalone_api.get_auto_sync_settings(p.cwd, p.capability_id),
-    )
-    mappings = {
-        "settings.patch": (
-            pcs._standalone_api.AutoSyncSettingsPatch,
-            pcs.patch_provider_config_sync_settings,
-        ),
-        "repository.init": (
-            pcs._standalone_api.RepositoryConfigRequest,
-            pcs.init_provider_config_sync_repository,
-        ),
-        "repository.load": (
-            pcs._standalone_api.RepositoryConfigRequest,
-            pcs.load_provider_config_sync_repository,
-        ),
-        "file.put": (pcs.WriteNativeFileRequest, pcs.write_native_file_route),
-        "file.restore": (pcs.RestoreNativeFileRequest, pcs.restore_native_file_route),
-        "capability.delete": (pcs.DeleteCapabilityRequest, pcs.delete_capability_route),
-        "capability.create": (pcs.CreateCapabilityRequest, pcs.create_capability_route),
-        "capability.transfer": (
-            pcs.TransferCapabilityRequest,
-            pcs.transfer_capability_route,
-        ),
-        "apply": (pcs.ApplyNativeFileRequest, pcs.apply_native_file_route),
-        "auto-sync": (pcs.AutoSyncRequest, pcs.auto_sync_route),
-        "unified-item.upsert": (
-            pcs.UpsertUnifiedCapabilityItemRequest,
-            pcs.upsert_unified_capability_item_route,
-        ),
-        "unified-item.remove": (
-            pcs.RemoveUnifiedCapabilityItemRequest,
-            pcs.remove_unified_capability_item_route,
-        ),
-    }
-    for action, (schema, fn) in mappings.items():
-        register("provider-config-sync", action, schema, lambda p, fn=fn: call(fn, p))
-    register(
-        "provider-config-sync",
-        "repository.get",
-        _StrictPayload,
-        lambda _p: pcs.get_provider_config_sync_repository_status(),
-    )
-    register(
-        "provider-config-sync",
-        "repository.sync",
-        _StrictPayload,
-        lambda _p: pcs.sync_provider_config_sync_repository(),
-    )
-
-    async def broadcast(payload: BaseModel) -> Any:
-        await pcs._broadcast_better_agent_changed(**payload.model_dump())
-        return {"ok": True}
-
-    register(
-        "provider-config-sync",
-        "change.broadcast",
-        _ProviderConfigBroadcastPayload,
-        broadcast,
-    )
-
-
 def _register_core() -> None:
     async def mcp_job_results(payload: BaseModel) -> Any:
         import main
@@ -1535,7 +1444,6 @@ def _register_session_events() -> None:
 
 _register_ask()
 _register_core()
-_register_provider_config_sync()
 _register_marketplace()
 _register_session_control()
 _register_session_bridge()

@@ -156,12 +156,12 @@ def _instruction_content(scope: str, projects: list[Path]) -> str:
 
 def _instruction_paths(scope: str, projects: list[Path]) -> list[Path]:
     import config_store
-    from provider_config_sync_backend import api as pcs_api
+    from managed_instruction_targets import managed_instruction_targets
 
     providers = config_store.list_provider_metadata()
     paths: list[Path] = []
     if scope == "global":
-        paths = pcs_api.managed_instruction_targets(
+        paths = managed_instruction_targets(
             scope="global",
             project_root=None,
             providers=providers,
@@ -169,7 +169,7 @@ def _instruction_paths(scope: str, projects: list[Path]) -> list[Path]:
     elif scope == "project":
         for project in projects:
             paths.extend(
-                pcs_api.managed_instruction_targets(
+                managed_instruction_targets(
                     scope="project",
                     project_root=project,
                     providers=providers,
@@ -294,5 +294,4 @@ def _enable_projects(
     stored["instructions_enabled"] = state
     stored["updated_at"] = extension_store._now()
     extension_store._save(data, resurrect_extension_ids={PERSONAL_HARNESS_EXTENSION_ID})
-    extension_instructions.reconcile_blocks(stored)
     return extension_store.get_extension(PERSONAL_HARNESS_EXTENSION_ID) or stored

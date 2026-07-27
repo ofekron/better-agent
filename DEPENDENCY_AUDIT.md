@@ -4,8 +4,7 @@ Last local audit: 2026-06-22.
 
 ## Commands Run
 
-- Node lockfile scan over `package-lock.json`, `frontend/package-lock.json`, and
-  `provider-config-sync/package-lock.json`.
+- Node lockfile scan over `package-lock.json` and `frontend/package-lock.json`.
 - Python distribution metadata scan from the current `backend/.venv`.
 - Current-tree secret pattern scan for common private keys, API tokens, GitHub
   tokens, GitLab tokens, Slack tokens, AWS keys, and OpenAI-style keys.
@@ -18,8 +17,6 @@ Last local audit: 2026-06-22.
   licenses detected.
 - `frontend/package-lock.json`: no GPL/AGPL/SSPL/BUSL/PolyForm/Commons-Clause
   style licenses detected.
-- `provider-config-sync/package-lock.json`: no suspicious dependency licenses
-  detected; local workspace package entries do not include license fields.
 
 ## Python Result
 

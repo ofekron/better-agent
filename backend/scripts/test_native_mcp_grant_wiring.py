@@ -330,46 +330,19 @@ def test_server_file_content_change_invalidates_grant_with_identical_manifest() 
     return ok
 
 
-def test_grant_survives_pcs_mirror_failure_and_converges_on_next_reconcile() -> bool:
-    # D2: grant_native_mcp_server is commit-and-fail, not transactional --
-    # add_grant() persists BEFORE reconcile_native_mcp_servers() (the PCS
-    # mirror step) runs. If the mirror fails, the grant store (the sole
-    # authority per reconcile_native_mcp_servers' own docstring) must still
-    # have the grant; the PCS mirror itself is just a stale-until-next-
-    # reconcile projection, not a second source of truth.
+def test_grant_survives_no_mirror_step_and_resolves_immediately() -> bool:
+    # The ambient provider-config mirror was removed; grant_native_mcp_server
+    # now persists the grant and returns with no out-of-BA fan-out. The grant
+    # must be immediately resolvable through the per-session runtime bridge
+    # (resolve_native_mcp_servers_for_context), which is the only remaining
+    # authority on what's active.
     _record()
-    original_mirror = extension_store.extension_mcp.reconcile_native_mcp_servers
-    extension_store.extension_mcp.reconcile_native_mcp_servers = lambda records: (_ for _ in ()).throw(OSError("PCS mirror unavailable"))
-    error_message = ""
-    try:
-        try:
-            extension_store.grant_native_mcp_server(EXT_ID, SERVER_ID, "global")
-            mirror_failure_raised = False
-        except extension_store.ExtensionError as exc:
-            mirror_failure_raised = True
-            error_message = str(exc)
-    finally:
-        extension_store.extension_mcp.reconcile_native_mcp_servers = original_mirror
-    truthful_error = "grant created" in error_message and "retry" in error_message
+    extension_store.grant_native_mcp_server(EXT_ID, SERVER_ID, "global")
     grant_survived = len(native_mcp_grants.list_grants(extension_id=EXT_ID)) == 1
-    mirrored: list[str] = []
-    extension_store.extension_mcp.reconcile_native_mcp_servers = (
-        lambda records: mirrored.extend(r["manifest"]["id"] for r in records) or 0
-    )
-    try:
-        extension_store.reconcile_native_mcp_servers()
-    finally:
-        extension_store.extension_mcp.reconcile_native_mcp_servers = original_mirror
-    resolved_after_recovery = extension_store.resolve_native_mcp_servers_for_context()
-    ok = (
-        mirror_failure_raised
-        and truthful_error
-        and grant_survived
-        and EXT_ID in mirrored  # the next reconcile call actually mirrors the surviving grant
-        and f"{EXT_ID}:{SERVER_ID}" in resolved_after_recovery
-    )
-    print(f"{OK if ok else FAIL} a PCS mirror failure surfaces a truthful error but the grant survives and a later reconcile converges "
-          f"(raised={mirror_failure_raised}, truthful_error={truthful_error!r}, survived={grant_survived}, mirrored={mirrored}, resolved={list(resolved_after_recovery)})")
+    resolved = extension_store.resolve_native_mcp_servers_for_context()
+    ok = grant_survived and f"{EXT_ID}:{SERVER_ID}" in resolved
+    print(f"{OK if ok else FAIL} grant persists and resolves immediately with no mirror step "
+          f"(survived={grant_survived}, resolved={list(resolved)})")
     _cleanup()
     return ok
 
@@ -562,7 +535,7 @@ def main_run() -> int:
         test_project_grant_does_not_inherit_into_subdirectory,
         test_manifest_update_invalidates_outstanding_grant,
         test_server_file_content_change_invalidates_grant_with_identical_manifest,
-        test_grant_survives_pcs_mirror_failure_and_converges_on_next_reconcile,
+        test_grant_survives_no_mirror_step_and_resolves_immediately,
         test_uninstall_removes_grants,
         test_disabled_extension_grant_resolves_to_nothing,
         test_config_disabled_builtin_extension_grant_resolves_to_nothing,

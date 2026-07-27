@@ -632,7 +632,6 @@ stop_known_better_agent_port_users() {
     return 0
   fi
   bootout_launchctl_job "better-claude"
-  bootout_launchctl_job "better-claude-provider-config-sync"
   kill_matching_processes \
     "Better Agent backend wrapper" \
     "cd $DIR/backend && .*uvicorn main:app.*--port $port"
@@ -651,25 +650,6 @@ export BETTER_CLAUDE_BACKEND_URL="http://127.0.0.1:$BACKEND_PORT"
 export BETTER_AGENT_BACKEND_PORT="$BACKEND_PORT"
 export BETTER_AGENT_BACKEND_URL="http://127.0.0.1:$BACKEND_PORT"
 export BA_BACKEND_PORT="$BACKEND_PORT"
-
-ensure_provider_config_sync_submodule() {
-  local pcs_dir="$DIR/provider-config-sync"
-
-  if [ ! -f "$DIR/.gitmodules" ]; then
-    return 0
-  fi
-  if [ -f "$pcs_dir/package.json" ] && [ -d "$pcs_dir/packages/provider-config-sync-ui/src" ]; then
-    return 0
-  fi
-
-  echo "Initializing provider-config-sync submodule..."
-  git -C "$DIR" submodule update --init provider-config-sync
-
-  if [ ! -f "$pcs_dir/package.json" ] || [ ! -d "$pcs_dir/packages/provider-config-sync-ui/src" ]; then
-    echo "provider-config-sync submodule is still missing after git submodule update." >&2
-    exit 1
-  fi
-}
 
 npm_project_hash() {
   local project_dir="$1"
@@ -727,7 +707,6 @@ sync_npm_project_deps() {
   printf '%s' "$current" > "$stamp"
 }
 
-ensure_provider_config_sync_submodule
 BOOTSTRAP_PYTHON="$(command -v python3 || command -v python || true)"
 if [ -z "$BOOTSTRAP_PYTHON" ]; then
   echo "Python is required to resolve installation dependencies." >&2
@@ -760,7 +739,6 @@ if PYTHONPATH="$DIR/backend" "$BOOTSTRAP_PYTHON" -c \
 else
   FRONTEND_NPM_MODE="desktop"
 fi
-sync_npm_project_deps "$DIR/provider-config-sync" "provider-config-sync" "full"
 sync_npm_project_deps "$DIR/frontend" "frontend" "$FRONTEND_NPM_MODE"
 
 # --- Sync backend dependencies before anything that imports them ----

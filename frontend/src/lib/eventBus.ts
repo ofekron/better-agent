@@ -100,16 +100,23 @@ export interface BusEventMap {
     app_session_id: string;
     schedules: Schedule[];
   };
-  provider_config_sync_changed: {
-    scope: string;
-    category: string;
-    capability_id: string;
-    path: string;
-    cwd: string;
-  };
   // Global ping — any schedule mutated; refetch GET /api/schedules.
   schedules_changed: Record<string, unknown>;
-  extensions_changed: Record<string, unknown>;
+  "extension.catalog": Record<string, unknown>;
+  "extension.config": Record<string, unknown>;
+  "extension.config.settings": Record<string, unknown>;
+  "extension.config.instructions": Record<string, unknown>;
+  "extension.config.ui_settings": Record<string, unknown>;
+  "extension.config.internal_llm": Record<string, unknown>;
+  "extension.config.permissions": Record<string, unknown>;
+  "extension.config.mcp": Record<string, unknown>;
+  "extension.config.skills": Record<string, unknown>;
+  "extension.config.native_exposure": Record<string, unknown>;
+  "extension.ui": Record<string, unknown>;
+  "extension.ui.frontend_modules": Record<string, unknown>;
+  "extension.harness.default": Record<string, unknown>;
+  "extension.harness.default.disabled_builtin_extensions": Record<string, unknown>;
+  "extension.harness.default.disabled_builtin_tools": Record<string, unknown>;
   harness_profiles_changed: Record<string, unknown>;
   // Remote-extension update projection changed; refetch GET /api/extensions/updates.
   extension_updates_changed: {

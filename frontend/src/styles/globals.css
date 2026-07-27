@@ -9023,7 +9023,7 @@ button.run-badge-clickable:focus-visible {
   margin: 8px 0;
 }
 
-/* Inline provider-config-sync capability panel (open_config_panel tool). */
+/* Inline open_config_panel widget header (pops a panel into the right side). */
 .inline-config-panel {
   margin: 8px 0;
   border: 1px solid var(--border);
@@ -9031,7 +9031,6 @@ button.run-badge-clickable:focus-visible {
   overflow: hidden;
   display: flex;
   flex-direction: column;
-  height: 480px;
 }
 .inline-config-panel-header {
   display: flex;
@@ -9059,12 +9058,6 @@ button.run-badge-clickable:focus-visible {
   font-size: calc(13px * var(--app-font-scale));
 }
 .inline-config-closed-label { opacity: 0.85; }
-.inline-config-panel-body {
-  flex: 1 1 auto;
-  min-height: 0;
-  overflow: hidden;
-  position: relative;
-}
 
 /* Right-panel stack of popped-out config panels. */
 .config-panels { display: flex; flex-direction: column; gap: 8px; }

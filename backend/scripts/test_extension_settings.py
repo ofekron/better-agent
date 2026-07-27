@@ -7,7 +7,6 @@ import json
 import os
 import sys
 import tempfile
-import types
 from pathlib import Path
 
 import _test_home
@@ -15,22 +14,6 @@ _TMP_HOME = _test_home.isolate("bc-test-extension-settings-")
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "sdk"))
-
-if "provider_config_sync_backend" not in sys.modules:
-    pcs_pkg = types.ModuleType("provider_config_sync_backend")
-    pcs_pkg.api = types.SimpleNamespace(
-        KNOWN_PROVIDER_KINDS=set(),
-        configure=lambda **_kwargs: None,
-        _current_unified_for_tool=lambda *_args, **_kwargs: ({"unified": {}, "specifics": []}, "", False),
-        _mcp_tool_content=lambda *_args, **_kwargs: {"mcpServers": {}},
-        _expected_content=lambda current, _exists: current,
-        _write_entry_if_unchanged=lambda *_args, **_kwargs: None,
-        _read_entry_current=lambda *_args, **_kwargs: ("", False),
-        reconcile_managed_instruction_blocks=lambda *_args, **_kwargs: None,
-        sweep_orphan_managed_instruction_blocks=lambda *_args, **_kwargs: 0,
-    )
-    sys.modules["provider_config_sync_backend"] = pcs_pkg
-    sys.modules["provider_config_sync_backend.api"] = pcs_pkg.api
 
 import extension_store  # noqa: E402
 import builtin_mcp_config  # noqa: E402
@@ -551,12 +534,8 @@ def test_native_harness_exposure_is_per_item_and_unsafe_mcp_fails_closed() -> No
     }
     real_get = extension_store.get_extension
     real_skills = extension_store.reconcile_runtime_skills
-    real_mcp = extension_store.reconcile_native_mcp_servers
-    real_instructions = extension_store.extension_instructions.reconcile_blocks
     extension_store.get_extension = lambda eid: record if eid == "ofek.demo" else real_get(eid)  # type: ignore[assignment]
     extension_store.reconcile_runtime_skills = lambda: 0  # type: ignore[assignment]
-    extension_store.reconcile_native_mcp_servers = lambda: 0  # type: ignore[assignment]
-    extension_store.extension_instructions.reconcile_blocks = lambda _record: None  # type: ignore[assignment]
     try:
         for kind, name in (("instructions", "rules"), ("skill", "reviewer")):
             assert extension_store.native_harness_exposed("ofek.demo", kind, name, record=record) is False
@@ -593,8 +572,6 @@ def test_native_harness_exposure_is_per_item_and_unsafe_mcp_fails_closed() -> No
     finally:
         extension_store.get_extension = real_get  # type: ignore[assignment]
         extension_store.reconcile_runtime_skills = real_skills  # type: ignore[assignment]
-        extension_store.reconcile_native_mcp_servers = real_mcp  # type: ignore[assignment]
-        extension_store.extension_instructions.reconcile_blocks = real_instructions  # type: ignore[assignment]
 
 
 def test_sdk_setting_builder_and_read_surface() -> None:

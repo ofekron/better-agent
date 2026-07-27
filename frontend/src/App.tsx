@@ -41,15 +41,8 @@ import { scrollCommentTargetIntoView } from "./utils/commentFocus";
 import { additionalSessionSubscriptionIds } from "./utils/sessionSubscriptions";
 import { StartupTasksBanner } from "./components/StartupTasksBanner";
 import { MarketplaceBridgeCenter } from "./components/MarketplaceBridgeCenter";
-import { SettingsPage } from "./components/SettingsPage";
 import { ExtensionModuleSlot, useExtensionFrontendModules } from "./components/ExtensionSlots";
 import { useAttentionSound } from "./utils/attentionSound";
-import {
-  createFetchProviderConfigSyncClient,
-  type ProviderConfigSyncCapabilityPickerOutput,
-  type ProviderConfigSyncCapabilityPickerSource,
-  type ProviderConfigSyncFetchRoutes,
-} from "@better-agent/provider-config-sync-ui";
 import { ConfirmModal } from "./components/ConfirmModal";
 import { BypassPermissionDialog } from "./components/BypassPermissionDialog";
 import { PreSendAdvisoryDialog } from "./components/PreSendAdvisoryDialog";
@@ -116,7 +109,6 @@ import { uuidv4 } from "./lib/uuid";
 import { logPromptSend } from "./lib/promptSendLog";
 import { logDurable } from "./lib/frontendLogger";
 import { acquireOfflineFlushLock, holdTabPresence, liveTabIds } from "./lib/offlineFlushLock";
-import { openProviderConfigSyncPage } from "./lib/providerConfigSyncRoute";
 import { markFirstRunWizardSeen } from "./lib/firstRunWizard";
 import { SIDEBAR_MINIMIZED_WIDTH } from "./sidebarLayout";
 import {
@@ -128,7 +120,7 @@ import {
 } from "./lib/voiceActivation";
 import { useRoute, sessionPath, extensionPanelPath } from "./hooks/useRoute";
 import { ackSessionSeen, sessionRegistry, useSessionMeta } from "./lib/sessionRegistry";
-import type { CapabilityContext, ChatMessage, FileAttachment, FileDiscussion, FileFocus, OrchestrationMode, PastedImage, Project, Provider, QueuedPrompt, SendMode, Session, WorkerCreationPolicy, WorkerInfo } from "./types";
+import type { ChatMessage, FileAttachment, FileDiscussion, FileFocus, OrchestrationMode, PastedImage, Project, Provider, QueuedPrompt, SendMode, Session, WorkerCreationPolicy, WorkerInfo } from "./types";
 import { SharePicker } from "./components/SharePicker";
 import { useShareTarget } from "./hooks/useShareTarget";
 import { buildShareDraftPatch } from "./utils/shareAttach";
@@ -171,7 +163,6 @@ import { clearStoredToken } from "./bearerAuth";
 import { clearNativeServerUrl, hasNativeServerUrl } from "./nativeServerConfig";
 import { initMobilePushNotifications, teardownMobilePushNotifications } from "./utils/mobilePushNotifications";
 import "./styles/globals.css";
-import "@better-agent/provider-config-sync-ui/styles.css";
 
 import { API, WS_URL } from "./api";
 import { extBackendBase } from "./extensionIds";
@@ -185,23 +176,6 @@ type RightPanelTab = "files" | "canvas" | "notes" | "comments" | "todos" | "scre
 
 const SESSION_BRIDGE_API = `${API}/api/extensions/ofek-dev.session-bridge/backend`;
 const supervisorApi = () => extBackendBase("supervisor");
-const PROVIDER_CONFIG_SYNC_PATH = "/api/extensions/ofek-dev.provider-config-sync/backend";
-const PROVIDER_CONFIG_SYNC_ROUTES: ProviderConfigSyncFetchRoutes = {
-  projects: "/api/projects",
-  state: PROVIDER_CONFIG_SYNC_PATH,
-  settings: `${PROVIDER_CONFIG_SYNC_PATH}/settings`,
-  file: `${PROVIDER_CONFIG_SYNC_PATH}/file`,
-  restoreFile: `${PROVIDER_CONFIG_SYNC_PATH}/file/restore`,
-  capability: `${PROVIDER_CONFIG_SYNC_PATH}/capability`,
-  transferCapability: `${PROVIDER_CONFIG_SYNC_PATH}/capability/transfer`,
-  apply: `${PROVIDER_CONFIG_SYNC_PATH}/apply`,
-  autoSync: `${PROVIDER_CONFIG_SYNC_PATH}/auto-sync`,
-  capabilityPicker: `${PROVIDER_CONFIG_SYNC_PATH}/capability-picker`,
-  repository: `${PROVIDER_CONFIG_SYNC_PATH}/repository`,
-  repositoryInit: `${PROVIDER_CONFIG_SYNC_PATH}/repository/init`,
-  repositoryLoad: `${PROVIDER_CONFIG_SYNC_PATH}/repository/load`,
-  repositorySync: `${PROVIDER_CONFIG_SYNC_PATH}/repository/sync`,
-};
 const stopSessionOpId = (sessionId: string) => `session:stop:${sessionId}`;
 
 interface ViewingFile {
@@ -295,16 +269,6 @@ function mergeOpenSessionRecord(current: Session | undefined, incoming: Session)
   return keys.some((key) => current[key] !== merged[key]) ? merged : current;
 }
 
-const ProviderConfigSyncPage = lazyWithRetry(() =>
-  import("@better-agent/provider-config-sync-ui").then((m) => ({
-    default: m.ProviderConfigSyncPage,
-  })),
-);
-const ProviderCapabilityPicker = lazyWithRetry(() =>
-  import("@better-agent/provider-config-sync-ui").then((m) => ({
-    default: m.ProviderCapabilityPicker,
-  })),
-);
 const FileViewer = lazyWithRetry(() =>
   import("./components/FileViewer").then((m) => ({ default: m.FileViewer })),
 );
@@ -329,11 +293,9 @@ const CommunicationsView = lazyWithRetry(() =>
 const SchedulesPage = lazyWithRetry(() =>
   import("./components/SchedulesPage").then((m) => ({ default: m.SchedulesPage })),
 );
-const providerConfigSyncClient = createFetchProviderConfigSyncClient({
-  baseUrl: API,
-  credentials: "include",
-  routes: PROVIDER_CONFIG_SYNC_ROUTES,
-});
+const SettingsPage = lazyWithRetry(() =>
+  import("./components/SettingsPage").then((m) => ({ default: m.SettingsPage })),
+);
 
 type DonationRedirect = {
   status: "success" | "return";
@@ -419,27 +381,6 @@ function findSessionNode(tree: Session | null | undefined, id: string): Session 
     if (match) return match;
   }
   return undefined;
-}
-
-function capabilityContextFromPickerSource(
-  source: ProviderConfigSyncCapabilityPickerSource,
-  output?: ProviderConfigSyncCapabilityPickerOutput,
-): CapabilityContext {
-  const outputs = output ? [output] : source.outputs;
-  return {
-    source_id: source.source_id,
-    capability_id: source.capability.capability_id,
-    name: source.capability.name,
-    category: source.capability.category,
-    outputs: outputs
-      .filter((item) => item.content && !item.render_error)
-      .map((item) => ({
-        provider_kind: item.provider_kind,
-        provider_name: item.provider_name,
-        content_kind: item.content_kind,
-        content: item.content,
-      })),
-  };
 }
 
 export default function App() {
@@ -2081,8 +2022,6 @@ function AppMain({
   useProviderChanged(syncProvider);
   const [newSessionModalOpen, setNewSessionModalOpen] = useState(false);
   const [investigationCtx, setInvestigationCtx] = useState<InvestigationContext | undefined>(undefined);
-  const [turnCapabilityPickerOpen, setTurnCapabilityPickerOpen] = useState(false);
-  const [turnCapabilityContextsBySession, setTurnCapabilityContextsBySession] = useState<Record<string, CapabilityContext[]>>({});
   const persistDraftPatch = useCallback(async (
     sessionId: string,
     value: string,
@@ -2131,7 +2070,6 @@ function AppMain({
     model: string;
     cwd: string;
     orchestrationMode: OrchestrationMode;
-    capabilityContexts: CapabilityContext[];
     harnessProfileId?: string;
   };
   type PendingInitialPrompt = InitialPromptPayload & { clientId: string };
@@ -2156,7 +2094,6 @@ function AppMain({
         files: initial.files.length > 0 ? initial.files : undefined,
         orchestrationMode: initial.orchestrationMode,
         sendMode: "queue",
-        capabilityContexts: initial.capabilityContexts,
         harnessProfileId: initial.harnessProfileId,
         deferUntilTargetReady,
       });
@@ -2201,7 +2138,6 @@ function AppMain({
         "queue",
         undefined,
         pending.files.length > 0 ? pending.files : undefined,
-        pending.capabilityContexts,
         pending.harnessProfileId,
       );
       if (sent) return true;
@@ -2317,7 +2253,6 @@ function AppMain({
                 runner: queued.runner,
                 permission: queued.permission,
                 clientSessionId: queued.id,
-                capabilityContexts: entry.capabilityContexts,
                 harnessProfileId: queued.harness_profile_id || undefined,
                 folderId: queued.folder_id,
               });
@@ -2387,7 +2322,6 @@ function AppMain({
                 undefined,
                 undefined,
                 offlineFiles,
-                entry.capabilityContexts,
                 entry.harnessProfileId,
               );
               if (!sent) {
@@ -2432,7 +2366,6 @@ function AppMain({
             entry.sendMode,
             entry.sendTarget,
             offlineFiles,
-            entry.capabilityContexts,
             entry.harnessProfileId,
           );
           if (!sent) {
@@ -3149,7 +3082,7 @@ function AppMain({
     [currentSession, applySessionMetadata, clientId],
   );
 
-  /** Pop a provider-config-sync capability panel into the right side
+  /** Pop a capability config panel into the right side
    *  panel from an inline `open_config_panel` tool widget's button.
    *  Mirrors handleOpenFilePanel: optimistic applySessionMetadata +
    *  REST persist, backend-owned list broadcast to every tab. */
@@ -4838,7 +4771,6 @@ function AppMain({
       }
 
       const sessionId = currentSession.id;
-      const capabilityContexts = turnCapabilityContextsBySession[sessionId] ?? [];
       logPromptSend("app_send_prepare", {
         app_session_id: sessionId,
         client_id: clientIdForMsg,
@@ -4850,7 +4782,6 @@ function AppMain({
         prompt_length: sendForm.prompt.length,
         image_count: imagePayloads.length,
         file_count: filePayloads.length,
-        capability_context_count: capabilityContexts.length,
       });
       // Always add an optimistic user bubble. Backend will either
       // echo `user_message_persisted` (immediate dispatch) which
@@ -4905,7 +4836,6 @@ function AppMain({
         orchestrationMode: currentSession?.orchestration_mode ?? undefined,
         sendMode,
         sendTarget: currentSession?.supervisor_enabled ? sendTarget : undefined,
-        capabilityContexts,
       };
       // Buffer to durable localStorage FIRST so a reconnect/reload can replay
       // the action even if this tab never gets to dispatch it. `offlineQueued`
@@ -4951,13 +4881,6 @@ function AppMain({
           )
         );
         handleDraftClearImmediate(sessionId);
-        if (capabilityContexts.length > 0) {
-          setTurnCapabilityContextsBySession((prev) => {
-            const { [sessionId]: _drop, ...rest } = prev;
-            void _drop;
-            return rest;
-          });
-        }
         lastOpenFilesReminderKeyBySessionRef.current[sessionId] =
           final.openFilesStateKey;
         return true;
@@ -4975,7 +4898,6 @@ function AppMain({
         sendMode,
         currentSession?.supervisor_enabled ? sendTarget : undefined,
         filePayloads.length > 0 ? filePayloads : undefined,
-        capabilityContexts,
         currentSession?.harness_profile_id,
       );
 
@@ -5020,19 +4942,12 @@ function AppMain({
       // Clear the persisted draft (immediate, not debounced) so other
       // tabs see the textarea empty without waiting on the timer.
       handleDraftClearImmediate(sessionId);
-      if (capabilityContexts.length > 0) {
-        setTurnCapabilityContextsBySession((prev) => {
-          const { [sessionId]: _drop, ...rest } = prev;
-          void _drop;
-          return rest;
-        });
-      }
       lastOpenFilesReminderKeyBySessionRef.current[sessionId] =
         final.openFilesStateKey;
 
       return true;
     },
-    [currentSession, model, cwd, sendMessage, applySessionMetadata, setPendingForSession, appendPendingForSession, handleDraftClearImmediate, clearSessionInlineTags, appendPendingQueueDraft, takePendingQueueDraft, offlineQueue, claimOfflineActionForDispatch, sendTarget, turnCapabilityContextsBySession, projects, selectedProjectNodeId, navigate, queuedBySession, persistedQueuedPrompts, connected, getCurrentOpenFileSnapshots]
+    [currentSession, model, cwd, sendMessage, applySessionMetadata, setPendingForSession, appendPendingForSession, handleDraftClearImmediate, clearSessionInlineTags, appendPendingQueueDraft, takePendingQueueDraft, offlineQueue, claimOfflineActionForDispatch, sendTarget, projects, selectedProjectNodeId, navigate, queuedBySession, persistedQueuedPrompts, connected, getCurrentOpenFileSnapshots]
   );
 
   // One-time bypass-permission warning on the first prompt send. The user
@@ -5180,7 +5095,6 @@ function AppMain({
         "alter",
         currentSession.supervisor_enabled ? sendTarget : undefined,
         undefined,
-        undefined,
         currentSession.harness_profile_id,
       );
       if (!sent) {
@@ -5296,7 +5210,6 @@ function AppMain({
         images.length > 0 ? images : undefined,
         currentSession?.orchestration_mode ?? undefined,
         newPendingMsg.id,
-        undefined,
         undefined,
         undefined,
         undefined,
@@ -5660,7 +5573,6 @@ function AppMain({
         // top, so they stay visible without sticking there permanently.
         pinned: false,
         offline_pending: true,
-        capability_contexts: config.capabilityContexts,
         folder_id: config.folderId ?? null,
         ...(action === "create" && (initialPrompt || draftImages.length > 0)
           ? { draft_input: initialPrompt, draft_images: draftImages }
@@ -5674,7 +5586,6 @@ function AppMain({
         prompt: shouldSend ? initialPrompt : "",
         images: shouldSend && images.length ? images : undefined,
         files: shouldSend && files.length ? files : undefined,
-        capabilityContexts: config.capabilityContexts,
         harnessProfileId: config.harnessProfileId || undefined,
       });
       if (!offlineQueued) return false;
@@ -5745,7 +5656,6 @@ function AppMain({
             model: config.main.model,
             cwd: config.cwd,
             orchestrationMode: config.orchestrationMode,
-            capabilityContexts: config.capabilityContexts,
             harnessProfileId: config.harnessProfileId || undefined,
           };
           const durablePending = persistInitialPromptForSession(
@@ -5778,7 +5688,6 @@ function AppMain({
             reasoningEffort: config.main.reasoningEffort,
             runner: config.main.runner,
             permission: config.main.permission,
-            capabilityContexts: config.capabilityContexts,
             harnessProfileId: config.harnessProfileId || undefined,
             folderId: config.folderId,
           });
@@ -5822,7 +5731,6 @@ function AppMain({
           reasoningEffort: config.main.reasoningEffort,
           runner: config.main.runner,
           permission: config.main.permission,
-          capabilityContexts: config.capabilityContexts,
           harnessProfileId: config.harnessProfileId || undefined,
           folderId: config.folderId,
         });
@@ -6161,7 +6069,6 @@ function AppMain({
         cwd: picked.cwd,
         orchestrationMode:
           (picked.orchestration_mode as OrchestrationMode) ?? "team",
-        capabilityContexts: [],
         harnessProfileId: picked.harness_profile_id || undefined,
       }, true);
       if (!durablePending) return;
@@ -6677,12 +6584,6 @@ function AppMain({
           teamEnabled={builtinExtensions.team}
           credentialBrokerEnabled={builtinExtensions.credentialBroker}
           onEditHarnessDescriptionFile={startFileEditor}
-          providerConfigSyncEnabled={builtinExtensions.providerConfigSync}
-          onOpenProviderConfigSync={
-            builtinExtensions.providerConfigSync
-              ? () => openProviderConfigSyncPage(API)
-              : undefined
-          }
         />
       )}
       {authStatus === "authed" && route.kind === "share" && (
@@ -6693,24 +6594,6 @@ function AppMain({
           onPick={attachImagesToSession}
           onCancel={cancelShare}
         />
-      )}
-      {authStatus === "authed" && route.kind === "providerConfigSync" && builtinExtensions.providerConfigSync && (
-        <Suspense fallback={<LazySurfaceFallback />}>
-          <ProviderConfigSyncPage
-            open
-            cwd={currentSession?.cwd ?? null}
-            onClose={() => navigate("/")}
-            client={providerConfigSyncClient}
-            subscribeExternalChanges={(cb) => {
-              const offProvider = eventBus.subscribe("provider_config_sync_changed", () => cb());
-              const offExtensions = eventBus.subscribe("extensions_changed", () => cb());
-              return () => {
-                offProvider();
-                offExtensions();
-              };
-            }}
-          />
-        </Suspense>
       )}
       {authStatus === "authed" &&
         (route.kind === "session" || route.kind === "emptyProject" || route.kind === "extensionPanel") && (
@@ -7299,15 +7182,6 @@ function AppMain({
           const chatElement = (
             <ConfigPanelContext.Provider
               value={{
-                client: providerConfigSyncClient,
-                subscribeExternalChanges: (cb) => {
-                  const offProvider = eventBus.subscribe("provider_config_sync_changed", () => cb());
-                  const offExtensions = eventBus.subscribe("extensions_changed", () => cb());
-                  return () => {
-                    offProvider();
-                    offExtensions();
-                  };
-                },
                 open: handleOpenConfigPanel,
                 activeInlineId: activeInlineConfigId,
                 claimInline: claimInlineConfigPanel,
@@ -7490,25 +7364,6 @@ function AppMain({
                     }
                   : undefined
               }
-              onAddCapabilityToNextTurn={
-                builtinExtensions.providerConfigSync
-                  ? () => setTurnCapabilityPickerOpen(true)
-                  : undefined
-              }
-              nextTurnCapabilities={
-                currentSession
-                  ? turnCapabilityContextsBySession[currentSession.id] ?? []
-                  : []
-              }
-              onRemoveNextTurnCapability={(sourceId) => {
-                if (!currentSession) return;
-                setTurnCapabilityContextsBySession((prev) => ({
-                  ...prev,
-                  [currentSession.id]: (prev[currentSession.id] ?? []).filter(
-                    (item) => item.source_id !== sourceId,
-                  ),
-                }));
-              }}
               tags={tags}
               onAddTag={handleAddTag}
               onAdvSync={handleAdvSync}
@@ -7767,7 +7622,6 @@ function AppMain({
               undefined,
               sendOrch,
               clientId,
-              undefined,
               undefined,
               undefined,
               undefined,
@@ -8205,15 +8059,6 @@ function AppMain({
               <Suspense fallback={<LazySurfaceFallback />}>
                 <ConfigPanels
                   panels={currentSession?.open_config_panels ?? []}
-                  client={providerConfigSyncClient}
-                  subscribeExternalChanges={(cb) => {
-                    const offProvider = eventBus.subscribe("provider_config_sync_changed", () => cb());
-                    const offExtensions = eventBus.subscribe("extensions_changed", () => cb());
-                    return () => {
-                      offProvider();
-                      offExtensions();
-                    };
-                  }}
                   onClosePanel={handleCloseConfigPanel}
                 />
                 <FilePanels
@@ -8261,7 +8106,6 @@ function AppMain({
             initialProjectPath={askProposedProjectPath}
             initialNodeId={askProposedProjectNodeId}
             investigation={investigationCtx}
-            capabilityPickerClient={providerConfigSyncClient}
             teamEnabled={builtinExtensions.team}
             machineNodesEnabled={builtinExtensions.machineNodes}
             allowOfflineCreate={!connected}
@@ -8277,34 +8121,6 @@ function AppMain({
           onConfirm={(updates) => void handleConfirmRateLimitPick(updates)}
           onClose={() => setRateLimitPickFor(null)}
         />
-      )}
-      {turnCapabilityPickerOpen && currentSession && builtinExtensions.providerConfigSync && (
-        <div className="modal-overlay capability-picker-overlay" onClick={() => setTurnCapabilityPickerOpen(false)}>
-          <div className="modal-content capability-picker-modal" onClick={(e) => e.stopPropagation()}>
-            <Suspense fallback={<LazySurfaceFallback />}>
-              <ProviderCapabilityPicker
-                open
-                cwd={currentSession.cwd || selectedProjectPath || cwd}
-                client={providerConfigSyncClient}
-                onClose={() => setTurnCapabilityPickerOpen(false)}
-                onSelect={(source, output) => {
-                  const next = capabilityContextFromPickerSource(source, output);
-                  if (next.outputs.length === 0) return;
-                  setTurnCapabilityContextsBySession((prev) => ({
-                    ...prev,
-                    [currentSession.id]: [
-                      next,
-                      ...(prev[currentSession.id] ?? []).filter(
-                        (item) => item.source_id !== next.source_id,
-                      ),
-                    ],
-                  }));
-                  setTurnCapabilityPickerOpen(false);
-                }}
-              />
-            </Suspense>
-          </div>
-        </div>
       )}
       {projectSettingsCwd && (
         <ProjectSettings

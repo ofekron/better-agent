@@ -569,8 +569,8 @@ class SessionWSBroadcaster:
                 "open_file_panels": list(change.get("open_file_panels") or [])
             }
         elif kind == "open_config_panels_set":
-            # Mirrors open_panels_set for the provider-config-sync
-            # capability panels popped into the right side panel.
+            # Mirrors open_panels_set for config panels popped into the
+            # right side panel.
             patch = {
                 "open_config_panels": list(change.get("open_config_panels") or [])
             }

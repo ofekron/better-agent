@@ -45,26 +45,12 @@ def test_plain_run_sh_delegates_matching_checkout_to_bas() -> None:
     assert '[[ "$BAS_LINE" =~ ^[a-z0-9][a-z0-9_.-]{0,31}$ ]]' in source
 
 
-def test_run_sh_initializes_provider_config_sync_before_frontend_build() -> None:
-    source = _run_sh()
-
-    submodule_call = source.index("ensure_provider_config_sync_submodule")
-    frontend_build = source.index("build_frontend()")
-
-    assert submodule_call < frontend_build
-    assert "git -C \"$DIR\" submodule update --init provider-config-sync" in source
-
-
 def test_run_sh_installs_node_dependencies_before_frontend_build() -> None:
     source = _run_sh()
 
-    provider_install = source.index(
-        'sync_npm_project_deps "$DIR/provider-config-sync" "provider-config-sync"'
-    )
-    frontend_install = source.index('sync_npm_project_deps "$DIR/frontend" "frontend"')
+    frontend_install = source.index('sync_npm_project_deps "$DIR/frontend"')
     frontend_build = source.index("build_frontend()")
 
-    assert provider_install < frontend_build
     assert frontend_install < frontend_build
     assert "(cd \"$project_dir\" && npm ci)" in source
 
@@ -87,10 +73,8 @@ def test_run_sh_checks_base_prereqs_before_startup_work() -> None:
 
     prereq_call = source.index("ensure_base_prereqs")
     port_check = source.index('echo "Checking startup ports..."')
-    submodule_call = source.index("ensure_provider_config_sync_submodule")
 
     assert prereq_call < port_check
-    assert prereq_call < submodule_call
     assert "Run ./scripts/install-macos.sh, then run ./run.sh again." in source
     assert "git npm node curl" in source
     assert "port_in_use()" in source
@@ -114,7 +98,6 @@ if __name__ == "__main__":
     test_run_sh_uses_non_standard_backend_port_by_default()
     test_run_sh_without_bas_prefers_main_then_uses_current_checkout()
     test_plain_run_sh_delegates_matching_checkout_to_bas()
-    test_run_sh_initializes_provider_config_sync_before_frontend_build()
     test_run_sh_installs_node_dependencies_before_frontend_build()
     test_run_sh_exports_backend_port_for_mobile_candidate_generation()
     test_run_sh_does_not_prompt_for_an_unserved_frontend_port()

@@ -1848,8 +1848,6 @@ from starlette.middleware.sessions import SessionMiddleware       # noqa: E402
 
 app.include_router(auth_routes.router)
 
-import provider_config_sync_api  # noqa: E402
-app.include_router(provider_config_sync_api.router)
 import capability_api  # noqa: E402
 app.include_router(capability_api.router)
 import runtime_operation_api  # noqa: E402
@@ -1864,7 +1862,7 @@ marketplace_bridge_api.configure(
         "marketplace_bridge_changed",
         {"revision": revision},
     ),
-    lambda: coordinator.broadcast_global("extensions_changed", {}),
+    lambda: extension_api._broadcast_extension_changed(*extension_api.EXTENSION_CATALOG_TOPICS),
 )
 app.include_router(marketplace_bridge_api.router)
 import testape_api  # noqa: E402
@@ -4364,7 +4362,7 @@ async def patch_harness_profile_fields(profile_id: str, body: dict = Body(defaul
     except harness_profile_resolver.HarnessProfileResolutionError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if changes_global_state:
-        await coordinator.broadcast_global("extensions_changed", {})
+        await extension_api._broadcast_extension_changed("extension.config", "extension.harness.default")
     await _broadcast_harness_profiles_changed({
         "action": "fields_updated",
         "profile_id": response.get("id"),
@@ -4484,7 +4482,7 @@ async def set_global_disabled_builtin_tools(body: dict = Body(default={})):
         raise HTTPException(status_code=400, detail="disabled_builtin_tools must be a list")
     updated = await asyncio.to_thread(config_store.set_disabled_builtin_tools, tools)
     harness_profile_resolver.invalidate_cache()
-    await coordinator.broadcast_global("extensions_changed", {})
+    await extension_api._broadcast_extension_changed("extension.harness.default.disabled_builtin_tools")
     return {"disabled_builtin_tools": updated}
 
 
@@ -4500,7 +4498,10 @@ async def set_global_disabled_builtin_extensions(body: dict = Body(default={})):
     extension_ids = _api_disabled_builtin_extensions(body.get("disabled_builtin_extensions"))
     updated = await asyncio.to_thread(config_store.set_disabled_builtin_extensions, extension_ids)
     harness_profile_resolver.invalidate_cache()
-    await coordinator.broadcast_global("extensions_changed", {})
+    await extension_api._broadcast_extension_changed(
+        "extension.catalog",
+        "extension.harness.default.disabled_builtin_extensions",
+    )
     return {"disabled_builtin_extensions": updated}
 
 
@@ -13280,20 +13281,19 @@ async def _housekeeping_task() -> None:
                 "housekeeping: auto-updated %d extension(s)",
                 result["updated"],
             )
-            await coordinator.broadcast_global("extensions_changed", {})
+            await extension_api._broadcast_extension_changed(*extension_api.EXTENSION_CATALOG_TOPICS)
             import node_config_sync
             node_config_sync.notify_changed("extensions")
     except Exception:
         logger.exception("housekeeping: update_installed_extensions failed")
 
-    # 5. Self-heal extension instruction blocks: re-apply enabled extensions,
-    #    purge disabled/uninstalled ones from provider config files.
+    # 5. Reapply extension applied-config state on startup. Instruction content
+    #    is resolved per session/turn through temporal harness profiles, so there
+    #    are no on-disk instruction blocks to sweep.
     try:
-        swept = await _run_maintenance_phase(
+        await _run_maintenance_phase(
             "extension_instructions", extension_store.reconcile_all_instructions,
         )
-        if swept:
-            logger.info("housekeeping: swept %d orphan instruction block(s)", swept)
     except Exception:
         logger.exception("housekeeping: reconcile_all_instructions failed")
 
@@ -13308,17 +13308,7 @@ async def _housekeeping_task() -> None:
     except Exception:
         logger.exception("housekeeping: reconcile_runtime_skills failed")
 
-    # 7. Self-heal extension native MCP entries through Provider Config Sync.
-    try:
-        changed = await _run_maintenance_phase(
-            "extension_native_mcp", extension_store.reconcile_native_mcp_servers,
-        )
-        if changed:
-            logger.info("housekeeping: reconciled %d extension native MCP item(s)", changed)
-    except Exception:
-        logger.exception("housekeeping: reconcile_native_mcp_servers failed")
-
-    # 8. Pre-mint per-extension internal-loopback tokens so out-of-process
+    # 7. Pre-mint per-extension internal-loopback tokens so out-of-process
     #    native MCP launchers never race to create one.
     try:
         await _run_maintenance_phase(
@@ -16911,7 +16901,7 @@ async def internal_open_config_panel(
 
     Always INLINE: NO session state mutation. The persisted tool-call
     event on the assistant message is the source of truth — the frontend
-    renders an embedded provider-config-sync capability editor from it.
+    renders an embedded config panel editor from it.
     Popping it into the right side panel is a later user action via the
     inline widget's button (→ /api/sessions/.../config-panels). Returns
     success + the resolved panel so the agent gets a clean tool_result.
@@ -17529,7 +17519,7 @@ async def internal_marketplace(
     except extension_store.ExtensionError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if changed:
-        await coordinator.broadcast_global("extensions_changed", {})
+        await extension_api._broadcast_extension_changed(*extension_api.EXTENSION_CATALOG_TOPICS)
     return result
 
 
@@ -17654,32 +17644,6 @@ async def internal_agent_board_run_prompt(
     _AGENT_BOARD_DELIVERY_TASKS.add(task)
     task.add_done_callback(_AGENT_BOARD_DELIVERY_TASKS.discard)
     return {"scheduled": True}
-
-
-@app.post("/api/internal/provider-config-sync/broadcast")
-async def internal_provider_config_sync_broadcast(
-    body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
-):
-    _require_builtin_runtime_extension(extension_store.BUILTIN_PROVIDER_CONFIG_SYNC_EXTENSION_ID)
-    """Change webhook hit by the out-of-process provider-config-sync MCP
-    server (run as a stdio subprocess) after it writes a provider config
-    file. Re-broadcasts the fact to open frontend clients so they refetch
-    the active scope. The subprocess cannot share Better Agent's
-    in-process broadcast callback, so it POSTs here instead."""
-    if not _internal_authority_is_valid():
-        raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
-    await coordinator.broadcast_global(
-        "provider_config_sync_changed",
-        {
-            "scope": body.get("scope"),
-            "category": body.get("category"),
-            "capability_id": body.get("capability_id"),
-            "path": body.get("path"),
-            "cwd": body.get("cwd"),
-        },
-    )
-    return {"ok": True}
 
 
 def _resolve_session_bridge_delegation(body: dict, delegation_id: str = "") -> dict:
@@ -20846,16 +20810,6 @@ def frontend_dist_dir() -> Path:
         # extraction root `sys._MEIPASS` (see desktop/BetterAgent.spec).
         return Path(_sys._MEIPASS) / "frontend_dist"
     return Path(__file__).resolve().parent.parent / "frontend" / "dist"
-
-
-@app.get("/provider-config-sync", include_in_schema=False)
-@app.get("/provider-config-sync/", include_in_schema=False)
-async def provider_config_sync_spa_route():
-    _require_builtin_extension(extension_store.BUILTIN_PROVIDER_CONFIG_SYNC_EXTENSION_ID)
-    return FileResponse(
-        frontend_dist_dir() / "index.html",
-        headers=_NO_CACHE_HEADERS,
-    )
 
 
 # Placeholder served while run.sh builds the frontend on a cold clone (no built

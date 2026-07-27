@@ -1,7 +1,6 @@
 """The Better Agent capabilities builtin MCP exposes exactly the three
 management tools (list/load/release). This is the in-repo home for the
-capability-scoping glue (moved out of the standalone provider-config-sync
-package, which stays generic open-source).
+capability-scoping glue.
 """
 
 import os

@@ -121,7 +121,6 @@ def register_operations(register: Register) -> None:
         _route_handler("/api/internal/coordination/lock-ops"),
         _control_policy(),
     )
-    _register_provider_config_sync_tools(register)
     _register_marketplace_tools(register)
     _register_session_control_tools(register)
     _register_session_bridge_tools(register)
@@ -148,34 +147,6 @@ def _register(
         policy=policy,
         recovery_handler=recovery_handler,
     )
-
-
-def _register_provider_config_sync_tools(register: Register) -> None:
-    from provider_config_sync_backend.mcp_server import create_server
-
-    server = create_server()
-    tools = getattr(getattr(server, "_tool_manager", None), "_tools", None)
-    if not isinstance(tools, dict):
-        raise RuntimeError("Provider Config Sync tool registry is unavailable")
-    read_prefixes = ("get_", "list_", "read_")
-    for name, tool in sorted(tools.items()):
-        is_read = str(name).startswith(read_prefixes)
-        _register(
-            register,
-            "provider-config-sync-tools",
-            str(name),
-            tool.fn,
-            _callable_handler(tool.fn),
-            _read_policy() if is_read else _mutation_policy(),
-        )
-
-
-def _callable_handler(source: Callable[..., Any]):
-    async def handler(payload: BaseModel) -> Any:
-        result = source(**payload.model_dump(by_alias=True))
-        return await result if inspect.isawaitable(result) else result
-
-    return handler
 
 
 def _register_marketplace_tools(register: Register) -> None:

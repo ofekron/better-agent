@@ -65,11 +65,6 @@ def main() -> int:
         and 'user_facing=bool(_user_facing_extras and app_session_id)' in runner
     )
     check(
-        "provider-config-sync comes from private extension runtime configs",
-        'mcp_servers["provider-config-sync"] = provider_config_sync_mcp_server_config(' not in runner
-        and "runtime_mcp_server_configs(" in runner,
-    )
-    check(
         "project-updates comes from private extension runtime configs",
         "runtime_mcp_server_configs(" in runner
         and '"project-updates"' not in extension_registry,

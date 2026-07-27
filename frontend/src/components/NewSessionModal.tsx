@@ -2,7 +2,6 @@ import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import type { KeyboardEvent } from "react";
 import { useTranslation } from "react-i18next";
 import type {
-  CapabilityContext,
   FileAttachment,
   HarnessProfile,
   NodeSnapshot,
@@ -14,12 +13,6 @@ import type {
   ReasoningEffort,
   Permission,
 } from "../types";
-import {
-  ProviderCapabilityPicker,
-  type ProviderConfigSyncApiClient,
-  type ProviderConfigSyncCapabilityPickerOutput,
-  type ProviderConfigSyncCapabilityPickerSource,
-} from "@better-agent/provider-config-sync-ui";
 import { trackedFetch } from "../progress/store";
 import { useMachines } from "../hooks/useMachines";
 import { useLocalNodeId } from "../hooks/useLocalNodeId";
@@ -85,7 +78,6 @@ interface SessionConfig {
   initialPrompt: string;
   initialImages: PastedImage[];
   initialFiles: FileAttachment[];
-  capabilityContexts: CapabilityContext[];
   harnessProfileId: string;
   /** Optional folder to file the new session into. `null` means "no
    * folder" (Unfiled) — a valid, persistable choice. Persisted across
@@ -144,7 +136,6 @@ interface Props {
   /** Pre-filled investigation context (screenshot + prompt). When present,
    *  shows an editable prompt textarea at the top of the modal. */
   investigation?: InvestigationContext;
-  capabilityPickerClient: Pick<ProviderConfigSyncApiClient, "listCapabilityPickerSources">;
   teamEnabled?: boolean;
   machineNodesEnabled?: boolean;
   allowOfflineCreate?: boolean;
@@ -231,27 +222,6 @@ function formatFileSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-function capabilityContextFromPickerSource(
-  source: ProviderConfigSyncCapabilityPickerSource,
-  output?: ProviderConfigSyncCapabilityPickerOutput,
-): CapabilityContext {
-  const outputs = output ? [output] : source.outputs;
-  return {
-    source_id: source.source_id,
-    capability_id: source.capability.capability_id,
-    name: source.capability.name,
-    category: source.capability.category,
-    outputs: outputs
-      .filter((item) => item.content && !item.render_error)
-      .map((item) => ({
-        provider_kind: item.provider_kind,
-        provider_name: item.provider_name,
-        content_kind: item.content_kind,
-        content: item.content,
-      })),
-  };
 }
 
 function resolveReasoningEffort(
@@ -566,7 +536,6 @@ export function NewSessionModal({
   initialProjectPath,
   initialNodeId,
   investigation,
-  capabilityPickerClient,
   teamEnabled = true,
   machineNodesEnabled = true,
   allowOfflineCreate = false,
@@ -585,14 +554,12 @@ export function NewSessionModal({
   const [discardPromptOpen, setDiscardPromptOpen] = useState(false);
   const [initialImages, setInitialImages] = useState<PastedImage[]>([]);
   const [initialFiles, setInitialFiles] = useState<FileAttachment[]>([]);
-  const [capabilityContexts, setCapabilityContexts] = useState<CapabilityContext[]>([]);
   const [harnessProfileId, setHarnessProfileId] = useState("");
   // File Edit's availability derives purely from whether the
   // "ofek-dev.file-edit" extension is enabled on the currently selected
   // harness profile (Default when none is picked) — refetched whenever the
   // profile selection changes.
   const [fileEditExtensionEnabled, setFileEditExtensionEnabled] = useState(true);
-  const [capabilityPickerOpen, setCapabilityPickerOpen] = useState(false);
   const attachmentInputRef = useRef<HTMLInputElement>(null);
   // Prompt text as last rendered + the dictated portion already merged into it.
   const promptRef = useRef("");
@@ -657,7 +624,6 @@ export function NewSessionModal({
     dictatedRef.current = "";
     setInitialImages(investigation?.images ?? []);
     setInitialFiles(investigation?.files ?? []);
-    setCapabilityContexts([]);
     setHarnessProfileId(defaults.harnessProfileId ?? "");
     // Prefer the Ask flow's proposed project, else fall back to defaultCwd
     // (the project currently selected in the sidebar), else first project.
@@ -887,7 +853,6 @@ export function NewSessionModal({
         initialPrompt: promptOverride ?? initialPrompt,
         initialImages,
         initialFiles,
-        capabilityContexts,
         harnessProfileId,
         folderId,
       };
@@ -1221,33 +1186,6 @@ export function NewSessionModal({
             />
           </div>
 
-          <div className="ns-modal-section">
-            <div className="ns-modal-section-title">{t("newSession.capabilities", "Capabilities")}</div>
-            <button
-              type="button"
-              className="btn-secondary ns-attach-btn"
-              onClick={() => setCapabilityPickerOpen(true)}
-            >
-              <Icon name="sparkles" size={14} /> {t("newSession.addCapability", "Add capability")}
-            </button>
-            {capabilityContexts.length > 0 && (
-              <div className="capability-context-list">
-                {capabilityContexts.map((capability) => (
-                  <span key={capability.source_id} className="capability-context-chip">
-                    {capability.name}
-                    <button
-                      type="button"
-                      onClick={() => setCapabilityContexts((prev) => prev.filter((item) => item.source_id !== capability.source_id))}
-                      aria-label={`Remove ${capability.name}`}
-                    >
-                      ×
-                    </button>
-                  </span>
-                ))}
-              </div>
-            )}
-          </div>
-
           {showPicker && (
             <MachineNodePicker
               machines={machines}
@@ -1302,27 +1240,6 @@ export function NewSessionModal({
         }}
         onClose={() => setFolderPopover(null)}
       />
-    )}
-    {capabilityPickerOpen && (
-      <div className="modal-overlay capability-picker-overlay" onClick={() => setCapabilityPickerOpen(false)}>
-        <div className="modal-content capability-picker-modal" onClick={(e) => e.stopPropagation()}>
-          <ProviderCapabilityPicker
-            open
-            cwd={cwd || defaultCwd}
-            client={capabilityPickerClient}
-            onClose={() => setCapabilityPickerOpen(false)}
-            onSelect={(source, output) => {
-              const next = capabilityContextFromPickerSource(source, output);
-              if (next.outputs.length === 0) return;
-              setCapabilityContexts((prev) => [
-                next,
-                ...prev.filter((item) => item.source_id !== next.source_id),
-              ]);
-              setCapabilityPickerOpen(false);
-            }}
-          />
-        </div>
-      </div>
     )}
     <ConfirmModal
       open={discardPromptOpen}

@@ -25,8 +25,6 @@
     "cap:prod:android": "BA_CAP_PORT=${BA_BACKEND_PORT:-${BETTER_AGENT_BACKEND_PORT:-${BETTER_CLAUDE_BACKEND_PORT:-18765}}}; BA_CAP_URL=${CAPACITOR_SERVER_URL:-${VITE_API_URL:?Set CAPACITOR_SERVER_URL or VITE_API_URL explicitly - no default server URL is baked in}}; VITE_API_URL=$BA_CAP_URL CAPACITOR_SERVER_URL=$BA_CAP_URL vite build && CAPACITOR_SERVER_URL=$BA_CAP_URL node scripts/cap-sync.mjs && npx cap open android"
   },
   "dependencies": {
-    "@better-agent/provider-config-sync-core": "file:../vendor/provider-config-sync/0.1.0/better-agent-provider-config-sync-core-0.1.0.tgz",
-    "@better-agent/provider-config-sync-ui": "file:../vendor/provider-config-sync/0.1.0/better-agent-provider-config-sync-ui-0.1.0.tgz",
     "@monaco-editor/react": "^4.7.0",
     "@types/papaparse": "^5.5.2",
     "@uiw/react-markdown-preview": "^5.2.0",

@@ -822,8 +822,6 @@ def set_disabled_builtin_extensions(extension_ids: list[str]) -> list[str]:
     state = _load_state()
     state["disabled_builtin_extensions"] = normalized
     _save_state(state)
-    import extension_store
-    extension_store.reconcile_native_mcp_servers()
     return normalized
 
 

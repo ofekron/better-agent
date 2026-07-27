@@ -110,8 +110,6 @@ def test_runtime_unready_extensions_block_routes(client: TestClient) -> None:
     checks = [
         ("post", "/api/internal/project-structure-edit/status", None, {"cwd": str(TMP_HOME)}, "project-structure without internal LLM defaults"),
         ("post", "/api/internal/ask-ui/search", None, {"query": "anything"}, "Ask without internal LLM defaults"),
-        ("get", "/api/internal/provider-config-sync/capability-picker", None, None, "provider config sync without review provider"),
-        ("post", "/api/internal/provider-config-sync/broadcast", None, {}, "provider config sync internal broadcast without review provider"),
     ]
     for method, path, params, payload, label in checks:
         if method == "post":
@@ -275,7 +273,6 @@ def test_disabled_misc_extensions_block_routes(client: TestClient) -> None:
     check(response.status_code == 404, "disabled coordination blocks lock_ops")
     checks = [
         (extension_store.extension_id_for_role('credential-broker'), "post", "/api/internal/credential-ui/pending", {}),
-        (extension_store.BUILTIN_PROVIDER_CONFIG_SYNC_EXTENSION_ID, "get", "/api/internal/provider-config-sync/capability-picker", None),
         (extension_store.extension_id_for_role('supervisor'), "post", "/api/internal/supervisor/default-prompt", {}),
         # Regression (H1): agent-board run-prompt MUST be runtime-gated. Without
         # the gate, a pure-public checkout (constant None) lets any core-token

@@ -53,7 +53,7 @@ def test_tracked_production_and_tests_do_not_name_private_sibling() -> None:
 def test_capability_only_extensions_do_not_request_raw_loopback() -> None:
     import json
 
-    capability_only = ("ask", "marketplace", "provider-config-sync", "session-control", "session-bridge")
+    capability_only = ("ask", "marketplace", "session-control", "session-bridge")
     for name in capability_only:
         manifest = json.loads((ROOT / "extensions" / name / "better-agent-extension.json").read_text(encoding="utf-8"))
         permissions = manifest["permissions"]

@@ -10,7 +10,6 @@ export type Route =
   | { kind: "machines" }
   | { kind: "settings" }
   | { kind: "share" }
-  | { kind: "providerConfigSync" }
   | { kind: "analytics" }
   | { kind: "communications" }
   | { kind: "schedules" }
@@ -57,9 +56,6 @@ export function parseRoutePath(pathname: string): Route {
   }
   if (pathname === "/share" || pathname === "/share/") {
     return { kind: "share" };
-  }
-  if (pathname === "/provider-config-sync" || pathname === "/provider-config-sync/") {
-    return { kind: "providerConfigSync" };
   }
   const m = pathname.match(/^\/s\/([^/]+)\/?$/);
   if (m) {

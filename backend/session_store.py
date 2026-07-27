@@ -49,6 +49,7 @@ from typing import Callable, Iterable, Iterator, Optional
 import config_store
 import perf
 import messages_delta_compaction
+import harness_profile_resolver
 from grouped_durability_writer import DurabilityReceipt, GroupedDurabilityWriter
 from root_change_wal import RootChange, RootChangeOwner, RootChangeWal
 from i18n import t
@@ -4375,6 +4376,15 @@ def _migrate_session(session: dict, ctx: Optional[dict] = None) -> dict:
     session.setdefault("draft_images", [])
     session.setdefault("capability_contexts", [])
     session.setdefault("harness_profile_id", "")
+    # Migrate from profile_id to profile_snapshot for existing sessions via
+    # the authoritative resolver/lifecycle (deterministic failure handling).
+    if session.get("harness_profile_id") and not session.get("harness_profile_snapshot"):
+        if resolve_profile_snapshot(
+            session, session["harness_profile_id"], clear_missing_id=True
+        ) and ctx is not None:
+            ctx.setdefault("dirty", [False])[0] = True
+    session.setdefault("harness_profile_snapshot", None)
+    session.setdefault("turn_harness_profile_snapshot", None)
     session.setdefault("working_mode", None)
     session.setdefault("working_mode_meta", None)
     session.setdefault("browser_harness_enabled", True)
@@ -4670,6 +4680,8 @@ def create_session(
         "queued_prompts": [],
         "capability_contexts": [],
         "harness_profile_id": str(harness_profile_id or "").strip(),
+        "harness_profile_snapshot": None,  # NEW: resolved profile data
+        "turn_harness_profile_snapshot": None,  # NEW: temporal profile for current turn
         "draft_input": "",
         "draft_input_seq": 0,
         "draft_images": [],
@@ -4733,12 +4745,63 @@ def create_session(
             for item in disabled_runtime_skills
             if str(item or "").strip()
         ))
+    # Resolve and store harness profile snapshot via the authoritative
+    # resolver/lifecycle. ``clear_missing_id=False`` because the caller
+    # supplied this id; a missing-profile result is surfaced by the helper.
+    if harness_profile_id:
+        resolve_profile_snapshot(
+            session, harness_profile_id, clear_missing_id=False
+        )
     # Route through `write_session_full` so the single write funnel
     # (and its `_upsert_summary` hook) covers fresh sessions too.
     # `bump_updated_at=False` because the in-memory record already
     # carries the just-set `updated_at` from above.
     write_session_full(session, bump_updated_at=False)
     return session
+
+
+def resolve_profile_snapshot(
+    session: dict, profile_id: str, *, clear_missing_id: bool
+) -> bool:
+    """Resolve the harness-profile snapshot for ``profile_id`` via the
+    authoritative resolver and store it on ``session``.
+
+    Deterministic failure handling — never silently swallows:
+      * ``HarnessProfileMissingError`` (profile was deleted): the stale
+        ``harness_profile_id`` is cleared (when ``clear_missing_id``) and the
+        snapshot set to ``None`` so the session never persists a profile
+        reference whose snapshot cannot resolve.
+      * any other resolution error: surfaced at ERROR level (session + profile
+        id + traceback); snapshot set to ``None`` so legacy fallback applies.
+    Returns True iff a snapshot was stored.
+    """
+    try:
+        snapshot = harness_profile_resolver.resolve_for_session(
+            session=session, profile_id=profile_id
+        )
+    except harness_profile_resolver.HarnessProfileMissingError:
+        _logger.warning(
+            "session_store: harness profile %r not found; clearing stale "
+            "reference (session %s)",
+            profile_id,
+            session.get("id"),
+        )
+        if clear_missing_id:
+            session["harness_profile_id"] = ""
+        session["harness_profile_snapshot"] = None
+        return False
+    except Exception:
+        _logger.exception(
+            "session_store: harness profile %r failed to resolve (session %s)",
+            profile_id,
+            session.get("id"),
+        )
+        session["harness_profile_snapshot"] = None
+        return False
+    if snapshot:
+        session["harness_profile_snapshot"] = snapshot
+        return True
+    return False
 
 
 def _migrate_and_persist(root: dict) -> dict:

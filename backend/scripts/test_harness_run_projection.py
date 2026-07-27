@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 import sys
-import types
 from pathlib import Path
 
 
@@ -10,12 +9,6 @@ HERE = Path(__file__).resolve().parent
 BACKEND = HERE.parent
 if str(BACKEND) not in sys.path:
     sys.path.insert(0, str(BACKEND))
-
-if "provider_config_sync_backend" not in sys.modules:
-    pcs_pkg = types.ModuleType("provider_config_sync_backend")
-    pcs_pkg.api = types.SimpleNamespace(KNOWN_PROVIDER_KINDS=set())
-    sys.modules["provider_config_sync_backend"] = pcs_pkg
-    sys.modules["provider_config_sync_backend.api"] = pcs_pkg.api
 
 import harness_run_projection
 import harness_profile_resolver

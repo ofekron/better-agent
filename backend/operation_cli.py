@@ -18,7 +18,6 @@ _MAINTAINED_EXTENSION_GROUPS = frozenset(
     {
         "better-agent-coordination",
         "better-agent-marketplace",
-        "better-agent-provider-config-sync",
         "better-agent-session-bridge",
         "better-agent-session-control",
     }

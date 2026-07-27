@@ -35,11 +35,10 @@ export default defineConfig(({ mode }) => ({
             return 'vendor-monaco'
           }
           if (
-            id.includes('/@better-agent/provider-config-sync-') ||
             id.includes('/diff/') ||
             id.includes('/codemirror/')
           ) {
-            return 'vendor-provider-sync'
+            return 'vendor-text-editors'
           }
           if (
             id.includes('/react-markdown/') ||

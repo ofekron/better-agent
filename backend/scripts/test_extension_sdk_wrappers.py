@@ -1,7 +1,7 @@
 """Path + payload checks for the generic-core + delegation SDK wrappers and the
 inter-extension ``call_extension`` primitive. Feature-specific capabilities
 (requirements, scheduler, credentials, browser-harness, project-updates,
-continuation-recall, provider-config-sync) are intentionally NOT in the shared
+continuation-recall) are intentionally NOT in the shared
 SDK — they live in per-extension SDKs reached via ``call_extension``.
 
 Run standalone:  python scripts/test_extension_sdk_wrappers.py

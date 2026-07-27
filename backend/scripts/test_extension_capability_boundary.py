@@ -227,13 +227,8 @@ def test_switch_capability_runtime_gets_identity_token(monkeypatch) -> None:
 def test_capability_only_token_cannot_reach_other_internal_routes(monkeypatch) -> None:
     import main
 
-    original_broadcast = capability_api._ACTIONS[("provider-config-sync", "change.broadcast")]
     capability_api._ACTIONS[("switch-control", "test.ping")] = capability_api._Action(
         capability_api._StrictPayload,
-        lambda _payload: {"ok": True},
-    )
-    capability_api._ACTIONS[("provider-config-sync", "change.broadcast")] = capability_api._Action(
-        capability_api._ProviderConfigBroadcastPayload,
         lambda _payload: {"ok": True},
     )
     records = {
@@ -245,21 +240,12 @@ def test_capability_only_token_cannot_reach_other_internal_routes(monkeypatch) -
             },
             "entitlement": {"status": "not_required"},
         },
-        "ofek-dev.provider-config-sync": {
-            "enabled": True,
-            "manifest": {
-                "id": "ofek-dev.provider-config-sync",
-                "permissions": {"capabilities": ["provider-config-sync.change.broadcast"]},
-            },
-            "entitlement": {"status": "not_required"},
-        },
     }
     original_get = capability_api.extension_store.get_extension
     original_active = capability_api.extension_store.is_extension_active
     monkeypatch.setattr(capability_api.extension_store, "get_extension", lambda extension_id: records.get(extension_id) or original_get(extension_id))
     monkeypatch.setattr(capability_api.extension_store, "is_extension_active", lambda extension_id: extension_id in records or original_active(extension_id))
     token = capability_api.extension_token_registry.mint("ofek-dev.switch-control")
-    pcs_token = capability_api.extension_token_registry.mint("ofek-dev.provider-config-sync")
     client = TestClient(main.app)
     try:
         allowed = client.post(
@@ -272,26 +258,9 @@ def test_capability_only_token_cannot_reach_other_internal_routes(monkeypatch) -
             headers={"X-Internal-Token": token},
             json={},
         )
-        pcs_allowed = client.post(
-            "/api/internal/capabilities/invoke",
-            headers={"X-Internal-Token": pcs_token},
-            json={
-                "capability": "provider-config-sync",
-                "action": "change.broadcast",
-                "payload": {"scope": "global", "category": "mcp", "capability_id": "x", "path": "", "cwd": ""},
-            },
-        )
-        pcs_denied = client.post(
-            "/api/internal/extension-settings",
-            headers={"X-Internal-Token": pcs_token},
-            json={},
-        )
         assert allowed.status_code == 200
         assert denied.status_code == 403
-        assert pcs_allowed.status_code == 200
-        assert pcs_denied.status_code == 403
         assert denied.json()["detail"] == "internal route requires internal_loopback permission"
     finally:
         client.close()
         capability_api._ACTIONS.pop(("switch-control", "test.ping"), None)
-        capability_api._ACTIONS[("provider-config-sync", "change.broadcast")] = original_broadcast

@@ -123,8 +123,21 @@ export type WSEventType =
   // owns the registry projection.
   | "provider_install_progress"
   | "provider_install_finished"
-  | "provider_config_sync_changed"
-  | "extensions_changed"
+  | "extension.catalog"
+  | "extension.config"
+  | "extension.config.settings"
+  | "extension.config.instructions"
+  | "extension.config.ui_settings"
+  | "extension.config.internal_llm"
+  | "extension.config.permissions"
+  | "extension.config.mcp"
+  | "extension.config.skills"
+  | "extension.config.native_exposure"
+  | "extension.ui"
+  | "extension.ui.frontend_modules"
+  | "extension.harness.default"
+  | "extension.harness.default.disabled_builtin_extensions"
+  | "extension.harness.default.disabled_builtin_tools"
   // The set of remote extensions with an available update changed —
   // frontend refetches `/api/extensions/updates`.
   | "extension_updates_changed"
@@ -1058,9 +1071,9 @@ export interface Session {
    * right-panel viewer. Pulled via the session REST snapshot, pushed
    * via `session_metadata_updated` (same channel as inline_tags). */
   open_file_panels?: OpenFilePanel[];
-  /** Provider-config-sync capability panels popped into the right side
-   *  panel from an inline `open_config_panel` tool widget. Backend-owned,
-   *  broadcast via `session_metadata_updated` (kind open_config_panels_set). */
+  /** Config panels popped into the right side panel from an inline
+   *  `open_config_panel` tool widget. Backend-owned, broadcast via
+   *  `session_metadata_updated` (kind open_config_panels_set). */
   open_config_panels?: OpenConfigPanel[];
   /** In-progress chat input for this session. Persisted on the backend
    * via debounced PATCH /api/sessions/{id}/draft, broadcast via

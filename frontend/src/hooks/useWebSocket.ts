@@ -1,7 +1,6 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 import type {
   ChatMessage,
-  CapabilityContext,
   OpenFilePanel,
   OrchestrationMode,
   RunInfo,
@@ -381,7 +380,6 @@ interface UseWebSocketReturn {
     sendMode?: SendMode | null,
     sendTarget?: "worker" | "supervisor" | null,
     files?: FilePayload[],
-    capabilityContexts?: CapabilityContext[],
     harnessProfileId?: string,
   ) => boolean;
   stopStreaming: (appSessionId: string) => boolean;
@@ -1618,7 +1616,6 @@ export function useWebSocket(
       sendMode?: SendMode | null,
       sendTarget?: "worker" | "supervisor" | null,
       files?: FilePayload[],
-      capabilityContexts?: CapabilityContext[],
       harnessProfileId?: string,
     ) => {
       const wsState = wsRef.current?.readyState ?? -1;
@@ -1631,7 +1628,6 @@ export function useWebSocket(
         prompt_length: prompt.length,
         image_count: images?.length ?? 0,
         file_count: files?.length ?? 0,
-        capability_context_count: capabilityContexts?.length ?? 0,
         harness_profile_id: harnessProfileId || null,
         ws_state: wsState,
         is_streaming: isStreaming,
@@ -1670,7 +1666,6 @@ export function useWebSocket(
           client_id: clientId || null,
           send_mode: sendMode || undefined,
           send_target: sendTarget || undefined,
-          capability_contexts: capabilityContexts && capabilityContexts.length > 0 ? capabilityContexts : undefined,
           harness_profile_id: wireHarnessProfileId(harnessProfileId),
         });
       } catch (error) {

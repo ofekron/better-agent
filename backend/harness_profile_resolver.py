@@ -86,6 +86,35 @@ def _run_snapshot_cache_put(key: tuple[Any, ...], value: dict[str, Any]) -> dict
     return value
 
 
+def _enforce_cross_provider_parity(snapshot: dict[str, Any]) -> dict[str, Any]:
+    """Validate cross-provider consistency of a resolved snapshot.
+
+    Provider scoping is owned by the canonical per-provider resolution path
+    (``_provider_context_blocks`` fans each section out to its declared
+    ``providers``; an empty list means every provider kind). This function
+    must NOT fabricate parity by copying one provider's content into another
+    -- provider-specific content differs by design, and copying it would
+    inject another provider's instructions where they do not apply.
+
+    Instead it validates structure and fails closed on a genuine
+    determinism bug: a capability context whose ``outputs`` contain more
+    than one entry for the same provider kind (ambiguous resolution).
+    """
+    for ctx in snapshot.get("capability_contexts") or []:
+        seen: set[str] = set()
+        for out in ctx.get("outputs") or []:
+            kind = out.get("provider_kind")
+            if not kind:
+                continue
+            if kind in seen:
+                raise HarnessProfileResolutionError(
+                    f"Capability context {ctx.get('source_id')!r} has duplicate "
+                    f"output for provider {kind!r}"
+                )
+            seen.add(kind)
+    return snapshot
+
+
 def _selected_package_fingerprints(extension_ids: Any) -> tuple[tuple[str, str | None], ...]:
     fingerprints: list[tuple[str, str | None]] = []
     for extension_id in sorted(str(item) for item in extension_ids if str(item or "").strip()):
@@ -637,10 +666,9 @@ def _provider_context_blocks(blocks: list[dict[str, Any]]) -> list[dict[str, Any
     sections that apply to that provider kind.
 
     A manifest section may declare `providers` (validated by
-    `extension_store`); the file-sync path already honors it via
-    `extension_instructions._sections_for_level`, and this is the same filter
-    for the run path, so a provider-scoped section never reaches a provider
-    outside its scope. An empty/absent list means every provider kind.
+    `extension_store`); this filter honors that scope on the run path so a
+    provider-scoped section never reaches a provider outside its scope. An
+    empty/absent list means every provider kind.
     """
     if not blocks:
         return []
@@ -724,6 +752,25 @@ def resolve_for_session(
     ).strip()
     if not selected_id:
         return None
+
+    base_snapshot = session.get("harness_profile_snapshot")
+    temporal_snapshot = session.get("turn_harness_profile_snapshot")
+
+    # A stored snapshot is valid only for the profile it resolved. Explicit
+    # reassignment (including back to default) must resolve the newly selected
+    # profile instead of retaining the previous profile's capabilities.
+    if (
+        isinstance(base_snapshot, dict)
+        and str(base_snapshot.get("profile_id") or "").strip() == selected_id
+    ):
+        if temporal_snapshot:
+            merged = merge_profile_snapshots(base_snapshot, temporal_snapshot)
+        else:
+            merged = base_snapshot
+
+        merged = _enforce_cross_provider_parity(merged)
+        return merged
+
     active_capability_ids = tuple(
         str(item)
         for item in session.get("active_capability_ids") or []
@@ -872,3 +919,123 @@ def resolve_for_session(
         # re-enable), so it is never cached — the next resolve re-reads.
         return snapshot
     return _run_snapshot_cache_put(cache_key, snapshot)
+
+
+def merge_profile_snapshots(
+    base: dict,  # session harness_profile_snapshot
+    temporal: dict | None  # turn_harness_profile_snapshot
+) -> dict:
+    """Merge temporal profile into base profile for turn execution.
+
+    Turn-level capabilities are additive to session-level capabilities.
+    For conflicts, temporal capabilities take precedence.
+    """
+    if not temporal:
+        return base
+
+    # Start with base as foundation
+    merged = copy.deepcopy(base)
+
+    # Merge capability contexts (additive)
+    base_capability_contexts = list(merged.get("capability_contexts") or [])
+    temporal_capability_contexts = list(temporal.get("capability_contexts") or [])
+
+    # Dedupe by source_id, temporal wins
+    capability_contexts_by_source = {}
+    for ctx in base_capability_contexts:
+        capability_contexts_by_source[ctx.get("source_id")] = ctx
+    for ctx in temporal_capability_contexts:
+        capability_contexts_by_source[ctx.get("source_id")] = ctx
+
+    merged["capability_contexts"] = list(capability_contexts_by_source.values())
+
+    # Merge extension instances (additive MCP servers, skills, instructions)
+    base_extension_instances = dict(merged.get("extension_instances") or {})
+    temporal_extension_instances = dict(temporal.get("extension_instances") or {})
+
+    for ext_id, temporal_instance in temporal_extension_instances.items():
+        if ext_id not in base_extension_instances:
+            # New extension from temporal profile
+            base_extension_instances[ext_id] = temporal_instance
+        else:
+            # Merge existing extension
+            base_instance = base_extension_instances[ext_id]
+
+            # Merge MCP servers (additive)
+            base_mcps = set(base_instance.get("mcp_servers") or [])
+            temporal_mcps = set(temporal_instance.get("mcp_servers") or [])
+            base_instance["mcp_servers"] = list(base_mcps | temporal_mcps)
+
+            # Merge skills (additive)
+            base_skills = set(base_instance.get("skills") or [])
+            temporal_skills = set(temporal_instance.get("skills") or [])
+            base_instance["skills"] = list(base_skills | temporal_skills)
+
+            # Merge instruction names (additive)
+            base_instructions = set(base_instance.get("instruction_names") or [])
+            temporal_instructions = set(temporal_instance.get("instruction_names") or [])
+            base_instance["instruction_names"] = list(base_instructions | temporal_instructions)
+
+            # Merge settings overlays (temporal wins for conflicts)
+            base_overlays = dict(base_instance.get("setting_overlays") or {})
+            temporal_overlays = dict(temporal_instance.get("setting_overlays") or {})
+            base_overlays.update(temporal_overlays)
+            base_instance["setting_overlays"] = base_overlays
+
+    merged["extension_instances"] = base_extension_instances
+
+    # Provider transport consumes this canonical resolved map. Temporal
+    # settings override base settings per extension and key.
+    extension_setting_overlays = copy.deepcopy(
+        merged.get("extension_setting_overlays") or {}
+    )
+    for extension_id, settings in (
+        temporal.get("extension_setting_overlays") or {}
+    ).items():
+        current = dict(extension_setting_overlays.get(extension_id) or {})
+        current.update(copy.deepcopy(settings or {}))
+        extension_setting_overlays[extension_id] = current
+    merged["extension_setting_overlays"] = extension_setting_overlays
+
+    launcher_projection = copy.deepcopy(merged.get("launcher_projection") or {})
+    launcher_projection["extension_setting_overlays"] = copy.deepcopy(
+        extension_setting_overlays
+    )
+    merged["launcher_projection"] = launcher_projection
+
+    # Merge disabled lists. Disabled = restriction. A turn profile may only
+    # ADD restrictions on top of the session profile, never relax one: a tool
+    # the session disabled stays disabled regardless of the turn overlay.
+    # Union (not intersection) preserves the session-level boundary.
+    base_disabled_tools = set(merged.get("disabled_builtin_tools") or [])
+    temporal_disabled_tools = set(temporal.get("disabled_builtin_tools") or [])
+    merged["disabled_builtin_tools"] = list(base_disabled_tools | temporal_disabled_tools)
+
+    base_disabled_extensions = set(merged.get("disabled_builtin_extensions") or [])
+    temporal_disabled_extensions = set(temporal.get("disabled_builtin_extensions") or [])
+    merged["disabled_builtin_extensions"] = list(base_disabled_extensions | temporal_disabled_extensions)
+
+    base_disabled_skills = set(merged.get("disabled_runtime_skills") or [])
+    temporal_disabled_skills = set(temporal.get("disabled_runtime_skills") or [])
+    merged["disabled_runtime_skills"] = list(base_disabled_skills | temporal_disabled_skills)
+
+    # Merge provider run config (temporal wins)
+    base_provider_config = dict(merged.get("provider_run_config") or {})
+    temporal_provider_config = dict(temporal.get("provider_run_config") or {})
+
+    for key in ["skills", "mcp_overrides", "skill_overrides", "native_harness_overrides"]:
+        if key in temporal_provider_config:
+            base_provider_config[key] = temporal_provider_config[key]
+
+    merged["provider_run_config"] = base_provider_config
+
+    # Merge extra MCP servers (additive)
+    base_extra_mcps = set(merged.get("extra_mcp_servers") or [])
+    temporal_extra_mcps = set(temporal.get("extra_mcp_servers") or [])
+    merged["extra_mcp_servers"] = list(base_extra_mcps | temporal_extra_mcps)
+
+    # Preserve temporal metadata
+    merged["temporal_profile_id"] = temporal.get("profile_id")
+    merged["temporal_profile_revision"] = temporal.get("revision")
+
+    return merged

@@ -10,7 +10,6 @@ const BUILTIN_FLAG_KEYS = [
   "projectStructure",
   "machineNodes",
   "credentialBroker",
-  "providerConfigSync",
   "canvas",
   "promptEngineer",
   "testape",
@@ -26,7 +25,6 @@ const DEFAULT_BUILTIN_EXTENSION_FLAGS: BuiltinExtensionFlags = {
   projectStructure: true,
   machineNodes: true,
   credentialBroker: true,
-  providerConfigSync: true,
   canvas: true,
   promptEngineer: true,
   testape: true,
@@ -64,7 +62,7 @@ export function useBuiltinExtensionFlags(
 
   useEffect(() => {
     void refresh();
-    const off = eventBus.subscribe("extensions_changed", () => {
+    const off = eventBus.subscribe("extension.catalog", () => {
       void refresh({ reloadBuiltinIds: true });
     });
     return off;

@@ -1,7 +1,6 @@
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import Editor from "@monaco-editor/react";
-import { ProviderConfigSyncPage } from "@better-agent/provider-config-sync-ui";
 import type { FileFocus } from "../types";
 import { JsonNode } from "./JsonNode";
 import { FileViewer } from "./FileViewer";
@@ -1334,8 +1333,9 @@ function inlineOpenConfigPanel(
   return { capability_id: capabilityId, scope, cwd };
 }
 
-/** Embedded provider-config-sync capability editor (same UI/UX as the
- *  configs page) plus a header button to pop it into the right side panel. */
+/** Inline `open_config_panel` widget: header with a button to pop the panel
+ *  into the right side panel. The panel body is owned by the side-panel host
+ *  (`ConfigPanels`); this widget only carries the open/claim registry. */
 function InlineConfigPanel({
   capabilityId,
   scope,
@@ -1409,23 +1409,6 @@ function InlineConfigPanel({
             Collapse
           </button>
         </div>
-      </div>
-      <div className="inline-config-panel-body">
-        {ctx ? (
-          <ProviderConfigSyncPage
-            open
-            embedded
-            cwd={scope === "project" ? cwd : null}
-            initialCapabilityId={capabilityId}
-            client={ctx.client}
-            subscribeExternalChanges={ctx.subscribeExternalChanges}
-            onClose={() => setCollapsed(true)}
-          />
-        ) : (
-          <div className="provider-config-sync-empty">
-            Config panel unavailable.
-          </div>
-        )}
       </div>
     </div>
   );

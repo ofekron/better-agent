@@ -38,11 +38,6 @@ def main() -> int:
         failures,
     )
     check(
-        "known launchctl backend label is stopped",
-        'bootout_launchctl_job "better-claude-provider-config-sync"' in text,
-        failures,
-    )
-    check(
         "launchctl path includes Homebrew and local CLIs",
         'export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"' in text,
         failures,
