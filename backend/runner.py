@@ -572,7 +572,17 @@ _MSSG_INPUT_SCHEMA: dict[str, Any] = {
         "collapse_policy": {
             "type": "string",
             "enum": ["take_latest"],
-            "description": "When collapse_key is set, take_latest keeps one pending message and replaces it with the newest body.",
+            "description": "When collapse_key is set, take_latest keeps one pending message and replaces it with the newest body. Requires queue_turn=true.",
+        },
+        "queue_turn": {
+            "type": "boolean",
+            "description": (
+                "Defaults to false: the message is deposited in the target's inbox "
+                "and NO turn is started — the target reads it when it next calls "
+                "inbox(). Set to true to queue the message as a prompt and fire a "
+                "turn in the target now. collapse_key/collapse_policy require "
+                "queue_turn=true."
+            ),
         },
     },
     "required": ["message"],
@@ -1451,6 +1461,7 @@ def _build_mssg_tool(
             "runner": str(args.get("runner") or "").strip() or None,
             "collapse_key": str(args.get("collapse_key") or "").strip(),
             "collapse_policy": str(args.get("collapse_policy") or "").strip(),
+            "queue_turn": bool(args.get("queue_turn")),
         }
         try:
             result = await asyncio.to_thread(_post_mssg_sync, payload)
