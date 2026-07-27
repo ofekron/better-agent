@@ -9,9 +9,34 @@
   --border-subtle: rgba(139, 148, 158, 0.14);
   --border-strong: rgba(139, 148, 158, 0.28);
   --shadow-surface: 0 10px 28px rgba(0, 0, 0, 0.18);
+  --md-surface: #0d1117;
+  --md-surface-container-low: #111720;
+  --md-surface-container: #161d27;
+  --md-surface-container-high: #1b2430;
+  --md-surface-container-highest: #222c39;
+  --md-on-surface: #e6edf3;
+  --md-on-surface-variant: #a9b3c1;
+  --md-outline: rgba(169, 179, 193, 0.32);
+  --md-outline-variant: rgba(169, 179, 193, 0.16);
+  --md-primary: #c9bdff;
+  --md-on-primary: #2d1f69;
+  --md-primary-container: #45358a;
+  --md-on-primary-container: #e7deff;
+  --md-error-container: rgba(248, 81, 73, 0.14);
+  --md-on-error-container: #ffb4ab;
+  --md-shape-xs: 6px;
+  --md-shape-sm: 10px;
+  --md-shape-md: 14px;
+  --md-shape-lg: 20px;
+  --md-control-height: 40px;
+  --md-state-hover: 8%;
+  --md-state-pressed: 12%;
+  --md-elevation-1: 0 1px 2px rgba(0, 0, 0, 0.22), 0 2px 8px rgba(0, 0, 0, 0.12);
+  --md-elevation-2: 0 8px 24px rgba(0, 0, 0, 0.28);
+  --md-motion-standard: cubic-bezier(0.2, 0, 0, 1);
   --signal-violet: #8b7cf6;
   --signal-mint: #34d399;
-  --conversation-measure: 1180px;
+  --conversation-measure: 100%;
   --text-primary: #e6edf3;
   --text-secondary: #8b949e;
   --text-muted: #6e7681;
@@ -97,6 +122,23 @@ body {
   color: var(--text-primary);
   overflow: hidden;
   height: var(--app-vh);
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+button:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible,
+[role="button"]:focus-visible,
+[tabindex]:not([tabindex="-1"]):focus-visible {
+  outline: 2px solid var(--md-primary);
+  outline-offset: 2px;
 }
 
 .voice-activation {
@@ -3219,7 +3261,7 @@ body {
 .chat-messages {
   flex: 1;
   overflow-y: auto;
-  padding: 28px clamp(20px, 2.4vw, 40px) 36px;
+  padding: 24px clamp(10px, 1vw, 16px) 32px;
   /* Block the gesture from bubbling to the document so Chrome
      Android's pull-to-refresh and iOS Safari's rubber-band don't
      reload the SPA or scroll the page chrome when the user is just
@@ -7366,7 +7408,9 @@ button.run-badge-clickable:focus-visible {
 }
 
 .input-area {
-  padding: 14px clamp(18px, 2.2vw, 36px) 18px;
+  padding-block: 12px 14px;
+  padding-inline-start: clamp(10px, 1vw, 16px);
+  padding-inline-end: calc(clamp(10px, 1vw, 16px) + 8px);
   border-top: 1px solid var(--border-subtle);
   display: flex;
   flex-direction: column;
@@ -21419,6 +21463,381 @@ button.progress-inflight {
 .native-import-errors code {
   font-size: 11px;
 }
+
+.settings-page-header,
+.communications-page,
+.communications-panel,
+.analytics-page,
+.file-viewer {
+  background: var(--md-surface);
+}
+
+.settings-page-header {
+  min-height: 72px;
+  border-color: var(--md-outline-variant);
+  background: var(--md-surface-container-low);
+}
+
+.settings-page-header h2,
+.analytics-header h1 {
+  color: var(--md-on-surface);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.settings-page-nav,
+.settings-page-content,
+.communications-panel,
+.config-panel-host,
+.analytics-stat-card,
+.analytics-chart-card,
+.communication-card,
+.communication-chat-card,
+.file-viewer-header {
+  border-color: var(--md-outline-variant);
+  background: var(--md-surface-container-low);
+  box-shadow: none;
+}
+
+.settings-page-nav {
+  gap: 2px;
+  padding: 6px;
+  border-radius: var(--md-shape-md);
+}
+
+.settings-page-content {
+  padding: clamp(18px, 2.2vw, 28px);
+  border-radius: var(--md-shape-md);
+}
+
+.settings-page-nav button,
+.harness-profile-rail-item {
+  min-height: var(--md-control-height);
+  border: 0;
+  border-radius: var(--md-shape-lg);
+  color: var(--md-on-surface-variant);
+  transition:
+    background-color 180ms var(--md-motion-standard),
+    color 180ms var(--md-motion-standard),
+    transform 180ms var(--md-motion-standard);
+}
+
+.settings-page-nav button:hover,
+.harness-profile-rail-item:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--md-on-surface) var(--md-state-hover), transparent);
+  color: var(--md-on-surface);
+  transform: none;
+}
+
+.settings-page-nav button.active,
+.harness-profile-rail-item.is-selected {
+  border-color: transparent;
+  background: var(--md-primary-container);
+  color: var(--md-on-primary-container);
+}
+
+.settings-page-nav button:active,
+.harness-profile-rail-item:active {
+  background: color-mix(in srgb, var(--md-primary) var(--md-state-pressed), var(--md-primary-container));
+}
+
+.settings-page-nav-group + .settings-page-nav-group,
+.harness-profile-rail {
+  border-color: var(--md-outline-variant);
+}
+
+.settings-page-nav-group-header {
+  color: var(--md-on-surface-variant);
+  letter-spacing: 0.08em;
+}
+
+.harness-extension-block,
+.provider-row,
+.refresh-choice-option,
+.donation-option,
+.analytics-log-row,
+.communication-chat-message,
+.marketplace-intent-facts {
+  border-color: var(--md-outline-variant);
+  border-radius: var(--md-shape-sm);
+  background: var(--md-surface-container);
+}
+
+.provider-row.active {
+  border-color: var(--md-primary);
+  background: color-mix(in srgb, var(--md-primary-container) 42%, var(--md-surface-container));
+}
+
+.modal-overlay,
+.harness-description-overlay {
+  background: rgba(0, 0, 0, 0.68);
+  backdrop-filter: blur(3px);
+  animation: modalFadeIn 180ms var(--md-motion-standard);
+}
+
+.modal-content,
+.harness-description-panel,
+.ns-create-menu,
+.bc-select-menu {
+  border-color: var(--md-outline-variant);
+  border-radius: var(--md-shape-lg);
+  background: var(--md-surface-container-high);
+  box-shadow: var(--md-elevation-2);
+}
+
+.modal-header,
+.modal-footer {
+  border-color: var(--md-outline-variant);
+}
+
+.modal-close,
+.modal-back {
+  min-width: var(--md-control-height);
+  min-height: var(--md-control-height);
+  display: inline-grid;
+  place-items: center;
+  border-radius: 999px;
+  transition:
+    background-color 180ms var(--md-motion-standard),
+    color 180ms var(--md-motion-standard);
+}
+
+.modal-close:hover,
+.modal-back:hover {
+  background: color-mix(in srgb, var(--md-on-surface) var(--md-state-hover), transparent);
+}
+
+.setup-btn,
+.setup-cancel-btn,
+.setup-save-btn,
+.an-btn,
+.native-import-btn,
+.communication-chat-send {
+  min-height: var(--md-control-height);
+  border-radius: var(--md-shape-lg);
+  padding-inline: 16px;
+  font-weight: 600;
+  transition:
+    background-color 180ms var(--md-motion-standard),
+    border-color 180ms var(--md-motion-standard),
+    color 180ms var(--md-motion-standard),
+    box-shadow 180ms var(--md-motion-standard),
+    transform 180ms var(--md-motion-standard);
+}
+
+.setup-save-btn,
+.an-btn.active,
+.communication-chat-send {
+  border-color: transparent;
+  background: var(--md-primary);
+  color: var(--md-on-primary);
+}
+
+.setup-btn:hover:not(:disabled),
+.setup-cancel-btn:hover:not(:disabled),
+.an-btn:hover:not(:disabled):not(.active),
+.native-import-btn:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--md-on-surface) var(--md-state-hover), transparent);
+  color: var(--md-on-surface);
+  transform: none;
+}
+
+.setup-save-btn:hover:not(:disabled),
+.communication-chat-send:not(:disabled):hover {
+  background: color-mix(in srgb, var(--md-on-primary) var(--md-state-hover), var(--md-primary));
+  box-shadow: var(--md-elevation-1);
+  transform: none;
+}
+
+.setup-field input,
+.harness-settings-create-row input,
+.harness-settings-search,
+.communication-chat-input,
+.analytics-custom-range input[type="date"],
+.bc-select-trigger {
+  min-height: var(--md-control-height);
+  border-color: var(--md-outline);
+  border-radius: var(--md-shape-xs);
+  background: var(--md-surface-container);
+  color: var(--md-on-surface);
+  transition:
+    background-color 180ms var(--md-motion-standard),
+    border-color 180ms var(--md-motion-standard),
+    box-shadow 180ms var(--md-motion-standard);
+}
+
+.setup-field input:hover,
+.harness-settings-create-row input:hover,
+.harness-settings-search:hover,
+.communication-chat-input:hover,
+.analytics-custom-range input[type="date"]:hover,
+.bc-select-trigger:hover:not(:disabled) {
+  border-color: var(--md-on-surface-variant);
+  background: var(--md-surface-container-high);
+}
+
+.setup-field input:focus,
+.harness-settings-create-row input:focus,
+.harness-settings-search:focus,
+.communication-chat-input:focus,
+.analytics-custom-range input[type="date"]:focus,
+.bc-select-trigger:focus-visible,
+.bc-select-trigger.open {
+  border-color: var(--md-primary);
+  background: var(--md-surface-container);
+  box-shadow: inset 0 0 0 1px var(--md-primary);
+}
+
+.setup-mode-toggle {
+  padding: 4px;
+  border-radius: var(--md-shape-lg);
+  background: var(--md-surface-container);
+}
+
+.setup-mode-btn {
+  min-height: var(--md-control-height);
+  border-radius: calc(var(--md-shape-lg) - 4px);
+}
+
+.setup-mode-btn.active {
+  background: var(--md-primary-container);
+  color: var(--md-on-primary-container);
+  box-shadow: none;
+}
+
+.config-panels,
+.analytics-charts,
+.communications-panel,
+.communication-chat-messages {
+  gap: 12px;
+}
+
+.config-panel-host,
+.analytics-stat-card,
+.analytics-chart-card,
+.communication-card,
+.communication-chat-card {
+  border-radius: var(--md-shape-md);
+}
+
+.config-panel-host-header,
+.communication-card-header,
+.communication-chat-card-header {
+  min-height: 52px;
+}
+
+.config-panel-host-header:hover,
+.communication-card-header:hover,
+.communication-chat-card-header:hover,
+.analytics-log-row:hover {
+  background: color-mix(in srgb, var(--md-on-surface) var(--md-state-hover), transparent);
+}
+
+.analytics-stat-card {
+  min-height: 112px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+
+.analytics-stat-value {
+  color: var(--md-on-surface);
+  font-weight: 600;
+  letter-spacing: -0.025em;
+}
+
+.analytics-stat-label,
+.analytics-chart-title,
+.communication-flow,
+.communication-time,
+.communication-meta {
+  color: var(--md-on-surface-variant);
+}
+
+.analytics-log-status {
+  background: color-mix(in srgb, var(--signal-mint) 16%, transparent);
+  color: var(--signal-mint);
+}
+
+.analytics-log-status.error,
+.analytics-error,
+.harness-settings-editor-error {
+  border-color: color-mix(in srgb, var(--error) 48%, transparent);
+  background: var(--md-error-container);
+  color: var(--md-on-error-container);
+}
+
+.file-viewer {
+  border-color: var(--md-outline-variant);
+  border-radius: var(--md-shape-md);
+}
+
+.file-viewer-header {
+  min-height: 56px;
+  border-radius: var(--md-shape-md) var(--md-shape-md) 0 0;
+}
+
+.file-viewer-markdown,
+.file-viewer-rendered-wrap {
+  color: var(--md-on-surface);
+}
+
+.file-viewer-markdown pre,
+.file-viewer-markdown code,
+.file-viewer-table thead,
+.file-viewer-table th {
+  background: var(--md-surface-container-high);
+}
+
+.file-viewer-markdown blockquote {
+  border-color: var(--md-primary);
+  color: var(--md-on-surface-variant);
+}
+
+.file-viewer-table th,
+.file-viewer-table td {
+  border-color: var(--md-outline-variant);
+}
+
+.marketplace-intent-facts {
+  overflow: hidden;
+}
+
+.marketplace-intent-facts div {
+  background: var(--md-surface-container);
+}
+
+.marketplace-bridge-status {
+  border-color: var(--md-outline-variant);
+  border-radius: var(--md-shape-md);
+  background: var(--md-surface-container-high);
+  box-shadow: var(--md-elevation-2);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .settings-page-nav button,
+  .harness-profile-rail-item,
+  .modal-overlay,
+  .harness-description-overlay,
+  .modal-close,
+  .modal-back,
+  .setup-btn,
+  .setup-cancel-btn,
+  .setup-save-btn,
+  .an-btn,
+  .native-import-btn,
+  .communication-chat-send,
+  .setup-field input,
+  .harness-settings-create-row input,
+  .harness-settings-search,
+  .communication-chat-input,
+  .analytics-custom-range input[type="date"],
+  .bc-select-trigger {
+    animation: none;
+    transition: none;
+  }
+}
+
 @media (max-width: 640px) {
   .native-import-desc { max-width: 100%; }
   .native-import-progress-bar { max-width: 100%; }
@@ -22539,5 +22958,35 @@ button.progress-inflight {
   .capability-badge.is-restart {
     transition: none;
     animation: none;
+  }
+}
+
+.bc-select-trigger {
+  min-height: var(--md-control-height);
+  border-color: var(--md-outline);
+  border-radius: var(--md-shape-xs);
+  background: var(--md-surface-container);
+  color: var(--md-on-surface);
+  transition:
+    background-color 180ms var(--md-motion-standard),
+    border-color 180ms var(--md-motion-standard),
+    box-shadow 180ms var(--md-motion-standard);
+}
+
+.bc-select-trigger:hover:not(:disabled) {
+  border-color: var(--md-on-surface-variant);
+  background: var(--md-surface-container-high);
+}
+
+.bc-select-trigger:focus-visible,
+.bc-select-trigger.open {
+  border-color: var(--md-primary);
+  background: var(--md-surface-container);
+  box-shadow: inset 0 0 0 1px var(--md-primary);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bc-select-trigger {
+    transition: none;
   }
 }
