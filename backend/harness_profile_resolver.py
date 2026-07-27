@@ -548,6 +548,51 @@ def _instruction_blocks(
     return [block for block in blocks if block.get("content")]
 
 
+def _selected_instruction_sources(
+    instruction_sources: dict[str, dict[str, Any]],
+    extension_instruction_names: dict[str, list[str]],
+    extension_all_instruction_names: dict[str, set[str]],
+) -> dict[str, dict[str, Any]]:
+    """The per-extension `instruction_names` selection is the authority for
+    which extension-owned instruction sections a run injects; the inherited
+    `instruction_sources` map only supplies the body override and the block
+    order.
+
+    Without this filter a named profile's deselection is cosmetic — the
+    section keeps its inherited source entry and its text still reaches the
+    provider — and a section its Default never enabled can never be added.
+    """
+    owner_by_name: dict[str, str] = {}
+    for extension_id, names in extension_instruction_names.items():
+        for name in names:
+            owner_by_name[name] = extension_id
+    deselected = {
+        name
+        for extension_id, names in extension_all_instruction_names.items()
+        for name in names
+        if name not in (extension_instruction_names.get(extension_id) or [])
+    }
+
+    out: dict[str, dict[str, Any]] = {}
+    for name, source in instruction_sources.items():
+        if not isinstance(source, dict):
+            continue
+        if source.get("kind") == "inline":
+            owner = harness_fields.user_instruction_source_owner(name)
+            if owner is not None and owner not in extension_instruction_names:
+                continue
+            if name in deselected:
+                continue
+            out[name] = source
+            continue
+        if owner_by_name.get(name) == source.get("extension_id"):
+            out[name] = source
+    for name, extension_id in owner_by_name.items():
+        if name not in out:
+            out[name] = {"kind": "extension", "extension_id": extension_id}
+    return out
+
+
 def _dropped_instruction_names(
     instruction_sources: dict[str, dict[str, Any]], dropped_extension_ids: list[str],
 ) -> set[str]:
@@ -673,6 +718,7 @@ def resolve_for_session(
     extension_mcp_servers: dict[str, list[str]] = {}
     extension_skills: dict[str, list[str]] = {}
     extension_instruction_names: dict[str, list[str]] = {}
+    extension_all_instruction_names: dict[str, set[str]] = {}
     extension_revisions: dict[str, str] = {}
     extension_setting_overlays: dict[str, dict[str, Any]] = {}
     secret_refs: dict[str, list[str]] = {}
@@ -710,6 +756,7 @@ def resolve_for_session(
         extension_mcp_servers[extension_id] = list(mcp_servers)
         extension_skills[extension_id] = list(skills)
         extension_instruction_names[extension_id] = list(instruction_names)
+        extension_all_instruction_names[extension_id] = set(items["instructions"])
         settings: dict[str, Any] = {}
         for key, entry in overlay_fields.items():
             item = entry["resolved"]
@@ -724,8 +771,18 @@ def resolve_for_session(
         if live_secret_refs:
             secret_refs[extension_id] = list(live_secret_refs)
     secret_refs.update(copy.deepcopy(resolved.get("secret_refs") or {}))
-    instruction_sources = {name: entry["resolved"] for name, entry in resolved["instruction_sources"].items()}
-    dropped_instruction_names = _dropped_instruction_names(instruction_sources, dropped_extension_ids)
+    inherited_instruction_sources = {
+        name: entry["resolved"] for name, entry in resolved["instruction_sources"].items()
+    }
+    instruction_sources = _selected_instruction_sources(
+        inherited_instruction_sources, extension_instruction_names, extension_all_instruction_names
+    )
+    # Reported against the INHERITED map: a dropped extension's sections never
+    # survive selection, so computing this from the filtered map would report
+    # an empty drop set for exactly the case it exists to surface.
+    dropped_instruction_names = _dropped_instruction_names(
+        inherited_instruction_sources, dropped_extension_ids
+    )
     instruction_blocks = _instruction_blocks(instruction_sources, selected, dropped_instruction_names)
     profile_contexts = _provider_context_blocks(instruction_blocks)
     profile_contexts.extend(_normalize_capability_contexts(resolved.get("capability_contexts")))

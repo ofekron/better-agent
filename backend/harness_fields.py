@@ -84,11 +84,22 @@ def setting_schema_hash(record: dict[str, Any], key: str) -> str:
     raise HarnessFieldError(f"Unknown extension setting: {(record.get('manifest') or {}).get('id')}.{key}")
 
 
+_USER_INSTRUCTION_SUFFIX = " user instructions"
+
+
 def user_instruction_source_name(extension_id: str) -> str:
     """Instruction-source key under which an extension's free-text user
     instructions appear. Must match `harness_profile_resolver`'s Default
     synthesis so a named profile's inline override lands on the same key."""
-    return f"{extension_id} user instructions"
+    return f"{extension_id}{_USER_INSTRUCTION_SUFFIX}"
+
+
+def user_instruction_source_owner(name: str) -> str | None:
+    """Inverse of `user_instruction_source_name`: the extension owning a
+    free-text user-instruction source key, or None for any other key."""
+    if not name.endswith(_USER_INSTRUCTION_SUFFIX):
+        return None
+    return name[: -len(_USER_INSTRUCTION_SUFFIX)] or None
 
 
 def delta_for(default_list: list[str], desired: list[str]) -> dict[str, list[str]]:
