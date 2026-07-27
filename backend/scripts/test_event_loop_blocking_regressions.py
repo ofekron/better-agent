@@ -422,7 +422,7 @@ def test_live_provider_stream_publish_is_render_tree_mutation_free() -> None:
 
 def test_provider_context_runtime_discovery_runs_off_loop() -> None:
     source = (ROOT / "turn_manager.py").read_text(encoding="utf-8")
-    start = source.index("        runtime_capability_contexts = await asyncio.to_thread(")
+    start = source.index("        runtime_capability_contexts, runtime_skill_identities = await _to_turn_dispatch_thread(")
     end = source.index("        transient_attempt = 0", start)
     initial_source = source[start:end]
     refresh_start = source.index("        async def _refresh_provider_context()")
@@ -432,9 +432,10 @@ def test_provider_context_runtime_discovery_runs_off_loop() -> None:
     loop_end = source.index("            if cancel_event.is_set():", loop_start)
     loop_source = source[loop_start:loop_end]
     for block in (initial_source, refresh_source):
-        assert "runtime_capability_contexts = await asyncio.to_thread(" in block
-        assert "runtime_skill_contexts," in block
-        assert "dynamic_capability_contexts = await asyncio.to_thread(" in block
+        assert "runtime_capability_contexts, runtime_skill_identities = await _to_turn_dispatch_thread(" in block
+        assert "runtime_skill_projection," in block
+        assert "provider_capability_projection(" in block
+        assert "dynamic_capability_contexts = await _to_turn_dispatch_thread(" in block
         assert "extension_audit_context," in block
     assert "await _refresh_provider_context()" in loop_source
 
@@ -3542,16 +3543,12 @@ def test_summary_index_validates_missing_summary_before_provider_context() -> No
 def test_extension_audit_inventory_refresh_is_off_provider_hot_path() -> None:
     source = (ROOT / "extension_context_audit.py").read_text(encoding="utf-8")
     runtime_start = source.index("def runtime_context(")
-    runtime_end = source.index("def _inventory_projection(", runtime_start)
+    runtime_end = source.index("def _validate_projection(", runtime_start)
     runtime_source = source[runtime_start:runtime_end]
-    assert "build_inventory(" not in runtime_source
-    assert "_trigger_projection_refresh(cwd)" in runtime_source
-    assert "_read_cache_cached()" in runtime_source
-    refresh_start = source.index("def _refresh_projection(")
-    refresh_end = source.index("def build_inventory(", refresh_start)
-    refresh_source = source[refresh_start:refresh_end]
-    assert "inventory = build_inventory(cwd)" in refresh_source
-    assert "_trigger_refresh(fingerprint, inventory)" in refresh_source
+    assert "build_inventory(" not in source
+    assert "_read_cache_cached(fingerprint" in runtime_source
+    assert "_trigger_refresh(fingerprint, normalized)" in runtime_source
+    assert "provisioning.run_sync(" not in runtime_source
 
 
 def test_summary_index_indexes_seen_sidecars_once() -> None:

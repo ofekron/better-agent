@@ -76,9 +76,18 @@ def provider_capability_contexts(
     contexts: Optional[list[dict]],
     provider_kind: str,
 ) -> list[dict]:
+    selected, _identities = provider_capability_projection(contexts, provider_kind)
+    return selected
+
+
+def provider_capability_projection(
+    contexts: Optional[list[dict]],
+    provider_kind: str,
+) -> tuple[list[dict], list[dict[str, str]]]:
     if not installation_profile.integrations_enabled():
-        return []
+        return [], []
     selected: list[dict] = []
+    identities: list[dict[str, str]] = []
     for item in contexts or []:
         if not isinstance(item, dict):
             continue
@@ -105,7 +114,11 @@ def provider_capability_contexts(
             "content_kind": str(output.get("content_kind") or ""),
             "content": output["content"],
         })
-    return selected
+        identities.append({
+            "source_id": str(item.get("source_id") or ""),
+            "capability_id": str(item.get("capability_id") or ""),
+        })
+    return selected, identities
 
 
 def render_capability_context(contexts: Optional[list[dict]]) -> str:

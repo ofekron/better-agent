@@ -1433,6 +1433,9 @@ def test_turn_manager_dead_runner_replays_codex_rollout_events() -> bool:
         def provider_for_session(self, *_args, **_kwargs):
             return self._provider
 
+        async def broadcast_session(self, *_args, **_kwargs) -> None:
+            return None
+
     async def _run() -> bool:
         sess = session_manager.create(
             name="dead-runner-replay",
@@ -1449,12 +1452,10 @@ def test_turn_manager_dead_runner_replays_codex_rollout_events() -> bool:
         async def ws_callback(event: dict) -> None:
             ws_events.append(event)
 
-        original_runtime = turn_manager_mod.runtime_skill_contexts
+        original_runtime = turn_manager_mod.runtime_skill_projection
         original_audit = turn_manager_mod.extension_audit_context
-        original_instructions = turn_manager_mod.extension_user_instruction_contexts
-        turn_manager_mod.runtime_skill_contexts = lambda *_args, **_kwargs: []
+        turn_manager_mod.runtime_skill_projection = lambda *_args, **_kwargs: ([], [])
         turn_manager_mod.extension_audit_context = lambda *_args, **_kwargs: []
-        turn_manager_mod.extension_user_instruction_contexts = lambda *_args, **_kwargs: []
         try:
             result = await tm._drive_cli_run(
                 prompt="do it",
@@ -1467,12 +1468,10 @@ def test_turn_manager_dead_runner_replays_codex_rollout_events() -> bool:
                 session_id_field="agent_session_id",
                 mode="native",
                 turn_run_id=str(uuid.uuid4()),
-                lifecycle_msg_id=str(uuid.uuid4()),
             )
         finally:
-            turn_manager_mod.runtime_skill_contexts = original_runtime
+            turn_manager_mod.runtime_skill_projection = original_runtime
             turn_manager_mod.extension_audit_context = original_audit
-            turn_manager_mod.extension_user_instruction_contexts = original_instructions
         events = result.get("events") or []
         if result.get("success") is not True:
             print(f"  expected success result, got {result!r}")

@@ -34,12 +34,28 @@ def runtime_skill_contexts(
     disabled: Optional[list[str]] = None,
     display_root: str = "",
 ) -> list[dict]:
+    contexts, _identities = runtime_skill_projection(
+        cwd,
+        bare_config=bare_config,
+        disabled=disabled,
+        display_root=display_root,
+    )
+    return contexts
+
+
+def runtime_skill_projection(
+    cwd: str,
+    *,
+    bare_config: bool = False,
+    disabled: Optional[list[str]] = None,
+    display_root: str = "",
+) -> tuple[list[dict], list[dict[str, str]]]:
     if bare_config or not installation_profile.integrations_enabled():
-        return []
+        return [], []
 
     skills = _filter_disabled(_discover_skills(cwd), disabled)
     if not skills:
-        return []
+        return [], []
 
     lines = [
         "The following skills are available in this session. Use them when their trigger applies.",
@@ -59,12 +75,14 @@ def runtime_skill_contexts(
             f"(Claude Skill id: {claude_id}; file: {display_path})"
         )
 
-    return [{
+    contexts = [{
         "name": "Runtime Skills",
         "category": "skills",
         "content_kind": "skills",
         "content": "\n".join(lines),
     }]
+    identities = [{"name": str(skill["name"])} for skill in skills]
+    return contexts, identities
 
 
 def has_runtime_skills(cwd: str, *, bare_config: bool = False) -> bool:

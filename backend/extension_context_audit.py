@@ -3,12 +3,15 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import re
+import tempfile
 import threading
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
+import portable_lock
 import provisioning
 from paths import bc_home
 from provisioning import DirtyPolicy, ProvisionedSessionSpec
@@ -19,19 +22,33 @@ logger = logging.getLogger(__name__)
 AUDIT_CONTEXT_NAME = "Dynamic Harness Audit"
 AUDIT_CONTEXT_CATEGORY = "dynamic"
 AUDIT_SPEC_KEY = "extension_context_audit"
-_CACHE_SCHEMA_VERSION = 1
-_AUDIT_VERSION = 1
-_MAX_TEXT = 500
-_MAX_ITEMS = 80
+_CACHE_SCHEMA_VERSION = 2
+_AUDIT_VERSION = 2
+_MAX_CACHE_ENTRIES = 64
+_MAX_FINDINGS = 12
+_MAX_REFS_PER_FINDING = 2
+_MAX_RETRY_SECONDS = 300.0
+_INITIAL_RETRY_SECONDS = 5.0
 _REFRESH_LOCK = threading.Lock()
-_PROJECTION_LOCK = threading.Lock()
+_CACHE_PROJECTION_LOCK = threading.Lock()
 _IN_FLIGHT: set[str] = set()
-_PROJECTION_IN_FLIGHT: set[str] = set()
-_INVENTORY_PROJECTION: dict[str, tuple[float, str, dict[str, Any]]] = {}
-_CACHE_PROJECTION: tuple[float, dict[str, Any]] | None = None
-_INVENTORY_PROJECTION_TTL_SECONDS = 10.0
-_CACHE_PROJECTION_TTL_SECONDS = 2.0
-_JSON_OBJECT_RE = re.compile(r"\{.*\}", re.S)
+_FAILURES: dict[str, tuple[int, float]] = {}
+_CACHE_PROJECTION: dict[str, dict[str, Any]] = {}
+_SAFE_DISPLAY_RE = re.compile(r"[A-Za-z0-9_.:-]{1,160}")
+_FINGERPRINT_RE = re.compile(r"[0-9a-f]{64}")
+_REF_RE = re.compile(r"(skill|mcp|instruction|capability):[0-9a-f]{64}")
+_FINDING_RULES = {
+    "potential_overlap": {
+        "kinds": frozenset({"skill", "mcp", "instruction", "capability"}),
+        "arity": 2,
+        "severity": "low",
+    },
+    "identifier_clarity": {
+        "kinds": frozenset({"skill", "mcp", "instruction", "capability"}),
+        "arity": 1,
+        "severity": "low",
+    },
+}
 
 
 class ExtensionContextAuditSpec(ProvisionedSessionSpec):
@@ -54,32 +71,109 @@ class ExtensionContextAuditSpec(ProvisionedSessionSpec):
         return render_prompt("provisioning/extension_context_auditor.md", {})
 
     def build_instructions(self, query: str, ctx: dict) -> str:
-        return (
-            "<extension-harness-inventory>\n"
-            f"{query}\n"
-            "</extension-harness-inventory>"
-        )
+        return f"<active-contextual-harness-mix>\n{query}\n</active-contextual-harness-mix>"
 
     def parse_result(self, text: str, ctx: dict) -> dict:
-        return _normalize_audit_result(_parse_json_object(text))
+        projection = ctx.get("projection")
+        if not isinstance(projection, dict):
+            raise ValueError("audit projection is required")
+        return _validate_audit_result(_parse_json_object(text), projection)
 
 
 AUDIT_SPEC = provisioning.register(ExtensionContextAuditSpec())
 
 
-def runtime_context(cwd: str, *, bare_config: bool = False) -> list[dict[str, str]]:
+def build_projection(
+    *,
+    provider_kind: str,
+    profile_id: str,
+    profile_revision: str,
+    runtime_skills: list[dict[str, str]],
+    capability_contexts: list[dict[str, str]],
+    extension_mcp_servers: dict[str, list[str]],
+    extension_skills: dict[str, list[str]],
+    extension_instruction_names: dict[str, list[str]],
+) -> dict[str, Any]:
+    entries: dict[str, dict[str, str]] = {}
+    identities: dict[str, dict[str, Any]] = {}
+
+    def add(kind: str, identity: Any, display: str = "") -> None:
+        canonical = _canonical_json({"kind": kind, "identity": identity})
+        ref = f"{kind}:{hashlib.sha256(canonical.encode('utf-8')).hexdigest()}"
+        entry = {"ref": ref, "kind": kind}
+        if _SAFE_DISPLAY_RE.fullmatch(display):
+            entry["display"] = display
+        entries[ref] = entry
+        identities[ref] = {"kind": kind, "identity": identity}
+
+    for item in runtime_skills:
+        if not isinstance(item, dict):
+            raise ValueError("runtime skill identity must be an object")
+        name = _identity_string(item.get("name"), "runtime skill name")
+        add("skill", {"source": "runtime", "name": name}, name)
+    for item in capability_contexts:
+        if not isinstance(item, dict):
+            raise ValueError("capability identity must be an object")
+        source_id = _identity_string(item.get("source_id"), "capability source id")
+        capability_id = _identity_string(item.get("capability_id"), "capability id")
+        add(
+            "capability",
+            {"source_id": source_id, "capability_id": capability_id},
+            capability_id,
+        )
+    _add_extension_entries(add, "mcp", extension_mcp_servers)
+    _add_extension_entries(add, "skill", extension_skills)
+    _add_extension_entries(add, "instruction", extension_instruction_names)
+    return {
+        "version": _AUDIT_VERSION,
+        "provider_kind": _bounded_string(provider_kind, "provider_kind"),
+        "profile_id": _bounded_string(profile_id, "profile_id"),
+        "profile_revision": _bounded_string(
+            profile_revision,
+            "profile_revision",
+            required=False,
+        ),
+        "entries": [entries[ref] for ref in sorted(entries)],
+        "identities": {ref: identities[ref] for ref in sorted(identities)},
+    }
+
+
+def _add_extension_entries(
+    add: Callable[[str, Any, str], None],
+    kind: str,
+    values: dict[str, list[str]],
+) -> None:
+    if not isinstance(values, dict):
+        raise ValueError(f"extension {kind} identities must be an object")
+    for raw_extension_id, raw_names in values.items():
+        extension_id = _identity_string(raw_extension_id, f"extension {kind} owner")
+        if not isinstance(raw_names, list):
+            raise ValueError(f"extension {kind} identities must be lists")
+        for raw_name in raw_names:
+            name = _identity_string(raw_name, f"extension {kind} name")
+            add(kind, {"extension_id": extension_id, "name": name}, f"{extension_id}:{name}")
+
+
+def _identity_string(value: Any, field: str) -> str:
+    if not isinstance(value, str) or not value or len(value) > 1_000:
+        raise ValueError(f"{field} must be a non-empty bounded string")
+    return value
+
+
+def runtime_context(
+    projection: dict[str, Any],
+    *,
+    bare_config: bool = False,
+) -> list[dict[str, str]]:
     if bare_config or not _is_runtime_ready():
         return []
-    projection = _inventory_projection(cwd)
-    if projection is None:
-        _trigger_projection_refresh(cwd)
+    normalized = _validate_projection(projection)
+    fingerprint = _fingerprint(normalized)
+    cached = _read_cache_cached(fingerprint, normalized)
+    if not cached:
+        _trigger_refresh(fingerprint, normalized)
         return []
-    fingerprint, inventory = projection
-    cached = _read_cache_cached()
-    if cached.get("fingerprint") != fingerprint:
-        _trigger_refresh(fingerprint, inventory)
-        return []
-    content = _render_context(cached.get("result"))
+    content = _render_context(cached["result"], normalized)
     if not content:
         return []
     return [{
@@ -90,275 +184,380 @@ def runtime_context(cwd: str, *, bare_config: bool = False) -> list[dict[str, st
     }]
 
 
-def _inventory_projection(cwd: str) -> tuple[str, dict[str, Any]] | None:
-    current = time.monotonic()
-    with _PROJECTION_LOCK:
-        cached = _INVENTORY_PROJECTION.get(cwd)
-        if cached is None:
-            return None
-        written_at, fingerprint, inventory = cached
-    if current - written_at > _INVENTORY_PROJECTION_TTL_SECONDS:
-        _trigger_projection_refresh(cwd)
-    return fingerprint, inventory
-
-
-def _trigger_projection_refresh(cwd: str) -> None:
-    with _PROJECTION_LOCK:
-        if cwd in _PROJECTION_IN_FLIGHT:
-            return
-        _PROJECTION_IN_FLIGHT.add(cwd)
-    thread = threading.Thread(
-        target=_refresh_projection,
-        args=(cwd,),
-        name="extension-context-inventory-refresh",
-        daemon=True,
-    )
-    thread.start()
-
-
-def _refresh_projection(cwd: str) -> None:
-    try:
-        inventory = build_inventory(cwd)
-        fingerprint = _fingerprint(inventory)
-        with _PROJECTION_LOCK:
-            _INVENTORY_PROJECTION[cwd] = (time.monotonic(), fingerprint, inventory)
-        cached = _read_cache_cached(force=True)
-        if cached.get("fingerprint") != fingerprint:
-            _trigger_refresh(fingerprint, inventory)
-    except Exception:
-        logger.exception("extension context inventory refresh failed")
-    finally:
-        with _PROJECTION_LOCK:
-            _PROJECTION_IN_FLIGHT.discard(cwd)
-
-
-def build_inventory(cwd: str) -> dict[str, Any]:
-    import extension_store
-    import runtime_skills
-
-    extensions: list[dict[str, Any]] = []
-    for record in extension_store.list_extensions(include_hidden=True):
-        manifest = record.get("manifest") or {}
-        extension_id = _clean(manifest.get("id"))
-        entrypoints = manifest.get("entrypoints") or {}
-        extensions.append({
-            "id": extension_id,
-            "name": _clean(manifest.get("name") or extension_id),
-            "enabled": record.get("enabled") is True,
-            "surfaces": _clean_list(manifest.get("surfaces") or []),
-            "permissions": sorted(k for k, v in extension_store.effective_permissions(record).items() if v),
-            "instructions": _instruction_items(entrypoints),
-            "skills": _entrypoint_items(entrypoints.get("skills") or []),
-            "mcp": _mcp_items(extension_store.extension_mcp_servers(extension_id) if extension_id else []),
-            "remote_services": _entrypoint_items(entrypoints.get("remote_services") or []),
-            "native_harness": [
-                {
-                    "kind": item["kind"],
-                    "name": item["name"],
-                    "exposed": item["native_exposed"],
-                }
-                for item in extension_store.extension_harness_additions(record)
-            ],
-        })
+def _validate_projection(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != {
+        "version",
+        "provider_kind",
+        "profile_id",
+        "profile_revision",
+        "entries",
+        "identities",
+    }:
+        raise ValueError("invalid audit projection")
+    if value.get("version") != _AUDIT_VERSION:
+        raise ValueError("unsupported audit projection version")
+    entries = value.get("entries")
+    identities = value.get("identities")
+    if not isinstance(entries, list) or not isinstance(identities, dict):
+        raise ValueError("audit projection entries and identities are required")
+    normalized_entries: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for item in entries:
+        if not isinstance(item, dict) or not set(item).issubset({"ref", "kind", "display"}):
+            raise ValueError("invalid audit projection entry")
+        ref = item.get("ref")
+        kind = item.get("kind")
+        display = item.get("display")
+        if not isinstance(ref, str) or not _REF_RE.fullmatch(ref):
+            raise ValueError("invalid audit projection ref")
+        if kind != ref.partition(":")[0] or ref in seen:
+            raise ValueError("inconsistent audit projection ref")
+        if display is not None and (
+            not isinstance(display, str) or not _SAFE_DISPLAY_RE.fullmatch(display)
+        ):
+            raise ValueError("invalid audit projection display")
+        normalized = {"ref": ref, "kind": kind}
+        if display is not None:
+            normalized["display"] = display
+        normalized_entries.append(normalized)
+        seen.add(ref)
+    normalized_identities: dict[str, dict[str, Any]] = {}
+    if set(identities) != seen:
+        raise ValueError("audit projection identities must match entries")
+    for ref in sorted(identities):
+        item = identities[ref]
+        if not isinstance(item, dict) or set(item) != {"kind", "identity"}:
+            raise ValueError("invalid audit projection identity")
+        kind = item.get("kind")
+        identity = _validate_original_identity(kind, item.get("identity"))
+        expected_ref = (
+            f"{kind}:"
+            f"{hashlib.sha256(_canonical_json({'kind': kind, 'identity': identity}).encode('utf-8')).hexdigest()}"
+        )
+        if ref != expected_ref:
+            raise ValueError("audit projection identity does not match ref")
+        normalized_identities[ref] = {"kind": kind, "identity": identity}
+    normalized_entries.sort(key=lambda item: item["ref"])
     return {
         "version": _AUDIT_VERSION,
-        "cwd": _clean(cwd, max_chars=300),
-        "extensions": extensions[:_MAX_ITEMS],
-        "runtime_skills": [
-            {
-                "name": _clean(skill.get("name")),
-                "description": _clean(skill.get("description")),
-            }
-            for skill in runtime_skills._discover_skills(cwd)[:_MAX_ITEMS]
-        ],
+        "provider_kind": _bounded_string(value.get("provider_kind"), "provider_kind"),
+        "profile_id": _bounded_string(value.get("profile_id"), "profile_id"),
+        "profile_revision": _bounded_string(
+            value.get("profile_revision"),
+            "profile_revision",
+            required=False,
+        ),
+        "entries": normalized_entries,
+        "identities": normalized_identities,
     }
 
 
-def _instruction_items(entrypoints: dict[str, Any]) -> list[dict[str, str]]:
-    items = entrypoints.get("instructions")
-    if items is None:
-        items = [{**i, "level": "global"} for i in entrypoints.get("provider_capabilities") or [] if isinstance(i, dict)]
-    out: list[dict[str, str]] = []
-    for item in items or []:
-        if not isinstance(item, dict):
-            continue
-        out.append({
-            "name": _clean(item.get("name")),
-            "level": "project" if item.get("level") == "project" else "global",
-        })
-    return out[:_MAX_ITEMS]
+def _validate_original_identity(kind: Any, identity: Any) -> dict[str, str]:
+    if kind == "capability":
+        expected = {"source_id", "capability_id"}
+    elif kind == "skill" and isinstance(identity, dict) and identity.get("source") == "runtime":
+        expected = {"source", "name"}
+    elif kind in {"skill", "mcp", "instruction"}:
+        expected = {"extension_id", "name"}
+    else:
+        raise ValueError("invalid audit projection identity kind")
+    if not isinstance(identity, dict) or set(identity) != expected:
+        raise ValueError("invalid audit projection identity shape")
+    return {
+        key: _identity_string(identity.get(key), f"audit identity {key}")
+        for key in sorted(expected)
+    }
 
 
-def _entrypoint_items(items: Any) -> list[dict[str, str]]:
-    out: list[dict[str, str]] = []
-    for item in items if isinstance(items, list) else []:
-        if isinstance(item, str):
-            out.append({"name": _clean(item)})
-        elif isinstance(item, dict):
-            out.append({
-                "name": _clean(item.get("name") or item.get("id") or item.get("label")),
-                "purpose": _clean(item.get("purpose") or item.get("description")),
-            })
-    return out[:_MAX_ITEMS]
+def _bounded_string(value: Any, field: str, *, required: bool = True) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"{field} must be a string")
+    if required and not value:
+        raise ValueError(f"{field} must be non-empty")
+    if len(value) > 1_000:
+        raise ValueError(f"{field} is too large")
+    return value
 
 
-def _mcp_items(items: Any) -> list[dict[str, Any]]:
-    out: list[dict[str, Any]] = []
-    for item in items if isinstance(items, list) else []:
-        if not isinstance(item, dict):
-            continue
-        out.append({
-            "name": _clean(item.get("name")),
-            "label": _clean(item.get("label")),
-            "purpose": _clean(item.get("description")),
-            "enabled": item.get("enabled") is True,
-            "user_facing": item.get("user_facing") is not False,
-        })
-    return out[:_MAX_ITEMS]
-
-
-def _trigger_refresh(fingerprint: str, inventory: dict[str, Any]) -> None:
+def _trigger_refresh(fingerprint: str, projection: dict[str, Any]) -> None:
+    current = time.monotonic()
     with _REFRESH_LOCK:
         if fingerprint in _IN_FLIGHT:
             return
+        failure = _FAILURES.get(fingerprint)
+        if failure is not None and current < failure[1]:
+            return
         _IN_FLIGHT.add(fingerprint)
-    thread = threading.Thread(
+    threading.Thread(
         target=_refresh_cache,
-        args=(fingerprint, inventory),
+        args=(fingerprint, projection),
         name="extension-context-audit-refresh",
         daemon=True,
-    )
-    thread.start()
+    ).start()
 
 
-def _refresh_cache(fingerprint: str, inventory: dict[str, Any]) -> None:
+def _refresh_cache(fingerprint: str, projection: dict[str, Any]) -> None:
     try:
-        payload = json.dumps(inventory, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-        result = provisioning.run_sync(AUDIT_SPEC, payload, {"fingerprint": fingerprint})
-        _write_cache({"schema_version": _CACHE_SCHEMA_VERSION, "fingerprint": fingerprint, "result": result.value})
+        payload = _canonical_json(_llm_projection(projection))
+        result = provisioning.run_sync(
+            AUDIT_SPEC,
+            payload,
+            {"fingerprint": fingerprint, "projection": projection},
+        )
+        validated = _validate_audit_result(result.value, projection)
+        _write_cache(fingerprint, validated, projection)
+        with _REFRESH_LOCK:
+            _FAILURES.pop(fingerprint, None)
     except Exception:
+        with _REFRESH_LOCK:
+            attempts = _FAILURES.get(fingerprint, (0, 0.0))[0] + 1
+            exponent = min(attempts - 1, 10)
+            delay = min(_MAX_RETRY_SECONDS, _INITIAL_RETRY_SECONDS * (2 ** exponent))
+            _FAILURES[fingerprint] = (attempts, time.monotonic() + delay)
         logger.exception("extension context audit refresh failed")
     finally:
         with _REFRESH_LOCK:
             _IN_FLIGHT.discard(fingerprint)
 
 
-def _fingerprint(inventory: dict[str, Any]) -> str:
-    payload = json.dumps(inventory, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
-
-
-def _is_runtime_ready() -> bool:
-    """The audit only runs when its fork-mode spec actually resolves — the
-    provider assigned to `extension_context_audit` (the active provider when
-    unassigned) must exist, have a model, and support forking. Anything else
-    means no audit context this turn, never a raise from the refresh thread."""
-    return provisioning.spec_is_runnable(AUDIT_SPEC)
-
-
-def _cache_path() -> Path:
-    return bc_home() / "extension_context_audit.json"
-
-
-def _read_cache() -> dict[str, Any]:
-    try:
-        data = json.loads(_cache_path().read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-    if not isinstance(data, dict) or data.get("schema_version") != _CACHE_SCHEMA_VERSION:
-        return {}
-    return data
-
-
-def _read_cache_cached(*, force: bool = False) -> dict[str, Any]:
-    global _CACHE_PROJECTION
-    current = time.monotonic()
-    with _PROJECTION_LOCK:
-        cached = _CACHE_PROJECTION
-        if (
-            not force
-            and cached is not None
-            and current - cached[0] <= _CACHE_PROJECTION_TTL_SECONDS
-        ):
-            return cached[1]
-    data = _read_cache()
-    with _PROJECTION_LOCK:
-        _CACHE_PROJECTION = (time.monotonic(), data)
-    return data
-
-
-def _write_cache(data: dict[str, Any]) -> None:
-    global _CACHE_PROJECTION
-    path = _cache_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False, sort_keys=True), encoding="utf-8")
-    tmp.replace(path)
-    with _PROJECTION_LOCK:
-        _CACHE_PROJECTION = (time.monotonic(), data)
-
-
-def _parse_json_object(text: str) -> dict[str, Any]:
-    match = _JSON_OBJECT_RE.search(text or "")
-    if not match:
-        return {}
-    try:
-        value = json.loads(match.group(0))
-    except json.JSONDecodeError:
-        return {}
-    return value if isinstance(value, dict) else {}
-
-
-def _normalize_audit_result(value: dict[str, Any]) -> dict[str, Any]:
-    attention = []
-    for item in value.get("attention") if isinstance(value.get("attention"), list) else []:
-        if not isinstance(item, dict):
-            continue
-        severity = _clean(item.get("severity")).lower()
-        if severity not in {"low", "medium", "high"}:
-            severity = "medium"
-        title = _clean(item.get("title"), max_chars=120)
-        reason = _clean(item.get("reason"), max_chars=300)
-        if title and reason:
-            attention.append({"severity": severity, "title": title, "reason": reason})
-    guidance = [
-        _clean(item, max_chars=180)
-        for item in value.get("tool_guidance", [])
-        if isinstance(item, str) and _clean(item, max_chars=180)
-    ]
+def _llm_projection(projection: dict[str, Any]) -> dict[str, Any]:
     return {
-        "summary": _clean(value.get("summary"), max_chars=650),
-        "attention": attention[:6],
-        "tool_guidance": guidance[:8],
+        "version": projection["version"],
+        "provider_kind": (
+            projection["provider_kind"]
+            if _SAFE_DISPLAY_RE.fullmatch(projection["provider_kind"])
+            else ""
+        ),
+        "profile": (
+            projection["profile_id"]
+            if _SAFE_DISPLAY_RE.fullmatch(projection["profile_id"])
+            else ""
+        ),
+        "entries": projection["entries"],
     }
 
 
-def _render_context(value: Any) -> str:
-    result = _normalize_audit_result(value if isinstance(value, dict) else {})
-    lines: list[str] = []
-    if result["summary"]:
-        lines.append(result["summary"])
-    if result["tool_guidance"]:
-        lines.append("")
-        lines.append("Tool mix guidance:")
-        lines.extend(f"- {item}" for item in result["tool_guidance"])
-    if result["attention"]:
-        lines.append("")
-        lines.append("Needs user attention:")
-        lines.extend(
-            f"- {item['severity']}: {item['title']} — {item['reason']}"
-            for item in result["attention"]
-        )
-    return "\n".join(lines).strip()
+def _fingerprint(projection: dict[str, Any]) -> str:
+    return hashlib.sha256(_canonical_json(projection).encode("utf-8")).hexdigest()
 
 
-def _clean(value: Any, *, max_chars: int = _MAX_TEXT) -> str:
-    if not isinstance(value, str):
+def _canonical_json(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+
+
+def _is_runtime_ready() -> bool:
+    return provisioning.spec_is_runnable(AUDIT_SPEC)
+
+
+def _cache_dir() -> Path:
+    return bc_home() / "extension_context_audits"
+
+
+def _cache_path(fingerprint: str) -> Path:
+    if not _FINGERPRINT_RE.fullmatch(fingerprint):
+        raise ValueError("invalid audit fingerprint")
+    return _cache_dir() / f"{fingerprint}.json"
+
+
+def _read_cache_cached(
+    fingerprint: str,
+    projection: dict[str, Any],
+) -> dict[str, Any]:
+    with _CACHE_PROJECTION_LOCK:
+        cached = _CACHE_PROJECTION.get(fingerprint)
+    if cached is not None:
+        if _cache_path(fingerprint).is_file():
+            return cached
+        with _CACHE_PROJECTION_LOCK:
+            _CACHE_PROJECTION.pop(fingerprint, None)
+    data = _read_cache(fingerprint, projection)
+    if data:
+        _remember_cache(fingerprint, data)
+    return data
+
+
+def _read_cache(
+    fingerprint: str,
+    projection: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    try:
+        data = json.loads(_cache_path(fingerprint).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if (
+        not isinstance(data, dict)
+        or set(data) != {"schema_version", "audit_version", "fingerprint", "result"}
+        or data.get("schema_version") != _CACHE_SCHEMA_VERSION
+        or data.get("audit_version") != _AUDIT_VERSION
+        or data.get("fingerprint") != fingerprint
+    ):
+        return {}
+    if projection is not None:
+        try:
+            data["result"] = _validate_audit_result(data.get("result"), projection)
+        except ValueError:
+            return {}
+    return data
+
+
+def _write_cache(
+    fingerprint: str,
+    result: dict[str, Any],
+    projection: dict[str, Any],
+) -> None:
+    projection = _validate_projection(projection)
+    if fingerprint != _fingerprint(projection):
+        raise ValueError("cache fingerprint does not match projection")
+    result = _validate_audit_result(result, projection)
+    directory = _cache_dir()
+    directory.mkdir(parents=True, exist_ok=True)
+    lock_path = directory / ".cache.lock"
+    with lock_path.open("a+b") as lock_file:
+        portable_lock.lock_ex(lock_file.fileno())
+        try:
+            data = {
+                "schema_version": _CACHE_SCHEMA_VERSION,
+                "audit_version": _AUDIT_VERSION,
+                "fingerprint": fingerprint,
+                "result": result,
+            }
+            path = _cache_path(fingerprint)
+            _atomic_write_json(path, data)
+            live_fingerprints = _evict_cache_entries(directory, keep=path)
+            _remember_cache(fingerprint, data, live_fingerprints=live_fingerprints)
+        finally:
+            portable_lock.unlock(lock_file.fileno())
+
+
+def _remember_cache(
+    fingerprint: str,
+    data: dict[str, Any],
+    *,
+    live_fingerprints: set[str] | None = None,
+) -> None:
+    with _CACHE_PROJECTION_LOCK:
+        _CACHE_PROJECTION[fingerprint] = data
+        if live_fingerprints is not None:
+            for cached_fingerprint in list(_CACHE_PROJECTION):
+                if cached_fingerprint not in live_fingerprints:
+                    _CACHE_PROJECTION.pop(cached_fingerprint, None)
+        while len(_CACHE_PROJECTION) > _MAX_CACHE_ENTRIES:
+            victim = next(
+                key for key in sorted(_CACHE_PROJECTION)
+                if key != fingerprint
+            )
+            _CACHE_PROJECTION.pop(victim, None)
+
+
+def _atomic_write_json(path: Path, data: dict[str, Any]) -> None:
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.stem}.", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(data, handle, ensure_ascii=True, sort_keys=True)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_name, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
+
+
+def _evict_cache_entries(directory: Path, *, keep: Path) -> set[str]:
+    entries: list[tuple[int, str, Path]] = []
+    for path in directory.glob("*.json"):
+        if not _FINGERPRINT_RE.fullmatch(path.stem):
+            continue
+        try:
+            mtime = path.stat().st_mtime_ns
+        except OSError:
+            continue
+        entries.append((mtime, path.name, path))
+    entries.sort()
+    removable = [entry for entry in entries if entry[2] != keep]
+    excess = max(0, len(entries) - _MAX_CACHE_ENTRIES)
+    removed: set[str] = set()
+    for _mtime, _name, path in removable[:excess]:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        removed.add(path.stem)
+    return {path.stem for _mtime, _name, path in entries} - removed
+
+
+def _parse_json_object(text: str) -> dict[str, Any]:
+    try:
+        value = json.loads(text.strip())
+    except (AttributeError, json.JSONDecodeError):
+        raise ValueError("audit result must be one JSON object")
+    if not isinstance(value, dict):
+        raise ValueError("audit result must be one JSON object")
+    return value
+
+
+def _validate_audit_result(value: Any, projection: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != {"status", "findings"}:
+        raise ValueError("invalid audit result")
+    status = value.get("status")
+    findings = value.get("findings")
+    if status not in {"clean", "findings"} or not isinstance(findings, list):
+        raise ValueError("invalid audit status")
+    if status == "clean" and findings:
+        raise ValueError("clean audit cannot contain findings")
+    if status == "findings" and not findings:
+        raise ValueError("findings audit must contain findings")
+    if len(findings) > _MAX_FINDINGS:
+        raise ValueError("too many audit findings")
+    ref_kinds = {
+        ref: item["kind"]
+        for ref, item in projection["identities"].items()
+    }
+    normalized: list[dict[str, Any]] = []
+    seen: set[tuple[str, tuple[str, ...]]] = set()
+    for item in findings:
+        if not isinstance(item, dict) or set(item) != {"code", "refs"}:
+            raise ValueError("invalid audit finding")
+        code = item.get("code")
+        refs = item.get("refs")
+        rule = _FINDING_RULES.get(code)
+        if rule is None or not isinstance(refs, list) or len(refs) != rule["arity"]:
+            raise ValueError("invalid audit finding rule")
+        if len(refs) > _MAX_REFS_PER_FINDING or any(not isinstance(ref, str) for ref in refs):
+            raise ValueError("invalid audit finding refs")
+        if len(set(refs)) != len(refs):
+            raise ValueError("audit finding refs must be distinct")
+        if any(ref_kinds.get(ref) not in rule["kinds"] for ref in refs):
+            raise ValueError("audit finding ref is unavailable")
+        key = (code, tuple(sorted(refs)))
+        if key in seen:
+            raise ValueError("duplicate audit finding")
+        seen.add(key)
+        normalized.append({"code": code, "refs": list(refs)})
+    normalized.sort(key=lambda item: (item["code"], item["refs"]))
+    return {"status": status, "findings": normalized}
+
+
+def _render_context(result: dict[str, Any], projection: dict[str, Any]) -> str:
+    validated = _validate_audit_result(result, projection)
+    if validated["status"] == "clean":
         return ""
-    return " ".join(value.replace("\x00", "").split())[:max_chars]
-
-
-def _clean_list(value: Any) -> list[str]:
-    if not isinstance(value, list):
-        return []
-    return [_clean(item) for item in value if isinstance(item, str) and _clean(item)][:_MAX_ITEMS]
+    labels = {
+        item["ref"]: item.get("display") or item["ref"][:24]
+        for item in projection["entries"]
+    }
+    lines = [
+        "Advisory harness review. These are review prompts, not instructions or verified defects.",
+        "",
+    ]
+    for finding in validated["findings"]:
+        refs = [labels[ref] for ref in finding["refs"]]
+        rule = _FINDING_RULES[finding["code"]]
+        if finding["code"] == "potential_overlap":
+            message = f"Consider whether {refs[0]} and {refs[1]} overlap."
+        else:
+            message = f"Consider whether {refs[0]} is clear enough to distinguish its purpose."
+        lines.append(f"- {rule['severity']}: {message}")
+    return "\n".join(lines)

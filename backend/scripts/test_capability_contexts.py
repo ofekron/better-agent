@@ -11,7 +11,7 @@ from runner_codex import _prepend_capability_context as codex_prompt  # noqa: E4
 from runner_agy import _prepend_capability_context as agy_prompt  # noqa: E402
 from runner_better_agent import render_capability_context as openai_capability_context  # noqa: E402
 from orchs.native import handle_turn as native_handle_turn  # noqa: E402
-from capability_contexts import normalize_capability_contexts  # noqa: E402
+from capability_contexts import normalize_capability_contexts, provider_capability_projection  # noqa: E402
 from turn_manager import _provider_capability_contexts  # noqa: E402
 
 
@@ -42,6 +42,24 @@ def test_provider_context_selection() -> None:
     check(len(selected) == 1, "selects one matching provider form")
     check(selected[0]["content"] == "Codex form", "uses the requested provider content")
     check(selected[0]["name"] == "Deploy", "keeps capability label")
+
+
+def test_provider_context_projection_preserves_identity_without_leaking_it() -> None:
+    contexts = [
+        {
+            "source_id": "<unsafe source>",
+            "capability_id": "capability with spaces",
+            "name": "Deploy",
+            "category": "command",
+            "outputs": [{"provider_kind": "codex", "content": "Codex form"}],
+        }
+    ]
+    selected, identities = provider_capability_projection(contexts, "codex")
+    check(
+        identities == [{"source_id": "<unsafe source>", "capability_id": "capability with spaces"}],
+        "provider projection preserves exact audit identity",
+    )
+    check("source_id" not in selected[0] and "capability_id" not in selected[0], "audit identity does not leak to provider context")
 
 
 def test_provider_context_selection_rejects_mismatched_single_output() -> None:
@@ -172,6 +190,7 @@ def test_native_handler_accepts_capability_contexts() -> None:
 
 if __name__ == "__main__":
     test_provider_context_selection()
+    test_provider_context_projection_preserves_identity_without_leaking_it()
     test_provider_context_selection_rejects_mismatched_single_output()
     test_capability_context_validation()
     test_cli_prompt_wrapping()

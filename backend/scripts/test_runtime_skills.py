@@ -17,6 +17,8 @@ import runtime_skills  # noqa: E402
 import turn_manager  # noqa: E402
 from turn_manager import _provider_capability_contexts  # noqa: E402
 
+runtime_skills.installation_profile.integrations_enabled = lambda: True
+
 
 def check(condition: bool, message: str) -> None:
     if not condition:
@@ -121,6 +123,22 @@ def t_project_skill_context_is_included_after_global() -> None:
 def t_bare_config_skips_runtime_skills() -> None:
     contexts = runtime_skills.runtime_skill_contexts(str(TMP_HOME), bare_config=True)
     check(contexts == [], "bare config skips runtime skills")
+
+
+def t_runtime_skill_projection_matches_delivered_filter() -> None:
+    contexts, identities = runtime_skills.runtime_skill_projection(
+        str(TMP_HOME),
+        disabled=["get-requirements"],
+    )
+    check(len(contexts) == 1, "runtime skill projection returns delivered context")
+    check(
+        all(item["name"] != "get-requirements" for item in identities),
+        "disabled runtime skill is absent from audit identities",
+    )
+    check(
+        all(set(context) == {"name", "category", "content_kind", "content"} for context in contexts),
+        "audit identities do not leak into provider contexts",
+    )
 
 
 def t_runtime_skill_discovery_is_cached_until_roots_change() -> None:
@@ -233,6 +251,7 @@ def main() -> None:
         t_long_description_is_not_clipped()
         t_project_skill_context_is_included_after_global()
         t_bare_config_skips_runtime_skills()
+        t_runtime_skill_projection_matches_delivered_filter()
         t_runtime_skill_discovery_is_cached_until_roots_change()
         t_runtime_skill_cache_invalidates_on_skill_edit()
         t_materialize_runtime_skills_copies_skill_dirs()

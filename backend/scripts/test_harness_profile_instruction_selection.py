@@ -13,6 +13,7 @@ import _test_home
 _TMP_HOME = _test_home.isolate("bc-harness-instruction-selection-")
 
 import capability_contexts
+import extension_context_audit
 import extension_store
 import harness_profile_resolver
 import harness_profile_store
@@ -122,6 +123,26 @@ def test_deselected_section_is_not_injected() -> None:
     # Before the fix the inherited instruction_sources entry kept injecting
     # "beta" even though the profile deselected it.
     assert names == ["alpha"], names
+    snapshot = harness_profile_resolver.resolve_for_session({}, profile_id="drop.one")
+    _contexts, identities = capability_contexts.provider_capability_projection(
+        snapshot["capability_contexts"],
+        "codex",
+    )
+    projection = extension_context_audit.build_projection(
+        provider_kind="codex",
+        profile_id=snapshot["profile_id"],
+        profile_revision=str(snapshot["profile_revision"]),
+        runtime_skills=[],
+        capability_contexts=identities,
+        extension_mcp_servers=snapshot["extension_mcp_servers"],
+        extension_skills=snapshot["extension_skills"],
+        extension_instruction_names=snapshot["extension_instruction_names"],
+    )
+    displays = {item.get("display") for item in projection["entries"]}
+    assert f"{_ON_ID}:alpha" in displays, displays
+    assert f"{_ON_ID}:beta" not in displays, displays
+    turn_source = (BACKEND / "turn_manager.py").read_text(encoding="utf-8")
+    assert "extension_user_instruction_contexts" not in turn_source
 
 
 def test_deselecting_every_section_does_not_fail_the_run() -> None:
