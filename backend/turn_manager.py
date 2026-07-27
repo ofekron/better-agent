@@ -61,11 +61,13 @@ from event_shape import (
     extract_subagent_types as _extract_subagent_types,
     is_synthetic_event as _is_synthetic_event,
 )
-from capability_contexts import provider_capability_contexts
+from capability_contexts import provider_capability_contexts, provider_capability_projection
 import harness_profile_resolver
-from extension_context_audit import runtime_context as extension_audit_context
-from extension_store import user_instruction_contexts as extension_user_instruction_contexts
-from runtime_skills import runtime_skill_contexts
+from extension_context_audit import (
+    build_projection as build_extension_audit_projection,
+    runtime_context as extension_audit_context,
+)
+from runtime_skills import runtime_skill_projection
 from i18n import t
 import llm_call_log
 import perf
@@ -188,6 +190,25 @@ def _provider_capability_contexts(
     return provider_capability_contexts(contexts, provider_kind)
 
 
+def _extension_audit_projection(
+    provider_kind: str,
+    resolved_harness_run_config: Optional[dict],
+    runtime_skill_identities: list[dict[str, str]],
+    capability_identities: list[dict[str, str]],
+) -> dict:
+    resolved = resolved_harness_run_config or {}
+    return build_extension_audit_projection(
+        provider_kind=provider_kind,
+        profile_id=str(resolved.get("profile_id") or "session-default"),
+        profile_revision=str(resolved.get("profile_revision") or ""),
+        runtime_skills=runtime_skill_identities,
+        capability_contexts=capability_identities,
+        extension_mcp_servers=dict(resolved.get("extension_mcp_servers") or {}),
+        extension_skills=dict(resolved.get("extension_skills") or {}),
+        extension_instruction_names=dict(resolved.get("extension_instruction_names") or {}),
+    )
+
+
 def _runtime_skill_display_root(provider_kind: str) -> str:
     if provider_kind in {"codex", "fugu", "agy"}:
         return "$HOME/.agents/skills"
@@ -286,6 +307,12 @@ class TurnManager:
         # handoff (cancel_turn writes, run_turn pops, UPM consumes
         # via an explicit parameter passed at emit-time).
         self._interrupted_by_msg_id: dict[str, str] = {}
+        # Same turn-side handoff shape: run_turn's error path reports the
+        # failure and returns instead of raising, so the caller that emits
+        # the user-msg terminal cannot see it and would publish a
+        # success-shaped `done`. run_turn writes, the orchestrator pops and
+        # passes it at emit-time.
+        self._terminal_error_by_session: dict[str, str] = {}
         # Pending cancel for the dequeue→cancel_events gap: cancel_turn
         # writes when no live turn exists but a prompt is in flight;
         # run_turn consumes right after registering its cancel_event.
@@ -2143,6 +2170,11 @@ class TurnManager:
             await ws_callback({"type": "error", "data": {
                 "app_session_id": persist_to, "error": error_text,
             }})
+            # This handler does not re-raise, so the user-msg terminal is
+            # emitted down the caller's success path. Hand the failure over
+            # or the turn reports success=True with the error only visible
+            # as a separate event.
+            self._terminal_error_by_session[app_session_id] = error_text
             # The error dot is set inside `_finalize_turn_messages` (called
             # just above with error_text) — the single chokepoint covering
             # both exception and non-exception failure paths.
@@ -2354,32 +2386,35 @@ class TurnManager:
         session_capability_contexts = (
             _session_rec or {}
         ).get("capability_contexts") or []
-        runtime_capability_contexts = await _to_turn_dispatch_thread(
-            runtime_skill_contexts,
+        runtime_capability_contexts, runtime_skill_identities = await _to_turn_dispatch_thread(
+            runtime_skill_projection,
             cwd,
             bare_config=harness_bare,
             disabled=(_session_rec or {}).get("disabled_runtime_skills"),
             display_root=_runtime_skill_display_root(provider_kind),
         )
-        dynamic_capability_contexts = await _to_turn_dispatch_thread(
-            extension_audit_context,
-            cwd,
-            bare_config=harness_bare,
-        )
-        extension_instruction_contexts = await _to_turn_dispatch_thread(
-            extension_user_instruction_contexts,
-            bare_config=harness_bare,
-        )
         if isinstance(resolved_harness_run_config, dict):
             selected_contexts = resolved_harness_run_config.get("raw_capability_contexts") or []
         else:
             selected_contexts = [*session_capability_contexts, *(capability_contexts or [])]
-        run_capability_contexts = _provider_capability_contexts(selected_contexts, provider_kind)
+        provider_contexts, capability_identities = provider_capability_projection(
+            selected_contexts,
+            provider_kind,
+        )
+        dynamic_capability_contexts = await _to_turn_dispatch_thread(
+            extension_audit_context,
+            _extension_audit_projection(
+                provider_kind,
+                resolved_harness_run_config,
+                runtime_skill_identities,
+                capability_identities,
+            ),
+            bare_config=harness_bare,
+        )
         run_capability_contexts = [
             *runtime_capability_contexts,
             *dynamic_capability_contexts,
-            *extension_instruction_contexts,
-            *run_capability_contexts,
+            *provider_contexts,
         ]
         if isinstance(resolved_harness_run_config, dict):
             resolved_harness_run_config = {
@@ -2544,33 +2579,36 @@ class TurnManager:
             )
             if harness_bare_refresh:
                 provider_run_config = dict(provider_run_config or {})
-            runtime_capability_contexts = await _to_turn_dispatch_thread(
-                runtime_skill_contexts,
+            runtime_capability_contexts, runtime_skill_identities = await _to_turn_dispatch_thread(
+                runtime_skill_projection,
                 cwd,
                 bare_config=harness_bare_refresh,
                 disabled=_session_rec.get("disabled_runtime_skills"),
                 display_root=_runtime_skill_display_root(provider_kind),
-            )
-            dynamic_capability_contexts = await _to_turn_dispatch_thread(
-                extension_audit_context,
-                cwd,
-                bare_config=harness_bare_refresh,
-            )
-            extension_instruction_contexts = await _to_turn_dispatch_thread(
-                extension_user_instruction_contexts,
-                bare_config=harness_bare_refresh,
             )
             selected_contexts = (
                 resolved_harness_run_config.get("raw_capability_contexts") or []
                 if isinstance(resolved_harness_run_config, dict)
                 else [*session_capability_contexts, *(capability_contexts or [])]
             )
-            run_capability_contexts = _provider_capability_contexts(selected_contexts, provider_kind)
+            provider_contexts, capability_identities = provider_capability_projection(
+                selected_contexts,
+                provider_kind,
+            )
+            dynamic_capability_contexts = await _to_turn_dispatch_thread(
+                extension_audit_context,
+                _extension_audit_projection(
+                    provider_kind,
+                    resolved_harness_run_config,
+                    runtime_skill_identities,
+                    capability_identities,
+                ),
+                bare_config=harness_bare_refresh,
+            )
             run_capability_contexts = [
                 *runtime_capability_contexts,
                 *dynamic_capability_contexts,
-                *extension_instruction_contexts,
-                *run_capability_contexts,
+                *provider_contexts,
             ]
             if isinstance(resolved_harness_run_config, dict):
                 resolved_harness_run_config = {

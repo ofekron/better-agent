@@ -206,14 +206,17 @@ class UserPromptManager:
         *,
         cancelled: bool = False,
         interrupted_by_msg_id: Optional[str] = None,
+        terminal_error: Optional[str] = None,
     ) -> None:
         """Assemble the done payload from the strategy's accumulator and
         publish to the bus. Idempotent on per-strategy accumulator
         (`make_done_payload` pops the entry).
 
-        `interrupted_by_msg_id` is passed in by the caller because
-        TurnManager owns the `_interrupted_by_msg_id` state — UPM
-        does not reach across to read it.
+        `interrupted_by_msg_id` and `terminal_error` are passed in by the
+        caller because TurnManager owns that state — UPM does not reach
+        across to read it. `terminal_error` carries a failure that run_turn
+        reported without raising; without it a failed turn has no recorded
+        sub-turn and the payload defaults to success.
         """
         try:
             from orchs import get_strategy
@@ -221,6 +224,7 @@ class UserPromptManager:
             payload = get_strategy(mode).make_done_payload(
                 lifecycle_msg_id,
                 cancelled=cancelled,
+                terminal_error=terminal_error,
                 interrupted_by_msg_id=interrupted_by_msg_id,
             )
             self._done_payloads[lifecycle_msg_id] = dict(payload)
