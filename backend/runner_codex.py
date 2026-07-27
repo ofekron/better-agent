@@ -448,15 +448,12 @@ async def _bridge_extension_mcp_dynamic_tools(
     }
     bridge_configs.update(resolved_configs)
     bridge_errors: list[tuple[str, Exception]] = []
-    bridged_any_server = False
+    unavailable_servers: list[tuple[str, Optional[Exception]]] = []
     for server_name, config in bridge_configs.items():
         configured_config = configured_servers.get(server_name)
         same_extension = (
             _extension_config_id(configured_config) == _extension_config_id(config)
         )
-        if same_extension and isinstance(configured_config, dict):
-            for tool_name in configured_config.get("tool_names") or ():
-                existing_tool_names.discard(str(tool_name))
         call_config = dict(config)
         call_config["_server_name"] = server_name
         try:
@@ -466,7 +463,12 @@ async def _bridge_extension_mcp_dynamic_tools(
                 tools = await mcp_stdio_bridge.mcp_list_tools(server_name, call_config)
             except Exception as exc:
                 bridge_errors.append((server_name, exc))
+                if not same_extension:
+                    unavailable_servers.append((server_name, exc))
                 continue
+        if same_extension and isinstance(configured_config, dict):
+            for tool_name in configured_config.get("tool_names") or ():
+                existing_tool_names.discard(str(tool_name))
         bridged_any = False
         bridged_all = bool(tools)
         for item in tools:
@@ -488,17 +490,18 @@ async def _bridge_extension_mcp_dynamic_tools(
             )
             bridged_any = bridged_any or added
             bridged_all = bridged_all and added
-        bridged_any_server = bridged_any_server or bridged_any
         if (
             bridged_any
             and bridged_all
             and same_extension
         ):
             configured_servers.pop(server_name, None)
-    if bridge_errors and not bridged_any_server:
-        server_name, exc = bridge_errors[0]
+        elif not bridged_any and not same_extension:
+            unavailable_servers.append((server_name, None))
+    if unavailable_servers:
+        server_name, exc = unavailable_servers[0]
         raise RuntimeError(
-            f"selected extension MCP {server_name!r} failed to list tools"
+            f"selected extension MCP {server_name!r} exposed no usable tools"
         ) from exc
     if bridge_configs:
         logger.info(
