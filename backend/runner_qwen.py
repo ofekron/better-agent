@@ -2,30 +2,30 @@
 
 Spawned by `QwenProvider.start_run` as a subprocess with
 `start_new_session=True`. Handles one Qwen Code CLI run via
-`qwen -o stream-json`. Qwen Code (a Gemini CLI fork) emits CLAUDE-shaped
-stream-json messages (type system/assistant/user/result with
-`message.content` block lists) — NOT Gemini's `init/message/tool_use`
-event vocabulary — so normalization here is a thin passthrough: chain
+`qwen -o stream-json`. Qwen Code emits CLAUDE-shaped stream-json
+messages (type system/assistant/user/result with `message.content` block
+lists) — NOT the `init/message/tool_use` event vocabulary of its
+gemini-cli ancestry — so normalization here is a thin passthrough: chain
 `parentUuid`, stamp `timestamp`, and route tool names/inputs through
-runner_gemini's `_map_tool` (Qwen keeps Gemini's tool names, e.g.
-`run_shell_command`).
+`runner_session_events._map_tool` (Qwen keeps the ancestral tool names,
+e.g. `run_shell_command`).
 
-Run-dir protocol is byte-identical to runner_gemini (input.json →
+Run-dir protocol is the session-events-family protocol (input.json →
 state.json → session_events.jsonl → complete.json, `cancel` sentinel,
-`pid` file), so `GeminiProvider._bootstrap_run`, the
-`GeminiJsonlTailer`, and recovery_family="gemini" replay work unchanged.
+`pid` file), so `SessionEventsProvider._bootstrap_run`, the
+`SessionEventsJsonlTailer`, and recovery_family="session_events" replay
+work unchanged.
 
-Reused from runner_gemini (single source of truth, no copies):
+Reused from `runner_session_events` (single source of truth, no copies):
 `_map_tool`, `_apply_image_attachments`, `_is_network_error_message`,
 `_sum_usage`, `_extract_error_message`, `_normalize_unknown`,
 `_new_uuid`. Stderr/error classification goes through `runner_errors`.
 
-DUPLICATED-PENDING-SEAM: the stderr-drain / cancel-watcher / file-preamble
-blocks below mirror runner_gemini's inline versions. runner_gemini keeps
-them inside its `_run` closure, so they cannot be imported without an
-edit. Proposed refactor (see provider_qwen module docstring): extract
-them into a shared `runner_stream_common.py` and have both runners
-import it.
+DUPLICATED-PENDING-SEAM: the stderr-drain / cancel-watcher /
+file-preamble blocks below are duplicated across the family's runners,
+which keep them inside their `_run` closures. Proposed refactor (see
+provider_qwen module docstring): extract them into a shared
+`runner_stream_common.py` and have every family runner import it.
 """
 
 import argparse
@@ -50,7 +50,7 @@ from runner_guard import (
     should_retry_ghost,
 )
 from runner_errors import resume_session_mismatch, stderr_error
-from runner_gemini import (
+from runner_session_events import (
     _apply_image_attachments,
     _extract_error_message,
     _is_network_error_message,
@@ -71,10 +71,10 @@ def _resolve_qwen_cli() -> Optional[str]:
     return resolve_cli_binary("qwen")
 
 
-# Better Agent stores the gemini-style permission mode with an underscore
+# Better Agent stores the family permission mode with an underscore
 # ("auto_edit"); qwen's --approval-mode vocabulary is hyphenated
 # ("auto-edit"). plan/yolo are identical. "default" is intentionally
-# absent: like gemini, qwen's non-interactive mode has no approval
+# absent: qwen's non-interactive mode has no approval
 # round-trip — a confirmation-requiring tool under "default" fails the
 # turn instead of asking.
 _APPROVAL_MODE_MAP = {
@@ -107,7 +107,7 @@ def resolve_auth_type(record_mode: str) -> str:
 # Event normalization — qwen (Claude-shaped) stream-json → Claude jsonl
 # ============================================================================
 def _map_content_blocks(blocks: Any) -> list:
-    """Route tool_use blocks through the shared gemini→claude tool map;
+    """Route tool_use blocks through the shared native→claude tool map;
     text / thinking / tool_result blocks pass through verbatim."""
     if not isinstance(blocks, list):
         return [{"type": "text", "text": str(blocks)}]
@@ -140,11 +140,11 @@ def _map_content_blocks(blocks: Any) -> list:
 
 def normalize_qwen_event(raw: dict, parent_uuid: str, resolved_model: str) -> Optional[dict]:
     """Normalize one qwen stream-json message to the Claude jsonl shape
-    the render tree and recovery_family="gemini" replay expect.
+    the render tree and recovery_family="session_events" replay expect.
 
     Returns None for messages handled elsewhere (system/init → state.json,
     result → complete.json). Unknown types surface as diagnostic events —
-    never silently dropped (same contract as runner_gemini)."""
+    never silently dropped (same family contract)."""
     etype = raw.get("type")
     if etype in ("system", "result"):
         return None
@@ -178,7 +178,7 @@ def _qwen_terminal_error(raw: dict) -> Optional[str]:
 
 def usage_from_result(raw: dict) -> dict:
     """Map a qwen result message's `usage` to the token_usage shape the
-    backend already speaks (same keys as runner_gemini's mapping)."""
+    backend already speaks (same keys as the family's mapping)."""
     usage = raw.get("usage") or {}
     input_tokens = int(usage.get("input_tokens") or 0)
     output_tokens = int(usage.get("output_tokens") or 0)
@@ -204,7 +204,7 @@ def _text_from_blocks(blocks: Any) -> str:
 
 
 # ============================================================================
-# Main async runner — same run-dir protocol as runner_gemini
+# Main async runner — the shared session-events run-dir protocol
 # ============================================================================
 async def _run(run_dir: Path, inputs: dict) -> int:
     log = logging.getLogger("runner_qwen")
@@ -221,7 +221,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
         return 1
     prompt = prepend_capability_context(prompt or "", inputs)
 
-    # DUPLICATED-PENDING-SEAM (runner_gemini file preamble): inline
+    # DUPLICATED-PENDING-SEAM (family file preamble): inline
     # non-image attachments into the prompt.
     if files:
         file_sections: list[str] = []
@@ -242,7 +242,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
         file_preamble = "\n\n".join(file_sections)
         prompt = f"{file_preamble}\n\n{prompt}" if prompt else file_preamble
 
-    # Image attachments: qwen keeps gemini's headless @path resolution
+    # Image attachments: qwen keeps the headless @path resolution
     # (handleAtCommand → read_many_files inlineData), so the shared
     # materialize-and-reference helper applies verbatim.
     prompt, attachment_dir = _apply_image_attachments(run_dir, prompt, images)
@@ -259,7 +259,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
     approval_mode = resolve_approval_mode(inputs.get("permission"))
     auth_type = resolve_auth_type(inputs.get("provider_mode") or "subscription")
     # --chat-recording is explicit so `-r <sid>` resume keeps working.
-    # NOTE (vs runner_gemini): no `--skip-trust` — qwen 0.10 does not
+    # NOTE: no `--skip-trust` — qwen 0.10 does not
     # ship that flag. Prompt goes over stdin (qwen appends stdin to the
     # prompt args; with no prompt arg, stdin IS the prompt).
     cmd: list[str] = [
@@ -349,7 +349,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
 
             cancel_seen = asyncio.Event()
 
-            # DUPLICATED-PENDING-SEAM (runner_gemini stderr drain).
+            # DUPLICATED-PENDING-SEAM (family stderr drain).
             async def _drain_stderr() -> None:
                 try:
                     with (run_dir / "qwen_stderr.log").open("ab") as f:
@@ -364,7 +364,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
 
             stderr_task = asyncio.create_task(_drain_stderr())
 
-            # DUPLICATED-PENDING-SEAM (runner_gemini cancel watcher).
+            # DUPLICATED-PENDING-SEAM (family cancel watcher).
             async def _cancel_watcher() -> None:
                 nonlocal cancelled
                 while not cancel_seen.is_set():
@@ -524,7 +524,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
     final_success = success and not cancelled and not error
 
     # The error IS the run's final answer — emit it as regular assistant
-    # text so content derivation keeps it (parity with runner_gemini).
+    # text so content derivation keeps it (family parity).
     if error and not final_success:
         try:
             error_event = {

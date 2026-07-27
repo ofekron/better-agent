@@ -6,14 +6,14 @@ from typing import Optional
 # guessed). Permission is per-provider-native (Option B): each provider's real
 # options are exposed losslessly, so the shape is kind-specific.
 #
-#   claude / gemini → {"mode": <value>}        (single axis)
+#   claude / qwen   → {"mode": <value>}        (single axis)
 #   codex           → {"approval": ..., "sandbox": ...}  (two independent axes)
 #   openai          → {"mode": <value>}        (BA-owned approval gate)
 
 CLAUDE_PERMISSION_MODES = ("default", "acceptEdits", "plan", "bypassPermissions", "dontAsk", "auto")
 CODEX_APPROVAL_POLICIES = ("untrusted", "on-request", "on-failure", "never")
 CODEX_SANDBOX_MODES = ("read-only", "workspace-write", "danger-full-access")
-GEMINI_APPROVAL_MODES = ("auto_edit", "yolo", "plan")
+SESSION_EVENTS_APPROVAL_MODES = ("auto_edit", "yolo", "plan")
 OPENAI_PERMISSION_MODES = ("default", "bypassPermissions")
 PI_PERMISSION_MODES = ("yolo", "plan")
 CURSOR_PERMISSION_MODES = ("default", "force")
@@ -25,10 +25,9 @@ OPENCODE_PERMISSION_MODES = ("default", "auto", "readonly")
 _AXES: dict[str, dict[str, tuple[str, ...]]] = {
     "claude": {"mode": CLAUDE_PERMISSION_MODES},
     "codex": {"approval": CODEX_APPROVAL_POLICIES, "sandbox": CODEX_SANDBOX_MODES},
-    "gemini": {"mode": GEMINI_APPROVAL_MODES},
     "openai": {"mode": OPENAI_PERMISSION_MODES},
     "pi": {"mode": PI_PERMISSION_MODES},
-    "qwen": {"mode": GEMINI_APPROVAL_MODES},
+    "qwen": {"mode": SESSION_EVENTS_APPROVAL_MODES},
     "cursor": {"mode": CURSOR_PERMISSION_MODES},
     "amp": {"mode": AMP_PERMISSION_MODES},
     "agy": {"mode": AGY_PERMISSION_MODES},
@@ -40,7 +39,6 @@ _AXES: dict[str, dict[str, tuple[str, ...]]] = {
 DEFAULT_PERMISSION: dict[str, dict[str, str]] = {
     "claude": {"mode": "bypassPermissions"},
     "codex": {"approval": "never", "sandbox": "danger-full-access"},
-    "gemini": {"mode": "yolo"},
     "openai": {"mode": "bypassPermissions"},
     "pi": {"mode": "yolo"},
     "qwen": {"mode": "yolo"},

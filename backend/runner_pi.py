@@ -3,7 +3,7 @@
 Per turn: spawns `pi --mode json -p` (prompt piped on stdin), reads pi's
 LF-delimited JSON event stream from stdout, normalizes each event to
 Claude jsonl shape, and appends to `<run_dir>/session_events.jsonl` —
-which PiProvider tails for the render tree (gemini recovery family).
+which PiProvider tails for the render tree (session-events recovery family).
 
 Session isolation: every run passes `--session-dir <run_dir>/pi-sessions`
 so pi's durable session file lands inside the run dir. Continuation
@@ -211,7 +211,7 @@ def normalize_tool_result_message(
 
 def normalize_unknown_event(raw: dict, parent_uuid: str) -> dict:
     """Surface an unrecognized pi event as a diagnostic row rather than
-    silently dropping it (same contract as runner_gemini)."""
+    silently dropping it (same family contract)."""
     return {
         "type": "unknown_event",
         "raw_type": raw.get("type"),
@@ -438,7 +438,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
     session_lost = False
     # uuid of the in-flight assistant message (message_start → message_end);
     # streaming updates rewrite the same uuid so the render tree replaces
-    # in place while events.jsonl appends per delta (gemini-family semantics).
+    # in place while events.jsonl appends per delta (family semantics).
     current_assistant_uuid: Optional[str] = None
 
     try:
@@ -653,7 +653,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
     final_success = not cancelled and not error
 
     # The error IS the run's final answer — emit it as a regular assistant
-    # text event so content derivation populates msg.content (gemini parity).
+    # text event so content derivation populates msg.content (family parity).
     if error and not final_success:
         try:
             error_event = {

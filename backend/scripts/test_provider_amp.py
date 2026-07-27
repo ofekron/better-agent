@@ -1,7 +1,7 @@
 """Focused tests for the Amp provider.
 
 Pins:
-  1. Class identity: AmpProvider subclasses GeminiProvider, KIND="amp".
+  1. Class identity: AmpProvider subclasses SessionEventsProvider, KIND="amp".
   2. Capability matrix: fork ON (amp threads fork is real), simulated
      rewind on, no team / steering / reasoning effort.
   3. build_env: clears Claude env; routes record api_key/base_url into
@@ -37,7 +37,7 @@ _TMP_HOME = _test_home.isolate("bc-test-provider-amp-")
 
 import provider_amp  # noqa: E402
 import runner_amp  # noqa: E402
-from provider_gemini import GeminiProvider  # noqa: E402
+from provider_session_events import SessionEventsProvider  # noqa: E402
 
 
 # Real lines captured from `amp -x "reply with just OK" --stream-json`
@@ -64,7 +64,7 @@ _REAL_RESULT_ERROR = {
 
 def test_class_identity() -> bool:
     cls = provider_amp.AmpProvider
-    return issubclass(cls, GeminiProvider) and cls.KIND == "amp"
+    return issubclass(cls, SessionEventsProvider) and cls.KIND == "amp"
 
 
 def test_capability_matrix() -> bool:

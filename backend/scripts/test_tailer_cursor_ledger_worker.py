@@ -36,7 +36,7 @@ Four subtests:
      contention (there IS no executor in the hot path anymore).
 
   D. End-to-end: tail a pre-written events.jsonl through
-     `GeminiJsonlTailer` (the class Gemini/OpenAI providers reuse) with
+     `SessionEventsJsonlTailer` (the class Gemini/OpenAI providers reuse) with
      an `on_cursor_advance` whose persist side-effect is artificially
      slow. All lines dispatch to the render tree well within a bound
      that would be impossible if dispatch were still coupled to
@@ -66,7 +66,7 @@ from pathlib import Path
 
 import spawn_ledger  # noqa: E402
 from cursor_ledger_worker import CursorLedgerWorker  # noqa: E402
-from jsonl_tailer import GeminiJsonlTailer  # noqa: E402
+from jsonl_tailer import SessionEventsJsonlTailer  # noqa: E402
 
 PASS = "\x1b[32mPASS\x1b[0m"
 FAIL = "\x1b[31mFAIL\x1b[0m"
@@ -171,7 +171,7 @@ async def test_d_dispatch_decoupled_from_slow_persist() -> bool:
         def _on_cursor_advance(n: int) -> None:
             w.note("run-d", lambda: time.sleep(0.3))  # simulated slow disk I/O
 
-        tailer = GeminiJsonlTailer(
+        tailer = SessionEventsJsonlTailer(
             path=events_path,
             start_offset=0,
             dispatch=_dispatch,

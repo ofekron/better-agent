@@ -1,5 +1,6 @@
 """ADVERSARIAL PROBE (not a kept test): import REAL native sessions from
-this machine's ~/.claude, ~/.codex, ~/.gemini into an isolated temp home
+this machine's ~/.claude, ~/.codex, and the agy conversation store into an
+isolated temp home
 and surface crashes / invariant violations my synthetic fixtures missed.
 
 Run with:
@@ -107,22 +108,6 @@ def main() -> None:
             ))
     print(f"found {len(agy_sessions)} real agy sessions")
     _run_kind("agy", agy_sessions)
-
-    # gemini: real tmp chats
-    real_gem = Path.home() / ".gemini" / "tmp"
-    gem_sessions: list[native_import.NativeSession] = []
-    if real_gem.exists():
-        for proj in real_gem.iterdir():
-            chats = proj / "chats"
-            if not chats.is_dir():
-                continue
-            for jp in chats.glob("session-*.jsonl"):
-                sid, _, _ = native_import._gemini_read_meta(jp)
-                gem_sessions.append(native_import.NativeSession(
-                    provider_id="", provider_kind="gemini", native_id=sid, jsonl_path=str(jp),
-                ))
-    print(f"found {len(gem_sessions)} real gemini sessions")
-    _run_kind("gemini", gem_sessions)
 
     # codex: real rollout db (skip if absent)
     try:

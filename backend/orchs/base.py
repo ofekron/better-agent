@@ -1231,7 +1231,7 @@ class OrchestrationStrategy(ABC):
         # Idempotence: an event with a claude uuid is durable and only
         # belongs on msg.events once.
         # UPDATE: if the event content changed, we replace the existing
-        # entry to support streaming updates (e.g. Gemini).
+        # entry to support streaming updates.
         # Whether THIS call mutated `msg.events` — the direct
         # replacement for the old before/after deepcopy-compare in
         # `session_manager.apply_written_journal_event`. Stays False
@@ -1263,7 +1263,7 @@ class OrchestrationStrategy(ABC):
                     # because `event_ingester.ingest`'s `uid:sha256(data)`
                     # dedup would no-op too — we just skip the call.
                     return False
-                # Mutated data (Gemini streaming, in-place updates,
+                # Mutated data (cumulative-text streaming, in-place updates,
                 # or any provider re-emitting same uuid). Replace in
                 # msg.events, then FALL THROUGH to the events.jsonl
                 # ingest tail so disk also sees the new snapshot.
@@ -1301,7 +1301,7 @@ class OrchestrationStrategy(ABC):
                 #
                 # `bump_unread` MUST stay scoped to this append branch.
                 # Replace path above (mutated data) MUST NOT bump —
-                # Gemini streaming would otherwise increment unread on
+                # Cumulative-text streaming would otherwise increment unread on
                 # every cumulative-text snapshot.
                 #
                 # `fires_side_effects` gate (seq > fold-pass-start

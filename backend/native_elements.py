@@ -5,7 +5,7 @@ The provider-agnostic core shared by the BA session miners
 (:mod:`native_session_prompt_search`), and the FTS index
 (:mod:`native_transcript_index`): the :class:`NativeElement` /
 :class:`NativeCandidate` shapes, the per-format message parsers and element
-extractors (Claude / Codex / Gemini / Windsurf), and the provider-native root
+extractors (Claude / Codex / Pi / Windsurf), and the provider-native root
 discovery helpers.
 
 This module deliberately has NO import-time dependency on the Better Agent
@@ -77,8 +77,6 @@ class NativeCandidate:
         try:
             if self.format == "codex":
                 messages, events_by_msg_id = _codex_messages(self.transcript)
-            elif self.format == "gemini":
-                messages, events_by_msg_id = _gemini_messages(self.transcript)
             elif self.format == "pi":
                 messages, events_by_msg_id = _pi_messages(self.transcript)
             elif self.format == "windsurf":
@@ -102,8 +100,6 @@ class NativeCandidate:
         try:
             if self.format == "codex":
                 return _codex_elements(self.transcript)
-            if self.format == "gemini":
-                return _gemini_elements(self.transcript)
             if self.format == "pi":
                 return _pi_elements(self.transcript)
             if self.format == "windsurf":
@@ -223,7 +219,7 @@ def _native_messages(transcript_path: Path) -> tuple[list[dict], dict[str, list[
     """Parse a Claude-shaped transcript into (messages, events_by_msg_id).
 
     Works for both Claude's own ``projects/<cwd>/<sid>.jsonl`` and the
-    Codex/Gemini run-dir ``session_events.jsonl`` (both are Claude message
+    Codex run-dir ``session_events.jsonl`` (both are Claude message
     shaped). ``messages`` holds user/assistant turns in order; per assistant
     turn a single render-tree-shaped ``agent_message`` event carries the native
     content blocks — enough for ``extract_output_text`` (previous reply) and
@@ -324,48 +320,6 @@ def _codex_messages(transcript_path: Path) -> tuple[list[dict], dict[str, list[d
                 continue
             uid = payload.get("id") if isinstance(payload.get("id"), str) else ""
             messages.append({"role": "user", "content": text, "timestamp": ts, "id": uid})
-    return messages, events_by_msg_id
-
-
-def _gemini_messages(transcript_path: Path) -> tuple[list[dict], dict[str, list[dict]]]:
-    """Parse a Gemini chat-history transcript (``~/.gemini/tmp/<cwd>/chats/*.jsonl``).
-
-    The first line is session metadata; subsequent lines are turns
-    ``{"id", "timestamp", "type": "user"|"gemini", "content": [{"text"}]}``,
-    interleaved with ``{"$set": ...}`` update lines (skipped). User turns become
-    ``role=="user"`` messages; gemini turns become ``role=="assistant"``.
-    """
-    messages: list[dict] = []
-    events_by_msg_id: dict[str, list[dict]] = {}
-    with transcript_path.open(encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                obj = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(obj, dict):
-                continue
-            turn_type = obj.get("type")
-            if turn_type not in ("user", "gemini"):
-                continue
-            content = obj.get("content")
-            texts: list[str] = []
-            if isinstance(content, list):
-                for block in content:
-                    if isinstance(block, dict) and isinstance(block.get("text"), str):
-                        texts.append(block["text"])
-            elif isinstance(content, str):
-                texts.append(content)
-            text = "\n".join(t for t in texts if t).strip()
-            if not text:
-                continue
-            ts = obj.get("timestamp") if isinstance(obj.get("timestamp"), str) else ""
-            uid = obj.get("id") if isinstance(obj.get("id"), str) else ""
-            role = "user" if turn_type == "user" else "assistant"
-            messages.append({"role": role, "content": text, "timestamp": ts, "id": uid})
     return messages, events_by_msg_id
 
 
@@ -742,51 +696,6 @@ def _codex_elements(transcript_path: Path) -> list[NativeElement]:
     return elements
 
 
-def _gemini_elements(transcript_path: Path) -> list[NativeElement]:
-    elements: list[NativeElement] = []
-    with transcript_path.open(encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                obj = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(obj, dict):
-                continue
-            turn_type = obj.get("type")
-            if turn_type not in ("user", "gemini"):
-                continue
-            ts = obj.get("timestamp") if isinstance(obj.get("timestamp"), str) else ""
-            uid = obj.get("id") if isinstance(obj.get("id"), str) else ""
-            role = "user" if turn_type == "user" else "assistant"
-            text_kind = "user_prompt" if turn_type == "user" else "assistant_text"
-            content = obj.get("content")
-            if isinstance(content, str):
-                if content.strip():
-                    elements.append(NativeElement(text_kind, role, content.strip(), "", ts, uid))
-                continue
-            if not isinstance(content, list):
-                continue
-            for block in content:
-                if not isinstance(block, dict):
-                    continue
-                if isinstance(block.get("text"), str) and block["text"].strip():
-                    elements.append(NativeElement(text_kind, role, block["text"].strip(), "", ts, uid))
-                if isinstance(block.get("functionCall"), dict):
-                    fc = block["functionCall"]
-                    name = fc.get("name") if isinstance(fc.get("name"), str) else ""
-                    elements.append(NativeElement("tool_call", role, f"{name} {_stringify(fc.get('args'))}".strip(), name, ts, uid))
-                if isinstance(block.get("functionResponse"), dict):
-                    fr = block["functionResponse"]
-                    name = fr.get("name") if isinstance(fr.get("name"), str) else ""
-                    text = _stringify(fr.get("response")).strip()
-                    if text:
-                        elements.append(NativeElement("tool_result", role, text, name, ts, uid))
-    return elements
-
-
 def _read_varint(data: bytes, index: int) -> tuple[int, int]:
     shift = 0
     value = 0
@@ -1003,11 +912,6 @@ def _claude_projects_roots() -> list[Path]:
 def _codex_sessions_root() -> Path:
     from paths import user_home
     return user_home() / ".codex" / "sessions"
-
-
-def _gemini_chats_root() -> Path:
-    from paths import user_home
-    return user_home() / ".gemini" / "tmp"
 
 
 def _pi_sessions_root() -> Path:

@@ -39,28 +39,6 @@ def test_supported_runner_matrix_is_strict() -> None:
     assert runtime_profile.supported_runners(fugu_subscription) == ("native",)
 
 
-def test_gemini_better_agent_adapter() -> None:
-    gemini = {
-        "id": "gemini",
-        "kind": "gemini",
-        "mode": "api_key",
-        "runner": "native",
-        "api_key": "secret",
-        "base_url": "",
-    }
-    assert runtime_profile.supported_runners(gemini) == ("native", "better_agent_runner")
-    adapted = runtime_profile.provider_record_for_runner(gemini, "better_agent_runner")
-    assert adapted["base_url"] == runtime_profile.GEMINI_OPENAI_BASE_URL
-    assert adapted["api_key"] == "secret"
-    assert gemini["base_url"] == ""
-    assert runtime_profile.reasoning_efforts(
-        gemini, "better_agent_runner", model="gemini-2.5-flash",
-    ) == ("none", "minimal", "low", "medium", "high")
-    assert runtime_profile.reasoning_efforts(
-        gemini, "better_agent_runner", model="gemini-3.5-flash",
-    ) == ("minimal", "low", "medium", "high")
-
-
 def test_provider_cache_is_runner_scoped(monkeypatch) -> None:
     record = {
         "id": "fugu",
@@ -81,29 +59,18 @@ def test_provider_cache_is_runner_scoped(monkeypatch) -> None:
     assert provider.get_provider("fugu", "better_agent_runner") is better_agent
 
 
-def test_internal_profile_and_session_persist_runner() -> None:
-    gemini = config_store.add_provider({
-        "name": "Gemini OpenAI runtime",
-        "kind": "gemini",
-        "mode": "api_key",
+def test_default_provider_is_resolved_before_orchestration_validation() -> None:
+    """A default provider whose kind has no team mode must fail session
+    creation on the orchestration axis — proving the default is resolved
+    before the orchestration check, not after."""
+    agy = config_store.add_provider({
+        "name": "AGY default",
+        "kind": "agy",
+        "mode": "subscription",
         "runner": "native",
-        "default_model": "gemini-2.5-flash",
+        "default_model": "Gemini 3.1 Pro (High)",
     })
-    # The installation fixture seeds its own provider as the default; the
-    # assertions below read the resolved default, so point it at gemini.
-    config_store.set_default_provider(gemini["id"])
-    config_store.set_internal_llm_assignments({
-        "default_session": {
-            "provider_id": gemini["id"],
-            "model": "gemini-2.5-flash",
-            "reasoning_effort": "minimal",
-            "runner": "better_agent_runner",
-        },
-    })
-    resolved = config_store.resolve_internal_llm("default_session")
-    assert resolved["runner"] == "better_agent_runner"
-    assert resolved["reasoning_effort"] == "minimal"
-
+    config_store.set_default_provider(agy["id"])
     try:
         session_manager.create(name="invalid default orchestration", cwd="/tmp")
     except IncompatibleOrchestrationMode as error:
@@ -111,10 +78,32 @@ def test_internal_profile_and_session_persist_runner() -> None:
     else:
         raise AssertionError("default provider must be resolved before orchestration validation")
 
+
+def test_internal_profile_and_session_persist_runner() -> None:
+    fugu = config_store.add_provider({
+        "name": "Fugu OpenAI runtime",
+        "kind": "fugu",
+        "mode": "api_key",
+        "runner": "native",
+        "default_model": "fugu-flash",
+    })
+    # The installation fixture seeds its own provider as the default; the
+    # assertions below read the resolved default, so point it at fugu.
+    config_store.set_default_provider(fugu["id"])
+    config_store.set_internal_llm_assignments({
+        "default_session": {
+            "provider_id": fugu["id"],
+            "model": "fugu-flash",
+            "runner": "better_agent_runner",
+        },
+    })
+    resolved = config_store.resolve_internal_llm("default_session")
+    assert resolved["runner"] == "better_agent_runner"
+
     session = session_manager.create(
         name="runner profile", cwd="/tmp", orchestration_mode="native",
     )
-    assert session["provider_id"] == gemini["id"]
+    assert session["provider_id"] == fugu["id"]
     assert session["runner"] == "better_agent_runner"
     assert session["last_active_runner"] is None
 
@@ -122,10 +111,10 @@ def test_internal_profile_and_session_persist_runner() -> None:
         session_manager.create(
             name="invalid runner profile",
             cwd="/tmp",
-            provider_id=gemini["id"],
-            model="gemini-2.5-flash",
+            provider_id=fugu["id"],
+            model="fugu-flash",
             runner="better_agent_runner",
-            reasoning_effort="xhigh",
+            reasoning_effort="minimal",
             orchestration_mode="native",
         )
     except ValueError as error:
@@ -136,7 +125,7 @@ def test_internal_profile_and_session_persist_runner() -> None:
 
 def main() -> int:
     test_supported_runner_matrix_is_strict()
-    test_gemini_better_agent_adapter()
+    test_default_provider_is_resolved_before_orchestration_validation()
     test_internal_profile_and_session_persist_runner()
     try:
         import pytest

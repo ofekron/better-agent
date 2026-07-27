@@ -12,7 +12,7 @@ up by an ordinary test run. Enabling it is the user's call:
 (`backend/scripts/live_llm_test_guard.py`); this suite deliberately does not
 invent a second one. Narrow the spend with either selector:
 
-    BETTER_AGENT_LIVE_VENDORS=claude,gemini      # only these provider kinds
+    BETTER_AGENT_LIVE_VENDORS=claude,agy         # only these provider kinds
     BETTER_AGENT_LIVE_SERVERS=ui,capabilities    # only these MCP servers
 
 Everything runs against an isolated `BETTER_AGENT_HOME` tempdir with its own

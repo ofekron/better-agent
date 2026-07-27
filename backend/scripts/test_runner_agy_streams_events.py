@@ -7,7 +7,7 @@ Reproduces the incident behind session d9d160af-… (model "Gemini 3.5 Flash
 yet the assistant bubble stayed empty and stuck "streaming" forever, with no
 error and no turn_complete. Root cause: runner_agy._run called
 `proc.communicate()` (blocks until agy exits) and only wrote
-session_events.jsonl AFTER exit — so the provider's polling GeminiJsonlTailer
+session_events.jsonl AFTER exit — so the provider's polling SessionEventsJsonlTailer
 had nothing to tail during the (long, agentic) turn, and if agy never exited
 the file was never written at all.
 

@@ -101,13 +101,13 @@ describe("subagent text events render standalone, not as tool results", () => {
       id: "err",
       content: "",
       error: true,
-      errorText: "gemini CLI not found on PATH",
+      errorText: "agy CLI not found on PATH",
     });
     const { container } = render(
       <MessageBubble message={msg} sessionId="s1" orchestrationMode="native" />,
     );
     expect(container.querySelector(".assistant-message .message-box")?.textContent).toContain(
-      "gemini CLI not found on PATH",
+      "agy CLI not found on PATH",
     );
     expect(container.querySelector(".message-status.status-error")).toBeTruthy();
   });

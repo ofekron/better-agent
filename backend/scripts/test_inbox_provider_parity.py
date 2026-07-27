@@ -32,7 +32,7 @@ def test_shared_descriptions_and_schemas() -> None:
     assert runner_codex._READ_INBOX_HISTORY_INPUT_SCHEMA is schemas.READ_INBOX_HISTORY_INPUT_SCHEMA
 
 
-def test_gemini_exposes_the_same_private_contract() -> None:
+def test_communicate_mcp_exposes_the_same_private_contract() -> None:
     tools = {tool.name: tool for tool in communicate_mcp.build_server()._tool_manager.list_tools()}
     assert tools["inbox"].description == descriptions.INBOX_DESCRIPTION
     assert tools["read_inbox_history"].description == descriptions.READ_INBOX_HISTORY_DESCRIPTION
@@ -53,7 +53,7 @@ def test_disable_lists_cover_both_inbox_tools() -> None:
         assert {"inbox", "read_inbox_history"} <= disabled
 
 
-def test_gemini_reads_only_the_bound_session() -> None:
+def test_communicate_mcp_reads_only_the_bound_session() -> None:
     for session_id in ("sender-session", "recipient-session"):
         session_store.create_session(
             id=session_id,
@@ -83,7 +83,7 @@ def test_gemini_reads_only_the_bound_session() -> None:
 
 if __name__ == "__main__":
     test_shared_descriptions_and_schemas()
-    test_gemini_exposes_the_same_private_contract()
+    test_communicate_mcp_exposes_the_same_private_contract()
     test_disable_lists_cover_both_inbox_tools()
-    test_gemini_reads_only_the_bound_session()
+    test_communicate_mcp_reads_only_the_bound_session()
     print("inbox provider parity tests: OK")

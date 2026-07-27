@@ -7,7 +7,7 @@
 <p align="center"><strong>Run every coding agent. Keep every session.</strong></p>
 
 <p align="center">
-  Claude, Codex, and Gemini in one local workspace—persistent, inspectable, and available from every trusted screen.
+  Claude, Codex, and Antigravity in one local workspace—persistent, inspectable, and available from every trusted screen.
 </p>
 
 <p align="center">
@@ -42,7 +42,7 @@ The first run initializes dependencies, builds the UI, and guides you through lo
 
 Stop juggling terminal tabs, provider UIs, hidden logs, and throwaway sessions.
 
-- **Every provider, one workspace.** Run Claude, Codex, and Gemini side by side. Choose the provider and model per session without changing how you organize or revisit work.
+- **Every provider, one workspace.** Run Claude, Codex, and Antigravity side by side. Choose the provider and model per session without changing how you organize or revisit work.
 - **Work that survives the tab.** Detached agents outlive browser disconnects and backend restarts. Return to the complete run and its full trace.
 - **A team, not a chatbot.** Fork sessions, delegate bounded work, run agents in parallel, and orchestrate them headlessly through the SDK and CLI.
 - **Local and inspectable.** Sessions, settings, credentials, project data, live output, tool calls, and file context stay on your machine and remain visible in one history.
@@ -53,7 +53,7 @@ Stop juggling terminal tabs, provider UIs, hidden logs, and throwaway sessions.
 - **Persistent sessions** — recover in-flight provider work after restarts and reconcile it into one deduplicated history.
 - **Offline-first capture** — create sessions and queue prompts while the backend is unreachable; sync them after reconnect.
 - **Project organization** — folder trees, tags, session tabs, quick filters, and advanced search across your work.
-- **Provider-native setup** — connect the Claude, Codex, and Gemini accounts and CLIs you already use.
+- **Provider-native setup** — connect the Claude, Codex, and Antigravity accounts and CLIs you already use.
 - **Multi-agent orchestration** — fork, delegate, supervise, and coordinate work across providers.
 - **Extension platform** — add permission-scoped workflows, tools, settings, and UI through signed marketplace or private extensions.
 
@@ -64,7 +64,7 @@ flowchart LR
     UI[Browser · Desktop · Mobile] <-- REST + WebSocket --> CORE[Better Agent backend]
     CORE --> C[Claude runner]
     CORE --> O[Codex runner]
-    CORE --> G[Gemini runner]
+    CORE --> G[Antigravity runner]
     CORE <--> STATE[(Local persistent state)]
 ```
 

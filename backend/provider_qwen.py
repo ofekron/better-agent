@@ -1,18 +1,18 @@
 """QwenProvider — `Provider` implementation for Alibaba's Qwen Code CLI.
 
-Qwen Code is a fork of Gemini CLI: identical run flags (`-o stream-json`,
+Qwen Code carries gemini-cli ancestry: the same run flags (`-o stream-json`,
 `--approval-mode plan|default|auto-edit|yolo`, `-m`, `-r/--resume`,
 `--include-directories`) but a DIFFERENT stream-json emitter — qwen 0.10+
 emits Claude-Code-compatible messages (`system/init`, `assistant`,
 `user`, `result` with `message.content` block lists), verified against
 the installed @qwen-code/qwen-code bundle's StreamJsonOutputAdapter.
 
-This provider subclasses GeminiProvider and reuses its RunState, tailer
+This provider subclasses SessionEventsProvider and reuses its RunState, tailer
 bootstrap (`_bootstrap_run`), completion watcher, backend-state writer,
 disk recovery (`recover_in_flight` / `attach_recovered_run`), rate-limit
 parsing skeleton, and simulated rewind. Only the runner script, env,
 auth routing, and model catalog differ. The runner writes Claude-shaped
-`session_events.jsonl`, so recovery_family="gemini" replay applies.
+`session_events.jsonl`, so recovery_family="session_events" replay applies.
 
 Auth (from the CLI source's AUTH_ENV_MAPPINGS):
   - subscription → `--auth-type qwen-oauth` (free tier, device-flow OAuth,
@@ -23,10 +23,10 @@ Auth (from the CLI source's AUTH_ENV_MAPPINGS):
 
 Registration this module still needs (files owned elsewhere):
   provider_manifest.SPECS entry (kind="qwen", runner_module="runner_qwen",
-  recovery_family="gemini", installable=True, hosts_ui_mcp=True),
+  recovery_family="session_events", installable=True, hosts_ui_mcp=True),
   models.py cold-start/refresh dispatch, provider_setup installer
   (`npm install -g @qwen-code/qwen-code`), permission._AXES["qwen"]
-  (gemini-style {"mode": ...}), and frontend setup template + i18n.
+  (single-axis {"mode": ...}), and frontend setup template + i18n.
 """
 
 from __future__ import annotations
@@ -47,14 +47,12 @@ import user_prefs
 from cli_paths import resolve_cli_binary
 from containment import containment
 from extension_run_policy import (
-    disabled_builtin_extensions_for_run,
-    disabled_builtin_tools_for_run,
     disabled_runtime_skills_for_run,
+    resolve_extension_run_policy,
 )
 from proc_control import process_control as _process_control
 from provider import build_better_agent_run_env, runner_argv, schedule_loop_task
-from provider_gemini import GeminiProvider, RunState
-from provider_run_config import normalize_provider_run_config
+from provider_session_events import SessionEventsProvider, RunState
 from runs_dir import runs_root as _runs_root
 
 logger = logging.getLogger(__name__)
@@ -79,7 +77,7 @@ QWEN_MODELS = [
 
 # --------------------------------------------------------------------
 # Bundle scraper — daily refresh path for the catalog. Qwen ships a
-# single esbuild bundle (<pkg>/cli.js, not gemini's chunk-*.js layout).
+# single esbuild bundle (<pkg>/cli.js).
 # The authoritative subscription list is the QWEN_OAUTH_MODELS array;
 # api-key ids come from DEFAULT_MODELS plus the qwen3* literals in the
 # model-limits table.
@@ -148,7 +146,7 @@ def fetch_qwen_models() -> list[str]:
             _add(m.group(1))
 
     # Integrity check — guard against a bundle reshape silently nuking
-    # the catalog (parity with fetch_gemini_models).
+    # the catalog.
     if len(models) < 3:
         logger.warning(
             "fetch_qwen_models: post-filter list has %d entries — "
@@ -168,10 +166,10 @@ def _dedupe_preserve_order(seq: list[str]) -> list[str]:
     return out
 
 
-class QwenProvider(GeminiProvider):
+class QwenProvider(SessionEventsProvider):
     uses_managed_api_key = True
-    """Qwen Code CLI provider. Native-mode only: like Gemini, qwen's CLI
-    has no non-interactive fork primitive, no in-process SDK MCP
+    """Qwen Code CLI provider. Native-mode only: qwen's CLI has no
+    non-interactive fork primitive, no in-process SDK MCP
     registration (manager mode), no mid-turn steering, and no
     reasoning-effort flag. Rewind is simulated (clear stored sid)."""
 
@@ -185,11 +183,11 @@ class QwenProvider(GeminiProvider):
     supports_native_subagents: ClassVar[bool] = False
     supports_reasoning_effort: ClassVar[bool] = False
 
-    # Extends the inherited gemini keyword set with qwen/DashScope quota
+    # Extends the inherited keyword set with qwen/DashScope quota
     # phrasing; `parse_rate_limit` is inherited and reads this attribute
     # via `self`, so the override applies without copying the method.
-    _GEMINI_RATE_LIMIT_KEYWORDS = (
-        GeminiProvider._GEMINI_RATE_LIMIT_KEYWORDS
+    _RATE_LIMIT_KEYWORDS = (
+        SessionEventsProvider._RATE_LIMIT_KEYWORDS
         + ("insufficient_quota", "allocated quota", "throttling.ratequota")
     )
 
@@ -227,10 +225,9 @@ class QwenProvider(GeminiProvider):
         return self.finalize_env(env)
 
     # ------------------------------------------------------------------
-    # start_run — copilot-style override of the gemini template: same
-    # run-dir protocol and bootstrap, but qwen's runner script, no
-    # gemini-subscription block (qwen-oauth subscriptions ARE supported),
-    # and the provider record mode forwarded for --auth-type routing.
+    # start_run — copilot-style override of the family template: same
+    # run-dir protocol and bootstrap, but qwen's runner script and the
+    # provider record mode forwarded for --auth-type routing.
     # ------------------------------------------------------------------
     def start_run(
         self,
@@ -304,19 +301,24 @@ class QwenProvider(GeminiProvider):
         _sess_rec = _sm.get(app_session_id) or {}
         _worker_sess_rec = _sm.get(worker_agent_session_id) if worker_agent_session_id else {}
         from permission import resolve_for_run as _resolve_perm
-        # Qwen shares gemini's single-axis approval-mode vocabulary
-        # verbatim (the runner maps auto_edit → auto-edit), so the
-        # gemini axis is the canonical permission shape until
-        # permission._AXES gains a first-class "qwen" entry.
+        # permission._AXES["qwen"] is the single-axis approval-mode
+        # vocabulary the runner maps onto the CLI (auto_edit → auto-edit).
         _permission = _resolve_perm(
             sess_rec=_sess_rec,
             worker_sess_rec=_worker_sess_rec,
             is_worker=is_worker,
-            fallback_kind="gemini",
+            fallback_kind=self.KIND,
         )
-        _bare = bool(_sess_rec.get("bare_config")) or bool(
-            (resolved_harness_run_config or {}).get("bare_config")
+        run_policy = resolve_extension_run_policy(
+            resolved_harness_run_config=resolved_harness_run_config,
+            session_record=_sess_rec,
+            worker_record=_worker_sess_rec,
+            provider_kind=self.KIND,
+            provider_run_config=provider_run_config,
+            capability_contexts=capability_contexts,
+            disabled_builtin_extensions=disabled_builtin_extensions,
         )
+        _bare = bool(run_policy["bare_config"])
         input_payload = {
             "prompt": prompt,
             "images": images or [],
@@ -341,26 +343,14 @@ class QwenProvider(GeminiProvider):
             "working_mode": _sess_rec.get("working_mode"),
             "worker_working_mode": (_worker_sess_rec or {}).get("working_mode"),
             "context_strategy": user_prefs.get_context_strategy(),
-            "provider_run_config": normalize_provider_run_config(provider_run_config),
-            "capability_contexts": capability_contexts or [],
-            "resolved_harness_run_config": resolved_harness_run_config or {},
             "target_message_id": target_message_id,
             "turn_run_id": turn_run_id,
             "provisioned_tool_profile": str(provisioned_tool_profile or "").strip(),
-            "disabled_builtin_tools": disabled_builtin_tools_for_run(
-                session_record=_sess_rec, worker_record=_worker_sess_rec,
-            ),
             "disabled_runtime_skills": disabled_runtime_skills_for_run(
                 session_record=_sess_rec, worker_record=_worker_sess_rec,
             ),
-            "disabled_builtin_extensions": (
-                disabled_builtin_extensions_for_run(
-                    disabled_builtin_extensions,
-                    session_record=_sess_rec,
-                    worker_record=_worker_sess_rec,
-                )
-            ),
         }
+        input_payload.update(run_policy)
         (run_dir / "input.json").write_text(json.dumps(input_payload), encoding="utf-8")
 
         containment().create(run_id)
@@ -435,7 +425,7 @@ class QwenProvider(GeminiProvider):
     # ------------------------------------------------------------------
     # run_headless — one-shot `qwen -o json`. Qwen's `-o json` prints the
     # Claude-shaped result message ({type:"result", result, session_id,
-    # usage, ...}), not gemini's {session_id, response, stats} envelope.
+    # usage, ...}), not a {session_id, response, stats} envelope.
     # ------------------------------------------------------------------
     async def run_headless(
         self,

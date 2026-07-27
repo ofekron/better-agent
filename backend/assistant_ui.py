@@ -336,7 +336,7 @@ async def search(query: str, *, max_results: int = 10) -> dict:
 
 async def resolve_ba_session(native_session_id: str) -> dict:
     """Map a session id returned by ``query_provider_native_transcript_index`` (a PROVIDER
-    native/agent session id for claude/codex/gemini, or already a BA id for the
+    native/agent session id for claude/codex/session-events runs, or already a BA id for the
     better-agent runner) to the Better Agent session id that ask/delegate operate
     on. Returns ``{"ba_session_id": <app id>}`` or ``{"ba_session_id": None}``
     when the transcript belongs to no BA session (raw native history never run
@@ -362,7 +362,7 @@ def _adopt_by_import(transcript_path: str, native_id: str) -> dict:
     PATH — the only provider-agnostic key: for codex the FTS ``sid`` is the
     rollout-file stem while the enumerator's ``native_id`` is the codex DB thread
     id, so a native_id match would miss codex; ``jsonl_path`` equals the FTS
-    ``path`` for every file-based provider (claude / codex-rollout / gemini /
+    ``path`` for every file-based provider (claude / codex-rollout / session-events /
     agy). ``native_id`` is only a claude fallback when no path is given."""
     import native_import
     want = _norm_path(transcript_path)

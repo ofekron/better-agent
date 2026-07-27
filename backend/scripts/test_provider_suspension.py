@@ -28,7 +28,7 @@ from session_manager import manager as session_manager  # noqa: E402
 _RECOVERY_PROVIDER_CASES = (
     {"name": "Claude", "kind": "claude", "mode": "subscription", "default_model": "model-claude"},
     {"name": "Codex", "kind": "codex", "mode": "subscription", "default_model": "model-codex"},
-    {"name": "Gemini", "kind": "gemini", "mode": "api_key", "default_model": "model-gemini"},
+    {"name": "AGY", "kind": "agy", "mode": "subscription", "default_model": "model-agy"},
     {
         "name": "OpenAI",
         "kind": "openai",

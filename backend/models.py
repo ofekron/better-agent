@@ -10,8 +10,6 @@ Refresh paths per provider kind/mode:
   - Claude subscription → HTTP /v1/models with OAuth bearer
                           (token read from macOS Keychain entry
                           `Claude Code-credentials`)
-  - Gemini              → parse the installed `gemini` CLI bundle's
-                          `VALID_GEMINI_MODELS` Set (no usable HTTP API)
   - AGY                 → `agy models`
 
 Cache file (`ba_home()/models_cache.{provider_id}.json`):
@@ -41,7 +39,6 @@ import asyncio
 import copy
 import json
 import logging
-import os
 import subprocess
 import threading
 import time
@@ -362,7 +359,6 @@ def _resolve_refresh_fetch(rec: dict) -> Optional[Callable[[], list[str]]]:
 
     - Claude api_key       → HTTP with x-api-key
     - Claude subscription  → HTTP with OAuth bearer (keychain read)
-    - Gemini               → scrape the installed CLI bundle
     - AGY                  → ask the installed CLI for models
 
     The closure captures `api_key` / `bearer_token` at resolve-time and
@@ -395,9 +391,6 @@ def _resolve_refresh_fetch(rec: dict) -> Optional[Callable[[], list[str]]]:
         if not base_url or not api_key:
             return None
         return lambda: fetch_openai_models(base_url, api_key)
-    if kind == "gemini":
-        from provider_gemini import fetch_gemini_models
-        return fetch_gemini_models
     if kind == "codex":
         from provider_codex import fetch_codex_models
         return fetch_codex_models
@@ -448,12 +441,9 @@ def _dedupe_preserve_order(seq: list[str]) -> list[str]:
 
 def _static_cold_start(provider: dict) -> list[str]:
     """Cold-start data when no cache exists. Subscription Claude →
-    `_SUBSCRIPTION_ALIASES`. Gemini → curated `GEMINI_MODELS`. Other
+    `_SUBSCRIPTION_ALIASES`. Codex → curated `CODEX_MODELS`. Other
     cases → []. Explicit kind+mode pairing — no implicit fallthrough."""
     kind = _runtime_kind_for_provider(provider)
-    if kind == "gemini":
-        from provider_gemini import GEMINI_MODELS
-        return list(GEMINI_MODELS)
     if kind == "codex":
         from provider_codex import CODEX_MODELS
         return list(CODEX_MODELS)
@@ -497,7 +487,7 @@ def _read_catalog_models(provider: dict) -> tuple[list[str], list[str], bool, di
     - Cache present → use cache. For subscription Claude, also union
       with `_SUBSCRIPTION_ALIASES` so `[1m]` variants survive.
     - Cache absent → fall back to static cold-start data (subscription
-      aliases or curated Gemini list). api_key Claude returns [].
+      aliases or a curated per-kind list). api_key Claude returns [].
     """
     cached = _read_cache(provider["id"])
     has_cache = cached is not None
@@ -544,8 +534,8 @@ def _models_for(provider: dict, *, include_retired: bool = False) -> list[str]:
 
 
 def available_models(provider_id: Optional[str] = None) -> list[str]:
-    """Active models only. Subscription/Gemini providers return their
-    static list on cold start, or the refreshed cache after first
+    """Active models only. Providers with static cold-start data return
+    that list on cold start, or the refreshed cache after first
     refresh. Does NOT include retired models.
 
     Returns [] for no-active-provider / unknown-provider-id — NEVER
@@ -591,7 +581,7 @@ def models_catalog(provider_id: Optional[str] = None) -> dict:
     State resolution:
     - Cache present → `last_fetch_state` from disk.
     - Cache absent + provider has static cold-start data (subscription
-      Claude, Gemini) → state="ok" (cold-start data IS canonical).
+      Claude, codex) → state="ok" (cold-start data IS canonical).
     - Cache absent + no cold-start data (api_key Claude pre-refresh) →
       state="warming". Frontend shows a loading banner.
     """
@@ -722,9 +712,9 @@ async def refresh_one(pid: str) -> Optional[dict]:
     """Refresh one provider's catalog. Returns the four-disjoint-set
     transition payload if anything changed, else None.
 
-    No-op when the provider is not refreshable right now: Gemini CLI
-    not installed, Claude subscription Keychain entry missing, api_key
-    empty, etc.
+    No-op when the provider is not refreshable right now: the CLI is
+    not installed, the Claude subscription Keychain entry is missing,
+    api_key is empty, etc.
     """
     async with _lock_for(pid):
         fetch = await asyncio.to_thread(_resolve_refresh_preflight, pid)

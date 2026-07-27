@@ -896,7 +896,7 @@ class EventIngester:
             # Dedup: orchestrator and session_watcher can both emit the
             # same claude event. Skip if we've already seen it ONLY if
             # the data is identical. If data changed, it's an
-            # update/delta (e.g. Gemini streaming).
+            # update/delta (e.g. cumulative-text streaming).
             #
             # Primary key: UUID from the event data. Fallback when no
             # UUID (e.g. pr-link, future metadata events): hash the

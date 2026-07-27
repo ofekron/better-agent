@@ -1,7 +1,7 @@
 """Canonical provider registry — the single source of truth for every
 per-kind fact that used to be scattered across if/elif chains and parallel
 dicts (`_resolve_class`, app_entry runner choices, INSTALLERS,
-`_GEMINI_FAMILY_KINDS`, the preempt/ui-mcp gates, credential
+`_SESSION_EVENTS_FAMILY_KINDS`, the preempt/ui-mcp gates, credential
 routing).
 
 STRING-ONLY BY DESIGN: this module imports nothing heavy — not `provider`,
@@ -34,15 +34,15 @@ class ProviderSpec:
     runner_module: str | None
     # Which crash-recovery replay reader run_recovery uses: "claude" (session
     # jsonl + subagent splice), "codex" (rollout + context_window), or
-    # "gemini" (session_events.jsonl, Claude-shaped). NOTE: fugu is
+    # "session_events" (session_events.jsonl, Claude-shaped). NOTE: fugu is
     # codex-based but currently recovers via the "claude" reader (it writes
     # provider_kind="fugu", which historically fell to the else branch). This
     # preserves that behavior; it is a pre-existing latent bug, flagged for a
     # separate fix — do not "correct" it here without recovery test coverage.
     recovery_family: str
     # Has an installable external CLI (drives the setup wizard). openai is
-    # in-process (no CLI); gemini/fugu have no verified install command yet —
-    # both are explicitly False here rather than silently absent.
+    # in-process (no CLI); fugu has no verified install command yet — both
+    # are explicitly False here rather than silently absent.
     installable: bool
     # Hosts the built-in `ui` MCP server (open-file-panel). codex cannot.
     hosts_ui_mcp: bool
@@ -80,13 +80,6 @@ SPECS: dict[str, ProviderSpec] = {
         runtime_requirements=("requirements-claude.txt",),
         runtime_probe_imports=("claude_agent_sdk",),
     ),
-    "gemini": ProviderSpec(
-        kind="gemini", module="provider_gemini", cls="GeminiProvider",
-        runner_module="runner_gemini", recovery_family="gemini",
-        installable=False, hosts_ui_mcp=True,
-        context_continuation=False, uses_claude_env=False,
-        runner_choices=("native", "better_agent_runner"),
-    ),
     "codex": ProviderSpec(
         kind="codex", module="provider_codex", cls="CodexProvider",
         runner_module="runner_codex", recovery_family="codex",
@@ -106,59 +99,59 @@ SPECS: dict[str, ProviderSpec] = {
     ),
     "openai": ProviderSpec(
         kind="openai", module="provider_openai", cls="OpenAIProvider",
-        runner_module="runner_better_agent", recovery_family="gemini",
+        runner_module="runner_better_agent", recovery_family="session_events",
         installable=False, hosts_ui_mcp=True,
         context_continuation=False, uses_claude_env=False,
         runner_choices=("better_agent_runner",),
     ),
     "agy": ProviderSpec(
         kind="agy", module="provider_agy", cls="AgyProvider",
-        runner_module="runner_agy", recovery_family="gemini",
+        runner_module="runner_agy", recovery_family="session_events",
         installable=True, hosts_ui_mcp=True,
         context_continuation=False, uses_claude_env=False,
     ),
     "copilot": ProviderSpec(
         kind="copilot", module="provider_copilot", cls="CopilotProvider",
-        runner_module="runner_copilot", recovery_family="gemini",
+        runner_module="runner_copilot", recovery_family="session_events",
         installable=True, hosts_ui_mcp=True,
         context_continuation=False, uses_claude_env=False,
     ),
     "pi": ProviderSpec(
         kind="pi", module="provider_pi", cls="PiProvider",
-        runner_module="runner_pi", recovery_family="gemini",
+        runner_module="runner_pi", recovery_family="session_events",
         installable=True, hosts_ui_mcp=True,
         context_continuation=False, uses_claude_env=False,
     ),
     "qwen": ProviderSpec(
         kind="qwen", module="provider_qwen", cls="QwenProvider",
-        runner_module="runner_qwen", recovery_family="gemini",
+        runner_module="runner_qwen", recovery_family="session_events",
         installable=True, hosts_ui_mcp=True,
         context_continuation=False, uses_claude_env=False,
     ),
     "cursor": ProviderSpec(
         kind="cursor", module="provider_cursor", cls="CursorProvider",
-        runner_module="runner_cursor", recovery_family="gemini",
-        # curl|bash installer only (no verified Windows path) — like gemini,
-        # usable when the CLI is already present, not wizard-installable.
+        runner_module="runner_cursor", recovery_family="session_events",
+        # curl|bash installer only (no verified Windows path) — usable when
+        # the CLI is already present, not wizard-installable.
         installable=False, hosts_ui_mcp=True,
         context_continuation=False, uses_claude_env=False,
     ),
     "kimi": ProviderSpec(
         kind="kimi", module="provider_kimi", cls="KimiProvider",
-        runner_module="runner_kimi", recovery_family="gemini",
+        runner_module="runner_kimi", recovery_family="session_events",
         # uv-based install has no verified Windows path — not wizard-installable.
         installable=False, hosts_ui_mcp=True,
         context_continuation=False, uses_claude_env=False,
     ),
     "amp": ProviderSpec(
         kind="amp", module="provider_amp", cls="AmpProvider",
-        runner_module="runner_amp", recovery_family="gemini",
+        runner_module="runner_amp", recovery_family="session_events",
         installable=True, hosts_ui_mcp=True,
         context_continuation=False, uses_claude_env=False,
     ),
     "opencode": ProviderSpec(
         kind="opencode", module="provider_opencode", cls="OpencodeProvider",
-        runner_module="runner_opencode", recovery_family="gemini",
+        runner_module="runner_opencode", recovery_family="session_events",
         installable=True, hosts_ui_mcp=True,
         context_continuation=False, uses_claude_env=False,
     ),
@@ -206,5 +199,7 @@ def installable_kinds() -> list[str]:
     return sorted(k for k, s in SPECS.items() if s.installable)
 
 
-def gemini_family_kinds() -> frozenset[str]:
-    return frozenset(k for k, s in SPECS.items() if s.recovery_family == "gemini")
+def session_events_family_kinds() -> frozenset[str]:
+    return frozenset(
+        k for k, s in SPECS.items() if s.recovery_family == "session_events"
+    )

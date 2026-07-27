@@ -6,7 +6,7 @@ All three provider runners import these constants so the descriptions cannot
 drift per provider:
   - Claude  -> runner.py        (@tool builders)
   - Codex   -> runner_codex.py  (dynamic tool dicts)
-  - Gemini  -> communicate_mcp.py (FastMCP stdio server)
+  - Session-events CLIs -> communicate_mcp.py (FastMCP stdio server)
 
 Keep each description concise and lead with the ONE axis that disambiguates
 the tool from its neighbours: wait-vs-detached, team-scoped-vs-any-session,

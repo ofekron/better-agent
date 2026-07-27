@@ -6,9 +6,6 @@ from dataclasses import dataclass
 import provider_manifest
 
 
-GEMINI_OPENAI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai"
-GEMINI_OPENAI_REASONING_EFFORTS = ("minimal", "low", "medium", "high")
-
 
 @dataclass(frozen=True)
 class RuntimeProfile:
@@ -71,8 +68,6 @@ def provider_record_for_runner(provider_record: dict, runner: object = None) -> 
     selected = resolve_runner(provider_record, runner)
     record = copy.deepcopy(provider_record)
     record["runner"] = selected
-    if record.get("kind") == "gemini" and selected == "better_agent_runner":
-        record["base_url"] = str(record.get("base_url") or GEMINI_OPENAI_BASE_URL).rstrip("/")
     return record
 
 
@@ -82,13 +77,6 @@ def reasoning_efforts(
     *,
     model: str = "",
 ) -> tuple[str, ...]:
-    selected = resolve_runner(provider_record, runner)
-    if provider_record.get("kind") == "gemini" and selected == "better_agent_runner":
-        efforts = list(GEMINI_OPENAI_REASONING_EFFORTS)
-        normalized_model = str(model or "").lower()
-        if normalized_model.startswith("gemini-2.5") and "pro" not in normalized_model:
-            efforts.insert(0, "none")
-        return tuple(efforts)
     options = provider_record.get("reasoning_effort_options") or ()
     return tuple(str(value) for value in options if str(value or "").strip())
 

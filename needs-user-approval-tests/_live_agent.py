@@ -42,13 +42,12 @@ BACKEND = REPO_ROOT / "backend"
 # no built-in MCP server at all.
 RUNNERS_WITH_BUILTIN_MCP = frozenset({
     "runner",           # Claude — in-process SDK servers, not stdio
-    "runner_gemini",
     "runner_codex",
     "runner_agy",
 })
 
 # Runners that expose the `communicate` tool set as a real MCP server.
-RUNNERS_WITH_COMMUNICATE_MCP = frozenset({"runner", "runner_gemini"})
+RUNNERS_WITH_COMMUNICATE_MCP = frozenset({"runner"})
 
 # Runners that expose the same tools as per-turn dynamic tools instead of an
 # MCP server. Functionally equivalent from the model's side; the assertion is
@@ -64,9 +63,9 @@ class Vendor:
     providers validate `model` by exact membership and raise otherwise.
 
     `mode` is the provider auth mode. It is not cosmetic: `config_store`
-    rejects a gemini or openai provider created in subscription mode outright,
-    so those kinds only exist here as api-key providers and are skipped when
-    the key is absent.
+    rejects an openai provider created in subscription mode outright, so that
+    kind only exists here as an api-key provider and is skipped when the key
+    is absent.
     """
 
     kind: str
@@ -98,10 +97,8 @@ class Vendor:
 VENDORS: tuple[Vendor, ...] = (
     Vendor("claude", "claude", "claude-haiku-4-5-20251001"),
     Vendor("codex", "codex", "gpt-5.4-mini"),
-    # Gemini CLI subscription auth is no longer supported; Antigravity is the
-    # replacement path for the same models, so `agy` carries the Gemini
-    # coverage and this row only runs when an API key is supplied.
-    Vendor("gemini", "gemini", "gemini-2.5-flash-lite", "api_key", "GEMINI_API_KEY"),
+    # The gemini CLI is gone; Antigravity (`agy`) is the replacement path for
+    # the same models and carries that coverage.
     Vendor("agy", "agy", "gemini-3.5-flash-medium"),
     Vendor("fugu", "codex", "fugu"),
     Vendor("copilot", "copilot", "gpt-5-mini"),

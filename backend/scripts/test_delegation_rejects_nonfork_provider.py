@@ -3,9 +3,9 @@ delegation against a provider with supports_fork=False is rejected with
 a clean error (delegate_error_payload) BEFORE minting a fork/spawning,
 instead of raising NotImplementedError -> HTTP 500.
 
-(The classic supports_fork=False case today is gemini, via
-gemini-cli#22563. Codex supports fork via the app-server `thread/fork`,
-so it passes this guard and is covered by
+(A canonical supports_fork=False case today is agy/Antigravity, whose
+CLI has no fork/branch primitive. Codex supports fork via the app-server
+`thread/fork`, so it passes this guard and is covered by
 integration_test_codex_fork.py.)
 
 Run:  cd backend && .venv/bin/python scripts/test_delegation_rejects_nonfork_provider.py
@@ -159,7 +159,7 @@ def _patch(monkeypatch, locked_called: list):
 def test_fork_rejected_for_nonfork_provider(monkeypatch):
     locked_called: list = []
     _patch(monkeypatch, locked_called)
-    coord = _FakeCoordinator(_Provider(supports_fork=False, kind="gemini"))
+    coord = _FakeCoordinator(_Provider(supports_fork=False, kind="agy"))
 
     result = asyncio.run(_delegation.run_delegation(
         coord,
@@ -167,7 +167,7 @@ def test_fork_rejected_for_nonfork_provider(monkeypatch):
         instructions="do isolated review",
         worker_session_id=WORKER_SID,
         worker_description="worker",
-        model="gemini-2.5-pro",
+        model="Gemini 3.1 Pro (High)",
         cwd="/tmp",
         run_mode="fork",
         ephemeral=True,
@@ -183,7 +183,7 @@ def test_nonfork_provider_rejected_before_missing_parent_init(monkeypatch):
     locked_called: list = []
     _patch(monkeypatch, locked_called)
     monkeypatch.setattr(_delegation.session_manager, "get", _fake_uninitialized_session_get)
-    coord = _FakeCoordinator(_Provider(supports_fork=False, kind="gemini"))
+    coord = _FakeCoordinator(_Provider(supports_fork=False, kind="agy"))
 
     result = asyncio.run(_delegation.run_delegation(
         coord,
@@ -191,7 +191,7 @@ def test_nonfork_provider_rejected_before_missing_parent_init(monkeypatch):
         instructions="do isolated review",
         worker_session_id=WORKER_SID,
         worker_description="worker",
-        model="gemini-2.5-pro",
+        model="Gemini 3.1 Pro (High)",
         cwd="/tmp",
         run_mode="fork",
         ephemeral=True,

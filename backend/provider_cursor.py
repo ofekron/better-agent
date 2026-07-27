@@ -5,9 +5,9 @@ subprocess per turn. The runner spawns
 `cursor-agent --print --output-format stream-json --stream-partial-output`,
 normalizes the CLI's stream-json events to Claude jsonl shape, and writes
 `session_events.jsonl`. This provider tails that file and pushes events onto
-the orchestrator queue — identical to the GeminiProvider path, which
+the orchestrator queue — identical to the SessionEventsProvider path, which
 CursorProvider subclasses to reuse RunState / bootstrap / tailer /
-completion watcher / disk recovery (recovery_family="gemini").
+completion watcher / disk recovery (recovery_family="session_events").
 
 Auth: `cursor-agent login` (browser OAuth) or the CURSOR_API_KEY env var.
 Resume: the stream init event's session_id is the chatId accepted by
@@ -34,14 +34,12 @@ import user_prefs
 from cli_paths import resolve_cli_binary
 from containment import containment
 from extension_run_policy import (
-    disabled_builtin_extensions_for_run,
-    disabled_builtin_tools_for_run,
     disabled_runtime_skills_for_run,
+    resolve_extension_run_policy,
 )
 from proc_control import process_control as _process_control
 from provider import build_better_agent_run_env, runner_argv, schedule_loop_task
-from provider_gemini import GeminiProvider, RunState
-from provider_run_config import normalize_provider_run_config
+from provider_session_events import SessionEventsProvider, RunState
 from runs_dir import runs_root as _runs_root
 import provider_runtime
 
@@ -130,11 +128,11 @@ def fetch_cursor_models() -> list[str]:
     return parse_cursor_models_output(proc.stdout)
 
 
-class CursorProvider(GeminiProvider):
+class CursorProvider(SessionEventsProvider):
     """Cursor CLI provider. Native-mode only: cursor-agent has no
     non-interactive fork primitive, no in-process SDK MCP registration
     (manager mode), no mid-turn steering, and no reasoning-effort flag.
-    Reuses GeminiProvider's RunState, tailer bootstrap, completion watcher,
+    Reuses SessionEventsProvider's RunState, tailer bootstrap, completion watcher,
     and disk recovery — only the runner binary, env, and permission model
     differ."""
 
@@ -142,7 +140,7 @@ class CursorProvider(GeminiProvider):
 
     supports_fork: ClassVar[bool] = False
     supports_manager_mode: ClassVar[bool] = False
-    # No CLI rewind primitive; simulated the Gemini way — clear the stored
+    # No CLI rewind primitive; simulated — clear the stored
     # provider session id so the next turn starts a fresh chat.
     supports_rewind: ClassVar[bool] = True
     rewind_requires_agent_identity: ClassVar[bool] = False
@@ -240,9 +238,16 @@ class CursorProvider(GeminiProvider):
             is_worker=is_worker,
             fallback_kind="cursor",
         )
-        _bare = bool(session_record.get("bare_config")) or bool(
-            (resolved_harness_run_config or {}).get("bare_config")
+        run_policy = resolve_extension_run_policy(
+            resolved_harness_run_config=resolved_harness_run_config,
+            session_record=session_record,
+            worker_record=worker_record,
+            provider_kind=self.KIND,
+            provider_run_config=provider_run_config,
+            capability_contexts=capability_contexts,
+            disabled_builtin_extensions=disabled_builtin_extensions,
         )
+        _bare = bool(run_policy["bare_config"])
         input_payload = {
             "prompt": prompt,
             "images": images or [],
@@ -264,26 +269,14 @@ class CursorProvider(GeminiProvider):
             "working_mode": session_record.get("working_mode"),
             "worker_working_mode": (worker_record or {}).get("working_mode"),
             "context_strategy": user_prefs.get_context_strategy(),
-            "capability_contexts": capability_contexts or [],
-            "resolved_harness_run_config": resolved_harness_run_config or {},
             "target_message_id": target_message_id,
             "turn_run_id": turn_run_id,
             "provisioned_tool_profile": str(provisioned_tool_profile or "").strip(),
-            "disabled_builtin_tools": disabled_builtin_tools_for_run(
-                session_record=session_record, worker_record=worker_record,
-            ),
             "disabled_runtime_skills": disabled_runtime_skills_for_run(
                 session_record=session_record, worker_record=worker_record,
             ),
-            "disabled_builtin_extensions": (
-                disabled_builtin_extensions_for_run(
-                    disabled_builtin_extensions,
-                    session_record=session_record,
-                    worker_record=worker_record,
-                )
-            ),
-            "provider_run_config": normalize_provider_run_config(provider_run_config),
         }
+        input_payload.update(run_policy)
         (run_dir / "input.json").write_text(
             json.dumps(input_payload), encoding="utf-8"
         )

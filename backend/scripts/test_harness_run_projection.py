@@ -30,7 +30,6 @@ PROVIDER_FILES = [
     "provider_codex.py",
     "provider_copilot.py",
     "provider_cursor.py",
-    "provider_gemini.py",
     "provider_kimi.py",
     "provider_openai.py",
     "provider_opencode.py",

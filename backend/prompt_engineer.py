@@ -87,8 +87,8 @@ async def start(parent_session_id: str, draft: str, mode: str) -> dict:
     parent_claude_sid: Optional[str] = None
     if mode == "fork":
         # mode="fork" branches the parent agent session, so the parent's
-        # provider must support fork (claude does; gemini-cli 0.42
-        # doesn't — issue google-gemini/gemini-cli#22563). Reject HERE
+        # provider must support fork (claude does; most external CLIs
+        # don't). Reject HERE
         # so no eng session record is created. mode="fresh" works for
         # every provider.
         parent_provider_id = parent.get("provider_id")

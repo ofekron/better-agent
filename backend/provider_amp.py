@@ -6,7 +6,7 @@ continue <threadId> -x --stream-json` to resume), parses Amp's
 Claude-Code-compatible stream-json from stdout, normalizes it to
 Claude jsonl shape, and writes `session_events.jsonl`. This provider
 tails that file and pushes events onto the orchestrator queue —
-identical to the GeminiProvider path, which AmpProvider subclasses to
+identical to the SessionEventsProvider path, which AmpProvider subclasses to
 reuse RunState / bootstrap / tailer / completion watcher / recovery.
 
 Auth: `amp login` stores an API key locally; AMP_API_KEY overrides it
@@ -32,17 +32,15 @@ from typing import ClassVar, Optional
 
 import config_store
 from extension_run_policy import (
-    disabled_builtin_extensions_for_run,
-    disabled_builtin_tools_for_run,
     disabled_runtime_skills_for_run,
+    resolve_extension_run_policy,
 )
 import user_prefs
 from cli_paths import resolve_cli_binary
 from containment import containment
 from provider import build_better_agent_run_env, schedule_loop_task, runner_argv
 import provider_runtime
-from provider_gemini import GeminiProvider, RunState
-from provider_run_config import normalize_provider_run_config
+from provider_session_events import SessionEventsProvider, RunState
 from proc_control import process_control as _process_control
 from runs_dir import runs_root as _runs_root
 
@@ -71,14 +69,14 @@ def fetch_amp_models() -> list[str]:
     return list(AMP_MODELS)
 
 
-class AmpProvider(GeminiProvider):
+class AmpProvider(SessionEventsProvider):
     uses_managed_api_key = True
     """Sourcegraph Amp CLI provider. Fork is supported natively
     (`amp threads fork`); everything else is native-mode only: no
     in-process SDK MCP registration (manager mode), no mid-turn
     steering, no reasoning-effort flag. Amp DOES run its own internal
     subagents (Task tool), but not through Better Agent's native
-    subagent integration. Reuses GeminiProvider's RunState, tailer
+    subagent integration. Reuses SessionEventsProvider's RunState, tailer
     bootstrap, completion watcher, and disk recovery — only the runner
     binary and env differ."""
 
@@ -86,7 +84,7 @@ class AmpProvider(GeminiProvider):
 
     supports_fork: ClassVar[bool] = True
     supports_manager_mode: ClassVar[bool] = False
-    # Amp has no rewind primitive; simulate like Gemini/Copilot by
+    # Amp has no rewind primitive; simulate like Copilot by
     # clearing the stored thread id so the next turn starts fresh.
     supports_rewind: ClassVar[bool] = True
     rewind_requires_agent_identity: ClassVar[bool] = False
@@ -190,9 +188,16 @@ class AmpProvider(GeminiProvider):
             is_worker=is_worker,
             fallback_kind=self.KIND,
         )
-        _bare = bool(session_record.get("bare_config")) or bool(
-            (resolved_harness_run_config or {}).get("bare_config")
+        run_policy = resolve_extension_run_policy(
+            resolved_harness_run_config=resolved_harness_run_config,
+            session_record=session_record,
+            worker_record=worker_record,
+            provider_kind=self.KIND,
+            provider_run_config=provider_run_config,
+            capability_contexts=capability_contexts,
+            disabled_builtin_extensions=disabled_builtin_extensions,
         )
+        _bare = bool(run_policy["bare_config"])
         input_payload = {
             "prompt": prompt,
             "images": images or [],
@@ -215,26 +220,14 @@ class AmpProvider(GeminiProvider):
             "working_mode": session_record.get("working_mode"),
             "worker_working_mode": (worker_record or {}).get("working_mode"),
             "context_strategy": user_prefs.get_context_strategy(),
-            "capability_contexts": capability_contexts or [],
-            "resolved_harness_run_config": resolved_harness_run_config or {},
             "target_message_id": target_message_id,
             "turn_run_id": turn_run_id,
             "provisioned_tool_profile": str(provisioned_tool_profile or "").strip(),
-            "disabled_builtin_tools": disabled_builtin_tools_for_run(
-                session_record=session_record, worker_record=worker_record,
-            ),
             "disabled_runtime_skills": disabled_runtime_skills_for_run(
                 session_record=session_record, worker_record=worker_record,
             ),
-            "disabled_builtin_extensions": (
-                disabled_builtin_extensions_for_run(
-                    disabled_builtin_extensions,
-                    session_record=session_record,
-                    worker_record=worker_record,
-                )
-            ),
-            "provider_run_config": normalize_provider_run_config(provider_run_config),
         }
+        input_payload.update(run_policy)
         (run_dir / "input.json").write_text(
             __import__("json").dumps(input_payload), encoding="utf-8"
         )

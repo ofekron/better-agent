@@ -3,7 +3,7 @@
 Covers three modules end to end:
 
   * ``native_session_miner`` — per-format parsers + element extractors
-    (Claude / Codex / Gemini), discovery, cwd token decode, run-dir index.
+    (Claude / Codex), discovery, cwd token decode, run-dir index.
   * ``native_session_prompt_search`` — query tokenization, whole-word match,
     Categorizer (every tool class), dedup, ranking, cwd filter, rg filter,
     generalized grep, public facades.
@@ -14,7 +14,7 @@ Covers three modules end to end:
 Isolation: every test runs against ``_test_home.isolate()`` (a temp
 ``BETTER_AGENT_HOME``) plus monkeypatched native roots pointing at temp dirs.
 No test scans or writes the real home (``~/.better-claude``, ``~/.claude``,
-``~/.codex``, ``~/.gemini``).
+``~/.codex``).
 
 Run with:
     cd backend && .venv/bin/python scripts/test_native_search_comprehensive.py
@@ -42,7 +42,7 @@ import native_session_prompt_search as nsp  # noqa: E402
 import native_transcript_index as idx  # noqa: E402
 from native_elements import (  # noqa: E402
     NativeCandidate, NativeElement, _claude_elements, _codex_elements,
-    _codex_first_cwd, _decode_cwd_token, _gemini_elements,
+    _codex_first_cwd, _decode_cwd_token,
 )
 from native_session_prompt_search import (  # noqa: E402
     Categorizer, ElementCategory, _query_tokens, _token_patterns,
@@ -67,7 +67,9 @@ def _install_empty_default_roots() -> None:
     ``_restore_*`` returns to THIS empty default, never the real home."""
     M._claude_projects_roots = lambda: []
     M._codex_sessions_root = lambda: _EMPTY_DEFAULT / "no-codex"
-    M._gemini_chats_root = lambda: _EMPTY_DEFAULT / "no-gemini"
+    M._pi_sessions_root = lambda: _EMPTY_DEFAULT / "no-pi"
+    M._windsurf_cascade_roots = lambda: []
+    nsp._windsurf_cascade_roots = lambda: []
     M._runs_root = lambda: _EMPTY_DEFAULT / "no-runs"
     nsp._native_roots = lambda: []
 
@@ -135,11 +137,6 @@ def _write_codex(records: list[dict]) -> Path:
     return _w(_SCRATCH / f"codex_{n}.jsonl", records)
 
 
-def _write_gemini(records: list[dict]) -> Path:
-    n = _next_seq()
-    return _w(_SCRATCH / f"gemini_{n}.jsonl", records)
-
-
 def _candidate(sid: str, cwd: str, transcript: Path, fmt: str = "claude") -> NativeCandidate:
     return NativeCandidate(key=f"{fmt}:{sid}", sid=sid, cwd=cwd, data={},
                            transcript=transcript, mtime=0.0, format=fmt)
@@ -178,23 +175,24 @@ def _restore_rg() -> None:
 
 
 def _isolate_native_roots(*, claude: list[Path] | None = None, codex: Path | None = None,
-                          gemini: Path | None = None, runs: Path | None = None):
+                          runs: Path | None = None):
     """Patch BOTH the miner roots (iter_all_native_candidates) AND nsp._native_roots
     (rg_filter / index stat-walk) so rg and the index see the SAME temp dirs the
     search discovery does. Returns a token for _restore_native_roots."""
-    orig = (M._claude_projects_roots, M._codex_sessions_root, M._gemini_chats_root,
-            M._runs_root, nsp._native_roots)
+    orig = (M._claude_projects_roots, M._codex_sessions_root, M._pi_sessions_root,
+            M._windsurf_cascade_roots, M._runs_root, nsp._native_roots,
+            nsp._windsurf_cascade_roots)
     M._claude_projects_roots = lambda: list(claude or [])
     M._codex_sessions_root = lambda: codex or _SCRATCH / "no-codex"
-    M._gemini_chats_root = lambda: gemini or _SCRATCH / "no-gemini"
+    M._pi_sessions_root = lambda: _SCRATCH / "no-pi"
+    M._windsurf_cascade_roots = lambda: []
+    nsp._windsurf_cascade_roots = lambda: []
     M._runs_root = lambda: runs or _SCRATCH / "no-runs"
     pairs: list[tuple[Path, str]] = []
     for c in (claude or []):
         pairs.append((c, "claude"))
     if codex and codex.exists():
         pairs.append((codex, "codex"))
-    if gemini and gemini.exists():
-        pairs.append((gemini, "gemini"))
     if runs and runs.exists():
         pairs.append((runs, "runs"))
     nsp._native_roots = lambda: pairs
@@ -202,8 +200,9 @@ def _isolate_native_roots(*, claude: list[Path] | None = None, codex: Path | Non
 
 
 def _restore_native_roots(orig) -> None:
-    (M._claude_projects_roots, M._codex_sessions_root, M._gemini_chats_root,
-     M._runs_root, nsp._native_roots) = orig
+    (M._claude_projects_roots, M._codex_sessions_root, M._pi_sessions_root,
+     M._windsurf_cascade_roots, M._runs_root, nsp._native_roots,
+     nsp._windsurf_cascade_roots) = orig
 
 
 _ORIG_NSP_ROOTS = None
@@ -211,7 +210,7 @@ _ORIG_MINER_ROOTS = None
 
 
 def _patch_nsp_roots(claude: list[Path] | None = None, codex: Path | None = None,
-                     gemini: Path | None = None, runs: Path | None = None):
+                     runs: Path | None = None):
     """Patch ``nsp._native_roots`` (used by the index stat-walk) in parallel with
     the miner roots so the index fast path walks the SAME temp dirs the search
     discovery does. Returns a token for ``_restore_nsp_roots``."""
@@ -223,8 +222,6 @@ def _patch_nsp_roots(claude: list[Path] | None = None, codex: Path | None = None
         pairs.append((c, "claude"))
     if codex and codex.exists():
         pairs.append((codex, "codex"))
-    if gemini and gemini.exists():
-        pairs.append((gemini, "gemini"))
     if runs and runs.exists():
         pairs.append((runs, "runs"))
     nsp._native_roots = lambda: pairs
@@ -256,12 +253,15 @@ def _idx_setup_roots(claude: Path | None = None):
         _ORIG_NSP_ROOTS = nsp._native_roots
     if _ORIG_MINER_ROOTS is None:
         _ORIG_MINER_ROOTS = (M._claude_projects_roots, M._codex_sessions_root,
-                             M._gemini_chats_root, M._runs_root)
+                             M._pi_sessions_root, M._windsurf_cascade_roots,
+                             M._runs_root)
     _IDX_CLAUDE = c
     nsp._native_roots = lambda: [(c, "claude"), (co, "codex")]
     M._claude_projects_roots = lambda: [c]
     M._codex_sessions_root = lambda: co
-    M._gemini_chats_root = lambda: _SCRATCH / "idx-no-gemini"
+    M._pi_sessions_root = lambda: _SCRATCH / "idx-no-pi"
+    M._windsurf_cascade_roots = lambda: []
+    nsp._windsurf_cascade_roots = lambda: []
     M._runs_root = lambda: _SCRATCH / "idx-no-runs"
     _reset_index()
     return _ORIG_NSP_ROOTS
@@ -274,8 +274,8 @@ def _restore_idx_roots(token) -> None:
         nsp._native_roots = _ORIG_NSP_ROOTS
         _ORIG_NSP_ROOTS = None
     if _ORIG_MINER_ROOTS is not None:
-        (M._claude_projects_roots, M._codex_sessions_root,
-         M._gemini_chats_root, M._runs_root) = _ORIG_MINER_ROOTS
+        (M._claude_projects_roots, M._codex_sessions_root, M._pi_sessions_root,
+         M._windsurf_cascade_roots, M._runs_root) = _ORIG_MINER_ROOTS
         _ORIG_MINER_ROOTS = None
 
 
@@ -542,74 +542,6 @@ def test_codex_first_cwd_invalid_json() -> bool:
     return ok
 
 
-# ─── gemini parser ─────────────────────────────────────────────────────────
-
-def test_gemini_parse_user_turn() -> bool:
-    t = _write_gemini([
-        {"sessionId": "g", "kind": "main"},
-        {"id": "u1", "timestamp": "t1", "type": "user",
-         "content": [{"text": "gemini prompt"}]},
-    ])
-    visit = _candidate("s1", "/p", t, fmt="gemini").parse()
-    ok = len(visit.messages) == 1 and visit.messages[0]["role"] == "user"
-    print(f"{OK if ok else FAIL} gemini parse keeps user turn (got {visit.messages})")
-    return ok
-
-
-def test_gemini_parse_gemini_turn_is_assistant() -> bool:
-    t = _write_gemini([
-        {"id": "g1", "timestamp": "t1", "type": "gemini",
-         "content": [{"text": "gemini reply"}]},
-    ])
-    visit = _candidate("s1", "/p", t, fmt="gemini").parse()
-    ok = len(visit.messages) == 1 and visit.messages[0]["role"] == "assistant"
-    print(f"{OK if ok else FAIL} gemini parse maps gemini turn -> assistant (got {visit.messages})")
-    return ok
-
-
-def test_gemini_parse_drops_metadata_line() -> bool:
-    t = _write_gemini([
-        {"sessionId": "g", "kind": "main"},
-        {"id": "u1", "timestamp": "t1", "type": "user", "content": [{"text": "prompt"}]},
-    ])
-    visit = _candidate("s1", "/p", t, fmt="gemini").parse()
-    ok = len(visit.messages) == 1
-    print(f"{OK if ok else FAIL} gemini parse drops metadata line (got {len(visit.messages)})")
-    return ok
-
-
-def test_gemini_parse_drops_set_update_line() -> bool:
-    t = _write_gemini([
-        {"id": "u1", "timestamp": "t1", "type": "user", "content": [{"text": "prompt"}]},
-        {"$set": {"foo": "bar"}},
-        {"id": "u2", "timestamp": "t2", "type": "user", "content": [{"text": "second"}]},
-    ])
-    visit = _candidate("s1", "/p", t, fmt="gemini").parse()
-    ok = len(visit.messages) == 2
-    print(f"{OK if ok else FAIL} gemini parse drops $set update line (got {len(visit.messages)})")
-    return ok
-
-
-def test_gemini_parse_string_content() -> bool:
-    t = _write_gemini([
-        {"id": "u1", "timestamp": "t1", "type": "user", "content": "string prompt"},
-    ])
-    visit = _candidate("s1", "/p", t, fmt="gemini").parse()
-    ok = len(visit.messages) == 1 and visit.messages[0]["content"] == "string prompt"
-    print(f"{OK if ok else FAIL} gemini parse accepts string content (got {visit.messages})")
-    return ok
-
-
-def test_gemini_parse_empty_content_dropped() -> bool:
-    t = _write_gemini([
-        {"id": "u1", "timestamp": "t1", "type": "user", "content": [{"text": "   "}]},
-    ])
-    visit = _candidate("s1", "/p", t, fmt="gemini").parse()
-    ok = visit.messages == []
-    print(f"{OK if ok else FAIL} gemini parse drops empty content (got {visit.messages})")
-    return ok
-
-
 # ─── claude element extractor ──────────────────────────────────────────────
 
 def test_claude_elements_user_prompt() -> bool:
@@ -819,61 +751,6 @@ def test_codex_elements_function_call_output_raw_string() -> bool:
     return ok
 
 
-# ─── gemini element extractor ──────────────────────────────────────────────
-
-def test_gemini_elements_user_prompt() -> bool:
-    t = _write_gemini([
-        {"id": "u1", "timestamp": "t1", "type": "user", "content": [{"text": "hi"}]},
-    ])
-    els = _gemini_elements(t)
-    ok = len(els) == 1 and els[0].kind == "user_prompt"
-    print(f"{OK if ok else FAIL} gemini_elements user_prompt (got {[(e.kind,e.text) for e in els]})")
-    return ok
-
-
-def test_gemini_elements_assistant_text() -> bool:
-    t = _write_gemini([
-        {"id": "g1", "timestamp": "t1", "type": "gemini", "content": [{"text": "reply"}]},
-    ])
-    els = _gemini_elements(t)
-    ok = len(els) == 1 and els[0].kind == "assistant_text"
-    print(f"{OK if ok else FAIL} gemini_elements assistant_text (got {[(e.kind,e.text) for e in els]})")
-    return ok
-
-
-def test_gemini_elements_function_call() -> bool:
-    t = _write_gemini([
-        {"id": "g1", "timestamp": "t1", "type": "gemini",
-         "content": [{"functionCall": {"name": "run_shell", "args": {"cmd": "ls"}}}]},
-    ])
-    els = _gemini_elements(t)
-    ok = len(els) == 1 and els[0].kind == "tool_call" and els[0].tool_name == "run_shell"
-    print(f"{OK if ok else FAIL} gemini_elements functionCall tool_call (got {[(e.kind,e.tool_name) for e in els]})")
-    return ok
-
-
-def test_gemini_elements_function_response() -> bool:
-    t = _write_gemini([
-        {"id": "g1", "timestamp": "t1", "type": "gemini",
-         "content": [{"functionResponse": {"name": "read_file",
-                                           "response": {"ok": "data"}}}]},
-    ])
-    els = _gemini_elements(t)
-    ok = len(els) == 1 and els[0].kind == "tool_result"
-    print(f"{OK if ok else FAIL} gemini_elements functionResponse tool_result (got {[(e.kind) for e in els]})")
-    return ok
-
-
-def test_gemini_elements_drops_non_user_gemini() -> bool:
-    t = _write_gemini([
-        {"id": "x", "type": "system", "content": [{"text": "system note"}]},
-    ])
-    els = _gemini_elements(t)
-    ok = els == []
-    print(f"{OK if ok else FAIL} gemini_elements drops non user/gemini type (got {[(e.kind) for e in els]})")
-    return ok
-
-
 # ─── cwd token decode ──────────────────────────────────────────────────────
 
 def test_decode_cwd_token_basic() -> bool:
@@ -946,14 +823,6 @@ def test_parse_elements_dispatch_codex() -> bool:
     return ok
 
 
-def test_parse_elements_dispatch_gemini() -> bool:
-    t = _write_gemini([{"id": "u1", "timestamp": "t1", "type": "user", "content": [{"text": "p"}]}])
-    els = _candidate("s1", "/p", t, fmt="gemini").parse_elements()
-    ok = len(els) == 1 and els[0].kind == "user_prompt"
-    print(f"{OK if ok else FAIL} parse_elements gemini dispatch (got {len(els)})")
-    return ok
-
-
 def test_parse_elements_missing_file_returns_empty() -> bool:
     els = _candidate("s1", "/p", _SCRATCH / "nope.jsonl", fmt="claude").parse_elements()
     ok = els == []
@@ -994,21 +863,6 @@ def test_iter_all_codex_rollout() -> bool:
         _restore_native_roots(orig)
     ok = len(cands) == 1 and cands[0].format == "codex" and cands[0].cwd == "/zapp"
     print(f"{OK if ok else FAIL} iter_all finds codex rollout (got {[(c.format,c.cwd) for c in cands]})")
-    return ok
-
-
-def test_iter_all_gemini_chat() -> bool:
-    gemini_root = _SCRATCH / "it-gemini-tmp"
-    chats = gemini_root / encode_cwd("/gproj") / "chats"
-    chats.mkdir(parents=True, exist_ok=True)
-    _w(chats / "session-1.jsonl", [{"id": "u1", "type": "user", "content": [{"text": "p"}]}])
-    orig = _isolate_native_roots(claude=[], gemini=gemini_root)
-    try:
-        cands = list(M.iter_all_native_candidates())
-    finally:
-        _restore_native_roots(orig)
-    ok = len(cands) == 1 and cands[0].format == "gemini"
-    print(f"{OK if ok else FAIL} iter_all finds gemini chat (got {[(c.format) for c in cands]})")
     return ok
 
 
@@ -1489,7 +1343,7 @@ def test_cat_empty_tool_name_other() -> bool:
 def test_rg_filter_none_when_no_roots() -> bool:
     _reset_candidates()
     orig = _isolate_native_roots(claude=[], codex=_SCRATCH / "no-codex",
-                                 gemini=_SCRATCH / "no-gemini", runs=_SCRATCH / "no-runs")
+                                 runs=_SCRATCH / "no-runs")
     try:
         res = nsp._rg_filter(["anything"])
     finally:
@@ -1522,7 +1376,7 @@ def test_rg_filter_finds_needle_files() -> bool:
     _w(sd / "hit.jsonl", [_claude_user("zulifrangible needle", "u1")])
     _w(sd / "miss.jsonl", [_claude_user("nothing here", "u1")])
     orig = _isolate_native_roots(claude=[projects], codex=_SCRATCH / "no-codex",
-                                 gemini=_SCRATCH / "no-gemini", runs=_SCRATCH / "no-runs")
+                                 runs=_SCRATCH / "no-runs")
     try:
         hits = nsp._rg_filter(["zulifrangible"])
     finally:
@@ -2202,29 +2056,6 @@ def test_integration_search_finds_codex() -> bool:
     return ok
 
 
-def test_integration_search_finds_gemini() -> bool:
-    _reset_candidates()
-    groot = _SCRATCH / "int-gemini-tmp"
-    chats = groot / encode_cwd("/g") / "chats"
-    chats.mkdir(parents=True, exist_ok=True)
-    _w(chats / "session-1.jsonl", [
-        {"id": "u1", "timestamp": "t", "type": "user", "content": [{"text": "zulifrangible gemini e2e"}]},
-    ])
-    _disable_rg()
-    orig = _isolate_native_roots(claude=[], gemini=groot)
-    _reset_index()
-    try:
-        out = nsp.search_native_session_prompts(query="zulifrangible gemini")
-    finally:
-        _restore_native_roots(orig)
-        _restore_rg()
-        _reset_index()
-    texts = {r["text"] for r in out}
-    ok = texts == {"zulifrangible gemini e2e"}
-    print(f"{OK if ok else FAIL} integration gemini search (got {texts})")
-    return ok
-
-
 def test_integration_index_fastpath_serves() -> bool:
     """Index built + fresh -> query served from FTS even with rg disabled.
     Both the miner roots (search discovery) and ``nsp._native_roots`` (the
@@ -2294,15 +2125,8 @@ def test_integration_multi_format_dispatch() -> bool:
                                               "content": [{"type": "input_text", "text": "multiformat needle codex"}]}},
     ])
 
-    groot = _SCRATCH / "multi-gemini-tmp"
-    gchats = groot / encode_cwd("/mg") / "chats"
-    gchats.mkdir(parents=True, exist_ok=True)
-    _w(gchats / "session-m.jsonl", [
-        {"id": "u", "type": "user", "content": [{"text": "multiformat needle gemini"}]},
-    ])
-
     _disable_rg()
-    orig = _isolate_native_roots(claude=[projects], codex=codex, gemini=groot)
+    orig = _isolate_native_roots(claude=[projects], codex=codex)
     _reset_index()
     try:
         out = nsp.search_native_session_prompts(query="multiformat needle")
@@ -2311,7 +2135,7 @@ def test_integration_multi_format_dispatch() -> bool:
         _restore_rg()
         _reset_index()
     texts = {r["text"] for r in out}
-    ok = texts == {"multiformat needle claude", "multiformat needle codex", "multiformat needle gemini"}
+    ok = texts == {"multiformat needle claude", "multiformat needle codex"}
     print(f"{OK if ok else FAIL} integration multi-format dispatch (got {texts})")
     return ok
 
@@ -2603,13 +2427,6 @@ def main_run() -> int:
         test_codex_first_cwd_extracts,
         test_codex_first_cwd_missing,
         test_codex_first_cwd_invalid_json,
-        # gemini parser
-        test_gemini_parse_user_turn,
-        test_gemini_parse_gemini_turn_is_assistant,
-        test_gemini_parse_drops_metadata_line,
-        test_gemini_parse_drops_set_update_line,
-        test_gemini_parse_string_content,
-        test_gemini_parse_empty_content_dropped,
         # claude element extractor
         test_claude_elements_user_prompt,
         test_claude_elements_command_tag,
@@ -2632,12 +2449,6 @@ def main_run() -> int:
         test_codex_elements_custom_tool_call,
         test_codex_elements_function_call_output,
         test_codex_elements_function_call_output_raw_string,
-        # gemini element extractor
-        test_gemini_elements_user_prompt,
-        test_gemini_elements_assistant_text,
-        test_gemini_elements_function_call,
-        test_gemini_elements_function_response,
-        test_gemini_elements_drops_non_user_gemini,
         # cwd token decode
         test_decode_cwd_token_basic,
         test_decode_cwd_token_empty,
@@ -2648,12 +2459,10 @@ def main_run() -> int:
         # parse_elements dispatch
         test_parse_elements_dispatch_claude,
         test_parse_elements_dispatch_codex,
-        test_parse_elements_dispatch_gemini,
         test_parse_elements_missing_file_returns_empty,
         # discovery
         test_iter_all_claude_only,
         test_iter_all_codex_rollout,
-        test_iter_all_gemini_chat,
         test_iter_all_runs_dir,
         test_iter_all_runs_dir_requires_state_json,
         # query tokens
@@ -2736,7 +2545,6 @@ def main_run() -> int:
         # cross-cutting / integration
         test_integration_search_finds_via_filesystem_walk,
         test_integration_search_finds_codex,
-        test_integration_search_finds_gemini,
         test_integration_index_fastpath_serves,
         test_integration_codex_env_context_dropped_in_search,
         test_integration_multi_format_dispatch,

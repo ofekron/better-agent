@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import platform
 import re
 import shutil
@@ -50,8 +49,6 @@ _PRESERVED_ENV_KEYS = {
     "CURL_CA_BUNDLE",
     "NODE_EXTRA_CA_CERTS",
     "SAKANA_API_KEY",
-    "GEMINI_API_KEY",
-    "GEMINI_CLI_HOME",
     "GOOGLE_API_KEY",
     "PATH",
     "TMPDIR",

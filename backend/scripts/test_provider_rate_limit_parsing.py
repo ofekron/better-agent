@@ -10,14 +10,14 @@ sys.path.insert(0, str(_BACKEND))
 
 from provider_claude import ClaudeProvider  # noqa: E402
 from provider_codex import CodexProvider  # noqa: E402
-from provider_gemini import GeminiProvider  # noqa: E402
+from provider_agy import AgyProvider  # noqa: E402
 
 
 def test_generic_rate_limits_use_scheduler_fallback() -> None:
     providers = [
         ClaudeProvider({"id": "claude", "name": "Claude", "kind": "claude"}),
         CodexProvider({"id": "codex", "name": "Codex", "kind": "codex"}),
-        GeminiProvider({"id": "gemini", "name": "Gemini", "kind": "gemini"}),
+        AgyProvider({"id": "agy", "name": "Agy", "kind": "agy"}),
     ]
     for provider in providers:
         assert provider.parse_rate_limit("HTTP 429: too many requests", []) is None
@@ -29,8 +29,8 @@ def test_specific_provider_resets_still_parse() -> None:
     assert reset is not None
     assert reset > datetime.now(timezone.utc)
 
-    gemini = GeminiProvider({"id": "gemini", "name": "Gemini", "kind": "gemini"})
-    reset = gemini.parse_rate_limit("RESOURCE_EXHAUSTED daily quota", [])
+    family = AgyProvider({"id": "agy", "name": "Agy", "kind": "agy"})
+    reset = family.parse_rate_limit("RESOURCE_EXHAUSTED daily quota", [])
     assert reset is not None
     assert reset > datetime.now(timezone.utc)
 

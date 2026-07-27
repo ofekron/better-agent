@@ -5510,7 +5510,7 @@ def _replace_runtime_skill_dir(source: Path, target: Path, extension_id: str) ->
     """Swap ``target`` to a fresh copy of ``source`` without a partial-content window.
 
     Sessions snapshot this directory concurrently (runtime-skill plugin build,
-    codex/gemini overlays), so the new tree is staged fully — owner marker
+    codex/agy overlays), so the new tree is staged fully — owner marker
     included — and swapped in with renames; the old tree is removed last.
     """
     _assert_runtime_skill_target_available(target, extension_id)
@@ -6436,7 +6436,7 @@ def resolve_native_mcp_servers_for_context(
     session_id: str | None = None, root_id: str | None = None, turn_id: str | None = None,
 ) -> dict[str, dict[str, Any]]:
     """The single call every provider's per-turn/per-run injection point
-    (runner.py, runner_codex.py, runner_gemini.py) makes. Gathers currently
+    (runner.py, runner_codex.py, runner_agy.py) makes. Gathers currently
     active/enabled extensions' declarations and resolves them against the
     grant store for this context -- global grants always included, project
     grants for `project_path`, session/turn grants for `session_id`/

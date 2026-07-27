@@ -3,7 +3,7 @@
 This is the cross-provider home for the capability-scoping management tools
 (list/load/release). Better Agent's own Claude SDK runner wires the same three
 tools in-process (`runner._build_capability_tools`); CLI-backed providers that
-launch their harness with an `mcpServers` config (Codex / AGY / Gemini) get them
+launch their harness with an `mcpServers` config (Codex / AGY / qwen) get them
 through this stdio server, injected by `builtin_mcp_config.with_builtin_mcp_servers`.
 
 The tools are thin triggers: Better Agent core owns the active-capability write

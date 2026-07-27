@@ -16,7 +16,6 @@ try:
     import config_store
     import extension_store
     import runner_codex
-    import runner_gemini
 
     disabled = config_store.set_disabled_builtin_tools([
         "create_session",
@@ -44,19 +43,5 @@ try:
     assert runner_codex._disabled_builtin_tools({
         "disabled_builtin_tools": disabled + ["unknown"],
     }) == {"ask", "create_session", "create_sub_session", "delegate_task", "mssg"}
-
-    gemini_config = runner_gemini._with_communicate_mcp(
-        {
-            "app_session_id": "sid",
-            "backend_url": "http://localhost:8000",
-            "internal_token": "token",
-            "disabled_builtin_tools": disabled + ["unknown"],
-        },
-        {},
-    )
-    env = gemini_config["mcp_servers"]["communicate"]["env"]
-    assert env["BETTER_CLAUDE_DISABLED_BUILTIN_TOOLS"] == (
-        "ask,create_session,create_sub_session,delegate_task,mssg"
-    )
 finally:
     shutil.rmtree(ba_home)

@@ -953,7 +953,7 @@ def _normalize_response_tool_call(payload: dict, parent_uuid: str) -> tuple[dict
         # Codex's native planning tool: `plan: [{step, status}]`. Map to
         # Claude's TodoWrite shape so the Todos extension reconstructs it as
         # `current_todos` — same boundary-normalization pattern as
-        # `_normalize_todo_list` (Codex stream item) and Gemini's
+        # `_normalize_todo_list` (Codex stream item) and the session-events family's
         # update_topic→TodoWrite rename. Status vocabulary is identical to
         # TodoWrite (pending/in_progress/completed), so it passes through.
         name, args = "TodoWrite", _codex_update_plan_to_todos(args)
@@ -1117,7 +1117,7 @@ def _normalize_todo_list(
 
     Status: Codex's stream has no `in_progress` — the FIRST
     not-completed entry is surfaced as `in_progress` (matches Codex's
-    own TUI active-step rendering and the Gemini in_progress heuristic);
+    own TUI active-step rendering and the session-events in_progress heuristic);
     remaining not-completed → `pending`; completed → `completed`.
     """
     raw_items = item.get("items")

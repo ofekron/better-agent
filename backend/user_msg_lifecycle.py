@@ -220,8 +220,8 @@ async def emit_sent(
     agent_sid: Optional[str] = None,
 ) -> None:
     """`agent_sid` is the underlying agent CLI's session id (provider-
-    agnostic — claude_sid for ClaudeProvider, the Gemini session id for
-    GeminiProvider, etc.)."""
+    agnostic — claude_sid for ClaudeProvider, the native session id for
+    SessionEventsProvider, etc.)."""
     await _publish_lifecycle(
         _USER_MSG_SENT, app_session_id, lifecycle_msg_id,
         {"lifecycle_msg_id": lifecycle_msg_id, "agent_sid": agent_sid},

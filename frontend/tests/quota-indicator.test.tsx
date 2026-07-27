@@ -90,21 +90,21 @@ describe("QuotaIndicator", () => {
     render(
       <QuotaIndicator
         status={{
-          provider: "gemini",
-          label: "Gemini",
+          provider: "agy",
+          label: "Antigravity",
           supported: true,
           stale: true,
           error: "http_503",
           windows: [
-            { key: "model:pro", label: "gemini-pro", used_percent: 80 },
-            { key: "model:flash", label: "gemini-flash", used_percent: 10 },
+            { key: "model:pro", label: "agy-pro", used_percent: 80 },
+            { key: "model:flash", label: "agy-flash", used_percent: 10 },
           ],
         }}
       />,
     );
 
-    expect(screen.getByText("gemini-pro")).toBeTruthy();
-    expect(screen.getByText("gemini-flash")).toBeTruthy();
+    expect(screen.getByText("agy-pro")).toBeTruthy();
+    expect(screen.getByText("agy-flash")).toBeTruthy();
     expect(screen.getAllByText("stale")).toHaveLength(2);
   });
 });

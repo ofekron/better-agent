@@ -94,7 +94,7 @@ type View =
   | { kind: "mobile" };
 
 type TemplateId = (typeof TEMPLATES)[number]["id"];
-type InstallableProviderKind = "claude" | "codex" | "gemini" | "agy" | "copilot" | "pi" | "qwen" | "amp" | "opencode";
+type InstallableProviderKind = "claude" | "codex" | "agy" | "copilot" | "pi" | "qwen" | "amp" | "opencode";
 type SettingsSection =
   | "providers"
   | "account"
@@ -200,13 +200,6 @@ function configDirCopyForKind(kind: string): {
       labelKey: "setup.configDirLabelCodex",
       placeholderKey: "setup.configDirPlaceholderCodex",
       hintKey: "setup.configDirHintCodex",
-    };
-  }
-  if (kind === "gemini") {
-    return {
-      labelKey: "setup.configDirLabelGemini",
-      placeholderKey: "setup.configDirPlaceholderGemini",
-      hintKey: "setup.configDirHintGemini",
     };
   }
   if (kind === "agy") {
@@ -2394,14 +2387,13 @@ interface FormPayload {
 }
 
 // Per-provider-native permission vocabularies (mirror backend/permission.py).
-// One axis for claude/gemini/openai, two independent axes (approval + sandbox) for codex.
+// One axis for claude/openai/pi, two independent axes (approval + sandbox) for codex.
 const PERMISSION_OPTIONS: Record<string, Record<string, string[]>> = {
   claude: { mode: ["default", "acceptEdits", "plan", "bypassPermissions", "dontAsk", "auto"] },
   codex: {
     approval: ["untrusted", "on-request", "on-failure", "never"],
     sandbox: ["read-only", "workspace-write", "danger-full-access"],
   },
-  gemini: { mode: ["auto_edit", "yolo", "plan"] },
   openai: { mode: ["default", "bypassPermissions"] },
   pi: { mode: ["yolo", "plan"] },
   qwen: { mode: ["auto_edit", "yolo", "plan"] },
@@ -2412,7 +2404,6 @@ const PERMISSION_OPTIONS: Record<string, Record<string, string[]>> = {
 const PERMISSION_DEFAULTS: Record<string, Record<string, string>> = {
   claude: { mode: "bypassPermissions" },
   codex: { approval: "never", sandbox: "danger-full-access" },
-  gemini: { mode: "yolo" },
   openai: { mode: "bypassPermissions" },
   pi: { mode: "yolo" },
   qwen: { mode: "yolo" },

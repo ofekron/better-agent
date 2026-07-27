@@ -5,7 +5,7 @@ Per turn: spawns `amp -x --stream-json` (fresh thread) or
 prompt via stdin, parses Amp's Claude-Code-compatible stream-json from
 stdout, normalizes each event to a Claude-shaped agent_message, and
 appends to `<run_dir>/session_events.jsonl` — which the AmpProvider
-tails for the render tree (gemini-family path). Writes `state.json`
+tails for the render tree (session-events-family path). Writes `state.json`
 (session_id = Amp thread id, e.g. "T-<uuid>") as soon as the thread id
 is known, and `complete.json` on exit.
 
@@ -203,7 +203,7 @@ def normalize_amp_event(
         }
 
     # Unknown event type: surface as a diagnostic instead of silently
-    # dropping (same invariant as runner_gemini's unknown path).
+    # dropping (same invariant as the family's unknown path).
     return {
         "type": "unknown_event",
         "raw_type": etype,
@@ -500,7 +500,7 @@ async def _run(run_dir: Path, inputs: dict[str, Any]) -> int:
         )
 
     # Surface the terminal error as the run's final answer so the message
-    # content isn't left empty (parity with runner_gemini's error event).
+    # content isn't left empty (family parity for the error event).
     if error and not cancelled:
         try:
             error_event = {

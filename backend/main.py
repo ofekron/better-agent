@@ -1410,7 +1410,7 @@ def _consume_shutdown_kill_runners_flag() -> bool:
 def _sigint_flag_handler(signum, frame):
     """Signal-safe: mutate flags + chain to uvicorn. NEVER block here.
 
-    The interactive "kill running Claude/Gemini processes? [y/N]" prompt
+    The interactive "kill running provider processes? [y/N]" prompt
     runs inside `on_shutdown` (off the signal frame, on the event loop)
     via `asyncio.to_thread`. Doing the prompt in the signal handler
     would (1) freeze the event loop while readline blocks, (2) re-enter
@@ -1466,7 +1466,7 @@ async def _prompt_kill_runners() -> None:
         return
     try:
         sys.stderr.write(
-            "\n^C — kill running Claude/Gemini processes too? "
+            "\n^C — kill running provider processes too? "
             "[y/N]  (Ctrl+C again = n): "
         )
         sys.stderr.flush()
@@ -2236,7 +2236,7 @@ if (
 
 class ProviderPayload(BaseModel):
     name: str = ""
-    kind: str = "claude"  # "claude" | "gemini" — selects the Provider impl
+    kind: str = "claude"  # provider kind — selects the Provider impl
     mode: str = "subscription"  # "subscription" | "api_key"
     api_key: str = ""
     base_url: str = ""
@@ -10640,7 +10640,7 @@ async def update_session_selectors(session_id: str, body: dict):
     already owns that run; the changed selector is applied lazily to the
     next prompt via continuation. `set_selectors` re-validates
     `orchestration_mode` against the new provider's capability (e.g.
-    Claude→Gemini on a manager-mode session fails here with
+    Claude→a non-manager-mode provider on a manager-mode session fails here with
     `IncompatibleOrchestrationMode` → 400)."""
     body = body or {}
     updates = await _resolve_selector_updates(session_id, body)

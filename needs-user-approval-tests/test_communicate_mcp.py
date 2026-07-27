@@ -1,6 +1,6 @@
 """`communicate` tool set against real agents.
 
-Only Claude and Gemini expose these as a real MCP server; Codex ships the same
+Only Claude exposes these as a real in-process MCP server; Codex ships the same
 tools as per-turn dynamic tools. Both routes end at the same backend
 operations, so the cases assert the operation's durable effect and stay
 agnostic about the transport.

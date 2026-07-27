@@ -10,16 +10,14 @@ from typing import ClassVar, Optional
 
 import config_store
 from extension_run_policy import (
-    disabled_builtin_extensions_for_run,
-    disabled_builtin_tools_for_run,
     disabled_runtime_skills_for_run,
+    resolve_extension_run_policy,
 )
 import user_prefs
 from cli_paths import resolve_cli_binary
 from containment import containment
 from provider import build_better_agent_run_env, schedule_loop_task, runner_argv
-from provider_gemini import GeminiProvider, RunState
-from provider_run_config import normalize_provider_run_config
+from provider_session_events import SessionEventsProvider, RunState
 from proc_control import process_control as _process_control
 from runs_dir import runs_root as _runs_root
 
@@ -62,7 +60,7 @@ def fetch_agy_models() -> list[str]:
     return out if out else list(AGY_MODELS)
 
 
-class AgyProvider(GeminiProvider):
+class AgyProvider(SessionEventsProvider):
     KIND: ClassVar[str] = "agy"
 
     supports_fork: ClassVar[bool] = False
@@ -152,9 +150,16 @@ class AgyProvider(GeminiProvider):
         from session_manager import manager as _sm
         session_record = _sm.get(app_session_id) or {}
         worker_record = _sm.get(worker_agent_session_id) if worker_agent_session_id else {}
-        _bare = bool(session_record.get("bare_config")) or bool(
-            (resolved_harness_run_config or {}).get("bare_config")
+        run_policy = resolve_extension_run_policy(
+            resolved_harness_run_config=resolved_harness_run_config,
+            session_record=session_record,
+            worker_record=worker_record,
+            provider_kind=self.KIND,
+            provider_run_config=provider_run_config,
+            capability_contexts=capability_contexts,
+            disabled_builtin_extensions=disabled_builtin_extensions,
         )
+        _bare = bool(run_policy["bare_config"])
         from permission import resolve_for_run as _resolve_perm
         _permission = _resolve_perm(
             sess_rec=session_record,
@@ -172,11 +177,6 @@ class AgyProvider(GeminiProvider):
             "mode": mode,
             "source": source or "",
             "app_session_id": app_session_id,
-            "active_capability_ids": [
-                str(cid)
-                for cid in (session_record.get("active_capability_ids") or [])
-                if str(cid or "").strip()
-            ],
             "backend_url": backend_url or "",
             "internal_token": "",
             "provider_id": self.id,
@@ -188,26 +188,14 @@ class AgyProvider(GeminiProvider):
             "working_mode": session_record.get("working_mode"),
             "worker_working_mode": (worker_record or {}).get("working_mode"),
             "context_strategy": user_prefs.get_context_strategy(),
-            "capability_contexts": capability_contexts or [],
-            "resolved_harness_run_config": resolved_harness_run_config or {},
             "target_message_id": target_message_id,
             "turn_run_id": turn_run_id,
             "provisioned_tool_profile": str(provisioned_tool_profile or "").strip(),
-            "disabled_builtin_tools": disabled_builtin_tools_for_run(
-                session_record=session_record, worker_record=worker_record,
-            ),
             "disabled_runtime_skills": disabled_runtime_skills_for_run(
                 session_record=session_record, worker_record=worker_record,
             ),
-            "disabled_builtin_extensions": (
-                disabled_builtin_extensions_for_run(
-                    disabled_builtin_extensions,
-                    session_record=session_record,
-                    worker_record=worker_record,
-                )
-            ),
-            "provider_run_config": normalize_provider_run_config(provider_run_config),
         }
+        input_payload.update(run_policy)
         (run_dir / "input.json").write_text(json.dumps(input_payload), encoding="utf-8")
 
         containment().create(run_id)

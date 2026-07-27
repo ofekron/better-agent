@@ -12,9 +12,8 @@ const modelPickerSource = readFileSync("src/components/modelPicker.ts", "utf8");
 const englishSource = readFileSync("src/i18n/en.json", "utf8");
 
 describe("modesForKind", () => {
-  it("restricts openai and gemini to api_key", () => {
+  it("restricts openai to api_key", () => {
     expect(modesForKind("openai")).toEqual(["api_key"]);
-    expect(modesForKind("gemini")).toEqual(["api_key"]);
   });
   it("offers both modes for claude/codex/unknown", () => {
     expect(modesForKind("claude")).toEqual(["subscription", "api_key"]);

@@ -1,9 +1,9 @@
 """Regression: runner-owned event streams (session_events.jsonl written
-by the Gemini/OpenAI-family runners) must be fully drained by the tailer
+by the session-events/OpenAI-family runners) must be fully drained by the tailer
 BEFORE `complete` is enqueued.
 
-Both `GeminiProvider._watch_complete` (base of Copilot/Amp/Cursor/Kimi/
-pi/Qwen/OpenCode/Agy) and `OpenAIProvider._watch_complete` used a fixed
+Both `SessionEventsProvider._watch_complete` (base of Copilot/Amp/Cursor/
+Kimi/pi/Qwen/OpenCode/Agy) and `OpenAIProvider._watch_complete` used a fixed
 `sleep(0.2)` drain guess: when the poll tailer lagged more than 0.2s,
 `complete` overtook trailing event lines — the turn loop broke, the
 lines never reached the render tree, and waiters (`ask_team_message`)
@@ -78,9 +78,9 @@ def _mk_run(provider_mod, tmp):
 
 async def _watch_complete_waits(provider_cls_name):
     print(f"{provider_cls_name}._watch_complete drains before complete:")
-    if provider_cls_name == "GeminiProvider":
-        import provider_gemini as mod
-        prov = mod.GeminiProvider({"id": "drain-gem"})
+    if provider_cls_name == "AgyProvider":
+        import provider_agy as mod
+        prov = mod.AgyProvider({"id": "drain-agy"})
     else:
         import provider_openai as mod
         prov = mod.OpenAIProvider({"id": "drain-oai"})
@@ -163,7 +163,7 @@ async def _drain_timeout_is_bounded():
 
 
 def main():
-    asyncio.run(_watch_complete_waits("GeminiProvider"))
+    asyncio.run(_watch_complete_waits("AgyProvider"))
     asyncio.run(_watch_complete_waits("OpenAIProvider"))
     asyncio.run(_watch_complete_waits_codex())
     asyncio.run(_drain_timeout_is_bounded())

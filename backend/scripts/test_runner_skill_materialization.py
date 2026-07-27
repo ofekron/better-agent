@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Extension/runtime skills must materialize natively for the Gemini CLI family
-(gemini + agy), not just Claude. Before the fix, `_materialize_gemini_run_home`
-and `_materialize_agy_run_home` returned early when a run had no MCP servers and
-no `provider_run_config.skills`, so locally/extension-discovered skills never
-landed in the per-run overlay the CLI actually reads. These tests fail on that
-old behavior and pass once `materialize_runtime_skills` is wired in.
+"""Extension/runtime skills must materialize natively for agy/Antigravity, not
+just Claude. Before the fix, `_materialize_agy_run_home` returned early when a
+run had no MCP servers and no `provider_run_config.skills`, so locally- and
+extension-discovered skills never landed in the per-run overlay the CLI
+actually reads. These tests fail on that old behavior and pass once
+`materialize_runtime_skills` is wired in.
 """
 from __future__ import annotations
 
@@ -20,7 +20,6 @@ import paths  # noqa: E402
 
 _TEST_HOME = paths.engage_test_home(tempfile.mkdtemp(prefix="ba-runner-skills-ba-"))
 
-import runner_gemini  # noqa: E402
 import runner_agy  # noqa: E402
 
 
@@ -42,30 +41,6 @@ def write_local_skill(home: str, name: str) -> None:
     skill.write_text(
         f"---\nname: {name}\ndescription: parity test skill\n---\n# {name}\n",
         encoding="utf-8",
-    )
-
-
-def t_gemini_no_skills_no_mcp_returns_none() -> None:
-    home = fresh_home()
-    run_dir = Path(tempfile.mkdtemp(prefix="ba-gemini-run-"))
-    env = runner_gemini._materialize_gemini_run_home(run_dir, {}, cwd=home)
-    check(env is None, "gemini overlay is skipped when no skills/mcp are configured")
-
-
-def t_gemini_materializes_runtime_skill() -> None:
-    home = fresh_home()
-    write_local_skill(home, "parity-gemini-skill")
-    run_dir = Path(tempfile.mkdtemp(prefix="ba-gemini-run-"))
-    env = runner_gemini._materialize_gemini_run_home(run_dir, {}, cwd=home)
-    check(env is not None, "gemini overlay is built when a runtime skill exists")
-    overlay = Path(env["GEMINI_CLI_HOME"])
-    check(
-        (overlay / ".gemini" / "skills" / "parity-gemini-skill" / "SKILL.md").is_file(),
-        "gemini runtime skill lands in .gemini/skills",
-    )
-    check(
-        (overlay / ".agents" / "skills" / "parity-gemini-skill" / "SKILL.md").is_file(),
-        "gemini runtime skill lands in .agents/skills",
     )
 
 

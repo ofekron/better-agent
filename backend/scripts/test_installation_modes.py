@@ -28,7 +28,6 @@ import installation_admission
 import installation_profile
 import provider_setup
 import runner_codex
-import runner_gemini
 import runtime_skills
 
 
@@ -284,7 +283,6 @@ def test_ui_only_suppresses_better_agent_injections() -> None:
         assert runtime_skills.runtime_skill_contexts(str(ROOT)) == []
         assert not runtime_skills.has_runtime_skills(str(ROOT))
         assert extension_store._active_records_from_data(active_data) == []
-        assert runner_gemini._with_communicate_mcp(inputs, provider_config) == provider_config
         dynamic_tools, handlers = runner_codex._build_dynamic_tool_set(
             mode="native",
             app_session_id="session",

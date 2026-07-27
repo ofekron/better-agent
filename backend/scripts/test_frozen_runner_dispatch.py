@@ -44,16 +44,16 @@ def test_runner_argv_dev() -> bool:
         print(f"  dev claude: got {argv}")
         return False
     argv_g = runner_argv(
-        Path("/runs/y"), dev_script=Path("/b/runner_gemini.py"), kind="gemini",
+        Path("/runs/y"), dev_script=Path("/b/runner_agy.py"), kind="agy",
     )
-    if argv_g != [sys.executable, "/b/runner_gemini.py", "--run-dir", "/runs/y"]:
-        print(f"  dev gemini: got {argv_g}")
+    if argv_g != [sys.executable, "/b/runner_agy.py", "--run-dir", "/runs/y"]:
+        print(f"  dev agy: got {argv_g}")
         return False
     return True
 
 
 def test_runner_argv_frozen() -> bool:
-    """Frozen: argv re-execs the app binary; gemini carries --runner-kind,
+    """Frozen: argv re-execs the app binary; agy carries --runner-kind,
     claude (the default) does not."""
     sys.frozen = True  # simulate PyInstaller
     try:
@@ -64,13 +64,13 @@ def test_runner_argv_frozen() -> bool:
             print(f"  frozen claude: got {argv}")
             return False
         argv_g = runner_argv(
-            Path("/runs/y"), dev_script=Path("/b/runner_gemini.py"),
-            kind="gemini",
+            Path("/runs/y"), dev_script=Path("/b/runner_agy.py"),
+            kind="agy",
         )
         if argv_g != [
-            sys.executable, "--run-dir", "/runs/y", "--runner-kind", "gemini",
+            sys.executable, "--run-dir", "/runs/y", "--runner-kind", "agy",
         ]:
-            print(f"  frozen gemini: got {argv_g}")
+            print(f"  frozen agy: got {argv_g}")
             return False
         return True
     finally:
@@ -78,7 +78,7 @@ def test_runner_argv_frozen() -> bool:
 
 
 def test_dispatch() -> bool:
-    """`_dispatch` routes --run-dir to a runner (claude default / gemini
+    """`_dispatch` routes --run-dir to a runner (claude default / agy
     explicit) and bare argv to the server."""
     if _dispatch([]) != ("server", None, None):
         print(f"  bare argv: got {_dispatch([])}")
@@ -100,9 +100,9 @@ def test_dispatch() -> bool:
     ):
         print(f"  --run-dir: got {_dispatch(['--run-dir', '/runs/x'])}")
         return False
-    got = _dispatch(["--run-dir", "/runs/y", "--runner-kind", "gemini"])
-    if got != ("runner", "gemini", Path("/runs/y")):
-        print(f"  --run-dir gemini: got {got}")
+    got = _dispatch(["--run-dir", "/runs/y", "--runner-kind", "agy"])
+    if got != ("runner", "agy", Path("/runs/y")):
+        print(f"  --run-dir agy: got {got}")
         return False
     return True
 

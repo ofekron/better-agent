@@ -72,10 +72,10 @@ def test_aggregate_breaks_sessions_down_by_provider_and_model():
          "provider_id": "p1", "model": "m1", "orchestration_mode": "team", "message_count": 2},  # out of range
     ]
     pmap = {"p1": {"id": "p1", "name": "Claude", "kind": "claude"},
-            "p2": {"id": "p2", "name": "Gemini", "kind": "gemini"}}
+            "p2": {"id": "p2", "name": "AGY", "kind": "agy"}}
     out = analytics.aggregate(sessions, [], [], pmap, start, END)
     assert out["sessions"]["total"] == 2
-    assert {p["name"]: p["count"] for p in out["sessions"]["by_provider"]} == {"Claude": 1, "Gemini": 1}
+    assert {p["name"]: p["count"] for p in out["sessions"]["by_provider"]} == {"Claude": 1, "AGY": 1}
     assert {m["model"]: m["count"] for m in out["sessions"]["by_model"]} == {"m1": 1, "m2": 1}
     assert {o["mode"]: o["count"] for o in out["sessions"]["by_orchestration"]} == {"team": 1, "native": 1}
 
@@ -290,13 +290,12 @@ def test_default_bounds_include_native_session_older_than_30_days():
 def test_compute_analytics_reads_live_stores():
     p1 = config_store.add_provider({"name": "Claude", "kind": "claude", "mode": "subscription"})
     p2 = config_store.add_provider({
-        "name": "Gemini",
-        "kind": "gemini",
-        "mode": "api_key",
-        "api_key": "test-key",
+        "name": "AGY",
+        "kind": "agy",
+        "mode": "subscription",
     })
     s1 = session_store.create_session(name="a", model="glm-5.1", provider_id=p1["id"], orchestration_mode="team")
-    s2 = session_store.create_session(name="b", model="gemini-2.5", provider_id=p2["id"], orchestration_mode="native")
+    s2 = session_store.create_session(name="b", model="Gemini 3.1 Pro (High)", provider_id=p2["id"], orchestration_mode="native")
     # give them a message so they pass the real-session filter
     session_store.write_session_full({**s1, "messages": [{"role": "user", "content": "hi", "timestamp": datetime.now().isoformat()}]})
     session_store.write_session_full({**s2, "messages": [{"role": "user", "content": "hi", "timestamp": datetime.now().isoformat()}]})
@@ -312,9 +311,9 @@ def test_compute_analytics_reads_live_stores():
 
     out = analytics.compute_analytics(*analytics.resolve_bounds(None, None))
     assert out["sessions"]["total"] == 2
-    assert {"claude", "gemini"} <= {p["kind"] for p in out["providers"]}
+    assert {"claude", "agy"} <= {p["kind"] for p in out["providers"]}
     prov = {p["name"]: p["turns"] for p in out["turns"]["by_provider"]}
-    assert prov["Claude"] == 1 and prov["Gemini"] == 1
+    assert prov["Claude"] == 1 and prov["AGY"] == 1
 
 
 def test_native_conversations_from_index_groups_sessions_and_turns():
@@ -555,9 +554,9 @@ def test_aggregate_llm_calls_from_single_log_shape():
             "source": "prompt_engineer",
             "reason": "session_tree_projection",
             "provider_id": "p2",
-            "provider_kind": "gemini",
-            "provider_name": "Gemini",
-            "model": "gemini-2.5",
+            "provider_kind": "agy",
+            "provider_name": "AGY",
+            "model": "Gemini 3.1 Pro (High)",
             "prompt_preview": "tree",
             "token_usage": {"input_tokens": 2, "output_tokens": 3, "cache_read_input_tokens": 5},
             "success": False,
@@ -579,7 +578,7 @@ def test_aggregate_llm_calls_from_single_log_shape():
     assert llm["token_usage"]["output_tokens"] == 7
     assert llm["token_usage"]["cache_read_input_tokens"] == 5
     assert llm["token_usage"]["total_tokens"] == 19
-    assert {p["name"]: p["calls"] for p in llm["by_provider"]} == {"Claude": 1, "Gemini": 1}
+    assert {p["name"]: p["calls"] for p in llm["by_provider"]} == {"Claude": 1, "AGY": 1}
     assert llm["recent"][0]["id"] == "llm_b"
 
 

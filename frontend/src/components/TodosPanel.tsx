@@ -138,8 +138,8 @@ function SmartItemList<T extends TodoItem | TaskItem>({
 /** Cross-provider TODO + Tasks list for the right panel.
  *
  * Read-only by design: both lists are backend-owned, derived from
- * the event stream. Todos come from TodoWrite (Claude snapshot,
- * Gemini delta); Tasks come from TaskCreate / TaskUpdate.
+ * the event stream. Todos come from the provider's todo tool
+ * (TodoWrite snapshot on Claude); Tasks come from TaskCreate / TaskUpdate.
  */
 export function TodosPanel({ todos, tasks }: Props) {
   const { t } = useTranslation();
@@ -153,7 +153,7 @@ export function TodosPanel({ todos, tasks }: Props) {
         <p className="todos-panel-hint">
           {t(
             "todos.hint",
-            "Appears when the agent calls TodoWrite (Claude) or update_topic (Gemini).",
+            "Appears when the agent calls its todo tool, such as TodoWrite on Claude.",
           )}
         </p>
       </div>

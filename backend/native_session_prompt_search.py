@@ -1,14 +1,14 @@
 """Raw provider-native transcript search.
 
 Generalized grep over EVERY provider's native transcripts (Claude
-``projects/<cwd>/<sid>.jsonl``, Codex ``~/.codex/sessions`` rollouts, Gemini
-``~/.gemini/tmp`` chats, and the Better-Agent run-dir ``session_events.jsonl``).
-Each provider is read by its own element extractor
+``projects/<cwd>/<sid>.jsonl``, Codex ``~/.codex/sessions`` rollouts, Pi
+``~/.pi/agent/sessions`` trees, and the Better-Agent run-dir
+``session_events.jsonl``). Each provider is read by its own element extractor
 (:func:`native_session_miner._claude_elements` / ``_codex_elements`` /
-``_gemini_elements``) — the only provider-specific code — emitting a shared
+``_pi_elements``) — the only provider-specific code — emitting a shared
 :class:`NativeElement` stream. Everything else (discovery, token-overlap grep,
 dedup, ranking, the :class:`Categorizer`) is provider-agnostic and reused
-across all four.
+across all of them.
 
 Entry points all share one optimized core (:func:`_search_elements`):
 
@@ -100,9 +100,6 @@ def _native_roots() -> list[tuple[Path, str]]:
     codex = nm._codex_sessions_root()
     if codex.exists():
         roots.append((codex, "codex"))
-    gemini = nm._gemini_chats_root()
-    if gemini.exists():
-        roots.append((gemini, "gemini"))
     pi = nm._pi_sessions_root()
     if pi.exists():
         roots.append((pi, "pi"))
@@ -218,10 +215,6 @@ def _candidate_from_match(path: Path, tag: str) -> NativeCandidate:
         return NativeCandidate(key=f"codex-rg:{path.name}", sid=path.stem,
                                cwd=_codex_first_cwd(path), data={}, transcript=path,
                                mtime=_mtime(path), format="codex")
-    if tag == "gemini":
-        cwd = _decode_cwd_token(path.parent.parent.name)  # tmp/<enc>/chats/<file>
-        return NativeCandidate(key=f"gemini-rg:{path.name}", sid=path.stem, cwd=cwd,
-                               data={}, transcript=path, mtime=_mtime(path), format="gemini")
     if tag == "runs":
         run_dir = path.parent
         sid = _runs_app_session_id(run_dir) or run_dir.name
@@ -302,7 +295,7 @@ def _windsurf_candidates(allowed: set[str]) -> list[NativeCandidate]:
     return candidates
 
 
-_SID_GLOB_EXTS = {"claude": "jsonl", "codex": "jsonl", "gemini": "jsonl", "pi": "jsonl", "windsurf": "pb"}
+_SID_GLOB_EXTS = {"claude": "jsonl", "codex": "jsonl", "pi": "jsonl", "windsurf": "pb"}
 
 
 def _pi_candidate_by_content_sid(root: Path, sid: str) -> NativeCandidate | None:
@@ -327,7 +320,7 @@ def _candidates_for_sids(sids: frozenset[str]) -> list[NativeCandidate]:
     wanting to scope to a specific runs session must go through the full
     :func:`_matched_candidates` discovery instead) is covered:
 
-    - claude/codex/gemini/windsurf: filename glob, since sid == path.stem.
+    - claude/codex/windsurf: filename glob, since sid == path.stem.
     - pi: filename glob first (covers the common case where the filename
       already matches the authoritative id), then :func:`_pi_candidate_by_content_sid`
       for any sid the glob missed (its true id lives inside the file)."""
@@ -570,7 +563,7 @@ def _search_elements(
     the original all-sessions-in-scope behavior. ``runs`` sessions cannot be
     looked up this way (see that function's docstring) and are silently
     absent from a ``sids``-scoped search; every other format (claude, codex,
-    gemini, pi, windsurf) is covered."""
+    pi, windsurf) is covered."""
     tokens = _query_tokens(query)
     if not tokens:
         return []
@@ -655,7 +648,7 @@ def search_in_native_session_transcript(
     ``sids``, when given, scopes the search to exactly those session ids via a
     cheap lookup instead of a full cwd-filtered corpus walk — use this for
     single-session search; omit it (default) to search every session in
-    scope. Covers claude, codex, gemini, pi, and windsurf; ``runs`` sessions
+    scope. Covers claude, codex, pi, and windsurf; ``runs`` sessions
     are not resolvable via ``sids`` (see :func:`_candidates_for_sids`). A
     match scores at least one query token as a
     whole word; the score is the count of distinct tokens hit."""

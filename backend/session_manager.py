@@ -984,7 +984,7 @@ class SessionManager:
                 # causing multi-second-to-tens-of-seconds event-loop
                 # stalls on long turns. A pure append (the dominant case)
                 # folds the one new event into the cached prior revision;
-                # anything else (a same-slot replace, e.g. Gemini
+                # anything else (a same-slot replace, e.g. cumulative
                 # streaming re-emitting the same uuid) re-establishes a
                 # fresh, correct full-hash baseline.
                 if len(after_events) == before_len + 1:
@@ -4164,8 +4164,7 @@ class SessionManager:
         if rid is None:
             raise KeyError(parent_sid)
         # Reject the fork up-front when the parent's provider has no
-        # CLI-level fork primitive (gemini-cli 0.42 — see issue
-        # google-gemini/gemini-cli#22563). Without this, the BC fork
+        # CLI-level fork primitive. Without this, the BC fork
         # record would be created and only the FIRST TURN would fail
         # with NotImplementedError — leaving a half-broken fork on
         # disk that confuses the user. Fail HERE, before the fork
@@ -4175,8 +4174,8 @@ class SessionManager:
             provider_id = parent_session.get("provider_id")
             if provider_id:
                 # Reject up-front when the parent's provider doesn't
-                # support fork. Hits gemini today via
-                # `GeminiProvider.supports_fork = False`. Capability is
+                # support fork. Hits the session-events family today
+                # via `SessionEventsProvider.supports_fork = False`. Capability is
                 # the source of truth — no per-kind isinstance checks
                 # anywhere else. INVARIANT: this fires BEFORE any disk
                 # write so we never leave a half-broken fork on disk
@@ -4569,8 +4568,8 @@ class SessionManager:
 
         When we accept a provider change, we re-validate the
         session's existing `orchestration_mode` against the NEW
-        provider's capability (e.g. switching Claude→Gemini on a
-        manager-mode session must fail loudly here, not silently on
+        provider's capability (e.g. switching to a provider without
+        manager-mode support must fail loudly here, not silently on
         the next turn).
 
         Empty / whitespace `provider_id` is rejected at the API
@@ -5204,8 +5203,8 @@ class SessionManager:
 
         Idempotent on the inner event's uuid: a re-apply with identical
         data is a no-op. Same uuid + different data replaces the
-        existing entry in place (supports streaming updates / Gemini
-        cumulative snapshots).
+        existing entry in place (supports streaming updates / cumulative
+        snapshots).
 
         Sole writer for `msg.workers[i].events`. The previous direct
         mutation at `orchs/manager/_delegation.py:545` is gone — every
@@ -5555,7 +5554,7 @@ class SessionManager:
     def bump_unread(self, sid: str, msg_id: str) -> None:
         """Increment the unread counter and fire `unread_changed`.
         Called from `OrchestrationStrategy.apply_event`'s APPEND-new-UUID
-        path (NOT the replace path — Gemini same-UUID streaming mutates
+        path (NOT the replace path — same-UUID streaming mutates
         in place and must not double-count). Worker forks dropped at
         the mutator boundary.
 

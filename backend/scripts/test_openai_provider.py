@@ -56,7 +56,7 @@ def test_dispatch_resolves_openai():
 def test_recovery_family_and_version():
     pm = _mod("provider_manifest")
     ingestion = _mod("ingestion_versions")
-    assert "openai" in pm.gemini_family_kinds()
+    assert "openai" in pm.session_events_family_kinds()
     assert ingestion.current_ingestion_version("openai") >= 1
 
 

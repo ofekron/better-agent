@@ -127,7 +127,7 @@ async def _main(home: Path) -> None:
     import main
     import session_store
     from session_manager import manager as session_manager
-    from provider_gemini import GeminiProvider
+    from provider_agy import AgyProvider
 
     # `with_builtin_mcp_servers` returns the run config untouched unless the
     # installation profile is active, so without this the ui server is never
@@ -158,7 +158,7 @@ async def _main(home: Path) -> None:
         # Codex is deliberately excluded: provider_manifest marks it
         # hosts_ui_mcp=False, so it never receives the ui server and can never
         # call open_file_panel.
-        await _run_provider_smoke("gemini", GeminiProvider, main, session_store, session_manager, port)
+        await _run_provider_smoke("agy", AgyProvider, main, session_store, session_manager, port)
     finally:
         server.should_exit = True
         thread.join(timeout=10.0)

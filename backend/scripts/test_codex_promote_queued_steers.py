@@ -1232,14 +1232,11 @@ def _test_build_semantic_alter_prompt_tags_replacement() -> None:
 
 def _test_real_provider_rewind_identity_defaults() -> None:
     codex_cls = _resolve_class("codex")
-    gemini_cls = _resolve_class("gemini")
     agy_cls = _resolve_class("agy")
     claude_cls = _resolve_class("claude")
 
     assert codex_cls.supports_rewind is True
     assert codex_cls.rewind_requires_agent_identity is False
-    assert gemini_cls.supports_rewind is True
-    assert gemini_cls.rewind_requires_agent_identity is False
     assert agy_cls.supports_rewind is False
     assert agy_cls.rewind_requires_agent_identity is True
     assert agy_cls.supports_semantic_alter is True

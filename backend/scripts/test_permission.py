@@ -41,7 +41,7 @@ check("codex approval", permission.CODEX_APPROVAL_POLICIES,
       ("untrusted", "on-request", "on-failure", "never"))
 check("codex sandbox", permission.CODEX_SANDBOX_MODES,
       ("read-only", "workspace-write", "danger-full-access"))
-check("gemini modes", permission.GEMINI_APPROVAL_MODES,
+check("session-events modes", permission.SESSION_EVENTS_APPROVAL_MODES,
       ("auto_edit", "yolo", "plan"))
 check("openai modes", permission.OPENAI_PERMISSION_MODES,
       ("default", "bypassPermissions"))
@@ -51,7 +51,7 @@ check("claude default", permission.default_permission_for_kind("claude"),
       {"mode": "bypassPermissions"})
 check("codex default", permission.default_permission_for_kind("codex"),
       {"approval": "never", "sandbox": "danger-full-access"})
-check("gemini default", permission.default_permission_for_kind("gemini"),
+check("qwen default", permission.default_permission_for_kind("qwen"),
       {"mode": "yolo"})
 check("openai default", permission.default_permission_for_kind("openai"),
       {"mode": "bypassPermissions"})
@@ -69,11 +69,11 @@ check("normalize openai bypass", permission.normalize_permission("openai", {"mod
       {"mode": "bypassPermissions"})
 
 # ── resolve: override → provider default → kind default ────────────────
-check("resolve override wins", permission.resolve_permission("gemini", {"mode": "plan"}, {"mode": "yolo"}),
+check("resolve override wins", permission.resolve_permission("qwen", {"mode": "plan"}, {"mode": "yolo"}),
       {"mode": "plan"})
-check("resolve falls to provider default", permission.resolve_permission("gemini", None, {"mode": "plan"}),
+check("resolve falls to provider default", permission.resolve_permission("qwen", None, {"mode": "plan"}),
       {"mode": "plan"})
-check("resolve falls to kind default", permission.resolve_permission("gemini", None, None),
+check("resolve falls to kind default", permission.resolve_permission("qwen", None, None),
       {"mode": "yolo"})
 check("resolve openai default", permission.resolve_permission("openai", None, None),
       {"mode": "bypassPermissions"})

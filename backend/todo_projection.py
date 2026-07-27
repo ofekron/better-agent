@@ -2,8 +2,8 @@
 
 Two independent funnels:
   1. `extract_todos_from_normalized` — TodoWrite (Claude full-list
-     snapshot) and `update_topic` (Gemini single-topic delta, mapped
-     to "TodoWrite" by `runner_gemini`).
+     snapshot; other providers' todo tools are renamed to it by their
+     runners).
   2. `extract_tasks_from_normalized` — Claude Code `TaskCreate` /
      `TaskUpdate` (individual item ops).
 
@@ -15,9 +15,6 @@ Idempotence / replay safety:
     current items (by content); items NOT in the snapshot are kept;
     new items are appended. Accumulates across all TodoWrite calls so
     completed items from earlier phases are never lost.
-  - Gemini shape dedupes by `source_id` (stable across replay because
-    real samples confirm Gemini supplies `update_topic_<ts>_<n>` IDs;
-    defensive content-hash fallback covers any future divergence).
   - TaskCreate dedupes by content hash — same subject → no duplicate.
   - TaskUpdate is idempotent on replay (same status transition is a no-op).
 
@@ -34,16 +31,9 @@ import re
 from typing import Any, Optional
 
 
-# Real Gemini sample IDs: `update_topic_1780096408174_0`.
-# Pattern lock — only these get trusted as-is. Anything else (e.g. a
-# `_new_uuid()` fallback in `runner_gemini._normalize_tool_use`) is
-# replaced with a deterministic content-hash so replays don't diverge.
-_GEMINI_TOOL_ID_PATTERN = re.compile(r"^update_topic_\d+_\d+$")
-
-
 def _content_hash_source_id(inp: dict) -> Optional[str]:
-    """Deterministic source_id from the Gemini input fields. Same input
-    → same hash → replay-safe dedup. Returns None if the input is not
+    """Deterministic source_id from a tool-input dict. Same input →
+    same hash → replay-safe dedup. Returns None if the input is not
     JSON-serializable (skip the event rather than crash the hot path)."""
     try:
         blob = json.dumps(inp, sort_keys=True).encode("utf-8")
@@ -60,59 +50,6 @@ def _normalize_claude_todo(t: dict) -> dict:
         "status": t.get("status", "pending"),
         "activeForm": t.get("activeForm"),
     }
-
-
-def _apply_gemini_delta(
-    current: list, inp: dict, source_id: str,
-) -> list:
-    """Build a new list reflecting a single Gemini `update_topic` call.
-
-    Dedup-by-source_id: if `source_id` already present, replace the
-    matching entry in place (handles streaming mutations on the same
-    tool_id). Else: mark prior Gemini-OWNED `in_progress` items
-    (items that themselves carry a `source_id`) → `completed`, then
-    append the new item.
-
-    Scoping the prior-completion to source_id-bearing items prevents
-    cross-pollination with Claude TodoWrite output: a Claude
-    `in_progress` (no source_id, authoritative status) MUST NOT be
-    silently demoted by a subsequent Gemini `update_topic` arriving
-    on an interleaved provider stream.
-
-    Never mutates `current` or its items.
-    """
-    new_item = {
-        "content": inp.get("title") or inp.get("strategic_intent") or "(untitled)",
-        "status": "in_progress",
-        "activeForm": inp.get("summary"),
-        "source_id": source_id,
-    }
-
-    for idx, item in enumerate(current):
-        if item.get("source_id") == source_id:
-            out = list(current)
-            # Re-emission of a tool_id that's already in current_todos.
-            # Update the content fields (handles Gemini streaming
-            # mutations) but PRESERVE `completed` — Gemini sometimes
-            # re-emits a previously-finished topic (verified against
-            # real session data: 33b3991a re-emits tool_ids seq>400
-            # that completed at seq<395). Downgrading those back to
-            # `in_progress` would mis-render the active focus.
-            preserved_status = (
-                "completed" if item.get("status") == "completed"
-                else new_item["status"]
-            )
-            out[idx] = {**new_item, "status": preserved_status}
-            return out
-
-    out = []
-    for item in current:
-        if item.get("status") == "in_progress" and item.get("source_id"):
-            out.append({**item, "status": "completed"})
-        else:
-            out.append(dict(item))
-    out.append(new_item)
-    return out
 
 
 # ── Shared helpers ───────────────────────────────────────────────
@@ -184,7 +121,7 @@ def _union_merge_claude_todos(current: list, snapshot: list) -> list:
 def extract_todos_from_normalized(
     normalized: dict, current: list,
 ) -> Optional[list]:
-    """Extract `current_todos` from TodoWrite / update_topic events.
+    """Extract `current_todos` from TodoWrite events.
 
     Args:
         normalized: a `_normalize_for_render`-normalized event.
@@ -199,32 +136,17 @@ def extract_todos_from_normalized(
     if block is None:
         return None
 
-    block_id = block.get("id")
-    if not block_id or not isinstance(block_id, str):
-        return None
-
     inp = block.get("input")
     if not isinstance(inp, dict):
         return None
 
-    # Claude shape: full-list UNION-MERGE. Keeps items from earlier
-    # phases that Claude dropped — accumulates across all TodoWrite calls.
+    # Full-list UNION-MERGE. Keeps items from earlier phases that the
+    # agent dropped — accumulates across all TodoWrite calls.
     todos = inp.get("todos")
-    if isinstance(todos, list):
-        snapshot = [_normalize_claude_todo(t) for t in todos if isinstance(t, dict)]
-        return _union_merge_claude_todos(current, snapshot)
-
-    # Gemini shape: single-topic DELTA.
-    if "title" in inp or "strategic_intent" in inp or "summary" in inp:
-        if _GEMINI_TOOL_ID_PATTERN.match(block_id):
-            source_id = block_id
-        else:
-            source_id = _content_hash_source_id(inp)
-            if source_id is None:
-                return None
-        return _apply_gemini_delta(current, inp, source_id)
-
-    return None
+    if not isinstance(todos, list):
+        return None
+    snapshot = [_normalize_claude_todo(t) for t in todos if isinstance(t, dict)]
+    return _union_merge_claude_todos(current, snapshot)
 
 
 # ── TaskCreate / TaskUpdate extraction (tasks) ──────────────────

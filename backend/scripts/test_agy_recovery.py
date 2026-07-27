@@ -7,9 +7,9 @@ agy runner writes Gemini-shaped `session_events.jsonl`. After a backend
 restart, recovered agy turns rendered empty/partial because the Claude parser
 cannot read agy's events file.
 
-The fix: agy is a gemini-family provider (provider_agy extends GeminiProvider,
+The fix: agy is a gemini-family provider (provider_agy extends SessionEventsProvider,
 writes session_events.jsonl). Recovery now routes both gemini and agy through
-`_replay_from_gemini_jsonl`.
+`_replay_from_session_events_jsonl`.
 
 Run with:
     cd backend && .venv/bin/python scripts/test_agy_recovery.py
@@ -37,13 +37,13 @@ from ingestion_versions import (  # noqa: E402
     AGY_INGESTION_VERSION,
     COPILOT_INGESTION_VERSION,
 )
-from provider_manifest import gemini_family_kinds as _GEMINI_FAMILY_KINDS_FN  # noqa: E402
+from provider_manifest import session_events_family_kinds as _GEMINI_FAMILY_KINDS_FN  # noqa: E402
 from run_recovery import (  # noqa: E402
     _provider_kind,
     _last_assistant,
     _replay_and_apply,
     _replay_from_claude_jsonl,
-    _replay_from_gemini_jsonl,
+    _replay_from_session_events_jsonl,
 )
 
 PASS = "\x1b[32mPASS\x1b[0m"
@@ -132,7 +132,7 @@ def test_agy_is_gemini_family() -> bool:
         print(f"  expected kind 'agy', got {_provider_kind(desc)!r}")
         return False
     if "agy" not in _GEMINI_FAMILY_KINDS_FN():
-        print("  'agy' not in gemini_family_kinds()")
+        print("  'agy' not in session_events_family_kinds()")
         return False
     return True
 
@@ -150,7 +150,7 @@ def test_claude_parser_cannot_read_agy_events() -> bool:
     if via_claude:
         print(f"  Claude parser unexpectedly read agy events: {len(via_claude)}")
         return False
-    via_gemini = _replay_from_gemini_jsonl(run_dir)
+    via_gemini = _replay_from_session_events_jsonl(run_dir)
     if len(via_gemini) != len(events):
         print(f"  gemini reader expected {len(events)} events, got {len(via_gemini)}")
         return False
@@ -211,11 +211,11 @@ def test_agy_ingestion_version_forces_redigest() -> bool:
 
 
 def test_copilot_gemini_family_parity() -> bool:
-    """copilot is the same kind of provider (GeminiProvider subclass writing
+    """copilot is the same kind of provider (SessionEventsProvider subclass writing
     session_events.jsonl) and must share the same recovery routing + bumped
     ingestion version, or it carries the identical empty-render recovery bug."""
     if "copilot" not in _GEMINI_FAMILY_KINDS_FN():
-        print("  'copilot' not in gemini_family_kinds()")
+        print("  'copilot' not in session_events_family_kinds()")
         return False
     v = current_ingestion_version("copilot")
     if v != COPILOT_INGESTION_VERSION or v <= 1:

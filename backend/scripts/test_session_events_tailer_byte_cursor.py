@@ -1,10 +1,10 @@
-"""Regression: GeminiJsonlTailer must read session_events.jsonl by a
+"""Regression: SessionEventsJsonlTailer must read session_events.jsonl by a
 persisted byte cursor, NOT re-read the whole file from line 0 on every
 poll.
 
 Pre-fix `_read_new_lines` skipped `processed_offset` lines via a
 readline() loop from the top on EVERY 50ms poll — O(total_lines) per
-poll, O(n^2) over a turn. For ba_runner (and Gemini) turns the runner
+poll, O(n^2) over a turn. For ba_runner (and session-events family) turns the runner
 writes a cumulative replacement line per text delta, so the file grows
 large fast; re-reading it each poll lagged the UI and stalled the
 deterministic drain (`await_line_tailer_drained`), leaving stale render
@@ -30,9 +30,9 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import _test_home
-_test_home.isolate("bc_gemini_byte_cursor_")
+_test_home.isolate("bc_session_events_byte_cursor_")
 
-from jsonl_tailer import GeminiJsonlTailer  # noqa: E402
+from jsonl_tailer import SessionEventsJsonlTailer  # noqa: E402
 
 
 def _line(i: int) -> str:
@@ -53,7 +53,7 @@ def test_byte_cursor_reads_only_new_lines_without_rescan(tmp_path: Path) -> None
     n = 4000
     _write(p, [_line(i) for i in range(n)])
 
-    tailer = GeminiJsonlTailer(path=p, start_offset=0, dispatch=lambda e: None)
+    tailer = SessionEventsJsonlTailer(path=p, start_offset=0, dispatch=lambda e: None)
 
     # First pass reads everything; cursor lands at EOF.
     first = tailer._read_new_lines()
@@ -84,7 +84,7 @@ def test_byte_cursor_primes_from_start_offset_for_recovery(tmp_path: Path) -> No
     _write(p, lines)
     skip = 12  # simulate a recovery re-attach mid-run
 
-    tailer = GeminiJsonlTailer(path=p, start_offset=skip, dispatch=lambda e: None)
+    tailer = SessionEventsJsonlTailer(path=p, start_offset=skip, dispatch=lambda e: None)
 
     # Prime must read past `skip` lines and return only the remainder.
     got = tailer._read_new_lines()
@@ -99,7 +99,7 @@ def test_run_loop_dispatches_all_and_advances_line_cursor(tmp_path: Path) -> Non
     _write(p, [_line(i) for i in range(n)])
 
     seen: list[dict] = []
-    tailer = GeminiJsonlTailer(
+    tailer = SessionEventsJsonlTailer(
         path=p, start_offset=0, dispatch=lambda e: seen.append(e)
     )
     # Drain then stop so run() terminates cleanly.
@@ -110,7 +110,7 @@ def test_run_loop_dispatches_all_and_advances_line_cursor(tmp_path: Path) -> Non
     assert tailer._byte_cursor == p.stat().st_size
 
 
-async def _drain_until_done(tailer: GeminiJsonlTailer, expected: int) -> None:
+async def _drain_until_done(tailer: SessionEventsJsonlTailer, expected: int) -> None:
     task = asyncio.create_task(tailer.run())
     # Poll until every line is dispatched, then stop.
     deadline = asyncio.get_running_loop().time() + 5.0
@@ -128,7 +128,7 @@ async def _drain_until_done(tailer: GeminiJsonlTailer, expected: int) -> None:
 
 def test_primes_lazily_when_file_appears_late(tmp_path: Path) -> None:
     p = tmp_path / "session_events.jsonl"
-    tailer = GeminiJsonlTailer(path=p, start_offset=0, dispatch=lambda e: None)
+    tailer = SessionEventsJsonlTailer(path=p, start_offset=0, dispatch=lambda e: None)
     assert tailer._read_new_lines() == []  # file absent: prime is a no-op, returns []
 
     _write(p, [_line(i) for i in range(5)])

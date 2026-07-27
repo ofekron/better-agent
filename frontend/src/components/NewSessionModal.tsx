@@ -802,7 +802,7 @@ export function NewSessionModal({
   // such provider configured, the "manager" button is disabled and
   // the modal forces "native". The main-role provider picker also
   // filters to capable providers when in manager mode so the user
-  // can't pick a Gemini as the manager.
+  // can't pick a manager-incapable provider as the manager.
   const activeProviders = providers.filter((p) => !p.suspended);
   const managerCapableProviders = activeProviders.filter(
     (p) => p.supports_manager_mode,

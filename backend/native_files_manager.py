@@ -175,7 +175,7 @@ def _scan_run_state_for_jsonl(agent_sid: str) -> Optional[Path]:
 def _resolve_primary_jsonl(sess: dict, sid: str) -> Optional[Path]:
     """Resolve the native session-stream path for a session's primary sid,
     provider-agnostically (Claude `<projects>/<encoded-cwd>/<sid>.jsonl`,
-    Gemini `<run-dir>/session_events.jsonl`, remote-node shadow, …).
+    session-events `<run-dir>/session_events.jsonl`, remote-node shadow, …).
 
     Two layers so this manager is the authority for ALL providers AND
     never silently drops a primary whose file lags the sid announcement:

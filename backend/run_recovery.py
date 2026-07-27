@@ -836,7 +836,8 @@ class RecoveryReplay:
 
 
 def _recovery_family(desc: dict | None) -> str:
-    """Recovery replay reader family ("claude"/"codex"/"gemini") for a run,
+    """Recovery replay reader family ("claude"/"codex"/"session_events") for
+    a run,
     from the canonical manifest. Unknown kinds fall back to the claude
     reader, matching the historical else-branch."""
     spec = _provider_manifest.spec_for(_provider_kind(desc))
@@ -847,11 +848,12 @@ def _replay_for_family(
     family: str, run_dir: Path, *, replay_end_byte: Optional[int] = None,
 ) -> RecoveryReplay:
     """Single recovery-replay dispatch, keyed off the manifest recovery
-    family — the one place that maps a run to its native reader. gemini-family
-    runners write a Claude-shaped session_events.jsonl; codex carries a
-    context_window; claude surfaces the unmatched orphan-subagent list."""
-    if family == "gemini":
-        return RecoveryReplay(events=_replay_from_gemini_jsonl(run_dir))
+    family — the one place that maps a run to its native reader.
+    session-events-family runners write a Claude-shaped
+    session_events.jsonl; codex carries a context_window; claude surfaces
+    the unmatched orphan-subagent list."""
+    if family == "session_events":
+        return RecoveryReplay(events=_replay_from_session_events_jsonl(run_dir))
     if family == "codex":
         events, ctx = _replay_from_codex_rollout(
             run_dir, replay_end_byte=replay_end_byte,
@@ -1790,7 +1792,7 @@ async def _integrate_one_locked(
                         run_id,
                         activity_kind,
                     )
-            elif getattr(provider, "KIND", "unknown") in ("claude", "gemini"):
+            elif getattr(provider, "KIND", "unknown") == "claude":
                 await _to_thread_joined(
                     coordinator.turn_manager.run_state_record_activity,
                     app_sid,
@@ -2149,9 +2151,9 @@ def _apply_integration_sync(
             )
 
 
-def _replay_from_gemini_jsonl(run_dir: Path) -> list[dict]:
-    """Replay this turn's events from the Gemini runner's normalized
-    session_events.jsonl.
+def _replay_from_session_events_jsonl(run_dir: Path) -> list[dict]:
+    """Replay this turn's events from a session-events-family runner's
+    normalized session_events.jsonl.
 
     Returns typed event envelopes expected by `apply_event`.
     """
@@ -2178,7 +2180,7 @@ def _replay_from_gemini_jsonl(run_dir: Path) -> list[dict]:
                     continue
     except Exception:
         logger.exception(
-            "_replay_from_gemini_jsonl: failed reading %s", events_path,
+            "_replay_from_session_events_jsonl: failed reading %s", events_path,
         )
     return wrapped
 
@@ -2503,14 +2505,14 @@ def _should_retry_rate_limit(run_dir: Path) -> bool:
     if payload.get("success"):
         return False
     error = payload.get("error")
-    # Fast path: most rate-limit errors produce "rate_limit" or 
-    # specific Gemini status errors in the string.
+    # Fast path: most rate-limit errors produce "rate_limit" or a
+    # provider status code in the string.
     if error:
         err_lower = error.lower()
         if "rate_limit" in err_lower or "429" in err_lower:
             return True
-        # Gemini-specific: "invalid session" is NOT a rate limit, but
-        # might want its own recovery later. For now, keep it to 429s.
+        # NOTE: "invalid session" is NOT a rate limit, but might want
+        # its own recovery later. For now, keep it to 429s.
 
     # Slow path: check event text for rate limit markers. Replay through the
     # run's recovery-family reader (same dispatch as full recovery, so codex
@@ -2657,7 +2659,10 @@ async def _retry_recovered_run(
         capability_contexts=inp.get("capability_contexts"),
         continuation_chain=continuation_chain,
         target_message_id=msg_id,
+        resolved_harness_run_config=inp.get("resolved_harness_run_config"),
         turn_run_id=inp.get("turn_run_id"),
+        disabled_builtin_extensions=inp.get("disabled_builtin_extensions"),
+        provisioned_tool_profile=inp.get("provisioned_tool_profile") or "",
     )
 
     new_desc = {

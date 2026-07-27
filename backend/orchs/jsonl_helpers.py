@@ -233,7 +233,7 @@ def compute_jsonl_path(cwd: str, agent_sid: str) -> Optional[Path]:
          — claude CLI's encoded-cwd dirname rules don't always match
          worker_store.encode_cwd, and the sid is unique, so the glob
          is the source of truth.
-      2. Gemini run-dir scan: `<ba_home>/runs/*/state.json` carrying
+      2. Session-events run-dir scan: `<ba_home>/runs/*/state.json` carrying
          that sid → that run's `session_events.jsonl`. Per-run files,
          so we have to scan; cheap because there are few in-flight
          runs and `state.json` is small.
@@ -252,7 +252,7 @@ def compute_jsonl_path(cwd: str, agent_sid: str) -> Optional[Path]:
     claude_path = claude_index.get(agent_sid)
     if claude_path is not None and claude_path.exists():
         return _cache_existing_path(agent_sid, claude_path)
-    # Gemini path — scan run dirs for one whose state.json discovered
+    # Session-events path — scan run dirs for one whose state.json discovered
     # this agent_sid; the runner writes the discovered sid into
     # state.json at init time. Resumed turns reuse the same sid across
     # multiple run dirs, so we collect ALL matches and return the

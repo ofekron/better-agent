@@ -3,7 +3,7 @@
 Mirrors the :mod:`session_search_index` pattern (FTS5 + lean extraction +
 background worker + schema-version + rebuild-into-fresh-file) but applied to the
 PROVIDER-NATIVE transcript corpus (claude ``projects``/codex ``sessions``/
-gemini ``tmp``/BA run-dirs) instead of BA's own ``sessions/*/events.jsonl``.
+pi ``sessions``/BA run-dirs) instead of BA's own ``sessions/*/events.jsonl``.
 
 Two differences from session_search_index, both deliberate:
 

@@ -880,53 +880,6 @@ def test_enumerate_agy() -> None:
     check(isinstance(res, list), "agy enum real home returns list")
 
 
-# --------------------------------------------------------------------------- #
-# gemini-cli enumeration + ingest
-# --------------------------------------------------------------------------- #
-
-def _make_gemini_session(path: Path, *, session_id: str,
-                         turns: list[tuple[str, str | None]],
-                         started: str = "2026-01-01T00:00:00.000Z") -> None:
-    lines = [json.dumps({"sessionId": session_id, "projectHash": "h",
-                         "startTime": started, "lastUpdated": started, "kind": "main"})]
-    for user_text, asst_text in turns:
-        lines.append(json.dumps({"id": str(uuid.uuid4()), "timestamp": started,
-                                 "type": "user", "content": [{"text": user_text}]}))
-        if asst_text is not None:
-            lines.append(json.dumps({"id": str(uuid.uuid4()), "timestamp": started,
-                                     "type": "gemini", "content": asst_text,
-                                     "thoughts": [], "tokens": {}}))
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-
-
-def test_enumerate_gemini() -> None:
-    with tempfile.TemporaryDirectory() as home:
-        home = Path(home)
-        proj = home / ".gemini" / "tmp" / "myproj"
-        (proj).mkdir(parents=True)
-        (proj / ".project_root").write_text("/code/myproj", encoding="utf-8")
-        chats = proj / "chats"
-        _make_gemini_session(chats / "session-2026-01-01T00-00-11111111.jsonl",
-                             session_id="sess-11111111",
-                             turns=[("first prompt here", "reply")])
-        _make_gemini_session(chats / "session-2026-01-02T00-00-22222222.jsonl",
-                             session_id="sess-22222222",
-                             turns=[("second prompt here", None)])  # no assistant reply
-
-        found = native_import._enumerate_gemini("pid", {"config_dir": str(home)})
-        by_id = {s.native_id: s for s in found}
-        check(set(by_id) == {"sess-11111111", "sess-22222222"}, f"gemini enum ids {set(by_id)}")
-        s1 = by_id["sess-11111111"]
-        check(s1.provider_kind == "gemini", "kind gemini")
-        check(s1.cwd == "/code/myproj", "gemini cwd from .project_root")
-        check(s1.created_at == "2026-01-01T00:00:00.000Z", "gemini created_at from startTime")
-        check(s1.title == "first prompt here", "gemini title from first user prompt")
-
-    # missing tmp dir → empty
-    check(native_import._enumerate_gemini("pid", {"config_dir": "/nope-gem-xyz"}) == [], "gemini missing dir")
-
-
 def test_ingest_agy() -> None:
     native_import._registry_save({})
     with tempfile.TemporaryDirectory() as home:
@@ -953,62 +906,6 @@ def test_ingest_agy() -> None:
         # assistant carries tool_use + tool_result + text (≥3 events)
         check(len(msgs[1]["events"]) >= 3, f"agy assistant events {len(msgs[1]['events'])}")
         check(native_import.import_session(sess) == root_id, "agy idempotent")
-
-
-def test_ingest_gemini() -> None:
-    native_import._registry_save({})
-    with tempfile.TemporaryDirectory() as home:
-        home = Path(home)
-        chats = home / ".gemini" / "tmp" / "proj" / "chats"
-        # multi-turn: gemini user prompts ARE turn boundaries
-        _make_gemini_session(chats / "session-x.jsonl", session_id="gem-x", turns=[
-            ("What is 2 plus 2", "It equals four."),
-            ("Thanks a lot", "You are welcome."),
-        ])
-        sess = native_import.NativeSession(
-            provider_id="", provider_kind="gemini", native_id="gem-x",
-            jsonl_path=str(chats / "session-x.jsonl"), cwd="/repo", title="",
-        )
-        root_id = native_import.import_session(sess)
-        _assert_session_invariants(root_id)
-        loaded = session_manager.get(root_id)
-        user_msgs = [m for m in loaded["messages"] if m["role"] == "user"]
-        check(len(user_msgs) == 2, f"gemini two turns, got {len(user_msgs)}")
-        check(user_msgs[0]["content"] == "What is 2 plus 2", "gemini prompt 1")
-        # assistant msgs must actually carry rendered events (regression for
-        # the uuid-less gemini events that apply_event silently dropped).
-        asst_msgs = [m for m in loaded["messages"] if m["role"] == "assistant"]
-        check(len(asst_msgs) == 2 and all(m.get("events") for m in asst_msgs),
-              "gemini assistant msgs must have rendered events")
-        check(loaded["name"].startswith("What is 2 plus 2"), "gemini title from prompt")
-        check(native_import.import_session(sess) == root_id, "gemini idempotent")
-
-        # user prompt with NO assistant reply → nothing renderable → ValueError
-        _make_gemini_session(chats / "session-lone.jsonl", session_id="gem-lone",
-                             turns=[("ignored", None)])
-        lone = native_import.NativeSession(
-            provider_id="", provider_kind="gemini", native_id="gem-lone",
-            jsonl_path=str(chats / "session-lone.jsonl"), cwd="", title="",
-        )
-        lone_raised = False
-        try:
-            native_import.import_session(lone)
-        except ValueError:
-            lone_raised = True
-        check(lone_raised, "gemini user-only (no reply) → ValueError")
-
-        # truly empty (meta only) → skipped
-        empty_path = chats / "session-empty.jsonl"
-        empty_path.write_text(json.dumps({"sessionId": "gem-empty", "startTime": "t",
-                                          "kind": "main"}) + "\n", encoding="utf-8")
-        raised = False
-        try:
-            native_import.import_session(native_import.NativeSession(
-                provider_id="", provider_kind="gemini", native_id="gem-empty",
-                jsonl_path=str(empty_path), cwd="", title=""))
-        except native_import.SkippedNativeSession:
-            raised = True
-        check(raised, "gemini empty → skipped")
 
 
 # --------------------------------------------------------------------------- #
@@ -1271,10 +1168,8 @@ def main() -> None:
     test_repair_enforces_loaded_project_scope()
     test_ingest_codex()
     test_enumerate_agy()
-    test_enumerate_gemini()
     test_enumerate_pi()
     test_ingest_agy()
-    test_ingest_gemini()
     test_ingest_pi()
     test_status_fallback()
     test_unknown_kind_not_enumerated()

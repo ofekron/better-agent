@@ -1,7 +1,7 @@
 """Focused tests for the Kimi CLI provider.
 
 Pins:
-  1. Class contract: KimiProvider subclasses GeminiProvider, KIND="kimi",
+  1. Class contract: KimiProvider subclasses SessionEventsProvider, KIND="kimi",
      native-only capability matrix (no fork / team / steering / reasoning),
      simulated rewind on.
   2. Env hygiene: build_env clears Claude/Anthropic vars.
@@ -43,7 +43,7 @@ _TMP_HOME = _test_home.isolate("bc-test-provider-kimi-")
 
 import provider_kimi  # noqa: E402
 import runner_kimi  # noqa: E402
-from provider_gemini import GeminiProvider  # noqa: E402
+from provider_session_events import SessionEventsProvider  # noqa: E402
 
 
 SID = "11111111-2222-3333-4444-555555555555"
@@ -51,7 +51,7 @@ SID = "11111111-2222-3333-4444-555555555555"
 
 def test_class_contract() -> bool:
     cls = provider_kimi.KimiProvider
-    return issubclass(cls, GeminiProvider) and cls.KIND == "kimi"
+    return issubclass(cls, SessionEventsProvider) and cls.KIND == "kimi"
 
 
 def test_capability_matrix() -> bool:

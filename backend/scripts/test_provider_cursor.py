@@ -1,7 +1,7 @@
 """Focused tests for the Cursor provider.
 
 Pins:
-  1. Class identity: CursorProvider subclasses GeminiProvider, KIND="cursor".
+  1. Class identity: CursorProvider subclasses SessionEventsProvider, KIND="cursor".
   2. Capability matrix: native-only (no fork / team / steering / reasoning),
      simulated rewind on.
   3. Models: static cold-start seed + `cursor-agent models` output parsing.
@@ -37,12 +37,12 @@ _TMP_HOME = _test_home.isolate("bc-test-provider-cursor-")
 
 import provider_cursor  # noqa: E402
 import runner_cursor  # noqa: E402
-from provider_gemini import GeminiProvider  # noqa: E402
+from provider_session_events import SessionEventsProvider  # noqa: E402
 
 
 def test_class_identity() -> bool:
     cls = provider_cursor.CursorProvider
-    return issubclass(cls, GeminiProvider) and cls.KIND == "cursor"
+    return issubclass(cls, SessionEventsProvider) and cls.KIND == "cursor"
 
 
 def test_capability_matrix() -> bool:

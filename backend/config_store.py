@@ -323,12 +323,6 @@ def _is_zai_claude_provider(kind: str, mode: str, base_url: str) -> bool:
     )
 
 
-GEMINI_SUBSCRIPTION_UNSUPPORTED = (
-    "Gemini CLI subscription auth is no longer supported for individual, "
-    "Google AI Pro, or Google AI Ultra accounts. Use Antigravity CLI or a "
-    "supported Gemini API-key provider instead."
-)
-
 OPENAI_SUBSCRIPTION_UNSUPPORTED = (
     "OpenAI-compatible providers run on Better Agent's own agent loop over "
     "an API key; there is no subscription auth. Use api_key mode."
@@ -368,8 +362,6 @@ def assert_provider_not_suspended(provider_id: str | None, *, action: str = "sta
 
 def _reject_unsupported_provider_config(kind: str, mode: str, runner: object = "") -> None:
     runtime_kind = _runtime_kind_for_config(kind, runner)
-    if kind == "gemini" and mode == "subscription":
-        raise ValueError(GEMINI_SUBSCRIPTION_UNSUPPORTED)
     if runtime_kind == "openai" and mode == "subscription":
         raise ValueError(OPENAI_SUBSCRIPTION_UNSUPPORTED)
 

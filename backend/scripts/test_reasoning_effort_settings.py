@@ -38,13 +38,14 @@ def _provider_by_name(client: TestClient, name: str) -> dict:
     return next(p for p in _providers(client)["providers"] if p["name"] == name)
 
 
-def _add_gemini_api_provider(name: str = "Gemini API") -> dict:
+def _add_effortless_provider(name: str = "AGY") -> dict:
+    """A provider kind that exposes no reasoning efforts at all."""
     return config_store.add_provider({
         "name": name,
-        "kind": "gemini",
-        "mode": "api_key",
-        "default_model": "gemini-2.5-pro",
-        "custom_models": ["gemini-3-pro"],
+        "kind": "agy",
+        "mode": "subscription",
+        "default_model": "Gemini 3.1 Pro (High)",
+        "custom_models": ["Gemini 3.5 Flash (High)"],
     })
 
 
@@ -247,7 +248,7 @@ def test_explicit_create_and_selector_patch_record_last_effort(client: TestClien
 
 def test_provider_switch_to_unsupported_clears_effort(client: TestClient) -> bool:
     codex = _provider_by_name(client, "Codex")
-    gemini = _add_gemini_api_provider("Gemini API Switch")
+    effortless = _add_effortless_provider("AGY Switch")
     r = client.post(
         "/api/sessions",
         json={
@@ -261,7 +262,7 @@ def test_provider_switch_to_unsupported_clears_effort(client: TestClient) -> boo
     sid = r.json()["id"]
     r = client.patch(
         f"/api/sessions/{sid}/selectors",
-        json={"provider_id": gemini["id"], "model": "gemini-3-pro"},
+        json={"provider_id": effortless["id"], "model": "Gemini 3.5 Flash (High)"},
     )
     if r.status_code != 200:
         print(f"  provider switch failed: {r.status_code} {r.text}")
@@ -277,12 +278,12 @@ def test_provider_switch_to_unsupported_clears_effort(client: TestClient) -> boo
 
 
 def test_unsupported_explicit_effort_is_rejected(client: TestClient) -> bool:
-    gemini = _add_gemini_api_provider("Gemini API Effort")
+    effortless = _add_effortless_provider("AGY Effort")
     r = client.post(
         "/api/sessions",
         json={
             "cwd": "/tmp",
-            "provider_id": gemini["id"],
+            "provider_id": effortless["id"],
             "orchestration_mode": "native",
             "reasoning_effort": "low",
         },
@@ -291,7 +292,7 @@ def test_unsupported_explicit_effort_is_rejected(client: TestClient) -> bool:
         print(f"  unsupported effort status mismatch: {r.status_code} {r.text}")
         return False
     r = client.patch(
-        f"/api/providers/{gemini['id']}",
+        f"/api/providers/{effortless['id']}",
         json={"default_reasoning_effort": "low"},
     )
     if r.status_code != 400:

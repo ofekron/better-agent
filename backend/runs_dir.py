@@ -2,7 +2,7 @@
 
 The "runs" directory holds per-run backend_state.json files written by
 each provider's runner-supervision layer. Helpers used to live on
-`provider_claude.py` (and a duplicate set on `provider_gemini.py`)
+`provider_claude.py` (and a duplicate set on `provider_session_events.py`)
 which forced lazy cross-imports and a circular dependency between
 the abstract `provider` and concrete `provider_claude`.
 
@@ -1604,7 +1604,7 @@ def cli_liveness_corroborated(
             return False
     # Growth past the last ingested byte is positive evidence, but only when a
     # real BYTE cursor is supplied (Claude/Codex). Providers that track a line
-    # cursor (Gemini) pass None and rely on mtime freshness alone.
+    # cursor and the session-events family pass None and rely on mtime freshness alone.
     if processed_byte is not None:
         try:
             if st.st_size > int(processed_byte):

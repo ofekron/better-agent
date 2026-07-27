@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import pathlib
 import shutil
 import sys
 import tempfile
@@ -49,7 +50,7 @@ def t_standalone_project_mcp_roundtrip() -> None:
         api.configure(
             provider_records=lambda: [
                 {"id": "claude", "name": "Claude", "kind": "claude", "config_dir": str(wipe / "claude")},
-                {"id": "gemini", "name": "Gemini", "kind": "gemini", "config_dir": str(wipe / "gemini")},
+                {"id": "agy", "name": "AGY", "kind": "agy", "config_dir": str(wipe / "agy")},
             ],
             project_records=lambda: [{"path": str(project), "node_id": "primary"}],
             sync_home=lambda: sync_home,
@@ -60,7 +61,7 @@ def t_standalone_project_mcp_roundtrip() -> None:
         payload = api._discover(str(project))
         mcp = next(capability for capability in payload["groups"]["project"] if capability["capability_id"] == "mcp")
         by_kind = {entry["provider_kinds"][0]: entry for entry in mcp["specifics"]}
-        check(set(by_kind) == {"claude", "gemini"}, "standalone discovery finds configured providers")
+        check(set(by_kind) == {"claude", "agy"}, "standalone discovery finds configured providers")
         check(str(sync_home) in mcp["unified"]["path"], "unified tracking lives under injected sync home")
 
         asyncio.run(
@@ -84,14 +85,14 @@ def t_standalone_project_mcp_roundtrip() -> None:
                     cwd=str(project),
                     capability_id="mcp",
                     source_entry_id=mcp["unified"]["entry_id"],
-                    target_entry_id=by_kind["gemini"]["entry_id"],
+                    target_entry_id=by_kind["agy"]["entry_id"],
                     expected_source=mcp["unified"]["content"],
                     expected_target=None,
                 )
             )
         )
-        gemini_settings = project / ".gemini" / "settings.json"
-        data = json.loads(gemini_settings.read_text(encoding="utf-8"))
+        agy_target = pathlib.Path(by_kind["agy"]["path"])
+        data = json.loads(agy_target.read_text(encoding="utf-8"))
         check(data["mcpServers"]["demo"]["command"] == "echo", "standalone apply writes provider-native target")
     finally:
         shutil.rmtree(wipe)

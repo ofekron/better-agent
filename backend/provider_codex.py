@@ -39,11 +39,9 @@ from provider import (
 )
 import config_store
 from extension_run_policy import (
-    disabled_builtin_extensions_for_run,
-    disabled_builtin_tools_for_run,
     disabled_runtime_skills_for_run,
+    resolve_extension_run_policy,
 )
-from provider_run_config import normalize_provider_run_config
 from reasoning_effort import CODEX_REASONING_EFFORTS, DEFAULT_REASONING_EFFORT
 from proc_control import process_control as _process_control
 from runs_dir import (
@@ -282,7 +280,7 @@ def fetch_codex_models() -> list[str]:
 
 
 # ============================================================================
-# RunState — per-run bookkeeping (mirrors GeminiProvider.RunState)
+# RunState — per-run bookkeeping (mirrors SessionEventsProvider.RunState)
 # ============================================================================
 @dataclass
 class RunState:
@@ -557,9 +555,16 @@ class CodexProvider(Provider):
             is_worker=is_worker,
             fallback_kind=self.KIND,
         )
-        _bare = bool(_sess_rec.get("bare_config")) or bool(
-            (resolved_harness_run_config or {}).get("bare_config")
+        run_policy = resolve_extension_run_policy(
+            resolved_harness_run_config=resolved_harness_run_config,
+            session_record=_sess_rec,
+            worker_record=_worker_sess_rec,
+            provider_kind=self.KIND,
+            provider_run_config=provider_run_config,
+            capability_contexts=capability_contexts,
+            disabled_builtin_extensions=disabled_builtin_extensions,
         )
+        _bare = bool(run_policy["bare_config"])
         request_user_input_enabled = (
             bool(user_facing)
             and not _bare
@@ -583,11 +588,6 @@ class CodexProvider(Provider):
             "codex_profile": self.CODEX_PROFILE,
             "codex_config_overrides": self.codex_config_overrides(model=model),
             "app_session_id": app_session_id,
-            "active_capability_ids": [
-                str(cid)
-                for cid in (_sess_rec.get("active_capability_ids") or [])
-                if str(cid or "").strip()
-            ],
             "disallowed_tools": disallowed_tools or [],
             "setting_sources": setting_sources or [],
             "backend_url": backend_url or "",
@@ -606,26 +606,14 @@ class CodexProvider(Provider):
             "worker_working_mode": (_worker_sess_rec or {}).get("working_mode"),
             "context_strategy": user_prefs.get_context_strategy(),
             "continuation_chain": continuation_chain or [],
-            "provider_run_config": normalize_provider_run_config(provider_run_config),
-            "capability_contexts": capability_contexts or [],
-            "resolved_harness_run_config": resolved_harness_run_config or {},
             "target_message_id": target_message_id,
             "turn_run_id": turn_run_id,
             "provisioned_tool_profile": str(provisioned_tool_profile or "").strip(),
-            "disabled_builtin_tools": disabled_builtin_tools_for_run(
-                session_record=_sess_rec, worker_record=_worker_sess_rec,
-            ),
             "disabled_runtime_skills": disabled_runtime_skills_for_run(
                 session_record=_sess_rec, worker_record=_worker_sess_rec,
             ),
-            "disabled_builtin_extensions": (
-                disabled_builtin_extensions_for_run(
-                    disabled_builtin_extensions,
-                    session_record=_sess_rec,
-                    worker_record=_worker_sess_rec,
-                )
-            ),
         }
+        input_payload.update(run_policy)
         input_payload["_mcp_prewarm_ready"] = self._prewarm_extension_mcp_ready(
             input_payload, app_session_id,
         )
@@ -1204,7 +1192,7 @@ class CodexProvider(Provider):
         # Codex's runner can't see token_count (it's in the rollout, tailed
         # here), so stamp the context window captured during tailing onto the
         # complete envelope — turn_manager routes it to set_context_window,
-        # mirroring how Claude/Gemini carry it in complete.json.
+        # mirroring how other providers carry it in complete.json.
         if rs.tailer is not None:
             window = getattr(rs.tailer.normalizer, "context_window", None)
             if window is not None:

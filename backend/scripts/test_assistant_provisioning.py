@@ -82,7 +82,7 @@ def test_capability_contexts_deliver_per_provider() -> bool:
     kinds = {o["provider_kind"] for o in ctx["outputs"]}
     # Every provider KIND the assistant can run on must be covered — a missing
     # output means that provider silently gets no role prompt (the original bug).
-    for required in ("claude", "codex", "gemini", "openai", "agy", "fugu",
+    for required in ("claude", "codex", "openai", "agy", "fugu",
                      "claude-remote", "copilot"):
         if required not in kinds:
             print(f"{FAIL} missing output for provider_kind {required!r}")
@@ -90,7 +90,7 @@ def test_capability_contexts_deliver_per_provider() -> bool:
 
     # The runner selects by provider_kind — every provider must get the role
     # prompt + preamble. This is the exact bug: pre-fix it was [].
-    for kind in ("claude", "codex", "gemini", "openai", "agy", "fugu",
+    for kind in ("claude", "codex", "openai", "agy", "fugu",
                  "claude-remote", "copilot"):
         selected = capability_contexts.provider_capability_contexts(caps, kind)
         if len(selected) != 1:

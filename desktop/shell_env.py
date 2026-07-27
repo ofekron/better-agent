@@ -1,4 +1,4 @@
-"""Capture the user's real PATH so bundled CLIs (`claude`, `gemini`,
+"""Capture the user's real PATH so bundled CLIs (`claude`, `agy`,
 `node`) resolve when the app is launched from the OS shell, not a terminal.
 
 macOS: a Finder/launchd-launched `.app` inherits a minimal PATH

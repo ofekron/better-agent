@@ -36,7 +36,7 @@ import node_link
 import node_store
 import perf
 import config_store
-from extension_run_policy import disabled_builtin_extensions_for_run
+from extension_run_policy import resolve_extension_run_policy
 from provider import Provider, StreamEvent
 from reasoning_effort import CLAUDE_REASONING_EFFORTS, DEFAULT_REASONING_EFFORT
 from runs_dir import atomic_write_json, runs_root
@@ -98,7 +98,7 @@ class RemoteProviderProxy(Provider):
     # the KIND name encodes this. Capability flags inherit Provider's
     # defaults (`supports_fork=True`, `supports_manager_mode=True`,
     # `supports_rewind=True`), matching ClaudeProvider. If a future
-    # node hosts a Gemini provider, the proxy MUST forward the remote
+    # node hosts a subprocess provider, the proxy MUST forward the remote
     # provider's actual capability flags via the node WS at startup;
     # today's inherited defaults would lie. Gate any new node-side
     # provider kind on that plumbing.
@@ -168,7 +168,7 @@ class RemoteProviderProxy(Provider):
         if mode not in ("native", "team"):
             raise ValueError(f"mode must be 'native' or 'team', got {mode!r}")
         self.assert_not_suspended(action="start new runs")
-        # Layer-3 capability defense (matches GeminiProvider.start_run).
+        # Layer-3 capability defense (matches SessionEventsProvider.start_run).
         # `supports_manager_mode` + `supports_fork` reflect the v1
         # assumption above (remote = Claude only → all True). If a
         # future remote node ever runs a non-Claude provider, the
@@ -198,6 +198,15 @@ class RemoteProviderProxy(Provider):
         )
         root_id = session_manager._root_id_for(
             worker_agent_session_id or app_session_id
+        )
+        run_policy = resolve_extension_run_policy(
+            resolved_harness_run_config=resolved_harness_run_config,
+            session_record=session_record,
+            worker_record=worker_record,
+            provider_kind=self.KIND,
+            provider_run_config=provider_run_config,
+            capability_contexts=capability_contexts,
+            disabled_builtin_extensions=disabled_builtin_extensions,
         )
         if root_id is None:
             raise RuntimeError(
@@ -288,20 +297,11 @@ class RemoteProviderProxy(Provider):
             "extra_env": extra_env,
             "files": files,
             "continuation_chain": continuation_chain or [],
-            "provider_run_config": provider_run_config or {},
-            "capability_contexts": capability_contexts or [],
-            "resolved_harness_run_config": resolved_harness_run_config or {},
             "target_message_id": target_message_id,
             "turn_run_id": turn_run_id,
             "provisioned_tool_profile": str(provisioned_tool_profile or "").strip(),
-            "disabled_builtin_extensions": (
-                disabled_builtin_extensions_for_run(
-                    disabled_builtin_extensions,
-                    session_record=session_record,
-                    worker_record=worker_record,
-                )
-            ),
         }
+        payload.update(run_policy)
         # spawn_run send is async. If it raises (node disconnected
         # between the get_connection check and the actual ws.send), we
         # MUST enqueue an `error` StreamEvent so the caller's queue.get()

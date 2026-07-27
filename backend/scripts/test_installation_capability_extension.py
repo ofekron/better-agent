@@ -464,15 +464,15 @@ def test_adoption_does_not_seize_a_default_the_user_already_had() -> None:
         config = root / "config.json"
         state = json.loads(config.read_text(encoding="utf-8"))
         state["providers"].append(
-            {"id": "gemini-id", "kind": "gemini", "name": "Gemini", "suspended": False}
+            {"id": "agy-id", "kind": "agy", "name": "AGY", "suspended": False}
         )
-        state["default_provider_id"] = "gemini-id"
+        state["default_provider_id"] = "agy-id"
         config.write_text(json.dumps(state), encoding="utf-8")
         config_store._state_cache = None
 
         config_store.apply_installation_profile_selection(make_default=False)
         adopted = json.loads(config.read_text(encoding="utf-8"))
-        assert adopted["default_provider_id"] == "gemini-id", (
+        assert adopted["default_provider_id"] == "agy-id", (
             "adoption must leave the configured default alone"
         )
         assert not any(p.get("suspended") for p in adopted["providers"])

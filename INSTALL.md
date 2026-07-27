@@ -273,9 +273,6 @@ ones you pick for you (with prerequisite checks). It covers:
 | **Antigravity (`agy`)** | vendor install script | bash / PowerShell | per CLI prompts |
 | **GitHub Copilot CLI** | `brew install copilot-cli` | Homebrew | `gh auth login` |
 
-**Gemini** is also a supported provider but is **not** in the wizard — install
-its CLI yourself (`gemini-cli`) and authenticate before selecting it.
-
 Install only what you use: if you only run Claude, install only Claude and skip
 the rest. After install + auth, pick the provider and model per session in the
 UI.
@@ -335,7 +332,7 @@ python scripts/integration_test_<thing>.py
 ```
 
 **Parity rule:** when changing a provider-facing or desktop feature, apply the
-equivalent change for every supported provider (Claude/Codex/Gemini) and for
+equivalent change for every supported provider (Claude/Codex/AGY) and for
 both macOS and Windows in the same change, or stop and ask.
 
 **Deeper architecture:** see the `project-structure` skill at

@@ -31,7 +31,7 @@ const RESPONSE = {
   capabilities: [],
   providers: [
     { kind: "claude", name: "Claude" },
-    { kind: "gemini", name: "Gemini" },
+    { kind: "agy", name: "Antigravity" },
   ],
   token_totals: {
     unified: 3,
@@ -39,7 +39,7 @@ const RESPONSE = {
     all_tracked: 9,
     by_provider: [
       { provider_kind: "claude", provider_name: "Claude", token_count: 2 },
-      { provider_kind: "gemini", provider_name: "Gemini", token_count: 4 },
+      { provider_kind: "agy", provider_name: "Antigravity", token_count: 4 },
     ],
   },
   groups: {
@@ -57,7 +57,7 @@ const RESPONSE = {
         total_token_count: 9,
         provider_token_counts: [
           { provider_kind: "claude", provider_name: "Claude", token_count: 2 },
-          { provider_kind: "gemini", provider_name: "Gemini", token_count: 4 },
+          { provider_kind: "agy", provider_name: "Antigravity", token_count: 4 },
         ],
         has_diffs: true,
         specific_count: 2,
@@ -106,8 +106,8 @@ const RESPONSE = {
             provider_kinds: ["claude"],
           },
           {
-            entry_id: "project:instructions:instructions:file:/tmp/project/GEMINI.md",
-            path: "/tmp/project/GEMINI.md",
+            entry_id: "project:instructions:instructions:file:/tmp/project/AGY.md",
+            path: "/tmp/project/AGY.md",
             content_kind: "file",
             scope: "project",
             category: "instructions",
@@ -115,16 +115,16 @@ const RESPONSE = {
             capability_key: "project:instructions:instructions",
             capability_name: "General instructions",
             role: "specific",
-            label: "Gemini instructions",
+            label: "Antigravity instructions",
             language: "markdown",
-            content: "GEMINI",
+            content: "AGY",
             token_count: 4,
             exists: true,
             read_error: null,
             writable: true,
             backup_exists: false,
-            provider_names: ["Gemini"],
-            provider_kinds: ["gemini"],
+            provider_names: ["Antigravity"],
+            provider_kinds: ["agy"],
           },
         ],
       },
@@ -329,8 +329,8 @@ const SKILL_RESPONSE = {
             read_error: null,
             writable: true,
             backup_exists: false,
-            provider_names: ["Gemini", "Codex"],
-            provider_kinds: ["gemini", "codex"],
+            provider_names: ["Antigravity", "Codex"],
+            provider_kinds: ["agy", "codex"],
           },
         ],
       },
@@ -380,9 +380,9 @@ describe("ProviderConfigSyncPage", () => {
     expect(screen.getAllByText("2 tok").length).toBeGreaterThan(0);
     expect(screen.getByRole("button", { name: "From Claude" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "To Claude" })).toBeTruthy();
-    fireEvent.click(screen.getByRole("tab", { name: /Gemini/ }));
-    expect(screen.getByRole("button", { name: "From Gemini" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "To Gemini" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("tab", { name: /Antigravity/ }));
+    expect(screen.getByRole("button", { name: "From Antigravity" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "To Antigravity" })).toBeTruthy();
     fireEvent.click(screen.getByRole("tab", { name: /Claude/ }));
     fireEvent.click(screen.getByRole("button", { name: "From Claude" }));
 
@@ -551,7 +551,7 @@ describe("ProviderConfigSyncPage", () => {
       expected_contents: {
         "unified:project:instructions:instructions:/tmp/bc/provider-config-sync/projects/hash/instructions.md": "UNIFIED",
         "project:instructions:instructions:file:/tmp/project/CLAUDE.md": "CLAUDE",
-        "project:instructions:instructions:file:/tmp/project/GEMINI.md": "GEMINI",
+        "project:instructions:instructions:file:/tmp/project/AGY.md": "AGY",
       },
     });
   });
@@ -587,7 +587,7 @@ describe("ProviderConfigSyncPage", () => {
       cwd: "/tmp/project",
       scope: "project",
       category: "skill",
-      provider_kinds: ["claude", "gemini"],
+      provider_kinds: ["claude", "agy"],
       name: "new-skill",
       description: "New skill",
       instructions: "Do the thing.",
@@ -637,7 +637,7 @@ describe("ProviderConfigSyncPage", () => {
     render(<ProviderConfigSyncPage open cwd="/tmp/project" onClose={() => {}} client={createFetchProviderConfigSyncClient({ baseUrl: "" })} subscribeExternalChanges={(cb) => eventBus.subscribe("provider_config_sync_changed", () => cb())} />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Add capability" }));
-    fireEvent.click(screen.getByLabelText("Gemini"));
+    fireEvent.click(screen.getByLabelText("Antigravity"));
     fireEvent.change(screen.getByLabelText("New capability name"), { target: { value: "new-skill" } });
     fireEvent.click(screen.getAllByRole("button", { name: "Add capability" }).at(-1)!);
 
@@ -914,7 +914,7 @@ describe("ProviderConfigSyncPage", () => {
     expect(screen.getAllByText("Review code").length).toBeGreaterThan(0);
     expect(screen.getAllByText("Provider extensions").length).toBeGreaterThan(0);
     await screen.findByRole("tab", { name: /Claude.*aligned/i });
-    fireEvent.click(screen.getByRole("tab", { name: /Gemini, Codex.*missing/i }));
+    fireEvent.click(screen.getByRole("tab", { name: /Antigravity, Codex.*missing/i }));
     expect(screen.getByText("Skill (reviewer) not configured yet.")).toBeTruthy();
     expect(screen.getByText("Apply unified to create this file from the unified source.")).toBeTruthy();
     expect(screen.queryByText("---")).toBeNull();

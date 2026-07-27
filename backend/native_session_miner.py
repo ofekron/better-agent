@@ -1,15 +1,12 @@
 """Provider-native transcript session miners.
 
-Five native :class:`SessionMinerBase` implementations, one per supported
+Native :class:`SessionMinerBase` implementations, one per supported
 provider, plus BA-indexed discovery. They are the native-source counterparts to
-:class:`session_miner.SessionMiner` (the Better Agent snapshot source);
-together that is six SessionMiner implementations of the one abstraction.
+:class:`session_miner.SessionMiner` (the Better Agent snapshot source).
 
 - :class:`NativeClaudeSessionMiner` — Claude ``projects/<cwd>/<sid>.jsonl``.
 - :class:`NativeCodexSessionMiner` — Codex run-dir ``session_events.jsonl``
   (Claude-shaped, captured by the runner from the Codex stream).
-- :class:`NativeGeminiSessionMiner` — Gemini run-dir ``session_events.jsonl``
-  (Claude-shaped, pre-normalized by ``runner_gemini``).
 - :class:`NativeBetterAgentSessionMiner` — Better Agent's own runner
   (``runner_better_agent``, ``openai`` provider kind) run-dir
   ``session_events.jsonl`` (Claude-shaped).
@@ -28,7 +25,7 @@ parsers/extractors, provider-native root helpers) lives in
 Agent stack: session records, provider configs, run-dir resolution, and the
 :class:`SessionMinerBase` hierarchy.
 
-Each miner namespaces its watermark key (``claude:``/``codex:``/``gemini:``) so
+Each miner namespaces its watermark key (``claude:``/``codex:``/``ba:``) so
 they can share one persisted state dict with the BA snapshot miner without
 collision.
 """
@@ -45,7 +42,6 @@ from native_elements import (
     _codex_first_cwd,
     _codex_sessions_root,
     _decode_cwd_token,
-    _gemini_chats_root,
     _mtime,
     _pi_sessions_root,
     _windsurf_cascade_roots,
@@ -59,7 +55,6 @@ __all__ = [
     "iter_all_native_candidates",
     "NativeClaudeSessionMiner",
     "NativeCodexSessionMiner",
-    "NativeGeminiSessionMiner",
     "NativeBetterAgentSessionMiner",
 ]
 
@@ -82,7 +77,7 @@ def _ba_session_cwd(sid: str) -> str:
 
 
 def _provider_kind(data: dict) -> str:
-    """Resolve a BA session record's provider kind (claude/codex/gemini).
+    """Resolve a BA session record's provider kind (claude/codex/openai).
 
     Defaults to ``claude`` when the provider is missing or unconfigured, mirroring
     the backend's own default (``config_store`` treats unknown/missing kind as
@@ -102,7 +97,7 @@ def _provider_kind(data: dict) -> str:
     return "claude"
 
 
-# Codex/Gemini run-dir index: {app_session_id -> run_dir}. Built on demand and
+# Run-dir index: {app_session_id -> run_dir}. Built on demand and
 # refreshed when the runs dir mtime_ns changes, so a long-lived process does
 # not rescan thousands of run dirs every mining pass.
 _RUN_INDEX: dict[str, Path] | None = None
@@ -186,9 +181,8 @@ def iter_all_native_candidates() -> Iterable[NativeCandidate]:
     - Claude (every config): all ``<config_dir>/projects/<encoded-cwd>/*.jsonl``
       — covers ``~/.claude``, ``~/.claude-zai``, and any provider ``config_dir``.
     - Codex native: ``~/.codex/sessions/**/*.jsonl`` rollout files.
-    - Gemini native: ``~/.gemini/tmp/<cwd>/chats/session-*.jsonl``.
     - Pi native: ``~/.pi/agent/sessions/**/*.jsonl`` tree session files.
-    - BA run-dirs: ``<runs>/<run_id>/session_events.jsonl`` (codex/gemini/ba-runner
+    - BA run-dirs: ``<runs>/<run_id>/session_events.jsonl`` (codex/ba-runner
       streams BA captured; Claude-shaped, so parsed as claude).
     """
     # Claude — every provider config root.
@@ -224,21 +218,6 @@ def iter_all_native_candidates() -> Iterable[NativeCandidate]:
                 format="codex",
             )
 
-    # Gemini native chat store.
-    gemini_root = _gemini_chats_root()
-    if gemini_root.exists():
-        for transcript in gemini_root.rglob("chats/session-*.jsonl"):
-            cwd_dir = transcript.parent.parent
-            yield NativeCandidate(
-                key=f"gemini-fs:{cwd_dir.name}/{transcript.name}",
-                sid=transcript.stem,
-                cwd=_decode_cwd_token(cwd_dir.name),
-                data={},
-                transcript=transcript,
-                mtime=_mtime(transcript),
-                format="gemini",
-            )
-
     pi_root = _pi_sessions_root()
     if pi_root.exists():
         for transcript in pi_root.rglob("*.jsonl"):
@@ -266,7 +245,7 @@ def iter_all_native_candidates() -> Iterable[NativeCandidate]:
                 format="windsurf",
             )
 
-    # BA run-dirs (codex/gemini/ba-runner) — every run, regardless of BA linkage.
+    # BA run-dirs (codex/ba-runner) — every run, regardless of BA linkage.
     for state_path in _runs_root().glob("*/state.json"):
         run_dir = state_path.parent
         transcript = run_dir / "session_events.jsonl"
@@ -368,9 +347,9 @@ class NativeClaudeSessionMiner(_NativeMinerBase):
 
 
 class _RunDirNativeMiner(_NativeMinerBase):
-    """Codex/Gemini native source: run-dir ``session_events.jsonl``.
+    """Run-dir native source: ``session_events.jsonl``.
 
-    Both providers write Claude-shaped events captured by their runners into a
+    These providers write Claude-shaped events captured by their runners into a
     per-run dir; the run dir is resolved from the BA app session id (the session
     record's filename stem) via the run-dir index (``state.json.app_session_id``).
     """
@@ -387,16 +366,11 @@ class NativeCodexSessionMiner(_RunDirNativeMiner):
     _key_prefix = "codex:"
 
 
-class NativeGeminiSessionMiner(_RunDirNativeMiner):
-    _kind = "gemini"
-    _key_prefix = "gemini:"
-
-
 class NativeBetterAgentSessionMiner(_RunDirNativeMiner):
     """Better Agent's own runner source (``runner_better_agent``).
 
     The ``openai`` provider kind runs through ``runner_better_agent``, which —
-    like Codex/Gemini — writes Claude-shaped ``session_events.jsonl`` into a
+    like Codex — writes Claude-shaped ``session_events.jsonl`` into a
     per-run dir. Same run-dir mechanism, distinct kind/key so it is mined as its
     own source alongside the provider-native CLIs.
     """

@@ -122,7 +122,7 @@ async def run_provider_poll_off_loop(fn, /, *args):
 def _count_event_lines(path: Path) -> int:
     """Non-blank lines in a runner-owned event stream — matches the
     line-count cursor `JsonlEventTailer` advances per dispatched line
-    (`GeminiJsonlTailer._read_new_lines` filters blank lines the same
+    (`SessionEventsJsonlTailer._read_new_lines` filters blank lines the same
     way)."""
     try:
         with path.open("r", encoding="utf-8") as fh:
@@ -351,7 +351,7 @@ def runner_argv(run_dir: Path, *, dev_script: Path, kind: str) -> list[str]:
     Python interpreter, so `python <script>` is impossible — the frozen
     entrypoint (`app_entry.py`) re-execs the app binary and dispatches on
     `--run-dir`. In a dev checkout `sys.executable` is the interpreter and
-    the runner script runs directly. `kind` ("claude"/"gemini") tells the
+    the runner script runs directly. `kind` (the provider kind) tells the
     frozen entrypoint which runner to dispatch to.
     """
     if getattr(sys, "frozen", False):
@@ -535,13 +535,13 @@ class Provider(ABC):
     # Whether this provider can run as the persistent "manager" session
     # in manager mode (i.e. supports MCP tool registration + resumable
     # sessions so the BOOTSTRAP_PROMPT can be re-applied across turns).
-    # Gemini's CLI has neither; manager mode is gated client-side off
-    # this flag and a server-side `raise NotImplementedError` enforces.
+    # CLIs lacking both gate manager mode client-side off this flag,
+    # and a server-side `raise NotImplementedError` enforces it.
     supports_manager_mode: ClassVar[bool] = True
     # Whether this provider's CLI exposes a non-interactive rewind /
     # session-truncation primitive that lets us cut the jsonl at a given
     # message UUID. Drives UI gating for the Rewind button + rewind-and-
-    # retry flow. Gemini doesn't have one.
+    # retry flow. Most external CLIs don't have one.
     supports_rewind: ClassVar[bool] = True
     # Internal server-side rewind contract: real CLI rewind providers
     # need the provider-native session id + user-message UUID; simulated

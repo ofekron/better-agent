@@ -16,7 +16,7 @@ from __future__ import annotations
 
 FALLBACK_PROVIDER_KINDS = (
     "agy", "amp", "claude", "claude-remote", "codex", "copilot", "cursor",
-    "fugu", "gemini", "kimi", "openai", "opencode", "pi", "qwen",
+    "fugu", "kimi", "openai", "opencode", "pi", "qwen",
 )
 
 

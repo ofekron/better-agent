@@ -6,7 +6,7 @@ Drives the `copilot` binary (a.k.a. `gh copilot`) via a detached
 event log at `<config_dir>/session-state/<sessionId>.jsonl`, normalizes
 those events to Claude jsonl shape, and writes `session_events.jsonl`.
 This provider tails that file and pushes events onto the orchestrator
-queue — identical to the GeminiProvider path, which CopilotProvider
+queue — identical to the SessionEventsProvider path, which CopilotProvider
 subclass reuses for RunState / bootstrap / tailer / recovery.
 
 Auth: Copilot CLI authenticates via GitHub OAuth (`gh auth login` or an
@@ -25,17 +25,15 @@ from typing import ClassVar, Optional
 
 import config_store
 from extension_run_policy import (
-    disabled_builtin_extensions_for_run,
-    disabled_builtin_tools_for_run,
     disabled_runtime_skills_for_run,
+    resolve_extension_run_policy,
 )
 import user_prefs
 from cli_paths import resolve_cli_binary
 from containment import containment
 from provider import build_better_agent_run_env, schedule_loop_task, runner_argv
 import provider_runtime
-from provider_gemini import GeminiProvider, RunState
-from provider_run_config import normalize_provider_run_config
+from provider_session_events import SessionEventsProvider, RunState
 from proc_control import process_control as _process_control
 from runs_dir import runs_root as _runs_root
 
@@ -72,7 +70,7 @@ COPILOT_MODELS = [
 
 # Current Copilot config help omits this available picker-only model, but the
 # interactive picker persists this id and `--model` accepts it. Keep it near its
-# displayed position in the picker (after GPT minis, before Gemini).
+# displayed position in the picker (after GPT minis, before the Gemini models).
 _COPILOT_PICKER_EXTRA_MODELS_AFTER = {
     "gpt-5-mini": ["mai-code-1-flash-picker"],
 }
@@ -229,18 +227,18 @@ def fetch_copilot_models() -> list[str]:
     return []
 
 
-class CopilotProvider(GeminiProvider):
+class CopilotProvider(SessionEventsProvider):
     """GitHub Copilot CLI provider. Native-mode only: Copilot has no
     non-interactive fork primitive, no in-process SDK MCP registration
     (manager mode), no mid-turn steering, and no reasoning-effort flag.
-    Reuses GeminiProvider's RunState, tailer bootstrap, completion
+    Reuses SessionEventsProvider's RunState, tailer bootstrap, completion
     watcher, and disk recovery — only the runner binary and env differ."""
 
     KIND: ClassVar[str] = "copilot"
 
     supports_fork: ClassVar[bool] = False
     supports_manager_mode: ClassVar[bool] = False
-    # Copilot has no rewind primitive, but we simulate one the way Gemini
+    # Copilot has no rewind primitive, but we simulate one the way the family
     # does: clear the stored provider session id so the next turn starts
     # a fresh CLI session.
     supports_rewind: ClassVar[bool] = True
@@ -331,9 +329,16 @@ class CopilotProvider(GeminiProvider):
         from session_manager import manager as _sm
         session_record = _sm.get(app_session_id) or {}
         worker_record = _sm.get(worker_agent_session_id) if worker_agent_session_id else {}
-        _bare = bool(session_record.get("bare_config")) or bool(
-            (resolved_harness_run_config or {}).get("bare_config")
+        run_policy = resolve_extension_run_policy(
+            resolved_harness_run_config=resolved_harness_run_config,
+            session_record=session_record,
+            worker_record=worker_record,
+            provider_kind=self.KIND,
+            provider_run_config=provider_run_config,
+            capability_contexts=capability_contexts,
+            disabled_builtin_extensions=disabled_builtin_extensions,
         )
+        _bare = bool(run_policy["bare_config"])
         input_payload = {
             "prompt": prompt,
             "images": images or [],
@@ -355,26 +360,14 @@ class CopilotProvider(GeminiProvider):
             "working_mode": session_record.get("working_mode"),
             "worker_working_mode": (worker_record or {}).get("working_mode"),
             "context_strategy": user_prefs.get_context_strategy(),
-            "capability_contexts": capability_contexts or [],
-            "resolved_harness_run_config": resolved_harness_run_config or {},
             "target_message_id": target_message_id,
             "turn_run_id": turn_run_id,
             "provisioned_tool_profile": str(provisioned_tool_profile or "").strip(),
-            "disabled_builtin_tools": disabled_builtin_tools_for_run(
-                session_record=session_record, worker_record=worker_record,
-            ),
             "disabled_runtime_skills": disabled_runtime_skills_for_run(
                 session_record=session_record, worker_record=worker_record,
             ),
-            "disabled_builtin_extensions": (
-                disabled_builtin_extensions_for_run(
-                    disabled_builtin_extensions,
-                    session_record=session_record,
-                    worker_record=worker_record,
-                )
-            ),
-            "provider_run_config": normalize_provider_run_config(provider_run_config),
         }
+        input_payload.update(run_policy)
         (run_dir / "input.json").write_text(
             __import__("json").dumps(input_payload), encoding="utf-8"
         )

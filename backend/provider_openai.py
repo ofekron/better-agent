@@ -1,14 +1,14 @@
 """OpenAIProvider — `Provider` implementation for the BA-owned Better Agent runner.
 
-Unlike claude/gemini/codex (which drive an external CLI subprocess), the
+Unlike claude/codex (which drive an external CLI subprocess), the
 `openai` provider runs the agent loop inside BA itself: `runner_better_agent.py`
 makes HTTP Chat Completions calls and executes tools in-process. It
 normalizes its events to the Claude-jsonl shape and writes them to
 `session_events.jsonl`; this provider tails that file (reusing
-`GeminiJsonlTailer` verbatim — it is provider-agnostic, only the file
+`SessionEventsJsonlTailer` verbatim — it is provider-agnostic, only the file
 path differs) and pushes events onto the orchestrator queue.
 
-Mirror of `provider_gemini.py` section-by-section: same RunState, same
+Mirror of `provider_session_events.py` section-by-section: same RunState, same
 bootstrap/complete lifecycle, same recovery classification, same
 `_write_backend_state` shape so `run_recovery._integrate_one` reads
 identical keys regardless of provider kind.
@@ -29,9 +29,8 @@ from typing import Any, ClassVar, Optional
 import httpx
 import config_store
 from extension_run_policy import (
-    disabled_builtin_extensions_for_run,
-    disabled_builtin_tools_for_run,
     disabled_runtime_skills_for_run,
+    resolve_extension_run_policy,
 )
 
 from provider import (
@@ -46,7 +45,6 @@ from provider import (
     runner_argv,
 )
 import provider_runtime
-from provider_run_config import normalize_provider_run_config
 from ingestion_versions import OPENAI_INGESTION_VERSION, marker_matches_current
 from reasoning_effort import (
     ALL_REASONING_EFFORTS,
@@ -116,7 +114,7 @@ async def _openai_headless_completion(
 
 
 # ============================================================================
-# RunState — per-run bookkeeping (mirrors GeminiProvider.RunState exactly)
+# RunState — per-run bookkeeping (mirrors SessionEventsProvider.RunState exactly)
 # ============================================================================
 @dataclass
 class RunState:
@@ -128,7 +126,7 @@ class RunState:
     queue: asyncio.Queue
     session_id: Optional[str] = None
     processed_line: int = 0
-    tailer: Optional["object"] = None  # GeminiJsonlTailer; typed loosely to avoid import cycle
+    tailer: Optional["object"] = None  # SessionEventsJsonlTailer; typed loosely to avoid import cycle
     tailer_task: Optional[asyncio.Task] = None
     complete_task: Optional[asyncio.Task] = None
     started_at: str = ""
@@ -295,9 +293,16 @@ class OpenAIProvider(Provider):
             is_worker=is_worker,
             fallback_kind=self.KIND,
         )
-        _bare = bool(_sess_rec.get("bare_config")) or bool(
-            (resolved_harness_run_config or {}).get("bare_config")
+        run_policy = resolve_extension_run_policy(
+            resolved_harness_run_config=resolved_harness_run_config,
+            session_record=_sess_rec,
+            worker_record=_worker_sess_rec,
+            provider_kind=self.KIND,
+            provider_run_config=provider_run_config,
+            capability_contexts=capability_contexts,
+            disabled_builtin_extensions=disabled_builtin_extensions,
         )
+        _bare = bool(run_policy["bare_config"])
         input_payload = {
             "prompt": prompt,
             "images": images or [],
@@ -310,11 +315,6 @@ class OpenAIProvider(Provider):
             "mode": runner_mode,
             "source": source or "",
             "app_session_id": app_session_id,
-            "active_capability_ids": [
-                str(cid)
-                for cid in (_sess_rec.get("active_capability_ids") or [])
-                if str(cid or "").strip()
-            ],
             "disallowed_tools": disallowed_tools or [],
             "setting_sources": setting_sources or [],
             "backend_url": backend_url or "",
@@ -332,26 +332,14 @@ class OpenAIProvider(Provider):
             "worker_working_mode": (_worker_sess_rec or {}).get("working_mode"),
             "context_strategy": user_prefs.get_context_strategy(),
             "continuation_chain": continuation_chain or [],
-            "provider_run_config": normalize_provider_run_config(provider_run_config),
-            "capability_contexts": capability_contexts or [],
-            "resolved_harness_run_config": resolved_harness_run_config or {},
             "target_message_id": target_message_id,
             "turn_run_id": turn_run_id,
             "provisioned_tool_profile": str(provisioned_tool_profile or "").strip(),
-            "disabled_builtin_tools": disabled_builtin_tools_for_run(
-                session_record=_sess_rec, worker_record=_worker_sess_rec,
-            ),
             "disabled_runtime_skills": disabled_runtime_skills_for_run(
                 session_record=_sess_rec, worker_record=_worker_sess_rec,
             ),
-            "disabled_builtin_extensions": (
-                disabled_builtin_extensions_for_run(
-                    disabled_builtin_extensions,
-                    session_record=_sess_rec,
-                    worker_record=_worker_sess_rec,
-                )
-            ),
         }
+        input_payload.update(run_policy)
         (run_dir / "input.json").write_text(json.dumps(input_payload), encoding="utf-8")
 
         from containment import containment
@@ -480,21 +468,21 @@ class OpenAIProvider(Provider):
             logger.exception("failed to enqueue session_discovered")
 
         # 3) Start the polling tailer on session_events.jsonl. Reuse
-        # GeminiJsonlTailer verbatim — it is provider-agnostic; only
+        # SessionEventsJsonlTailer verbatim — it is provider-agnostic; only
         # the file path differs. No subclass needed.
-        from jsonl_tailer import GeminiJsonlTailer
+        from jsonl_tailer import SessionEventsJsonlTailer
 
         def _dispatch_to_queue(event: dict, _rs: RunState = rs) -> None:
             try:
                 _rs.queue.put_nowait(runner_event_to_stream_event(event))
             except Exception:
                 logger.exception(
-                    "GeminiJsonlTailer dispatch: put_nowait failed for run %s",
+                    "SessionEventsJsonlTailer dispatch: put_nowait failed for run %s",
                     _rs.run_id,
                 )
 
         def _on_cursor(n: int, _rs: RunState = rs) -> None:
-            # Mirror GeminiProvider._on_cursor: called synchronously from
+            # Mirror SessionEventsProvider._on_cursor: called synchronously from
             # the tailer's read loop, so this MUST stay non-blocking.
             # In-memory state updates immediately (cheap; this is what
             # the deterministic drain polls); the actual
@@ -504,7 +492,7 @@ class OpenAIProvider(Provider):
             from cursor_ledger_worker import worker as cursor_ledger_worker
             cursor_ledger_worker.note(_rs.run_id, lambda: self._write_backend_state(_rs))
 
-        rs.tailer = GeminiJsonlTailer(
+        rs.tailer = SessionEventsJsonlTailer(
             path=events_path,
             start_offset=rs.processed_line,
             dispatch=_dispatch_to_queue,
@@ -618,7 +606,7 @@ class OpenAIProvider(Provider):
 
     def _write_backend_state(self, rs: RunState) -> None:
         """Provider-specific backend_state.json contents.
-        Mirrors `GeminiProvider._write_backend_state` (run_id /
+        Mirrors `SessionEventsProvider._write_backend_state` (run_id /
         app_session_id / mode / runner_pid / started_at / session_id /
         processed_line / cancelled / provider_id / persist_to /
         jsonl_path) so `run_recovery._integrate_one` reads the same
@@ -759,7 +747,7 @@ class OpenAIProvider(Provider):
         loop: Optional[asyncio.AbstractEventLoop] = None,
         run_id_filter: Optional[set[str]] = None,
     ) -> list[dict]:
-        """Mirror `GeminiProvider.recover_in_flight`'s descriptor shape
+        """Mirror `SessionEventsProvider.recover_in_flight`'s descriptor shape
         so `run_recovery._integrate_one` reads identical keys regardless
         of provider kind.
 

@@ -5,12 +5,12 @@ Drives the `pi` binary via a detached `runner_pi.py` subprocess per turn.
 The runner spawns `pi --mode json -p` (prompt on stdin), normalizes pi's
 JSON event stream to Claude jsonl shape, and writes
 `<run_dir>/session_events.jsonl`. This provider tails that file and pushes
-events onto the orchestrator queue — identical to the GeminiProvider path,
+events onto the orchestrator queue — identical to the SessionEventsProvider path,
 which PiProvider subclasses for RunState / bootstrap / tailer / recovery
-(gemini recovery family).
+(session-events recovery family).
 
 Auth: pi reads provider API keys from env vars (ANTHROPIC_API_KEY,
-OPENAI_API_KEY, GEMINI_API_KEY, …) or OAuth/API-key records the user
+OPENAI_API_KEY, OPENROUTER_API_KEY, …) or OAuth/API-key records the user
 stores via its interactive `/login` in `~/.pi/agent/auth.json`. The CLI is
 the credential authority; Better Agent passes nothing through.
 
@@ -30,17 +30,15 @@ from typing import ClassVar, Optional
 
 import config_store
 from extension_run_policy import (
-    disabled_builtin_extensions_for_run,
-    disabled_builtin_tools_for_run,
     disabled_runtime_skills_for_run,
+    resolve_extension_run_policy,
 )
 import user_prefs
 from cli_paths import resolve_cli_binary
 from containment import containment
 from provider import build_better_agent_run_env, schedule_loop_task, runner_argv
 import provider_runtime
-from provider_gemini import GeminiProvider, RunState
-from provider_run_config import normalize_provider_run_config
+from provider_session_events import SessionEventsProvider, RunState
 from proc_control import process_control as _process_control
 from runs_dir import runs_root as _runs_root
 
@@ -142,12 +140,12 @@ def _model_allowed(model: str, available: list[str]) -> bool:
     return bare in available or "/" in bare
 
 
-class PiProvider(GeminiProvider):
+class PiProvider(SessionEventsProvider):
     """pi coding agent CLI provider. Fork is native (`pi --fork`); rewind is
-    simulated the way Gemini/Copilot do it (clear the stored provider session
+    simulated the way Copilot does it (clear the stored provider session
     id so the next turn starts fresh). No manager mode (no in-process SDK MCP
     registration), no mid-turn steering, no native subagents. Reasoning
-    effort maps to pi's `--thinking` levels. Reuses GeminiProvider's
+    effort maps to pi's `--thinking` levels. Reuses SessionEventsProvider's
     RunState, tailer bootstrap, completion watcher, and disk recovery — only
     the runner binary, env, and capability surface differ."""
 
@@ -261,9 +259,16 @@ class PiProvider(GeminiProvider):
             is_worker=is_worker,
             fallback_kind=self.KIND,
         )
-        _bare = bool(session_record.get("bare_config")) or bool(
-            (resolved_harness_run_config or {}).get("bare_config")
+        run_policy = resolve_extension_run_policy(
+            resolved_harness_run_config=resolved_harness_run_config,
+            session_record=session_record,
+            worker_record=worker_record,
+            provider_kind=self.KIND,
+            provider_run_config=provider_run_config,
+            capability_contexts=capability_contexts,
+            disabled_builtin_extensions=disabled_builtin_extensions,
         )
+        _bare = bool(run_policy["bare_config"])
         input_payload = {
             "prompt": prompt,
             "images": images or [],
@@ -288,26 +293,14 @@ class PiProvider(GeminiProvider):
             "working_mode": session_record.get("working_mode"),
             "worker_working_mode": (worker_record or {}).get("working_mode"),
             "context_strategy": user_prefs.get_context_strategy(),
-            "capability_contexts": capability_contexts or [],
-            "resolved_harness_run_config": resolved_harness_run_config or {},
             "target_message_id": target_message_id,
             "turn_run_id": turn_run_id,
             "provisioned_tool_profile": str(provisioned_tool_profile or "").strip(),
-            "disabled_builtin_tools": disabled_builtin_tools_for_run(
-                session_record=session_record, worker_record=worker_record,
-            ),
             "disabled_runtime_skills": disabled_runtime_skills_for_run(
                 session_record=session_record, worker_record=worker_record,
             ),
-            "disabled_builtin_extensions": (
-                disabled_builtin_extensions_for_run(
-                    disabled_builtin_extensions,
-                    session_record=session_record,
-                    worker_record=worker_record,
-                )
-            ),
-            "provider_run_config": normalize_provider_run_config(provider_run_config),
         }
+        input_payload.update(run_policy)
         (run_dir / "input.json").write_text(
             __import__("json").dumps(input_payload), encoding="utf-8"
         )

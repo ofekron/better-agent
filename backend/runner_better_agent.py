@@ -1,14 +1,15 @@
 """runner_better_agent — BA-owned agent loop over an OpenAI Chat Completions endpoint.
 
-Unlike the claude/gemini/codex runners (which spawn an external CLI that owns
+Unlike the claude/codex runners (which spawn an external CLI that owns
 the tool/MCP/approval loop), this runner IS the agent host: it makes HTTP
 Chat Completions calls itself and executes tools in-process. There is no
 external CLI subprocess.
 
-It plugs into the SAME event/recovery/render-tree funnel as gemini: it writes
+It plugs into the SAME event/recovery/render-tree funnel as the rest of the
+session-events family: it writes
 only `run_dir/session_events.jsonl` (Claude-shaped lines), `state.json`, and
 `complete.json`. The provider (provider_openai.py) tails session_events.jsonl
-with GeminiJsonlTailer and feeds apply_event.
+with SessionEventsJsonlTailer and feeds apply_event.
 
 OpenAI-compatible APIs are the clean path where BA owns the internals instead of adapting to
 provider-native CLI quirks:
@@ -87,7 +88,7 @@ _MCP_LIST_TIMEOUT_S = 10.0
 _MCP_CALL_TIMEOUT_S = 130.0
 _REQUIREMENTS_WAIT_TRUE_MCP_CALL_TIMEOUT_S = 1380.0
 # Safety bound on the agent tool loop. runner_better_agent IS the agent host (no
-# external CLI like claude/codex/gemini to impose its own limits), so it needs
+# external CLI like claude/codex to impose its own limits), so it needs
 # an in-process runaway guard. High enough that agentic models (e.g. Sakana
 # Fugu, a tool-heavy multi-agent system that routinely needs >40 tool rounds)
 # finish naturally; overridable per-run via inputs["max_tool_loops"]. When the

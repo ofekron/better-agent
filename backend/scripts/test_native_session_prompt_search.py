@@ -126,27 +126,31 @@ def _restore_rg() -> None:
 
 
 def _isolate_native_roots(*, claude: list[Path] | None = None, codex: Path | None = None,
-                          gemini: Path | None = None, runs: Path | None = None,
-                          pi: Path | None = None):
+                          runs: Path | None = None, pi: Path | None = None):
     """Point every native-root helper in native_session_miner at temp dirs so
     filesystem-walk tests neither scan the real home (~/.claude*, ~/.codex,
-    ~/.gemini, ~/.pi — tens of thousands of files) nor read real data. Returns
+    ~/.pi — tens of thousands of files) nor read real data. Returns
     the original callables for restoration."""
     import native_session_miner as M
-    orig = (M._claude_projects_roots, M._codex_sessions_root, M._gemini_chats_root,
-            M._runs_root, M._pi_sessions_root)
+    orig = (M._claude_projects_roots, M._codex_sessions_root,
+            M._runs_root, M._pi_sessions_root, M._windsurf_cascade_roots,
+            nsp._windsurf_cascade_roots)
     M._claude_projects_roots = lambda: list(claude or [])
     M._codex_sessions_root = lambda: codex or _SCRATCH / "no-codex"
-    M._gemini_chats_root = lambda: gemini or _SCRATCH / "no-gemini"
     M._runs_root = lambda: runs or _SCRATCH / "no-runs"
     M._pi_sessions_root = lambda: pi or _SCRATCH / "no-pi"
+    M._windsurf_cascade_roots = lambda: []
+    # nsp imports the helper by name, so the miner-side patch alone leaves the
+    # real ~/.codeium cascade store reachable through `_windsurf_candidates`.
+    nsp._windsurf_cascade_roots = lambda: []
     return orig
 
 
 def _restore_native_roots(orig) -> None:
     import native_session_miner as M
-    (M._claude_projects_roots, M._codex_sessions_root, M._gemini_chats_root,
-     M._runs_root, M._pi_sessions_root) = orig
+    (M._claude_projects_roots, M._codex_sessions_root,
+     M._runs_root, M._pi_sessions_root, M._windsurf_cascade_roots,
+     nsp._windsurf_cascade_roots) = orig
 
 
 def test_whole_word_match_not_substring() -> bool:
@@ -315,10 +319,10 @@ def test_unlinked_transcript_found_via_filesystem_walk() -> bool:
     return ok
 
 
-def test_codex_and_gemini_native_transcripts_found() -> bool:
-    """The native stores of every provider are covered — a codex rollout and a
-    gemini chat with no BA record must both be found, and codex's injected
-    ``<environment_context>`` block must be dropped (not treated as a prompt)."""
+def test_codex_native_transcripts_found() -> bool:
+    """The native stores of every provider are covered — a codex rollout with
+    no BA record must be found, and codex's injected ``<environment_context>``
+    block must be dropped (not treated as a prompt)."""
     _reset_candidates()
 
     codex_root = _SCRATCH / "codex-sessions"
@@ -337,20 +341,10 @@ def test_codex_and_gemini_native_transcripts_found() -> bool:
         encoding="utf-8",
     )
 
-    gemini_root = _SCRATCH / "gemini-tmp" / "zapp-proj" / "chats"
-    gemini_root.mkdir(parents=True, exist_ok=True)
-    (gemini_root / "session-2024-01-01-zapp.jsonl").write_text(
-        json.dumps({"sessionId": "z", "startTime": "2024-01-01T00:00:00Z", "kind": "main"}) + "\n"
-        + json.dumps({"id": "u1", "timestamp": "2024-01-01T00:00:01Z", "type": "user",
-                      "content": [{"text": "zulifrangible gemini widget"}]}) + "\n",
-        encoding="utf-8",
-    )
-
     _disable_rg()
     orig = _isolate_native_roots(
         claude=[],
         codex=codex_root,
-        gemini=gemini_root.parent.parent,
     )
     try:
         out = nsp.search_native_session_prompts(query="zulifrangible widget")
@@ -360,10 +354,9 @@ def test_codex_and_gemini_native_transcripts_found() -> bool:
     texts = {r["text"] for r in out}
     ok = (
         "zulifrangible codex widget" in texts
-        and "zulifrangible gemini widget" in texts
         and not any("<environment_context>" in t for t in texts)
     )
-    print(f"{OK if ok else FAIL} codex+gemini native transcripts found, env-context dropped (got {texts})")
+    print(f"{OK if ok else FAIL} codex native transcripts found, env-context dropped (got {texts})")
     return ok
 
 
@@ -426,12 +419,18 @@ def test_rg_filter_narrows_to_files_containing_needle() -> bool:
                     "message": {"role": "user", "content": "nothing relevant here"}}) + "\n",
         encoding="utf-8",
     )
+    import native_transcript_index as idx
     orig = _isolate_native_roots(claude=[projects], codex=_SCRATCH / "no-codex",
-                                 gemini=_SCRATCH / "no-gemini", runs=_SCRATCH / "no-runs")
+                                 runs=_SCRATCH / "no-runs")
+    # `_matched_candidates` prefers the FTS index over rg; drop the index so
+    # this test exercises the rg path it is named for (and cannot serve rows
+    # indexed from outside the isolated roots).
+    idx.reset_for_test()
     try:
         cands = nsp._matched_candidates(["zulifrangible"], set())
     finally:
         _restore_native_roots(orig)
+        idx.reset_for_test()
     sids = {c.sid for c in cands}
     ok = sids == {"rg-hit"}
     print(f"{OK if ok else FAIL} rg filter narrows to needle files (got sids={sids})")
@@ -670,7 +669,7 @@ def main_run() -> int:
         test_bad_transcript_does_not_abort_search,
         test_deterministic_order_for_empty_ts_ties,
         test_unlinked_transcript_found_via_filesystem_walk,
-        test_codex_and_gemini_native_transcripts_found,
+        test_codex_native_transcripts_found,
         test_categorizer_maps_elements_to_categories,
         test_generalized_search_greps_tool_calls_and_results,
         test_sids_scopes_to_exactly_one_session,

@@ -1,4 +1,4 @@
-"""Codex/Gemini provider contract: complete.json finalizes a turn even
+"""Codex/session-events provider contract: complete.json finalizes a turn even
 while the runner process is still alive.
 
 Run with:
@@ -22,7 +22,8 @@ if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
 from provider_codex import CodexProvider, RunState as CodexRunState  # noqa: E402
-from provider_gemini import GeminiProvider, RunState as GeminiRunState  # noqa: E402
+from provider_agy import AgyProvider  # noqa: E402
+from provider_session_events import RunState as SessionEventsRunState  # noqa: E402
 
 failures: list[str] = []
 
@@ -102,7 +103,7 @@ async def _run_provider_case(provider_cls, run_state_cls, label: str) -> None:
 
 async def _scenario() -> None:
     await _run_provider_case(CodexProvider, CodexRunState, "codex")
-    await _run_provider_case(GeminiProvider, GeminiRunState, "gemini")
+    await _run_provider_case(AgyProvider, SessionEventsRunState, "agy")
 
 
 def main() -> int:
@@ -111,7 +112,7 @@ def main() -> int:
     if failures:
         print(f"FAILED: {len(failures)}")
         return 1
-    print("OK: Codex/Gemini _watch_complete fires on complete.json while alive")
+    print("OK: Codex/session-events _watch_complete fires on complete.json while alive")
     return 0
 
 

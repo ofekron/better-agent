@@ -166,7 +166,7 @@ def read(app_session_id: str, *, limit: Optional[int] = None) -> list[dict]:
 # provenance log above; this is a disposable read projection (filter +
 # normalize), never a second source of truth — re-derived on every fetch.
 #
-# Tool names are the union across providers (Claude / Codex / Gemini); the
+# Tool names are the union across providers (Claude / Codex / CLI family); the
 # agents all normalize to Claude-shaped tool_use events before provenance.
 
 _WRITE_TOOLS = {"Write", "write_file", "create_file"}

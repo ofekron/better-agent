@@ -34,16 +34,16 @@ CLAUDE_INGESTION_VERSION = 2
 # panels from the canonical child-task boundary during recovery.
 CODEX_INGESTION_VERSION = 11
 # Bump when agy's recovery digest changes shape. v2: recovery now replays agy's
-# session_events.jsonl through the gemini-family reader instead of the Claude
+# session_events.jsonl through the session-events-family reader instead of the Claude
 # parser, so runs reconciled under v1 (empty/partial render) re-digest on the
 # next startup.
 AGY_INGESTION_VERSION = 2
-# Same bug/fix as agy: copilot is a gemini-family provider whose runner writes
-# session_events.jsonl. v2: recovery now replays it through the gemini-family
+# Same bug/fix as agy: copilot is a session-events-family provider whose runner
+# writes session_events.jsonl. v2: recovery now replays it through the family
 # reader instead of the Claude parser, so runs reconciled under v1 re-digest.
 COPILOT_INGESTION_VERSION = 2
-# openai is a gemini-family provider: BA's own runner writes
-# session_events.jsonl (Claude-shaped), recovered via the gemini-family replay
+# openai is a session-events-family provider: BA's own runner writes
+# session_events.jsonl (Claude-shaped), recovered via the family replay
 # reader. v1: initial shape.
 # v2: require recovered successful/failed runs to carry assistant terminal
 # fields (`completed_at` / assistant error) before reconciling.

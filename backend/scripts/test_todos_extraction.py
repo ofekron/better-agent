@@ -2,18 +2,12 @@
 
 Locks the contract for the public Todos extension extractor and the
 session-event hook that derives `session.current_todos` from
-the event stream — both Claude `TodoWrite` (full-list snapshot) and
-Gemini `update_topic` (single-topic delta, mapped to "TodoWrite" by
-`runner_gemini`).
+the event stream — Claude `TodoWrite` (full-list snapshot), Codex
+`todo_list` / `update_plan`, and the TaskCreate/TaskUpdate tools.
 
 Coverage:
   - Claude TodoWrite REPLACE semantics (sample-confirmed: full list
     rewrite every call).
-  - Gemini single-topic delta semantics (sample-confirmed: per-call
-    `{title, strategic_intent, summary}`, no list, no status).
-  - Gemini dedup by `update_topic_<ts>_<n>` source_id; content-hash
-    fallback for non-matching ids; skip when `tool_id` empty / input
-    non-serializable.
   - Worker_event branch does NOT touch session-level current_todos.
   - Interleaved manager_event + agent_message → last-wins.
   - Convergence invariant: source_is_provider_stream=True vs source_is_provider_stream=False over the same
@@ -155,35 +149,6 @@ def _claude_todowrite_manager(uuid: str, todos: list, tool_id: str = "tu_1") -> 
     return {
         "type": "manager_event",
         "data": {"event": _claude_todowrite_native(uuid, todos, tool_id)},
-    }
-
-
-def _gemini_update_topic(
-    uuid: str, tool_id: str, title: str, summary: str,
-    strategic_intent: str = "",
-) -> dict:
-    """Gemini's `update_topic` after runner_gemini normalization:
-    tool name remapped to "TodoWrite", input keys passed through.
-    Native-mode shape (Gemini sessions use native orchestration)."""
-    return {
-        "type": "agent_message",
-        "data": {
-            "uuid": uuid,
-            "type": "assistant",
-            "message": {
-                "role": "assistant",
-                "content": [{
-                    "type": "tool_use",
-                    "id": tool_id,
-                    "name": "TodoWrite",
-                    "input": {
-                        "title": title,
-                        "summary": summary,
-                        "strategic_intent": strategic_intent,
-                    },
-                }],
-            },
-        },
     }
 
 
@@ -426,186 +391,6 @@ def test_claude_two_sequential_todowrites_union_merge() -> bool:
     return True
 
 
-def test_gemini_single_update_topic_appends_in_progress() -> bool:
-    """Gemini's single-topic call → one new in_progress item with
-    `content=title`, `activeForm=summary`, `source_id=tool_id`."""
-    sid, msg = _mk_session("native")
-    strategy = get_strategy("native")
-    ev = _gemini_update_topic(
-        "u1", "update_topic_1780096408174_0",
-        title="Investigating Foo", summary="Looking into Foo logs",
-    )
-    _apply(strategy, sid, msg, ev, source_is_provider_stream=True)
-    got = session_manager.get(sid).get("current_todos") or []
-    if got != [{
-        "content": "Investigating Foo",
-        "status": "in_progress",
-        "activeForm": "Looking into Foo logs",
-        "source_id": "update_topic_1780096408174_0",
-    }]:
-        print(f"  got {got}")
-        return False
-    return True
-
-
-def test_gemini_three_sequential_prior_completed() -> bool:
-    """Three sequential update_topic calls → first two become
-    `completed`, third stays `in_progress`. Best-effort UX heuristic
-    documented as project caveat."""
-    sid, msg = _mk_session("native")
-    strategy = get_strategy("native")
-    for i, (title, summary) in enumerate([
-        ("topic 1", "doing 1"),
-        ("topic 2", "doing 2"),
-        ("topic 3", "doing 3"),
-    ]):
-        tid = f"update_topic_178000000{i}_0"
-        _apply(
-            strategy, sid, msg,
-            _gemini_update_topic(f"u{i}", tid, title=title, summary=summary),
-            source_is_provider_stream=True,
-        )
-    got = session_manager.get(sid).get("current_todos") or []
-    statuses = [t["status"] for t in got]
-    if statuses != ["completed", "completed", "in_progress"]:
-        print(f"  statuses: {statuses}")
-        return False
-    titles = [t["content"] for t in got]
-    if titles != ["topic 1", "topic 2", "topic 3"]:
-        print(f"  titles: {titles}")
-        return False
-    return True
-
-
-def test_gemini_same_source_id_same_content_noop() -> bool:
-    """Replay safety: same tool_id replayed with same content does NOT
-    grow the list (dedup-by-source_id)."""
-    sid, msg = _mk_session("native")
-    strategy = get_strategy("native")
-    ev = _gemini_update_topic(
-        "u1", "update_topic_1780000000_0", title="T", summary="S",
-    )
-    _apply(strategy, sid, msg, ev, source_is_provider_stream=True)
-    _apply(strategy, sid, msg, ev, source_is_provider_stream=False)  # recovery replay
-    got = session_manager.get(sid).get("current_todos") or []
-    if len(got) != 1:
-        print(f"  expected len 1, got {len(got)}: {got}")
-        return False
-    return True
-
-
-def test_gemini_same_source_id_mutated_content_replaces() -> bool:
-    """If Gemini re-emits the same tool_id with updated input (in-place
-    streaming mutation), the matching entry is REPLACED in place — the
-    list length stays 1."""
-    sid, msg = _mk_session("native")
-    strategy = get_strategy("native")
-    tid = "update_topic_1780000000_0"
-    _apply(
-        strategy, sid, msg,
-        _gemini_update_topic("u1", tid, title="early", summary="early s"),
-        source_is_provider_stream=True,
-    )
-    _apply(
-        strategy, sid, msg,
-        # Same tool_id but the underlying agent_message uuid differs
-        # (Gemini streaming sometimes mutates either; either should
-        # work — but we use a new uuid here to model "next streamed
-        # chunk for the same tool_use").
-        _gemini_update_topic("u2", tid, title="final", summary="final s"),
-        source_is_provider_stream=True,
-    )
-    got = session_manager.get(sid).get("current_todos") or []
-    if len(got) != 1:
-        print(f"  expected len 1, got {len(got)}")
-        return False
-    if got[0]["content"] != "final" or got[0]["activeForm"] != "final s":
-        print(f"  expected mutated content, got {got[0]}")
-        return False
-    return True
-
-
-def test_gemini_tool_id_pattern_mismatch_uses_content_hash() -> bool:
-    """A tool_id NOT matching `update_topic_\\d+_\\d+` (e.g. the
-    `runner_gemini._new_uuid()` fallback) falls back to a deterministic
-    content-hash source_id. Two replays of the same input yield the
-    same hash → dedup still works → no list growth."""
-    sid, msg = _mk_session("native")
-    strategy = get_strategy("native")
-    # Use a uuid-shaped tool_id that does NOT match the gemini pattern.
-    ev1 = _gemini_update_topic(
-        "u1", "9d1f-not-a-gemini-id", title="X", summary="Y",
-    )
-    ev2 = _gemini_update_topic(
-        "u2", "different-uuid-but-same-input",
-        title="X", summary="Y",
-    )
-    _apply(strategy, sid, msg, ev1, source_is_provider_stream=True)
-    _apply(strategy, sid, msg, ev2, source_is_provider_stream=True)
-    got = session_manager.get(sid).get("current_todos") or []
-    if len(got) != 1:
-        print(f"  expected len 1 (content-hash dedup), got {len(got)}: {got}")
-        return False
-    # source_id is the content hash — 16 hex chars.
-    sid_field = got[0].get("source_id") or ""
-    if len(sid_field) != 16 or not all(c in "0123456789abcdef" for c in sid_field):
-        print(f"  expected 16-hex content-hash source_id, got {sid_field!r}")
-        return False
-    return True
-
-
-def test_extractor_skip_when_tool_id_missing() -> bool:
-    """Empty/missing tool_use.id → extractor returns None (no
-    undedupable item appended). Defensive: the runner SHOULD always
-    supply an id, but if it doesn't, we'd diverge across replays."""
-    normalized = {
-        "type": "agent_message",
-        "data": {
-            "uuid": "u1",
-            "type": "assistant",
-            "message": {
-                "role": "assistant",
-                "content": [{
-                    "type": "tool_use",
-                    "id": "",
-                    "name": "TodoWrite",
-                    "input": {"title": "T", "summary": "S"},
-                }],
-            },
-        },
-    }
-    if extract_todos_from_normalized(normalized, []) is not None:
-        print("  expected None on empty id")
-        return False
-    return True
-
-
-def test_extractor_skip_non_serializable_gemini_input() -> bool:
-    """Defensive: a Gemini input with non-JSON-serializable values
-    (e.g. bytes) bypasses content-hash fallback → return None, NOT
-    crash."""
-    normalized = {
-        "type": "agent_message",
-        "data": {
-            "uuid": "u1",
-            "type": "assistant",
-            "message": {
-                "role": "assistant",
-                "content": [{
-                    "type": "tool_use",
-                    "id": "not-a-gemini-pattern-id",
-                    "name": "TodoWrite",
-                    "input": {"title": "T", "summary": b"\xff bytes"},
-                }],
-            },
-        },
-    }
-    if extract_todos_from_normalized(normalized, []) is not None:
-        print("  expected None on non-serializable input")
-        return False
-    return True
-
-
 def test_extractor_purity_does_not_mutate_current() -> bool:
     """Locked invariant: extractor MUST NOT mutate `current` or its
     items. Callers pass shallow-copy snapshots and expect them intact."""
@@ -614,9 +399,9 @@ def test_extractor_purity_does_not_mutate_current() -> bool:
         "source_id": "sid-old",
     }]
     snapshot = copy.deepcopy(current)
-    ev = _gemini_update_topic(
-        "u1", "update_topic_1780000000_0", title="new", summary="ns",
-    )
+    ev = _claude_todowrite_native("u1", [
+        {"content": "new", "status": "in_progress", "activeForm": "new"},
+    ])
     extract_todos_from_normalized(ev, current)
     if current != snapshot:
         print(f"  extractor mutated current: {current} != {snapshot}")
@@ -706,33 +491,6 @@ def test_convergence_invariant_live_equals_recovery() -> bool:
     return True
 
 
-def test_convergence_invariant_gemini_replay() -> bool:
-    """Gemini path of the convergence invariant: same update_topic
-    sequence via source_is_provider_stream=True vs source_is_provider_stream=False → byte-equal current_todos.
-    Pins replay-stability of `source_id` dedup (both gemini-pattern
-    and content-hash branches)."""
-    seq = [
-        ("update_topic_1780000001_0", "topic 1", "doing 1"),
-        ("update_topic_1780000002_0", "topic 2", "doing 2"),
-        # Mismatched id forces content-hash branch.
-        ("free-form-uuid-shape", "topic 3", "doing 3"),
-    ]
-
-    def run(source_is_provider_stream: bool) -> list:
-        sid, msg = _mk_session("native")
-        strategy = get_strategy("native")
-        for i, (tid, title, summary) in enumerate(seq):
-            _apply(strategy, sid, msg,
-                   _gemini_update_topic(f"u{i}", tid, title=title, summary=summary),
-                   source_is_provider_stream=source_is_provider_stream)
-        return session_manager.get(sid).get("current_todos") or []
-
-    if run(source_is_provider_stream=True) != run(source_is_provider_stream=False):
-        print("  Gemini live != Gemini recovery")
-        return False
-    return True
-
-
 def test_equality_skip_suppresses_redundant_fires() -> bool:
     """The hook exits early when the extracted list equals the current state — no `todos_updated`
     fire on a no-op.
@@ -778,70 +536,6 @@ def test_equality_skip_suppresses_redundant_fires() -> bool:
             return False
     finally:
         session_manager._listeners.remove(listener)
-    return True
-
-
-def test_claude_in_progress_not_demoted_by_gemini_delta() -> bool:
-    """Hostile review hole #2: when Gemini `update_topic` arrives
-    after a Claude TodoWrite that left items `in_progress`, those
-    Claude items (no `source_id`) MUST NOT be silently demoted to
-    `completed`. Only prior Gemini-owned (source_id-bearing) items
-    rotate to completed on a new delta.
-    """
-    sid, msg = _mk_session("native")
-    strategy = get_strategy("native")
-    claude_todos = [
-        {"content": "claude A", "status": "in_progress", "activeForm": "a"},
-        {"content": "claude B", "status": "pending", "activeForm": "b"},
-    ]
-    _apply(
-        strategy, sid, msg,
-        _claude_todowrite_native("u1", claude_todos, tool_id="tu_claude"),
-        source_is_provider_stream=True,
-    )
-    _apply(
-        strategy, sid, msg,
-        _gemini_update_topic(
-            "u2", "update_topic_1780000099_0",
-            title="gemini topic", summary="doing it",
-        ),
-        source_is_provider_stream=True,
-    )
-    got = session_manager.get(sid).get("current_todos") or []
-    # Expect 3 items: claude A (still in_progress), claude B (pending),
-    # gemini topic (in_progress). Claude A must NOT be flipped.
-    if len(got) != 3:
-        print(f"  expected 3 items, got {len(got)}: {got}")
-        return False
-    a = next((t for t in got if t["content"] == "claude A"), None)
-    if a is None or a["status"] != "in_progress":
-        print(f"  claude A demoted: {a}")
-        return False
-    g = next((t for t in got if t.get("source_id", "").startswith("update_topic_")), None)
-    if g is None or g["status"] != "in_progress":
-        print(f"  gemini topic missing/wrong status: {g}")
-        return False
-    return True
-
-
-def test_two_gemini_deltas_prior_completes_only_self() -> bool:
-    """Companion to the demotion test: two sequential Gemini deltas
-    (no Claude in between) STILL rotate the prior Gemini item to
-    `completed`. The scope is "Gemini-owned only", not "no rotation".
-    """
-    sid, msg = _mk_session("native")
-    strategy = get_strategy("native")
-    _apply(strategy, sid, msg, _gemini_update_topic(
-        "u1", "update_topic_1780000100_0", title="g1", summary="s1",
-    ), source_is_provider_stream=True)
-    _apply(strategy, sid, msg, _gemini_update_topic(
-        "u2", "update_topic_1780000101_0", title="g2", summary="s2",
-    ), source_is_provider_stream=True)
-    got = session_manager.get(sid).get("current_todos") or []
-    statuses = [(t["content"], t["status"]) for t in got]
-    if statuses != [("g1", "completed"), ("g2", "in_progress")]:
-        print(f"  unexpected statuses: {statuses}")
-        return False
     return True
 
 
@@ -898,56 +592,6 @@ def test_fork_skip_worker_panel_events() -> bool:
     return True
 
 
-def test_concurrent_gemini_deltas_no_lost_update() -> bool:
-    """Hostile review hole #3 (TOCTOU): two concurrent Gemini
-    `update_topic` events on the same session must NOT lose either
-    one. The session-event projection closes the snapshot→set race window. Simulated by interleaving
-    apply_event calls from two threads on the same sid.
-    """
-    import threading
-
-    sid, msg = _mk_session("native")
-    strategy = get_strategy("native")
-
-    barrier = threading.Barrier(2)
-    errors: list = []
-
-    def fire(uid: str, tid: str, title: str) -> None:
-        try:
-            barrier.wait(timeout=2.0)
-            _apply(strategy, sid, msg,
-                   _gemini_update_topic(uid, tid, title=title, summary=title),
-                   source_is_provider_stream=True)
-        except Exception as e:  # noqa: BLE001
-            errors.append(e)
-
-    t1 = threading.Thread(target=fire, args=(
-        "u1", "update_topic_1780000200_0", "topic 1",
-    ))
-    t2 = threading.Thread(target=fire, args=(
-        "u2", "update_topic_1780000201_0", "topic 2",
-    ))
-    t1.start(); t2.start()
-    t1.join(); t2.join()
-
-    if errors:
-        print(f"  thread errors: {errors}")
-        return False
-
-    got = session_manager.get(sid).get("current_todos") or []
-    titles = sorted(t["content"] for t in got)
-    if titles != ["topic 1", "topic 2"]:
-        print(f"  expected both topics, got {titles} (lost update)")
-        return False
-    # Exactly one in_progress (whichever lost the race) — the second
-    # delta marks the first's prior in_progress as completed.
-    in_prog = [t for t in got if t["status"] == "in_progress"]
-    if len(in_prog) != 1:
-        print(f"  expected 1 in_progress, got {len(in_prog)}: {got}")
-        return False
-    return True
-
-
 def test_hydration_loads_current_todos_from_events_jsonl() -> bool:
     """End-to-end hydration integration: build a session via live
     ingest (writes to events.jsonl AND populates in-memory msg.events
@@ -997,46 +641,6 @@ def test_hydration_loads_current_todos_from_events_jsonl() -> bool:
     got = reloaded.get("current_todos") or []
     if got != [{"content": "Hyd", "status": "in_progress", "activeForm": "h"}]:
         print(f"  hydration failed to repopulate current_todos: {got}")
-        return False
-    return True
-
-
-def test_gemini_reemission_preserves_completed_status() -> bool:
-    """Real-data regression: Gemini sometimes re-emits a previously-
-    completed topic's tool_id later in the session. The replace-in-
-    place branch must NOT downgrade `completed` back to `in_progress`.
-    Verified against ~/.better-claude/sessions/33b3991a where 7 unique
-    tool_ids were each re-emitted, leading to all-in_progress
-    rendering until this fix.
-    """
-    sid, msg = _mk_session("native")
-    strategy = get_strategy("native")
-    # First emission: A becomes in_progress.
-    _apply(strategy, sid, msg, _gemini_update_topic(
-        "u1", "update_topic_1780000300_0", title="A", summary="a",
-    ), source_is_provider_stream=True)
-    # Second emission: B → A flips to completed, B in_progress.
-    _apply(strategy, sid, msg, _gemini_update_topic(
-        "u2", "update_topic_1780000301_0", title="B", summary="b",
-    ), source_is_provider_stream=True)
-    # Re-emission of A (same tool_id, possibly mutated content) —
-    # must NOT downgrade A's completed status.
-    _apply(strategy, sid, msg, _gemini_update_topic(
-        "u3", "update_topic_1780000300_0",
-        title="A revised", summary="a revised",
-    ), source_is_provider_stream=True)
-    got = session_manager.get(sid).get("current_todos") or []
-    if len(got) != 2:
-        print(f"  expected 2 items, got {len(got)}: {got}")
-        return False
-    a = next((t for t in got if t["source_id"] == "update_topic_1780000300_0"), None)
-    if a is None or a["status"] != "completed":
-        print(f"  A downgraded after re-emission: {a}")
-        return False
-    # Content/activeForm updated despite preserving status — that's
-    # how Gemini streaming mutations are meant to flow through.
-    if a["content"] != "A revised":
-        print(f"  A's content not updated: {a}")
         return False
     return True
 
@@ -2643,26 +2247,14 @@ TESTS = [
     ("Claude TodoWrite first call sets list", test_claude_todowrite_first_call_sets_list),
     ("Claude two sequential → union merge", test_claude_two_sequential_todowrites_union_merge),
     ("Claude TodoWrite UNION keeps completed across phases", test_claude_todowrite_union_keeps_completed_across_phases),
-    ("Gemini single update_topic → in_progress", test_gemini_single_update_topic_appends_in_progress),
-    ("Gemini three sequential → prior completed", test_gemini_three_sequential_prior_completed),
-    ("Gemini same source_id same content → no-op", test_gemini_same_source_id_same_content_noop),
-    ("Gemini same source_id mutated → replace", test_gemini_same_source_id_mutated_content_replaces),
-    ("Gemini tool_id pattern mismatch → content-hash", test_gemini_tool_id_pattern_mismatch_uses_content_hash),
-    ("Extractor skip when tool_id missing", test_extractor_skip_when_tool_id_missing),
-    ("Extractor skip non-serializable Gemini input", test_extractor_skip_non_serializable_gemini_input),
     ("Extractor purity (current unmutated)", test_extractor_purity_does_not_mutate_current),
     ("worker_event TodoWrite does NOT touch session todos", test_worker_event_todowrite_does_not_touch_session_todos),
     ("interleaved manager + agent_message → accumulates", test_interleaved_manager_and_agent_message_accumulates),
     ("convergence invariant: Claude source_is_provider_stream==recovery", test_convergence_invariant_live_equals_recovery),
-    ("convergence invariant: Gemini source_is_provider_stream==recovery", test_convergence_invariant_gemini_replay),
     ("equality precheck suppresses redundant fires", test_equality_skip_suppresses_redundant_fires),
-    ("Claude in_progress NOT demoted by Gemini delta", test_claude_in_progress_not_demoted_by_gemini_delta),
-    ("two Gemini deltas → only Gemini-owned prior completes", test_two_gemini_deltas_prior_completes_only_self),
     ("fork derives current_todos from copied messages", test_fork_derives_current_todos_from_copied_messages),
     ("fork derivation skips worker panel events", test_fork_skip_worker_panel_events),
-    ("concurrent Gemini deltas: no lost update (TOCTOU)", test_concurrent_gemini_deltas_no_lost_update),
     ("hydration loads current_todos from events.jsonl", test_hydration_loads_current_todos_from_events_jsonl),
-    ("Gemini re-emission preserves completed", test_gemini_reemission_preserves_completed_status),
     ("_load_root derives current_todos including orphans", test_load_derives_current_todos_from_orphan_rows),
     ("hydration skips irrelevant rows before projection", test_hydration_skips_irrelevant_rows_before_projection),
     ("hydration reuses todo projection cache when events unchanged", test_hydration_reuses_todo_projection_cache_when_events_unchanged),

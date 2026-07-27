@@ -1140,10 +1140,11 @@ class ClaudeJsonlTailer(JsonlEventTailer):
 
 
 # ============================================================================
-# GeminiJsonlTailer — concrete: polling read on runner-written events file
+# SessionEventsJsonlTailer — concrete: polling read on runner-written events file
 # ============================================================================
-class GeminiJsonlTailer(JsonlEventTailer):
-    """Tails a `session_events.jsonl` file written by the Gemini runner.
+class SessionEventsJsonlTailer(JsonlEventTailer):
+    """Tails a `session_events.jsonl` file written by a session-events-family
+    runner.
 
     Differs from `ClaudeJsonlTailer`:
       - No `tail -F` subprocess. Polling read (file lives in our own
@@ -1152,7 +1153,7 @@ class GeminiJsonlTailer(JsonlEventTailer):
       - No sub-source watchers.
 
     The polling cadence is set by `_POLL_INTERVAL`. Cancel responsiveness
-    is bounded by the poll period — fine for Gemini's coarse-grained
+    is bounded by the poll period — fine for these CLIs' coarse-grained
     event cadence; if the file ever needs sub-100ms latency, swap to
     `inotify` / `kqueue`.
     """
@@ -1180,7 +1181,7 @@ class GeminiJsonlTailer(JsonlEventTailer):
         # steady-state polls seek straight to new bytes instead of
         # re-reading the whole file from the top every poll — which made
         # the tailer O(total_lines) per poll and lagged the UI for long
-        # streamed turns (ba_runner / gemini session_events.jsonl grows
+        # streamed turns (session_events.jsonl grows
         # large because the runner writes a cumulative line per delta).
         # `processed_offset` (line count) stays the persisted recovery
         # cursor; `_byte_cursor` is purely a read optimization.
@@ -1273,7 +1274,7 @@ class GeminiJsonlTailer(JsonlEventTailer):
             return None
         if isinstance(parsed, dict):
             # Stamp `parent_tool_use_id` to match what `enrich_jsonl_line`
-            # produces in the claude path. Gemini has no sidechain / Agent
+            # produces in the claude path. These CLIs have no sidechain / Agent
             # nesting so the value is always None, but the FIELD must be
             # present so live-streamed events are byte-identical to events
             # replayed through run_recovery (which DOES run enrich and

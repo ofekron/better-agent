@@ -1,5 +1,5 @@
-"""Integration test: agy/gemini-family runs must route through the
-gemini-family parser during recovery based on the provider kind from
+"""Integration test: session-events-family runs must route through the
+session-events parser during recovery based on the provider kind from
 config_store, rather than relying on fragile file-presence sniffing or
 stderr filenames.
 
@@ -42,13 +42,13 @@ def _seed_config_store() -> None:
     # Directly write configuration to config.json in the sandboxed home
     cfg_path = paths.ba_home() / "config.json"
     cfg = {
-        "default_provider_id": "test-gemini-prov",
+        "default_provider_id": "test-agy-prov",
         "providers": [
             {
-                "id": "test-gemini-prov",
-                "name": "Test Gemini",
-                "kind": "gemini",
-                "model": "gemini-test"
+                "id": "test-agy-prov",
+                "name": "Test Agy",
+                "kind": "agy",
+                "model": "agy-test"
             }
         ]
     }
@@ -57,8 +57,8 @@ def _seed_config_store() -> None:
 
 def _seed_session_with_streaming_assistant() -> tuple[str, str, str]:
     sess = session_manager.create(
-        name="test-session", model="gemini-test", cwd="/tmp", orchestration_mode="native",
-        provider_id="test-gemini-prov"
+        name="test-session", model="agy-test", cwd="/tmp", orchestration_mode="native",
+        provider_id="test-agy-prov"
     )
     sid = sess["id"]
     user_msg = {
@@ -101,7 +101,7 @@ def _seed_agy_run(
     (run_dir / "input.json").write_text(json.dumps({
         "prompt": "do a thing",
         "cwd": "/tmp",
-        "model": "gemini-test",
+        "model": "agy-test",
         "session_id": "test-agent-sess",
         "mode": "native",
         "app_session_id": app_sid,
@@ -120,7 +120,7 @@ def _seed_agy_run(
         "processed_line": 0,
         "cancelled": False,
         "target_message_id": target_msg_id,
-        "provider_id": "test-gemini-prov"
+        "provider_id": "test-agy-prov"
     }))
     (run_dir / "pid").write_text("0")
     return run_id
@@ -136,8 +136,8 @@ def test_agy_recovery_with_events() -> None:
                 "type": "assistant",
                 "message": {
                     "role": "assistant",
-                    "content": [{"type": "text", "text": "Hi from agy/gemini"}],
-                    "model": "gemini-test"
+                    "content": [{"type": "text", "text": "Hi from agy"}],
+                    "model": "agy-test"
                 },
                 "uuid": "u1",
                 "timestamp": "2026-06-24T12:00:00Z"
@@ -149,8 +149,8 @@ def test_agy_recovery_with_events() -> None:
                 "type": "assistant",
                 "message": {
                     "role": "assistant",
-                    "content": [{"type": "text", "text": "Hi from agy/gemini resource_exhausted in query"}],
-                    "model": "gemini-test"
+                    "content": [{"type": "text", "text": "Hi from agy resource_exhausted in query"}],
+                    "model": "agy-test"
                 },
                 "uuid": "u1",
                 "timestamp": "2026-06-24T12:00:01Z"
@@ -184,7 +184,7 @@ def test_agy_recovery_with_events() -> None:
     (run_dir / "complete.json").write_text(json.dumps({
         "success": False, "session_id": "test-agent-sess", "error": "RESOURCE_EXHAUSTED", "token_usage": None
     }))
-    check("detects rate limit from Gemini events", _should_retry_rate_limit(run_dir) is True)
+    check("detects rate limit from session-events", _should_retry_rate_limit(run_dir) is True)
 
 
 def test_agy_recovery_missing_events_file() -> None:

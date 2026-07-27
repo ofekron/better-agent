@@ -269,7 +269,7 @@ def test_jsonl_dispatch_reads_session_lite_off_loop() -> None:
 
 def test_gemini_polling_tailer_reads_file_off_loop() -> None:
     source = (ROOT / "jsonl_tailer.py").read_text(encoding="utf-8")
-    start = source.index("class GeminiJsonlTailer")
+    start = source.index("class SessionEventsJsonlTailer")
     end = source.index("class OwnedClaudeJsonlTailer", start)
     gemini_source = source[start:end]
     assert "new_lines = await asyncio.to_thread(self._read_new_lines)" in gemini_source
@@ -969,7 +969,7 @@ def test_provider_complete_watcher_filesystem_poll_runs_off_loop() -> None:
     for filename in (
         "provider_claude.py",
         "provider_codex.py",
-        "provider_gemini.py",
+        "provider_session_events.py",
         "provider_openai.py",
     ):
         source = (ROOT / filename).read_text(encoding="utf-8")
@@ -1024,7 +1024,7 @@ def test_provider_run_process_poll_runs_off_loop() -> None:
             ("async def _bootstrap_run(", "if runner_state is None:"),
             ("async def _watch_complete(", "async def _emit_complete_from_file("),
         ),
-        "provider_gemini.py": (
+        "provider_session_events.py": (
             ("async def _bootstrap_run(", "if runner_state is None:"),
             ("async def _watch_complete(", "# ------------------------------------------------------------------\n    # _emit_complete_from_file"),
         ),
@@ -1651,7 +1651,7 @@ def test_filtered_provider_recovery_does_not_rescan_all_runs() -> None:
     for filename in (
         "provider_claude.py",
         "provider_codex.py",
-        "provider_gemini.py",
+        "provider_session_events.py",
         "provider_openai.py",
     ):
         source = (ROOT / filename).read_text(encoding="utf-8")
@@ -1680,7 +1680,7 @@ def test_provider_prune_uses_shared_scandir_helper() -> None:
     for filename in (
         "provider_claude.py",
         "provider_codex.py",
-        "provider_gemini.py",
+        "provider_session_events.py",
         "provider_openai.py",
     ):
         source = (ROOT / filename).read_text(encoding="utf-8")
@@ -1757,7 +1757,7 @@ def test_jsonl_cursor_advance_is_synchronous_and_non_blocking() -> None:
 
     for provider_file, callback_marker in (
         ("provider_claude.py", "def _on_tailer_progress("),
-        ("provider_gemini.py", "def _on_cursor("),
+        ("provider_session_events.py", "def _on_cursor("),
         ("provider_openai.py", "def _on_cursor("),
     ):
         provider_source = (ROOT / provider_file).read_text(encoding="utf-8")

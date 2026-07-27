@@ -8,13 +8,11 @@ a Better Agent session by replaying its events through the same
   - codex:  `state_5.sqlite` threads table → rollout files
   - agy:    `~/.gemini/antigravity-cli/conversations/*.db` (main-thread
             extractor in runner_agy.extract_main_conversation_events)
-  - gemini:`~/.gemini/tmp/*/chats/session-*.jsonl` chat-history normalizer
   - pi:     `~/.pi/agent/sessions/**/*.jsonl` tree session normalizer
 
 Runs as a single-flight background job; progress is exposed via
-`get_status()` for the REST layer. agy/gemini only carry what the native
-format stores (e.g. gemini tool calls are text-embedded) — imported
-faithfully within that constraint.
+`get_status()` for the REST layer. agy only carries what the native
+format stores — imported faithfully within that constraint.
 """
 
 from __future__ import annotations
@@ -268,8 +266,6 @@ def enumerate_native_sessions(
                 out.extend(_enumerate_codex(pid, provider))
             elif kind == "agy":
                 out.extend(_enumerate_agy(pid, provider))
-            elif kind == "gemini":
-                out.extend(_enumerate_gemini(pid, provider))
         except Exception:
             logger.exception("native_import: enumerate failed for provider %s (%s)", pid, kind)
     if provider_ids is None:
@@ -458,86 +454,6 @@ def _enumerate_agy(provider_id: str, provider: dict) -> list[NativeSession]:
     return out
 
 
-# --------------------------------- gemini ---------------------------------- #
-
-def _gemini_home(provider: dict) -> Path:
-    cfg = provider.get("config_dir") or ""
-    if cfg:
-        return Path(os.path.expandvars(cfg)).expanduser()
-    raw = os.environ.get("GEMINI_CLI_HOME", "")
-    return Path(os.path.expandvars(raw)).expanduser() if raw else Path.home()
-
-
-def _gemini_read_meta(path: Path) -> tuple[str, str, str]:
-    """First-line metadata → (session_id, start_time_iso, first_user_prompt).
-
-    The gemini CLI writes one `session-*.jsonl` per conversation under
-    `~/.gemini/tmp/<project>/chats/`. Line 1 is metadata; subsequent
-    lines are `{type: user|gemini|$set, ...}` events. We stream only
-    until the first user prompt to avoid loading large transcripts.
-    """
-    session_id = path.stem
-    started_at = ""
-    first_prompt = ""
-    try:
-        with path.open(encoding="utf-8") as f:
-            for raw in f:
-                try:
-                    obj = json.loads(raw)
-                except json.JSONDecodeError:
-                    continue
-                if not isinstance(obj, dict):
-                    continue
-                if "sessionId" in obj and not started_at:
-                    session_id = str(obj.get("sessionId") or session_id)
-                    started_at = str(obj.get("startTime") or "")
-                    continue
-                if obj.get("type") == "user" and not first_prompt:
-                    content = obj.get("content")
-                    if isinstance(content, list):
-                        parts = [str(i.get("text", "")) for i in content if isinstance(i, dict)]
-                        first_prompt = "\n".join(p for p in parts if p).strip()
-                    elif isinstance(content, str):
-                        first_prompt = content.strip()
-                    if first_prompt:
-                        break
-    except OSError:
-        pass
-    return session_id, started_at, first_prompt
-
-
-def _enumerate_gemini(provider_id: str, provider: dict) -> list[NativeSession]:
-    tmp = _gemini_home(provider) / ".gemini" / "tmp"
-    if not tmp.exists():
-        return []
-    out: list[NativeSession] = []
-    for project_dir in tmp.iterdir():
-        if not project_dir.is_dir():
-            continue
-        cwd = ""
-        root_file = project_dir / ".project_root"
-        if root_file.exists():
-            try:
-                cwd = root_file.read_text(encoding="utf-8").strip()
-            except OSError:
-                cwd = ""
-        chats = project_dir / "chats"
-        if not chats.is_dir():
-            continue
-        for session_path in chats.glob("session-*.jsonl"):
-            session_id, started_at, first_prompt = _gemini_read_meta(session_path)
-            out.append(NativeSession(
-                provider_id=provider_id,
-                provider_kind="gemini",
-                native_id=session_id,
-                jsonl_path=str(session_path),
-                cwd=cwd,
-                title=first_prompt[:80],
-                created_at=started_at,
-            ))
-    return out
-
-
 # ------------------------------------ pi ----------------------------------- #
 
 def _pi_sessions_root() -> Path:
@@ -610,13 +526,11 @@ def _enumerate_pi() -> list[NativeSession]:
 def _replay_events(sess: NativeSession) -> list[dict]:
     """Read the whole native session and return the flat event list that
     the segmenter consumes. Claude/codex reuse the recovery replay
-    functions via a synthesized run_dir; agy/gemini have their own
+    functions via a synthesized run_dir; agy/pi have their own
     native-format normalizers."""
     if sess.provider_kind == "agy":
         import runner_agy
         return runner_agy.extract_main_conversation_events(Path(sess.jsonl_path))
-    if sess.provider_kind == "gemini":
-        return _gemini_native_events(Path(sess.jsonl_path))
     if sess.provider_kind == "pi":
         return _pi_native_events(Path(sess.jsonl_path))
 
@@ -643,7 +557,6 @@ def _replay_events(sess: NativeSession) -> list[dict]:
         return _replay_from_claude_jsonl(run_dir)
 
 
-_GEMINI_UUID_NAMESPACE = uuid.uuid5(uuid.NAMESPACE_DNS, "better-agent.native_import.gemini")
 _PI_UUID_NAMESPACE = uuid.uuid5(uuid.NAMESPACE_DNS, "better-agent.native_import.pi")
 
 
@@ -660,53 +573,6 @@ def _wrapped(role: str, content: list[dict], *, uid: str) -> dict:
             "parentUuid": "root",
         },
     }
-
-
-def _gemini_native_events(path: Path) -> list[dict]:
-    """Normalize a gemini-CLI chat-history transcript (`session-*.jsonl`)
-    into Claude-shaped events: `user` lines → user-prompt turn
-    boundaries, `gemini` lines → assistant text. Metadata and `$set`
-    lines are skipped. Tool calls are text-embedded in this format, so
-    they ride along inside the assistant text."""
-    events: list[dict] = []
-    try:
-        with path.open(encoding="utf-8") as f:
-            for raw in f:
-                try:
-                    obj = json.loads(raw)
-                except json.JSONDecodeError:
-                    continue
-                if not isinstance(obj, dict):
-                    continue
-                etype = obj.get("type")
-                if etype == "user":
-                    content = obj.get("content")
-                    if isinstance(content, list):
-                        parts = [str(i.get("text", "")) for i in content if isinstance(i, dict)]
-                        text = "\n".join(p for p in parts if p).strip()
-                    elif isinstance(content, str):
-                        text = content.strip()
-                    else:
-                        text = ""
-                    if text:
-                        uid = str(uuid.uuid5(_GEMINI_UUID_NAMESPACE, f"user|{text}"))
-                        events.append(_wrapped("user", [{"type": "text", "text": text}], uid=uid))
-                elif etype == "gemini":
-                    content = obj.get("content")
-                    if isinstance(content, str):
-                        text = content.strip()
-                    elif isinstance(content, list):
-                        text = "\n".join(
-                            str(i.get("text", "")) for i in content if isinstance(i, dict)
-                        ).strip()
-                    else:
-                        text = ""
-                    if text:
-                        uid = str(uuid.uuid5(_GEMINI_UUID_NAMESPACE, f"assistant|{text}"))
-                        events.append(_wrapped("assistant", [{"type": "text", "text": text}], uid=uid))
-    except OSError:
-        logger.exception("native_import: gemini read failed for %s", path)
-    return events
 
 
 def _pi_text(content: object) -> str:
@@ -1387,7 +1253,7 @@ def already_imported_keys() -> set[str]:
 
 
 # Isolates the recursive native-session directory scan (rglob across
-# Claude+Codex+Gemini+pi session dirs, reading hundreds of MB of jsonl/db
+# Claude+Codex+agy+pi session dirs, reading hundreds of MB of jsonl/db
 # headers on a full history) from the process-wide default executor, so a
 # scan in flight can't delay unrelated `asyncio.to_thread` callers elsewhere
 # in the backend that happen to share the default pool. Not latency-sensitive

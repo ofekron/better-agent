@@ -54,11 +54,11 @@ def test_copilot_dispatchable_in_frozen_app():
 
 
 def test_recovery_families():
-    # Lock the recovery-reader mapping. gemini-family = runners writing a
-    # Claude-shaped session_events.jsonl; codex = rollout reader; fugu
+    # Lock the recovery-reader mapping. session-events family = runners
+    # writing a Claude-shaped session_events.jsonl; codex = rollout reader; fugu
     # currently uses the claude reader (pre-existing, flagged in the manifest).
-    assert pm.gemini_family_kinds() == frozenset({
-        "gemini", "agy", "copilot", "openai",
+    assert pm.session_events_family_kinds() == frozenset({
+        "agy", "copilot", "openai",
         "pi", "qwen", "cursor", "kimi", "amp", "opencode",
     })
     assert {k for k, s in pm.SPECS.items() if s.recovery_family == "codex"} == {"codex"}
@@ -98,7 +98,6 @@ def test_runner_choices_are_valid():
     assert pm.default_runner_for("claude") == "native"
     assert pm.default_runner_for("openai") == "better_agent_runner"
     assert pm.runner_choices_for("fugu") == ("native", "better_agent_runner")
-    assert pm.runner_choices_for("gemini") == ("native", "better_agent_runner")
 
 
 def test_provider_runner_round_trips():
@@ -146,15 +145,6 @@ def test_provider_runner_round_trips():
     assert fugu_ba["runner_options"] == ["native", "better_agent_runner"]
     assert fugu_ba["permission_options"] == {"mode": ["default", "bypassPermissions"]}
     assert fugu_ba["reasoning_effort_options"] == ["high", "xhigh"]
-
-    gemini = config_store.add_provider({
-        "name": "Gemini API",
-        "kind": "gemini",
-        "mode": "api_key",
-        "default_model": "gemini-3.5-flash",
-        "runner": "native",
-    })
-    assert gemini["runner_options"] == ["native", "better_agent_runner"]
 
     import provider
     assert provider._provider_runtime_kind({"kind": "fugu", "runner": "better_agent_runner"}) == "openai"

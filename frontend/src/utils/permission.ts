@@ -6,7 +6,6 @@ import type { Permission } from "../types";
 const BYPASS_TARGET: Record<string, Permission> = {
   claude: { mode: "bypassPermissions" },
   codex: { approval: "never", sandbox: "danger-full-access" },
-  gemini: { mode: "yolo" },
   openai: { mode: "bypassPermissions" },
   pi: { mode: "yolo" },
   qwen: { mode: "yolo" },

@@ -2,7 +2,7 @@
 
 Owns a Better Agent session record and its underlying agent-CLI session id
 (`agent_sid` — the provider-specific session: claude_sid for Claude,
-the Gemini session id for Gemini, etc.). Provides shared lifecycle:
+the native session id for CLI providers, etc.). Provides shared lifecycle:
 create Better Agent session → init turn (prep prompt) → run turns via detached runner.
 """
 

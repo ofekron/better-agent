@@ -2,7 +2,7 @@
 
 This file is BOTH the living map of every harness manipulation Better Agent
 performs AND the parity lock that the SHARED inputs to those manipulations
-reach Claude, Codex, and Gemini equivalently.
+reach Claude, Codex, and AGY equivalently.
 
 MAP OF HARNESS MANIPULATION SURFACES
 ------------------------------------
@@ -63,7 +63,7 @@ import turn_manager  # noqa: E402
 installation_profile.integrations_enabled = lambda: True
 
 # The three first-class CLI providers this map covers.
-PROVIDERS = ("claude", "codex", "gemini")
+PROVIDERS = ("claude", "codex", "agy")
 
 
 # ---------------------------------------------------------------------------
@@ -76,7 +76,7 @@ PROVIDERS = ("claude", "codex", "gemini")
 CANONICAL_FULL_BYPASS = {
     "claude": {"mode": "bypassPermissions"},
     "codex": {"approval": "never", "sandbox": "danger-full-access"},
-    "gemini": {"mode": "yolo"},
+    "agy": {"mode": "dangerously-skip-permissions"},
     "openai": {"mode": "bypassPermissions"},
 }
 
@@ -161,8 +161,8 @@ def test_run_env_is_kind_agnostic_and_deterministic():
 # ---------------------------------------------------------------------------
 def test_delegate_task_schema_is_shared_by_runner_providers():
     # Claude and Codex runners must import the SAME schema object — a forked
-    # copy would let the two drift. Gemini infers its schema from the function
-    # signature, so its parity is locked structurally (next test).
+    # copy would let the two drift. The stdio communicate MCP infers its schema
+    # from the function signature, so its parity is locked structurally (next test).
     assert runner._DELEGATE_TASK_INPUT_SCHEMA is ots.DELEGATE_TASK_INPUT_SCHEMA, (
         "Claude runner forked the delegate_task input schema"
     )
@@ -171,18 +171,18 @@ def test_delegate_task_schema_is_shared_by_runner_providers():
     )
 
 
-def test_gemini_delegate_task_params_match_shared_schema():
-    # Gemini's communicate MCP builds delegate_task as a FastMCP tool whose
+def test_communicate_mcp_delegate_task_params_match_shared_schema():
+    # The stdio communicate MCP builds delegate_task as a FastMCP tool whose
     # input schema is inferred from the Python signature, not from the shared
     # schema object. Lock that the inferred schema's property keys still match
     # the shared schema's property keys, so all three providers expose the same
     # contract to the model.
     shared_props = set(ots.DELEGATE_TASK_INPUT_SCHEMA["properties"].keys())
     tools = {t.name: t for t in communicate_mcp.build_server()._tool_manager.list_tools()}
-    assert "delegate_task" in tools, "Gemini communicate server missing delegate_task"
-    gemini_props = set((tools["delegate_task"].parameters or {}).get("properties", {}).keys())
-    assert gemini_props == shared_props, (
-        f"Gemini delegate_task props {gemini_props} != shared schema props "
+    assert "delegate_task" in tools, "communicate server missing delegate_task"
+    mcp_props = set((tools["delegate_task"].parameters or {}).get("properties", {}).keys())
+    assert mcp_props == shared_props, (
+        f"communicate delegate_task props {mcp_props} != shared schema props "
         f"{shared_props}"
     )
 
@@ -191,10 +191,10 @@ def test_stop_turn_schema_is_shared_across_providers():
     assert runner._STOP_TURN_INPUT_SCHEMA is ots.STOP_TURN_INPUT_SCHEMA
     assert runner_codex._STOP_TURN_INPUT_SCHEMA is ots.STOP_TURN_INPUT_SCHEMA
     tools = {t.name: t for t in communicate_mcp.build_server()._tool_manager.list_tools()}
-    assert "stop_turn" in tools, "Gemini communicate server missing stop_turn"
-    gemini_props = set((tools["stop_turn"].parameters or {}).get("properties", {}).keys())
+    assert "stop_turn" in tools, "communicate server missing stop_turn"
+    mcp_props = set((tools["stop_turn"].parameters or {}).get("properties", {}).keys())
     shared_props = set(ots.STOP_TURN_INPUT_SCHEMA["properties"].keys())
-    assert gemini_props == shared_props
+    assert mcp_props == shared_props
 
 
 def test_provider_catalog_schema_is_shared_across_providers():
@@ -207,7 +207,7 @@ def test_provider_catalog_schema_is_shared_across_providers():
         is ots.LIST_AVAILABLE_PROVIDER_MODELS_INPUT_SCHEMA
     )
     tools = {t.name: t for t in communicate_mcp.build_server()._tool_manager.list_tools()}
-    gemini_props = set(
+    mcp_props = set(
         (tools["list_available_provider_models"].parameters or {})
         .get("properties", {})
         .keys()
@@ -215,7 +215,7 @@ def test_provider_catalog_schema_is_shared_across_providers():
     shared_props = set(
         ots.LIST_AVAILABLE_PROVIDER_MODELS_INPUT_SCHEMA["properties"].keys()
     )
-    assert gemini_props == shared_props
+    assert mcp_props == shared_props
 
 
 # ---------------------------------------------------------------------------
@@ -254,7 +254,7 @@ def test_builtin_mcp_reserved_servers_parity():
             f"{kind} is missing a common reserved MCP server: {common - names}"
         )
     # ...plus the `ui` (open-file-panel) server, which is gated by the
-    # provider's hosts_ui_mcp capability. claude+gemini host it; codex cannot.
+    # provider's hosts_ui_mcp capability. claude+agy host it; codex cannot.
     # This is the ONE allowed, documented divergence — locking it prevents a
     # silent change in either direction.
     for kind in PROVIDERS:
@@ -278,7 +278,7 @@ def test_builtin_mcp_capabilities_server_identical_across_providers():
         )["mcp_servers"]["capabilities"]
         assert cfg["command"] and cfg["args"], f"{kind} capabilities cfg malformed"
     # Sanity: common base identical regardless of kind (re-derive deterministically).
-    base = _builtin_mcp_names("claude") & _builtin_mcp_names("codex") & _builtin_mcp_names("gemini")
+    base = _builtin_mcp_names("claude") & _builtin_mcp_names("codex") & _builtin_mcp_names("agy")
     assert {"capabilities", "open-config-panel"}.issubset(base)
 
 
@@ -312,7 +312,6 @@ def test_runtime_skill_display_root_matches_overlay_home_providers():
     assert turn_manager._runtime_skill_display_root("fugu") == "$HOME/.agents/skills"
     assert turn_manager._runtime_skill_display_root("agy") == "$HOME/.agents/skills"
     assert turn_manager._runtime_skill_display_root("claude") == ""
-    assert turn_manager._runtime_skill_display_root("gemini") == ""
 
 
 # ---------------------------------------------------------------------------
@@ -477,7 +476,7 @@ def main() -> int:
     test_permission_axes_cover_every_provider()
     test_run_env_is_kind_agnostic_and_deterministic()
     test_delegate_task_schema_is_shared_by_runner_providers()
-    test_gemini_delegate_task_params_match_shared_schema()
+    test_communicate_mcp_delegate_task_params_match_shared_schema()
     test_stop_turn_schema_is_shared_across_providers()
     test_provider_catalog_schema_is_shared_across_providers()
     test_builtin_mcp_reserved_servers_parity()

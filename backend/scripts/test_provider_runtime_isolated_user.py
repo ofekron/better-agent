@@ -137,7 +137,7 @@ def test_isolated_runner_spawn_wrapper() -> None:
                 "BETTER_AGENT_HOME": "do-not-preserve",
                 "ANTHROPIC_API_KEY": "secret-key",
                 "OPENAI_BASE_URL": "https://openai-compatible.example",
-                "GEMINI_CLI_HOME": "/tmp/gemini-home",
+                "CODEX_HOME": "/tmp/codex-home",
                 "UNSAFE_ENV": "do-not-preserve",
             },
         )
@@ -148,7 +148,7 @@ def test_isolated_runner_spawn_wrapper() -> None:
         check("runner argv preserves current Better Agent env alias", "BETTER_AGENT_BACKEND_URL" in argv_text)
         check("runner argv preserves provider auth env name", "ANTHROPIC_API_KEY" in argv_text)
         check("runner argv preserves OpenAI base URL env name", "OPENAI_BASE_URL" in argv_text)
-        check("runner argv preserves Gemini CLI home env name", "GEMINI_CLI_HOME" in argv_text)
+        check("runner argv preserves provider config-dir env name", "CODEX_HOME" in argv_text)
         check("runner argv does not include secret values", "secret-token" not in argv_text and "secret-key" not in argv_text)
         check("runner argv does not preserve unknown env", "UNSAFE_ENV" not in argv_text)
         check("runner argv does not preserve Better Agent state home", "BETTER_AGENT_HOME" not in argv_text)

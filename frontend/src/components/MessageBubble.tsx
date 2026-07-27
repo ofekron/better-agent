@@ -1352,8 +1352,8 @@ function renderSingleEvent(
       );
     default:
       // Unknown top-level event type — render rather than silently
-      // drop so future provider events (gemini stream-json types,
-      // claude jsonl additions) stay visible.
+      // drop so future provider events (stream-json types, claude
+      // jsonl additions) stay visible.
       return (
         <DiagnosticEvent
           key={idx}

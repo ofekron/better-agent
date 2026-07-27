@@ -1,7 +1,7 @@
 """Cross-platform control of detached subprocess *trees*.
 
 The runner/provider layer spawns detached CLI subprocesses (claude,
-gemini, codex), then later needs to (a) kill the whole process *tree*
+codex, agy), then later needs to (a) kill the whole process *tree*
 and (b) probe a runner's liveness by pid. POSIX does both with process
 groups: spawn with ``start_new_session=True`` so the child leads its own
 group, ``os.killpg`` the group, and ``os.kill(pid, 0)`` to probe. None of

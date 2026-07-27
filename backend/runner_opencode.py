@@ -5,7 +5,7 @@ Spawned by `OpencodeProvider.start_run` as a subprocess with
 `opencode run --format json`, which emits raw JSON events (one per line)
 on stdout: `{"type": ..., "sessionID": ..., "part": {...}}`. Each event
 is normalized to Claude jsonl shape and appended to
-`session_events.jsonl` so the backend can tail it (GeminiProvider path).
+`session_events.jsonl` so the backend can tail it (SessionEventsProvider path).
 
 Life of a run:
   1. Backend creates run dir, writes input.json.

@@ -153,7 +153,7 @@ def test_provider_scoped_section_reaches_only_its_providers() -> None:
     codex = _content_for(harness_profile_store.DEFAULT_PROFILE_ID, "codex")
     assert "CONTENT OF alpha" in codex and "CONTENT OF beta" in codex, codex
 
-    for kind in ("claude", "gemini"):
+    for kind in ("claude", "agy"):
         scoped = _content_for(harness_profile_store.DEFAULT_PROFILE_ID, kind)
         assert "CONTENT OF alpha" in scoped, (kind, scoped)
         assert "CONTENT OF beta" not in scoped, (kind, scoped)

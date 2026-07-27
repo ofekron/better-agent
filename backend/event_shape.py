@@ -138,8 +138,8 @@ NON_RENDER_AGENT_DATA_TYPES = frozenset({
 # `agentMessages.flattenClaudeMessages`, and the facts they carry are
 # already surfaced through normalized events — Codex's compaction
 # boundary, for one, becomes a `lifecycle_notice` with kind "compacted"
-# (codex_native.py). Gating them keeps Codex at parity with the Claude /
-# Gemini sidecar types above.
+# (codex_native.py). Gating them keeps Codex at parity with the Claude
+# sidecar types above.
 NON_RENDER_PROVIDER_ENVELOPE_TYPES = frozenset({
     "response_item",
     "event_msg",
@@ -303,8 +303,8 @@ def _final_marked_text(units: list[_TextUnit]) -> str:
 def _collect_text_units(events: list[dict]) -> list[_TextUnit]:
     """Flatten events into ordered text units with inter-message boundaries.
 
-    INVARIANT: when multiple events carry the SAME `uuid` (gemini
-    streams cumulative text snapshots — every delta re-emits the
+    INVARIANT: when multiple events carry the SAME `uuid` (some CLIs
+    stream cumulative text snapshots — every delta re-emits the
     growing buffer under one stable per-message uuid), only the LAST
     occurrence per uuid counts downstream. Text before or between
     tool/thinking blocks is renderable in `msg.events`, but it is not

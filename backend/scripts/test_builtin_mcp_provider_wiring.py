@@ -4,7 +4,7 @@
 `builtin_mcp_config.with_builtin_mcp_servers` computes a server set for every
 provider kind, but a runner that never calls it ships none of them. The gap
 between "computed" and "registered" is invisible from the config layer alone,
-so it is pinned here: today 4 of the 13 runnable kinds wire the built-ins, and
+so it is pinned here: today 3 of the 12 runnable kinds wire the built-ins, and
 the other 9 give their agent no `ui`, `open-config-panel`, or `capabilities`
 tools at all.
 
@@ -36,13 +36,12 @@ import provider_manifest  # noqa: E402
 # in-process SDK servers rather than the stdio assembler.
 RUNNERS_WITH_BUILTIN_MCP = {
     "runner",
-    "runner_gemini",
     "runner_codex",
     "runner_agy",
 }
 
 # Runners exposing the communicate tool set as a real MCP server.
-RUNNERS_WITH_COMMUNICATE_MCP = {"runner", "runner_gemini"}
+RUNNERS_WITH_COMMUNICATE_MCP = {"runner"}
 
 # Runners exposing the same tools as per-turn dynamic tools instead.
 RUNNERS_WITH_DYNAMIC_COMMUNICATE = {"runner_codex"}

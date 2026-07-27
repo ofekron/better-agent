@@ -170,7 +170,7 @@ def test_codex_delegate_task_posts_shared_payload() -> None:
     assert payload["sub_session"] is False
 
 
-def test_gemini_delegate_task_posts_shared_payload() -> None:
+def test_communicate_mcp_delegate_task_posts_shared_payload() -> None:
     captured: list[tuple[str, dict, float]] = []
     original_post = communicate_mcp._post_json
 

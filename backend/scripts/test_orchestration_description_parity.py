@@ -6,11 +6,11 @@ create_sub_session / create_worker live in ONE module
 provider runners:
   - Claude  -> runner.py
   - Codex   -> runner_codex.py
-  - Gemini  -> communicate_mcp.py (FastMCP)
+  - stdio   -> communicate_mcp.py (FastMCP), served to every other provider
 
 This test fails if any provider forks its own copy, if a description goes
-empty (the historical Gemini defect), or if the key disambiguator that keeps
-each tool distinct from its neighbours is edited away.
+empty (the historical stdio-server defect), or if the key disambiguator that
+keeps each tool distinct from its neighbours is edited away.
 
 Run: python backend/scripts/test_orchestration_description_parity.py
 """
@@ -83,8 +83,8 @@ _CODEX_ALIASES = {
 }
 
 
-def _gemini_descriptions() -> dict[str, str]:
-    """Build the Gemini stdio FastMCP server and read what the model would see."""
+def _stdio_descriptions() -> dict[str, str]:
+    """Build the stdio FastMCP server and read what the model would see."""
     server = communicate_mcp.build_server()
     return {t.name: (t.description or "") for t in server._tool_manager.list_tools()}
 
@@ -102,12 +102,12 @@ def test_claude_and_codex_share_one_source():
         assert _CODEX_ALIASES[name] is shared, f"Codex forked {name} description"
 
 
-def test_gemini_exposes_same_descriptions():
-    gem = _gemini_descriptions()
+def test_stdio_server_exposes_same_descriptions():
+    stdio = _stdio_descriptions()
     for name, (shared, _) in SPEC.items():
-        assert name in gem, f"Gemini server missing tool {name}"
-        assert gem[name] == shared, (
-            f"Gemini {name} description diverges from the shared source "
+        assert name in stdio, f"stdio communicate server missing tool {name}"
+        assert stdio[name] == shared, (
+            f"stdio {name} description diverges from the shared source "
             f"(empty-description defect would reappear here)"
         )
 
@@ -115,7 +115,7 @@ def test_gemini_exposes_same_descriptions():
 def main() -> int:
     test_non_empty_and_meaningful()
     test_claude_and_codex_share_one_source()
-    test_gemini_exposes_same_descriptions()
+    test_stdio_server_exposes_same_descriptions()
     print("orchestration description parity: OK")
     return 0
 

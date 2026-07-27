@@ -4,7 +4,7 @@ Spawned by `CursorProvider.start_run` as a detached subprocess. Handles one
 `cursor-agent` run via `cursor-agent --print --output-format stream-json
 --stream-partial-output <prompt>`. Parses the CLI's stream-json events from
 stdout, normalizes each to Claude jsonl shape, and appends to
-`<run_dir>/session_events.jsonl` so the provider (GeminiProvider tailer
+`<run_dir>/session_events.jsonl` so the provider (SessionEventsProvider tailer
 machinery) can tail it. Streaming only — no render-tree mutation.
 
 Event shapes were verified against the installed CLI bundle
@@ -21,7 +21,7 @@ emitter in 7434.index.js):
 With --stream-partial-output the CLI emits per-delta assistant/thinking
 events (mutually exclusive with the accumulated stream-json flushes — the
 emitter's else-if chain proves it), so this runner accumulates deltas into
-one stable uuid per segment, mirroring runner_gemini.
+one stable uuid per segment, mirroring the session-events family.
 
 The `session_id` on the init event is the chatId accepted by
 `cursor-agent --resume <chatId>`; it is captured into state.json for
@@ -624,7 +624,7 @@ async def _run(run_dir: Path, inputs: dict[str, Any]) -> int:
     )
 
     # A failed run's error IS the final answer — emit it as regular assistant
-    # text so content derivation surfaces it (mirrors runner_gemini).
+    # text so content derivation surfaces it (family parity).
     if error and not final_success:
         try:
             with events_path.open("a", encoding="utf-8") as ef:

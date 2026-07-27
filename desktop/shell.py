@@ -3,7 +3,7 @@
 This is the macOS app's main process. It supervises the FastAPI backend
 as a child process, shows the backend-served UI in a native window,
 respawns the backend on `/api/admin/restart`, and on close asks whether
-to kill the running Claude/Gemini runner subprocesses.
+to kill the running provider runner subprocesses.
 
 GUI-independent logic lives in `supervisor.py` / `shell_env.py` (unit
 tested); this module is the thin pywebview wiring.
@@ -301,7 +301,7 @@ def main(initial_activation: ActivationEvent | None = None) -> int:
         quitting.set()
         kill_on_quit["value"] = bool(window.create_confirmation_dialog(
             "Quit Better Agent",
-            "Also stop the running Claude/Gemini processes?\n"
+            "Also stop the running agent processes?\n"
             "Cancel leaves them running — they finish on their own.",
         ))
 

@@ -275,20 +275,20 @@ describe("ToolCall — edit diff rendering", () => {
     h.unmount();
   });
 
-  it("shows Gemini-normalized Edit diffs expanded by default", async () => {
+  it("shows AGY-normalized Edit diffs expanded by default", async () => {
     const h = await mount(
       <ToolCall
         tool="Edit"
         args={JSON.stringify({
-          file_path: "/tmp/gemini.ts",
-          old_string: "gemini old",
-          new_string: "gemini new",
+          file_path: "/tmp/agy.ts",
+          old_string: "agy old",
+          new_string: "agy new",
         })}
       />,
     );
 
-    expect(h.container.textContent).toContain("- gemini old");
-    expect(h.container.textContent).toContain("+ gemini new");
+    expect(h.container.textContent).toContain("- agy old");
+    expect(h.container.textContent).toContain("+ agy new");
 
     h.unmount();
   });

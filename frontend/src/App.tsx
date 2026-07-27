@@ -2058,7 +2058,7 @@ function AppMain({
         // is selected. When a session IS selected, the model must come from
         // the session record — setting it here triggers the drift detector
         // which PATCHes the active provider's default onto sessions that
-        // use a DIFFERENT provider (e.g. Gemini session + Z.AI active
+        // use a DIFFERENT provider (e.g. Codex session + Z.AI active
         // → model gets overwritten to glm-5.1).
         if (!currentSessionRef.current) {
           setModel(active.last_model || active.default_model || "");

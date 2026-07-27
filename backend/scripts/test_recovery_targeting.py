@@ -11,7 +11,7 @@ _test_home.isolate("bc_test_retarget_")
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import run_recovery  # noqa: E402
-from provider_gemini import GeminiProvider  # noqa: E402
+from provider_agy import AgyProvider  # noqa: E402
 from provider_openai import OpenAIProvider  # noqa: E402
 from runs_dir import runs_root, atomic_write_json  # noqa: E402
 from turn_manager import TurnManager  # noqa: E402
@@ -208,10 +208,10 @@ def test_same_target_native_run_state_replaces_but_workers_stay_distinct() -> No
     check("worker same-target entries preserved", "worker-1" in run_ids and "worker-2" in run_ids)
 
 
-def test_gemini_live_orphan_returns_live_descriptor_without_complete_json() -> None:
-    print("T4 gemini live orphan remains live during recovery scan")
-    provider = GeminiProvider({"id": "gemini-test", "kind": "gemini"})
-    run_id = "gemini-live-run"
+def test_session_events_live_orphan_returns_live_descriptor_without_complete_json() -> None:
+    print("T4 session-events live orphan remains live during recovery scan")
+    provider = AgyProvider({"id": "agy-test", "kind": "agy"})
+    run_id = "agy-live-run"
     run_dir = runs_root() / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
     atomic_write_json(run_dir / "backend_state.json", {
@@ -221,11 +221,11 @@ def test_gemini_live_orphan_returns_live_descriptor_without_complete_json() -> N
         "mode": "native",
         "runner_pid": os.getpid(),
         "started_at": "2026-01-01T00:00:00",
-        "session_id": "gemini-session",
+        "session_id": "agy-session",
         "jsonl_path": str(run_dir / "session_events.jsonl"),
         "processed_line": 0,
         "cancelled": False,
-        "provider_id": "gemini-test",
+        "provider_id": "agy-test",
         "target_message_id": "msg",
     })
 
@@ -394,6 +394,12 @@ def test_retry_recovered_run_uses_passed_coordinator() -> None:
         "cwd": "/tmp",
         "backend_url": "http://127.0.0.1:8000",
         "internal_token": "token",
+        "resolved_harness_run_config": {
+            "profile_id": "recovery-profile",
+            "extra_mcp_servers": ["recovery-server"],
+        },
+        "disabled_builtin_extensions": ["recovery.disabled"],
+        "provisioned_tool_profile": "",
     })
     fake_sm = _FakeSessionManager({
         "agent_session_id": "provider-sid",
@@ -489,6 +495,15 @@ def test_retry_recovered_run_uses_passed_coordinator() -> None:
     )
     check("run_state emitted", coordinator.turn_manager.emitted == ["sid"])
     check("retry preserves source", provider.kwargs.get("source") == "mssg")
+    check(
+        "retry preserves resolved harness snapshot",
+        provider.kwargs.get("resolved_harness_run_config", {}).get("profile_id")
+        == "recovery-profile",
+    )
+    check(
+        "retry preserves disabled extensions",
+        provider.kwargs.get("disabled_builtin_extensions") == ["recovery.disabled"],
+    )
 
 
 def test_recovered_capability_change_starts_fresh_continuation() -> None:
@@ -605,7 +620,7 @@ def main() -> int:
         test_recovery_targets_descriptor_message_not_latest()
         test_recovery_missing_target_does_not_mutate_latest()
         test_same_target_native_run_state_replaces_but_workers_stay_distinct()
-        test_gemini_live_orphan_returns_live_descriptor_without_complete_json()
+        test_session_events_live_orphan_returns_live_descriptor_without_complete_json()
         test_openai_live_orphan_returns_live_descriptor_without_complete_json()
         test_missing_target_finalizer_marks_reconciled()
         test_missing_target_completed_startup_marks_reconciled()

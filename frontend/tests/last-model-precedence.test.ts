@@ -154,15 +154,15 @@ describe("resolveRuntimeProfile model precedence", () => {
   });
 
   it("uses model-specific effort combinations when the catalog provides them", () => {
-    const gemini = provider({
-      kind: "gemini",
+    const agy = provider({
+      kind: "agy",
       runner_options: ["native", "better_agent_runner"],
     });
     const profiles = [
-      { runner: "better_agent_runner" as const, model: "gemini-2.5-flash", reasoning_efforts: ["none", "minimal"] as const },
-      { runner: "better_agent_runner" as const, model: "gemini-3.5-flash", reasoning_efforts: ["minimal"] as const },
+      { runner: "better_agent_runner" as const, model: "agy-2.5-flash", reasoning_efforts: ["none", "minimal"] as const },
+      { runner: "better_agent_runner" as const, model: "agy-3.5-flash", reasoning_efforts: ["minimal"] as const },
     ].map((profile) => ({ ...profile, reasoning_efforts: [...profile.reasoning_efforts] }));
-    expect(effortsForRuntime(gemini, "better_agent_runner", "gemini-2.5-flash", profiles)).toContain("none");
-    expect(effortsForRuntime(gemini, "better_agent_runner", "gemini-3.5-flash", profiles)).not.toContain("none");
+    expect(effortsForRuntime(agy, "better_agent_runner", "agy-2.5-flash", profiles)).toContain("none");
+    expect(effortsForRuntime(agy, "better_agent_runner", "agy-3.5-flash", profiles)).not.toContain("none");
   });
 });

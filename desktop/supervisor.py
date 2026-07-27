@@ -380,7 +380,7 @@ class BackendSupervisor:
         self._credential_session: ProviderCredentialSession | None = None
         self._active_checkout = _REPO_ROOT.resolve()
         # The backend — and every runner it spawns — inherits this PATH so
-        # `claude`/`gemini`/`node` resolve under launchd's stripped PATH.
+        # `claude`/`agy`/`node` resolve under launchd's stripped PATH.
         self._env = {
             **os.environ,
             "PATH": capture_login_path(),

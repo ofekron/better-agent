@@ -1026,7 +1026,8 @@ export interface Session {
   /** Last turn's token usage (not cumulative). Used for context fill bar. */
   token_usage_last?: TokenUsage | null;
   /** Model's max context window capacity (tokens). Set by the backend
-   * from the SDK's model_usage response. Null when unavailable (Gemini). */
+   * from the SDK's model_usage response. Null when the provider does not
+   * report it. */
   context_window?: number | null;
   /** Compact entries from the global worker registry. For full worker
    * details, hit the Team Orchestration extension directly. */
@@ -1130,8 +1131,8 @@ export interface Session {
   /** Per-session scratchpad notes. Persisted on the backend, pushed
    * via `session_metadata_updated` for cross-tab convergence. */
   notes?: Note[];
-  /** Cross-provider TODO list reconstructed from TodoWrite (Claude) /
-   * update_topic (Gemini) tool_use events. Backend is the single
+  /** Cross-provider TODO list reconstructed from the provider's
+   * todo/topic tool_use events. Backend is the single
    * source of truth: the `apply_event` hook + `todos_extractor`
    * derive this in real time and broadcast via `session_metadata_updated`. */
   current_todos?: TodoItem[];
@@ -1188,14 +1189,14 @@ export interface Note {
 }
 
 export interface TodoItem {
-  /** Display text. Claude: `todos[i].content`. Gemini: `update_topic.title`. */
+  /** Display text. Claude: `todos[i].content`. */
   content: string;
   status: "pending" | "in_progress" | "completed";
   /** Present-tense description shown while in_progress. Claude:
-   * `todos[i].activeForm`. Gemini: `update_topic.summary`. */
+   * `todos[i].activeForm`. */
   activeForm?: string;
-  /** Dedup id used by the Gemini delta branch (Claude REPLACE never
-   * sets it). Stable per tool_use across replay. */
+  /** Dedup id used by providers that emit incremental todo deltas
+   * (Claude REPLACE never sets it). Stable per tool_use across replay. */
   source_id?: string;
 }
 
@@ -1247,7 +1248,7 @@ export type ProviderRunner = "native" | "better_agent_runner";
 // "off" is pi's native no-thinking level; "max" is opencode's top --variant.
 export type ReasoningEffort = "none" | "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
-/** Per-provider-native permission. Kind-shaped: {"mode"} for claude/gemini/openai,
+/** Per-provider-native permission. Kind-shaped: {"mode"} for claude/openai/pi,
  * {"approval","sandbox"} for codex. {} = inherit the provider default. */
 export type Permission = Record<string, string>;
 /** Axis → allowed-values map for the provider's permission selector(s). */

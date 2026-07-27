@@ -260,7 +260,7 @@ describe("SettingsPage title", () => {
     expect(screen.getByText("App UI")).toBeTruthy();
     expect(screen.getByText("Buttons or pages this extension adds to Better Agent.")).toBeTruthy();
     expect(screen.getByText("Agent tools")).toBeTruthy();
-    expect(screen.getByText("MCP servers exposed as tools to Claude, Codex, or Gemini runs.")).toBeTruthy();
+    expect(screen.getByText("MCP servers exposed as tools to Claude, Codex, or AGY runs.")).toBeTruthy();
     expect(screen.getByText("Permissions")).toBeTruthy();
     expect(screen.getByText("Read and update sessions")).toBeTruthy();
     expect(screen.getByText(/buggy or malicious extension could expose or alter your conversations/)).toBeTruthy();

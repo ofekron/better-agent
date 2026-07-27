@@ -24,7 +24,7 @@ import provider  # noqa: E402
 import runner  # noqa: E402
 import runner_better_agent  # noqa: E402
 import runner_codex  # noqa: E402
-import runner_gemini  # noqa: E402
+import runner_agy  # noqa: E402
 import runtime_skills  # noqa: E402
 import open_file_panel_mcp  # noqa: E402
 import builtin_mcp_config  # noqa: E402
@@ -758,9 +758,11 @@ def t_normalizes_unified_mcp_key() -> None:
     config = provider_run_config.normalize_provider_run_config({
         "mcpServers": {"demo": {"command": "echo"}},
         "skills": {"reviewer": "Review.\n"},
+        "fork_parent_line_count": 42,
     })
     check(config["mcp_servers"]["demo"]["command"] == "echo", "mcpServers normalizes to mcp_servers")
     check(config["skills"]["reviewer"] == "Review.\n", "skills pass through")
+    check(config["fork_parent_line_count"] == 42, "dynamic run-local fields pass through")
 
 
 def t_codex_materializes_mcp_and_skills() -> None:
@@ -1084,54 +1086,39 @@ def t_codex_request_user_input_uses_better_agent_dynamic_tool() -> None:
         )
 
 
-def t_gemini_materializes_isolated_home() -> None:
+def t_agy_materializes_isolated_home() -> None:
     real_home = Path(tempfile.mkdtemp(dir=_TMP_HOME))
-    (real_home / ".gemini").mkdir()
+    real_cli = real_home / ".gemini" / "antigravity-cli"
+    real_cli.mkdir(parents=True)
     (real_home / ".gemini" / "google_accounts.json").write_text("{}", encoding="utf-8")
-    (real_home / ".gemini" / "settings.json").write_text(
+    (real_cli / "settings.json").write_text(
         json.dumps({"security": {"auth": {"selectedType": "oauth-personal"}}}),
         encoding="utf-8",
     )
-    old = os.environ.get("GEMINI_CLI_HOME")
-    os.environ["GEMINI_CLI_HOME"] = str(real_home)
+    original_home = Path.home
+    Path.home = staticmethod(lambda: real_home)  # type: ignore[method-assign]
     try:
         run_dir = Path(tempfile.mkdtemp(dir=_TMP_HOME))
-        env = runner_gemini._materialize_gemini_run_home(run_dir, {
+        env = runner_agy._materialize_agy_run_home(run_dir, {
             "mcp_servers": {"demo": {"command": "echo"}},
             "skills": {"reviewer": "Review.\n"},
         }, cwd=str(real_home))
     finally:
-        if old is None:
-            os.environ.pop("GEMINI_CLI_HOME", None)
-        else:
-            os.environ["GEMINI_CLI_HOME"] = old
-    overlay = Path(env["GEMINI_CLI_HOME"])
-    settings = json.loads((overlay / "settings.json").read_text(encoding="utf-8"))
-    check(settings["mcpServers"]["demo"]["command"] == "echo", "Gemini MCP settings are run-local")
+        Path.home = original_home  # type: ignore[method-assign]
+    overlay = Path(env["HOME"])
+    overlay_cli = overlay / ".gemini" / "antigravity-cli"
+    settings = json.loads((overlay_cli / "settings.json").read_text(encoding="utf-8"))
+    check(settings["mcpServers"]["demo"]["command"] == "echo", "AGY MCP settings are run-local")
     check(
         settings["security"]["auth"]["selectedType"] == "oauth-personal",
-        "Gemini run-local settings preserve auth selection",
+        "AGY run-local settings preserve auth selection",
     )
-    check((overlay / ".gemini" / "google_accounts.json").is_symlink(), "Gemini auth file is linked, not copied")
-    skill = overlay / ".gemini" / "skills" / "reviewer" / "SKILL.md"
-    check(skill.read_text(encoding="utf-8") == "Review.\n", "Gemini skill is written")
-
-
-def t_gemini_max_tokens_result_is_context_overflow() -> None:
-    err = runner_gemini._gemini_terminal_error({
-        "type": "result",
-        "status": "error",
-        "stopReason": "max_tokens",
-    })
-    check(err == "context_window_exceeded", "Gemini max_tokens terminal result triggers continuation")
     check(
-        runner_gemini._gemini_terminal_error({
-            "type": "result",
-            "status": "success",
-            "stopReason": "max_tokens",
-        }) is None,
-        "Gemini successful max_tokens result is not treated as overflow",
+        (overlay / ".gemini" / "google_accounts.json").is_symlink(),
+        "AGY auth file is linked, not copied",
     )
+    skill = overlay_cli / "builtin" / "skills" / "reviewer" / "SKILL.md"
+    check(skill.read_text(encoding="utf-8") == "Review.\n", "AGY skill is written")
 
 
 def t_builtin_user_facing_mcp_servers_injected() -> None:
@@ -1515,7 +1502,7 @@ def t_builtin_mcp_registry_applies_to_all_provider_runners() -> None:
             f"{main_enabled_only_uses + direct_enabled_only_uses}"
         ),
     )
-    for provider_name in ("codex", "gemini"):
+    for provider_name in ("codex", "agy"):
         _install_core_mcp_gate_extensions()
         config = builtin_mcp_config.with_builtin_mcp_servers({
             "user_facing": True,
@@ -1866,7 +1853,7 @@ def t_request_user_approval_contract_has_provider_parity() -> None:
     for module, label in (
         (runner, "Claude"),
         (runner_codex, "Codex"),
-        (runner_better_agent, "Gemini/Better Agent"),
+        (runner_better_agent, "Better Agent"),
     ):
         schema = module._REQUEST_USER_APPROVAL_SCHEMA
         check(schema["required"] == ["prompt"], f"{label} uses the approval-only prompt contract")
@@ -1877,7 +1864,7 @@ def t_request_user_approval_contract_has_provider_parity() -> None:
     mcp_tool_names = {
         tool.name for tool in asyncio.run(open_file_panel_mcp.build_server().list_tools())
     }
-    check("request_user_approval" in mcp_tool_names, "Gemini/native UI MCP registers request_user_approval")
+    check("request_user_approval" in mcp_tool_names, "native UI MCP registers request_user_approval")
     claude_tool = runner._build_request_user_approval_tool(
         app_session_id="session-1",
         backend_url="http://backend",
@@ -1922,7 +1909,7 @@ def t_request_user_approval_contract_has_provider_parity() -> None:
 
 def t_provider_sources_persist_open_file_panel_flag() -> None:
     codex_src = (Path(_BACKEND) / "provider_codex.py").read_text(encoding="utf-8")
-    gemini_src = (Path(_BACKEND) / "provider_gemini.py").read_text(encoding="utf-8")
+    agy_src = (Path(_BACKEND) / "provider_agy.py").read_text(encoding="utf-8")
     check(
         '"user_facing": bool(user_facing)' in codex_src,
         "Codex provider persists user_facing into runner input",
@@ -1936,24 +1923,24 @@ def t_provider_sources_persist_open_file_panel_flag() -> None:
         "Codex provider persists provider_kind into runner input",
     )
     check(
-        '"user_facing": bool(user_facing)' in gemini_src,
-        "Gemini provider persists user_facing into runner input",
+        '"user_facing": bool(user_facing)' in agy_src,
+        "AGY provider persists user_facing into runner input",
     )
     check(
         '"browser_harness_enabled": bool(browser_harness_enabled)' in codex_src,
         "Codex provider persists browser_harness_enabled into runner input",
     )
     check(
-        '"browser_harness_enabled": bool(browser_harness_enabled)' in gemini_src,
-        "Gemini provider persists browser_harness_enabled into runner input",
+        '"browser_harness_enabled": bool(browser_harness_enabled)' in agy_src,
+        "AGY provider persists browser_harness_enabled into runner input",
     )
     check(
         '"context_strategy": user_prefs.get_context_strategy()' in codex_src,
         "Codex provider persists context_strategy into runner input",
     )
     check(
-        '"context_strategy": user_prefs.get_context_strategy()' in gemini_src,
-        "Gemini provider persists context_strategy into runner input",
+        '"context_strategy": user_prefs.get_context_strategy()' in agy_src,
+        "AGY provider persists context_strategy into runner input",
     )
     check(
         '"disabled_builtin_extensions": (' in codex_src
@@ -1969,17 +1956,17 @@ def t_provider_sources_persist_open_file_panel_flag() -> None:
         "Codex provider persists provisioned tool profile into runner input",
     )
     check(
-        '"disabled_builtin_extensions": (' in gemini_src
-        and "disabled_builtin_extensions_for_run(" in gemini_src,
-        "Gemini provider persists disabled built-in extensions into runner input",
+        "disabled_builtin_extensions=disabled_builtin_extensions," in agy_src
+        and 'input_payload["disabled_builtin_extensions"]' in agy_src,
+        "AGY provider persists disabled built-in extensions into runner input",
     )
     check(
-        '"worker_working_mode": (_worker_sess_rec or {}).get("working_mode")' in gemini_src,
-        "Gemini provider persists worker working mode into runner input",
+        '"worker_working_mode": (worker_record or {}).get("working_mode")' in agy_src,
+        "AGY provider persists worker working mode into runner input",
     )
     check(
-        '"provisioned_tool_profile": str(provisioned_tool_profile or "").strip()' in gemini_src,
-        "Gemini provider persists provisioned tool profile into runner input",
+        '"provisioned_tool_profile": str(provisioned_tool_profile or "").strip()' in agy_src,
+        "AGY provider persists provisioned tool profile into runner input",
     )
     claude_src = (Path(_BACKEND) / "provider_claude.py").read_text(encoding="utf-8")
     check(
@@ -2022,6 +2009,34 @@ def t_provider_sources_persist_open_file_panel_flag() -> None:
         "disabled_builtin_extensions: Optional[list[str]]" in node_protocol_src,
         "Node protocol types disabled built-in extensions",
     )
+    for filename in (
+        "provider_agy.py",
+        "provider_amp.py",
+        "provider_claude.py",
+        "provider_codex.py",
+        "provider_copilot.py",
+        "provider_cursor.py",
+        "provider_kimi.py",
+        "provider_openai.py",
+        "provider_opencode.py",
+        "provider_pi.py",
+        "provider_qwen.py",
+        "provider_remote.py",
+    ):
+        source = (Path(_BACKEND) / filename).read_text(encoding="utf-8")
+        check(
+            "resolve_extension_run_policy(" in source,
+            f"{filename} resolves the unified extension run policy",
+        )
+        update_call = (
+            "payload.update(run_policy)"
+            if filename == "provider_remote.py"
+            else "input_payload.update(run_policy)"
+        )
+        check(
+            update_call in source,
+            f"{filename} applies the effective extension run policy to its payload",
+        )
     check(
         "provisioned_tool_profile: str" in node_protocol_src,
         "Node protocol types provisioned tool profile",
@@ -2061,8 +2076,7 @@ def main() -> int:
         ("codex built-in tool schemas do not invite null defaults", t_codex_builtin_tool_schemas_do_not_invite_null_defaults),
         ("codex dynamic tools respect existing tool owners", t_codex_dynamic_tools_respect_existing_tool_owners),
         ("codex request_user_input uses Better Agent dynamic tool", t_codex_request_user_input_uses_better_agent_dynamic_tool),
-        ("gemini materializes isolated home", t_gemini_materializes_isolated_home),
-        ("gemini max_tokens result is context overflow", t_gemini_max_tokens_result_is_context_overflow),
+        ("agy materializes isolated home", t_agy_materializes_isolated_home),
         ("built-in user-facing mcp servers injected", t_builtin_user_facing_mcp_servers_injected),
         ("built-in manager mcp servers exclude session bridge", t_builtin_manager_mcp_servers_exclude_session_bridge),
         ("built-in mcp servers are extension owned", t_builtin_mcp_servers_are_extension_owned),

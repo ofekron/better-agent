@@ -7,9 +7,9 @@ Pins:
      record's api_key/base_url through OPENAI_API_KEY / OPENAI_BASE_URL
      (qwen `--auth-type openai`); subscription mode sets neither.
   3. Runner normalization: qwen's Claude-shaped stream-json messages map to
-     the Claude jsonl shape recovery_family="gemini" replay expects —
+     the Claude jsonl shape recovery_family="session_events" replay expects —
      assistant text/thinking passthrough, tool_use routed through
-     runner_gemini's shared _map_tool (run_shell_command→Bash etc.),
+     runner_session_events' shared _map_tool (run_shell_command→Bash etc.),
      tool_result passthrough, system/result handled out-of-band, unknown
      types surfaced as diagnostics (never dropped).
   4. Approval-mode mapping: BA's gemini-style "auto_edit" → qwen's
@@ -313,7 +313,7 @@ def test_models_fetch_parses_real_cli() -> bool:
 
 
 def test_rate_limit_keywords_extended() -> bool:
-    kws = provider_qwen.QwenProvider._GEMINI_RATE_LIMIT_KEYWORDS
+    kws = provider_qwen.QwenProvider._RATE_LIMIT_KEYWORDS
     return "insufficient_quota" in kws and "rate limit" in kws
 
 

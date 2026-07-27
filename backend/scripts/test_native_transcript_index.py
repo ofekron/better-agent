@@ -344,7 +344,6 @@ def test_provider_roots_ignore_spoofed_home() -> bool:
     shutil.rmtree(real_home, ignore_errors=True)
     shutil.rmtree(fake_home, ignore_errors=True)
     (real_home / ".codex" / "sessions").mkdir(parents=True)
-    (real_home / ".gemini" / "tmp").mkdir(parents=True)
     (real_home / ".pi" / "agent" / "sessions").mkdir(parents=True)
     (real_home / ".codeium" / "cascade").mkdir(parents=True)
     (real_home / ".claude-old" / "projects").mkdir(parents=True)
@@ -368,7 +367,6 @@ def test_provider_roots_ignore_spoofed_home() -> bool:
         claude_roots = nm._claude_projects_roots()
         ok = (
             nm._codex_sessions_root() == real_home / ".codex" / "sessions"
-            and nm._gemini_chats_root() == real_home / ".gemini" / "tmp"
             and nm._pi_sessions_root() == real_home / ".pi" / "agent" / "sessions"
             and nm._windsurf_cascade_roots() == [real_home / ".codeium" / "cascade"]
             and real_home / ".claude-old" / "projects" in claude_roots
