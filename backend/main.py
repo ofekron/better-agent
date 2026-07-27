@@ -33,7 +33,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Optional
 
-from fastapi import Response
+from fastapi import BackgroundTasks, Response
 from pathlib import Path
 
 # Assert an adequate fd limit before any backend module opens handles.
@@ -15998,6 +15998,7 @@ async def _ask_continue_and_expect_inbox_back_async(
     message: str,
     requested_provider_id: str,
     requested_model: str,
+    background_tasks: BackgroundTasks | None = None,
 ) -> dict[str, Any]:
     target_worker_pool = str(body.get("target_worker_pool") or "").strip()
     pool_affinity_key = _api_optional_pool_affinity_key(body.get("pool_affinity_key"))
@@ -16030,7 +16031,8 @@ async def _ask_continue_and_expect_inbox_back_async(
         target_session_id = str(target.get("agent_session_id") or "")
     else:
         target_session_id = await _resolve_communication_target(body)
-    return await coordinator.submit_team_message(
+    defer_turn_start = background_tasks is not None
+    result = await coordinator.submit_team_message(
         sender_session_id=sender_session_id,
         target_session_id=target_session_id,
         message=message,
@@ -16041,7 +16043,14 @@ async def _ask_continue_and_expect_inbox_back_async(
         reasoning_effort=str(body.get("reasoning_effort") or "").strip(),
         runner=str(body.get("runner") or "").strip(),
         target_selector=_communication_target_selector(body),
+        start_turn=not defer_turn_start,
     )
+    if background_tasks is not None:
+        background_tasks.add_task(
+            coordinator.start_session_processor_async,
+            target_session_id,
+        )
+    return result
 
 
 async def _ask_wait_and_grab_last_assistant_mssg_in_turn(
@@ -16135,7 +16144,10 @@ async def _ask_wait_and_grab_last_assistant_mssg_in_turn(
     )
 
 
-async def _handle_internal_ask(body: dict) -> dict[str, Any]:
+async def _handle_internal_ask(
+    body: dict,
+    background_tasks: BackgroundTasks | None = None,
+) -> dict[str, Any]:
     sender_session_id = str(body.get("sender_session_id") or "").strip()
     message = str(body.get("message") or "").strip()
     if not sender_session_id or not message:
@@ -16161,6 +16173,7 @@ async def _handle_internal_ask(body: dict) -> dict[str, Any]:
                 message,
                 requested_provider_id,
                 requested_model,
+                background_tasks,
             )
         return await _ask_wait_and_grab_last_assistant_mssg_in_turn(
             body,
@@ -16237,6 +16250,7 @@ def _communication_target_selector(body: dict) -> dict:
 @app.post("/api/internal/ask")
 async def internal_ask(
     body: dict,
+    background_tasks: BackgroundTasks,
     x_internal_token: str = Header(..., alias="X-Internal-Token"),
 ):
     if not _internal_authority_is_valid():
@@ -16245,7 +16259,7 @@ async def internal_ask(
     if durable is not None:
         return durable
     try:
-        return await _handle_internal_ask(body)
+        return await _handle_internal_ask(body, background_tasks)
     except asyncio.TimeoutError:
         raise HTTPException(status_code=504, detail="ask timed out")
 

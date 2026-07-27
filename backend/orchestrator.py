@@ -1471,9 +1471,23 @@ class Coordinator:
             "lifecycle_msg_id": lifecycle_msg_id,
         }
 
-    async def submit_prompt_async(self, app_session_id: str, params: dict) -> str:
+    async def submit_prompt_async(
+        self,
+        app_session_id: str,
+        params: dict,
+        *,
+        start_processor: bool = True,
+    ) -> str:
         await _to_team_message_thread(self._reject_if_adv_sync_fork_locked, app_session_id)
-        return self.submit_prompt(app_session_id, params, _adv_sync_checked=True)
+        return self.submit_prompt(
+            app_session_id,
+            params,
+            _adv_sync_checked=True,
+            start_processor=start_processor,
+        )
+
+    async def start_session_processor_async(self, app_session_id: str) -> None:
+        self._ensure_session_processor(app_session_id)
 
     def submit_prompt(
         self,
@@ -1481,12 +1495,11 @@ class Coordinator:
         params: dict,
         *,
         _adv_sync_checked: bool = False,
+        start_processor: bool = True,
     ) -> str:
-        """Enqueue a prompt for `app_session_id` and ensure a processor
-        task is running. Called by the WS handler (or any other producer).
-        Returns immediately; the actual work happens in the per-session
-        processor task owned by this coordinator and unaffected by WS
-        lifecycle.
+        """Enqueue a prompt for `app_session_id` and normally ensure its
+        processor is running. Response-boundary callers may defer processor
+        startup until their durable-enqueue acknowledgement is flushed.
 
         Returns the queue item ID (for promote_queued / tracking).
         """
@@ -1521,6 +1534,11 @@ class Coordinator:
         # Track queued IDs
         ids = self._queued_ids.setdefault(app_session_id, [])
         ids.append(item_id)
+        if start_processor:
+            self._ensure_session_processor(app_session_id)
+        return item_id
+
+    def _ensure_session_processor(self, app_session_id: str) -> None:
         task = self._processor_tasks.get(app_session_id)
         if task is None or task.done():
             task = asyncio.create_task(
@@ -1528,7 +1546,6 @@ class Coordinator:
                 name=f"prompt-processor-{app_session_id[:8]}",
             )
             self._processor_tasks[app_session_id] = task
-        return item_id
 
     async def submit_team_message(
         self,
@@ -1548,6 +1565,7 @@ class Coordinator:
         source: str = "",
         target_selector: Optional[dict] = None,
         queue_turn: bool = True,
+        start_turn: bool = True,
     ) -> dict:
         import uuid
         import team_messaging
@@ -1717,7 +1735,11 @@ class Coordinator:
                 target_session_id,
                 queue_item,
             )
-            await self.submit_prompt_async(target_session_id, prompt_params)
+            await self.submit_prompt_async(
+                target_session_id,
+                prompt_params,
+                start_processor=start_turn,
+            )
         except Exception:
             await _to_team_message_thread(
                 session_manager.remove_queued_prompt,

@@ -37,12 +37,20 @@ class _Coordinator:
         self.calls.append({"method": "submit_team_message", **kwargs})
         return {"success": True}
 
+    async def start_session_processor_async(self, session_id: str):
+        self.calls.append({
+            "method": "start_session_processor_async",
+            "session_id": session_id,
+        })
+
     async def ask_team_message(self, **kwargs):
         self.calls.append({"method": "ask_team_message", **kwargs})
         return {"success": True, "response": "ok"}
 
 
 async def _run() -> None:
+    from fastapi import BackgroundTasks
+
     original_coordinator = main.coordinator
     original_validate = main._validate_optional_run_selector
     original_resolve = main._resolve_communication_target
@@ -101,15 +109,22 @@ async def _run() -> None:
             "value": "worker-session-1",
         }
 
+        background_tasks = BackgroundTasks()
         await main._handle_internal_ask({
             "sender_session_id": "sender-1",
             "target_session_id": "target-1",
             "message": "continue",
             "mode": "continue_and_expect_inbox_back_async",
-        })
+        }, background_tasks)
         assert coordinator.calls[-1]["method"] == "submit_team_message"
         assert coordinator.calls[-1]["detach"] is True
         assert coordinator.calls[-1]["expect_inbox_response"] is True
+        assert coordinator.calls[-1]["start_turn"] is False
+        await background_tasks()
+        assert coordinator.calls[-1] == {
+            "method": "start_session_processor_async",
+            "session_id": "target-1",
+        }
 
         await main._handle_internal_ask({
             "sender_session_id": "sender-1",
