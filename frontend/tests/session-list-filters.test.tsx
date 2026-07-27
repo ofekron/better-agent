@@ -78,6 +78,7 @@ function renderList(
       providers={providers}
       onSelect={() => {}}
       onDelete={() => {}}
+      onDeleteSelected={() => {}}
       onRename={() => {}}
       onPin={() => {}}
       onUnpinOthers={() => {}}
@@ -966,13 +967,14 @@ describe("SessionList advanced filters", () => {
   it("bulk deletes selected sessions", () => {
     vi.useFakeTimers();
     const onDelete = vi.fn();
+    const onDeleteSelected = vi.fn();
     renderList(
       [
         makeSession({ id: "alpha", name: "Alpha" }),
         makeSession({ id: "beta", name: "Beta" }),
         makeSession({ id: "gamma", name: "Gamma" }),
       ],
-      { onDelete },
+      { onDelete, onDeleteSelected },
     );
 
     longPressSession("alpha");
@@ -984,9 +986,9 @@ describe("SessionList advanced filters", () => {
     expect(bulkBar.textContent).toContain("session.selectedCount");
     fireEvent.click(within(bulkBar).getByRole("button", { name: /session.deleteSelected/ }));
 
-    expect(onDelete).toHaveBeenCalledTimes(2);
-    expect(onDelete).toHaveBeenNthCalledWith(1, "alpha");
-    expect(onDelete).toHaveBeenNthCalledWith(2, "gamma");
+    expect(onDelete).not.toHaveBeenCalled();
+    expect(onDeleteSelected).toHaveBeenCalledTimes(1);
+    expect(onDeleteSelected).toHaveBeenCalledWith(["alpha", "gamma"]);
     expect(screen.queryByTestId("session-bulk-bar")).toBeNull();
   });
 

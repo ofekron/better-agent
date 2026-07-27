@@ -10,6 +10,7 @@ import {
 import { useOfflineQueue } from "./hooks/useOfflineQueue";
 import { filePayloadToAttachment, imagePayloadToPastedImage } from "./utils/imageAttach";
 import { useSession, type SessionMetadataPatch } from "./hooks/useSession";
+import { useSessionDeleteConfirmation } from "./hooks/useSessionDeleteConfirmation";
 import { useResizable } from "./hooks/useResizable";
 import { useViewport } from "./hooks/useViewport";
 import { useVisualViewport } from "./hooks/useVisualViewport";
@@ -3610,37 +3611,23 @@ function AppMain({
   );
 
 
-  const [sessionToDelete, setSessionToDelete] = useState<string | null>(null);
   const [queuedCancelPending, setQueuedCancelPending] = useState<
     { queuedId?: string; count: number; preview: string } | null
   >(null);
   const [detailsSessionId, setDetailsSessionId] = useState<string | null>(null);
-
-  const handleDeleteSession = useCallback((id: string) => {
-    setSessionToDelete(id);
-  }, []);
-
-  const confirmDeleteSession = useCallback(async () => {
-    if (!sessionToDelete) return;
-    const id = sessionToDelete;
-    setSessionToDelete(null);
-
-    // Drop the per-session debounce timer so a typing-PATCH for a
-    // now-deleted session doesn't fire a wasted 404 request after
-    // unmount.
-    const timers = draftDebounceRef.current;
-    const existing = timers.get(id);
-    if (existing) {
-      clearTimeout(existing);
-      timers.delete(id);
-    }
-    await deleteSession(id);
-  }, [sessionToDelete, deleteSession]);
-
-  const sessionBeingDeleted = useMemo(() => {
-    if (!sessionToDelete) return null;
-    return sessions.find((s) => s.id === sessionToDelete) || getNode(sessionToDelete);
-  }, [sessionToDelete, sessions, getNode]);
+  const {
+    sessionsToDelete,
+    sessionBeingDeleted,
+    requestDeleteSession,
+    requestDeleteSessions,
+    confirmDeleteSessions,
+    cancelDeleteSessions,
+  } = useSessionDeleteConfirmation({
+    sessions,
+    getNode,
+    deleteSession,
+    draftDebounceRef,
+  });
 
   const handleDraftClearImmediate = useCallback(
     (sessionId: string) => {
@@ -7107,7 +7094,8 @@ function AppMain({
                 navigate(sessionPath(id));
                 if (isMobile) setMobileSidebarOpen(false);
               }}
-              onDelete={handleDeleteSession}
+              onDelete={requestDeleteSession}
+              onDeleteSelected={requestDeleteSessions}
               onRename={renameSession}
               onPin={togglePin}
               onUnpinOthers={unpinOtherSessions}
@@ -7571,7 +7559,7 @@ function AppMain({
               onSetForkFocus={handleSetForkFocus}
               onCloseFork={handleCloseFork}
               onReopenFork={handleReopenFork}
-              onDeleteFork={handleDeleteSession}
+              onDeleteFork={requestDeleteSession}
               runStateBySession={runStateBySession}
               onForkAndSend={handleForkAndSend}
               canForkSession={currentSessionCanFork}
@@ -8442,13 +8430,17 @@ function AppMain({
         onCancel={dismissPreSendAdvisory}
         onSnoozeFiveHours={snoozePreSendAdvisoryAndSend}
       />
-      {sessionToDelete && (
+      {sessionsToDelete.length > 0 && (
         <ConfirmModal
-          open={!!sessionToDelete}
+          open={sessionsToDelete.length > 0}
           title={t("session.deleteTitle")}
-          message={t("app.deleteSessionConfirm", { name: sessionBeingDeleted?.name || t("fork.fork") })}
-          onConfirm={confirmDeleteSession}
-          onCancel={() => setSessionToDelete(null)}
+          message={
+            sessionsToDelete.length === 1
+              ? t("app.deleteSessionConfirm", { name: sessionBeingDeleted?.name || t("fork.fork") })
+              : t("app.deleteSessionsConfirm", { count: sessionsToDelete.length })
+          }
+          onConfirm={confirmDeleteSessions}
+          onCancel={cancelDeleteSessions}
         />
       )}
       {queuedCancelPending && (

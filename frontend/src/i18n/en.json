@@ -122,6 +122,7 @@
   "common.yes": "yes",
   "common.no": "no",
   "app.deleteSessionConfirm": "Are you sure you want to delete session \"{{name}}\"? This action is irreversible.",
+  "app.deleteSessionsConfirm": "Are you sure you want to delete {{count}} selected sessions? This action is irreversible.",
   "voice.enable": "Enable voice activation",
   "voice.disable": "Disable voice activation",
   "voice.permissionDenied": "Microphone access was denied. Enable it in your device settings and try again.",

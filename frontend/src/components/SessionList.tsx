@@ -71,6 +71,7 @@ interface Props {
   providers: Provider[];
   onSelect: SessionSelectHandler;
   onDelete: (id: string) => void;
+  onDeleteSelected: (ids: string[]) => void;
   onRename: (id: string, name: string) => void;
   onPin: (id: string, pinned: boolean) => void;
   onArchive: (id: string, archived: boolean) => void;
@@ -1632,6 +1633,7 @@ export function SessionList({
   providers,
   onSelect,
   onDelete,
+  onDeleteSelected,
   onRename,
   onPin,
   onArchive,
@@ -3426,7 +3428,7 @@ export function SessionList({
               type="button"
               className="btn-small session-bulk-delete"
               onClick={() => {
-                for (const id of selectedSessionIds) onDelete(id);
+                onDeleteSelected(selectedSessions.map((session) => session.id));
                 clearSelectedSessions();
               }}
             >

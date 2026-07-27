@@ -27,6 +27,7 @@ function renderList(
       providers={providers}
       onSelect={() => {}}
       onDelete={() => {}}
+      onDeleteSelected={() => {}}
       onRename={() => {}}
       onPin={() => {}}
       onUnpinOthers={() => {}}

@@ -31,6 +31,7 @@ function renderList() {
       providers={[]}
       onSelect={() => {}}
       onDelete={() => {}}
+      onDeleteSelected={() => {}}
       onRename={() => {}}
       onPin={() => {}}
       onArchive={() => {}}
