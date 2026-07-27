@@ -82,6 +82,43 @@ def _codex_terminal_state(record: dict) -> Optional[bool]:
     return None
 
 
+def codex_is_assistant_message_item(record: dict) -> bool:
+    """True for a `response_item` carrying an assistant message — the item
+    a completed Codex turn always ends on."""
+    payload = record.get("payload")
+    if not isinstance(payload, dict):
+        return False
+    return (
+        record.get("type") == "response_item"
+        and payload.get("type") == "message"
+        and payload.get("role") == "assistant"
+    )
+
+
+def codex_is_response_item(record: dict) -> bool:
+    return record.get("type") == "response_item" and isinstance(
+        record.get("payload"), dict
+    )
+
+
+def codex_task_complete_without_answer(record: dict) -> bool:
+    """True when a `task_complete` reports no final agent message.
+
+    codex-cli ends an ABORTED turn (upstream stream/transport death) with a
+    normal `task_complete` carrying `last_agent_message: null` instead of a
+    `task_failed`, so this is the only in-band signal that the turn stopped
+    mid-work. It is necessary but NOT sufficient on its own: older rollouts
+    omit the field entirely on turns that did finish, so callers must pair
+    it with `codex_is_assistant_message_item` on the turn's last response
+    item."""
+    payload = record.get("payload")
+    if not isinstance(payload, dict):
+        return False
+    if record.get("type") != "event_msg" or payload.get("type") != "task_complete":
+        return False
+    return payload.get("last_agent_message") is None
+
+
 def _codex_reasoning_text(payload: dict) -> str:
     """Reasoning text lives under `summary`/`content` for
     `response_item.reasoning`, and under `text` (`delta` while streaming) for

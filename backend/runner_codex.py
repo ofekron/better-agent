@@ -31,7 +31,7 @@ import urllib.error
 import urllib.request
 from datetime import datetime
 from pathlib import Path
-from typing import Any, NoReturn, Optional
+from typing import Any, NamedTuple, NoReturn, Optional
 
 import re
 
@@ -58,6 +58,7 @@ from runner_guard import (
     GHOST_ERROR,
     GHOST_RETRY_BACKOFF_S,
     GHOST_RETRY_MAX,
+    apply_aborted_turn_guard,
     apply_ghost_completion_guard,
     should_retry_ghost,
 )
@@ -2526,13 +2527,31 @@ def build_codex_turn_input(run_dir: Path, prompt: str, images: list) -> list[dic
     return turn_input
 
 
+class RolloutScan(NamedTuple):
+    """What a rollout byte range reports about the turn that wrote it.
+
+    `last_item_assistant` is carried out so an incremental scanner can feed
+    it back in: the `task_complete` that decides `aborted` often lands in a
+    later chunk than the response item it must be judged against."""
+    terminal: Optional[bool]
+    usage: dict
+    assistant_seen: bool
+    rate_limits: Optional[dict]
+    aborted: bool
+    last_item_assistant: bool
+
+
+EMPTY_ROLLOUT_SCAN = RolloutScan(None, {}, False, None, False, False)
+
+
 def _scan_rollout_slice(
     path: Path, start: int, end: Optional[int],
-) -> tuple[Optional[bool], dict, bool, Optional[dict]]:
+) -> RolloutScan:
     """Scan rollout bytes [start, end) and report the slice's terminal
     state, last cumulative token usage, whether any non-empty
-    `agent_message` was seen, and the last quota state reported by a
-    `token_count`. `end=None` scans to EOF."""
+    `agent_message` was seen, the last quota state reported by a
+    `token_count`, and whether the turn aborted mid-work. `end=None` scans
+    to EOF."""
     with path.open("rb") as f:
         if start:
             f.seek(start)
@@ -2541,12 +2560,13 @@ def _scan_rollout_slice(
 
 
 def _scan_rollout_rows(
-    rows: list[bytes],
-) -> tuple[Optional[bool], dict, bool, Optional[dict]]:
+    rows: list[bytes], *, last_item_assistant: bool = False,
+) -> RolloutScan:
     usage: dict = {}
     terminal: Optional[bool] = None
     assistant_seen = False
     rate_limits: Optional[dict] = None
+    aborted = False
     for raw in rows:
         try:
             item = json.loads(raw.decode("utf-8", errors="replace"))
@@ -2561,6 +2581,17 @@ def _scan_rollout_rows(
                 terminal = item_terminal
             if _codex_primary_assistant_text(item):
                 assistant_seen = True
+            if codex_is_response_item(item):
+                last_item_assistant = codex_is_assistant_message_item(item)
+            # A turn codex-cli abandoned mid-work still reports
+            # `task_complete`; the pair "no final agent message" AND "the
+            # turn's last response item is not an assistant message" is
+            # what separates it from a real completion. Neither half is
+            # sufficient: older rollouts omit `last_agent_message` on
+            # turns that did finish, and a turn may legitimately carry no
+            # `final_answer` phase while still ending on an agent message.
+            if codex_task_complete_without_answer(item) and not last_item_assistant:
+                aborted = True
             if item.get("type") != "event_msg" or not isinstance(payload, dict):
                 continue
             payload_type = payload.get("type")
@@ -2574,7 +2605,9 @@ def _scan_rollout_rows(
                     rate_limits = limits
         except Exception:
             continue
-    return terminal, usage, assistant_seen, rate_limits
+    return RolloutScan(
+        terminal, usage, assistant_seen, rate_limits, aborted, last_item_assistant,
+    )
 
 
 class _IncrementalRolloutScanner:
@@ -2589,6 +2622,8 @@ class _IncrementalRolloutScanner:
         self.cumulative_usage: dict = {}
         self.assistant_seen = False
         self.rate_limits: Optional[dict] = None
+        self.aborted = False
+        self.last_item_assistant = False
         self.baseline = _rollout_usage_baseline(str(path), self.byte_offset)
         self.bytes_read = 0
 
@@ -2601,6 +2636,8 @@ class _IncrementalRolloutScanner:
         self.cumulative_usage = {}
         self.assistant_seen = False
         self.rate_limits = None
+        self.aborted = False
+        self.last_item_assistant = False
         self.baseline = (
             _rollout_usage_baseline(str(self.path), self.offset)
             if self.offset
@@ -2610,20 +2647,24 @@ class _IncrementalRolloutScanner:
     def _apply(self, rows: list[bytes]) -> None:
         if not rows:
             return
-        terminal, usage, assistant_seen, rate_limits = _scan_rollout_rows(rows)
-        if terminal is not None:
-            self.terminal = terminal
-        if usage:
-            self.cumulative_usage = usage
-        self.assistant_seen = self.assistant_seen or assistant_seen
-        if rate_limits is not None:
-            self.rate_limits = rate_limits
+        scan = _scan_rollout_rows(
+            rows, last_item_assistant=self.last_item_assistant,
+        )
+        if scan.terminal is not None:
+            self.terminal = scan.terminal
+        if scan.usage:
+            self.cumulative_usage = scan.usage
+        self.assistant_seen = self.assistant_seen or scan.assistant_seen
+        self.aborted = self.aborted or scan.aborted
+        self.last_item_assistant = scan.last_item_assistant
+        if scan.rate_limits is not None:
+            self.rate_limits = scan.rate_limits
 
-    def poll(self) -> tuple[Optional[bool], dict, bool, Optional[dict]]:
+    def poll(self) -> RolloutScan:
         try:
             stat = self.path.stat()
         except OSError:
-            return None, {}, False
+            return EMPTY_ROLLOUT_SCAN
         identity = (stat.st_dev, stat.st_ino)
         if self.identity != identity or stat.st_size < self.offset:
             self._reset(stat)
@@ -2665,11 +2706,18 @@ class _IncrementalRolloutScanner:
             )
         return self._result()
 
-    def _result(self) -> tuple[Optional[bool], dict, bool, Optional[dict]]:
+    def _result(self) -> RolloutScan:
         usage = self.cumulative_usage
         if usage and self.offset:
             usage = _usage_delta(usage, self.baseline)
-        return self.terminal, usage, self.assistant_seen, self.rate_limits
+        return RolloutScan(
+            self.terminal,
+            usage,
+            self.assistant_seen,
+            self.rate_limits,
+            self.aborted,
+            self.last_item_assistant,
+        )
 
 
 def _rollout_usage_baseline(rollout_path: Optional[str], byte_offset: int) -> dict:
@@ -2682,10 +2730,9 @@ def _rollout_usage_baseline(rollout_path: Optional[str], byte_offset: int) -> di
     if not path.exists():
         return {}
     try:
-        _, usage, _, _ = _scan_rollout_slice(path, 0, byte_offset)
+        return _scan_rollout_slice(path, 0, byte_offset).usage
     except OSError:
         return {}
-    return usage
 
 
 def _usage_delta(cumulative: dict, baseline: dict) -> dict:
@@ -2704,12 +2751,13 @@ def _rollout_terminal_state(
     *,
     byte_offset: int = 0,
     usage_baseline: Optional[dict] = None,
-) -> tuple[Optional[bool], dict, bool, Optional[dict]]:
+) -> RolloutScan:
     """Scan the rollout from `byte_offset` forward and report this slice's
     terminal state, PER-ATTEMPT token usage, whether any non-empty
-    `agent_message` was seen, and the attempt's last reported quota state
+    `agent_message` was seen, the attempt's last reported quota state
     (`token_count.rate_limits`, the only trace of a turn codex-cli
-    rejected on quota — see `codex_rate_limits`).
+    rejected on quota — see `codex_rate_limits`), and whether the turn
+    aborted mid-work.
 
     The Codex rollout is CUMULATIVE across resumed turns on the same native
     session — prior turns' events (including `agent_message`, `task_complete`
@@ -2726,27 +2774,21 @@ def _rollout_terminal_state(
     delta against the last cumulative usage before `byte_offset`
     (`usage_baseline`; computed from the prefix when not supplied)."""
     if not rollout_path:
-        return None, {}, False, None
+        return EMPTY_ROLLOUT_SCAN
     path = Path(rollout_path)
     if not path.exists():
-        return None, {}, False, None
-    usage: dict = {}
-    terminal: Optional[bool] = None
-    assistant_seen = False
-    rate_limits: Optional[dict] = None
+        return EMPTY_ROLLOUT_SCAN
     try:
-        terminal, usage, assistant_seen, rate_limits = _scan_rollout_slice(
-            path, byte_offset, None,
-        )
+        scan = _scan_rollout_slice(path, byte_offset, None)
     except OSError:
-        return None, usage, assistant_seen, rate_limits
-    if usage and byte_offset:
-        baseline = (
-            usage_baseline if usage_baseline is not None
-            else _rollout_usage_baseline(rollout_path, byte_offset)
-        )
-        usage = _usage_delta(usage, baseline)
-    return terminal, usage, assistant_seen, rate_limits
+        return EMPTY_ROLLOUT_SCAN
+    if not (scan.usage and byte_offset):
+        return scan
+    baseline = (
+        usage_baseline if usage_baseline is not None
+        else _rollout_usage_baseline(rollout_path, byte_offset)
+    )
+    return scan._replace(usage=_usage_delta(scan.usage, baseline))
 
 
 async def _wait_rollout_terminal_state(
@@ -2756,7 +2798,7 @@ async def _wait_rollout_terminal_state(
     timeout: float = 20.0,
     poll_interval: float = 0.25,
     scanner: Optional[_IncrementalRolloutScanner] = None,
-) -> tuple[Optional[bool], dict, bool, Optional[dict]]:
+) -> RolloutScan:
     deadline = time.monotonic() + timeout
     scanner = scanner or (
         _IncrementalRolloutScanner(Path(rollout_path), byte_offset=byte_offset)
@@ -2764,13 +2806,11 @@ async def _wait_rollout_terminal_state(
         else None
     )
     while True:
-        terminal, usage, assistant_seen, rate_limits = (
-            scanner.poll() if scanner is not None else (None, {}, False, None)
-        )
-        if terminal is not None:
-            return terminal, usage, assistant_seen, rate_limits
+        scan = scanner.poll() if scanner is not None else EMPTY_ROLLOUT_SCAN
+        if scan.terminal is not None:
+            return scan
         if time.monotonic() >= deadline:
-            return None, usage, assistant_seen, rate_limits
+            return scan._replace(terminal=None)
         await asyncio.sleep(poll_interval)
 
 
@@ -2789,18 +2829,20 @@ async def _forward_rollout_terminal(
     # rollout scan exists to rescue, so the rollout stays the ground truth until
     # the stdout consumer cancels this task.
     while True:
-        terminal, usage, assistant_seen, _ = await _wait_rollout_terminal_state(
+        scan = await _wait_rollout_terminal_state(
             rollout_path,
             byte_offset=byte_offset,
             timeout=1.0,
             scanner=scanner,
         )
+        terminal = scan.terminal
         if terminal is True:
             await proc._mapped.put((json.dumps({
                 "type": "turn.completed",
-                "usage": usage,
+                "usage": scan.usage,
                 "rollout_terminal": True,
-                "assistant_seen": assistant_seen,
+                "assistant_seen": scan.assistant_seen,
+                "aborted": scan.aborted,
             }) + "\n").encode("utf-8"))
             return
         if terminal is False:
@@ -3068,6 +3110,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
         cancelled = False
         turn_completed_seen = False
         assistant_seen = False
+        rollout_aborted = False
         rollout_rate_limits: Optional[dict] = None
         attempt_start_byte, attempt_boundary_known = _rollout_attempt_boundary(
             session_id, initial_rollout_path,
@@ -3236,6 +3279,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
                         error = None
                         total_usage = token_usage_from_codex_usage(raw_event.get("usage")) or {}
                         assistant_seen = assistant_seen or bool(raw_event.get("assistant_seen"))
+                        rollout_aborted = rollout_aborted or bool(raw_event.get("aborted"))
                         rollout_terminal_completion = bool(raw_event.get("rollout_terminal"))
                         break
 
@@ -3342,13 +3386,18 @@ async def _run(run_dir: Path, inputs: dict) -> int:
                                 atomic_write_json(state_path, state)
                         except Exception:
                             log.exception("failed to resolve Codex rollout path after stdout closed")
-                (
-                    rollout_terminal, rollout_usage, rollout_assistant, rollout_rate_limits,
-                ) = await _wait_rollout_terminal_state(
+                rollout_scan = await _wait_rollout_terminal_state(
                     rollout_path,
                     byte_offset=attempt_start_byte or (state.get("pre_query_byte_offset") or 0),
                     timeout=60.0,
                 )
+                (
+                    rollout_terminal, rollout_usage, rollout_assistant, rollout_rate_limits,
+                ) = (
+                    rollout_scan.terminal, rollout_scan.usage,
+                    rollout_scan.assistant_seen, rollout_scan.rate_limits,
+                )
+                rollout_aborted = rollout_aborted or rollout_scan.aborted
                 if rollout_assistant:
                     assistant_seen = True
                 if rollout_terminal is True:
@@ -3382,12 +3431,17 @@ async def _run(run_dir: Path, inputs: dict) -> int:
                 error = base
 
             if not cancelled and attempt_boundary_known:
-                (
-                    rollout_terminal, rollout_usage, rollout_assistant, rollout_rate_limits,
-                ) = _rollout_terminal_state(
+                rollout_scan = _rollout_terminal_state(
                     state.get("rollout_path"),
                     byte_offset=attempt_start_byte or (state.get("pre_query_byte_offset") or 0),
                 )
+                (
+                    rollout_terminal, rollout_usage, rollout_assistant, rollout_rate_limits,
+                ) = (
+                    rollout_scan.terminal, rollout_scan.usage,
+                    rollout_scan.assistant_seen, rollout_scan.rate_limits,
+                )
+                rollout_aborted = rollout_aborted or rollout_scan.aborted
                 if rollout_assistant:
                     assistant_seen = True
                 if rollout_terminal is True:
@@ -3430,8 +3484,15 @@ async def _run(run_dir: Path, inputs: dict) -> int:
         # A completed turn with assistant output but no phase=final_answer
         # (e.g. worker turns that deliver via inter-agent messages) is a
         # SUCCESS: content falls back to the last-assistant-text projection,
-        # same as providers without final marks. Only the ghost guard above
-        # (no assistant output at all) may fail a completed turn.
+        # same as providers without final marks. Such a turn still ends on
+        # an agent message, which is what keeps it clear of the aborted-turn
+        # guard below.
+        success, error = apply_aborted_turn_guard(
+            success=success,
+            cancelled=cancelled,
+            error=error,
+            turn_aborted=rollout_aborted,
+        )
 
         # Network retry check
         if error and not cancelled and _is_network_error_message(error):

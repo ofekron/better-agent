@@ -28,6 +28,14 @@ GHOST_RETRY_BACKOFF_S = 3.0
 # only this generic ghost is retried.
 GHOST_ERROR = "prompt_not_executed"
 
+# A turn the provider abandoned PART WAY THROUGH: it ran tool calls and
+# produced output, then its upstream stream died and the CLI reported a
+# normal completion carrying no final answer. Distinct from the ghost
+# above (which executed nothing) and deliberately NOT retried: the
+# attempt's tool calls already took effect, so a silent re-run would
+# repeat them.
+ABORTED_ERROR = "provider_turn_aborted"
+
 
 class GuardResult(NamedTuple):
     """``retry_ghost`` is decided where the failure is classified, so the
@@ -94,6 +102,29 @@ def apply_ghost_completion_guard(
         )
         return GuardResult(False, empty_turn_error or GHOST_ERROR, empty_turn_error is None)
     return GuardResult(success, error, False)
+
+
+def apply_aborted_turn_guard(
+    *,
+    success: bool,
+    cancelled: bool,
+    error: Optional[str],
+    turn_aborted: bool,
+) -> tuple[bool, Optional[str]]:
+    """Fail closed when the provider reported success for a turn it
+    actually abandoned mid-work.
+
+    Without this, an aborted turn is indistinguishable from a finished one
+    on the wire: the session simply goes idle with the work half-done and
+    no error, which reads to the user as "it stopped on its own". A turn
+    already failing or cancelled keeps its own outcome."""
+    if not (turn_aborted and success and not cancelled and not error):
+        return success, error
+    log.warning(
+        "aborted turn: provider reported completion with no final answer "
+        "after mid-turn work — marking %s", ABORTED_ERROR,
+    )
+    return False, ABORTED_ERROR
 
 
 def should_retry_ghost(

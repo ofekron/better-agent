@@ -158,7 +158,7 @@ async def _test_fork_thread_started_boundary_controls_terminal_scan() -> None:
 
         async def forward(_proc, _rollout_path, *, byte_offset, cancel_path=None):
             captured_offsets.append(byte_offset)
-            terminal, _usage, _assistant, _ = runner_codex._rollout_terminal_state(
+            terminal, _usage, _assistant, *_ = runner_codex._rollout_terminal_state(
                 str(rollout),
                 byte_offset=byte_offset,
             )
