@@ -31,6 +31,7 @@ Run with:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import sys
@@ -172,6 +173,16 @@ async def main() -> None:
     )
     _ok(client.interrupted, "turn1: interrupt() was invoked by watcher")
     _ok(r1.get("cancelled") is True, "turn1: ends cancelled", f"r1={r1}")
+    turn1_complete = json.loads(
+        (run_dir / "turns" / "turn1" / "complete.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    _ok(
+        turn1_complete.get("cancelled") is True,
+        "turn1: durable completion records soft cancellation",
+        f"complete={turn1_complete}",
+    )
     _ok(client._q.empty(),
         "turn1: settle barrier drained the interrupted turn's tail "
         "(shared stream is idle)",

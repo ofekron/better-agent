@@ -212,6 +212,7 @@ def test_remote_run_dir_finalize_and_prepare() -> None:
         "persist_to": "app-x",
         "mode": "native",
         "started_at": "2026-01-01T00:00:00",
+        "turn_cancelled": True,
     }
     (rd2 / "backend_state.json").write_text(json.dumps(bs), encoding="utf-8")
     desc = asyncio.run(run_recovery._prepare_remote_desc(
@@ -222,6 +223,7 @@ def test_remote_run_dir_finalize_and_prepare() -> None:
         desc is not None
         and desc["has_complete_json"] is True
         and desc["app_session_id"] == "app-x"
+        and desc["turn_cancelled"] is True
         and (rd2 / "complete.json").exists()
         and json.loads(
             (rd2 / "complete.json").read_text(encoding="utf-8")

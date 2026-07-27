@@ -1373,6 +1373,7 @@ def salvage_complete_payload(run_id: str) -> Optional[dict]:
         return None
     return {
         "success": bool(data.get("success", False)),
+        "cancelled": bool(data.get("cancelled", False)),
         "error": data.get("error"),
         "session_id": data.get("session_id"),
         "token_usage": data.get("token_usage"),

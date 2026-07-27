@@ -1119,6 +1119,37 @@ class Provider(ABC):
                 type(self).__name__, run_id, e,
             )
             return False
+        if rs is not None:
+            rs.turn_cancelled = True
+            try:
+                self._write_backend_state(rs)
+            except Exception:
+                logger.exception(
+                    "%s.cancel_turn: failed to persist soft cancel for %s",
+                    type(self).__name__,
+                    run_id,
+                )
+        else:
+            backend_state_path = target.parent / "backend_state.json"
+            if backend_state_path.exists():
+                try:
+                    state = json.loads(
+                        backend_state_path.read_text(encoding="utf-8")
+                    )
+                    if not isinstance(state, dict):
+                        raise ValueError(
+                            "backend_state.json must contain an object"
+                        )
+                    state["turn_cancelled"] = True
+                    from runs_dir import atomic_write_json
+                    atomic_write_json(backend_state_path, state)
+                except (OSError, ValueError, json.JSONDecodeError):
+                    logger.exception(
+                        "%s.cancel_turn: failed to persist detached soft "
+                        "cancel for %s",
+                        type(self).__name__,
+                        run_id,
+                    )
         return True
 
     def steer_run(self, run_id: str, prompt: str, images: Optional[list] = None) -> bool:

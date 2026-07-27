@@ -333,6 +333,7 @@ class RunState:
     complete_task: Optional[asyncio.Task] = None
     started_at: str = ""
     cancelled: bool = False
+    turn_cancelled: bool = False
     persist_to: str = ""
     target_message_id: Optional[str] = None
     turn_run_id: Optional[str] = None
@@ -1262,6 +1263,7 @@ class CodexProvider(Provider):
             "processed_line": rs.processed_line,
             "processed_byte_offset": rs.processed_byte_offset,
             "cancelled": rs.cancelled,
+            "turn_cancelled": getattr(rs, "turn_cancelled", False),
             "target_message_id": rs.target_message_id,
             "turn_run_id": rs.turn_run_id,
             "ingestion_version": CODEX_INGESTION_VERSION,
@@ -1349,6 +1351,7 @@ class CodexProvider(Provider):
                 or datetime.now(timezone.utc).isoformat()
             ),
             cancelled=bool(desc.get("cancelled", False)),
+            turn_cancelled=bool(desc.get("turn_cancelled", False)),
             persist_to=desc.get("persist_to") or desc.get("app_session_id") or "",
             target_message_id=desc.get("target_message_id"),
             turn_run_id=desc.get("turn_run_id"),
@@ -1547,6 +1550,7 @@ class CodexProvider(Provider):
                 "processed_line": processed_line,
                 "processed_byte_offset": processed_byte_offset,
                 "cancelled": bool(bs.get("cancelled", False)),
+                "turn_cancelled": bool(bs.get("turn_cancelled", False)),
                 "mode": bs.get("mode") or rs_disk.get("mode") or "native",
                 "provider_id": bs.get("provider_id") or self.id,
                 "provider_kind": self.KIND,

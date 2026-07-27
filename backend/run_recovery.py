@@ -21,6 +21,7 @@ from provider import RecoveredPopen, live_recovery_pid
 from runs_dir import (
     iter_run_dirs,
     pid_alive as _pid_alive,
+    read_best_complete as _read_best_complete,
     runs_root as _runs_root,
     salvage_complete_payload as _salvage_complete_payload,
 )
@@ -90,6 +91,22 @@ def _is_provider_capability_change(run_id: str) -> bool:
         payload
         and not payload.get("success")
         and payload.get("error") == PROVIDER_CAPABILITIES_CHANGED_ERROR
+    )
+
+
+def _recovered_run_cancelled(desc: dict) -> bool:
+    run_id = str(desc.get("run_id") or "")
+    run_dir = _runs_root() / run_id if run_id else None
+    payload = _read_best_complete(run_dir) if run_dir is not None else None
+    if payload is not None:
+        if "cancelled" in payload:
+            return bool(payload.get("cancelled"))
+        if payload.get("success"):
+            return False
+    return bool(
+        desc.get("cancelled")
+        or desc.get("turn_cancelled")
+        or (run_dir is not None and (run_dir / "cancel").exists())
     )
 
 
@@ -1428,7 +1445,7 @@ def _is_consistent(sess: dict, desc: dict) -> bool:
         if bool(payload.get("success")):
             if not stopped and not last_asst.get("completed_at"):
                 return False
-        elif not bool(desc.get("cancelled")):
+        elif not _recovered_run_cancelled(desc):
             error_text = str(payload.get("error") or "")
             if (
                 not stopped
@@ -1517,7 +1534,10 @@ async def _integrate_one_locked(
                 run_id,
                 persist_sid,
             )
-        if bool(desc.get("has_complete_json")) or bool(desc.get("cancelled")):
+        if (
+            bool(desc.get("has_complete_json"))
+            or _recovered_run_cancelled(desc)
+        ):
             await _mark_reconciled_terminal_async(
                 run_id,
                 desc,
@@ -1528,7 +1548,7 @@ async def _integrate_one_locked(
 
     alive = bool(desc.get("alive")) or bool(desc.get("orphaned_cli"))
     has_complete = bool(desc.get("has_complete_json"))
-    cancelled = bool(desc.get("cancelled"))
+    cancelled = _recovered_run_cancelled(desc)
     if has_complete:
         await asyncio.to_thread(
             _preserve_recoverable_partial_completion,
@@ -2822,7 +2842,11 @@ async def _finalize_when_done(
         if backend_state_path.exists():
             try:
                 bs = json.loads(backend_state_path.read_text(encoding="utf-8"))
-                cancelled = bool(bs.get("cancelled", False))
+                cancelled = _recovered_run_cancelled({
+                    **desc,
+                    "cancelled": bool(bs.get("cancelled", False)),
+                    "turn_cancelled": bool(bs.get("turn_cancelled", False)),
+                })
             except Exception:
                 pass
 
@@ -3194,6 +3218,7 @@ async def _prepare_remote_desc(
         "started_at": bs.get("started_at") or "",
         "processed_byte": 0,
         "cancelled": bool(bs.get("cancelled", False)),
+        "turn_cancelled": bool(bs.get("turn_cancelled", False)),
         "mode": bs.get("mode"),
         "has_complete_json": True,
         "provider_id": bs.get("provider_id") or f"remote:{node_id}",

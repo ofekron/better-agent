@@ -73,6 +73,7 @@ class RunState:
     complete_task: Optional[asyncio.Task] = None
     started_at: str = ""
     cancelled: bool = False
+    turn_cancelled: bool = False
     # Where this run's messages PERSIST. In supervisor mode, a worker
     # turn's events route to the worker Better Agent session even though the run
     # is bookkept under the supervisor's app_session_id. Mirrors
@@ -319,6 +320,7 @@ class SessionEventsProvider(Provider):
             "jsonl_path": str(rs.run_dir / "session_events.jsonl"),
             "processed_line": rs.processed_line,
             "cancelled": rs.cancelled,
+            "turn_cancelled": getattr(rs, "turn_cancelled", False),
             "target_message_id": rs.target_message_id,
             "turn_run_id": rs.turn_run_id,
             "provider_id": self.id,
@@ -383,6 +385,7 @@ class SessionEventsProvider(Provider):
                 or datetime.now(timezone.utc).isoformat()
             ),
             cancelled=bool(desc.get("cancelled", False)),
+            turn_cancelled=bool(desc.get("turn_cancelled", False)),
             persist_to=desc.get("persist_to") or desc.get("app_session_id") or "",
             target_message_id=desc.get("target_message_id"),
             turn_run_id=desc.get("turn_run_id"),
@@ -508,6 +511,7 @@ class SessionEventsProvider(Provider):
                 "started_at": bs.get("started_at") or rs_disk.get("started_at") or "",
                 "processed_line": processed_line,
                 "cancelled": bool(bs.get("cancelled", False)),
+                "turn_cancelled": bool(bs.get("turn_cancelled", False)),
                 "mode": bs.get("mode") or rs_disk.get("mode") or "native",
                 "provider_id": bs.get("provider_id") or self.id,
                 "provider_kind": bs.get("provider_kind") or self.KIND,

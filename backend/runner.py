@@ -2975,6 +2975,7 @@ async def _run_one_turn(
     # the runner dies before the run-level write lands.
     turn_complete_payload = {
         "success": final_success,
+        "cancelled": cancelled,
         "session_id": discovered_sid,
         "error": error,
         "token_usage": total_usage or None,
@@ -3630,6 +3631,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
     # finalizes the turn off this file).
     complete = {
         "success": final_success,
+        "cancelled": cancelled,
         "session_id": discovered_sid,
         "error": error,
         "token_usage": total_usage or None,

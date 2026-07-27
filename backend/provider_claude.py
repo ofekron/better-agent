@@ -242,6 +242,7 @@ class RunState:
     worker_tailers: dict[str, "ClaudeJsonlTailer"] = field(default_factory=dict)
     started_at: str = ""
     cancelled: bool = False
+    turn_cancelled: bool = False
     persist_to: str = ""  # session messages are persisted to (differs from app_session_id in supervisor mode)
     target_message_id: Optional[str] = None
     turn_run_id: Optional[str] = None
@@ -1592,6 +1593,7 @@ class ClaudeProvider(Provider):
             "processed_byte": rs.processed_byte,
             "jsonl_inode": jsonl_inode,
             "cancelled": rs.cancelled,
+            "turn_cancelled": rs.turn_cancelled,
             "target_message_id": rs.target_message_id,
             "turn_run_id": rs.turn_run_id,
             "root_id": rs.root_id,
@@ -1654,6 +1656,7 @@ class ClaudeProvider(Provider):
                 or datetime.now(timezone.utc).isoformat()
             ),
             cancelled=bool(desc.get("cancelled", False)),
+            turn_cancelled=bool(desc.get("turn_cancelled", False)),
             persist_to=desc.get("persist_to") or desc.get("app_session_id") or "",
             target_message_id=desc.get("target_message_id"),
             turn_run_id=desc.get("turn_run_id"),
@@ -1779,6 +1782,7 @@ class ClaudeProvider(Provider):
                 "processed_byte": processed_byte,
                 "jsonl_inode": bs.get("jsonl_inode"),
                 "cancelled": bool(bs.get("cancelled", False)),
+                "turn_cancelled": bool(bs.get("turn_cancelled", False)),
                 "mode": bs.get("mode"),
                 "has_complete_json": has_complete_json,
                 # Owning provider for the run. Falls back to `self.id`
