@@ -1,5 +1,9 @@
 import { useEffect } from "react";
 import { eventBus } from "../lib/eventBus";
+import {
+  extensionAppSettingValue,
+  useExtensionAppSettingsSync,
+} from "../hooks/useExtensionAppSettings";
 
 // A short two-tone "ding" synthesized via the Web Audio API so we ship no
 // audio asset. Played when an extension attention marker that declares
@@ -54,11 +58,21 @@ export function playAttentionSound(): void {
 /** Subscribe to extension attention markers and play the attention sound
  *  for any that declare `sound: true`. Live WS deltas only — the bootstrap
  *  snapshot does not route through this event, so loading the app never
- *  triggers a burst of sounds. */
+ *  triggers a burst of sounds.
+ *
+ *  A marker may name a boolean setting of its own extension in
+ *  `sound_setting`; the sound is then muted whenever the user turned that
+ *  setting off in app Settings. An unloaded settings cache leaves the
+ *  declared default in force, which is why the cache is kept warm here. */
 export function useAttentionSound(): void {
+  useExtensionAppSettingsSync();
   useEffect(() => {
     return eventBus.subscribe("session_marker_changed", (p) => {
-      if (p?.marker?.sound) playAttentionSound();
+      const marker = p?.marker;
+      if (!marker?.sound) return;
+      if (marker.sound_setting
+        && extensionAppSettingValue(p.extension_id, marker.sound_setting) === false) return;
+      playAttentionSound();
     });
   }, []);
 }

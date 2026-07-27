@@ -145,9 +145,32 @@ class Page:
 
 
 @dataclass(frozen=True)
+class SettingsSection:
+    """A section the extension adds to the app Settings page (manifest
+    ``entrypoints.settings_sections``). Settings that name it in their
+    ``section`` render there instead of in the harness profile editor, and
+    hold one app-wide value rather than a per-profile overlay."""
+
+    id: str
+    label: str
+    description: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        data: dict[str, Any] = {"id": self.id, "label": self.label}
+        if self.description:
+            data["description"] = self.description
+        return data
+
+
+@dataclass(frozen=True)
 class Setting:
     """A user-configurable field surfaced in Settings (manifest
-    ``entrypoints.settings``). ``secret`` type routes to the OS keychain."""
+    ``entrypoints.settings``). ``secret`` type routes to the OS keychain.
+
+    Without ``section`` the field is a per-harness-profile overlay edited in
+    the harness profile editor. With ``section`` naming a declared
+    :class:`SettingsSection`, it is an app-wide field rendered in that
+    section of the app Settings page."""
 
     key: str
     label: str
@@ -155,6 +178,7 @@ class Setting:
     default: Any = None
     enum: tuple[Any, ...] | None = None
     help: str | None = None
+    section: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         data: dict[str, Any] = {"key": self.key, "label": self.label, "type": self.type}
@@ -164,6 +188,8 @@ class Setting:
             data["enum"] = list(self.enum)
         if self.help:
             data["help"] = self.help
+        if self.section:
+            data["section"] = self.section
         return data
 
 

@@ -1833,7 +1833,7 @@ def _validate_applied_config(value: Any, *, extension_id: str) -> dict[str, Any]
         if marker_raw is not None:
             if not isinstance(marker_raw, dict):
                 raise ExtensionError(f"{prefix}.marker must be an object")
-            unknown = set(marker_raw) - {"color", "tooltip", "sound"}
+            unknown = set(marker_raw) - {"color", "tooltip", "sound", "sound_setting"}
             if unknown:
                 raise ExtensionError(f"{prefix}.marker has unknown keys: {', '.join(sorted(unknown))}")
             color = marker_raw.get("color")
@@ -1847,6 +1847,16 @@ def _validate_applied_config(value: Any, *, extension_id: str) -> dict[str, Any]
                 if not isinstance(marker_raw["sound"], bool):
                     raise ExtensionError(f"{prefix}.marker.sound must be a boolean")
                 marker["sound"] = marker_raw["sound"]
+            sound_setting = marker_raw.get("sound_setting")
+            if sound_setting is not None:
+                # Names one of the extension's own boolean settings; the
+                # sound only plays while that setting is on. Cross-checked
+                # against entrypoints.settings in validate_manifest.
+                if not isinstance(sound_setting, str) or not _SETTING_KEY_RE.fullmatch(sound_setting):
+                    raise ExtensionError(
+                        f"{prefix}.marker.sound_setting must be a lowercase snake_case setting key"
+                    )
+                marker["sound_setting"] = sound_setting
             rule["marker"] = marker
 
         clear_on = raw.get("clear_on")
@@ -1861,16 +1871,55 @@ def _validate_applied_config(value: Any, *, extension_id: str) -> dict[str, Any]
     return {"tag_rules": rules}
 
 
-def _validate_settings(value: Any) -> list[dict[str, Any]]:
+def _validate_settings_sections(value: Any) -> list[dict[str, Any]]:
+    """Sections an extension adds to the app Settings page. A setting that
+    names one here is app-wide (one global value) instead of a per-profile
+    harness overlay."""
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ExtensionError("entrypoints.settings_sections must be a list")
+    sections: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for index, raw in enumerate(value):
+        if not isinstance(raw, dict):
+            raise ExtensionError(f"entrypoints.settings_sections[{index}] must be an object")
+        section_id = str(raw.get("id") or "").strip()
+        if not _SETTING_KEY_RE.fullmatch(section_id):
+            raise ExtensionError(
+                f"entrypoints.settings_sections[{index}].id must be a lowercase snake_case identifier"
+            )
+        if section_id in seen:
+            raise ExtensionError(
+                f"entrypoints.settings_sections contains duplicate id: {section_id}"
+            )
+        seen.add(section_id)
+        label = str(raw.get("label") or "").strip()
+        if not label:
+            raise ExtensionError(f"entrypoints.settings_sections[{index}].label is required")
+        section: dict[str, Any] = {"id": section_id, "label": label}
+        description = str(raw.get("description") or "").strip()
+        if description:
+            section["description"] = description
+        sections.append(section)
+    return sections
+
+
+def _validate_settings(
+    value: Any, *, sections: list[dict[str, Any]] | None = None
+) -> list[dict[str, Any]]:
     """Declarative config fields an extension surfaces in Settings.
 
     Stored values are user-supplied; ``secret`` types route to the OS
     keychain (never plaintext). List order is the author's display order.
+    A ``section`` naming a declared ``settings_sections`` entry moves the
+    field to the app Settings page as one app-wide value.
     """
     if value is None:
         return []
     if not isinstance(value, list):
         raise ExtensionError("entrypoints.settings must be a list")
+    known_sections = {section["id"] for section in sections or []}
     items: list[dict[str, Any]] = []
     seen: set[str] = set()
     for index, raw in enumerate(value):
@@ -1893,6 +1942,18 @@ def _validate_settings(value: Any) -> list[dict[str, Any]]:
                 f"entrypoints.settings[{index}].type must be one of: {', '.join(sorted(_SETTING_TYPES))}"
             )
         item: dict[str, Any] = {"key": key, "label": label, "type": setting_type}
+        section_id = str(raw.get("section") or "").strip()
+        if section_id:
+            if section_id not in known_sections:
+                raise ExtensionError(
+                    f"entrypoints.settings[{index}].section is not declared in "
+                    f"entrypoints.settings_sections: {section_id}"
+                )
+            if setting_type == "secret":
+                raise ExtensionError(
+                    f"entrypoints.settings[{index}] of type secret cannot declare a section"
+                )
+            item["section"] = section_id
         help_text = str(raw.get("help") or "").strip()
         if help_text:
             item["help"] = help_text
@@ -2531,6 +2592,7 @@ def validate_manifest(raw: Any) -> dict[str, Any]:
     if backend_entrypoint and backend_module:
         raise ExtensionError("entrypoints must declare either backend or backend_module, not both")
     frontend_entrypoint = _clean_optional_rel_path(entrypoints_raw.get("frontend"), field="entrypoints.frontend")
+    _settings_sections = _validate_settings_sections(entrypoints_raw.get("settings_sections"))
     entrypoints = {
         "backend": backend_entrypoint,
         "backend_module": backend_module,
@@ -2557,7 +2619,10 @@ def validate_manifest(raw: Any) -> dict[str, Any]:
             extension_id=extension_id,
         ),
         "page": _validate_page(entrypoints_raw.get("page")),
-        "settings": _validate_settings(entrypoints_raw.get("settings")),
+        "settings_sections": _settings_sections,
+        "settings": _validate_settings(
+            entrypoints_raw.get("settings"), sections=_settings_sections
+        ),
         "python_requirements": _validate_python_requirements(entrypoints_raw.get("python_requirements")),
         "hooks": _validate_hooks(
             entrypoints_raw.get("hooks"),
@@ -2589,6 +2654,16 @@ def validate_manifest(raw: Any) -> dict[str, Any]:
         if declared_level not in ("backend", "supervisor"):
             raise ExtensionError(
                 "entrypoints.daemons requires permissions.daemons='backend' or 'supervisor'"
+            )
+    _boolean_setting_keys = {
+        item["key"] for item in entrypoints["settings"] if item["type"] == "boolean"
+    }
+    for rule in entrypoints["applied_config"].get("tag_rules") or []:
+        gate = (rule.get("marker") or {}).get("sound_setting")
+        if gate and gate not in _boolean_setting_keys:
+            raise ExtensionError(
+                f"tag_rules[{rule['tag']}].marker.sound_setting must name a declared "
+                f"boolean entrypoints.settings key: {gate}"
             )
     marketplace_raw = raw.get("marketplace") or {}
     if not isinstance(marketplace_raw, dict):

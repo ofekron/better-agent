@@ -67,7 +67,14 @@ export interface BusEventMap {
   session_marker_changed: {
     session_id: string;
     extension_id: string;
-    marker: { color: string; tooltip: string; sound?: boolean } | null;
+    // `sound_setting` names a boolean setting of the owning extension that
+    // gates the sound; absent means the sound is ungated.
+    marker: {
+      color: string;
+      tooltip: string;
+      sound?: boolean;
+      sound_setting?: string;
+    } | null;
   };
   // Finer per-session monitoring state (active / idle / blocked_on_user /
   // waiting_on_background / stopped). Fires on transitions that don't flip

@@ -29,6 +29,7 @@ _BACKEND = os.path.dirname(_HERE)
 if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
+import _test_installation  # noqa: E402
 import extension_store  # noqa: E402
 import extension_applied_config  # noqa: E402
 import file_ref_resolver  # noqa: E402
@@ -44,6 +45,9 @@ def _load_real_rules() -> None:
     )
     rec = {"enabled": True, "manifest": extension_store.validate_manifest(man)}
     extension_applied_config._all_enabled_records = lambda: [rec]  # type: ignore
+    # The rule builder re-checks activity against the installed store, which
+    # is empty in the isolated test home — the injected record IS the fixture.
+    extension_store.is_extension_active = lambda _id: True  # type: ignore
     extension_applied_config.reconcile_all()
 
 
@@ -90,6 +94,8 @@ def _apply(sid: str, msg: dict, event: dict) -> None:
 
 def main() -> int:
     try:
+        # Sessions are only creatable against an active installation.
+        _test_installation.activate(Path(_TMP_HOME))
         _load_real_rules()
         assert {"NEEDS_USER_DECISION", "ALL_TASKS__DONE"} <= set(
             file_ref_resolver.tag_names()), file_ref_resolver.tag_names()

@@ -181,7 +181,7 @@ export function useExtensionUiHooks(): UiHooks {
 
   useEffect(() => {
     void refresh();
-    return eventBus.subscribe("extensions_changed", () => {
+    return eventBus.subscribe("extension.ui", () => {
       void refresh();
     });
   }, [refresh]);
@@ -227,7 +227,7 @@ export function useExtensionPageBadges(pages: PageHook[]): Record<string, number
     };
     void poll();
     const timer = window.setInterval(poll, BADGE_POLL_MS);
-    const offChanged = eventBus.subscribe("extensions_changed", () => void poll());
+    const offChanged = eventBus.subscribe("extension.ui", () => void poll());
     const offUpdates = eventBus.subscribe("project_updates_changed", () => void poll());
     return () => {
       cancelled = true;

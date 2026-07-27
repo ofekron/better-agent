@@ -18,7 +18,7 @@ if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
 from orchestrator import Coordinator  # noqa: E402
-from global_events import extension_event  # noqa: E402
+from global_events import EXTENSION_CHANGE_TOPICS, extension_event  # noqa: E402
 from ws_serialization import (  # noqa: E402
     reopen_ws_json_executor,
     shutdown_ws_json_executor,
@@ -148,6 +148,29 @@ async def test_extension_event_validation() -> bool:
     else:
         ok = False
     print(f"{PASS if ok else FAIL} extension envelope validation")
+    return ok
+
+
+async def test_extension_change_topic_validation() -> bool:
+    coordinator = Coordinator()
+    ok = True
+    try:
+        for topic in EXTENSION_CHANGE_TOPICS:
+            coordinator.prepare_global_event(topic, {})
+    except Exception as exc:
+        print(f"  allowed extension topic raised: {exc}")
+        ok = False
+    try:
+        coordinator.prepare_global_event("extension.config.typo", {})
+    except ValueError:
+        pass
+    except Exception as exc:
+        print(f"  expected ValueError, got {type(exc).__name__}: {exc}")
+        ok = False
+    else:
+        print("  unknown extension topic did NOT raise")
+        ok = False
+    print(f"{PASS if ok else FAIL} extension change topic validation")
     return ok
 
 
@@ -343,6 +366,7 @@ async def main_runner() -> int:
         test_invalid_global_event_rejects_before_task_creation,
         test_global_broadcast_drain_owns_delivery,
         test_extension_event_validation,
+        test_extension_change_topic_validation,
         test_owned_task_exception_is_retrieved,
         test_cross_thread_schedule_is_drained,
         test_drain_closes_validation_submission_race,

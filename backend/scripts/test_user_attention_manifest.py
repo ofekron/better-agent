@@ -51,10 +51,13 @@ def main() -> int:
         assert decision["bold"] is True
         assert decision["font_scale"] == 1.3
         assert decision["highlight"] == {"color": "#cfbcff", "alpha": 0.18}, decision.get("highlight")
+        # The ding is gated by the extension's own app setting, so the
+        # Notifications toggle mutes it without losing the orange dot.
         assert decision["marker"] == {
             "color": "#ff8c00",
             "tooltip": "Needs your decision",
             "sound": True,
+            "sound_setting": "play_sound",
         }, decision.get("marker")
         assert decision["clear_on"] == "view"
 
@@ -68,6 +71,14 @@ def main() -> int:
         assert done["clear_on"] == "view"
         # Blue dot is a pure signal — no inline text styling.
         assert "bold" not in done and "font_scale" not in done and "highlight" not in done, done
+
+        sections = m["entrypoints"]["settings_sections"]
+        assert [s["id"] for s in sections] == ["notifications"], sections
+        assert sections[0]["label"] == "Notifications", sections
+        settings = {s["key"]: s for s in m["entrypoints"]["settings"]}
+        assert settings["play_sound"]["type"] == "boolean", settings
+        assert settings["play_sound"]["default"] is True, settings
+        assert settings["play_sound"]["section"] == "notifications", settings
 
         print("PASS test_user_attention_manifest")
         return 0

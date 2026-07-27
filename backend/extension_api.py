@@ -10,6 +10,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 
+import extension_app_settings
 import extension_store
 import personal_harness_extension
 import extension_backend_loader
@@ -284,10 +285,6 @@ async def _broadcast_extension_changed(*topics: str) -> None:
         logger.exception("lag incident destination wake failed")
 
 
-async def _broadcast_extensions_changed() -> None:
-    await _broadcast_extension_changed(*EXTENSION_CATALOG_TOPICS)
-
-
 def _json_projection_response(content: bytes) -> Response:
     return Response(content=content, media_type="application/json")
 
@@ -415,7 +412,7 @@ async def list_extensions(include_hidden: bool = Query(default=False)):
         include_hidden=include_hidden,
     )
     if changed:
-        await _broadcast_extensions_changed()
+        await _broadcast_extension_changed(*EXTENSION_CATALOG_TOPICS)
     return _projection_response_cache_put("list", cache_key, {"extensions": extensions})
 
 
@@ -991,7 +988,7 @@ async def create_personal_harness_extension(req: PersonalHarnessCreateRequest | 
         )
     except extension_store.ExtensionError as exc:
         raise _extension_error(exc) from exc
-    await _broadcast_extensions_changed()
+    await _broadcast_extension_changed(*EXTENSION_CATALOG_TOPICS)
     return {"extension": record}
 
 
@@ -1029,6 +1026,17 @@ async def list_extension_updates(refresh: bool = False):
     except extension_store.ExtensionError as exc:
         raise _extension_error(exc) from exc
     return result
+
+
+@router.get("/app-settings")
+async def list_extension_app_settings():
+    """Extension-contributed app Settings sections with their current values.
+    Writes go through PATCH /{extension_id}/settings, which broadcasts
+    `extension.config.settings` so open clients refetch."""
+    try:
+        return {"sections": await asyncio.to_thread(extension_app_settings.sections)}
+    except extension_store.ExtensionError as exc:
+        raise _extension_error(exc) from exc
 
 
 @router.post("/{extension_id}/update")

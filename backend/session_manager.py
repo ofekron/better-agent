@@ -43,6 +43,7 @@ from typing import Any, Callable, Iterable, Optional
 
 import perf
 import config_store
+import harness_profile_store
 import messages_delta_compaction
 import session_store
 from event_bus import BusEvent, bus
@@ -4599,6 +4600,15 @@ class SessionManager:
 
         def _do(s: dict) -> None:
             s["harness_profile_id"] = clean_profile_id
+            s["harness_profile_snapshot"] = None
+            selected_id = (
+                clean_profile_id or harness_profile_store.DEFAULT_PROFILE_ID
+            )
+            session_store.resolve_profile_snapshot(
+                s,
+                selected_id,
+                clear_missing_id=True,
+            )
 
         return self._run(
             sid,

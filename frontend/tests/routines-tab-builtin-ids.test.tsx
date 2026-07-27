@@ -86,7 +86,7 @@ describe("builtin-ids recovery drives the Routines flag", () => {
     );
   });
 
-  it("re-loads ids after extensions_changed when a builtin id appears later", async () => {
+  it("re-loads ids after extension catalog changes when a builtin id appears later", async () => {
     vi.resetModules();
     const state: FetchState = {
       idsOk: { value: true },
@@ -151,7 +151,7 @@ describe("builtin-ids recovery drives the Routines flag", () => {
     const logLengthBeforeEvent = calls.length;
     const { eventBus } = await import("../src/lib/eventBus");
     act(() => {
-      eventBus.publish("extensions_changed", {});
+      eventBus.publish("extension.catalog", {});
     });
 
     await waitFor(() => expect(state.idsCalls.n).toBeGreaterThan(callsBeforeEvent));

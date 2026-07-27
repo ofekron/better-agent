@@ -6538,6 +6538,54 @@ button.run-badge-clickable:focus-visible {
   color: var(--error);
   font-size: calc(13px * var(--app-font-scale));
 }
+.extension-app-settings {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.extension-app-settings-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  transition:
+    border-color 200ms ease,
+    background-color 200ms ease;
+}
+.extension-app-settings-row:focus-within {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--bg-tertiary) 55%, transparent);
+}
+.extension-app-settings-toggle {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+}
+.extension-app-settings-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.extension-app-settings-owner {
+  font-size: calc(12px * var(--app-font-scale));
+  opacity: 0.6;
+}
+@keyframes extension-app-settings-status-in {
+  from { opacity: 0; transform: translateY(-2px); }
+  to { opacity: 0.8; transform: none; }
+}
+.extension-app-settings-status {
+  font-size: calc(12px * var(--app-font-scale));
+  opacity: 0.8;
+  animation: extension-app-settings-status-in 200ms ease;
+}
+.extension-app-settings-status.is-error {
+  color: var(--error);
+  opacity: 1;
+}
 .extension-ui-settings-row {
   display: grid;
   grid-template-columns: minmax(190px, 0.45fr) minmax(0, 1fr);

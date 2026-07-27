@@ -51,6 +51,8 @@ import { ExtensionQuickButtons, type HookActionContext } from "./ExtensionUiHook
 import { ServerSetting } from "./ServerSetting";
 import { BasCompanionAppsSetting } from "./BasCompanionAppsSetting";
 import { MobileNotificationSettings } from "./MobileNotificationSettings";
+import { ExtensionAppSettingsSection } from "./ExtensionAppSettingsSection";
+import { useExtensionAppSettings } from "../hooks/useExtensionAppSettings";
 
 import { API } from "../api";
 import { providerQuotaStatus } from "../utils/quotaStatus";
@@ -115,7 +117,26 @@ type SettingsSection =
   | "passwords"
   | "server"
   | "notifications"
-  | `extension:${string}`;
+  | `extension:${string}`
+  | `extsettings:${string}`;
+
+/** Core section ids an extension may contribute settings INTO — a manifest
+ * section whose id matches one of these appends to that section instead of
+ * adding a second nav entry with the same meaning. */
+const CORE_SETTINGS_SECTION_IDS: ReadonlySet<string> = new Set([
+  "providers", "account", "language", "appearance", "desktop", "recovery",
+  "shortcuts", "delegation", "context", "internalLlm", "sessions", "voice",
+  "extensions", "capabilities", "harnessProfiles", "passwords", "server",
+  "notifications",
+]);
+
+const EXT_SETTINGS_PREFIX = "extsettings:";
+
+function navIdForExtensionSection(sectionId: string): SettingsSection {
+  return CORE_SETTINGS_SECTION_IDS.has(sectionId)
+    ? (sectionId as SettingsSection)
+    : (`${EXT_SETTINGS_PREFIX}${sectionId}` as SettingsSection);
+}
 type NetworkBindAddress = "127.0.0.1" | "0.0.0.0";
 
 interface ProviderSetupCommandResult {
@@ -1343,8 +1364,10 @@ function ProvidersList({
   }, [extensionSettingsModules]);
   const extensionSettingsSection = extensionSettingsBySection.get(section);
   const isNative = Capacitor.isNativePlatform();
+  const { sections: extensionAppSettings, refresh: refreshExtensionAppSettings } =
+    useExtensionAppSettings();
   type SettingsGroup = "general" | "harness";
-  const sections: { id: SettingsSection; label: string; group: SettingsGroup }[] = [
+  const coreSections: { id: SettingsSection; label: string; group: SettingsGroup }[] = [
     { id: "providers", label: t("setup.providersTitle"), group: "general" },
     { id: "account", label: t("settings.accountTitle"), group: "general" },
     { id: "language", label: t("language.label"), group: "general" },
@@ -1369,11 +1392,39 @@ function ProvidersList({
       group: "general" as const,
     })),
   ];
+  // An extension section whose id matches a core section merges into it; the
+  // rest each get their own nav entry.
+  const extensionAppSettingsSection = useMemo(() => {
+    const id = section.startsWith(EXT_SETTINGS_PREFIX)
+      ? section.slice(EXT_SETTINGS_PREFIX.length)
+      : section;
+    return (extensionAppSettings ?? []).find((item) => item.id === id) ?? null;
+  }, [extensionAppSettings, section]);
+  const presentSectionIds = new Set(coreSections.map((item) => item.id));
+  const sections = [
+    ...coreSections,
+    ...(extensionAppSettings ?? [])
+      .map((item) => ({
+        id: navIdForExtensionSection(item.id),
+        label: item.label,
+        group: "general" as const,
+      }))
+      .filter((item) => !presentSectionIds.has(item.id)),
+  ];
   useEffect(() => {
     if (section.startsWith("extension:") && !extensionSettingsSection) {
       onSectionChange("providers");
     }
   }, [extensionSettingsSection, onSectionChange, section]);
+  useEffect(() => {
+    if (
+      section.startsWith(EXT_SETTINGS_PREFIX)
+      && extensionAppSettings
+      && !extensionAppSettingsSection
+    ) {
+      onSectionChange("providers");
+    }
+  }, [extensionAppSettings, extensionAppSettingsSection, onSectionChange, section]);
   const body = (
     <>
       {section === "providers" && (
@@ -1467,6 +1518,12 @@ function ProvidersList({
       {section === "server" && isNative && <ServerSetting />}
       {section === "notifications" && isNative && <MobileNotificationSettings />}
       {extensionSettingsSection && <ExtensionModuleSlot module={extensionSettingsSection} />}
+      {extensionAppSettingsSection && (
+        <ExtensionAppSettingsSection
+          section={extensionAppSettingsSection}
+          onSaved={refreshExtensionAppSettings}
+        />
+      )}
     </>
   );
 

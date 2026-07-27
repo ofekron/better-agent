@@ -21,6 +21,7 @@ function mockHooksFetch() {
                 extension_name: "Assistant",
                 label: "Assistant",
                 icon: "assistant-start",
+                placements: ["session"],
                 action: {
                   type: "ensure",
                   endpoint: "/api/assistant/ensure",
@@ -46,10 +47,34 @@ function mockHooksFetch() {
 }
 
 describe("ExtensionQuickButtons", () => {
+  it("delivers tree events to ancestor subscribers and not siblings", () => {
+    const root = vi.fn();
+    const branch = vi.fn();
+    const leaf = vi.fn();
+    const sibling = vi.fn();
+    const offRoot = eventBus.subscribe("extension", root);
+    const offBranch = eventBus.subscribe("extension.ui", branch);
+    const offLeaf = eventBus.subscribe("extension.ui.frontend_modules", leaf);
+    const offSibling = eventBus.subscribe("extension.config", sibling);
+    try {
+      eventBus.publish("extension.ui.frontend_modules", {});
+    } finally {
+      offRoot();
+      offBranch();
+      offLeaf();
+      offSibling();
+    }
+
+    expect(root).toHaveBeenCalledTimes(1);
+    expect(branch).toHaveBeenCalledTimes(1);
+    expect(leaf).toHaveBeenCalledTimes(1);
+    expect(sibling).not.toHaveBeenCalled();
+  });
+
   it("renders generic Assistant quick button and navigates through ensure action", async () => {
     const fetchMock = mockHooksFetch();
     const navigate = vi.fn();
-    render(<ExtensionQuickButtons context={{ navigate, cwd: "/repo" }} variant="toolbar" />);
+    render(<ExtensionQuickButtons context={{ navigate, cwd: "/repo" }} variant="toolbar" placement="session" />);
 
     const button = await screen.findByRole("button", { name: "Assistant" });
     expect(button.className).toContain("extension-quick-button--icon-assistant-start");
@@ -67,7 +92,7 @@ describe("ExtensionQuickButtons", () => {
 
   it("renders the same hook in mobile topbar variant", async () => {
     mockHooksFetch();
-    render(<ExtensionQuickButtons context={{ navigate: vi.fn(), cwd: "" }} variant="topbar" />);
+    render(<ExtensionQuickButtons context={{ navigate: vi.fn(), cwd: "" }} variant="topbar" placement="session" />);
 
     expect(await screen.findByRole("button", { name: "Assistant" })).toBeTruthy();
   });

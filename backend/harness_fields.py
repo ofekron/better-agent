@@ -220,6 +220,10 @@ def _settings_group(extension_id: str) -> dict[str, Any]:
     for spec in settings.get("schema") or []:
         if not isinstance(spec, dict) or not spec.get("key"):
             continue
+        # Settings bound to an app Settings section hold one app-wide value
+        # and are edited there, so they are never profile overlays.
+        if spec.get("section"):
+            continue
         key = str(spec["key"])
         is_secret = spec.get("type") == "secret"
         items.append({
@@ -564,14 +568,22 @@ _PROFILE_SCOPED_GROUPS = frozenset({
 })
 
 
-def _is_secret_setting(extension_id: str, key: str) -> bool:
+def _setting_spec(extension_id: str, key: str) -> dict:
     record = extension_store.get_extension(extension_id)
     if record is None:
-        return False
+        return {}
     for item in (record.get("manifest") or {}).get("entrypoints", {}).get("settings") or []:
         if isinstance(item, dict) and item.get("key") == key:
-            return item.get("type") == "secret"
-    return False
+            return item
+    return {}
+
+
+def _is_global_setting(extension_id: str, key: str) -> bool:
+    """A setting is global when it is secret-typed (the value lives in the OS
+    keychain, so a profile that could rebind it would be a credential-theft
+    primitive) or bound to an app Settings section (one app-wide value)."""
+    spec = _setting_spec(extension_id, key)
+    return spec.get("type") == "secret" or bool(spec.get("section"))
 
 
 def scope_for(path: list[str]) -> str:
@@ -589,9 +601,9 @@ def scope_for(path: list[str]) -> str:
         group = str(path[2])
         if group not in _PROFILE_SCOPED_GROUPS:
             return SCOPE_GLOBAL
-        # A secret-typed setting lives in the OS keychain, so it is global
-        # even though the settings group as a whole is profile-scoped.
-        if group == GROUP_SETTINGS and len(path) > 3 and _is_secret_setting(str(path[1]), str(path[3])):
+        # Secret-typed and app-section settings hold one value, so they are
+        # global even though the settings group as a whole is profile-scoped.
+        if group == GROUP_SETTINGS and len(path) > 3 and _is_global_setting(str(path[1]), str(path[3])):
             return SCOPE_GLOBAL
         return SCOPE_PROFILE
     raise HarnessFieldError(f"Unknown harness field path: {'.'.join(str(p) for p in path)}")

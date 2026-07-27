@@ -470,7 +470,7 @@ async def _record_slow_call(
     if not disabled:
         return
     import extension_api
-    await extension_api._broadcast_extensions_changed()
+    await extension_api._broadcast_extension_changed(*extension_api.EXTENSION_CATALOG_TOPICS)
     logger.error(
         "extension backend quarantined after repeated slow calls: %s",
         extension_id,
@@ -489,7 +489,7 @@ async def _record_timeout(
     if not disabled:
         return
     import extension_api
-    await extension_api._broadcast_extensions_changed()
+    await extension_api._broadcast_extension_changed(*extension_api.EXTENSION_CATALOG_TOPICS)
     logger.error("extension backend quarantined after repeated timeouts: %s", extension_id)
 
 

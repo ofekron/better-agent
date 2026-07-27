@@ -217,14 +217,14 @@ describe("harness settings save latency", () => {
     expect(fetchDescriptor).toHaveBeenCalledTimes(initialDescriptorCalls + 1);
   });
 
-  it("reconciles after an in-flight extension event", async () => {
+  it("reconciles after an in-flight extension config event", async () => {
     trackedFetch.mockResolvedValue(response({
       profiles: [{ id: "default", name: "Default", revision: "" }],
     }));
     fetchDescriptor.mockResolvedValue(descriptor);
     fetchProfile.mockResolvedValue(profile("r1", true));
     writeFields.mockImplementation(async () => {
-      eventBus.publish("extensions_changed", {});
+      eventBus.publish("extension.config.skills", {});
       eventBus.publish("harness_profiles_changed", {
         action: "fields_updated",
         profile_id: "default",
@@ -245,5 +245,37 @@ describe("harness settings save latency", () => {
     await waitFor(() => expect(fetchProfile).toHaveBeenCalledTimes(initialProfileCalls + 1));
     expect(trackedFetch).toHaveBeenCalledTimes(initialListCalls + 1);
     expect(fetchDescriptor).toHaveBeenCalledTimes(initialDescriptorCalls + 1);
+  });
+
+  it("ignores unrelated in-flight extension UI events", async () => {
+    trackedFetch.mockResolvedValue(response({
+      profiles: [{ id: "default", name: "Default", revision: "" }],
+    }));
+    fetchDescriptor.mockResolvedValue(descriptor);
+    fetchProfile.mockResolvedValue(profile("r1", true));
+    writeFields.mockImplementation(async () => {
+      eventBus.publish("extension.ui.frontend_modules", {});
+      eventBus.publish("harness_profiles_changed", {
+        action: "fields_updated",
+        profile_id: "default",
+        revision: "r2",
+      });
+      return profile("r2", false);
+    });
+
+    render(<HarnessSettingsEditor />);
+    await screen.findByText("Fixture Extension");
+    const initialListCalls = trackedFetch.mock.calls.length;
+    const initialProfileCalls = fetchProfile.mock.calls.length;
+    const initialDescriptorCalls = fetchDescriptor.mock.calls.length;
+
+    fireEvent.click(screen.getByLabelText("Fixture skill"));
+
+    await waitFor(() => expect(writeFields).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect((screen.getByLabelText("Fixture skill") as HTMLInputElement).checked).toBe(false));
+
+    expect(trackedFetch).toHaveBeenCalledTimes(initialListCalls);
+    expect(fetchProfile).toHaveBeenCalledTimes(initialProfileCalls);
+    expect(fetchDescriptor).toHaveBeenCalledTimes(initialDescriptorCalls);
   });
 });

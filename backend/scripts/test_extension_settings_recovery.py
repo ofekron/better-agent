@@ -19,9 +19,12 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 import extension_api  # noqa: E402
 import extension_store  # noqa: E402
+import installation_profile  # noqa: E402
+
+installation_profile.integrations_enabled = lambda: True  # type: ignore[assignment]
 
 
-async def _no_broadcast() -> None:
+async def _no_broadcast(*_topics: str) -> None:
     return None
 
 
@@ -72,8 +75,8 @@ def main() -> None:
         encoding="utf-8",
     )
 
-    original_broadcast = extension_api._broadcast_extensions_changed
-    extension_api._broadcast_extensions_changed = _no_broadcast
+    original_broadcast = extension_api._broadcast_extension_changed
+    extension_api._broadcast_extension_changed = _no_broadcast
     app = FastAPI()
     app.include_router(extension_api.router)
     app.get("/healthy")(lambda: {"ok": True})
@@ -82,7 +85,7 @@ def main() -> None:
             response = client.get("/api/extensions/frontend-entrypoints")
             assert response.status_code == 200
             assert json.loads(settings_path.read_text(encoding="utf-8")) == {
-                "schema_version": 2,
+                "schema_version": 3,
                 "extensions": {
                     "ofek-dev.supervisor": {
                         "values": {},
@@ -111,7 +114,7 @@ def main() -> None:
                 "error": "extension_settings_incompatible",
                 "message": "Extension settings are incompatible with this Better Agent version",
                 "found_schema": 999,
-                "expected_schema": 2,
+                "expected_schema": 3,
                 "reset_available": True,
             }
             assert client.get("/healthy").json() == {"ok": True}
@@ -137,7 +140,7 @@ def main() -> None:
                 "expected_revision": current["revision"],
             })
             assert reset.status_code == 200
-            assert reset.json() == {"schema_version": 2}
+            assert reset.json() == {"schema_version": 3}
             assert not settings_path.exists()
             quarantined = settings_path.with_name(
                 f"extension-settings.incompatible-{current['revision']}.json"
@@ -170,7 +173,7 @@ def main() -> None:
             }
             assert all("/api/extensions/ofek-dev.supervisor/frontend/ui/index.js" in item["module_url"] for item in modules)
     finally:
-        extension_api._broadcast_extensions_changed = original_broadcast
+        extension_api._broadcast_extension_changed = original_broadcast
         shutil.rmtree(HOME, ignore_errors=True)
 
 

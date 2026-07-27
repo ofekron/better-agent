@@ -38,7 +38,10 @@ async def _fake_broadcast_workers_changed(_cwd):
 
 
 def _install_team_orchestration_extension() -> None:
-    extension_id = extension_store.extension_id_for_role('team-orchestration')
+    extension_id = (
+        extension_store.extension_id_for_role('team-orchestration')
+        or "test.team-orchestration"
+    )
     package = Path(_tmp) / "private-fixtures" / extension_id
     if package.exists():
         shutil.rmtree(package)
@@ -49,6 +52,7 @@ def _install_team_orchestration_extension() -> None:
         "name": extension_id,
         "version": "1.0.0",
         "description": extension_id,
+        "core_roles": ["team-orchestration"],
         "surfaces": ["backend_feature"],
         "entrypoints": {},
         "permissions": {},
@@ -795,6 +799,35 @@ def test_bare_provision_worker_persists_disabled_builtin_extensions():
     assert session["disabled_builtin_extensions"] == ["ofek.testape-internal"]
 
 
+def test_provision_can_replace_uninitialized_existing_worker():
+    import asyncio as _asyncio
+
+    main.coordinator._init_target_agent_session = _fail_init_target_agent_session
+    main.coordinator.broadcast_workers_changed = _fake_broadcast_workers_changed
+    body = {
+        "cwd": "/tmp/replace-uninitialized-worker-project",
+        "bare_config": True,
+        "replace_uninitialized": True,
+        "workers": [
+            {
+                "role_key": "testape:web-device-worker",
+                "orchestration_mode": "native",
+            }
+        ],
+    }
+
+    first = _asyncio.run(main._provision_workers_from_body(body))
+    second = _asyncio.run(main._provision_workers_from_body(body))
+
+    first_worker = first["workers"][0]
+    second_worker = second["workers"][0]
+    assert first_worker["initialized"] is False
+    assert second_worker["initialized"] is False
+    assert second_worker["created"] is True
+    assert second_worker["agent_session_id"] != first_worker["agent_session_id"]
+    assert main.session_manager.get_lite(first_worker["agent_session_id"]) is None
+
+
 def test_existing_provision_worker_can_clear_disabled_builtin_extensions():
     import asyncio as _asyncio
     from session_manager import manager as session_manager
@@ -833,6 +866,53 @@ def test_existing_provision_worker_can_clear_disabled_builtin_extensions():
     assert second["workers"][0]["created"] is False
     session = session_manager.get(worker["agent_session_id"])
     assert session["disabled_builtin_extensions"] == []
+
+
+def test_pool_picker_skips_uninitialized_workers_and_clears_affinity():
+    from stores import pool_affinity_store
+    from stores import worker_store
+
+    sender = main.session_manager.create(
+        name="manager",
+        cwd="/tmp/pool-init-filter",
+        orchestration_mode="native",
+    )
+    pending = main.session_manager.create(
+        name="worker:pending-reviewer",
+        cwd="/tmp/pool-init-filter",
+        orchestration_mode="native",
+    )
+    ready = main.session_manager.create(
+        name="worker:ready-reviewer",
+        cwd="/tmp/pool-init-filter",
+        orchestration_mode="native",
+    )
+    main.session_manager.set_agent_sid(ready["id"], "native", "agent-ready")
+    worker_store.upsert_worker(
+        cwd="/tmp/pool-init-filter",
+        agent_session_id=pending["id"],
+        orchestration_mode="native",
+        agent_sid=None,
+        name="worker:pending-reviewer",
+        role_key="pending-reviewer",
+        tags=["review"],
+    )
+    worker_store.upsert_worker(
+        cwd="/tmp/pool-init-filter",
+        agent_session_id=ready["id"],
+        orchestration_mode="native",
+        agent_sid="agent-ready",
+        name="worker:ready-reviewer",
+        role_key="ready-reviewer",
+        tags=["review"],
+    )
+
+    pool_affinity_store.bind("review", sender["id"], "thread-1", pending["id"])
+
+    target = main._pick_pool_worker_for_sender("review", sender["id"], "thread-1", True)
+
+    assert target["agent_session_id"] == ready["id"]
+    assert pool_affinity_store.get_binding("review", sender["id"], "thread-1") == ready["id"]
 
 
 def test_team_messages_inherit_target_disallowed_tools():
@@ -1296,7 +1376,11 @@ if __name__ == "__main__":
     test_find_worker_removes_stale_provider_session_and_continues()
     test_bare_provision_workers_returns_pending_without_init_turn()
     test_bare_provision_worker_persists_disallowed_tools()
+    test_bare_provision_worker_persists_disabled_builtin_extensions()
+    test_provision_can_replace_uninitialized_existing_worker()
     test_team_messages_inherit_target_disallowed_tools()
+    test_existing_provision_worker_can_clear_disabled_builtin_extensions()
+    test_pool_picker_skips_uninitialized_workers_and_clears_affinity()
     test_persisted_queue_promotion_preserves_disallowed_tools()
     test_handle_prompt_inherits_session_disallowed_tools_when_turn_omits_them()
     test_supervisor_prompt_inherits_session_disallowed_tools()

@@ -225,7 +225,7 @@ export function useExtensionFrontendCatalog(slot: string): ExtensionFrontendCata
 
   useEffect(() => {
     void refresh();
-    const off = eventBus.subscribe("extensions_changed", () => {
+    const off = eventBus.subscribe("extension.ui.frontend_modules", () => {
       void refresh();
     });
     return off;

@@ -72,6 +72,9 @@ export interface MarkerInfo {
   color: string;
   tooltip: string;
   sound?: boolean;
+  // Boolean setting of the owning extension that gates `sound`. Absent means
+  // the sound is ungated.
+  sound_setting?: string;
   // Source tag (e.g. NEEDS_USER_DECISION / ALL_TASKS__DONE). Set by the
   // backend at marker-detect time so status sort classifies by tag, never
   // by drifting color/tooltip.

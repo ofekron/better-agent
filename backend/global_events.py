@@ -70,6 +70,7 @@ _EVENT_OWNERS: Mapping[str, tuple[str, ...]] = {
         "node_registration_resolved",
     ),
     "credential_broker": ("credential_consent_changed",),
+    "installation_profile": ("installation_capabilities_changed",),
 }
 
 GLOBAL_EVENT_SPECS = {

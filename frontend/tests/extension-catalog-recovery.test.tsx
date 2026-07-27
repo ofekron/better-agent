@@ -93,14 +93,16 @@ describe("extension catalog recovery", () => {
       expect.stringContaining("/api/extensions/settings/reset"),
       expect.objectContaining({ method: "POST", credentials: "include" }),
     );
-    const resetCall = fetchMock.mock.calls.find(([, init]) => init?.method === "POST");
+    const resetCall = fetchMock.mock.calls.find(([url, init]) =>
+      String(url).includes("/api/extensions/settings/reset") && init?.method === "POST"
+    );
     expect(JSON.parse(String(resetCall?.[1]?.body))).toEqual({
       expected_found_schema: 1,
       expected_revision: "a".repeat(64),
     });
   });
 
-  it("refetches the catalog after an extensions_changed recovery event", async () => {
+  it("refetches the catalog after an extension UI recovery event", async () => {
     let requests = 0;
     vi.stubGlobal("fetch", vi.fn(async () => {
       requests += 1;
@@ -127,7 +129,7 @@ describe("extension catalog recovery", () => {
     render(<CatalogProbe />);
     expect(await screen.findByRole("alert")).toBeTruthy();
 
-    eventBus.publish("extensions_changed", {});
+    eventBus.publish("extension.ui.frontend_modules", {});
 
     expect(await screen.findByText("supervisor-controls")).toBeTruthy();
     expect(screen.queryByRole("alert")).toBeNull();

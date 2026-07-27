@@ -35,6 +35,7 @@ from better_agent_sdk.manifest import (
     PermissionSet,
     QuickButton,
     Setting,
+    SettingsSection,
     SmokeTest,
     TeamDefinition,
 )
@@ -56,6 +57,7 @@ __all__ = [
     "PermissionSet",
     "QuickButton",
     "Setting",
+    "SettingsSection",
     "SmokeTest",
     "TeamDefinition",
 ]
