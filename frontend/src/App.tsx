@@ -35,6 +35,7 @@ import type { FileEditorHandle } from "./components/FileViewer";
 import { ConfigPanelContext } from "./components/configPanelContext";
 import { FileChooserModal } from "./components/FileChooserModal";
 import { isAbsolutePath } from "./utils/linkifyFilePaths";
+import { sameProjectPath } from "./utils/projectPath";
 import { sessionHasForkSource } from "./utils/sessionFork";
 import { setFocusedTagHighlight } from "./utils/tagHighlights";
 import { scrollCommentTargetIntoView } from "./utils/commentFocus";
@@ -3853,7 +3854,7 @@ function AppMain({
     ) {
       return;
     }
-    if (currentSession.cwd !== selectedProjectPath) return;
+    if (!sameProjectPath(currentSession.cwd, selectedProjectPath)) return;
     if ((currentSession.node_id || "primary") !== selectedProjectNodeId) return;
     if (currentSession.archived) return;
     setRememberedSessionId(
@@ -4081,7 +4082,7 @@ function AppMain({
     // gets redirected to whatever session the current project resolves to.
     if (routed.bare_config) return;
     if (
-      routed.cwd === selectedProjectPath &&
+      sameProjectPath(routed.cwd, selectedProjectPath) &&
       (routed.node_id || "primary") === selectedProjectNodeId &&
       !routed.archived
     ) {
@@ -6406,7 +6407,7 @@ function AppMain({
       selectedProjectPath
         ? sessions.filter(
             (s) =>
-              s.cwd === selectedProjectPath
+              sameProjectPath(s.cwd, selectedProjectPath)
               && (s.node_id || "primary") === selectedProjectNodeId,
           )
         : machines.length > 1

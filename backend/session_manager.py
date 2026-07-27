@@ -7543,18 +7543,48 @@ def _find_worker_panel_message_id(
     return None
 
 
+_WINDOWS_PATH_RE = re.compile(r"^(?:[A-Za-z]:[\\/]|\\\\)")
+
+
+def canonical_project_path(path: str | None) -> str:
+    """Spelling-independent identity for a project path.
+
+    A Windows directory has two equally valid spellings — `C:\\Users\\x` and
+    `C:/Users/x` — and a session hosted on a Windows node is stored with
+    whichever one its creator used. Exact comparison then files the same
+    directory as two projects, which hid node-hosted sessions from the node's
+    own view.
+
+    Only Windows-shaped paths (drive letter or UNC) are normalized: on POSIX a
+    backslash is a legal filename character, so rewriting separators there
+    would merge genuinely different directories.
+    """
+    text = (path or "").strip()
+    if not text or not _WINDOWS_PATH_RE.match(text):
+        return text
+    unified = text.replace("\\", "/").rstrip("/")
+    if len(unified) >= 2 and unified[1] == ":":
+        return unified[0].upper() + unified[1:]
+    return unified
+
+
 def session_matches_project(record: dict, project_path: str | None) -> bool:
     """Canonical project-membership check for a session or summary dict.
 
-    A session belongs to a project when its cwd equals the project path, or
-    when it carries the `all_projects` flag (visible in every project, e.g.
-    the assistant singleton). Every project_path filter — backend list/facet
-    paths and the frontend mirror in useSession.ts — must follow this rule."""
+    A session belongs to a project when its cwd names the same directory as
+    the project path, or when it carries the `all_projects` flag (visible in
+    every project, e.g. the assistant singleton). Every project_path filter —
+    backend list/facet paths and the frontend mirror in useSession.ts — must
+    follow this rule."""
     if not project_path:
         return True
     if record.get("all_projects"):
         return True
-    return record.get("cwd") == project_path
+    if record.get("cwd") == project_path:
+        return True
+    return canonical_project_path(record.get("cwd")) == canonical_project_path(
+        project_path
+    )
 
 
 # Module-level singleton — every backend caller imports `manager` from here.

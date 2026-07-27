@@ -25,6 +25,7 @@ import {
 } from "../lib/messagePagination";
 import { SingleFlight } from "../lib/singleFlight";
 import { wireHarnessProfileId } from "../lib/harnessProfile";
+import { sameProjectPath } from "../utils/projectPath";
 
 export { sortSessionsForList };
 
@@ -253,7 +254,7 @@ function canLocallyInsertIntoSessionList(
   if (
     filters.projectPath &&
     !session.all_projects &&
-    session.cwd !== filters.projectPath
+    !sameProjectPath(session.cwd, filters.projectPath)
   )
     return false;
   if (filters.search?.trim()) return false;
