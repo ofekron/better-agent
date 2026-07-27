@@ -132,6 +132,16 @@ def _mk_session_with_journal_only_panel() -> tuple[str, str]:
         },
         source="test", msg_id=msg["id"],
     )
+    for index in range(5):
+        event_ingester.ingest(
+            sid, sid, "agent_message",
+            {
+                "uuid": f"d-journal-only-late-{index}",
+                "type": "assistant",
+                "message": {"content": f"late {index}"},
+            },
+            source="test", msg_id=msg["id"],
+        )
     return sid, msg["id"]
 
 
@@ -169,6 +179,9 @@ def test_streaming_message_keeps_journal_worker_events() -> bool:
 
 def test_completed_message_recovers_journal_only_worker_panel() -> bool:
     sid, msg_id = _mk_session_with_journal_only_panel()
+    summary = event_ingester.message_event_summaries(sid, msg_ids={msg_id}).get(msg_id)
+    if not summary or summary.get("worker_panel_event_count") != 2:
+        return False
     tree = session_manager.get_root_tree_stubbed(sid, exchange_count=3)
     asst = _tree_assistant(tree, msg_id)
     workers = asst.get("workers") or []

@@ -32,13 +32,9 @@ import session_store
 logger = logging.getLogger(__name__)
 
 _UUID_KEY = "uuid"
-# Bump when the derivation of a summary's `last_events` changes so existing
-# sidecars (which cache the pre-computed preview verbatim) are invalidated
-# and rebuilt. v7: `model_switched` pinned into the preview by
-# `render_stub._STUB_ALWAYS_INCLUDE_TYPES` — without this bump every
-# pre-existing session keeps its stale unpinned preview forever (the
-# incremental path only folds NEW events, never re-prunes old ones).
-_EVENT_SUMMARIES_VERSION = 7
+# Bump when the derivation of a summary changes so existing sidecars are
+# invalidated and rebuilt.
+_EVENT_SUMMARIES_VERSION = 8
 _MAX_OPEN_APPEND_HANDLES = 64
 # Stable-storage fsync cadence for the background flusher. `fh.flush()`
 # (kernel page-cache visibility — what cross-process tailers and readers
@@ -2318,6 +2314,7 @@ class EventIngester:
             "byte_start": line_start,
             "byte_end": line_end,
             "event_count": 0,
+            "worker_panel_event_count": 0,
             "last_events": [],
             "_render_uuid_idx": {},
         })
@@ -2326,6 +2323,10 @@ class EventIngester:
                 rec["seq_start"] = seq
             rec["seq_end"] = seq
         rec["byte_end"] = line_end
+        if etype in {"worker_start", "worker_complete"}:
+            rec["worker_panel_event_count"] = (
+                int(rec.get("worker_panel_event_count") or 0) + 1
+            )
         summary_event = self._summary_render_event(entry)
         if summary_event is None:
             return

@@ -2126,12 +2126,7 @@ class SessionManager:
 
     @staticmethod
     def _summary_may_have_worker_panels(summary: dict) -> bool:
-        for event in summary.get("last_events") or []:
-            if isinstance(event, dict) and event.get("type") in {
-                "worker_start", "worker_event", "worker_complete",
-            }:
-                return True
-        return False
+        return int(summary.get("worker_panel_event_count") or 0) > 0
 
     @staticmethod
     def _worker_panel_delegation_ids(msg: dict) -> set[str]:

@@ -326,6 +326,7 @@ def _run_message_summaries_uses_valid_sidecar() -> bool:
     expected_summary = {
         "sid": sid,
         "event_count": 123,
+        "worker_panel_event_count": 0,
         "last_events": [{"seq": 9, "type": "agent_message", "data": {"ok": True}}],
         "seq_start": 9,
         "seq_end": 9,
@@ -341,6 +342,7 @@ def _run_message_summaries_uses_valid_sidecar() -> bool:
             "summaries": {"msg-1": expected_summary},
             "resolutions": {"9": "msg-1"},
             "seq_offsets": [0],
+            "worker_rows": {},
         }),
         encoding="utf-8",
     )
@@ -388,6 +390,7 @@ def _run_message_summaries_empty_sidecar_skips_seq_rebuild() -> bool:
             "summaries": {},
             "resolutions": {},
             "seq_offsets": seq_offsets,
+            "worker_rows": {},
         }),
         encoding="utf-8",
     )
@@ -426,6 +429,7 @@ def _run_message_summaries_non_empty_sidecar_loads_seq_offsets() -> bool:
     expected_summary = {
         "sid": sid,
         "event_count": 1,
+        "worker_panel_event_count": 0,
         "last_events": [{"seq": 1, "type": "agent_message", "data": {"ok": True}}],
         "seq_start": 1,
         "seq_end": 1,
@@ -441,6 +445,7 @@ def _run_message_summaries_non_empty_sidecar_loads_seq_offsets() -> bool:
             "summaries": {"msg-1": expected_summary},
             "resolutions": {},
             "seq_offsets": [0],
+            "worker_rows": {},
         }),
         encoding="utf-8",
     )
@@ -485,6 +490,7 @@ def _write_summary_sidecar(
     summary = {
         "sid": sid,
         "event_count": 1,
+        "worker_panel_event_count": 0,
         "last_events": [{"seq": 1, "type": "agent_message", "data": {"ok": True}}],
         "seq_start": 1,
         "seq_end": 1,
@@ -500,6 +506,7 @@ def _write_summary_sidecar(
             "summaries": {msg_id: summary},
             "resolutions": resolutions or {},
             "seq_offsets": [0],
+            "worker_rows": {},
         }),
         encoding="utf-8",
     )
