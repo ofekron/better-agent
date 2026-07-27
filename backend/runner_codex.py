@@ -44,6 +44,9 @@ from codex_normalize import (
     _codex_primary_assistant_text,
     _codex_terminal_state,
     _file_size,
+    codex_is_assistant_message_item,
+    codex_is_response_item,
+    codex_task_complete_without_answer,
 )
 from codex_usage import token_usage_from_codex_usage
 import codex_rate_limits
@@ -190,7 +193,21 @@ def _codex_config_overrides(
 CODEX_RESUME_CAPABILITY_METADATA_UNAVAILABLE = (
     "codex_resume_capability_metadata_unavailable"
 )
-CODEX_RESUME_CAPABILITY_CONTRACT_CHANGED = "codex_resume_capability_contract_changed"
+
+def _contract_matches(requested: dict, persisted: dict) -> bool:
+    """True when the resumed thread already carries the contract we want.
+
+    Codex re-serializes each tool with its own defaults (`type`, `deferLoading`),
+    so only the fields we actually sent define the contract.
+    """
+    try:
+        return json.dumps(
+            {key: persisted[key] for key in requested if key in persisted},
+            sort_keys=True,
+            separators=(",", ":"),
+        ) == json.dumps(requested, sort_keys=True, separators=(",", ":"))
+    except (TypeError, ValueError):
+        return False
 
 
 def _dynamic_tool_contracts_from_rollout(path: Path) -> Optional[dict[str, dict]]:
@@ -241,22 +258,12 @@ def _dynamic_tools_missing_from_rollout(
         if not name:
             continue
         persisted = persisted_contracts.get(name)
-        if persisted is None:
+        # session_meta records the tools offered at thread START and is never
+        # rewritten on resume, so a drifted contract is re-supplied on every
+        # resume — codex accepts a same-name tool and the turn gets the current
+        # definition.
+        if persisted is None or not _contract_matches(tool, persisted):
             missing.append(tool)
-            continue
-        try:
-            requested = json.dumps(tool, sort_keys=True, separators=(",", ":"))
-            # Codex re-serializes the tool with its own defaults (e.g. deferLoading);
-            # only the fields we actually requested define the capability contract.
-            projected = json.dumps(
-                {key: persisted[key] for key in tool if key in persisted},
-                sort_keys=True,
-                separators=(",", ":"),
-            )
-        except (TypeError, ValueError):
-            return [], CODEX_RESUME_CAPABILITY_CONTRACT_CHANGED
-        if projected != requested:
-            return [], CODEX_RESUME_CAPABILITY_CONTRACT_CHANGED
     return missing, None
 
 

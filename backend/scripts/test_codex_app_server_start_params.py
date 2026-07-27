@@ -180,8 +180,8 @@ def test_resume_dynamic_tools_use_only_missing_rollout_tools() -> None:
     assert missing_error is None
     assert unchanged == []
     assert unchanged_error is None
-    assert schema_changed == []
-    assert schema_error == runner_codex.CODEX_RESUME_CAPABILITY_CONTRACT_CHANGED
+    assert schema_changed == same_name_changed_schema
+    assert schema_error is None
     none_missing, none_error = runner_codex._dynamic_tools_missing_from_rollout(None, desired)
     assert none_missing == []
     assert none_error == runner_codex.CODEX_RESUME_CAPABILITY_METADATA_UNAVAILABLE
@@ -190,13 +190,22 @@ def test_resume_dynamic_tools_use_only_missing_rollout_tools() -> None:
 
 
 def test_resume_ignores_codex_added_rollout_fields() -> None:
+    """Codex stamps its own `type`/`deferLoading` defaults into session_meta.
+
+    Those are not drift: a schema change we shipped must be re-supplied, but a
+    byte-identical tool must not be, or every resume re-sends every tool.
+    """
     desired = [{"name": "mssg", "description": "Send", "inputSchema": {"type": "object"}}]
     with tempfile.TemporaryDirectory() as tmp:
         rollout = Path(tmp) / "rollout.jsonl"
         rollout.write_text(
             json.dumps({
                 "type": "session_meta",
-                "payload": {"dynamic_tools": [desired[0] | {"deferLoading": False}]},
+                "payload": {
+                    "dynamic_tools": [
+                        desired[0] | {"type": "function", "deferLoading": False},
+                    ],
+                },
             }) + "\n",
             encoding="utf-8",
         )
@@ -204,21 +213,17 @@ def test_resume_ignores_codex_added_rollout_fields() -> None:
             rollout, desired,
         )
 
-        rollout.write_text(
-            json.dumps({
-                "type": "session_meta",
-                "payload": {"dynamic_tools": [{"name": "mssg", "deferLoading": False}]},
-            }) + "\n",
-            encoding="utf-8",
-        )
-        dropped, dropped_error = runner_codex._dynamic_tools_missing_from_rollout(
-            rollout, desired,
+        # A field we now send that the persisted contract lacks is real drift:
+        # exactly the harness_profile_id case that bricked pre-existing threads.
+        widened = [desired[0] | {"inputSchema": {"type": "object", "properties": {}}}]
+        drifted, drifted_error = runner_codex._dynamic_tools_missing_from_rollout(
+            rollout, widened,
         )
 
     assert unchanged == []
     assert unchanged_error is None
-    assert dropped == []
-    assert dropped_error == runner_codex.CODEX_RESUME_CAPABILITY_CONTRACT_CHANGED
+    assert drifted == widened
+    assert drifted_error is None
 
 
 async def test_app_server_passes_config_overrides_before_subcommand() -> None:
