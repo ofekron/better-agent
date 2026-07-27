@@ -20,6 +20,7 @@ base that turns out dirty raises rather than being rotated.
 """
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -28,6 +29,8 @@ from paths import ba_home
 from env_compat import get_env
 
 from provisioning.spec import ProvisionedSessionSpec
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -90,6 +93,25 @@ def resolve_config(
         worker_description=_env(spec, "WORKER_DESCRIPTION") or spec.name,
         runner=runner,
     ))
+
+
+def spec_is_runnable(spec: ProvisionedSessionSpec) -> bool:
+    """Whether `resolve_config(spec)` yields a runnable configuration: a
+    provider + model are resolvable and, for fork run_mode, the resolved
+    provider supports forking.
+
+    Background/startup consumers gate on this so an unsupported assignment
+    (e.g. a non-fork-capable active provider inherited by a fork-only spec)
+    degrades to "no result" instead of raising out of a daemon thread. The
+    escape hatch stays the user's: pinning a fork-capable provider on the
+    spec's internal-LLM task makes it runnable again.
+    """
+    try:
+        resolve_config(spec)
+    except Exception:
+        logger.debug("provisioned spec %r is not runnable", spec.key, exc_info=True)
+        return False
+    return True
 
 
 def _with_resolved_runner(cfg: ProvisionedConfig) -> ProvisionedConfig:

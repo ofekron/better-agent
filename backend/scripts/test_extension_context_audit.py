@@ -15,8 +15,10 @@ _test_home.isolate("ba-extension-context-audit-")
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+import config_store  # noqa: E402
 import extension_context_audit as audit  # noqa: E402
 import extension_store  # noqa: E402
+import provisioning  # noqa: E402
 
 
 def reset_projection() -> None:
@@ -120,6 +122,80 @@ def t_cold_projection_schedules_inventory_refresh_without_blocking() -> None:
     check(calls == ["/tmp/project"], "cold projection schedules inventory refresh")
 
 
+class resolved_provider:
+    """Pin what `extension_context_audit` resolves to, with its fork capability."""
+
+    def __init__(self, provider_id: str, *, supports_fork: bool) -> None:
+        self._provider_id = provider_id
+        self._supports_fork = supports_fork
+
+    def __enter__(self) -> "resolved_provider":
+        self._resolve_internal_llm = config_store.resolve_internal_llm
+        self._resolve_provider_ref = config_store.resolve_provider_ref
+        config_store.resolve_internal_llm = lambda _task: {  # type: ignore[assignment]
+            "provider_id": self._provider_id,
+            "model": "test-model",
+            "reasoning_effort": "",
+            "runner": "",
+        }
+        config_store.resolve_provider_ref = lambda _ref: {  # type: ignore[assignment]
+            "id": self._provider_id,
+            "supports_fork": self._supports_fork,
+        }
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        config_store.resolve_internal_llm = self._resolve_internal_llm  # type: ignore[assignment]
+        config_store.resolve_provider_ref = self._resolve_provider_ref  # type: ignore[assignment]
+
+
+def _refresh_calls_for_stale_cache(inventory: dict) -> list[str]:
+    reset_projection()
+    calls: list[str] = []
+    seed_projection("/tmp/project", inventory)
+    old_build = audit.build_inventory
+    old_trigger = audit._trigger_refresh  # type: ignore[attr-defined]
+    try:
+        audit.build_inventory = lambda _cwd: inventory  # type: ignore[assignment]
+        audit._trigger_refresh = lambda fingerprint, _inventory: calls.append(fingerprint)  # type: ignore[attr-defined]
+        check(audit.runtime_context("/tmp/project") == [], "stale cache injects nothing")
+    finally:
+        audit.build_inventory = old_build  # type: ignore[assignment]
+        audit._trigger_refresh = old_trigger  # type: ignore[attr-defined]
+    return calls
+
+
+def t_non_fork_provider_skips_audit_instead_of_raising() -> None:
+    inventory = {"version": 1, "cwd": "/tmp/project", "extensions": [{"id": "agy"}], "runtime_skills": []}
+    with resolved_provider("agy-default", supports_fork=False):
+        try:
+            provisioning.resolve_config(audit.AUDIT_SPEC)
+            raise AssertionError("fork spec resolved against a non-fork provider")
+        except RuntimeError as exc:
+            check("does not support fork" in str(exc), "fork run_mode rejects a non-fork provider")
+        check(
+            audit._is_runtime_ready() is False,  # type: ignore[attr-defined]
+            "non-fork resolved provider makes the audit not runtime-ready",
+        )
+        check(
+            _refresh_calls_for_stale_cache(inventory) == [],
+            "non-fork resolved provider skips the audit refresh instead of raising",
+        )
+
+
+def t_fork_capable_provider_still_runs_the_audit() -> None:
+    inventory = {"version": 1, "cwd": "/tmp/project", "extensions": [{"id": "fork"}], "runtime_skills": []}
+    with resolved_provider("fork-capable", supports_fork=True):
+        check(
+            audit._is_runtime_ready() is True,  # type: ignore[attr-defined]
+            "fork-capable resolved provider makes the audit runtime-ready",
+        )
+        check(
+            _refresh_calls_for_stale_cache(inventory) == [audit._fingerprint(inventory)],  # type: ignore[attr-defined]
+            "fork-capable resolved provider still starts the audit refresh",
+        )
+
+
 def t_audit_result_is_bounded_and_normalized() -> None:
     parsed = audit.AUDIT_SPEC.parse_result(
         "prefix {\"summary\":\"ok\",\"tool_guidance\":[\"a\",\"b\"],"
@@ -143,7 +219,7 @@ def t_harness_additions_include_instructions_skills_and_mcp() -> None:
     }
     old_enabled = extension_store.is_mcp_server_enabled
     try:
-        extension_store.is_mcp_server_enabled = lambda _extension_id, _name: True  # type: ignore[assignment]
+        extension_store.is_mcp_server_enabled = lambda _extension_id, _name, **_kw: True  # type: ignore[assignment]
         additions = extension_store.extension_harness_additions(record)
     finally:
         extension_store.is_mcp_server_enabled = old_enabled  # type: ignore[assignment]
@@ -160,6 +236,8 @@ def main() -> None:
         t_not_ready_suppresses_cached_context()
         t_stale_cache_triggers_refresh_without_blocking()
         t_cold_projection_schedules_inventory_refresh_without_blocking()
+        t_non_fork_provider_skips_audit_instead_of_raising()
+        t_fork_capable_provider_still_runs_the_audit()
         t_audit_result_is_bounded_and_normalized()
         t_harness_additions_include_instructions_skills_and_mcp()
     finally:
