@@ -461,9 +461,12 @@ async def _bridge_extension_mcp_dynamic_tools(
         call_config["_server_name"] = server_name
         try:
             tools = await mcp_stdio_bridge.mcp_list_tools(server_name, call_config)
-        except Exception as exc:
-            bridge_errors.append((server_name, exc))
-            continue
+        except Exception:
+            try:
+                tools = await mcp_stdio_bridge.mcp_list_tools(server_name, call_config)
+            except Exception as exc:
+                bridge_errors.append((server_name, exc))
+                continue
         bridged_any = False
         bridged_all = bool(tools)
         for item in tools:
@@ -502,7 +505,7 @@ async def _bridge_extension_mcp_dynamic_tools(
             "extension MCP bridge servers=%s dynamic_tools=%s errors=%s",
             sorted(bridge_configs),
             sorted(tool["name"] for tool in dynamic_tools),
-            [server_name for server_name, _exc in bridge_errors],
+            [f"{server_name}: {exc}" for server_name, exc in bridge_errors],
         )
 
 

@@ -240,13 +240,18 @@ async def test_bridge_uses_selected_extension_when_provider_config_has_only_skil
 async def test_bridge_uses_configured_extension_during_resolution_race() -> None:
     original_configs = runner_codex.extension_store.native_mcp_server_configs
     original_list_tools = runner_codex.mcp_stdio_bridge.mcp_list_tools
+    list_attempts = 0
 
     def fake_configs(_inputs: dict, *, user_facing: bool, bare: bool):
         return {}
 
     async def fake_list_tools(server_name: str, config: dict):
+        nonlocal list_attempts
+        list_attempts += 1
         assert server_name == "testape"
         assert config["command"] == "/configured/testape-mcp"
+        if list_attempts == 1:
+            raise RuntimeError("transient MCP startup failure")
         return [{
             "name": "test_ui",
             "description": "Run TestApe UI test",
@@ -282,6 +287,7 @@ async def test_bridge_uses_configured_extension_during_resolution_race() -> None
 
     assert [tool["name"] for tool in dynamic_tools] == ["test_ui"]
     assert "testape" not in provider_run_config["mcp_servers"]
+    assert list_attempts == 2
 
 
 async def test_bridge_preserves_custom_same_name_mcp_server() -> None:
