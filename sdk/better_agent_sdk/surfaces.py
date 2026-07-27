@@ -142,7 +142,22 @@ def build_mcp_server(
 
     server = FastMCP(name, instructions=instructions or None)
     add_tools(server, build_client(specs, local=local))
+    _disable_structured_output(server._tool_manager.list_tools())
     return server
+
+
+def _disable_structured_output(tools: Any) -> None:
+    """Drop the outputSchema FastMCP derives from OperationResult.
+
+    OperationResult is a RootModel[Any], so its JSON schema has no ``type``.
+    MCP requires outputSchema to be an object schema, and strict clients reject
+    the whole tools/list response, hiding every tool on the server.
+    """
+    for tool in tools:
+        metadata = tool.fn_metadata
+        metadata.output_schema = None
+        metadata.output_model = None
+        metadata.wrap_output = False
 
 
 def build_cli_app(name: str, specs: tuple[OperationSpec, ...], *, local: bool = False):
