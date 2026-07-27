@@ -214,6 +214,7 @@ function sameSessionListFilters(
 
 const SESSION_TREE_CACHE_LIMIT = 20;
 const SESSION_LIST_PAGE_SIZE = 50;
+const SESSION_SEARCH_DEBOUNCE_MS = 300;
 
 /** Return only the user-facing forks of `node` — filters out internal
  * Better Agent sessions like delegate forks (manager-mode per-pair threads).
@@ -1033,6 +1034,8 @@ export function useSession(authStatus?: string) {
   sessionsRef.current = sessions;
   const sessionListFiltersRef = useRef<SessionListFilters>({});
   sessionListFiltersRef.current = sessionListFilters;
+  const pendingSessionListFiltersRef = useRef<SessionListFilters>({});
+  const sessionSearchDebounceRef = useRef<number | undefined>(undefined);
   const sessionsHasMoreRef = useRef(true);
   sessionsHasMoreRef.current = sessionsHasMore;
   const sessionsLoadedRef = useRef(false);
@@ -1402,9 +1405,44 @@ export function useSession(authStatus?: string) {
   }, [fetchSessionPage, sessionListFilters, sessionsLoaded]);
 
   const updateSessionListFilters = useCallback((next: SessionListFilters) => {
-    setSessionListFilters((prev) =>
-      sameSessionListFilters(prev, next) ? prev : next,
+    const pending = pendingSessionListFiltersRef.current;
+    if (sameSessionListFilters(pending, next)) return;
+
+    pendingSessionListFiltersRef.current = next;
+    window.clearTimeout(sessionSearchDebounceRef.current);
+    sessionSearchDebounceRef.current = undefined;
+
+    const applied = sessionListFiltersRef.current;
+    if (sameSessionListFilters(applied, next)) {
+      void fetchSessionPage(0, true, next);
+      return;
+    }
+
+    sessionListRequestSeqRef.current += 1;
+    const onlySearchChanged = sameSessionListFilters(
+      { ...applied, search: next.search },
+      next,
     );
+    if (onlySearchChanged && next.search?.trim()) {
+      if (sessionsLoadedRef.current) setSessionsSearching(true);
+      sessionSearchDebounceRef.current = window.setTimeout(() => {
+        sessionSearchDebounceRef.current = undefined;
+        setSessionListFilters(next);
+        if (!sessionsLoadedRef.current) {
+          void fetchSessionPage(0, true, next);
+        }
+      }, SESSION_SEARCH_DEBOUNCE_MS);
+      return;
+    }
+
+    setSessionListFilters(next);
+    if (!sessionsLoadedRef.current) {
+      void fetchSessionPage(0, true, next);
+    }
+  }, [fetchSessionPage]);
+
+  useEffect(() => () => {
+    window.clearTimeout(sessionSearchDebounceRef.current);
   }, []);
 
   useEffect(() => {

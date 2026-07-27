@@ -747,6 +747,160 @@ describe("useSession.selectSession — optimistic swap", () => {
     });
   });
 
+  it("debounces typed searches and rejects the previous query while the latest waits", async () => {
+    const initial = makeSession({ id: "initial", name: "Initial" });
+    const stale = makeSession({ id: "stale", name: "Stale" });
+    gate = installFetchGate({
+      hold: SESSION_LIST,
+      defaultBody: {},
+    });
+
+    const { result } = renderHook(() => useSession());
+
+    await act(async () => {
+      gate!.resolve(SESSION_LIST, { sessions: [initial] });
+      await Promise.resolve();
+    });
+    await waitFor(() => {
+      expect(result.current.sessions.map((session) => session.id)).toEqual(["initial"]);
+    });
+
+    vi.useFakeTimers();
+    try {
+      act(() => {
+        result.current.setSessionListFilters({ search: "old" });
+        vi.advanceTimersByTime(300);
+      });
+      expect(gate.urls.filter((url) => url.includes("search=old"))).toHaveLength(1);
+
+      act(() => {
+        result.current.setSessionListFilters({ search: "n" });
+        result.current.setSessionListFilters({ search: "ne" });
+        result.current.setSessionListFilters({ search: "new" });
+      });
+      expect(gate.urls.filter((url) => url.includes("search="))).toHaveLength(1);
+      expect(result.current.sessionsSearching).toBe(true);
+
+      await act(async () => {
+        gate!.resolve(SESSION_LIST, { sessions: [stale] });
+        await Promise.resolve();
+      });
+      expect(result.current.sessions.map((session) => session.id)).toEqual(["initial"]);
+
+      act(() => {
+        vi.advanceTimersByTime(299);
+      });
+      expect(gate.urls.filter((url) => url.includes("search="))).toHaveLength(1);
+
+      act(() => {
+        vi.advanceTimersByTime(1);
+      });
+      expect(gate.urls.filter((url) => url.includes("search=new"))).toHaveLength(1);
+
+      await act(async () => {
+        gate!.resolve(SESSION_LIST, { sessions: [initial] });
+        await Promise.resolve();
+      });
+      const requestCountBeforeClear = gate.urls.filter(
+        (url) => url.includes("/api/sessions?"),
+      ).length;
+
+      act(() => {
+        result.current.setSessionListFilters({ search: "later" });
+        result.current.setSessionListFilters({ search: "" });
+      });
+      expect(gate.urls.filter((url) => url.includes("/api/sessions?"))).toHaveLength(
+        requestCountBeforeClear + 1,
+      );
+      expect(gate.urls.at(-1)).not.toContain("search=");
+
+      act(() => {
+        vi.advanceTimersByTime(300);
+      });
+      expect(gate.urls.filter((url) => url.includes("search=later"))).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps the applied search request valid when typing returns to that query", async () => {
+    const initial = makeSession({ id: "initial", name: "Initial" });
+    gate = installFetchGate({
+      hold: SESSION_LIST,
+      defaultBody: {},
+    });
+
+    const { result } = renderHook(() => useSession());
+
+    await act(async () => {
+      gate!.resolve(SESSION_LIST, { sessions: [initial] });
+      await Promise.resolve();
+    });
+    await waitFor(() => {
+      expect(result.current.sessions.map((session) => session.id)).toEqual(["initial"]);
+    });
+
+    vi.useFakeTimers();
+    try {
+      act(() => {
+        result.current.setSessionListFilters({ search: "applied" });
+        vi.advanceTimersByTime(300);
+      });
+      expect(gate.urls.filter((url) => url.includes("search=applied"))).toHaveLength(1);
+
+      act(() => {
+        result.current.setSessionListFilters({ search: "pending" });
+        result.current.setSessionListFilters({ search: "applied" });
+        vi.advanceTimersByTime(300);
+      });
+      expect(gate.urls.filter((url) => url.includes("search=applied"))).toHaveLength(2);
+
+      await act(async () => {
+        gate!.resolve(SESSION_LIST, { sessions: [initial] });
+        await Promise.resolve();
+      });
+      expect(result.current.sessions.map((session) => session.id)).toEqual(["initial"]);
+      expect(result.current.sessionsSearching).toBe(true);
+
+      await act(async () => {
+        gate!.resolve(SESSION_LIST, { sessions: [initial] });
+        await Promise.resolve();
+      });
+      expect(result.current.sessionsSearching).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("reconciles search intent entered before the initial session page resolves", async () => {
+    const unfiltered = makeSession({ id: "unfiltered", name: "Unfiltered" });
+    gate = installFetchGate({
+      hold: SESSION_LIST,
+      defaultBody: {},
+    });
+
+    const { result } = renderHook(() => useSession());
+
+    vi.useFakeTimers();
+    try {
+      act(() => {
+        result.current.setSessionListFilters({ search: "latest" });
+      });
+
+      await act(async () => {
+        gate!.resolve(SESSION_LIST, { sessions: [unfiltered] }, 500);
+        await Promise.resolve();
+      });
+
+      act(() => {
+        vi.advanceTimersByTime(300);
+      });
+      expect(gate!.urls.filter((url) => url.includes("search=latest"))).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("does not locally prepend a created session while search filters are active", async () => {
     const existing = makeSession({ id: "a", name: "Search title" });
     const created = makeSession({ id: "created", name: "Session 12:35" });
