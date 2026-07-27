@@ -24,7 +24,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import quote, urlparse
 
 from cryptography.exceptions import InvalidSignature
@@ -97,6 +97,9 @@ _BUILTIN_FEATURE_CACHE_LOCK = threading.Lock()
 _STORE_FINGERPRINT_CACHE: tuple[float, StoreFingerprint] | None = None
 _STORE_FINGERPRINT_CACHE_LOCK = threading.Lock()
 _STORE_FINGERPRINT_TTL_SECONDS = 0.5
+_STORE_MUTATION_LOCAL = threading.local()
+_STORE_MUTATION_SUBSCRIBERS: dict[str, Callable[[], None]] = {}
+_STORE_MUTATION_SUBSCRIBERS_LOCK = threading.Lock()
 _RECONCILED_STORE_FINGERPRINT: tuple[str, StoreFingerprint] | None = None
 _RECONCILED_STORE_LOCK = threading.Lock()
 _CORE_ROLE_OWNERS_CACHE: tuple[StoreFingerprint, MappingProxyType] | None = None
@@ -418,6 +421,8 @@ def _blank_store() -> dict[str, Any]:
 
 @contextmanager
 def _store_lock():
+    depth = int(getattr(_STORE_MUTATION_LOCAL, "depth", 0))
+    _STORE_MUTATION_LOCAL.depth = depth + 1
     lock_path = ba_home() / "extensions" / "extensions.lock"
     lock_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     lock_file = lock_path.open("a+b")
@@ -444,6 +449,30 @@ def _store_lock():
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
         finally:
             lock_file.close()
+            _STORE_MUTATION_LOCAL.depth = depth
+            if depth == 0 and bool(getattr(_STORE_MUTATION_LOCAL, "pending", False)):
+                _STORE_MUTATION_LOCAL.pending = False
+                _notify_store_mutated()
+
+
+def subscribe_store_mutations(name: str, callback: Callable[[], None]) -> None:
+    with _STORE_MUTATION_SUBSCRIBERS_LOCK:
+        _STORE_MUTATION_SUBSCRIBERS[name] = callback
+
+
+def unsubscribe_store_mutations(name: str) -> None:
+    with _STORE_MUTATION_SUBSCRIBERS_LOCK:
+        _STORE_MUTATION_SUBSCRIBERS.pop(name, None)
+
+
+def _notify_store_mutated() -> None:
+    with _STORE_MUTATION_SUBSCRIBERS_LOCK:
+        subscribers = list(_STORE_MUTATION_SUBSCRIBERS.items())
+    for name, callback in subscribers:
+        try:
+            callback()
+        except Exception:
+            logger.exception("extension store mutation subscriber failed: %s", name)
 
 
 _SOURCE_TYPE_V1_TO_V2 = {
@@ -612,6 +641,7 @@ def _write_store_unlocked(data: dict[str, Any]) -> None:
     os.replace(tmp_name, path)
     _refresh_store_fingerprint_cache(path)
     _clear_projection_cache()
+    _STORE_MUTATION_LOCAL.pending = True
 
 
 def _merge_store_for_save(

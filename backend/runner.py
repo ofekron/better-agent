@@ -60,6 +60,7 @@ from communication_modes import (
 )
 from env_compat import get_env
 from loopback_http import raise_loopback_http_error
+from provider_completion import classify_completion_after_progress
 from runner_exit import hard_exit
 from trace_collector import aggregate_claude_turn_usage
 from orchestration_tool_descriptions import (
@@ -2984,6 +2985,10 @@ async def _run_one_turn(
         "turn_id": turn_id,
         "used_tools": sorted(used_tools),
     }
+    turn_complete_payload = classify_completion_after_progress(
+        turn_complete_payload,
+        progress_seen=bool(assistant_seen or total_usage or used_tools),
+    )
     try:
         atomic_write_json(turn_d / "complete.json", turn_complete_payload)
     except Exception:
@@ -3633,6 +3638,14 @@ async def _run(run_dir: Path, inputs: dict) -> int:
         "sdk_output": " ".join(sdk_output_parts).strip() or None,
         "final_assistant_text": final_assistant_text,
     }
+    complete = classify_completion_after_progress(
+        complete,
+        progress_seen=bool(
+            turn_result.get("used_tools")
+            or sdk_output_parts
+            or total_usage
+        ),
+    )
     try:
         # Atomic: the backend's _watch_complete fires on this file's
         # APPEARANCE (possibly mid-write under plain write_text) — a torn

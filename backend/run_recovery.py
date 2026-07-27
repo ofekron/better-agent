@@ -35,6 +35,10 @@ from ingestion_versions import current_ingestion_version, marker_matches_current
 from redigest_backup import RecoveryRootLease, RedigestBackup
 from continuation import PROVIDER_CAPABILITIES_CHANGED_ERROR
 from continuation_flow import start_continuation_for
+from provider_completion import (
+    classify_completion_after_progress,
+    completion_has_progress,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -864,6 +868,31 @@ def _replay_for_family(
     return RecoveryReplay(events=events, unmatched=unmatched)
 
 
+def _preserve_recoverable_partial_completion(
+    run_dir: Path,
+    desc: dict,
+) -> dict | None:
+    complete_path = run_dir / "complete.json"
+    try:
+        payload = json.loads(complete_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if payload.get("success") or payload.get("recoverable") is True:
+        return payload
+
+    replay = _replay_for_family(_recovery_family(desc), run_dir)
+    classified = classify_completion_after_progress(
+        payload,
+        progress_seen=completion_has_progress(payload, replay.events),
+    )
+    if classified == payload:
+        return payload
+
+    from runs_dir import atomic_write_json
+    atomic_write_json(complete_path, classified)
+    return classified
+
+
 def _provider_kind(desc: dict | None) -> str:
     if desc and desc.get("provider_kind"):
         return str(desc.get("provider_kind"))
@@ -1488,6 +1517,12 @@ async def _integrate_one_locked(
     alive = bool(desc.get("alive")) or bool(desc.get("orphaned_cli"))
     has_complete = bool(desc.get("has_complete_json"))
     cancelled = bool(desc.get("cancelled"))
+    if has_complete:
+        await asyncio.to_thread(
+            _preserve_recoverable_partial_completion,
+            _runs_root() / run_id,
+            desc,
+        )
     recovering_msg_id = _descriptor_target_message_id(desc)
     if recovering_msg_id and _assistant_by_id(sess, recovering_msg_id) is None:
         if summary is not None:
@@ -2502,6 +2537,8 @@ def _should_retry_rate_limit(run_dir: Path) -> bool:
         payload = json.loads(complete_path.read_text(encoding="utf-8"))
     except Exception:
         return False
+    if payload.get("recoverable") is True:
+        return False
     if payload.get("success"):
         return False
     error = payload.get("error")
@@ -2771,6 +2808,12 @@ async def _finalize_when_done(
                 cancelled = bool(bs.get("cancelled", False))
             except Exception:
                 pass
+
+        await asyncio.to_thread(
+            _preserve_recoverable_partial_completion,
+            run_dir,
+            desc,
+        )
 
         finalize_ok = True
         if last_asst is None:

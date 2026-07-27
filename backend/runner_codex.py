@@ -33,8 +33,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, NoReturn, Optional
 
-import re
-
 from i18n import t
 from builtin_mcp_config import native_mcp_runtime_env, with_builtin_mcp_servers
 from capability_contexts import prepend_capability_context
@@ -47,7 +45,11 @@ from codex_normalize import (
 )
 from codex_usage import token_usage_from_codex_usage
 import codex_rate_limits
-from provider_completion import recoverable_partial_payload
+from provider_completion import (
+    is_ambiguous_transport_failure,
+    recoverable_partial_payload,
+    should_preserve_recoverable_partial,
+)
 from codex_agent_tree import (
     resolve_rollout_path_for_join as _resolve_rollout_path_for_join,
     wait_for_agent_tree_terminal as _wait_codex_agent_tree_terminal,
@@ -3064,23 +3066,8 @@ def build_codex_steer_input(run_dir: Path, payload: dict) -> list[dict]:
 # ============================================================================
 # Network error detection
 # ============================================================================
-_NETWORK_ERROR_PATTERN = re.compile(
-    r"(?:"
-    r"ECONNREFUSED|ECONNRESET|ETIMEDOUT|EPIPE|"
-    r"ENOTFOUND|EAI_NONAME|getaddrinfo|could not resolve|"
-    r"socket hang up|network error|connection reset|connection refused|"
-    r"websocket.*(?:closed|reset|refused)|"
-    r"connect ETIMEDOUT|connect ECONNREFUSED|"
-    r"TLS handshake|SSL handshake|"
-    r"HTTP 50[23]|HTTP 429|"
-    r"rate.?limit|overloaded|temporarily unavailable|"
-    r"service unavailable|bad gateway"
-    r")",
-    re.IGNORECASE,
-)
-
 def _is_network_error_message(msg: str) -> bool:
-    return bool(_NETWORK_ERROR_PATTERN.search(msg))
+    return is_ambiguous_transport_failure(msg)
 
 
 _ROLLOUT_PROGRESS_ITEM_TYPES = frozenset({
@@ -3128,13 +3115,12 @@ def _should_preserve_recoverable_partial(
     native_session_id: Optional[str],
     progress_seen: bool,
 ) -> bool:
-    return bool(
-        error
-        and not cancelled
-        and not turn_completed_seen
-        and native_session_id
-        and progress_seen
-        and _is_network_error_message(error)
+    del turn_completed_seen
+    return should_preserve_recoverable_partial(
+        error=error,
+        cancelled=cancelled,
+        native_session_id=native_session_id,
+        progress_seen=progress_seen,
     )
 
 

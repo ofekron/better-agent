@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import sys
 import tempfile
+import threading
 from pathlib import Path
 
 BACKEND = Path(__file__).resolve().parent.parent
@@ -29,8 +30,9 @@ installation_profile.capture_active_capabilities()
 
 import extension_store
 import extension_daemons
+from daemonhost.host import DaemonHost
 from daemonhost.jsonio import read_json, write_json
-from daemonhost.paths import registry_path
+from daemonhost.paths import daemon_root, registry_path
 
 
 def _manifest(daemons, permissions=None, protocol=None):
@@ -104,6 +106,90 @@ _rejects(
     ),
     "daemon.worker",
 )
+
+def _write_install_package(
+    root: Path,
+    manifest: dict,
+    module_source: str | None = None,
+) -> None:
+    root.mkdir(parents=True)
+    (root / "better-agent-extension.json").write_text(
+        json.dumps(manifest),
+        encoding="utf-8",
+    )
+    if module_source is not None:
+        daemon_package = root / "daemon"
+        daemon_package.mkdir()
+        (daemon_package / "__init__.py").write_text("", encoding="utf-8")
+        (daemon_package / "worker.py").write_text(module_source, encoding="utf-8")
+
+
+extension_id = "test.mutation-daemons"
+initial_manifest = {
+    "kind": "better-agent-extension",
+    "id": extension_id,
+    "name": "Mutation Daemons Test",
+    "version": "0.1.0",
+    "surfaces": [],
+    "entrypoints": {},
+    "permissions": {},
+}
+updated_manifest = {
+    **initial_manifest,
+    "version": "0.2.0",
+    "surfaces": ["daemons"],
+    "entrypoints": {"daemons": [DAEMON]},
+    "permissions": {"daemons": "supervisor"},
+}
+initial_package = Path(_TMP) / "mutation-extension-v1"
+updated_package = Path(_TMP) / "mutation-extension-v2"
+_write_install_package(initial_package, initial_manifest)
+_write_install_package(updated_package, updated_manifest, "def main(): pass\n")
+
+extension_daemons.reconcile()
+mutation_key = f"{extension_id}:worker"
+assert mutation_key not in read_json(registry_path()).get("daemons", {})
+
+initial_record = extension_store._install_from_package_dir(
+    package_dir=initial_package,
+    source={"type": "test", "commit_sha": "mutation-v1"},
+    force_enabled=True,
+)
+assert initial_record["enabled"] is True
+assert mutation_key not in read_json(registry_path()).get("daemons", {})
+
+host = DaemonHost(poll_interval=0.01)
+daemon_observed = threading.Event()
+
+
+def _observe_daemon(daemon) -> None:
+    daemon.status = "desired"
+    daemon_observed.set()
+
+
+host._tick = _observe_daemon
+host_thread = threading.Thread(target=host.run, name="test-daemonhost")
+host_thread.start()
+
+try:
+    extension_store._install_from_package_dir(
+        package_dir=updated_package,
+        source={"type": "test", "commit_sha": "mutation-v2"},
+        force_enabled=True,
+        existing_record=initial_record,
+    )
+    registry_entry = read_json(registry_path())["daemons"].get(mutation_key)
+    assert registry_entry and registry_entry["desired_state"] == "active", registry_entry
+    assert daemon_observed.wait(2), "daemonhost did not consume the republished registry"
+    desired = read_json(daemon_root(extension_id, "worker") / "desired.json")
+    assert desired == {
+        "generation": registry_entry["generation"],
+        "state": "active",
+    }, desired
+finally:
+    host.stop()
+    host_thread.join(timeout=2)
+    assert not host_thread.is_alive(), "daemonhost test thread leaked"
 
 # --- registry publish semantics -------------------------------------------
 records = {}

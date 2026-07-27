@@ -39,7 +39,11 @@ if _BACKEND not in sys.path:
 from provider import default_provider  # noqa: E402
 from provider_claude import _runs_root  # noqa: E402
 from provider_codex import CodexProvider  # noqa: E402
-from run_recovery import _should_retry_transient  # noqa: E402
+from run_recovery import (  # noqa: E402
+    _preserve_recoverable_partial_completion,
+    _should_retry_rate_limit,
+    _should_retry_transient,
+)
 from ingestion_versions import CLAUDE_INGESTION_VERSION  # noqa: E402
 
 PASS = "\x1b[32mPASS\x1b[0m"
@@ -282,6 +286,86 @@ def test_dead_codex_with_tool_progress_is_recoverable_partial() -> bool:
     return True
 
 
+def test_completed_claude_server_error_after_tool_progress_is_recoverable_partial() -> bool:
+    run_id = _seed_claude_run(
+        runner_pid=_spawn_dead_pid(), cli_pid=_spawn_dead_pid(), stale_jsonl=False,
+    )
+    run_dir = _runs_root() / run_id
+    state_path = run_dir / "state.json"
+    state = json.loads(state_path.read_text())
+    native_sid = state["session_id"]
+    jsonl_path = Path(state["jsonl_path"])
+    jsonl_path.write_text(
+        "\n".join([
+            json.dumps({
+                "type": "assistant",
+                "uuid": str(uuid.uuid4()),
+                "message": {
+                    "role": "assistant",
+                    "content": [{
+                        "type": "tool_use",
+                        "id": "call-once",
+                        "name": "Bash",
+                        "input": {"command": "apply-side-effect"},
+                    }],
+                },
+            }),
+            json.dumps({
+                "type": "user",
+                "uuid": str(uuid.uuid4()),
+                "message": {
+                    "role": "user",
+                    "content": [{
+                        "type": "tool_result",
+                        "tool_use_id": "call-once",
+                        "content": "side effect completed",
+                    }],
+                },
+            }),
+            json.dumps({
+                "type": "assistant",
+                "uuid": str(uuid.uuid4()),
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "API Error: connection refused"}],
+                },
+                "error": "server_error",
+                "isApiErrorMessage": True,
+            }),
+        ]) + "\n",
+        encoding="utf-8",
+    )
+    state["complete"] = True
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    (run_dir / "complete.json").write_text(json.dumps({
+        "success": False,
+        "session_id": native_sid,
+        "error": "server_error",
+        "sdk_output": "tool side effect completed API Error: connection refused",
+    }), encoding="utf-8")
+
+    desc = _descriptor_for(run_id)
+    if desc is not None:
+        _preserve_recoverable_partial_completion(run_dir, desc)
+    complete = json.loads((run_dir / "complete.json").read_text())
+    if desc is None or desc.get("recovered_as") != "already_complete":
+        print(f"  expected already_complete descriptor, got {desc!r}")
+        return False
+    if complete.get("outcome") != "recoverable_partial":
+        print(f"  expected recoverable_partial, got {complete!r}")
+        return False
+    if complete.get("session_id") != native_sid:
+        print("  recoverable partial lost the native Claude session id")
+        return False
+    if _should_retry_transient(run_dir, None):
+        print("  recovery would replay the original Claude prompt after tool progress")
+        return False
+    if _should_retry_rate_limit(run_dir):
+        print("  rate-limit recovery would replay a recoverable partial")
+        return False
+    return True
+
+
 def test_both_dead_is_dead_orphan() -> bool:
     run_id = _seed_claude_run(
         runner_pid=_spawn_dead_pid(), cli_pid=_spawn_dead_pid(), stale_jsonl=False,
@@ -302,6 +386,7 @@ TESTS = [
     ("inode mismatch → dead_orphan", test_inode_mismatch_not_reattached),
     ("codex orphaned live CLI re-attaches (not dead_orphan)", test_codex_orphaned_live_cli_reattaches),
     ("dead Codex tool progress becomes recoverable partial", test_dead_codex_with_tool_progress_is_recoverable_partial),
+    ("completed Claude server_error after tool progress is recoverable partial", test_completed_claude_server_error_after_tool_progress_is_recoverable_partial),
     ("wrapper + CLI both dead → dead_orphan", test_both_dead_is_dead_orphan),
 ]
 

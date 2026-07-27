@@ -38,6 +38,7 @@ from daemonhost.paths import daemon_root, registry_path, state_path  # noqa: E40
 import extension_store  # noqa: E402
 
 _lock = threading.Lock()
+_reconcile_lock = threading.RLock()
 _backend_procs: dict[str, subprocess.Popen] = {}
 _BUILTIN_SWITCH_MANIFEST = _REPO_ROOT / "extensions" / "switch-control" / "better-agent-extension.json"
 
@@ -205,9 +206,10 @@ def _stop(proc: subprocess.Popen) -> None:
 
 
 def reconcile() -> None:
-    """Single funnel called at startup and whenever extensions change."""
-    publish_registry()
-    reconcile_backend_daemons()
+    """Project each durable extension-store mutation into daemon state."""
+    with _reconcile_lock:
+        publish_registry()
+        reconcile_backend_daemons()
 
 
 def daemons_projection() -> dict[str, Any]:
@@ -242,3 +244,6 @@ def ui_only_quiescent() -> bool:
         supervisor_running = True
         break
     return not registry and not backend_running and not supervisor_running
+
+
+extension_store.subscribe_store_mutations("extension_daemons", reconcile)
