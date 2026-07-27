@@ -1241,7 +1241,7 @@ export function useSession(authStatus?: string) {
       // the search spinner — it is reserved for user-initiated fetches.
       if (replace && !silent && sessionsLoadedRef.current) setSessionsSearching(true);
       startOp(replace ? "session:list" : "session:list:more");
-      let incompleteSnapshot = false;
+      let completedSnapshot = false;
       try {
         const params = new URLSearchParams({
           offset: String(offset),
@@ -1281,7 +1281,6 @@ export function useSession(authStatus?: string) {
         const data = await res.json();
         if (replace && requestSeq !== sessionListRequestSeqRef.current) return;
         if (replace && offset === 0 && data?.snapshot_complete === false) {
-          incompleteSnapshot = true;
           window.setTimeout(() => {
             void fetchSessionPage(0, true, filterSnapshot, limitOverride, silent);
           }, 150);
@@ -1314,13 +1313,23 @@ export function useSession(authStatus?: string) {
         setSessions((prev) => mergeSessionPage(prev, page, replace, dispatchInsertGen));
         sessionsNextOffsetRef.current = offset + rawPage.length;
         setSessionsHasMore(Boolean(data.has_more));
+        completedSnapshot = true;
       } catch {
         // ignore
       } finally {
         if (!replace) setSessionsLoadingMore(false);
         if (requestSeq === sessionListRequestSeqRef.current) {
-          if (replace && !incompleteSnapshot) setSessionsLoaded(true);
-          if (replace) setSessionsSearching(false);
+          if (replace && completedSnapshot) {
+            setSessionsLoaded(true);
+            if (
+              sameSessionListFilters(
+                pendingSessionListFiltersRef.current,
+                filterSnapshot,
+              )
+            ) {
+              setSessionsSearching(false);
+            }
+          }
           sessionsLoadingPageRef.current = false;
         }
         completeOp(replace ? "session:list" : "session:list:more");

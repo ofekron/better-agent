@@ -15,7 +15,11 @@ import { eventBus } from "../src/lib/eventBus";
 
 const SESSION_LIST = /\/api\/sessions\?/;
 
-type Pending = { url: string; resolve: (body: unknown) => void };
+type Pending = {
+  url: string;
+  resolve: (body: unknown) => void;
+  reject: (error: Error) => void;
+};
 
 function installFetchStub() {
   const pending: Pending[] = [];
@@ -26,7 +30,7 @@ function installFetchStub() {
         : input instanceof URL
         ? input.toString()
         : input.url;
-    return new Promise<Response>((res) => {
+    return new Promise<Response>((res, reject) => {
       pending.push({
         url,
         resolve: (body) =>
@@ -36,6 +40,7 @@ function installFetchStub() {
               headers: { "content-type": "application/json" },
             }),
           ),
+        reject,
       });
     });
   });
@@ -50,6 +55,14 @@ function installFetchStub() {
         p.resolve(body);
       });
     },
+    rejectOldestList: async (error: Error) => {
+      const p = pending.find((q) => SESSION_LIST.test(q.url));
+      if (!p) throw new Error("no pending session-list fetch");
+      pending.splice(pending.indexOf(p), 1);
+      await act(async () => {
+        p.reject(error);
+      });
+    },
   };
 }
 
@@ -62,6 +75,46 @@ afterEach(() => {
 });
 
 describe("sessions list background refresh is silent", () => {
+  it("keeps search loading visible while the server is offline", async () => {
+    vi.useFakeTimers();
+    const gate = installFetchStub();
+    const { result } = renderHook(() => useSession("authed"));
+
+    await gate.resolveOldestList(EMPTY_PAGE);
+
+    act(() => {
+      result.current.setSessionListFilters({ search: "offline" });
+    });
+    expect(result.current.sessionsSearching).toBe(true);
+
+    let staleRefresh!: Promise<void>;
+    act(() => {
+      staleRefresh = result.current.refreshSessions();
+    });
+    await gate.resolveOldestList(EMPTY_PAGE);
+    await act(async () => {
+      await staleRefresh;
+    });
+    expect(result.current.sessionsSearching).toBe(true);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(300);
+    });
+
+    await gate.rejectOldestList(new TypeError("Failed to fetch"));
+    expect(result.current.sessionsSearching).toBe(true);
+
+    let refresh!: Promise<void>;
+    act(() => {
+      refresh = result.current.refreshSessions();
+    });
+    await gate.resolveOldestList(EMPTY_PAGE);
+    await act(async () => {
+      await refresh;
+    });
+    expect(result.current.sessionsSearching).toBe(false);
+  });
+
   it("status-delta refetch does not flip sessionsSearching; user refresh does", async () => {
     vi.useFakeTimers();
     const gate = installFetchStub();
@@ -110,6 +163,9 @@ describe("sessions list background refresh is silent", () => {
       result.current.setSessionListFilters({ statusSort: true, search: "bug" });
     });
     expect(result.current.sessionsSearching).toBe(true);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(300);
+    });
     await gate.resolveOldestList(EMPTY_PAGE);
     expect(result.current.sessionsSearching).toBe(false);
   });
