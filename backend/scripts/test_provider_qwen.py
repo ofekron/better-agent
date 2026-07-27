@@ -30,8 +30,11 @@ Run:
 
 from __future__ import annotations
 
+import asyncio
+import json
 import shutil
 import sys
+import tempfile
 from pathlib import Path
 
 _BACKEND = Path(__file__).resolve().parent.parent
@@ -317,6 +320,85 @@ def test_rate_limit_keywords_extended() -> bool:
     return "insufficient_quota" in kws and "rate limit" in kws
 
 
+def test_materializes_selected_extension_mcp_in_scoped_home() -> bool:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        source_home = root / "source-home"
+        source_qwen = source_home / ".qwen"
+        source_qwen.mkdir(parents=True)
+        (source_qwen / "settings.json").write_text(
+            json.dumps({"theme": "dark"}),
+            encoding="utf-8",
+        )
+        (source_qwen / "oauth_creds.json").write_text("credentials", encoding="utf-8")
+        run_dir = root / "run"
+        run_dir.mkdir()
+        env = runner_qwen._materialize_qwen_run_home(
+            run_dir,
+            {
+                "skills": {"implement": "instructions"},
+                "mcp_servers": {
+                    "testape": {
+                        "command": "/fake/testape-mcp",
+                        "args": [],
+                    },
+                },
+            },
+            real_home=source_home,
+        )
+        if not env:
+            return False
+        overlay_home = Path(env["HOME"])
+        settings = json.loads(
+            (overlay_home / ".qwen" / "settings.json").read_text(encoding="utf-8")
+        )
+        return (
+            settings["theme"] == "dark"
+            and settings["mcpServers"]["testape"]["command"] == "/fake/testape-mcp"
+            and (overlay_home / ".qwen" / "oauth_creds.json").read_text(encoding="utf-8")
+            == "credentials"
+        )
+
+
+def test_run_projects_qwen_provider_kind_before_mcp_resolution() -> bool:
+    original_runtime_env = runner_qwen.native_mcp_runtime_env
+    original_with_builtin = runner_qwen.with_builtin_mcp_servers
+    original_resolve_cli = runner_qwen._resolve_qwen_cli
+    seen: dict = {}
+
+    def fake_runtime_env(inputs: dict) -> dict:
+        seen["runtime_kind"] = inputs.get("provider_kind")
+        return {}
+
+    def fake_with_builtin(inputs: dict, config: dict) -> dict:
+        seen["config_kind"] = inputs.get("provider_kind")
+        seen["config"] = config
+        return config
+
+    runner_qwen.native_mcp_runtime_env = fake_runtime_env  # type: ignore[assignment]
+    runner_qwen.with_builtin_mcp_servers = fake_with_builtin  # type: ignore[assignment]
+    runner_qwen._resolve_qwen_cli = lambda: None  # type: ignore[assignment]
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            code = asyncio.run(runner_qwen._run(run_dir, {
+                "prompt": "check",
+                "cwd": str(run_dir),
+                "provider_run_config": {"skills": {"implement": "instructions"}},
+            }))
+    finally:
+        runner_qwen.native_mcp_runtime_env = original_runtime_env  # type: ignore[assignment]
+        runner_qwen.with_builtin_mcp_servers = original_with_builtin  # type: ignore[assignment]
+        runner_qwen._resolve_qwen_cli = original_resolve_cli  # type: ignore[assignment]
+
+    return (
+        code == 1
+        and seen["runtime_kind"] == "qwen"
+        and seen["config_kind"] == "qwen"
+        and seen["config"] == {"skills": {"implement": "instructions"}}
+    )
+
+
 TESTS = [
     ("kind_and_capability_matrix", test_kind_and_capability_matrix),
     ("build_env_clears_foreign_providers", test_build_env_clears_foreign_providers),
@@ -336,6 +418,8 @@ TESTS = [
     ("models_static_seed", test_models_static_seed),
     ("models_fetch_parses_real_cli", test_models_fetch_parses_real_cli),
     ("rate_limit_keywords_extended", test_rate_limit_keywords_extended),
+    ("materializes_selected_extension_mcp_in_scoped_home", test_materializes_selected_extension_mcp_in_scoped_home),
+    ("run_projects_qwen_provider_kind_before_mcp_resolution", test_run_projects_qwen_provider_kind_before_mcp_resolution),
 ]
 
 

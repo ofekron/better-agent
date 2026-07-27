@@ -39,10 +39,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
+from builtin_mcp_config import native_mcp_runtime_env, with_builtin_mcp_servers
 from capability_contexts import prepend_capability_context
 import harness_run_projection
 from continuation import normalize_context_overflow_error
 from proc_control import process_control as _process_control
+from provider_run_config import symlink_home_overlay
 from runner_guard import (
     GHOST_RETRY_BACKOFF_S,
     GHOST_RETRY_MAX,
@@ -101,6 +103,38 @@ _AUTH_TYPE_MAP = {
 
 def resolve_auth_type(record_mode: str) -> str:
     return _AUTH_TYPE_MAP.get(str(record_mode or "").strip(), "qwen-oauth")
+
+
+def _qwen_runner_inputs(inputs: dict[str, Any]) -> dict[str, Any]:
+    return {**inputs, "provider_kind": "qwen"}
+
+
+def _materialize_qwen_run_home(
+    run_dir: Path,
+    provider_run_config: dict,
+    *,
+    real_home: Optional[Path] = None,
+) -> Optional[dict[str, str]]:
+    mcp_servers = provider_run_config.get("mcp_servers") or {}
+    if not mcp_servers:
+        return None
+    source_home = real_home or Path.home()
+    overlay_home = run_dir / "qwen-home"
+    symlink_home_overlay(source_home, overlay_home, skip={".qwen"})
+    source_qwen = source_home / ".qwen"
+    overlay_qwen = overlay_home / ".qwen"
+    symlink_home_overlay(source_qwen, overlay_qwen, skip={"settings.json"})
+    settings_path = source_qwen / "settings.json"
+    settings = {}
+    if settings_path.is_file():
+        loaded = json.loads(settings_path.read_text(encoding="utf-8"))
+        if not isinstance(loaded, dict):
+            raise ValueError(f"{settings_path} must contain a JSON object")
+        settings = loaded
+    settings["mcpServers"] = mcp_servers
+    overlay_qwen.mkdir(parents=True, exist_ok=True)
+    atomic_write_json(overlay_qwen / "settings.json", settings)
+    return {"HOME": str(overlay_home)}
 
 
 # ============================================================================
@@ -250,6 +284,15 @@ async def _run(run_dir: Path, inputs: dict) -> int:
     model = inputs.get("model")
     session_id = inputs.get("session_id")
     run_env = os.environ.copy()
+    runner_inputs = _qwen_runner_inputs(inputs)
+    run_env.update(native_mcp_runtime_env(runner_inputs))
+    provider_run_config = with_builtin_mcp_servers(
+        runner_inputs,
+        inputs.get("provider_run_config") or {},
+    )
+    scoped_env = _materialize_qwen_run_home(run_dir, provider_run_config)
+    if scoped_env:
+        run_env.update(scoped_env)
 
     qwen_bin = _resolve_qwen_cli()
     if not qwen_bin:

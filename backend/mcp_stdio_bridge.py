@@ -101,11 +101,7 @@ async def mcp_json_request(
 
 
 async def mcp_list_tools(server_name: str, config: dict[str, Any]) -> list[dict[str, Any]]:
-    try:
-        result = await mcp_json_request(config, "tools/list", {}, timeout=MCP_LIST_TIMEOUT_S)
-    except Exception:
-        logger.warning("extension MCP %s tools/list failed", server_name, exc_info=True)
-        return []
+    result = await mcp_json_request(config, "tools/list", {}, timeout=MCP_LIST_TIMEOUT_S)
     tools = result.get("tools") or []
     return [item for item in tools if isinstance(item, dict)]
 

@@ -171,11 +171,17 @@ def _codex_thread_capability_params(
     provider_run_config: Optional[dict[str, Any]],
 ) -> dict[str, Any]:
     params: dict[str, Any] = {}
+    config: dict[str, Any] = {}
     if dynamic_tools:
-        params["dynamicTools"] = dynamic_tools
+        params["dynamicTools"] = [
+            {"type": "function", **tool}
+            for tool in dynamic_tools
+        ]
     thread_config = _codex_thread_config(provider_run_config)
     if thread_config:
-        params["config"] = thread_config
+        config.update(thread_config)
+    if config:
+        params["config"] = config
     return params
 
 
@@ -404,7 +410,20 @@ def _build_mcp_dynamic_tool_handler(
     return call_mcp_tool
 
 
-async def _bridge_resume_extension_mcp_dynamic_tools(
+def _extension_config_id(config: Any) -> str:
+    if not isinstance(config, dict):
+        return ""
+    env = config.get("env")
+    if not isinstance(env, dict):
+        return ""
+    return str(
+        env.get("BETTER_CLAUDE_EXTENSION_ID")
+        or env.get("BETTER_AGENT_EXTENSION_ID")
+        or ""
+    ).strip()
+
+
+async def _bridge_extension_mcp_dynamic_tools(
     *,
     inputs: dict[str, Any],
     provider_run_config: dict[str, Any],
@@ -415,25 +434,38 @@ async def _bridge_resume_extension_mcp_dynamic_tools(
     bare_config: bool,
 ) -> None:
     configured_servers = provider_run_config.get("mcp_servers") or {}
-    if not isinstance(configured_servers, dict) or not configured_servers:
-        return
-    launcher_configs = extension_store.native_mcp_launcher_server_configs(
+    if not isinstance(configured_servers, dict):
+        configured_servers = {}
+    resolved_configs = extension_store.native_mcp_server_configs(
         inputs,
         user_facing=user_facing,
         bare=bare_config,
     )
-    for server_name, config in launcher_configs.items():
-        if server_name not in configured_servers:
-            continue
+    bridge_configs = {
+        server_name: config
+        for server_name, config in configured_servers.items()
+        if _extension_config_id(config)
+    }
+    bridge_configs.update(resolved_configs)
+    bridge_errors: list[tuple[str, Exception]] = []
+    bridged_any_server = False
+    for server_name, config in bridge_configs.items():
         call_config = dict(config)
         call_config["_server_name"] = server_name
-        tools = await mcp_stdio_bridge.mcp_list_tools(server_name, call_config)
+        try:
+            tools = await mcp_stdio_bridge.mcp_list_tools(server_name, call_config)
+        except Exception as exc:
+            bridge_errors.append((server_name, exc))
+            continue
+        bridged_any = False
+        bridged_all = bool(tools)
         for item in tools:
             tool = _mcp_dynamic_tool(server_name, item)
             if tool is None:
+                bridged_all = False
                 continue
             tool_name = tool["name"]
-            _add_dynamic_tool(
+            added = _add_dynamic_tool(
                 dynamic_tools,
                 tool_handlers,
                 tool,
@@ -444,6 +476,21 @@ async def _bridge_resume_extension_mcp_dynamic_tools(
                 ),
                 existing_tool_names=existing_tool_names,
             )
+            bridged_any = bridged_any or added
+            bridged_all = bridged_all and added
+        bridged_any_server = bridged_any_server or bridged_any
+        configured_config = configured_servers.get(server_name)
+        if (
+            bridged_any
+            and bridged_all
+            and _extension_config_id(configured_config) == _extension_config_id(config)
+        ):
+            configured_servers.pop(server_name, None)
+    if bridge_errors and not bridged_any_server:
+        server_name, exc = bridge_errors[0]
+        raise RuntimeError(
+            f"selected extension MCP {server_name!r} failed to list tools"
+        ) from exc
 
 
 _CREATE_WORKER_INPUT_SCHEMA: dict[str, Any] = {
@@ -3118,8 +3165,8 @@ async def _run(run_dir: Path, inputs: dict) -> int:
     if session_id and initial_rollout_path is None:
         initial_rollout_path = await resolve_rollout_path_polled(session_id, timeout=5.0)
     dynamic_tools_for_start = dynamic_tools
-    if session_id:
-        await _bridge_resume_extension_mcp_dynamic_tools(
+    try:
+        await _bridge_extension_mcp_dynamic_tools(
             inputs=runner_inputs,
             provider_run_config=provider_run_config,
             dynamic_tools=dynamic_tools,
@@ -3128,6 +3175,10 @@ async def _run(run_dir: Path, inputs: dict) -> int:
             user_facing=bool(user_facing and app_session_id),
             bare_config=bare_config,
         )
+    except RuntimeError as exc:
+        _fail(run_dir, str(exc))
+        return 1
+    if session_id:
         dynamic_tools_for_start, capability_error = _dynamic_tools_missing_from_rollout(
             initial_rollout_path,
             dynamic_tools,

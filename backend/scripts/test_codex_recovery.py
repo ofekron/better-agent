@@ -755,7 +755,7 @@ def test_codex_ambient_cancel_preserves_recoverable_app_server() -> bool:
         original_resolve_rollout = codex_native.resolve_rollout_path
         original_resolve_rollout_polled = codex_native.resolve_rollout_path_polled
         original_control = runner_codex._process_control
-        original_bridge = runner_codex._bridge_resume_extension_mcp_dynamic_tools
+        original_bridge = runner_codex._bridge_extension_mcp_dynamic_tools
         try:
             async def _fake_start(*_args, **_kwargs) -> _Proc:
                 return _Proc()
@@ -773,7 +773,7 @@ def test_codex_ambient_cancel_preserves_recoverable_app_server() -> bool:
             async def _bridge_noop(**_kwargs):
                 return None
 
-            runner_codex._bridge_resume_extension_mcp_dynamic_tools = _bridge_noop  # type: ignore[assignment]
+            runner_codex._bridge_extension_mcp_dynamic_tools = _bridge_noop  # type: ignore[assignment]
             code = await runner_codex._run(run_dir, {
                 "prompt": "continue",
                 "cwd": "/tmp",
@@ -790,7 +790,7 @@ def test_codex_ambient_cancel_preserves_recoverable_app_server() -> bool:
             codex_native.resolve_rollout_path = original_resolve_rollout  # type: ignore[assignment]
             codex_native.resolve_rollout_path_polled = original_resolve_rollout_polled  # type: ignore[assignment]
             runner_codex._process_control = original_control  # type: ignore[assignment]
-            runner_codex._bridge_resume_extension_mcp_dynamic_tools = original_bridge  # type: ignore[assignment]
+            runner_codex._bridge_extension_mcp_dynamic_tools = original_bridge  # type: ignore[assignment]
 
         state = json.loads((run_dir / "state.json").read_text(encoding="utf-8"))
         ok = (
@@ -913,7 +913,7 @@ def test_codex_fallback_rollout_completion_settles_app_server() -> bool:
         original_resolve_cli = runner_codex._resolve_codex_cli
         original_resolve_rollout = codex_native.resolve_rollout_path
         original_resolve_rollout_polled = codex_native.resolve_rollout_path_polled
-        original_bridge = runner_codex._bridge_resume_extension_mcp_dynamic_tools
+        original_bridge = runner_codex._bridge_extension_mcp_dynamic_tools
         original_wait = runner_codex._wait_rollout_terminal_state
         try:
             async def _fake_start(*_args, **_kwargs) -> _Proc:
@@ -933,7 +933,7 @@ def test_codex_fallback_rollout_completion_settles_app_server() -> bool:
             runner_codex._resolve_codex_cli = lambda _inputs=None: "codex"  # type: ignore[assignment]
             codex_native.resolve_rollout_path = lambda _sid: rollout  # type: ignore[assignment]
             codex_native.resolve_rollout_path_polled = _resolve_rollout_polled  # type: ignore[assignment]
-            runner_codex._bridge_resume_extension_mcp_dynamic_tools = _bridge_noop  # type: ignore[assignment]
+            runner_codex._bridge_extension_mcp_dynamic_tools = _bridge_noop  # type: ignore[assignment]
             runner_codex._wait_rollout_terminal_state = _wait_terminal  # type: ignore[assignment]
             code = await runner_codex._run(run_dir, {
                 "prompt": "continue",
@@ -950,7 +950,7 @@ def test_codex_fallback_rollout_completion_settles_app_server() -> bool:
             runner_codex._resolve_codex_cli = original_resolve_cli  # type: ignore[assignment]
             codex_native.resolve_rollout_path = original_resolve_rollout  # type: ignore[assignment]
             codex_native.resolve_rollout_path_polled = original_resolve_rollout_polled  # type: ignore[assignment]
-            runner_codex._bridge_resume_extension_mcp_dynamic_tools = original_bridge  # type: ignore[assignment]
+            runner_codex._bridge_extension_mcp_dynamic_tools = original_bridge  # type: ignore[assignment]
             runner_codex._wait_rollout_terminal_state = original_wait  # type: ignore[assignment]
 
         complete = json.loads((run_dir / "complete.json").read_text(encoding="utf-8"))
