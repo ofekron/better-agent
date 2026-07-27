@@ -10363,7 +10363,7 @@ button.run-badge-clickable:focus-visible {
 .harness-profile-rail-item.is-selected {
   background: var(--accent-dim);
   border-color: var(--accent);
-  color: var(--accent);
+  color: var(--text-primary);
   font-weight: 600;
 }
 
