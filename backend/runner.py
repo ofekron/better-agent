@@ -106,6 +106,7 @@ from runtime_skills import (
     CLAUDE_RUNTIME_SKILLS_PLUGIN_NAME,
     materialize_runtime_skills,
 )
+from runtime_agents import materialize_runtime_agents
 
 
 def _claude_cache_env() -> dict[str, str]:
@@ -426,7 +427,7 @@ def _resolve_claude_config_dir(raw: str) -> Path:
     return Path.home() / ".claude"
 
 
-def _materialize_claude_skill_plugin(
+def _materialize_claude_runtime_plugin(
     run_dir: Path,
     cwd: str,
     provider_run_config: dict,
@@ -448,6 +449,11 @@ def _materialize_claude_skill_plugin(
         write_skill_tree(skills_root, configured_skills)
         count += len(configured_skills)
 
+    # Subagents ride in the same run-local plugin: Claude Code discovers an
+    # `agents/` subdir of a plugin and loads each definition natively.
+    agents_root = plugin_dir / "agents"
+    count += materialize_runtime_agents(agents_root, "claude", bare_config=bare_config)
+
     if count == 0:
         return None
 
@@ -456,7 +462,7 @@ def _materialize_claude_skill_plugin(
     (manifest_dir / "plugin.json").write_text(
         json.dumps({
             "name": CLAUDE_RUNTIME_SKILLS_PLUGIN_NAME,
-            "description": "Run-local Better Agent skills for this turn.",
+            "description": "Run-local Better Agent skills and agents for this turn.",
         }, indent=2) + "\n",
         encoding="utf-8",
     )
@@ -3353,7 +3359,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
 
     raw_provider_run_config = inputs.get("provider_run_config")
     provider_run_config = raw_provider_run_config if isinstance(raw_provider_run_config, dict) else {}
-    skill_plugin = _materialize_claude_skill_plugin(
+    skill_plugin = _materialize_claude_runtime_plugin(
         run_dir,
         cwd,
         provider_run_config,

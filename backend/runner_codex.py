@@ -109,6 +109,7 @@ from orchestration_tool_schemas import (
 from provider_catalog_mcp import available_provider_models_response
 from provider_run_config import symlink_home_overlay, toml_literal, write_skill_tree
 from runtime_skills import materialize_runtime_skills
+from runtime_agents import has_runtime_agents, materialize_runtime_agents
 from proc_control import process_control as _process_control
 from stream_limits import SUBPROCESS_LINE_LIMIT_BYTES
 
@@ -278,6 +279,37 @@ def _dynamic_tools_missing_from_rollout(
     return missing, None
 
 
+def _overlay_codex_home_children(overlay_codex_home: Path, real_codex_home: Path) -> None:
+    """Build overlay_codex_home as a real dir symlinking each child of the real
+    codex home except `agents/`, which is layered separately so extension
+    subagents can be merged in without mutating the real home."""
+    overlay_codex_home.mkdir(parents=True, exist_ok=True)
+    for child in real_codex_home.iterdir():
+        if child.name == "agents":
+            continue
+        link = overlay_codex_home / child.name
+        if link.exists() or link.is_symlink():
+            continue
+        os.symlink(child, link, target_is_directory=child.is_dir())
+
+
+def _merge_codex_agents_dir(agents_root: Path, real_agents: Path) -> None:
+    """Seed the overlay agents dir with symlinks to the user's real codex agents
+    so manually installed subagents stay available alongside extension ones.
+    Extension materialization later overwrites same-named entries (single source
+    of truth)."""
+    agents_root.mkdir(parents=True, exist_ok=True)
+    if not real_agents.is_dir():
+        return
+    for child in real_agents.iterdir():
+        if child.name.startswith("."):
+            continue
+        link = agents_root / child.name
+        if link.exists() or link.is_symlink():
+            continue
+        os.symlink(child, link, target_is_directory=child.is_dir())
+
+
 def _materialize_codex_run_home(
     run_dir: Path,
     provider_run_config: dict,
@@ -297,8 +329,12 @@ def _materialize_codex_run_home(
 
     real_codex_home = Path(os.environ.get("CODEX_HOME") or real_home / ".codex").expanduser()
     overlay_codex_home = overlay_home / ".codex"
+    inject_agents = has_runtime_agents("codex", bare_config=bare_config)
     if real_codex_home.exists() and not overlay_codex_home.exists() and not overlay_codex_home.is_symlink():
-        os.symlink(real_codex_home, overlay_codex_home, target_is_directory=real_codex_home.is_dir())
+        if inject_agents:
+            _overlay_codex_home_children(overlay_codex_home, real_codex_home)
+        else:
+            os.symlink(real_codex_home, overlay_codex_home, target_is_directory=real_codex_home.is_dir())
 
     skills_root = overlay_home / ".agents" / "skills"
     materialize_runtime_skills(
@@ -309,6 +345,11 @@ def _materialize_codex_run_home(
     skills = provider_run_config.get("skills") or {}
     if skills:
         write_skill_tree(skills_root, skills)
+
+    if inject_agents and overlay_codex_home.is_dir() and not overlay_codex_home.is_symlink():
+        agents_root = overlay_codex_home / "agents"
+        _merge_codex_agents_dir(agents_root, real_codex_home / "agents")
+        materialize_runtime_agents(agents_root, "codex", bare_config=bare_config)
 
     env = {"HOME": str(overlay_home)}
     if overlay_codex_home.exists() or overlay_codex_home.is_symlink():

@@ -279,6 +279,10 @@ def _materialize_agy_run_home(
         overlay_home / ".agents" / "skills", cwd, bare_config=bare_config,
         disabled=disabled_runtime_skills,
     )
+    # Subagents: agy/gemini has no user-defined native agent-definition
+    # surface, so extension-declared agents are intentionally a no-op here.
+    # Claude and Codex materialize them in their runners; when gemini gains a
+    # native surface, add a materialize_runtime_agents(..., "gemini") call.
 
     settings = _load_json_object(real_cli / "settings.json")
     if mcp_servers:
