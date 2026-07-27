@@ -4456,12 +4456,11 @@ async def delete_harness_profile(profile_id: str, revision: str = ""):
 async def update_session_harness_profile(session_id: str, body: dict = Body(default={})):
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="request body must be an object")
-    profile_id, revision = _harness_profile_selection(body)
+    profile_id = _harness_profile_selection(body)
     session = await asyncio.to_thread(
         session_manager.set_harness_profile,
         session_id,
         profile_id,
-        revision,
     )
     if not session:
         raise HTTPException(status_code=404, detail=t("error.session_not_found_retry"))
