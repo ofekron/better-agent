@@ -10,14 +10,12 @@
 .DS_Store
 
 better-agent-private/
-provider-config-sync/
 testape/
 desktop/
 docs/
 
 node_modules/
 frontend/node_modules/
-provider-config-sync/node_modules/
 frontend/dist/
 frontend/releases/
 

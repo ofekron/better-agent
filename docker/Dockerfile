@@ -58,7 +58,6 @@ WORKDIR /repo
 COPY . /repo
 
 # Real frontend build — not a stub. frontend/package.json's vendor deps
-# (@better-agent/provider-config-sync-*) resolve from vendor/*.tgz, which
 # .dockerignore does not exclude.
 RUN cd frontend && npm ci && npm run build
 

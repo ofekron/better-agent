@@ -21,7 +21,6 @@ _MAINTAINED_PREFIXES = (
     "runtime_",
     "coordination_",
     "marketplace_",
-    "provider_config_sync_",
     "session_bridge_",
     "session_control_",
     "agent_board_",

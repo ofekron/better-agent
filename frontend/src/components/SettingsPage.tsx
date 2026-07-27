@@ -84,8 +84,6 @@ interface Props {
   teamEnabled?: boolean;
   credentialBrokerEnabled?: boolean;
   onEditHarnessDescriptionFile?: (path: string) => Promise<unknown>;
-  providerConfigSyncEnabled?: boolean;
-  onOpenProviderConfigSync?: () => void;
 }
 
 type View =
@@ -138,17 +136,6 @@ interface ProviderSetupStatus {
   installed: boolean;
   verify: ProviderSetupCommandResult;
   install?: ProviderSetupCommandResult | null;
-}
-
-interface ProviderConfigRepositoryStatus {
-  enabled: boolean;
-  auto_apply: boolean;
-  remote_url: string;
-  checkout_path: string;
-  checkout_exists: boolean;
-  last_synced_at?: string;
-  last_error?: string;
-  apply?: { updated: number; considered: number };
 }
 
 interface Template {
@@ -503,7 +490,6 @@ const TEMPLATES = [
 ] as const satisfies readonly Template[];
 
 const KEEP = "__keep__";
-const PROVIDER_CONFIG_SYNC_API = `${API}/api/extensions/ofek-dev.provider-config-sync/backend`;
 
 export function SettingsPage({
   onClose,
@@ -513,14 +499,11 @@ export function SettingsPage({
   teamEnabled = true,
   credentialBrokerEnabled = true,
   onEditHarnessDescriptionFile,
-  providerConfigSyncEnabled = true,
-  onOpenProviderConfigSync,
 }: Props) {
   const { t } = useTranslation();
   const [state, setState] = useState<ProvidersState | null>(null);
   const [setupStatuses, setSetupStatuses] = useState<ProviderSetupStatus[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
-  const [repoStatus, setRepoStatus] = useState<ProviderConfigRepositoryStatus | null>(null);
   const [firstRunDone, setFirstRunDone] = useState(true);
   const [networkBindAddress, setNetworkBindAddress] = useState<NetworkBindAddress>("127.0.0.1");
   const [mobileEnabled, setMobileEnabled] = useState(false);
@@ -617,23 +600,6 @@ export function SettingsPage({
     }
   };
 
-  const refetchRepository = async () => {
-    if (!providerConfigSyncEnabled) {
-      setRepoStatus(null);
-      return;
-    }
-    try {
-      const { promise } = trackPromise("providerConfigRepo:status", async () => {
-        const r = await fetch(`${PROVIDER_CONFIG_SYNC_API}/repository`);
-        if (!r.ok) throw new Error(`HTTP ${r.status}`);
-        return (await r.json()) as ProviderConfigRepositoryStatus;
-      });
-      setRepoStatus(await promise);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "repository status failed");
-    }
-  };
-
   const refetchInstallationProfile = async () => {
     try {
       const r = await fetch(`${API}/api/installation-profile`);
@@ -655,9 +621,8 @@ export function SettingsPage({
     refetchSetupStatus();
     refetchPrefs();
     refetchProjects();
-    refetchRepository();
     refetchInstallationProfile();
-  }, [providerConfigSyncEnabled]);
+  }, []);
 
   useEffect(() => {
     const handler = () => refetch();
@@ -700,16 +665,13 @@ export function SettingsPage({
           mobileEnabled={mobileEnabled}
           integrationsEnabled={integrationsEnabled}
           onEdit={(p) => setView({ kind: "edit", providerId: p.id })}
-          onOpenProviderConfigSync={onOpenProviderConfigSync}
           setupStatuses={setupStatuses}
           projects={projects}
-          repoStatus={repoStatus}
           firstRunDone={firstRunDone}
           networkBindAddress={networkBindAddress}
           teamEnabled={teamEnabled}
           credentialBrokerEnabled={credentialBrokerEnabled}
           onEditHarnessDescriptionFile={onEditHarnessDescriptionFile}
-          providerConfigSyncEnabled={providerConfigSyncEnabled}
           section={section}
           onSectionChange={setSection}
           onAddProject={(path) => runBusyAction(setBusy, setError, "add project failed", async () => {
@@ -722,35 +684,6 @@ export function SettingsPage({
               if (!r.ok) throw new Error(await r.text());
             }).promise;
             await refetchProjects();
-          })}
-          onInitConfigRepo={(remoteUrl) => runBusyAction(setBusy, setError, "repository init failed", async () => {
-            await trackPromise("providerConfigRepo:init", async () => {
-              const r = await fetch(`${PROVIDER_CONFIG_SYNC_API}/repository/init`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ remote_url: remoteUrl, auto_apply: true }),
-              });
-              if (!r.ok) throw new Error(await r.text());
-            }).promise;
-            await refetchRepository();
-          })}
-          onLoadConfigRepo={(remoteUrl) => runBusyAction(setBusy, setError, "repository load failed", async () => {
-            await trackPromise("providerConfigRepo:load", async () => {
-              const r = await fetch(`${PROVIDER_CONFIG_SYNC_API}/repository/load`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ remote_url: remoteUrl, auto_apply: true }),
-              });
-              if (!r.ok) throw new Error(await r.text());
-            }).promise;
-            await refetchRepository();
-          })}
-          onSyncConfigRepo={() => runBusyAction(setBusy, setError, "repository sync failed", async () => {
-            await trackPromise("providerConfigRepo:sync", async () => {
-              const r = await fetch(`${PROVIDER_CONFIG_SYNC_API}/repository/sync`, { method: "POST" });
-              if (!r.ok) throw new Error(await r.text());
-            }).promise;
-            await refetchRepository();
           })}
           onInstallProvider={installProvider}
           installRuns={installRuns}
@@ -933,22 +866,16 @@ interface ProvidersListProps {
   credentialRetryingId: string | null;
   onRetryCredential: (p: Provider) => void;
   onDelete: (p: Provider) => void;
-  onOpenProviderConfigSync?: () => void;
   setupStatuses: ProviderSetupStatus[];
   projects: Project[];
-  repoStatus: ProviderConfigRepositoryStatus | null;
   firstRunDone: boolean;
   networkBindAddress: NetworkBindAddress;
   teamEnabled: boolean;
   credentialBrokerEnabled: boolean;
   onEditHarnessDescriptionFile?: (path: string) => Promise<unknown>;
-  providerConfigSyncEnabled: boolean;
   section: SettingsSection;
   onSectionChange: (section: SettingsSection) => void;
   onAddProject: (path: string) => void;
-  onInitConfigRepo: (remoteUrl: string) => void;
-  onLoadConfigRepo: (remoteUrl: string) => void;
-  onSyncConfigRepo: () => void;
   onInstallProvider: (kind: InstallableProviderKind) => void;
   installRuns: Record<string, InstallRun>;
   onVerifyProviders: () => void;
@@ -1379,22 +1306,16 @@ function ProvidersList({
   credentialRetryingId,
   onRetryCredential,
   onDelete,
-  onOpenProviderConfigSync,
   setupStatuses,
   projects,
-  repoStatus,
   firstRunDone,
   networkBindAddress,
   teamEnabled,
   credentialBrokerEnabled,
   onEditHarnessDescriptionFile,
-  providerConfigSyncEnabled,
   section,
   onSectionChange,
   onAddProject,
-  onInitConfigRepo,
-  onLoadConfigRepo,
-  onSyncConfigRepo,
   onInstallProvider,
   installRuns,
   onVerifyProviders,
@@ -1471,15 +1392,10 @@ function ProvidersList({
           refreshAppDisabled={refreshAppDisabled}
           setupStatuses={setupStatuses}
           projects={projects}
-          repoStatus={repoStatus}
           firstRunDone={firstRunDone}
           networkBindAddress={networkBindAddress}
           credentialBrokerEnabled={credentialBrokerEnabled}
-          providerConfigSyncEnabled={providerConfigSyncEnabled}
           onAddProject={onAddProject}
-          onInitConfigRepo={onInitConfigRepo}
-          onLoadConfigRepo={onLoadConfigRepo}
-          onSyncConfigRepo={onSyncConfigRepo}
           onInstallProvider={onInstallProvider}
           installRuns={installRuns}
           onVerifyProviders={onVerifyProviders}
@@ -1622,15 +1538,6 @@ function ProvidersList({
           {body}
           {section === "providers" && (
             <div className="settings-page-provider-actions">
-              {integrationsEnabled && onOpenProviderConfigSync && (
-                <button
-                  type="button"
-                  className="btn-secondary"
-                  onClick={onOpenProviderConfigSync}
-                >
-                  Provider Config Sync
-                </button>
-              )}
               <button className="setup-save-btn" onClick={onAdd} disabled={busy}>
                 {t('setup.addProvider')}
               </button>
@@ -1718,15 +1625,10 @@ function ProvidersSettingsSection({
   onDelete,
   setupStatuses,
   projects,
-  repoStatus,
   firstRunDone,
   networkBindAddress,
   credentialBrokerEnabled,
-  providerConfigSyncEnabled,
   onAddProject,
-  onInitConfigRepo,
-  onLoadConfigRepo,
-  onSyncConfigRepo,
   onInstallProvider,
   installRuns,
   onVerifyProviders,
@@ -1790,18 +1692,13 @@ function ProvidersSettingsSection({
           statuses={setupStatuses}
           providers={providers}
           projects={projects}
-          repoStatus={repoStatus}
           networkBindAddress={networkBindAddress}
           onNetworkBindChange={onNetworkBindChange}
           onRefreshApp={onRefreshApp}
           refreshAppDisabled={refreshAppDisabled}
           busy={busy}
           credentialBrokerEnabled={credentialBrokerEnabled}
-          providerConfigSyncEnabled={providerConfigSyncEnabled}
           onAddProject={onAddProject}
-          onInitConfigRepo={onInitConfigRepo}
-          onLoadConfigRepo={onLoadConfigRepo}
-          onSyncConfigRepo={onSyncConfigRepo}
           onInstallProvider={onInstallProvider}
           installRuns={installRuns}
           onVerifyProviders={onVerifyProviders}
@@ -2107,15 +2004,10 @@ function FirstRunWizard({
   statuses,
   providers,
   projects,
-  repoStatus,
   networkBindAddress,
   busy,
   credentialBrokerEnabled,
-  providerConfigSyncEnabled,
   onAddProject,
-  onInitConfigRepo,
-  onLoadConfigRepo,
-  onSyncConfigRepo,
   onInstallProvider,
   installRuns,
   onVerifyProviders,
@@ -2127,15 +2019,10 @@ function FirstRunWizard({
   statuses: ProviderSetupStatus[];
   providers: Provider[];
   projects: Project[];
-  repoStatus: ProviderConfigRepositoryStatus | null;
   networkBindAddress: NetworkBindAddress;
   busy: boolean;
   credentialBrokerEnabled: boolean;
-  providerConfigSyncEnabled: boolean;
   onAddProject: (path: string) => void;
-  onInitConfigRepo: (remoteUrl: string) => void;
-  onLoadConfigRepo: (remoteUrl: string) => void;
-  onSyncConfigRepo: () => void;
   onInstallProvider: (kind: InstallableProviderKind) => void;
   installRuns: Record<string, InstallRun>;
   onVerifyProviders: () => void;
@@ -2146,13 +2033,8 @@ function FirstRunWizard({
 }) {
   const { t } = useTranslation();
   const [projectPath, setProjectPath] = useState("");
-  const [remoteUrl, setRemoteUrl] = useState(repoStatus?.remote_url || "");
-  useEffect(() => {
-    if (repoStatus?.remote_url) setRemoteUrl(repoStatus.remote_url);
-  }, [repoStatus?.remote_url]);
   const hasProvider = providers.length > 0;
   const hasProject = projects.length > 0;
-  const hasRepo = Boolean(repoStatus?.enabled && repoStatus.remote_url);
 
   return (
     <section className="first-run-wizard">
@@ -2200,55 +2082,6 @@ function FirstRunWizard({
       <div className="first-run-step">
         <NativeImportSetting />
       </div>
-      {providerConfigSyncEnabled && (
-        <div className="first-run-step">
-          <div className="first-run-step-copy">
-            <strong>{t("setup.configRepoStepTitle")}</strong>
-            <span>
-              {hasRepo
-                ? t("setup.configRepoEnabled")
-                : t("setup.configRepoMissing")}
-            </span>
-            {repoStatus?.last_error && <span className="setup-error">{repoStatus.last_error}</span>}
-            {repoStatus?.apply && (
-              <span>{t("setup.configRepoApplied", { count: repoStatus.apply.updated })}</span>
-            )}
-          </div>
-          <div className="first-run-inline-form">
-            <input
-              type="text"
-              value={remoteUrl}
-              onChange={(e) => setRemoteUrl(e.target.value)}
-              placeholder={t("setup.configRepoRemotePlaceholder")}
-              spellCheck={false}
-            />
-            <button
-              type="button"
-              className="btn-secondary"
-              disabled={busy || !remoteUrl.trim()}
-              onClick={() => onLoadConfigRepo(remoteUrl.trim())}
-            >
-              {t("setup.loadConfigRepo")}
-            </button>
-            <button
-              type="button"
-              className="btn-secondary"
-              disabled={busy || !remoteUrl.trim()}
-              onClick={() => onInitConfigRepo(remoteUrl.trim())}
-            >
-              {t("setup.pushConfigRepo")}
-            </button>
-            <button
-              type="button"
-              className="btn-secondary"
-              disabled={busy || !hasRepo}
-              onClick={onSyncConfigRepo}
-            >
-              {t("setup.syncConfigRepo")}
-            </button>
-          </div>
-        </div>
-      )}
       <div className="first-run-step">
         <div className="first-run-step-copy">
           <strong>{t("setup.networkStepTitle")}</strong>

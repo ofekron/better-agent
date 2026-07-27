@@ -11,7 +11,7 @@ managed-instruction blocks into:
 
 This is a pure path resolver. It does NOT read or write instruction content;
 callers own the splice/sweep logic. Per-provider file-format details live here
-so no provider-config-sync package coupling remains.
+so no external synchronization package coupling remains.
 """
 from __future__ import annotations
 

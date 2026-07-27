@@ -18,4 +18,3 @@ huggingface-hub>=0.24.0
 filelock>=3.16.1
 psutil>=5.9.0
 ../vendor/api-surface-sync/0.2.1/api_surface_sync-0.2.1-py3-none-any.whl
-../vendor/provider-config-sync/0.1.0/better_agent_provider_config_sync_backend-0.1.0-py3-none-any.whl[mcp]
