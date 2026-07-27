@@ -102,6 +102,15 @@ def _resolved(root: Path | None, item: dict[str, Any], relative: str) -> str:
     return _markdown_description(_artifact_path(root, relative))
 
 
+def _source_path(root: Path | None, item: dict[str, Any], relative: str) -> str:
+    """The authoritative file containing the resolved description."""
+    if str(item.get("description") or "").strip():
+        path = _artifact_path(root, "better-agent-extension.json")
+    else:
+        path = _artifact_path(root, relative)
+    return str(path) if path is not None and path.is_file() else ""
+
+
 def _server_directory(item: dict[str, Any]) -> str:
     """Directory holding an MCP server, from however it is launched — a
     relative script path, or a dotted module whose top package is a directory
@@ -120,11 +129,26 @@ def skill_description(root: Path | None, item: dict[str, Any]) -> str:
     return _resolved(root, item, f"{path}/SKILL.md" if path else "")
 
 
+def skill_description_path(root: Path | None, item: dict[str, Any]) -> str:
+    path = str(item.get("path") or "")
+    return _source_path(root, item, f"{path}/SKILL.md" if path else "")
+
+
 def instruction_description(root: Path | None, item: dict[str, Any]) -> str:
     return _resolved(root, item, str(item.get("path") or ""))
+
+
+def instruction_description_path(root: Path | None, item: dict[str, Any]) -> str:
+    return _source_path(root, item, str(item.get("path") or ""))
 
 
 def mcp_description(root: Path | None, item: dict[str, Any]) -> str:
     name = str(item.get("name") or "").strip()
     directory = _server_directory(item)
     return _resolved(root, item, f"{directory}/{name}.md" if name and directory else "")
+
+
+def mcp_description_path(root: Path | None, item: dict[str, Any]) -> str:
+    name = str(item.get("name") or "").strip()
+    directory = _server_directory(item)
+    return _source_path(root, item, f"{directory}/{name}.md" if name and directory else "")

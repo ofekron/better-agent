@@ -10498,6 +10498,71 @@ button.run-badge-clickable:focus-visible {
   color: var(--text-secondary);
 }
 
+.harness-description-link {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  text-align: start;
+  cursor: pointer;
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, currentColor 35%, transparent);
+  text-underline-offset: 2px;
+  transition: color 160ms ease, text-decoration-color 160ms ease;
+}
+
+.harness-description-link:hover,
+.harness-description-link:focus-visible {
+  color: var(--accent);
+  text-decoration-color: currentColor;
+}
+
+.harness-description-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1200;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgb(0 0 0 / 55%);
+  animation: modalFadeIn 180ms ease-out;
+}
+
+.harness-description-panel {
+  width: min(1000px, 92vw);
+  height: min(760px, 88vh);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg-primary);
+  box-shadow: var(--shadow-lg);
+}
+
+.harness-description-header,
+.harness-description-actions {
+  display: flex;
+  align-items: center;
+}
+
+.harness-description-header {
+  min-height: 48px;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  font-weight: 600;
+}
+
+.harness-description-actions {
+  gap: 8px;
+}
+
+.harness-description-file-panel {
+  min-height: 0;
+  flex: 1;
+}
+
 /* The card's master switch: everything below it is only reachable while this
    is on, so it reads heavier than the group rows it gates. */
 .harness-extension-enabled .harness-item-row {

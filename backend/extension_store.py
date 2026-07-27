@@ -7802,6 +7802,7 @@ def extension_runtime_skills(extension_id: str) -> list[dict[str, Any]]:
         {
             "name": item["name"],
             "description": extension_descriptions.skill_description(root, item),
+            "description_path": extension_descriptions.skill_description_path(root, item),
             "enabled": is_runtime_skill_enabled(extension_id, item["name"], record=record),
         }
         for item in entrypoints.get("skills") or []
@@ -7864,6 +7865,7 @@ def extension_mcp_servers(extension_id: str) -> list[dict[str, Any]]:
                 "name": item["name"],
                 "label": item.get("label") or item["name"],
                 "description": extension_descriptions.mcp_description(root, item),
+                "description_path": extension_descriptions.mcp_description_path(root, item),
                 "user_facing": item.get("user_facing", True),
                 "enabled": is_mcp_server_enabled(extension_id, item["name"], record=record),
                 "forced_by_skills": mcp_forcing_skills(extension_id, item["name"], record=record),

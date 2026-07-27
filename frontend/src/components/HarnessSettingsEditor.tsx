@@ -3,8 +3,10 @@ import { useTranslation } from "react-i18next";
 import { API } from "../api";
 import { eventBus } from "../lib/eventBus";
 import { trackedFetch } from "../progress/store";
+import { ProgressButton } from "../progress/ProgressButton";
 import type { HarnessProfile } from "../types";
-import { ExtensionEnabledToggle, HarnessGroup } from "./harness/HarnessGroup";
+import { DescriptionLink, ExtensionEnabledToggle, HarnessGroup } from "./harness/HarnessGroup";
+import { FileViewer } from "./FileViewer";
 import { HarnessProfileMeta } from "./harness/HarnessProfileMeta";
 import {
   PROFILE_NOT_FOUND,
@@ -48,7 +50,11 @@ function allGroups(
   return groups;
 }
 
-export function HarnessSettingsEditor() {
+interface HarnessSettingsEditorProps {
+  onEditDescriptionFile?: (path: string) => Promise<unknown>;
+}
+
+export function HarnessSettingsEditor({ onEditDescriptionFile }: HarnessSettingsEditorProps) {
   const { t } = useTranslation();
   const [selectedId, setSelectedId] = useState(DEFAULT_ID);
   const [descriptor, setDescriptor] = useState<HarnessDescriptor | null>(null);
@@ -61,6 +67,7 @@ export function HarnessSettingsEditor() {
   const [newProfileName, setNewProfileName] = useState("");
   const [diffOnly, setDiffOnly] = useState(false);
   const [search, setSearch] = useState("");
+  const [descriptionFile, setDescriptionFile] = useState<{ path: string; label: string } | null>(null);
   const localProfileWriteInFlight = useRef(false);
   const inFlightHarnessProfileEvents = useRef<Record<string, unknown>[]>([]);
   const inFlightExternalEvent = useRef(false);
@@ -366,9 +373,13 @@ export function HarnessSettingsEditor() {
                       </span>
                     )}
                   </div>
-                  {extension.description && (
-                    <p className="harness-extension-block-description">{extension.description}</p>
-                  )}
+                  <DescriptionLink
+                    description={extension.description}
+                    path={extension.description_path}
+                    label={extension.name}
+                    onOpen={(path, label) => setDescriptionFile({ path, label })}
+                    className="harness-extension-block-description"
+                  />
                   <ExtensionEnabledToggle
                     group={descriptor.builtin_extensions}
                     profile={profile}
@@ -377,6 +388,7 @@ export function HarnessSettingsEditor() {
                     disabled={disabled}
                     diffOnly={diffOnly}
                     onWrite={(write) => applyWrites([write])}
+                    onOpenDescription={(path, label) => setDescriptionFile({ path, label })}
                   />
                   {extension.groups.map((group) => (
                     <HarnessGroup
@@ -388,6 +400,7 @@ export function HarnessSettingsEditor() {
                       disabled={disabled}
                       diffOnly={diffOnly}
                       onWrite={(write) => applyWrites([write])}
+                      onOpenDescription={(path, label) => setDescriptionFile({ path, label })}
                     />
                   ))}
                 </article>
@@ -402,6 +415,7 @@ export function HarnessSettingsEditor() {
                   disabled={disabled}
                   diffOnly={diffOnly}
                   onWrite={(write) => applyWrites([write])}
+                  onOpenDescription={(path, label) => setDescriptionFile({ path, label })}
                 />
                 <HarnessGroup
                   group={descriptor.runtime_skills}
@@ -411,12 +425,45 @@ export function HarnessSettingsEditor() {
                   disabled={disabled || isDefault}
                   diffOnly={diffOnly}
                   onWrite={(write) => applyWrites([write])}
+                  onOpenDescription={(path, label) => setDescriptionFile({ path, label })}
                 />
               </article>
             </div>
           )}
         </section>
       </div>
+      {descriptionFile && (
+        <div className="harness-description-overlay" role="dialog" aria-modal="true" aria-label={descriptionFile.label}>
+          <div className="harness-description-panel">
+            <div className="harness-description-header">
+              <span>{descriptionFile.label}</span>
+              <div className="harness-description-actions">
+                {onEditDescriptionFile && (
+                  <ProgressButton
+                    opId={`fileEditor:start:${descriptionFile.path}`}
+                    className="btn-secondary"
+                    onClick={() => void onEditDescriptionFile(descriptionFile.path)}
+                    loadingChildren={t("common.loading", "Loading…")}
+                  >
+                    {t("files.editWithAiTitle")}
+                  </ProgressButton>
+                )}
+                <button
+                  type="button"
+                  className="project-settings-close"
+                  onClick={() => setDescriptionFile(null)}
+                  aria-label={t("common.close", "Close")}
+                >
+                  &times;
+                </button>
+              </div>
+            </div>
+            <div className="harness-description-file-panel">
+              <FileViewer filePath={descriptionFile.path} onClose={() => setDescriptionFile(null)} />
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

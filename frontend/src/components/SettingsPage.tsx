@@ -83,6 +83,7 @@ interface Props {
   hookActionContext: HookActionContext;
   teamEnabled?: boolean;
   credentialBrokerEnabled?: boolean;
+  onEditHarnessDescriptionFile?: (path: string) => Promise<unknown>;
   providerConfigSyncEnabled?: boolean;
   onOpenProviderConfigSync?: () => void;
 }
@@ -505,6 +506,7 @@ export function SettingsPage({
   hookActionContext,
   teamEnabled = true,
   credentialBrokerEnabled = true,
+  onEditHarnessDescriptionFile,
   providerConfigSyncEnabled = true,
   onOpenProviderConfigSync,
 }: Props) {
@@ -700,6 +702,7 @@ export function SettingsPage({
           networkBindAddress={networkBindAddress}
           teamEnabled={teamEnabled}
           credentialBrokerEnabled={credentialBrokerEnabled}
+          onEditHarnessDescriptionFile={onEditHarnessDescriptionFile}
           providerConfigSyncEnabled={providerConfigSyncEnabled}
           section={section}
           onSectionChange={setSection}
@@ -932,6 +935,7 @@ interface ProvidersListProps {
   networkBindAddress: NetworkBindAddress;
   teamEnabled: boolean;
   credentialBrokerEnabled: boolean;
+  onEditHarnessDescriptionFile?: (path: string) => Promise<unknown>;
   providerConfigSyncEnabled: boolean;
   section: SettingsSection;
   onSectionChange: (section: SettingsSection) => void;
@@ -1377,6 +1381,7 @@ function ProvidersList({
   networkBindAddress,
   teamEnabled,
   credentialBrokerEnabled,
+  onEditHarnessDescriptionFile,
   providerConfigSyncEnabled,
   section,
   onSectionChange,
@@ -1524,7 +1529,9 @@ function ProvidersList({
       {section === "capabilities" && (
         <InstallationCapabilities onRestartRequested={onRefreshApp} />
       )}
-      {section === "harnessProfiles" && <HarnessSettingsEditor />}
+      {section === "harnessProfiles" && (
+        <HarnessSettingsEditor onEditDescriptionFile={onEditHarnessDescriptionFile} />
+      )}
       {section === "passwords" && credentialBrokerEnabled && <PasswordManagerSetting />}
       {section === "server" && isNative && <ServerSetting />}
       {section === "notifications" && isNative && <MobileNotificationSettings />}

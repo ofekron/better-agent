@@ -143,6 +143,7 @@ def _mcp_group(extension_id: str) -> dict[str, Any]:
             "name": server["name"],
             "label": server.get("label") or server["name"],
             "description": server.get("description") or "",
+            "description_path": server.get("description_path") or "",
             "detail": "",
             "default_enabled": bool(server.get("enabled")),
             # A server an enabled skill depends on cannot be turned off
@@ -159,6 +160,7 @@ def _skills_group(extension_id: str) -> dict[str, Any]:
             "name": skill["name"],
             "label": skill["name"],
             "description": skill.get("description") or "",
+            "description_path": skill.get("description_path") or "",
             "detail": "",
             "default_enabled": bool(skill.get("enabled")),
             "locked_by": [],
@@ -178,6 +180,7 @@ def _instructions_group(record: dict[str, Any]) -> dict[str, Any]:
             "name": str(item["name"]),
             "label": str(item["name"]),
             "description": extension_descriptions.instruction_description(root, item),
+            "description_path": extension_descriptions.instruction_description_path(root, item),
             "detail": "project" if item.get("level") == "project" else "global",
             # Manifest provider scope — the run path and the file-sync path
             # both drop this section for any provider outside the list, so the
@@ -208,6 +211,8 @@ def _instructions_group(record: dict[str, Any]) -> dict[str, Any]:
 
 def _settings_group(extension_id: str) -> dict[str, Any]:
     record = extension_store.get_extension(extension_id)
+    root = extension_store.runtime_package_root_for_record(record)
+    manifest_path = str((root / "better-agent-extension.json").resolve()) if root else ""
     settings = extension_store.get_extension_settings(extension_id)
     values = settings.get("values") or {}
     secret_present = settings.get("secret_present") or {}
@@ -221,6 +226,7 @@ def _settings_group(extension_id: str) -> dict[str, Any]:
             "name": key,
             "label": spec.get("label") or key,
             "description": spec.get("description") or "",
+            "description_path": manifest_path if spec.get("description") else "",
             "detail": "",
             "type": spec.get("type"),
             "enum": list(spec.get("enum") or []),
@@ -324,6 +330,8 @@ def _permissions_group(record: dict[str, Any]) -> dict[str, Any]:
 
 def _extension_descriptor(record: dict[str, Any], extension_id: str) -> dict[str, Any]:
     manifest = record.get("manifest") or {}
+    root = extension_store.runtime_package_root_for_record(record)
+    manifest_path = str((root / "better-agent-extension.json").resolve()) if root else ""
     groups = [
         _mcp_group(extension_id),
         _skills_group(extension_id),
@@ -339,6 +347,7 @@ def _extension_descriptor(record: dict[str, Any], extension_id: str) -> dict[str
         "id": extension_id,
         "name": manifest.get("name") or extension_id,
         "description": manifest.get("description") or "",
+        "description_path": manifest_path if manifest.get("description") else "",
         "required": extension_id in extension_store.REQUIRED_EXTENSION_IDS,
         "enabled": bool(record.get("enabled")),
         "runtime_ready": extension_store.is_extension_runtime_ready(extension_id),

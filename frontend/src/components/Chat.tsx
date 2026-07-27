@@ -1088,7 +1088,14 @@ export function Chat({
       if (targetId && scrollMessageIntoView(targetId)) clearPendingMessageFocus(targetId);
     };
     const off = eventBus.subscribe("focus_message", (p) => {
-      if (p?.session_id === sid) tryFocus();
+      if (
+        p &&
+        typeof p === "object" &&
+        "session_id" in p &&
+        p.session_id === sid
+      ) {
+        tryFocus();
+      }
     });
     return () => off();
   }, [session?.id]);

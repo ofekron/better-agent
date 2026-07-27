@@ -26,6 +26,33 @@ interface GroupProps {
   /** Filters the tree to overridden controls only. */
   diffOnly: boolean;
   onWrite: (write: HarnessFieldWrite) => void;
+  onOpenDescription?: (path: string, label: string) => void;
+}
+
+export function DescriptionLink({
+  description,
+  path,
+  label,
+  onOpen,
+  className,
+}: {
+  description: string;
+  path?: string;
+  label: string;
+  onOpen?: (path: string, label: string) => void;
+  className: string;
+}) {
+  if (!description) return null;
+  if (!path || !onOpen) return <p className={className}>{description}</p>;
+  return (
+    <button
+      type="button"
+      className={`${className} harness-description-link`}
+      onClick={() => onOpen(path, label)}
+    >
+      {description}
+    </button>
+  );
 }
 
 /** Inherit/override state with a reset affordance. Absent on Default, which
@@ -99,6 +126,7 @@ function ToggleRow({
   isDefault,
   disabled,
   onWrite,
+  onOpenDescription,
   labelOverride,
 }: GroupProps & { item: HarnessDescriptorItem; labelOverride?: string }) {
   const { t } = useTranslation();
@@ -160,7 +188,13 @@ function ToggleRow({
           </button>
         </span>
       )}
-      {caption && <p className="harness-item-hint">{caption}</p>}
+      <DescriptionLink
+        description={caption}
+        path={item.description ? item.description_path : undefined}
+        label={item.label}
+        onOpen={onOpenDescription}
+        className="harness-item-hint"
+      />
     </div>
   );
 }
@@ -172,6 +206,7 @@ function SettingRow({
   isDefault,
   disabled,
   onWrite,
+  onOpenDescription,
 }: GroupProps & { item: HarnessDescriptorItem; extensionId: string }) {
   const { t } = useTranslation();
   const state = settingState(profile, extensionId, item);
@@ -197,6 +232,13 @@ function SettingRow({
           }}
         />
         <GlobalBadge />
+        <DescriptionLink
+          description={item.description}
+          path={item.description_path}
+          label={item.label}
+          onOpen={onOpenDescription}
+          className="harness-item-hint"
+        />
       </div>
     );
   }
@@ -246,7 +288,13 @@ function SettingRow({
           onReset={() => onWrite({ path, clear: true })}
         />
       )}
-      {item.description && <p className="harness-item-hint">{item.description}</p>}
+      <DescriptionLink
+        description={item.description}
+        path={item.description_path}
+        label={item.label}
+        onOpen={onOpenDescription}
+        className="harness-item-hint"
+      />
     </div>
   );
 }
@@ -339,7 +387,13 @@ export function HarnessGroup(props: GroupProps) {
             <span className="harness-item-label">{item.label}</span>
             {item.detail && <span className="harness-item-detail">{item.detail}</span>}
             <ProviderScope providers={item.providers} />
-            {item.description && <p className="harness-item-hint">{item.description}</p>}
+            <DescriptionLink
+              description={item.description}
+              path={item.description_path}
+              label={item.label}
+              onOpen={props.onOpenDescription}
+              className="harness-item-hint"
+            />
           </div>
         ))}
       </>

@@ -16,6 +16,8 @@ export interface HarnessDescriptorItem {
    * from the artifact it ships (a skill's SKILL.md, an instruction block's
    * opening paragraph). Empty when the extension declares nothing. */
   description: string;
+  /** Absolute validated path of the artifact that owns `description`. */
+  description_path?: string;
   /** Short classification chip (instruction level, native kind, module slot,
    * required/optional) — a label, never an explanation. */
   detail?: string;
@@ -52,6 +54,8 @@ export interface HarnessDescriptorExtension {
   id: string;
   name: string;
   description: string;
+  /** Absolute validated path of the manifest that owns `description`. */
+  description_path?: string;
   required: boolean;
   enabled: boolean;
   runtime_ready: boolean;

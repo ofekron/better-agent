@@ -100,9 +100,13 @@ def main_test() -> None:
     body = descriptor.json()
     entry = next((e for e in body["extensions"] if e["id"] == FIXTURE_ID), None)
     check(entry is not None, "descriptor lists the installed extension")
+    manifest_path = str((Path(_TMP_HOME) / "apicheck-extension" / "better-agent-extension.json").resolve())
+    check(entry["description_path"] == manifest_path, "extension description links to its manifest")
     group_ids = {g["id"] for g in entry["groups"]}
     check(harness_fields.GROUP_MCP in group_ids, "descriptor exposes the MCP group")
     check(harness_fields.GROUP_SETTINGS in group_ids, "descriptor exposes the settings group")
+    skills = next(group for group in entry["groups"] if group["id"] == harness_fields.GROUP_SKILLS)
+    check(skills["items"][0]["description_path"] == manifest_path, "declared skill description links to its manifest")
 
     original_resolve_profile = harness_profile_resolver.resolve_profile
     resolve_calls = 0

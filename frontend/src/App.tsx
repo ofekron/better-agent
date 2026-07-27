@@ -6676,6 +6676,7 @@ function AppMain({
           hookActionContext={hookActionContext}
           teamEnabled={builtinExtensions.team}
           credentialBrokerEnabled={builtinExtensions.credentialBroker}
+          onEditHarnessDescriptionFile={startFileEditor}
           providerConfigSyncEnabled={builtinExtensions.providerConfigSync}
           onOpenProviderConfigSync={
             builtinExtensions.providerConfigSync

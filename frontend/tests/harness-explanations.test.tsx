@@ -1,5 +1,5 @@
-import { render, screen } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { fireEvent, render, screen } from "@testing-library/react";
+import { describe, expect, it, vi } from "vitest";
 import "../src/i18n";
 import { HarnessGroup } from "../src/components/harness/HarnessGroup";
 import type { HarnessDescriptorGroup } from "../src/components/harness/types";
@@ -23,7 +23,10 @@ function group(overrides: Partial<HarnessDescriptorGroup>): HarnessDescriptorGro
   };
 }
 
-function renderGroup(descriptorGroup: HarnessDescriptorGroup) {
+function renderGroup(
+  descriptorGroup: HarnessDescriptorGroup,
+  onOpenDescription?: (path: string, label: string) => void,
+) {
   return render(
     <HarnessGroup
       group={descriptorGroup}
@@ -33,6 +36,7 @@ function renderGroup(descriptorGroup: HarnessDescriptorGroup) {
       disabled={false}
       diffOnly={false}
       onWrite={() => {}}
+      onOpenDescription={onOpenDescription}
     />,
   );
 }
@@ -76,6 +80,26 @@ describe("harness control explanations", () => {
       }),
     );
     expect(screen.getByText(/Commit the intended working-tree changes/i)).toBeTruthy();
+  });
+
+  it("opens every artifact-backed description through its source file", () => {
+    const onOpenDescription = vi.fn();
+    renderGroup(
+      group({
+        id: "skills",
+        scope: "profile",
+        items: [{
+          name: "deploy",
+          label: "deploy",
+          description: "Commit and push the current branch.",
+          description_path: "/extensions/deploy/SKILL.md",
+          default_enabled: true,
+        }],
+      }),
+      onOpenDescription,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /Commit and push/i }));
+    expect(onOpenDescription).toHaveBeenCalledWith("/extensions/deploy/SKILL.md", "deploy");
   });
 
   it("gives UI surfaces a readable name instead of the raw key", () => {
