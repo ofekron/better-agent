@@ -33,17 +33,17 @@ def main() -> int:
         codex_exe = bin_dir / "codex"
         codex_exe.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
         codex_exe.chmod(codex_exe.stat().st_mode | stat.S_IXUSR)
-        gemini_exe = bin_dir / "gemini"
-        gemini_exe.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-        gemini_exe.chmod(gemini_exe.stat().st_mode | stat.S_IXUSR)
+        agy_exe = bin_dir / "agy"
+        agy_exe.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        agy_exe.chmod(agy_exe.stat().st_mode | stat.S_IXUSR)
         os.environ["PATH"] = "/usr/bin:/bin"
 
         codex_found = resolve_cli_binary("codex", extra_dirs=[str(bin_dir)])
-        gemini_found = resolve_cli_binary("gemini", extra_dirs=[str(bin_dir)])
-        ok = codex_found == str(codex_exe) and gemini_found == str(gemini_exe)
+        agy_found = resolve_cli_binary("agy", extra_dirs=[str(bin_dir)])
+        ok = codex_found == str(codex_exe) and agy_found == str(agy_exe)
         print(
             f"{PASS if ok else FAIL} resolves CLIs from explicit non-PATH dir -- "
-            f"{codex_found=} {gemini_found=}"
+            f"{codex_found=} {agy_found=}"
         )
         if os.name == "nt":
             path_dir = Path(tmp) / "path-bin"

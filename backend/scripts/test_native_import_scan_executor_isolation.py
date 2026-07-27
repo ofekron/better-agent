@@ -3,7 +3,7 @@
 in the backend.
 
 `native_import.count_native_sessions` does a full recursive `rglob` across
-Claude+Codex+Gemini+pi native session directories, reading per-file headers
+Claude+Codex+pi native session directories, reading per-file headers
 ("can reach hundreds of MB across a full Claude+Codex history" per its own
 docstring). It was dispatched via a bare
 `asyncio.to_thread(native_import.count_native_sessions, ...)` from the
