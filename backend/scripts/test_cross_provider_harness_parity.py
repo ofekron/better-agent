@@ -317,6 +317,32 @@ def test_runtime_skill_display_root_matches_overlay_home_providers():
 # ---------------------------------------------------------------------------
 # S7 — Capability contexts: shared build reaches every provider.
 # ---------------------------------------------------------------------------
+def test_every_runner_delivers_capability_context_through_the_shared_helper():
+    """Building capability contexts identically is only half of S7 — every
+    runner must also DELIVER them the same way.
+
+    The Claude runner used to render its own copy of the blocks and append
+    them to the system prompt, which put them on the CLI command line. That
+    silently diverged from the other ten providers and, once the payload
+    passed Windows' 32,767-char CreateProcess limit, made every turn on a
+    Windows host fail with an unrelated-looking error. Delivery goes through
+    `prepend_capability_context`, or not at all.
+    """
+    from pathlib import Path
+
+    backend_dir = Path(__file__).resolve().parent.parent
+    offenders: list[str] = []
+    for path in sorted(backend_dir.glob("runner*.py")):
+        source = path.read_text(encoding="utf-8")
+        if "capability_contexts" not in source:
+            continue
+        if "prepend_capability_context" not in source:
+            offenders.append(f"{path.name}: reads capability contexts without the shared helper")
+        if "capability_context.md" in source:
+            offenders.append(f"{path.name}: renders its own capability blocks")
+    assert not offenders, "capability context delivery diverged:\n  " + "\n  ".join(offenders)
+
+
 def test_provider_capability_contexts_is_kind_dispatched_not_forked():
     # provider_capability_contexts dispatches on provider_kind — it is ONE
     # function feeding all providers, not a per-provider fork. Lock that the
@@ -484,6 +510,7 @@ def main() -> int:
     test_runtime_skill_contexts_is_provider_agnostic()
     test_runtime_skill_contexts_deterministic_and_bare_empty()
     test_runtime_skill_display_root_matches_overlay_home_providers()
+    test_every_runner_delivers_capability_context_through_the_shared_helper()
     test_provider_capability_contexts_is_kind_dispatched_not_forked()
     test_disabled_builtin_extensions_normalizer_is_kind_agnostic()
     test_builtin_harness_instructions_default_to_native_exposed()

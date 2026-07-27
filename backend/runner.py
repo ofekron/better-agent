@@ -164,7 +164,7 @@ from paths import encode_cwd
 from stream_limits import SUBPROCESS_LINE_LIMIT_BYTES
 from tool_approval_client import describe_tool_call as _describe_tool_call
 from tool_approval_client import request_tool_approval
-from prompt_templates import render_prompt
+from capability_contexts import prepend_capability_context
 
 logger = logging.getLogger(__name__)
 
@@ -3330,40 +3330,12 @@ async def _run(run_dir: Path, inputs: dict) -> int:
 
     fork = bool(inputs.get("fork", False))
 
-    _runner_options: dict = {}
-
-    def _append_system_prompt(text: str) -> None:
-        existing = (_runner_options.get("system_prompt") or {}).get("append", "")
-        merged = f"{existing}\n\n{text}" if existing else text
-        _runner_options["system_prompt"] = {
-            "type": "preset",
-            "preset": "claude_code",
-            "append": merged,
-        }
-
-    def _capability_prompt() -> str:
-        blocks = []
-        for item in inputs.get("capability_contexts") or []:
-            if not isinstance(item, dict):
-                continue
-            content = item.get("content")
-            if not isinstance(content, str) or not content.strip():
-                continue
-            name = str(item.get("name") or "Capability")
-            category = str(item.get("category") or "capability")
-            blocks.append(
-                f"## {name} ({category})\n\n{content.strip()}"
-            )
-        if not blocks:
-            return ""
-        return render_prompt(
-            "runner/capability_context.md",
-            {"blocks": "\n\n".join(blocks)},
-        )
-
-    capability_prompt = _capability_prompt()
-    if capability_prompt:
-        _append_system_prompt(capability_prompt)
+    # Capability context rides the prompt, like every other provider does
+    # through the same helper. It used to be rendered here and appended to
+    # the system prompt, which put tens of KB on the CLI command line — over
+    # Windows' 32,767-char CreateProcess limit, so no Windows host could run
+    # a turn at all.
+    prompt = prepend_capability_context(prompt, inputs)
 
     extra_args = {"exclude-dynamic-system-prompt-sections": None}
     if _bare:
@@ -3470,7 +3442,6 @@ async def _run(run_dir: Path, inputs: dict) -> int:
         extra_args=extra_args,
         plugins=plugins,
         env=_claude_cache_env(),
-        **_runner_options,
     )
 
     # Compute pre_query_byte_offset: for resumes, snapshot current jsonl size
