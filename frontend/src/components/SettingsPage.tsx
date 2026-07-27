@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Capacitor } from "@capacitor/core";
 import type { Project, Provider, ProvidersState, ReasoningEffort, Permission } from "../types";
@@ -33,7 +33,7 @@ import { AppearanceSetting } from "./AppearanceSetting";
 import { UserDisplayNameSetting } from "./UserDisplayNameSetting";
 import { AuthCredentialsSetting } from "./AuthCredentialsSetting";
 import { PasswordManagerSetting } from "./PasswordManagerSetting";
-import { HarnessSettingsEditor } from "./HarnessSettingsEditor";
+import { lazyWithRetry } from "../lib/lazyWithRetry";
 import {
   downloadUrl as desktopDownloadUrl,
   platformLabel as desktopPlatformLabel,
@@ -174,6 +174,12 @@ const REASONING_EFFORT_OPTIONS: Record<string, ReasoningEffort[]> = {
   codex: ["none", "minimal", "low", "medium", "high", "xhigh"],
   fugu: ["high", "xhigh"],
 };
+
+const HarnessSettingsEditor = lazyWithRetry(() =>
+  import("./HarnessSettingsEditor").then((module) => ({
+    default: module.HarnessSettingsEditor,
+  })),
+);
 const SAKANA_FUGU_API_BASE_URL = "https://api.sakana.ai/v1";
 
 function effortOptionsForKind(kind: string): ReasoningEffort[] {
@@ -1530,7 +1536,15 @@ function ProvidersList({
         <InstallationCapabilities onRestartRequested={onRefreshApp} />
       )}
       {section === "harnessProfiles" && (
-        <HarnessSettingsEditor onEditDescriptionFile={onEditHarnessDescriptionFile} />
+        <Suspense
+          fallback={
+            <div className="harness-settings-editor">
+              {t("common.loading", "Loading…")}
+            </div>
+          }
+        >
+          <HarnessSettingsEditor onEditDescriptionFile={onEditHarnessDescriptionFile} />
+        </Suspense>
       )}
       {section === "passwords" && credentialBrokerEnabled && <PasswordManagerSetting />}
       {section === "server" && isNative && <ServerSetting />}
