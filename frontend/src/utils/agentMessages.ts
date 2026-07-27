@@ -163,6 +163,7 @@ export function flattenClaudeMessages(events: WSEvent[]): FlatEventsResult {
 
   for (const ev of events) {
     if (ev.type !== "agent_message") {
+      if ((ev.type as string) === "agent_message.file-history-delta") continue;
       const _ts = deriveTs(ev);
       flat.push(_ts ? { ...ev, _ts } : ev);
       continue;
