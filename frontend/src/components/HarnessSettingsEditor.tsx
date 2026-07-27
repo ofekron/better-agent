@@ -1,12 +1,12 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { API } from "../api";
 import { eventBus } from "../lib/eventBus";
 import { trackedFetch } from "../progress/store";
 import { ProgressButton } from "../progress/ProgressButton";
+import { lazyWithRetry } from "../lib/lazyWithRetry";
 import type { HarnessProfile } from "../types";
 import { DescriptionLink, ExtensionEnabledToggle, HarnessGroup } from "./harness/HarnessGroup";
-import { FileViewer } from "./FileViewer";
 import { HarnessProfileMeta } from "./harness/HarnessProfileMeta";
 import {
   PROFILE_NOT_FOUND,
@@ -26,6 +26,9 @@ import type {
 
 const DEFAULT_ID = "default";
 
+const FileViewer = lazyWithRetry(() =>
+  import("./FileViewer").then((module) => ({ default: module.FileViewer })),
+);
 
 interface ProfileSummary {
   id: string;
@@ -128,10 +131,12 @@ export function HarnessSettingsEditor({ onEditDescriptionFile }: HarnessSettings
     };
     // Default is a projection of extension state, so an extension change
     // moves it just as a profile write does — both channels refetch.
-    const unsubExtensions = eventBus.subscribe("extensions_changed", (payload) => reload(payload, "extensions"));
+    const unsubExtensionConfig = eventBus.subscribe("extension.config", (payload) => reload(payload, "extensions"));
+    const unsubDefaultHarness = eventBus.subscribe("extension.harness.default", (payload) => reload(payload, "extensions"));
     const unsubProfiles = eventBus.subscribe("harness_profiles_changed", (payload) => reload(payload, "profiles"));
     return () => {
-      unsubExtensions();
+      unsubExtensionConfig();
+      unsubDefaultHarness();
       unsubProfiles();
     };
   }, [load, loadProfiles]);
@@ -459,7 +464,15 @@ export function HarnessSettingsEditor({ onEditDescriptionFile }: HarnessSettings
               </div>
             </div>
             <div className="harness-description-file-panel">
-              <FileViewer filePath={descriptionFile.path} onClose={() => setDescriptionFile(null)} />
+              <Suspense
+                fallback={
+                  <div className="harness-settings-editor">
+                    {t("common.loading", "Loading…")}
+                  </div>
+                }
+              >
+                <FileViewer filePath={descriptionFile.path} onClose={() => setDescriptionFile(null)} />
+              </Suspense>
             </div>
           </div>
         </div>
