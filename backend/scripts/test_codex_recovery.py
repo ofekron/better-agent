@@ -686,6 +686,371 @@ def test_emit_complete_recovers_missing_complete_from_rollout() -> bool:
     return asyncio.run(_run())
 
 
+def test_codex_ambient_cancel_preserves_recoverable_app_server() -> bool:
+    import runner_codex
+
+    calls: list[str] = []
+    codex_sid = str(uuid.uuid4())
+    rollout = runs_root() / "ambient-cancel-rollout.jsonl"
+    rollout.parent.mkdir(parents=True, exist_ok=True)
+    rollout.write_text(
+        json.dumps(_make_assistant_text_event("still working")) + "\n",
+        encoding="utf-8",
+    )
+
+    class _Stdout:
+        def __init__(self) -> None:
+            self.rows = [
+                {"type": "thread.started", "thread_id": codex_sid},
+                {"type": "turn.started", "turn_id": "turn-ambient"},
+            ]
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self) -> bytes:
+            await asyncio.sleep(0)
+            if self.rows:
+                return (json.dumps(self.rows.pop(0)) + "\n").encode("utf-8")
+            raise asyncio.CancelledError()
+
+    class _Proc:
+        pid = 43210
+        returncode = None
+        stdout = _Stdout()
+        thread_id = codex_sid
+        turn_id = "turn-ambient"
+        _pending_tool_calls: set = set()
+        _stderr_task: asyncio.Task
+        _mapped: asyncio.Queue
+
+        def __init__(self) -> None:
+            self._mapped = asyncio.Queue()
+            self._stderr_task = asyncio.create_task(asyncio.sleep(999))
+
+        async def request(self, *_args, **_kwargs):
+            calls.append("request")
+
+        async def close_input(self) -> None:
+            calls.append("close")
+
+        async def wait(self) -> int:
+            calls.append("wait")
+            return 0
+
+    class _Control:
+        def signal_stop(self, _pid: int) -> None:
+            calls.append("signal")
+
+        def force_kill(self, _pid: int) -> None:
+            calls.append("kill")
+
+    async def _run() -> bool:
+        import codex_native
+
+        run_dir = runs_root() / str(uuid.uuid4())
+        run_dir.mkdir(parents=True)
+        original_start = runner_codex._start_app_server
+        original_resolve_cli = runner_codex._resolve_codex_cli
+        original_resolve_rollout = codex_native.resolve_rollout_path
+        original_resolve_rollout_polled = codex_native.resolve_rollout_path_polled
+        original_control = runner_codex._process_control
+        original_bridge = runner_codex._bridge_resume_extension_mcp_dynamic_tools
+        try:
+            async def _fake_start(*_args, **_kwargs) -> _Proc:
+                return _Proc()
+
+            async def _resolve_rollout_polled(_sid, timeout=5.0):
+                del timeout
+                return rollout
+
+            runner_codex._start_app_server = _fake_start  # type: ignore[assignment]
+            runner_codex._resolve_codex_cli = lambda _inputs=None: "codex"  # type: ignore[assignment]
+            codex_native.resolve_rollout_path = lambda _sid: rollout  # type: ignore[assignment]
+            codex_native.resolve_rollout_path_polled = _resolve_rollout_polled  # type: ignore[assignment]
+            runner_codex._process_control = lambda: _Control()  # type: ignore[assignment]
+
+            async def _bridge_noop(**_kwargs):
+                return None
+
+            runner_codex._bridge_resume_extension_mcp_dynamic_tools = _bridge_noop  # type: ignore[assignment]
+            code = await runner_codex._run(run_dir, {
+                "prompt": "continue",
+                "cwd": "/tmp",
+                "mode": "native",
+                "session_id": codex_sid,
+                "app_session_id": "app-ambient",
+                "permission": {"approval_policy": "never", "sandbox": "danger-full-access"},
+                "bare_config": True,
+                "provider_run_config": {},
+            })
+        finally:
+            runner_codex._start_app_server = original_start  # type: ignore[assignment]
+            runner_codex._resolve_codex_cli = original_resolve_cli  # type: ignore[assignment]
+            codex_native.resolve_rollout_path = original_resolve_rollout  # type: ignore[assignment]
+            codex_native.resolve_rollout_path_polled = original_resolve_rollout_polled  # type: ignore[assignment]
+            runner_codex._process_control = original_control  # type: ignore[assignment]
+            runner_codex._bridge_resume_extension_mcp_dynamic_tools = original_bridge  # type: ignore[assignment]
+
+        state = json.loads((run_dir / "state.json").read_text(encoding="utf-8"))
+        ok = (
+            code == 130
+            and not (run_dir / "complete.json").exists()
+            and state.get("complete") is False
+            and state.get("session_id") == codex_sid
+            and state.get("cli_pid") == 43210
+            and state.get("rollout_path") == str(rollout)
+            and "signal" not in calls
+            and "kill" not in calls
+        )
+        if not ok:
+            print(f"  code={code} calls={calls!r} state={state!r}")
+        return ok
+
+    return asyncio.run(_run())
+
+
+def test_codex_explicit_cancel_still_stops_app_server() -> bool:
+    import runner_codex
+
+    calls: list[str] = []
+
+    class _Proc:
+        pid = 54321
+        returncode = None
+
+        async def close_input(self) -> None:
+            calls.append("close")
+
+        async def wait(self) -> int:
+            calls.append("wait")
+            return 0
+
+    class _Control:
+        def signal_stop(self, _pid: int) -> None:
+            calls.append("signal")
+
+        def force_kill(self, _pid: int) -> None:
+            calls.append("kill")
+
+    async def _run() -> bool:
+        original_control = runner_codex._process_control
+        try:
+            runner_codex._process_control = lambda: _Control()  # type: ignore[assignment]
+            await runner_codex._settle_app_server_process(
+                _Proc(),
+                rollout_terminal_completion=False,
+                stop_requested=True,
+                log=runner_codex.logging.getLogger("test"),
+            )
+        finally:
+            runner_codex._process_control = original_control  # type: ignore[assignment]
+        return calls == ["signal", "wait"]
+
+    return asyncio.run(_run())
+
+
+def test_codex_fallback_rollout_completion_settles_app_server() -> bool:
+    import runner_codex
+
+    calls: list[str] = []
+    codex_sid = str(uuid.uuid4())
+    rollout = runs_root() / "fallback-terminal-rollout.jsonl"
+    rollout.parent.mkdir(parents=True, exist_ok=True)
+    rollout.write_text(
+        json.dumps(_make_assistant_text_event("done")) + "\n"
+        + json.dumps(_make_turn_completed_event()) + "\n",
+        encoding="utf-8",
+    )
+
+    class _Stdout:
+        def __init__(self) -> None:
+            self.rows = [
+                {"type": "thread.started", "thread_id": codex_sid},
+                {"type": "turn.started", "turn_id": "turn-fallback"},
+            ]
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self) -> bytes:
+            await asyncio.sleep(0)
+            if self.rows:
+                return (json.dumps(self.rows.pop(0)) + "\n").encode("utf-8")
+            raise StopAsyncIteration
+
+    class _Proc:
+        pid = 65432
+        returncode = None
+        stdout = _Stdout()
+        thread_id = codex_sid
+        turn_id = "turn-fallback"
+        _pending_tool_calls: set = set()
+        _stderr_task: asyncio.Task
+        _mapped: asyncio.Queue
+
+        def __init__(self) -> None:
+            self._mapped = asyncio.Queue()
+            self._stderr_task = asyncio.create_task(asyncio.sleep(999))
+
+        async def request(self, *_args, **_kwargs):
+            calls.append("request")
+
+        async def close_input(self) -> None:
+            calls.append("close")
+            self.returncode = 0
+
+        async def wait(self) -> int:
+            calls.append("wait")
+            return 0
+
+    async def _run() -> bool:
+        import codex_native
+
+        run_dir = runs_root() / str(uuid.uuid4())
+        run_dir.mkdir(parents=True)
+        original_start = runner_codex._start_app_server
+        original_resolve_cli = runner_codex._resolve_codex_cli
+        original_resolve_rollout = codex_native.resolve_rollout_path
+        original_resolve_rollout_polled = codex_native.resolve_rollout_path_polled
+        original_bridge = runner_codex._bridge_resume_extension_mcp_dynamic_tools
+        original_wait = runner_codex._wait_rollout_terminal_state
+        try:
+            async def _fake_start(*_args, **_kwargs) -> _Proc:
+                return _Proc()
+
+            async def _resolve_rollout_polled(_sid, timeout=5.0):
+                del timeout
+                return rollout
+
+            async def _wait_terminal(*_args, **_kwargs):
+                return True, {"input_tokens": 1}, True, None
+
+            async def _bridge_noop(**_kwargs):
+                return None
+
+            runner_codex._start_app_server = _fake_start  # type: ignore[assignment]
+            runner_codex._resolve_codex_cli = lambda _inputs=None: "codex"  # type: ignore[assignment]
+            codex_native.resolve_rollout_path = lambda _sid: rollout  # type: ignore[assignment]
+            codex_native.resolve_rollout_path_polled = _resolve_rollout_polled  # type: ignore[assignment]
+            runner_codex._bridge_resume_extension_mcp_dynamic_tools = _bridge_noop  # type: ignore[assignment]
+            runner_codex._wait_rollout_terminal_state = _wait_terminal  # type: ignore[assignment]
+            code = await runner_codex._run(run_dir, {
+                "prompt": "continue",
+                "cwd": "/tmp",
+                "mode": "native",
+                "session_id": codex_sid,
+                "app_session_id": "app-fallback",
+                "permission": {"approval_policy": "never", "sandbox": "danger-full-access"},
+                "bare_config": True,
+                "provider_run_config": {},
+            })
+        finally:
+            runner_codex._start_app_server = original_start  # type: ignore[assignment]
+            runner_codex._resolve_codex_cli = original_resolve_cli  # type: ignore[assignment]
+            codex_native.resolve_rollout_path = original_resolve_rollout  # type: ignore[assignment]
+            codex_native.resolve_rollout_path_polled = original_resolve_rollout_polled  # type: ignore[assignment]
+            runner_codex._bridge_resume_extension_mcp_dynamic_tools = original_bridge  # type: ignore[assignment]
+            runner_codex._wait_rollout_terminal_state = original_wait  # type: ignore[assignment]
+
+        complete = json.loads((run_dir / "complete.json").read_text(encoding="utf-8"))
+        ok = code == 0 and complete.get("success") is True and calls == ["close", "wait"]
+        if not ok:
+            print(f"  code={code} calls={calls!r} complete={complete!r}")
+        return ok
+
+    return asyncio.run(_run())
+
+
+def test_codex_pre_thread_ambient_cancel_cleans_unrecoverable_app_server() -> bool:
+    import runner_codex
+
+    calls: list[str] = []
+
+    class _Stdout:
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self) -> bytes:
+            raise asyncio.CancelledError()
+
+    class _Proc:
+        pid = 76543
+        returncode = None
+        stdout = _Stdout()
+        thread_id = None
+        turn_id = None
+        _pending_tool_calls: set = set()
+        _stderr_task: asyncio.Task
+        _mapped: asyncio.Queue
+
+        def __init__(self) -> None:
+            self._mapped = asyncio.Queue()
+            self._stderr_task = asyncio.create_task(asyncio.sleep(999))
+
+        async def request(self, *_args, **_kwargs):
+            calls.append("request")
+
+        async def close_input(self) -> None:
+            calls.append("close")
+
+        async def wait(self) -> int:
+            calls.append("wait")
+            return 0
+
+    class _Control:
+        def signal_stop(self, _pid: int) -> None:
+            calls.append("signal")
+
+        def force_kill(self, _pid: int) -> None:
+            calls.append("kill")
+
+    async def _run() -> bool:
+        import codex_native
+
+        run_dir = runs_root() / str(uuid.uuid4())
+        run_dir.mkdir(parents=True)
+        original_start = runner_codex._start_app_server
+        original_resolve_cli = runner_codex._resolve_codex_cli
+        original_control = runner_codex._process_control
+        original_resolve_rollout = codex_native.resolve_rollout_path
+        try:
+            async def _fake_start(*_args, **_kwargs) -> _Proc:
+                return _Proc()
+
+            runner_codex._start_app_server = _fake_start  # type: ignore[assignment]
+            runner_codex._resolve_codex_cli = lambda _inputs=None: "codex"  # type: ignore[assignment]
+            runner_codex._process_control = lambda: _Control()  # type: ignore[assignment]
+            codex_native.resolve_rollout_path = lambda _sid: None  # type: ignore[assignment]
+            code = await runner_codex._run(run_dir, {
+                "prompt": "start",
+                "cwd": "/tmp",
+                "mode": "native",
+                "app_session_id": "app-pre-thread",
+                "permission": {"approval_policy": "never", "sandbox": "danger-full-access"},
+                "bare_config": True,
+                "provider_run_config": {},
+            })
+        finally:
+            runner_codex._start_app_server = original_start  # type: ignore[assignment]
+            runner_codex._resolve_codex_cli = original_resolve_cli  # type: ignore[assignment]
+            runner_codex._process_control = original_control  # type: ignore[assignment]
+            codex_native.resolve_rollout_path = original_resolve_rollout  # type: ignore[assignment]
+
+        complete = json.loads((run_dir / "complete.json").read_text(encoding="utf-8"))
+        ok = (
+            code == 1
+            and complete.get("success") is False
+            and complete.get("error") == "cancelled before Codex thread started"
+            and calls == ["signal", "wait"]
+        )
+        if not ok:
+            print(f"  code={code} calls={calls!r} complete={complete!r}")
+        return ok
+
+    return asyncio.run(_run())
+
+
 def test_loopback_post_retries_transient_reset() -> bool:
     import runner_codex
 
@@ -2275,6 +2640,10 @@ TESTS = [
     ("dead codex wrapper uses rollout terminal failure", test_dead_wrapper_uses_rollout_terminal_failure),
     ("dead codex wrapper without terminal fails closed", test_dead_wrapper_without_terminal_still_fails_closed),
     ("codex complete emit recovers missing complete from rollout", test_emit_complete_recovers_missing_complete_from_rollout),
+    ("codex ambient cancel preserves recoverable app-server", test_codex_ambient_cancel_preserves_recoverable_app_server),
+    ("codex explicit cancel still stops app-server", test_codex_explicit_cancel_still_stops_app_server),
+    ("codex fallback rollout completion settles app-server", test_codex_fallback_rollout_completion_settles_app_server),
+    ("codex pre-thread ambient cancel cleans unrecoverable app-server", test_codex_pre_thread_ambient_cancel_cleans_unrecoverable_app_server),
     ("codex loopback POST retries transient reset", test_loopback_post_retries_transient_reset),
     ("codex loopback POST retries disk token after forbidden", test_loopback_post_retries_disk_token_after_forbidden),
     ("codex loopback POST surfaces HTTP error detail", test_loopback_post_surfaces_http_error_detail),

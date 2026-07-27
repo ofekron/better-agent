@@ -2957,6 +2957,7 @@ async def _settle_app_server_process(
     proc: _AppServerProcess,
     *,
     rollout_terminal_completion: bool,
+    stop_requested: bool,
     log: logging.Logger,
 ) -> None:
     if proc.returncode is None:
@@ -2965,18 +2966,20 @@ async def _settle_app_server_process(
                 await proc.close_input()
             except (BrokenPipeError, ConnectionResetError, RuntimeError):
                 log.debug("Codex app-server input was already closed", exc_info=True)
-        else:
+        elif stop_requested:
             _process_control().signal_stop(proc.pid)
+        else:
+            return
     try:
         await asyncio.wait_for(proc.wait(), timeout=3)
     except asyncio.TimeoutError:
-        if rollout_terminal_completion:
+        if rollout_terminal_completion or stop_requested:
             log.warning(
-                "Codex app-server remained alive after rollout completion; "
-                "reaping completed infrastructure"
+                "Codex app-server remained alive after terminal/cancel; "
+                "reaping infrastructure"
             )
-        _process_control().force_kill(proc.pid)
-        await proc.wait()
+            _process_control().force_kill(proc.pid)
+            await proc.wait()
 
 
 def build_codex_steer_input(run_dir: Path, payload: dict) -> list[dict]:
@@ -3147,6 +3150,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
         "complete": False,
     }
     state_path = run_dir / "state.json"
+    atomic_write_json(state_path, state)
 
     _retry_backoff = 2.0
     _ghost_attempts = 0
@@ -3176,6 +3180,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
         interrupt_timeout_task: Optional[asyncio.Task] = None
         rollout_terminal_task: Optional[asyncio.Task] = None
         rollout_terminal_completion = False
+        proc: Optional[_AppServerProcess] = None
 
         state["session_id"] = session_id
         state["jsonl_path"] = str(initial_rollout_path) if initial_rollout_path else None
@@ -3407,23 +3412,16 @@ async def _run(run_dir: Path, inputs: dict) -> int:
                         proc=proc,
                     )
                 except asyncio.CancelledError:
-                    cancelled = True
-                    success = False
-                    error = "cancelled"
+                    if _cancel_path.exists():
+                        cancelled = True
+                        success = False
+                        error = "cancelled"
+                    else:
+                        atomic_write_json(state_path, state)
+                        raise
                 except Exception as join_error:
                     success = False
                     error = f"{type(join_error).__name__}: {join_error}"
-
-            await _settle_app_server_process(
-                proc,
-                rollout_terminal_completion=rollout_terminal_completion,
-                log=log,
-            )
-
-            try:
-                await asyncio.wait_for(stderr_task, timeout=2.0)
-            except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
-                stderr_task.cancel()
 
             if not turn_completed_seen and not cancelled and attempt_boundary_known:
                 rollout_path = state.get("rollout_path")
@@ -3456,11 +3454,24 @@ async def _run(run_dir: Path, inputs: dict) -> int:
                     turn_completed_seen = True
                     success = True
                     error = None
+                    rollout_terminal_completion = True
                     if rollout_usage:
                         total_usage = rollout_usage
                 elif rollout_terminal is False and not error:
                     turn_completed_seen = True
                     error = "Codex rollout reported turn failure"
+
+            await _settle_app_server_process(
+                proc,
+                rollout_terminal_completion=rollout_terminal_completion,
+                stop_requested=cancelled or turn_completed_seen,
+                log=log,
+            )
+
+            try:
+                await asyncio.wait_for(stderr_task, timeout=2.0)
+            except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+                stderr_task.cancel()
 
             if proc.returncode != 0 and not error and not cancelled:
                 try:
@@ -3499,6 +3510,19 @@ async def _run(run_dir: Path, inputs: dict) -> int:
                         total_usage = rollout_usage
 
         except asyncio.CancelledError:
+            if not _cancel_path.exists():
+                if not state.get("cli_pid") and proc is not None:
+                    await _settle_app_server_process(
+                        proc,
+                        rollout_terminal_completion=False,
+                        stop_requested=True,
+                        log=log,
+                    )
+                    error = "cancelled before Codex thread started"
+                    break
+                state["complete"] = False
+                atomic_write_json(state_path, state)
+                return 130
             error = "cancelled"
         except Exception as e:
             log.exception("Codex runner failed")

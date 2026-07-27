@@ -455,6 +455,7 @@ async def test_rollout_completion_never_signals_or_kills() -> None:
         await _settle_app_server_process(
             Proc(),
             rollout_terminal_completion=True,
+            stop_requested=False,
             log=runner_codex.logging.getLogger("test"),
         )
     finally:
