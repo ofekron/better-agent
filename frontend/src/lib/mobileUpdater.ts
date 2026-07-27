@@ -4,8 +4,7 @@
 // launch we ask the user's OWN backend for the current bundle version; if
 // it differs from what's running, we download + apply it. The download URL
 // carries a short-lived capability scoped to the exact bundle because capgo's
-// native HTTP GET can't send our Authorization header. notifyAppReady commits the running bundle so a
-// broken update auto-rolls-back to the last good one.
+// native HTTP GET can't send our Authorization header.
 import { Capacitor } from "@capacitor/core";
 import { CapacitorUpdater } from "@capgo/capacitor-updater";
 import { API } from "../api";
@@ -18,16 +17,32 @@ interface BundleManifest {
 }
 
 const MANIFEST_FETCH_TIMEOUT_MS = 4_000;
+const UPDATE_CHECK_DELAY_MS = 3_000;
+
+async function commitRunningMobileBundle(): Promise<void> {
+  if (!Capacitor.isNativePlatform()) return;
+  await CapacitorUpdater.notifyAppReady();
+}
+
+export function initializeMobileUpdater(onCommitError: (error: unknown) => void): void {
+  if (!Capacitor.isNativePlatform()) return;
+  const bundleCommitted = commitRunningMobileBundle().then(
+    () => true,
+    (error) => {
+      onCommitError(error);
+      return false;
+    },
+  );
+  window.setTimeout(() => {
+    void bundleCommitted.then((committed) => {
+      if (!committed) return;
+      return runMobileOtaCheck();
+    });
+  }, UPDATE_CHECK_DELAY_MS);
+}
 
 export async function runMobileOtaCheck(): Promise<void> {
   if (!Capacitor.isNativePlatform()) return;
-
-  // Commit the currently-running bundle first, so capgo never rolls it back.
-  try {
-    await CapacitorUpdater.notifyAppReady();
-  } catch {
-    /* builtin bundle on a fresh install — nothing to commit yet */
-  }
 
   // No token => not logged in yet; the manifest is auth-gated. Skip; the
   // next launch after login will pick it up.
