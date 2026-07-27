@@ -192,12 +192,73 @@ def _require_posix_peer(connection: socket.socket) -> None:
         raise PermissionError("runtime broker peer belongs to a different user")
 
 
+_win32_prototypes_declared = False
+_WIN32_PROTOTYPE_LOCK = threading.Lock()
+
+
+def _declare_win32_prototypes() -> None:
+    """Give every Win32 call below an explicit signature, once.
+
+    Without argtypes/restype ctypes marshals a Python int as a 32-bit C
+    ``int`` and assumes a 32-bit return. HANDLEs and SID pointers are
+    64-bit on Win64, so an untyped call either truncates a handle or
+    raises ``OverflowError: int too long to convert`` on an address that
+    does not fit — which killed the peer check, and with it the broker
+    pipe, on every run a Windows node tried to execute.
+    """
+    global _win32_prototypes_declared
+    with _WIN32_PROTOTYPE_LOCK:
+        if _win32_prototypes_declared:
+            return
+        from ctypes import wintypes
+
+        kernel32 = ctypes.windll.kernel32
+        advapi32 = ctypes.windll.advapi32
+
+        kernel32.GetNamedPipeClientProcessId.argtypes = [
+            wintypes.HANDLE, ctypes.POINTER(wintypes.ULONG),
+        ]
+        kernel32.GetNamedPipeClientProcessId.restype = wintypes.BOOL
+        kernel32.OpenProcess.argtypes = [
+            wintypes.DWORD, wintypes.BOOL, wintypes.DWORD,
+        ]
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        kernel32.LocalFree.argtypes = [wintypes.HLOCAL]
+        kernel32.LocalFree.restype = wintypes.HLOCAL
+
+        advapi32.OpenProcessToken.argtypes = [
+            wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE),
+        ]
+        advapi32.OpenProcessToken.restype = wintypes.BOOL
+        advapi32.GetTokenInformation.argtypes = [
+            wintypes.HANDLE,
+            ctypes.c_int,
+            ctypes.c_void_p,
+            wintypes.DWORD,
+            ctypes.POINTER(wintypes.DWORD),
+        ]
+        advapi32.GetTokenInformation.restype = wintypes.BOOL
+        advapi32.ConvertSidToStringSidW.argtypes = [
+            ctypes.c_void_p, ctypes.POINTER(wintypes.LPWSTR),
+        ]
+        advapi32.ConvertSidToStringSidW.restype = wintypes.BOOL
+
+        _win32_prototypes_declared = True
+
+
 def _require_windows_peer(pipe_handle: int) -> None:
     if os.name != "nt":
         raise PermissionError("Windows peer validation is unavailable")
+    _declare_win32_prototypes()
+    from ctypes import wintypes
+
     kernel32 = ctypes.windll.kernel32
-    client_pid = ctypes.c_ulong()
-    if not kernel32.GetNamedPipeClientProcessId(pipe_handle, ctypes.byref(client_pid)):
+    client_pid = wintypes.ULONG()
+    if not kernel32.GetNamedPipeClientProcessId(
+        wintypes.HANDLE(pipe_handle), ctypes.byref(client_pid),
+    ):
         raise PermissionError("runtime broker cannot identify the pipe peer")
     if _windows_process_sid(client_pid.value) != _windows_process_sid(os.getpid()):
         raise PermissionError("runtime broker peer belongs to a different user")
@@ -206,39 +267,45 @@ def _require_windows_peer(pipe_handle: int) -> None:
 def _windows_process_sid(pid: int) -> str:
     from ctypes import wintypes
 
-    process = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)
+    _declare_win32_prototypes()
+    kernel32 = ctypes.windll.kernel32
+    advapi32 = ctypes.windll.advapi32
+
+    process = kernel32.OpenProcess(0x1000, False, pid)
     if not process:
         raise PermissionError("runtime broker cannot open peer process")
     token = wintypes.HANDLE()
     try:
-        if not ctypes.windll.advapi32.OpenProcessToken(process, 0x0008, ctypes.byref(token)):
+        if not advapi32.OpenProcessToken(process, 0x0008, ctypes.byref(token)):
             raise PermissionError("runtime broker cannot read peer identity")
         needed = wintypes.DWORD()
-        ctypes.windll.advapi32.GetTokenInformation(token, 1, None, 0, ctypes.byref(needed))
+        advapi32.GetTokenInformation(token, 1, None, 0, ctypes.byref(needed))
         buffer = ctypes.create_string_buffer(needed.value)
-        if not ctypes.windll.advapi32.GetTokenInformation(
+        if not advapi32.GetTokenInformation(
             token,
             1,
             buffer,
-            needed,
+            needed.value,
             ctypes.byref(needed),
         ):
             raise PermissionError("runtime broker cannot read peer identity")
-        sid_pointer = ctypes.cast(buffer, ctypes.POINTER(ctypes.c_void_p))[0]
+        # TOKEN_USER starts with a SID_AND_ATTRIBUTES whose first member is
+        # the SID pointer. Keep it typed: dereferencing to a plain int hands
+        # ctypes a 64-bit address it would try to squeeze into a C int.
+        sid_pointer = ctypes.cast(
+            buffer, ctypes.POINTER(ctypes.c_void_p),
+        ).contents
         sid_text = wintypes.LPWSTR()
-        if not ctypes.windll.advapi32.ConvertSidToStringSidW(
-            sid_pointer,
-            ctypes.byref(sid_text),
-        ):
+        if not advapi32.ConvertSidToStringSidW(sid_pointer, ctypes.byref(sid_text)):
             raise PermissionError("runtime broker cannot format peer identity")
         try:
             return str(sid_text.value)
         finally:
-            ctypes.windll.kernel32.LocalFree(sid_text)
+            kernel32.LocalFree(sid_text)
     finally:
         if token:
-            ctypes.windll.kernel32.CloseHandle(token)
-        ctypes.windll.kernel32.CloseHandle(process)
+            kernel32.CloseHandle(token)
+        kernel32.CloseHandle(process)
 
 
 def _recv_frame(connection: socket.socket) -> bytes:
