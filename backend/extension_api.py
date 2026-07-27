@@ -243,15 +243,20 @@ class ResetExtensionSettingsRequest(BaseModel):
     expected_revision: str = Field(min_length=64, max_length=64, pattern=r"^[a-f0-9]{64}$")
 
 
+EXTENSION_CATALOG_TOPICS = (
+    "extension.catalog",
+    "extension.config",
+    "extension.ui",
+)
+
+
 def _extension_error(exc: extension_store.ExtensionError) -> HTTPException:
     return HTTPException(status_code=400, detail=str(exc))
 
 
-async def _broadcast_extensions_changed() -> None:
+async def _broadcast_extension_changed(*topics: str) -> None:
     from orchestrator import get_active_coordinator
 
-    # Extensions changed: re-project the desired daemon set for the platform
-    # daemon host and reconcile backend-lifecycle daemon children.
     try:
         import extension_daemons
 
@@ -261,7 +266,8 @@ async def _broadcast_extensions_changed() -> None:
 
     coordinator = get_active_coordinator()
     if coordinator is not None:
-        await coordinator.broadcast_global("extensions_changed", {})
+        for topic in dict.fromkeys(topics or EXTENSION_CATALOG_TOPICS):
+            await coordinator.broadcast_global(topic, {})
 
     try:
         import node_config_sync
@@ -276,6 +282,10 @@ async def _broadcast_extensions_changed() -> None:
         lag_incident_queue.notify_destination_changed()
     except Exception:
         logger.exception("lag incident destination wake failed")
+
+
+async def _broadcast_extensions_changed() -> None:
+    await _broadcast_extension_changed(*EXTENSION_CATALOG_TOPICS)
 
 
 def _json_projection_response(content: bytes) -> Response:
@@ -461,7 +471,7 @@ async def reset_extension_settings(req: ResetExtensionSettingsRequest):
             status_code=409,
             detail={"error": "extension_settings_reset_rejected", "message": str(exc)},
         ) from exc
-    await _broadcast_extensions_changed()
+    await _broadcast_extension_changed(*EXTENSION_CATALOG_TOPICS)
     return result
 
 
@@ -915,7 +925,7 @@ async def install_extension(req: InstallExtensionRequest):
             )
     except extension_store.ExtensionError as exc:
         raise _extension_error(exc) from exc
-    await _broadcast_extensions_changed()
+    await _broadcast_extension_changed(*EXTENSION_CATALOG_TOPICS)
     return {"extension": record}
 
 
@@ -940,7 +950,7 @@ async def install_marketplace_extension(extension_id: str, req: MarketplaceInsta
         )
     except extension_store.ExtensionError as exc:
         raise _extension_error(exc) from exc
-    await _broadcast_extensions_changed()
+    await _broadcast_extension_changed(*EXTENSION_CATALOG_TOPICS)
     return {"extension": record}
 
 
@@ -955,7 +965,7 @@ async def set_marketplace_extension_enabled(extension_id: str, req: SetEnabledRe
         )
     except extension_store.ExtensionError as exc:
         raise _extension_error(exc) from exc
-    await _broadcast_extensions_changed()
+    await _broadcast_extension_changed(*EXTENSION_CATALOG_TOPICS)
     return {"extension": record}
 
 
@@ -967,7 +977,7 @@ async def uninstall_marketplace_extension(extension_id: str):
         )
     except extension_store.ExtensionError as exc:
         raise _extension_error(exc) from exc
-    await _broadcast_extensions_changed()
+    await _broadcast_extension_changed(*EXTENSION_CATALOG_TOPICS)
     return {"ok": True}
 
 
@@ -992,7 +1002,7 @@ async def update_extensions():
     except extension_store.ExtensionError as exc:
         raise _extension_error(exc) from exc
     if result.get("updated"):
-        await _broadcast_extensions_changed()
+        await _broadcast_extension_changed(*EXTENSION_CATALOG_TOPICS)
         await _broadcast_extension_updates_changed()
     return result
 
@@ -1030,7 +1040,7 @@ async def update_extension(extension_id: str):
     except extension_store.ExtensionError as exc:
         raise _extension_error(exc) from exc
     if result.get("updated"):
-        await _broadcast_extensions_changed()
+        await _broadcast_extension_changed(*EXTENSION_CATALOG_TOPICS)
     await _broadcast_extension_updates_changed()
     return result
 
@@ -1052,7 +1062,7 @@ async def set_extension_enabled(extension_id: str, req: SetEnabledRequest):
         ) from exc
     except extension_store.ExtensionError as exc:
         raise _extension_error(exc) from exc
-    await _broadcast_extensions_changed()
+    await _broadcast_extension_changed(*EXTENSION_CATALOG_TOPICS)
     return {"extension": record}
 
 
@@ -1064,7 +1074,7 @@ async def grant_extension_consent(extension_id: str):
         record = extension_store.grant_consent(extension_id)
     except extension_store.ExtensionError as exc:
         raise _extension_error(exc) from exc
-    await _broadcast_extensions_changed()
+    await _broadcast_extension_changed("extension.config.permissions")
     return {"extension": record}
 
 
@@ -1076,7 +1086,7 @@ async def set_extension_instruction_enabled(extension_id: str, req: SetInstructi
         )
     except extension_store.ExtensionError as exc:
         raise _extension_error(exc) from exc
-    await _broadcast_extensions_changed()
+    await _broadcast_extension_changed("extension.config.instructions")
     return {"extension": record}
 
 
@@ -1098,7 +1108,7 @@ async def set_extension_ui_settings(extension_id: str, req: SetUiSettingsRequest
         )
     except extension_store.ExtensionError as exc:
         raise _extension_error(exc) from exc
-    await _broadcast_extensions_changed()
+    await _broadcast_extension_changed("extension.config.ui_settings", "extension.ui")
     return settings
 
 
@@ -1124,7 +1134,7 @@ async def set_extension_setting(extension_id: str, req: SetExtensionSettingReque
         result = extension_store.set_extension_setting(extension_id, req.key, req.value)
     except extension_store.ExtensionError as exc:
         raise _extension_error(exc) from exc
-    await _broadcast_extensions_changed()
+    await _broadcast_extension_changed("extension.config.settings")
     return result
 
 
@@ -1170,7 +1180,7 @@ async def set_extension_internal_llm(extension_id: str, req: SetInternalLlmAssig
     }
     merged.update(req.assignments)
     assignments = config_store.set_internal_llm_assignments(merged)
-    await _broadcast_extensions_changed()
+    await _broadcast_extension_changed("extension.config.internal_llm")
     return {
         "assignments": {
             key: value
@@ -1194,7 +1204,7 @@ async def set_extension_user_instructions(extension_id: str, req: SetUserInstruc
         instructions = extension_store.set_user_instructions(extension_id, req.instructions)
     except extension_store.ExtensionError as exc:
         raise _extension_error(exc) from exc
-    await _broadcast_extensions_changed()
+    await _broadcast_extension_changed("extension.config.instructions")
     return {"instructions": instructions}
 
 
@@ -1212,7 +1222,7 @@ async def set_extension_mcp_enabled(extension_id: str, server_name: str, req: Se
         enabled = extension_store.set_mcp_server_enabled(extension_id, server_name, req.enabled)
     except extension_store.ExtensionError as exc:
         raise _extension_error(exc) from exc
-    await _broadcast_extensions_changed()
+    await _broadcast_extension_changed("extension.config.mcp")
     return {"server": server_name, "enabled": enabled}
 
 
@@ -1222,7 +1232,7 @@ async def set_extension_skill_enabled(extension_id: str, skill_name: str, req: S
         enabled = extension_store.set_runtime_skill_enabled(extension_id, skill_name, req.enabled)
     except extension_store.ExtensionError as exc:
         raise _extension_error(exc) from exc
-    await _broadcast_extensions_changed()
+    await _broadcast_extension_changed("extension.config.skills")
     return {"skill": skill_name, "enabled": enabled}
 
 
@@ -1242,7 +1252,7 @@ async def set_extension_frontend_module_enabled(
         )
     except extension_store.ExtensionError as exc:
         raise _extension_error(exc) from exc
-    await _broadcast_extensions_changed()
+    await _broadcast_extension_changed("extension.ui.frontend_modules")
     return {"slot": slot, "id": module_id, "enabled": enabled}
 
 
@@ -1259,7 +1269,7 @@ async def set_extension_native_exposure(
         )
     except extension_store.ExtensionError as exc:
         raise _extension_error(exc) from exc
-    await _broadcast_extensions_changed()
+    await _broadcast_extension_changed("extension.config.native_exposure")
     return {"kind": kind, "name": name, "native_exposed": exposed}
 
 
@@ -1269,7 +1279,7 @@ async def set_extension_permission_grant(extension_id: str, permission: str, req
         record = extension_store.set_permission_grant(extension_id, permission, req.granted)
     except extension_store.ExtensionError as exc:
         raise _extension_error(exc) from exc
-    await _broadcast_extensions_changed()
+    await _broadcast_extension_changed("extension.config.permissions")
     return {"extension": record}
 
 
@@ -1279,5 +1289,5 @@ async def uninstall_extension(extension_id: str):
         extension_store.uninstall(extension_id)
     except extension_store.ExtensionError as exc:
         raise _extension_error(exc) from exc
-    await _broadcast_extensions_changed()
+    await _broadcast_extension_changed(*EXTENSION_CATALOG_TOPICS)
     return {"ok": True}

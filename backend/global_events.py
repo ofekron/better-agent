@@ -11,6 +11,25 @@ class GlobalEventSpec:
     owner: str
 
 
+EXTENSION_CHANGE_TOPICS = frozenset((
+    "extension.catalog",
+    "extension.config",
+    "extension.config.settings",
+    "extension.config.instructions",
+    "extension.config.ui_settings",
+    "extension.config.internal_llm",
+    "extension.config.permissions",
+    "extension.config.mcp",
+    "extension.config.skills",
+    "extension.config.native_exposure",
+    "extension.ui",
+    "extension.ui.frontend_modules",
+    "extension.harness.default",
+    "extension.harness.default.disabled_builtin_extensions",
+    "extension.harness.default.disabled_builtin_tools",
+))
+
+
 _EVENT_OWNERS: Mapping[str, tuple[str, ...]] = {
     "provider": (
         "provider_changed", "provider_install_progress",
@@ -22,7 +41,8 @@ _EVENT_OWNERS: Mapping[str, tuple[str, ...]] = {
         "tasks_changed", "project_updates_changed",
     ),
     "extension": (
-        "extensions_changed", "extension_updates_changed", "extension_event",
+        *EXTENSION_CHANGE_TOPICS,
+        "extension_updates_changed", "extension_event",
         "harness_profiles_changed", "marketplace_bridge_changed",
     ),
     "schedule_store": ("schedules_changed",),

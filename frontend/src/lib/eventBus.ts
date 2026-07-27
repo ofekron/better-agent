@@ -130,6 +130,16 @@ export interface BusEventMap {
 
 type Handler<T> = (payload: T) => void;
 
+function topicAncestors(type: string): string[] {
+  if (!type.includes(".")) return [type];
+  const parts = type.split(".");
+  const topics: string[] = [];
+  for (let i = 1; i <= parts.length; i += 1) {
+    topics.push(parts.slice(0, i).join("."));
+  }
+  return topics;
+}
+
 class EventBus {
   // Per-type subscriber set. Using Set so unsubscribe is O(1) AND
   // duplicate subscriptions (same handler ref) collapse to one.
@@ -155,11 +165,16 @@ class EventBus {
   publish<K extends keyof BusEventMap>(type: K, payload: BusEventMap[K]): void;
   publish(type: string, payload: unknown): void;
   publish(type: string, payload: unknown): void {
-    const set = this.subs.get(type);
-    if (!set) return;
+    const handlers = new Set<Handler<unknown>>();
+    for (const topic of topicAncestors(type)) {
+      const set = this.subs.get(topic);
+      if (!set) continue;
+      for (const handler of set) handlers.add(handler);
+    }
+    if (!handlers.size) return;
     // Snapshot to insulate against handlers that subscribe/unsubscribe
     // during dispatch.
-    for (const h of [...set]) {
+    for (const h of [...handlers]) {
       try {
         h(payload);
       } catch (err) {
