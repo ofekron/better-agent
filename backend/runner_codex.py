@@ -491,7 +491,6 @@ async def _bridge_extension_mcp_dynamic_tools(
     )
     bridge_configs = dict(resolved_configs)
     bridge_errors: list[tuple[str, Exception]] = []
-    unavailable_servers: list[tuple[str, Optional[Exception]]] = []
     for server_name, config in bridge_configs.items():
         configured_config = configured_servers.get(server_name)
         same_extension = (
@@ -506,7 +505,14 @@ async def _bridge_extension_mcp_dynamic_tools(
                 tools = await mcp_stdio_bridge.mcp_list_tools(server_name, call_config)
             except Exception as exc:
                 bridge_errors.append((server_name, exc))
-                unavailable_servers.append((server_name, exc))
+                if same_extension:
+                    configured_servers.pop(server_name, None)
+                logger.warning(
+                    "selected extension MCP %r unavailable; continuing without it: "
+                    "tools/list failed: %s",
+                    server_name,
+                    exc,
+                )
                 continue
         if same_extension and isinstance(configured_config, dict):
             for tool_name in configured_config.get("tool_names") or ():
@@ -532,19 +538,21 @@ async def _bridge_extension_mcp_dynamic_tools(
             )
             bridged_any = bridged_any or added
             bridged_all = bridged_all and added
-        if (
-            bridged_any
-            and bridged_all
-            and same_extension
-        ):
+        if bridged_any and bridged_all and same_extension:
             configured_servers.pop(server_name, None)
         elif not bridged_any:
-            unavailable_servers.append((server_name, None))
-    if unavailable_servers:
-        server_name, exc = unavailable_servers[0]
-        raise RuntimeError(
-            f"selected extension MCP {server_name!r} exposed no usable tools"
-        ) from exc
+            if same_extension:
+                configured_servers.pop(server_name, None)
+            reason = (
+                "tools/list returned no tools"
+                if not tools
+                else "tools/list returned no usable non-conflicting tools"
+            )
+            logger.warning(
+                "selected extension MCP %r unavailable; continuing without it: %s",
+                server_name,
+                reason,
+            )
     if bridge_configs:
         logger.info(
             "extension MCP bridge servers=%s dynamic_tools=%s errors=%s",

@@ -578,7 +578,7 @@ async def test_bridge_keeps_extension_mcp_server_when_tool_list_partially_bridge
     assert "testape" in provider_run_config["mcp_servers"]
 
 
-async def test_bridge_fails_when_selected_extension_cannot_list_tools() -> None:
+async def test_bridge_continues_when_selected_extension_cannot_list_tools() -> None:
     original_configs = runner_codex.extension_store.native_mcp_server_configs
     original_list_tools = runner_codex.mcp_stdio_bridge.mcp_list_tools
 
@@ -608,26 +608,23 @@ async def test_bridge_fails_when_selected_extension_cannot_list_tools() -> None:
     runner_codex.extension_store.native_mcp_server_configs = fake_configs  # type: ignore[method-assign]
     runner_codex.mcp_stdio_bridge.mcp_list_tools = fake_list_tools  # type: ignore[assignment]
     try:
-        try:
-            await runner_codex._bridge_extension_mcp_dynamic_tools(
-                inputs={"provider_kind": "codex", "app_session_id": "sender-1"},
-                provider_run_config={"skills": {"implement": "instructions"}},
-                dynamic_tools=[],
-                tool_handlers={},
-                existing_tool_names=set(),
-                user_facing=True,
-                bare_config=False,
-            )
-        except RuntimeError as exc:
-            assert "testape" in str(exc)
-        else:
-            raise AssertionError("selected extension MCP failure was silently ignored")
+        dynamic_tools: list[dict] = []
+        await runner_codex._bridge_extension_mcp_dynamic_tools(
+            inputs={"provider_kind": "codex", "app_session_id": "sender-1"},
+            provider_run_config={"skills": {"implement": "instructions"}},
+            dynamic_tools=dynamic_tools,
+            tool_handlers={},
+            existing_tool_names=set(),
+            user_facing=True,
+            bare_config=False,
+        )
+        assert [tool["name"] for tool in dynamic_tools] == ["working_tool"]
     finally:
         runner_codex.extension_store.native_mcp_server_configs = original_configs  # type: ignore[method-assign]
         runner_codex.mcp_stdio_bridge.mcp_list_tools = original_list_tools  # type: ignore[assignment]
 
 
-async def test_bridge_fails_when_configured_selected_extension_cannot_list_tools() -> None:
+async def test_bridge_quarantines_configured_extension_that_cannot_list_tools() -> None:
     original_configs = runner_codex.extension_store.native_mcp_server_configs
     original_list_tools = runner_codex.mcp_stdio_bridge.mcp_list_tools
 
@@ -646,34 +643,40 @@ async def test_bridge_fails_when_configured_selected_extension_cannot_list_tools
     runner_codex.extension_store.native_mcp_server_configs = fake_configs  # type: ignore[method-assign]
     runner_codex.mcp_stdio_bridge.mcp_list_tools = fake_list_tools  # type: ignore[assignment]
     try:
-        try:
-            await runner_codex._bridge_extension_mcp_dynamic_tools(
-                inputs={"provider_kind": "codex", "app_session_id": "sender-1"},
-                provider_run_config={
-                    "mcp_servers": {
-                        "testape": {
-                            "command": "/resolved/testape-mcp",
-                            "args": [],
-                            "env": {"BETTER_AGENT_EXTENSION_ID": "ofek.testape"},
-                        },
-                    },
+        provider_run_config = {
+            "mcp_servers": {
+                "testape": {
+                    "command": "/resolved/testape-mcp",
+                    "args": [],
+                    "env": {"BETTER_AGENT_EXTENSION_ID": "ofek.testape"},
                 },
-                dynamic_tools=[],
-                tool_handlers={},
-                existing_tool_names=set(),
-                user_facing=True,
-                bare_config=False,
-            )
-        except RuntimeError as exc:
-            assert "testape" in str(exc)
-        else:
-            raise AssertionError("configured selected extension MCP failure was ignored")
+                "custom": {
+                    "command": "/custom/mcp",
+                    "args": [],
+                },
+            },
+        }
+        await runner_codex._bridge_extension_mcp_dynamic_tools(
+            inputs={"provider_kind": "codex", "app_session_id": "sender-1"},
+            provider_run_config=provider_run_config,
+            dynamic_tools=[],
+            tool_handlers={},
+            existing_tool_names=set(),
+            user_facing=True,
+            bare_config=False,
+        )
+        assert provider_run_config["mcp_servers"] == {
+            "custom": {
+                "command": "/custom/mcp",
+                "args": [],
+            },
+        }
     finally:
         runner_codex.extension_store.native_mcp_server_configs = original_configs  # type: ignore[method-assign]
         runner_codex.mcp_stdio_bridge.mcp_list_tools = original_list_tools  # type: ignore[assignment]
 
 
-async def test_bridge_fails_when_selected_extension_exposes_no_tools() -> None:
+async def test_bridge_continues_when_selected_extension_exposes_no_tools() -> None:
     original_configs = runner_codex.extension_store.native_mcp_server_configs
     original_list_tools = runner_codex.mcp_stdio_bridge.mcp_list_tools
 
@@ -692,35 +695,30 @@ async def test_bridge_fails_when_selected_extension_exposes_no_tools() -> None:
     runner_codex.extension_store.native_mcp_server_configs = fake_configs  # type: ignore[method-assign]
     runner_codex.mcp_stdio_bridge.mcp_list_tools = fake_list_tools  # type: ignore[assignment]
     try:
-        try:
-            await runner_codex._bridge_extension_mcp_dynamic_tools(
-                inputs={"provider_kind": "codex", "app_session_id": "sender-1"},
-                provider_run_config={},
-                dynamic_tools=[],
-                tool_handlers={},
-                existing_tool_names=set(),
-                user_facing=True,
-                bare_config=False,
-            )
-        except RuntimeError as exc:
-            assert "testape" in str(exc)
-        else:
-            raise AssertionError("empty selected extension MCP was silently ignored")
+        await runner_codex._bridge_extension_mcp_dynamic_tools(
+            inputs={"provider_kind": "codex", "app_session_id": "sender-1"},
+            provider_run_config={},
+            dynamic_tools=[],
+            tool_handlers={},
+            existing_tool_names=set(),
+            user_facing=True,
+            bare_config=False,
+        )
     finally:
         runner_codex.extension_store.native_mcp_server_configs = original_configs  # type: ignore[method-assign]
         runner_codex.mcp_stdio_bridge.mcp_list_tools = original_list_tools  # type: ignore[assignment]
 
 
-async def test_bridge_fails_when_configured_selected_extension_exposes_no_tools() -> None:
+async def test_bridge_quarantines_configured_extension_that_exposes_no_tools() -> None:
     original_configs = runner_codex.extension_store.native_mcp_server_configs
     original_list_tools = runner_codex.mcp_stdio_bridge.mcp_list_tools
 
     def fake_configs(_inputs: dict, *, user_facing: bool, bare: bool):
         return {
-            "testape": {
-                "command": "/resolved/testape-mcp",
+            "provider-config-sync": {
+                "command": "/resolved/provider-config-sync-mcp",
                 "args": [],
-                "env": {"BETTER_AGENT_EXTENSION_ID": "ofek.testape"},
+                "env": {"BETTER_AGENT_EXTENSION_ID": "better-agent.provider-config-sync"},
             },
         }
 
@@ -730,28 +728,25 @@ async def test_bridge_fails_when_configured_selected_extension_exposes_no_tools(
     runner_codex.extension_store.native_mcp_server_configs = fake_configs  # type: ignore[method-assign]
     runner_codex.mcp_stdio_bridge.mcp_list_tools = fake_list_tools  # type: ignore[assignment]
     try:
-        try:
-            await runner_codex._bridge_extension_mcp_dynamic_tools(
-                inputs={"provider_kind": "codex", "app_session_id": "sender-1"},
-                provider_run_config={
-                    "mcp_servers": {
-                        "testape": {
-                            "command": "/resolved/testape-mcp",
-                            "args": [],
-                            "env": {"BETTER_AGENT_EXTENSION_ID": "ofek.testape"},
-                        },
-                    },
+        provider_run_config = {
+            "mcp_servers": {
+                "provider-config-sync": {
+                    "command": "/resolved/provider-config-sync-mcp",
+                    "args": [],
+                    "env": {"BETTER_AGENT_EXTENSION_ID": "better-agent.provider-config-sync"},
                 },
-                dynamic_tools=[],
-                tool_handlers={},
-                existing_tool_names=set(),
-                user_facing=True,
-                bare_config=False,
-            )
-        except RuntimeError as exc:
-            assert "testape" in str(exc)
-        else:
-            raise AssertionError("empty configured selected extension MCP was ignored")
+            },
+        }
+        await runner_codex._bridge_extension_mcp_dynamic_tools(
+            inputs={"provider_kind": "codex", "app_session_id": "sender-1"},
+            provider_run_config=provider_run_config,
+            dynamic_tools=[],
+            tool_handlers={},
+            existing_tool_names=set(),
+            user_facing=True,
+            bare_config=False,
+        )
+        assert provider_run_config["mcp_servers"] == {}
     finally:
         runner_codex.extension_store.native_mcp_server_configs = original_configs  # type: ignore[method-assign]
         runner_codex.mcp_stdio_bridge.mcp_list_tools = original_list_tools  # type: ignore[assignment]
@@ -1180,10 +1175,10 @@ if __name__ == "__main__":
     asyncio.run(test_bridge_preserves_custom_same_name_mcp_server())
     asyncio.run(test_bridge_prunes_extension_owned_mcp_server_after_registration())
     asyncio.run(test_bridge_keeps_extension_mcp_server_when_tool_list_partially_bridges())
-    asyncio.run(test_bridge_fails_when_selected_extension_cannot_list_tools())
-    asyncio.run(test_bridge_fails_when_configured_selected_extension_cannot_list_tools())
-    asyncio.run(test_bridge_fails_when_selected_extension_exposes_no_tools())
-    asyncio.run(test_bridge_fails_when_configured_selected_extension_exposes_no_tools())
+    asyncio.run(test_bridge_continues_when_selected_extension_cannot_list_tools())
+    asyncio.run(test_bridge_quarantines_configured_extension_that_cannot_list_tools())
+    asyncio.run(test_bridge_continues_when_selected_extension_exposes_no_tools())
+    asyncio.run(test_bridge_quarantines_configured_extension_that_exposes_no_tools())
     asyncio.run(test_bridge_preserves_explicit_servers_when_no_extension_is_selected())
     asyncio.run(test_fresh_run_bridges_extension_mcp_before_thread_start())
     asyncio.run(test_app_server_resume_preserves_mcp_tool_timeout())
