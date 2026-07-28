@@ -12,6 +12,7 @@ import tarfile
 import tempfile
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -1933,6 +1934,75 @@ def test_install_smoke_test_rejects_bad_python_module_import() -> None:
             raise
         return
     raise AssertionError("install accepted a package with a failing python smoke import")
+
+
+def test_package_install_repairs_incomplete_content_addressed_target() -> None:
+    root = Path(tempfile.mkdtemp(prefix="bc-test-incomplete-package-"))
+    try:
+        package = root / "source"
+        target = root / "installed" / "artifact-sha"
+        package.mkdir()
+        target.mkdir(parents=True)
+        manifest = {"kind": "better-agent-extension", "id": "ofek.incomplete"}
+        (package / "better-agent-extension.json").write_text(json.dumps(manifest), encoding="utf-8")
+        (package / "extension_module.py").write_text("READY = True\n", encoding="utf-8")
+        (target / "better-agent-extension.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+        if extension_store._package_published(target):
+            raise AssertionError("manifest-only target was trusted as complete")
+        if not extension_store._install_package_artifact(package, target):
+            raise AssertionError("incomplete target was not rebuilt")
+        if not (target / "extension_module.py").is_file():
+            raise AssertionError("rebuilt target omitted package content")
+        if not extension_store._package_published(target):
+            raise AssertionError("rebuilt target lacks a valid completion marker")
+        if extension_store._install_package_artifact(package, target):
+            raise AssertionError("complete content-addressed target was republished")
+
+        concurrent_target = root / "installed" / "concurrent-sha"
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            published = list(
+                pool.map(
+                    lambda _: extension_store._install_package_artifact(package, concurrent_target),
+                    range(8),
+                )
+            )
+        if published.count(True) != 1:
+            raise AssertionError(f"concurrent install published {published.count(True)} winners")
+        if not extension_store._package_published(concurrent_target):
+            raise AssertionError("concurrent install winner is incomplete")
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_smoke_rejects_entrypoint_module_resolved_outside_package() -> None:
+    root = Path(tempfile.mkdtemp(prefix="bc-test-smoke-origin-"))
+    old_pythonpath = os.environ.get("PYTHONPATH")
+    try:
+        package = root / "package"
+        ambient = root / "ambient"
+        package.mkdir()
+        ambient.mkdir()
+        (ambient / "escaped_entrypoint.py").write_text("READY = True\n", encoding="utf-8")
+        os.environ["PYTHONPATH"] = str(ambient)
+
+        try:
+            extension_store._run_python_module_smoke(
+                package,
+                ["escaped_entrypoint"],
+                static_modules={"escaped_entrypoint": ""},
+            )
+        except extension_store.ExtensionError as exc:
+            if "resolves outside package" not in str(exc):
+                raise
+        else:
+            raise AssertionError("smoke accepted an entrypoint from ambient PYTHONPATH")
+    finally:
+        if old_pythonpath is None:
+            os.environ.pop("PYTHONPATH", None)
+        else:
+            os.environ["PYTHONPATH"] = old_pythonpath
+        shutil.rmtree(root, ignore_errors=True)
 
 
 def test_runtime_ready_requires_protocol_smoke_to_pass() -> None:
@@ -5623,6 +5693,8 @@ if __name__ == "__main__":
         test_extension_store_rehydrate_skips_tombstoned_installed_snapshot()
         test_extension_store_rehydrates_installed_artifact_snapshot()
         test_install_smoke_test_rejects_bad_python_module_import()
+        test_package_install_repairs_incomplete_content_addressed_target()
+        test_smoke_rejects_entrypoint_module_resolved_outside_package()
         test_optional_permissions_allow_forbid()
         test_command_based_mcp_server()
         test_module_based_mcp_server_config()

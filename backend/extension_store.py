@@ -3127,6 +3127,8 @@ def _safe_extract_tar_gz(archive_bytes: bytes, target: Path) -> None:
 # the package's own manifests, and they routinely contain symlinks that the
 # package guard below would otherwise reject.
 _PACKAGE_ARTIFACT_SKIP_DIRS = frozenset({".git", ".venv", "node_modules", "__pycache__"})
+_PACKAGE_COMPLETION_MARKER = ".better-agent-package-complete.json"
+_PACKAGE_COMPLETION_VERSION = 1
 
 
 def _package_artifact_paths(package_dir: Path) -> list[Path]:
@@ -3174,13 +3176,45 @@ def _build_package_artifact(package_dir: Path) -> bytes:
     return buf.getvalue()
 
 
-def _package_published(target: Path) -> bool:
-    """True when ``target`` already holds a published package tree.
+def _package_content_hashes(root: Path) -> dict[str, str]:
+    marker = root / _PACKAGE_COMPLETION_MARKER
+    return {
+        path.relative_to(root).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in _package_artifact_paths(root)
+        if path != marker
+    }
 
-    Version directories are content-addressed, so a published tree is exactly
-    the content any install of the same sha would produce.
-    """
-    return (target / "better-agent-extension.json").is_file()
+
+def _write_package_completion(target: Path) -> None:
+    files = _package_content_hashes(target)
+    if "better-agent-extension.json" not in files:
+        raise ExtensionError("extension package manifest is missing")
+    (target / _PACKAGE_COMPLETION_MARKER).write_text(
+        json.dumps(
+            {"version": _PACKAGE_COMPLETION_VERSION, "files": files},
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        encoding="utf-8",
+    )
+
+
+def _package_published(target: Path) -> bool:
+    marker = target / _PACKAGE_COMPLETION_MARKER
+    try:
+        if marker.stat().st_size > 4 * 1024 * 1024:
+            return False
+        payload = json.loads(marker.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            return False
+        files = payload.get("files")
+        return (
+            payload.get("version") == _PACKAGE_COMPLETION_VERSION
+            and isinstance(files, dict)
+            and files == _package_content_hashes(target)
+        )
+    except (ExtensionError, FileNotFoundError, OSError, ValueError, TypeError):
+        return False
 
 
 def _package_publish_lock(target: Path) -> threading.Lock:
@@ -3240,6 +3274,7 @@ def _install_package_artifact(package_dir: Path, target: Path) -> bool:
         staging = target.parent / f".staging-{uuid.uuid4().hex}"
         try:
             _safe_extract_tar_gz(_build_package_artifact(package_dir), staging)
+            _write_package_completion(staging)
             return _publish_package_dir(staging, target)
         finally:
             shutil.rmtree(staging, ignore_errors=True)
@@ -4350,8 +4385,12 @@ def _run_python_module_smoke(
         "        raise ModuleNotFoundError(module)\n"
         "    if module in static:\n"
         "        origin = getattr(spec, 'origin', '') or ''\n"
-        "        if origin and origin not in {'built-in', 'namespace'}:\n"
-        "            py_compile.compile(origin, doraise=True)\n"
+        "        if not origin or origin in {'built-in', 'namespace'}:\n"
+        "            raise RuntimeError(f'package module has no file origin: {module}')\n"
+        "        path = Path(origin).resolve()\n"
+        "        if not path.is_relative_to(root):\n"
+        "            raise RuntimeError(f'package module resolves outside package: {module}')\n"
+        "        py_compile.compile(str(path), doraise=True)\n"
         "        continue\n"
         "    importlib.import_module(module)\n"
     )
