@@ -48,8 +48,10 @@ if [ "$needs_build" -eq 1 ]; then
   (cd "$DIR" && "$VENV/bin/pyinstaller" --noconfirm CredentialAuthority.spec)
 fi
 
-if ! bash "$DIR/local_codesign.sh" verify "$TARGET" >/dev/null 2>&1; then
-  bash "$DIR/local_codesign.sh" sign "$TARGET"
+if [ "$(uname -s)" = "Darwin" ]; then
+  if ! bash "$DIR/local_codesign.sh" verify "$TARGET" >/dev/null 2>&1; then
+    bash "$DIR/local_codesign.sh" sign "$TARGET"
+  fi
 fi
 
 "$TARGET" --self-test
