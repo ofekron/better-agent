@@ -4,6 +4,7 @@ import json
 import os
 import secrets
 import threading
+import time
 from multiprocessing.connection import Connection
 from typing import Literal, TypedDict
 
@@ -31,6 +32,7 @@ except (OSError, ValueError):
     _CONNECTION = None
 _FD_TEXT = ""
 _LOCK = threading.Lock()
+_RESPONSE_TIMEOUT_SECONDS = 10.0
 
 
 def available() -> bool:
@@ -53,7 +55,11 @@ def request(op: str, provider_id: str, *, value: str | None = None) -> Credentia
         _CONNECTION.send_bytes(
             json.dumps(payload, separators=(",", ":")).encode("utf-8")
         )
+        deadline = time.monotonic() + _RESPONSE_TIMEOUT_SECONDS
         for _ in range(8):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not _CONNECTION.poll(remaining):
+                raise RuntimeError("credential session response timed out")
             raw = _CONNECTION.recv_bytes(maxlength=128 * 1024)
             response = json.loads(raw.decode("utf-8"))
             if isinstance(response, dict) and response.get("request_id") == request_id:
