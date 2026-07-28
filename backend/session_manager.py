@@ -219,6 +219,8 @@ class _SessionPersistCoordinator:
         self.deadline_heap: list[tuple[float, str]] = []
         self.last_at: dict[str, float] = {}
         self.inflight: set[str] = set()
+        self.inflight_claims: dict[str, object] = {}
+        self.cancelled_claims: set[object] = set()
         self.lock = threading.Lock()
         self.changed = threading.Condition(self.lock)
         self.scheduler_started = False
@@ -247,6 +249,8 @@ class _SessionPersistCoordinator:
         self.deadline_heap.clear()
         self.last_at.clear()
         self.inflight.clear()
+        self.inflight_claims.clear()
+        self.cancelled_claims.clear()
         self.changed.notify_all()
 
     def scheduler_loop(self) -> None:
@@ -1394,6 +1398,15 @@ class SessionManager:
                     "_load_root: pre-flush of pending persist failed for %s",
                     rid,
                 )
+        if drain_failed:
+            with self._persist_coordinator.lock:
+                authoritative = self._persist_coordinator.pending.setdefault(
+                    rid, pending,
+                )
+            self._roots[rid] = authoritative
+            self._index_root(authoritative)
+            self._enforce_root_cap(keep_rid=rid)
+            return authoritative
         root = self._root_repository.read_root(rid)
         if root is None:
             # Re-queue the drained pending state so it isn't silently
@@ -3862,42 +3875,45 @@ class SessionManager:
         """Scheduler callback. Copies the root under its lock, then writes
         outside the lock so summary refresh and filesystem work cannot
         block live readers of the root tree."""
-        claim = None
+        claim_token = None
         failed = False
+        pending = None
         sess = None
         root_lock = self._lock_for_root(root_id)
         lock_wait_started = time.perf_counter()
         root_lock.acquire()
         lock_acquired_at = time.perf_counter()
         try:
-            with perf.timed("session.tail_persist.lock_copy"):
-                with perf.timed("session.tail_persist.state"):
-                    persist = self._persist_coordinator
-                    with persist.lock:
-                        if root_id in persist.inflight:
-                            return
-                        pending = persist.pending.pop(root_id, None)
-                        persist.cancel_deadline_unlocked(root_id)
-                        if pending is None:
-                            return
-                        persist.inflight.add(root_id)
-                        persist.last_at[root_id] = time.monotonic()
-                with perf.timed("session.tail_persist.copy"):
-                    sess = self._root_repository.copy_persistable_root(pending)
-        finally:
-            lock_released_at = time.perf_counter()
-            root_lock.release()
-            perf.record(
-                "session.tail_persist.root_lock_wait",
-                (lock_acquired_at - lock_wait_started) * 1000.0,
-            )
-            perf.record(
-                "session.tail_persist.root_lock_held",
-                (lock_released_at - lock_acquired_at) * 1000.0,
-            )
-        # bump=False — `updated_at` was set at queue time under
-        # the caller's lock.
-        try:
+            try:
+                with perf.timed("session.tail_persist.lock_copy"):
+                    with perf.timed("session.tail_persist.state"):
+                        persist = self._persist_coordinator
+                        with persist.lock:
+                            if root_id in persist.inflight:
+                                return
+                            pending = persist.pending.pop(root_id, None)
+                            persist.cancel_deadline_unlocked(root_id)
+                            if pending is None:
+                                return
+                            claim_token = object()
+                            persist.inflight.add(root_id)
+                            persist.inflight_claims[root_id] = claim_token
+                            persist.last_at[root_id] = time.monotonic()
+                    with perf.timed("session.tail_persist.copy"):
+                        sess = self._root_repository.copy_persistable_root(pending)
+            finally:
+                lock_released_at = time.perf_counter()
+                root_lock.release()
+                perf.record(
+                    "session.tail_persist.root_lock_wait",
+                    (lock_acquired_at - lock_wait_started) * 1000.0,
+                )
+                perf.record(
+                    "session.tail_persist.root_lock_held",
+                    (lock_released_at - lock_acquired_at) * 1000.0,
+                )
+            # bump=False — `updated_at` was set at queue time under
+            # the caller's lock.
             with perf.timed("session.tail_persist.write_full"):
                 self._root_repository.write_root(
                     sess,
@@ -3912,14 +3928,29 @@ class SessionManager:
                 "_tail_persist failed for %s", root_id,
             )
         finally:
-            persist = self._persist_coordinator
-            with persist.changed:
-                persist.inflight.discard(root_id)
-                if root_id in persist.pending and root_id not in persist.deadlines:
-                    last = persist.last_at.get(root_id, 0.0)
-                    delay = max(0.0, PERSIST_DEBOUNCE_S - (time.monotonic() - last))
-                    persist.arm_deadline_unlocked(root_id, delay)
-                persist.changed.notify_all()
+            if claim_token is not None:
+                persist = self._persist_coordinator
+                with persist.changed:
+                    if persist.inflight_claims.get(root_id) is claim_token:
+                        new_work_waiting = root_id in persist.pending
+                        cancelled = claim_token in persist.cancelled_claims
+                        if failed and not cancelled:
+                            persist.pending.setdefault(root_id, pending)
+                        persist.inflight_claims.pop(root_id, None)
+                        persist.inflight.discard(root_id)
+                        if (
+                            new_work_waiting
+                            and root_id in persist.pending
+                            and root_id not in persist.deadlines
+                        ):
+                            last = persist.last_at.get(root_id, 0.0)
+                            delay = max(
+                                0.0,
+                                PERSIST_DEBOUNCE_S - (time.monotonic() - last),
+                            )
+                            persist.arm_deadline_unlocked(root_id, delay)
+                    persist.cancelled_claims.discard(claim_token)
+                    persist.changed.notify_all()
 
     def _drop_pending_persist(self, root_id: str) -> None:
         """Cancel any queued tail flush + drop the pending entry for
@@ -3939,6 +3970,9 @@ class SessionManager:
             persist.pending.pop(root_id, None)
             persist.cancel_deadline_unlocked(root_id)
             persist.last_at.pop(root_id, None)
+            claim_token = persist.inflight_claims.get(root_id)
+            if claim_token is not None:
+                persist.cancelled_claims.add(claim_token)
 
     def flush_pending_persists(self) -> None:
         """Best-effort drain of pending tail flushes. Called from:
@@ -3946,9 +3980,9 @@ class SessionManager:
             clean stop persists everything queued.
 
         Iterates the keys at snapshot time and blocks on each root lock.
-        This method is the explicit durability barrier used by shutdown
-        and tests, so returning while a pending tree write remains would
-        violate its contract."""
+        Each root is attempted at most once per call. Failed writes stay
+        pending for the next explicit drain instead of being dropped or
+        retried in a tight loop."""
         persist = self._persist_coordinator
         with persist.lock:
             rids = set(persist.pending) | set(persist.inflight)
@@ -3962,41 +3996,30 @@ class SessionManager:
                     sess = persist.pending.pop(rid, None)
                     persist.cancel_deadline_unlocked(rid)
                     if sess is None:
-                        persist._release_root_if_quiescent_unlocked(rid)
                         continue
                     persist.last_at[rid] = time.monotonic()
                 try:
+                    self._root_repository.write_root(
+                        sess,
+                        bump_updated_at=False,
+                        preserve_projection_fields=True,
+                    )
+                    self._note_root_file_written(rid)
+                except Exception:
                     with persist.changed:
-                        while rid in persist.inflight:
-                            persist.changed.wait(timeout=1.0)
-                        sess = persist.pending.pop(rid, None)
-                        persist.cancel_deadline_unlocked(rid)
-                        if sess is None:
-                            break
-                        persist.last_at[rid] = time.monotonic()
-                    try:
-                        self._root_repository.write_root(
-                            sess,
-                            bump_updated_at=False,
-                            preserve_projection_fields=True,
-                        )
-                        self._note_root_file_written(rid)
-                    except Exception:
-                        logger.exception(
-                            "flush_pending_persists: failed for %s", rid,
-                        )
-                finally:
-                    lock.release()
-                with persist.changed:
-                    if rid not in persist.pending and rid not in persist.inflight:
-                        break
+                        persist.pending.setdefault(rid, sess)
+                    logger.exception(
+                        "flush_pending_persists: failed for %s", rid,
+                    )
+            finally:
+                lock.release()
 
     def flush_root_persist(self, root_id: str) -> None:
         """Durability barrier for one root without draining unrelated roots."""
         persist = self._persist_coordinator
         while True:
-            claim = None
-            failed = False
+            claim_token = None
+            pending = None
             wait_started = time.perf_counter()
             with persist.changed:
                 while root_id in persist.inflight:
@@ -4013,19 +4036,21 @@ class SessionManager:
                 (time.perf_counter() - lock_started) * 1000.0,
             )
             try:
-                with persist.changed:
-                    if root_id in persist.inflight:
-                        continue
-                    pending = persist.pending.pop(root_id, None)
-                    persist.cancel_deadline_unlocked(root_id)
-                    if pending is None:
-                        return
-                    persist.inflight.add(root_id)
-                    persist.last_at[root_id] = time.monotonic()
-                sess = self._root_repository.copy_persistable_root(pending)
-            finally:
-                lock.release()
-            try:
+                try:
+                    with persist.changed:
+                        if root_id in persist.inflight:
+                            continue
+                        pending = persist.pending.pop(root_id, None)
+                        persist.cancel_deadline_unlocked(root_id)
+                        if pending is None:
+                            return
+                        claim_token = object()
+                        persist.inflight.add(root_id)
+                        persist.inflight_claims[root_id] = claim_token
+                        persist.last_at[root_id] = time.monotonic()
+                    sess = self._root_repository.copy_persistable_root(pending)
+                finally:
+                    lock.release()
                 with perf.timed("session.flush_root.write"):
                     self._root_repository.write_root(
                         sess,
@@ -4036,12 +4061,21 @@ class SessionManager:
                 self._note_root_file_written(root_id)
             except Exception:
                 with persist.changed:
-                    persist.pending.setdefault(root_id, sess)
+                    if (
+                        claim_token is not None
+                        and persist.inflight_claims.get(root_id) is claim_token
+                        and claim_token not in persist.cancelled_claims
+                    ):
+                        persist.pending.setdefault(root_id, pending)
                 raise
             finally:
-                with persist.changed:
-                    persist.inflight.discard(root_id)
-                    persist.changed.notify_all()
+                if claim_token is not None:
+                    with persist.changed:
+                        if persist.inflight_claims.get(root_id) is claim_token:
+                            persist.inflight_claims.pop(root_id, None)
+                            persist.inflight.discard(root_id)
+                        persist.cancelled_claims.discard(claim_token)
+                        persist.changed.notify_all()
 
     # ── Draft persist coalescer ────────────────────────────────────
     # Moved to `backend/draft_store.py`. sm hot paths resolve the
