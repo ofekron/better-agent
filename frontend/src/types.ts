@@ -1,5 +1,44 @@
 import type { InlineTag } from "./types/inlineTag";
 
+export type ModelCatalogStatus =
+  | "pending"
+  | "refreshing"
+  | "current"
+  | "stale"
+  | "error"
+  | "unsupported"
+  | "unavailable";
+
+export interface RetiredModel {
+  id: string;
+  first_absent_at: number;
+}
+
+export interface ModelRuntimeCatalogProfile {
+  runner: string;
+  model: string;
+  reasoning_efforts: string[];
+}
+
+export interface ModelCatalog {
+  provider_id: string;
+  provider_generation: string;
+  authoritative: boolean;
+  status: ModelCatalogStatus;
+  models: string[];
+  models_current: boolean;
+  retired: string[];
+  retired_models: RetiredModel[];
+  last_refreshed_at: number;
+  reason: string;
+  authority_fingerprint: string;
+  last_known_good: {
+    models: string[];
+    last_refreshed_at: number;
+  } | null;
+  runtime_profiles: ModelRuntimeCatalogProfile[];
+}
+
 /** An image attachment (pasted or file-selected) stored as base64. */
 export interface PastedImage {
   dataUrl: string;

@@ -12,7 +12,7 @@ import type {
   VoiceRecognizerHandlers,
 } from "../src/lib/voiceRecognition";
 import type { Provider } from "../src/types";
-import { cacheProviderModels, cacheProviders } from "../src/utils/providerCache";
+import { cacheProviders } from "../src/utils/providerCache";
 
 let handlers: VoiceRecognizerHandlers | null = null;
 
@@ -103,7 +103,6 @@ describe("new session modal voice mode", () => {
 
   it("dictates into the initial prompt and creates on the send command", async () => {
     cacheProviders([provider], provider.id);
-    cacheProviderModels(provider.id, ["cached-default"]);
     vi.spyOn(globalThis, "fetch").mockRejectedValue(new TypeError("offline"));
     const onCreate = vi.fn();
 
@@ -148,7 +147,6 @@ describe("new session modal voice mode", () => {
 
   it("keeps voice commands out of the chat composer while the modal owns them", async () => {
     cacheProviders([provider], provider.id);
-    cacheProviderModels(provider.id, ["cached-default"]);
     vi.spyOn(globalThis, "fetch").mockRejectedValue(new TypeError("offline"));
     const appendToChat = vi.fn();
     window.addEventListener("better-agent-voice-append-draft", appendToChat);

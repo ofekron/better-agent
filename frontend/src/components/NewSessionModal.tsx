@@ -18,8 +18,9 @@ import { useMachines } from "../hooks/useMachines";
 import { useLocalNodeId } from "../hooks/useLocalNodeId";
 import { useBackButtonDismiss } from "../hooks/useBackButtonDismiss";
 import { usePersistedDraft } from "../hooks/usePersistedDraft";
-import { useProviderCatalogRevision } from "../hooks/useModelsCatalogChanged";
+import { useProviderModelCatalog } from "../hooks/useProviderModelCatalog";
 import { ConfirmModal } from "./ConfirmModal";
+import { ModelCatalogStatus } from "./ModelCatalogStatus";
 
 import { API, fetchSessionOrganization, createSessionFolder } from "../api";
 import {
@@ -48,7 +49,6 @@ import type { SessionFolder } from "../types";
 import { fileToAttachment } from "../utils/fileAttach";
 import { fileToPastedImage, imageFilesFromClipboard } from "../utils/imageAttach";
 import {
-  cacheProviderModels,
   cacheProviders,
   readProviderCache,
 } from "../utils/providerCache";
@@ -269,7 +269,6 @@ export function resolveRuntimeProfile(
   saved: RuntimeProfile | undefined,
   providers: Provider[],
   defaultProviderId: string | null,
-  modelsByProvider: Record<string, string[]>,
   role: "main" | "worker",
 ): RuntimeProfile {
   const availableProviders = providers.filter((item) => !item.suspended);
@@ -284,7 +283,6 @@ export function resolveRuntimeProfile(
     ? savedRunner
     : runnerForProvider(provider);
 
-  const models = modelsByProvider[provider.id] ?? [];
   const savedModel = saved?.providerId === provider.id ? saved.model : "";
   const lastModel = provider.last_model ?? "";
   // Main usage is what the backend records as `last_model`, so for the
@@ -295,10 +293,7 @@ export function resolveRuntimeProfile(
     role === "main"
       ? [lastModel, savedModel, provider.default_model]
       : [savedModel, lastModel, provider.default_model];
-  const model =
-    candidates.find((m) => m && (models.length === 0 || models.includes(m)))
-    || models[0]
-    || "";
+  const model = candidates.find(Boolean) || "";
   return {
     providerId: provider.id,
     model,
@@ -361,37 +356,35 @@ function RuntimeProfilePicker({
 }) {
   const { t } = useTranslation();
   const quotaStatus = useQuotaStatus(API, providers);
-  const [models, setModels] = useState<string[]>([]);
-  const [runtimeProfiles, setRuntimeProfiles] = useState<ModelRuntimeProfile[]>([]);
   const selectedProvider = providers.find((p) => p.id === value.providerId);
-  const modelCatalogRevision = useProviderCatalogRevision(value.providerId);
+  const {
+    catalog,
+    networkState,
+    refresh,
+    refreshing,
+    refreshError,
+  } = useProviderModelCatalog(value.providerId);
+  const models = catalog?.models ?? [];
+  const runtimeProfiles = (catalog?.runtime_profiles ?? []) as ModelRuntimeProfile[];
   const selectedQuota = summarizeProvider(quotaStatus, selectedProvider);
 
   useEffect(() => {
-    if (!value.providerId) {
-      setModels([]);
-      setRuntimeProfiles([]);
+    if (!catalog || catalog.provider_id !== value.providerId) return;
+    if (
+      catalog.authoritative
+      && (
+        catalog.status === "pending"
+        || catalog.status === "unsupported"
+        || catalog.status === "unavailable"
+        || (catalog.status === "error" && !catalog.models.length)
+      )
+    ) {
+      if (value.model) onChange({ ...value, model: "" });
       return;
     }
-    const cachedModels = readProviderCache()?.modelsByProvider[value.providerId] ?? [];
-    setModels(cachedModels);
-    setRuntimeProfiles([]);
-    trackedFetch(
-      `providers:fetchModels:${value.providerId}`,
-      `${API}/api/providers/${value.providerId}/models`,
-    )
-      .then((r) => r.json())
-      .then((d) => {
-        const list: string[] = d.models || [];
-        cacheProviderModels(value.providerId, list);
-        setModels(list);
-        setRuntimeProfiles(d.runtime_profiles || []);
-        if (list.length && !list.includes(value.model)) {
-          onChange({ ...value, model: list[0] });
-        }
-      })
-      .catch(() => {});
-  }, [value.providerId, modelCatalogRevision]);
+    if (!catalog.models.length || catalog.models.includes(value.model)) return;
+    onChange({ ...value, model: catalog.models[0] });
+  }, [catalog, onChange, value]);
 
   return (
     <div className="ns-modal-section">
@@ -457,6 +450,12 @@ function RuntimeProfilePicker({
         <label>{t("newSession.model")}</label>
         <select
           value={value.model}
+          disabled={
+            !models.length
+            || catalog?.status === "pending"
+            || catalog?.status === "unsupported"
+            || catalog?.status === "unavailable"
+          }
           onChange={(e) => {
             const model = e.target.value;
             if (!selectedProvider) {
@@ -478,10 +477,17 @@ function RuntimeProfilePicker({
             </option>
           ))}
           {!models.length && (
-            <option value={value.model}>{value.model || "—"}</option>
+            <option value={value.model} disabled>{value.model || "—"}</option>
           )}
         </select>
       </div>
+      <ModelCatalogStatus
+        catalog={catalog}
+        networkState={networkState}
+        onRefresh={refresh}
+        refreshing={refreshing}
+        refreshError={refreshError}
+      />
       {selectedProvider && effortsForRuntime(selectedProvider, value.runner, value.model, runtimeProfiles).length ? (
         <div className="ns-modal-row">
           <label>{t("newSession.reasoningEffort")}</label>
@@ -711,8 +717,8 @@ export function NewSessionModal({
     const cached = readProviderCache();
     if (cached) {
       setProviders(cached.providers);
-      setMain(resolveRuntimeProfile(defaults.main, cached.providers, cached.defaultProviderId, cached.modelsByProvider, "main"));
-      setWorker(resolveRuntimeProfile(defaults.worker, cached.providers, cached.defaultProviderId, cached.modelsByProvider, "worker"));
+      setMain(resolveRuntimeProfile(defaults.main, cached.providers, cached.defaultProviderId, "main"));
+      setWorker(resolveRuntimeProfile(defaults.worker, cached.providers, cached.defaultProviderId, "worker"));
     }
     trackedFetch("providers:list", `${API}/api/providers`)
       .then((r) => r.json())
@@ -721,9 +727,8 @@ export function NewSessionModal({
         const activeId: string | null = d.default_provider_id;
         cacheProviders(list, activeId);
         setProviders(list);
-        const modelsByProvider = readProviderCache()?.modelsByProvider ?? {};
-        setMain(resolveRuntimeProfile(defaults.main, list, activeId, modelsByProvider, "main"));
-        setWorker(resolveRuntimeProfile(defaults.worker, list, activeId, modelsByProvider, "worker"));
+        setMain(resolveRuntimeProfile(defaults.main, list, activeId, "main"));
+        setWorker(resolveRuntimeProfile(defaults.worker, list, activeId, "worker"));
       })
       .catch(() => {});
   }, [open, sessionExtensionOptions]);

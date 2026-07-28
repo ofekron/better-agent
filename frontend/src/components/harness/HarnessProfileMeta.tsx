@@ -6,7 +6,8 @@ import type { Provider } from "../../types";
 import type { HarnessProfile } from "../../types";
 import { effortsForRunner, runnerForProvider } from "../modelPicker";
 import type { HarnessFieldWrite } from "./types";
-import { useProviderCatalogRevision } from "../../hooks/useModelsCatalogChanged";
+import { useProviderModelCatalog } from "../../hooks/useProviderModelCatalog";
+import { ModelCatalogStatus } from "../ModelCatalogStatus";
 
 interface ProfileSummary {
   id: string;
@@ -33,14 +34,20 @@ const PROVISIONING_PROMPT_FIELD = "provisioning_prompt";
 export function HarnessProfileMeta({ profile, profiles, disabled, onWrite }: Props) {
   const { t } = useTranslation();
   const [providers, setProviders] = useState<Provider[]>([]);
-  const [models, setModels] = useState<string[]>([]);
 
   const pinnedProviderId = profile.default_provider_id ?? "";
   const pinnedModel = profile.default_model ?? "";
   const pinnedEffort = profile.default_reasoning_effort ?? "";
   const provisioningPrompt = profile.provisioning_prompt ?? "";
   const baseId = profile.base_profile_id ?? "";
-  const modelCatalogRevision = useProviderCatalogRevision(pinnedProviderId);
+  const {
+    catalog,
+    networkState,
+    refresh,
+    refreshing,
+    refreshError,
+  } = useProviderModelCatalog(pinnedProviderId);
+  const models = catalog?.models ?? [];
   const [provisioningPromptDraft, setProvisioningPromptDraft] = useState(provisioningPrompt);
 
   useEffect(() => {
@@ -59,28 +66,6 @@ export function HarnessProfileMeta({ profile, profiles, disabled, onWrite }: Pro
   }, []);
 
   useEffect(() => {
-    if (!pinnedProviderId) {
-      setModels([]);
-      return;
-    }
-    let cancelled = false;
-    trackedFetch(
-      `harnessProfiles:models:${pinnedProviderId}`,
-      `${API}/api/providers/${encodeURIComponent(pinnedProviderId)}/models`,
-    )
-      .then((res) => (res.ok ? res.json() : Promise.reject(new Error(`HTTP ${res.status}`))))
-      .then((catalog: { models?: string[] }) => {
-        if (!cancelled) setModels(catalog.models ?? []);
-      })
-      .catch(() => {
-        if (!cancelled) setModels([]);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [pinnedProviderId, modelCatalogRevision]);
-
-  useEffect(() => {
     setProvisioningPromptDraft(provisioningPrompt);
   }, [provisioningPrompt]);
 
@@ -93,11 +78,10 @@ export function HarnessProfileMeta({ profile, profiles, disabled, onWrite }: Pro
 
   const pinnedProvider = providers.find((item) => item.id === pinnedProviderId);
   // Keep the current pin visible even if the live catalog no longer lists it.
-  const modelOptions = useMemo(() => {
-    const list = [...models];
-    if (pinnedModel && !list.includes(pinnedModel)) list.unshift(pinnedModel);
-    return list;
-  }, [models, pinnedModel]);
+  const modelOptions = [...models];
+  if (pinnedModel && !modelOptions.includes(pinnedModel)) {
+    modelOptions.unshift(pinnedModel);
+  }
   const effortOptions = pinnedProvider
     ? effortsForRunner(pinnedProvider, runnerForProvider(pinnedProvider))
     : [];
@@ -150,9 +134,19 @@ export function HarnessProfileMeta({ profile, profiles, disabled, onWrite }: Pro
         >
           <option value="">{t("harnessProfile.pinNone")}</option>
           {modelOptions.map((model) => (
-            <option key={model} value={model}>{model}</option>
+            <option key={model} value={model} disabled={!models.includes(model)}>
+              {model}
+              {!models.includes(model) ? ` — ${t("model.notSelectable")}` : ""}
+            </option>
           ))}
         </select>
+        <ModelCatalogStatus
+          catalog={catalog}
+          networkState={networkState}
+          onRefresh={refresh}
+          refreshing={refreshing}
+          refreshError={refreshError}
+        />
       </div>
 
       <div className="harness-item-row">

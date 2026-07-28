@@ -2740,7 +2740,19 @@ _model_catalog_unsubscribe: Callable[[], None] | None = None
 
 
 async def _broadcast_model_catalog_fact(fact) -> None:
-    await _broadcast_models_catalog_changed(fact.provider_id, {})
+    await coordinator.broadcast_global(
+        "models_catalog_changed",
+        {
+            "provider_id": fact.provider_id,
+            "kind": fact.kind,
+            "idempotency_key": fact.idempotency_key,
+            "projection": (
+                fact.projection.to_dict()
+                if fact.projection is not None
+                else None
+            ),
+        },
+    )
 
 
 @app.get("/api/startup_tasks")
@@ -3137,6 +3149,25 @@ async def get_models():
     return models_mod.models_catalog()
 
 
+@app.get("/api/model-catalogs")
+async def get_provider_model_catalogs():
+    state = await asyncio.to_thread(config_store.list_providers)
+    records = [
+        provider
+        for provider in state.get("providers", [])
+        if provider.get("kind") in {"codex", "fugu"}
+        and provider.get("suspended") is not True
+    ]
+    return {
+        "catalogs": await asyncio.gather(
+            *(
+                asyncio.to_thread(_provider_models_catalog, provider["id"])
+                for provider in records
+            ),
+        ),
+    }
+
+
 def _provider_models_catalog(provider_id: str) -> dict:
     import models as models_mod
     catalog = models_mod.models_catalog(provider_id)
@@ -3155,7 +3186,7 @@ def _provider_models_catalog(provider_id: str) -> dict:
     return catalog
 
 
-@app.post("/api/models/refresh")
+@app.post("/api/models/refresh", status_code=202)
 async def refresh_active_models_endpoint():
     """Refresh the active provider through its authoritative catalog owner."""
     import models as models_mod
@@ -3165,27 +3196,40 @@ async def refresh_active_models_endpoint():
     diff = await _refresh_provider_models(active)
     if diff:
         await _broadcast_models_catalog_changed(active["id"], diff)
-    return _provider_models_catalog(active["id"])
+    catalog = _provider_models_catalog(active["id"])
+    return {
+        "accepted": True,
+        "provider_id": active["id"],
+        "provider_generation": str(active.get("generation") or ""),
+        "catalog": catalog,
+    }
 
 
-@app.post("/api/providers/{provider_id}/models/refresh")
+@app.post("/api/providers/{provider_id}/models/refresh", status_code=202)
 async def refresh_provider_models_endpoint(provider_id: str):
     """Refresh one provider through its authoritative catalog owner."""
     import models as models_mod
     record = await asyncio.to_thread(config_store.get_provider, provider_id)
     if record is None:
         raise HTTPException(status_code=404, detail=t("error.provider_not_found"))
+    if record.get("suspended") is True:
+        raise HTTPException(status_code=409, detail=t("error.provider_suspended"))
     diff = await _refresh_provider_models(record)
     if diff:
         await _broadcast_models_catalog_changed(provider_id, diff)
-    return _provider_models_catalog(provider_id)
+    return {
+        "accepted": True,
+        "provider_id": provider_id,
+        "provider_generation": str(record.get("generation") or ""),
+        "catalog": _provider_models_catalog(provider_id),
+    }
 
 
 async def _refresh_provider_models(record: dict) -> dict | None:
     if record.get("kind") in {"codex", "fugu"}:
         import model_catalog_refresh
 
-        await model_catalog_refresh.request_refresh(str(record["id"]))
+        model_catalog_refresh.request_refresh_background(str(record["id"]))
         return None
     import models as models_mod
 

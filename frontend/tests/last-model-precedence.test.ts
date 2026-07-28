@@ -33,17 +33,12 @@ function provider(overrides: Partial<Provider>): Provider {
   };
 }
 
-const MODELS = {
-  p1: ["default-model", "saved-model", "last-model"],
-};
-
 describe("resolveRuntimeProfile model precedence", () => {
   it("main role: backend last_model outranks the locally-saved default", () => {
     const r = resolveRuntimeProfile(
       { providerId: "p1", model: "saved-model", reasoningEffort: "high", runner: "native", permission: {} },
       [provider({ last_model: "last-model" })],
       "p1",
-      MODELS,
       "main",
     );
     expect(r).toEqual({ providerId: "p1", model: "last-model", reasoningEffort: "high", runner: "native", permission: {} });
@@ -54,7 +49,6 @@ describe("resolveRuntimeProfile model precedence", () => {
       { providerId: "p1", model: "saved-model", reasoningEffort: "high", runner: "native", permission: {} },
       [provider({ last_model: "last-model" })],
       "p1",
-      MODELS,
       "worker",
     );
     expect(r).toEqual({ providerId: "p1", model: "saved-model", reasoningEffort: "high", runner: "native", permission: {} });
@@ -65,7 +59,6 @@ describe("resolveRuntimeProfile model precedence", () => {
       { providerId: "other", model: "irrelevant", reasoningEffort: "low", runner: "native", permission: {} },
       [provider({ id: "p1", last_model: "last-model" })],
       "p1",
-      MODELS,
       "worker",
     );
     expect(r).toEqual({ providerId: "p1", model: "last-model", reasoningEffort: "medium", runner: "native", permission: {} });
@@ -78,22 +71,20 @@ describe("resolveRuntimeProfile model precedence", () => {
         undefined,
         [provider({})],
         "p1",
-        MODELS,
         role,
       );
       expect(r).toEqual({ providerId: "p1", model: "default-model", reasoningEffort: "medium", runner: "native", permission: {} });
     },
   );
 
-  it("skips a stale last_model that is no longer in the provider's model list", () => {
+  it("defers last_model validation to the authoritative catalog hook", () => {
     const r = resolveRuntimeProfile(
       undefined,
       [provider({ last_model: "retired-model" })],
       "p1",
-      MODELS,
       "main",
     );
-    expect(r).toEqual({ providerId: "p1", model: "default-model", reasoningEffort: "medium", runner: "native", permission: {} });
+    expect(r).toEqual({ providerId: "p1", model: "retired-model", reasoningEffort: "medium", runner: "native", permission: {} });
   });
 
   it("accepts last_model unvalidated when the model list is empty (not yet fetched)", () => {
@@ -101,7 +92,6 @@ describe("resolveRuntimeProfile model precedence", () => {
       undefined,
       [provider({ last_model: "last-model" })],
       "p1",
-      {},
       "main",
     );
     expect(r).toEqual({ providerId: "p1", model: "last-model", reasoningEffort: "medium", runner: "native", permission: {} });
@@ -112,7 +102,6 @@ describe("resolveRuntimeProfile model precedence", () => {
       { providerId: "p1", model: "saved-model", reasoningEffort: "low", runner: "native", permission: {} },
       [provider({ last_reasoning_effort: "high" })],
       "p1",
-      MODELS,
       "main",
     );
     expect(r.reasoningEffort).toBe("high");
@@ -123,7 +112,6 @@ describe("resolveRuntimeProfile model precedence", () => {
       { providerId: "p1", model: "saved-model", reasoningEffort: "low", runner: "native", permission: {} },
       [provider({ last_reasoning_effort: "high" })],
       "p1",
-      MODELS,
       "worker",
     );
     expect(r.reasoningEffort).toBe("low");
@@ -146,7 +134,6 @@ describe("resolveRuntimeProfile model precedence", () => {
         ],
       })],
       "p1",
-      MODELS,
       "worker",
     );
     expect(r.runner).toBe("better_agent_runner");

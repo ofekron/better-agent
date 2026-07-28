@@ -3,7 +3,6 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { SessionSelectorControls } from "../src/components/SessionSelectorControls";
 import type { Provider, Session } from "../src/types";
-import { cacheProviderModels } from "../src/utils/providerCache";
 
 vi.mock("react-i18next", () => ({
   useTranslation: () => ({
@@ -63,11 +62,28 @@ function session(overrides: Partial<Session> = {}): Session {
   };
 }
 
+function catalog(models: string[]) {
+  return {
+    provider_id: "claude",
+    provider_generation: "generation-1",
+    authoritative: false,
+    status: "current",
+    models,
+    models_current: true,
+    retired: [],
+    retired_models: [],
+    last_refreshed_at: 1,
+    reason: "",
+    authority_fingerprint: "",
+    last_known_good: null,
+    runtime_profiles: [],
+  };
+}
+
 describe("SessionSelectorControls picker interactions", () => {
   it("stages model edits until OK and discards them on Cancel", async () => {
-    cacheProviderModels("claude", ["sonnet", "opus"]);
     vi.spyOn(globalThis, "fetch").mockImplementation(() => Promise.resolve(
-      new Response(JSON.stringify({ models: ["sonnet", "opus"] }), {
+      new Response(JSON.stringify(catalog(["sonnet", "opus"])), {
         status: 200,
         headers: { "Content-Type": "application/json" },
       }),
@@ -126,7 +142,7 @@ describe("SessionSelectorControls picker interactions", () => {
         );
       }
       return Promise.resolve(
-        new Response(JSON.stringify({ models: ["sonnet", "opus"] }), {
+        new Response(JSON.stringify(catalog(["sonnet", "opus"])), {
           status: 200,
           headers: { "Content-Type": "application/json" },
         }),

@@ -95,7 +95,7 @@ def test_codex_and_fugu_manual_refresh_use_catalog_authority_owner() -> None:
     )[1].split("\n\n@app.get", 1)[0]
 
     assert 'record.get("kind") in {"codex", "fugu"}' in helper
-    assert "await model_catalog_refresh.request_refresh(" in helper
+    assert "model_catalog_refresh.request_refresh_background(" in helper
 
 
 def test_legacy_due_refresh_excludes_catalog_authority_owner() -> None:

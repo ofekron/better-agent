@@ -1,14 +1,13 @@
-import { useEffect, useMemo, useState } from "react";
+import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { API } from "../api";
 import type { Provider, ReasoningEffort, Session } from "../types";
-import { trackedFetch, useOpProgress } from "../progress/store";
-import { cacheProviderModels, readProviderCache } from "../utils/providerCache";
 import { providerDisplayName } from "../utils/providerDisplayName";
 import { optionLabelWithQuota, summarizeProvider } from "../utils/quotaStatus";
 import { useQuotaStatus } from "../hooks/useQuotaStatus";
-import { useProviderCatalogRevision } from "../hooks/useModelsCatalogChanged";
+import { useProviderModelCatalog } from "../hooks/useProviderModelCatalog";
 import { HarnessProfileSelector } from "./HarnessProfileSelector";
+import { ModelCatalogStatus } from "./ModelCatalogStatus";
 import {
   changedUpdates,
   effortsForRuntime,
@@ -20,20 +19,6 @@ import {
   type SelectorUpdates,
   type ModelRuntimeProfile,
 } from "./modelPicker";
-
-interface ModelCatalog {
-  models?: string[];
-  runtime_profiles?: ModelRuntimeProfile[];
-}
-
-interface ModelCatalogState {
-  providerId: string;
-  models: string[];
-  runtimeProfiles: ModelRuntimeProfile[];
-  error?: string;
-}
-
-const providerModelsOp = (providerId: string) => `sessionSelector:models:${providerId}`;
 
 interface Props {
   session: Session;
@@ -60,53 +45,27 @@ export function ModelPickerModal({
   const quotaStatus = useQuotaStatus(API, providers);
   const selectedProviderId = session.provider_id || providers.find((p) => !p.suspended)?.id || "";
   const [draft, setDraft] = useState<SelectorDraft>(() => makeDraft(session, selectedProviderId, providers));
-  const [modelsResult, setModelsResult] = useState<ModelCatalogState | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const modelProviderId = draft.provider_id || selectedProviderId;
-  const modelCatalogRevision = useProviderCatalogRevision(modelProviderId);
-  const cachedModels = modelProviderId ? readProviderCache()?.modelsByProvider[modelProviderId] ?? [] : [];
-  const models = modelsResult?.providerId === modelProviderId ? modelsResult.models : cachedModels;
-  const modelLoadError = modelsResult?.providerId === modelProviderId ? modelsResult.error ?? null : null;
-  const loadingModels = useOpProgress(modelProviderId ? providerModelsOp(modelProviderId) : "").inflight;
+  const {
+    catalog,
+    networkState,
+    loading: loadingModels,
+    refresh,
+    refreshing,
+    refreshError,
+  } = useProviderModelCatalog(modelProviderId);
+  const models = catalog?.models ?? [];
+  const retired = catalog?.retired ?? [];
   const busy = disabled || saving;
-
-  useEffect(() => {
-    let cancelled = false;
-    if (!modelProviderId) return;
-    trackedFetch(providerModelsOp(modelProviderId), `${API}/api/providers/${encodeURIComponent(modelProviderId)}/models`)
-      .then((r) => r.json() as Promise<ModelCatalog>)
-      .then((catalog) => {
-        if (cancelled) return;
-        const list = catalog.models || [];
-        cacheProviderModels(modelProviderId, list);
-        setModelsResult({
-          providerId: modelProviderId,
-          models: list,
-          runtimeProfiles: catalog.runtime_profiles || [],
-        });
-      })
-      .catch((e) => {
-        if (cancelled) return;
-        setModelsResult({
-          providerId: modelProviderId,
-          models: readProviderCache()?.modelsByProvider[modelProviderId] ?? [],
-          runtimeProfiles: [],
-          error: e instanceof Error ? e.message : String(e),
-        });
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [modelProviderId, modelCatalogRevision]);
 
   const changeDraftProvider = (providerId: string) => {
     const nextProvider = providers.find((p) => p.id === providerId && !p.suspended);
     if (!nextProvider) return;
-    const providerCachedModels = readProviderCache()?.modelsByProvider[providerId] ?? [];
     setDraft((current) => ({
       provider_id: providerId,
-      model: modelForProvider(nextProvider, providerCachedModels),
+      model: modelForProvider(nextProvider, []),
       reasoning_effort: nextProvider.default_reasoning_effort || "",
       runner: runnerForProvider(nextProvider),
       permission: nextProvider.default_permission || {},
@@ -128,23 +87,32 @@ export function ModelPickerModal({
     onConfirm(updates);
   };
 
-  const modelOptions = useMemo(() => {
-    const seen = new Set<string>();
-    const out: string[] = [];
-    const sessionModelForProvider = draft?.provider_id === selectedProviderId ? session.model : "";
-    for (const item of [draft?.model, sessionModelForProvider, ...models]) {
-      if (!item || seen.has(item)) continue;
-      seen.add(item);
-      out.push(item);
-    }
-    return out;
-  }, [draft?.model, draft?.provider_id, selectedProviderId, session.model, models]);
+  const seenModels = new Set<string>();
+  const modelOptions: string[] = [];
+  const sessionModelForProvider = draft.provider_id === selectedProviderId ? session.model : "";
+  for (const item of [draft.model, sessionModelForProvider, ...models, ...retired]) {
+    if (!item || seenModels.has(item)) continue;
+    seenModels.add(item);
+    modelOptions.push(item);
+  }
 
   const draftProvider = draft ? providers.find((p) => p.id === draft.provider_id) : null;
   const draftQuota = summarizeProvider(quotaStatus, draftProvider);
-  const runtimeProfiles = modelsResult?.providerId === modelProviderId
-    ? modelsResult.runtimeProfiles
-    : [];
+  const runtimeProfiles = (catalog?.runtime_profiles ?? []) as ModelRuntimeProfile[];
+  const knownModels = new Set([...models, ...retired]);
+  const catalogBlocksSelection = (
+    catalog?.status === "pending"
+    || catalog?.status === "unsupported"
+    || catalog?.status === "unavailable"
+  );
+  const selectedModelValid = (
+    models.includes(draft.model)
+    || (
+      draft.provider_id === selectedProviderId
+      && draft.model === session.model
+      && knownModels.has(draft.model)
+    )
+  );
 
   return (
     <div className="modal-overlay session-model-picker-overlay" onClick={() => !busy && onClose()}>
@@ -235,7 +203,10 @@ export function ModelPickerModal({
                     <option value="">{t("sessionSelector.selectModel", "Select a model")}</option>
                   ) : null}
                   {modelOptions.map((m) => (
-                    <option key={m} value={m}>{optionLabelWithQuota(m, draftQuota, t)}</option>
+                    <option key={m} value={m} disabled={!models.includes(m)}>
+                      {optionLabelWithQuota(m, draftQuota, t)}
+                      {!models.includes(m) ? ` — ${t("model.notSelectable")}` : ""}
+                    </option>
                   ))}
                 </>
               ) : (
@@ -243,6 +214,13 @@ export function ModelPickerModal({
               )}
             </select>
           </label>
+          <ModelCatalogStatus
+            catalog={catalog}
+            networkState={networkState}
+            onRefresh={refresh}
+            refreshing={refreshing}
+            refreshError={refreshError}
+          />
           {draftProvider && effortsForRuntime(draftProvider, draft.runner, draft.model, runtimeProfiles).length ? (
             <label className="session-model-picker-field">
               <span>{t("newSession.reasoningEffort", "Effort")}</span>
@@ -281,13 +259,23 @@ export function ModelPickerModal({
               setDraft({ ...draft, harness_profile_id })
             }
           />
-          {error || modelLoadError ? <div className="session-model-picker-error">{error || modelLoadError}</div> : null}
+          {error ? <div className="session-model-picker-error">{error}</div> : null}
         </div>
         <div className="modal-actions session-model-picker-actions">
           <button type="button" className="btn-secondary" onClick={onClose} disabled={busy}>
             {t("newSession.cancel", "Cancel")}
           </button>
-          <button type="button" className="btn-primary" onClick={confirm} disabled={busy || !draft.model}>
+          <button
+            type="button"
+            className="btn-primary"
+            onClick={confirm}
+            disabled={
+              busy
+              || !draft.model
+              || catalogBlocksSelection
+              || !selectedModelValid
+            }
+          >
             {saving ? t("sessionSelector.applying", "Applying...") : t("common.ok", "OK")}
           </button>
         </div>

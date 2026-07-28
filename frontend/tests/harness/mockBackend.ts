@@ -1,6 +1,7 @@
 import type {
   CredentialConsent,
   FileDiscussion,
+  ModelCatalog,
   PendingApproval,
   Project,
   Provider,
@@ -47,6 +48,33 @@ export interface BackendState {
    * GET /api/file?path=... while the prompt-engineering overlay is up;
    * tests can pre-seed paths or watch them get fetched. */
   files: Record<string, string>;
+}
+
+function modelCatalog(
+  provider: Provider,
+  discovered: BackendState["models"],
+): ModelCatalog {
+  const models = Array.from(new Set([
+    provider.last_model,
+    provider.default_model,
+    ...(provider.custom_models ?? []),
+    ...discovered.map((model) => model.id),
+  ].filter((model): model is string => typeof model === "string" && model.length > 0)));
+  return {
+    provider_id: provider.id,
+    provider_generation: `mock:${provider.id}`,
+    authoritative: provider.kind === "codex" || provider.kind === "fugu",
+    status: "current",
+    models,
+    models_current: true,
+    retired: [],
+    retired_models: [],
+    last_refreshed_at: 1,
+    reason: "",
+    authority_fingerprint: `mock:${provider.id}`,
+    last_known_good: null,
+    runtime_profiles: [],
+  };
 }
 
 export interface RestCall {
@@ -1120,20 +1148,57 @@ export class MockBackend {
       return { before_content: "", after_content: "" };
     }
     if (method === "GET" && path === "/api/models") {
-      return { models: this.state.models };
+      const provider = this.state.providers.find(
+        (record) => record.id === this.state.default_provider_id,
+      );
+      return provider
+        ? modelCatalog(provider, this.state.models)
+        : {
+            provider_id: "",
+            provider_generation: "",
+            authoritative: false,
+            status: "unavailable",
+            models: [],
+            models_current: false,
+            retired: [],
+            retired_models: [],
+            last_refreshed_at: 0,
+            reason: "no_provider",
+            authority_fingerprint: "",
+            last_known_good: null,
+            runtime_profiles: [],
+          };
+    }
+    if (method === "GET" && path === "/api/model-catalogs") {
+      return {
+        catalogs: this.state.providers
+          .filter((provider) => (
+            (provider.kind === "codex" || provider.kind === "fugu")
+            && !provider.suspended
+          ))
+          .map((provider) => modelCatalog(provider, this.state.models)),
+      };
     }
     const providerModelsMatch = path.match(/^\/api\/providers\/([^/]+)\/models$/);
     if (method === "GET" && providerModelsMatch) {
       const providerId = decodeURIComponent(providerModelsMatch[1]);
       const provider = this.state.providers.find((p) => p.id === providerId);
-      if (!provider) return { models: [] };
-      const models = [
-        provider.last_model,
-        provider.default_model,
-        ...(provider.custom_models ?? []),
-        ...this.state.models.map((model) => model.id),
-      ].filter((model): model is string => typeof model === "string" && model.length > 0);
-      return { models: Array.from(new Set(models)) };
+      if (!provider) return notFound();
+      return modelCatalog(provider, this.state.models);
+    }
+    const providerModelsRefreshMatch = path.match(
+      /^\/api\/providers\/([^/]+)\/models\/refresh$/,
+    );
+    if (method === "POST" && providerModelsRefreshMatch) {
+      const providerId = decodeURIComponent(providerModelsRefreshMatch[1]);
+      const provider = this.state.providers.find((record) => record.id === providerId);
+      if (!provider) return notFound();
+      return {
+        accepted: true,
+        provider_id: provider.id,
+        provider_generation: `mock:${provider.id}`,
+        catalog: modelCatalog(provider, this.state.models),
+      };
     }
     if (method === "GET" && path === "/api/installation-profile") {
       return this.state.installationProfile;
