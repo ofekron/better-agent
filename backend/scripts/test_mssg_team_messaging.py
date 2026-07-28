@@ -1487,6 +1487,7 @@ def test_ask_team_message_submits_target_app_session_id(monkeypatch):
             sender_session_id=sender["id"],
             target_session_id=target["id"],
             message="review this",
+            user_initiated=True,
             timeout_s=1,
         )
 
@@ -1496,6 +1497,7 @@ def test_ask_team_message_submits_target_app_session_id(monkeypatch):
     assert captured["sid"] == target["id"]
     assert captured["params"]["app_session_id"] == target["id"]
     assert captured["params"]["source"] == team_messaging.ASK_SOURCE
+    assert captured["params"]["user_initiated"] is True
 
 
 def test_ask_response_omits_token_usage():

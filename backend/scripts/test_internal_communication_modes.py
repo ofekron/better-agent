@@ -145,6 +145,16 @@ async def _run() -> None:
             "kind": "session",
             "value": "target-1",
         }
+        assert coordinator.calls[-1]["user_initiated"] is False
+
+        await main._handle_internal_ask({
+            "sender_session_id": "sender-1",
+            "target_session_id": "target-1",
+            "message": "user-facing QA turn",
+            "mode": "wait_and_grab_last_assistant_mssg_in_turn",
+            "user_initiated": True,
+        })
+        assert coordinator.calls[-1]["user_initiated"] is True
     finally:
         main.coordinator = original_coordinator
         main._validate_optional_run_selector = original_validate  # type: ignore[assignment]

@@ -16150,6 +16150,7 @@ async def _ask_wait_and_grab_last_assistant_mssg_in_turn(
         sender_session_id=sender_session_id,
         target_session_id=target_session_id,
         message=message,
+        user_initiated=_body_bool(body, "user_initiated"),
         ask_id=str(body.get("ask_id") or ""),
         provider_id=requested_provider_id,
         model=requested_model,
