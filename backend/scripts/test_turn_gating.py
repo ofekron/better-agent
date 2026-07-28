@@ -28,13 +28,17 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import _test_home
-_test_home.isolate("bc_test_gating_")
+_TMP_HOME = _test_home.isolate("bc_test_gating_")
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+import _test_installation  # noqa: E402
+_test_installation.activate(Path(_TMP_HOME))
 
 from turn_helpers import _is_transient_error  # noqa: E402
 from turn_manager import TurnManager  # noqa: E402
 import turn_manager as turn_manager_mod  # noqa: E402
 from continuation import PROVIDER_CAPABILITIES_CHANGED_ERROR  # noqa: E402
+import config_store  # noqa: E402
 from session_manager import manager as session_manager  # noqa: E402
 import session_store  # noqa: E402
 import user_prefs  # noqa: E402
@@ -86,6 +90,7 @@ class _RetryProvider:
         outcomes: list[dict],
         *,
         id: str = "codex",
+        kind: str = "codex",
         emit_discovered: bool = False,
         reset_seconds: float = 0.5,
     ) -> None:
@@ -95,8 +100,9 @@ class _RetryProvider:
         self.session_ids: list[str | None] = []
         self.continuation_chains: list[list[str] | None] = []
         self.cancelled: list[str] = []
-        self.KIND = "codex"
+        self.KIND = kind
         self.id = id
+        self.record = {"runner": "native"}
         self._emit_discovered = emit_discovered
         self.reset_seconds = reset_seconds
 
@@ -311,6 +317,7 @@ def test_drive_cli_run_pre_spawn_guard() -> None:
     spawned: list[str] = []
 
     class _Provider:
+        KIND = "codex"
         _runs: dict = {}
 
         def start_run(self, **kw):
@@ -961,14 +968,33 @@ def test_codex_context_usage_persists_then_preempts_next_turn() -> None:
 
 def test_lazy_selector_change_continuation() -> None:
     print("T7d lazy selector change continuation")
-    session = session_manager.create(name="lazy-selector", cwd="/tmp", model="sonnet", provider_id="prov-a")
+    provider_a_id = config_store.get_default_provider()["id"]
+    provider_b_id = config_store.add_provider({
+        "name": "Provider B",
+        "kind": "claude",
+        "mode": "subscription",
+        "default_model": "haiku",
+        "custom_models": ["haiku"],
+    })["id"]
+    session = session_manager.create(
+        name="lazy-selector",
+        cwd="/tmp",
+        model="sonnet",
+        provider_id=provider_a_id,
+    )
     sid = session["id"]
 
     # Simulate a successful previous run that set last_active_provider_id and last_active_model
-    session_manager.set_agent_sid(sid, "native", "old-provider-sid", provider_id="prov-a", model="sonnet")
+    session_manager.set_agent_sid(
+        sid,
+        "native",
+        "old-provider-sid",
+        provider_id=provider_a_id,
+        model="sonnet",
+    )
 
     # Change session selectors (provider/model) to simulate user action
-    session_manager.set_selectors(sid, provider_id="prov-b", model="haiku")
+    session_manager.set_selectors(sid, provider_id=provider_b_id, model="haiku")
 
     provider = _RetryProvider(
         [{
@@ -976,7 +1002,8 @@ def test_lazy_selector_change_continuation() -> None:
             "session_id": "fresh-provider-b",
             "token_usage": {"input_tokens": 1},
         }],
-        id="prov-b",
+        id=provider_b_id,
+        kind="claude",
         emit_discovered=True,
     )
     c = _StubCoordinator()
@@ -1011,7 +1038,7 @@ def test_lazy_selector_change_continuation() -> None:
     )
     check("runner received continuation chain", provider.continuation_chains == [["old-provider-sid"]])
     check("prompt contains provider change msg", "Session provider or model changed" in provider.prompts[0])
-    check("last active provider updated", fresh.get("last_active_provider_id") == "prov-b")
+    check("last active provider updated", fresh.get("last_active_provider_id") == provider_b_id)
     check("last active model updated", fresh.get("last_active_model") == "haiku")
     check("result success", result.get("success") is True)
 
