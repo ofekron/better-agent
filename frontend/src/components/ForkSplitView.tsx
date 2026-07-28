@@ -730,7 +730,6 @@ function MessageList({
             onRetry={onRetry}
             onRetryStopped={onRetryStopped}
             threadColorMap={threadColorMap}
-            defaultCollapsed={!!g.response && !g.response.isStreaming}
             orchestrationMode={orchestrationMode}
             runs={turnRuns}
             scrollEl={scrollEl}

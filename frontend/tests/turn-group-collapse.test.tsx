@@ -3,12 +3,36 @@ import { act, fireEvent, render, cleanup, screen, waitFor, within } from "@testi
 import React from "react";
 import "../src/i18n";
 import { Chat } from "../src/components/Chat";
-import { TurnGroup } from "../src/components/MessageBubble";
+import { TurnGroup as ProductionTurnGroup } from "../src/components/MessageBubble";
 import { makeAssistantMsg, makeSession, makeUserMsg } from "./fixtures";
 import { renderApp } from "./harness";
 import { sessionLinkMarker } from "../src/utils/linkifyFilePaths";
 
 afterEach(cleanup);
+
+// Collapsed-state tests must enter that state through the same explicit
+// header interaction available to users.
+function TurnGroup({
+  defaultCollapsed = false,
+  ...props
+}: React.ComponentProps<typeof ProductionTurnGroup> & {
+  defaultCollapsed?: boolean;
+}) {
+  const rootRef = React.useRef<HTMLDivElement>(null);
+
+  React.useLayoutEffect(() => {
+    if (!defaultCollapsed) return;
+    rootRef.current
+      ?.querySelector<HTMLButtonElement>(".message-box-header-main")
+      ?.click();
+  }, [defaultCollapsed]);
+
+  return (
+    <div ref={rootRef} className="turn-group-test-host">
+      <ProductionTurnGroup {...props} />
+    </div>
+  );
+}
 
 describe("TurnGroup collapsed interrupted indicator", () => {
   it("renders a collapsed assistant session marker as a native link", () => {
@@ -74,7 +98,7 @@ describe("TurnGroup collapsed interrupted indicator", () => {
     }
   });
 
-  it("keeps historical collapsed groups compact when a later group exists", async () => {
+  it("keeps every completed assistant response expanded when later turns exist", async () => {
     const realFetch = globalThis.fetch;
     globalThis.fetch = vi.fn(async () =>
       new Response(JSON.stringify([]), {
@@ -111,14 +135,104 @@ describe("TurnGroup collapsed interrupted indicator", () => {
       const firstGroup = container.querySelector<HTMLElement>('[data-message-id="u1"]')?.closest(".turn-group");
       expect(firstGroup).not.toBeNull();
       expect(firstGroup!.querySelector('.user-message-box > .message-box-body')).not.toBeNull();
-      expect(firstGroup!.querySelector('.assistant-message .message-content')).toBeNull();
-      expect(firstGroup!.querySelector('.collapse-arrow')?.textContent).toBe("▶");
+      expect(firstGroup!.querySelector('.assistant-message .message-content')).not.toBeNull();
+      expect(firstGroup!.querySelector('.collapse-arrow')?.textContent).toBe("▼");
     } finally {
       globalThis.fetch = realFetch;
     }
   });
 
-  it("keeps the user prompt body visible when the latest group auto-collapses", () => {
+  it("does not collapse the previous assistant response when a failed turn is appended", () => {
+    const firstTurn = [
+      makeUserMsg({ id: "u1", content: "working prompt" }),
+      makeAssistantMsg({ id: "a1", content: "working reply", isStreaming: false }),
+    ];
+    const props = {
+      pendingMessages: [],
+      runs: [],
+      streamingEvents: [],
+      isStreaming: false,
+      isStopping: false,
+      streamingLoadPhase: null,
+      onSend: () => true,
+      disabled: false,
+      session: makeSession(),
+      draft: "",
+      onDraftChange: () => {},
+      queuedPrompt: null,
+      onPromoteQueued: () => {},
+    } satisfies Partial<React.ComponentProps<typeof Chat>>;
+    const { container, rerender } = render(<Chat {...props} messages={firstTurn} />);
+
+    rerender(
+      <Chat
+        {...props}
+        messages={[
+          ...firstTurn,
+          makeUserMsg({
+            id: "u2",
+            content: "failed prompt",
+            status: "error",
+            errorText: "unsupported provider config schema",
+          }),
+        ]}
+      />,
+    );
+
+    const firstGroup = container.querySelector<HTMLElement>('[data-message-id="u1"]')?.closest(".turn-group");
+    expect(firstGroup).not.toBeNull();
+    expect(firstGroup!.querySelector('.assistant-message .message-content')).not.toBeNull();
+    expect(firstGroup!.querySelector('.collapse-arrow')?.textContent).toBe("▼");
+  });
+
+  it("preserves an explicit manual collapse while later failed and successful turns are appended", () => {
+    const firstTurn = [
+      makeUserMsg({ id: "u1", content: "working prompt" }),
+      makeAssistantMsg({ id: "a1", content: "working reply", isStreaming: false }),
+    ];
+    const props = {
+      pendingMessages: [],
+      runs: [],
+      streamingEvents: [],
+      isStreaming: false,
+      isStopping: false,
+      streamingLoadPhase: null,
+      onSend: () => true,
+      disabled: false,
+      session: makeSession(),
+      draft: "",
+      onDraftChange: () => {},
+      queuedPrompt: null,
+      onPromoteQueued: () => {},
+    } satisfies Partial<React.ComponentProps<typeof Chat>>;
+    const { container, rerender } = render(<Chat {...props} messages={firstTurn} />);
+    const firstHeader = screen.getByRole("button", { name: /User/i });
+    fireEvent.click(firstHeader);
+
+    const failedTurn = makeUserMsg({
+      id: "u2",
+      content: "failed prompt",
+      status: "error",
+      errorText: "unsupported provider config schema",
+    });
+    rerender(<Chat {...props} messages={[...firstTurn, failedTurn]} />);
+    expect(container.querySelector('[data-message-id="a1"] .message-content')).toBeNull();
+
+    rerender(
+      <Chat
+        {...props}
+        messages={[
+          ...firstTurn,
+          failedTurn,
+          makeUserMsg({ id: "u3", content: "later prompt" }),
+          makeAssistantMsg({ id: "a3", content: "later reply", isStreaming: false }),
+        ]}
+      />,
+    );
+    expect(container.querySelector('[data-message-id="a1"] .message-content')).toBeNull();
+  });
+
+  it("keeps the user prompt body visible when the assistant response is manually collapsed", () => {
     const { container } = render(
       <TurnGroup
         initiatorMessage={makeUserMsg({ id: "u1", content: "latest prompt" })}
@@ -932,7 +1046,7 @@ describe("TurnGroup collapsed interrupted indicator", () => {
     expect(container.textContent).not.toContain("outer setup");
   });
 
-  it("uses stub tail events while collapsed and fetches full events only after expand", async () => {
+  it("hydrates stubbed historical events immediately while expanded", async () => {
     const realFetch = globalThis.fetch;
     const fetchMock = vi.fn(async () =>
       new Response(
@@ -972,20 +1086,14 @@ describe("TurnGroup collapsed interrupted indicator", () => {
               ],
             },
           })}
-          defaultCollapsed
           sessionId="s1"
           orchestrationMode="native"
         />,
       );
 
-      expect(fetchMock).not.toHaveBeenCalled();
-      expect(container.textContent).toContain("stub collapsed preview");
-      expect(container.textContent).not.toContain("stale fallback content");
-
-      fireEvent.click(screen.getByRole("button", { name: /User/i }));
-
       await waitFor(() => {
         expect(fetchMock).toHaveBeenCalledTimes(1);
+        expect(container.textContent).toContain("full expanded output");
       });
       expect(fetchMock.mock.calls[0][0]).toBe(
         "/api/sessions/s1/messages/a1/events",
@@ -995,7 +1103,7 @@ describe("TurnGroup collapsed interrupted indicator", () => {
     }
   });
 
-  it("fetches projected non-stub events only after collapsed group expands", async () => {
+  it("hydrates projected historical events immediately while expanded", async () => {
     const realFetch = globalThis.fetch;
     const fetchMock = vi.fn(async () =>
       new Response(
@@ -1027,17 +1135,10 @@ describe("TurnGroup collapsed interrupted indicator", () => {
             events: undefined,
             omitted_payloads: { events: { revision: "rev-1", count: 1 } },
           })}
-          defaultCollapsed
           sessionId="s1"
           orchestrationMode="native"
         />,
       );
-
-      expect(fetchMock).not.toHaveBeenCalled();
-      expect(container.textContent).toContain("stale fallback content");
-      expect(container.textContent).not.toContain("full projected output");
-
-      fireEvent.click(screen.getByRole("button", { name: /User/i }));
 
       await waitFor(() => {
         expect(fetchMock).toHaveBeenCalledTimes(1);

@@ -3180,7 +3180,7 @@ function UserFiles({ files }: { files?: ChatMessage["files"] }) {
  *  streaming updates — those mutate only the in-flight assistant message
  *  (last in the list), leaving every earlier turn group's props
  *  referentially stable. */
-function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, sessionId, userDisplayName, onFileClick, onViewDiff, onRetry, onRetryStopped, onContinueRateLimitOnAnotherProvider, rateLimitFallbackLabel, onChooseAnotherProviderForRateLimit, onAlterTurnMessage, threadColorMap, defaultCollapsed = false, expandAllTrigger, tags, advSyncOverlays, onAdvSyncClick, scrollEl: scrollElProp, orchestrationMode, runs, sessionRunning = false, loadPhase, enterAnimation, precedingModelSwitchEvents = [], trailingModelSwitchEvents = [], fallbackRunMeta }: {
+function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, sessionId, userDisplayName, onFileClick, onViewDiff, onRetry, onRetryStopped, onContinueRateLimitOnAnotherProvider, rateLimitFallbackLabel, onChooseAnotherProviderForRateLimit, onAlterTurnMessage, threadColorMap, expandAllTrigger, tags, advSyncOverlays, onAdvSyncClick, scrollEl: scrollElProp, orchestrationMode, runs, sessionRunning = false, loadPhase, enterAnimation, precedingModelSwitchEvents = [], trailingModelSwitchEvents = [], fallbackRunMeta }: {
   initiatorMessage: ChatMessage;
   responseMessage?: ChatMessage;
   precedingModelSwitchEvents?: WSEvent[];
@@ -3202,7 +3202,6 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
   onChooseAnotherProviderForRateLimit?: (responseMessage: ChatMessage) => void;
   onAlterTurnMessage?: (message: ChatMessage, content: string) => boolean | Promise<boolean>;
   threadColorMap?: Map<string, string>;
-  defaultCollapsed?: boolean;
   expandAllTrigger?: number;
   tags?: InlineTag[];
   onRemoveTag?: (id: string) => void;
@@ -3239,20 +3238,11 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
   // the scroll container + its scrollTop at click time. Read in the
   // useLayoutEffect below to compensate scrollTop after the DOM grows
   // (or shrinks). Only populated on user-initiated toggles — auto-toggles
-  // from defaultCollapsed / expandAllTrigger leave it null so they don't
-  // disturb scroll.
+  // from expandAllTrigger leaves it null so it doesn't disturb scroll.
   const pendingAnchorRef = useRef<
     { bottom: number; scrollTop: number; scrollEl: HTMLElement } | null
   >(null);
-  // Track whether the user has manually toggled this group. If they haven't,
-  // we follow `defaultCollapsed` — so the latest turn auto-expands and
-  // previously-latest turns auto-collapse when a new turn arrives. Once the
-  // user clicks the header, we stop overriding and respect their choice.
-  const [collapsed, setCollapsed] = useState(defaultCollapsed);
-  const [userToggled, setUserToggled] = useState(false);
-  useEffect(() => {
-    if (!userToggled) setCollapsed(defaultCollapsed);
-  }, [defaultCollapsed, userToggled]);
+  const [collapsed, setCollapsed] = useState(false);
   // Two independent collapse surfaces: the group chevron folds the events/
   // response, while the user prompt text has its own chevron. The prompt
   // never auto-collapses — only its own toggle folds it.
@@ -3283,7 +3273,6 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
     [],
   );
   const toggleCollapsed = () => {
-    setUserToggled(true);
     const groupEl = groupRef.current;
     // Prefer the prop (parent-owned scroll container, zero DOM walk);
     // fall back to a computed-style walk up the tree for the nearest

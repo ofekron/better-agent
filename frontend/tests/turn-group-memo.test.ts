@@ -14,7 +14,7 @@ const run2 = { target_message_id: "m2" };
 
 describe("turnGroupPropsEqual (TurnGroup memo comparator)", () => {
   it("holds when every prop is the same reference", () => {
-    const p = props({ runs: [run1], defaultCollapsed: false });
+    const p = props({ runs: [run1], sessionRunning: false });
     expect(turnGroupPropsEqual(p, p)).toBe(true);
   });
 
@@ -58,8 +58,8 @@ describe("turnGroupPropsEqual (TurnGroup memo comparator)", () => {
   it("bails when a scalar prop changes value", () => {
     expect(
       turnGroupPropsEqual(
-        props({ runs: [run1], defaultCollapsed: false }),
-        props({ runs: [run1], defaultCollapsed: true }),
+        props({ runs: [run1], sessionRunning: false }),
+        props({ runs: [run1], sessionRunning: true }),
       ),
     ).toBe(false);
   });

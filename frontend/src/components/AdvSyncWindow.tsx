@@ -204,7 +204,6 @@ function AdvSyncPane({ label, session, parentTree }: PaneProps) {
               responseMessage={g.response}
               sessionId={session.id}
               threadColorMap={undefined}
-              defaultCollapsed={!!g.response}
               orchestrationMode={parentTree.orchestration_mode}
               runs={[]}
             />
