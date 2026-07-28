@@ -6048,6 +6048,8 @@ def create_sub_session(
         "queued_prompts": [],
         "capability_contexts": [],
         "harness_profile_id": str(harness_profile_id or "").strip(),
+        "harness_profile_snapshot": None,
+        "turn_harness_profile_snapshot": None,
         "token_usage_total": {
             "input_tokens": 0,
             "output_tokens": 0,
@@ -6087,6 +6089,10 @@ def create_sub_session(
             str(item).strip() for item in disabled_runtime_skills if str(item or "").strip()
         ))} if disabled_runtime_skills else {}),
     }
+    if child["harness_profile_id"]:
+        resolve_profile_snapshot(
+            child, child["harness_profile_id"], clear_missing_id=False
+        )
     parent.setdefault("forks", []).append(child)
     _index_set(child["id"], root["id"])
     return child

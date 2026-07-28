@@ -320,6 +320,21 @@ def test_created_sub_session_applies_inclusion_and_exclusion() -> None:
     )
     record = session_manager.get(sub["id"])
     assert record["harness_profile_id"] == profile["id"]
+    assert (
+        sub.get("harness_profile_snapshot")
+        == record.get("harness_profile_snapshot")
+    )
+    snapshot = record.get("harness_profile_snapshot")
+    assert isinstance(snapshot, dict), (
+        "fresh sub-session did not persist its harness profile snapshot"
+    )
+    assert snapshot["profile_id"] == profile["id"]
+    assert snapshot["launcher_projection"]["profile_id"] == profile["id"]
+    assert KEPT_SERVER in snapshot["extension_mcp_servers"][KEPT_EXT]
+    assert DROPPED_SERVER not in snapshot["extension_mcp_servers"].get(
+        DROPPED_EXT, []
+    )
+    assert record.get("turn_harness_profile_snapshot") is None
 
     servers = _servers_offered_to(sub["id"])
     assert KEPT_SERVER in servers, f"profile-selected server missing: {sorted(servers)}"
@@ -336,6 +351,19 @@ def test_session_created_without_a_profile_keeps_every_server() -> None:
     assert KEPT_SERVER in servers and DROPPED_SERVER in servers, (
         f"a session with no profile must not be narrowed: {sorted(servers)}"
     )
+
+    parent = session_manager.create(
+        name="plain-parent", cwd=_TMP_HOME, orchestration_mode="native", model="model-x",
+    )
+    plain_sub = session_manager.create_sub_session(
+        parent_session_id=parent["id"],
+        name="plain-sub",
+        model="model-x",
+        cwd=_TMP_HOME,
+    )
+    assert plain_sub["harness_profile_id"] == ""
+    assert plain_sub.get("harness_profile_snapshot") is None
+    assert plain_sub.get("turn_harness_profile_snapshot") is None
 
 
 def main() -> int:
