@@ -5,6 +5,7 @@ import logging
 import os
 import subprocess
 import threading
+from contextlib import ExitStack
 from dataclasses import dataclass
 from multiprocessing import Pipe
 from typing import Literal
@@ -72,6 +73,27 @@ class ProviderCredentialBroker:
             raise ValueError("invalid provider_id")
         if op == "status":
             return {"status": self._state(provider_id).status}
+        if op == "clone":
+            target_provider_id = request.get("target_provider_id")
+            if (
+                not isinstance(target_provider_id, str)
+                or not target_provider_id
+                or len(target_provider_id) > 128
+                or any(
+                    character in target_provider_id
+                    for character in "\0\r\n"
+                )
+                or target_provider_id == provider_id
+            ):
+                raise ValueError("invalid target_provider_id")
+            with ExitStack() as locks:
+                for locked_provider_id in sorted(
+                    (provider_id, target_provider_id)
+                ):
+                    locks.enter_context(
+                        self._provider_lock(locked_provider_id)
+                    )
+                return self._clone(provider_id, target_provider_id)
         with self._provider_lock(provider_id):
             if op == "read":
                 return self._read(provider_id)
@@ -87,6 +109,16 @@ class ProviderCredentialBroker:
             if op == "delete":
                 return self._delete(provider_id)
         raise ValueError("unsupported operation")
+
+    def _clone(
+        self,
+        source_provider_id: str,
+        target_provider_id: str,
+    ) -> dict[str, str]:
+        source = self._read(source_provider_id)
+        if source["status"] != "available":
+            return {"status": source["status"]}
+        return self._store(target_provider_id, source["value"])
 
     def _read(self, provider_id: str) -> dict[str, str]:
         state = self._state(provider_id)

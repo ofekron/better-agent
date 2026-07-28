@@ -1888,6 +1888,9 @@ marketplace_bridge_api.configure(
     lambda: extension_api._broadcast_extension_changed(*extension_api.EXTENSION_CATALOG_TOPICS),
 )
 app.include_router(marketplace_bridge_api.router)
+import credential_clone_api  # noqa: E402
+credential_clone_api.configure(coordinator.verify_internal_token)
+app.include_router(credential_clone_api.router)
 import testape_api  # noqa: E402
 app.include_router(testape_api.router)
 

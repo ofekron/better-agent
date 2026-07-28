@@ -255,6 +255,26 @@ def provider_credential_authority_available() -> bool:
     return credential_session_client.available()
 
 
+def clone_provider_credential(
+    source_provider_id: str,
+    target_provider_id: str,
+) -> str:
+    if not credential_session_client.available():
+        raise RuntimeError("provider credential authority is unavailable")
+    response = credential_session_client.request(
+        "clone",
+        source_provider_id,
+        target_provider_id=target_provider_id,
+    )
+    status = response["status"]
+    _credential_status[source_provider_id] = status
+    if status == "available":
+        _credential_status[target_provider_id] = status
+        with _api_key_cache_lock:
+            _api_key_cache.pop(target_provider_id, None)
+    return status
+
+
 def provider_credential_status(provider_id: str) -> str:
     if not credential_session_client.available():
         return "blocked"

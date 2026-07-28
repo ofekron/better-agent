@@ -1,0 +1,187 @@
+from __future__ import annotations
+
+import os
+import sys
+from pathlib import Path
+from unittest.mock import patch
+
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "desktop"))
+sys.path.insert(0, str(ROOT / "backend"))
+
+import config_store  # noqa: E402
+import credential_clone_api  # noqa: E402
+import credential_session  # noqa: E402
+
+
+def test_authority_clone_never_returns_plaintext() -> None:
+    broker = credential_session.ProviderCredentialBroker()
+    credentials = {"source": "super-secret"}
+
+    with (
+        patch.object(
+            broker._credential_store,
+            "read",
+            side_effect=lambda provider_id: credentials.get(provider_id, ""),
+        ),
+        patch.object(
+            broker._credential_store,
+            "store",
+            side_effect=lambda provider_id, value: credentials.__setitem__(
+                provider_id, value
+            ),
+        ),
+    ):
+        response = broker.handle(
+            {
+                "op": "clone",
+                "provider_id": "source",
+                "target_provider_id": "isolated",
+                "request_id": "0" * 32,
+            }
+        )
+
+    assert response == {"status": "available"}
+    assert credentials["isolated"] == "super-secret"
+    assert "super-secret" not in repr(response)
+    assert "value" not in response
+
+
+def test_authority_clone_fails_closed_when_source_is_missing() -> None:
+    broker = credential_session.ProviderCredentialBroker()
+    stored: list[tuple[str, str]] = []
+
+    with (
+        patch.object(broker._credential_store, "read", return_value=""),
+        patch.object(
+            broker._credential_store,
+            "store",
+            side_effect=lambda provider_id, value: stored.append(
+                (provider_id, value)
+            ),
+        ),
+    ):
+        response = broker.handle(
+            {
+                "op": "clone",
+                "provider_id": "missing",
+                "target_provider_id": "isolated",
+                "request_id": "1" * 32,
+            }
+        )
+
+    assert response == {"status": "missing"}
+    assert stored == []
+
+
+def test_clone_api_requires_internal_token_and_returns_metadata_only() -> None:
+    app = FastAPI()
+    credential_clone_api.configure(lambda token: token == "internal-secret")
+    app.include_router(credential_clone_api.router)
+    client = TestClient(app)
+    payload = {
+        "source_provider_id": "source",
+        "target_provider_id": "isolated",
+    }
+
+    assert client.post(
+        "/api/internal/provider-credentials/clone", json=payload
+    ).status_code == 422
+    assert client.post(
+        "/api/internal/provider-credentials/clone",
+        json=payload,
+        headers={"X-Internal-Token": "wrong"},
+    ).status_code == 403
+
+    with patch.object(
+        config_store,
+        "clone_provider_credential",
+        return_value="available",
+    ) as clone:
+        response = client.post(
+            "/api/internal/provider-credentials/clone",
+            json=payload,
+            headers={"X-Internal-Token": "internal-secret"},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "available"}
+    assert clone.call_args.args == ("source", "isolated")
+    assert "secret" not in response.text
+    assert client.post(
+        "/api/internal/provider-credentials/clone",
+        json={
+            "source_provider_id": "same",
+            "target_provider_id": "same",
+        },
+        headers={"X-Internal-Token": "internal-secret"},
+    ).status_code == 422
+
+
+def test_failed_clone_preserves_target_cache_projection() -> None:
+    config_store._api_key_cache["isolated"] = "existing-target-secret"
+    config_store._credential_status["isolated"] = "available"
+    try:
+        with (
+            patch.object(
+                config_store.credential_session_client,
+                "available",
+                return_value=True,
+            ),
+            patch.object(
+                config_store.credential_session_client,
+                "request",
+                return_value={"status": "missing"},
+            ) as request,
+        ):
+            status = config_store.clone_provider_credential(
+                "missing", "isolated"
+            )
+
+        assert status == "missing"
+        assert (
+            config_store._api_key_cache["isolated"]
+            == "existing-target-secret"
+        )
+        assert config_store._credential_status["isolated"] == "available"
+        assert request.call_args.kwargs == {
+            "target_provider_id": "isolated"
+        }
+    finally:
+        config_store._api_key_cache.pop("isolated", None)
+        config_store._credential_status.pop("isolated", None)
+        config_store._credential_status.pop("missing", None)
+
+
+def test_clone_api_maps_authority_failures_without_secret_content() -> None:
+    app = FastAPI()
+    credential_clone_api.configure(lambda token: token == "internal-secret")
+    app.include_router(credential_clone_api.router)
+    client = TestClient(app)
+    payload = {
+        "source_provider_id": "source",
+        "target_provider_id": "isolated",
+    }
+    expected = {"missing": 404, "blocked": 503}
+
+    for authority_status, http_status in expected.items():
+        with patch.object(
+            config_store,
+            "clone_provider_credential",
+            return_value=authority_status,
+        ):
+            response = client.post(
+                "/api/internal/provider-credentials/clone",
+                json=payload,
+                headers={"X-Internal-Token": "internal-secret"},
+            )
+        assert response.status_code == http_status
+        assert "value" not in response.text
+
+
+if __name__ == "__main__":
+    os.environ.setdefault("BETTER_AGENT_HOME", str(ROOT / ".better-claude"))
+    raise SystemExit(__import__("pytest").main([__file__, "-q"]))

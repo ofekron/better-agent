@@ -39,7 +39,13 @@ def available() -> bool:
     return _CONNECTION is not None
 
 
-def request(op: str, provider_id: str, *, value: str | None = None) -> CredentialResponse:
+def request(
+    op: str,
+    provider_id: str,
+    *,
+    value: str | None = None,
+    target_provider_id: str | None = None,
+) -> CredentialResponse:
     if not available():
         raise RuntimeError("desktop credential session is unavailable")
     request_id = secrets.token_hex(16)
@@ -50,6 +56,8 @@ def request(op: str, provider_id: str, *, value: str | None = None) -> Credentia
     }
     if value is not None:
         payload["value"] = value
+    if target_provider_id is not None:
+        payload["target_provider_id"] = target_provider_id
     assert _CONNECTION is not None
     with _LOCK:
         _CONNECTION.send_bytes(
