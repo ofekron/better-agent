@@ -27,6 +27,7 @@ production repo, generate encrypted keys and keep the keystore offline.
 
 from __future__ import annotations
 
+import subprocess
 from contextlib import chdir, contextmanager
 from pathlib import Path
 
@@ -105,7 +106,22 @@ class ReleaseRepo:
         return dest
 
 
-def _main(argv: list[str] | None = None) -> int:
+def _current_branch() -> str:
+    result = subprocess.run(
+        ["git", "branch", "--show-current"],
+        cwd=Path(__file__).resolve().parent.parent,
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+
+def _main(
+    argv: list[str] | None = None,
+    *,
+    branch_name: str | None = None,
+) -> int:
     """CLI for the build scripts / manual releases.
 
         release.py init        <repo_dir> <keys_dir>
@@ -136,6 +152,13 @@ def _main(argv: list[str] | None = None) -> int:
                        help="also write the trusted root.json here")
 
     args = parser.parse_args(argv)
+    if args.cmd == "publish":
+        active_branch = _current_branch() if branch_name is None else branch_name
+        if active_branch != "main":
+            label = active_branch or "detached HEAD"
+            print(f"Desktop update publish skipped on {label}; main is required.")
+            return 0
+
     repo = ReleaseRepo(args.repo_dir, args.keys_dir)
     if args.cmd == "init":
         repo.initialize()
