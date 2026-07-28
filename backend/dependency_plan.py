@@ -246,6 +246,15 @@ def assert_active() -> None:
     _assert_environment(active_env(), plan)
 
 
+def assert_active_plan() -> None:
+    plan = resolve_plan()
+    marker = _read_object(active_env() / PLAN_MARKER)
+    if marker != {"schema_version": 1, "hash": plan["hash"]}:
+        raise DependencyPlanError(
+            "provider runtime dependencies changed; restart Better Agent to activate them"
+        )
+
+
 def verified_active_env(backend_dir: Path) -> Path:
     env_dir = active_env(backend_dir)
     python = _python_in(env_dir)
@@ -254,7 +263,7 @@ def verified_active_env(backend_dir: Path) -> Path:
         raise DependencyPlanError("target checkout has no dependency planner")
     try:
         subprocess.run(
-            [str(python), str(planner), "assert-active"],
+            [str(python), str(planner), "assert-active-plan"],
             cwd=backend_dir,
             check=True,
             capture_output=True,
@@ -505,7 +514,14 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "command",
-        choices=("activate", "active", "plan", "apply-selection", "assert-active"),
+        choices=(
+            "activate",
+            "active",
+            "plan",
+            "apply-selection",
+            "assert-active",
+            "assert-active-plan",
+        ),
     )
     parser.add_argument("--uv")
     parser.add_argument("--make-default", action="store_true")
@@ -525,6 +541,9 @@ def main() -> int:
             value = str(active_env())
         elif args.command == "assert-active":
             assert_active()
+            value = "active"
+        elif args.command == "assert-active-plan":
+            assert_active_plan()
             value = "active"
         else:
             value = resolve_plan()

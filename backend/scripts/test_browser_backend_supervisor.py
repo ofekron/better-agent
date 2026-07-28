@@ -41,13 +41,22 @@ def _wait_until(predicate, timeout: float = 10.0) -> None:
 
 def _fake_checkout(root: Path, probe_path: Path, *, read: bool) -> Path:
     backend = root / "backend"
-    python_path = backend / ".venv" / "bin" / "python"
+    python_path = backend / ".venvs" / "test" / "bin" / "python"
     python_path.parent.mkdir(parents=True)
     python_path.write_text(
         f"#!/bin/sh\nexec {str(ROOT / 'backend' / '.venv' / 'bin' / 'python')!r} \"$@\"\n",
         encoding="utf-8",
     )
     python_path.chmod(0o700)
+    (backend / ".active-venv").write_text(
+        ".venvs/test",
+        encoding="utf-8",
+    )
+    (backend / "dependency_plan.py").write_text(
+        "import sys\n"
+        "raise SystemExit(0 if sys.argv[1:] == ['assert-active-plan'] else 2)\n",
+        encoding="utf-8",
+    )
     operation = "read" if read else "status"
     (backend / "main.py").write_text(
         "import json, os, subprocess, sys\n"

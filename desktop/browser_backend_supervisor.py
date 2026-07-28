@@ -149,14 +149,9 @@ class BrowserBackendSupervisor:
 
     def _resolved_checkout(self) -> Path:
         from daemonhost import pointer
-        from dependency_plan import verified_active_env
 
         checkout = Path(pointer.resolve(str(self._launcher_root))).resolve()
-        env_dir = verified_active_env(checkout / "backend")
-        python = env_dir / (
-            "Scripts/python.exe" if os.name == "nt" else "bin/python"
-        )
-        if not python.is_file() or not (checkout / "backend" / "main.py").is_file():
+        if not (checkout / "backend" / "main.py").is_file():
             raise RuntimeError("resolved checkout is not runnable")
         return checkout
 

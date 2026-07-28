@@ -879,6 +879,37 @@ def test_target_checkout_rejects_stale_dependency_environment() -> None:
         assert dependency_plan.verified_active_env(backend) == env_dir.resolve()
 
 
+def test_target_checkout_verifier_checks_plan_receipt_without_runtime_probe() -> None:
+    with tempfile.TemporaryDirectory(prefix="ba-target-verifier-") as tmp:
+        backend = Path(tmp)
+        env_dir = backend / ".venvs" / "candidate"
+        python = dependency_plan._python_in(env_dir)
+        python.parent.mkdir(parents=True)
+        python.symlink_to(Path(sys.executable))
+        (backend / ".active-venv").write_text(
+            ".venvs/candidate",
+            encoding="utf-8",
+        )
+        (backend / "dependency_plan.py").write_text(
+            "raise SystemExit(0)\n",
+            encoding="utf-8",
+        )
+        with patch.object(dependency_plan.subprocess, "run") as run:
+            assert dependency_plan.verified_active_env(backend) == env_dir.resolve()
+
+        assert run.call_args.args[0][-1] == "assert-active-plan"
+        assert run.call_args.kwargs["timeout"] == 30
+
+
+def test_active_plan_receipt_check_does_not_repeat_runtime_probe() -> None:
+    with patch.object(
+        dependency_plan,
+        "_probe_environment",
+        side_effect=AssertionError("runtime probe must not repeat"),
+    ):
+        dependency_plan.assert_active_plan()
+
+
 def test_desktop_profile_excludes_native_dependencies() -> None:
     package = json.loads(
         (ROOT / "frontend" / "package.json").read_text(encoding="utf-8")
