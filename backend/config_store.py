@@ -59,10 +59,120 @@ from permission import (
 
 logger = logging.getLogger(__name__)
 
+CONFIG_SCHEMA_VERSION = 1
+
 _state_cache_lock = threading.RLock()
 _state_cache: tuple[tuple[int, int], dict] | None = None
 _provider_mutation_lock = threading.RLock()
 _config_transaction_state = threading.local()
+
+
+class ProviderConfigConflict(RuntimeError):
+    def __init__(self, provider: dict):
+        self.generation = provider["generation"]
+        self.revision = provider["revision"]
+        super().__init__(
+            f"provider config conflict: current authority is "
+            f"{self.generation}@{self.revision}"
+        )
+
+
+def _new_provider_authority() -> dict:
+    return {"generation": str(uuid.uuid4()), "revision": 0}
+
+
+def _validate_provider_authority(provider: dict) -> None:
+    generation = provider.get("generation")
+    revision = provider.get("revision")
+    try:
+        parsed_generation = uuid.UUID(generation)
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise RuntimeError("unsupported provider config schema: invalid generation") from exc
+    if str(parsed_generation) != generation:
+        raise RuntimeError("unsupported provider config schema: invalid generation")
+    if (
+        not isinstance(revision, int)
+        or isinstance(revision, bool)
+        or revision < 0
+    ):
+        raise RuntimeError("unsupported provider config schema: invalid revision")
+
+
+def _assert_provider_authority(
+    provider: dict,
+    expected_generation: str | None,
+    expected_revision: int | None,
+) -> None:
+    if expected_generation is None and expected_revision is None:
+        return
+    if expected_generation is None or expected_revision is None:
+        raise ValueError("expected_generation and expected_revision must be supplied together")
+    try:
+        canonical_generation = str(uuid.UUID(expected_generation))
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise ValueError("expected_generation must be a canonical UUID") from exc
+    if canonical_generation != expected_generation:
+        raise ValueError("expected_generation must be a canonical UUID")
+    if (
+        not isinstance(expected_revision, int)
+        or isinstance(expected_revision, bool)
+        or expected_revision < 0
+    ):
+        raise ValueError("expected_revision must be a non-negative integer")
+    if (
+        provider["generation"] != expected_generation
+        or provider["revision"] != expected_revision
+    ):
+        raise ProviderConfigConflict(provider)
+
+
+def _advance_provider_revision(provider: dict) -> None:
+    provider["revision"] += 1
+
+
+def _assert_default_provider_authority(
+    state: dict,
+    target: dict,
+    *,
+    expected_generation: str | None,
+    expected_revision: int | None,
+    expected_default_provider_id: str | None,
+    expected_default_generation: str | None,
+    expected_default_revision: int | None,
+) -> None:
+    values = (
+        expected_generation,
+        expected_revision,
+        expected_default_provider_id,
+        expected_default_generation,
+        expected_default_revision,
+    )
+    if all(value is None for value in values):
+        return
+    if any(value is None for value in values):
+        raise ValueError(
+            "target and current-default authority must be supplied together"
+        )
+    if not isinstance(expected_default_provider_id, str) or not expected_default_provider_id:
+        raise ValueError("expected_default_provider_id must be a non-empty string")
+    _assert_provider_authority(target, expected_generation, expected_revision)
+    current = next(
+        (
+            provider
+            for provider in state["providers"]
+            if provider["id"] == state.get("default_provider_id")
+        ),
+        None,
+    )
+    if current is None:
+        raise RuntimeError("provider config conflict: no current default provider")
+    if current["id"] != expected_default_provider_id:
+        raise ProviderConfigConflict(current)
+    _assert_provider_authority(
+        current,
+        expected_default_generation,
+        expected_default_revision,
+    )
 
 
 @contextmanager
@@ -87,12 +197,20 @@ def _serialized_provider_mutation(function):
     @wraps(function)
     def wrapped(*args, **kwargs):
         global _state_cache
-        with _provider_mutation_lock:
-            with _config_file_transaction():
-                with _state_cache_lock:
-                    _state_cache = None
-                result = function(*args, **kwargs)
-        _notify_provider_config_changed()
+        committed = False
+        try:
+            with _provider_mutation_lock:
+                with _config_file_transaction():
+                    _config_transaction_state.committed = False
+                    with _state_cache_lock:
+                        _state_cache = None
+                    try:
+                        result = function(*args, **kwargs)
+                    finally:
+                        committed = bool(_config_transaction_state.committed)
+        finally:
+            if committed:
+                _notify_provider_config_changed()
         return result
 
     return wrapped
@@ -409,6 +527,7 @@ def _new_provider_record(kind: str) -> dict:
     provider_id = str(uuid.uuid4())
     default_models = {"claude": "opus", "codex": "gpt-5.5"}
     return {
+        **_new_provider_authority(),
         "id": provider_id,
         "name": kind.replace("-", " ").title(),
         "nickname": "",
@@ -422,6 +541,8 @@ def _new_provider_record(kind: str) -> dict:
         "runner": _clean_runner(kind, ""),
         "default_permission": default_permission_for_kind(kind),
         "suspended": False,
+        "allowed_sinks": [],
+        "capabilities": {},
     }
 
 
@@ -434,11 +555,13 @@ def _seed_default_state() -> dict:
         claude = _new_provider_record("claude")
         codex = _new_provider_record("codex")
         return {
+            "schema_version": CONFIG_SCHEMA_VERSION,
             "default_provider_id": claude["id"],
             "providers": [claude, codex],
         }
     provider = _new_provider_record(str(kind))
     return {
+        "schema_version": CONFIG_SCHEMA_VERSION,
         "default_provider_id": provider["id"],
         "providers": [provider],
     }
@@ -469,16 +592,40 @@ def apply_installation_profile_selection(make_default: bool = False) -> dict:
         ),
         None,
     )
+    created = target is None
     if target is None:
         target = _new_provider_record(kind)
         state["providers"].append(target)
-    target["suspended"] = False
+    target_changed = target["suspended"] is True
+    if target_changed:
+        target["suspended"] = False
     known_ids = {provider.get("id") for provider in state.get("providers", [])}
-    if make_default or state.get("default_provider_id") not in known_ids:
+    previous_default_id = state.get("default_provider_id")
+    default_changed = (
+        target["id"] != previous_default_id
+        and (make_default or previous_default_id not in known_ids)
+    )
+    if default_changed:
+        previous_default = next(
+            (
+                provider
+                for provider in state["providers"]
+                if provider.get("id") == previous_default_id
+            ),
+            None,
+        )
+        if previous_default is not None:
+            _advance_provider_revision(previous_default)
+        if not created:
+            _advance_provider_revision(target)
         state["default_provider_id"] = target["id"]
-    _save_state(state)
+    elif target_changed:
+        _advance_provider_revision(target)
+    if created or target_changed or default_changed:
+        _save_state(state)
     installation_profile.mark_selection_applied()
-    apply_provider_config_env_vars()
+    if created or target_changed or default_changed:
+        apply_provider_config_env_vars()
     return list_provider_ui_state()
 
 
@@ -501,8 +648,10 @@ def _migrate_flat_to_providers(flat: dict) -> dict:
     custom_models = flat.get("custom_models", []) or []
     pid = str(uuid.uuid5(uuid.NAMESPACE_URL, f"better-agent:legacy-provider:{_config_path()}"))
     provider = {
+        **_new_provider_authority(),
         "id": pid,
         "name": _detect_provider_name(mode, base_url),
+        "nickname": "",
         "kind": "claude",
         "mode": normalized_mode,
         "base_url": base_url,
@@ -511,38 +660,70 @@ def _migrate_flat_to_providers(flat: dict) -> dict:
         "default_model": _default_model_for(mode, base_url),
         "default_reasoning_effort": _clean_default_reasoning_effort("claude", None),
         "runner": _clean_runner("claude", ""),
+        "default_permission": default_permission_for_kind("claude"),
         "suspended": False,
+        "allowed_sinks": [],
+        "capabilities": {},
     }
     if provider["mode"] == "api_key":
         _migrate_legacy_api_key(pid)
-    return {"default_provider_id": pid, "providers": [provider]}
+    provider = {
+        **_clean_provider_record(provider),
+        "generation": provider["generation"],
+        "revision": provider["revision"],
+    }
+    return {
+        "schema_version": CONFIG_SCHEMA_VERSION,
+        "default_provider_id": pid,
+        "providers": [provider],
+    }
+
+
+_LEGACY_FLAT_CONFIG_KEYS = frozenset({
+    "mode",
+    "base_url",
+    "config_dir",
+    "custom_models",
+})
+
+
+def _is_legacy_flat_state(raw: dict) -> bool:
+    keys = set(raw)
+    return bool(keys & _LEGACY_FLAT_CONFIG_KEYS) and keys <= _LEGACY_FLAT_CONFIG_KEYS
 
 
 def _normalize_loaded_state(raw: dict) -> dict:
-    providers = [
-        {
-            **p,
-            "config_dir": _clean_provider_config_dir(
-                kind=str(p.get("kind") or "claude").strip() or "claude",
-                mode=p.get("mode", "subscription")
-                if p.get("mode") in ("subscription", "api_key")
-                else "subscription",
-                base_url=str(p.get("base_url") or "").strip(),
-                value=p.get("config_dir"),
-            ),
-            "suspended": _provider_is_suspended(p),
+    if raw.get("schema_version") != CONFIG_SCHEMA_VERSION:
+        raise RuntimeError(
+            f"unsupported provider config schema: expected {CONFIG_SCHEMA_VERSION}"
+        )
+    if not isinstance(raw.get("providers"), list):
+        raise RuntimeError("unsupported provider config schema: providers must be a list")
+    provider_ids: set[str] = set()
+    for provider in raw["providers"]:
+        if not isinstance(provider, dict):
+            raise RuntimeError("unsupported provider config schema: invalid provider record")
+        _validate_provider_authority(provider)
+        provider_id = provider.get("id")
+        if not isinstance(provider_id, str) or not provider_id or provider_id in provider_ids:
+            raise RuntimeError("unsupported provider config schema: invalid provider id")
+        provider_ids.add(provider_id)
+        canonical = {
+            **_clean_provider_record(provider),
+            "generation": provider["generation"],
+            "revision": provider["revision"],
         }
-        for p in raw["providers"]
-        if isinstance(p, dict)
-    ]
+        if provider != canonical:
+            raise RuntimeError("unsupported provider config schema: noncanonical provider record")
+    providers = copy.deepcopy(raw["providers"])
     active = raw.get("default_provider_id")
     active_record = next((p for p in providers if p.get("id") == active), None)
+    available = [p for p in providers if not _provider_is_suspended(p)]
     if active_record is None or _provider_is_suspended(active_record):
-        active = next(
-            (p["id"] for p in providers if not _provider_is_suspended(p)),
-            None,
-        )
+        if active is not None or available:
+            raise RuntimeError("unsupported provider config schema: invalid default provider")
     return {
+        "schema_version": CONFIG_SCHEMA_VERSION,
         "default_provider_id": active,
         "providers": providers,
         "delegate_task_policy": _normalize_delegate_task_policy(
@@ -692,10 +873,12 @@ def _load_state() -> dict:
                 state = _seed_default_state()
                 _save_state(state)
                 return copy.deepcopy(_state_cache[1])
-            if "providers" in raw and isinstance(raw.get("providers"), list):
+            if "providers" in raw or "schema_version" in raw:
                 state = _normalize_loaded_state(raw)
                 _state_cache = (fingerprint, copy.deepcopy(state))
                 return state
+            if not _is_legacy_flat_state(raw):
+                raise RuntimeError("unsupported provider config schema")
             state = _migrate_flat_to_providers(raw)
             _save_state(state)
             return copy.deepcopy(_state_cache[1])
@@ -728,6 +911,7 @@ def _log_removed_providers(new_providers: list) -> None:
 
 
 def _validate_state_for_save(state: dict) -> None:
+    _normalize_loaded_state(state)
     dependency_plan.assert_state_supported(state)
 
 
@@ -737,6 +921,7 @@ def _save_state(state: dict) -> None:
     new_providers = state.get("providers", [])
     _log_removed_providers(new_providers)
     payload = {
+        "schema_version": CONFIG_SCHEMA_VERSION,
         "default_provider_id": state.get("default_provider_id"),
         "providers": state.get("providers", []),
         "delegate_task_policy": state.get("delegate_task_policy", "auto"),
@@ -749,6 +934,7 @@ def _save_state(state: dict) -> None:
         "internal_llm": _normalize_internal_llm(state.get("internal_llm")),
     }
     write_json(_config_path(), payload)
+    _config_transaction_state.committed = True
     with _state_cache_lock:
         _state_cache = (_config_fingerprint(), copy.deepcopy(_normalize_loaded_state(payload)))
 
@@ -1014,6 +1200,8 @@ def _provider_config(provider: dict) -> dict:
     )
     return {
         "id": provider["id"],
+        "generation": provider["generation"],
+        "revision": provider["revision"],
         "name": provider.get("name", ""),
         "nickname": provider.get("nickname", ""),
         "kind": kind,
@@ -1542,6 +1730,7 @@ def add_provider(payload: dict) -> dict:
     base_url = (payload.get("base_url") or "").strip()
     _reject_unsupported_provider_config(kind, mode, runner)
     provider = {
+        **_new_provider_authority(),
         "id": pid,
         "name": (payload.get("name") or "").strip() or "Provider",
         "nickname": (payload.get("nickname") or "").strip(),
@@ -1568,6 +1757,11 @@ def add_provider(payload: dict) -> dict:
     provider["default_reasoning_effort"] = clean_default_reasoning_effort_for_provider(
         provider, payload.get("default_reasoning_effort")
     )
+    provider = {
+        **_clean_provider_record(provider),
+        "generation": provider["generation"],
+        "revision": provider["revision"],
+    }
     dependency_plan.assert_provider_supported(provider)
     state["providers"].append(provider)
     credential_changes: list[tuple[str, str]] = []
@@ -1582,7 +1776,13 @@ def add_provider(payload: dict) -> dict:
 
 
 @_serialized_provider_mutation
-def update_provider(provider_id: str, payload: dict) -> Optional[dict]:
+def update_provider(
+    provider_id: str,
+    payload: dict,
+    *,
+    expected_generation: str | None = None,
+    expected_revision: int | None = None,
+) -> Optional[dict]:
     """Patch fields on an existing provider. `api_key=KEEP_SENTINEL` preserves
     the existing keychain entry. Pass empty string to clear it."""
     state = _load_state()
@@ -1593,6 +1793,9 @@ def update_provider(provider_id: str, payload: dict) -> Optional[dict]:
             break
     if not target:
         return None
+    _assert_provider_authority(target, expected_generation, expected_revision)
+    before = copy.deepcopy(target)
+    default_replacement: Optional[dict] = None
     if "name" in payload:
         target["name"] = (payload.get("name") or "").strip() or target.get("name", "")
     if "nickname" in payload:
@@ -1649,59 +1852,87 @@ def update_provider(provider_id: str, payload: dict) -> Optional[dict]:
     if "suspended" in payload:
         target["suspended"] = payload.get("suspended") is True
         if target["suspended"] and state.get("default_provider_id") == provider_id:
-            state["default_provider_id"] = next(
+            default_replacement = next(
                 (
-                    p.get("id")
+                    p
                     for p in state.get("providers", [])
                     if p.get("id") != provider_id and not _provider_is_suspended(p)
                 ),
                 None,
             )
+            state["default_provider_id"] = (
+                default_replacement.get("id") if default_replacement else None
+            )
     if "allowed_sinks" in payload:
         target["allowed_sinks"] = _clean_allowed_sinks(payload["allowed_sinks"])
     if "capabilities" in payload:
         target["capabilities"] = _clean_capabilities(payload["capabilities"])
+    authority = {
+        "generation": target["generation"],
+        "revision": target["revision"],
+    }
+    canonical_target = _clean_provider_record(target)
+    target.clear()
+    target.update(canonical_target)
+    target.update(authority)
     dependency_plan.assert_provider_supported(target)
     credential_changes: list[tuple[str, str]] = []
     if "api_key" in payload:
         new_key = payload["api_key"]
-        if new_key != KEEP_SENTINEL:
+        if (
+            new_key != KEEP_SENTINEL
+            and new_key != _read_api_key_authoritative(provider_id)
+        ):
             credential_changes.append((provider_id, new_key))
-    # Monotonic edit counter: spawn-time snapshots (e.g. the Claude
-    # handoff eligibility check) compare against it to detect that a
-    # live process was configured under a different record.
-    target["record_version"] = int(target.get("record_version") or 0) + 1
+    provider_changed = target != before
+    credential_changed = bool(credential_changes)
+    if not provider_changed and not credential_changed:
+        return _provider_ui_state(target)
+    _advance_provider_revision(target)
+    if default_replacement is not None:
+        _advance_provider_revision(default_replacement)
     _validate_state_for_save(state)
     with _credential_transaction(credential_changes):
         _save_state(state)
     # If we just updated the active provider, re-apply env so changes take.
-    if state.get("default_provider_id") == provider_id:
+    if before.get("suspended") != target.get("suspended") or (
+        state.get("default_provider_id") == provider_id
+    ):
         apply_provider_config_env_vars()
     return _provider_ui_state(target)
 
 
-def provider_record_version(provider_id: str) -> Optional[int]:
-    """Monotonic edit counter for a provider record — bumped on every
-    update_provider. 0 for a never-edited record; None when the provider
-    does not exist (callers fail closed)."""
+def provider_record_authority(provider_id: str) -> Optional[tuple[str, int]]:
+    """Immutable incarnation generation plus monotonic record revision."""
     state = _load_state()
     for p in state.get("providers", []):
         if p.get("id") == provider_id:
-            return int(p.get("record_version") or 0)
+            return p["generation"], p["revision"]
     return None
 
 
 @_serialized_provider_mutation
-def delete_provider(provider_id: str) -> tuple[bool, str]:
+def delete_provider(
+    provider_id: str,
+    *,
+    expected_generation: str | None = None,
+    expected_revision: int | None = None,
+) -> tuple[bool, str]:
     """Returns (deleted, reason). Refuses to delete the active provider —
     the UI should activate another first."""
     state = _load_state()
+    target = next(
+        (p for p in state.get("providers", []) if p.get("id") == provider_id),
+        None,
+    )
+    if target is None:
+        return False, "missing"
+    _assert_provider_authority(target, expected_generation, expected_revision)
     if state.get("default_provider_id") == provider_id:
         return False, "default"
-    before = len(state.get("providers", []))
-    state["providers"] = [p for p in state.get("providers", []) if p.get("id") != provider_id]
-    if len(state["providers"]) == before:
-        return False, "missing"
+    state["providers"] = [
+        p for p in state.get("providers", []) if p.get("id") != provider_id
+    ]
     _validate_state_for_save(state)
     with _credential_transaction([(provider_id, "")]):
         _save_state(state)
@@ -1709,42 +1940,61 @@ def delete_provider(provider_id: str) -> tuple[bool, str]:
 
 
 @_serialized_provider_mutation
-def set_default_provider(provider_id: str) -> Optional[dict]:
+def set_default_provider(
+    provider_id: str,
+    *,
+    expected_generation: str | None = None,
+    expected_revision: int | None = None,
+    expected_default_provider_id: str | None = None,
+    expected_default_generation: str | None = None,
+    expected_default_revision: int | None = None,
+) -> Optional[dict]:
     state = _load_state()
     target = next((p for p in state.get("providers", []) if p.get("id") == provider_id), None)
     if target is None:
         return None
+    _assert_default_provider_authority(
+        state,
+        target,
+        expected_generation=expected_generation,
+        expected_revision=expected_revision,
+        expected_default_provider_id=expected_default_provider_id,
+        expected_default_generation=expected_default_generation,
+        expected_default_revision=expected_default_revision,
+    )
     if _provider_is_suspended(target):
         raise RuntimeError("provider is suspended")
+    previous_id = state.get("default_provider_id")
+    if previous_id == provider_id:
+        return list_provider_ui_state()
+    previous = next(
+        (p for p in state.get("providers", []) if p.get("id") == previous_id),
+        None,
+    )
+    if previous is not None:
+        _advance_provider_revision(previous)
+    _advance_provider_revision(target)
     state["default_provider_id"] = provider_id
     _save_state(state)
     apply_provider_config_env_vars()
     return list_provider_ui_state()
 
 
-@_serialized_provider_mutation
-def set_provider_suspended(provider_id: str, suspended: bool) -> Optional[dict]:
-    state = _load_state()
-    target: Optional[dict] = None
-    for p in state.get("providers", []):
-        if p.get("id") == provider_id:
-            target = p
-            break
-    if target is None:
+def set_provider_suspended(
+    provider_id: str,
+    suspended: bool,
+    *,
+    expected_generation: str | None = None,
+    expected_revision: int | None = None,
+) -> Optional[dict]:
+    record = update_provider(
+        provider_id,
+        {"suspended": bool(suspended)},
+        expected_generation=expected_generation,
+        expected_revision=expected_revision,
+    )
+    if record is None:
         return None
-    target["suspended"] = bool(suspended)
-    if suspended and state.get("default_provider_id") == provider_id:
-        replacement = next(
-            (
-                p.get("id")
-                for p in state.get("providers", [])
-                if p.get("id") != provider_id and not _provider_is_suspended(p)
-            ),
-            None,
-        )
-        state["default_provider_id"] = replacement
-    _save_state(state)
-    apply_provider_config_env_vars()
     return list_provider_ui_state()
 
 
@@ -1762,6 +2012,7 @@ def add_custom_model_to_default(name: str) -> Optional[dict]:
             if name and name not in cm:
                 cm.append(name)
                 p["custom_models"] = cm
+                _advance_provider_revision(p)
                 _save_state(state)
             return _provider_ui_state(p)
     return None

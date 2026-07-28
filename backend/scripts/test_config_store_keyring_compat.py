@@ -35,7 +35,13 @@ def test_native_session_provider_kind_never_reads_keychain() -> None:
     real_load = config_store._load_state
     real_read = config_store._read_api_key
     config_store._load_state = lambda: {
-        "providers": [{"id": "provider-1", "kind": "codex", "mode": "api_key"}],
+        "providers": [{
+            "id": "provider-1",
+            "generation": "00000000-0000-4000-8000-000000000001",
+            "revision": 0,
+            "kind": "codex",
+            "mode": "api_key",
+        }],
     }
     config_store._read_api_key = lambda provider_id: (_ for _ in ()).throw(
         AssertionError("metadata classification must not read credentials")
@@ -53,6 +59,8 @@ def test_provider_config_reads_are_pure_and_ui_status_is_explicit() -> None:
     real_status = config_store.provider_credential_status
     provider = {
         "id": "provider-pure",
+        "generation": "00000000-0000-4000-8000-000000000002",
+        "revision": 0,
         "name": "Pure provider",
         "kind": "codex",
         "mode": "api_key",

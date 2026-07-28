@@ -47,6 +47,7 @@ def activate(
     provider: str = "claude",
     launcher_path: str | None = None,
 ) -> dict[str, Any]:
+    import config_store
     import installation_profile
 
     mode = mode or installation_profile.DEFAULT
@@ -60,16 +61,13 @@ def activate(
     )
     (backend / ".active-venv").write_text(".venvs/test", encoding="utf-8")
     provider_id = f"{provider}-id"
+    provider_record = config_store._new_provider_record(provider)
+    provider_record["id"] = provider_id
     (root / "config.json").write_text(
         json.dumps({
+            "schema_version": config_store.CONFIG_SCHEMA_VERSION,
             "default_provider_id": provider_id,
-            "providers": [
-                {
-                    "id": provider_id,
-                    "kind": provider,
-                    "suspended": False,
-                }
-            ],
+            "providers": [provider_record],
         }),
         encoding="utf-8",
     )

@@ -35,17 +35,26 @@ def _reset_state_cache() -> None:
         config_store._state_cache = None
 
 
-def _seed_config(providers) -> None:
+def _seed_config(provider_ids: list[str]) -> None:
+    providers = []
+    for provider_id in provider_ids:
+        provider = config_store._new_provider_record("claude")
+        provider["id"] = provider_id
+        providers.append(provider)
     path = config_store._config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
-        json.dumps({"default_provider_id": None, "providers": providers}),
+        json.dumps({
+            "schema_version": config_store.CONFIG_SCHEMA_VERSION,
+            "default_provider_id": provider_ids[0],
+            "providers": providers,
+        }),
         encoding="utf-8",
     )
 
 
 def test_cold_cache_herd_reads_disk_once() -> None:
-    _seed_config([{"id": "p1", "kind": "claude", "mode": "subscription"}])
+    _seed_config(["p1"])
     _reset_state_cache()
 
     real_read_json = config_store.read_json
@@ -83,7 +92,7 @@ def test_cold_cache_herd_reads_disk_once() -> None:
 
 
 def test_fingerprint_change_triggers_one_reload() -> None:
-    _seed_config([{"id": "p1", "kind": "claude", "mode": "subscription"}])
+    _seed_config(["p1"])
     _reset_state_cache()
 
     real_read_json = config_store.read_json
@@ -106,10 +115,7 @@ def test_fingerprint_change_triggers_one_reload() -> None:
         # Rewrite config so mtime_ns/size fingerprint changes; ensure the
         # stat resolution actually advances even on coarse clocks.
         time.sleep(0.01)
-        _seed_config([
-            {"id": "p1", "kind": "claude", "mode": "subscription"},
-            {"id": "p2", "kind": "claude", "mode": "subscription"},
-        ])
+        _seed_config(["p1", "p2"])
         second = config_store._load_state()
         assert [p["id"] for p in second["providers"]] == ["p1", "p2"]
         assert reads["n"] == 2, f"fingerprint change must reload exactly once, got {reads['n']}"
