@@ -6,11 +6,14 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Mapping
 
 from codex_execution_common import ExecutionContractError, required_string
-from codex_execution_identity import FileIdentity, file_identity_from_dict
+from codex_execution_identity import (
+    FileIdentity,
+    file_identity_from_dict,
+    file_identity_to_dict,
+)
 from provider_launch_identity import (
     AttestedLaunch,
     _SAFE_NAME_RE,
-    _file_to_dict,
     _require_object,
     _validate_launch,
 )
@@ -30,7 +33,7 @@ class RunnerLaunch:
     def to_dict(self) -> dict[str, Any]:
         return {
             "launch": self.launch.to_dict(),
-            "runner_entry": _file_to_dict(self.runner_entry),
+            "runner_entry": file_identity_to_dict(self.runner_entry),
             "runner_kind": self.runner_kind,
             "runner_module": self.runner_module,
             "frozen": self.frozen,

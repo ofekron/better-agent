@@ -19,11 +19,11 @@ from codex_execution_identity import (
     FileIdentity,
     config_identity_from_dict,
     file_identity_from_dict,
+    file_identity_to_dict,
 )
 from provider_launch_identity import (
     AttestedLaunch,
     DirectoryIdentity,
-    _file_to_dict,
     _require_object,
     capture_cli_launch,
 )
@@ -53,7 +53,7 @@ def _config_to_dict(identity: ConfigIdentity) -> dict[str, Any]:
         "parent_inode": identity.parent_inode,
         "config_path": identity.config_path,
         "config_file": (
-            _file_to_dict(identity.config_file)
+            file_identity_to_dict(identity.config_file)
             if identity.config_file is not None
             else None
         ),
@@ -78,7 +78,9 @@ class ConfigScopeIdentity:
             "root": self.root.to_dict(),
             "files": [_config_to_dict(identity) for identity in self.files],
             "resume": (
-                _file_to_dict(self.resume) if self.resume is not None else None
+                file_identity_to_dict(self.resume)
+                if self.resume is not None
+                else None
             ),
         }
 
@@ -183,7 +185,9 @@ class CriticalPackageIdentity:
         return {
             "package_name": self.package_name,
             "root": self.root.to_dict(),
-            "files": [_file_to_dict(identity) for identity in self.files],
+            "files": [
+                file_identity_to_dict(identity) for identity in self.files
+            ],
         }
 
     @classmethod

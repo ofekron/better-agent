@@ -130,6 +130,20 @@ class FileIdentity:
         )
 
 
+def file_identity_to_dict(identity: FileIdentity) -> dict[str, Any]:
+    return {
+        "requested_path": identity.requested_path,
+        "resolved_path": identity.resolved_path,
+        "sha256": identity.sha256,
+        "size": identity.size,
+        "mtime_ns": identity.mtime_ns,
+        "ctime_ns": identity.ctime_ns,
+        "device": identity.device,
+        "inode": identity.inode,
+        "symlink_chain": [list(item) for item in identity.symlink_chain],
+    }
+
+
 def file_identity_from_dict(raw: Mapping[str, Any]) -> FileIdentity:
     expected = {
         "requested_path",

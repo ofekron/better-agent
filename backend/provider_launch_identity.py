@@ -24,6 +24,7 @@ from codex_execution_common import (
 from codex_execution_identity import (
     FileIdentity,
     file_identity_from_dict,
+    file_identity_to_dict,
 )
 
 
@@ -35,20 +36,6 @@ _LAUNCH_MODES = frozenset({
     "runner-dev",
     "runner-frozen",
 })
-
-
-def _file_to_dict(identity: FileIdentity) -> dict[str, Any]:
-    return {
-        "requested_path": identity.requested_path,
-        "resolved_path": identity.resolved_path,
-        "sha256": identity.sha256,
-        "size": identity.size,
-        "mtime_ns": identity.mtime_ns,
-        "ctime_ns": identity.ctime_ns,
-        "device": identity.device,
-        "inode": identity.inode,
-        "symlink_chain": [list(item) for item in identity.symlink_chain],
-    }
 
 
 def _require_object(
@@ -234,9 +221,10 @@ class AttestedLaunch:
             "platform": self.platform,
             "mode": self.mode,
             "argv": list(self.argv),
-            "launcher": _file_to_dict(self.launcher),
+            "launcher": file_identity_to_dict(self.launcher),
             "components": [
-                _file_to_dict(component) for component in self.components
+                file_identity_to_dict(component)
+                for component in self.components
             ],
             "component_argv_indexes": list(self.component_argv_indexes),
         }
