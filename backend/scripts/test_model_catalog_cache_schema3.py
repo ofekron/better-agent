@@ -9,6 +9,7 @@ import tempfile
 import threading
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 
 BACKEND = Path(__file__).resolve().parents[1]
@@ -74,7 +75,6 @@ def _authority(root: Path, *, revision: int = 7) -> CatalogAuthority:
         launcher_path=str(executable),
         profile="work",
         catalog_args=("-c", 'model_provider="openai"'),
-        credential_generation=4,
     )
     return build_catalog_authority(
         provider_id=provider["id"],
@@ -235,6 +235,39 @@ def test_path_replacement_is_rejected_before_reading_replacement_bytes() -> None
         assert result.status == "invalid"
         assert reads == 0
         assert target.read_text(encoding="utf-8") == "sensitive unrelated content"
+
+
+def test_access_time_change_does_not_invalidate_stable_cache() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        path = root / "models.json"
+        authority = _authority(root)
+        write_catalog_cache(path, _snapshot(authority))
+        real_fstat = catalog_cache.os.fstat
+        calls = 0
+
+        def changing_atime(descriptor: int) -> SimpleNamespace:
+            nonlocal calls
+            calls += 1
+            observed = real_fstat(descriptor)
+            return SimpleNamespace(
+                st_mode=observed.st_mode,
+                st_size=observed.st_size,
+                st_mtime_ns=observed.st_mtime_ns,
+                st_ctime_ns=observed.st_ctime_ns,
+                st_dev=observed.st_dev,
+                st_ino=observed.st_ino,
+                st_atime_ns=observed.st_atime_ns + calls,
+            )
+
+        catalog_cache.os.fstat = changing_atime
+        try:
+            result = read_catalog_cache(path, expected_authority=authority)
+        finally:
+            catalog_cache.os.fstat = real_fstat
+
+        assert calls == 2
+        assert result.status == "matching"
 
 
 def test_valid_but_different_source_is_preserved_and_never_authorized() -> None:
@@ -417,6 +450,7 @@ TESTS = (
     test_schema2_corrupt_missing_and_tampered_authority_are_removed,
     test_oversize_and_symlink_cache_files_are_removed_without_following,
     test_path_replacement_is_rejected_before_reading_replacement_bytes,
+    test_access_time_change_does_not_invalidate_stable_cache,
     test_valid_but_different_source_is_preserved_and_never_authorized,
     test_runtime_only_arguments_do_not_change_catalog_authority,
     test_strict_shapes_types_and_bounds_fail_closed,

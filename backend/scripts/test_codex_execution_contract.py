@@ -53,7 +53,6 @@ def test_contract_is_deterministic_secret_free_and_config_bound() -> None:
             profile="work",
             catalog_args=("-c", 'model_provider="openai"'),
             runtime_args=("-c", "features.shell_snapshot=false"),
-            credential_generation=3,
         )
         encoded = contract.to_dict()
         serialized = json.dumps(encoded, sort_keys=True)
@@ -152,7 +151,19 @@ def test_deserialization_rejects_coercion_unknowns_and_missing_fingerprint() -> 
             provider(config_dir),
             launcher_path=str(executable),
         ).to_dict()
+        mismatched_generation = json.loads(json.dumps(encoded))
+        mismatched_generation["credential_generation"] += 1
+        mismatched_payload = dict(mismatched_generation)
+        mismatched_payload.pop("fingerprint")
+        mismatched_generation["fingerprint"] = hashlib.sha256(
+            json.dumps(
+                mismatched_payload,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8"),
+        ).hexdigest()
         mutations = []
+        mutations.append(mismatched_generation)
         boolean_revision = json.loads(json.dumps(encoded))
         boolean_revision["provider_revision"] = True
         mutations.append(boolean_revision)

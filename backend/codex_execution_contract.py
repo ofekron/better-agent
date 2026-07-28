@@ -185,7 +185,7 @@ class CodexExecutionContract:
             or not contract.provider_id
             or not contract.provider_generation
             or contract.provider_revision < 0
-            or contract.credential_generation < 0
+            or contract.credential_generation != contract.provider_revision
             or not SAFE_PROFILE_RE.fullmatch(contract.profile)
             or not SHA256_RE.fullmatch(supplied_fingerprint)
         ):
@@ -268,7 +268,6 @@ def build_codex_execution_contract(
     profile: str | None = None,
     catalog_args: Sequence[str] = (),
     runtime_args: Sequence[str] = (),
-    credential_generation: int = 0,
     environment_selectors: Mapping[str, str] | None = None,
     config_paths: Sequence[str] | None = None,
     search_path: str | None = None,
@@ -284,7 +283,6 @@ def build_codex_execution_contract(
     if (
         type(provider_revision) is not int
         or provider_revision < 0
-        or credential_generation < 0
     ):
         raise ExecutionContractError("provider authority revision is invalid")
     cleaned_profile = str(profile or "")
@@ -326,7 +324,7 @@ def build_codex_execution_contract(
         mode=str(provider.get("mode") or "subscription"),
         base_url=_clean_base_url(provider.get("base_url")),
         profile=cleaned_profile,
-        credential_generation=int(credential_generation),
+        credential_generation=provider_revision,
         catalog_args=_clean_config_args(catalog_args),
         runtime_args=_clean_config_args(runtime_args),
         environment_selectors=_clean_environment_selectors(environment_selectors),

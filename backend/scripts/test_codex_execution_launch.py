@@ -4,6 +4,7 @@ import os
 import sys
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -14,6 +15,7 @@ from codex_execution import (  # noqa: E402
     resolve_codex_launch_chain,
 )
 from codex_execution_identity import FileIdentity  # noqa: E402
+import codex_execution_launch as execution_launch  # noqa: E402
 from scripts.codex_execution_test_support import write_executable  # noqa: E402
 
 
@@ -194,6 +196,43 @@ def test_identity_capture_ignores_access_time_updates() -> None:
         assert executable.stat().st_atime_ns != before.st_atime_ns
 
 
+def test_shebang_resolution_ignores_access_time_updates() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        node = root / "runtime" / "node"
+        launcher = root / "bin" / "codex"
+        write_executable(node, b"node-runtime")
+        write_executable(launcher, b"#!/usr/bin/env node\n")
+        real_fstat = execution_launch.os.fstat
+        calls = 0
+
+        def changing_atime(descriptor: int) -> SimpleNamespace:
+            nonlocal calls
+            calls += 1
+            observed = real_fstat(descriptor)
+            return SimpleNamespace(
+                st_mode=observed.st_mode,
+                st_size=observed.st_size,
+                st_mtime_ns=observed.st_mtime_ns,
+                st_ctime_ns=observed.st_ctime_ns,
+                st_dev=observed.st_dev,
+                st_ino=observed.st_ino,
+                st_atime_ns=observed.st_atime_ns + calls,
+            )
+
+        execution_launch.os.fstat = changing_atime
+        try:
+            chain = resolve_codex_launch_chain(
+                str(launcher),
+                search_path=str(node.parent),
+                platform="linux",
+            )
+        finally:
+            execution_launch.os.fstat = real_fstat
+
+        assert chain.attest()
+
+
 LAUNCH_TESTS = (
     test_native_symlink_chain_is_attested_and_retarget_fails,
     test_same_size_same_mtime_replacement_fails_strong_identity,
@@ -203,6 +242,7 @@ LAUNCH_TESTS = (
     test_ambiguous_vendor_targets_fail_closed,
     test_open_attested_components_pins_exact_bytes,
     test_identity_capture_ignores_access_time_updates,
+    test_shebang_resolution_ignores_access_time_updates,
 )
 
 

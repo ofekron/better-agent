@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 
-CONTRACT_SCHEMA = 1
+CONTRACT_SCHEMA = 2
 SECRET_NAMES = (
     "api_key",
     "apikey",
@@ -44,6 +44,17 @@ def sha256_fd(fd: int) -> str:
         digest.update(chunk)
     os.lseek(fd, 0, os.SEEK_SET)
     return digest.hexdigest()
+
+
+def stable_stat_identity(stat_result: os.stat_result) -> tuple[int, ...]:
+    return (
+        stat_result.st_mode,
+        stat_result.st_size,
+        stat_result.st_mtime_ns,
+        stat_result.st_ctime_ns,
+        stat_result.st_dev,
+        stat_result.st_ino,
+    )
 
 
 def sha256_and_first_line_fd(fd: int) -> tuple[str, bytes]:

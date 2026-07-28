@@ -275,9 +275,8 @@ def test_failed_clone_preserves_target_cache_projection() -> None:
             == "existing-target-secret"
         )
         assert config_store._credential_status["isolated"] == "available"
-        assert request.call_args.kwargs == {
-            "target_provider_id": "isolated"
-        }
+        assert request.call_args.args == ("read", "missing")
+        assert request.call_args.kwargs == {}
     finally:
         config_store._api_key_cache.pop("isolated", None)
         config_store._credential_status.pop("isolated", None)

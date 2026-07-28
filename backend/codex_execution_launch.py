@@ -15,6 +15,7 @@ from codex_execution_common import (
     ExecutionContractError,
     sha256_and_first_line_fd,
     sha256_fd,
+    stable_stat_identity,
 )
 from codex_execution_identity import FileIdentity
 
@@ -195,7 +196,9 @@ def _read_shebang_tokens(
             stat_before = os.fstat(fd)
             digest, first_line = sha256_and_first_line_fd(fd)
             stat_after = os.fstat(fd)
-            if stat_before != stat_after:
+            if stable_stat_identity(stat_before) != stable_stat_identity(
+                stat_after,
+            ):
                 raise ExecutionContractError(
                     "provider launcher changed during shebang read",
                 )

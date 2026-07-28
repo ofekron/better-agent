@@ -9,7 +9,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Mapping, Sequence
 
-from codex_execution_common import SHA256_RE, canonical_json
+from codex_execution_common import (
+    SHA256_RE,
+    canonical_json,
+    stable_stat_identity,
+)
 from json_store import write_json_durable
 from model_catalog_authority import (
     CatalogAuthority,
@@ -234,7 +238,7 @@ def _read_bytes(
         if len(data) > MAX_CACHE_BYTES:
             raise CatalogCacheError("catalog cache is too large")
         after = os.fstat(descriptor)
-        if observed != after:
+        if stable_stat_identity(observed) != stable_stat_identity(after):
             raise CatalogCacheError("catalog cache changed during read")
         return data, after
     finally:

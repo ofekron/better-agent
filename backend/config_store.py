@@ -258,6 +258,16 @@ def config_fingerprint() -> tuple[int, int]:
     return _config_fingerprint()
 
 
+@contextmanager
+def provider_state_read_transaction():
+    global _state_cache
+    with _provider_mutation_lock:
+        with _config_file_transaction():
+            with _state_cache_lock:
+                _state_cache = None
+            yield
+
+
 def _engine_env_path():
     return ba_home() / "engine.env"
 
@@ -436,24 +446,38 @@ def provider_credential_authority_available() -> bool:
     return credential_session_client.available()
 
 
+@_serialized_provider_mutation
 def clone_provider_credential(
     source_provider_id: str,
     target_provider_id: str,
 ) -> str:
-    if not credential_session_client.available():
-        raise RuntimeError("provider credential authority is unavailable")
-    response = credential_session_client.request(
-        "clone",
-        source_provider_id,
-        target_provider_id=target_provider_id,
+    if source_provider_id == target_provider_id:
+        raise ValueError("source and target provider ids must be distinct")
+    state = _load_state()
+    source_value = _read_api_key_authoritative(source_provider_id)
+    if not source_value:
+        return "missing"
+    target_value = _read_api_key_authoritative(target_provider_id)
+    if target_value == source_value:
+        return "available"
+    target = next(
+        (
+            provider
+            for provider in state.get("providers", [])
+            if provider.get("id") == target_provider_id
+        ),
+        None,
     )
-    status = response["status"]
-    _credential_status[source_provider_id] = status
-    if status == "available":
-        _credential_status[target_provider_id] = status
-        with _api_key_cache_lock:
-            _api_key_cache.pop(target_provider_id, None)
-    return status
+    if target is not None:
+        _advance_provider_revision(target)
+        _validate_state_for_save(state)
+    with _credential_transaction(
+        [(target_provider_id, source_value)],
+        expected_values={target_provider_id: target_value},
+    ):
+        if target is not None:
+            _save_state(state)
+    return "available"
 
 
 def provider_credential_status(provider_id: str) -> str:

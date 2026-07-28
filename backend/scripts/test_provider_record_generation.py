@@ -171,6 +171,105 @@ def main() -> None:
     assert credential_changed is not None
     assert credential_changed["revision"] == credential_provider["revision"] + 1
 
+    clone_source = config_store.add_provider({
+        "name": "Clone source",
+        "kind": "codex",
+        "mode": "api_key",
+        "api_key": "clone-source-secret",
+    })
+    clone_target = config_store.add_provider({
+        "name": "Clone target",
+        "kind": "codex",
+        "mode": "api_key",
+        "api_key": "clone-target-secret",
+    })
+    before_clone = config_store.export_provider_sync_state()
+    before_clone_authority = before_clone["provider_state_authority"]
+    clone_notifications = len(notifications)
+    assert config_store.clone_provider_credential(
+        clone_source["id"],
+        clone_target["id"],
+    ) == "available"
+    cloned_target = _provider(clone_target["id"])
+    cloned_state = config_store.export_provider_sync_state()
+    assert CREDENTIALS[clone_target["id"]] == "clone-source-secret"
+    assert cloned_target["revision"] == clone_target["revision"] + 1
+    assert (
+        cloned_state["provider_state_authority"]["revision"]
+        == before_clone_authority["revision"] + 1
+    )
+    assert len(notifications) == clone_notifications + 1
+
+    no_op_bytes = config_store._config_path().read_bytes()
+    no_op_notifications = len(notifications)
+    assert config_store.clone_provider_credential(
+        clone_source["id"],
+        clone_target["id"],
+    ) == "available"
+    assert _authority(_provider(clone_target["id"])) == _authority(cloned_target)
+    assert config_store._config_path().read_bytes() == no_op_bytes
+    assert len(notifications) == no_op_notifications
+
+    original_save_state = config_store._save_state
+    config_store._save_state = lambda _state: (_ for _ in ()).throw(
+        RuntimeError("injected save failure")
+    )
+    CREDENTIALS[clone_source["id"]] = "rollback-source-secret"
+    try:
+        try:
+            config_store.clone_provider_credential(
+                clone_source["id"],
+                clone_target["id"],
+            )
+        except RuntimeError as exc:
+            assert str(exc) == "injected save failure"
+        else:
+            raise AssertionError("credential clone ignored config save failure")
+    finally:
+        config_store._save_state = original_save_state
+    assert CREDENTIALS[clone_target["id"]] == "clone-source-secret"
+    assert config_store._config_path().read_bytes() == no_op_bytes
+
+    original_request = config_store.credential_session_client.request
+    compare_attempted = False
+
+    def conflicting_request(action: str, provider_id: str, **kwargs) -> dict:
+        nonlocal compare_attempted
+        if action == "compare_set" and provider_id == clone_target["id"]:
+            compare_attempted = True
+            CREDENTIALS[provider_id] = "concurrent-newer-secret"
+            return {"status": "available", "applied": False}
+        return _credential_request(action, provider_id, **kwargs)
+
+    CREDENTIALS[clone_source["id"]] = "concurrent-source-secret"
+    config_store.credential_session_client.request = conflicting_request
+    try:
+        try:
+            config_store.clone_provider_credential(
+                clone_source["id"],
+                clone_target["id"],
+            )
+        except config_store.ProviderCredentialConflict:
+            pass
+        else:
+            raise AssertionError("concurrent credential mutation was overwritten")
+    finally:
+        config_store.credential_session_client.request = original_request
+    assert compare_attempted
+    assert CREDENTIALS[clone_target["id"]] == "concurrent-newer-secret"
+    assert config_store._config_path().read_bytes() == no_op_bytes
+
+    isolated_target_id = "isolated-clone-target"
+    isolated_bytes = config_store._config_path().read_bytes()
+    isolated_notifications = len(notifications)
+    assert config_store.clone_provider_credential(
+        clone_source["id"],
+        isolated_target_id,
+    ) == "available"
+    assert CREDENTIALS[isolated_target_id] == "concurrent-source-secret"
+    assert config_store._config_path().read_bytes() == isolated_bytes
+    assert len(notifications) == isolated_notifications
+
     updated = config_store.update_provider(
         provider_id,
         {"nickname": "primary"},

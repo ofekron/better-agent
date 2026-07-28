@@ -12,19 +12,9 @@ from codex_execution_common import (
     required_integer,
     required_string,
     sha256_fd,
+    stable_stat_identity,
     symlink_chain,
 )
-
-
-def _stable_identity(stat_result: os.stat_result) -> tuple[int, ...]:
-    return (
-        stat_result.st_mode,
-        stat_result.st_size,
-        stat_result.st_mtime_ns,
-        stat_result.st_ctime_ns,
-        stat_result.st_dev,
-        stat_result.st_ino,
-    )
 
 
 @dataclass(frozen=True)
@@ -56,7 +46,9 @@ class FileIdentity:
                     raise ExecutionContractError("authority file is unavailable")
                 digest = sha256_fd(fd)
                 stat_after = os.fstat(fd)
-                if _stable_identity(stat_before) != _stable_identity(stat_after):
+                if stable_stat_identity(stat_before) != stable_stat_identity(
+                    stat_after,
+                ):
                     raise ExecutionContractError(
                         "authority file changed during identity capture",
                     )
@@ -191,6 +183,13 @@ def file_identity_from_dict(raw: Mapping[str, Any]) -> FileIdentity:
 @dataclass(frozen=True)
 class ConfigIdentity:
     root_path: str
+    parent_path: str
+    parent_mode: int
+    parent_size: int
+    parent_mtime_ns: int
+    parent_ctime_ns: int
+    parent_device: int
+    parent_inode: int
     config_path: str
     config_file: FileIdentity | None
 
@@ -213,9 +212,13 @@ class ConfigIdentity:
             raise ExecutionContractError("config path escapes its root")
         try:
             resolved_parent = candidate.parent.resolve(strict=True)
+            parent_before = resolved_parent.stat()
         except OSError as exc:
             raise ExecutionContractError("config parent is unavailable") from exc
-        if not resolved_parent.is_relative_to(canonical_root):
+        if (
+            not resolved_parent.is_relative_to(canonical_root)
+            or not stat.S_ISDIR(parent_before.st_mode)
+        ):
             raise ExecutionContractError("config path escapes its root")
         if candidate.exists() or candidate.is_symlink():
             try:
@@ -227,8 +230,25 @@ class ConfigIdentity:
             identity = FileIdentity.capture(candidate)
         else:
             identity = None
+        try:
+            parent_after = resolved_parent.stat()
+        except OSError as exc:
+            raise ExecutionContractError("config parent is unavailable") from exc
+        if stable_stat_identity(parent_before) != stable_stat_identity(
+            parent_after,
+        ):
+            raise ExecutionContractError(
+                "config parent changed during identity capture",
+            )
         return cls(
             root_path=str(canonical_root),
+            parent_path=str(resolved_parent),
+            parent_mode=parent_after.st_mode,
+            parent_size=parent_after.st_size,
+            parent_mtime_ns=parent_after.st_mtime_ns,
+            parent_ctime_ns=parent_after.st_ctime_ns,
+            parent_device=parent_after.st_dev,
+            parent_inode=parent_after.st_ino,
             config_path=str(lexical),
             config_file=identity,
         )
@@ -239,10 +259,31 @@ class ConfigIdentity:
         try:
             if root.resolve(strict=True) != root:
                 return False
+            parent = candidate.parent.resolve(strict=True)
+            parent_stat = parent.stat()
+            if (
+                parent != Path(self.parent_path)
+                or stable_stat_identity(parent_stat)
+                != self.parent_identity
+            ):
+                return False
             current = ConfigIdentity.capture(root, candidate)
         except ExecutionContractError:
             return False
+        except OSError:
+            return False
         return current == self
+
+    @property
+    def parent_identity(self) -> tuple[int, ...]:
+        return (
+            self.parent_mode,
+            self.parent_size,
+            self.parent_mtime_ns,
+            self.parent_ctime_ns,
+            self.parent_device,
+            self.parent_inode,
+        )
 
     def attest_metadata(self) -> bool:
         root = Path(self.root_path)
@@ -253,7 +294,12 @@ class ConfigIdentity:
             if not candidate.absolute().is_relative_to(root):
                 return False
             resolved_parent = candidate.parent.resolve(strict=True)
-            if not resolved_parent.is_relative_to(root):
+            if (
+                not resolved_parent.is_relative_to(root)
+                or resolved_parent != Path(self.parent_path)
+                or stable_stat_identity(resolved_parent.stat())
+                != self.parent_identity
+            ):
                 return False
         except OSError:
             return False
@@ -265,23 +311,52 @@ class ConfigIdentity:
 def config_identity_from_dict(raw: Mapping[str, Any]) -> ConfigIdentity:
     if type(raw) is not dict or set(raw) != {
         "root_path",
+        "parent_path",
+        "parent_mode",
+        "parent_size",
+        "parent_mtime_ns",
+        "parent_ctime_ns",
+        "parent_device",
+        "parent_inode",
         "config_path",
         "config_file",
     }:
         raise ExecutionContractError("invalid config identity")
     root_path = required_string(raw, "root_path")
+    parent_path = required_string(raw, "parent_path")
     config_path = required_string(raw, "config_path")
-    if not Path(root_path).is_absolute() or not Path(config_path).is_absolute():
+    integers = {
+        key: required_integer(raw, key)
+        for key in (
+            "parent_mode",
+            "parent_size",
+            "parent_mtime_ns",
+            "parent_ctime_ns",
+            "parent_device",
+            "parent_inode",
+        )
+    }
+    if (
+        not Path(root_path).is_absolute()
+        or not Path(parent_path).is_absolute()
+        or not Path(config_path).is_absolute()
+        or Path(config_path).parent != Path(parent_path)
+        or not Path(parent_path).is_relative_to(Path(root_path))
+        or not stat.S_ISDIR(integers["parent_mode"])
+        or any(value < 0 for value in integers.values())
+    ):
         raise ExecutionContractError("invalid config identity")
     config_file_raw = raw.get("config_file")
     if config_file_raw is not None and type(config_file_raw) is not dict:
         raise ExecutionContractError("invalid config identity")
     return ConfigIdentity(
         root_path=root_path,
+        parent_path=parent_path,
         config_path=config_path,
         config_file=(
             file_identity_from_dict(config_file_raw)
-            if config_file_raw
+            if config_file_raw is not None
             else None
         ),
+        **integers,
     )
