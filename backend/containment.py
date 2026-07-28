@@ -179,71 +179,12 @@ def _current_cgroup_v2_directory(
                         continue
                     if not os.path.isfile(os.path.join(resolved, "cgroup.controllers")):
                         continue
-                    if not os.path.isfile(os.path.join(resolved, "cgroup.type")):
-                        continue
                 except (OSError, ValueError):
                     continue
                 return resolved
     except (OSError, ValueError) as exc:
         raise ContainmentUnavailable(f"cannot discover cgroup v2 hierarchy: {exc}") from exc
     raise ContainmentUnavailable("cannot discover cgroup v2 hierarchy")
-
-
-def _current_cgroup_v1_pids_directory(
-    mountinfo_path: str = "/proc/self/mountinfo",
-    cgroup_path: str = "/proc/self/cgroup",
-    *,
-    pid: int | None = None,
-) -> str:
-    pid = os.getpid() if pid is None else pid
-    membership = None
-    try:
-        with open(cgroup_path, encoding="ascii") as stream:
-            for line in stream:
-                _, controllers, path = line.rstrip("\n").split(":", 2)
-                if "pids" in controllers.split(","):
-                    membership = os.path.normpath(path)
-                    break
-        if membership is None or not membership.startswith("/"):
-            raise ValueError("process has no cgroup v1 pids membership")
-
-        with open(mountinfo_path, encoding="utf-8") as stream:
-            for line in stream:
-                before, separator, after = line.rstrip("\n").partition(" - ")
-                fields = before.split()
-                after_fields = after.split()
-                if (
-                    not separator
-                    or len(fields) < 5
-                    or len(after_fields) < 3
-                    or after_fields[0] != "cgroup"
-                    or "pids" not in after_fields[2].split(",")
-                ):
-                    continue
-                mount_root = os.path.normpath(_unescape_mountinfo_path(fields[3]))
-                mount_point = os.path.normpath(_unescape_mountinfo_path(fields[4]))
-                if membership == mount_root:
-                    relative = "."
-                elif membership.startswith(mount_root.rstrip("/") + "/"):
-                    relative = os.path.relpath(membership, mount_root)
-                else:
-                    continue
-                resolved = os.path.normpath(os.path.join(mount_point, relative))
-                if os.path.commonpath((mount_point, resolved)) != mount_point:
-                    raise ValueError("cgroup v1 membership escapes mount")
-                try:
-                    with open(os.path.join(resolved, "tasks"), encoding="ascii") as tasks:
-                        members = {int(value) for value in tasks.read().split()}
-                    if pid not in members:
-                        continue
-                except (OSError, ValueError):
-                    continue
-                return resolved
-    except (OSError, ValueError) as exc:
-        raise ContainmentUnavailable(
-            f"cannot discover cgroup v1 pids hierarchy: {exc}"
-        ) from exc
-    raise ContainmentUnavailable("cannot discover cgroup v1 pids hierarchy")
 
 
 class _LinuxCgroupContainment(Containment):
