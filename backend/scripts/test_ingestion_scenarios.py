@@ -37,6 +37,9 @@ _BACKEND = os.path.dirname(_HERE)
 if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
+import _test_installation  # noqa: E402
+_test_installation.activate(Path(_TMP_HOME))
+
 from event_ingester import event_ingester  # noqa: E402
 from event_bus import bus  # noqa: E402
 from event_journal import event_journal_writer  # noqa: E402
