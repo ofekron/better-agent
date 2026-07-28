@@ -5,12 +5,13 @@ set -euo pipefail
 DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(dirname "$DIR")"
 VENV="$REPO/backend/.venv"
+PYTHON="${BETTER_AGENT_BACKEND_PYTHON:-$VENV/bin/python}"
 TARGET="$DIR/dist/BetterAgentCredentialAuthority/BetterAgentCredentialAuthority"
 
 if [ "${BETTER_AGENT_CREDENTIAL_BUILD_LOCKED:-0}" != "1" ]; then
   mkdir -p "$DIR/build"
   export BETTER_AGENT_CREDENTIAL_BUILD_LOCKED=1
-  exec "$VENV/bin/python" "$DIR/credential_build_lock.py" \
+  exec "$PYTHON" "$DIR/credential_build_lock.py" \
     "$DIR/build/.credential-authority.lock" "$0" "$@"
 fi
 
