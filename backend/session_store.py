@@ -5422,7 +5422,11 @@ def copy_persistable_tree(root: dict) -> dict:
         _restore_volatile_to_tree(popped)
 
 
-def _overlay_queue_projection(root: dict) -> None:
+def _overlay_queue_projection(
+    root: dict,
+    *,
+    storage_identity: Path,
+) -> None:
     import session_queue_projection
 
     stack = [root]
@@ -5437,7 +5441,10 @@ def _overlay_queue_projection(root: dict) -> None:
         for fork in node.get("forks") or []:
             if isinstance(fork, dict):
                 stack.append(fork)
-    records = session_queue_projection.get_many(sids)
+    records = session_queue_projection.get_many(
+        sids,
+        storage_identity=storage_identity,
+    )
     for node in nodes:
         sid = node.get("id")
         if not isinstance(sid, str):
@@ -5458,6 +5465,27 @@ def write_session_full(
     bump_updated_at: bool = True,
     preserve_projection_fields: bool = False,
     already_persistable: bool = False,
+) -> Optional[FileSignature]:
+    import session_queue_projection
+
+    storage_identity = _sessions_dir().resolve()
+    with session_queue_projection.producer_lease(storage_identity):
+        return _write_session_full_bound(
+            root,
+            storage_identity=storage_identity,
+            bump_updated_at=bump_updated_at,
+            preserve_projection_fields=preserve_projection_fields,
+            already_persistable=already_persistable,
+        )
+
+
+def _write_session_full_bound(
+    root: dict,
+    *,
+    storage_identity: Path,
+    bump_updated_at: bool,
+    preserve_projection_fields: bool,
+    already_persistable: bool,
 ) -> Optional[FileSignature]:
     """Write the whole ROOT tree to disk. Caller MUST pass a root dict
     (the top-level record), not an embedded fork — embedded fork writes
@@ -5482,7 +5510,6 @@ def write_session_full(
     `_root_writer_guard` the same way `_migrate_and_persist` does.
     """
     global _index_fingerprint
-    storage_identity = _sessions_dir().resolve()
     if root.get("parent_session_id"):
         raise ValueError(
             "write_session_full received a fork dict; pass the root tree "
@@ -5493,7 +5520,10 @@ def write_session_full(
             root["updated_at"] = datetime.now().isoformat()
     if preserve_projection_fields:
         with perf.timed("store.session.write_full.queue_projection"):
-            _overlay_queue_projection(root)
+            _overlay_queue_projection(
+                root,
+                storage_identity=storage_identity,
+            )
     with perf.timed("store.session.write_full.index_tree"):
         fork_topology_changed = _index_tree(root)
     with perf.timed("store.session.write_full.path"):
@@ -5559,7 +5589,10 @@ def write_session_full(
             )
         with perf.timed("store.session.write_full.queue_projection_fact"):
             import session_queue_projection
-            session_queue_projection.note_persisted_tree(root)
+            session_queue_projection.note_persisted_tree(
+                root,
+                storage_identity=storage_identity,
+            )
     except BaseException:
         _abandon_root_change(root_change)
         raise

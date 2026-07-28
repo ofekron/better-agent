@@ -35,7 +35,6 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass
-from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -52,16 +51,6 @@ from reasoning_effort import normalize_reasoning_effort
 
 logger = logging.getLogger(__name__)
 _NEGATIVE_NODE_ROOT_TTL_SECONDS = 5.0
-_QUEUE_PROJECTION_EXECUTOR = ThreadPoolExecutor(
-    max_workers=1,
-    thread_name_prefix="queue-projection-submit",
-)
-_queue_projection_cv = threading.Condition()
-_queue_projection_pending: dict[str, dict] = {}
-_queue_projection_worker_scheduled = False
-_queue_projection_failure: Optional[BaseException] = None
-_queue_projection_accepting = True
-
 # Mirrors the frontend's BA_LINK_MARKER_RE (linkifyFilePaths.tsx). A session
 # name is never allowed to carry raw copy-id marker syntax: every marker
 # builder (frontend Copy id, team_messaging's FROM tag) re-embeds the stored
@@ -100,80 +89,6 @@ def _jsonish_byte_size(value: Any) -> int:
     if isinstance(value, list):
         return sum(_jsonish_byte_size(item) for item in value)
     return len(str(value).encode("utf-8", errors="replace"))
-
-
-def begin_queue_projection_shutdown() -> None:
-    global _queue_projection_accepting
-    with _queue_projection_cv:
-        _queue_projection_accepting = False
-
-
-def drain_queue_projection_submissions() -> None:
-    with _queue_projection_cv:
-        while _queue_projection_worker_scheduled or _queue_projection_pending:
-            _queue_projection_cv.wait()
-        if _queue_projection_failure is not None:
-            raise RuntimeError("queue projection submission failed") from _queue_projection_failure
-
-
-def shutdown_queue_projection_executor() -> None:
-    _QUEUE_PROJECTION_EXECUTOR.shutdown(wait=True, cancel_futures=False)
-
-
-def _submit_queue_projection_record(record: dict) -> None:
-    global _queue_projection_failure, _queue_projection_worker_scheduled
-    # project_session constructs this record from deep-copied user messages
-    # and queued prompts. Ownership transfers here; callers do not reuse it.
-    owned_record = record
-    session_id = owned_record.get("id")
-    if not isinstance(session_id, str) or not session_id:
-        return
-    with _queue_projection_cv:
-        if not _queue_projection_accepting:
-            error = RuntimeError("queue projection submission rejected during shutdown")
-            _queue_projection_failure = _queue_projection_failure or error
-            import session_queue_projection
-            session_queue_projection.mark_dirty()
-            logger.warning(str(error))
-            _queue_projection_cv.notify_all()
-            return
-        _queue_projection_pending[session_id] = owned_record
-        if _queue_projection_worker_scheduled:
-            return
-        _queue_projection_worker_scheduled = True
-        try:
-            _QUEUE_PROJECTION_EXECUTOR.submit(_drain_queue_projection_pending)
-        except BaseException as exc:
-            _queue_projection_worker_scheduled = False
-            _queue_projection_failure = _queue_projection_failure or exc
-            import session_queue_projection
-            session_queue_projection.mark_dirty()
-            _queue_projection_cv.notify_all()
-            raise
-
-
-def _drain_queue_projection_pending() -> None:
-    global _queue_projection_failure, _queue_projection_worker_scheduled
-    while True:
-        with _queue_projection_cv:
-            if not _queue_projection_pending:
-                _queue_projection_worker_scheduled = False
-                _queue_projection_cv.notify_all()
-                return
-            _, record = _queue_projection_pending.popitem()
-        try:
-            _upsert_queue_projection_record(record)
-        except BaseException as exc:
-            logger.exception("queue projection background submission failed")
-            import session_queue_projection
-            session_queue_projection.mark_dirty()
-            with _queue_projection_cv:
-                _queue_projection_failure = _queue_projection_failure or exc
-
-
-def _upsert_queue_projection_record(record: dict) -> None:
-    import session_queue_projection
-    session_queue_projection.upsert_record_background(record)
 
 
 # Draft-persist coalescer window. Bounds the worst-case data loss on
@@ -630,6 +545,7 @@ class SessionManager:
         # One lock per root tree — siblings serialize on the same lock.
         self._root_locks: dict[str, threading.RLock] = {}
         self._cache_guard = threading.Lock()
+        self._home_transition_lock = threading.Lock()
         self._listeners: list[Listener] = []
         # Active batch contexts, keyed by root_id (a batch covers all
         # mutations to nodes within one tree).
@@ -1254,14 +1170,19 @@ class SessionManager:
         sessions_dir = self._root_repository.storage_identity()
         if self._home_sessions_dir == sessions_dir:
             return
-        close_event_ingester = False
-        with self._cache_guard:
+        with self._home_transition_lock:
             if self._home_sessions_dir == sessions_dir:
                 return
-            self._home_sessions_dir = sessions_dir
-            self._clear_home_scoped_state()
-            close_event_ingester = True
-        if close_event_ingester:
+            previous_identity = self._home_sessions_dir
+            if previous_identity is not None:
+                import session_queue_projection
+                session_queue_projection.shutdown(
+                    storage_identity=previous_identity,
+                    timeout=5.0,
+                )
+            with self._cache_guard:
+                self._home_sessions_dir = sessions_dir
+                self._clear_home_scoped_state()
             self._close_home_scoped_event_ingester()
 
     def _clear_home_scoped_state(self) -> None:
@@ -3754,7 +3675,9 @@ class SessionManager:
     def rebuild_queued_prompt_counts(self) -> None:
         import session_queue_projection
 
-        self._queued_prompt_counts_by_sid = session_queue_projection.queued_counts()
+        self._queued_prompt_counts_by_sid = session_queue_projection.queued_counts(
+            storage_identity=self._root_repository.storage_identity(),
+        )
 
     def _set_queued_prompt_count(self, sid: str, queued_count: int) -> None:
         if queued_count:
@@ -3768,24 +3691,18 @@ class SessionManager:
 
         return session_queue_projection.project_session(session)
 
-    @staticmethod
-    def _upsert_queue_record(record: Optional[dict]) -> None:
-        if record is None:
-            return
-        import session_queue_projection
-
-        try:
-            asyncio.get_running_loop()
-        except RuntimeError:
-            session_queue_projection.upsert_record(record)
-            return
-        _submit_queue_projection_record(record)
-
     def _queue_projection_enricher(
         self, holder: dict[str, Optional[dict]], *, include_queued_prompts: bool,
     ) -> Callable[[dict], dict]:
         def _enrich(session: dict) -> dict:
-            holder["record"] = self._project_queue_record(session)
+            record = self._project_queue_record(session)
+            holder["record"] = record
+            if record is not None:
+                import session_queue_projection
+                session_queue_projection.upsert_record_background(
+                    record,
+                    storage_identity=self._root_repository.storage_identity(),
+                )
             if include_queued_prompts:
                 return {"queued_prompts": list(session.get("queued_prompts") or [])}
             return {}
@@ -3959,10 +3876,10 @@ class SessionManager:
                 return None
             mutate(sess)
             batch_ctx = self._batches.get(rid)
-            if batch_ctx is None:
-                self._persist_root(rid, bump=bump_updated_at)
             if enrich is not None:
                 change = {**change, **enrich(sess)}
+            if batch_ctx is None:
+                self._persist_root(rid, bump=bump_updated_at)
             # Phantom batch (set by `_load_root` during hydration)
             # suppresses both persist (above) AND listener fan-out
             # (here). Hydrate re-applies events already on disk in
@@ -4704,6 +4621,14 @@ class SessionManager:
 
     def delete(self, sid: str) -> bool:
         """Delete only after every owner in the target subtree is quiescent."""
+        import session_queue_projection
+
+        with session_queue_projection.producer_lease(
+            self._root_repository.storage_identity(),
+        ):
+            return self._delete_bound(sid)
+
+    def _delete_bound(self, sid: str) -> bool:
         while True:
             rid = self._root_id_for(sid)
             if rid is None:
@@ -4809,7 +4734,10 @@ class SessionManager:
             self._unread_counts_version += 1
             try:
                 import session_queue_projection
-                session_queue_projection.delete_records(deleted_sids)
+                session_queue_projection.delete_records(
+                    deleted_sids,
+                    storage_identity=self._root_repository.storage_identity(),
+                )
             except Exception:
                 logger.exception("queue projection delete failed for %s", sid)
             # `deleted_sids` carries the whole removed subtree (the target
@@ -5178,6 +5106,14 @@ class SessionManager:
     # ── Queued prompts ──────────────────────────────────────────────
 
     def admit_queued_prompt(self, sid: str, prompt: dict) -> dict:
+        import session_queue_projection
+
+        with session_queue_projection.producer_lease(
+            self._root_repository.storage_identity(),
+        ):
+            return self._admit_queued_prompt_bound(sid, prompt)
+
+    def _admit_queued_prompt_bound(self, sid: str, prompt: dict) -> dict:
         client_id = prompt.get("client_id")
         projection_record: Optional[dict] = None
         result: dict = {
@@ -5229,6 +5165,15 @@ class SessionManager:
                 q = sess.setdefault("queued_prompts", [])
                 q[:] = [p for p in q if p.get("id") != prompt.get("id")]
                 q.append(prompt)
+                projection_record = self._project_queue_record(sess)
+                if projection_record is not None:
+                    import session_queue_projection
+                    session_queue_projection.upsert_record_background(
+                        projection_record,
+                        storage_identity=(
+                            self._root_repository.storage_identity()
+                        ),
+                    )
                 batch_ctx = self._batches.get(rid)
                 if batch_ctx is None:
                     self._persist_root(rid, bump=True)
@@ -5237,11 +5182,9 @@ class SessionManager:
                     self._fire(sid, change)
                 result["session"] = sess
                 result["admitted"] = True
-                projection_record = self._project_queue_record(sess)
 
         queued_len = len((projection_record or {}).get("queued_prompts") or [])
         self._set_queued_prompt_count(sid, queued_len)
-        self._upsert_queue_record(projection_record)
         logger.debug(
             "queue-diag admit_queued_prompt sid=%s qp_id=%s client_id=%s "
             "admitted=%s -> queue_len=%d",
@@ -5267,6 +5210,16 @@ class SessionManager:
     def update_queued_prompt(
         self, sid: str, queued_id: str, updates: dict,
     ) -> Optional[dict]:
+        import session_queue_projection
+
+        with session_queue_projection.producer_lease(
+            self._root_repository.storage_identity(),
+        ):
+            return self._update_queued_prompt_bound(sid, queued_id, updates)
+
+    def _update_queued_prompt_bound(
+        self, sid: str, queued_id: str, updates: dict,
+    ) -> Optional[dict]:
         projection: dict[str, Optional[dict]] = {}
 
         def _do(s: dict) -> None:
@@ -5286,7 +5239,6 @@ class SessionManager:
         if result is not None:
             queued_len = len((projection.get("record") or {}).get("queued_prompts") or [])
             self._set_queued_prompt_count(sid, queued_len)
-            self._upsert_queue_record(projection.get("record"))
             logger.debug(
                 "queue-diag update_queued_prompt sid=%s qp_id=%s keys=%s "
                 "-> queue_len=%d",
@@ -5296,6 +5248,16 @@ class SessionManager:
         return result
 
     def remove_queued_prompt(
+        self, sid: str, queued_id: Optional[str],
+    ) -> Optional[dict]:
+        import session_queue_projection
+
+        with session_queue_projection.producer_lease(
+            self._root_repository.storage_identity(),
+        ):
+            return self._remove_queued_prompt_bound(sid, queued_id)
+
+    def _remove_queued_prompt_bound(
         self, sid: str, queued_id: Optional[str],
     ) -> Optional[dict]:
         projection: dict[str, Optional[dict]] = {}
@@ -5320,7 +5282,6 @@ class SessionManager:
         if result is not None:
             queued_len = len((projection.get("record") or {}).get("queued_prompts") or [])
             self._set_queued_prompt_count(sid, queued_len)
-            self._upsert_queue_record(projection.get("record"))
             logger.debug(
                 "queue-diag remove_queued_prompt sid=%s qp_id=%s "
                 "-> queue_len=%d",
@@ -5329,6 +5290,19 @@ class SessionManager:
         return result
 
     def remove_queued_prompt_by_client_id(
+        self, sid: str, client_id: str,
+    ) -> Optional[dict]:
+        import session_queue_projection
+
+        with session_queue_projection.producer_lease(
+            self._root_repository.storage_identity(),
+        ):
+            return self._remove_queued_prompt_by_client_id_bound(
+                sid,
+                client_id,
+            )
+
+    def _remove_queued_prompt_by_client_id_bound(
         self, sid: str, client_id: str,
     ) -> Optional[dict]:
         projection: dict[str, Optional[dict]] = {}
@@ -5350,7 +5324,6 @@ class SessionManager:
         if result is not None:
             queued_len = len((projection.get("record") or {}).get("queued_prompts") or [])
             self._set_queued_prompt_count(sid, queued_len)
-            self._upsert_queue_record(projection.get("record"))
             logger.debug(
                 "queue-diag remove_queued_prompt_by_client_id sid=%s "
                 "client_id=%s -> queue_len=%d",
@@ -5362,6 +5335,16 @@ class SessionManager:
 
     def append_user_msg(
         self, sid: str, msg: dict, *, strict: bool = False,
+    ) -> Optional[dict]:
+        import session_queue_projection
+
+        with session_queue_projection.producer_lease(
+            self._root_repository.storage_identity(),
+        ):
+            return self._append_user_msg_bound(sid, msg, strict=strict)
+
+    def _append_user_msg_bound(
+        self, sid: str, msg: dict, *, strict: bool,
     ) -> Optional[dict]:
         client_id = msg.get("client_id")
         if isinstance(client_id, str) and client_id:
@@ -5387,14 +5370,21 @@ class SessionManager:
                         return existing_msg
                 session_store.assign_message_seq(sess, msg)
                 sess["messages"].append(msg)
+                projection_record = self._project_queue_record(sess)
+                if projection_record is not None:
+                    import session_queue_projection
+                    session_queue_projection.upsert_record_background(
+                        projection_record,
+                        storage_identity=(
+                            self._root_repository.storage_identity()
+                        ),
+                    )
                 batch_ctx = self._batches.get(rid)
                 if batch_ctx is None:
                     self._persist_root(rid, bump=True)
                 change = {"kind": "user_msg_appended", "msg": msg}
                 if not (batch_ctx and batch_ctx.get("_phantom")):
                     self._fire(sid, change)
-                projection_record = self._project_queue_record(sess)
-            self._upsert_queue_record(projection_record)
             return msg
 
         projection: dict[str, Optional[dict]] = {}
@@ -5414,7 +5404,6 @@ class SessionManager:
         )
         if result is None:
             return None
-        self._upsert_queue_record(projection.get("record"))
         return msg
 
     def append_assistant_msg(

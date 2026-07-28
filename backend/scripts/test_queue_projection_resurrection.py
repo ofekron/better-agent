@@ -91,18 +91,13 @@ def _session_file_exists(sid: str) -> bool:
 
 def _reset_projection_memory() -> None:
     """Force the next read to reload from disk (simulate a process restart)."""
-    session_queue_projection._loaded = False
-    session_queue_projection._records.clear()
-    session_queue_projection._journal.clear()
-    session_queue_projection._mutation_log.clear()
+    session_manager.flush_pending_persists()
+    session_queue_projection.shutdown(timeout=5.0)
 
 
 def _certify_current() -> None:
     """Make `projection_is_current()` True so the load (not rebuild) path runs."""
-    session_queue_projection.flush_pending_writes(timeout=5.0)
-    session_queue_projection.mark_current_if_generation(
-        session_queue_projection.certification_generation()
-    )
+    session_queue_projection.shutdown(timeout=5.0, certify=True)
 
 
 async def _run_reenqueue(stale_records: list[dict]) -> _Coordinator:
@@ -115,8 +110,10 @@ async def _run_reenqueue(stale_records: list[dict]) -> _Coordinator:
     original_list = session_queue_projection.list_queued_records
     original_ensure = session_queue_projection.ensure_current_or_rebuild
     main.coordinator = coordinator
-    session_queue_projection.list_queued_records = lambda: list(stale_records)
-    session_queue_projection.ensure_current_or_rebuild = lambda: False
+    session_queue_projection.list_queued_records = (
+        lambda **_kwargs: list(stale_records)
+    )
+    session_queue_projection.ensure_current_or_rebuild = lambda **_kwargs: False
     try:
         await main._re_enqueue_queued_prompts()
     finally:
@@ -241,7 +238,7 @@ def main_test() -> int:
             session_queue_projection.flush_pending_writes(timeout=5.0)
         except Exception:
             pass
-        session_queue_projection.shutdown_loader()
+        session_queue_projection.shutdown(timeout=5.0)
         shutil.rmtree(_TMP_HOME, ignore_errors=True)
 
 

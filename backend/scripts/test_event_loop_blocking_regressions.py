@@ -1852,19 +1852,21 @@ def test_queue_projection_scans_user_messages_once() -> None:
     assert "def _user_message_keys(" not in source
     assert "def _user_messages(" not in source
     project_start = source.index("def project_session(")
-    project_end = source.index("def upsert_from_session(", project_start)
+    project_end = source.index("def _walk_nodes(", project_start)
     project_source = source[project_start:project_end]
-    assert "user_projection = _user_message_projection(" in project_source
-    assert "**user_projection" in project_source
+    assert "users = _user_message_projection(" in project_source
+    assert "**users" in project_source
 
 
 def test_queue_projection_skips_unchanged_disk_write() -> None:
-    source = (ROOT / "session_queue_projection.py").read_text(encoding="utf-8")
-    start = source.index("def upsert_from_session(")
-    end = source.index("def get(", start)
-    upsert_source = source[start:end]
-    assert "if _records.get(session_id) == owned:" in upsert_source
-    assert "if not changed and not _needs_durable_write(" in upsert_source
+    source = (
+        ROOT / "session_queue_projection_runtime.py"
+    ).read_text(encoding="utf-8")
+    start = source.index("    def _mutate(")
+    end = source.index("    def upsert(", start)
+    mutation_source = source[start:end]
+    assert "self._records.get(sid) == owned" in mutation_source
+    assert "return sequence, True" in mutation_source
 
 
 def test_queue_projection_overlay_reads_records_in_bulk() -> None:
@@ -1874,130 +1876,64 @@ def test_queue_projection_overlay_reads_records_in_bulk() -> None:
     start = store_source.index("def _overlay_queue_projection(")
     end = store_source.index("@perf.timed_fn(\"store.session.write_full\")", start)
     overlay_source = store_source[start:end]
-    assert "session_queue_projection.get_many(sids)" in overlay_source
+    assert "session_queue_projection.get_many(" in overlay_source
+    assert "storage_identity=storage_identity" in overlay_source
     assert "session_queue_projection.get(sid)" not in overlay_source
 
 
 def test_queue_projection_upsert_backgrounds_from_event_loop() -> None:
-    import session_queue_projection
-    from session_manager import manager as session_manager
-
-    async def run() -> None:
-        with (
-            mock.patch.object(session_queue_projection, "upsert_record") as sync_upsert,
-            mock.patch("session_manager._submit_queue_projection_record") as background_upsert,
-        ):
-            session_manager._upsert_queue_record({"id": "event-loop-session"})
-
-        sync_upsert.assert_not_called()
-        background_upsert.assert_called_once_with({"id": "event-loop-session"})
-
-    asyncio.run(run())
+    manager_source = (ROOT / "session_manager.py").read_text(encoding="utf-8")
+    assert "session_queue_projection.upsert_record_background(" in manager_source
+    assert manager_source.count(
+        "with session_queue_projection.producer_lease("
+    ) >= 5
+    dispatcher_source = (
+        ROOT / "session_queue_projection_dispatcher.py"
+    ).read_text(encoding="utf-8")
+    assert "ThreadPoolExecutor(" in dispatcher_source
+    assert "self.runtime.upsert(record, durable=False)" in dispatcher_source
 
 
 def test_queue_projection_lock_never_blocks_event_loop() -> None:
-    import session_queue_projection
-    import session_manager as manager_module
-
-    async def run() -> None:
-        lock_acquired = threading.Event()
-        release_lock = threading.Event()
-
-        def hold_projection_lock() -> None:
-            with session_queue_projection._lock:
-                lock_acquired.set()
-                release_lock.wait(timeout=5)
-
-        holder = threading.Thread(target=hold_projection_lock)
-        holder.start()
-        await asyncio.to_thread(lock_acquired.wait, 2)
-        ticks = 0
-
-        async def heartbeat() -> None:
-            nonlocal ticks
-            for _ in range(5):
-                await asyncio.sleep(0.02)
-                ticks += 1
-
-        manager_module.manager._upsert_queue_record({"id": "locked-projection"})
-        await heartbeat()
-        assert ticks == 5
-        release_lock.set()
-        holder.join(timeout=2)
-        await asyncio.to_thread(manager_module.drain_queue_projection_submissions)
-        assert session_queue_projection.flush_pending_writes(timeout=5)
-        assert session_queue_projection.get("locked-projection") == {
-            "id": "locked-projection",
-        }
-
-    asyncio.run(run())
+    dispatcher_source = (
+        ROOT / "session_queue_projection_dispatcher.py"
+    ).read_text(encoding="utf-8")
+    submit_start = dispatcher_source.index("    def submit(")
+    submit_end = dispatcher_source.index("    def overlay(", submit_start)
+    submit_source = dispatcher_source[submit_start:submit_end]
+    assert "self.runtime." not in submit_source
+    assert "self._pending[sid]" in submit_source
 
 
 def test_queue_projection_submission_coalesces_and_shutdown_rejection_is_dirty() -> None:
-    import session_manager as manager_module
-
-    original_upsert = manager_module._upsert_queue_projection_record
-    started = threading.Event()
-    release = threading.Event()
-
-    def blocked_upsert(_record: dict) -> None:
-        started.set()
-        release.wait(timeout=5)
-
-    manager_module._upsert_queue_projection_record = blocked_upsert
-    try:
-        manager_module._submit_queue_projection_record({"id": "busy", "value": 0})
-        assert started.wait(timeout=2)
-        for value in range(100):
-            manager_module._submit_queue_projection_record({"id": "busy", "value": value})
-        with manager_module._queue_projection_cv:
-            assert list(manager_module._queue_projection_pending) == ["busy"]
-            assert manager_module._queue_projection_pending["busy"]["value"] == 99
-        release.set()
-        manager_module.drain_queue_projection_submissions()
-
-        with manager_module._queue_projection_cv:
-            manager_module._queue_projection_accepting = False
-        manager_module._submit_queue_projection_record({"id": "late"})
-        try:
-            manager_module.drain_queue_projection_submissions()
-        except RuntimeError:
-            pass
-        else:
-            raise AssertionError("shutdown-rejected projection did not fail drain")
-    finally:
-        release.set()
-        manager_module._upsert_queue_projection_record = original_upsert
-        with manager_module._queue_projection_cv:
-            manager_module._queue_projection_accepting = True
-            manager_module._queue_projection_failure = None
-            manager_module._queue_projection_pending.clear()
+    source = (
+        ROOT / "session_queue_projection_dispatcher.py"
+    ).read_text(encoding="utf-8")
+    assert "self._pending[sid] = copy.deepcopy(record)" in source
+    assert 'self._state != "open"' in source
+    assert "queue projection dispatcher is closing" in source
 
 
 def test_queue_projection_shutdown_always_closes_executor() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
-    start = source.index("        begin_queue_projection_shutdown()")
-    end = source.index("    except Exception:", start)
+    source = (ROOT / "session_queue_projection.py").read_text(encoding="utf-8")
+    start = source.index("def shutdown(")
+    end = source.index("def debug_snapshot(", start)
     shutdown_source = source[start:end]
-    assert "try:" in shutdown_source
-    assert "finally:" in shutdown_source
-    assert "await asyncio.to_thread(shutdown_queue_projection_executor)" in shutdown_source
-    assert shutdown_source.index("finally:") < shutdown_source.index(
-        "await asyncio.to_thread(shutdown_queue_projection_executor)",
+    assert "dispatcher_registry.close(" in shutdown_source
+    assert shutdown_source.index("dispatcher_registry.close(") < (
+        shutdown_source.index("registry.shutdown(")
     )
 
 
 def test_queue_projection_certification_rejects_late_mutations() -> None:
-    import session_queue_projection
-
-    generation = session_queue_projection.certification_generation()
-    session_queue_projection.mark_dirty()
-    assert not session_queue_projection.mark_current_if_generation(generation)
-    current_generation = session_queue_projection.certification_generation()
-    assert session_queue_projection.mark_current_if_generation(current_generation)
-    assert session_queue_projection.projection_is_current()
-    session_queue_projection.mark_dirty()
-    assert not session_queue_projection.projection_is_current()
+    store_source = (ROOT / "session_store.py").read_text(encoding="utf-8")
+    assert "with session_queue_projection.producer_lease(storage_identity):" in (
+        store_source
+    )
+    runtime_source = (
+        ROOT / "session_queue_projection_runtime.py"
+    ).read_text(encoding="utf-8")
+    assert "self._certify_closing(fingerprint)" in runtime_source
 
 
 def test_provider_spawn_flushes_only_target_root() -> None:

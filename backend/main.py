@@ -12887,10 +12887,12 @@ async def _re_enqueue_queued_prompts() -> set[str]:
     operation never scans the global session projection."""
     import session_queue_projection
     import team_messaging
+    storage_identity = session_manager._root_repository.storage_identity()
 
     with perf.timed("startup.recovery.projection"):
         rebuilt = await asyncio.to_thread(
             session_queue_projection.ensure_current_or_rebuild,
+            storage_identity=storage_identity,
         )
         await asyncio.to_thread(session_manager.rebuild_queued_prompt_counts)
     logger.info(
@@ -12902,6 +12904,7 @@ async def _re_enqueue_queued_prompts() -> set[str]:
     rehydrated_session_ids: set[str] = set()
     queued_records = await asyncio.to_thread(
         session_queue_projection.list_queued_records,
+        storage_identity=storage_identity,
     )
     for session in queued_records:
         sid = session.get("id")
@@ -12912,7 +12915,11 @@ async def _re_enqueue_queued_prompts() -> set[str]:
         # row survived. Drop the row and move on — submit_prompt_async would
         # otherwise materialize a brand-new root for the dead sid.
         if not await asyncio.to_thread(session_manager.is_live_session, sid):
-            await asyncio.to_thread(session_queue_projection.delete_records, [sid])
+            await asyncio.to_thread(
+                session_queue_projection.delete_records,
+                [sid],
+                storage_identity=storage_identity,
+            )
             logger.info(
                 "re-enqueue: dropping stale queued record for %s "
                 "(no live root / tombstoned)", sid,
@@ -14512,22 +14519,13 @@ async def on_shutdown():
     # detects changed session files and falls back to a full rebuild.
     try:
         import session_queue_projection
-        from session_manager import (
-            begin_queue_projection_shutdown,
-            drain_queue_projection_submissions,
-            shutdown_queue_projection_executor,
+        storage_identity = session_manager._root_repository.storage_identity()
+        await asyncio.to_thread(
+            session_queue_projection.shutdown,
+            storage_identity=storage_identity,
+            timeout=5.0,
+            certify=True,
         )
-        begin_queue_projection_shutdown()
-        certification_generation = session_queue_projection.certification_generation()
-        try:
-            await asyncio.to_thread(drain_queue_projection_submissions)
-            if session_queue_projection.flush_pending_writes(timeout=5.0):
-                session_queue_projection.mark_current_if_generation(
-                    certification_generation,
-                )
-        finally:
-            await asyncio.to_thread(shutdown_queue_projection_executor)
-            await asyncio.to_thread(session_queue_projection.shutdown_loader)
     except Exception:
         logger.exception("queue projection flush_pending_writes failed")
     try:
@@ -20088,6 +20086,9 @@ async def websocket_chat(websocket: WebSocket):
                         persisted_queued = await asyncio.to_thread(
                             session_queue_projection.queued_prompts,
                             sub_sid,
+                            storage_identity=(
+                                session_manager._root_repository.storage_identity()
+                            ),
                         )
                         if (
                             not coordinator.has_queued_prompts(sub_sid)
@@ -20337,6 +20338,9 @@ async def websocket_chat(websocket: WebSocket):
                     _sess = await asyncio.to_thread(
                         session_queue_projection.get,
                         app_session_id,
+                        storage_identity=(
+                            session_manager._root_repository.storage_identity()
+                        ),
                     )
                     if _sess:
                         # Check if user message with this client_id exists.

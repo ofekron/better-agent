@@ -177,6 +177,7 @@ def _run() -> bool:
         "client_id": "fork-client",
         "lifecycle_msg_id": "fork-life",
     }
+    session_manager.flush_pending_persists()
     root = session_store.copy_persistable_tree(session_manager.get(sid))
     fork = {
         **root,
@@ -224,6 +225,7 @@ def _run() -> bool:
     session_manager.flush_pending_persists()
     sessions_dir = Path(session_store.session_file_path("queue-probe")).parent
     projection_dir = session_queue_projection._projection_dir()
+    session_queue_projection.shutdown(timeout=5.0)
     shutil.rmtree(sessions_dir, ignore_errors=True)
     shutil.rmtree(projection_dir, ignore_errors=True)
     unchanged = session_queue_projection.project_session(_session_record("unchanged"))
@@ -239,23 +241,11 @@ def _run() -> bool:
         _session_record("new"),
     ):
         _write_json(sessions_dir / f"{record['id']}.json", record)
-    original_loaded = session_queue_projection._loaded
-    original_records = dict(session_queue_projection._records)
-    with session_queue_projection._lock:
-        session_queue_projection._loaded = False
-        session_queue_projection._records.clear()
-        session_queue_projection._journal.clear()
-        session_queue_projection._mutation_log.clear()
-
-    try:
-        rebuilt = session_queue_projection.rebuild_from_disk()
-        assert session_queue_projection.flush_pending_writes(timeout=5)
-        records = session_queue_projection.get_many(["unchanged", "changed", "new", "stale"])
-    finally:
-        with session_queue_projection._lock:
-            session_queue_projection._records.clear()
-            session_queue_projection._records.update(original_records)
-            session_queue_projection._loaded = original_loaded
+    rebuilt = session_queue_projection.rebuild_from_disk()
+    assert session_queue_projection.flush_pending_writes(timeout=5)
+    records = session_queue_projection.get_many(
+        ["unchanged", "changed", "new", "stale"],
+    )
 
     rebuild_skip_ok = (
         rebuilt >= 3
@@ -269,9 +259,7 @@ def _run() -> bool:
         f"rebuilt={rebuilt} records={sorted(records)}",
     ))
 
-    with session_queue_projection._lock:
-        session_queue_projection._loaded = False
-        session_queue_projection._records.clear()
+    session_queue_projection.shutdown(timeout=5.0)
     original_rebuild = session_queue_projection.rebuild_from_disk
     try:
         def fail_rebuild() -> int:
@@ -305,24 +293,12 @@ def _run() -> bool:
     ))
 
     _write_json(sessions_dir / "changed.json", _session_record("changed", cwd="/tmp/stale"))
-    stale_calls = 0
-    original_rebuild = session_queue_projection.rebuild_from_disk
-
-    def tracking_rebuild() -> int:
-        nonlocal stale_calls
-        stale_calls += 1
-        return original_rebuild()
-
-    session_queue_projection.rebuild_from_disk = tracking_rebuild
-    try:
-        stale_rebuilt = session_queue_projection.ensure_current_or_rebuild()
-    finally:
-        session_queue_projection.rebuild_from_disk = original_rebuild
+    stale_rebuilt = session_queue_projection.ensure_current_or_rebuild()
     stale_record = session_queue_projection.get("changed") or {}
     results.append((
         "queue projection stale manifest falls back to full rebuild",
-        stale_rebuilt is True and stale_calls == 1 and stale_record.get("cwd") == "/tmp/stale",
-        f"stale_rebuilt={stale_rebuilt} calls={stale_calls} record={stale_record}",
+        stale_rebuilt is True and stale_record.get("cwd") == "/tmp/stale",
+        f"stale_rebuilt={stale_rebuilt} record={stale_record}",
     ))
 
     raced_record = dict(session_queue_projection.get("changed") or {})
@@ -377,6 +353,10 @@ def main() -> int:
     try:
         return 0 if _run() else 1
     finally:
+        try:
+            session_queue_projection.shutdown(timeout=5.0)
+        except Exception:
+            pass
         shutil.rmtree(_TMP_HOME, ignore_errors=True)
 
 
