@@ -9,8 +9,10 @@ if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
 import _test_home  # noqa: E402
+import _test_installation  # noqa: E402
 
 _TMP_HOME = _test_home.isolate("bc-test-routine-session-storage-")
+_test_installation.activate(Path(_TMP_HOME), mode="default", provider="codex")
 
 import event_ingester  # noqa: E402
 import native_files_manager  # noqa: E402
@@ -147,8 +149,43 @@ def test_delete_cleans_scoped_sidecars():
     check(all(not path.exists() for path in sidecars), "scoped sidecars removed")
 
 
+def test_iteration_tolerates_concurrent_root_delete():
+    print("T4 iteration tolerates concurrent root delete")
+    deleted = session_manager_mod.manager.create(
+        name="Deleted During Iteration",
+        cwd="/tmp/deleted-during-iteration",
+        model="model-d",
+        provider_id=None,
+        storage_scope={"kind": "routine", "routine_id": "routine-race"},
+    )
+    surviving = session_manager_mod.manager.create(
+        name="Surviving Iteration",
+        cwd="/tmp/surviving-iteration",
+        model="model-d",
+        provider_id=None,
+        storage_scope={"kind": "routine", "routine_id": "routine-race"},
+    )
+    deleted_path = Path(session_store.session_file_path(deleted["id"]))
+    surviving_path = Path(session_store.session_file_path(surviving["id"]))
+    original_files = session_store._session_json_files
+
+    def files_with_concurrent_delete():
+        deleted_path.unlink()
+        yield deleted_path
+        yield surviving_path
+
+    session_store._session_json_files = files_with_concurrent_delete
+    try:
+        roots = list(session_store.iter_root_sessions())
+    finally:
+        session_store._session_json_files = original_files
+
+    check([root["id"] for root in roots] == [surviving["id"]],
+          "missing root is skipped and later roots still load")
+
+
 def test_provisioned_spec_requires_memory_scope():
-    print("T4 provisioned routines carry memory scope")
+    print("T5 provisioned routines carry memory scope")
     spec = task_runner._provisioned_task_spec(
         {"id": "b" * 12, "name": "Provisioned", "cwd": "/tmp/prov"},
         model="model-e",
@@ -164,6 +201,7 @@ def main() -> int:
     test_routine_session_uses_routine_directory()
     test_scoped_roots_feed_projections_and_mining()
     test_delete_cleans_scoped_sidecars()
+    test_iteration_tolerates_concurrent_root_delete()
     test_provisioned_spec_requires_memory_scope()
     print()
     if failures:

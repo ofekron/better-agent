@@ -5726,6 +5726,8 @@ def iter_root_sessions() -> Iterator[dict]:
     for path in _session_json_files():
         try:
             root = _migrate_and_persist(json.loads(path.read_text(encoding="utf-8")))
+        except FileNotFoundError:
+            continue
         except (json.JSONDecodeError, KeyError, ValueError):
             continue
         if not isinstance(root, dict) or "id" not in root:
