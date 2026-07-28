@@ -44,7 +44,7 @@ def _fake_checkout(root: Path, probe_path: Path, *, read: bool) -> Path:
     python_path = backend / ".venvs" / "test" / "bin" / "python"
     python_path.parent.mkdir(parents=True)
     python_path.write_text(
-        f"#!/bin/sh\nexec {str(ROOT / 'backend' / '.venv' / 'bin' / 'python')!r} \"$@\"\n",
+        f"#!/bin/sh\nexec {sys.executable!r} \"$@\"\n",
         encoding="utf-8",
     )
     python_path.chmod(0o700)
@@ -120,7 +120,7 @@ def test_fresh_channels_preserve_denial_without_leaking_to_children(temp_root: P
             _stop_generation(supervisor)
         rows = [json.loads(line) for line in probe_path.read_text(encoding="utf-8").splitlines()]
         assert [row["response"]["status"] for row in rows] == ["blocked", "blocked"]
-        assert reads == 1
+        assert reads == 1, reads
         assert all(row["fd_before"] is True for row in rows)
         assert all(row["fd_after"] is False for row in rows)
         assert all(row["child_available"] == "False" for row in rows)
