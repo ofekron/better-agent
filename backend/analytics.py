@@ -21,8 +21,8 @@ magnitude. Counts and durations are reliable; token sums are not.
 
 from __future__ import annotations
 
-import logging
 import json
+import logging
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import Iterable, Optional
@@ -41,7 +41,6 @@ DEFAULT_RANGE_DAYS = 30
 ANALYTICS_ALL_START = datetime(2000, 1, 1)
 NATIVE_ANALYTICS_SQL_TIMEOUT_SECONDS = 15.0
 VALID_GRANULARITIES = {"hour", "day", "week", "month"}
-NATIVE_ANALYTICS_PATH_CHUNK_SIZE = 250
 
 
 # ── datetime helpers ────────────────────────────────────────────────────
@@ -77,7 +76,11 @@ def _utc_z(value: datetime) -> str:
         dt = value.astimezone()
     else:
         dt = value
-    return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    return (
+        dt.astimezone(timezone.utc)
+        .isoformat(timespec="microseconds")
+        .replace("+00:00", "Z")
+    )
 
 
 def resolve_bounds(
@@ -170,6 +173,7 @@ def aggregate(
     end: datetime,
     native_conversations: Optional[Iterable[dict]] = None,
     granularity: Optional[str] = None,
+    native_projection: Optional[dict] = None,
 ) -> dict:
     """Pure aggregation over raw native conversations + BA supplements."""
     granularity = resolve_granularity(granularity, start, end)
@@ -188,9 +192,11 @@ def aggregate(
         sid_attr[sid] = (pkey, kind, name, model)
 
     native_items = list(native_conversations or [])
+    native_projection = native_projection or {}
     native_session_ids = {
         item.get("sid") for item in native_items if item.get("sid")
     }
+    native_session_ids.update(native_projection.get("session_ids") or [])
 
     def _session_attr(s: dict) -> tuple[str, str, str, str]:
         prov = provider_map.get(s.get("provider_id")) or {}
@@ -254,6 +260,31 @@ def aggregate(
         bm["count"] += 1
         by_orch[mode] += 1
 
+    for row in native_projection.get("sessions") or []:
+        count = int(row.get("count") or 0)
+        user_count = int(row.get("user_count") or 0)
+        kind = row.get("provider_kind") or "unknown"
+        pkey = f"native:{kind}"
+        model = "unknown"
+        name = _provider_name_for_kind(kind, provider_map)
+
+        sess_total += count
+        sess_user_total += user_count
+        messages_total += int(row.get("message_count") or 0)
+        bucket = sess_series[row["bucket"]]
+        bucket["count"] += count
+        bucket["user_count"] += user_count
+
+        bp = by_provider[pkey]
+        bp["kind"] = kind
+        bp["name"] = name
+        bp["count"] += count
+        bm = by_model[(kind, model)]
+        bm["kind"] = kind
+        bm["model"] = model
+        bm["count"] += count
+        by_orch["native"] += count
+
     for s in real_sessions:
         if s.get("id") in native_session_ids:
             continue
@@ -316,6 +347,28 @@ def aggregate(
             bm["kind"] = kind
             bm["model"] = model
             bm["turns"] += 1
+
+    for row in native_projection.get("turns") or []:
+        count = int(row.get("count") or 0)
+        user_count = int(row.get("user_count") or 0)
+        kind = row.get("provider_kind") or "unknown"
+        pkey = f"native:{kind}"
+        model = "unknown"
+        name = _provider_name_for_kind(kind, provider_map)
+
+        turn_total += count
+        bucket = turn_series[row["bucket"]]
+        bucket["count"] += count
+        bucket["user_count"] += user_count
+
+        bp = t_by_provider[pkey]
+        bp["kind"] = kind
+        bp["name"] = name
+        bp["turns"] += count
+        bm = t_by_model[(kind, model)]
+        bm["kind"] = kind
+        bm["model"] = model
+        bm["turns"] += count
 
     for tr in traces:
         ts = _parse_dt(tr.get("timestamp"))
@@ -529,7 +582,18 @@ def _sorted(group_map: dict, key: str) -> list[dict]:
     return [
         dict(item)
         for item in sorted(
-            group_map.values(), key=lambda d: d.get(key, 0), reverse=True
+            group_map.values(),
+            key=lambda item: (
+                -int(item.get(key, 0)),
+                str(item.get("provider_id") or item.get("kind") or ""),
+                str(
+                    item.get("name")
+                    or item.get("model")
+                    or item.get("source")
+                    or item.get("reason")
+                    or ""
+                ),
+            ),
         )
     ]
 
@@ -541,168 +605,154 @@ def _provider_name_for_kind(kind: str, provider_map: dict) -> str:
     return kind or "unknown"
 
 
-def _native_metadata_fallback(
-    paths: list[str],
-    start_z: str,
-    end_z: str,
-) -> dict[str, dict]:
-    """Recover per-file metadata when ``native_file_state`` is incomplete.
-
-    This is normally unused because ``native_file_state`` is maintained by the
-    same indexing transaction as ``native_element_meta``. If an old or partial
-    index has meta rows without a matching file-state row, query only those
-    paths so analytics keeps provider attribution without reviving the old
-    all-path ``MAX(sid/cwd/tag)`` scan.
-    """
-    if not paths:
-        return {}
-
-    out: dict[str, dict] = {}
-    for i in range(0, len(paths), NATIVE_ANALYTICS_PATH_CHUNK_SIZE):
-        chunk = paths[i:i + NATIVE_ANALYTICS_PATH_CHUNK_SIZE]
-        placeholders = ",".join("?" for _ in chunk)
-        result = native_transcript_index.run_readonly_sql(
-            f"""
-            SELECT
-                path,
-                COALESCE(MAX(sid), '') AS sid,
-                COALESCE(MAX(cwd), '') AS cwd,
-                COALESCE(MAX(tag), 'unknown') AS tag,
-                MIN(CASE WHEN element_kind = 'user_prompt' THEN ts_utc END) AS created_at,
-                COUNT(CASE WHEN element_kind IN ('user_prompt', 'assistant_text') THEN 1 END) AS message_count
-            FROM native_element_meta INDEXED BY native_element_meta_path_ts_idx
-            WHERE path IN ({placeholders})
-              AND ts_utc >= ?
-              AND ts_utc <= ?
-              AND element_kind IN ('user_prompt', 'assistant_text')
-            GROUP BY path
-            """,
-            (*chunk, start_z, end_z),
-            timeout_s=NATIVE_ANALYTICS_SQL_TIMEOUT_SECONDS,
+def _native_bucket_sql(column: str, granularity: str) -> str:
+    local = f"datetime({column}, 'localtime')"
+    if granularity == "hour":
+        return f"strftime('%Y-%m-%d %H:00', {local})"
+    if granularity == "day":
+        return f"strftime('%Y-%m-%d', {local})"
+    if granularity == "week":
+        return (
+            f"strftime('%Y-%m-%d', date({local}, "
+            f"printf('-%d days', (CAST(strftime('%w', {local}) AS INTEGER) + 6) % 7)))"
         )
-        if result.get("error"):
-            logger.warning(
-                "native analytics metadata fallback query failed: %s",
-                result.get("error"),
-            )
-            continue
-        columns = result.get("columns") or []
-        for raw in result.get("rows") or []:
-            row = dict(zip(columns, raw))
-            path = row.get("path")
-            if path:
-                out[path] = row
-    return out
+    return f"strftime('%Y-%m', {local})"
 
 
-def _native_conversation_metadata_for_paths(paths: set[str]) -> list[dict]:
+def _native_projection_query(sql: str, params: tuple) -> list[dict]:
     result = native_transcript_index.run_readonly_sql(
-        """
-        WITH path_filter(path) AS (
-            SELECT value FROM json_each(?)
-        )
-        SELECT
-            pf.path,
-            COALESCE(fs.sid, '') AS sid,
-            COALESCE(fs.cwd, '') AS cwd,
-            COALESCE(fs.tag, 'unknown') AS tag,
-            fs.first_user_prompt_ts AS created_at,
-            COALESCE(fs.message_count, 0) AS message_count,
-            COALESCE(fs.turn_source, '') AS turn_source,
-            fs.path AS file_state_path
-        FROM path_filter pf
-        LEFT JOIN native_file_state fs ON fs.path = pf.path
-        """,
-        (json.dumps(sorted(paths)),),
+        sql,
+        params,
         timeout_s=NATIVE_ANALYTICS_SQL_TIMEOUT_SECONDS,
     )
     if result.get("error"):
-        raise RuntimeError(str(result.get("error")))
+        raise RuntimeError(str(result["error"]))
     columns = result.get("columns") or []
-    return [dict(zip(columns, raw)) for raw in result.get("rows") or []]
+    return [dict(zip(columns, row)) for row in result.get("rows") or []]
 
 
-def _native_conversations_from_index(start: datetime, end: datetime) -> list[dict]:
+def _native_analytics_projection(
+    start: datetime,
+    end: datetime,
+    granularity: str,
+    ba_session_ids: set[str],
+) -> Optional[dict]:
     state = native_transcript_index.quick_state()
     if not state.get("schema_ok") or not state.get("covered"):
-        return _native_conversations_from_raw(start, end)
+        return None
 
     start_z = _utc_z(start)
     end_z = _utc_z(end)
-
-    turns_result = native_transcript_index.run_readonly_sql(
-        """
-        SELECT path, ts_utc
+    session_bucket = _native_bucket_sql("fs.first_user_prompt_ts", granularity)
+    turn_bucket = _native_bucket_sql("m.ts_utc", granularity)
+    range_paths = """
+        SELECT DISTINCT path
         FROM native_element_meta INDEXED BY native_element_meta_kind_path_ts_idx
         WHERE element_kind = 'user_prompt'
           AND ts_utc >= ?
           AND ts_utc <= ?
-        ORDER BY path, ts_utc, rowid
+    """
+    sessions = _native_projection_query(
+        f"""
+        SELECT
+            COALESCE(fs.tag, 'unknown') AS provider_kind,
+            {session_bucket} AS bucket,
+            COUNT(*) AS count,
+            SUM(CASE WHEN COALESCE(fs.turn_source, '') IN ('fork', 'team', 'internal')
+                     THEN 0 ELSE 1 END) AS user_count,
+            SUM(COALESCE(fs.message_count, 0)) AS message_count
+        FROM native_file_state fs
+        WHERE fs.first_user_prompt_ts >= ?
+          AND fs.first_user_prompt_ts <= ?
+        GROUP BY provider_kind, bucket
         """,
         (start_z, end_z),
-        timeout_s=NATIVE_ANALYTICS_SQL_TIMEOUT_SECONDS,
     )
-    if turns_result.get("error"):
-        logger.warning("native analytics turns query failed: %s", turns_result.get("error"))
-        return _native_conversations_from_raw(start, end)
-    turn_columns = turns_result.get("columns") or []
-    turn_rows = [
-        dict(zip(turn_columns, raw))
-        for raw in turns_result.get("rows") or []
-    ]
-    range_paths = {
-        row.get("path") for row in turn_rows
-        if row.get("path")
+    missing_probe = _native_projection_query(
+        f"""
+        WITH range_paths(path) AS ({range_paths})
+        SELECT rp.path
+        FROM range_paths rp
+        LEFT JOIN native_file_state fs ON fs.path = rp.path
+        WHERE fs.path IS NULL
+        LIMIT 1
+        """,
+        (start_z, end_z),
+    )
+    if missing_probe:
+        missing_sessions = _native_projection_query(
+            f"""
+            WITH range_paths(path) AS ({range_paths}),
+            missing AS (
+                SELECT
+                    m.path,
+                    COALESCE(MAX(m.tag), 'unknown') AS provider_kind,
+                    MIN(CASE WHEN m.element_kind = 'user_prompt' THEN m.ts_utc END) AS created_at,
+                    COUNT(CASE WHEN m.element_kind IN ('user_prompt', 'assistant_text')
+                               THEN 1 END) AS message_count
+                FROM native_element_meta m
+                JOIN range_paths rp ON rp.path = m.path
+                LEFT JOIN native_file_state fs ON fs.path = m.path
+                WHERE fs.path IS NULL
+                GROUP BY m.path
+            )
+            SELECT
+                provider_kind,
+                {_native_bucket_sql("created_at", granularity)} AS bucket,
+                COUNT(*) AS count,
+                COUNT(*) AS user_count,
+                SUM(message_count) AS message_count
+            FROM missing
+            WHERE created_at >= ?
+              AND created_at <= ?
+            GROUP BY provider_kind, bucket
+            """,
+            (start_z, end_z, start_z, end_z),
+        )
+        sessions.extend(missing_sessions)
+    turns = _native_projection_query(
+        f"""
+        SELECT
+            COALESCE(fs.tag, m.tag, 'unknown') AS provider_kind,
+            {turn_bucket} AS bucket,
+            COUNT(*) AS count,
+            SUM(CASE WHEN COALESCE(fs.turn_source, '') IN ('fork', 'team', 'internal')
+                     THEN 0 ELSE 1 END) AS user_count
+        FROM native_element_meta m INDEXED BY native_element_meta_kind_path_ts_idx
+        LEFT JOIN native_file_state fs ON fs.path = m.path
+        WHERE m.element_kind = 'user_prompt'
+          AND m.ts_utc >= ?
+          AND m.ts_utc <= ?
+        GROUP BY provider_kind, bucket
+        """,
+        (start_z, end_z),
+    )
+    sid_rows = []
+    if ba_session_ids:
+        sid_rows = _native_projection_query(
+            f"""
+            WITH requested(sid) AS (SELECT value FROM json_each(?)),
+            range_paths(path) AS ({range_paths})
+            SELECT fs.sid
+            FROM range_paths rp
+            JOIN native_file_state fs ON fs.path = rp.path
+            JOIN requested r ON r.sid = fs.sid
+            UNION
+            SELECT m.sid
+            FROM range_paths rp
+            JOIN native_element_meta m ON m.path = rp.path
+            LEFT JOIN native_file_state fs ON fs.path = rp.path
+            JOIN requested r ON r.sid = m.sid
+            WHERE fs.path IS NULL
+              AND m.element_kind = 'user_prompt'
+            """,
+            (json.dumps(sorted(ba_session_ids)), start_z, end_z),
+        )
+    return {
+        "sessions": sessions,
+        "turns": turns,
+        "session_ids": [row["sid"] for row in sid_rows],
     }
-    if not range_paths:
-        return []
-
-    try:
-        rows = _native_conversation_metadata_for_paths(range_paths)
-    except RuntimeError as exc:
-        logger.warning("native analytics query failed: %s", exc)
-        return _native_conversations_from_raw(start, end)
-    missing_file_state_paths = [
-        row["path"] for row in rows
-        if row.get("path") and not row.get("file_state_path")
-    ]
-    metadata_fallback = _native_metadata_fallback(
-        missing_file_state_paths,
-        start_z,
-        end_z,
-    )
-    conversations: dict[str, dict] = {}
-    for row in rows:
-        path = row.get("path")
-        if not path:
-            continue
-        fallback = metadata_fallback.get(path) or {}
-        sid = row.get("sid") or fallback.get("sid") or ""
-        cwd = row.get("cwd") or fallback.get("cwd") or ""
-        tag = row.get("tag") or fallback.get("tag") or "unknown"
-        if tag == "unknown" and fallback.get("tag"):
-            tag = fallback["tag"]
-        conversations[path] = {
-            "id": f"native:{path}",
-            "sid": sid,
-            "cwd": cwd,
-            "provider_kind": tag,
-            "provider_key": f"native:{tag}",
-            "model": "unknown",
-            "orchestration_mode": "native",
-            "created_at": row.get("created_at") or fallback.get("created_at") or "",
-            "message_count": row.get("message_count") or fallback.get("message_count") or 0,
-            "turn_source": row.get("turn_source") or "",
-            "turns": [],
-        }
-    if not conversations:
-        return []
-
-    for row in turn_rows:
-        item = conversations.get(row.get("path"))
-        if item is not None:
-            item["turns"].append({"timestamp": row.get("ts_utc") or ""})
-    return list(conversations.values())
 
 
 def _native_conversations_from_raw(start: datetime, end: datetime) -> list[dict]:
@@ -763,6 +813,22 @@ def compute_analytics(
     provider_map = {
         p["id"]: p for p in prov_state.get("providers", []) if p.get("id")
     }
+    resolved_granularity = resolve_granularity(granularity, start, end)
+    native_projection = _native_analytics_projection(
+        start,
+        end,
+        resolved_granularity,
+        {
+            session.get("id")
+            for session in sessions
+            if session.get("id")
+        },
+    )
+    native_conversations = (
+        _native_conversations_from_raw(start, end)
+        if native_projection is None
+        else []
+    )
     return aggregate(
         sessions,
         traces,
@@ -770,6 +836,7 @@ def compute_analytics(
         provider_map,
         start,
         end,
-        _native_conversations_from_index(start, end),
-        granularity,
+        native_conversations,
+        resolved_granularity,
+        native_projection,
     )

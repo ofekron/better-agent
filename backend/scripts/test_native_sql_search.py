@@ -26,6 +26,7 @@ import shutil
 import statistics
 import sys
 import time
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -36,6 +37,7 @@ if _BACKEND not in sys.path:
 import _test_home
 _TMP_HOME = _test_home.isolate("bc-test-native-sql-")
 
+import analytics  # noqa: E402
 import native_transcript_index as idx  # noqa: E402
 
 OK = "\033[92mPASS\033[0m"
@@ -87,6 +89,22 @@ def _seed() -> None:
     conn.execute(
         "INSERT INTO native_element_text(rowid, text) "
         "SELECT rowid, text FROM native_element_fts"
+    )
+    conn.executemany(
+        "INSERT INTO native_file_state("
+        "path, mtime, size, tag, sid, cwd, first_user_prompt_ts, message_count, "
+        "turn_source, indexed_at"
+        ") VALUES (?,?,?,?,?,?,?,?,?,?)",
+        [
+            ("/p/a.jsonl", 1, 1, "claude", "sA", "/proj",
+             "2024-01-01T00:00:00.000000Z", 2, "direct_user", 1),
+            ("/p/b.jsonl", 1, 1, "codex", "sB", "/proj",
+             "2024-01-02T00:00:00.000000Z", 1, "fork", 1),
+            ("/p/c.jsonl", 1, 1, "gemini", "sC", "/proj",
+             None, 1, "external", 1),
+            ("/p/large.jsonl", 1, 1, "codex", "sLarge", "/proj",
+             None, 2000, "external", 1),
+        ],
     )
     conn.commit()
 
@@ -1163,6 +1181,185 @@ def test_analytics_conversations_turns_query_uses_kind_path_index() -> bool:
     return ok
 
 
+def test_analytics_projection_preserves_results_and_bounds_rows() -> bool:
+    start = analytics._parse_dt("2024-01-01T00:00:00Z")
+    end = analytics._parse_dt("2024-01-03T00:00:00Z")
+    raw = [
+        {
+            "id": "native:/p/a.jsonl",
+            "sid": "sA",
+            "provider_kind": "claude",
+            "provider_key": "native:claude",
+            "model": "unknown",
+            "orchestration_mode": "native",
+            "created_at": "2024-01-01T00:00:00.000000Z",
+            "message_count": 2,
+            "turn_source": "direct_user",
+            "turns": [{"timestamp": "2024-01-01T00:00:00.000000Z"}],
+        },
+        {
+            "id": "native:/p/b.jsonl",
+            "sid": "sB",
+            "provider_kind": "codex",
+            "provider_key": "native:codex",
+            "model": "unknown",
+            "orchestration_mode": "native",
+            "created_at": "2024-01-02T00:00:00.000000Z",
+            "message_count": 1,
+            "turn_source": "fork",
+            "turns": [{"timestamp": "2024-01-02T00:00:00.000000Z"}],
+        },
+    ]
+    original_state = idx.quick_state
+    original_ensure = idx.ensure_fresh_for_read
+    idx.quick_state = lambda: {"schema_ok": True, "covered": True, "usable": True}
+    idx.ensure_fresh_for_read = lambda **_kwargs: {
+        "schema_ok": True,
+        "covered": True,
+        "usable": True,
+    }
+    conn = idx._writer_connection()
+    conn.execute("DELETE FROM native_file_state WHERE path = '/p/a.jsonl'")
+    conn.commit()
+    try:
+        comparisons = []
+        row_counts = []
+        for granularity in ("hour", "day", "week", "month"):
+            projection = analytics._native_analytics_projection(
+                start,
+                end,
+                granularity,
+                {"sA", "sB"},
+            )
+            projected = analytics.aggregate(
+                [], [], [], {}, start, end,
+                granularity=granularity,
+                native_projection=projection,
+            )
+            expected = analytics.aggregate(
+                [], [], [], {}, start, end, raw, granularity,
+            )
+            comparisons.append(
+                projected["sessions"] == expected["sessions"]
+                and projected["turns"] == expected["turns"]
+                and set(projection["session_ids"]) == {"sA", "sB"}
+            )
+            row_counts.append(
+                len(projection["sessions"]) + len(projection["turns"])
+            )
+    finally:
+        idx.quick_state = original_state
+        idx.ensure_fresh_for_read = original_ensure
+
+    heavy_prefix = "/p/heavy/"
+    heavy_paths = [
+        heavy_prefix + f"{i:05d}-" + ("x" * 1016) + ".jsonl"
+        for i in range(17_000)
+    ]
+    heavy_timestamps = [
+        (
+            datetime(2024, 1, 1, tzinfo=timezone.utc)
+            + timedelta(seconds=i * 10)
+        ).isoformat(timespec="microseconds").replace("+00:00", "Z")
+        for i in range(17_000)
+    ]
+    first_rowid = conn.execute(
+        "SELECT COALESCE(MAX(rowid), 0) + 1 FROM native_element_meta"
+    ).fetchone()[0]
+    conn.executemany(
+        "INSERT INTO native_element_meta("
+        "rowid, path, sid, cwd, tag, element_kind, tool_name, ts_utc, role"
+        ") VALUES (?,?,?,?,?,?,?,?,?)",
+        (
+            (
+                first_rowid + i,
+                heavy_paths[i],
+                f"heavy-sid-{i}",
+                "/proj",
+                "claude",
+                "user_prompt",
+                "",
+                heavy_timestamps[i],
+                "user",
+            )
+            for i in range(17_000)
+        ),
+    )
+    conn.executemany(
+        "INSERT INTO native_file_state("
+        "path, mtime, size, tag, sid, cwd, first_user_prompt_ts, message_count, "
+        "turn_source, indexed_at"
+        ") VALUES (?,?,?,?,?,?,?,?,?,?)",
+        (
+            (
+                heavy_paths[i], 1, 1, "claude", f"heavy-sid-{i}", "/proj",
+                heavy_timestamps[i], 1, "external", 1,
+            )
+            for i in range(17_000)
+        ),
+    )
+    conn.commit()
+    raw_started = time.perf_counter()
+    raw_query = idx.run_readonly_sql(
+        "SELECT path, ts_utc FROM native_element_meta "
+        "WHERE element_kind = 'user_prompt' ORDER BY path, ts_utc",
+    )
+    raw_elapsed = time.perf_counter() - raw_started
+    idx.quick_state = lambda: {"schema_ok": True, "covered": True, "usable": True}
+    idx.ensure_fresh_for_read = lambda **_kwargs: {
+        "schema_ok": True,
+        "covered": True,
+        "usable": True,
+    }
+    try:
+        projection_started = time.perf_counter()
+        bounded = analytics._native_analytics_projection(
+            start,
+            end,
+            "day",
+            {"sA", "sB"},
+        )
+        projection_elapsed = time.perf_counter() - projection_started
+    finally:
+        idx.quick_state = original_state
+        idx.ensure_fresh_for_read = original_ensure
+    conn.execute(
+        "DELETE FROM native_element_meta WHERE path LIKE ?",
+        (heavy_prefix + "%",),
+    )
+    conn.execute(
+        "DELETE FROM native_file_state WHERE path LIKE ?",
+        (heavy_prefix + "%",),
+    )
+    conn.execute(
+        "INSERT INTO native_file_state("
+        "path, mtime, size, tag, sid, cwd, first_user_prompt_ts, message_count, "
+        "turn_source, indexed_at"
+        ") VALUES (?,?,?,?,?,?,?,?,?,?)",
+        (
+            "/p/a.jsonl", 1, 1, "claude", "sA", "/proj",
+            "2024-01-01T00:00:00.000000Z", 2, "direct_user", 1,
+        ),
+    )
+    conn.commit()
+    ok = (
+        all(comparisons)
+        and max(row_counts) <= 4
+        and len(bounded["sessions"]) + len(bounded["turns"]) <= 10
+        and raw_query.get("error") == "result_too_large"
+        and projection_elapsed < 8.0
+    )
+    print(
+        f"{OK if ok else FAIL} analytics projection preserves results and bounds rows "
+        f"(comparisons={comparisons}, row_counts={row_counts}, "
+        f"bounded_rows={len(bounded['sessions']) + len(bounded['turns'])}, "
+        f"raw_error={raw_query.get('error')!r}, "
+        f"raw_elapsed_s={raw_elapsed:.3f}, "
+        f"projection_elapsed_s={projection_elapsed:.3f})"
+    )
+    return ok
+
+
 def test_match_recency_rejection_is_structural_and_private() -> bool:
     sql = (
         "SELECT random() AS secret_alias FROM native_element_fts "
@@ -1734,6 +1931,7 @@ def main_run() -> int:
         test_raw_text_projection_replace_and_delete_converges,
         test_analytics_metadata_fallback_query_uses_path_index,
         test_analytics_conversations_turns_query_uses_kind_path_index,
+        test_analytics_projection_preserves_results_and_bounds_rows,
         test_unbounded_rowid_metadata_scan_is_allowed,
         test_metadata_on_fts_shapes_are_allowed,
         test_readonly_sql_refreshes_before_opening_db,

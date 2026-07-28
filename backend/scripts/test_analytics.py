@@ -316,222 +316,6 @@ def test_compute_analytics_reads_live_stores():
     assert prov["Claude"] == 1 and prov["AGY"] == 1
 
 
-def test_native_conversations_from_index_groups_sessions_and_turns():
-    calls = []
-
-    def fake_sql(sql, params=(), **kwargs):
-        calls.append((sql, params, kwargs))
-        if "SELECT path, ts_utc" in sql:
-            return {
-                "columns": ["path", "ts_utc"],
-                "rows": [["/native/codex.jsonl", "2026-06-01T09:00:00.000000Z"]],
-            }
-        return {
-            "columns": ["path", "sid", "cwd", "tag", "created_at", "message_count", "file_state_path"],
-            "rows": [["/native/codex.jsonl", "sid-native", "/repo", "codex",
-                      "2026-06-01T08:00:00.000000Z", 3, "/native/codex.jsonl"]],
-        }
-
-    original = analytics.native_transcript_index.run_readonly_sql
-    original_state = analytics.native_transcript_index.quick_state
-    analytics.native_transcript_index.run_readonly_sql = fake_sql
-    analytics.native_transcript_index.quick_state = lambda: {
-        "schema_ok": True,
-        "covered": True,
-        "usable": True,
-    }
-    try:
-        out = analytics._native_conversations_from_index(
-            datetime(2026, 6, 1, 0, 0, 0),
-            datetime(2026, 6, 2, 0, 0, 0),
-        )
-    finally:
-        analytics.native_transcript_index.run_readonly_sql = original
-        analytics.native_transcript_index.quick_state = original_state
-
-    assert len(calls) == 2
-    assert calls[0][2]["timeout_s"] == analytics.NATIVE_ANALYTICS_SQL_TIMEOUT_SECONDS
-    assert calls[1][2]["timeout_s"] == analytics.NATIVE_ANALYTICS_SQL_TIMEOUT_SECONDS
-    assert json.loads(calls[1][1][0]) == ["/native/codex.jsonl"]
-    assert out == [{
-        "id": "native:/native/codex.jsonl",
-        "sid": "sid-native",
-        "cwd": "/repo",
-        "provider_kind": "codex",
-        "provider_key": "native:codex",
-        "model": "unknown",
-        "orchestration_mode": "native",
-        "created_at": "2026-06-01T08:00:00.000000Z",
-        "message_count": 3,
-        "turn_source": "",
-        "turns": [{"timestamp": "2026-06-01T09:00:00.000000Z"}],
-    }]
-
-
-def test_native_conversations_index_metadata_uses_file_state_not_meta_maxima():
-    calls = []
-
-    def fake_sql(sql, params=(), **kwargs):
-        calls.append(sql)
-        if "SELECT path, ts_utc" in sql:
-            return {"columns": ["path", "ts_utc"], "rows": [["/native/codex.jsonl", "2026-06-01T09:00:00.000000Z"]]}
-        return {"columns": ["path", "sid", "cwd", "tag", "created_at", "message_count", "file_state_path"], "rows": []}
-
-    original = analytics.native_transcript_index.run_readonly_sql
-    original_state = analytics.native_transcript_index.quick_state
-    analytics.native_transcript_index.run_readonly_sql = fake_sql
-    analytics.native_transcript_index.quick_state = lambda: {
-        "schema_ok": True,
-        "covered": True,
-        "usable": True,
-    }
-    try:
-        analytics._native_conversations_from_index(
-            datetime(2026, 6, 1, 0, 0, 0),
-            datetime(2026, 6, 2, 0, 0, 0),
-        )
-    finally:
-        analytics.native_transcript_index.run_readonly_sql = original
-        analytics.native_transcript_index.quick_state = original_state
-
-    metadata_sql = calls[1].lower()
-    assert "native_file_state" in metadata_sql
-    assert "json_each" in metadata_sql
-    assert "max(sid" not in metadata_sql
-    assert "max(cwd" not in metadata_sql
-    assert "max(tag" not in metadata_sql
-
-
-def test_native_conversations_index_recovers_missing_file_state_metadata():
-    calls = []
-
-    def fake_sql(sql, params=(), **kwargs):
-        calls.append((sql, params, kwargs))
-        if "SELECT path, ts_utc" in sql:
-            return {
-                "columns": ["path", "ts_utc"],
-                "rows": [["/native/orphan.jsonl", "2026-06-01T09:00:00.000000Z"]],
-            }
-        if "MAX(sid)" in sql:
-            return {
-                "columns": ["path", "sid", "cwd", "tag"],
-                "rows": [["/native/orphan.jsonl", "sid-orphan", "/repo", "claude"]],
-            }
-        return {
-            "columns": ["path", "sid", "cwd", "tag", "created_at", "message_count", "file_state_path"],
-            "rows": [["/native/orphan.jsonl", "", "", "unknown",
-                      "2026-06-01T08:00:00.000000Z", 2, None]],
-        }
-
-    original = analytics.native_transcript_index.run_readonly_sql
-    original_state = analytics.native_transcript_index.quick_state
-    analytics.native_transcript_index.run_readonly_sql = fake_sql
-    analytics.native_transcript_index.quick_state = lambda: {
-        "schema_ok": True,
-        "covered": True,
-        "usable": True,
-    }
-    try:
-        out = analytics._native_conversations_from_index(
-            datetime(2026, 6, 1, 0, 0, 0),
-            datetime(2026, 6, 2, 0, 0, 0),
-        )
-    finally:
-        analytics.native_transcript_index.run_readonly_sql = original
-        analytics.native_transcript_index.quick_state = original_state
-
-    assert len(calls) == 3
-    assert calls[2][1][:1] == ("/native/orphan.jsonl",)
-    assert out[0]["sid"] == "sid-orphan"
-    assert out[0]["cwd"] == "/repo"
-    assert out[0]["provider_kind"] == "claude"
-    assert out[0]["provider_key"] == "native:claude"
-
-
-def test_native_conversations_reads_raw_when_index_uncovered():
-    class Candidate:
-        key = "codex-old"
-        sid = "codex-old"
-        cwd = "/repo"
-        format = "codex"
-        transcript = "/native/old-codex.jsonl"
-
-        def parse_elements(self):
-            return [
-                SimpleNamespace(kind="user_prompt", timestamp="2025-10-20T07:05:55.926Z"),
-                SimpleNamespace(kind="assistant_text", timestamp="2025-10-20T07:05:56.000Z"),
-            ]
-
-    original_state = analytics.native_transcript_index.quick_state
-    original_iter = analytics.native_session_miner.iter_all_native_candidates
-    analytics.native_transcript_index.quick_state = lambda: {
-        "schema_ok": False,
-        "covered": False,
-        "usable": False,
-    }
-    analytics.native_session_miner.iter_all_native_candidates = lambda: [Candidate()]
-    try:
-        out = analytics._native_conversations_from_index(
-            datetime(2000, 1, 1),
-            datetime(2026, 7, 6),
-        )
-    finally:
-        analytics.native_transcript_index.quick_state = original_state
-        analytics.native_session_miner.iter_all_native_candidates = original_iter
-
-    assert out == [{
-        "id": "native:/native/old-codex.jsonl",
-        "sid": "codex-old",
-        "cwd": "/repo",
-        "provider_kind": "codex",
-        "provider_key": "native:codex",
-        "model": "unknown",
-        "orchestration_mode": "native",
-        "created_at": "2025-10-20T07:05:55.926000Z",
-        "message_count": 2,
-        "turns": [{"timestamp": "2025-10-20T07:05:55.926000Z"}],
-    }]
-
-
-def test_native_conversations_reads_raw_when_index_query_fails():
-    class Candidate:
-        key = "claude-old"
-        sid = "claude-old"
-        cwd = "/repo"
-        format = "claude"
-        transcript = "/native/old-claude.jsonl"
-
-        def parse_elements(self):
-            return [SimpleNamespace(kind="user_prompt", timestamp="2025-10-20T08:00:00Z")]
-
-    original_state = analytics.native_transcript_index.quick_state
-    original_sql = analytics.native_transcript_index.run_readonly_sql
-    original_iter = analytics.native_session_miner.iter_all_native_candidates
-    analytics.native_transcript_index.quick_state = lambda: {
-        "schema_ok": True,
-        "covered": True,
-        "usable": True,
-    }
-    analytics.native_transcript_index.run_readonly_sql = lambda *_args, **_kwargs: {
-        "error": "OperationalError: interrupted",
-        "columns": [],
-        "rows": [],
-    }
-    analytics.native_session_miner.iter_all_native_candidates = lambda: [Candidate()]
-    try:
-        out = analytics._native_conversations_from_index(
-            datetime(2000, 1, 1),
-            datetime(2026, 7, 6),
-        )
-    finally:
-        analytics.native_transcript_index.quick_state = original_state
-        analytics.native_transcript_index.run_readonly_sql = original_sql
-        analytics.native_session_miner.iter_all_native_candidates = original_iter
-
-    assert out[0]["id"] == "native:/native/old-claude.jsonl"
-    assert out[0]["created_at"] == "2025-10-20T08:00:00Z"
-
-
 def test_aggregate_llm_calls_from_single_log_shape():
     start = END - timedelta(days=7)
     calls = [
@@ -686,6 +470,92 @@ def test_aggregate_sessions_split_user_vs_system():
     row = {b["t"]: b for b in out["sessions"]["series"]}
     assert sum(b["user_count"] for b in row.values()) == 2
     assert sum(b["count"] for b in row.values()) == 3
+
+
+def test_compute_analytics_uses_raw_only_when_index_is_uncovered():
+    class Candidate:
+        sid = "uncovered-native"
+        cwd = "/repo"
+        format = "codex"
+        transcript = "/native/uncovered.jsonl"
+
+        def parse_elements(self):
+            return [
+                SimpleNamespace(
+                    kind="user_prompt",
+                    timestamp="2026-06-01T09:00:00.000000Z",
+                ),
+                SimpleNamespace(
+                    kind="assistant_text",
+                    timestamp="2026-06-01T09:00:01.000000Z",
+                ),
+            ]
+
+    original_state = analytics.native_transcript_index.quick_state
+    original_iter = analytics.native_session_miner.iter_all_native_candidates
+    analytics.native_transcript_index.quick_state = lambda: {
+        "schema_ok": False,
+        "covered": False,
+        "usable": False,
+    }
+    analytics.native_session_miner.iter_all_native_candidates = lambda: [Candidate()]
+    try:
+        out = analytics.compute_analytics(
+            datetime(2026, 6, 1),
+            datetime(2026, 6, 2),
+        )
+    finally:
+        analytics.native_transcript_index.quick_state = original_state
+        analytics.native_session_miner.iter_all_native_candidates = original_iter
+
+    assert out["sessions"]["by_provider"][0]["kind"] == "codex"
+    assert out["turns"]["by_provider"][0]["turns"] == 1
+
+
+def test_compute_analytics_never_raw_parses_after_covered_query_failure():
+    original_state = analytics.native_transcript_index.quick_state
+    original_sql = analytics.native_transcript_index.run_readonly_sql
+    original_iter = analytics.native_session_miner.iter_all_native_candidates
+    raw_called = False
+
+    def raw_candidates():
+        nonlocal raw_called
+        raw_called = True
+        return []
+
+    analytics.native_transcript_index.quick_state = lambda: {
+        "schema_ok": True,
+        "covered": True,
+        "usable": True,
+    }
+    analytics.native_transcript_index.run_readonly_sql = lambda *_args, **_kwargs: {
+        "error": "result_too_large",
+        "columns": [],
+        "rows": [],
+    }
+    analytics.native_session_miner.iter_all_native_candidates = raw_candidates
+    try:
+        try:
+            analytics.compute_analytics(
+                datetime(2026, 6, 1),
+                datetime(2026, 6, 2),
+            )
+        except RuntimeError as exc:
+            assert str(exc) == "result_too_large"
+        else:
+            raise AssertionError("covered analytics query failure was hidden")
+    finally:
+        analytics.native_transcript_index.quick_state = original_state
+        analytics.native_transcript_index.run_readonly_sql = original_sql
+        analytics.native_session_miner.iter_all_native_candidates = original_iter
+
+    assert not raw_called
+
+
+def test_utc_z_uses_lexically_stable_microsecond_bounds():
+    assert analytics._utc_z(datetime(2024, 1, 1)).endswith(
+        ":00.000000Z"
+    )
 
 
 _TESTS = [v for k, v in sorted(globals().items())
