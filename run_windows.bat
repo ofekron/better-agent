@@ -28,5 +28,5 @@ if not defined ACTIVE_ENV (
   echo Backend dependency activation failed.
   exit /b 1
 )
-"%ACTIVE_ENV%\Scripts\python.exe" -m desktop.windows_source_launcher --checkout "%ROOT%" --host 127.0.0.1 --port %BETTER_AGENT_BACKEND_PORT%
+"%ACTIVE_ENV%\Scripts\python.exe" -m desktop.windows_source_launcher --checkout "%ROOT%" --host 127.0.0.1 --port 8000
 exit /b %ERRORLEVEL%
