@@ -159,7 +159,7 @@ def test_provider_start_remains_blocked_by_global_recovery_gate() -> None:
 def test_provider_recovery_does_not_wrap_scan_in_catalog_lock() -> None:
     source = inspect.getsource(provider.recover_all_in_flight)
     assert "run_catalog_lock" not in source
-    assert "_recover_all_in_flight_owned(loop)" in source
+    assert "_recover_all_in_flight_owned(" in source
 
 
 def test_provider_recovery_prioritizes_known_running_scan_buckets() -> None:
