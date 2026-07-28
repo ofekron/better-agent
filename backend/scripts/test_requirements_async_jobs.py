@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Regression lock for durable core extension jobs used by get-requirements.
 
-The backend restarts routinely (auto-restart-on-idle), so extension jobs must be
-core-owned durable workflows, not per-extension in-memory registries.
+Extension jobs must survive backend restarts as core-owned durable workflows,
+not per-extension in-memory registries.
 """
 from __future__ import annotations
 

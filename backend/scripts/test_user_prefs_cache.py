@@ -71,6 +71,13 @@ def test_get_all_loads_preferences_once() -> None:
     assert prefs["folder_view_enabled"] is True
 
 
+def test_removed_auto_restart_preference_is_not_projected() -> None:
+    path = Path(TMP_HOME) / "user_prefs.json"
+    path.write_text(json.dumps({"auto_restart_on_idle": True}), encoding="utf-8")
+    os.utime(path, None)
+    assert "auto_restart_on_idle" not in user_prefs.get_all()
+
+
 def test_appearance_theme_rejects_unknown_values() -> None:
     try:
         user_prefs.set_appearance_theme("unknown")  # type: ignore[arg-type]
@@ -84,6 +91,7 @@ if __name__ == "__main__":
         test_repeated_getters_share_cached_file_read()
         test_external_file_change_invalidates_cache()
         test_get_all_loads_preferences_once()
+        test_removed_auto_restart_preference_is_not_projected()
         test_appearance_theme_rejects_unknown_values()
         print("PASS test_user_prefs_cache")
     finally:

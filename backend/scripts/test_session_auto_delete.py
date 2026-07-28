@@ -7,6 +7,7 @@ import tempfile
 import asyncio
 from datetime import datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import _test_home
 _TMP_HOME = _test_home.isolate("bc-test-session-auto-delete-")
@@ -17,6 +18,7 @@ if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
 from fastapi.testclient import TestClient  # noqa: E402
+from fastapi import HTTPException  # noqa: E402
 
 import main  # noqa: E402
 import auth  # noqa: E402
@@ -92,6 +94,44 @@ def test_invalid_values_rejected(client: TestClient) -> bool:
     return True
 
 
+def test_removed_auto_restart_preference_rejected() -> bool:
+    _reset_home()
+    broadcasts: list[tuple[str, dict]] = []
+    original_broadcast = main.coordinator.broadcast_global
+
+    async def capture_broadcast(event_type: str, data: dict) -> None:
+        broadcasts.append((event_type, data))
+
+    main.coordinator.broadcast_global = capture_broadcast
+    try:
+        try:
+            asyncio.run(
+                main.patch_user_prefs(
+                    request=SimpleNamespace(session={}),
+                    body={"auto_restart_on_idle": True},
+                )
+            )
+            status_code = 200
+            detail = "accepted"
+        except HTTPException as exc:
+            status_code = exc.status_code
+            detail = str(exc.detail)
+    finally:
+        main.coordinator.broadcast_global = original_broadcast
+
+    prefs_path = Path(_TMP_HOME) / "user_prefs.json"
+    if status_code != 400:
+        print(f"  removed preference accepted: {status_code} {detail}")
+        return False
+    if prefs_path.exists():
+        print(f"  removed preference persisted: {prefs_path.read_text()}")
+        return False
+    if broadcasts:
+        print(f"  removed preference broadcast changes: {broadcasts}")
+        return False
+    return True
+
+
 def test_prunes_only_expired_non_running_sessions(client: TestClient) -> bool:
     _reset_home()
     old_sid = _create(client, "old")
@@ -132,6 +172,7 @@ def main_test() -> int:
     tests = [
         ("default never + persistence", test_default_never_and_persistence),
         ("invalid values rejected", test_invalid_values_rejected),
+        ("removed auto restart preference rejected", lambda _client: test_removed_auto_restart_preference_rejected()),
         ("prunes only expired non-running sessions", test_prunes_only_expired_non_running_sessions),
     ]
     ok = True

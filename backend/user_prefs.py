@@ -57,10 +57,6 @@ SUPPORTED_LANGUAGES: tuple[str, ...] = (
 DEFAULT_FIRST_RUN_WIZARD_DONE = False
 DEFAULT_FOLDER_VIEW_ENABLED = True
 DEFAULT_NETWORK_BIND_ADDRESS: NetworkBindAddress = "127.0.0.1"
-# Auto-restart the backend+frontend (via the run.sh supervisor) every time
-# the system transitions from busy to idle. Off by default — restarting a
-# running server is opt-in.
-DEFAULT_AUTO_RESTART_ON_IDLE = False
 DEFAULT_TASK_START_SILENCE_SECONDS = 90
 MIN_TASK_START_SILENCE_SECONDS = 15
 MAX_TASK_START_SILENCE_SECONDS = 3600
@@ -514,21 +510,6 @@ def set_last_reasoning_effort(provider_id: str, reasoning_effort: str) -> bool:
     return True
 
 
-def get_auto_restart_on_idle() -> bool:
-    """Whether the backend auto-fires a supervisor restart every time the
-    system goes idle after work (to pick up code changes). Default OFF."""
-    return _bool_pref(_load(), "auto_restart_on_idle", DEFAULT_AUTO_RESTART_ON_IDLE)
-
-
-def set_auto_restart_on_idle(enabled: bool) -> bool:
-    if not isinstance(enabled, bool):
-        raise ValueError(f"Invalid auto_restart_on_idle: {enabled!r}")
-    prefs = _load()
-    prefs["auto_restart_on_idle"] = enabled
-    _save(prefs)
-    return enabled
-
-
 def get_task_start_silence_seconds() -> int:
     return _bounded_int_pref(
         _load(),
@@ -676,11 +657,6 @@ def get_all(login_username: str | None = None) -> dict:
             prefs,
             "voice_close_on_background",
             DEFAULT_VOICE_CLOSE_ON_BACKGROUND,
-        ),
-        "auto_restart_on_idle": _bool_pref(
-            prefs,
-            "auto_restart_on_idle",
-            DEFAULT_AUTO_RESTART_ON_IDLE,
         ),
         "task_start_silence_seconds": _bounded_int_pref(
             prefs,

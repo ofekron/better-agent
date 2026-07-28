@@ -4,10 +4,10 @@ import { renderApp } from "./harness";
 import "../src/i18n";
 
 async function openRefreshModal(h: Awaited<ReturnType<typeof renderApp>>) {
-  if (h.$('button[aria-label="Settings"]')) {
-    await h.click('button[aria-label="Settings"]');
-  }
-  await h.clickByText(/Rebuild frontend \+ restart backend/);
+  const selector = h.$('button[aria-label="app.refreshButtonTitle"]')
+    ? 'button[aria-label="app.refreshButtonTitle"]'
+    : 'button[aria-label="Rebuild frontend + restart backend"]';
+  await h.click(selector);
 }
 
 async function waitForRestartStatus(h: Awaited<ReturnType<typeof renderApp>>) {

@@ -5,7 +5,6 @@ import type { Project, Provider, ProvidersState, ReasoningEffort, Permission } f
 import { trackPromise } from "../progress/store";
 import { ShortcutSettings } from "./ShortcutSettings";
 import { CrossSessionDelegateSetting } from "./CrossSessionDelegateSetting";
-import { AutoRestartOnIdleSetting } from "./AutoRestartOnIdleSetting";
 import { TaskStartSilenceSetting } from "./TaskStartSilenceSetting";
 import { RecursionGuardsSettings } from "./RecursionGuardsSettings";
 import { ContextStrategySetting } from "./ContextStrategySetting";
@@ -1472,7 +1471,6 @@ function ProvidersList({
         <>
           <DesktopAppSettingsSection />
           <div className="setup-divider" />
-          <AutoRestartOnIdleSetting />
           <TaskStartSilenceSetting />
         </>
       )}

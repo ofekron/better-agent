@@ -271,6 +271,7 @@ describe("SettingsPage title", () => {
     expect(screen.getByText("0.1.42")).toBeTruthy();
     expect(screen.getByText("Download for Windows")).toBeTruthy();
     expect(screen.getByText("Not built on this server")).toBeTruthy();
+    expect(screen.queryByText("Auto-restart when idle")).toBeNull();
   });
 
   it("persists the user display name from account settings", async () => {

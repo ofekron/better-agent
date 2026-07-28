@@ -1,5 +1,5 @@
-"""Regression test: restart-cadence busy probes must see pending/active
-cold-batch recovery integration as busy.
+"""Regression test: restart idle-wait probes must see pending/active cold-batch
+recovery integration as busy.
 
 RCA: `recover_all_in_flight` marks `startup_recovery_gate` done as soon as
 cold (completed/stale) recovered runs are *enqueued* for the
@@ -7,7 +7,7 @@ cold (completed/stale) recovered runs are *enqueued* for the
 finished integrating them. `_has_restart_blocking_agent_work` had no
 signal for that in-flight background integration at all, so a
 multi-minute cold batch (observed: 8 runs / 281s) read as idle for its
-entire duration, letting `auto_restart_on_idle` fire mid-integration.
+entire duration, allowing an idle-mode manual restart mid-integration.
 
 Run with:
     cd backend && .venv/bin/python scripts/test_restart_busy_cold_recovery.py

@@ -1513,8 +1513,6 @@ import runtime_profile
 import pre_send_advisory
 import shortcut_picker
 import user_prefs
-import auto_restart_on_idle
-import auto_restart_cooldown
 import ui_selection
 
 # Apply saved auth env vars at import time so any code path that still
@@ -3172,6 +3170,8 @@ async def patch_user_prefs(request: Request, body: dict = Body(...)):
     login_username = (request.session.get("user") or {}).get("username")
 
     def _patch_user_prefs_sync() -> dict:
+        if "auto_restart_on_idle" in body:
+            raise ValueError("auto_restart_on_idle is no longer supported")
         if "user_display_name" in body:
             user_prefs.set_user_display_name(body["user_display_name"])
         if "send_mode" in body:
@@ -3257,11 +3257,6 @@ async def patch_user_prefs(request: Request, body: dict = Body(...)):
             if not isinstance(val, bool):
                 raise ValueError("voice_close_on_background must be a boolean")
             user_prefs.set_voice_close_on_background(val)
-        if "auto_restart_on_idle" in body:
-            val = body["auto_restart_on_idle"]
-            if not isinstance(val, bool):
-                raise ValueError("auto_restart_on_idle must be a boolean")
-            user_prefs.set_auto_restart_on_idle(val)
         if "task_start_silence_seconds" in body:
             user_prefs.set_task_start_silence_seconds(
                 body["task_start_silence_seconds"]
@@ -11376,34 +11371,6 @@ def _has_restart_blocking_agent_work() -> bool:
     return any(coordinator.turn_manager.has_active_runs(sid) for sid in active_sids)
 
 
-def _system_busy_for_auto_restart() -> bool:
-    """Fresh snapshot of "is any agent work running right now", for the
-    auto-restart-on-idle monitor. Refreshes the turn-manager cache first so
-    dead PIDs are pruned before the check."""
-    import startup_recovery_gate
-    if startup_recovery_gate.is_pending():
-        return True
-    coordinator.turn_manager._refresh_cache()
-    return _has_restart_blocking_agent_work()
-
-
-def _has_new_commit_for_auto_restart() -> bool:
-    import app_version
-    process_sha = app_version.current_commit_sha()
-    head_sha = app_version.repository_head_commit_sha()
-    return bool(process_sha and head_sha and process_sha != head_sha)
-
-
-_auto_restart_on_idle_monitor = auto_restart_on_idle.AutoRestartOnIdleMonitor(
-    is_busy=_system_busy_for_auto_restart,
-    trigger_restart=_trigger_supervisor_restart,
-    is_enabled=user_prefs.get_auto_restart_on_idle,
-    has_new_commit=_has_new_commit_for_auto_restart,
-    restart_cooldown_remaining=auto_restart_cooldown.restart_cooldown_remaining_seconds,
-    record_restart_fired=auto_restart_cooldown.record_restart_fired,
-)
-
-
 async def _restart_connected_worker_nodes() -> list[str]:
     import node_link
     import node_store
@@ -13913,12 +13880,6 @@ async def on_startup():
     if installation_profile.integrations_enabled():
         import operation_requests
         _fire_and_forget(operation_requests.recover())
-
-    # Auto-restart-on-idle: when the user enables the pref, fire a
-    # supervisor restart every time the system goes idle after work, so
-    # code changes are picked up without a manual reload. Inert unless
-    # `auto_restart_on_idle` is on AND we're under the run.sh supervisor.
-    _auto_restart_on_idle_monitor.start()
 
     # Backend-owned schedule ticker — fires due schedules as normal
     # prompts through coordinator.submit_prompt.
