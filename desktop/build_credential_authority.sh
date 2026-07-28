@@ -12,7 +12,7 @@ if [ "${BETTER_AGENT_CREDENTIAL_BUILD_LOCKED:-0}" != "1" ]; then
   mkdir -p "$DIR/build"
   export BETTER_AGENT_CREDENTIAL_BUILD_LOCKED=1
   exec "$PYTHON" "$DIR/credential_build_lock.py" \
-    "$DIR/build/.credential-authority.lock" "$0" "$@"
+    "$DIR/build/.credential-authority.lock" bash "$0" "$@"
 fi
 
 SOURCES=(
