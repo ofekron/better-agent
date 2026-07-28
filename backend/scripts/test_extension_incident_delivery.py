@@ -303,6 +303,31 @@ async def test_worker_outbox_capacity_does_not_fall_back_to_worker_store() -> No
     check(fake.sent == [], "full worker outbox does not send an unpersisted incident")
 
 
+async def test_worker_outbox_expires_stale_incidents_before_capacity_check() -> None:
+    original_max = extension_incident_outbox.MAX_PENDING_INCIDENTS
+    extension_incident_outbox.MAX_PENDING_INCIDENTS = len(extension_incident_outbox.pending()) + 1
+    try:
+        stale = extension_incident_outbox.enqueue(
+            kind="backend_timeout",
+            extension_id="ofek.expired-ext",
+            activation_id="b" * 32,
+            elapsed_seconds=3.0,
+            occurred_at=time.time() - extension_incident_outbox.MAX_PENDING_INCIDENT_AGE_SECONDS - 1,
+        )
+        fresh = extension_incident_outbox.enqueue(
+            kind="backend_timeout",
+            extension_id="ofek.fresh-ext",
+            activation_id="c" * 32,
+            elapsed_seconds=3.0,
+        )
+    finally:
+        extension_incident_outbox.MAX_PENDING_INCIDENTS = original_max
+
+    pending_ids = {item["incident_id"] for item in extension_incident_outbox.pending()}
+    check(stale["incident_id"] not in pending_ids, "worker outbox expires stale incidents")
+    check(fresh["incident_id"] in pending_ids, "worker outbox frees capacity before enqueue")
+
+
 async def _main() -> None:
     await test_worker_incident_is_persisted_before_send_and_never_mutates_worker_store()
     await test_reconnect_replays_until_ack_then_removes()
@@ -311,6 +336,7 @@ async def _main() -> None:
     await test_primary_rejects_stale_future_malformed_and_over_capacity()
     await test_primary_quarantine_syncs_read_only_decision_state()
     await test_worker_outbox_capacity_does_not_fall_back_to_worker_store()
+    await test_worker_outbox_expires_stale_incidents_before_capacity_check()
     print("extension incident delivery tests passed")
 
 
