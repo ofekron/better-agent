@@ -1,13 +1,13 @@
-"""Locks the v8 write_session_full latency regression:
+"""Locks the v8 write_session_full payload regression:
 
-A session with 3000 events on the heaviest msg should write the
-snapshot in < 20 ms. The pre-v8 path (events embedded in JSON) was
-measured at 150 ms+ on the same shape. This test guards against
-accidentally re-embedding events on disk.
+A session with 3000 events on the heaviest msg must serialize to the
+exact same snapshot bytes as the otherwise-identical persistable tree.
+The pre-v8 path embedded events in JSON and took 150 ms+ on the same
+shape. Exact payload equality catches that regression without treating
+filesystem durability latency as application work.
 
-Also asserts that REST GET / cache-hit-path stays responsive while
-ingest fires concurrently — the per-root lock holds for tens of
-microseconds during a thin write, not hundreds of milliseconds.
+Also keeps a generous REST cache-hit smoke metric and the persistence
+correctness checks that protect the thin-snapshot path.
 
 Run with:
     cd backend && .venv/bin/python scripts/test_session_write_full_latency.py
@@ -19,8 +19,10 @@ import os
 import json
 import shutil
 import sys
-import tempfile
+import threading
 import time
+from concurrent.futures import Future
+from pathlib import Path
 from unittest.mock import patch
 
 import _test_home
@@ -33,11 +35,70 @@ if _BACKEND not in sys.path:
 
 import session_store  # noqa: E402
 import session_manager as session_manager_module  # noqa: E402
+import messages_delta_compaction  # noqa: E402
+from grouped_durability_writer import DurabilityReceipt  # noqa: E402
 from orchs import ApplyEventCtx, get_strategy  # noqa: E402
 from session_manager import manager as session_manager  # noqa: E402
 
 PASS = "\x1b[32mPASS\x1b[0m"
 FAIL = "\x1b[31mFAIL\x1b[0m"
+
+
+class _CaptureWriter:
+    def __init__(self) -> None:
+        self.generation = 0
+        self.writes: list[tuple[Path, bytes]] = []
+
+    def replace(self, target: Path, payload: bytes) -> DurabilityReceipt:
+        self.generation += 1
+        target = Path(target)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(payload)
+        self.writes.append((target, payload))
+        future: Future[int] = Future()
+        future.set_result(self.generation)
+        return DurabilityReceipt(self.generation, future)
+
+
+_VOLATILE_KEYS = {
+    "events",
+    "_uid_idx",
+    "_has_final",
+    "_panel_anchor_cache",
+    "isStreaming",
+    "draft_input",
+    "draft_input_seq",
+    "draft_images",
+    "last_opened_at",
+    "_content_dirty",
+    messages_delta_compaction.PRECOMPUTED_REVISION_KEY,
+}
+
+
+def _volatile_paths(value: object, path: str = "$") -> list[str]:
+    found: list[str] = []
+    if isinstance(value, dict):
+        for key, child in value.items():
+            child_path = f"{path}.{key}"
+            if key in _VOLATILE_KEYS:
+                found.append(child_path)
+            found.extend(_volatile_paths(child, child_path))
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            found.extend(_volatile_paths(child, f"{path}[{index}]"))
+    return found
+
+
+def _without_volatile(value: object) -> object:
+    if isinstance(value, dict):
+        return {
+            key: _without_volatile(child)
+            for key, child in value.items()
+            if key not in _VOLATILE_KEYS
+        }
+    if isinstance(value, list):
+        return [_without_volatile(child) for child in value]
+    return value
 
 
 def _native_event(uuid: str, text: str = "x") -> dict:
@@ -72,6 +133,95 @@ def _build_heavy_session(n: int) -> str:
         )
     session_manager.flush_pending_persists()
     return sid
+
+
+def _capture_thin_snapshot_invariant(root: dict, sid: str) -> tuple[bool, str]:
+    msg = root["messages"][-1]
+    original_workers = msg.get("workers")
+    original_forks = root.get("forks")
+    msg["workers"] = [
+        {
+            "id": "volatile-worker",
+            "events": [_native_event("worker-volatile")],
+            "_uid_idx": {"worker-volatile": 0},
+            "_has_final": True,
+        }
+    ]
+    root["forks"] = [
+        {
+            "id": "volatile-fork",
+            "parent_session_id": sid,
+            "forks": [],
+            "messages": [
+                {
+                    "id": "volatile-fork-message",
+                    "role": "assistant",
+                    "content": "nested",
+                    "events": [_native_event("fork-volatile")],
+                    "_uid_idx": {"fork-volatile": 0},
+                    "_panel_anchor_cache": {"cached": True},
+                    "isStreaming": True,
+                }
+            ],
+            "draft_input": "volatile",
+            "last_opened_at": "2030-01-02T03:04:05",
+        }
+    ]
+    baseline = _without_volatile(root)
+    assert isinstance(baseline, dict)
+    capture = _CaptureWriter()
+    session_path = session_store._session_path(sid)
+    owner_thread = threading.get_ident()
+    real_writer = session_store._get_durability_writer
+
+    def writer_for_current_thread():
+        if threading.get_ident() == owner_thread:
+            return capture
+        return real_writer()
+
+    try:
+        with patch(
+            "session_store._get_durability_writer",
+            side_effect=writer_for_current_thread,
+        ):
+            session_store.write_session_full(
+                baseline,
+                bump_updated_at=False,
+                already_persistable=True,
+            )
+            session_store.write_session_full(root, bump_updated_at=False)
+    finally:
+        if original_workers is None:
+            msg.pop("workers", None)
+        else:
+            msg["workers"] = original_workers
+        if original_forks is None:
+            root.pop("forks", None)
+        else:
+            root["forks"] = original_forks
+        session_store.write_session_full(root, bump_updated_at=False)
+    session_payloads = [
+        payload for target, payload in capture.writes
+        if target == session_path
+    ]
+    decoded_payload = (
+        json.loads(session_payloads[-1])
+        if session_payloads
+        else {}
+    )
+    volatile_paths = _volatile_paths(decoded_payload)
+    ok = (
+        len(session_payloads) == 2
+        and session_payloads[0] == session_payloads[1]
+        and not volatile_paths
+        and len(msg.get("events") or []) == 3000
+    )
+    detail = (
+        f"payloads={len(session_payloads)} "
+        f"bytes={[len(payload) for payload in session_payloads]} "
+        f"volatile_paths={volatile_paths}"
+    )
+    return ok, detail
 
 
 def _run() -> bool:
@@ -124,27 +274,21 @@ def _run() -> bool:
 
     sid = _build_heavy_session(3000)
 
-    # Force an explicit write and measure.
+    # Capture the exact persistence payload with and without the live-only
+    # event state. The capture boundary acknowledges immediately but still
+    # exercises the real indexing, stripping, encoding, signature, summary,
+    # and projection path.
     root = session_manager.get_ref(sid)
-    # Cold the perf cache.
-    t0 = time.perf_counter()
-    session_store.write_session_full(root, bump_updated_at=False)
-    elapsed_ms = (time.perf_counter() - t0) * 1000.0
+    thin_snapshot_ok, thin_snapshot_detail = _capture_thin_snapshot_invariant(
+        root, sid,
+    )
     results.append(
-        (f"write_session_full < 20ms (3000 events)", elapsed_ms < 20.0,
-         f"got {elapsed_ms:.2f}ms"))
-
-    # Repeat 5x to catch warm-cache regressions and report median.
-    samples = []
-    for _ in range(5):
-        t0 = time.perf_counter()
-        session_store.write_session_full(root, bump_updated_at=False)
-        samples.append((time.perf_counter() - t0) * 1000.0)
-    samples.sort()
-    median = samples[len(samples) // 2]
-    results.append(
-        (f"median write_session_full < 15ms", median < 15.0,
-         f"got median={median:.2f}ms samples={[f'{s:.1f}' for s in samples]}"))
+        (
+            "3000 live events produce the exact thin snapshot bytes",
+            thin_snapshot_ok,
+            thin_snapshot_detail,
+        )
+    )
 
     version_before = session_store.summary_version()
 
@@ -270,17 +414,9 @@ def _run() -> bool:
     msg.pop("_uid_idx", None)
     msg.pop("events", None)
 
-    # Concurrent contention: alternating writer + reader on the same
-    # session. Writer goes through `set_pinned` which acquires
-    # `_lock_for_root(rid)` and calls `_persist_root` →
-    # `write_session_full`. Reader goes through
-    # `get_root_tree_paginated` which also takes the lock. They
-    # serialize. With the thin snapshot the writer holds the lock for
-    # ~2ms per write, so reader latency stays bounded.
-    #
-    # Run synchronously (no threads — keeps the test deterministic;
-    # the goal is to prove the write isn't the dominant cost, not to
-    # stress the lock).
+    # Alternating write/read smoke metric. This is deliberately not a
+    # contention proof: the persistence coordinator's lock-release
+    # contract is covered by its lifecycle integration suite.
     rest_latencies: list[float] = []
     for _ in range(30):
         session_manager.set_pinned(sid, True)
@@ -293,10 +429,10 @@ def _run() -> bool:
     p95 = rest_latencies[int(len(rest_latencies) * 0.95)]
     # The cache-hit path is a deep_copy of the trimmed tree. With
     # 3000 events on msg.events the deepcopy itself is the dominant
-    # cost — bar at 200ms accommodates that, while still catching
-    # regressions where reads queue behind a 150ms+ write.
+    # cost. The 200ms smoke ceiling catches gross read-side regressions
+    # without conflating this sequential check with lock contention.
     results.append(
-        (f"REST p95 < 200ms while interleaved with writes",
+        (f"REST p95 < 200ms across alternating writes",
          p95 < 200.0,
          f"got p95={p95:.2f}ms n={len(rest_latencies)} "
          f"samples-trim={[f'{s:.1f}' for s in rest_latencies[:5]]}..."))
@@ -391,6 +527,9 @@ def main() -> int:
         ok = _run()
         return 0 if ok else 1
     finally:
+        session_manager.flush_pending_persists()
+        session_store._summary_sidecar_write_queue.join()
+        session_store.shutdown_durability_writer()
         shutil.rmtree(_TMP_HOME, ignore_errors=True)
 
 
