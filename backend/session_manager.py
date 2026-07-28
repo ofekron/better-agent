@@ -212,13 +212,6 @@ PERSIST_DEBOUNCE_S = 0.050
 EXTERNAL_RELOAD_POLL_INTERVAL_S = 1.0
 
 
-@dataclass(frozen=True)
-class _PersistClaim:
-    root_id: str
-    token: object
-    live_root: dict
-
-
 class _SessionPersistCoordinator:
     def __init__(self, flush_root: Callable[[str], None]) -> None:
         self.pending: dict[str, dict] = {}
@@ -226,129 +219,27 @@ class _SessionPersistCoordinator:
         self.deadline_heap: list[tuple[float, str]] = []
         self.last_at: dict[str, float] = {}
         self.inflight: set[str] = set()
-        self.inflight_claims: dict[str, object] = {}
-        self.cancelled_claims: set[object] = set()
-        self.accepted_roots: set[str] = set()
         self.lock = threading.Lock()
         self.changed = threading.Condition(self.lock)
-        self.state = "accepting"
         self.scheduler_started = False
-        self._thread: Optional[threading.Thread] = None
-        self._drain_in_progress = False
-        self._drain_succeeded = False
         self._flush_root = flush_root
 
-    def _is_quiescent_unlocked(self) -> bool:
-        return not (
-            self.pending
-            or self.deadlines
-            or self.inflight
-            or self.inflight_claims
-            or self.accepted_roots
-        )
-
-    def _arm_accepted_deadline_unlocked(
-        self, root_id: str, delay: float,
-    ) -> None:
-        if root_id not in self.accepted_roots:
-            raise RuntimeError("cannot schedule an unaccepted persist root")
+    def arm_deadline_unlocked(self, root_id: str, delay: float) -> None:
         deadline = time.monotonic() + max(0.0, delay)
         self.deadlines[root_id] = deadline
         heapq.heappush(self.deadline_heap, (deadline, root_id))
         if not self.scheduler_started:
-            thread = threading.Thread(
+            self.scheduler_started = True
+            threading.Thread(
                 target=self.scheduler_loop,
                 name="session-persist-scheduler",
                 daemon=True,
-            )
-            self._thread = thread
-            self.scheduler_started = True
-            try:
-                thread.start()
-            except BaseException:
-                self._thread = None
-                self.scheduler_started = False
-                raise
+            ).start()
         self.changed.notify_all()
-
-    def enqueue_unlocked(
-        self,
-        root_id: str,
-        live_root: dict,
-        *,
-        now: float,
-        debounce: float,
-    ) -> None:
-        if self.state != "accepting":
-            raise RuntimeError("persist coordinator is closing")
-        self.accepted_roots.add(root_id)
-        self.pending[root_id] = live_root
-        if root_id in self.inflight:
-            return
-        last = self.last_at.get(root_id, 0.0)
-        delay = max(0.0, debounce - (now - last))
-        self._arm_accepted_deadline_unlocked(root_id, delay)
 
     def cancel_deadline_unlocked(self, root_id: str) -> None:
         self.deadlines.pop(root_id, None)
         self.changed.notify_all()
-
-    def claim_pending_unlocked(self, root_id: str) -> Optional[_PersistClaim]:
-        if root_id in self.inflight:
-            return None
-        live_root = self.pending.pop(root_id, None)
-        self.cancel_deadline_unlocked(root_id)
-        if live_root is None:
-            return None
-        claim = _PersistClaim(root_id, object(), live_root)
-        self.inflight.add(root_id)
-        self.inflight_claims[root_id] = claim.token
-        self.last_at[root_id] = time.monotonic()
-        return claim
-
-    def cancel_active_claim_unlocked(self, root_id: str) -> None:
-        token = self.inflight_claims.get(root_id)
-        if token is not None:
-            self.cancelled_claims.add(token)
-
-    def finish_claim_unlocked(
-        self,
-        claim: _PersistClaim,
-        *,
-        failed: bool,
-        reschedule_concurrent: bool,
-    ) -> None:
-        if self.inflight_claims.get(claim.root_id) is claim.token:
-            new_work_waiting = claim.root_id in self.pending
-            cancelled = claim.token in self.cancelled_claims
-            if failed and not cancelled:
-                self.pending.setdefault(claim.root_id, claim.live_root)
-            self.inflight_claims.pop(claim.root_id, None)
-            self.inflight.discard(claim.root_id)
-            if (
-                reschedule_concurrent
-                and new_work_waiting
-                and claim.root_id in self.pending
-                and claim.root_id not in self.deadlines
-            ):
-                last = self.last_at.get(claim.root_id, 0.0)
-                delay = max(
-                    0.0,
-                    PERSIST_DEBOUNCE_S - (time.monotonic() - last),
-                )
-                self._arm_accepted_deadline_unlocked(claim.root_id, delay)
-            self._release_root_if_quiescent_unlocked(claim.root_id)
-        self.cancelled_claims.discard(claim.token)
-        self.changed.notify_all()
-
-    def _release_root_if_quiescent_unlocked(self, root_id: str) -> None:
-        if (
-            root_id not in self.pending
-            and root_id not in self.deadlines
-            and root_id not in self.inflight
-            and root_id not in self.inflight_claims
-        ):
-            self.accepted_roots.discard(root_id)
 
     def clear_unlocked(self) -> None:
         self.pending.clear()
@@ -356,116 +247,33 @@ class _SessionPersistCoordinator:
         self.deadline_heap.clear()
         self.last_at.clear()
         self.inflight.clear()
-        self.inflight_claims.clear()
-        self.cancelled_claims.clear()
-        self.accepted_roots.clear()
         self.changed.notify_all()
 
-    def request_close(self) -> None:
-        with self.changed:
-            if self.state == "accepting":
-                self.state = "closing"
-            self.changed.notify_all()
-
-    def close(self, drain: Callable[[], None], timeout: float) -> None:
-        if self._thread is threading.current_thread():
-            raise RuntimeError("persist coordinator cannot join its scheduler thread")
-        deadline = time.monotonic() + max(0.0, timeout)
-        with self.changed:
-            if self.state == "accepting":
-                self.state = "closing"
-            owns_drain = False
-            while self.state != "closed" and not self._drain_succeeded:
-                if not self._drain_in_progress:
-                    self._drain_in_progress = True
-                    owns_drain = True
-                    break
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise TimeoutError("persist coordinator close timed out")
-                self.changed.wait(timeout=remaining)
-        if owns_drain:
-            drain_succeeded = False
-            try:
-                drain()
-                drain_succeeded = True
-            finally:
-                with self.changed:
-                    self._drain_in_progress = False
-                    self._drain_succeeded = drain_succeeded
-                    self.changed.notify_all()
-        with self.changed:
-            while self.state != "closed":
-                if (
-                    self._drain_succeeded
-                    and self._is_quiescent_unlocked()
-                    and (self._thread is None or not self._thread.is_alive())
-                ):
-                    self.state = "closed"
-                    self.changed.notify_all()
-                    break
-                self.changed.notify_all()
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise TimeoutError("persist coordinator close timed out")
-                self.changed.wait(timeout=remaining)
-            thread = self._thread
-        if thread is not None and thread.is_alive():
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise TimeoutError("persist coordinator close timed out")
-            thread.join(timeout=remaining)
-            if thread.is_alive():
-                raise TimeoutError("persist coordinator close timed out")
-
     def scheduler_loop(self) -> None:
-        try:
-            while True:
-                due: list[str] = []
-                with self.changed:
-                    while True:
-                        if (
-                            self.state == "closing"
-                            and self._drain_succeeded
-                            and self._is_quiescent_unlocked()
-                        ):
-                            if self._drain_in_progress:
-                                self.changed.wait()
-                                continue
-                            self.state = "closed"
-                            self.changed.notify_all()
-                            return
-                        now = time.monotonic()
-                        while self.deadline_heap:
-                            deadline, root_id = self.deadline_heap[0]
-                            if self.deadlines.get(root_id) == deadline:
-                                break
-                            heapq.heappop(self.deadline_heap)
-                        if not self.deadline_heap:
-                            self.changed.wait()
-                            continue
-                        deadline, root_id = self.deadline_heap[0]
-                        wait_s = deadline - now
-                        if wait_s > 0:
-                            self.changed.wait(timeout=wait_s)
-                            continue
-                        heapq.heappop(self.deadline_heap)
-                        if self.deadlines.pop(root_id, None) == deadline:
-                            due.append(root_id)
-                        break
-                for root_id in due:
-                    self._flush_root(root_id)
-        finally:
+        while True:
+            due: list[str] = []
             with self.changed:
-                self.scheduler_started = False
-                if (
-                    self.state == "closing"
-                    and not self._drain_in_progress
-                    and self._drain_succeeded
-                    and self._is_quiescent_unlocked()
-                ):
-                    self.state = "closed"
-                self.changed.notify_all()
+                while True:
+                    now = time.monotonic()
+                    while self.deadline_heap:
+                        deadline, root_id = self.deadline_heap[0]
+                        if self.deadlines.get(root_id) == deadline:
+                            break
+                        heapq.heappop(self.deadline_heap)
+                    if not self.deadline_heap:
+                        self.changed.wait()
+                        continue
+                    deadline, root_id = self.deadline_heap[0]
+                    wait_s = deadline - now
+                    if wait_s > 0:
+                        self.changed.wait(timeout=wait_s)
+                        continue
+                    heapq.heappop(self.deadline_heap)
+                    if self.deadlines.pop(root_id, None) == deadline:
+                        due.append(root_id)
+                    break
+            for root_id in due:
+                self._flush_root(root_id)
 
 
 _production_persist_coordinator: Optional[_SessionPersistCoordinator] = None
@@ -481,7 +289,7 @@ _persist_state_changed: threading.Condition
 def _arm_persist_deadline_unlocked(root_id: str, delay: float) -> None:
     if _production_persist_coordinator is None:
         raise RuntimeError("production persist coordinator is not initialized")
-    _production_persist_coordinator._arm_accepted_deadline_unlocked(root_id, delay)
+    _production_persist_coordinator.arm_deadline_unlocked(root_id, delay)
 
 
 def _cancel_persist_deadline_unlocked(root_id: str) -> None:
@@ -588,6 +396,7 @@ def _validate_orchestration_mode_against_provider(
 
 class SessionManager:
     def __init__(self) -> None:
+        self._persist_coordinator = _SessionPersistCoordinator(self._tail_persist)
         self._root_repository: SessionRootRepository = JsonSessionRootRepository()
         # Root trees, keyed by root_id. Forks live inside their root.
         # OrderedDict for LRU: `move_to_end` marks recency on access,
@@ -3993,12 +3802,26 @@ class SessionManager:
         now = time.monotonic()
         persist = self._persist_coordinator
         with persist.lock:
-            persist.enqueue_unlocked(
-                root_id,
-                root,
-                now=now,
-                debounce=PERSIST_DEBOUNCE_S,
-            )
+            persist.pending[root_id] = root
+            if root_id in persist.inflight:
+                return
+            last = persist.last_at.get(root_id, 0.0)
+            if root_id in persist.deadlines:
+                delay = max(0.0, PERSIST_DEBOUNCE_S - (now - last))
+                persist.arm_deadline_unlocked(root_id, delay)
+                return
+            if now - last >= PERSIST_DEBOUNCE_S:
+                # Leading edge: queue a zero-delay scheduler dispatch that re-acquires
+                # the root lock before writing. The caller's lock is
+                # still held → the timer thread blocks on
+                # _lock_for_root until the caller returns, then writes
+                # the latest state. This avoids running json.dump on
+                # the event loop for large (13MB+) session trees.
+                persist.arm_deadline_unlocked(root_id, 0.0)
+            else:
+                # Inside window: queue the live ref + (re)arm tail deadline.
+                delay = PERSIST_DEBOUNCE_S - (now - last)
+                persist.arm_deadline_unlocked(root_id, delay)
         # Drafts no longer live in the tree, so a tree persist does NOT
         # capture them. Flush the small draft sidecar synchronously when
         # this root has a pending draft (any mutator's persist also
@@ -4049,15 +3872,16 @@ class SessionManager:
         try:
             with perf.timed("session.tail_persist.lock_copy"):
                 with perf.timed("session.tail_persist.state"):
-                    with _persist_state_lock:
-                        if root_id in _persist_inflight:
+                    persist = self._persist_coordinator
+                    with persist.lock:
+                        if root_id in persist.inflight:
                             return
-                        pending = _persist_pending.pop(root_id, None)
-                        _cancel_persist_deadline_unlocked(root_id)
+                        pending = persist.pending.pop(root_id, None)
+                        persist.cancel_deadline_unlocked(root_id)
                         if pending is None:
                             return
-                        _persist_inflight.add(root_id)
-                        _persist_last_at[root_id] = time.monotonic()
+                        persist.inflight.add(root_id)
+                        persist.last_at[root_id] = time.monotonic()
                 with perf.timed("session.tail_persist.copy"):
                     sess = self._root_repository.copy_persistable_root(pending)
         finally:
@@ -4088,14 +3912,14 @@ class SessionManager:
                 "_tail_persist failed for %s", root_id,
             )
         finally:
-            if claim is not None:
-                persist = self._persist_coordinator
-                with persist.changed:
-                    persist.finish_claim_unlocked(
-                        claim,
-                        failed=failed,
-                        reschedule_concurrent=True,
-                    )
+            persist = self._persist_coordinator
+            with persist.changed:
+                persist.inflight.discard(root_id)
+                if root_id in persist.pending and root_id not in persist.deadlines:
+                    last = persist.last_at.get(root_id, 0.0)
+                    delay = max(0.0, PERSIST_DEBOUNCE_S - (time.monotonic() - last))
+                    persist.arm_deadline_unlocked(root_id, delay)
+                persist.changed.notify_all()
 
     def _drop_pending_persist(self, root_id: str) -> None:
         """Cancel any queued tail flush + drop the pending entry for
@@ -4115,8 +3939,6 @@ class SessionManager:
             persist.pending.pop(root_id, None)
             persist.cancel_deadline_unlocked(root_id)
             persist.last_at.pop(root_id, None)
-            persist.cancel_active_claim_unlocked(root_id)
-            persist._release_root_if_quiescent_unlocked(root_id)
 
     def flush_pending_persists(self) -> None:
         """Best-effort drain of pending tail flushes. Called from:
@@ -4124,9 +3946,9 @@ class SessionManager:
             clean stop persists everything queued.
 
         Iterates the keys at snapshot time and blocks on each root lock.
-        Each root is attempted at most once per call. Failed writes stay
-        pending for the next explicit drain instead of being dropped or
-        retried in a tight loop."""
+        This method is the explicit durability barrier used by shutdown
+        and tests, so returning while a pending tree write remains would
+        violate its contract."""
         persist = self._persist_coordinator
         with persist.lock:
             rids = set(persist.pending) | set(persist.inflight)
@@ -4144,14 +3966,14 @@ class SessionManager:
                         continue
                     persist.last_at[rid] = time.monotonic()
                 try:
-                    with _persist_state_changed:
-                        while rid in _persist_inflight:
-                            _persist_state_changed.wait(timeout=1.0)
-                        sess = _persist_pending.pop(rid, None)
-                        _cancel_persist_deadline_unlocked(rid)
+                    with persist.changed:
+                        while rid in persist.inflight:
+                            persist.changed.wait(timeout=1.0)
+                        sess = persist.pending.pop(rid, None)
+                        persist.cancel_deadline_unlocked(rid)
                         if sess is None:
                             break
-                        _persist_last_at[rid] = time.monotonic()
+                        persist.last_at[rid] = time.monotonic()
                     try:
                         self._root_repository.write_root(
                             sess,
@@ -4165,8 +3987,8 @@ class SessionManager:
                         )
                 finally:
                     lock.release()
-                with _persist_state_changed:
-                    if rid not in _persist_pending and rid not in _persist_inflight:
+                with persist.changed:
+                    if rid not in persist.pending and rid not in persist.inflight:
                         break
 
     def flush_root_persist(self, root_id: str) -> None:
@@ -4191,15 +4013,15 @@ class SessionManager:
                 (time.perf_counter() - lock_started) * 1000.0,
             )
             try:
-                with _persist_state_changed:
-                    if root_id in _persist_inflight:
+                with persist.changed:
+                    if root_id in persist.inflight:
                         continue
-                    pending = _persist_pending.pop(root_id, None)
-                    _cancel_persist_deadline_unlocked(root_id)
+                    pending = persist.pending.pop(root_id, None)
+                    persist.cancel_deadline_unlocked(root_id)
                     if pending is None:
                         return
-                    _persist_inflight.add(root_id)
-                    _persist_last_at[root_id] = time.monotonic()
+                    persist.inflight.add(root_id)
+                    persist.last_at[root_id] = time.monotonic()
                 sess = self._root_repository.copy_persistable_root(pending)
             finally:
                 lock.release()
@@ -4213,16 +4035,13 @@ class SessionManager:
                     )
                 self._note_root_file_written(root_id)
             except Exception:
-                failed = True
+                with persist.changed:
+                    persist.pending.setdefault(root_id, sess)
                 raise
             finally:
-                if claim is not None:
-                    with persist.changed:
-                        persist.finish_claim_unlocked(
-                            claim,
-                            failed=failed,
-                            reschedule_concurrent=False,
-                        )
+                with persist.changed:
+                    persist.inflight.discard(root_id)
+                    persist.changed.notify_all()
 
     # ── Draft persist coalescer ────────────────────────────────────
     # Moved to `backend/draft_store.py`. sm hot paths resolve the
