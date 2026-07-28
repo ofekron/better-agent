@@ -2041,6 +2041,120 @@ def test_runtime_ready_requires_protocol_smoke_to_pass() -> None:
         extension_store.uninstall("ofek.protocol-ready")
 
 
+def test_reconcile_re_smokes_stale_marketplace_smoke_after_manifest_path_change() -> None:
+    # A non-local (artifact/marketplace) extension whose manifest
+    # protocol.smoke_test.required_paths was expanded after install must
+    # self-heal on reconcile: the stored "passed" smoke is stale relative to
+    # the new path list, so _ensure_installed_smoke_current re-runs it against
+    # the present install. Regression for the routines extension disappearing
+    # from every session after its smoke required_paths grew from 3 to 5:
+    # _ensure_local_extensions only covers better_agent_local sources, so
+    # without this re-smoke the stale record kept the extension
+    # not-runtime-ready forever (and a backend restart did not fix it).
+    ext_id = "ofek.stale-smoke-fixture"
+    package = Path(tempfile.mkdtemp(prefix="bc-test-stale-smoke-")) / "stale-smoke"
+    (package / "mcp").mkdir(parents=True)
+    manifest = {
+        "kind": extension_store.MANIFEST_KIND,
+        "id": ext_id,
+        "name": "Stale smoke fixture",
+        "version": "0.1.0",
+        "description": "Non-local extension with a stale smoke record.",
+        "surfaces": ["runtime_mcp"],
+        "entrypoints": {
+            "mcp": [
+                {
+                    "name": "stale-smoke-mcp",
+                    "python": "mcp/server.py",
+                    "args": [],
+                    "env": {},
+                    "user_facing": True,
+                    "bare_allowed": False,
+                    "requires_backend_auth": True,
+                }
+            ],
+        },
+        "permissions": {"internal_loopback": True},
+        "protocol": {
+            "version": 1,
+            "smoke_test": {
+                "required_paths": ["better-agent-extension.json"],
+                "python_modules": ["mcp.server"],
+            },
+        },
+        "marketplace": {},
+    }
+    (package / "better-agent-extension.json").write_text(json.dumps(manifest), encoding="utf-8")
+    (package / "mcp" / "server.py").write_text("# stub mcp server\n", encoding="utf-8")
+    record = extension_store._install_from_package_dir(
+        package_dir=package,
+        source={
+            "type": "artifact",
+            "repo_url": "https://example.test/stale.tar.gz",
+            "extension_path": "",
+            "ref": "",
+            "commit_sha": "stale-smoke",
+        },
+        persist=True,
+    )
+    try:
+        install_path = Path(record["source"]["install_path"])
+        # Simulate a post-install manifest update: add a new required path that
+        # EXISTS in the install, update the registry manifest to expect it, but
+        # leave the stored smoke recording the old (single-path) result.
+        (install_path / "marker.txt").write_text("ok", encoding="utf-8")
+        new_protocol = {
+            "version": 1,
+            "smoke_test": {
+                "required_paths": ["better-agent-extension.json", "marker.txt"],
+                "python_modules": ["mcp.server"],
+            },
+        }
+        with extension_store._store_lock():
+            data = extension_store._read_store_unlocked()
+            rec = data["extensions"][ext_id]
+            rec["manifest"]["protocol"] = new_protocol
+            # Stored smoke still reflects the pre-update single-path result.
+            rec["smoke_test"] = {
+                "status": "passed",
+                "checked_at": "2026-01-01T00:00:00+00:00",
+                "protocol_version": 1,
+                "required_paths": ["better-agent-extension.json"],
+                "python_modules": ["mcp.server"],
+            }
+            extension_store._write_store_unlocked(data)
+        # Non-local source: _ensure_local_extensions cannot heal it.
+        if extension_store._local_package_from_record(
+            extension_store.get_extension(ext_id)
+        ) is not None:
+            raise AssertionError("fixture must be a non-local source to exercise the bug")
+        # Pre-condition: stored smoke is stale relative to the new manifest.
+        pre = extension_store.get_extension(ext_id)
+        if extension_store._record_smoke_test_current(pre):
+            raise AssertionError("stored smoke must be stale before reconcile")
+        if extension_store._record_backend_surface_ready(pre):
+            raise AssertionError(
+                "stale smoke must fail the backend-surface readiness gate"
+            )
+        # Reconcile is what runs on store load / startup.
+        extension_store.list_extensions_with_reconciliation(include_hidden=True)
+        post = extension_store.get_extension(ext_id)
+        if not extension_store._record_smoke_test_current(post):
+            raise AssertionError("reconcile did not re-smoke the stale marketplace smoke")
+        fresh = post["smoke_test"]
+        if fresh.get("status") != "passed":
+            raise AssertionError(f"re-smoke did not pass: {fresh}")
+        if list(fresh.get("required_paths") or []) != [
+            "better-agent-extension.json",
+            "marker.txt",
+        ]:
+            raise AssertionError(f"re-smoke did not adopt the new required_paths: {fresh}")
+        if not extension_store._record_backend_surface_ready(post):
+            raise AssertionError("re-smoked extension still fails backend-surface readiness")
+    finally:
+        extension_store.uninstall(ext_id)
+
+
 def test_runtime_ready_accepts_persisted_manifest_without_protocol() -> None:
     package = Path(tempfile.mkdtemp(prefix="bc-test-no-protocol-ready-")) / "legacy"
     package.mkdir(parents=True)
@@ -5790,6 +5904,7 @@ if __name__ == "__main__":
         test_manifest_dependencies_reject_self_and_bad_id()
         test_install_smoke_test_rejects_missing_protocol_files()
         test_runtime_ready_requires_protocol_smoke_to_pass()
+        test_reconcile_re_smokes_stale_marketplace_smoke_after_manifest_path_change()
         test_runtime_ready_accepts_persisted_manifest_without_protocol()
         test_runtime_ready_only_spawn_runs_requires_default_session_llm()
         test_set_enabled_enforces_dependencies()

@@ -765,8 +765,53 @@ def _reconcile_loaded_store(data: dict[str, Any]) -> tuple[bool, bool, list[str]
         changed = True
     if recovered:
         public_changed = True
+    if _ensure_installed_smoke_current(data):
+        changed = True
     _prune_extension_versions(data)
     return changed, public_changed, recovered
+
+
+def _ensure_installed_smoke_current(data: dict[str, Any]) -> bool:
+    """Re-smoke installed extensions whose stored result is a stale "passed".
+
+    A stored smoke is stale when the manifest's ``required_paths`` /
+    ``python_modules`` changed since it was recorded but the install is still
+    present. Local/path extensions are refreshed by ``_ensure_local_extensions``
+    on manifest change; marketplace and other remotely-installed extensions are
+    not, so a manifest smoke-path update left them permanently
+    not-runtime-ready — the stale record never re-ran, silently dropping the
+    extension (and its MCP) from every session. Re-smoke those here so a valid
+    install self-heals on reconcile. Genuinely-failed smokes are left as-is;
+    only a previously-passing install is re-verified, and a re-run that fails
+    leaves the record unchanged (still not-ready)."""
+    changed = False
+    for record in (data.get("extensions") or {}).values():
+        if not isinstance(record, dict):
+            continue
+        manifest = record.get("manifest") or {}
+        if "protocol" not in manifest:
+            continue
+        smoke = record.get("smoke_test")
+        if not isinstance(smoke, dict) or smoke.get("status") != "passed":
+            continue
+        if _record_smoke_test_current(record):
+            continue
+        install_path = Path(
+            str((record.get("source") or {}).get("install_path") or "")
+        ).expanduser()
+        if not install_path.is_dir():
+            continue
+        try:
+            fresh = _run_extension_smoke_test(manifest, install_path)
+        except Exception:
+            logger.exception(
+                "stale smoke re-run failed for %s", manifest.get("id")
+            )
+            continue
+        record["smoke_test"] = fresh
+        record["updated_at"] = _now()
+        changed = True
+    return changed
 
 
 def _load() -> dict[str, Any]:
