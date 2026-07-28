@@ -15,6 +15,7 @@ isn't garbage-collected after startup returns.
 """
 
 import asyncio
+import inspect
 import logging
 import threading
 import time
@@ -65,7 +66,7 @@ def timed(name: str):
 def timed_fn(name: str):
     """Decorator. Works on sync and async functions."""
     def deco(fn):
-        if asyncio.iscoroutinefunction(fn):
+        if inspect.iscoroutinefunction(fn):
             @wraps(fn)
             async def aw(*a, **kw):
                 t = time.perf_counter()

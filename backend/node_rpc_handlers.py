@@ -17,6 +17,7 @@ existence is enough to keep ingestion working.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import os
 import re
@@ -470,7 +471,7 @@ async def dispatch_rpc(method: str, params: dict) -> dict:
     handler = _HANDLERS.get(method)
     if handler is None:
         raise ValueError(f"unknown rpc method: {method!r}")
-    if asyncio.iscoroutinefunction(handler):
+    if inspect.iscoroutinefunction(handler):
         return await handler(params)
     return await asyncio.to_thread(handler, params)
 

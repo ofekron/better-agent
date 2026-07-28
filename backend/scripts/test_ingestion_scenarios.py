@@ -20,6 +20,7 @@ Run with:
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import os
 import shutil
@@ -1410,7 +1411,7 @@ def main_run() -> int:
     try:
         for name, fn in TESTS:
             try:
-                if asyncio.iscoroutinefunction(fn):
+                if inspect.iscoroutinefunction(fn):
                     ok = asyncio.run(fn())
                 else:
                     ok = fn()

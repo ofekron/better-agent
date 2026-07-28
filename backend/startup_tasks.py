@@ -18,6 +18,7 @@ uvicorn `--reload` cycle.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import threading
 from collections import OrderedDict
@@ -220,7 +221,7 @@ async def run_task(
     it. The error is captured on the task and surfaced via WS."""
     startup_task_registry.register(task_id, label)
     try:
-        if asyncio.iscoroutinefunction(fn):
+        if inspect.iscoroutinefunction(fn):
             result: Any = await fn(*args, **kwargs)  # type: ignore[func-returns-value]
         elif in_thread:
             result = await asyncio.to_thread(fn, *args, **kwargs)
