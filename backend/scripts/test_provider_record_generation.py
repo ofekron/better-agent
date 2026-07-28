@@ -399,6 +399,28 @@ else:
             raise AssertionError("unsupported provider schema was accepted")
         assert config_store._config_path().read_bytes() == unsupported_bytes
 
+    legacy_provider_state = copy.deepcopy(canonical)
+    legacy_provider_state.pop("schema_version")
+    for provider in legacy_provider_state["providers"]:
+        provider.pop("generation")
+        provider.pop("revision")
+    config_store._config_path().write_text(
+        json.dumps(legacy_provider_state),
+        encoding="utf-8",
+    )
+    _reset_cache()
+    migrated_provider_state = config_store.list_providers()
+    persisted_migration = json.loads(
+        config_store._config_path().read_text(encoding="utf-8")
+    )
+    assert persisted_migration["schema_version"] == config_store.CONFIG_SCHEMA_VERSION
+    assert [provider["id"] for provider in migrated_provider_state["providers"]] == [
+        provider["id"] for provider in legacy_provider_state["providers"]
+    ]
+    for provider in migrated_provider_state["providers"]:
+        assert provider["revision"] == 0
+        uuid.UUID(provider["generation"])
+
     config_store._config_path().write_text(
         json.dumps({"mode": "subscription", "base_url": ""}),
         encoding="utf-8",

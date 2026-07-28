@@ -692,6 +692,35 @@ def _is_legacy_flat_state(raw: dict) -> bool:
     return bool(keys & _LEGACY_FLAT_CONFIG_KEYS) and keys <= _LEGACY_FLAT_CONFIG_KEYS
 
 
+def _migrate_unversioned_provider_state(raw: dict) -> dict:
+    providers = raw.get("providers")
+    if not isinstance(providers, list):
+        raise RuntimeError("unsupported provider config schema: providers must be a list")
+    migrated = []
+    provider_ids: set[str] = set()
+    for provider in providers:
+        if not isinstance(provider, dict):
+            raise RuntimeError("unsupported provider config schema: invalid provider record")
+        provider_id = provider.get("id")
+        if (
+            not isinstance(provider_id, str)
+            or not provider_id
+            or provider_id in provider_ids
+        ):
+            raise RuntimeError("unsupported provider config schema: invalid provider id")
+        provider_ids.add(provider_id)
+        migrated.append({
+            **_clean_provider_record(provider),
+            **_new_provider_authority(),
+        })
+    state = _normalize_loaded_state({
+        **raw,
+        "schema_version": CONFIG_SCHEMA_VERSION,
+        "providers": migrated,
+    })
+    return state
+
+
 def _normalize_loaded_state(raw: dict) -> dict:
     if raw.get("schema_version") != CONFIG_SCHEMA_VERSION:
         raise RuntimeError(
@@ -873,10 +902,14 @@ def _load_state() -> dict:
                 state = _seed_default_state()
                 _save_state(state)
                 return copy.deepcopy(_state_cache[1])
-            if "providers" in raw or "schema_version" in raw:
+            if "schema_version" in raw:
                 state = _normalize_loaded_state(raw)
                 _state_cache = (fingerprint, copy.deepcopy(state))
                 return state
+            if "providers" in raw:
+                state = _migrate_unversioned_provider_state(raw)
+                _save_state(state)
+                return copy.deepcopy(_state_cache[1])
             if not _is_legacy_flat_state(raw):
                 raise RuntimeError("unsupported provider config schema")
             state = _migrate_flat_to_providers(raw)
