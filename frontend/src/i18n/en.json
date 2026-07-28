@@ -1421,5 +1421,11 @@
   "harnessProfile.provisioningPromptLabel": "Provisioning prompt",
   "harnessProfile.provisioningPromptPlaceholder": "Use the default worker setup prompt",
   "harnessProfile.provisioningPromptHint": "Used as the worker provisioning prompt when a worker is created with this profile and the request doesn't specify one.",
-  "newSession.usageLowWarning": "{{provider}} usage is running low — {{remaining}}"
+  "newSession.usageLowWarning": "{{provider}} usage is running low — {{remaining}}",
+  "extensionHealth.title": "Extension needs attention: {{name}}",
+  "extensionHealth.cohort": "Affects",
+  "extensionHealth.error": "Couldn't submit your decision. Please try again.",
+  "extensionHealth.disable": "Disable",
+  "extensionHealth.keepEnabled": "Keep enabled",
+  "extensionHealth.working": "Working…"
 }

@@ -1346,5 +1346,11 @@
   "harnessProfile.provisioningPromptLabel": "Provisioning prompt",
   "harnessProfile.provisioningPromptPlaceholder": "Use the default worker setup prompt",
   "harnessProfile.provisioningPromptHint": "Used as the worker provisioning prompt when a worker is created with this profile and the request doesn't specify one.",
-  "newSession.usageLowWarning": "Het gebruik van {{provider}} is bijna op — {{remaining}}"
+  "newSession.usageLowWarning": "Het gebruik van {{provider}} is bijna op — {{remaining}}",
+  "extensionHealth.title": "Extensie vergt aandacht: {{name}}",
+  "extensionHealth.cohort": "Beïnvloedt",
+  "extensionHealth.error": "Kon je beslissing niet verzenden. Probeer het opnieuw.",
+  "extensionHealth.disable": "Uitschakelen",
+  "extensionHealth.keepEnabled": "Ingeschakeld laten",
+  "extensionHealth.working": "Verwerken…"
 }

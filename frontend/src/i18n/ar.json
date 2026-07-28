@@ -1349,5 +1349,11 @@
   "harnessProfile.provisioningPromptLabel": "Provisioning prompt",
   "harnessProfile.provisioningPromptPlaceholder": "Use the default worker setup prompt",
   "harnessProfile.provisioningPromptHint": "Used as the worker provisioning prompt when a worker is created with this profile and the request doesn't specify one.",
-  "newSession.usageLowWarning": "استخدام {{provider}} على النفاد — {{remaining}}"
+  "newSession.usageLowWarning": "استخدام {{provider}} على النفاد — {{remaining}}",
+  "extensionHealth.title": "الإضافة تحتاج إلى اهتمام: {{name}}",
+  "extensionHealth.cohort": "يؤثر على",
+  "extensionHealth.error": "تعذّر إرسال قرارك. حاول مرة أخرى.",
+  "extensionHealth.disable": "تعطيل",
+  "extensionHealth.keepEnabled": "إبقاء مفعّل",
+  "extensionHealth.working": "جارٍ المعالجة…"
 }

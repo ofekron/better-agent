@@ -1349,5 +1349,11 @@
   "harnessProfile.provisioningPromptLabel": "Provisioning prompt",
   "harnessProfile.provisioningPromptPlaceholder": "Use the default worker setup prompt",
   "harnessProfile.provisioningPromptHint": "Used as the worker provisioning prompt when a worker is created with this profile and the request doesn't specify one.",
-  "newSession.usageLowWarning": "El uso de {{provider}} está casi agotado — {{remaining}}"
+  "newSession.usageLowWarning": "El uso de {{provider}} está casi agotado — {{remaining}}",
+  "extensionHealth.title": "La extensión necesita atención: {{name}}",
+  "extensionHealth.cohort": "Afecta a",
+  "extensionHealth.error": "No se pudo enviar tu decisión. Inténtalo de nuevo.",
+  "extensionHealth.disable": "Desactivar",
+  "extensionHealth.keepEnabled": "Mantener activada",
+  "extensionHealth.working": "Procesando…"
 }

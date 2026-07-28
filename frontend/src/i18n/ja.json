@@ -1346,5 +1346,11 @@
   "harnessProfile.provisioningPromptLabel": "Provisioning prompt",
   "harnessProfile.provisioningPromptPlaceholder": "Use the default worker setup prompt",
   "harnessProfile.provisioningPromptHint": "Used as the worker provisioning prompt when a worker is created with this profile and the request doesn't specify one.",
-  "newSession.usageLowWarning": "{{provider}}の使用量が残り少なくなっています — {{remaining}}"
+  "newSession.usageLowWarning": "{{provider}}の使用量が残り少なくなっています — {{remaining}}",
+  "extensionHealth.title": "拡張機能の注意が必要です: {{name}}",
+  "extensionHealth.cohort": "影響",
+  "extensionHealth.error": "決定を送信できませんでした。もう一度お試しください。",
+  "extensionHealth.disable": "無効化",
+  "extensionHealth.keepEnabled": "有効のままにする",
+  "extensionHealth.working": "処理中…"
 }

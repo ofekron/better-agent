@@ -1350,5 +1350,11 @@
   "harnessProfile.provisioningPromptLabel": "Provisioning prompt",
   "harnessProfile.provisioningPromptPlaceholder": "Use the default worker setup prompt",
   "harnessProfile.provisioningPromptHint": "Used as the worker provisioning prompt when a worker is created with this profile and the request doesn't specify one.",
-  "newSession.usageLowWarning": "O uso de {{provider}} está quase esgotado — {{remaining}}"
+  "newSession.usageLowWarning": "O uso de {{provider}} está quase esgotado — {{remaining}}",
+  "extensionHealth.title": "A extensão precisa de atenção: {{name}}",
+  "extensionHealth.cohort": "Afeta",
+  "extensionHealth.error": "Não foi possível enviar sua decisão. Tente novamente.",
+  "extensionHealth.disable": "Desativar",
+  "extensionHealth.keepEnabled": "Manter ativada",
+  "extensionHealth.working": "Processando…"
 }

@@ -1350,5 +1350,11 @@
   "harnessProfile.provisioningPromptLabel": "Provisioning prompt",
   "harnessProfile.provisioningPromptPlaceholder": "Use the default worker setup prompt",
   "harnessProfile.provisioningPromptHint": "Used as the worker provisioning prompt when a worker is created with this profile and the request doesn't specify one.",
-  "newSession.usageLowWarning": "{{provider}} का उपयोग लगभग समाप्त हो रहा है — {{remaining}}"
+  "newSession.usageLowWarning": "{{provider}} का उपयोग लगभग समाप्त हो रहा है — {{remaining}}",
+  "extensionHealth.title": "एक्सटेंशन को ध्यान चाहिए: {{name}}",
+  "extensionHealth.cohort": "प्रभावित",
+  "extensionHealth.error": "आपका निर्णय सबमिट नहीं हो सका। कृपया पुनः प्रयास करें।",
+  "extensionHealth.disable": "अक्षम करें",
+  "extensionHealth.keepEnabled": "सक्षम रखें",
+  "extensionHealth.working": "प्रसंस्करण…"
 }

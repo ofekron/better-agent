@@ -25,6 +25,7 @@ import { useBuiltinExtensionFlags } from "./hooks/useBuiltinExtensionFlags";
 import { useLatestEventOfTypes } from "./hooks/useLatestEventOfTypes";
 import { Chat } from "./components/Chat";
 import { UserInteractionToastStack } from "./components/UserInteractionToastStack";
+import { ExtensionHealthPromptContainer } from "./components/ExtensionHealthPrompt";
 import { SessionTabs } from "./components/SessionTabs";
 import { ASK_SINGLETON_ID } from "./askSession";
 import { editSingletonId } from "./projectStructureEditSession";
@@ -7826,6 +7827,7 @@ function AppMain({
             ) : null}
           </aside>
         ) : null}
+        <ExtensionHealthPromptContainer />
       </div>
 
       {/* Right Panel — desktop: always in the flex layout (collapsed

@@ -1350,5 +1350,11 @@
   "harnessProfile.provisioningPromptLabel": "Provisioning prompt",
   "harnessProfile.provisioningPromptPlaceholder": "Use the default worker setup prompt",
   "harnessProfile.provisioningPromptHint": "Used as the worker provisioning prompt when a worker is created with this profile and the request doesn't specify one.",
-  "newSession.usageLowWarning": "{{provider}} 的用量即将耗尽 — {{remaining}}"
+  "newSession.usageLowWarning": "{{provider}} 的用量即将耗尽 — {{remaining}}",
+  "extensionHealth.title": "扩展需要关注：{{name}}",
+  "extensionHealth.cohort": "影响",
+  "extensionHealth.error": "无法提交您的决定。请重试。",
+  "extensionHealth.disable": "禁用",
+  "extensionHealth.keepEnabled": "保持启用",
+  "extensionHealth.working": "处理中…"
 }

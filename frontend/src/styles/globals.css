@@ -23554,3 +23554,87 @@ button.progress-inflight {
     transition: none;
   }
 }
+
+/* Global extension-health-decision prompt. Backend-owned (derived from
+   GET /api/extensions pending_health_decision); persists across routes,
+   bottom-right in LTR / bottom-left in RTL via logical insets, and stays
+   visible until the backend ack + refetch clears it. */
+.extension-health-prompt {
+  position: fixed;
+  bottom: 16px;
+  inset-inline-end: 16px;
+  z-index: 60;
+  max-width: min(380px, calc(100vw - 32px));
+  padding: 12px 14px;
+  border-radius: 10px;
+  background: var(--bg-elevated, #1f1f24);
+  color: var(--text-primary, #f4f4f5);
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.35);
+  border: 1px solid var(--border-muted, rgba(255, 255, 255, 0.08));
+  animation: extension-health-prompt-in 0.24s cubic-bezier(0.2, 0.78, 0.28, 1);
+}
+.extension-health-prompt--reduced,
+@media (prefers-reduced-motion: reduce) {
+  .extension-health-prompt {
+    animation: none;
+  }
+}
+.extension-health-prompt__title {
+  display: block;
+  font-size: 0.92rem;
+  margin-bottom: 4px;
+}
+.extension-health-prompt__reason {
+  display: block;
+  font-size: 0.82rem;
+  opacity: 0.9;
+}
+.extension-health-prompt__cohort {
+  display: block;
+  margin-top: 4px;
+  font-size: 0.75rem;
+  opacity: 0.7;
+}
+.extension-health-prompt__error {
+  display: block;
+  margin-top: 6px;
+  font-size: 0.78rem;
+  color: #ff6b6b;
+}
+.extension-health-prompt__actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+.extension-health-prompt__action {
+  flex: 1;
+  padding: 6px 10px;
+  border-radius: 7px;
+  border: 1px solid var(--border-muted, rgba(255, 255, 255, 0.14));
+  background: transparent;
+  color: inherit;
+  font-size: 0.82rem;
+  cursor: pointer;
+}
+.extension-health-prompt__action:disabled {
+  cursor: progress;
+  opacity: 0.7;
+}
+.extension-health-prompt__action--danger {
+  background: #d92d20;
+  border-color: #d92d20;
+  color: #fff;
+}
+.extension-health-prompt__action--danger:disabled {
+  opacity: 0.75;
+}
+@keyframes extension-health-prompt-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}

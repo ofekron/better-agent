@@ -1349,5 +1349,11 @@
   "harnessProfile.provisioningPromptLabel": "Provisioning prompt",
   "harnessProfile.provisioningPromptPlaceholder": "Use the default worker setup prompt",
   "harnessProfile.provisioningPromptHint": "Used as the worker provisioning prompt when a worker is created with this profile and the request doesn't specify one.",
-  "newSession.usageLowWarning": "{{provider}} 사용량이 거의 소진되었습니다 — {{remaining}}"
+  "newSession.usageLowWarning": "{{provider}} 사용량이 거의 소진되었습니다 — {{remaining}}",
+  "extensionHealth.title": "확장 기능 주의 필요: {{name}}",
+  "extensionHealth.cohort": "영향",
+  "extensionHealth.error": "결정을 제출할 수 없습니다. 다시 시도해 주세요.",
+  "extensionHealth.disable": "비활성화",
+  "extensionHealth.keepEnabled": "활성화 유지",
+  "extensionHealth.working": "처리 중…"
 }
