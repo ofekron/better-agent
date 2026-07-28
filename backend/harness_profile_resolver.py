@@ -903,6 +903,7 @@ def resolve_for_session(
     snapshot["launcher_projection"] = {
         "profile_id": snapshot["profile_id"],
         "profile_revision": snapshot["profile_revision"],
+        "extension_selection_authoritative": True,
         "bare_config": snapshot["bare_config"],
         "extension_revisions": extension_revisions,
         "extension_mcp_servers": extension_mcp_servers,
