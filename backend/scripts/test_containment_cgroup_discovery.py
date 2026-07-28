@@ -174,20 +174,20 @@ def test_linux_spawn_preserves_cgroup_descriptor() -> None:
     assert callable(kwargs["preexec_fn"])
 
 
-def test_discovers_wsl_hybrid_freezer_hierarchy(tmp_path) -> None:
-    mount_point = tmp_path / "freezer"
+def test_discovers_wsl_hybrid_pids_hierarchy(tmp_path) -> None:
+    mount_point = tmp_path / "pids"
     mount_point.mkdir()
     (mount_point / "tasks").write_text("123\n", encoding="ascii")
-    (mount_point / "freezer.state").write_text("THAWED\n", encoding="ascii")
+    (mount_point / "pids.current").write_text("1\n", encoding="ascii")
     mountinfo = tmp_path / "mountinfo"
     cgroup = tmp_path / "cgroup"
     mountinfo.write_text(
-        f"42 25 0:40 / {mount_point} rw - cgroup cgroup rw,freezer\n",
+        f"42 25 0:40 / {mount_point} rw - cgroup cgroup rw,pids\n",
         encoding="utf-8",
     )
-    cgroup.write_text("7:freezer:/\n0::/\n", encoding="ascii")
+    cgroup.write_text("12:pids:/\n0::/\n", encoding="ascii")
 
-    assert containment._current_cgroup_v1_freezer_directory(
+    assert containment._current_cgroup_v1_pids_directory(
         str(mountinfo),
         str(cgroup),
         pid=123,
@@ -204,10 +204,10 @@ def test_linux_factory_falls_back_to_verified_v1(monkeypatch) -> None:
     )
     monkeypatch.setattr(
         containment,
-        "_current_cgroup_v1_freezer_directory",
-        lambda: "/freezer/session",
+        "_current_cgroup_v1_pids_directory",
+        lambda: "/pids/session",
     )
 
     instance = containment.containment()
 
-    assert isinstance(instance, containment._LinuxCgroupV1FreezerContainment)
+    assert isinstance(instance, containment._LinuxCgroupV1PidsContainment)
