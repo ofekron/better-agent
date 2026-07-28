@@ -171,8 +171,9 @@ def resolve_extension_run_policy(
     )
     snapshot_disabled_extensions = snapshot.get("disabled_builtin_extensions")
     if snapshot_supplied and isinstance(snapshot_disabled_extensions, list):
-        effective_disabled_extensions = (
-            normalize_disabled_builtin_extensions(snapshot_disabled_extensions) or []
+        effective_disabled_extensions = _merge_names(
+            snapshot_disabled_extensions,
+            disabled_builtin_extensions,
         )
     else:
         effective_disabled_extensions = _merge_names(

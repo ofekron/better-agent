@@ -206,17 +206,18 @@ def main() -> int:
         provider_kind="codex",
         provider_run_config={},
         capability_contexts=[],
-        disabled_builtin_extensions=["stale.default.disabled"],
+        disabled_builtin_extensions=["ofek.testape-internal"],
     )
     check(
-        "resolved profile extension selection ignores stale caller defaults",
-        supplied_policy["disabled_builtin_extensions"] == ["profile.disabled"],
+        "resolved profile preserves explicit turn extension restrictions",
+        supplied_policy["disabled_builtin_extensions"]
+        == ["profile.disabled", "ofek.testape-internal"],
     )
     check(
-        "launcher projection uses authoritative resolved profile selection",
+        "launcher projection preserves explicit turn extension restrictions",
         supplied_policy["resolved_harness_run_config"]["launcher_projection"]
         ["disabled_builtin_extensions"]
-        == ["profile.disabled"],
+        == ["profile.disabled", "ofek.testape-internal"],
     )
     for invalid_snapshot_value in (None, "profile.disabled"):
         invalid_snapshot = copy.deepcopy(
