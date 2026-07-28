@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import subprocess
 import sys
 import tempfile
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -11,21 +13,23 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 import requirements_search_supervisor as supervisor
+import requirement_prewarm
 from requirements_search_supervisor import (
     SEARCH_LIMITS,
     SearchLimits,
     _communicate_with_posix_limits,
     _failure,
 )
-from requirements_search_worker import _set_posix_limit
+from requirements_search_worker import WORKER_ACTION_NAMES, _set_posix_limit
 
 
-def test_four_processor_lanes_are_supervised() -> None:
+def test_every_processor_route_is_supervised() -> None:
     source = (ROOT / "main.py").read_text(encoding="utf-8")
     expected = {
         "internal_search_requirements": "unit_rg",
         "internal_requirements_unit_fts": "unit_fts",
         "internal_requirements_unit_vector": "unit_vector",
+        "internal_requirements_thread_vector": "thread_vector_search",
         "internal_requirements_index_sql": "index_sql",
     }
     for function_name, action in expected.items():
@@ -38,6 +42,7 @@ def test_four_processor_lanes_are_supervised() -> None:
         assert limits.memory_mb > 0
         assert limits.cpu_seconds > 0
         assert limits.wall_seconds > 0
+    assert set(SEARCH_LIMITS) == set(WORKER_ACTION_NAMES)
 
 
 def test_resource_failure_is_clear_and_retryable() -> None:
@@ -48,6 +53,20 @@ def test_resource_failure_is_clear_and_retryable() -> None:
     assert "Retry with a finer search" in result["error"]
     assert result["lane"] == "unit-vector"
     assert result["resource"] == "memory"
+
+
+def test_projection_build_failure_does_not_claim_narrowing_will_help() -> None:
+    result = _failure("thread_vector_build", "memory", "3072MB")
+    assert result["retryable"] is True
+    assert result["retry_strategy"] == "resume_projection_build"
+    assert "narrow" not in result["error"].lower()
+
+
+def test_thread_vector_search_failure_does_not_claim_narrowing_will_help() -> None:
+    result = _failure("thread_vector_search", "memory", "1024MB")
+    assert result["retryable"] is False
+    assert "retry_strategy" not in result
+    assert "narrow" not in result["error"].lower()
 
 
 def test_posix_worker_applies_cpu_limit_without_startup_memory_limit() -> None:
@@ -156,6 +175,62 @@ def test_worker_setup_failure_detail_surfaces_through_supervisor() -> None:
     assert "RLIMIT_CPU" in result["error"]
     assert "requested soft=75s hard=76s" in result["error"]
     assert "Traceback" not in result["error"]
+
+
+def test_supervised_worker_cancellation_kills_child_and_returns() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        worker = Path(tmp) / "worker.py"
+        worker.write_text(
+            "import sys, time\nsys.stdin.read()\ntime.sleep(30)\n",
+            encoding="utf-8",
+        )
+        original_worker = supervisor._WORKER
+        supervisor._WORKER = worker
+        cancel_event = threading.Event()
+        result_box = {}
+
+        def run() -> None:
+            result_box["result"] = supervisor.run_supervised_search(
+                "thread_vector_build",
+                _cancel_event=cancel_event,
+            )
+
+        thread = threading.Thread(target=run)
+        try:
+            thread.start()
+            cancel_event.set()
+            thread.join(timeout=5)
+        finally:
+            supervisor._WORKER = original_worker
+        assert not thread.is_alive()
+        assert result_box["result"]["resource"] == "cancelled"
+        assert result_box["result"]["retry_strategy"] == "resume_projection_build"
+
+
+def test_background_projection_shutdown_quiesces_managed_worker() -> None:
+    original = supervisor.run_supervised_search
+    started = threading.Event()
+    stopped = threading.Event()
+
+    def fake_run(action: str, **kwargs):
+        assert action == "thread_vector_build"
+        cancel_event = kwargs["_cancel_event"]
+        started.set()
+        assert cancel_event.wait(timeout=5)
+        stopped.set()
+        return {"success": False, "resource": "cancelled"}
+
+    async def exercise() -> None:
+        supervisor.run_supervised_search = fake_run
+        try:
+            requirement_prewarm.request_thread_vector_projection()
+            assert await asyncio.to_thread(started.wait, 5)
+            await requirement_prewarm.shutdown_thread_vector_projection()
+        finally:
+            supervisor.run_supervised_search = original
+
+    asyncio.run(exercise())
+    assert stopped.is_set()
 
 
 def test_windows_worker_uses_job_memory_and_cpu_limits() -> None:

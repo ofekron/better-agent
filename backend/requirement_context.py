@@ -12,6 +12,7 @@ import sqlite3
 import subprocess
 import tempfile
 import threading
+from contextlib import contextmanager
 from copy import copy
 from pathlib import Path
 from typing import Any
@@ -89,6 +90,7 @@ UNIT_FTS_TABLE = "requirement_units_fts"
 THREAD_FTS_DB_NAME = "requirement_threads_fts.sqlite3"
 THREAD_VECTOR_DB_NAME = "requirement_threads_vectors.npz"
 THREAD_VECTOR_STATE_NAME = "requirement_threads_vectors.state.json"
+VECTOR_BUILD_BATCH_SIZE = 32
 THREAD_FTS_TABLE = "requirement_threads_fts"
 FTS_TOKEN_RE = re.compile(r"[\w-]{2,}", re.UNICODE)
 RG_QUERY_MAX_CHARS = 4000
@@ -1242,15 +1244,6 @@ def _default_requirement_embed(texts: list[str]):
     return unit_vector_embedder.embed(texts)
 
 
-# Serializes vector-index builds across threads. Concurrent processor forks
-# (admission allows 2) each call _ensure_*_vector_index; two simultaneous
-# full-corpus ONNX re-embeds thrash CPU and race on the npz write. The lock
-# collapses them into one build + cheap reuse. Shared across unit and thread
-# indexes since both use the same embedder/model and would otherwise thrash
-# each other just as badly.
-_VECTOR_INDEX_LOCK = threading.Lock()
-
-
 def _load_vector_arrays(db_path: Path):
     """Return (vectors, ids, cwds_json, text_shas) for an existing index, or
     None when the index is missing, ill-formed, internally inconsistent, or
@@ -1277,8 +1270,33 @@ def _load_vector_arrays(db_path: Path):
     return vectors, ids, cwds_json, text_shas
 
 
-def _vector_text_sha(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+def _vector_text_sha(text: str, embedding_space: str) -> str:
+    return hashlib.sha256(
+        f"{embedding_space}\0{text}".encode("utf-8")
+    ).hexdigest()
+
+
+def _default_requirement_embedding_space() -> str:
+    from requirement_analysis import unit_vector_embedder
+
+    return ":".join(
+        (
+            str(unit_vector_embedder.MODEL_REPO),
+            str(unit_vector_embedder.MODEL_REVISION),
+            str(unit_vector_embedder.ONNX_FILENAME),
+            str(unit_vector_embedder.TOKENIZER_FILENAME),
+            str(unit_vector_embedder.MAX_SEQ_LENGTH),
+            "mean-pool-l2-v1",
+        )
+    )
+
+
+def _requirement_embedder(embedder):
+    if embedder is None or embedder is _default_requirement_embed:
+        return _default_requirement_embed, _default_requirement_embedding_space()
+    return embedder, str(
+        getattr(embedder, "embedding_space", "injected-requirement-embedder-v1")
+    )
 
 
 def _build_vector_index(
@@ -1288,59 +1306,73 @@ def _build_vector_index(
     text_fn,
     cwds_fn,
     embedder,
+    embedding_space: str,
     db_path: Path,
 ):
-    """Return (vectors, ids, cwds_json, text_shas) covering ``records``.
-
-    MiniLM embeddings are deterministic per text, so an existing index's
-    vectors are reusable for any record whose embedded text is unchanged.
-    Incremental embedding reuses the cached prefix and embeds only the
-    appended tail — guarded by BOTH id AND a per-record sha256 of the
-    embedded text, because an id can be re-emitted with different text (a
-    re-extracted unit under the same source_key; a thread's `reality` text
-    changing whenever it gets recomputed with more/changed history) —
-    key-only matching would silently serve stale vectors. Fall back to a
-    full re-embed on cold start, any prefix mismatch, or embedding-dim
-    change. Re-embedding the whole corpus on every search wastes real CPU
-    (and under concurrent forks, tens of minutes) — for threads, whose
-    `reality` is fully recomputed on every reality rebuild (see
-    requirement_analysis.reality.rebuild_requirement_reality), this means a
-    full re-embed is the common case rather than the exception; acceptable
-    at this corpus scale (dozens-hundreds of threads), revisit if that
-    stops being true."""
+    """Build a complete index from content-addressed, resumable embeddings."""
     import numpy as np
 
     new_ids = [str(r.get(id_field) or "") for r in records]
     new_texts = [text_fn(r) for r in records]
     new_cwds_json = [json.dumps(cwds_fn(r), ensure_ascii=False) for r in records]
-    new_shas = [_vector_text_sha(t) for t in new_texts]
+    new_shas = [_vector_text_sha(t, embedding_space) for t in new_texts]
     ids_arr = np.asarray(new_ids)
     cwds_arr = np.asarray(new_cwds_json)
     shas_arr = np.asarray(new_shas)
 
-    existing = _load_vector_arrays(db_path)
-    if existing is not None:
-        ex_vectors, ex_ids, _ex_cwds_json, ex_shas = existing
-        prefix_len = ex_vectors.shape[0]
-        prefix_intact = (
-            0 < prefix_len <= len(records)
-            and ex_ids == new_ids[:prefix_len]
-            and ex_shas == new_shas[:prefix_len]
-        )
-        if prefix_intact:
-            tail_texts = new_texts[prefix_len:]
-            if not tail_texts:
-                return ex_vectors, ids_arr, cwds_arr, shas_arr
-            tail_vectors = np.asarray(embedder(tail_texts), dtype=np.float32)
-            if tail_vectors.ndim == 2 and tail_vectors.shape[1] == ex_vectors.shape[1]:
-                vectors = np.vstack([ex_vectors, tail_vectors]).astype(np.float32, copy=False)
-                return vectors, ids_arr, cwds_arr, shas_arr
+    progress_path = db_path.with_name(f"{db_path.name}.progress.npz")
+    text_by_sha: dict[str, str] = {}
+    for sha, text in zip(new_shas, new_texts, strict=True):
+        text_by_sha.setdefault(sha, text)
+    required_shas = set(text_by_sha)
+    cached: dict[str, Any] = {}
+    vector_dim: int | None = None
+    for candidate in (db_path, progress_path):
+        existing = _load_vector_arrays(candidate)
+        if existing is None:
+            continue
+        ex_vectors, _ex_ids, _ex_cwds_json, ex_shas = existing
+        if ex_vectors.ndim != 2:
+            continue
+        matching_positions = [
+            position for position, sha in enumerate(ex_shas) if sha in required_shas
+        ]
+        if matching_positions and vector_dim is None:
+            vector_dim = ex_vectors.shape[1]
+        if matching_positions and ex_vectors.shape[1] != vector_dim:
+            continue
+        for sha, vector in zip(ex_shas, ex_vectors, strict=True):
+            if sha not in required_shas:
+                continue
+            cached.setdefault(sha, vector)
 
-    # Cold start, prefix/id/text mismatch, or embedding-dim change: full re-embed.
-    vectors = embedder(new_texts) if new_texts else np.zeros((0, 1), dtype=np.float32)
-    vectors = np.asarray(vectors, dtype=np.float32)
-    if vectors.ndim != 2:
-        vectors = vectors.reshape(0, 1)
+    missing_shas = [sha for sha in text_by_sha if sha not in cached]
+    for offset in range(0, len(missing_shas), VECTOR_BUILD_BATCH_SIZE):
+        batch_shas = missing_shas[offset : offset + VECTOR_BUILD_BATCH_SIZE]
+        batch = np.asarray(
+            embedder([text_by_sha[sha] for sha in batch_shas]),
+            dtype=np.float32,
+        )
+        if batch.ndim != 2 or batch.shape[0] != len(batch_shas):
+            raise ValueError("requirement embedder returned an invalid batch shape")
+        if vector_dim is None:
+            vector_dim = batch.shape[1]
+        if batch.shape[1] != vector_dim:
+            raise ValueError("requirement embedder dimension changed during index build")
+        cached.update(zip(batch_shas, batch, strict=True))
+        cache_shas = list(cached)
+        _write_vector_index_atomic(
+            progress_path,
+            np.asarray([cached[sha] for sha in cache_shas], dtype=np.float32),
+            cache_shas,
+            ["[]"] * len(cache_shas),
+            cache_shas,
+        )
+
+    if not new_shas:
+        vectors = np.zeros((0, vector_dim or 1), dtype=np.float32)
+    else:
+        vectors = np.asarray([cached[sha] for sha in new_shas], dtype=np.float32)
     return vectors, ids_arr, cwds_arr, shas_arr
 
 
@@ -1371,6 +1403,32 @@ def _write_vector_index_atomic(db_path: Path, vectors, ids, cwds_json, text_shas
             tmp_path.unlink(missing_ok=True)
 
 
+def _write_json_atomic(path: Path, value: dict[str, str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
+    os.close(fd)
+    tmp_path = Path(tmp_name)
+    try:
+        tmp_path.write_text(json.dumps(value, separators=(",", ":")), encoding="utf-8")
+        os.replace(tmp_path, path)
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+
+@contextmanager
+def _vector_index_file_lock(db_path: Path):
+    from portable_lock import lock_ex, unlock
+
+    lock_path = db_path.with_name(f"{db_path.name}.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(lock_path, "a+b") as handle:
+        lock_ex(handle.fileno())
+        try:
+            yield
+        finally:
+            unlock(handle.fileno())
+
+
 def _vector_index_ok(
     db_path: Path, source_path: Path, record_count: int, *, rebuilt: bool
 ) -> dict[str, Any]:
@@ -1383,6 +1441,87 @@ def _vector_index_ok(
     }
 
 
+def _vector_index_status(
+    *,
+    db_path: Path,
+    state_path: Path,
+    source_path: Path,
+    records: list[dict[str, Any]],
+    id_field: str,
+    text_fn,
+    cwds_fn,
+    embedding_space: str,
+) -> dict[str, Any]:
+    if not source_path.exists():
+        return {"ready": False, "reason": "source_missing", "path": str(db_path)}
+    source_state = _index_source_state(source_path)
+    current = {
+        "source_mtime_ns": str(source_state["mtime_ns"]),
+        "source_size": str(source_state["size"]),
+        "record_count": str(len(records)),
+        "embedding_space": embedding_space,
+    }
+    generation_rows = [
+        (
+            str(record.get(id_field) or ""),
+            _vector_text_sha(text_fn(record), embedding_space),
+            json.dumps(cwds_fn(record), ensure_ascii=False, sort_keys=True),
+        )
+        for record in records
+    ]
+    current["record_generation"] = hashlib.sha256(
+        json.dumps(generation_rows, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    try:
+        indexed = {
+            str(key): str(value)
+            for key, value in json.loads(state_path.read_text(encoding="utf-8")).items()
+        }
+    except (OSError, ValueError, AttributeError):
+        indexed = {}
+    if indexed != current:
+        return {
+            "ready": False,
+            "reason": "index_not_ready_or_stale",
+            "path": str(db_path),
+            "source_path": str(source_path),
+            "current_source": current,
+            "indexed_source": indexed,
+        }
+    arrays = _load_vector_arrays(db_path)
+    if arrays is None:
+        return {
+            "ready": False,
+            "reason": "index_not_ready_or_stale",
+            "path": str(db_path),
+            "source_path": str(source_path),
+            "current_source": current,
+            "indexed_source": indexed,
+        }
+    _vectors, ids, cwds_json, text_shas = arrays
+    expected_ids = [str(record.get(id_field) or "") for record in records]
+    expected_shas = [
+        _vector_text_sha(text_fn(record), embedding_space) for record in records
+    ]
+    expected_cwds = [
+        json.dumps(cwds_fn(record), ensure_ascii=False) for record in records
+    ]
+    if (
+        ids != expected_ids
+        or text_shas != expected_shas
+        or cwds_json != expected_cwds
+    ):
+        return {
+            "ready": False,
+            "reason": "index_not_ready_or_stale",
+            "path": str(db_path),
+            "source_path": str(source_path),
+            "current_source": current,
+            "indexed_source": indexed,
+        }
+    return _vector_index_ok(db_path, source_path, len(records), rebuilt=False)
+
+
 def _ensure_vector_index(
     *,
     db_path: Path,
@@ -1393,9 +1532,8 @@ def _ensure_vector_index(
     text_fn,
     cwds_fn,
     embedder,
+    embedding_space: str,
 ) -> dict[str, Any]:
-    import json as _json
-
     if not source_path.exists():
         return {"ready": False, "reason": "source_missing", "path": str(db_path)}
 
@@ -1404,31 +1542,67 @@ def _ensure_vector_index(
         "source_mtime_ns": source_state["mtime_ns"],
         "source_size": source_state["size"],
         "record_count": str(len(records)),
+        "embedding_space": embedding_space,
     }
+    expected["record_generation"] = hashlib.sha256(
+        json.dumps(
+            [
+                (
+                    str(record.get(id_field) or ""),
+                    _vector_text_sha(text_fn(record), embedding_space),
+                    json.dumps(cwds_fn(record), ensure_ascii=False, sort_keys=True),
+                )
+                for record in records
+            ],
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    initial_source_state = source_state
 
-    def _read_state() -> dict[str, str]:
-        try:
-            with open(state_path, "r", encoding="utf-8") as fh:
-                return {str(k): str(v) for k, v in _json.load(fh).items()}
-        except (OSError, ValueError):
-            return {}
+    status = _vector_index_status(
+        db_path=db_path,
+        state_path=state_path,
+        source_path=source_path,
+        records=records,
+        id_field=id_field,
+        text_fn=text_fn,
+        cwds_fn=cwds_fn,
+        embedding_space=embedding_space,
+    )
+    if status.get("ready"):
+        return status
 
-    if _read_state() == expected and db_path.exists():
-        return _vector_index_ok(db_path, source_path, len(records), rebuilt=False)
-
-    # Serialize builds: a second processor fork may have produced the exact
-    # index while we waited, and two concurrent full-corpus re-embeds must not
-    # run together. Re-check state inside the lock.
-    with _VECTOR_INDEX_LOCK:
-        stored = _read_state()
-        if stored == expected and db_path.exists():
-            return _vector_index_ok(db_path, source_path, len(records), rebuilt=False)
-        vectors, ids, cwds_json, text_shas = _build_vector_index(
-            records, id_field=id_field, text_fn=text_fn, cwds_fn=cwds_fn, embedder=embedder, db_path=db_path,
+    with _vector_index_file_lock(db_path):
+        status = _vector_index_status(
+            db_path=db_path,
+            state_path=state_path,
+            source_path=source_path,
+            records=records,
+            id_field=id_field,
+            text_fn=text_fn,
+            cwds_fn=cwds_fn,
+            embedding_space=embedding_space,
         )
+        if status.get("ready"):
+            return status
+        vectors, ids, cwds_json, text_shas = _build_vector_index(
+            records,
+            id_field=id_field,
+            text_fn=text_fn,
+            cwds_fn=cwds_fn,
+            embedder=embedder,
+            embedding_space=embedding_space,
+            db_path=db_path,
+        )
+        if _index_source_state(source_path) != initial_source_state:
+            return {
+                "ready": False,
+                "reason": "source_changed_during_build",
+                "path": str(db_path),
+            }
         _write_vector_index_atomic(db_path, vectors, ids, cwds_json, text_shas)
-        with open(state_path, "w", encoding="utf-8") as fh:
-            _json.dump(expected, fh)
+        _write_json_atomic(state_path, expected)
+        db_path.with_name(f"{db_path.name}.progress.npz").unlink(missing_ok=True)
     return _vector_index_ok(db_path, source_path, len(records), rebuilt=True)
 
 
@@ -1518,6 +1692,7 @@ def _ensure_unit_vector_index(
 
     if records is None:
         records = _load_unit_records()
+    embedder, embedding_space = _requirement_embedder(embedder)
     return _ensure_vector_index(
         db_path=_unit_vector_path(),
         state_path=_unit_vector_state_path(),
@@ -1526,7 +1701,8 @@ def _ensure_unit_vector_index(
         id_field="source_key",
         text_fn=_unit_vector_text,
         cwds_fn=lambda r: [r["cwd"]] if r.get("cwd") else [],
-        embedder=embedder or _default_requirement_embed,
+        embedder=embedder,
+        embedding_space=embedding_space,
     )
 
 
@@ -1558,7 +1734,7 @@ def search_requirement_units_vector(
     if fields_error:
         return {"success": False, "error": fields_error, "matches": [], "count": 0}
     records = _load_unit_records()
-    embedder = embedder or _default_requirement_embed
+    embedder, _embedding_space = _requirement_embedder(embedder)
     index = _ensure_unit_vector_index(records, embedder=embedder)
     if not index.get("ready"):
         return {
@@ -1631,6 +1807,7 @@ def _ensure_thread_vector_index(
 
     if records is None:
         records = _load_thread_records()
+    embedder, embedding_space = _requirement_embedder(embedder)
     return _ensure_vector_index(
         db_path=_thread_vector_path(),
         state_path=_thread_vector_state_path(),
@@ -1640,8 +1817,16 @@ def _ensure_thread_vector_index(
         id_field="id",
         text_fn=_thread_vector_text,
         cwds_fn=lambda r: r["project_cwds"] if isinstance(r.get("project_cwds"), list) else [],
-        embedder=embedder or _default_requirement_embed,
+        embedder=embedder,
+        embedding_space=embedding_space,
     )
+
+
+def build_requirement_threads_vector_projection() -> dict[str, Any]:
+    _ensure_requirements_importable()
+    records = _load_thread_records()
+    index = _ensure_thread_vector_index(records)
+    return {"success": bool(index.get("ready")), "index": index}
 
 
 def search_requirement_threads_vector(
@@ -1673,8 +1858,23 @@ def search_requirement_threads_vector(
     if fields_error:
         return {"success": False, "error": fields_error, "matches": [], "count": 0}
     records = _load_thread_records()
-    embedder = embedder or _default_requirement_embed
-    index = _ensure_thread_vector_index(records, embedder=embedder)
+    embedder, embedding_space = _requirement_embedder(embedder)
+    from requirement_analysis.reality import requirement_reality_path
+
+    index = _vector_index_status(
+        db_path=_thread_vector_path(),
+        state_path=_thread_vector_state_path(),
+        source_path=requirement_reality_path(),
+        records=records,
+        id_field="id",
+        text_fn=_thread_vector_text,
+        cwds_fn=lambda record: (
+            record["project_cwds"]
+            if isinstance(record.get("project_cwds"), list)
+            else []
+        ),
+        embedding_space=embedding_space,
+    )
     if not index.get("ready"):
         return {
             "success": True,

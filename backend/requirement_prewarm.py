@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import asyncio
+import threading
 from typing import Any
 
 import requirement_context
@@ -15,6 +16,8 @@ import requirement_context
 logger = logging.getLogger(__name__)
 _projection_ready_task: asyncio.Task[None] | None = None
 _projection_ready_loop: asyncio.AbstractEventLoop | None = None
+_thread_vector_task: asyncio.Task[dict[str, Any]] | None = None
+_thread_vector_cancel: threading.Event | None = None
 
 
 async def ensure_requirements_projection_ready() -> None:
@@ -34,12 +37,56 @@ async def ensure_requirements_projection_ready() -> None:
         _projection_ready_task = task
         _projection_ready_loop = loop
     await asyncio.shield(task)
+    request_thread_vector_projection()
 
 
 def reset_requirements_projection_readiness() -> None:
     global _projection_ready_task, _projection_ready_loop
     _projection_ready_task = None
     _projection_ready_loop = None
+
+
+def request_thread_vector_projection() -> None:
+    global _thread_vector_task, _thread_vector_cancel
+    task = _thread_vector_task
+    if task is not None and not task.done():
+        return
+    loop = asyncio.get_running_loop()
+    cancel_event = threading.Event()
+    _thread_vector_cancel = cancel_event
+
+    async def build() -> dict[str, Any]:
+        from requirements_search_supervisor import run_supervised_search
+
+        try:
+            result = await asyncio.to_thread(
+                run_supervised_search,
+                "thread_vector_build",
+                _cancel_event=cancel_event,
+            )
+        except Exception as exc:
+            logger.exception("thread vector projection build failed")
+            return {"success": False, "error": str(exc)}
+        if not result.get("success"):
+            logger.info("thread vector projection build incomplete: %s", result)
+        return result
+
+    _thread_vector_task = loop.create_task(
+        build(),
+        name="requirements-thread-vector-projection",
+    )
+
+
+async def shutdown_thread_vector_projection() -> None:
+    global _thread_vector_task, _thread_vector_cancel
+    task = _thread_vector_task
+    cancel_event = _thread_vector_cancel
+    if cancel_event is not None:
+        cancel_event.set()
+    if task is not None:
+        await asyncio.shield(task)
+    _thread_vector_task = None
+    _thread_vector_cancel = None
 
 
 async def run_requirements_prewarm(reason: str = "manual") -> dict[str, Any]:

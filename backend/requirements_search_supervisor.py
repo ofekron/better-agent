@@ -6,6 +6,7 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -33,6 +34,8 @@ SEARCH_LIMITS = {
     "unit_rg": SearchLimits(memory_mb=512, cpu_seconds=20, wall_seconds=30),
     "unit_fts": SearchLimits(memory_mb=768, cpu_seconds=25, wall_seconds=40),
     "unit_vector": SearchLimits(memory_mb=3072, cpu_seconds=75, wall_seconds=90),
+    "thread_vector_search": SearchLimits(memory_mb=1024, cpu_seconds=30, wall_seconds=45),
+    "thread_vector_build": SearchLimits(memory_mb=3072, cpu_seconds=180, wall_seconds=240),
     "index_sql": SearchLimits(memory_mb=768, cpu_seconds=35, wall_seconds=45),
 }
 _MAX_RESULT_BYTES = 64 * 1024 * 1024
@@ -42,23 +45,33 @@ _WORKER = Path(__file__).with_name("requirements_search_worker.py")
 
 def _failure(action: str, resource_name: str, limit: str) -> dict[str, Any]:
     lane = action.replace("_", "-")
-    message = (
-        f"Requirements search lane '{lane}' exceeded its {resource_name} limit ({limit}). "
-        "Retry with a finer search: narrow the cwd/project scope and use fewer, rarer terms "
-        "or a more selective transcript SQL predicate."
-    )
-    return {
+    is_projection_build = action == "thread_vector_build"
+    is_thread_vector_search = action == "thread_vector_search"
+    message = f"Requirements search lane '{lane}' exceeded its {resource_name} limit ({limit})."
+    if not is_projection_build and not is_thread_vector_search:
+        message += (
+            " Retry with a finer search: narrow the cwd/project scope and use fewer, rarer "
+            "terms or a more selective transcript SQL predicate."
+        )
+    result = {
         "success": False,
         "error": message,
         "error_code": "requirements_search_resource_limit",
         "lane": lane,
         "resource": resource_name,
-        "retryable": True,
-        "retry_strategy": "narrow_query",
+        "retryable": not is_thread_vector_search,
     }
+    if is_projection_build:
+        result["retry_strategy"] = "resume_projection_build"
+    elif not is_thread_vector_search:
+        result["retry_strategy"] = "narrow_query"
+    return result
 
 
 def run_supervised_search(action: str, **kwargs: Any) -> dict[str, Any]:
+    cancel_event = kwargs.pop("_cancel_event", None)
+    if cancel_event is not None and not isinstance(cancel_event, threading.Event):
+        raise TypeError("_cancel_event must be a threading.Event")
     limits = SEARCH_LIMITS.get(action)
     if limits is None:
         raise ValueError(f"unsupported requirements search action: {action}")
@@ -88,7 +101,13 @@ def run_supervised_search(action: str, **kwargs: Any) -> dict[str, Any]:
     )
     windows_job = _assign_windows_job(process, limits) if os.name == "nt" else None
     try:
-        output = _communicate_with_limits(process, payload, limits, windows_job)
+        output = _communicate_with_limits(
+            process,
+            payload,
+            limits,
+            windows_job,
+            cancel_event,
+        )
     finally:
         if windows_job is not None:
             import ctypes
@@ -148,16 +167,36 @@ def _communicate_with_limits(
     payload: bytes,
     limits: SearchLimits,
     windows_job: int | None,
+    cancel_event: threading.Event | None = None,
 ) -> SupervisedOutput:
     if os.name == "posix":
-        return _communicate_with_posix_limits(process, payload, limits, windows_job)
-    try:
-        stdout, stderr = process.communicate(payload, timeout=limits.wall_seconds)
-    except subprocess.TimeoutExpired:
-        _terminate_process_tree(process, windows_job)
-        stdout, stderr = process.communicate()
-        return SupervisedOutput(stdout, stderr, "wall-time", f"{limits.wall_seconds}s")
-    return SupervisedOutput(stdout, stderr)
+        return _communicate_with_posix_limits(
+            process,
+            payload,
+            limits,
+            windows_job,
+            cancel_event,
+        )
+    deadline = time.monotonic() + limits.wall_seconds
+    pending_input: bytes | None = payload
+    while True:
+        if cancel_event is not None and cancel_event.is_set():
+            _terminate_process_tree(process, windows_job)
+            stdout, stderr = process.communicate()
+            return SupervisedOutput(stdout, stderr, "cancelled", "shutdown")
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            _terminate_process_tree(process, windows_job)
+            stdout, stderr = process.communicate()
+            return SupervisedOutput(stdout, stderr, "wall-time", f"{limits.wall_seconds}s")
+        try:
+            stdout, stderr = process.communicate(
+                pending_input,
+                timeout=min(_POSIX_MEMORY_POLL_SECONDS, remaining),
+            )
+            return SupervisedOutput(stdout, stderr)
+        except subprocess.TimeoutExpired:
+            pending_input = None
 
 
 def _communicate_with_posix_limits(
@@ -165,11 +204,16 @@ def _communicate_with_posix_limits(
     payload: bytes,
     limits: SearchLimits,
     windows_job: int | None,
+    cancel_event: threading.Event | None = None,
 ) -> SupervisedOutput:
     deadline = time.monotonic() + limits.wall_seconds
     pending_input: bytes | None = payload
     memory_limit_kb = limits.memory_mb * 1024
     while True:
+        if cancel_event is not None and cancel_event.is_set():
+            _terminate_process_tree(process, windows_job)
+            stdout, stderr = process.communicate()
+            return SupervisedOutput(stdout, stderr, "cancelled", "shutdown")
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             _terminate_process_tree(process, windows_job)

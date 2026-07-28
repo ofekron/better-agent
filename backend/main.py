@@ -5814,11 +5814,12 @@ async def internal_requirements_thread_vector(
     if not isinstance(include_all_fields, bool):
         raise HTTPException(status_code=400, detail="include_all_fields must be a boolean")
 
-    import requirement_context
-    return await run_requirements_query(
+    from requirements_search_supervisor import run_supervised_search
+    response = await run_requirements_query(
         "requirements.thread_vector",
-        requirement_context.search_requirement_threads_vector,
+        run_supervised_search,
         executor=REQUIREMENTS_SEARCH_EXECUTOR,
+        action="thread_vector_search",
         query=payload["query"],
         cwd=payload["cwd"],
         cwds=payload["cwds"],
@@ -5826,6 +5827,11 @@ async def internal_requirements_thread_vector(
         fields=fields,
         include_all_fields=include_all_fields,
     )
+    if response.get("reason") in {"source_missing", "index_not_ready_or_stale"}:
+        import requirement_prewarm
+
+        requirement_prewarm.request_thread_vector_projection()
+    return response
 
 
 @app.post("/api/internal/get-requirements/index-sql")
@@ -14345,6 +14351,12 @@ async def on_shutdown():
             await startup_task
         except asyncio.CancelledError:
             pass
+    try:
+        import requirement_prewarm
+
+        await requirement_prewarm.shutdown_thread_vector_projection()
+    except Exception:
+        logger.exception("thread vector projection shutdown failed")
     await lag_incident_queue.stop()
     await marketplace_bridge_api.stop()
     # Kill any in-flight OAuth login/logout subprocesses so a `claude auth

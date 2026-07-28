@@ -4,6 +4,15 @@ import json
 import sys
 from typing import Any, Callable
 
+WORKER_ACTION_NAMES = (
+    "unit_rg",
+    "unit_fts",
+    "unit_vector",
+    "thread_vector_search",
+    "thread_vector_build",
+    "index_sql",
+)
+
 
 def main() -> int:
     try:
@@ -17,8 +26,12 @@ def main() -> int:
         "unit_rg": requirement_context.search_requirements,
         "unit_fts": requirement_context.search_requirement_units_fts,
         "unit_vector": requirement_context.search_requirement_units_vector,
+        "thread_vector_search": requirement_context.search_requirement_threads_vector,
+        "thread_vector_build": requirement_context.build_requirement_threads_vector_projection,
         "index_sql": requirement_context.run_native_index_sql,
     }
+    if set(actions) != set(WORKER_ACTION_NAMES):
+        raise RuntimeError("requirements search worker action registry is inconsistent")
     request = json.load(sys.stdin)
     action = request.get("action")
     kwargs = request.get("kwargs")
