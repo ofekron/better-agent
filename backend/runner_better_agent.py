@@ -1279,13 +1279,9 @@ async def _mcp_json_request(
 
 
 async def _mcp_list_tools(server_name: str, config: dict[str, Any]) -> list[dict[str, Any]]:
-    try:
-        result = await _mcp_json_request(
-            config, "tools/list", {}, timeout=_MCP_LIST_TIMEOUT_S,
-        )
-    except Exception:
-        logger.warning("extension MCP %s tools/list failed", server_name, exc_info=True)
-        return []
+    result = await _mcp_json_request(
+        config, "tools/list", {}, timeout=_MCP_LIST_TIMEOUT_S,
+    )
     tools = result.get("tools") or []
     return [tool for tool in tools if isinstance(tool, dict)]
 
@@ -1349,11 +1345,44 @@ async def _extension_mcp_tools_for_run(
     configs = list(_extension_mcp_server_configs_for_run(
         inputs, user_facing=user_facing, bare=bare,
     ).items())
-    tool_lists = await asyncio.gather(*(
-        _mcp_list_tools(server_name, config)
-        for server_name, config in configs
-    ))
+    import extension_store
+    try:
+        required_servers = extension_store.required_profile_mcp_server_names(inputs)
+    except Exception as exc:
+        raise RuntimeError(
+            f"required extension MCP selection resolution failed: {exc}"
+        ) from exc
+    configured_servers = {server_name for server_name, _ in configs}
+    if missing_servers := sorted(required_servers - configured_servers):
+        raise RuntimeError(
+            "required extension MCP config unavailable: "
+            + ", ".join(repr(name) for name in missing_servers)
+        )
+    tool_lists = await asyncio.gather(
+        *(
+            _mcp_list_tools(server_name, config)
+            for server_name, config in configs
+        ),
+        return_exceptions=True,
+    )
     for (server_name, config), tools in zip(configs, tool_lists):
+        if isinstance(tools, BaseException):
+            if not isinstance(tools, Exception):
+                raise tools
+            if server_name in required_servers:
+                raise RuntimeError(
+                    f"required extension MCP {server_name!r} tools/list failed: {tools}"
+                ) from tools
+            logger.warning(
+                "ambient extension MCP %s tools/list failed",
+                server_name,
+                exc_info=(type(tools), tools, tools.__traceback__),
+            )
+            continue
+        if server_name in required_servers and not tools:
+            raise RuntimeError(
+                f"required extension MCP {server_name!r} advertised no tools"
+            )
         for tool in tools:
             raw_tool_name = str(tool.get("name") or "").strip()
             if not raw_tool_name:
