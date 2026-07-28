@@ -131,10 +131,10 @@ def _ensure_trusted_root() -> bool:
 
 
 def _build_client():
-    from tufup.client import Client
+    from update_delta import TufupDeltaClient
 
     base = update_base_url()
-    return Client(
+    return TufupDeltaClient(
         app_name=APP_NAME,
         app_install_dir=_app_install_dir(),
         current_version=_current_version(),

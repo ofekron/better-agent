@@ -55,7 +55,7 @@ hiddenimports = [
     "runner_codex", "runner_better_agent", "runner_agy", "runner_copilot",
     "shell", "supervisor", "shell_env", "setup", "auth_secrets",
     "deep_link", "activation_server", "macos_url_handler",
-    "updater", "_version",
+    "updater", "update_delta", "pyxdelta", "_version",
     "node_client", "node_identity", "node_link", "node_protocol",
     "node_registry_store", "node_rpc_handlers", "node_store", "topology",
     # `i18n` is a Python package (`from i18n import t`) — listed so it

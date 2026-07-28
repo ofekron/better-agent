@@ -30,8 +30,10 @@ from __future__ import annotations
 from contextlib import chdir, contextmanager
 from pathlib import Path
 
+from tufup.common import SUFFIX_PATCH
 from tufup.repo import Repository
 
+from update_delta import create_patch
 from updater import APP_NAME
 
 
@@ -73,9 +75,22 @@ class ReleaseRepo:
             # already set. Load on demand so both paths work.
             if self._repo.roles is None:
                 self._repo._load_keys_and_roles(create_keys=False)
+            previous_archive = self._repo.roles.get_latest_archive()
             self._repo.add_bundle(
-                new_bundle_dir=str(bundle_dir), new_version=version,
+                new_bundle_dir=str(bundle_dir),
+                new_version=version,
+                skip_patch=True,
             )
+            latest_archive = self._repo.roles.get_latest_archive()
+            if previous_archive and latest_archive.version > previous_archive.version:
+                source_path = self._repo.targets_dir / previous_archive.path
+                target_path = self._repo.targets_dir / latest_archive.path
+                patch_path = target_path.with_suffix("").with_suffix(SUFFIX_PATCH)
+                patch_metadata = create_patch(source_path, target_path, patch_path)
+                self._repo.roles.add_or_update_target(
+                    local_path=patch_path,
+                    custom=dict(user=None, tufup=patch_metadata),
+                )
             self._repo.publish_changes(
                 private_key_dirs=[str(self.keys_dir)],
             )
