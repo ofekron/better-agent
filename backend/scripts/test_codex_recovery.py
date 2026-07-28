@@ -1521,7 +1521,7 @@ def test_turn_manager_dead_runner_replays_codex_rollout_events() -> bool:
         codex_sid = str(uuid.uuid4())
         provider = _FakeCodexProvider(app_sid, codex_sid)
         tm = TurnManager(_Coordinator(provider))
-        tm.lifecycle.bind()
+        await tm.lifecycle.bind()
         ws_events: list[dict] = []
 
         async def ws_callback(event: dict) -> None:
@@ -1547,7 +1547,7 @@ def test_turn_manager_dead_runner_replays_codex_rollout_events() -> bool:
         finally:
             turn_manager_mod.runtime_skill_projection = original_runtime
             turn_manager_mod.extension_audit_context = original_audit
-            tm.lifecycle.close()
+            await tm.lifecycle.close()
         events = result.get("events") or []
         if result.get("success") is not True:
             print(f"  expected success result, got {result!r}")
