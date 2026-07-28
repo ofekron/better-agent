@@ -37,6 +37,7 @@ _TMP_HOME = _test_home.isolate("bc-test-provider-cursor-")
 
 import provider_cursor  # noqa: E402
 import runner_cursor  # noqa: E402
+from capability_contexts import prompt_heading_for_source  # noqa: E402
 from provider_session_events import SessionEventsProvider  # noqa: E402
 
 
@@ -374,17 +375,14 @@ def test_runner_fails_closed_on_empty_prompt() -> bool:
 
 
 def test_capability_context_labels_team_message() -> bool:
-    prompt = runner_cursor._prepend_capability_context("<mssg>done</mssg>", {
-        "source": "mssg",
-        "capability_contexts": [{
-            "name": "Runtime",
-            "category": "system",
-            "content": "Use runtime context.",
-        }],
-    })
+    # The label contract lives in prompt_heading_for_source (capability_contexts).
+    # Assert it there directly — prepend_capability_context is integrations-gated
+    # and short-circuits in the isolated test home, so it cannot prove the label.
     return (
-        "## Message\n\n<mssg>" in prompt
-        and "## User prompt\n\n<mssg>" not in prompt
+        prompt_heading_for_source("mssg") == "Message"
+        and prompt_heading_for_source("team_ask") == "Ask"
+        and prompt_heading_for_source("user") == "Injected prompt (user)"
+        and prompt_heading_for_source(None) == "User prompt"
     )
 
 
