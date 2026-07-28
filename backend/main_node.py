@@ -30,6 +30,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -67,7 +68,23 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-app = FastAPI(title=f"Better Agent — node {os.environ.get('BETTER_CLAUDE_NODE_ID', '?')}")
+@asynccontextmanager
+async def node_lifespan(_app: FastAPI):
+    """Application lifespan: run startup before serving, shutdown after.
+
+    Startup and shutdown stay in separate blocks (not one try/finally) so a
+    failure in startup cannot trigger the shutdown drain on resources startup
+    never initialised. `_on_startup`/`_on_shutdown` are defined below; names
+    resolve at call time.
+    """
+    await _on_startup()
+    try:
+        yield
+    finally:
+        await _on_shutdown()
+
+
+app = FastAPI(title=f"Better Agent — node {os.environ.get('BETTER_CLAUDE_NODE_ID', '?')}", lifespan=node_lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -80,7 +97,6 @@ app.add_middleware(
 _client: NodeClient | None = None
 
 
-@app.on_event("startup")
 async def _on_startup() -> None:
     global _client
 
@@ -116,7 +132,6 @@ async def _on_startup() -> None:
     await _client.start()
 
 
-@app.on_event("shutdown")
 async def _on_shutdown() -> None:
     if _client is not None:
         await _client.stop()

@@ -4,6 +4,7 @@ import asyncio
 import collections
 import contextvars
 import copy
+from contextlib import asynccontextmanager
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 import faulthandler
 import gzip
@@ -1669,6 +1670,22 @@ if not frontend_logger.handlers:
     _install_queued_logging(frontend_logger, _frontend_file_handler)
 
 
+@asynccontextmanager
+async def app_lifespan(_app: FastAPI):
+    """Application lifespan: run startup before serving, shutdown after.
+
+    Startup and shutdown stay in separate blocks (not one try/finally) so a
+    failure in startup cannot trigger the shutdown drain on resources startup
+    never initialised. `on_startup`/`on_shutdown` are defined later in this
+    module; names resolve at call time.
+    """
+    await on_startup()
+    try:
+        yield
+    finally:
+        await on_shutdown()
+
+
 def create_api_app() -> FastAPI:
     """Create the FastAPI API app before frontend static files are mounted.
 
@@ -1676,7 +1693,7 @@ def create_api_app() -> FastAPI:
     module-level `app`; tests that need API-only import set
     `BETTER_CLAUDE_API_ONLY=1` before importing `main`.
     """
-    return FastAPI(title="Better Agent")
+    return FastAPI(title="Better Agent", lifespan=app_lifespan)
 
 
 app = create_api_app()
@@ -13783,7 +13800,6 @@ def _start_extension_update_checker() -> None:
     )
 
 
-@app.on_event("startup")
 async def on_startup():
     """Boot uvicorn fast: every long-running step (migrations,
     recovery scans, jsonl replay) runs as a tracked background task
@@ -14381,7 +14397,6 @@ async def on_startup():
         )
 
 
-@app.on_event("shutdown")
 async def on_shutdown():
     """Cancel every in-flight runner on intentional shutdown (Ctrl+C).
     During uvicorn hot-reload (SIGTERM), leave runners alive — they're
