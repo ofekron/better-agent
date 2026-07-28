@@ -18,7 +18,6 @@ def _reset_index() -> None:
     session_store._fork_index.clear()  # type: ignore[attr-defined]
     session_store._root_forks.clear()  # type: ignore[attr-defined]
     session_store._root_index_signatures.clear()  # type: ignore[attr-defined]
-    session_store._negative_root_resolve_cache.clear()  # type: ignore[attr-defined]
     session_store._index_refresh_attempt_until.clear()  # type: ignore[attr-defined]
     session_store._index_refresh_global_attempt_until = 0.0  # type: ignore[attr-defined]
     session_store._index_loaded = False  # type: ignore[attr-defined]
@@ -27,21 +26,33 @@ def _reset_index() -> None:
     session_manager._node_root_missing_until.clear()  # type: ignore[attr-defined]
 
 
-def test_unknown_sid_resolution_is_negative_cached_until_dir_changes() -> None:
+def test_unknown_sid_resolution_never_rescans_warm_index_on_request_path() -> None:
     _reset_index()
-    refresh_calls = 0
+    session_store._ensure_index()  # type: ignore[attr-defined]
+    calls = {"fingerprint": 0, "build": 0, "refresh": 0}
+    original_fingerprint = session_store._dir_fingerprint_for  # type: ignore[attr-defined]
+    original_build = session_store._build_index_snapshot  # type: ignore[attr-defined]
     original_refresh = session_store._refresh_index  # type: ignore[attr-defined]
 
+    def counted_fingerprint(*args, **kwargs):
+        calls["fingerprint"] += 1
+        return original_fingerprint(*args, **kwargs)
+
+    def counted_build(*args, **kwargs):
+        calls["build"] += 1
+        return original_build(*args, **kwargs)
+
     def counted_refresh(*args, **kwargs) -> tuple[int, int, int]:
-        nonlocal refresh_calls
-        refresh_calls += 1
+        calls["refresh"] += 1
         return original_refresh(*args, **kwargs)
 
+    session_store._dir_fingerprint_for = counted_fingerprint  # type: ignore[attr-defined]
+    session_store._build_index_snapshot = counted_build  # type: ignore[attr-defined]
     session_store._refresh_index = counted_refresh  # type: ignore[attr-defined]
     try:
         assert session_store._resolve_root_id("missing-sid") is None  # type: ignore[attr-defined]
         assert session_store._resolve_root_id("missing-sid") is None  # type: ignore[attr-defined]
-        assert refresh_calls == 1
+        assert calls == {"fingerprint": 0, "build": 0, "refresh": 0}
 
         created = session_manager.create(
             name="root",
@@ -49,9 +60,12 @@ def test_unknown_sid_resolution_is_negative_cached_until_dir_changes() -> None:
             orchestration_mode="native",
         )
         assert created["id"]
+        before_lookup = dict(calls)
         assert session_store._resolve_root_id("missing-sid") is None  # type: ignore[attr-defined]
-        assert refresh_calls == 1
+        assert calls == before_lookup
     finally:
+        session_store._dir_fingerprint_for = original_fingerprint  # type: ignore[attr-defined]
+        session_store._build_index_snapshot = original_build  # type: ignore[attr-defined]
         session_store._refresh_index = original_refresh  # type: ignore[attr-defined]
 
 
@@ -120,8 +134,8 @@ def test_loaded_fork_mapping_wins_over_stray_root_file() -> None:
 
 
 if __name__ == "__main__":
-    test_unknown_sid_resolution_is_negative_cached_until_dir_changes()
+    test_unknown_sid_resolution_never_rescans_warm_index_on_request_path()
     test_session_manager_unknown_sid_resolution_is_negative_cached()
     test_session_store_root_sid_skips_index_load()
     test_loaded_fork_mapping_wins_over_stray_root_file()
-    print("PASS root resolve negative cache")
+    print("PASS root resolve owner projection")

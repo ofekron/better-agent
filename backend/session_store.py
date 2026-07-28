@@ -341,12 +341,8 @@ _index_lock = threading.Lock()
 _index_fingerprint: Optional[DirFingerprint] = None
 _index_generation = 0
 _index_build_lock = threading.Lock()
-_negative_root_resolve_cache: dict[str, DirFingerprint] = {}
-_negative_root_resolve_until: dict[str, float] = {}
-_negative_root_resolve_global_until = 0.0
 _index_refresh_attempt_until: dict[DirFingerprint, float] = {}
 _index_refresh_global_attempt_until = 0.0
-_NEGATIVE_ROOT_RESOLVE_TTL_SECONDS = 0.75
 _DIR_FINGERPRINT_CACHE_TTL_SECONDS = 0.10
 _INDEX_INCREMENTAL_REFRESH_MAX_CHANGED = 32
 _dir_fingerprint_cache: tuple[float, DirFingerprint] | None = None
@@ -915,7 +911,7 @@ def _reset_home_scoped_caches() -> None:
         _root_index_signatures.clear()
         _index_loaded = False
         _index_fingerprint = None
-        _clear_negative_root_resolve_cache()
+        _clear_index_refresh_throttles()
         _bump_index_generation_locked()
     with _root_file_dirs_lock:
         _root_file_dirs.clear()
@@ -944,12 +940,9 @@ def _reset_home_scoped_caches() -> None:
         _opened_cache.clear()
 
 
-def _clear_negative_root_resolve_cache() -> None:
-    global _negative_root_resolve_global_until, _index_refresh_global_attempt_until
-    _negative_root_resolve_cache.clear()
-    _negative_root_resolve_until.clear()
+def _clear_index_refresh_throttles() -> None:
+    global _index_refresh_global_attempt_until
     _index_refresh_attempt_until.clear()
-    _negative_root_resolve_global_until = 0.0
     _index_refresh_global_attempt_until = 0.0
 
 
@@ -2844,7 +2837,7 @@ def _index_tree(
         if file_signature is not None:
             _root_index_signatures[rid] = file_signature
         if topology_changed or force:
-            _clear_negative_root_resolve_cache()
+            _clear_index_refresh_throttles()
         if topology_changed or force or file_signature is not None:
             _bump_index_generation_locked()
         return topology_changed
@@ -2856,7 +2849,7 @@ def _index_set(fork_id: str, root_id: str) -> None:
         _fork_index[fork_id] = root_id
         _root_forks.setdefault(root_id, set()).add(fork_id)
         _index_loaded = True
-        _clear_negative_root_resolve_cache()
+        _clear_index_refresh_throttles()
         _bump_index_generation_locked()
 
 
@@ -2870,7 +2863,7 @@ def _index_pop(sid: str) -> None:
                 if not forks:
                     _root_forks.pop(root_id, None)
                     _root_index_signatures.pop(root_id, None)
-        _clear_negative_root_resolve_cache()
+        _clear_index_refresh_throttles()
         _bump_index_generation_locked()
 
 
@@ -3514,7 +3507,7 @@ def _install_index_snapshot(
     _root_index_signatures.clear()
     _root_index_signatures.update(root_signatures)
     _index_fingerprint = fp
-    _clear_negative_root_resolve_cache()
+    _clear_index_refresh_throttles()
     _bump_index_generation_locked()
 
 
@@ -3576,7 +3569,7 @@ def _refresh_index(
                     with _index_lock:
                         _install_index_snapshot(fp, fork_index, root_forks, root_signatures)
                         _index_fingerprint = None
-                        _clear_negative_root_resolve_cache()
+                        _clear_index_refresh_throttles()
                     return fp
             else:
                 fp, fork_index, root_forks, root_signatures = incremental
@@ -3647,7 +3640,6 @@ def _resolve_root_id(sid: str) -> Optional[str]:
     Cross-process changes are projected by the root-change owner. An unknown
     id waits briefly for one already-in-progress observation cycle, then
     returns None under the truthful eventual-consistency contract."""
-    global _negative_root_resolve_global_until
     loaded_root_id = _loaded_root_id_for(sid)
     if loaded_root_id is not None:
         return loaded_root_id
@@ -3743,7 +3735,7 @@ def project_external_root_delete(root_id: str) -> bool:
         )
         if updated is not None:
             _index_fingerprint = updated
-        _clear_negative_root_resolve_cache()
+        _clear_index_refresh_throttles()
         generation = _bump_index_generation_locked()
     _remove_summary(root_id)
     _remove_deleted_root_sidecars(root_id, root_path)
@@ -6231,7 +6223,7 @@ def delete_session(root_id: str) -> bool:
                     _index_fingerprint = updated_fingerprint
             else:
                 updated_fingerprint = None
-            _clear_negative_root_resolve_cache()
+            _clear_index_refresh_throttles()
             generation = _bump_index_generation_locked()
         if updated_fingerprint is not None:
             _publish_dir_fingerprint_cache(updated_fingerprint, generation)

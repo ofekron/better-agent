@@ -1551,23 +1551,17 @@ def test_root_id_resolution_caches_successful_store_lookup() -> None:
     assert "self._node_root_missing_until.pop(fork[\"id\"], None)" in index_source
 
 
-def test_unknown_root_resolution_uses_global_negative_throttle() -> None:
+def test_unknown_root_resolution_uses_owner_projection_without_request_scan() -> None:
     source = (ROOT / "session_store.py").read_text(encoding="utf-8")
-    assert "_negative_root_resolve_global_until = 0.0" in source
-    helper_start = source.index("def _clear_negative_root_resolve_cache(")
-    helper_end = source.index("def _copy_jsonish(", helper_start)
-    helper_source = source[helper_start:helper_end]
-    assert "_negative_root_resolve_cache.clear()" in helper_source
-    assert "_negative_root_resolve_until.clear()" in helper_source
-    assert "_negative_root_resolve_global_until = 0.0" in helper_source
     resolve_start = source.index("def _resolve_root_id(")
     resolve_end = source.index("def _session_path(", resolve_start)
     resolve_source = source[resolve_start:resolve_end]
-    throttle_idx = resolve_source.index("_negative_root_resolve_global_until > now")
-    fingerprint_idx = resolve_source.index("live_fp = _dir_fingerprint_cached()")
-    assert throttle_idx < fingerprint_idx
-    assert "_negative_root_resolve_global_until = (" in resolve_source
-    assert "def _dir_fingerprint_cached(" in source
+    assert "_wait_root_change_owner_ready()" in resolve_source
+    assert "generation = binding.owner.observation_generation" in resolve_source
+    assert "_wait_root_change_observation(generation)" in resolve_source
+    assert "_refresh_index(" not in resolve_source
+    assert "_dir_fingerprint" not in resolve_source
+    assert "_negative_root_resolve" not in source
 
 
 def test_fork_index_refresh_sidecar_write_is_backgrounded() -> None:
@@ -3474,16 +3468,16 @@ def test_root_resolution_consults_loaded_index_before_filesystem_shortcut() -> N
     loaded_start = source.index("def _loaded_root_id_for(")
     loaded_end = source.index("def _resolve_root_id(", loaded_start)
     loaded_source = source[loaded_start:loaded_end]
-    assert "(_sessions_dir() / f\"{sid}.json\").exists()" in helper_source
+    assert "_root_file_path(sid).exists()" in helper_source
     assert "_ensure_index()" in helper_source
     assert "_loaded_root_id_for(sid)" in helper_source
     assert "if not _index_loaded:" in loaded_source
     assert "sid in _root_index_signatures" in loaded_source
     assert "_fork_index.get(sid)" in loaded_source
     assert helper_source.index("_loaded_root_id_for(sid)") < helper_source.index(
-        "(_sessions_dir() / f\"{sid}.json\").exists()"
+        "_root_file_path(sid).exists()"
     )
-    assert helper_source.index("(_sessions_dir() / f\"{sid}.json\").exists()") < helper_source.index(
+    assert helper_source.index("_root_file_path(sid).exists()") < helper_source.index(
         "_ensure_index()"
     )
 
@@ -4757,7 +4751,7 @@ if __name__ == "__main__":
     test_team_message_validation_uses_lite_session_read()
     test_known_worker_projection_uses_field_reads()
     test_session_exists_uses_index_without_cold_root_load()
-    test_unknown_root_resolution_uses_global_negative_throttle()
+    test_unknown_root_resolution_uses_owner_projection_without_request_scan()
     test_fork_index_refresh_sidecar_write_is_backgrounded()
     test_fork_index_refresh_updates_changed_roots_incrementally()
     test_session_detail_reuses_migrated_root_cache()
