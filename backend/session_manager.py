@@ -588,7 +588,6 @@ def _validate_orchestration_mode_against_provider(
 
 class SessionManager:
     def __init__(self) -> None:
-        self._persist_coordinator = _SessionPersistCoordinator(self._tail_persist)
         self._root_repository: SessionRootRepository = JsonSessionRootRepository()
         # Root trees, keyed by root_id. Forks live inside their root.
         # OrderedDict for LRU: `move_to_end` marks recency on access,
@@ -1586,15 +1585,6 @@ class SessionManager:
                     "_load_root: pre-flush of pending persist failed for %s",
                     rid,
                 )
-        if drain_failed:
-            with self._persist_coordinator.lock:
-                authoritative = self._persist_coordinator.pending.setdefault(
-                    rid, pending,
-                )
-            self._roots[rid] = authoritative
-            self._index_root(authoritative)
-            self._enforce_root_cap(keep_rid=rid)
-            return authoritative
         root = self._root_repository.read_root(rid)
         if root is None:
             # Re-queue the drained pending state so it isn't silently
@@ -4057,31 +4047,33 @@ class SessionManager:
         root_lock.acquire()
         lock_acquired_at = time.perf_counter()
         try:
-            try:
-                with perf.timed("session.tail_persist.lock_copy"):
-                    with perf.timed("session.tail_persist.state"):
-                        persist = self._persist_coordinator
-                        with persist.lock:
-                            claim = persist.claim_pending_unlocked(root_id)
-                            if claim is None:
-                                return
-                    with perf.timed("session.tail_persist.copy"):
-                        sess = self._root_repository.copy_persistable_root(
-                            claim.live_root,
-                        )
-            finally:
-                lock_released_at = time.perf_counter()
-                root_lock.release()
-                perf.record(
-                    "session.tail_persist.root_lock_wait",
-                    (lock_acquired_at - lock_wait_started) * 1000.0,
-                )
-                perf.record(
-                    "session.tail_persist.root_lock_held",
-                    (lock_released_at - lock_acquired_at) * 1000.0,
-                )
-            # bump=False — `updated_at` was set at queue time under
-            # the caller's lock.
+            with perf.timed("session.tail_persist.lock_copy"):
+                with perf.timed("session.tail_persist.state"):
+                    with _persist_state_lock:
+                        if root_id in _persist_inflight:
+                            return
+                        pending = _persist_pending.pop(root_id, None)
+                        _cancel_persist_deadline_unlocked(root_id)
+                        if pending is None:
+                            return
+                        _persist_inflight.add(root_id)
+                        _persist_last_at[root_id] = time.monotonic()
+                with perf.timed("session.tail_persist.copy"):
+                    sess = self._root_repository.copy_persistable_root(pending)
+        finally:
+            lock_released_at = time.perf_counter()
+            root_lock.release()
+            perf.record(
+                "session.tail_persist.root_lock_wait",
+                (lock_acquired_at - lock_wait_started) * 1000.0,
+            )
+            perf.record(
+                "session.tail_persist.root_lock_held",
+                (lock_released_at - lock_acquired_at) * 1000.0,
+            )
+        # bump=False — `updated_at` was set at queue time under
+        # the caller's lock.
+        try:
             with perf.timed("session.tail_persist.write_full"):
                 self._root_repository.write_root(
                     sess,
@@ -4152,23 +4144,30 @@ class SessionManager:
                         continue
                     persist.last_at[rid] = time.monotonic()
                 try:
-                    self._root_repository.write_root(
-                        sess,
-                        bump_updated_at=False,
-                        preserve_projection_fields=True,
-                    )
-                    self._note_root_file_written(rid)
-                    with persist.changed:
-                        persist._release_root_if_quiescent_unlocked(rid)
-                        persist.changed.notify_all()
-                except Exception:
-                    with persist.changed:
-                        persist.pending.setdefault(rid, sess)
-                    logger.exception(
-                        "flush_pending_persists: failed for %s", rid,
-                    )
-            finally:
-                lock.release()
+                    with _persist_state_changed:
+                        while rid in _persist_inflight:
+                            _persist_state_changed.wait(timeout=1.0)
+                        sess = _persist_pending.pop(rid, None)
+                        _cancel_persist_deadline_unlocked(rid)
+                        if sess is None:
+                            break
+                        _persist_last_at[rid] = time.monotonic()
+                    try:
+                        self._root_repository.write_root(
+                            sess,
+                            bump_updated_at=False,
+                            preserve_projection_fields=True,
+                        )
+                        self._note_root_file_written(rid)
+                    except Exception:
+                        logger.exception(
+                            "flush_pending_persists: failed for %s", rid,
+                        )
+                finally:
+                    lock.release()
+                with _persist_state_changed:
+                    if rid not in _persist_pending and rid not in _persist_inflight:
+                        break
 
     def flush_root_persist(self, root_id: str) -> None:
         """Durability barrier for one root without draining unrelated roots."""
@@ -4192,18 +4191,19 @@ class SessionManager:
                 (time.perf_counter() - lock_started) * 1000.0,
             )
             try:
-                try:
-                    with persist.changed:
-                        if root_id in persist.inflight:
-                            continue
-                        claim = persist.claim_pending_unlocked(root_id)
-                        if claim is None:
-                            return
-                    sess = self._root_repository.copy_persistable_root(
-                        claim.live_root,
-                    )
-                finally:
-                    lock.release()
+                with _persist_state_changed:
+                    if root_id in _persist_inflight:
+                        continue
+                    pending = _persist_pending.pop(root_id, None)
+                    _cancel_persist_deadline_unlocked(root_id)
+                    if pending is None:
+                        return
+                    _persist_inflight.add(root_id)
+                    _persist_last_at[root_id] = time.monotonic()
+                sess = self._root_repository.copy_persistable_root(pending)
+            finally:
+                lock.release()
+            try:
                 with perf.timed("session.flush_root.write"):
                     self._root_repository.write_root(
                         sess,
