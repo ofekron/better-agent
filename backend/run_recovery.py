@@ -2098,7 +2098,7 @@ def _apply_completion_state(
             session_manager.set_completed_at(
                 persist_sid,
                 msg_id,
-                datetime.utcnow().isoformat(),
+                datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
             )
         return
 

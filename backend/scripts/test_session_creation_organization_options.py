@@ -3,6 +3,7 @@ from __future__ import annotations
 import inspect
 import os
 import sys
+from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -40,6 +41,17 @@ def test_store_validates_and_assigns_together() -> None:
         project_id="/repo", name="Folder",
     )
     tag = session_organization_store.create_tag(project_id="/repo", name="Tag")
+    timestamps = [
+        folder["created_at"],
+        folder["updated_at"],
+        tag["created_at"],
+        tag["updated_at"],
+    ]
+    assert all(value.endswith("Z") for value in timestamps)
+    assert all(
+        datetime.fromisoformat(value.replace("Z", "+00:00")).utcoffset() is not None
+        for value in timestamps
+    )
     session_organization_store.set_session_organization(
         "session-1", folder["id"], [tag["id"], tag["id"]],
     )

@@ -28,6 +28,7 @@ import shutil
 import sys
 import tempfile
 import uuid
+from datetime import datetime
 from pathlib import Path
 
 import _test_home
@@ -187,8 +188,12 @@ async def test_recovered_success_gets_completed_at() -> bool:
     _apply_completion_state(app_sid, asst_id, run_id=run_id, cancelled=False)
 
     asst = _asst(app_sid, asst_id)
-    if not asst.get("completed_at"):
+    completed_at = str(asst.get("completed_at") or "")
+    if not completed_at:
         print(f"  recovered success missing completed_at: {asst!r}")
+        return False
+    if datetime.fromisoformat(completed_at).tzinfo is not None:
+        print(f"  recovered completed_at changed wire shape: {completed_at!r}")
         return False
     if asst.get("stopped_at"):
         print(f"  recovered success got stopped_at: {asst.get('stopped_at')!r}")
