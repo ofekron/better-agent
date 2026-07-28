@@ -37,6 +37,13 @@ def _identity_paths(authority: CatalogAuthority) -> set[Path]:
     return paths
 
 
+def _identity_directories(authority: CatalogAuthority) -> set[Path]:
+    return {
+        Path(config.parent_path)
+        for config in authority.execution_contract.config
+    }
+
+
 def _nearest_existing_directory(path: Path) -> Path | None:
     candidate = path if path.is_dir() else path.parent
     for directory in (candidate, *candidate.parents):
@@ -45,14 +52,23 @@ def _nearest_existing_directory(path: Path) -> Path | None:
     return None
 
 
-def _provider_config_paths(provider: Mapping[str, object]) -> set[Path]:
+def _provider_config_root(
+    provider: Mapping[str, object],
+) -> Path | None:
     raw = str(provider.get("config_dir") or "").strip()
     if not raw:
         raw = os.environ.get("CODEX_HOME", "").strip()
     if not raw:
-        return set()
+        return None
     root = expand_user_path(raw)
     if not root.is_absolute():
+        return None
+    return root
+
+
+def _provider_config_paths(provider: Mapping[str, object]) -> set[Path]:
+    root = _provider_config_root(provider)
+    if root is None:
         return set()
     return {root, root / "config.toml", root / "auth.json"}
 
@@ -88,11 +104,16 @@ def build_source_watch_spec(
     authorities: Mapping[str, CatalogAuthority],
 ) -> SourceWatchSpec:
     watch_roots, exact = _search_paths()
+    identity_directories: set[Path] = set()
     for provider in providers:
         provider_id = str(provider.get("id") or "")
         authority = authorities.get(provider_id)
         if authority is not None:
             exact.update(_identity_paths(authority))
+            identity_directories.update(_identity_directories(authority))
+        config_root = _provider_config_root(provider)
+        if config_root is not None:
+            identity_directories.add(config_root)
         config_paths = _provider_config_paths(provider)
         exact.update(config_paths)
         for path in config_paths:
@@ -101,6 +122,7 @@ def build_source_watch_spec(
                 watch_roots.add(root)
     return SourceWatchSpec.build(
         exact_paths=exact,
+        identity_directories=identity_directories,
         search_directories=watch_roots,
         search_names=(
             _WINDOWS_CODEX_NAMES if os.name == "nt" else ("codex",)

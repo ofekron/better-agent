@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 // Subscribe to the cross-tab `models_catalog_changed` window event the
 // App dispatches when the WS routes a per-provider catalog delta (see
@@ -21,4 +21,22 @@ export function useModelsCatalogChanged(cb: (detail?: unknown) => void): void {
     return () =>
       window.removeEventListener("models_catalog_changed", handler);
   }, [cb]);
+}
+
+export function useProviderCatalogRevision(providerId: string): number {
+  const [revision, setRevision] = useState(0);
+  const invalidate = useCallback((detail?: unknown) => {
+    const changedProviderId = (
+      detail
+      && typeof detail === "object"
+      && "provider_id" in detail
+    )
+      ? String(detail.provider_id || "")
+      : "";
+    if (changedProviderId === providerId) {
+      setRevision((current) => current + 1);
+    }
+  }, [providerId]);
+  useModelsCatalogChanged(invalidate);
+  return revision;
 }

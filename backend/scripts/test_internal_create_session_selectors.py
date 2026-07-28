@@ -23,9 +23,11 @@ from starlette.testclient import TestClient  # noqa: E402
 import config_store  # noqa: E402
 import extension_store  # noqa: E402
 import main  # noqa: E402
+import model_catalog_read_projection  # noqa: E402
 import models as models_mod  # noqa: E402
 import runtime_profile  # noqa: E402
 import orchs.manager._approval as approval  # noqa: E402
+from model_catalog_refresh_state import CatalogProjection, changed_fact  # noqa: E402
 from session_manager import manager as session_manager  # noqa: E402
 
 
@@ -220,12 +222,17 @@ def main_test() -> int:
         "default_model": "gpt-5.6",
         "custom_models": [],
     })
-    models_mod._update_cache(
-        codex_provider["id"],
-        models=["gpt-5.5", "gpt-5.4"],
-        retired=[],
-        last_fetch_state="ok",
-    )
+    model_catalog_read_projection.apply_fact(changed_fact(CatalogProjection(
+        provider_id=codex_provider["id"],
+        provider_generation=codex_provider["generation"],
+        status="current",
+        models=("gpt-5.5", "gpt-5.4"),
+        models_current=True,
+        retired=(),
+        last_refreshed_at=1.0,
+        reason="",
+        authority_fingerprint="test-authority",
+    )))
     stale_codex_default = _post(client, {
         "sender_session_id": sender["id"],
         "name": "stale codex default",

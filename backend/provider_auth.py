@@ -384,6 +384,7 @@ async def refresh_auth_status(provider_id: str, broadcast: BroadcastFn) -> None:
         logger.warning("provider_auth status check failed for %s: %s", provider_id, exc)
         authenticated = False
     _auth_cache[provider_id] = (time.monotonic(), authenticated)
+    _notify_catalog_auth_changed(provider_id)
     await broadcast()
 
 

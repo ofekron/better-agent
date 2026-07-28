@@ -116,6 +116,7 @@ async def _scenario(root: Path) -> None:
             models=("alpha", "zeta"),
             models_current=True,
             retired=(),
+            last_refreshed_at=first.last_refreshed_at,
             reason="",
             authority_fingerprint=first.authority_fingerprint,
         )

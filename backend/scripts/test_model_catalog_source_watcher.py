@@ -79,6 +79,28 @@ async def _exercise_symlink_retarget_and_restart(root: Path) -> None:
     assert not watcher.running
 
 
+async def _exercise_identity_directory_children(root: Path) -> None:
+    queue: asyncio.Queue[tuple[str, ...]] = asyncio.Queue()
+    watcher = CatalogSourceWatcher(ready_timeout_ms=50, debounce_ms=20)
+    await watcher.start(
+        SourceWatchSpec.build(identity_directories=[root]),
+        queue.put_nowait,
+    )
+    await watcher.wait_ready()
+
+    first = root / "unrelated"
+    first.write_text("one", encoding="utf-8")
+    await _next_change(queue)
+
+    renamed = root / "renamed"
+    os.replace(first, renamed)
+    await _next_change(queue)
+
+    renamed.unlink()
+    await _next_change(queue)
+    await watcher.shutdown()
+
+
 def test_native_watcher_file_lifecycle() -> None:
     with tempfile.TemporaryDirectory() as raw:
         asyncio.run(_exercise_file_lifecycle(Path(raw)))
@@ -89,7 +111,13 @@ def test_native_watcher_symlink_retarget_restart_and_shutdown() -> None:
         asyncio.run(_exercise_symlink_retarget_and_restart(Path(raw)))
 
 
+def test_identity_directory_accepts_every_direct_child_mutation() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        asyncio.run(_exercise_identity_directory_children(Path(raw)))
+
+
 if __name__ == "__main__":
     test_native_watcher_file_lifecycle()
     test_native_watcher_symlink_retarget_restart_and_shutdown()
+    test_identity_directory_accepts_every_direct_child_mutation()
     print("PASS: native catalog source watcher lifecycle")

@@ -6,6 +6,7 @@ import type { Provider } from "../../types";
 import type { HarnessProfile } from "../../types";
 import { effortsForRunner, runnerForProvider } from "../modelPicker";
 import type { HarnessFieldWrite } from "./types";
+import { useProviderCatalogRevision } from "../../hooks/useModelsCatalogChanged";
 
 interface ProfileSummary {
   id: string;
@@ -39,6 +40,7 @@ export function HarnessProfileMeta({ profile, profiles, disabled, onWrite }: Pro
   const pinnedEffort = profile.default_reasoning_effort ?? "";
   const provisioningPrompt = profile.provisioning_prompt ?? "";
   const baseId = profile.base_profile_id ?? "";
+  const modelCatalogRevision = useProviderCatalogRevision(pinnedProviderId);
   const [provisioningPromptDraft, setProvisioningPromptDraft] = useState(provisioningPrompt);
 
   useEffect(() => {
@@ -76,7 +78,7 @@ export function HarnessProfileMeta({ profile, profiles, disabled, onWrite }: Pro
     return () => {
       cancelled = true;
     };
-  }, [pinnedProviderId]);
+  }, [pinnedProviderId, modelCatalogRevision]);
 
   useEffect(() => {
     setProvisioningPromptDraft(provisioningPrompt);

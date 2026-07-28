@@ -586,6 +586,7 @@ class CatalogRefreshEngine:
                     models=projection.models,
                     models_current=False,
                     retired=projection.retired,
+                    last_refreshed_at=projection.last_refreshed_at,
                     reason="watcher_unavailable",
                     authority_fingerprint=projection.authority_fingerprint,
                 ),
@@ -624,6 +625,9 @@ class CatalogRefreshEngine:
             models=snapshot.models if snapshot is not None else (),
             models_current=models_current and snapshot is not None,
             retired=snapshot.retired if snapshot is not None else (),
+            last_refreshed_at=(
+                snapshot.last_refreshed_at if snapshot is not None else 0.0
+            ),
             reason=reason,
             authority_fingerprint=(
                 authority.fingerprint if authority is not None else ""
