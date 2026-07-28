@@ -1,0 +1,217 @@
+from __future__ import annotations
+
+import hashlib
+import os
+import stat
+import tempfile
+from contextlib import contextmanager
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Iterator
+
+from codex_execution_common import ExecutionContractError
+from codex_execution_identity import FileIdentity
+from provider_launch_identity import (
+    AttestedLaunch,
+    _open_file_identities,
+    _validate_launch,
+    _verify_file_handle,
+)
+
+
+@dataclass(frozen=True)
+class PinnedLaunch:
+    argv: tuple[str, ...]
+    pass_fds: tuple[int, ...]
+
+
+def _unlink_if_present(path: Path) -> None:
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError:
+        pass
+
+
+def _copy_descriptor(
+    descriptor: int,
+    target: Path,
+    identity: FileIdentity,
+) -> None:
+    mode = 0o500
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    created = False
+    try:
+        output = os.open(target, flags, mode)
+        created = True
+        try:
+            os.fchmod(output, mode)
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            while True:
+                chunk = os.read(descriptor, 1024 * 1024)
+                if not chunk:
+                    break
+                offset = 0
+                while offset < len(chunk):
+                    offset += os.write(output, chunk[offset:])
+            os.fsync(output)
+        finally:
+            os.close(output)
+        _verify_file_handle(descriptor, identity)
+        copied = FileIdentity.capture(target)
+        if copied.sha256 != identity.sha256 or copied.size != identity.size:
+            raise ExecutionContractError(
+                "materialized execution component identity mismatch",
+            )
+    except OSError as exc:
+        if created:
+            _unlink_if_present(target)
+        raise ExecutionContractError(
+            "execution component cannot be materialized",
+        ) from exc
+    except ExecutionContractError:
+        if created:
+            _unlink_if_present(target)
+        raise
+
+
+@contextmanager
+def open_pinned_launch(launch: AttestedLaunch) -> Iterator[PinnedLaunch]:
+    _validate_launch(launch)
+    if not launch.launcher.attest_metadata():
+        raise ExecutionContractError("provider launcher identity mismatch")
+    if os.name == "nt":
+        from codex_execution_launch import _open_windows_locked_components
+
+        with _open_windows_locked_components(launch.components):
+            yield PinnedLaunch(launch.argv, ())
+        return
+    with _open_file_identities(launch.components) as handles:
+        with tempfile.TemporaryDirectory(
+            prefix="better-agent-launch-",
+        ) as raw:
+            argv = list(launch.argv)
+            for position, (index, descriptor) in enumerate(
+                zip(launch.component_argv_indexes, handles),
+            ):
+                source = launch.components[position]
+                target = Path(raw) / f"{position}-{Path(argv[index]).name}"
+                _copy_descriptor(descriptor, target, source)
+                argv[index] = str(target)
+            yield PinnedLaunch(tuple(argv), ())
+
+
+@dataclass(frozen=True)
+class MaterializedSdkLaunch:
+    executable_path: str
+    files: tuple[FileIdentity, ...]
+
+    def attest(self) -> bool:
+        return all(identity.attest() for identity in self.files)
+
+
+def _secure_materialization_root(raw_path: str | Path) -> Path:
+    path = Path(raw_path)
+    if not path.is_absolute():
+        raise ExecutionContractError("materialization root must be absolute")
+    try:
+        resolved = path.resolve(strict=True)
+        observed = path.lstat()
+    except OSError as exc:
+        raise ExecutionContractError(
+            "materialization root is unavailable",
+        ) from exc
+    if (
+        not stat.S_ISDIR(observed.st_mode)
+        or stat.S_ISLNK(observed.st_mode)
+    ):
+        raise ExecutionContractError("materialization root must not be a symlink")
+    return resolved
+
+
+def materialize_sdk_launch(
+    launch: AttestedLaunch,
+    destination: str | Path,
+) -> MaterializedSdkLaunch:
+    _validate_launch(launch)
+    if not launch.launcher.attest_metadata():
+        raise ExecutionContractError("provider launcher identity mismatch")
+    if launch.mode not in {"native", "posix-shebang"}:
+        raise ExecutionContractError(
+            "SDK launch cannot materialize this launcher type",
+        )
+    root = _secure_materialization_root(destination)
+    with _open_file_identities(launch.components) as handles:
+        if launch.mode == "native":
+            suffix = Path(launch.argv[0]).suffix
+            executable = root / f"provider-cli{suffix}"
+            _copy_descriptor(handles[0], executable, launch.components[0])
+            files = (FileIdentity.capture(executable),)
+            return MaterializedSdkLaunch(str(executable), files)
+        interpreter = root / f"provider-runtime{Path(launch.argv[0]).suffix}"
+        _copy_descriptor(handles[0], interpreter, launch.components[0])
+        script = root / f"provider-cli{Path(launch.argv[-1]).suffix}"
+        arguments = launch.argv[1:-1]
+        if any(any(character.isspace() for character in value) for value in (
+            str(interpreter),
+            *arguments,
+        )):
+            _unlink_if_present(interpreter)
+            raise ExecutionContractError(
+                "materialized shebang path cannot contain whitespace",
+            )
+        os.lseek(handles[-1], 0, os.SEEK_SET)
+        chunks: list[bytes] = []
+        while True:
+            chunk = os.read(handles[-1], 1024 * 1024)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        source = b"".join(chunks)
+        try:
+            _verify_file_handle(handles[-1], launch.components[-1])
+        except ExecutionContractError:
+            _unlink_if_present(interpreter)
+            raise
+        if hashlib.sha256(source).hexdigest() != launch.components[-1].sha256:
+            _unlink_if_present(interpreter)
+            raise ExecutionContractError("SDK launcher identity mismatch")
+        newline = source.find(b"\n")
+        body = b"" if newline < 0 else source[newline + 1:]
+        shebang = f"#!{interpreter}"
+        if arguments:
+            shebang += " " + " ".join(arguments)
+        payload = shebang.encode("utf-8") + b"\n" + body
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        created = False
+        try:
+            descriptor = os.open(script, flags, 0o500)
+            created = True
+            try:
+                os.fchmod(descriptor, 0o500)
+                offset = 0
+                while offset < len(payload):
+                    offset += os.write(descriptor, payload[offset:])
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+        except OSError as exc:
+            if created:
+                _unlink_if_present(script)
+            _unlink_if_present(interpreter)
+            raise ExecutionContractError(
+                "SDK launcher cannot be materialized",
+            ) from exc
+    try:
+        files = (
+            FileIdentity.capture(interpreter),
+            FileIdentity.capture(script),
+        )
+    except ExecutionContractError:
+        _unlink_if_present(script)
+        _unlink_if_present(interpreter)
+        raise
+    return MaterializedSdkLaunch(str(script), files)
