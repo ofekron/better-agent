@@ -19,16 +19,19 @@ import config_store
 
 config_store._save_state(config_store._seed_default_state())
 state = json.loads(config_store._config_path().read_text(encoding="utf-8"))
-state.pop("schema_version")
-for provider in state["providers"]:
-    provider.pop("generation")
-    provider.pop("revision")
+state["schema_version"] = config_store.MIN_SUPPORTED_CONFIG_SCHEMA_VERSION
+state.pop("provider_state_authority")
+state.pop("provider_state_projected")
 active = next(
     provider
     for provider in state["providers"]
     if provider["id"] == state["default_provider_id"]
 )
 active["config_dir"] = os.environ["PROVIDER_CONFIG_PROBE"]
+provider_authority = {
+    provider["id"]: (provider["generation"], provider["revision"])
+    for provider in state["providers"]
+}
 config_store._config_path().parent.mkdir(parents=True, exist_ok=True)
 config_store._config_path().write_text(json.dumps(state), encoding="utf-8")
 with config_store._state_cache_lock:
@@ -38,6 +41,17 @@ importlib.import_module(sys.argv[1])
 
 persisted = json.loads(config_store._config_path().read_text(encoding="utf-8"))
 assert persisted["schema_version"] == config_store.CONFIG_SCHEMA_VERSION
+assert {
+    provider["id"]: (provider["generation"], provider["revision"])
+    for provider in persisted["providers"]
+} == provider_authority
+assert persisted["provider_state_projected"] is False
+assert persisted["provider_state_authority"]["digest"] == (
+    config_store.provider_sync_authority.snapshot_digest(
+        persisted["default_provider_id"],
+        persisted["providers"],
+    )
+)
 persisted_active = next(
     provider
     for provider in persisted["providers"]

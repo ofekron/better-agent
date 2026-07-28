@@ -36,7 +36,7 @@ import traceback
 import uuid
 from contextlib import contextmanager
 from functools import wraps
-from typing import Optional
+from typing import Callable, Optional
 
 import credential_session_client
 import dependency_plan
@@ -61,6 +61,7 @@ from permission import (
 logger = logging.getLogger(__name__)
 
 CONFIG_SCHEMA_VERSION = 2
+MIN_SUPPORTED_CONFIG_SCHEMA_VERSION = 1
 
 _state_cache_lock = threading.RLock()
 _state_cache: tuple[tuple[int, int], dict] | None = None
@@ -766,6 +767,7 @@ _UNVERSIONED_PROVIDER_STATE_KEYS = frozenset({
     "internal_llm",
 })
 
+
 def _migrate_unversioned_provider_state(raw: dict) -> dict:
     if set(raw) != _UNVERSIONED_PROVIDER_STATE_KEYS:
         raise RuntimeError("unsupported provider config schema")
@@ -880,6 +882,63 @@ def _normalize_loaded_state(raw: dict) -> dict:
         ),
         "internal_llm": _normalize_internal_llm(raw.get("internal_llm")),
     }
+
+
+def _migrate_schema_1_to_2(raw: dict) -> dict:
+    if raw.get("schema_version") != 1:
+        raise RuntimeError("unsupported provider config schema")
+    candidate = {
+        **copy.deepcopy(raw),
+        "schema_version": 2,
+        "provider_state_authority": provider_sync_authority.new_authority(
+            raw.get("default_provider_id"),
+            raw.get("providers"),
+        ),
+        "provider_state_projected": False,
+    }
+    normalized = _normalize_loaded_state(candidate)
+    expected_v1 = copy.deepcopy(normalized)
+    expected_v1["schema_version"] = 1
+    expected_v1.pop("provider_state_authority")
+    expected_v1.pop("provider_state_projected")
+    if raw != expected_v1:
+        raise RuntimeError("unsupported provider config schema")
+    return normalized
+
+
+_CONFIG_SCHEMA_MIGRATIONS: dict[int, Callable[[dict], dict]] = {
+    1: _migrate_schema_1_to_2,
+}
+
+
+def _validate_config_schema_migrations() -> None:
+    expected = set(
+        range(MIN_SUPPORTED_CONFIG_SCHEMA_VERSION, CONFIG_SCHEMA_VERSION)
+    )
+    if set(_CONFIG_SCHEMA_MIGRATIONS) != expected:
+        raise RuntimeError("provider config schema migration chain is incomplete")
+
+
+def _migrate_versioned_state(raw: dict) -> dict:
+    _validate_config_schema_migrations()
+    version = raw.get("schema_version")
+    if (
+        not isinstance(version, int)
+        or isinstance(version, bool)
+        or version < MIN_SUPPORTED_CONFIG_SCHEMA_VERSION
+        or version > CONFIG_SCHEMA_VERSION
+    ):
+        raise RuntimeError(
+            f"unsupported provider config schema: expected {CONFIG_SCHEMA_VERSION}"
+        )
+    state = copy.deepcopy(raw)
+    while version < CONFIG_SCHEMA_VERSION:
+        state = _CONFIG_SCHEMA_MIGRATIONS[version](state)
+        next_version = state.get("schema_version")
+        if next_version != version + 1:
+            raise RuntimeError("provider config schema migration edge is invalid")
+        version = next_version
+    return _normalize_loaded_state(state)
 
 
 def _clean_config_dir(value) -> str:
@@ -1017,7 +1076,14 @@ def _load_state() -> dict:
                 _save_state(state)
                 return copy.deepcopy(_state_cache[1])
             if "schema_version" in raw:
-                state = _normalize_loaded_state(raw)
+                source_version = raw.get("schema_version")
+                state = _migrate_versioned_state(raw)
+                if source_version != CONFIG_SCHEMA_VERSION:
+                    _save_state(
+                        state,
+                        provider_state_authority=state["provider_state_authority"],
+                    )
+                    return copy.deepcopy(_state_cache[1])
                 _state_cache = (fingerprint, copy.deepcopy(state))
                 return state
             if "providers" in raw:
@@ -1090,7 +1156,17 @@ def _current_provider_state_metadata() -> tuple[dict | None, bool]:
     if "schema_version" not in raw and "providers" in raw:
         _migrate_unversioned_provider_state(raw)
         return None, False
-    if raw.get("schema_version") != CONFIG_SCHEMA_VERSION:
+    version = raw.get("schema_version")
+    if version != CONFIG_SCHEMA_VERSION:
+        _validate_config_schema_migrations()
+        if (
+            isinstance(version, int)
+            and not isinstance(version, bool)
+            and MIN_SUPPORTED_CONFIG_SCHEMA_VERSION
+            <= version
+            < CONFIG_SCHEMA_VERSION
+        ):
+            return None, False
         raise RuntimeError(
             f"unsupported provider config schema: expected {CONFIG_SCHEMA_VERSION}"
         )
@@ -1124,10 +1200,17 @@ def _save_state(
     if provider_state_authority is None:
         supplied_authority = state.get("provider_state_authority")
         if current_authority is None:
-            authority = provider_sync_authority.new_authority(
-                default_provider_id,
-                providers,
-            )
+            if supplied_authority is None:
+                authority = provider_sync_authority.new_authority(
+                    default_provider_id,
+                    providers,
+                )
+            else:
+                authority = provider_sync_authority.validate_authority(
+                    supplied_authority,
+                    default_provider_id,
+                    providers,
+                )
         else:
             if (
                 supplied_authority is not None

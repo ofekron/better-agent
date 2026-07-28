@@ -105,6 +105,14 @@ def _unversioned_provider_state(canonical: dict) -> dict:
     return state
 
 
+def _schema_v1_state(canonical: dict) -> dict:
+    state = copy.deepcopy(canonical)
+    state["schema_version"] = 1
+    state.pop("provider_state_authority")
+    state.pop("provider_state_projected")
+    return state
+
+
 def main() -> None:
     config_store.credential_session_client.available = lambda: True
     config_store.credential_session_client.request = _credential_request
@@ -113,6 +121,13 @@ def main() -> None:
 
     seeded = config_store.list_providers()
     persisted = json.loads(config_store._config_path().read_text(encoding="utf-8"))
+    config_store._validate_config_schema_migrations()
+    assert set(config_store._CONFIG_SCHEMA_MIGRATIONS) == set(
+        range(
+            config_store.MIN_SUPPORTED_CONFIG_SCHEMA_VERSION,
+            config_store.CONFIG_SCHEMA_VERSION,
+        )
+    )
     assert persisted["schema_version"] == config_store.CONFIG_SCHEMA_VERSION
     assert all(record["revision"] == 0 for record in seeded["providers"])
     assert len({record["generation"] for record in seeded["providers"]}) == len(
@@ -398,9 +413,11 @@ else:
     missing_projection_marker = copy.deepcopy(canonical)
     missing_projection_marker.pop("provider_state_projected")
     unsupported_states.append(missing_projection_marker)
-    previous_schema = copy.deepcopy(canonical)
-    previous_schema["schema_version"] = config_store.CONFIG_SCHEMA_VERSION - 1
-    unsupported_states.append(previous_schema)
+    below_minimum = copy.deepcopy(canonical)
+    below_minimum["schema_version"] = (
+        config_store.MIN_SUPPORTED_CONFIG_SCHEMA_VERSION - 1
+    )
+    unsupported_states.append(below_minimum)
     wrong_version = copy.deepcopy(canonical)
     wrong_version["schema_version"] += 1
     unsupported_states.append(wrong_version)
@@ -431,6 +448,58 @@ else:
         else:
             raise AssertionError("unsupported provider schema was accepted")
         assert config_store._config_path().read_bytes() == unsupported_bytes
+
+    schema_v1 = _schema_v1_state(canonical)
+    unsupported_v1_states = []
+    unexpected_v1 = copy.deepcopy(schema_v1)
+    unexpected_v1["unexpected"] = True
+    unsupported_v1_states.append(unexpected_v1)
+    malformed_v1 = copy.deepcopy(schema_v1)
+    malformed_v1["providers"][0]["mode"] = "invalid"
+    unsupported_v1_states.append(malformed_v1)
+    for unsupported in unsupported_v1_states:
+        config_store._config_path().write_text(
+            json.dumps(unsupported),
+            encoding="utf-8",
+        )
+        _reset_cache()
+        unsupported_bytes = config_store._config_path().read_bytes()
+        try:
+            config_store.list_providers()
+        except RuntimeError as exc:
+            assert "unsupported provider config schema" in str(exc)
+        else:
+            raise AssertionError("unsupported schema v1 provider state was accepted")
+        assert config_store._config_path().read_bytes() == unsupported_bytes
+
+    config_store._config_path().write_text(
+        json.dumps(schema_v1),
+        encoding="utf-8",
+    )
+    _reset_cache()
+    migrated_v1 = config_store.list_providers()
+    persisted_v1_migration = json.loads(
+        config_store._config_path().read_text(encoding="utf-8")
+    )
+    assert persisted_v1_migration["schema_version"] == config_store.CONFIG_SCHEMA_VERSION
+    assert persisted_v1_migration["default_provider_id"] == schema_v1["default_provider_id"]
+    assert persisted_v1_migration["providers"] == schema_v1["providers"]
+    assert persisted_v1_migration["provider_state_projected"] is False
+    assert persisted_v1_migration["provider_state_authority"]["revision"] == 0
+    uuid.UUID(persisted_v1_migration["provider_state_authority"]["generation"])
+    assert persisted_v1_migration["provider_state_authority"]["digest"] == (
+        config_store.provider_sync_authority.snapshot_digest(
+            schema_v1["default_provider_id"],
+            schema_v1["providers"],
+        )
+    )
+    assert migrated_v1["provider_state_authority"] == (
+        persisted_v1_migration["provider_state_authority"]
+    )
+    migrated_v1_bytes = config_store._config_path().read_bytes()
+    _reset_cache()
+    assert config_store.list_providers() == migrated_v1
+    assert config_store._config_path().read_bytes() == migrated_v1_bytes
 
     legacy_provider_state = _unversioned_provider_state(canonical)
     unsupported_legacy_states = []
