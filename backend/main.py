@@ -12887,6 +12887,17 @@ async def _re_enqueue_queued_prompts() -> set[str]:
         sid = session.get("id")
         if not sid:
             continue
+        # Definitive resurrection guard: never re-submit for a session whose
+        # root is gone or tombstoned, regardless of how the stale projection
+        # row survived. Drop the row and move on — submit_prompt_async would
+        # otherwise materialize a brand-new root for the dead sid.
+        if not await asyncio.to_thread(session_manager.is_live_session, sid):
+            await asyncio.to_thread(session_queue_projection.delete_records, [sid])
+            logger.info(
+                "re-enqueue: dropping stale queued record for %s "
+                "(no live root / tombstoned)", sid,
+            )
+            continue
         try:
             queued = session.get("queued_prompts", [])
             if not queued:

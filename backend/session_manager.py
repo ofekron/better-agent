@@ -2258,6 +2258,24 @@ class SessionManager:
             return session_store._find_in_tree(root, sid) is not None
         return True
 
+    def is_live_session(self, sid: str) -> bool:
+        """Authoritative liveness check for crash-recovery paths (queue
+        projection self-heal, queued-prompt re-enqueue) that must not
+        resurrect a session whose root was deleted.
+
+        True iff `sid` resolves to a live root AND has no deletion
+        tombstone. The tombstone (`.owner-deletions/{sid}.json`) always
+        wins: session ids are never reused, so a tombstone means the sid
+        was durably deleted even if a stray file lingers on disk. Sids are
+        UUIDs, so a tombstone is permanent — no incarnation/generation
+        comparison is needed here (unlike `owner_deletion_committed`,
+        which gates live in-flight owners against a specific token)."""
+        if not sid:
+            return False
+        if self._deletion_evidence_path(sid).exists():
+            return False
+        return self.exists(sid)
+
     def get_field(self, sid: str, field: str) -> Any:
         """Read a single session-level field without deepcopy. Returns
         the field value (which may be a mutable list/dict from the live

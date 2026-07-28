@@ -253,6 +253,37 @@ def shutdown_loader() -> None:
         executor.shutdown(wait=True, cancel_futures=True)
 
 
+def _dead_sids(records: dict[str, dict[str, Any]]) -> list[str]:
+    """Sids in `records` whose root is gone or carries a deletion tombstone.
+
+    Fail-open: if session_manager is unavailable or a single liveness check
+    raises, that sid is treated as live so a genuinely alive session is never
+    dropped. The queued-prompt re-enqueue loop applies the same check again
+    before it can materialize a session, so fail-open here cannot resurrect."""
+    try:
+        from session_manager import manager as session_manager
+    except Exception:
+        logger.exception("queue projection self-heal: session_manager unavailable")
+        return []
+    dead: list[str] = []
+    for sid in records:
+        try:
+            if not session_manager.is_live_session(sid):
+                dead.append(sid)
+        except Exception:
+            logger.exception("queue projection liveness check failed for %s", sid)
+    return dead
+
+
+def _purge_dead_durable(sids: list[str]) -> None:
+    """Persist DELETEs for tombstoned/absent sids so the sqlite stops
+    carrying stale rows across restarts. Runs after `_ensure_loaded` has
+    released the load lock; the writer serializes the DELETEs."""
+    for sid in sids:
+        sequence = mark_dirty()
+        _enqueue_write(sid, sequence, None)
+
+
 def _ensure_loaded() -> None:
     global _loaded, _loading, _durable_sequence, _sequence, _persisted_sequence
     wait_started = time.perf_counter()
@@ -270,12 +301,18 @@ def _ensure_loaded() -> None:
             _loading = False
             _load_cv.notify_all()
         raise
+    # Self-heal the verbatim sqlite load: drop any row whose root was deleted.
+    # Computed before re-acquiring the load lock so session_manager is reached
+    # without holding the projection lock.
+    dead_sids = _dead_sids(candidate)
     with _load_cv:
         for sid, (_sequence_value, record) in _mutation_log.items():
             if record is None:
                 candidate.pop(sid, None)
             else:
                 candidate[sid] = record
+        for sid in dead_sids:
+            candidate.pop(sid, None)
         _records.clear()
         _records.update(candidate)
         _durable_sequence = max(_durable_sequence, durable)
@@ -284,6 +321,12 @@ def _ensure_loaded() -> None:
         _loaded = True
         _loading = False
         _load_cv.notify_all()
+    if dead_sids:
+        logger.info(
+            "queue projection self-heal: dropping %d stale record(s)", len(dead_sids),
+        )
+        perf.record_count("queue_projection.self_heal.dropped", len(dead_sids))
+        _purge_dead_durable(dead_sids)
 
 
 def _reset_and_load() -> None:
@@ -621,7 +664,13 @@ def _scan_complete_snapshot() -> tuple[dict[str, dict[str, Any]], dict[str, list
 def rebuild_from_disk() -> int:
     global _loaded, _pending_rebuild, _persisted_sequence
     rebuilt, fingerprint = _scan_complete_snapshot()
+    # Self-heal: even though the scan reads live files, drop any sid whose
+    # root was deleted (tombstone wins). The full-table replace below purges
+    # these from disk too.
+    dead_sids = _dead_sids(rebuilt)
     with _lock:
+        for sid in dead_sids:
+            rebuilt.pop(sid, None)
         for sid, (_sequence_value, record) in _mutation_log.items():
             if record is None:
                 rebuilt.pop(sid, None)

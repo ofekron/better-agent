@@ -41,6 +41,10 @@ class _SessionManager:
     def get_lite(self, sid: str) -> dict | None:
         return self.get(sid)
 
+    def is_live_session(self, sid: str) -> bool:
+        # The lifecycle test's session is live; the re-enqueue guard must pass.
+        return sid == "sid"
+
     def update_queued_prompt(
         self,
         sid: str,
