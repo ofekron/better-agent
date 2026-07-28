@@ -82,7 +82,7 @@ def main() -> int:
         coordinator_type = session_manager_module._SessionPersistCoordinator
         test_coordinator = coordinator_type(lambda _root_id: None)
         scheduled: list[tuple[str, float]] = []
-        test_coordinator.arm_deadline_unlocked = (
+        test_coordinator._arm_accepted_deadline_unlocked = (
             lambda root_id, delay: scheduled.append((root_id, delay))
         )
 
@@ -133,6 +133,7 @@ def main() -> int:
                 "id": "concurrent",
                 "newer": True,
             }
+            test_coordinator.accepted_roots.add("concurrent")
             test_coordinator.finish_claim_unlocked(
                 concurrent_claim,
                 failed=True,
