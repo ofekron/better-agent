@@ -291,15 +291,19 @@ class ProviderCredentialSession:
                 payload = self._server_connection.recv_bytes(maxlength=_MAX_FRAME_BYTES)
                 request = json.loads(payload.decode("utf-8"))
                 response = self._broker.handle(request)
-                if isinstance(request, dict) and isinstance(request.get("request_id"), str):
-                    response["request_id"] = request["request_id"]
+            except (EOFError, OSError):
+                return
+            except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+                request = None
+                response = {"status": "blocked", "error": "invalid request"}
+            except Exception:
+                logger.exception("provider credential request failed")
+                response = {"status": "blocked", "error": "credential access failed"}
+            if isinstance(request, dict) and isinstance(request.get("request_id"), str):
+                response["request_id"] = request["request_id"]
+            try:
                 self._server_connection.send_bytes(
                     json.dumps(response, separators=(",", ":")).encode("utf-8")
                 )
-            except (EOFError, OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
-                try:
-                    self._server_connection.send_bytes(
-                        b'{"status":"blocked","error":"invalid request"}'
-                    )
-                except (EOFError, OSError):
-                    return
+            except (EOFError, OSError):
+                return

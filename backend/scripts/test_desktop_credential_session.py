@@ -125,6 +125,23 @@ def main() -> None:
             "request_id": "1" * 32,
         }).encode())
         assert backend_request(session, "status", "provider-1") == {"status": "unknown"}
+        original_handle = broker.handle
+        failed_once = False
+
+        def fail_once(payload):
+            nonlocal failed_once
+            if not failed_once:
+                failed_once = True
+                raise ModuleNotFoundError("simulated missing keyring backend")
+            return original_handle(payload)
+
+        broker.handle = fail_once
+        assert backend_request(session, "read", "provider-1") == {
+            "status": "blocked",
+            "error": "credential access failed",
+        }
+        assert backend_request(session, "status", "provider-1") == {"status": "unknown"}
+        broker.handle = original_handle
         assert backend_request(session, "read", "provider-1") == {"status": "blocked"}
         assert reads == 1
         assert read_kwargs == [{}]

@@ -12,6 +12,7 @@ hiddenimports = [
     "daemonhost.jsonio",
     "daemonhost.paths",
     "daemonhost.pointer",
+    "headless_keyring",
     "keyring.backends.macOS.api",
 ]
 
