@@ -421,6 +421,18 @@ def _forget_proc(provider_id: str, proc: asyncio.subprocess.Process) -> None:
         _procs.pop(provider_id, None)
 
 
+def _notify_catalog_auth_changed(provider_id: str) -> None:
+    try:
+        import model_catalog_refresh
+
+        model_catalog_refresh.notify_provider_auth_changed(provider_id)
+    except Exception:
+        logger.exception(
+            "model catalog auth-change notify failed for %s",
+            provider_id,
+        )
+
+
 async def _monitor(
     provider_id: str,
     action: str,
@@ -451,6 +463,7 @@ async def _monitor(
     finally:
         _forget_proc(provider_id, proc)
         _clear_marker(provider_id)
+        _notify_catalog_auth_changed(provider_id)
 
     tail = ""
     for stream in (stderr, stdout):

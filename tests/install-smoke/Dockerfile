@@ -79,7 +79,7 @@ sys.exit(0 if p.get('status')=='active' and p.get('mode')=='desktop-ui-only' and
     test -f backend/.active-venv \
       || { echo "backend/.active-venv pointer was not created"; exit 1; }; \
     VENV_DIR="backend/$(cat backend/.active-venv)"; \
-    "$VENV_DIR/bin/python" -c "import fastapi, uvicorn, argon2" \
+    "$VENV_DIR/bin/python" -c "import fastapi, uvicorn, argon2, watchfiles" \
       || { echo "activated venv is missing expected base packages"; exit 1; }; \
     ./scripts/install-bagent.sh; \
     command -v bagent >/dev/null 2>&1 || [ -x "$HOME/.local/bin/bagent" ] \

@@ -282,7 +282,7 @@ def test_valid_but_different_source_is_preserved_and_never_authorized() -> None:
         result = read_catalog_cache(path, expected_authority=current)
 
         assert result.status == "source_changed"
-        assert result.snapshot is None
+        assert result.snapshot == _snapshot(original)
         assert result.stored_authority == original
         assert path.read_bytes() == before
 

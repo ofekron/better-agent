@@ -44,17 +44,17 @@ def _child(mode: str, home: Path) -> None:
             else b"#!/bin/sh\nexit 0\n"
         )
         launcher.chmod(0o700)
-        (home / "config.json").write_text(
-            json.dumps({
-                "default_provider_id": "codex-id",
-                "providers": [{
-                    "id": "codex-id",
-                    "kind": "codex",
-                    "suspended": False,
-                }],
-            }),
-            encoding="utf-8",
+        os.environ["PATH"] = os.pathsep.join(
+            (str(home), os.environ.get("PATH", "")),
         )
+        import config_store
+
+        config_store.add_provider({
+            "name": "Codex",
+            "kind": "codex",
+            "mode": "subscription",
+            "runner": "native",
+        })
         profile = installation_profile.new_active_profile(
             mode=mode,
             provider="codex",

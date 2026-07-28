@@ -235,6 +235,12 @@ def _notify_provider_config_changed() -> None:
     only through the explicit per-node route.
     """
     try:
+        import model_catalog_refresh
+
+        model_catalog_refresh.notify_provider_state_changed()
+    except Exception:
+        logger.exception("model catalog provider-change notify failed")
+    try:
         import node_config_sync
 
         node_config_sync.notify_changed("providers")

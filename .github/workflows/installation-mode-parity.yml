@@ -33,6 +33,8 @@ jobs:
         run: python backend/scripts/test_installation_setup_transaction.py
       - name: Run executable identity matrix
         run: python backend/scripts/test_provider_executable_identity.py
+      - name: Verify native catalog watcher packaging
+        run: python backend/scripts/test_model_catalog_watcher_packaging.py
       - name: Run startup and background policy matrix
         run: python backend/scripts/test_installation_lifespan_policy.py
       - name: Run headless container auth matrix

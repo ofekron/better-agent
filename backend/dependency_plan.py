@@ -26,7 +26,7 @@ MOBILE_REQUIREMENTS = "requirements-mobile.txt"
 ACTIVE_POINTER = BACKEND / ".active-venv"
 VENV_ROOT = BACKEND / ".venvs"
 PLAN_MARKER = ".dependency-plan.json"
-BASE_PROBES = ("argon2", "fastapi", "uvicorn")
+BASE_PROBES = ("argon2", "fastapi", "uvicorn", "watchfiles")
 
 
 class DependencyPlanError(RuntimeError):

@@ -40,12 +40,35 @@ DiscoveryStatus = Literal[
     "unsupported",
     "error",
 ]
+SourceStatus = Literal["available", "unavailable", "unsupported", "error"]
 
 DISCOVERY_VERSION = 1
 DEFAULT_TIMEOUT_SECONDS = 15.0
 MAX_TIMEOUT_SECONDS = 30.0
 class CatalogDiscoveryError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class SourceInspection:
+    status: SourceStatus
+    reason: str
+    authority: CatalogAuthority | None = None
+
+    def __post_init__(self) -> None:
+        available = (
+            self.status == "available"
+            and not self.reason
+            and type(self.authority) is CatalogAuthority
+        )
+        if available:
+            return
+        if (
+            self.status not in {"unavailable", "unsupported", "error"}
+            or not self.reason
+            or self.authority is not None
+        ):
+            raise CatalogDiscoveryError("invalid source inspection")
 
 
 @dataclass(frozen=True)
@@ -211,6 +234,10 @@ def _build_context(
             launcher_path=executable,
             catalog_args=catalog_args,
             environment_selectors={"CODEX_HOME": str(codex_home)},
+            config_paths=(
+                str(codex_home / "config.toml"),
+                str(codex_home / "auth.json"),
+            ),
             search_path=os.environ.get("PATH"),
         )
         authority = build_catalog_authority(
@@ -424,6 +451,58 @@ async def discover_models(
         raise
     except Exception:
         return DiscoveryResult(status="error", reason="internal_error")
+
+
+def _inspect_source_sync(
+    provider_id: str,
+    timeout_seconds: float,
+) -> SourceInspection:
+    deadline = time.monotonic() + timeout_seconds
+    try:
+        context = _build_context(provider_id, deadline=deadline)
+        refreshed = _refresh_context(context, deadline=deadline)
+    except _PreparationFailure as exc:
+        return SourceInspection(status=exc.status, reason=exc.reason)
+    if refreshed is None:
+        return SourceInspection(status="error", reason="authority_changed")
+    return SourceInspection(
+        status="available",
+        reason="",
+        authority=refreshed.authority,
+    )
+
+
+async def inspect_catalog_source(
+    provider_id: str,
+    *,
+    timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
+) -> SourceInspection:
+    if (
+        type(provider_id) is not str
+        or not provider_id
+        or type(timeout_seconds) not in {int, float}
+        or not math.isfinite(timeout_seconds)
+        or timeout_seconds <= 0
+        or timeout_seconds > MAX_TIMEOUT_SECONDS
+    ):
+        raise CatalogDiscoveryError("invalid source inspection request")
+    worker = asyncio.create_task(
+        asyncio.to_thread(
+            _inspect_source_sync,
+            provider_id,
+            float(timeout_seconds),
+        ),
+    )
+    try:
+        return await asyncio.shield(worker)
+    except asyncio.CancelledError:
+        try:
+            await asyncio.shield(worker)
+        except asyncio.CancelledError:
+            pass
+        raise
+    except Exception:
+        return SourceInspection(status="error", reason="internal_error")
 
 
 def write_discovery_cache(

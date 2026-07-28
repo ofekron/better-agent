@@ -699,7 +699,10 @@ def _due_provider_ids(threshold_seconds: int) -> list[str]:
     now = time.time()
     due: list[str] = []
     for rec_public in list_providers().get("providers", []):
-        if rec_public.get("suspended"):
+        if (
+            rec_public.get("suspended")
+            or rec_public.get("kind") in {"codex", "fugu"}
+        ):
             continue
         pid = rec_public["id"]
         cached = _read_cache(pid) or {}

@@ -326,6 +326,7 @@ def read_catalog_cache(
     if snapshot.authority != expected_authority:
         return CatalogCacheRead(
             status="source_changed",
+            snapshot=snapshot,
             stored_authority=snapshot.authority,
         )
     return CatalogCacheRead(

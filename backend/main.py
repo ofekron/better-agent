@@ -13864,6 +13864,9 @@ async def on_startup():
     # prompts through coordinator.submit_prompt.
     if provider_runtime_enabled:
         schedule_ticker.start()
+        import model_catalog_refresh
+
+        await model_catalog_refresh.start()
 
     _start_tailscale_serve_reconciler()
     _start_extension_update_checker()
@@ -14349,6 +14352,9 @@ async def on_shutdown():
     global _kill_runners_on_shutdown, _STARTUP_ORCHESTRATOR_TASK
     global _PROMPT_HANDOFFS_OPEN
     _PROMPT_HANDOFFS_OPEN = False
+    import model_catalog_refresh
+
+    await model_catalog_refresh.shutdown()
     startup_task = _STARTUP_ORCHESTRATOR_TASK
     _STARTUP_ORCHESTRATOR_TASK = None
     if startup_task is not None and not startup_task.done():

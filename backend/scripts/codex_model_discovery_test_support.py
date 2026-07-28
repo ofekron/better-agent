@@ -50,6 +50,7 @@ def write_executable(
     exit_code: int = 0,
     expected_args: tuple[str, ...] | None = None,
     pid_file: Path | None = None,
+    invocation_log: Path | None = None,
     raw_output_bytes: int = 0,
     forbidden_environment_value: str = "",
 ) -> None:
@@ -71,6 +72,12 @@ def write_executable(
         + (
             f"Path({str(pid_file)!r}).write_text(str(os.getpid()), encoding='utf-8')\n"
             if pid_file is not None
+            else ""
+        )
+        + (
+            f"with Path({str(invocation_log)!r}).open('a', encoding='utf-8') as stream:\n"
+            "    stream.write('invoked\\n')\n"
+            if invocation_log is not None
             else ""
         )
         + (
