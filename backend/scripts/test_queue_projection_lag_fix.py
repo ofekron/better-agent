@@ -30,7 +30,12 @@ class _Coordinator:
     def is_prompt_item_in_flight(self, sid: str, item_id: str) -> bool:
         return False
 
-    async def submit_prompt_async(self, sid: str, params: dict) -> str:
+    async def submit_prompt_async(
+        self,
+        sid: str,
+        params: dict,
+        **_kwargs,
+    ) -> str:
         self.submitted.append((sid, params))
         return params["_queued_id"]
 

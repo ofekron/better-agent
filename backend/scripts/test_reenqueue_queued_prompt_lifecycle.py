@@ -62,6 +62,7 @@ class _SessionManager:
 class _Coordinator:
     def __init__(self) -> None:
         self.submitted: list[tuple[str, dict]] = []
+        self.start_processor_values: list[bool] = []
 
     def is_prompt_item_in_flight(self, sid: str, item_id: str) -> bool:
         # Startup re-enqueue runs against a cold coordinator; nothing is in-flight.
@@ -71,7 +72,14 @@ class _Coordinator:
         self.submitted.append((sid, params))
         return "queued-runtime-id"
 
-    async def submit_prompt_async(self, sid: str, params: dict) -> str:
+    async def submit_prompt_async(
+        self,
+        sid: str,
+        params: dict,
+        *,
+        start_processor: bool = True,
+    ) -> str:
+        self.start_processor_values.append(start_processor)
         return self.submit_prompt(sid, params)
 
 
@@ -87,7 +95,9 @@ def main_test() -> int:
     session_queue_projection.list_queued_records = lambda: [fake_session_manager.session]
     session_queue_projection.ensure_current_or_rebuild = lambda: False
     try:
-        asyncio.run(main._re_enqueue_queued_prompts())
+        rehydrated_session_ids = asyncio.run(main._re_enqueue_queued_prompts())
+        assert rehydrated_session_ids == {"sid"}
+        assert fake_coordinator.start_processor_values == [False]
         assert len(fake_session_manager.updated) == 1
         _, queued_id, updates = fake_session_manager.updated[0]
         assert queued_id == "q1"

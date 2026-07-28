@@ -3874,10 +3874,16 @@ def test_startup_recovery_gate_opens_after_live_before_background_recovery() -> 
     recover_start = source.index("async def _recover_in_flight_task()")
     recover_end = source.index("async def _housekeeping_task()", recover_start)
     recover_source = source[recover_start:recover_end]
+    reenqueue = recover_source.index("await _re_enqueue_queued_prompts()")
+    scan = recover_source.index("pre_provider_orphan_candidates")
     opened = recover_source.index("startup_recovery_gate.mark_recovery_done()")
-    assert recover_source.index("await integrate_recovered_runs(coordinator, live)") < opened
+    integrate = recover_source.index("await integrate_recovered_runs(coordinator, batch)")
+    start_processors = recover_source.index(
+        "await coordinator.start_session_processor_async(sid)",
+    )
+    assert reenqueue < scan < integrate
+    assert integrate < opened < start_processors
     assert opened < recover_source.index("_enqueue_recovered_cold_runs(cold)")
-    assert opened < recover_source.index("await _re_enqueue_queued_prompts()")
 
 
 def test_hydration_uses_local_projection_not_extension_backend() -> None:

@@ -6,7 +6,9 @@ import json
 import os
 import shutil
 import tempfile
+import threading
 from pathlib import Path
+from unittest.mock import patch
 
 HOME = tempfile.mkdtemp(prefix="bc-test-startup-recovery-priority-")
 os.environ["BETTER_AGENT_HOME"] = HOME
@@ -17,6 +19,7 @@ import orchestrator  # noqa: E402
 import perf  # noqa: E402
 import provider  # noqa: E402
 import startup_recovery_gate  # noqa: E402
+import turn_manager  # noqa: E402
 
 
 def test_pending_recovery_is_restart_busy_without_cache_refresh() -> None:
@@ -69,18 +72,88 @@ def test_startup_orchestrator_failure_releases_recovery_gate() -> None:
 
 def test_recovery_gate_opens_after_live_integration_before_background_recovery() -> None:
     source = inspect.getsource(main._recover_in_flight_task)
+    reenqueue = source.index("await _re_enqueue_queued_prompts()")
+    scan = source.index("pre_provider_orphan_candidates")
     integrate = source.index("await integrate_recovered_runs")
     cold = source.index("_enqueue_recovered_cold_runs(cold)")
-    reenqueue = source.index("await _re_enqueue_queued_prompts")
     opened = source.index("startup_recovery_gate.mark_recovery_done()")
-    assert integrate < opened < cold
-    assert opened < reenqueue
+    start_processors = source.index(
+        "await coordinator.start_session_processor_async(sid)",
+    )
+    assert reenqueue < scan < integrate
+    assert integrate < opened < start_processors < cold
+
+
+def test_queued_prompts_rehydrate_before_scan_but_execution_waits_for_gate() -> None:
+    async def scenario() -> None:
+        scan_release = threading.Event()
+        prompt_visible = asyncio.Event()
+        processor_started = asyncio.Event()
+        processor_start_count = 0
+
+        def blocked_candidates() -> list:
+            assert prompt_visible.is_set()
+            assert not processor_started.is_set()
+            assert scan_release.wait(timeout=2.0)
+            return []
+
+        async def reenqueue() -> set[str]:
+            prompt_visible.set()
+            return {"sid"}
+
+        async def reconcile(*args, **kwargs) -> None:
+            return None
+
+        async def start_processor(sid: str) -> None:
+            nonlocal processor_start_count
+            assert sid == "sid"
+            assert not startup_recovery_gate.is_pending()
+            processor_start_count += 1
+            processor_started.set()
+
+        startup_recovery_gate.reset_for_tests()
+        startup_recovery_gate.begin_recovery()
+        with (
+            patch.object(main, "_re_enqueue_queued_prompts", side_effect=reenqueue),
+            patch.object(main, "pre_provider_orphan_candidates", side_effect=blocked_candidates),
+            patch.object(main, "recover_all_in_flight", return_value=[]),
+            patch.object(main, "take_recovery_scan_ownership", return_value=({}, True)),
+            patch.object(main, "reconcile_pre_provider_orphans", side_effect=reconcile),
+            patch.object(
+                main.coordinator,
+                "start_session_processor_async",
+                side_effect=start_processor,
+            ),
+        ):
+            recovery = asyncio.create_task(main._recover_in_flight_task())
+            await asyncio.wait_for(prompt_visible.wait(), timeout=1.0)
+            provider_gate = asyncio.create_task(
+                startup_recovery_gate.wait_for_recovery_ready(timeout=None),
+            )
+            await asyncio.sleep(0)
+            assert not provider_gate.done()
+
+            scan_release.set()
+            await asyncio.wait_for(recovery, timeout=2.0)
+            await asyncio.wait_for(provider_gate, timeout=1.0)
+            assert processor_started.is_set()
+            assert processor_start_count == 1
+        startup_recovery_gate.reset_for_tests()
+
+    asyncio.run(scenario())
 
 
 def test_prompt_waits_only_for_session_recovery_gate() -> None:
     source = inspect.getsource(orchestrator.Coordinator._run_session_processor)
     assert "wait_for_session_recovery_ready" in source
     assert "wait_for_recovery_ready()" not in source
+
+
+def test_provider_start_remains_blocked_by_global_recovery_gate() -> None:
+    source = inspect.getsource(turn_manager.TurnManager._drive_cli_run)
+    gate = source.index("await startup_recovery_gate.wait_for_recovery_ready()")
+    provider_start = source.index("provider.start_run", gate)
+    assert gate < provider_start
 
 
 def test_provider_recovery_does_not_wrap_scan_in_catalog_lock() -> None:
@@ -313,7 +386,9 @@ def main_test() -> None:
     test_startup_source_orders_recovery_before_maintenance()
     test_startup_orchestrator_failure_releases_recovery_gate()
     test_recovery_gate_opens_after_live_integration_before_background_recovery()
+    test_queued_prompts_rehydrate_before_scan_but_execution_waits_for_gate()
     test_prompt_waits_only_for_session_recovery_gate()
+    test_provider_start_remains_blocked_by_global_recovery_gate()
     test_provider_recovery_does_not_wrap_scan_in_catalog_lock()
     test_provider_recovery_prioritizes_known_running_scan_buckets()
     test_live_recovery_registers_session_gates_and_sorts_priority()

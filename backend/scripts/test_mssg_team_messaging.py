@@ -666,7 +666,12 @@ def test_startup_reenqueue_preserves_team_message_collapse_metadata(monkeypatch)
     captured: list[tuple[str, dict]] = []
 
     class FakeCoordinator:
-        async def submit_prompt_async(self, sid: str, params: dict) -> str:
+        async def submit_prompt_async(
+            self,
+            sid: str,
+            params: dict,
+            **_kwargs,
+        ) -> str:
             captured.append((sid, params))
             return params["_queued_id"]
 

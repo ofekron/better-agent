@@ -12859,7 +12859,7 @@ async def _drain_prompt_handoffs() -> None:
         await asyncio.gather(*tasks, return_exceptions=True)
 
 
-async def _re_enqueue_queued_prompts() -> None:
+async def _re_enqueue_queued_prompts() -> set[str]:
     """Re-enqueue accepted prompts that have not become user messages.
 
     Runs once at startup as crash recovery for the durable prompt outbox.
@@ -12879,6 +12879,7 @@ async def _re_enqueue_queued_prompts() -> None:
     )
 
     re_enqueue_started = time.perf_counter()
+    rehydrated_session_ids: set[str] = set()
     queued_records = await asyncio.to_thread(
         session_queue_projection.list_queued_records,
     )
@@ -12949,7 +12950,12 @@ async def _re_enqueue_queued_prompts() -> None:
                     "collapse_policy": qp.get("collapse_policy") or "",
                     "_queued_id": qp_id,
                 }
-                item_id = await coordinator.submit_prompt_async(sid, params)
+                item_id = await coordinator.submit_prompt_async(
+                    sid,
+                    params,
+                    start_processor=False,
+                )
+                rehydrated_session_ids.add(sid)
                 logger.info(
                     "re-enqueue: re-submitted queued prompt %s -> %s "
                     "for session %s",
@@ -12963,6 +12969,7 @@ async def _re_enqueue_queued_prompts() -> None:
         "startup.recovery.re_enqueue",
         (time.perf_counter() - re_enqueue_started) * 1000.0,
     )
+    return rehydrated_session_ids
 
 
 async def _recover_in_flight_task() -> None:
@@ -12974,6 +12981,7 @@ async def _recover_in_flight_task() -> None:
     import startup_recovery_gate
     gate_open = False
     try:
+        rehydrated_session_ids = await _re_enqueue_queued_prompts()
         loop = asyncio.get_running_loop()
         candidates = await asyncio.to_thread(pre_provider_orphan_candidates)
         candidate_targets = {
@@ -13039,15 +13047,14 @@ async def _recover_in_flight_task() -> None:
                             for sid in _recovered_run_session_ids(batch):
                                 startup_recovery_gate.mark_session_recovery_done(sid)
         # The gate protects provider-run ownership: classification and every
-        # alive run must be registered before new turns can start. Cold replay
-        # and queued-prompt recovery are background convergence work and must
-        # not extend that ownership-critical window.
+        # alive run must be registered before rehydrated prompts can start.
         startup_recovery_gate.mark_recovery_done()
         gate_open = True
+        for sid in sorted(rehydrated_session_ids):
+            await coordinator.start_session_processor_async(sid)
         if recovered:
             if cold:
                 _enqueue_recovered_cold_runs(cold)
-        await _re_enqueue_queued_prompts()
         # Resume a native-session import that a restart interrupted. Spawns
         # its own background thread; the idempotency registry makes resume
         # duplicate-free. Best-effort — must never block startup.
