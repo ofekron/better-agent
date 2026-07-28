@@ -672,27 +672,16 @@ def _scan_state_has_duplicate_frames(state: dict[str, Any]) -> bool:
     return False
 
 
-def _scan_dir_signature(path: Path) -> dict[str, int] | None:
-    try:
-        st = path.stat()
-    except OSError:
-        return None
-    return {"dir_mtime_ns": st.st_mtime_ns, "dir_size": st.st_size}
-
-
 def _scan_frame(
     path: str,
     tag: str,
     *,
     cursor: str = "",
     offset: int | None = None,
-    signature: dict[str, int] | None = None,
 ) -> dict[str, Any]:
     frame: dict[str, Any] = {"path": path, "tag": tag, "cursor": cursor}
     if offset is not None:
         frame["offset"] = offset
-    if signature:
-        frame.update(signature)
     return frame
 
 
@@ -736,14 +725,6 @@ def _scan_full_batch(
         next_offset = offset
         budget_exhausted = False
         child_dirs: list[str] = []
-        dir_signature = _scan_dir_signature(dir_path)
-        if has_offset and dir_signature:
-            if (
-                item.get("dir_mtime_ns") != dir_signature.get("dir_mtime_ns")
-                or item.get("dir_size") != dir_signature.get("dir_size")
-            ):
-                offset = 0
-                next_offset = 0
         try:
             with os.scandir(dir_path) as entries:
                 entry_index = 0
@@ -763,9 +744,12 @@ def _scan_full_batch(
                                 break
                             continue
                         path = Path(entry.path)
-                        if _full_scan_seen_contains(conn, path):
-                            continue
                         visited_entries += 1
+                        if _full_scan_seen_contains(conn, path):
+                            if visited_entries >= entry_budget:
+                                budget_exhausted = True
+                                break
+                            continue
                         pattern_suffix = ".pb" if tag == "windsurf" else ".jsonl"
                         if not entry.name.endswith(pattern_suffix):
                             _full_scan_mark_seen(conn, path)
@@ -795,7 +779,6 @@ def _scan_full_batch(
         if budget_exhausted:
             stack.append(_scan_frame(
                 str(dir_path), tag, offset=next_offset,
-                signature=dir_signature,
             ))
         for child_path in child_dirs:
             stack.append(_scan_frame(child_path, tag))

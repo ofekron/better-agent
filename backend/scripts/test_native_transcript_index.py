@@ -1196,6 +1196,90 @@ def test_partial_resume_does_not_scan_entire_queue() -> bool:
     return ok
 
 
+def test_full_scan_seen_queries_bounded_on_mutated_resume() -> bool:
+    """Regression: a directory mutated between passes must not re-query the
+    SQLite seen-set for every already-seen entry each pass (O(N^2)). Each
+    examined entry costs one budget unit, and the positional offset persists
+    across the mutation so already-seen entries are skipped by index compare
+    and never reach the seen-query. Per-pass seen-query count must stay within
+    the entry budget while the scan converges monotonically and still finds
+    the needle."""
+    claude, codex = _setup_roots()
+    shutil.rmtree(claude, ignore_errors=True)
+    shutil.rmtree(codex, ignore_errors=True)
+    claude.mkdir(parents=True, exist_ok=True)
+    codex.mkdir(parents=True, exist_ok=True)
+    live_dir = claude / encode_cwd("/seen-budget")
+    live_dir.mkdir(parents=True, exist_ok=True)
+    # >2 budgets worth of ignored-suffix entries plus one real needle.
+    budget = 8
+    for i in range(17):
+        (live_dir / f"seen-ignored-{i:02d}.txt").write_text("skip\n", encoding="utf-8")
+    _write_claude(live_dir / "seen-needle.jsonl", ["seenbudgetneedle"])
+
+    class GuardedConn:
+        def __init__(self, inner):
+            self.inner = inner
+            self.seen_queries = 0
+
+        def execute(self, sql, *args, **kwargs):
+            normalized = " ".join(str(sql).split()).lower()
+            if "from native_full_scan_seen" in normalized and "where path" in normalized:
+                self.seen_queries += 1
+            return self.inner.execute(sql, *args, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(self.inner, name)
+
+    def _run_pass_counted():
+        real_conn = idx._writer_connection()
+        guarded = GuardedConn(real_conn)
+        idx._writer_conn = guarded
+        try:
+            result = idx.refresh_once()
+        finally:
+            if isinstance(idx._writer_conn, GuardedConn):
+                idx._writer_conn = idx._writer_conn.inner
+        return result, guarded.seen_queries
+
+    original_budget = idx._FULL_SCAN_ENTRY_BUDGET
+    idx._FULL_SCAN_ENTRY_BUDGET = budget
+    per_pass_seen_queries: list[int] = []
+    try:
+        results = []
+        while True:
+            result, seen_queries = _run_pass_counted()
+            per_pass_seen_queries.append(seen_queries)
+            results.append(result)
+            if results[-1]["partial"] == 0 or len(results) >= 30:
+                break
+            # Bump dir mtime without changing the entry set (create+remove temp)
+            # so the old signature reset fires every pass.
+            temp = live_dir / f".mut-{len(results)}.tmp"
+            temp.write_text("x", encoding="utf-8")
+            temp.unlink()
+        rows = idx.search_rows(["seenbudgetneedle"], limit=10)
+        final_state = idx.quick_state()
+    finally:
+        idx._FULL_SCAN_ENTRY_BUDGET = original_budget
+        shutil.rmtree(claude, ignore_errors=True)
+        shutil.rmtree(codex, ignore_errors=True)
+
+    max_seen = max(per_pass_seen_queries)
+    ok = (
+        any(r["partial"] == 1 for r in results)
+        and results[-1]["partial"] == 0
+        and max_seen <= budget + 1
+        and len(rows) == 1
+        and final_state == {"schema_ok": True, "covered": True, "usable": True}
+    )
+    print(f"{OK if ok else FAIL} full scan bounds seen-set queries on mutated resume "
+          f"(budget={budget}, passes={len(results)}, "
+          f"per_pass_seen={per_pass_seen_queries}, max_seen={max_seen}, "
+          f"rows={len(rows)}, final={final_state})")
+    return ok
+
+
 def test_partial_full_build_reconciles_deletes_before_final_covered() -> bool:
     claude, codex = _setup_roots()
     shutil.rmtree(claude, ignore_errors=True)
@@ -1776,6 +1860,7 @@ def main_run() -> int:
         test_incremental_full_scan_keeps_one_parent_continuation,
         test_corrupt_duplicate_full_scan_state_restarts,
         test_full_scan_entry_budget_yields_without_candidates,
+        test_full_scan_seen_queries_bounded_on_mutated_resume,
         test_partial_resume_does_not_scan_entire_queue,
         test_partial_full_build_reconciles_deletes_before_final_covered,
         test_covered_partial_full_queue_resumes_by_default,
