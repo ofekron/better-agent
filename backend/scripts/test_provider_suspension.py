@@ -62,7 +62,12 @@ def test_suspended_provider_is_not_default_or_selectable() -> None:
     second = _add_provider("Second", "model-second")
     config_store.set_default_provider(first["id"])
 
-    r = client.post(f"/api/providers/{first['id']}/suspended", json={"suspended": True})
+    first = config_store.get_provider(first["id"])
+    r = client.post(f"/api/providers/{first['id']}/suspended", json={
+        "suspended": True,
+        "expected_generation": first["generation"],
+        "expected_revision": first["revision"],
+    })
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["default_provider_id"] != first["id"]
@@ -70,7 +75,16 @@ def test_suspended_provider_is_not_default_or_selectable() -> None:
     assert listed[first["id"]]["suspended"] is True
     assert not listed[body["default_provider_id"]]["suspended"]
 
-    r = client.post(f"/api/providers/{first['id']}/set-default")
+    state = config_store.list_providers()
+    target = next(p for p in state["providers"] if p["id"] == first["id"])
+    active = next(p for p in state["providers"] if p["id"] == state["default_provider_id"])
+    r = client.post(f"/api/providers/{first['id']}/set-default", json={
+        "expected_generation": target["generation"],
+        "expected_revision": target["revision"],
+        "expected_default_provider_id": active["id"],
+        "expected_default_generation": active["generation"],
+        "expected_default_revision": active["revision"],
+    })
     assert r.status_code == 409, r.text
 
     session = session_manager.create(

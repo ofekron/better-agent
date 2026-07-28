@@ -320,7 +320,19 @@ class LiveHarness:
             "default_model": CHEAP_MODEL,
         })
         self.provider_id = created["id"]
-        await self._post(f"/api/providers/{self.provider_id}/set-default")
+        state = (await self.client.get("/api/providers")).json()
+        current = next(
+            provider
+            for provider in state["providers"]
+            if provider["id"] == state["default_provider_id"]
+        )
+        await self._post(f"/api/providers/{self.provider_id}/set-default", {
+            "expected_generation": created["generation"],
+            "expected_revision": created["revision"],
+            "expected_default_provider_id": current["id"],
+            "expected_default_generation": current["generation"],
+            "expected_default_revision": current["revision"],
+        })
 
     async def session_on(self, name: str, profile: dict | None = None) -> str:
         payload = {

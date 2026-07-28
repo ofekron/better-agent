@@ -293,11 +293,40 @@ class ConfigStorage(Protocol):
     def add_provider(self, payload: dict) -> dict: ...
 
     def update_provider(
-        self, provider_id: str, payload: dict,
+        self,
+        provider_id: str,
+        payload: dict,
+        *,
+        expected_generation: str | None = None,
+        expected_revision: int | None = None,
     ) -> Optional[dict]: ...
 
-    def delete_provider(self, provider_id: str) -> tuple[bool, str]: ...
-    def set_default_provider(self, provider_id: str) -> Optional[dict]: ...
+    def delete_provider(
+        self,
+        provider_id: str,
+        *,
+        expected_generation: str | None = None,
+        expected_revision: int | None = None,
+    ) -> tuple[bool, str]: ...
+    def set_default_provider(
+        self,
+        provider_id: str,
+        *,
+        expected_generation: str | None = None,
+        expected_revision: int | None = None,
+        expected_default_provider_id: str | None = None,
+        expected_default_generation: str | None = None,
+        expected_default_revision: int | None = None,
+    ) -> Optional[dict]: ...
+    def set_provider_suspended(
+        self,
+        provider_id: str,
+        suspended: bool,
+        *,
+        expected_generation: str | None = None,
+        expected_revision: int | None = None,
+    ) -> Optional[dict]: ...
+    def provision_provider_catalog(self, payload: dict) -> dict: ...
     def add_custom_model_to_default(self, name: str) -> Optional[dict]: ...
     def apply_env_vars(self) -> None: ...
 
@@ -313,4 +342,3 @@ class TracesStorage(Protocol):
     callback set on the collector."""
 
     def iter_trace_index(self) -> "Iterator[dict]": ...
-

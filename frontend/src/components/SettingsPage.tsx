@@ -2,6 +2,11 @@ import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "rea
 import { useTranslation } from "react-i18next";
 import { Capacitor } from "@capacitor/core";
 import type { Project, Provider, ProvidersState, ReasoningEffort, Permission } from "../types";
+import {
+  defaultProviderAuthority,
+  providerAuthority,
+  requireProvider,
+} from "../providerAuthority";
 import { trackPromise } from "../progress/store";
 import { ShortcutSettings } from "./ShortcutSettings";
 import { CrossSessionDelegateSetting } from "./CrossSessionDelegateSetting";
@@ -550,6 +555,13 @@ export function SettingsPage({
     }
   };
 
+  const requireProviderMutation = async (response: Response) => {
+    if (response.ok) return;
+    const detail = await response.text();
+    if (response.status === 409) await refetch();
+    throw new Error(detail || `HTTP ${response.status}`);
+  };
+
   const refetchSetupStatus = async () => {
     try {
       const { promise } = trackPromise("providerSetup:status", async () => {
@@ -722,8 +734,12 @@ export function SettingsPage({
           })}
           onActivate={(p) => runBusyAction(setBusy, setError, "activate failed", async () => {
             await trackPromise(`provider:activate:${p.id}`, async () => {
-              const r = await fetch(`${API}/api/providers/${p.id}/set-default`, { method: "POST" });
-              if (!r.ok) throw new Error(await r.text());
+              const r = await fetch(`${API}/api/providers/${p.id}/set-default`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(defaultProviderAuthority(p, providers, activeId)),
+              });
+              await requireProviderMutation(r);
             }).promise;
             await refetch();
           })}
@@ -732,9 +748,9 @@ export function SettingsPage({
               const r = await fetch(`${API}/api/providers/${p.id}/suspended`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ suspended }),
+                body: JSON.stringify({ suspended, ...providerAuthority(p) }),
               });
-              if (!r.ok) throw new Error(await r.text());
+              await requireProviderMutation(r);
             }).promise;
             await refetch();
           })}
@@ -757,11 +773,12 @@ export function SettingsPage({
             if (!confirm(t('setup.deleteConfirm'))) return;
             await runBusyAction(setBusy, setError, "delete failed", async () => {
               await trackPromise(`provider:delete:${p.id}`, async () => {
-                const r = await fetch(`${API}/api/providers/${p.id}`, { method: "DELETE" });
-                if (!r.ok) {
-                  const t = await r.text();
-                  throw new Error(t || "delete failed");
-                }
+                const r = await fetch(`${API}/api/providers/${p.id}`, {
+                  method: "DELETE",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify(providerAuthority(p)),
+                });
+                await requireProviderMutation(r);
               }).promise;
               await refetch();
             });
@@ -817,28 +834,37 @@ export function SettingsPage({
               const r = await fetch(`${API}/api/providers/${view.providerId}`, {
                 method: "PATCH",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(payload),
+                body: JSON.stringify({
+                  ...payload,
+                  ...providerAuthority(requireProvider(providers, view.providerId)),
+                }),
               });
-              if (!r.ok) throw new Error(await r.text());
+              await requireProviderMutation(r);
             }).promise;
             await refetch();
             setView({ kind: "list" });
           })}
           onActivate={() => runBusyAction(setBusy, setError, "activate failed", async () => {
             await trackPromise(`provider:activate:${view.providerId}`, async () => {
-              const r = await fetch(`${API}/api/providers/${view.providerId}/set-default`, { method: "POST" });
-              if (!r.ok) throw new Error(await r.text());
+              const provider = requireProvider(providers, view.providerId);
+              const r = await fetch(`${API}/api/providers/${view.providerId}/set-default`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(defaultProviderAuthority(provider, providers, activeId)),
+              });
+              await requireProviderMutation(r);
             }).promise;
             await refetch();
           })}
           onSuspend={(suspended) => runBusyAction(setBusy, setError, suspended ? "suspend failed" : "resume failed", async () => {
             await trackPromise(`provider:suspend:${view.providerId}`, async () => {
+              const provider = requireProvider(providers, view.providerId);
               const r = await fetch(`${API}/api/providers/${view.providerId}/suspended`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ suspended }),
+                body: JSON.stringify({ suspended, ...providerAuthority(provider) }),
               });
-              if (!r.ok) throw new Error(await r.text());
+              await requireProviderMutation(r);
             }).promise;
             await refetch();
           })}
@@ -846,11 +872,13 @@ export function SettingsPage({
             if (!confirm(t('setup.deleteConfirm'))) return;
             await runBusyAction(setBusy, setError, "delete failed", async () => {
               await trackPromise(`provider:delete:${view.providerId}`, async () => {
-                const r = await fetch(`${API}/api/providers/${view.providerId}`, { method: "DELETE" });
-                if (!r.ok) {
-                  const t = await r.text();
-                  throw new Error(t || "delete failed");
-                }
+                const provider = requireProvider(providers, view.providerId);
+                const r = await fetch(`${API}/api/providers/${view.providerId}`, {
+                  method: "DELETE",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify(providerAuthority(provider)),
+                });
+                await requireProviderMutation(r);
               }).promise;
               await refetch();
               setView({ kind: "list" });

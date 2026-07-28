@@ -116,6 +116,7 @@ _CORE_MCP_RESUMABLE_OPERATIONS = frozenset({
     "ask",
     "ask-fork",
     "session-bridge-search",
+    "testape-qa-ask",
 })
 
 install_access_log_redaction()
@@ -2291,6 +2292,23 @@ class ProviderPatch(BaseModel):
     default_permission: dict | None = None
     capabilities: dict[str, bool] | None = None
     suspended: bool | None = None
+    expected_generation: str
+    expected_revision: int
+
+
+class ProviderAuthorityPayload(BaseModel):
+    expected_generation: str
+    expected_revision: int
+
+
+class ProviderSuspensionPayload(ProviderAuthorityPayload):
+    suspended: bool = True
+
+
+class ProviderDefaultAuthorityPayload(ProviderAuthorityPayload):
+    expected_default_provider_id: str
+    expected_default_generation: str
+    expected_default_revision: int
 
 
 class ProviderSetupInstallPayload(BaseModel):
@@ -2791,6 +2809,8 @@ async def create_provider(payload: ProviderPayload):
 @app.patch("/api/providers/{provider_id}")
 async def patch_provider(provider_id: str, payload: ProviderPatch):
     body = {k: v for k, v in payload.model_dump().items() if v is not None}
+    expected_generation = body.pop("expected_generation")
+    expected_revision = body.pop("expected_revision")
     if "default_reasoning_effort" in body:
         current = await asyncio.to_thread(config_store.get_provider, provider_id)
         if current is None:
@@ -2801,7 +2821,15 @@ async def patch_provider(provider_id: str, payload: ProviderPatch):
             candidate, body.get("default_reasoning_effort"),
         )
     try:
-        record = await asyncio.to_thread(config_store.update_provider, provider_id, body)
+        record = await asyncio.to_thread(
+            config_store.update_provider,
+            provider_id,
+            body,
+            expected_generation=expected_generation,
+            expected_revision=expected_revision,
+        )
+    except config_store.ProviderConfigConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if record is None:
@@ -2819,9 +2847,21 @@ async def patch_provider(provider_id: str, payload: ProviderPatch):
 
 
 @app.post("/api/providers/{provider_id}/suspended")
-async def set_provider_suspended(provider_id: str, body: dict = Body(default={})):
-    suspended = bool((body or {}).get("suspended", True))
-    state = await asyncio.to_thread(config_store.set_provider_suspended, provider_id, suspended)
+async def set_provider_suspended(
+    provider_id: str,
+    body: ProviderSuspensionPayload,
+):
+    suspended = body.suspended
+    try:
+        state = await asyncio.to_thread(
+            config_store.set_provider_suspended,
+            provider_id,
+            suspended,
+            expected_generation=body.expected_generation,
+            expected_revision=body.expected_revision,
+        )
+    except config_store.ProviderConfigConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     if state is None:
         raise HTTPException(status_code=404, detail=t("error.provider_not_found"))
     cancelled = 0
@@ -2912,8 +2952,19 @@ def _provider_auth_result_response(result: dict):
 
 
 @app.delete("/api/providers/{provider_id}")
-async def remove_provider(provider_id: str):
-    deleted, reason = await asyncio.to_thread(config_store.delete_provider, provider_id)
+async def remove_provider(
+    provider_id: str,
+    authority: ProviderAuthorityPayload,
+):
+    try:
+        deleted, reason = await asyncio.to_thread(
+            config_store.delete_provider,
+            provider_id,
+            expected_generation=authority.expected_generation,
+            expected_revision=authority.expected_revision,
+        )
+    except config_store.ProviderConfigConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     if deleted:
         # Drop transient auth state so a deleted record leaves no
         # in-flight/registry entry (and none survives id reuse).
@@ -2932,10 +2983,23 @@ async def remove_provider(provider_id: str):
 
 
 @app.post("/api/providers/{provider_id}/set-default")
-async def set_default_provider(provider_id: str):
+async def set_default_provider(
+    provider_id: str,
+    authority: ProviderDefaultAuthorityPayload,
+):
     try:
-        state = await asyncio.to_thread(config_store.set_default_provider, provider_id)
-    except RuntimeError as exc:
+        state = await asyncio.to_thread(
+            config_store.set_default_provider,
+            provider_id,
+            expected_generation=authority.expected_generation,
+            expected_revision=authority.expected_revision,
+            expected_default_provider_id=authority.expected_default_provider_id,
+            expected_default_generation=authority.expected_default_generation,
+            expected_default_revision=authority.expected_default_revision,
+        )
+    except config_store.ProviderConfigConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except (RuntimeError, ValueError) as exc:
         raise HTTPException(
             status_code=409,
             detail=t("error.provider_suspended", action="set as default"),
@@ -5423,6 +5487,8 @@ def _core_mcp_nonresumable_response(operation: str, request_id: str) -> dict[str
 def _core_mcp_job_handler(operation: str):
     if operation == "ask":
         return _handle_internal_ask
+    if operation == "testape-qa-ask":
+        return _handle_internal_testape_qa_ask
     if operation == "ask-fork":
         return _handle_internal_ask_fork
     if operation == "delegate-task":
@@ -16074,6 +16140,8 @@ async def _ask_wait_and_grab_last_assistant_mssg_in_turn(
     message: str,
     requested_provider_id: str,
     requested_model: str,
+    *,
+    user_initiated: bool = False,
 ) -> dict[str, Any]:
     target_worker_pool = str(body.get("target_worker_pool") or "").strip()
     pool_affinity_key = _api_optional_pool_affinity_key(body.get("pool_affinity_key"))
@@ -16150,7 +16218,7 @@ async def _ask_wait_and_grab_last_assistant_mssg_in_turn(
         sender_session_id=sender_session_id,
         target_session_id=target_session_id,
         message=message,
-        user_initiated=_body_bool(body, "user_initiated"),
+        user_initiated=user_initiated,
         ask_id=str(body.get("ask_id") or ""),
         provider_id=requested_provider_id,
         model=requested_model,
@@ -16163,6 +16231,8 @@ async def _ask_wait_and_grab_last_assistant_mssg_in_turn(
 async def _handle_internal_ask(
     body: dict,
     background_tasks: BackgroundTasks | None = None,
+    *,
+    trusted_user_initiated: bool = False,
 ) -> dict[str, Any]:
     sender_session_id = str(body.get("sender_session_id") or "").strip()
     message = str(body.get("message") or "").strip()
@@ -16197,6 +16267,7 @@ async def _handle_internal_ask(
             message,
             requested_provider_id,
             requested_model,
+            user_initiated=trusted_user_initiated,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -16278,6 +16349,95 @@ async def internal_ask(
         return await _handle_internal_ask(body, background_tasks)
     except asyncio.TimeoutError:
         raise HTTPException(status_code=504, detail="ask timed out")
+
+
+@app.post("/api/internal/testape/qa-ask")
+async def internal_testape_qa_ask(
+    body: dict,
+    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_testape_qa_token: str = Header(..., alias="X-TestApe-QA-Token"),
+):
+    if not _internal_authority_is_valid():
+        raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
+    import testape_qa_runtime
+    try:
+        runtime_id = testape_qa_runtime.authorize(x_testape_qa_token)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    if not str(body.get("target_session_id") or "").strip():
+        raise HTTPException(status_code=400, detail="target_session_id is required")
+    if body.get("target_worker_id") or body.get("target_worker_pool"):
+        raise HTTPException(status_code=400, detail="TestApe QA asks require an exact session")
+    body = {**body, "_testape_qa_runtime_id": runtime_id}
+    durable = await _maybe_run_core_mcp_job("testape-qa-ask", body)
+    if durable is not None:
+        return durable
+    try:
+        return await _handle_internal_testape_qa_ask(body)
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="ask timed out")
+
+
+async def _handle_internal_testape_qa_ask(body: dict) -> dict[str, Any]:
+    import testape_qa_runtime
+    runtime_id = str(body.get("_testape_qa_runtime_id") or "").strip()
+    sender_session_id = str(body.get("sender_session_id") or "").strip()
+    target_session_id = str(body.get("target_session_id") or "").strip()
+    try:
+        await asyncio.to_thread(
+            testape_qa_runtime.assert_owned,
+            runtime_id,
+            sender_session_id,
+            target_session_id,
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    return await _handle_internal_ask(body, trusted_user_initiated=True)
+
+
+@app.post("/api/internal/testape/qa-create-session")
+async def internal_testape_qa_create_session(
+    body: dict,
+    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_testape_qa_token: str = Header(..., alias="X-TestApe-QA-Token"),
+):
+    if not _internal_authority_is_valid():
+        raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
+    import testape_qa_runtime
+    try:
+        runtime_id = testape_qa_runtime.authorize(x_testape_qa_token)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    result = await internal_create_session(body, x_internal_token)
+    await asyncio.to_thread(testape_qa_runtime.claim, runtime_id, result["session_id"])
+    return result
+
+
+@app.post("/api/internal/testape/qa-create-sub-session")
+async def internal_testape_qa_create_sub_session(
+    body: dict,
+    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_testape_qa_token: str = Header(..., alias="X-TestApe-QA-Token"),
+):
+    if not _internal_authority_is_valid():
+        raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
+    import testape_qa_runtime
+    try:
+        runtime_id = testape_qa_runtime.authorize(x_testape_qa_token)
+        await asyncio.to_thread(
+            testape_qa_runtime.assert_owned,
+            runtime_id,
+            str(body.get("sender_session_id") or "").strip(),
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    result = await internal_create_sub_session(body, x_internal_token)
+    await asyncio.to_thread(
+        testape_qa_runtime.claim,
+        runtime_id,
+        result["target_session_id"],
+    )
+    return result
 
 
 @app.post("/api/internal/test/force-context-overflow")

@@ -2114,6 +2114,46 @@ def import_provider_sync_state(payload: dict) -> dict:
     return result
 
 
+@_serialized_provider_mutation
+def provision_provider_catalog(payload: dict) -> dict:
+    if not isinstance(payload, dict):
+        raise ValueError("provider catalog payload must be an object")
+    raw_providers = payload.get("providers")
+    if not isinstance(raw_providers, list) or not raw_providers:
+        raise ValueError("provider catalog requires providers")
+    if _config_path().exists():
+        state = _load_state()
+        raise ProviderStateConflict(
+            "already_initialized",
+            state["provider_state_authority"],
+            state["provider_state_authority"],
+        )
+    providers = []
+    for raw_provider in raw_providers:
+        if not isinstance(raw_provider, dict):
+            raise ValueError("provider catalog items must be objects")
+        clean = _clean_provider_record(raw_provider)
+        provider = {**clean, **_new_provider_authority()}
+        dependency_plan.assert_provider_supported(provider)
+        providers.append(provider)
+    provider_ids = {provider["id"] for provider in providers}
+    default_provider_id = str(payload.get("default_provider_id") or "").strip()
+    if default_provider_id not in provider_ids:
+        raise ValueError("provider catalog default is missing")
+    authority = provider_sync_authority.new_authority(default_provider_id, providers)
+    next_state = {
+        **_seed_default_state(),
+        "default_provider_id": default_provider_id,
+        "providers": providers,
+        "provider_state_authority": authority,
+        "provider_state_projected": True,
+        "internal_llm": _normalize_internal_llm(payload.get("internal_llm")),
+    }
+    _validate_state_for_save(next_state)
+    _save_state(next_state, provider_state_authority=authority)
+    return list_providers()
+
+
 def get_provider(provider_id: str) -> Optional[dict]:
     state = _load_state()
     for p in state.get("providers", []):

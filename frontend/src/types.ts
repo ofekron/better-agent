@@ -1253,6 +1253,8 @@ export interface ToolApproval {
 
 export interface Provider {
   id: string;
+  generation: string;
+  revision: number;
   name: string;
   /** Optional distinguishing label shown beside the name (e.g. an account
    * alias separating two same-kind subscription providers). */

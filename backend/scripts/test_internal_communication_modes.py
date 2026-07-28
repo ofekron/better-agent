@@ -5,6 +5,8 @@ import os
 import sys
 from pathlib import Path
 
+import pytest
+
 import _test_home
 
 _test_home.isolate("bc-test-communication-modes-")
@@ -154,6 +156,17 @@ async def _run() -> None:
             "mode": "wait_and_grab_last_assistant_mssg_in_turn",
             "user_initiated": True,
         })
+        assert coordinator.calls[-1]["user_initiated"] is False
+
+        await main._handle_internal_ask(
+            {
+                "sender_session_id": "sender-1",
+                "target_session_id": "target-1",
+                "message": "trusted user-facing QA turn",
+                "mode": "wait_and_grab_last_assistant_mssg_in_turn",
+            },
+            trusted_user_initiated=True,
+        )
         assert coordinator.calls[-1]["user_initiated"] is True
     finally:
         main.coordinator = original_coordinator
@@ -165,6 +178,106 @@ async def _run() -> None:
 
 def test_internal_communication_modes() -> None:
     asyncio.run(_run())
+
+
+def test_testape_qa_ask_requires_runtime_capability_and_exact_session(
+    monkeypatch,
+) -> None:
+    import testape_qa_runtime
+
+    body = {
+        "sender_session_id": "sender",
+        "target_session_id": "target",
+        "message": "run QA",
+    }
+    monkeypatch.delenv("BETTER_AGENT_TESTAPE_QA_TOKEN", raising=False)
+    monkeypatch.delenv("BETTER_AGENT_TESTAPE_QA_RUNTIME_ID", raising=False)
+    monkeypatch.setattr(testape_qa_runtime, "_expected_token", None)
+    monkeypatch.setattr(testape_qa_runtime, "_runtime_id", None)
+    monkeypatch.setattr(main, "_internal_authority_is_valid", lambda: True)
+    with pytest.raises(main.HTTPException) as disabled:
+        asyncio.run(main.internal_testape_qa_ask(body, "internal", "qa"))
+    assert disabled.value.status_code == 403
+
+    monkeypatch.setenv("BETTER_AGENT_TESTAPE_QA_TOKEN", "qa")
+    monkeypatch.setenv("BETTER_AGENT_TESTAPE_QA_RUNTIME_ID", "runtime")
+    monkeypatch.setattr(testape_qa_runtime, "_expected_token", None)
+    monkeypatch.setattr(testape_qa_runtime, "_runtime_id", None)
+    testape_qa_runtime.claim("runtime", "sender")
+    testape_qa_runtime.claim("runtime", "target")
+    captured = {}
+
+    async def handle(request_body, *, trusted_user_initiated=False):
+        captured["body"] = request_body
+        captured["trusted"] = trusted_user_initiated
+        return {"success": True}
+
+    monkeypatch.setattr(main, "_handle_internal_ask", handle)
+    assert asyncio.run(main.internal_testape_qa_ask(body, "internal", "qa")) == {
+        "success": True,
+    }
+    assert captured == {
+        "body": {**body, "_testape_qa_runtime_id": "runtime"},
+        "trusted": True,
+    }
+
+    with pytest.raises(main.HTTPException) as foreign:
+        asyncio.run(main.internal_testape_qa_ask(
+            {**body, "target_session_id": "foreign"},
+            "internal",
+            "qa",
+        ))
+    assert foreign.value.status_code == 403
+
+    with pytest.raises(main.HTTPException) as pooled:
+        asyncio.run(main.internal_testape_qa_ask(
+            {
+                "sender_session_id": "sender",
+                "target_worker_pool": "pool",
+                "message": "run QA",
+            },
+            "internal",
+            "qa",
+        ))
+    assert pooled.value.status_code == 400
+
+
+def test_testape_qa_ask_uses_durable_idempotent_operation(monkeypatch) -> None:
+    import testape_qa_runtime
+
+    monkeypatch.setenv("BETTER_AGENT_TESTAPE_QA_TOKEN", "qa")
+    monkeypatch.setenv("BETTER_AGENT_TESTAPE_QA_RUNTIME_ID", "runtime")
+    monkeypatch.setattr(testape_qa_runtime, "_expected_token", None)
+    monkeypatch.setattr(testape_qa_runtime, "_runtime_id", None)
+    monkeypatch.setattr(main, "_internal_authority_is_valid", lambda: True)
+    testape_qa_runtime.claim("runtime", "sender")
+    testape_qa_runtime.claim("runtime", "target")
+    captured = {}
+
+    async def durable(operation, body):
+        captured.update(operation=operation, body=body)
+        return {"success": True, "id": body["_mcp_job_id"], "ready": False}
+
+    monkeypatch.setattr(main, "_maybe_run_core_mcp_job", durable)
+    body = {
+        "sender_session_id": "sender",
+        "target_session_id": "target",
+        "message": "run QA",
+        "_mcp_job_id": "stable-job",
+    }
+    result = asyncio.run(
+        main.internal_testape_qa_ask(body, "internal", "qa")
+    )
+
+    assert result == {"success": True, "id": "stable-job", "ready": False}
+    assert captured == {
+        "operation": "testape-qa-ask",
+        "body": {**body, "_testape_qa_runtime_id": "runtime"},
+    }
+    assert "testape-qa-ask" in main._CORE_MCP_RESUMABLE_OPERATIONS
+    assert main._core_mcp_job_handler("testape-qa-ask") is (
+        main._handle_internal_testape_qa_ask
+    )
 
 
 def test_pool_enqueue_endpoint_maps_unavailable_inbox_to_400(monkeypatch) -> None:
