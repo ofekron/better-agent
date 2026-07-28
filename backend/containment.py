@@ -6,10 +6,10 @@ the backend can keep a session's running + monitoring state accurate. The
 ppid walk in ``proc_control.py`` is BLIND to a reparented orphan (its parent
 link to the runner is gone); OS containment is not:
 
-  * Linux   — cgroup v2. Every descendant is in the run's cgroup;
-              ``cgroup.procs`` enumerates them regardless of how they
-              detach. A process cannot leave a cgroup without write access
-              to another, which it does not have. GUARANTEED.
+  * Linux   — cgroup v2, or the cgroup-v1 freezer hierarchy on hybrid
+              kernels. Every descendant inherits the run's cgroup and is
+              enumerated regardless of how it detaches. A process cannot
+              leave without write access to another cgroup. GUARANTEED.
   * Windows — a named Job Object. Descendants cannot break away (we never
               set ``JOB_OBJECT_LIMIT_BREAKAWAY_OK``); the job's process-id
               list enumerates them. The handle is re-openable by name.
@@ -124,7 +124,7 @@ class Containment(abc.ABC):
 
 
 # ======================================================================
-# Linux — cgroup v2
+# Linux — cgroup v2 / v1 freezer
 # ======================================================================
 def _unescape_mountinfo_path(value: str) -> str:
     for escaped, literal in (
@@ -179,12 +179,73 @@ def _current_cgroup_v2_directory(
                         continue
                     if not os.path.isfile(os.path.join(resolved, "cgroup.controllers")):
                         continue
+                    if not os.path.isfile(os.path.join(resolved, "cgroup.type")):
+                        continue
                 except (OSError, ValueError):
                     continue
                 return resolved
     except (OSError, ValueError) as exc:
         raise ContainmentUnavailable(f"cannot discover cgroup v2 hierarchy: {exc}") from exc
     raise ContainmentUnavailable("cannot discover cgroup v2 hierarchy")
+
+
+def _current_cgroup_v1_freezer_directory(
+    mountinfo_path: str = "/proc/self/mountinfo",
+    cgroup_path: str = "/proc/self/cgroup",
+    *,
+    pid: int | None = None,
+) -> str:
+    pid = os.getpid() if pid is None else pid
+    membership = None
+    try:
+        with open(cgroup_path, encoding="ascii") as stream:
+            for line in stream:
+                _, controllers, path = line.rstrip("\n").split(":", 2)
+                if "freezer" in controllers.split(","):
+                    membership = os.path.normpath(path)
+                    break
+        if membership is None or not membership.startswith("/"):
+            raise ValueError("process has no cgroup v1 freezer membership")
+
+        with open(mountinfo_path, encoding="utf-8") as stream:
+            for line in stream:
+                before, separator, after = line.rstrip("\n").partition(" - ")
+                fields = before.split()
+                after_fields = after.split()
+                if (
+                    not separator
+                    or len(fields) < 5
+                    or len(after_fields) < 3
+                    or after_fields[0] != "cgroup"
+                    or "freezer" not in after_fields[2].split(",")
+                ):
+                    continue
+                mount_root = os.path.normpath(_unescape_mountinfo_path(fields[3]))
+                mount_point = os.path.normpath(_unescape_mountinfo_path(fields[4]))
+                if membership == mount_root:
+                    relative = "."
+                elif membership.startswith(mount_root.rstrip("/") + "/"):
+                    relative = os.path.relpath(membership, mount_root)
+                else:
+                    continue
+                resolved = os.path.normpath(os.path.join(mount_point, relative))
+                if os.path.commonpath((mount_point, resolved)) != mount_point:
+                    raise ValueError("cgroup v1 membership escapes mount")
+                try:
+                    with open(os.path.join(resolved, "tasks"), encoding="ascii") as tasks:
+                        members = {int(value) for value in tasks.read().split()}
+                    if pid not in members:
+                        continue
+                    if not os.path.isfile(os.path.join(resolved, "freezer.state")):
+                        continue
+                except (OSError, ValueError):
+                    continue
+                return resolved
+    except (OSError, ValueError) as exc:
+        raise ContainmentUnavailable(
+            f"cannot discover cgroup v1 freezer hierarchy: {exc}"
+        ) from exc
+    raise ContainmentUnavailable("cannot discover cgroup v1 freezer hierarchy")
 
 
 class _LinuxCgroupContainment(Containment):
@@ -313,6 +374,85 @@ class _LinuxCgroupContainment(Containment):
             with open(os.path.join(self._dir(run_id), "cgroup.kill"),
                       "w", encoding="ascii") as f:
                 f.write("1")
+        except (FileNotFoundError, PermissionError, OSError, ContainmentUnavailable):
+            return 0
+        return len(members)
+
+
+class _LinuxCgroupV1FreezerContainment(_LinuxCgroupContainment):
+    def __init__(self, *, cgroup_directory: str | None = None) -> None:
+        self._procs_fd = {}
+        parent = cgroup_directory or _current_cgroup_v1_freezer_directory()
+        self._base = os.path.join(parent, "better-agent")
+
+    def create(self, run_id: str) -> None:
+        d = self._dir(run_id)
+        base_fd = None
+        run_fd = None
+        try:
+            try:
+                os.mkdir(self._base, 0o700)
+            except FileExistsError:
+                pass
+            base_stat = os.lstat(self._base)
+            if not stat.S_ISDIR(base_stat.st_mode) or base_stat.st_uid != os.geteuid():
+                raise OSError("cgroup base is not an owned directory")
+            os.chmod(self._base, 0o700)
+            base_fd = os.open(
+                self._base,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+            )
+            safe = os.path.basename(d)
+            try:
+                os.mkdir(safe, 0o700, dir_fd=base_fd)
+            except FileExistsError:
+                pass
+            run_fd = os.open(
+                safe,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                dir_fd=base_fd,
+            )
+            run_stat = os.fstat(run_fd)
+            if run_stat.st_uid != os.geteuid():
+                raise OSError("run cgroup is not owned by the backend user")
+            os.fchmod(run_fd, 0o700)
+            fd = os.open(
+                "tasks",
+                os.O_WRONLY | os.O_NOFOLLOW,
+                dir_fd=run_fd,
+            )
+        except (FileNotFoundError, PermissionError, OSError) as exc:
+            raise ContainmentUnavailable(
+                f"cgroup v1 freezer unavailable/undelegated at {self._base}: {exc}"
+            ) from exc
+        finally:
+            if run_fd is not None:
+                os.close(run_fd)
+            if base_fd is not None:
+                os.close(base_fd)
+        self._procs_fd[run_id] = fd
+
+    def enumerate(self, run_id: str) -> list[int]:
+        try:
+            with open(os.path.join(self._dir(run_id), "tasks"), encoding="ascii") as tasks:
+                return [int(line) for line in tasks if line.strip()]
+        except (FileNotFoundError, PermissionError, OSError, ValueError):
+            return []
+
+    def force_kill_all(self, run_id: str) -> int:
+        members = self.enumerate(run_id)
+        try:
+            with open(
+                os.path.join(self._dir(run_id), "freezer.state"),
+                "w",
+                encoding="ascii",
+            ) as freezer:
+                freezer.write("FROZEN")
+            for pid in members:
+                try:
+                    os.kill(pid, 9)
+                except (ProcessLookupError, PermissionError, OSError):
+                    pass
         except (FileNotFoundError, PermissionError, OSError, ContainmentUnavailable):
             return 0
         return len(members)
@@ -514,7 +654,10 @@ def containment() -> Containment:
         if os.name == "nt":
             _INSTANCE = _WindowsJobContainment()
         elif sys.platform == "linux":
-            _INSTANCE = _LinuxCgroupContainment()
+            try:
+                _INSTANCE = _LinuxCgroupContainment()
+            except ContainmentUnavailable:
+                _INSTANCE = _LinuxCgroupV1FreezerContainment()
         else:
             _INSTANCE = _DarwinBestEffortContainment()
     return _INSTANCE
