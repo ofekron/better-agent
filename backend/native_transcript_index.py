@@ -41,7 +41,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-from paths import ba_home, encode_cwd
+from paths import ba_home, encode_cwd, is_test_mode
+from proc_control import process_control
+from process_identity import (
+    ProcessIdentity,
+    capture_process_identity,
+    process_identity_is_live,
+)
 import portable_lock
 import native_internal_prompt
 import run_source_index
@@ -106,7 +112,12 @@ _FULL_SCAN_DISCOVERY_BATCH = 128
 _FULL_SCAN_ENTRY_BUDGET = 4096
 _CHECKPOINT_WAL_BYTES = 256 * 1024 * 1024
 _WORKER_ARG = "--native-transcript-index-worker"
+_WORKER_OWNER_PID_ARG = "--owner-pid"
+_WORKER_OWNER_CREATE_TIME_ARG = "--owner-create-time"
+_WORKER_ROOTS_ARG = "--roots-json"
+_WORKER_TEST_START_GATE_ENV = "BETTER_AGENT_TEST_NATIVE_INDEX_START_GATE"
 _WORKER_POLL_INTERVAL_SECONDS = 0.5
+_WORKER_OWNER_POLL_INTERVAL_SECONDS = 0.25
 _WORKER_LOG_BYTES = 16 * 1024 * 1024
 _MAX_FILE_TIMING_ROWS = 20
 _REFRESH_REQUESTED_AT_KEY = "refresh_requested_at"
@@ -119,6 +130,8 @@ _worker_started = False
 _worker_lock = threading.Lock()
 _worker_thread: threading.Thread | None = None
 _worker_process: subprocess.Popen | None = None
+_worker_process_identity: ProcessIdentity | None = None
+_worker_owner_identity: ProcessIdentity | None = None
 _stop = threading.Event()
 
 # Refresh signaling: once covered, a stale query REQUESTS a refresh and waits
@@ -147,39 +160,73 @@ def _worker_log_path() -> Path:
     return _home_resolver() / "logs" / "native-transcript-index.log"
 
 
-def _is_process_alive(pid: int) -> bool:
-    if pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-        return True
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
+@dataclass(frozen=True)
+class _WorkerRecord:
+    worker: ProcessIdentity
+    owner: ProcessIdentity
 
 
-def _read_worker_pid() -> int | None:
+def _identity_from_value(value: Any) -> ProcessIdentity:
+    return ProcessIdentity(
+        pid=int(value["pid"]),
+        create_time=float(value["create_time"]),
+    )
+
+
+def _read_worker_record() -> _WorkerRecord | None:
     try:
-        return int(_worker_pid_path().read_text(encoding="utf-8").strip())
-    except (OSError, ValueError):
+        value = json.loads(_worker_pid_path().read_text(encoding="utf-8"))
+        return _WorkerRecord(
+            worker=_identity_from_value(value["worker"]),
+            owner=_identity_from_value(value["owner"]),
+        )
+    except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError):
         return None
 
 
-def _write_worker_pid(pid: int) -> None:
+def _identity_value(identity: ProcessIdentity) -> dict[str, int | float]:
+    return {
+        "pid": identity.pid,
+        "create_time": identity.create_time,
+    }
+
+
+def _write_worker_record(record: _WorkerRecord) -> None:
     path = _worker_pid_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(str(pid), encoding="utf-8")
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(
+        json.dumps({
+            "worker": _identity_value(record.worker),
+            "owner": _identity_value(record.owner),
+        }),
+        encoding="utf-8",
+    )
+    os.replace(temporary, path)
 
 
-def _clear_worker_pid(pid: int | None = None) -> None:
+def _clear_worker_record(record: _WorkerRecord | None = None) -> None:
     path = _worker_pid_path()
-    if pid is not None and _read_worker_pid() != pid:
+    if record is not None and _read_worker_record() != record:
         return
     try:
         path.unlink()
     except FileNotFoundError:
         pass
+
+
+def _clear_worker_record_for_worker(
+    worker_identity: ProcessIdentity,
+    owner_identity: ProcessIdentity,
+) -> None:
+    record = _read_worker_record()
+    if (
+        record is None
+        or record.worker.pid != worker_identity.pid
+        or record.owner != owner_identity
+    ):
+        return
+    _clear_worker_record(record)
 
 
 def _append_worker_log(message: str) -> None:
@@ -819,6 +866,69 @@ def _roots_and_resolver():
         _native_roots,
     )
     return _native_roots, _classify_root, _candidate_from_match, _is_native_transcript_path
+
+
+def _resolved_worker_roots() -> list[tuple[Path, str]]:
+    native_roots, _, _, _ = _roots_and_resolver()
+    return [(root.resolve(), tag) for root, tag in native_roots()]
+
+
+def _serialize_worker_roots() -> str:
+    return json.dumps([
+        {"path": str(root), "tag": tag}
+        for root, tag in _resolved_worker_roots()
+    ])
+
+
+def _configure_worker_roots(raw: str) -> None:
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError("worker roots must be valid JSON") from exc
+    if not isinstance(payload, list):
+        raise ValueError("worker roots must be a list")
+
+    from native_session_prompt_search import (
+        _candidate_from_match,
+        _classify_root,
+        _is_native_transcript_path,
+        _native_roots,
+    )
+
+    default_roots = {
+        (root.resolve(), tag)
+        for root, tag in _native_roots()
+    }
+    state_root = ba_home().resolve()
+    allowed_tags = {"claude", "codex", "pi", "windsurf", "runs"}
+    roots: list[tuple[Path, str]] = []
+    for item in payload:
+        if not isinstance(item, dict):
+            raise ValueError("worker root entries must be objects")
+        path_value = item.get("path")
+        tag = item.get("tag")
+        if not isinstance(path_value, str) or not isinstance(tag, str):
+            raise ValueError("worker root entries require string path and tag")
+        path = Path(path_value)
+        if not path.is_absolute() or tag not in allowed_tags:
+            raise ValueError("worker root path or tag is invalid")
+        resolved = path.resolve(strict=True)
+        if not resolved.is_dir():
+            raise ValueError("worker roots must be directories")
+        if is_test_mode():
+            if resolved != state_root and state_root not in resolved.parents:
+                raise ValueError("test worker root escapes BETTER_AGENT_HOME")
+        elif (resolved, tag) not in default_roots:
+            raise ValueError("worker root is not a configured native transcript root")
+        roots.append((resolved, tag))
+
+    root_snapshot = tuple(roots)
+    set_roots_resolver(lambda: (
+        lambda: list(root_snapshot),
+        _classify_root,
+        _candidate_from_match,
+        _is_native_transcript_path,
+    ))
 
 
 def _stat_walk() -> list[tuple[Path, str, float, int]]:
@@ -3045,44 +3155,71 @@ def run_readonly_sql(
 
 def ensure_started() -> None:
     """Start the external daemon that keeps the index covered + fresh."""
-    global _worker_process, _worker_started
+    global _worker_process, _worker_process_identity, _worker_owner_identity
+    global _worker_started
     if _worker_started:
         return
     with _worker_lock:
         if _worker_started:
             return
         _stop.clear()
-        existing_pid = _read_worker_pid()
-        if existing_pid and _is_process_alive(existing_pid):
+        owner_identity = capture_process_identity(os.getpid())
+        if owner_identity is None:
+            raise RuntimeError("cannot establish transcript index worker owner identity")
+        existing_record = _read_worker_record()
+        if existing_record and process_identity_is_live(existing_record.worker):
+            if existing_record.owner != owner_identity:
+                raise RuntimeError(
+                    "transcript index worker belongs to another live launcher"
+                )
+            _worker_process_identity = existing_record.worker
+            _worker_owner_identity = existing_record.owner
             _worker_started = True
             return
-        _clear_worker_pid(existing_pid)
+        _clear_worker_record(existing_record)
+        worker_roots = _serialize_worker_roots()
         log_path = _worker_log_path()
         log_path.parent.mkdir(parents=True, exist_ok=True)
         log_fh = open(log_path, "a", encoding="utf-8")
         try:
             proc = subprocess.Popen(
-                [sys.executable, str(Path(__file__).resolve()), _WORKER_ARG],
+                [
+                    sys.executable,
+                    str(Path(__file__).resolve()),
+                    _WORKER_ARG,
+                    _WORKER_OWNER_PID_ARG,
+                    str(owner_identity.pid),
+                    _WORKER_OWNER_CREATE_TIME_ARG,
+                    repr(owner_identity.create_time),
+                    _WORKER_ROOTS_ARG,
+                    worker_roots,
+                ],
                 cwd=str(Path(__file__).resolve().parent),
                 stdout=log_fh,
                 stderr=log_fh,
-                start_new_session=True,
+                **process_control().detach_spawn_kwargs(),
             )
         finally:
             log_fh.close()
-        _write_worker_pid(proc.pid)
+        worker_identity = capture_process_identity(proc.pid)
+        if worker_identity is None:
+            proc.kill()
+            proc.wait(timeout=2.0)
+            raise RuntimeError("cannot establish transcript index worker identity")
+        record = _WorkerRecord(worker_identity, owner_identity)
+        _write_worker_record(record)
         _worker_process = proc
+        _worker_process_identity = worker_identity
+        _worker_owner_identity = owner_identity
         _worker_started = True
         logger.info("native transcript index worker process started pid=%s", proc.pid)
 
 
-def _worker_main(parent_pid: int | None = None) -> None:
+def _worker_main() -> None:
     # Cold start: keep doing full delta passes until covered, then poll. Each
     # refresh (refresh_once) stamps _last_refresh_at + notifies waiting queries.
     global _refresh_requested
     while not _stop.is_set():
-        if parent_pid and not _is_process_alive(parent_pid):
-            break
         try:
             full = None
             if is_covered() and _full_reconcile_due():
@@ -3115,20 +3252,68 @@ def _worker_main(parent_pid: int | None = None) -> None:
             _stop.wait(0.2)  # throttle the initial build so we don't hog disk
 
 
-def _run_worker_process() -> int:
-    parent_pid = os.getppid()
+def _start_owner_watchdog(
+    owner_identity: ProcessIdentity,
+    worker_record: _WorkerRecord,
+) -> threading.Thread:
+    def watch() -> None:
+        while process_identity_is_live(owner_identity):
+            time.sleep(_WORKER_OWNER_POLL_INTERVAL_SECONDS)
+        _clear_worker_record_for_worker(worker_record.worker, owner_identity)
+        os._exit(0)
+
+    thread = threading.Thread(
+        target=watch,
+        name="native-transcript-index-owner",
+        daemon=True,
+    )
+    thread.start()
+    return thread
+
+
+def _run_worker_process(owner_identity: ProcessIdentity, roots_json: str) -> int:
+    worker_identity = capture_process_identity(os.getpid())
+    if worker_identity is None:
+        return 1
+    worker_record = _WorkerRecord(worker_identity, owner_identity)
+    if not process_identity_is_live(owner_identity):
+        _clear_worker_record_for_worker(worker_identity, owner_identity)
+        return 0
+    gate_value = os.environ.get(_WORKER_TEST_START_GATE_ENV, "").strip()
+    if gate_value:
+        if not is_test_mode():
+            raise RuntimeError("worker startup gate is test-only")
+        gate = Path(gate_value)
+        state_root = ba_home().resolve()
+        if not gate.is_absolute():
+            raise ValueError("worker startup gate must be absolute")
+        gate_parent = gate.parent.resolve(strict=True)
+        if gate_parent != state_root and state_root not in gate_parent.parents:
+            raise ValueError("worker startup gate escapes BETTER_AGENT_HOME")
+        while not gate.exists():
+            if not process_identity_is_live(owner_identity):
+                _clear_worker_record_for_worker(
+                    worker_record.worker,
+                    owner_identity,
+                )
+                return 0
+            time.sleep(0.01)
+    _configure_worker_roots(roots_json)
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
     pid = os.getpid()
-    _write_worker_pid(pid)
+    _start_owner_watchdog(owner_identity, worker_record)
     try:
-        logger.info("native transcript index worker process running pid=%s parent=%s", pid, parent_pid)
-        _worker_main(parent_pid=parent_pid)
+        logger.info(
+            "native transcript index worker process running pid=%s owner=%s",
+            pid,
+            owner_identity.pid,
+        )
+        _worker_main()
         return 0
     finally:
-        _clear_worker_pid(pid)
         shutdown()
 
 
@@ -3141,6 +3326,7 @@ def _stop_worker() -> None:
     don't need their own ``_lock`` barrier before clearing ``_stop`` (which would
     otherwise resume a ghost worker that keeps polling mid-test)."""
     global _worker_started, _worker_thread, _worker_process
+    global _worker_process_identity, _worker_owner_identity
     _stop.set()
     with _refresh_cond:
         _refresh_cond.notify_all()
@@ -3155,10 +3341,15 @@ def _stop_worker() -> None:
             logger.warning("native transcript index worker did not stop within 2s")
     proc = _worker_process
     if proc is None:
-        pid = _read_worker_pid()
-        if pid and _is_process_alive(pid):
+        record = _read_worker_record()
+        current_owner = capture_process_identity(os.getpid())
+        if (
+            record
+            and record.owner == current_owner
+            and process_identity_is_live(record.worker)
+        ):
             try:
-                os.kill(pid, 15)
+                process_control().signal_stop(record.worker.pid)
             except OSError:
                 pass
     else:
@@ -3169,10 +3360,16 @@ def _stop_worker() -> None:
             except subprocess.TimeoutExpired:
                 proc.kill()
                 proc.wait(timeout=2.0)
-        _clear_worker_pid(proc.pid)
+        if _worker_process_identity and _worker_owner_identity:
+            _clear_worker_record(_WorkerRecord(
+                _worker_process_identity,
+                _worker_owner_identity,
+            ))
     _worker_started = False
     _worker_thread = None
     _worker_process = None
+    _worker_process_identity = None
+    _worker_owner_identity = None
 
 
 def shutdown() -> None:
@@ -3228,9 +3425,21 @@ def reset_for_test() -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(_WORKER_ARG, action="store_true")
+    parser.add_argument(_WORKER_OWNER_PID_ARG, type=int)
+    parser.add_argument(_WORKER_OWNER_CREATE_TIME_ARG, type=float)
+    parser.add_argument(_WORKER_ROOTS_ARG)
     args = parser.parse_args(argv)
     if args.native_transcript_index_worker:
-        return _run_worker_process()
+        if (
+            args.owner_pid is None
+            or args.owner_create_time is None
+            or args.roots_json is None
+        ):
+            parser.error("worker owner identity and roots are required")
+        return _run_worker_process(
+            ProcessIdentity(args.owner_pid, args.owner_create_time),
+            args.roots_json,
+        )
     return 0
 
 

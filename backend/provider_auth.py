@@ -29,6 +29,7 @@ from typing import Awaitable, Callable, Optional
 import config_store
 from paths import ba_home, user_home
 from proc_control import process_control
+from process_identity import capture_process_identity
 
 logger = logging.getLogger(__name__)
 
@@ -271,14 +272,8 @@ def _clear_marker(provider_id: str) -> None:
 
 
 def _process_create_time(pid: int) -> Optional[float]:
-    """The process's creation time, or None if it can't be determined
-    (psutil missing, or the pid isn't a live process we can introspect)."""
-    try:
-        import psutil
-
-        return float(psutil.Process(pid).create_time())
-    except Exception:
-        return None
+    identity = capture_process_identity(pid)
+    return identity.create_time if identity is not None else None
 
 
 def reap_orphaned_logins() -> None:

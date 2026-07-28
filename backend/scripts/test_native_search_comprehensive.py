@@ -35,7 +35,8 @@ if _BACKEND not in sys.path:
 
 # Isolate ~/.better-claude BEFORE any backend import (per CLAUDE.md).
 import _test_home  # noqa: E402
-_TMP_HOME = _test_home.isolate("bc-test-native-search-comprehensive-")
+_TEST_HOME = _test_home.TestHome.acquire("bc-test-native-search-comprehensive-")
+_TMP_HOME = _TEST_HOME.path
 
 import native_session_miner as M  # noqa: E402
 import native_session_prompt_search as nsp  # noqa: E402
@@ -1638,7 +1639,9 @@ def test_idx_wait_fresh_serves_delta() -> bool:
         time.sleep(1.05)
         with fpath.open("a", encoding="utf-8") as f:
             f.write(json.dumps(_claude_user("deltawaitneedle new", "u2")) + "\n")
-        idx._last_refresh_at = 0.0  # force stale
+        writer = idx._writer_connection()
+        idx._state_set(writer, "last_walk_at", "0")
+        writer.commit()
         assert idx.is_covered() and not idx.is_usable()
         idx.ensure_started()
         idx.request_refresh()
@@ -1662,7 +1665,9 @@ def test_idx_wait_fresh_timeout_returns_false() -> bool:
     try:
         idx.refresh_once()
         # Make it stale and request NO refresh; tiny timeout must give up.
-        idx._last_refresh_at = 0.0
+        writer = idx._writer_connection()
+        idx._state_set(writer, "last_walk_at", "0")
+        writer.commit()
         fresh = idx.wait_fresh(0.05)
     finally:
         _restore_idx_roots(token)
@@ -2559,20 +2564,23 @@ def main_run() -> int:
         test_gap_wal_inode_staleness_after_reset,
         test_gap_fts_injection_harmless,
     ]
-    results = []
-    for fn in tests:
-        try:
-            results.append(fn())
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
-            print(f"{FAIL} {fn.__name__} raised: {e}")
-            results.append(False)
-    n_pass = sum(1 for r in results if r)
-    n_total = len(results)
-    print(f"\n{n_pass}/{n_total} native-search-comprehensive tests passed")
-    shutil.rmtree(_TMP_HOME, ignore_errors=True)
-    return 0 if n_pass == n_total else 1
+    try:
+        results = []
+        for fn in tests:
+            try:
+                results.append(fn())
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                print(f"{FAIL} {fn.__name__} raised: {e}")
+                results.append(False)
+        n_pass = sum(1 for r in results if r)
+        n_total = len(results)
+        print(f"\n{n_pass}/{n_total} native-search-comprehensive tests passed")
+        return 0 if n_pass == n_total else 1
+    finally:
+        idx.shutdown()
+        _TEST_HOME.release()
 
 
 if __name__ == "__main__":

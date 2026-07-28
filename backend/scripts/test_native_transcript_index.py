@@ -662,9 +662,10 @@ def test_cold_full_build_commits_partial_progress_and_resumes() -> bool:
 def test_default_cold_build_batch_is_bounded() -> bool:
     claude, codex = _setup_roots()
     original_path_stat = idx.Path.stat
-    stat_calls = {"count": 0}
+    stat_calls = {"count": 0, "paths": set()}
     def counted_stat(path_self, *args, **kwargs):
         stat_calls["count"] += 1
+        stat_calls["paths"].add(str(path_self))
         return original_path_stat(path_self, *args, **kwargs)
     try:
         shutil.rmtree(claude, ignore_errors=True)
@@ -681,6 +682,10 @@ def test_default_cold_build_batch_is_bounded() -> bool:
         idx.Path.stat = counted_stat
         first = idx.refresh_once()
         stat_calls_after_first = stat_calls["count"]
+        transcript_paths_after_first = {
+            path for path in stat_calls["paths"]
+            if "default-batch-" in path
+        }
         first_state = idx.quick_state()
         first_files = idx._readonly_connection().execute(
             "SELECT COUNT(*) FROM native_file_state"
@@ -712,7 +717,7 @@ def test_default_cold_build_batch_is_bounded() -> bool:
         and fourth["partial"] == 0
         and final_state == {"schema_ok": True, "covered": True, "usable": True}
         and len(rows) == idx._FULL_REFRESH_FILE_BATCH + 5
-        and stat_calls_after_first < total_files
+        and len(transcript_paths_after_first) <= idx._FULL_REFRESH_FILE_BATCH
     )
     print(f"{OK if ok else FAIL} default cold build batch is bounded "
           f"(batch={idx._FULL_REFRESH_FILE_BATCH}, first={first}, "
@@ -1989,17 +1994,24 @@ def test_ensure_started_spawns_external_worker_process() -> bool:
             self._terminated = True
 
     original_popen = idx.subprocess.Popen
+    original_capture = idx.capture_process_identity
     try:
         idx.subprocess.Popen = FakePopen
+        idx.capture_process_identity = lambda pid: idx.ProcessIdentity(pid, float(pid))
         idx.ensure_started()
         spawned = idx._worker_process
         idx.shutdown()
     finally:
         idx.subprocess.Popen = original_popen
+        idx.capture_process_identity = original_capture
 
     ok = (
         len(calls) == 1
-        and calls[0][0][-1] == idx._WORKER_ARG
+        and idx._WORKER_ARG in calls[0][0]
+        and all(
+            calls[0][1].get(key) == value
+            for key, value in idx.process_control().detach_spawn_kwargs().items()
+        )
         and spawned is not None
         and idx._worker_thread is None
         and idx._worker_process is None
