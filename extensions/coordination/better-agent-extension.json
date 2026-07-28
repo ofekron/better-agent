@@ -17,7 +17,7 @@
         "args": [],
         "env": {},
         "user_facing": true,
-        "bare_allowed": false,
+        "bare_allowed": true,
         "requires_backend_auth": true
       }
     ],

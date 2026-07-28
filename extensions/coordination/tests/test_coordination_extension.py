@@ -86,6 +86,10 @@ def test_lock_ops_validates_key_before_loopback() -> None:
 def test_manifest_declares_git_ops_lock_instruction() -> None:
     root = Path(__file__).resolve().parents[1]
     manifest = json.loads((root / "better-agent-extension.json").read_text(encoding="utf-8"))
+    mcp = manifest["entrypoints"]["mcp"]
+    assert len(mcp) == 1
+    assert mcp[0]["requires_backend_auth"] is True
+    assert mcp[0]["bare_allowed"] is True
     instructions = manifest["entrypoints"]["instructions"]
     assert "instructions" in manifest["surfaces"]
     assert {
