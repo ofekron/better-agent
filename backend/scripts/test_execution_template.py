@@ -8,6 +8,7 @@ import sys
 import tempfile
 import threading
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
 
 
@@ -306,6 +307,11 @@ def test_provider_boundary_uses_frozen_execution_without_blocking_config_replace
             self._runs = {}
             self.events: list[str] = []
 
+        @contextmanager
+        def _execution_authority_context(self, execution, start_arguments):
+            del execution, start_arguments
+            yield self.record
+
         def assert_not_suspended(self, *, action: str = "start runs") -> None:
             self.events.append(f"suspension:{action}")
 
@@ -411,6 +417,11 @@ def test_provider_starts_are_concurrent() -> None:
             self.spawn_started = threading.Event()
             self.spawned: list[str] = []
 
+        @contextmanager
+        def _execution_authority_context(self, execution, start_arguments):
+            del execution, start_arguments
+            yield self.record
+
         def assert_not_suspended(self, *, action: str = "start runs") -> None:
             del action
 
@@ -494,6 +505,11 @@ def test_spawn_commit_linearizes_cancellation() -> None:
             self.spawn_started = threading.Event()
             self.spawn_gate = threading.Event()
             self.spawned: list[str] = []
+
+        @contextmanager
+        def _execution_authority_context(self, execution, start_arguments):
+            del execution, start_arguments
+            yield self.record
 
         def assert_not_suspended(self, *, action: str = "start runs") -> None:
             del action

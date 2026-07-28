@@ -20,7 +20,6 @@ import subprocess
 import sys
 import threading
 import time
-from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -390,36 +389,10 @@ class CodexProvider(Provider):
     def __init__(self, record: dict) -> None:
         super().__init__(record)
         self._runs: dict[str, RunState] = {}
-        self._execution_record = threading.local()
 
-    def runtime_record(self) -> dict:
-        active = getattr(self._execution_record, "value", None)
-        return active if active is not None else self.record
-
-    @contextmanager
-    def _execution_authority_context(
-        self,
-        execution,
-        start_arguments: dict[str, Any],
-    ):
-        del start_arguments
-        artifact = execution.artifact
-        hydrated = config_store.hydrate_provider_execution(
-            artifact.provider_id,
-            expected_generation=artifact.provider_generation,
-            expected_revision=artifact.provider_revision,
-        )
-        if hydrated is None:
-            raise RuntimeError(
-                f"provider {artifact.provider_id} is unavailable",
-            )
-        self._execution_record.value = hydrated
-        try:
-            yield hydrated
-        finally:
-            del self._execution_record.value
-            run_id = artifact.template.arguments()["run_id"]
-            cleanup_staged_codex_runtime_agent_payload(run_id)
+    def _release_execution_authority(self, execution) -> None:
+        run_id = execution.artifact.template.arguments()["run_id"]
+        cleanup_staged_codex_runtime_agent_payload(run_id)
 
     def codex_config_overrides(self, *, model: Optional[str]) -> list[str]:
         del model

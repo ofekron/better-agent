@@ -39,6 +39,7 @@ from execution_template import (  # noqa: E402
     ExecutionAuthorityError,
 )
 from provider_codex import CodexProvider  # noqa: E402
+from provider_execution_authority import ProviderExecutionHydration  # noqa: E402
 from provider_fugu import FuguProvider  # noqa: E402
 import runner_codex  # noqa: E402
 from runs_dir import runs_root  # noqa: E402
@@ -63,6 +64,14 @@ def _record(*, kind: str, config_dir: Path, revision: int = 7) -> dict:
         "runner": "native",
         "api_key": "secret-not-persisted" if kind == "fugu" else "",
         "_credential_authoritative": kind == "fugu",
+    }
+
+
+def _nonsecret_record(record: dict) -> dict:
+    return {
+        key: value
+        for key, value in record.items()
+        if key not in {"api_key", "_credential_authoritative"}
     }
 
 
@@ -361,7 +370,9 @@ def test_prepare_to_spawn_provider_mutation_fails_closed() -> None:
         }
         original_hydrate = config_store.hydrate_provider_execution
         config_store.hydrate_provider_execution = (
-            lambda *_args, **_kwargs: provider.record
+            lambda *_args, **_kwargs: ProviderExecutionHydration.create(
+                _nonsecret_record(provider.record),
+            )
         )
         loop = asyncio.new_event_loop()
         try:
@@ -584,7 +595,9 @@ def test_runtime_agent_payload_is_removed_on_failed_admission() -> None:
                 "revision": provider.record["revision"] + 1,
             }
             config_store.hydrate_provider_execution = (
-                lambda *_args, **_kwargs: provider.record
+                lambda *_args, **_kwargs: ProviderExecutionHydration.create(
+                    _nonsecret_record(provider.record),
+                )
             )
             loop = asyncio.new_event_loop()
             try:

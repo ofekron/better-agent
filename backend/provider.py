@@ -46,7 +46,12 @@ from typing import Any, Callable, ClassVar, Iterable, Optional
 
 import config_store
 import perf
-from execution_template import PreparedExecution, prepare_execution
+from execution_template import (
+    ExecutionArtifact,
+    ExecutionAuthorityError,
+    PreparedExecution,
+    prepare_execution,
+)
 from env_compat import dual_env_many
 from paths import ba_home
 from proc_control import process_control as _process_control
@@ -598,6 +603,7 @@ class Provider(ABC):
         # Subclass methods MUST snapshot at top, never deref `self._record`
         # twice in one method.
         self._record: dict = dict(record)
+        self._execution_record = threading.local()
         self.defunct: bool = False
         self.suspended: bool = config_store.provider_suspended(self.id)
         self._parked_runs: dict[str, ParkedRun] = {}
@@ -640,6 +646,9 @@ class Provider(ABC):
         self._apply_capability_overrides()
 
     def assert_not_suspended(self, *, action: str = "start runs") -> None:
+        if getattr(self._execution_record, "value", None) is not None:
+            self.suspended = False
+            return
         if config_store.provider_suspended(self.id):
             self.suspended = True
             raise ProviderSuspendedError(
@@ -648,7 +657,8 @@ class Provider(ABC):
         self.suspended = False
 
     def runtime_record(self) -> dict:
-        return self.record
+        active = getattr(self._execution_record, "value", None)
+        return active if active is not None else self.record
 
     def require_runtime_credential(self) -> None:
         record = self.runtime_record()
@@ -658,6 +668,14 @@ class Provider(ABC):
         if is_ollama_base_url(str(record.get("base_url") or "")) and record.get("api_key"):
             return
         if record.get("_credential_authoritative") is not True:
+            hydrated_status = record.get("_credential_status")
+            if hydrated_status in {"available", "missing", "blocked"}:
+                raise ProviderCredentialError(
+                    f"provider {self.id} credential is {hydrated_status}; "
+                    "cannot start provider process",
+                    provider_id=self.id,
+                    credential_status=hydrated_status,
+                )
             try:
                 status = config_store.provider_credential_status(self.id)
             except (EOFError, OSError, RuntimeError):
@@ -667,6 +685,9 @@ class Provider(ABC):
                 provider_id=self.id,
                 credential_status=status,
             )
+        hydrated_status = record.get("_credential_status")
+        if hydrated_status == "available" and record.get("api_key"):
+            return
         try:
             status = config_store.provider_credential_status(self.id)
         except (EOFError, OSError, RuntimeError):
@@ -852,8 +873,46 @@ class Provider(ABC):
         execution: PreparedExecution,
         start_arguments: dict[str, Any],
     ):
+        del start_arguments
+        installed = False
+        try:
+            artifact = execution.artifact
+            self._assert_execution_provider(artifact)
+            hydration = config_store.hydrate_provider_execution(
+                artifact.provider_id,
+                expected_generation=artifact.provider_generation,
+                expected_revision=artifact.provider_revision,
+            )
+            if hydration is None:
+                raise RuntimeError(
+                    f"provider {artifact.provider_id} is unavailable",
+                )
+            authority = hydration.provider
+            self._execution_record.value = hydration.runtime_record()
+            installed = True
+            yield authority
+        finally:
+            if installed:
+                del self._execution_record.value
+            self._release_execution_authority(execution)
+
+    def _assert_execution_provider(
+        self,
+        artifact: ExecutionArtifact,
+    ) -> None:
+        if (
+            artifact.provider_id != self.id
+            or artifact.provider_kind != self.KIND
+        ):
+            raise ExecutionAuthorityError(
+                "prepared execution belongs to a different provider",
+            )
+
+    def _release_execution_authority(
+        self,
+        execution: PreparedExecution,
+    ) -> None:
         del execution
-        yield self.execution_authority_record(start_arguments)
 
     @contextmanager
     def _execution_admission(
@@ -1882,13 +1941,15 @@ def _recover_all_in_flight_owned(
         execution_document: Optional[dict] = None
         execution_kind = ""
         if execution_path.exists():
-            try:
-                if execution_path.is_symlink():
-                    raise ValueError("invalid execution ownership document")
-                from execution_template import ExecutionArtifact
+            from execution_artifact_io import (
+                load_execution_artifact,
+                requires_execution_artifact,
+            )
 
-                artifact = ExecutionArtifact.from_dict(
-                    json.loads(execution_path.read_text(encoding="utf-8")),
+            try:
+                artifact = load_execution_artifact(
+                    child,
+                    validate_input=input_path.exists(),
                 )
                 arguments = artifact.template.arguments()
                 execution_document = {
@@ -1912,7 +1973,7 @@ def _recover_all_in_flight_owned(
                     )
                 except Exception:
                     failed_kind = ""
-                if failed_kind in {"codex", "fugu"}:
+                if requires_execution_artifact(failed_kind):
                     ownership_safe = False
                     continue
         backend_document_error = False
@@ -1967,7 +2028,7 @@ def _recover_all_in_flight_owned(
         )
         if (
             execution_document is not None
-            and execution_kind in {"codex", "fugu"}
+            and requires_execution_artifact(execution_kind)
         ):
             documents = [execution_document]
             pid = str(execution_document["provider_id"])
