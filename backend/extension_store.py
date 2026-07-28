@@ -6042,6 +6042,42 @@ def _profile_selected_mcp_server_names(inputs: dict[str, Any], extension_id: str
     return harness_run_projection.selected_mcp_servers(inputs, extension_id)
 
 
+def required_profile_mcp_server_names(inputs: dict[str, Any]) -> set[str]:
+    projection = harness_run_projection.launcher_projection(inputs)
+    if projection.get("extension_selection_authoritative") is not True:
+        return set()
+    selected_by_extension = projection.get("extension_mcp_servers")
+    if not isinstance(selected_by_extension, dict):
+        return set()
+    required: set[str] = set()
+    mapped: set[tuple[str, str]] = set()
+    for record in _active_records():
+        manifest = record["manifest"]
+        extension_id = str(manifest["id"])
+        selected = selected_by_extension.get(extension_id)
+        if not isinstance(selected, list):
+            continue
+        selected_names = {
+            str(name).strip()
+            for name in selected
+            if str(name or "").strip()
+        }
+        for item in _stored_mcp_entrypoints(record):
+            item_name = str(item.get("name") or "")
+            if item_name not in selected_names:
+                continue
+            required.add(str(item.get("replaces_builtin") or item_name))
+            mapped.add((extension_id, item_name))
+    for extension_id, selected in selected_by_extension.items():
+        if not isinstance(selected, list):
+            continue
+        for name in selected:
+            item_name = str(name or "").strip()
+            if item_name and (str(extension_id), item_name) not in mapped:
+                required.add(item_name)
+    return required
+
+
 def _profile_setting_overlays(inputs: dict[str, Any], extension_id: str) -> dict[str, Any]:
     projection = harness_run_projection.launcher_projection(inputs)
     raw = projection.get("extension_setting_overlays") if projection else None

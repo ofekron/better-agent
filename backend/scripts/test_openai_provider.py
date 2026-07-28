@@ -729,6 +729,248 @@ def test_openai_runner_lists_extension_mcp_tools_concurrently_in_order():
     ]] == ["alpha", "beta", "gamma"]
 
 
+def test_openai_runner_fails_closed_when_profile_selected_mcp_cannot_list_tools():
+    runner = _mod("runner_better_agent")
+    extension_store = _mod("extension_store")
+    original_configs = runner._extension_mcp_server_configs_for_run
+    original_list = runner._mcp_list_tools
+    original_required = extension_store.required_profile_mcp_server_names
+
+    def fake_configs(inputs, *, user_facing, bare):
+        return {
+            "better-agent-session-control": {"command": sys.executable},
+        }
+
+    async def fake_list(server_name, config):
+        raise RuntimeError("MCP server closed stdout: import failed")
+
+    try:
+        runner._extension_mcp_server_configs_for_run = fake_configs
+        runner._mcp_list_tools = fake_list
+        extension_store.required_profile_mcp_server_names = lambda inputs: {
+            "better-agent-session-control",
+        }
+        with pytest.raises(
+            RuntimeError,
+            match=(
+                "required extension MCP 'better-agent-session-control' "
+                "tools/list failed: MCP server closed stdout: import failed"
+            ),
+        ):
+            asyncio.run(runner._extension_mcp_tools_for_run(
+                {
+                    "resolved_harness_run_config": {
+                        "profile_id": "better-agent-qa-fresh",
+                    },
+                },
+                user_facing=True,
+                bare=False,
+                used_names=set(),
+            ))
+    finally:
+        runner._extension_mcp_server_configs_for_run = original_configs
+        runner._mcp_list_tools = original_list
+        extension_store.required_profile_mcp_server_names = original_required
+
+
+def test_openai_runner_keeps_ambient_mcp_failures_isolated():
+    runner = _mod("runner_better_agent")
+    extension_store = _mod("extension_store")
+    original_configs = runner._extension_mcp_server_configs_for_run
+    original_list = runner._mcp_list_tools
+    original_required = extension_store.required_profile_mcp_server_names
+
+    def fake_configs(inputs, *, user_facing, bare):
+        return {
+            "broken": {"command": sys.executable},
+            "healthy": {"command": sys.executable},
+        }
+
+    async def fake_list(server_name, config):
+        if server_name == "broken":
+            raise RuntimeError("unavailable")
+        return [{
+            "name": "observe",
+            "description": "Observe.",
+            "inputSchema": {"type": "object", "properties": {}},
+        }]
+
+    try:
+        runner._extension_mcp_server_configs_for_run = fake_configs
+        runner._mcp_list_tools = fake_list
+        extension_store.required_profile_mcp_server_names = lambda inputs: set()
+        schemas, handlers = asyncio.run(runner._extension_mcp_tools_for_run(
+            {},
+            user_facing=True,
+            bare=False,
+            used_names=set(),
+        ))
+    finally:
+        runner._extension_mcp_server_configs_for_run = original_configs
+        runner._mcp_list_tools = original_list
+        extension_store.required_profile_mcp_server_names = original_required
+
+    assert [schema["function"]["name"] for schema in schemas] == [
+        "mcp__healthy__observe",
+    ]
+    assert list(handlers) == ["mcp__healthy__observe"]
+
+
+def test_openai_runner_rejects_profile_selected_mcp_without_tools():
+    runner = _mod("runner_better_agent")
+    extension_store = _mod("extension_store")
+    original_configs = runner._extension_mcp_server_configs_for_run
+    original_list = runner._mcp_list_tools
+    original_required = extension_store.required_profile_mcp_server_names
+
+    def fake_configs(inputs, *, user_facing, bare):
+        return {"empty": {"command": sys.executable}}
+
+    async def fake_list(server_name, config):
+        return []
+
+    try:
+        runner._extension_mcp_server_configs_for_run = fake_configs
+        runner._mcp_list_tools = fake_list
+        extension_store.required_profile_mcp_server_names = lambda inputs: {"empty"}
+        with pytest.raises(
+            RuntimeError,
+            match="required extension MCP 'empty' advertised no tools",
+        ):
+            asyncio.run(runner._extension_mcp_tools_for_run(
+                {
+                    "resolved_harness_run_config": {
+                        "profile_id": "required-profile",
+                    },
+                },
+                user_facing=True,
+                bare=False,
+                used_names=set(),
+            ))
+    finally:
+        runner._extension_mcp_server_configs_for_run = original_configs
+        runner._mcp_list_tools = original_list
+        extension_store.required_profile_mcp_server_names = original_required
+
+
+def test_openai_runner_fails_closed_when_required_mcp_selection_cannot_resolve():
+    runner = _mod("runner_better_agent")
+    extension_store = _mod("extension_store")
+    original_configs = runner._extension_mcp_server_configs_for_run
+    original_required = extension_store.required_profile_mcp_server_names
+
+    def fake_configs(inputs, *, user_facing, bare):
+        return {"ambient": {"command": sys.executable}}
+
+    def fail_required(inputs):
+        raise ValueError("profile projection unreadable")
+
+    try:
+        runner._extension_mcp_server_configs_for_run = fake_configs
+        extension_store.required_profile_mcp_server_names = fail_required
+        with pytest.raises(
+            RuntimeError,
+            match=(
+                "required extension MCP selection resolution failed: "
+                "profile projection unreadable"
+            ),
+        ):
+            asyncio.run(runner._extension_mcp_tools_for_run(
+                {},
+                user_facing=True,
+                bare=False,
+                used_names=set(),
+            ))
+    finally:
+        runner._extension_mcp_server_configs_for_run = original_configs
+        extension_store.required_profile_mcp_server_names = original_required
+
+
+def test_openai_runner_propagates_mcp_discovery_cancellation():
+    runner = _mod("runner_better_agent")
+    extension_store = _mod("extension_store")
+    original_configs = runner._extension_mcp_server_configs_for_run
+    original_list = runner._mcp_list_tools
+    original_required = extension_store.required_profile_mcp_server_names
+
+    def fake_configs(inputs, *, user_facing, bare):
+        return {"cancelled": {"command": sys.executable}}
+
+    async def fake_list(server_name, config):
+        raise asyncio.CancelledError()
+
+    try:
+        runner._extension_mcp_server_configs_for_run = fake_configs
+        runner._mcp_list_tools = fake_list
+        extension_store.required_profile_mcp_server_names = lambda inputs: {"cancelled"}
+        with pytest.raises(asyncio.CancelledError):
+            asyncio.run(runner._extension_mcp_tools_for_run(
+                {},
+                user_facing=True,
+                bare=False,
+                used_names=set(),
+            ))
+    finally:
+        runner._extension_mcp_server_configs_for_run = original_configs
+        runner._mcp_list_tools = original_list
+        extension_store.required_profile_mcp_server_names = original_required
+
+
+def test_openai_runner_lists_real_profile_selected_session_control_tools():
+    runner = _mod("runner_better_agent")
+    extension_store = _mod("extension_store")
+    installation_profile = _mod("installation_profile")
+    test_installation = _mod("_test_installation")
+    test_installation.activate(Path(_TMP_HOME))
+    installation_profile.capture_active_capabilities()
+    original_verified_python = extension_store.dependency_plan.verified_active_python
+    extension_store.dependency_plan.verified_active_python = lambda backend_dir: Path(
+        sys.executable
+    )
+    data = extension_store._load()
+    extension_store._ensure_public_extensions(data)
+    extension_store._save(data)
+    inputs = {
+        "mode": "native",
+        "app_session_id": "session-control-integration",
+        "working_mode": "native",
+        "user_facing": True,
+        "backend_url": "http://127.0.0.1:9",
+        "internal_token": "test-token",
+        "resolved_harness_run_config": {
+            "profile_id": "better-agent-qa-fresh",
+            "launcher_projection": {
+                "extension_selection_authoritative": True,
+                "extension_mcp_servers": {
+                    extension_store.BUILTIN_SESSION_CONTROL_EXTENSION_ID: [
+                        "better-agent-session-control",
+                    ],
+                },
+            },
+        },
+    }
+
+    try:
+        schemas, handlers = asyncio.run(runner._extension_mcp_tools_for_run(
+            inputs,
+            user_facing=True,
+            bare=False,
+            used_names=set(),
+        ))
+    finally:
+        extension_store.dependency_plan.verified_active_python = original_verified_python
+
+    tool_names = {
+        schema["function"]["name"]
+        for schema in schemas
+    }
+    assert "mcp__better-agent-session-control__switch_model" in tool_names
+    assert "mcp__better-agent-session-control__continue_in_fresh_context" in tool_names
+    assert handlers["mcp__better-agent-session-control__switch_model"][
+        "server_name"
+    ] == "better-agent-session-control"
+
+
 def test_openai_runner_mcp_tool_names_are_canonical_bounded_and_unique():
     runner = _mod("runner_better_agent")
     used_names = {"mcp__server__tool"}
