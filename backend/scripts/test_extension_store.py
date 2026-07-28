@@ -3930,6 +3930,8 @@ def test_skill_entrypoint_description_is_validated_and_stored() -> None:
 
 
 def test_module_based_mcp_server_config() -> None:
+    original_verified = extension_store.dependency_plan.verified_active_python
+    active_python = Path("/authoritative/backend/python")
     package = _write_private_extension_package(
         "ofek.module-mcp",
         "extensions/module-mcp",
@@ -3965,6 +3967,9 @@ def test_module_based_mcp_server_config() -> None:
         persist=True,
     )
     try:
+        extension_store.dependency_plan.verified_active_python = (
+            lambda _backend_dir: active_python
+        )
         configs = extension_store.runtime_mcp_server_configs(
             {
                 "app_session_id": "s1",
@@ -3979,7 +3984,7 @@ def test_module_based_mcp_server_config() -> None:
         config = configs.get("module-mcp")
         if not config:
             raise AssertionError(configs)
-        if config["command"] != sys.executable:
+        if config["command"] != str(active_python):
             raise AssertionError(config)
         if config["args"] != ["-m", "compiled_mcp.server", "serve"]:
             raise AssertionError(config)
@@ -3987,6 +3992,7 @@ def test_module_based_mcp_server_config() -> None:
         if str(Path(record["source"]["install_path"]).resolve()) not in pythonpath.split(os.pathsep):
             raise AssertionError(config["env"])
     finally:
+        extension_store.dependency_plan.verified_active_python = original_verified
         try:
             extension_store.uninstall("ofek.module-mcp")
         except Exception:
@@ -3994,8 +4000,13 @@ def test_module_based_mcp_server_config() -> None:
 
 
 def test_installed_extension_exports_runtime_mcp_server_config() -> None:
+    original_verified = extension_store.dependency_plan.verified_active_python
+    active_python = Path("/authoritative/backend/python")
     work = _private_monorepo_test_work("bc-test-runtime-extension-repo-")
     try:
+        extension_store.dependency_plan.verified_active_python = (
+            lambda _backend_dir: active_python
+        )
         repo, _commit = _make_runtime_repo(work)
         record = extension_store.install_from_repo(
             repo_url=repo.as_uri(),
@@ -4016,7 +4027,7 @@ def test_installed_extension_exports_runtime_mcp_server_config() -> None:
         config = configs.get("ofek-scheduler")
         if not config:
             raise AssertionError(configs)
-        if config["command"] != sys.executable:
+        if config["command"] != str(active_python):
             raise AssertionError(config)
         if Path(config["args"][0]).resolve() != (Path(record["source"]["install_path"]) / "mcp" / "server.py").resolve():
             raise AssertionError(config)
@@ -4035,6 +4046,7 @@ def test_installed_extension_exports_runtime_mcp_server_config() -> None:
         if config["env"]["OF_EXTENSION_TEST"] != "1":
             raise AssertionError(config)
     finally:
+        extension_store.dependency_plan.verified_active_python = original_verified
         shutil.rmtree(work, ignore_errors=True)
 
 
@@ -5645,8 +5657,52 @@ def test_extension_dependencies_use_active_backend_python() -> None:
         shutil.rmtree(target, ignore_errors=True)
 
 
+def test_extension_runtime_prefers_its_dependency_environment() -> None:
+    target = Path(tempfile.mkdtemp(prefix="bc-test-extension-runtime-python-"))
+    original_verified = extension_store.dependency_plan.verified_active_python
+    try:
+        extension_python = extension_store._venv_python(target / ".venv")
+        extension_python.parent.mkdir(parents=True)
+        shutil.copy2(sys.executable, extension_python)
+        extension_store.dependency_plan.verified_active_python = (
+            lambda _backend_dir: (_ for _ in ()).throw(
+                AssertionError("backend interpreter should not be resolved")
+            )
+        )
+        if extension_store._extension_python(
+            target,
+            has_dependency_environment=True,
+        ) != extension_python:
+            raise AssertionError(extension_python)
+        extension_python.unlink()
+        extension_python.touch()
+        try:
+            extension_store._extension_python(
+                target,
+                has_dependency_environment=True,
+            )
+        except extension_store.ExtensionError as exc:
+            if "not runnable" not in str(exc):
+                raise AssertionError(exc)
+        else:
+            raise AssertionError("corrupt extension environment should fail closed")
+        active_python = Path("/authoritative/backend/python")
+        extension_store.dependency_plan.verified_active_python = (
+            lambda _backend_dir: active_python
+        )
+        if extension_store._extension_python(
+            target,
+            has_dependency_environment=False,
+        ) != active_python:
+            raise AssertionError("undeclared extension environment was selected")
+    finally:
+        extension_store.dependency_plan.verified_active_python = original_verified
+        shutil.rmtree(target, ignore_errors=True)
+
+
 if __name__ == "__main__":
     try:
+        test_extension_runtime_prefers_its_dependency_environment()
         test_extension_dependencies_use_active_backend_python()
         test_v1_store_migrates_source_types_to_v2_without_wipe()
         test_manifest_validation_rejects_unknown_permissions()

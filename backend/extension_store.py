@@ -3460,17 +3460,33 @@ def _venv_bin_dir(venv_dir: Path) -> Path:
     return venv_dir / "bin"
 
 
-def _venv_site_packages_dir(venv_dir: Path) -> Path | None:
-    if sys.platform == "win32":
-        candidate = venv_dir / "Lib" / "site-packages"
-        return candidate if candidate.is_dir() else None
-    lib_dir = venv_dir / "lib"
-    if not lib_dir.is_dir():
-        return None
-    for candidate in sorted(lib_dir.glob("python*/site-packages")):
-        if candidate.is_dir():
-            return candidate
-    return None
+def _extension_python(install_root: Path, *, has_dependency_environment: bool) -> Path:
+    extension_python = _venv_python(install_root / ".venv")
+    if has_dependency_environment:
+        if not extension_python.is_file():
+            raise ExtensionError("extension dependency environment is missing")
+        try:
+            result = subprocess.run(
+                [str(extension_python), "-c", "import sys; sys.exit(0)"],
+                cwd=install_root,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise ExtensionError(
+                "extension dependency environment is not runnable"
+            ) from exc
+        if result.returncode != 0:
+            raise ExtensionError("extension dependency environment is not runnable")
+        return extension_python
+    try:
+        return dependency_plan.verified_active_python(Path(__file__).resolve().parent)
+    except dependency_plan.DependencyPlanError as exc:
+        raise ExtensionError(
+            "extension runtime requires an active backend dependency environment"
+        ) from exc
 
 
 def _install_python_requirements(target: Path, manifest: dict[str, Any]) -> None:
@@ -6234,9 +6250,6 @@ def _runtime_mcp_server_config_for_item(
         env["PATH"] = str(venv_bin) + (os.pathsep + existing_path if existing_path else "")
     sdk_path = _sdk_pythonpath()
     pythonpath_parts = [str(install_root)]
-    site_packages = _venv_site_packages_dir(install_root / ".venv")
-    if site_packages is not None:
-        pythonpath_parts.append(str(site_packages))
     if sdk_path:
         pythonpath_parts.append(sdk_path)
     existing_pythonpath = env.get("PYTHONPATH", "")
@@ -6244,9 +6257,15 @@ def _runtime_mcp_server_config_for_item(
         pythonpath_parts.append(existing_pythonpath)
     env["PYTHONPATH"] = os.pathsep.join(pythonpath_parts)
     module = str(item.get("module") or "").strip()
+    python = _extension_python(
+        install_root,
+        has_dependency_environment=bool(
+            manifest.get("entrypoints", {}).get("python_requirements")
+        ),
+    )
     if module:
         return {
-            "command": sys.executable,
+            "command": str(python),
             "args": ["-m", module, *list(item.get("args") or [])],
             "env": env,
             **timeout_config,
@@ -6255,7 +6274,7 @@ def _runtime_mcp_server_config_for_item(
     if not script.is_relative_to(install_root) or not script.is_file():
         return None
     return {
-        "command": sys.executable,
+        "command": str(python),
         "args": [str(script), *list(item.get("args") or [])],
         "env": env,
         **timeout_config,
