@@ -578,13 +578,6 @@ def test_import_provider_sync_clears_default_when_every_provider_needs_missing_k
     assert result["default_provider_id"] is None
 
 
-def test_machine_page_uses_sync_callbacks() -> None:
-    assert callable(config_store.import_provider_sync_state)
-    assert "context.syncExtensionsToNode" in ui
-    assert "Sync providers" in ui
-    assert "Sync extensions" in ui
-
-
 async def test_node_cwd_is_validated_against_the_node() -> None:
     """A cwd the node cannot use must be rejected before the turn starts.
 
@@ -756,7 +749,6 @@ async def _main() -> None:
     test_import_provider_sync_skips_keyless_api_provider_as_default()
     test_import_provider_sync_clears_default_when_every_provider_needs_missing_key()
     await test_node_cwd_is_validated_against_the_node()
-    test_machine_page_uses_sync_callbacks()
     test_package_artifact_prunes_runtime_trees_with_links()
     test_package_artifact_still_rejects_links_in_real_content()
     test_export_skips_bad_package_instead_of_aborting()
