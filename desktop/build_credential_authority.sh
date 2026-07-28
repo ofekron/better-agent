@@ -4,8 +4,9 @@ set -euo pipefail
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(dirname "$DIR")"
-VENV="$REPO/backend/.venv"
-PYTHON="${BETTER_AGENT_BACKEND_PYTHON:-$VENV/bin/python}"
+DEFAULT_VENV="$REPO/backend/.venv"
+PYTHON="${BETTER_AGENT_BACKEND_PYTHON:-$DEFAULT_VENV/bin/python}"
+VENV="$(dirname "$(dirname "$PYTHON")")"
 TARGET="$DIR/dist/BetterAgentCredentialAuthority/BetterAgentCredentialAuthority"
 
 if [ "${BETTER_AGENT_CREDENTIAL_BUILD_LOCKED:-0}" != "1" ]; then
