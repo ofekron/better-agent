@@ -266,6 +266,8 @@ class _WindowsProcessControl(ProcessControl):
         # are set), so this is a replacement, not an addition.
         flags = subprocess.CREATE_NEW_PROCESS_GROUP  # type: ignore[attr-defined]
         flags |= getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+        if os.environ.get("BETTER_AGENT_RUN_SH_SERVICE_CHILD", "").strip() == "1":
+            flags |= getattr(subprocess, "CREATE_BREAKAWAY_FROM_JOB", 0x01000000)
         return {"creationflags": flags}
 
     def pid_alive(self, pid: int) -> bool:
