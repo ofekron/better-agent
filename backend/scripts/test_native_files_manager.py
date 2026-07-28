@@ -12,17 +12,21 @@ import sys
 import tempfile
 import threading
 import time
+from pathlib import Path
 
 import _test_home
-_test_home.isolate("nfm-test-")
+_TMP_HOME = _test_home.isolate("nfm-test-")
 # Provider-agnostic resolver globs the claude projects dir for an existing
 # <sid>.jsonl, so point it at a temp config dir and create the file below.
-_CLAUDE_CFG = tempfile.mkdtemp(prefix="nfm-claude-")
+_CLAUDE_CFG = os.path.join(_TMP_HOME, ".claude-config")
 os.environ["CLAUDE_CONFIG_DIR"] = _CLAUDE_CFG
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import asyncio  # noqa: E402
 import json  # noqa: E402
+
+import _test_installation  # noqa: E402
+_test_installation.activate(Path(_TMP_HOME))
 
 import jsonl_tailer  # noqa: E402
 import native_session_miner as nsm_mod  # noqa: E402
@@ -2327,7 +2331,6 @@ async def test_codex_primary_not_tailed_by_claude_tailer() -> None:
     forward them verbatim as agent_message noise. Codex is covered by its
     run-scoped CodexRolloutTailer + recovery, so the claude backup is
     skipped. Regression for the 'unknown event: agent_message.*' garbage."""
-    from pathlib import Path
     import native_files_manager as nfm
 
     rollout = Path.home() / ".codex" / "sessions" / "2026" / "06" / "16" / "rollout-X.jsonl"
