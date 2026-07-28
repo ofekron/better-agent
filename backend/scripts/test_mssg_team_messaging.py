@@ -1105,6 +1105,7 @@ def test_ask_team_message_can_target_sub_session(monkeypatch):
                     "type": "user_message_done",
                     "data": {
                         "lifecycle_msg_id": params["lifecycle_msg_id"],
+                        "success": True,
                     },
                 })
         asyncio.create_task(finish())
@@ -1182,6 +1183,103 @@ def test_ask_team_message_failed_target_returns_error_without_empty_response(mon
     assert result["success"] is False
     assert result["error"] == "unsupported model"
     assert result["target_session_id"] == target["id"]
+    assert "assistant_content" not in result
+    assert "response_message_id" not in result
+
+
+def test_ask_team_message_done_failure_returns_error_without_empty_response(monkeypatch):
+    sender = session_manager.create(
+        name="manager ask failed done",
+        cwd="/repo",
+        orchestration_mode="native",
+    )
+    target = session_manager.create(
+        name="failed done target",
+        cwd="/repo",
+        orchestration_mode="native",
+    )
+    coordinator = Coordinator()
+
+    def fake_submit_prompt(sid: str, params: dict, **_kwargs) -> str:
+        async def finish() -> None:
+            await asyncio.sleep(0)
+            for cb in list(coordinator.ws_callbacks.get(sid, [])):
+                await cb({
+                    "type": "user_message_done",
+                    "data": {
+                        "lifecycle_msg_id": params["lifecycle_msg_id"],
+                        "success": False,
+                        "error": "provider failed",
+                    },
+                })
+        asyncio.create_task(finish())
+        return params["_queued_id"]
+
+    monkeypatch.setattr(coordinator, "submit_prompt", fake_submit_prompt)
+
+    result = asyncio.run(coordinator.ask_team_message(
+        sender_session_id=sender["id"],
+        target_session_id=target["id"],
+        message="review this",
+        timeout_s=1,
+    ))
+
+    assert result["success"] is False
+    assert result["error"] == "provider failed"
+    assert result["target_session_id"] == target["id"]
+    assert "assistant_content" not in result
+    assert "response_message_id" not in result
+
+
+def test_ask_team_message_done_without_assistant_fails_closed(monkeypatch):
+    sender = session_manager.create(
+        name="manager ask missing answer",
+        cwd="/repo",
+        orchestration_mode="native",
+    )
+    target = session_manager.create(
+        name="missing answer target",
+        cwd="/repo",
+        orchestration_mode="native",
+    )
+    coordinator = Coordinator()
+
+    def fake_submit_prompt(sid: str, params: dict, **_kwargs) -> str:
+        async def finish() -> None:
+            await asyncio.sleep(0)
+            session = session_manager.get(sid)
+            coordinator._init_turn_messages(
+                session=session,
+                app_session_id=sid,
+                prompt=params["prompt"],
+                images=None,
+                source=params["source"],
+                lifecycle_msg_id=params["lifecycle_msg_id"],
+                queue_item_id=params["_queued_id"],
+                team_message=params["team_message"],
+            )
+            for cb in list(coordinator.ws_callbacks.get(sid, [])):
+                await cb({
+                    "type": "user_message_done",
+                    "data": {
+                        "lifecycle_msg_id": params["lifecycle_msg_id"],
+                        "success": True,
+                    },
+                })
+        asyncio.create_task(finish())
+        return params["_queued_id"]
+
+    monkeypatch.setattr(coordinator, "submit_prompt", fake_submit_prompt)
+
+    result = asyncio.run(coordinator.ask_team_message(
+        sender_session_id=sender["id"],
+        target_session_id=target["id"],
+        message="review this",
+        timeout_s=1,
+    ))
+
+    assert result["success"] is False
+    assert result["error"] == "target turn completed without an assistant response"
     assert "assistant_content" not in result
     assert "response_message_id" not in result
 
@@ -1368,7 +1466,10 @@ def test_ask_team_message_submits_target_app_session_id(monkeypatch):
             for callback in list(coordinator.ws_callbacks.get(target["id"], [])):
                 await callback({
                     "type": "user_message_done",
-                    "data": {"lifecycle_msg_id": params["lifecycle_msg_id"]},
+                    "data": {
+                        "lifecycle_msg_id": params["lifecycle_msg_id"],
+                        "success": True,
+                    },
                 })
 
         asyncio.get_running_loop().create_task(finish())

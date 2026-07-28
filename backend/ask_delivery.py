@@ -235,28 +235,16 @@ async def on_target_turn_terminal(event: Any) -> None:
     if coordinator is None:
         return
     target_session_id = str(event.sid or "")
-    if event.type == "user_message_done":
-        # Match the live path exactly (orchestrator.py's wait_callback):
-        # `user_message_done` is success regardless of `payload["success"]`,
-        # which can be False for a sub-turn-recorded failure that didn't
-        # raise the overall turn. Branching on that field here would make
-        # this writer disagree with the live path on the identical event.
-        result: dict[str, Any] = {"success": True}
-        response = await asyncio.to_thread(
-            coordinator._team_message_turn_response,
-            target_session_id=target_session_id,
-            lifecycle_msg_id=lifecycle_msg_id,
-        )
-    else:
-        result = {
-            "success": False,
-            "error": payload.get("error") or payload.get("reason") or "target turn failed",
-        }
-        response = {}
+    result = await asyncio.to_thread(
+        coordinator._team_message_terminal_result,
+        event_type=event.type,
+        payload=payload,
+        target_session_id=target_session_id,
+        lifecycle_msg_id=lifecycle_msg_id,
+    )
     full = {
         **result,
         "target_session_id": target_session_id,
         "queued_id": str(status.get("queue_item_id") or ""),
-        **response,
     }
     await ask_status_store.write_status_async(ask_id, result=full)

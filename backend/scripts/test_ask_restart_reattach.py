@@ -265,11 +265,25 @@ def test_reattach_uses_async_terminal_scan(monkeypatch):
     async def fake_async(app_session_id: str, observed_lifecycle_msg_id: str):
         assert app_session_id == target["id"]
         assert observed_lifecycle_msg_id == lifecycle_msg_id
-        return {"type": "user_message_done", "data": {"lifecycle_msg_id": lifecycle_msg_id}}
+        return {
+            "type": "user_message_done",
+            "data": {
+                "lifecycle_msg_id": lifecycle_msg_id,
+                "success": True,
+            },
+        }
 
     coordinator = Coordinator()
     monkeypatch.setattr(user_msg_lifecycle, "terminal_event_for_lifecycle", sync_must_not_run)
     monkeypatch.setattr(user_msg_lifecycle, "terminal_event_for_lifecycle_async", fake_async)
+    monkeypatch.setattr(
+        coordinator,
+        "_team_message_turn_response",
+        lambda **_kwargs: {
+            "response_message_id": "assistant-async-terminal",
+            "assistant_content": "answer",
+        },
+    )
     monkeypatch.setattr(
         coordinator,
         "submit_prompt",

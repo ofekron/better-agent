@@ -2271,13 +2271,11 @@ class Coordinator:
                 panel=panel,
                 event=event,
             )
-            if event.get("type") == "user_message_done" and not done.done():
-                done.set_result({"success": True})
-            elif event.get("type") == "user_message_failed" and not done.done():
-                done.set_result({
-                    "success": False,
-                    "error": data.get("error") or data.get("reason") or "target turn failed",
-                })
+            if (
+                event.get("type") in ("user_message_done", "user_message_failed")
+                and not done.done()
+            ):
+                done.set_result(user_msg_lifecycle.terminal_result(event["type"], data))
 
         self.register_ws(target_session_id, wait_callback)
 
@@ -2777,13 +2775,16 @@ class Coordinator:
                     panel=panel,
                     event=event,
                 )
-            if event.get("type") == "user_message_done" and not done.done():
-                done.set_result({"success": True})
-            elif event.get("type") == "user_message_failed" and not done.done():
-                done.set_result({
-                    "success": False,
-                    "error": data.get("error") or data.get("reason") or "target turn failed",
-                })
+            if (
+                event.get("type") in ("user_message_done", "user_message_failed")
+                and not done.done()
+            ):
+                done.set_result(self._team_message_terminal_result(
+                    event_type=event["type"],
+                    payload=data,
+                    target_session_id=target_session_id,
+                    lifecycle_msg_id=lifecycle_msg_id,
+                ))
 
         async def _dispatch_prompt() -> None:
             """Durably persist the queue item and submit the target turn.
@@ -2862,14 +2863,12 @@ class Coordinator:
                 target_session_id, lifecycle_msg_id
             )
             if terminal is not None:
-                if terminal.get("type") == "user_message_done":
-                    result = {"success": True}
-                else:
-                    tdata = terminal.get("data") or {}
-                    result = {
-                        "success": False,
-                        "error": tdata.get("error") or tdata.get("reason") or "target turn failed",
-                    }
+                result = self._team_message_terminal_result(
+                    event_type=str(terminal.get("type") or ""),
+                    payload=terminal.get("data"),
+                    target_session_id=target_session_id,
+                    lifecycle_msg_id=lifecycle_msg_id,
+                )
             elif reattach:
                 recovered = await self._team_message_completed_result_from_store(
                     target_session_id=target_session_id,
@@ -2924,37 +2923,54 @@ class Coordinator:
                 success=bool(result.get("success")),
                 error=result.get("error"),
             )
-        response = {}
-        if result.get("success"):
-            response = self._team_message_turn_response(
-                target_session_id=target_session_id,
-                lifecycle_msg_id=lifecycle_msg_id,
-            )
         full = {
             **result,
             "target_session_id": target_session_id,
             "queued_id": queue_item_id,
-            **response,
         }
         if ask_id:
             await ask_status_store.write_status_async(ask_id, result=full)
         return full
+
+    def _team_message_terminal_result(
+        self,
+        *,
+        event_type: str,
+        payload: Optional[dict],
+        target_session_id: str,
+        lifecycle_msg_id: str,
+    ) -> dict:
+        import user_msg_lifecycle
+
+        result = user_msg_lifecycle.terminal_result(event_type, payload)
+        if not result["success"]:
+            return result
+        response = self._team_message_turn_response(
+            target_session_id=target_session_id,
+            lifecycle_msg_id=lifecycle_msg_id,
+        )
+        if response is None:
+            return {
+                "success": False,
+                "error": "target turn completed without an assistant response",
+            }
+        return {**result, **response}
 
     def _team_message_turn_response(
         self,
         *,
         target_session_id: str,
         lifecycle_msg_id: str,
-    ) -> dict:
+    ) -> Optional[dict]:
         found = self._team_message_user_and_assistant(
             target_session_id=target_session_id,
             lifecycle_msg_id=lifecycle_msg_id,
         )
         if found is None:
-            return {"response_message_id": None, "assistant_content": ""}
+            return None
         _user_msg, assistant_msg = found
-        if assistant_msg is None:
-            return {"response_message_id": None, "assistant_content": ""}
+        if assistant_msg is None or not assistant_msg.get("id"):
+            return None
         return {
             "response_message_id": assistant_msg.get("id"),
             "assistant_content": self._team_message_assistant_content(

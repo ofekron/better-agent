@@ -195,14 +195,7 @@ def test_on_target_turn_terminal_reports_failure():
     ask_status_store.delete_status(ask_id)
 
 
-def test_on_target_turn_terminal_matches_live_path_success_semantics():
-    """`user_message_done` is success regardless of `payload["success"]` —
-    matching orchestrator.py's live wait_callback (`event.get("type") ==
-    "user_message_done"` alone, no `payload["success"]` check), since
-    `emit_done` can legitimately carry `success=False` for a recorded
-    sub-turn failure without failing the overall turn. The target-side
-    writer must agree with the live path on the identical event, or the
-    two "single sources of truth" for the same ask would diverge."""
+def test_on_target_turn_terminal_preserves_failed_done_outcome():
     sender = session_manager.create(name="caller D", cwd="/repo", orchestration_mode="native")
     target = session_manager.create(name="target D", cwd="/repo", orchestration_mode="native")
     lifecycle_msg_id = "life-order-d"
@@ -221,11 +214,17 @@ def test_on_target_turn_terminal_matches_live_path_success_semantics():
         root_id=root_id,
         sid=target["id"],
         msg_id=lifecycle_msg_id,
-        payload={"lifecycle_msg_id": lifecycle_msg_id, "success": False},
+        payload={
+            "lifecycle_msg_id": lifecycle_msg_id,
+            "success": False,
+            "error": "provider failed",
+        },
     )
     asyncio.run(ask_delivery.on_target_turn_terminal(done_event_with_false_success))
     status = ask_status_store.read_status(ask_id)
-    assert status["result"]["success"] is True
+    assert status["result"]["success"] is False
+    assert status["result"]["error"] == "provider failed"
+    assert "assistant_content" not in status["result"]
     ask_status_store.delete_status(ask_id)
 
 

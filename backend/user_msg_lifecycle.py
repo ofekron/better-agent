@@ -38,6 +38,27 @@ _USER_MSG_DONE = "user_message_done"
 _USER_MSG_FAILED = "user_message_failed"
 
 
+def terminal_result(event_type: str, payload: Optional[dict]) -> dict:
+    data = payload if isinstance(payload, dict) else {}
+    if event_type == _USER_MSG_FAILED:
+        return {
+            "success": False,
+            "error": data.get("error") or data.get("reason") or "target turn failed",
+        }
+    if event_type != _USER_MSG_DONE:
+        raise ValueError(f"unsupported user message terminal event: {event_type}")
+    if data.get("success") is True and not data.get("cancelled"):
+        return {"success": True}
+    return {
+        "success": False,
+        "error": (
+            data.get("error")
+            or data.get("reason")
+            or ("target turn cancelled" if data.get("cancelled") else "target turn failed")
+        ),
+    }
+
+
 def new_lifecycle_msg_id() -> str:
     """Generate a fresh correlation id for one user-message lifecycle."""
     return str(uuid.uuid4())
