@@ -2275,7 +2275,12 @@ class Coordinator:
                 event.get("type") in ("user_message_done", "user_message_failed")
                 and not done.done()
             ):
-                done.set_result(user_msg_lifecycle.terminal_result(event["type"], data))
+                done.set_result(self._team_message_terminal_result(
+                    event_type=event["type"],
+                    payload=data,
+                    target_session_id=target_session_id,
+                    lifecycle_msg_id=lifecycle_msg_id,
+                ))
 
         self.register_ws(target_session_id, wait_callback)
 

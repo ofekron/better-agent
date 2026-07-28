@@ -2006,3 +2006,71 @@ def test_team_message_assistant_content_keeps_content_on_empty_projection():
         if m.get("id") == "assistant-tool-tail"
     )
     assert coordinator._team_message_assistant_content(sid, msg) == "kept answer"
+
+
+def test_team_message_panel_watcher_resolves_terminal_result(monkeypatch):
+    import installation_profile
+
+    monkeypatch.setattr(
+        installation_profile,
+        "assert_orchestration_mode_allowed",
+        lambda mode: None,
+    )
+    sender = session_manager.create(
+        name="sender terminal",
+        cwd="/repo",
+        orchestration_mode="team",
+    )
+    target = session_manager.create(
+        name="target terminal",
+        cwd="/repo",
+        orchestration_mode="native",
+    )
+    coordinator = Coordinator()
+    completed: list[dict] = []
+
+    async def _capture_complete(*, success, error=None, **_kwargs):
+        completed.append({"success": success, "error": error})
+
+    async def _noop_forward(**_kwargs):
+        return None
+
+    async def _noop_save(_event):
+        return None
+
+    # Isolate the terminal-result path: stub the shielded ordered-save paths
+    # so the watch completes deterministically in-process.
+    coordinator._emit_team_message_panel_complete = _capture_complete
+    coordinator._forward_team_message_panel_event = _noop_forward
+    coordinator.turn_manager._turn_save_callbacks[sender["id"]] = _noop_save
+    coordinator.turn_manager.current_turn_workers[sender["id"]] = []
+
+    async def run() -> None:
+        panel = await coordinator._start_team_message_panel(
+            sender_session_id=sender["id"],
+            target_session_id=target["id"],
+            target=target,
+            message="please answer",
+            queue_item_id="queue-terminal",
+            run_mode=team_messaging.SOURCE,
+        )
+        coordinator._watch_team_message_panel(
+            sender_session_id=sender["id"],
+            target_session_id=target["id"],
+            lifecycle_msg_id="life-terminal",
+            panel=panel,
+        )
+        callback = coordinator.ws_callbacks[target["id"]][0]
+        await callback({
+            "type": "user_message_persisted",
+            "data": {"lifecycle_msg_id": "life-terminal"},
+        })
+        await callback({
+            "type": "user_message_done",
+            "data": {"lifecycle_msg_id": "life-terminal"},
+        })
+        for _ in range(10):
+            await asyncio.sleep(0)
+
+    asyncio.run(run())
+    assert completed, "terminal event did not resolve the panel watch"
