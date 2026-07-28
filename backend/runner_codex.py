@@ -126,6 +126,8 @@ _CODEX_HOME_OVERLAY_SKIP = {
 }
 
 APP_SERVER_REQUEST_TIMEOUT_S = 45.0
+APP_SERVER_START_ATTEMPTS = 2
+APP_SERVER_INITIALIZE_TIMEOUT = "codex app-server request timed out: initialize"
 DELEGATE_HTTP_TIMEOUT_S = 24 * 60 * 60
 
 _CODEX_SANDBOX_TO_TYPE = {
@@ -2542,6 +2544,7 @@ class _AppServerProcess:
     async def wait(self) -> int:
         code = await self._proc.wait()
         self._steer_task.cancel()
+        await asyncio.gather(self._steer_task, return_exceptions=True)
         try:
             await asyncio.wait_for(self._reader_task, timeout=2.0)
         except asyncio.TimeoutError:
@@ -2556,6 +2559,7 @@ class _AppServerProcess:
             task.cancel()
         if self._pending_tool_calls:
             await asyncio.gather(*self._pending_tool_calls, return_exceptions=True)
+        await self._stderr_task
         return code
 
 
@@ -2674,16 +2678,39 @@ async def _start_app_server(
             "approvalPolicy": approval_policy,
             "sandboxPolicy": _codex_sandbox_policy(sandbox),
         })
-    except Exception:
+    except (Exception, asyncio.CancelledError):
         if proc.returncode is None:
             _process_control().signal_stop(proc.pid)
             try:
-                await asyncio.wait_for(proc.wait(), timeout=3)
+                await asyncio.wait_for(client.wait(), timeout=3)
             except asyncio.TimeoutError:
                 _process_control().force_kill(proc.pid)
-                await proc.wait()
+                await client.wait()
+        else:
+            await client.wait()
         raise
     return client
+
+
+async def _start_app_server_with_retry(
+    codex_bin: str,
+    *,
+    cancel_path: Path,
+    **start_kwargs: Any,
+) -> _AppServerProcess:
+    for attempt in range(APP_SERVER_START_ATTEMPTS):
+        try:
+            return await _start_app_server(codex_bin, **start_kwargs)
+        except TimeoutError as error:
+            if str(error) != APP_SERVER_INITIALIZE_TIMEOUT:
+                raise
+            if attempt + 1 >= APP_SERVER_START_ATTEMPTS:
+                raise
+            if cancel_path.exists():
+                raise asyncio.CancelledError()
+            logger.warning("retrying Codex app-server after initialize timeout")
+    raise RuntimeError("Codex app-server startup attempts exhausted")
+
 
 logger = logging.getLogger(__name__)
 
@@ -3346,8 +3373,9 @@ async def _run(run_dir: Path, inputs: dict) -> int:
         state["complete"] = False
 
         try:
-            proc = await _start_app_server(
+            proc = await _start_app_server_with_retry(
                 codex_bin,
+                cancel_path=_cancel_path,
                 run_dir=run_dir,
                 cwd=cwd,
                 model=model,

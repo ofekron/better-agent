@@ -94,6 +94,139 @@ async def test_app_server_resume_receives_capability_config() -> None:
     assert client.tool_handlers["tool_x"] is tool_handler
 
 
+async def test_initialize_timeout_retries_after_full_client_cleanup() -> None:
+    original_create_subprocess_exec = runner_codex.asyncio.create_subprocess_exec
+    original_app_server_process = runner_codex._AppServerProcess
+    original_process_control = runner_codex._process_control
+    created_clients = []
+    stopped_pids = []
+
+    class RetryProcess(_FakeProcess):
+        next_pid = 500
+
+        def __init__(self):
+            self.returncode = None
+            self.pid = self.next_pid
+            type(self).next_pid += 1
+
+    class RetryClient(_FakeAppServerProcess):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self._proc = args[0]
+            self.reader_done = False
+            self.steer_done = False
+            self.stderr_done = False
+            created_clients.append(self)
+
+        async def request(self, method: str, params: dict) -> dict:
+            self.requests.append((method, params))
+            if method == "initialize" and len(created_clients) == 1:
+                raise TimeoutError("codex app-server request timed out: initialize")
+            if method == "thread/resume":
+                return {"thread": {"id": "thread-existing"}}
+            return {}
+
+        async def wait(self) -> int:
+            await self._proc.wait()
+            self.reader_done = True
+            self.steer_done = True
+            self.stderr_done = True
+            return 0
+
+    class RetryProcessControl:
+        def detach_spawn_kwargs(self) -> dict:
+            return {}
+
+        def signal_stop(self, pid: int) -> None:
+            stopped_pids.append(pid)
+
+        def force_kill(self, _pid: int) -> None:
+            raise AssertionError("graceful cleanup should reap the fake process")
+
+    async def create_retry_process(*_args, **_kwargs):
+        return RetryProcess()
+
+    try:
+        runner_codex.asyncio.create_subprocess_exec = create_retry_process
+        runner_codex._AppServerProcess = RetryClient
+        runner_codex._process_control = lambda: RetryProcessControl()
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            client = await runner_codex._start_app_server_with_retry(
+                "codex",
+                run_dir=tmp_path,
+                cwd=str(tmp_path),
+                model="gpt-5",
+                reasoning_effort="low",
+                session_id="thread-existing",
+                turn_input=[],
+                cancel_path=tmp_path / "cancel",
+            )
+    finally:
+        runner_codex.asyncio.create_subprocess_exec = original_create_subprocess_exec
+        runner_codex._AppServerProcess = original_app_server_process
+        runner_codex._process_control = original_process_control
+
+    assert len(created_clients) == 2
+    first, second = created_clients
+    assert stopped_pids == [first._proc.pid]
+    assert first.reader_done and first.steer_done and first.stderr_done
+    assert [method for method, _params in first.requests] == ["initialize"]
+    assert [method for method, _params in second.requests] == [
+        "initialize",
+        "thread/resume",
+        "turn/start",
+    ]
+    assert client is second
+
+
+async def test_app_server_wait_joins_owned_tasks() -> None:
+    async def pending() -> None:
+        await asyncio.Future()
+
+    client = object.__new__(runner_codex._AppServerProcess)
+    client._proc = _FakeProcess()
+    client._reader_task = asyncio.create_task(pending())
+    client._steer_task = asyncio.create_task(pending())
+    client._stderr_task = asyncio.create_task(asyncio.sleep(0))
+    client._pending_tool_calls = set()
+
+    await client.wait()
+
+    assert client._reader_task.done()
+    assert client._steer_task.done()
+    assert client._stderr_task.done()
+
+
+async def test_initialize_timeout_does_not_retry_after_cancel() -> None:
+    original_start = runner_codex._start_app_server
+    attempts = 0
+    with tempfile.TemporaryDirectory() as tmp:
+        cancel_path = Path(tmp) / "cancel"
+
+        async def timeout_then_cancel(*_args, **_kwargs):
+            nonlocal attempts
+            attempts += 1
+            cancel_path.touch()
+            raise TimeoutError(runner_codex.APP_SERVER_INITIALIZE_TIMEOUT)
+
+        try:
+            runner_codex._start_app_server = timeout_then_cancel
+            try:
+                await runner_codex._start_app_server_with_retry(
+                    "codex",
+                    cancel_path=cancel_path,
+                )
+            except asyncio.CancelledError:
+                pass
+            else:
+                raise AssertionError("cancellation should stop app-server retry")
+        finally:
+            runner_codex._start_app_server = original_start
+
+    assert attempts == 1
+
+
 async def test_bridges_selected_extension_mcp_tools_as_dynamic_tools() -> None:
     original_launcher_configs = runner_codex.extension_store.native_mcp_server_configs
     original_mcp_list_tools = runner_codex.mcp_stdio_bridge.mcp_list_tools
@@ -954,6 +1087,9 @@ async def _record_start_app_server(
 if __name__ == "__main__":
     asyncio.run(test_app_server_uses_structured_sandbox_policy())
     asyncio.run(test_app_server_resume_receives_capability_config())
+    asyncio.run(test_initialize_timeout_retries_after_full_client_cleanup())
+    asyncio.run(test_app_server_wait_joins_owned_tasks())
+    asyncio.run(test_initialize_timeout_does_not_retry_after_cancel())
     asyncio.run(test_bridges_selected_extension_mcp_tools_as_dynamic_tools())
     asyncio.run(test_bridge_uses_selected_extension_when_provider_config_has_only_skills())
     asyncio.run(test_bridge_uses_configured_extension_during_resolution_race())
