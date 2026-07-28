@@ -54,6 +54,9 @@ MANIFEST_KIND = "better-agent-extension"
 EXTENSION_SLOW_CALL_SECONDS = 2.0
 _EXTENSION_SLOW_CALL_LIMIT = 3
 _EXTENSION_SLOW_CALL_WINDOW_SECONDS = 10 * 60.0
+_EXTENSION_INCIDENT_FUTURE_SKEW_SECONDS = 60.0
+_EXTENSION_INCIDENT_DEDUP_SECONDS = 20 * 60.0
+_EXTENSION_INCIDENT_IDS_PER_NODE = 2048
 
 _ID_RE = re.compile(r"^[a-z0-9][a-z0-9_.-]{2,79}$")
 _VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.+:-]{0,127}$")
@@ -5373,14 +5376,31 @@ def _record_backend_incident(
     history_key: str,
     reason: str,
     route_path: str | None = None,
+    incident_id: str | None = None,
+    node_id: str | None = None,
+    occurred_at: float | None = None,
 ) -> list[str]:
     # One threshold per incident kind: an incident tied to a backend route is
     # judged by that route's declared budget (needs the record, so it is checked
     # under the lock below); an incident with no route uses the global floor.
     if route_path is None and elapsed_seconds < EXTENSION_SLOW_CALL_SECONDS:
         return []
-    observed_at = time.time()
-    cutoff = observed_at - _EXTENSION_SLOW_CALL_WINDOW_SECONDS
+    received_at = time.time()
+    observed_at = float(occurred_at) if occurred_at is not None else received_at
+    if incident_id or node_id:
+        if (
+            not incident_id
+            or not node_id
+            or not re.fullmatch(r"[a-f0-9]{32}", incident_id)
+            or not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", node_id)
+            or observed_at
+            > received_at + _EXTENSION_INCIDENT_FUTURE_SKEW_SECONDS
+            or observed_at
+            < received_at - _EXTENSION_SLOW_CALL_WINDOW_SECONDS
+        ):
+            return []
+        observed_at = min(observed_at, received_at)
+    cutoff = received_at - _EXTENSION_SLOW_CALL_WINDOW_SECONDS
     with _store_lock():
         data = _read_store_unlocked()
         record = data["extensions"].get(extension_id)
@@ -5397,6 +5417,29 @@ def _record_backend_incident(
         ):
             return []
         history = read_json(_slow_calls_path(), {"extensions": {}})
+        if incident_id and node_id:
+            processed_by_node = history.get("processed_incidents")
+            if not isinstance(processed_by_node, dict):
+                processed_by_node = {}
+                history["processed_incidents"] = processed_by_node
+            processed = processed_by_node.get(node_id)
+            if not isinstance(processed, dict):
+                processed = {}
+            processed = {
+                key: timestamp
+                for key, timestamp in processed.items()
+                if isinstance(timestamp, (int, float))
+                and float(timestamp) + _EXTENSION_INCIDENT_DEDUP_SECONDS
+                >= received_at
+            }
+            if incident_id in processed:
+                return []
+            if len(processed) >= _EXTENSION_INCIDENT_IDS_PER_NODE:
+                processed_by_node[node_id] = processed
+                write_json(_slow_calls_path(), history)
+                return []
+            processed[incident_id] = observed_at
+            processed_by_node[node_id] = processed
         histories = history.get("extensions")
         if not isinstance(histories, dict):
             histories = {}
@@ -5407,11 +5450,20 @@ def _record_backend_incident(
             or extension_histories.get("activation_id") != activation_id
         ):
             extension_histories = {"activation_id": activation_id}
-        incidents = [
-            float(item) for item in extension_histories.get(history_key, [])
-            if isinstance(item, (int, float)) and float(item) >= cutoff
-        ]
-        incidents.append(observed_at)
+        incidents = []
+        for item in extension_histories.get(history_key, []):
+            item_at = item.get("at") if isinstance(item, dict) else item
+            if not isinstance(item_at, (int, float)) or float(item_at) < cutoff:
+                continue
+            incidents.append(item)
+        if incident_id and node_id:
+            incidents.append({
+                "at": observed_at,
+                "incident_id": str(incident_id),
+                "node_id": str(node_id),
+            })
+        else:
+            incidents.append(observed_at)
         extension_histories[history_key] = incidents
         histories[extension_id] = extension_histories
         write_json(_slow_calls_path(), history)
@@ -5467,7 +5519,14 @@ def _record_backend_incident(
 
 
 def record_slow_backend_call(
-    extension_id: str, *, activation_id: str, elapsed_seconds: float, path: str
+    extension_id: str,
+    *,
+    activation_id: str,
+    elapsed_seconds: float,
+    path: str,
+    incident_id: str | None = None,
+    node_id: str | None = None,
+    occurred_at: float | None = None,
 ) -> list[str]:
     """Count one slow in-extension call, quarantining after the third one.
 
@@ -5484,11 +5543,20 @@ def record_slow_backend_call(
         history_key="slow_asgi",
         reason="repeated_slow_backend_calls",
         route_path=str(path),
+        incident_id=incident_id,
+        node_id=node_id,
+        occurred_at=occurred_at,
     )
 
 
 def record_backend_timeout(
-    extension_id: str, *, activation_id: str, elapsed_seconds: float
+    extension_id: str,
+    *,
+    activation_id: str,
+    elapsed_seconds: float,
+    incident_id: str | None = None,
+    node_id: str | None = None,
+    occurred_at: float | None = None,
 ) -> list[str]:
     """Count one host-side timeout. The declared budget is deliberately not
     consulted: the host only times a call out after that budget already elapsed,
@@ -5499,6 +5567,9 @@ def record_backend_timeout(
         elapsed_seconds=elapsed_seconds,
         history_key="timeout",
         reason="repeated_backend_timeouts",
+        incident_id=incident_id,
+        node_id=node_id,
+        occurred_at=occurred_at,
     )
 
 

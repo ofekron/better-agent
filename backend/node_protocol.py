@@ -179,6 +179,24 @@ class RpcResponse(TypedDict, total=False):
     error: Optional[str]
 
 
+class ExtensionIncident(TypedDict, total=False):
+    type: Literal["extension_incident"]
+    incident_id: str
+    kind: Literal["slow_backend_call", "backend_timeout"]
+    extension_id: str
+    activation_id: str
+    elapsed_seconds: float
+    occurred_at: float
+    path: Optional[str]
+
+
+class ExtensionIncidentAck(TypedDict, total=False):
+    type: Literal["extension_incident_ack"]
+    incident_id: str
+    accepted: bool
+    reason: str
+
+
 # ============================================================================
 # Bidirectional — ping/pong heartbeats (cheap, used by both directions).
 # ============================================================================
@@ -195,9 +213,9 @@ class Pong(TypedDict):
 # Union for type-narrowing convenience.
 NodeBoundMessage = (
     SpawnRun | CancelRun | ResumeStream | RpcRequest | Restart
-    | Ping | Pong | Handshake
+    | ExtensionIncidentAck | Ping | Pong | Handshake
 )
 PrimaryBoundMessage = (
-    EventForward | JsonlLine | RunControl | RpcResponse | Ping | Pong
+    EventForward | JsonlLine | RunControl | RpcResponse | ExtensionIncident | Ping | Pong
     | Handshake | HandshakeReject
 )

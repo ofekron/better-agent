@@ -60,6 +60,41 @@ _EMPTY_B64 = ""
 _EXTENSION_ID_RE = re.compile(r"^[a-z0-9][a-z0-9.-]{0,127}$")
 
 
+async def _report_worker_incident(
+    *,
+    kind: str,
+    extension_id: str,
+    activation_id: str,
+    elapsed_seconds: float,
+    path: str | None = None,
+) -> bool:
+    try:
+        import node_client
+        client = node_client.get()
+    except Exception:
+        return False
+    import extension_incident_outbox
+    try:
+        incident = extension_incident_outbox.enqueue(
+            kind=kind,
+            extension_id=extension_id,
+            activation_id=activation_id,
+            elapsed_seconds=elapsed_seconds,
+            path=path,
+        )
+    except extension_incident_outbox.IncidentOutboxFull:
+        logger.error("extension incident outbox full; dropping %s for %s", kind, extension_id)
+        return True
+    try:
+        await client.send_extension_incident(incident)
+    except Exception as exc:
+        logger.warning(
+            "extension incident send failed; queued for reconnect replay: %s",
+            exc,
+        )
+    return True
+
+
 def _stable_extension_paths(extension_id: str) -> tuple[Path, Path]:
     if _EXTENSION_ID_RE.fullmatch(extension_id) is None:
         raise RuntimeError("extension id is unsafe for stable storage")
@@ -460,6 +495,14 @@ async def _record_slow_call(
     ):
         return
     extension_id = spec["extension_id"]
+    if await _report_worker_incident(
+        kind="slow_backend_call",
+        extension_id=extension_id,
+        activation_id=activation_id,
+        elapsed_seconds=elapsed_seconds,
+        path=path,
+    ):
+        return
     disabled = await asyncio.to_thread(
         extension_store.record_slow_backend_call,
         extension_id,
@@ -480,6 +523,13 @@ async def _record_slow_call(
 async def _record_timeout(
     extension_id: str, activation_id: str, elapsed_seconds: float
 ) -> None:
+    if await _report_worker_incident(
+        kind="backend_timeout",
+        extension_id=extension_id,
+        activation_id=activation_id,
+        elapsed_seconds=elapsed_seconds,
+    ):
+        return
     disabled = await asyncio.to_thread(
         extension_store.record_backend_timeout,
         extension_id,

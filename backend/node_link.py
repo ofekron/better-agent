@@ -29,7 +29,10 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import ipaddress
+import json
 import logging
+import math
+import re
 import threading
 import time
 import uuid
@@ -50,6 +53,13 @@ from topology import NodeSpec, load_topology
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+_EXTENSION_INCIDENT_MAX_AGE_SECONDS = 10 * 60.0
+_EXTENSION_INCIDENT_FUTURE_SKEW_SECONDS = 30.0
+_EXTENSION_INCIDENT_MAX_PAYLOAD_BYTES = 4096
+_INCIDENT_ID_RE = re.compile(r"^[a-f0-9]{32}$")
+_EXTENSION_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_.-]{2,79}$")
+_ACTIVATION_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 
 
 @router.post("/api/node/runtime-operations")
@@ -531,6 +541,10 @@ async def _route_inbound(node_id: str, msg: dict) -> None:
         await _handle_run_control(node_id, msg)
         return
 
+    if msg_type == "extension_incident":
+        await _handle_extension_incident(node_id, msg)
+        return
+
     if msg_type == "rpc_response":
         _handle_rpc_response(node_id, msg)
         return
@@ -637,6 +651,103 @@ async def _handle_run_control(node_id: str, msg: dict) -> None:
         )
     except Exception:
         logger.exception("node_link: run_control dispatcher raised")
+
+
+async def _ack_extension_incident(
+    node_id: str, incident_id: str, *, accepted: bool, reason: str
+) -> None:
+    conn = node_store.get_connection(node_id)
+    if conn is None:
+        return
+    await conn.ws.send_json({
+        "type": "extension_incident_ack",
+        "incident_id": incident_id,
+        "accepted": accepted,
+        "reason": reason,
+    })
+
+
+def _incident_rejection_reason(msg: dict, *, now: float) -> str:
+    try:
+        size = len(json.dumps(msg, separators=(",", ":")).encode("utf-8"))
+    except (TypeError, ValueError):
+        return "malformed"
+    if size > _EXTENSION_INCIDENT_MAX_PAYLOAD_BYTES:
+        return "capacity"
+    incident_id = msg.get("incident_id")
+    extension_id = msg.get("extension_id")
+    activation_id = msg.get("activation_id")
+    kind = msg.get("kind")
+    elapsed = msg.get("elapsed_seconds")
+    occurred_at = msg.get("occurred_at")
+    if not (
+        isinstance(incident_id, str)
+        and _INCIDENT_ID_RE.fullmatch(incident_id)
+        and isinstance(extension_id, str)
+        and _EXTENSION_ID_RE.fullmatch(extension_id)
+        and isinstance(activation_id, str)
+        and _ACTIVATION_ID_RE.fullmatch(activation_id)
+        and kind in {"slow_backend_call", "backend_timeout"}
+        and isinstance(elapsed, (int, float))
+        and not isinstance(elapsed, bool)
+        and math.isfinite(float(elapsed))
+        and float(elapsed) >= 0
+        and isinstance(occurred_at, (int, float))
+        and not isinstance(occurred_at, bool)
+        and math.isfinite(float(occurred_at))
+    ):
+        return "malformed"
+    if kind == "slow_backend_call":
+        path = msg.get("path")
+        if not isinstance(path, str) or not path or len(path) > 512:
+            return "malformed"
+    if float(occurred_at) - now > _EXTENSION_INCIDENT_FUTURE_SKEW_SECONDS:
+        return "future_skew"
+    if now - float(occurred_at) > _EXTENSION_INCIDENT_MAX_AGE_SECONDS:
+        return "stale"
+    return ""
+
+
+async def _handle_extension_incident(node_id: str, msg: dict) -> None:
+    incident_id = str(msg.get("incident_id") or "")
+    reason = _incident_rejection_reason(msg, now=time.time())
+    if reason:
+        await _ack_extension_incident(
+            node_id, incident_id, accepted=False, reason=reason,
+        )
+        return
+    import extension_store
+
+    kwargs = {
+        "activation_id": str(msg["activation_id"]),
+        "elapsed_seconds": float(msg["elapsed_seconds"]),
+        "incident_id": incident_id,
+        "node_id": node_id,
+        "occurred_at": float(msg["occurred_at"]),
+    }
+    try:
+        if msg["kind"] == "slow_backend_call":
+            disabled = await asyncio.to_thread(
+                extension_store.record_slow_backend_call,
+                str(msg["extension_id"]),
+                path=str(msg["path"]),
+                **kwargs,
+            )
+        else:
+            disabled = await asyncio.to_thread(
+                extension_store.record_backend_timeout,
+                str(msg["extension_id"]),
+                **kwargs,
+            )
+    except Exception:
+        logger.exception("node_link: extension incident handling failed")
+        return
+    if disabled:
+        import extension_api
+        await extension_api._broadcast_extension_changed(*extension_api.EXTENSION_CATALOG_TOPICS)
+        import node_config_sync
+        node_config_sync.notify_changed("extensions")
+    await _ack_extension_incident(node_id, incident_id, accepted=True, reason="handled")
 
 
 def _handle_rpc_response(node_id: str, msg: dict) -> None:

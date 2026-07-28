@@ -165,6 +165,9 @@ class NodeClient:
             "data": data,
         })
 
+    async def send_extension_incident(self, incident: dict) -> None:
+        await self.send({"type": "extension_incident", **incident})
+
     # ----- Inbound dispatch (called by receiver loop) --------------------
 
     async def _route_inbound(self, msg: dict) -> None:
@@ -185,6 +188,10 @@ class NodeClient:
             return
         if msg_type == "resume_stream":
             asyncio.create_task(rpc_handlers.handle_resume_stream(self, msg))
+            return
+        if msg_type == "extension_incident_ack":
+            import extension_incident_outbox
+            extension_incident_outbox.ack(str(msg.get("incident_id") or ""))
             return
         if msg_type == "rpc_request":
             asyncio.create_task(self._handle_rpc_request(msg))
@@ -296,6 +303,10 @@ class NodeClient:
 
             sender = asyncio.create_task(self._sender_loop(ws), name="node-sender")
             receiver = asyncio.create_task(self._receiver_loop(ws), name="node-receiver")
+            asyncio.create_task(
+                self._replay_extension_incidents(),
+                name="node-extension-incident-replay",
+            )
             try:
                 await asyncio.wait(
                     [sender, receiver],
@@ -312,6 +323,11 @@ class NodeClient:
         while True:
             msg = await self._send_queue.get()
             await ws.send(_to_json(msg))
+
+    async def _replay_extension_incidents(self) -> None:
+        import extension_incident_outbox
+        for incident in extension_incident_outbox.pending():
+            await self.send_extension_incident(incident)
 
     async def _receiver_loop(self, ws) -> None:
         async for raw in ws:
