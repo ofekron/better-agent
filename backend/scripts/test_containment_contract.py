@@ -3,7 +3,7 @@
 Proves the containment abstraction against a REAL process tree:
   * enumerate() returns the runner + same-group child + setsid'd bg child;
   * has_background_work() detects the setsid'd (own-group) descendant;
-  * THE FIX — a reparented-to-init orphan (the T3 case the ppid walk loses)
+  * THE FIX — an orphan reparented outside the runner tree
     is STILL enumerated IFF the backend is `guaranteed` (Linux cgroup /
     Windows job). On macOS (`guaranteed is False`) it is honestly MISSED —
     this test LOCKS that documented best-effort gap so callers know to
@@ -37,8 +37,8 @@ sys.stdout.flush()
 time.sleep(600)
 """
 
-# leader → intermediate that spawns a detached orphan then EXITS (orphan
-# reparents to init: the ppid walk loses it, a real container does not)
+# leader → intermediate that spawns a detached orphan then EXITS. The adopter
+# may be init or a subreaper; either way, the runner-rooted ppid walk loses it.
 _ORPHAN = r"""
 import subprocess, sys, json, time
 inter = subprocess.Popen([sys.executable, "-c",
@@ -48,7 +48,8 @@ inter = subprocess.Popen([sys.executable, "-c",
     stdout=subprocess.PIPE, text=True)
 line = inter.stdout.readline()
 inter.wait()
-sys.stdout.write(line); sys.stdout.flush()
+payload=json.loads(line); payload['inter']=inter.pid
+sys.stdout.write(json.dumps(payload)+chr(10)); sys.stdout.flush()
 time.sleep(600)
 """
 
@@ -68,6 +69,17 @@ def _ppid(pid):
         return int(out.stdout.strip())
     except ValueError:
         return -1
+
+
+def _is_descendant(pid, ancestor):
+    seen = set()
+    current = pid
+    while current > 1 and current not in seen:
+        if current == ancestor:
+            return True
+        seen.add(current)
+        current = _ppid(current)
+    return False
 
 
 def _hard_cleanup(*pids):
@@ -133,13 +145,17 @@ def test_reparented_orphan():
         C.after_spawn(RUN_ID, -1)
         C.teardown(RUN_ID)
         raise
-    g = json.loads(leader.stdout.readline())["g"]
+    orphan = json.loads(leader.stdout.readline())
+    g, intermediate = orphan["g"], orphan["inter"]
     C.after_spawn(RUN_ID, leader.pid)
     try:
         end = time.monotonic() + 5
-        while time.monotonic() < end and _ppid(g) != 1:
+        while time.monotonic() < end and _is_descendant(g, intermediate):
             time.sleep(0.1)
-        _check(_ppid(g) == 1, "orphan reparented to init (ppid==1)")
+        _check(_ppid(intermediate) == -1, "intermediate exited")
+        _check(_ppid(g) > 0, "orphan remains alive")
+        _check(not _is_descendant(g, intermediate),
+               "orphan left the exited intermediate's ancestry tree")
         found = g in C.enumerate(RUN_ID)
         if C.guaranteed:
             _check(found, "GUARANTEED backend STILL enumerates the orphan (the fix)")
