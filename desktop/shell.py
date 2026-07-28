@@ -27,6 +27,7 @@ import webview
 
 import updater
 from activation_server import ActivationEvent, ActivationServer, forward_activation_when_ready
+from backend_watch import watch_backend
 from notifications import DesktopNotificationApi
 from supervisor import BackendSupervisor
 from updater import start_background_check
@@ -35,20 +36,7 @@ from updater import start_background_check
 def _watch_for_restart(
     sup: BackendSupervisor, window, quitting: threading.Event, local_url: str,
 ) -> None:
-    """Background thread. When the backend process exits:
-      - user-initiated quit (`quitting` set) → do nothing; `main` tears down.
-      - `/api/admin/restart` → respawn the backend and reload the window.
-      - anything else (a crash) → close the window so the app exits.
-    """
-    while True:
-        sup.wait_exit()
-        if quitting.is_set():
-            return
-        if sup.restart_was_requested() and sup.restart():
-            window.load_url(local_url)
-            continue
-        window.destroy()
-        return
+    watch_backend(sup, window, quitting, local_url)
 
 
 def _error_window(message: str) -> None:

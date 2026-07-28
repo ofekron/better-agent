@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 import logging.handlers
 import os
+import stat
 import signal
 import socket
 import subprocess
@@ -23,9 +24,12 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import uuid
 from pathlib import Path
 from collections.abc import Callable
 from typing import Literal, Optional, TypedDict
+
+import psutil
 
 from shell_env import capture_login_path
 
@@ -69,7 +73,13 @@ if str(_BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(_BACKEND_DIR))
 
 from env_compat import dual_env_many
+from backend_exit_journal import append_backend_exit
 from credential_session import ProviderCredentialBroker, ProviderCredentialSession
+
+
+_CRASH_RESTART_LIMIT = 5
+_CRASH_STABILITY_SECONDS = 60.0
+_CRASH_RESTART_BACKOFF_SECONDS = (0.25, 0.5, 1.0, 2.0, 4.0)
 
 
 def _ba_home() -> Path:
@@ -272,27 +282,22 @@ def port_is_free(port: int) -> bool:
 
 
 def _listener_pids(port: int) -> list[int]:
-    try:
-        proc = subprocess.run(
-            ["lsof", f"-tiTCP:{port}", "-sTCP:LISTEN"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return []
-    if proc.returncode not in (0, 1):
-        return []
     own_pid = os.getpid()
     pids: list[int] = []
-    for line in proc.stdout.splitlines():
-        try:
-            pid = int(line.strip())
-        except ValueError:
+    for process in psutil.process_iter(["pid"]):
+        if process.pid == own_pid:
             continue
-        if pid != own_pid and pid not in pids:
-            pids.append(pid)
+        try:
+            connections = process.net_connections(kind="tcp")
+        except (psutil.AccessDenied, psutil.NoSuchProcess, OSError):
+            continue
+        if any(
+            connection.status == psutil.CONN_LISTEN
+            and connection.laddr
+            and connection.laddr.port == port
+            for connection in connections
+        ):
+            pids.append(int(process.pid))
     return pids
 
 
@@ -326,9 +331,15 @@ def port_listener_details(port: int) -> list[PortListener]:
 
 
 def kill_port_listeners(port: int, *, timeout: float = 5.0) -> bool:
+    discovery_deadline = time.monotonic() + min(timeout, 1.0)
     pids = _listener_pids(port)
+    while not pids and not port_is_free(port):
+        if time.monotonic() >= discovery_deadline:
+            return False
+        time.sleep(0.05)
+        pids = _listener_pids(port)
     if not pids:
-        return True
+        return port_is_free(port)
     logger.info("terminating listener(s) on port %d: %s", port, pids)
     for pid in pids:
         try:
@@ -379,6 +390,17 @@ class BackendSupervisor:
         self._credential_broker = ProviderCredentialBroker()
         self._credential_session: ProviderCredentialSession | None = None
         self._active_checkout = _REPO_ROOT.resolve()
+        self._generation_started_at: float | None = None
+        self._generation_started_wall_time: float | None = None
+        self._generation_healthy_at: float | None = None
+        self._generation_id = ""
+        self._generation_pid: int | None = None
+        self._last_restart_request_id = ""
+        self._consecutive_crashes = 0
+        self._monotonic = time.monotonic
+        self._stopping = threading.Event()
+        self._wait_for_stop = self._stopping.wait
+        self._lifecycle_lock = threading.RLock()
         # The backend — and every runner it spawns — inherits this PATH so
         # `claude`/`agy`/`node` resolve under launchd's stripped PATH.
         self._env = {
@@ -400,6 +422,7 @@ class BackendSupervisor:
         """Spawn the backend after resolving any occupied port with the
         caller. Desktop startup must not kill arbitrary listeners without
         explicit user permission."""
+        self._stopping.clear()
         if self.role == "primary" and not kill_backend_lock_holder():
             raise RuntimeError("Another Better Agent backend is already using this state directory.")
         while not port_is_free(self.port):
@@ -421,8 +444,9 @@ class BackendSupervisor:
             if not installation_profile.integrations_enabled():
                 self._stop_daemon_host()
         self._set_port_env()
+        self._clear_stale_restart_request()
         try:
-            self._proc = self._spawn_backend()
+            self._set_generation(self._spawn_backend())
         except Exception:
             self._close_credential_session()
             self._credential_broker.clear()
@@ -462,11 +486,14 @@ class BackendSupervisor:
         `timeout` elapses."""
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
+            if self._stopping.is_set():
+                return False
             if self._proc is None or self._proc.poll() is not None:
                 return False
             try:
                 with urllib.request.urlopen(self.health_url, timeout=2) as r:
                     if r.status == 200:
+                        self._generation_healthy_at = self._monotonic()
                         self._confirm_active_checkout()
                         return True
             except (urllib.error.URLError, OSError):
@@ -512,19 +539,98 @@ class BackendSupervisor:
         The flag is consumed so a later crash isn't mistaken for a
         restart."""
         flag = _ba_home() / "restart_requested"
-        if flag.exists():
-            try:
-                flag.unlink()
-            except OSError:
-                pass
-            return True
-        return False
+        try:
+            path_details = flag.lstat()
+        except FileNotFoundError:
+            return False
+        if stat.S_ISLNK(path_details.st_mode):
+            raise OSError("restart request must not be a symlink")
+        flags = os.O_RDONLY
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        try:
+            descriptor = os.open(flag, flags)
+        except FileNotFoundError:
+            return False
+        try:
+            details = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(details.st_mode)
+                or details.st_size > 64
+                or (details.st_dev, details.st_ino)
+                != (path_details.st_dev, path_details.st_ino)
+            ):
+                raise OSError("restart request must be a small regular file")
+            request_id = os.read(descriptor, 65).decode("ascii")
+        except (UnicodeDecodeError, OSError):
+            raise OSError("restart request is invalid") from None
+        finally:
+            os.close(descriptor)
+        flag.unlink()
+        if (
+            self._generation_started_wall_time is not None
+            and details.st_mtime < self._generation_started_wall_time
+        ):
+            return False
+        if (
+            len(request_id) != 32
+            or any(character not in "0123456789abcdef" for character in request_id)
+        ):
+            raise OSError("restart request id is invalid")
+        self._last_restart_request_id = request_id
+        return True
+
+    def _clear_stale_restart_request(self) -> None:
+        flag = _ba_home() / "restart_requested"
+        try:
+            flag.unlink()
+        except FileNotFoundError:
+            pass
+
+    def _set_generation(self, proc: subprocess.Popen) -> None:
+        self._proc = proc
+        self._generation_started_at = self._monotonic()
+        self._generation_started_wall_time = time.time()
+        self._generation_healthy_at = None
+        self._generation_id = uuid.uuid4().hex
+        self._generation_pid = int(proc.pid)
+
+    def _record_exit(
+        self,
+        exit_code: int,
+        *,
+        classification: str,
+        decision: str,
+        restart_attempt: int | None = None,
+        request_id: str = "",
+    ) -> None:
+        try:
+            append_backend_exit(
+                _ba_home(),
+                source="desktop",
+                exit_code=exit_code,
+                classification=classification,
+                decision=decision,
+                restart_attempt=restart_attempt,
+                generation_id=self._generation_id,
+                pid=self._generation_pid,
+                checkout=str(self._active_checkout),
+                request_id=request_id,
+            )
+        except OSError:
+            logger.exception("failed to persist backend exit record")
 
     def restart(self) -> bool:
+        with self._lifecycle_lock:
+            return self._restart_locked()
+
+    def _restart_locked(self) -> bool:
         """Respawn the backend and wait for it to become healthy again.
         Briefly polls for `BACKEND_PORT` to free first — the previous
         backend just exited, but a slow shutdown can hold the socket for
         a moment; spawning before that would die silently on bind."""
+        if self._stopping.is_set():
+            return False
         deadline = time.monotonic() + 3.0
         while not port_is_free(self.port):
             if time.monotonic() >= deadline:
@@ -534,20 +640,78 @@ class BackendSupervisor:
                 return False
             time.sleep(0.1)
         try:
-            self._proc = self._spawn_backend()
+            if self._stopping.is_set():
+                return False
+            self._set_generation(self._spawn_backend())
         except RuntimeError as exc:
             if not self._recover_failed_switch(str(exc)):
                 return False
-            self._proc = self._spawn_backend()
+            self._set_generation(self._spawn_backend())
         if self.wait_healthy():
             return True
         if not self._stop_tracked_backend():
             logger.error("failed switch backend did not terminate")
+            self._close_credential_session()
             return False
         if not self._recover_failed_switch("backend failed to become healthy"):
+            self._close_credential_session()
             return False
-        self._proc = self._spawn_backend()
-        return self.wait_healthy()
+        if self._stopping.is_set():
+            self._close_credential_session()
+            return False
+        self._set_generation(self._spawn_backend())
+        if self.wait_healthy():
+            return True
+        self._stop_tracked_backend()
+        self._close_credential_session()
+        return False
+
+    def recover_unexpected_exit(self, exit_code: int) -> bool:
+        now = self._monotonic()
+        if (
+            self._generation_healthy_at is not None
+            and now - self._generation_healthy_at >= _CRASH_STABILITY_SECONDS
+        ):
+            self._consecutive_crashes = 0
+        while self._consecutive_crashes < _CRASH_RESTART_LIMIT:
+            self._consecutive_crashes += 1
+            attempt = self._consecutive_crashes
+            self._record_exit(
+                exit_code,
+                classification="unexpected",
+                decision="restart",
+                restart_attempt=attempt,
+            )
+            if self._wait_for_stop(
+                _CRASH_RESTART_BACKOFF_SECONDS[attempt - 1]
+            ):
+                return False
+            try:
+                if self.restart():
+                    return True
+            except Exception:
+                self._close_credential_session()
+                logger.exception(
+                    "backend crash recovery attempt %d failed",
+                    attempt,
+                )
+        self._record_exit(
+            exit_code,
+            classification="unexpected",
+            decision="circuit_open",
+            restart_attempt=self._consecutive_crashes,
+        )
+        self._close_credential_session()
+        return False
+
+    def record_requested_restart(self, exit_code: int) -> None:
+        self._consecutive_crashes = 0
+        self._record_exit(
+            exit_code,
+            classification="refresh",
+            decision="restart",
+            request_id=self._last_restart_request_id,
+        )
 
     def _health_url(self) -> str:
         return f"http://127.0.0.1:{self.port}/readyz"
@@ -696,6 +860,11 @@ class BackendSupervisor:
         kill flag before SIGINT; `False` sends SIGTERM and leaves the
         detached runners alive to finish on their own. Hard-kills if it
         hangs."""
+        self._stopping.set()
+        with self._lifecycle_lock:
+            self._shutdown_locked(kill_runners=kill_runners)
+
+    def _shutdown_locked(self, *, kill_runners: bool) -> None:
         self._stop_daemon_host()
         if self._proc is None or self._proc.poll() is not None:
             self._close_credential_session()

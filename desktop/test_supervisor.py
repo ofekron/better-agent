@@ -6,6 +6,7 @@ Run with:
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import signal
@@ -13,6 +14,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -265,7 +267,7 @@ def test_restart_flag_detected_and_consumed() -> bool:
     from paths import ba_home  # noqa: E402  (BETTER_CLAUDE_HOME set above)
     flag = ba_home() / "restart_requested"
     flag.parent.mkdir(parents=True, exist_ok=True)
-    flag.write_text("1")
+    flag.write_text("1" * 32)
     sup = BackendSupervisor()
     if not sup.restart_was_requested():
         print("  flag present but restart_was_requested() returned False")
@@ -275,6 +277,46 @@ def test_restart_flag_detected_and_consumed() -> bool:
         return False
     if sup.restart_was_requested():
         print("  restart_was_requested() returned True with no flag")
+        return False
+    return True
+
+
+def test_stale_restart_flag_is_consumed_without_refresh() -> bool:
+    from paths import ba_home
+
+    flag = ba_home() / "restart_requested"
+    flag.parent.mkdir(parents=True, exist_ok=True)
+    flag.write_text("a" * 32, encoding="utf-8")
+    sup = BackendSupervisor()
+    sup._generation_started_wall_time = time.time() + 1
+    if sup.restart_was_requested():
+        print("  stale restart flag was classified as refresh")
+        return False
+    if flag.exists():
+        print("  stale restart flag was not consumed")
+        return False
+    return True
+
+
+def test_restart_flag_symlink_is_rejected() -> bool:
+    from paths import ba_home
+
+    target = ba_home() / "restart-target"
+    target.write_text("b" * 32, encoding="utf-8")
+    flag = ba_home() / "restart_requested"
+    flag.symlink_to(target)
+    sup = BackendSupervisor()
+    try:
+        sup.restart_was_requested()
+    except OSError:
+        pass
+    else:
+        print("  restart symlink was accepted")
+        return False
+    finally:
+        flag.unlink(missing_ok=True)
+    if target.read_text(encoding="utf-8") != "b" * 32:
+        print("  restart symlink target was modified")
         return False
     return True
 
@@ -289,6 +331,196 @@ def test_wait_exit_returns_exit_code() -> bool:
     code = sup.wait_exit()
     if code != 7:
         print(f"  wait_exit expected 7, got {code}")
+        return False
+    return True
+
+
+def test_unexpected_exit_restarts_with_bounded_circuit() -> bool:
+    sup = BackendSupervisor()
+    sup.restart = lambda: False
+    sup._generation_started_at = sup._monotonic()
+    sup._wait_for_stop = lambda _seconds: False
+    if sup.recover_unexpected_exit(-15):
+        print("  crash recovery exceeded the configured limit")
+        return False
+    rows = [
+        json.loads(line)
+        for line in (Path(_TMP_HOME) / "backend-exits.jsonl").read_text(
+            encoding="utf-8"
+        ).splitlines()
+    ]
+    decisions = [row["decision"] for row in rows[-6:]]
+    if decisions != ["restart"] * 5 + ["circuit_open"]:
+        print(f"  unexpected exit journal decisions: {decisions}")
+        return False
+    return True
+
+
+def test_stable_generation_resets_crash_circuit() -> bool:
+    import supervisor as supervisor_module
+
+    sup = BackendSupervisor()
+    sup._consecutive_crashes = 5
+    sup._generation_healthy_at = (
+        sup._monotonic() - supervisor_module._CRASH_STABILITY_SECONDS
+    )
+    sup.restart = lambda: True
+    sup._wait_for_stop = lambda _seconds: False
+    if not sup.recover_unexpected_exit(7):
+        print("  stable generation did not reset crash circuit")
+        return False
+    if sup._consecutive_crashes != 1:
+        print(f"  expected reset attempt 1, got {sup._consecutive_crashes}")
+        return False
+    return True
+
+
+def test_unexpected_exit_respawns_real_process() -> bool:
+    holder, port = _held_port()
+    holder.close()
+    sup = BackendSupervisor(port=port)
+    first = subprocess.Popen(
+        [sys.executable, "-c", "import sys; sys.exit(7)"],
+    )
+    sup._set_generation(first)
+    first_pid = first.pid
+    assert sup.wait_exit() == 7
+    spawned: list[subprocess.Popen] = []
+
+    def spawn():
+        proc = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+        )
+        spawned.append(proc)
+        return proc
+
+    sup._spawn_backend = spawn
+    sup.wait_healthy = lambda timeout=30.0: True
+    sup._wait_for_stop = lambda _seconds: False
+    try:
+        if not sup.recover_unexpected_exit(7):
+            print("  real process was not respawned")
+            return False
+        if not spawned or spawned[0].pid == first_pid:
+            print("  recovery did not create a new backend PID")
+            return False
+        return True
+    finally:
+        sup.shutdown(kill_runners=False)
+
+
+def test_quit_during_backoff_prevents_respawn() -> bool:
+    sup = BackendSupervisor()
+    entered_backoff = threading.Event()
+    restarted = threading.Event()
+
+    def wait_for_stop(_seconds: float) -> bool:
+        entered_backoff.set()
+        return sup._stopping.wait(5)
+
+    sup._wait_for_stop = wait_for_stop
+    sup.restart = lambda: restarted.set() or True
+    result: list[bool] = []
+    thread = threading.Thread(
+        target=lambda: result.append(sup.recover_unexpected_exit(7))
+    )
+    thread.start()
+    if not entered_backoff.wait(2):
+        print("  recovery never entered backoff")
+        return False
+    sup.shutdown(kill_runners=False)
+    thread.join(timeout=2)
+    if thread.is_alive():
+        print("  recovery thread did not stop during quit")
+        return False
+    if restarted.is_set() or result != [False]:
+        print("  quit allowed a backend respawn")
+        return False
+    return True
+
+
+def test_shutdown_reaps_spawn_crossing_lifecycle_boundary() -> bool:
+    holder, port = _held_port()
+    holder.close()
+    sup = BackendSupervisor(port=port)
+    entered_spawn = threading.Event()
+    release_spawn = threading.Event()
+    spawned: list[subprocess.Popen] = []
+
+    def spawn():
+        entered_spawn.set()
+        release_spawn.wait(5)
+        proc = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+        )
+        spawned.append(proc)
+        return proc
+
+    sup._spawn_backend = spawn
+    sup.wait_healthy = lambda timeout=30.0: True
+    recovery = threading.Thread(target=sup.restart)
+    recovery.start()
+    if not entered_spawn.wait(2):
+        print("  restart never reached spawn boundary")
+        return False
+    shutdown = threading.Thread(
+        target=lambda: sup.shutdown(kill_runners=False)
+    )
+    shutdown.start()
+    release_spawn.set()
+    recovery.join(timeout=5)
+    shutdown.join(timeout=5)
+    if recovery.is_alive() or shutdown.is_alive():
+        print("  lifecycle synchronization deadlocked")
+        return False
+    if not spawned or spawned[0].poll() is None:
+        print("  shutdown left the crossing backend generation alive")
+        if spawned and spawned[0].poll() is None:
+            spawned[0].kill()
+            spawned[0].wait()
+        return False
+    return True
+
+
+def test_shutdown_interrupts_health_polling() -> bool:
+    holder, port = _held_port()
+    holder.close()
+    sup = BackendSupervisor(port=port)
+    spawned = threading.Event()
+    process: list[subprocess.Popen] = []
+
+    def spawn():
+        proc = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+        )
+        process.append(proc)
+        spawned.set()
+        return proc
+
+    sup._spawn_backend = spawn
+    recovery = threading.Thread(target=sup.restart)
+    recovery.start()
+    if not spawned.wait(2):
+        print("  restart never entered health polling")
+        return False
+    started = time.monotonic()
+    shutdown = threading.Thread(
+        target=lambda: sup.shutdown(kill_runners=False)
+    )
+    shutdown.start()
+    recovery.join(timeout=3)
+    shutdown.join(timeout=3)
+    elapsed = time.monotonic() - started
+    if recovery.is_alive() or shutdown.is_alive() or elapsed > 3:
+        print(f"  shutdown did not interrupt health polling ({elapsed:.1f}s)")
+        if process and process[0].poll() is None:
+            process[0].kill()
+            process[0].wait()
+        return False
+    if process[0].poll() is None:
+        print("  health-polling backend remained alive after shutdown")
+        process[0].kill()
+        process[0].wait()
         return False
     return True
 
@@ -499,7 +731,23 @@ TESTS = [
      test_start_uses_prompt_handler_alternate_port),
     ("restart flag is detected once then consumed",
      test_restart_flag_detected_and_consumed),
+    ("stale restart flag is consumed without refresh",
+     test_stale_restart_flag_is_consumed_without_refresh),
+    ("restart flag symlink is rejected",
+     test_restart_flag_symlink_is_rejected),
     ("wait_exit returns the backend exit code", test_wait_exit_returns_exit_code),
+    ("unexpected exits restart with a bounded circuit",
+     test_unexpected_exit_restarts_with_bounded_circuit),
+    ("stable generation resets the crash circuit",
+     test_stable_generation_resets_crash_circuit),
+    ("unexpected exit respawns a real process",
+     test_unexpected_exit_respawns_real_process),
+    ("quit during backoff prevents respawn",
+     test_quit_during_backoff_prevents_respawn),
+    ("shutdown reaps a spawn crossing the lifecycle boundary",
+     test_shutdown_reaps_spawn_crossing_lifecycle_boundary),
+    ("shutdown interrupts health polling",
+     test_shutdown_interrupts_health_polling),
     ("tracked backend shutdown escalates to kill", test_stop_tracked_backend_force_kills_stubborn_child),
     ("shutdown sends SIGINT to kill runners, SIGTERM to keep them",
      test_shutdown_signal_choice),
