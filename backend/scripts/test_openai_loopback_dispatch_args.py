@@ -385,6 +385,60 @@ def test_ensure_named_worker_schema_requires_team_orchestration() -> None:
     assert tool["function"]["parameters"]["required"] == ["name", "orchestration_mode"]
 
 
+def test_bare_manager_loopback_requires_authenticated_team_orchestration() -> None:
+    enabled = runner_better_agent._loopback_tools_enabled
+
+    bare_manager_enabled = enabled(
+        interactive=True,
+        bare_config=True,
+        mode="manager",
+        team_orchestration_enabled=True,
+    )
+    assert bare_manager_enabled
+    schemas = runner_better_agent._tool_schemas_for_run(
+        inputs={"disallowed_tools": []},
+        capabilities_enabled=False,
+        loopback_enabled=bare_manager_enabled,
+        team_manager_enabled=True,
+        team_orchestration_enabled=True,
+        user_facing=False,
+        file_editing_mode=False,
+        coordination_enabled=False,
+    )
+    names = {schema["function"]["name"] for schema in schemas}
+    assert {
+        "create_worker",
+        "ensure_named_worker",
+        "delegate_task",
+        "create_session",
+        "create_sub_session",
+    } <= names
+    assert not enabled(
+        interactive=True,
+        bare_config=True,
+        mode="native",
+        team_orchestration_enabled=True,
+    )
+    assert not enabled(
+        interactive=True,
+        bare_config=True,
+        mode="manager",
+        team_orchestration_enabled=False,
+    )
+    assert not enabled(
+        interactive=False,
+        bare_config=True,
+        mode="manager",
+        team_orchestration_enabled=True,
+    )
+    assert enabled(
+        interactive=True,
+        bare_config=False,
+        mode="native",
+        team_orchestration_enabled=False,
+    )
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

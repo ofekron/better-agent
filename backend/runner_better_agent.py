@@ -1423,6 +1423,20 @@ def _tool_schemas_for_run(
     return schemas
 
 
+def _loopback_tools_enabled(
+    *,
+    interactive: bool,
+    bare_config: bool,
+    mode: str,
+    team_orchestration_enabled: bool,
+) -> bool:
+    if not interactive:
+        return False
+    if not bare_config:
+        return True
+    return mode == "manager" and team_orchestration_enabled
+
+
 def _is_bypass(permission: Optional[dict]) -> bool:
     if not permission:
         return False
@@ -2280,7 +2294,6 @@ async def _run(run_dir: Path, inputs: dict) -> int:
     # wired (ask/mssg/delegate/create_*/file-panel). Team-manager requires
     # manager mode; file_editing is the working_mode the file-panel edits in.
     mode = inputs.get("mode") or "native"
-    loopback_enabled = capabilities_enabled
     team_manager_enabled = mode == "manager"
     try:
         import extension_store
@@ -2293,6 +2306,12 @@ async def _run(run_dir: Path, inputs: dict) -> int:
     except Exception:
         team_orchestration_enabled = False
         coordination_enabled = False
+    loopback_enabled = _loopback_tools_enabled(
+        interactive=interactive,
+        bare_config=bool(inputs.get("bare_config")),
+        mode=mode,
+        team_orchestration_enabled=team_orchestration_enabled,
+    )
     user_facing = integrations_enabled and bool(inputs.get("user_facing"))
     file_editing_mode = inputs.get("working_mode") == "file_editing"
     tool_schemas = _tool_schemas_for_run(
