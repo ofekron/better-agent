@@ -3,12 +3,45 @@ from __future__ import annotations
 import shutil
 import threading
 import time
+from pathlib import Path
 
 import _test_home
 
 _TEST_HOME = _test_home.isolate("ba-test-persist-lifecycle-")
 
 import session_manager as sm  # noqa: E402
+from session_repository import SessionRootRepository  # noqa: E402
+
+
+class _BlockingRootRepository(SessionRootRepository):
+    def __init__(self) -> None:
+        self.write_started = threading.Event()
+        self.release_write = threading.Event()
+        self.writes_completed = 0
+
+    def write_root(self, root, **_kwargs) -> Path:
+        self.write_started.set()
+        assert self.release_write.wait(timeout=2.0)
+        self.writes_completed += 1
+        return Path(f"/tmp/{root['id']}.json")
+
+    def copy_persistable_root(self, root):
+        return dict(root)
+
+
+class _FailingRootRepository(SessionRootRepository):
+    def __init__(self) -> None:
+        self.fail = True
+        self.writes_completed = 0
+
+    def write_root(self, root, **_kwargs) -> Path:
+        if self.fail:
+            raise OSError("write failed")
+        self.writes_completed += 1
+        return Path(f"/tmp/{root['id']}.json")
+
+    def copy_persistable_root(self, root):
+        return dict(root)
 
 
 def _clear_root(coordinator, root_id: str) -> None:
@@ -360,6 +393,98 @@ def _test_single_thread_and_callback_close() -> None:
         _close_for_cleanup(coordinator)
 
 
+def _test_manager_shutdown_waits_for_accepted_write() -> None:
+    manager = sm.SessionManager()
+    repository = _BlockingRootRepository()
+    manager._root_repository = repository
+    root_id = "accepted"
+    with manager._persist_coordinator.changed:
+        manager._persist_coordinator.enqueue_unlocked(
+            root_id,
+            {"id": root_id},
+            now=time.monotonic(),
+            debounce=0,
+        )
+    assert repository.write_started.wait(timeout=2.0)
+    closed = threading.Event()
+
+    def close() -> None:
+        manager.shutdown_persistence(timeout=2.0)
+        closed.set()
+
+    close_thread = threading.Thread(target=close)
+    close_thread.start()
+    try:
+        assert not closed.wait(timeout=0.05)
+        repository.release_write.set()
+        close_thread.join(timeout=2.0)
+        assert not close_thread.is_alive()
+        assert closed.is_set()
+        assert repository.writes_completed == 1
+        assert manager._persist_coordinator.state == "closed"
+        with manager._persist_coordinator.changed:
+            try:
+                manager._persist_coordinator.enqueue_unlocked(
+                    "late",
+                    {"id": "late"},
+                    now=time.monotonic(),
+                    debounce=0,
+                )
+                raise AssertionError("closed manager accepted persistence work")
+            except RuntimeError:
+                pass
+    finally:
+        repository.release_write.set()
+        close_thread.join(timeout=2.0)
+        assert not close_thread.is_alive()
+
+
+def _test_manager_reopens_after_shutdown() -> None:
+    manager = sm.SessionManager()
+    original = manager._persist_coordinator
+    manager.shutdown_persistence(timeout=0.2)
+    manager.start_persistence()
+    replacement = manager._persist_coordinator
+    assert replacement is not original
+    assert replacement.state == "accepting"
+    with replacement.changed:
+        replacement.enqueue_unlocked(
+            "reopened",
+            {"id": "reopened"},
+            now=time.monotonic(),
+            debounce=10,
+        )
+        replacement.pending.pop("reopened")
+        replacement.cancel_deadline_unlocked("reopened")
+        replacement._release_root_if_quiescent_unlocked("reopened")
+    manager.shutdown_persistence(timeout=2.0)
+    assert replacement.state == "closed"
+
+
+def _test_manager_failed_close_preserves_active_producer() -> None:
+    manager = sm.SessionManager()
+    repository = _FailingRootRepository()
+    manager._root_repository = repository
+    with manager._persist_coordinator.changed:
+        manager._persist_coordinator.enqueue_unlocked(
+            "failed",
+            {"id": "failed"},
+            now=time.monotonic(),
+            debounce=0,
+        )
+    try:
+        manager.shutdown_persistence(timeout=2.0)
+        raise AssertionError("failed persistence shutdown reported success")
+    except RuntimeError:
+        pass
+    assert manager._persist_coordinator.state == "closing"
+    assert manager._persist_coordinator._drain_succeeded is False
+    repository.fail = False
+    manager.shutdown_persistence(timeout=2.0)
+    assert manager._persist_coordinator.state == "closed"
+    assert repository.writes_completed == 1
+
+
 def main() -> int:
     try:
         _test_never_started_and_atomic_rejection()
@@ -370,6 +495,9 @@ def main() -> int:
         _test_start_failure_is_recoverable()
         _test_request_close_cannot_skip_owed_drain()
         _test_single_thread_and_callback_close()
+        _test_manager_shutdown_waits_for_accepted_write()
+        _test_manager_reopens_after_shutdown()
+        _test_manager_failed_close_preserves_active_producer()
         print("PASS session persist coordinator lifecycle")
         return 0
     finally:

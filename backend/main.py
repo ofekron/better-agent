@@ -13839,7 +13839,8 @@ async def on_startup():
         not os.environ.get("BETTER_AGENT_TEST_MODE")
         and installation_profile.integrations_enabled()
     ):
-        _fire_and_forget(asyncio.to_thread(session_store.start_root_change_owner))
+        await asyncio.to_thread(session_store.start_root_change_owner)
+    session_manager.start_persistence()
     from provider import reopen_provider_tasks
     reopen_provider_tasks()
     provider_setup.reopen_provider_setup()
@@ -14496,16 +14497,11 @@ async def on_shutdown():
         coordinator.draft_store.drain_pending_drafts()
     except Exception:
         logger.exception("drain_pending_drafts failed")
-    # Drain the per-root write_full debounce queue. drafts.discard
-    # above may have enqueued additional pending writes (via
-    # `_persist_root`'s debounce), so this MUST run after
-    # `drain_pending_drafts`. Without it, a clean shutdown loses up
-    # to PERSIST_DEBOUNCE_S of mutations sitting in `_persist_pending`.
+    # Close the per-root persistence producer before its WAL-backed
+    # durability consumer. Draft draining above may enqueue writes, so
+    # the producer owns the final drain and scheduler join.
     try:
-        session_manager.flush_pending_persists()
-    except Exception:
-        logger.exception("flush_pending_persists failed")
-    try:
+        await asyncio.to_thread(session_manager.shutdown_persistence)
         await asyncio.to_thread(session_store.shutdown_root_change_owner)
         await asyncio.to_thread(session_store.shutdown_durability_writer)
     except Exception:

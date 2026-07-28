@@ -4170,6 +4170,33 @@ class SessionManager:
             finally:
                 lock.release()
 
+    def shutdown_persistence(self, timeout: float = 5.0) -> None:
+        self._persist_coordinator.close(
+            self._drain_persistence_for_shutdown,
+            timeout=timeout,
+        )
+
+    def _drain_persistence_for_shutdown(self) -> None:
+        self.flush_pending_persists()
+        persist = self._persist_coordinator
+        with persist.changed:
+            if not persist._is_quiescent_unlocked():
+                raise RuntimeError("session persistence drain is incomplete")
+
+    def start_persistence(self) -> None:
+        persist = self._persist_coordinator
+        with persist.changed:
+            if persist.state == "accepting":
+                return
+            if persist.state != "closed":
+                raise RuntimeError(
+                    f"persist coordinator is {persist.state}"
+                )
+        replacement = _SessionPersistCoordinator(self._tail_persist)
+        self._persist_coordinator = replacement
+        if globals().get("manager") is self:
+            _bind_production_persist_coordinator(replacement)
+
     def flush_root_persist(self, root_id: str) -> None:
         """Durability barrier for one root without draining unrelated roots."""
         persist = self._persist_coordinator
@@ -7875,11 +7902,23 @@ def session_matches_project(record: dict, project_path: str | None) -> bool:
 
 # Module-level singleton — every backend caller imports `manager` from here.
 manager = SessionManager()
-_production_persist_coordinator = manager._persist_coordinator
-_persist_pending = _production_persist_coordinator.pending
-_persist_deadlines = _production_persist_coordinator.deadlines
-_persist_deadline_heap = _production_persist_coordinator.deadline_heap
-_persist_last_at = _production_persist_coordinator.last_at
-_persist_inflight = _production_persist_coordinator.inflight
-_persist_state_lock = _production_persist_coordinator.lock
-_persist_state_changed = _production_persist_coordinator.changed
+
+
+def _bind_production_persist_coordinator(
+    coordinator: _SessionPersistCoordinator,
+) -> None:
+    global _production_persist_coordinator
+    global _persist_pending, _persist_deadlines, _persist_deadline_heap
+    global _persist_last_at, _persist_inflight
+    global _persist_state_lock, _persist_state_changed
+    _production_persist_coordinator = coordinator
+    _persist_pending = coordinator.pending
+    _persist_deadlines = coordinator.deadlines
+    _persist_deadline_heap = coordinator.deadline_heap
+    _persist_last_at = coordinator.last_at
+    _persist_inflight = coordinator.inflight
+    _persist_state_lock = coordinator.lock
+    _persist_state_changed = coordinator.changed
+
+
+_bind_production_persist_coordinator(manager._persist_coordinator)

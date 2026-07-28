@@ -2262,10 +2262,23 @@ def test_shutdown_global_drain_flushes_all_and_certifies_exact_generation() -> N
     original_write = manager_module.session_store.write_session_full
     original_fingerprint = session_queue_projection._session_files_fingerprint
     main_source = (ROOT / "main.py").read_text(encoding="utf-8")
+    startup_source = main_source[
+        main_source.index("async def on_startup()") :
+        main_source.index("async def on_shutdown()")
+    ]
     shutdown_source = main_source[main_source.index("async def on_shutdown()") :]
-    assert shutdown_source.index("session_manager.flush_pending_persists()") < shutdown_source.index(
+    assert startup_source.index(
+        "await asyncio.to_thread(session_store.start_root_change_owner)"
+    ) < startup_source.index("session_manager.start_persistence()")
+    assert shutdown_source.index(
+        "await asyncio.to_thread(session_manager.shutdown_persistence)"
+    ) < shutdown_source.index(
+        "await asyncio.to_thread(session_store.shutdown_root_change_owner)"
+    ) < shutdown_source.index(
         "await asyncio.to_thread(drain_queue_projection_submissions)"
-    ) < shutdown_source.index("session_queue_projection.flush_pending_writes(timeout=5.0)")
+    ) < shutdown_source.index(
+        "session_queue_projection.flush_pending_writes(timeout=5.0)"
+    )
     assert "mark_current_if_generation(\n                    certification_generation" in shutdown_source
     try:
         manager_module.session_store.write_session_full = (
