@@ -719,6 +719,36 @@ def test_capability_change_retries_as_fresh_continuation() -> None:
     print("T7c provider capability drift starts fresh continuation")
     session = session_manager.create(name="capability-drift", cwd="/tmp", model="gpt")
     sid = session["id"]
+    prior_user = {
+        "id": "capability-prior-user",
+        "role": "user",
+        "content": "Why does Agent Board not own MCP services?",
+        "events": [],
+    }
+    prior_assistant = {
+        "id": "capability-prior-assistant",
+        "role": "assistant",
+        "content": "Agent Board owns durable board state; services have separate owners.",
+        "completed_at": "2026-07-25T12:00:00Z",
+        "events": [],
+    }
+    current_user = {
+        "id": "capability-current-user",
+        "role": "user",
+        "content": "why",
+        "cli_prompt": "STALE WRAPPED CLI PROMPT",
+        "events": [],
+    }
+    target_assistant = {
+        "id": "capability-target-assistant",
+        "role": "assistant",
+        "content": "",
+        "events": [],
+    }
+    session_manager.append_user_msg(sid, prior_user, strict=True)
+    session_manager.append_assistant_msg(sid, prior_assistant, strict=True)
+    session_manager.append_user_msg(sid, current_user, strict=True)
+    session_manager.append_assistant_msg(sid, target_assistant, strict=True)
     provider = _RetryProvider([
         {
             "success": False,
@@ -736,13 +766,14 @@ def test_capability_change_retries_as_fresh_continuation() -> None:
     c.provider_for_session = lambda _sid: provider
     c.user_prompt_manager = _UPM()
     tm = TurnManager(c)
+    tm.current_assistant_msgs[sid] = target_assistant
 
     async def _ws(_event):
         pass
 
     async def _go() -> dict:
         return await tm._drive_cli_run(
-            prompt="continue with inbox",
+            prompt="STALE RUNTIME PROMPT",
             cwd="/tmp",
             model="gpt",
             session_id="old-provider",
@@ -763,6 +794,14 @@ def test_capability_change_retries_as_fresh_continuation() -> None:
         "retry prompt explains capability change",
         "Available provider capabilities changed" in provider.prompts[1],
     )
+    check(
+        "retry prompt includes authoritative prior exchange",
+        "Agent Board owns durable board state; services have separate owners."
+        in provider.prompts[1],
+    )
+    check("retry prompt ends with persisted current user", provider.prompts[1].endswith("why"))
+    check("retry excludes stale runtime prompt", "STALE RUNTIME PROMPT" not in provider.prompts[1])
+    check("retry excludes transformed CLI prompt", "STALE WRAPPED CLI PROMPT" not in provider.prompts[1])
     check("capability-change continuation succeeds", result.get("success") is True)
 
 

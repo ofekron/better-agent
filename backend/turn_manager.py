@@ -2484,6 +2484,7 @@ class TurnManager:
                 prompt=prompt_snapshot,
                 old_provider_sid=old_provider_sid,
                 reason=reason,
+                target_assistant_msg_id=active_msg_id,
             )
             if active_msg_id:
                 session_manager.set_msg_continuation_active(

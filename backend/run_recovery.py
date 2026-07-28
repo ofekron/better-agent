@@ -2963,6 +2963,7 @@ async def _retry_recovered_run(
             prompt=prompt,
             old_provider_sid=resume_sid,
             reason=fresh_continuation_reason,
+            target_assistant_msg_id=msg_id,
         )
         prompt = continuation.prompt
         continuation_chain = continuation.continuation_chain

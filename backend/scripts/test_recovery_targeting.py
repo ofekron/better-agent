@@ -734,14 +734,39 @@ def test_recovered_capability_change_starts_fresh_continuation() -> None:
     run_dir = runs_root() / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
     atomic_write_json(run_dir / "input.json", {
-        "prompt": "call inbox",
+        "prompt": "STALE WRAPPED RECOVERY PROMPT",
         "cwd": "/tmp",
         "model": "gpt",
         "continuation_chain": [],
     })
     fake_sm = _FakeSessionManager({
         "agent_session_id": "newer-session-global-sid",
-        "messages": [{"id": "msg-1", "role": "assistant", "events": []}],
+        "messages": [
+            {
+                "id": "prior-user",
+                "role": "user",
+                "content": "Why does Agent Board not own MCP services?",
+                "events": [],
+            },
+            {
+                "id": "prior-assistant",
+                "role": "assistant",
+                "content": (
+                    "Agent Board owns durable board state; "
+                    "services have separate owners."
+                ),
+                "completed_at": "2026-07-25T12:00:00Z",
+                "events": [],
+            },
+            {
+                "id": "current-user",
+                "role": "user",
+                "content": "why",
+                "cli_prompt": "STALE CLI PROMPT",
+                "events": [],
+            },
+            {"id": "msg-1", "role": "assistant", "content": "", "events": []},
+        ],
     })
 
     class _Run:
@@ -816,6 +841,23 @@ def test_recovered_capability_change_starts_fresh_continuation() -> None:
     check(
         "fresh recovery wraps original prompt",
         "Available provider capabilities changed" in provider.kwargs.get("prompt", ""),
+    )
+    check(
+        "fresh recovery includes authoritative prior exchange",
+        "Agent Board owns durable board state; services have separate owners."
+        in provider.kwargs.get("prompt", ""),
+    )
+    check(
+        "fresh recovery ends with persisted current user",
+        provider.kwargs.get("prompt", "").endswith("why"),
+    )
+    check(
+        "fresh recovery excludes stale runner prompt",
+        "STALE WRAPPED RECOVERY PROMPT" not in provider.kwargs.get("prompt", ""),
+    )
+    check(
+        "fresh recovery excludes transformed CLI prompt",
+        "STALE CLI PROMPT" not in provider.kwargs.get("prompt", ""),
     )
     check(
         "fresh recovery forwards continuation chain",
