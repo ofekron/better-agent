@@ -1151,11 +1151,8 @@ def _schema_tool_names(schemas: list[dict]) -> set[str]:
 
 
 def _mcp_chat_tool_name(server_name: str, tool_name: str, used_names: set[str]) -> str:
-    if tool_name and tool_name not in used_names and re.fullmatch(r"[A-Za-z0-9_-]{1,64}", tool_name):
-        used_names.add(tool_name)
-        return tool_name
-    server_part = re.sub(r"[^A-Za-z0-9_]+", "_", server_name).strip("_") or "mcp"
-    tool_part = re.sub(r"[^A-Za-z0-9_]+", "_", tool_name).strip("_") or "tool"
+    server_part = re.sub(r"[^A-Za-z0-9_-]+", "_", server_name).strip("_") or "mcp"
+    tool_part = re.sub(r"[^A-Za-z0-9_-]+", "_", tool_name).strip("_") or "tool"
     base = f"mcp__{server_part}__{tool_part}"[:64].strip("_") or "mcp_tool"
     candidate = base
     suffix = 2

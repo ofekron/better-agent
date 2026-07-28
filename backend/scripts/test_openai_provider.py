@@ -616,16 +616,17 @@ def test_openai_runner_exposes_and_dispatches_extension_mcp_tools():
             bare=False,
             used_names=set(),
         ))
-        assert [schema["function"]["name"] for schema in schemas] == ["get_requirements"]
+        canonical_name = "mcp__better-agent-requirements__get_requirements"
+        assert [schema["function"]["name"] for schema in schemas] == [canonical_name]
         assert schemas[0]["function"]["parameters"]["required"] == ["query"]
-        assert "get_requirements" in handlers
+        assert canonical_name in handlers
 
         with tempfile.TemporaryDirectory() as d:
             emitter = runner.EventEmitter(Path(d) / "ev.jsonl")
             result = asyncio.run(runner._dispatch_tool(
                 {
                     "id": "call_req",
-                    "name": "get_requirements",
+                    "name": canonical_name,
                     "arguments": json.dumps({"query": "assistant requirements"}),
                 },
                 Path(d),
@@ -691,15 +692,32 @@ def test_openai_runner_lists_extension_mcp_tools_concurrently_in_order():
 
     assert elapsed < 0.30
     assert [schema["function"]["name"] for schema in schemas] == [
-        "tool",
+        "mcp__alpha__tool",
         "mcp__beta__tool",
         "mcp__gamma__tool",
     ]
     assert [handlers[name]["server_name"] for name in [
-        "tool",
+        "mcp__alpha__tool",
         "mcp__beta__tool",
         "mcp__gamma__tool",
     ]] == ["alpha", "beta", "gamma"]
+
+
+def test_openai_runner_mcp_tool_names_are_canonical_bounded_and_unique():
+    runner = _mod("runner_better_agent")
+    used_names = {"mcp__server__tool"}
+
+    assert runner._mcp_chat_tool_name(
+        "better-agent-session-control",
+        "switch_model",
+        used_names,
+    ) == "mcp__better-agent-session-control__switch_model"
+    assert runner._mcp_chat_tool_name("server", "tool", used_names) == "mcp__server__tool_2"
+    long_name = runner._mcp_chat_tool_name("server-" * 20, "tool-" * 20, used_names)
+
+    assert long_name.startswith("mcp__")
+    assert len(long_name) <= 64
+    assert long_name in used_names
 
 
 def _private_requirements_mcp_integration_is_owned_by_extension_repo():
