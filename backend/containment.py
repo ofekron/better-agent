@@ -10,6 +10,8 @@ link to the runner is gone); OS containment is not:
               kernels. Every descendant inherits the run's cgroup and is
               enumerated regardless of how it detaches. A process cannot
               leave without write access to another cgroup. GUARANTEED.
+              WSL hosts without a delegated cgroup use an explicitly
+              degraded process-tree tracker, surfaced as not guaranteed.
   * Windows — a named Job Object. Descendants cannot break away (we never
               set ``JOB_OBJECT_LIMIT_BREAKAWAY_OK``); the job's process-id
               list enumerates them. The handle is re-openable by name.
@@ -27,8 +29,9 @@ gap, surfaced via ``guaranteed``.
 
 Fail-closed: if the guaranteed mechanism is unavailable on a platform that
 should have it (e.g. Linux without a writable/delegated cgroup), ``create``
-raises ``ContainmentUnavailable`` — it MUST NOT silently degrade to the
-blind ppid walk, which would reopen the orphan hole undetected.
+raises ``ContainmentUnavailable``. WSL without either cgroup hierarchy is
+the explicit exception because its host kernel may not expose one; callers
+receive ``guaranteed=False`` rather than a false containment guarantee.
 """
 
 from __future__ import annotations
@@ -582,9 +585,9 @@ class _WindowsJobContainment(Containment):
 
 
 # ======================================================================
-# macOS — best-effort ppid walk (NO real containment)
+# POSIX fallback — best-effort ppid walk (NO real containment)
 # ======================================================================
-class _DarwinBestEffortContainment(Containment):
+class _PosixBestEffortContainment(Containment):
     guaranteed = False
 
     def __init__(self) -> None:
@@ -617,7 +620,7 @@ class _DarwinBestEffortContainment(Containment):
         self._runner_pid.pop(run_id, None)
 
     def force_kill_all(self, run_id: str) -> int:
-        # No OS containment on macOS — fall back to the ppid walk via
+        # No usable OS containment — fall back to the ppid walk via
         # proc_control. Requires the runner pid to be live; if the runner
         # already exited, the descendant chain is broken and reparented
         # orphans are unreachable. Documented best-effort gap.
@@ -639,6 +642,20 @@ class _DarwinBestEffortContainment(Containment):
         return swept + 1
 
 
+class _LinuxWslBestEffortContainment(_PosixBestEffortContainment):
+    """Explicit degraded containment for WSL hosts without usable cgroups."""
+
+
+def _is_wsl(osrelease_path: str = "/proc/sys/kernel/osrelease") -> bool:
+    if os.environ.get("WSL_INTEROP") or os.environ.get("WSL_DISTRO_NAME"):
+        return True
+    try:
+        with open(osrelease_path, encoding="ascii") as handle:
+            return "microsoft" in handle.read().lower()
+    except OSError:
+        return False
+
+
 _INSTANCE: Optional[Containment] = None
 
 
@@ -653,7 +670,12 @@ def containment() -> Containment:
             try:
                 _INSTANCE = _LinuxCgroupContainment()
             except ContainmentUnavailable:
-                _INSTANCE = _LinuxCgroupV1PidsContainment()
+                try:
+                    _INSTANCE = _LinuxCgroupV1PidsContainment()
+                except ContainmentUnavailable:
+                    if not _is_wsl():
+                        raise
+                    _INSTANCE = _LinuxWslBestEffortContainment()
         else:
-            _INSTANCE = _DarwinBestEffortContainment()
+            _INSTANCE = _PosixBestEffortContainment()
     return _INSTANCE

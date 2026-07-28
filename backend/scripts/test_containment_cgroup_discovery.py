@@ -211,3 +211,55 @@ def test_linux_factory_falls_back_to_verified_v1(monkeypatch) -> None:
     instance = containment.containment()
 
     assert isinstance(instance, containment._LinuxCgroupV1PidsContainment)
+
+
+def test_linux_factory_uses_explicit_degraded_containment_on_wsl(monkeypatch) -> None:
+    monkeypatch.setattr(containment, "_INSTANCE", None)
+    monkeypatch.setattr(
+        containment.sys if hasattr(containment, "sys") else __import__("sys"),
+        "platform",
+        "linux",
+    )
+    monkeypatch.setattr(
+        containment,
+        "_current_cgroup_v2_directory",
+        lambda: (_ for _ in ()).throw(containment.ContainmentUnavailable("no v2")),
+    )
+    monkeypatch.setattr(
+        containment,
+        "_current_cgroup_v1_pids_directory",
+        lambda: (_ for _ in ()).throw(containment.ContainmentUnavailable("no v1")),
+    )
+    monkeypatch.setattr(containment, "_is_wsl", lambda: True)
+
+    instance = containment.containment()
+
+    assert isinstance(instance, containment._LinuxWslBestEffortContainment)
+    assert instance.guaranteed is False
+
+
+def test_linux_factory_fails_closed_without_cgroups_outside_wsl(monkeypatch) -> None:
+    monkeypatch.setattr(containment, "_INSTANCE", None)
+    monkeypatch.setattr(
+        containment.sys if hasattr(containment, "sys") else __import__("sys"),
+        "platform",
+        "linux",
+    )
+    monkeypatch.setattr(
+        containment,
+        "_current_cgroup_v2_directory",
+        lambda: (_ for _ in ()).throw(containment.ContainmentUnavailable("no v2")),
+    )
+    monkeypatch.setattr(
+        containment,
+        "_current_cgroup_v1_pids_directory",
+        lambda: (_ for _ in ()).throw(containment.ContainmentUnavailable("no v1")),
+    )
+    monkeypatch.setattr(containment, "_is_wsl", lambda: False)
+
+    try:
+        containment.containment()
+    except containment.ContainmentUnavailable:
+        pass
+    else:
+        raise AssertionError("non-WSL Linux without cgroups must fail closed")
