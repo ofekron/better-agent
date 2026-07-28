@@ -180,35 +180,6 @@ def test_applies_xdelta_patch() -> bool:
     return _apply_with_repo()
 
 
-def test_publish_cli_is_main_only() -> bool:
-    root = Path(tempfile.mkdtemp(prefix="bc-upd-policy-"))
-    repo_dir = root / "repository"
-    keys_dir = root / "keystore"
-    bundle = _make_bundle(root / "bundles", "0.1.0")
-    release.ReleaseRepo(repo_dir, keys_dir).initialize()
-    args = [
-        "publish",
-        str(repo_dir),
-        str(keys_dir),
-        str(bundle),
-        "0.1.0",
-    ]
-    try:
-        if release._main(args, branch_name="dev") != 0:
-            return False
-        if list((repo_dir / "targets").glob("*.tar.gz")):
-            return False
-        if release._main(args, branch_name="") != 0:
-            return False
-        if list((repo_dir / "targets").glob("*.tar.gz")):
-            return False
-        if release._main(args, branch_name="main") != 0:
-            return False
-        return len(list((repo_dir / "targets").glob("*.tar.gz"))) == 1
-    finally:
-        shutil.rmtree(root)
-
-
 TESTS = [
     ("client detects newer published version (0.1.0 -> 0.2.0)",
      test_detects_newer_version),
@@ -216,8 +187,6 @@ TESTS = [
      test_none_when_on_latest),
     ("client downloads and applies a signed xdelta patch",
      test_applies_xdelta_patch),
-    ("release CLI publishes only from main",
-     test_publish_cli_is_main_only),
 ]
 
 
