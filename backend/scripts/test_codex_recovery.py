@@ -18,6 +18,7 @@ Run with:
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import io
 import json
 import os
@@ -26,7 +27,6 @@ import subprocess
 import sys
 import tempfile
 import threading
-import time
 import urllib.error
 import uuid
 from types import SimpleNamespace
@@ -1276,7 +1276,7 @@ def test_loopback_post_surfaces_http_error_detail() -> bool:
 def test_schedule_loop_task_from_worker_thread() -> bool:
     async def main() -> bool:
         loop = asyncio.get_running_loop()
-        done = threading.Event()
+        done = asyncio.Event()
 
         async def marker() -> None:
             done.set()
@@ -1287,9 +1287,7 @@ def test_schedule_loop_task_from_worker_thread() -> bool:
             marker(),
             name="test-schedule-loop-task-worker",
         )
-        if not done.wait(timeout=2.0):
-            print("  scheduled coro never ran on the loop")
-            return False
+        await done.wait()
         return True
 
     return asyncio.run(main())
@@ -1302,67 +1300,42 @@ def test_schedule_loop_task_no_block_under_loop_lag() -> bool:
     turn — whenever the loop could not service a call_soon within 5s. With
     the loop deliberately held, scheduling must still return immediately.
     """
-    loop = asyncio.new_event_loop()
-    hold = threading.Event()      # freed by the test to release the loop
-    holding = threading.Event()   # set once the loop has entered the hold
-    scheduled = threading.Event()  # set by the scheduled coro when it runs
-
-    def occupy_loop() -> None:
-        holding.set()
-        hold.wait(10.0)
-
-    def run_loop() -> None:
-        loop.call_soon(occupy_loop)
-        loop.run_forever()
-
-    loop_thread = threading.Thread(target=run_loop, daemon=True)
-    loop_thread.start()
+    callbacks = []
 
     async def marker() -> None:
-        scheduled.set()
+        pass
 
-    result: dict = {}
+    class NonServicingLoop:
+        def call_soon_threadsafe(self, callback) -> None:
+            callbacks.append(callback)
 
-    def schedule_from_worker() -> None:
-        # Hard happens-before: confirm the loop is actually held before
-        # scheduling, closing the call_soon vs call_soon_threadsafe race.
-        if not holding.wait(timeout=2.0):
-            result["error"] = "loop never entered hold"
-            return
-        start = time.monotonic()
+    def reject_synchronous_wait(
+        _future: concurrent.futures.Future,
+        timeout=None,
+    ):
+        del timeout
+        raise AssertionError("scheduling waited for loop-owned completion")
+
+    loop = NonServicingLoop()
+    coro = marker()
+    original_result = concurrent.futures.Future.result
+    concurrent.futures.Future.result = reject_synchronous_wait
+    try:
         try:
             schedule_loop_task(
-                loop, marker(), name="test-schedule-under-lag",
+                loop, coro, name="test-schedule-under-lag",
             )
-        except BaseException as exc:  # noqa: BLE001 — surface pre-fix TimeoutError
-            result["error"] = repr(exc)
-            return
-        result["elapsed"] = time.monotonic() - start
-
-    worker = threading.Thread(target=schedule_from_worker)
-    worker.start()
-    worker.join(timeout=3.0)
-    try:
-        if worker.is_alive():
-            print("  scheduling worker blocked on the held loop (pre-fix hang)")
+        except AssertionError as exc:
+            print(f"  {exc}")
             return False
-        if "error" in result:
-            print(f"  scheduling raised (pre-fix behavior): {result['error']}")
-            return False
-        elapsed = result.get("elapsed", 99.0)
-        if elapsed >= 1.0:
-            print(f"  scheduling blocked worker {elapsed:.3f}s; expected immediate return")
-            return False
-        hold.set()
-        if not scheduled.wait(timeout=2.0):
-            print("  scheduled coro never ran after loop released")
-            return False
-        return True
     finally:
-        hold.set()  # release occupy_loop so the loop can service stop
-        loop.call_soon_threadsafe(loop.stop)
-        loop_thread.join(timeout=2.0)
-        loop.close()
+        concurrent.futures.Future.result = original_result
+        coro.close()
+
+    if len(callbacks) != 1:
+        print(f"  expected one loop admission callback, got {len(callbacks)}")
+        return False
+    return True
 
 
 def test_codex_mcp_string_error_normalizes() -> bool:
@@ -1548,7 +1521,7 @@ def test_turn_manager_dead_runner_replays_codex_rollout_events() -> bool:
         codex_sid = str(uuid.uuid4())
         provider = _FakeCodexProvider(app_sid, codex_sid)
         tm = TurnManager(_Coordinator(provider))
-        tm.lifecycle.bind()
+        await tm.lifecycle.bind()
         ws_events: list[dict] = []
 
         async def ws_callback(event: dict) -> None:
@@ -1574,7 +1547,7 @@ def test_turn_manager_dead_runner_replays_codex_rollout_events() -> bool:
         finally:
             turn_manager_mod.runtime_skill_projection = original_runtime
             turn_manager_mod.extension_audit_context = original_audit
-            tm.lifecycle.close()
+            await tm.lifecycle.close()
         events = result.get("events") or []
         if result.get("success") is not True:
             print(f"  expected success result, got {result!r}")
